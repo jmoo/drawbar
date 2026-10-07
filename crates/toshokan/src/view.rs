@@ -18,7 +18,7 @@ pub struct View(Arc<Parts>);
 /// What a view is built from.
 pub struct Parts {
     pub folded: Folded,
-    pub bindings: Bindings,
+    pub bindings: Arc<Bindings>,
     pub writers: Vec<WriterInfo>,
     pub forks: Vec<Fork>,
     pub gaps: Vec<Gap>,
@@ -204,8 +204,8 @@ impl EntityView<'_> {
         if let Some(bound) = self.view.0.bindings.bound.get(&self.id) {
             return Some(bound.clone());
         }
-        let files = self.view.0.folded.files();
-        let latest = files.get(&self.id)?.last()?;
+        let files = self.view.0.folded.file(self.id);
+        let latest = files.last()?;
         Some(FileRef {
             path: latest.value.path.clone(),
             state: FileState::Missing,

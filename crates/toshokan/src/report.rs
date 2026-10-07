@@ -204,14 +204,14 @@ pub struct Refreshed {
 }
 
 /// One change to what a reader sees.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Change {
     pub entity: EntityId,
     pub what: What,
     pub by: By,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum What {
     Created,
     Deleted,
@@ -219,7 +219,7 @@ pub enum What {
     File,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum By {
     This,
     Writer {

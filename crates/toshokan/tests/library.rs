@@ -12,7 +12,8 @@ use toshokan::blocking::{self, Backend};
 use toshokan::env::{ExactNames, PrefixIdentity, SeededRandom, TestClock};
 use toshokan::intent::{Driver, Intent};
 use toshokan::io::{Capabilities, Range};
-use toshokan::log::{Entry, EntryKind, Genesis, Op, Settlement};
+use toshokan::line::MAX_LINE;
+use toshokan::log::{Entry, EntryKind, FileFact, Genesis, Logged, Op, Settlement};
 use toshokan::report::{
     By, Change, Committed, Compacted, DraftState, Emptied, HistoryItem, Opened, Presence,
     Refreshed, Rekey, Start, TrashItem, What, WriterInfo,
@@ -21,8 +22,8 @@ use toshokan::simulator::Machine;
 use toshokan::view::Conflicted;
 use toshokan::{
     EntityId, EntryHash, Env, Error, Expect, Field, FileState, Hlc, Identify, Identity, Io,
-    IoResult, Layout, MemDisk, Policy, Refusal, Register, RelPath, Reply, Root, Schema, Set, View,
-    WriterId,
+    IoResult, Layout, MemDisk, Policy, Random, Refusal, Register, RelPath, Reply, Root, Schema,
+    Set, View, WriterId,
 };
 
 const ORIGIN: Register<String> = Register::new("origin");
@@ -64,6 +65,11 @@ struct Seen {
     /// directory is created.
     own: Option<String>,
     folder_writes: u64,
+    local_writes: u64,
+    /// Lists, stats and reads of library paths.
+    library_reads: u64,
+    /// Reads of library files' bytes.
+    file_reads: u64,
     /// The longest read of a pending record.
     longest_pending_read: u64,
     /// Renames to this path fail, as a backend's might.
@@ -96,6 +102,18 @@ impl Probe {
         self.seen.borrow().folder_writes
     }
 
+    fn local_writes(&self) -> u64 {
+        self.seen.borrow().local_writes
+    }
+
+    fn library_reads(&self) -> u64 {
+        self.seen.borrow().library_reads
+    }
+
+    fn file_reads(&self) -> u64 {
+        self.seen.borrow().file_reads
+    }
+
     /// Panics on a write under toshokan's root outside the directory of the writer
     /// this instance writes as. The directories holding every writer's may be
     /// made and synced.
@@ -107,6 +125,14 @@ impl Probe {
                 let len = range.len.min(self.len(path));
                 seen.longest_pending_read = seen.longest_pending_read.max(len);
             }
+        }
+        if io.root() == Root::Folder && !io.mutates() && !layout().owns(io.path()) {
+            let mut seen = self.seen.borrow_mut();
+            seen.library_reads += 1;
+            seen.file_reads += u64::from(matches!(io, Io::Read { .. }));
+        }
+        if io.mutates() && io.root() == Root::Local {
+            self.seen.borrow_mut().local_writes += 1;
         }
         if !io.mutates() || io.root() != Root::Folder {
             return;
@@ -401,6 +427,8 @@ macro_rules! through_both {
 
 through_both!(
     two_writers_tag_one_library_and_converge,
+    what_refreshes_fold_in_is_what_a_fresh_open_shows,
+    a_refresh_that_finds_nothing_new_writes_nothing,
     a_conflict_is_shown_and_resolved,
     a_clone_forks_and_both_branches_survive,
     a_restored_folder_makes_the_writer_rekey,
@@ -412,6 +440,8 @@ through_both!(
     undoing_a_save_restores_the_displaced_bytes,
     a_copy_has_no_entity_until_one_is_said,
     a_move_keeps_its_tags_and_is_pinned_by_the_next_commit,
+    a_commit_scans_only_what_it_moved_and_a_refresh_finds_the_rest,
+    an_identity_read_for_a_new_time_is_read_once_per_install,
     opening_viewing_and_refreshing_write_nothing_in_the_folder,
     losing_the_local_root_at_any_step_loses_only_drafts,
     a_crash_at_any_step_is_settled_before_the_next_write,
@@ -434,7 +464,6 @@ through_both!(
     a_folder_whose_renames_may_replace_is_written_and_says_so,
     a_view_is_read_on_other_threads,
     a_commit_writes_to_the_local_root_only_what_it_adds,
-    a_refresh_that_finds_nothing_new_writes_nothing,
     reopening_reads_only_the_ends_of_files_read_before,
     a_writers_directory_stays_bounded_across_sessions,
 );
@@ -585,6 +614,71 @@ fn two_writers_tag_one_library_and_converge<F: Facade>() {
         facts(&a.view()),
         "a new reader agrees"
     );
+}
+
+fn what_refreshes_fold_in_is_what_a_fresh_open_shows<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+    let mut songs = vec![create(&mut a, "song.npno", b"song")];
+    let mut random = SeededRandom::new(9);
+    for step in 0..60 {
+        clock.advance(1);
+        let pick = random.next_u128();
+        let song = songs[pick as usize / 7 % songs.len()];
+        let (writer, other) = match pick % 2 {
+            0 => (&mut a, &mut b),
+            _ => (&mut b, &mut a),
+        };
+        writer.refresh().unwrap();
+        let value = format!("t{}", step % 3);
+        let _ = match pick / 2 % 6 {
+            0 => writer.commit("Tag", |i| i.add(song, TAGS, value)).map(drop),
+            1 => writer
+                .commit("Untag", |i| i.remove(song, TAGS, &value))
+                .map(drop),
+            2 => writer
+                .commit("Origin", |i| i.set(song, ORIGIN, value))
+                .map(drop),
+            3 => writer.commit("Delete", |i| i.delete(song)).map(drop),
+            4 => writer.compact().map(drop),
+            _ => {
+                let at = format!("song-{step}.npno");
+                songs.push(create(writer, &at, at.as_bytes()));
+                Ok(())
+            }
+        };
+        if (pick / 12).is_multiple_of(3) {
+            continue;
+        }
+        other.refresh().unwrap();
+        let fresh = F::open(Probe::new(&machine(&folder)), env("c", 3, &clock))
+            .unwrap()
+            .0;
+        assert!(
+            other.view().folded() == fresh.view().folded(),
+            "step {step}: {:?}",
+            facts(&other.view())
+        );
+        assert_eq!(facts(&other.view()), facts(&fresh.view()), "step {step}");
+    }
+}
+
+fn a_refresh_that_finds_nothing_new_writes_nothing<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+    b.commit("Tag", |i| i.add(song, TAGS, tag("b"))).unwrap();
+    a.refresh().unwrap();
+    let (writes, view) = ((probe.folder_writes(), probe.local_writes()), a.view());
+    let refreshed = a.refresh().unwrap();
+    assert_eq!(refreshed.changes, []);
+    assert_eq!((probe.folder_writes(), probe.local_writes()), writes);
+    assert_eq!(facts(&a.view()), facts(&view));
 }
 
 fn a_view_is_read_on_other_threads<F: Facade>() {
@@ -1209,6 +1303,216 @@ fn a_move_keeps_its_tags_and_is_pinned_by_the_next_commit<F: Facade>() {
         "the pinned path wins over a copy at the old one"
     );
     assert_eq!(b.view().unbound(), [path("song.npno")]);
+}
+
+fn a_commit_scans_only_what_it_moved_and_a_refresh_finds_the_rest<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    let others = 100;
+    for i in 0..others {
+        put(&folder, &format!("old/{i}.npno"), i.to_string().as_bytes());
+    }
+    a.refresh().unwrap();
+    folder
+        .perform(Io::Rename {
+            root: Root::Folder,
+            from: path("song.npno"),
+            to: path("old/song.npno"),
+        })
+        .unwrap();
+    let before = probe.library_reads();
+    let new = create(&mut a, "new/one.npno", b"one");
+    let reads = probe.library_reads() - before;
+    assert!(
+        reads < others,
+        "{reads} lists, stats and reads of library paths"
+    );
+    let file = a.view().entity(new).unwrap().file().unwrap();
+    assert_eq!(
+        (file.path, file.state),
+        (path("new/one.npno"), FileState::InSync)
+    );
+    a.commit("Move", |i| i.move_tree(&path("new"), &path("shelf/new")))
+        .unwrap();
+    let file = a.view().entity(new).unwrap().file().unwrap();
+    assert_eq!(
+        (file.path, file.state),
+        (path("shelf/new/one.npno"), FileState::InSync)
+    );
+
+    let changes = a.refresh().unwrap().changes;
+    assert_eq!(
+        changes,
+        [Change {
+            entity: song,
+            what: What::File,
+            by: By::Outside
+        }]
+    );
+    let file = a.view().entity(song).unwrap().file().unwrap();
+    assert_eq!(file.path, path("old/song.npno"));
+}
+
+/// A writer's log that bound `count` files under `lib/` to as many entities, at
+/// the modification times they have now, written straight into the folder.
+fn shelved(folder: &MemDisk, count: usize) -> Vec<(EntityId, RelPath)> {
+    let mut files = Vec::with_capacity(count);
+    let mut ops = Vec::with_capacity(2 * count);
+    for i in 0..count {
+        let at = path(&format!("lib/{:03}/{i}.npno", i / 100));
+        let bytes = format!("file {i}").into_bytes();
+        put(folder, at.as_str(), &bytes);
+        let entity = EntityId::from_u128(i as u128 + 1);
+        let file = FileFact {
+            path: at.clone(),
+            identity: identity(&bytes),
+            len: bytes.len() as u64,
+            modified: Some(modified(folder, &at)),
+        };
+        ops.push(Op::Create {
+            entity,
+            replaces: Vec::new(),
+        });
+        ops.push(Op::File {
+            entity,
+            file: Some(file),
+            replaces: Vec::new(),
+        });
+        files.push((entity, at));
+    }
+    let writer = WriterId::from_u128(0xfeed);
+    let genesis = EntryKind::Genesis(Genesis {
+        writer,
+        label: "elsewhere".into(),
+    });
+    let intents = ops.chunks(2000).map(|ops| {
+        EntryKind::Intent(Logged {
+            label: "Import".into(),
+            ops: ops.to_vec(),
+            displaced: Vec::new(),
+            reverses: None,
+        })
+    });
+    let (mut prev, mut segment) = (EntryHash::ZERO, Vec::new());
+    for (n, kind) in std::iter::once(genesis).chain(intents).enumerate() {
+        let at = Hlc {
+            wall_ms: n as u64 + 1,
+            counter: 0,
+        };
+        let entry = Entry::encode(prev, at, kind).unwrap();
+        prev = entry.hash();
+        segment.extend(entry.line.to_bytes());
+    }
+    let log = layout().writer(writer).join("log.jsonl").unwrap();
+    put(folder, log.as_str(), &segment);
+    files
+}
+
+fn modified(folder: &MemDisk, at: &RelPath) -> u64 {
+    let stat = Io::Stat {
+        root: Root::Folder,
+        path: at.clone(),
+    };
+    match folder.perform(stat) {
+        Ok(Reply::Stat(Some(meta))) => meta.modified.unwrap(),
+        reply => panic!("{at}: {reply:?}"),
+    }
+}
+
+fn binds(folder: &MemDisk, writer: WriterId) -> Vec<Entry> {
+    let entries = segment_entries(folder, writer).into_iter();
+    entries
+        .filter(|entry| matches!(entry.kind, EntryKind::Bind(_)))
+        .collect()
+}
+
+fn an_identity_read_for_a_new_time_is_read_once_per_install<F: Facade>() {
+    let folder = MemDisk::new();
+    let files = shelved(&folder, 20);
+    for (_, at) in &files {
+        let later = modified(&folder, at) + 1_000_000;
+        folder.set_modified(Root::Folder, at, later).unwrap();
+    }
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let open = |seed| {
+        let probe = Probe::new(&here);
+        let (library, opened) = F::open(probe.clone(), env("a", seed, &clock)).unwrap();
+        (library, opened, probe.file_reads())
+    };
+    let (_, opened, reads) = open(1);
+    assert_eq!((reads, opened.scan.changed.len()), (20, 0));
+    let (_, opened, reads) = open(2);
+    assert_eq!((reads, opened.scan.changed.len()), (0, 0));
+    let (song, at) = &files[0];
+    put(&folder, at.as_str(), b"FILE 0");
+    let (_, opened, reads) = open(3);
+    assert_eq!((reads, opened.scan.changed), (1, vec![*song]));
+}
+
+#[test]
+fn a_library_whose_files_all_have_new_modification_times_commits() {
+    let folder = MemDisk::new();
+    let files = shelved(&folder, 26_000);
+    for (_, at) in &files {
+        let later = modified(&folder, at) + 1_000_000;
+        folder.set_modified(Root::Folder, at, later).unwrap();
+    }
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, opened) = Blocking::open(probe, env("a", 1, &clock)).unwrap();
+    assert_eq!((opened.scan.changed.len(), opened.scan.moved.len()), (0, 0));
+    let (song, _) = files[0];
+    a.commit("Tag", |i| i.add(song, TAGS, tag("kept"))).unwrap();
+    let writer = label_of(&a.view(), "a");
+    let pinned = binds(&folder, writer).len();
+    assert_eq!(pinned, 0, "a new time alone is not logged");
+}
+
+#[test]
+fn a_commit_pins_any_number_of_moves_in_entries_within_the_line_limit() {
+    let folder = MemDisk::new();
+    let files = shelved(&folder, 26_000);
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = Blocking::open(probe, env("a", 1, &clock)).unwrap();
+    folder
+        .perform(Io::Rename {
+            root: Root::Folder,
+            from: path("lib"),
+            to: path("shelf"),
+        })
+        .unwrap();
+    assert_eq!(a.refresh().unwrap().changes.len(), files.len());
+    let (song, _) = files[0];
+    a.commit("Tag", |i| i.add(song, TAGS, tag("moved")))
+        .unwrap();
+
+    let writer = label_of(&a.view(), "a");
+    let binds = binds(&folder, writer);
+    let pinned: usize = binds
+        .iter()
+        .map(|entry| match &entry.kind {
+            EntryKind::Bind(bound) => bound.ops.len(),
+            kind => panic!("{kind:?}"),
+        })
+        .sum();
+    assert_eq!((pinned, binds.len() > 1), (files.len(), true));
+    for entry in &binds {
+        let len = entry.line.to_bytes().len();
+        assert!(len <= MAX_LINE, "{len} bytes");
+    }
+    let probe = Probe::new(&machine(&folder));
+    let (b, opened) = Blocking::open(probe, env("b", 2, &clock)).unwrap();
+    assert_eq!(opened.scan.moved, [], "the pins say where each file went");
+    let file = b.view().entity(song).unwrap().file().unwrap();
+    assert_eq!(
+        (file.path, file.state),
+        (path("shelf/000/0.npno"), FileState::InSync)
+    );
 }
 
 fn opening_viewing_and_refreshing_write_nothing_in_the_folder<F: Facade>() {
@@ -2358,22 +2662,6 @@ fn a_commit_writes_to_the_local_root_only_what_it_adds<F: Facade>() {
     a.commit("Tag", |i| i.add(song, TAGS, tag("last"))).unwrap();
     let written = seen.borrow().local_written - before;
     assert!(written < 2048, "{written} bytes for one short entry");
-}
-
-fn a_refresh_that_finds_nothing_new_writes_nothing<F: Facade>() {
-    let folder = MemDisk::new();
-    let clock = TestClock::at(1_000);
-    let probe = Probe::new(&machine(&folder));
-    let seen = Rc::clone(&probe.seen);
-    let (mut a, _) = F::open(probe, env("a", 1, &clock)).unwrap();
-    let song = create(&mut a, "song.npno", b"song");
-    a.commit("Tag", |i| i.add(song, TAGS, tag("a"))).unwrap();
-    a.refresh().unwrap();
-    let (written, view) = (seen.borrow().local_written, a.view());
-    let refreshed = a.refresh().unwrap();
-    assert_eq!(refreshed.changes, []);
-    assert_eq!(seen.borrow().local_written, written);
-    assert_eq!(facts(&a.view()), facts(&view));
 }
 
 fn reopening_reads_only_the_ends_of_files_read_before<F: Facade>() {

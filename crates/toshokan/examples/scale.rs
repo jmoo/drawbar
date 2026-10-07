@@ -1017,6 +1017,7 @@ fn main() {
             binding::scan(&layout(), &identify, &facts, &Scan::default()),
         )
         .unwrap()
+        .0
     });
     for _ in 0..args.runs {
         bench.measure("scan: walk and stat (previous scan given)", || {

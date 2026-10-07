@@ -6,16 +6,17 @@
 //! still holds it, such a file is a copy, a new file without an entity until an
 //! intent says something about it. When several files could be the one, or one
 //! file could be several entities', nothing is bound and it is reported. Scans
-//! never write; every commit pins the bindings this writer holds.
+//! never write; every commit pins the moves this writer found.
 
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use crate::env::{Identify, Names};
 use crate::error::Result;
-use crate::flow::{self, fold, ok, Flow};
+use crate::flow::{self, fold, ok};
 use crate::ids::{EntityId, Identity};
-use crate::io::{Kind, Root, Task};
+use crate::io::{Kind, Meta, Root, Task};
 use crate::layout::Layout;
 use crate::log::{FileFact, Op};
 use crate::path::RelPath;
@@ -52,85 +53,192 @@ pub struct Bindings {
     pub report: ScanReport,
 }
 
-/// Lists every library file outside toshokan's root. Requests only
-/// [`crate::Io::List`], [`crate::Io::Stat`] and [`crate::Io::Read`].
+/// One identity as `identities.json` keeps it: of the file at a path, length and
+/// time.
+type Remembered = (RelPath, u64, Option<u64>, Identity);
+
+impl Scan {
+    /// The identities this scan holds, as `identities.json` keeps them.
+    pub fn identities(&self) -> Vec<u8> {
+        let rows: Vec<Remembered> = self
+            .files
+            .iter()
+            .filter_map(|(path, file)| {
+                Some((path.clone(), file.len, file.modified, file.identity?))
+            })
+            .collect();
+        serde_json::to_vec(&rows).expect("identities are JSON")
+    }
+
+    /// The files whose identities `identities.json` keeps; `None` when `bytes` are
+    /// not such a file.
+    pub fn of_identities(bytes: &[u8]) -> Option<Self> {
+        let rows: Vec<Remembered> = serde_json::from_slice(bytes).ok()?;
+        let files = rows.into_iter().map(|(path, len, modified, identity)| {
+            let file = Scanned {
+                len,
+                modified,
+                identity: Some(identity),
+            };
+            (path, file)
+        });
+        Some(Self {
+            files: files.collect(),
+        })
+    }
+}
+
+/// Lists every library file outside toshokan's root, with the paths whose
+/// identities it read. Requests only [`crate::Io::List`], [`crate::Io::Stat`] and
+/// [`crate::Io::Read`].
 pub fn scan(
     layout: &Layout,
     identify: &Rc<dyn Identify>,
     facts: &Facts,
     previous: &Scan,
-) -> Task<'static, Result<Scan>> {
-    let lengths: BTreeSet<u64> = facts
-        .values()
-        .flatten()
-        .map(|fact| fact.value.len)
-        .collect();
-    let known: BTreeMap<(RelPath, u64, Option<u64>), Identity> = facts
-        .values()
-        .flatten()
-        .map(|fact| {
-            (
-                (fact.value.path.clone(), fact.value.len, fact.value.modified),
-                fact.value.identity,
-            )
-        })
-        .chain(previous.files.iter().filter_map(|(path, file)| {
-            file.identity
-                .map(|identity| ((path.clone(), file.len, file.modified), identity))
-        }))
-        .collect();
+) -> Task<'static, Result<(Scan, Vec<RelPath>)>> {
+    let known = Known::of(facts, previous, |_| true);
     let identify = Rc::clone(identify);
     walk(Rc::new(layout.clone()), RelPath::ROOT, Scan::default())
-        .and_then(move |mut scan| {
-            let unknown: Vec<(RelPath, u64)> = scan
-                .files
-                .iter_mut()
-                .filter_map(|(path, file)| {
-                    let key = (path.clone(), file.len, file.modified);
-                    file.identity = known.get(&key).copied();
-                    let needed = file.identity.is_none() && lengths.contains(&file.len);
-                    needed.then(|| (path.clone(), file.len))
-                })
-                .collect();
-            fold(unknown.into_iter(), scan, move |mut scan, (path, len)| {
-                flow::identity(Root::Folder, path.clone(), len, &identify).map_ok(move |identity| {
-                    if let Some(file) = scan.files.get_mut(&path) {
-                        file.identity = Some(identity);
-                    }
-                    scan
-                })
-            })
-        })
+        .and_then(move |scan| identified(scan, known, identify))
         .task()
+}
+
+/// `previous` with each of `paths` scanned again: the file at a path, the files
+/// under a directory, or nothing; with the paths whose identities it read.
+/// Requests only [`crate::Io::List`], [`crate::Io::Stat`] and [`crate::Io::Read`].
+pub fn rescan(
+    layout: &Layout,
+    identify: &Rc<dyn Identify>,
+    facts: &Facts,
+    previous: &Scan,
+    paths: Vec<RelPath>,
+) -> Task<'static, Result<(Scan, Vec<RelPath>)>> {
+    let touched: BTreeSet<&str> = paths.iter().map(RelPath::as_str).collect();
+    let mut scan = previous.clone();
+    scan.files.retain(|path, _| !under(path, &touched));
+    let unread = |path: &RelPath| {
+        under(path, &touched) || scan.files.get(path).is_some_and(|f| f.identity.is_none())
+    };
+    let known = Known::of(facts, previous, unread);
+    let identify = Rc::clone(identify);
+    let layout = Rc::new(layout.clone());
+    fold(paths.into_iter(), scan, move |scan, path| {
+        visit(Rc::clone(&layout), path, scan)
+    })
+    .and_then(move |scan| identified(scan, known, identify))
+    .task()
+}
+
+/// Whether `path` is one of `paths` or under one of them.
+fn under(path: &RelPath, paths: &BTreeSet<&str>) -> bool {
+    let text = path.as_str();
+    paths.contains(text)
+        || text
+            .match_indices('/')
+            .any(|(at, _)| paths.contains(&text[..at]))
+}
+
+/// What a scan knows without reading: the lengths of the files facts name, and
+/// the identity of a file at a path, length and time, from a fact or an earlier
+/// scan.
+struct Known {
+    lengths: BTreeSet<u64>,
+    identities: BTreeMap<(RelPath, u64, Option<u64>), Identity>,
+}
+
+impl Known {
+    /// Keeps identities only for paths `wanted` takes.
+    fn of(facts: &Facts, previous: &Scan, wanted: impl Fn(&RelPath) -> bool) -> Self {
+        let facts = facts.values().flatten().map(|fact| &fact.value);
+        let lengths = facts.clone().map(|fact| fact.len).collect();
+        let logged = facts
+            .filter(|fact| wanted(&fact.path))
+            .map(|fact| ((fact.path.clone(), fact.len, fact.modified), fact.identity));
+        let read = previous.files.iter().filter(|(path, _)| wanted(path));
+        let read = read.filter_map(|(path, file)| {
+            let identity = file.identity?;
+            Some(((path.clone(), file.len, file.modified), identity))
+        });
+        Self {
+            lengths,
+            identities: logged.chain(read).collect(),
+        }
+    }
+}
+
+/// `scan` with the identities `known` gives, and those it must read, of each file
+/// whose length is a fact's; with the paths whose identities it read.
+fn identified<'a>(
+    mut scan: Scan,
+    known: Known,
+    identify: Rc<dyn Identify>,
+) -> flow::Fallible<'a, (Scan, Vec<RelPath>)> {
+    let unknown: Vec<(RelPath, u64)> = scan
+        .files
+        .iter_mut()
+        .filter(|(_, file)| file.identity.is_none())
+        .filter_map(|(path, file)| {
+            let key = (path.clone(), file.len, file.modified);
+            file.identity = known.identities.get(&key).copied();
+            let needed = file.identity.is_none() && known.lengths.contains(&file.len);
+            needed.then(|| (path.clone(), file.len))
+        })
+        .collect();
+    let read = unknown.iter().map(|(path, _)| path.clone()).collect();
+    let identified = fold(unknown.into_iter(), scan, move |mut scan, (path, len)| {
+        flow::identity(Root::Folder, path.clone(), len, &identify).map_ok(move |identity| {
+            if let Some(file) = scan.files.get_mut(&path) {
+                file.identity = Some(identity);
+            }
+            scan
+        })
+    });
+    identified.map_ok(move |scan| (scan, read))
+}
+
+/// `scan` with what is at `path`: a file, every file under a directory, or
+/// nothing.
+fn visit<'a>(layout: Rc<Layout>, path: RelPath, scan: Scan) -> flow::Fallible<'a, Scan> {
+    if layout.owns(&path) {
+        return ok(scan);
+    }
+    flow::stat(Root::Folder, &path).and_then(move |meta| match meta {
+        Some(meta) if meta.kind == Kind::Directory => walk(layout, path, scan),
+        Some(meta) => ok(found(scan, path, meta)),
+        None => ok(scan),
+    })
 }
 
 fn walk<'a>(layout: Rc<Layout>, dir: RelPath, scan: Scan) -> flow::Fallible<'a, Scan> {
     flow::list(Root::Folder, &dir).and_then(move |entries| {
-        fold(entries.into_iter(), scan, move |mut scan, entry| {
+        fold(entries.into_iter(), scan, move |scan, entry| {
             let path = dir
                 .join(&entry.name)
                 .expect("a listed name is one component");
             match entry.kind {
                 Kind::Directory if layout.owns(&path) => ok(scan),
                 Kind::Directory => walk(Rc::clone(&layout), path, scan),
-                Kind::File => flow::stat(Root::Folder, &path).then(move |meta| match meta {
-                    Ok(Some(meta)) if meta.kind == Kind::File => {
-                        scan.files.insert(
-                            path,
-                            Scanned {
-                                len: meta.len,
-                                modified: meta.modified,
-                                identity: None,
-                            },
-                        );
-                        ok(scan)
-                    }
-                    Ok(_) => ok(scan),
-                    Err(error) => Flow::Done(Err(error)),
+                Kind::File => flow::stat(Root::Folder, &path).map_ok(move |meta| match meta {
+                    Some(meta) => found(scan, path, meta),
+                    None => scan,
                 }),
             }
         })
     })
+}
+
+/// `scan` with the file `meta` describes at `path`; unchanged unless it is a file.
+fn found(mut scan: Scan, path: RelPath, meta: Meta) -> Scan {
+    if meta.kind == Kind::File {
+        let file = Scanned {
+            len: meta.len,
+            modified: meta.modified,
+            identity: None,
+        };
+        scan.files.insert(path, file);
+    }
+    scan
 }
 
 /// Whether `file` holds what `fact` says.
@@ -148,13 +256,17 @@ pub fn bind(facts: &Facts, scan: &Scan, names: &dyn Names) -> Bindings {
     let mut taken: BTreeMap<&RelPath, EntityId> = BTreeMap::new();
     let mut departed: Vec<(EntityId, &FileFact)> = Vec::new();
     let mut claims: BTreeMap<&RelPath, Vec<(EntityId, &FileFact)>> = BTreeMap::new();
-    let mut by_key: BTreeMap<String, Vec<&RelPath>> = BTreeMap::new();
-    for path in scan.files.keys() {
-        by_key
-            .entry(names.key(path.as_str()))
-            .or_default()
-            .push(path);
-    }
+    let by_key = OnceCell::new();
+    let by_key = || {
+        by_key.get_or_init(|| {
+            let mut by_key: BTreeMap<String, Vec<&RelPath>> = BTreeMap::new();
+            for path in scan.files.keys() {
+                let key = names.key(path.as_str());
+                by_key.entry(key).or_default().push(path);
+            }
+            by_key
+        })
+    };
 
     for (&entity, written) in facts {
         let Some(first) = written.first() else {
@@ -164,7 +276,7 @@ pub fn bind(facts: &Facts, scan: &Scan, names: &dyn Names) -> Bindings {
         for fact in written.iter().map(|w| &w.value) {
             let same = match scan.files.get_key_value(&fact.path) {
                 Some((path, _)) => vec![path],
-                None => by_key
+                None => by_key()
                     .get(&names.key(fact.path.as_str()))
                     .cloned()
                     .unwrap_or_default(),
@@ -226,26 +338,25 @@ pub fn bind(facts: &Facts, scan: &Scan, names: &dyn Names) -> Bindings {
         );
     }
 
-    let free: Vec<(&RelPath, &Scanned)> = scan
-        .files
-        .iter()
-        .filter(|(path, _)| !taken.contains_key(path))
-        .collect();
+    let mut free: BTreeMap<(Identity, u64), Vec<&RelPath>> = BTreeMap::new();
+    for (path, file) in &scan.files {
+        if let (Some(identity), false) = (file.identity, taken.contains_key(path)) {
+            free.entry((identity, file.len)).or_default().push(path);
+        }
+    }
     let mut claims: BTreeMap<&RelPath, Vec<EntityId>> = BTreeMap::new();
-    let mut moves: Vec<(EntityId, &FileFact, Vec<&RelPath>)> = Vec::new();
+    let mut moves: Vec<(EntityId, &FileFact, &[&RelPath])> = Vec::new();
     for (entity, fact) in departed {
-        let matches: Vec<&RelPath> = free
-            .iter()
-            .filter(|(_, file)| file.identity == Some(fact.identity) && file.len == fact.len)
-            .map(|(path, _)| *path)
-            .collect();
-        for path in &matches {
+        let matches = free
+            .get(&(fact.identity, fact.len))
+            .map_or(&[][..], Vec::as_slice);
+        for path in matches {
             claims.entry(path).or_default().push(entity);
         }
         moves.push((entity, fact, matches));
     }
     for (entity, fact, matches) in moves {
-        match matches.as_slice() {
+        match matches {
             [path] if claims[path].len() == 1 => {
                 taken.insert(path, entity);
                 bindings.report.moved.push(Moved {
@@ -314,9 +425,10 @@ fn missing(fact: &FileFact) -> FileRef {
     }
 }
 
-/// File-register writes for the bindings that `facts` do not already say: a file
-/// found in sync at another path or with another time. Conflicted registers,
-/// changed files and missing ones are left for the user.
+/// File-register writes for the moves `facts` do not already say: a file found in
+/// sync at another path. A new modification time alone is not pinned; it only
+/// saves reading an identity. Conflicted registers, changed files and missing
+/// ones are left for the user.
 pub fn pins(facts: &Facts, bindings: &Bindings, scan: &Scan) -> Vec<Op> {
     let mut ops = Vec::new();
     for (&entity, file) in &bindings.bound {
@@ -329,19 +441,20 @@ pub fn pins(facts: &Facts, bindings: &Bindings, scan: &Scan) -> Vec<Op> {
         let Some(found) = scan.files.get(&file.path) else {
             continue;
         };
+        if file.path == written.value.path {
+            continue;
+        }
         let pinned = FileFact {
             path: file.path.clone(),
             identity: found.identity.unwrap_or(written.value.identity),
             len: found.len,
             modified: found.modified,
         };
-        if pinned != written.value {
-            ops.push(Op::Pin {
-                entity,
-                file: pinned,
-                replaces: vec![written.entry],
-            });
-        }
+        ops.push(Op::Pin {
+            entity,
+            file: pinned,
+            replaces: vec![written.entry],
+        });
     }
     ops
 }
@@ -641,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pin_records_a_move_or_a_new_time_and_nothing_else() {
+    fn a_pin_records_a_move_and_nothing_else() {
         let e = EntityId::from_u128(1);
         let facts = one("a");
         let pins_for = |files: &[(&str, usize)]| {
@@ -660,7 +773,7 @@ mod tests {
             (*entity, moved.path.as_str(), replaces.as_slice()),
             (e, "b", &[EntryHash::from_u128(1)][..])
         );
-        assert_eq!(pins_for(&[("a", 0)]).len(), 1, "a new time");
+        assert!(pins_for(&[("a", 0)]).is_empty(), "a new time");
         assert!(pins_for(&[("a", 1)]).is_empty(), "changed outside");
         assert!(pins_for(&[]).is_empty(), "missing");
         let mut in_sync = one("a");
@@ -700,11 +813,12 @@ mod tests {
             )
             .unwrap()
         };
-        let first = run(&Scan::default());
+        let (first, read) = run(&Scan::default());
         assert_eq!(
             first.files.keys().collect::<Vec<_>>(),
             [&path("b"), &path("d/a")]
         );
+        assert_eq!(read, [path("d/a")]);
         assert!(
             first.files[&path("d/a")].identity.is_some(),
             "its length is a fact's"
@@ -713,9 +827,10 @@ mod tests {
         let mut previous = first.clone();
         let remembered = Identity::from_u128(42);
         previous.files.get_mut(&path("d/a")).unwrap().identity = Some(remembered);
+        let (again, read) = run(&previous);
         assert_eq!(
-            run(&previous).files[&path("d/a")].identity,
-            Some(remembered),
+            (again.files[&path("d/a")].identity, read),
+            (Some(remembered), Vec::new()),
             "same length and time"
         );
     }

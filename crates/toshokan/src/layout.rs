@@ -142,6 +142,11 @@ impl Layout {
         child(&RelPath::ROOT, "let-go.json")
     }
 
+    /// The identities this install's scans read that no fact gives.
+    pub fn identities() -> RelPath {
+        child(&RelPath::ROOT, "identities.json")
+    }
+
     /// Present once the writer can no longer be continued: it leaves the pool.
     pub fn retired(genesis: EntryHash) -> RelPath {
         child(&Self::local(genesis), "retired")

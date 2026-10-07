@@ -44,17 +44,19 @@ Each install keeps, per library, a local root of its own that is never synced:
 | `<genesis>/lock`                 | Held while an instance writes as this writer |
 | `<genesis>/retired`              | Empty; the writer is never written again     |
 | `let-go.json`                    | Entries the install let go, by writer        |
+| `identities.json`                | Identities the install's scans read          |
 
 `<genesis>` is the hash of the writer's genesis entry. The directory is created
 only after that entry is durable in the folder, so the directories of the local
 root are the install's pool of writers.
 
-`head.json` is `{"writer":"<writer id>","head":"<entry hash>"}`, and
-`let-go.json` is `{"<writer id>":["<entry hash>",…]}`. A file in the
-local root that is replaced, such as `head.json`, `view.json` or a draft, is
-first written beside it as `<name>.next` and synced; then `<name>` is removed and
-`<name>.next` renamed to it. A reader takes `<name>`, or `<name>.next` when
-`<name>` is missing.
+`head.json` is `{"writer":"<writer id>","head":"<entry hash>"}`,
+`let-go.json` is `{"<writer id>":["<entry hash>",…]}`, and `identities.json` is
+`[["<library path>",<length>,<modification time or null>,"<identity>"],…]`.
+A file in the local root that is replaced, such as `head.json`, `view.json` or a
+draft, is first written beside it as `<name>.next` and synced; then `<name>` is
+removed and `<name>.next` renamed to it. A reader takes `<name>`, or
+`<name>.next` when `<name>` is missing.
 
 ## Identifiers and clocks
 
@@ -115,11 +117,11 @@ readable part. The marker's last 34 bytes are those of the line it names.
 
 An entry is an object whose first members are:
 
-| Member | Value                                 |
-| ------ | ------------------------------------- |
-| `prev` | The hash of the entry before it       |
-| `at`   | Its clock reading                     |
-| `kind` | `"genesis"`, `"intent"` or `"settle"` |
+| Member | Value                                           |
+| ------ | ----------------------------------------------- |
+| `prev` | The hash of the entry before it                 |
+| `at`   | Its clock reading                               |
+| `kind` | `"genesis"`, `"intent"`, `"settle"` or `"bind"` |
 
 followed by the members of its kind. A reader ignores members it does not know,
 at any depth, and keeps the line and the whole entry (see Merging), so they
@@ -180,6 +182,17 @@ effect with the user's consent:
 | `writer`  | The writer whose pending record it settles     |
 | `record`  | The record's nonce                             |
 | `outcome` | `"finished"`, `"rolled-back"` or `"dismissed"` |
+
+A **bind** entry pins moves this writer's reader found (see Binding), after the
+intent it committed with:
+
+| Member | Value         |
+| ------ | ------------- |
+| `ops`  | Its `pin` ops |
+
+Its ops are merged as an intent's are, and it is never undone. A commit spreads
+its pins over as many `bind` entries as keep each line within the limit, so any
+number of moves can be pinned.
 
 Nothing derived is logged: views, bindings a reader has not pinned, and the
 merged state exist only in readers and in snapshots.
@@ -424,7 +437,11 @@ their identities:
 
 1. A scan lists every library file with its length and modification time. It
    reads an identity only when a file's length is that of some file fact, and no
-   earlier scan or fact gives the identity for that path, length and time.
+   fact, earlier scan or `identities.json` gives the identity for that path,
+   length and time. The install keeps in `identities.json` the identities its
+   scans read while their files keep their length and time. After a commit, only
+   the paths its file effects moved files from and to are scanned again; opening
+   and refreshing scan every file.
 2. An entity whose file fact names a path a file is at is bound to it: in sync
    when the file holds the fact's identity (or, without one, its length and
    time), else changed outside. Paths compare under the volume's rules for case
@@ -438,10 +455,11 @@ their identities:
    holds it is a copy: a new file with no entity until an intent says something
    about it.
 
-Every commit appends the bindings this writer holds that its facts do not say
-yet, as `pin` ops: a file in sync at another path, or with a new modification
-time. Conflicted file registers, changed files and missing ones are left for the
-user. A scan writes nothing.
+Every commit pins the moves this writer holds that its facts do not say yet: each
+file in sync at another path, as a `pin` op in a `bind` entry. A new
+modification time alone is not logged; it only spares a scan reading an
+identity. Conflicted file registers, changed files and missing ones are left for
+the user. A scan writes nothing in the folder.
 
 ## Intents
 
@@ -461,8 +479,8 @@ A commit:
    and only then creates its writer, so a refused first intent leaves nothing.
 4. Settles this writer's own unfinished effects (see Recovery).
 5. Carries out the file effects under a pending record, then appends the intent
-   with a `file` op for each entity's file as the folder shows it afterwards and
-   a `pin` op for each binding to pin.
+   with a `file` op for each entity's file as the folder shows it afterwards,
+   and after it the `bind` entries that pin the moves found.
 
 Building an intent writes nothing, but draws the id of each entity it creates,
 so one intent can create entities that name each other.

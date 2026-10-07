@@ -34,6 +34,7 @@ pub enum EntryKind {
     Genesis(Genesis),
     Intent(Logged),
     Settle(Settle),
+    Bind(Bound),
     /// A kind this build does not know, or a known kind whose members do not
     /// decode, as the entry's whole JSON object: kept, merged by nothing, and
     /// reported.
@@ -49,8 +50,7 @@ pub struct Genesis {
     pub label: String,
 }
 
-/// A committed intent: its facts, the file effects it made, and the bindings the
-/// writer pinned with it.
+/// A committed intent: its facts and the file effects it made.
 ///
 /// ⚠️ Its ops decode only straight from JSON text: not through `#[serde(flatten)]`
 /// or an internally tagged enum, which buffer the [`Raw`] values an op keeps.
@@ -122,6 +122,22 @@ pub enum Op {
     Unknown(Raw),
 }
 
+impl Op {
+    /// The entity the op changes; `None` for an op this build does not know.
+    pub fn entity(&self) -> Option<EntityId> {
+        match self {
+            Self::Create { entity, .. }
+            | Self::Delete { entity, .. }
+            | Self::Write { entity, .. }
+            | Self::Add { entity, .. }
+            | Self::Remove { entity, .. }
+            | Self::File { entity, .. }
+            | Self::Pin { entity, .. } => Some(*entity),
+            Self::Unknown(_) => None,
+        }
+    }
+}
+
 /// Where an entity's file is and what it held when this writer last wrote or bound
 /// it.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -141,6 +157,13 @@ pub struct Displaced {
     pub from: RelPath,
     pub identity: Identity,
     pub len: u64,
+}
+
+/// The moves a writer found and pinned as it committed, logged after the intent:
+/// merged as an intent's ops are, and never undone.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Bound {
+    pub ops: Vec<Op>,
 }
 
 /// This writer settled another writer's unfinished effect, with the user's consent.
@@ -242,6 +265,7 @@ impl Entry {
             }
             Some("intent") => members(json).map(EntryKind::Intent),
             Some("settle") => members(json).map(EntryKind::Settle),
+            Some("bind") => members(json).map(EntryKind::Bind),
             _ => None,
         };
         Ok(Self::of(line, head.at, known))
@@ -379,6 +403,11 @@ impl Serialize for EntryKind {
             Self::Settle(settle) => Tagged {
                 kind: "settle",
                 members: settle,
+            }
+            .serialize(serializer),
+            Self::Bind(bound) => Tagged {
+                kind: "bind",
+                members: bound,
             }
             .serialize(serializer),
             Self::Unknown(raw) => {
@@ -790,6 +819,12 @@ mod tests {
                 writer: WriterId::from_u128(2),
                 record: Nonce::from_u128(3),
                 outcome: Settlement::RolledBack,
+            }),
+            EntryKind::Bind(Bound {
+                ops: every_op()
+                    .into_iter()
+                    .filter(|op| matches!(op, Op::Pin { .. }))
+                    .collect(),
             }),
         ];
         for kind in kinds {

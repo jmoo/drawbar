@@ -673,6 +673,14 @@ pub struct ReadReport {
     pub unreadable: Vec<(RelPath, Option<Stop>)>,
 }
 
+impl ReadReport {
+    /// Whether the read found anything new: the cached view grew, or a file in a
+    /// writer's directory came, went or changed.
+    pub fn anything_new(&self) -> bool {
+        self.changed || self.folder_changed
+    }
+}
+
 /// Clones share where they save the cached view.
 #[derive(Clone)]
 pub struct Reader {
