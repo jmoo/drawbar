@@ -24,6 +24,8 @@ use toshokan::blocking::{run, Backend, Library, Native};
 use toshokan::env::{ExactNames, OsRandom, PrefixIdentity, SystemClock};
 use toshokan::io::{Capabilities, Kind, Range};
 use toshokan::log::{Displaced, Entry, EntryKind, FileFact, Genesis, Logged, Op};
+use toshokan::merge::merge;
+use toshokan::reader::{CachedView, Reader};
 use toshokan::simulator::Machine;
 use toshokan::{
     EntityId, EntryHash, Env, Expect, Hlc, Identify, Identity, Io, IoResult, Layout, MemDisk,
@@ -943,6 +945,15 @@ fn main() {
         });
         drop(opened);
     }
+
+    let mut backend = world.counted("reader", &stats);
+    let reader = bench.measure("reader: read every writer (no cached view)", || {
+        let mut reader = Reader::new(layout(), CachedView::default());
+        run(&mut backend, reader.read()).unwrap();
+        reader
+    });
+    let folded = bench.measure("merge: every log", || merge(reader.logs().values()));
+    drop((reader, folded));
 
     let backend = world.counted(own_local, &stats);
     let (lib, _) = bench.measure("open own, no cached view", || {
