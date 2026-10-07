@@ -8,6 +8,7 @@
 //! file could be several entities', nothing is bound and it is reported. Scans
 //! never write; every commit pins the moves this writer found.
 
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
@@ -148,13 +149,17 @@ pub fn bind(facts: &Facts, scan: &Scan, names: &dyn Names) -> Bindings {
     let mut taken: BTreeMap<&RelPath, EntityId> = BTreeMap::new();
     let mut departed: Vec<(EntityId, &FileFact)> = Vec::new();
     let mut claims: BTreeMap<&RelPath, Vec<(EntityId, &FileFact)>> = BTreeMap::new();
-    let mut by_key: BTreeMap<String, Vec<&RelPath>> = BTreeMap::new();
-    for path in scan.files.keys() {
-        by_key
-            .entry(names.key(path.as_str()))
-            .or_default()
-            .push(path);
-    }
+    let by_key = OnceCell::new();
+    let by_key = || {
+        by_key.get_or_init(|| {
+            let mut by_key: BTreeMap<String, Vec<&RelPath>> = BTreeMap::new();
+            for path in scan.files.keys() {
+                let key = names.key(path.as_str());
+                by_key.entry(key).or_default().push(path);
+            }
+            by_key
+        })
+    };
 
     for (&entity, written) in facts {
         let Some(first) = written.first() else {
@@ -164,7 +169,7 @@ pub fn bind(facts: &Facts, scan: &Scan, names: &dyn Names) -> Bindings {
         for fact in written.iter().map(|w| &w.value) {
             let same = match scan.files.get_key_value(&fact.path) {
                 Some((path, _)) => vec![path],
-                None => by_key
+                None => by_key()
                     .get(&names.key(fact.path.as_str()))
                     .cloned()
                     .unwrap_or_default(),
@@ -226,26 +231,25 @@ pub fn bind(facts: &Facts, scan: &Scan, names: &dyn Names) -> Bindings {
         );
     }
 
-    let free: Vec<(&RelPath, &Scanned)> = scan
-        .files
-        .iter()
-        .filter(|(path, _)| !taken.contains_key(path))
-        .collect();
+    let mut free: BTreeMap<(Identity, u64), Vec<&RelPath>> = BTreeMap::new();
+    for (path, file) in &scan.files {
+        if let (Some(identity), false) = (file.identity, taken.contains_key(path)) {
+            free.entry((identity, file.len)).or_default().push(path);
+        }
+    }
     let mut claims: BTreeMap<&RelPath, Vec<EntityId>> = BTreeMap::new();
-    let mut moves: Vec<(EntityId, &FileFact, Vec<&RelPath>)> = Vec::new();
+    let mut moves: Vec<(EntityId, &FileFact, &[&RelPath])> = Vec::new();
     for (entity, fact) in departed {
-        let matches: Vec<&RelPath> = free
-            .iter()
-            .filter(|(_, file)| file.identity == Some(fact.identity) && file.len == fact.len)
-            .map(|(path, _)| *path)
-            .collect();
-        for path in &matches {
+        let matches = free
+            .get(&(fact.identity, fact.len))
+            .map_or(&[][..], Vec::as_slice);
+        for path in matches {
             claims.entry(path).or_default().push(entity);
         }
         moves.push((entity, fact, matches));
     }
     for (entity, fact, matches) in moves {
-        match matches.as_slice() {
+        match matches {
             [path] if claims[path].len() == 1 => {
                 taken.insert(path, entity);
                 bindings.report.moved.push(Moved {
