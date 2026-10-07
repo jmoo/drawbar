@@ -1,7 +1,7 @@
 //! What the library tells the app: on open, on commit, on refresh and on upkeep.
 
 use crate::error::Why;
-use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, SegmentName, WriterId};
+use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
 use crate::io::IoError;
 use crate::path::RelPath;
 
@@ -277,6 +277,6 @@ pub struct Emptied {
 pub struct Compacted {
     pub snapshot: Nonce,
     pub folded: usize,
-    /// Segments this process sealed, folded and deleted.
-    pub removed: Vec<SegmentName>,
+    /// Segments that ended with a seal marker, folded and deleted.
+    pub removed: Vec<RelPath>,
 }

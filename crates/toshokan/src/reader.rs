@@ -6,22 +6,25 @@
 //! after a gap is held back. Two entries with one predecessor are a fork: both
 //! branches are merged and the fork is reported once. What is placed is kept in
 //! the cached view, which only grows. Reading writes nothing in the folder.
+//!
+//! Each line is parsed and decoded once: the reader keeps what it read of each
+//! file, reads only the bytes a segment gained since, and shares each decoded
+//! entry between the cached view and what the folder holds.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
-use serde::{Deserialize, Serialize};
-
+use crate::cache::{self, Store};
 use crate::error::{Error, Result};
 use crate::flow::{self, Flow};
 use crate::ids::{EntryHash, Hlc, WriterId};
 use crate::io::{Kind, Range, Root, Task};
 use crate::layout::Layout;
-use crate::line::{self, lines, Line, Stop};
+use crate::line::{self, Stop};
 use crate::log::{Entry, EntryKind};
 use crate::path::RelPath;
 use crate::report::{Fork, Gap};
-use crate::schema::Raw;
 use crate::snapshot::Snapshot;
 
 /// The most of one file a reader holds. A longer segment is read up to here; a
@@ -31,55 +34,139 @@ pub const MAX_FILE: u64 = 1 << 28;
 /// What one file in a writer's directory holds, judged by its contents.
 #[derive(Clone, PartialEq, Debug)]
 pub enum WriterFile {
-    /// Lines up to the first unreadable one. An empty file is an empty segment.
-    Segment {
-        lines: Vec<Line>,
-        stop: Option<Stop>,
-    },
-    Snapshot(Box<Snapshot>),
+    /// An empty file is an empty segment.
+    Segment(Segment),
+    Snapshot(Rc<Snapshot>),
     /// Neither: reported, and read again next time.
     Unreadable,
 }
 
+/// The readable lines of a segment file, decoded.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Segment {
+    pub entries: Vec<Rc<Entry>>,
+    /// The offset just past the last line.
+    pub end: u64,
+    /// Why the readable lines end before the file does.
+    pub stop: Option<Stop>,
+    /// Whether the file ends with the seal marker after its last line.
+    pub sealed: bool,
+}
+
+impl Segment {
+    /// Reads `bytes`, which follow the readable lines in the file; returns the
+    /// entries they add.
+    pub fn extend(&mut self, bytes: &[u8]) -> &[Rc<Entry>] {
+        let last = self.entries.last().map(|entry| entry.hash());
+        let read = line::read_with(bytes, self.end, last, Entry::parse, Entry::hash);
+        let before = self.entries.len();
+        self.entries.extend(read.lines.into_iter().map(Rc::new));
+        self.end = read.end;
+        self.stop = read.stop;
+        self.sealed = read.sealed;
+        &self.entries[before..]
+    }
+
+    /// Where reading may continue once the file grows: just past the last line,
+    /// unless the file is sealed.
+    fn resume(&self) -> Option<Resume> {
+        let last = self.entries.last().filter(|_| !self.sealed)?;
+        Some(Resume {
+            end: self.end,
+            ending: line::ending(last.hash()),
+        })
+    }
+
+    /// Whether each line follows the one before it, as the lines one process
+    /// appends do.
+    pub fn contiguous(&self) -> bool {
+        self.entries
+            .windows(2)
+            .all(|pair| pair[1].prev() == pair[0].hash())
+    }
+}
+
 impl WriterFile {
     pub fn parse(bytes: &[u8]) -> Self {
-        let mut read = lines(bytes);
-        let found: Vec<Line> = read.by_ref().collect();
-        let stop = read.stop().cloned();
-        if !found.is_empty() || stop.is_none() {
-            return Self::Segment { lines: found, stop };
+        let mut segment = Segment::default();
+        segment.extend(bytes);
+        if !segment.entries.is_empty() || segment.stop.is_none() {
+            return Self::Segment(segment);
         }
         match Snapshot::decode(bytes) {
-            Ok(snapshot) => Self::Snapshot(Box::new(snapshot)),
+            Ok(snapshot) => Self::Snapshot(Rc::new(snapshot)),
             Err(_) => Self::Unreadable,
+        }
+    }
+
+    /// Whether the file gives a reader anything to place.
+    fn holds_any(&self) -> bool {
+        match self {
+            Self::Segment(segment) => !segment.entries.is_empty(),
+            Self::Snapshot(_) => true,
+            Self::Unreadable => false,
         }
     }
 }
 
 /// One writer's history as this install has placed it.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Debug)]
 pub struct WriterLog {
     writer: WriterId,
     /// No one extends another.
-    snapshots: Vec<Snapshot>,
-    entries: Vec<Entry>,
+    snapshots: Vec<Rc<Snapshot>>,
+    entries: Vec<Rc<Entry>>,
     /// Every placed or folded entry, with its predecessor.
-    chain: BTreeMap<EntryHash, EntryHash>,
+    chain: BTreeMap<EntryHash, Link>,
     /// Entries seen and never placed, with their predecessors, so that a fork with
     /// one of them is found after its file is gone.
     strays: BTreeMap<EntryHash, EntryHash>,
+    /// The lines last offered and held back.
+    waiting: BTreeMap<EntryHash, Rc<Entry>>,
+    /// The first successor seen of each entry, among the chain and the strays.
+    next: BTreeMap<EntryHash, EntryHash>,
+    /// Every successor of each entry with more than one.
+    branches: BTreeMap<EntryHash, BTreeSet<EntryHash>>,
     forks: Vec<Fork>,
     gaps: Vec<Gap>,
+    last_at: Option<Hlc>,
+}
+
+/// A placed or folded entry: its predecessor, and itself unless folded.
+#[derive(Clone, Debug)]
+struct Link {
+    prev: EntryHash,
+    entry: Option<Rc<Entry>>,
+}
+
+/// Two logs are equal when they hold the same snapshots, entries, strays and
+/// forks; what they hold back from the last read does not count.
+impl PartialEq for WriterLog {
+    fn eq(&self, other: &Self) -> bool {
+        self.writer == other.writer
+            && self.snapshots == other.snapshots
+            && self.entries == other.entries
+            && self.strays == other.strays
+            && self.forks == other.forks
+    }
 }
 
 /// What [`WriterLog::place`] added.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Debug, Default)]
 pub struct Placement {
     /// In placement order: each after its predecessor.
-    pub placed: Vec<EntryHash>,
+    pub placed: Vec<Rc<Entry>>,
+    pub kept: Vec<Rc<Snapshot>>,
+    /// Entries held back for the first time, with their predecessors.
+    pub strayed: Vec<(EntryHash, EntryHash)>,
     pub forks: Vec<Fork>,
+}
+
+impl Placement {
     /// Whether the log grew at all: a snapshot kept, a line placed or held back.
-    pub changed: bool,
+    pub fn changed(&self) -> bool {
+        !self.placed.is_empty() || !self.kept.is_empty() || !self.strayed.is_empty()
+    }
 }
 
 impl WriterLog {
@@ -90,8 +177,12 @@ impl WriterLog {
             entries: Vec::new(),
             chain: BTreeMap::new(),
             strays: BTreeMap::new(),
+            waiting: BTreeMap::new(),
+            next: BTreeMap::new(),
+            branches: BTreeMap::new(),
             forks: Vec::new(),
             gaps: Vec::new(),
+            last_at: None,
         }
     }
 
@@ -116,7 +207,7 @@ impl WriterLog {
     pub fn genesis(&self) -> Option<EntryHash> {
         self.chain
             .iter()
-            .find(|(_, prev)| **prev == EntryHash::ZERO)
+            .find(|(_, link)| link.prev == EntryHash::ZERO)
             .map(|(hash, _)| *hash)
     }
 
@@ -132,7 +223,12 @@ impl WriterLog {
 
     /// The predecessor of a placed or folded entry.
     pub fn predecessor(&self, hash: EntryHash) -> Option<EntryHash> {
-        self.chain.get(&hash).copied()
+        self.chain.get(&hash).map(|link| link.prev)
+    }
+
+    /// The placed entry `hash`; `None` when it is folded or not held.
+    pub fn entry(&self, hash: EntryHash) -> Option<&Rc<Entry>> {
+        self.chain.get(&hash)?.entry.as_ref()
     }
 
     /// The placed or folded entries from the genesis entry to `head`, in chain
@@ -150,19 +246,24 @@ impl WriterLog {
 
     /// The snapshots whose folded lists the placed entries continue. More than one
     /// only when the writer's history forked and each branch compacted.
-    pub fn snapshots(&self) -> &[Snapshot] {
+    pub fn snapshots(&self) -> &[Rc<Snapshot>] {
         &self.snapshots
     }
 
     /// The placed entries no snapshot folds, each after its predecessor; fork
     /// branches in the order of their first entries' hashes.
-    pub fn entries(&self) -> &[Entry] {
+    pub fn entries(&self) -> &[Rc<Entry>] {
         &self.entries
+    }
+
+    /// Entries seen and never placed, with their predecessors.
+    pub fn strays(&self) -> &BTreeMap<EntryHash, EntryHash> {
+        &self.strays
     }
 
     /// Placed or folded entries with no placed successor: one, unless forked.
     pub fn heads(&self) -> Vec<EntryHash> {
-        let prevs: BTreeSet<&EntryHash> = self.chain.values().collect();
+        let prevs: BTreeSet<EntryHash> = self.chain.values().map(|link| link.prev).collect();
         self.chain
             .keys()
             .filter(|hash| !prevs.contains(hash))
@@ -171,7 +272,7 @@ impl WriterLog {
     }
 
     pub fn last_at(&self) -> Option<Hlc> {
-        self.readings().max()
+        self.last_at
     }
 
     /// Every fork found so far. Never shrinks.
@@ -184,80 +285,139 @@ impl WriterLog {
         &self.gaps
     }
 
-    /// Places what `snapshots` fold and every line whose predecessor is then held,
-    /// repeatedly. Lines left over are the gaps until the next placement. Only
-    /// grows the log: a snapshot extended by one already kept is ignored, and one
-    /// that extends kept ones replaces them.
-    pub fn place(&mut self, snapshots: Vec<Snapshot>, lines: Vec<Line>) -> Placement {
-        let kept = snapshots
-            .into_iter()
-            .fold(false, |kept, snapshot| self.keep(snapshot) | kept);
-        if kept {
-            self.reindex();
+    /// Places what `snapshots` fold and every entry whose predecessor is then
+    /// held, repeatedly, together with the entries held back before. Entries left
+    /// over are the gaps until the next placement. Only grows the log: a snapshot
+    /// extended by one already kept is ignored, and one that extends kept ones
+    /// replaces them.
+    pub fn place(&mut self, snapshots: Vec<Rc<Snapshot>>, entries: Vec<Rc<Entry>>) -> Placement {
+        self.grow(snapshots, entries, BTreeSet::new())
+    }
+
+    /// Forgets the entries held back, so that the next placement offers again
+    /// only what is held back then.
+    fn forget_waiting(&mut self) {
+        self.waiting.clear();
+        self.gaps.clear();
+    }
+
+    /// As [`WriterLog::place`], reporting forks also at the predecessors in
+    /// `touched`.
+    fn grow(
+        &mut self,
+        snapshots: Vec<Rc<Snapshot>>,
+        entries: Vec<Rc<Entry>>,
+        mut touched: BTreeSet<EntryHash>,
+    ) -> Placement {
+        let mut placement = Placement::default();
+        for snapshot in snapshots {
+            if self.keep(&snapshot) {
+                placement.kept.push(snapshot);
+            }
         }
-        let mut waiting: BTreeMap<EntryHash, Line> = lines
-            .into_iter()
-            .filter(|line| !self.holds(line.hash()))
-            .map(|line| (line.hash(), line))
-            .collect();
+        if !placement.kept.is_empty() {
+            self.reindex(&mut touched);
+        }
+        for entry in entries {
+            let (hash, prev) = (entry.hash(), entry.prev());
+            if self.holds(hash) {
+                continue;
+            }
+            if prev != EntryHash::ZERO && !self.holds(prev) {
+                self.waiting.insert(hash, entry);
+                continue;
+            }
+            self.waiting.remove(&hash);
+            self.strays.remove(&hash);
+            self.link(hash, prev, Some(Rc::clone(&entry)), &mut touched);
+            placement.placed.push(entry);
+        }
         let mut after: BTreeMap<EntryHash, Vec<EntryHash>> = BTreeMap::new();
-        for (hash, line) in &waiting {
-            after.entry(line.prev()).or_default().push(*hash);
+        for (hash, entry) in &self.waiting {
+            after.entry(entry.prev()).or_default().push(*hash);
         }
         let mut ready: VecDeque<EntryHash> = after
             .keys()
             .filter(|prev| **prev == EntryHash::ZERO || self.holds(**prev))
             .copied()
             .collect();
-        let mut placed = Vec::new();
         while let Some(prev) = ready.pop_front() {
             for hash in after.remove(&prev).unwrap_or_default() {
-                let line = waiting
+                let entry = self
+                    .waiting
                     .remove(&hash)
-                    .expect("each waiting line is placed once");
-                self.chain.insert(hash, prev);
+                    .expect("each waiting entry is placed once");
                 self.strays.remove(&hash);
-                self.entries.push(entry(line));
-                placed.push(hash);
+                self.link(hash, prev, Some(Rc::clone(&entry)), &mut touched);
+                placement.placed.push(entry);
                 ready.push_back(hash);
             }
         }
-        let mut strayed = false;
-        for (hash, line) in &waiting {
-            strayed |= self.strays.insert(*hash, line.prev()).is_none();
+        let held: Vec<(EntryHash, EntryHash)> = self
+            .waiting
+            .iter()
+            .map(|(hash, entry)| (*hash, entry.prev()))
+            .collect();
+        for (hash, prev) in held {
+            if self.strays.insert(hash, prev).is_none() {
+                self.note(hash, prev, &mut touched);
+                placement.strayed.push((hash, prev));
+            }
         }
-        self.gaps = gaps(self.writer, &waiting);
-        if !placed.is_empty() {
-            self.order();
+        self.gaps = gaps(self.writer, &self.waiting);
+        self.append(&placement.placed);
+        if !placement.kept.is_empty() {
+            self.last_at = self.readings().max();
         }
-        let changed = kept || strayed || !placed.is_empty();
-        let forks = match changed {
-            true => self.find_forks(),
-            false => Vec::new(),
-        };
-        Placement {
-            placed,
-            forks,
-            changed,
-        }
+        placement.forks = self.forks_at(touched);
+        placement
     }
 
     /// Places everything `other`, a log of the same writer, holds: its
     /// snapshots, entries, strays and forks.
-    fn join(&mut self, other: &WriterLog) {
-        for (hash, prev) in &other.strays {
-            if !self.holds(*hash) {
-                self.strays.insert(*hash, *prev);
+    fn join(&mut self, other: &WriterLog) -> Placement {
+        self.restore(
+            other.snapshots.clone(),
+            other.entries.clone(),
+            other.strays.iter().map(|(hash, prev)| (*hash, *prev)),
+            other.forks.iter().map(|fork| (fork.prev, fork.branches)),
+        )
+    }
+
+    /// Places what a stored view of this writer holds: its strays and forks
+    /// first, so that a fork it reported is not reported again.
+    fn restore(
+        &mut self,
+        snapshots: Vec<Rc<Snapshot>>,
+        entries: Vec<Rc<Entry>>,
+        strays: impl IntoIterator<Item = (EntryHash, EntryHash)>,
+        forks: impl IntoIterator<Item = (EntryHash, [EntryHash; 2])>,
+    ) -> Placement {
+        let mut touched = BTreeSet::new();
+        let mut strayed = Vec::new();
+        for (hash, prev) in strays {
+            if !self.holds(hash) && self.strays.insert(hash, prev).is_none() {
+                self.note(hash, prev, &mut touched);
+                strayed.push((hash, prev));
             }
         }
-        let reported: BTreeSet<EntryHash> = self.forks.iter().map(|fork| fork.prev).collect();
-        let forks = other
-            .forks
-            .iter()
-            .filter(|fork| !reported.contains(&fork.prev));
-        self.forks.extend(forks.copied());
-        let lines = other.entries.iter().map(|entry| entry.line.clone());
-        self.place(other.snapshots.clone(), lines.collect());
+        let mut reported = Vec::new();
+        for (prev, branches) in forks {
+            if !self.forks.iter().any(|fork| fork.prev == prev) {
+                let fork = Fork {
+                    writer: self.writer,
+                    prev,
+                    branches,
+                };
+                self.forks.push(fork);
+                reported.push(fork);
+            }
+        }
+        let mut placement = self.grow(snapshots, entries, touched);
+        strayed.retain(|(hash, _)| self.strays.contains_key(hash));
+        placement.strayed.extend(strayed);
+        placement.forks.extend(reported);
+        placement
     }
 
     /// Every clock reading of the placed entries and the snapshots.
@@ -266,34 +426,102 @@ impl WriterLog {
         entries.chain(self.snapshots.iter().map(|snapshot| snapshot.at))
     }
 
-    fn keep(&mut self, snapshot: Snapshot) -> bool {
-        if self.snapshots.iter().any(|kept| kept.extends(&snapshot)) {
+    fn keep(&mut self, snapshot: &Rc<Snapshot>) -> bool {
+        if self.snapshots.iter().any(|kept| kept.extends(snapshot)) {
             return false;
         }
         self.snapshots.retain(|kept| !snapshot.extends(kept));
-        self.snapshots.push(snapshot);
-        self.snapshots.sort_by_key(Snapshot::head);
+        self.snapshots.push(Rc::clone(snapshot));
+        self.snapshots.sort_by_key(|snapshot| snapshot.head());
         true
     }
 
-    fn reindex(&mut self) {
-        let folded: BTreeMap<EntryHash, EntryHash> =
-            self.snapshots.iter().flat_map(Snapshot::pairs).collect();
-        self.entries
-            .retain(|entry| !folded.contains_key(&entry.hash()));
-        self.chain = folded;
-        self.chain.extend(
-            self.entries
-                .iter()
-                .map(|entry| (entry.hash(), entry.prev())),
-        );
+    /// Folds into the chain what the kept snapshots fold, and drops the entries
+    /// they fold.
+    fn reindex(&mut self, touched: &mut BTreeSet<EntryHash>) {
+        let mut folded = BTreeSet::new();
+        for snapshot in self.snapshots.clone() {
+            for (hash, prev) in snapshot.pairs() {
+                folded.insert(hash);
+                match self.chain.get_mut(&hash) {
+                    Some(link) => link.entry = None,
+                    None => self.link(hash, prev, None, touched),
+                }
+            }
+        }
+        self.entries.retain(|entry| !folded.contains(&entry.hash()));
         let chain = &self.chain;
         self.strays.retain(|hash, _| !chain.contains_key(hash));
+        self.waiting.retain(|hash, _| !chain.contains_key(hash));
+    }
+
+    fn link(
+        &mut self,
+        hash: EntryHash,
+        prev: EntryHash,
+        entry: Option<Rc<Entry>>,
+        touched: &mut BTreeSet<EntryHash>,
+    ) {
+        if let Some(entry) = &entry {
+            self.last_at = self.last_at.max(Some(entry.at));
+        }
+        self.chain.insert(hash, Link { prev, entry });
+        self.note(hash, prev, touched);
+    }
+
+    /// Records that `hash` follows `prev`; a second successor makes `prev` a
+    /// fork, reported once the placement ends.
+    fn note(&mut self, hash: EntryHash, prev: EntryHash, touched: &mut BTreeSet<EntryHash>) {
+        let first = *self.next.entry(prev).or_insert(hash);
+        if first != hash {
+            let branches = self.branches.entry(prev).or_default();
+            branches.insert(first);
+            branches.insert(hash);
+            touched.insert(prev);
+        }
+    }
+
+    /// The forks at `touched` not reported before, each with its two least
+    /// branches, now reported.
+    fn forks_at(&mut self, touched: BTreeSet<EntryHash>) -> Vec<Fork> {
+        let mut found = Vec::new();
+        for prev in touched {
+            if self.forks.iter().any(|fork| fork.prev == prev) {
+                continue;
+            }
+            let Some(branches) = self.branches.get(&prev) else {
+                continue;
+            };
+            let mut least = branches.iter().copied();
+            let branches = [least.next(), least.next()].map(|hash| hash.expect("two branches"));
+            found.push(Fork {
+                writer: self.writer,
+                prev,
+                branches,
+            });
+        }
+        self.forks.extend(&found);
+        found
+    }
+
+    /// Adds `placed` to the entries, each after its predecessor. Entries that
+    /// continue the last one are appended; anything else orders them all again.
+    fn append(&mut self, placed: &[Rc<Entry>]) {
+        let mut last = self.entries.last().map(|entry| entry.hash());
+        let continues = placed.iter().all(|entry| {
+            let follows = last.is_none_or(|last| entry.prev() == last);
+            last = Some(entry.hash());
+            follows
+        });
+        self.entries.extend(placed.iter().cloned());
+        if !continues {
+            self.order();
+        }
     }
 
     fn order(&mut self) {
-        let placed: BTreeSet<EntryHash> = self.entries.iter().map(Entry::hash).collect();
-        let mut after: BTreeMap<EntryHash, Vec<Entry>> = BTreeMap::new();
+        let placed: BTreeSet<EntryHash> = self.entries.iter().map(|entry| entry.hash()).collect();
+        let mut after: BTreeMap<EntryHash, Vec<Rc<Entry>>> = BTreeMap::new();
         let mut roots = Vec::new();
         for entry in self.entries.drain(..) {
             match placed.contains(&entry.prev()) {
@@ -312,44 +540,10 @@ impl WriterLog {
             }
         }
     }
-
-    fn find_forks(&mut self) -> Vec<Fork> {
-        let mut after: BTreeMap<EntryHash, BTreeSet<EntryHash>> = BTreeMap::new();
-        for (hash, prev) in self.chain.iter().chain(&self.strays) {
-            after.entry(*prev).or_default().insert(*hash);
-        }
-        let reported: BTreeSet<EntryHash> = self.forks.iter().map(|fork| fork.prev).collect();
-        let found: Vec<Fork> = after
-            .into_iter()
-            .filter(|(prev, next)| next.len() > 1 && !reported.contains(prev))
-            .map(|(prev, next)| {
-                let mut next = next.into_iter();
-                let branches = [next.next(), next.next()].map(|hash| hash.expect("two branches"));
-                Fork {
-                    writer: self.writer,
-                    prev,
-                    branches,
-                }
-            })
-            .collect();
-        self.forks.extend(&found);
-        found
-    }
 }
 
-/// A verified line as an entry. A line whose JSON is not an entry is still a link
-/// of the chain, so it is placed as an unknown kind.
-fn entry(line: Line) -> Entry {
-    Entry::decode(line.clone()).unwrap_or_else(|_| Entry {
-        at: Hlc::ZERO,
-        kind: EntryKind::Unknown(Raw::new(line.json()).expect("a verified line holds JSON")),
-        line,
-        unknown_members: false,
-    })
-}
-
-/// Held lines grouped by the missing entry each waits for.
-fn gaps(writer: WriterId, waiting: &BTreeMap<EntryHash, Line>) -> Vec<Gap> {
+/// Held entries grouped by the missing entry each waits for.
+fn gaps(writer: WriterId, waiting: &BTreeMap<EntryHash, Rc<Entry>>) -> Vec<Gap> {
     let mut missing_of: BTreeMap<EntryHash, EntryHash> = BTreeMap::new();
     for &start in waiting.keys() {
         let mut path = Vec::new();
@@ -359,9 +553,9 @@ fn gaps(writer: WriterId, waiting: &BTreeMap<EntryHash, Line>) -> Vec<Gap> {
                 break missing;
             }
             match waiting.get(&at) {
-                Some(line) if path.len() <= waiting.len() => {
+                Some(entry) if path.len() <= waiting.len() => {
                     path.push(at);
-                    at = line.prev();
+                    at = entry.prev();
                 }
                 _ => break at,
             }
@@ -391,161 +585,73 @@ pub struct CachedView {
     writers: BTreeMap<WriterId, WriterLog>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct StoredView {
-    writers: BTreeMap<WriterId, StoredLog>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct StoredLog {
-    snapshots: Vec<Raw>,
-    /// Each line without its newline.
-    entries: Vec<String>,
-    strays: Vec<(EntryHash, EntryHash)>,
-    forks: Vec<(EntryHash, [EntryHash; 2])>,
-}
-
 impl CachedView {
     /// Refuses what this build cannot read with [`crate::Error::Corrupt`] naming
     /// `path`; the caller then reads from scratch.
     pub fn decode(path: &RelPath, bytes: &[u8]) -> Result<Self> {
-        let corrupt = |reason: String| Error::Corrupt {
+        let mut view = Self::default();
+        cache::restore(&mut view, bytes).map_err(|reason| Error::Corrupt {
             path: path.clone(),
             reason,
-        };
-        let stored: StoredView =
-            serde_json::from_slice(bytes).map_err(|error| corrupt(error.to_string()))?;
-        let mut writers = BTreeMap::new();
-        for (writer, stored) in stored.writers {
-            let snapshots = stored
-                .snapshots
-                .iter()
-                .map(|raw| Snapshot::decode(raw.as_str().as_bytes()))
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|error| corrupt(error.to_string()))?;
-            let lines = stored
-                .entries
-                .iter()
-                .map(|text| Line::parse(format!("{text}\n").as_bytes()))
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|error| corrupt(error.to_string()))?;
-            if snapshots.iter().any(|snapshot| snapshot.writer != writer) {
-                return Err(corrupt(format!(
-                    "a snapshot of {writer} names another writer"
-                )));
-            }
-            let mut log = WriterLog::new(writer);
-            log.strays = stored.strays.into_iter().collect();
-            log.forks = stored
-                .forks
-                .into_iter()
-                .map(|(prev, branches)| Fork {
-                    writer,
-                    prev,
-                    branches,
-                })
-                .collect();
-            log.place(snapshots, lines);
-            if !log.gaps.is_empty() {
-                return Err(corrupt(format!(
-                    "an entry of {writer} follows one it does not hold"
-                )));
-            }
-            writers.insert(writer, log);
-        }
-        Ok(Self { writers })
+        })?;
+        Ok(view)
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        let writers = self
-            .writers
-            .iter()
-            .map(|(writer, log)| {
-                let snapshots = log
-                    .snapshots
-                    .iter()
-                    .map(|snapshot| {
-                        let text = String::from_utf8(snapshot.encode()).expect("JSON is UTF-8");
-                        Raw::new(&text).expect("a snapshot is JSON")
-                    })
-                    .collect();
-                let entries = log
-                    .entries
-                    .iter()
-                    .map(|entry| format!("{}\t{}", entry.line.json(), entry.hash()))
-                    .collect();
-                let stored = StoredLog {
-                    snapshots,
-                    entries,
-                    strays: log
-                        .strays
-                        .iter()
-                        .map(|(hash, prev)| (*hash, *prev))
-                        .collect(),
-                    forks: log
-                        .forks
-                        .iter()
-                        .map(|fork| (fork.prev, fork.branches))
-                        .collect(),
-                };
-                (*writer, stored)
-            })
-            .collect();
-        serde_json::to_vec(&StoredView { writers }).expect("a cached view is JSON")
+        cache::encode_view(self)
     }
 
     pub fn writers(&self) -> &BTreeMap<WriterId, WriterLog> {
         &self.writers
     }
 
-    /// The cached view kept for the writer whose genesis entry is `genesis`; empty
-    /// when none was saved.
-    pub fn load(genesis: EntryHash) -> Task<'static, Result<Self>> {
-        let path = Layout::cached_view(genesis);
-        flow::read_replaced(Root::Local, path.clone())
-            .and_then(move |bytes| {
-                Flow::Done(match bytes {
-                    Some(bytes) => Self::decode(&path, &bytes),
-                    None => Ok(Self::default()),
-                })
-            })
-            .task()
+    pub(crate) fn log_mut(&mut self, writer: WriterId) -> &mut WriterLog {
+        self.writers
+            .entry(writer)
+            .or_insert_with(|| WriterLog::new(writer))
     }
 
-    /// The views kept for each of `genesis`, joined. A view this build cannot
-    /// read is left out.
-    pub fn load_all(genesis: Vec<EntryHash>) -> Task<'static, Result<Self>> {
-        flow::fold(
-            genesis.into_iter(),
-            Self::default(),
-            |mut joined, genesis| {
-                flow::run(Self::load(genesis)).then(move |loaded| match loaded {
-                    Ok(view) => {
-                        joined.join(&view);
-                        flow::ok(joined)
-                    }
-                    Err(Error::Corrupt { .. }) => flow::ok(joined),
-                    Err(error) => Flow::Done(Err(error)),
-                })
-            },
-        )
-        .task()
-    }
-
-    /// Adds everything `other` holds.
-    pub fn join(&mut self, other: &CachedView) {
-        for (writer, log) in &other.writers {
-            self.writers
-                .entry(*writer)
-                .or_insert_with(|| WriterLog::new(*writer))
-                .join(log);
+    /// Places a stored part of `writer`'s log; refuses one that holds an entry
+    /// whose predecessor the view does not hold.
+    pub(crate) fn restore(
+        &mut self,
+        writer: WriterId,
+        snapshots: Vec<Rc<Snapshot>>,
+        entries: Vec<Rc<Entry>>,
+        strays: Vec<(EntryHash, EntryHash)>,
+        forks: Vec<(EntryHash, [EntryHash; 2])>,
+    ) -> std::result::Result<(), String> {
+        let log = self.log_mut(writer);
+        log.restore(snapshots, entries, strays, forks);
+        match log.waiting.is_empty() {
+            true => Ok(()),
+            false => {
+                log.forget_waiting();
+                Err(format!("an entry of {writer} follows one it does not hold"))
+            }
         }
     }
 
-    /// Keeps this view for the writer whose genesis entry is `genesis`, replacing
-    /// what was kept so that a crash leaves the old view or the new.
+    /// The cached view kept for the writer whose genesis entry is `genesis`; empty
+    /// when none was saved.
+    pub fn load(genesis: EntryHash) -> Task<'static, Result<Self>> {
+        cache::load_one(genesis).map_ok(|kept| kept.view).task()
+    }
+
+    /// Adds everything `other` holds; whether this view grew.
+    pub fn join(&mut self, other: &CachedView) -> bool {
+        let mut grew = false;
+        for (writer, log) in &other.writers {
+            let placement = self.log_mut(*writer).join(log);
+            grew |= placement.changed() || !placement.forks.is_empty();
+        }
+        grew
+    }
+
+    /// Keeps this view alone for the writer whose genesis entry is `genesis`,
+    /// replacing what was kept so that a crash leaves the old view or the new.
     pub fn save(&self, genesis: EntryHash) -> Task<'static, Result<()>> {
-        flow::replace(Root::Local, Layout::cached_view(genesis), self.encode()).task()
+        cache::write_checkpoint(genesis, self.encode(), Rc::default()).task()
     }
 }
 
@@ -554,6 +660,8 @@ impl CachedView {
 pub struct ReadReport {
     /// Whether the cached view grew.
     pub changed: bool,
+    /// Whether any file in a writer's directory came, went or changed.
+    pub folder_changed: bool,
     /// Newly placed entries per writer, in placement order.
     pub placed: BTreeMap<WriterId, Vec<EntryHash>>,
     /// Forks found by this read and not reported before.
@@ -565,40 +673,106 @@ pub struct ReadReport {
     pub unreadable: Vec<(RelPath, Option<Stop>)>,
 }
 
+/// Clones share where they save the cached view.
+#[derive(Clone)]
 pub struct Reader {
     layout: Layout,
     cached: CachedView,
-    /// What each writer's files in the folder held at the last read, placed
-    /// without the cached view.
-    folder: BTreeMap<WriterId, WriterLog>,
-    /// Files read before, by path, so an unchanged file is not read again.
-    seen: BTreeMap<RelPath, Seen>,
+    /// What each writer's directory in the folder held at the last read.
+    folder: BTreeMap<WriterId, Folder>,
+    /// Each writer's placed and folded entries no file in the folder held at the
+    /// last read; writers with none are left out.
+    removed: BTreeMap<WriterId, BTreeSet<EntryHash>>,
+    /// What the cached view gained since it was last saved.
+    pub(crate) unsaved: Unsaved,
+    /// The retired writers of this install whose cached views this one holds.
+    pub(crate) absorbed: BTreeSet<EntryHash>,
+    pub(crate) store: Rc<RefCell<Store>>,
+}
+
+/// One writer's directory as the last read found it.
+#[derive(Clone)]
+pub(crate) struct Folder {
+    pub(crate) files: BTreeMap<RelPath, Record>,
+    /// What the files hold, placed without the cached view.
+    log: WriterLog,
+    /// Whether `log`, what the cached view holds back of this writer and the
+    /// entries the folder lost must be found again from every file at the next
+    /// read: until the first read, and after records loaded from the local root.
+    stale: bool,
+}
+
+/// What the last read found in one file.
+#[derive(Clone)]
+pub(crate) struct Record {
+    /// `None` when the file is read again next time.
+    pub(crate) stamp: Option<Stamp>,
+    pub(crate) file: WriterFile,
+}
+
+/// What the cached view and the files gained since the view was last saved.
+#[derive(Clone, Default)]
+pub(crate) struct Unsaved {
+    pub(crate) logs: BTreeMap<WriterId, Placement>,
+    /// Files whose records came, went or changed.
+    pub(crate) files: BTreeSet<RelPath>,
+}
+
+impl Unsaved {
+    fn add(&mut self, writer: WriterId, placement: &Placement) {
+        if !placement.changed() && placement.forks.is_empty() {
+            return;
+        }
+        let kept = self.logs.entry(writer).or_default();
+        kept.placed.extend(placement.placed.iter().cloned());
+        kept.kept.extend(placement.kept.iter().cloned());
+        kept.strayed.extend(placement.strayed.iter().copied());
+        kept.forks.extend(placement.forks.iter().copied());
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.logs.is_empty() && self.files.is_empty()
+    }
 }
 
 /// A file is unchanged while its length, its modification time and its last
 /// bytes are: for a segment, the ending that names its last line.
 #[derive(Clone, PartialEq, Eq, Debug)]
-struct Stamp {
-    len: u64,
-    modified: u64,
-    tail: Vec<u8>,
+pub struct Stamp {
+    pub len: u64,
+    pub modified: u64,
+    pub tail: Vec<u8>,
 }
 
-struct Seen {
+/// What a scan knows of a file from the last read.
+#[derive(Clone)]
+struct Known {
     stamp: Stamp,
-    file: Rc<WriterFile>,
+    resume: Option<Resume>,
+}
+
+/// Where a segment's readable lines end, and the bytes that end them.
+#[derive(Clone)]
+struct Resume {
+    end: u64,
+    ending: Vec<u8>,
 }
 
 enum Found {
     Unchanged,
-    Read(Vec<u8>),
+    Read {
+        bytes: Vec<u8>,
+        stamp: Option<Stamp>,
+    },
+    /// The bytes a segment gained past its readable lines.
+    Grown {
+        bytes: Vec<u8>,
+        stamp: Stamp,
+    },
 }
 
-/// A file in a writer's directory as a scan found it. Without a stamp it is read
-/// every time.
 struct Scanned {
     path: RelPath,
-    stamp: Option<Stamp>,
     found: Found,
 }
 
@@ -619,8 +793,49 @@ impl Reader {
             layout,
             cached,
             folder: BTreeMap::new(),
-            seen: BTreeMap::new(),
+            removed: BTreeMap::new(),
+            unsaved: Unsaved::default(),
+            absorbed: BTreeSet::new(),
+            store: Rc::default(),
         }
+    }
+
+    /// A reader starting from what [`cache::load`] found in the local root. The
+    /// files the saved records describe are read again only once they change.
+    pub fn open(layout: Layout, loaded: cache::Loaded) -> Self {
+        let cache::Loaded {
+            view,
+            files,
+            absorbed,
+            store,
+        } = loaded;
+        let mut reader = Self::new(layout, view);
+        reader.absorbed = absorbed;
+        reader.store = Rc::new(RefCell::new(store));
+        for (path, record) in files {
+            let Some(writer) = reader.writer_of(&path) else {
+                continue;
+            };
+            let Some(log) = reader.cached.writers.get(&writer) else {
+                continue;
+            };
+            let Some(record) = record.resolve(log) else {
+                continue;
+            };
+            let folder = reader
+                .folder
+                .entry(writer)
+                .or_insert_with(|| Folder::new(writer));
+            folder.files.insert(path, record);
+        }
+        reader
+    }
+
+    /// The writer whose directory holds `path`.
+    pub(crate) fn writer_of(&self, path: &RelPath) -> Option<WriterId> {
+        let dir = path.parent()?;
+        let writer = dir.name()?.parse().ok()?;
+        (dir == self.layout.writer(writer)).then_some(writer)
     }
 
     pub fn cached(&self) -> &CachedView {
@@ -634,20 +849,36 @@ impl Reader {
     /// What `writer`'s files in the folder held at the last read, placed without
     /// the cached view; `None` when the folder held no file of it.
     pub fn folder_log(&self, writer: WriterId) -> Option<&WriterLog> {
-        self.folder.get(&writer)
+        self.folder.get(&writer).map(|folder| &folder.log)
+    }
+
+    /// Each file of `writer`'s directory as the last read found it, with its
+    /// stamp when it has one.
+    pub fn files(&self, writer: WriterId) -> Vec<(&RelPath, Option<&Stamp>, &WriterFile)> {
+        let Some(folder) = self.folder.get(&writer) else {
+            return Vec::new();
+        };
+        folder
+            .files
+            .iter()
+            .map(|(path, record)| (path, record.stamp.as_ref(), &record.file))
+            .collect()
+    }
+
+    pub(crate) fn records(&self) -> impl Iterator<Item = (&RelPath, &Record)> {
+        self.folder.values().flat_map(|folder| folder.files.iter())
+    }
+
+    pub(crate) fn record(&self, path: &RelPath) -> Option<&Record> {
+        let writer = self.writer_of(path)?;
+        self.folder.get(&writer)?.files.get(path)
     }
 
     /// Each writer's placed and folded entries that no file in the folder held at
     /// the last read: a restore took them, or sync has not yet brought the files
     /// that hold them now. Writers with none are left out.
     pub fn removed(&self) -> BTreeMap<WriterId, BTreeSet<EntryHash>> {
-        let removed = self.cached.writers.iter().map(|(writer, log)| {
-            let folder = self.folder.get(writer);
-            let gone = log.chain.keys().copied();
-            let gone = gone.filter(|hash| !folder.is_some_and(|folder| folder.saw(*hash)));
-            (*writer, gone.collect::<BTreeSet<EntryHash>>())
-        });
-        removed.filter(|(_, gone)| !gone.is_empty()).collect()
+        self.removed.clone()
     }
 
     /// Reads every writer's directory and places what it can. Requests only
@@ -689,16 +920,22 @@ impl Reader {
         everyone: bool,
     ) -> Task<'static, Result<Listing>> {
         let layout = self.layout.clone();
-        let stamps: Rc<BTreeMap<RelPath, Stamp>> = Rc::new(
-            self.seen
-                .iter()
-                .map(|(path, seen)| (path.clone(), seen.stamp.clone()))
+        let known: Rc<BTreeMap<RelPath, Known>> = Rc::new(
+            self.records()
+                .filter_map(|(path, record)| {
+                    let stamp = record.stamp.clone()?;
+                    let resume = match &record.file {
+                        WriterFile::Segment(segment) => segment.resume(),
+                        _ => None,
+                    };
+                    Some((path.clone(), Known { stamp, resume }))
+                })
                 .collect(),
         );
         writers
             .and_then(move |writers| {
                 flow::fold(writers.into_iter(), Vec::new(), move |mut done, writer| {
-                    scan_writer(&layout, writer, Rc::clone(&stamps)).map_ok(move |listed| {
+                    scan_writer(&layout, writer, Rc::clone(&known)).map_ok(move |listed| {
                         done.push(listed);
                         done
                     })
@@ -710,16 +947,24 @@ impl Reader {
 
     /// Places entries this instance appended as `writer`, as a read would.
     pub fn add(&mut self, writer: WriterId, entries: &[Entry]) -> Placement {
-        let lines: Vec<Line> = entries.iter().map(|entry| entry.line.clone()).collect();
+        let entries: Vec<Rc<Entry>> = entries.iter().cloned().map(Rc::new).collect();
         self.folder
             .entry(writer)
-            .or_insert_with(|| WriterLog::new(writer))
-            .place(Vec::new(), lines.clone());
-        self.cached
-            .writers
-            .entry(writer)
-            .or_insert_with(|| WriterLog::new(writer))
-            .place(Vec::new(), lines)
+            .or_insert_with(|| Folder::new(writer))
+            .log
+            .place(Vec::new(), entries.clone());
+        let placement = self.cached.log_mut(writer).place(Vec::new(), entries);
+        self.unsaved.add(writer, &placement);
+        self.drop_unsaved_without_store();
+        placement
+    }
+
+    /// A view not yet saved anywhere is written whole by its first save, so what
+    /// it gains is not kept apart.
+    fn drop_unsaved_without_store(&mut self) {
+        if self.store.borrow().genesis.is_none() {
+            self.unsaved = Unsaved::default();
+        }
     }
 
     /// Places what [`Reader::list`] or [`Reader::list_writer`] read.
@@ -728,100 +973,199 @@ impl Reader {
             writers: listed,
             everyone,
         } = listing;
+        let mut report = ReadReport::default();
         if everyone {
-            let dirs: BTreeSet<RelPath> = listed
-                .iter()
-                .map(|listed| self.layout.writer(listed.writer))
+            let present: BTreeSet<WriterId> = listed.iter().map(|listed| listed.writer).collect();
+            let gone: Vec<WriterId> = self
+                .folder
+                .keys()
+                .filter(|writer| !present.contains(writer))
+                .copied()
                 .collect();
-            self.seen
-                .retain(|path, _| path.parent().is_some_and(|dir| dirs.contains(&dir)));
-            self.folder
-                .retain(|writer, _| listed.iter().any(|listed| listed.writer == *writer));
-            for (writer, log) in &mut self.cached.writers {
-                if !listed.iter().any(|listed| listed.writer == *writer) {
-                    log.gaps.clear();
-                }
+            for writer in gone {
+                let folder = self.folder.remove(&writer).expect("listed above");
+                self.unsaved.files.extend(folder.files.into_keys());
+                report.folder_changed = true;
+            }
+            let absent: Vec<WriterId> = self
+                .cached
+                .writers
+                .keys()
+                .filter(|writer| !present.contains(writer))
+                .copied()
+                .collect();
+            for writer in absent {
+                self.cached.log_mut(writer).forget_waiting();
+                self.recount(writer, true);
             }
         }
-        let mut report = ReadReport::default();
         for listed in listed {
             self.absorb_writer(listed, &mut report);
         }
+        self.drop_unsaved_without_store();
         report
     }
 
     fn absorb_writer(&mut self, listed: Listed, report: &mut ReadReport) {
-        let writer = listed.writer;
-        let dir = self.layout.writer(writer);
-        let present: BTreeSet<RelPath> =
-            listed.files.iter().map(|file| file.path.clone()).collect();
-        let before = self.seen.len();
-        self.seen
-            .retain(|path, _| path.parent().as_ref() != Some(&dir) || present.contains(path));
-        let mut changed = before != self.seen.len() || !self.cached.writers.contains_key(&writer);
-        let (mut snapshots, mut lines) = (Vec::new(), Vec::new());
-        for Scanned { path, stamp, found } in listed.files {
-            let file = match found {
-                Found::Unchanged => Rc::clone(&self.seen[&path].file),
-                Found::Read(bytes) => {
-                    changed = true;
-                    let file = Rc::new(WriterFile::parse(&bytes));
-                    match stamp {
-                        Some(stamp) => {
-                            let seen = Seen {
-                                stamp,
-                                file: Rc::clone(&file),
-                            };
-                            self.seen.insert(path.clone(), seen);
-                        }
-                        None => {
-                            self.seen.remove(&path);
-                        }
-                    }
-                    file
-                }
-            };
-            match &*file {
-                WriterFile::Segment { lines: found, stop } => {
-                    lines.extend(found.iter().cloned());
-                    if let Some(stop) = stop {
-                        report.unreadable.push((path, Some(stop.clone())));
-                    }
-                }
-                WriterFile::Snapshot(snapshot) if snapshot.writer == writer => {
-                    snapshots.push(Snapshot::clone(snapshot));
-                }
-                WriterFile::Snapshot(_) | WriterFile::Unreadable => {
-                    report.unreadable.push((path, None));
-                }
-            }
-        }
-        if changed || !self.folder.contains_key(&writer) {
-            let mut folder = WriterLog::new(writer);
-            folder.place(snapshots.clone(), lines.clone());
-            self.folder.insert(writer, folder);
-        }
-        let log = self
-            .cached
-            .writers
+        let Listed { writer, files } = listed;
+        let folder = self
+            .folder
             .entry(writer)
-            .or_insert_with(|| WriterLog::new(writer));
-        if changed {
-            let placement = log.place(snapshots, lines);
-            report.changed |= placement.changed;
-            if !placement.placed.is_empty() {
-                report.placed.insert(writer, placement.placed);
+            .or_insert_with(|| Folder::new(writer));
+        let mut whole = std::mem::take(&mut folder.stale);
+        let present: BTreeSet<&RelPath> = files.iter().map(|file| &file.path).collect();
+        let gone: Vec<RelPath> = folder
+            .files
+            .keys()
+            .filter(|path| !present.contains(path))
+            .cloned()
+            .collect();
+        for path in gone {
+            let record = folder.files.remove(&path).expect("listed above");
+            whole |= record.file.holds_any();
+            self.unsaved.files.insert(path);
+            report.folder_changed = true;
+        }
+        let (mut snapshots, mut entries) = (Vec::new(), Vec::new());
+        for Scanned { path, found } in files {
+            match found {
+                Found::Unchanged => continue,
+                Found::Grown { bytes, stamp } => {
+                    let record = folder
+                        .files
+                        .get_mut(&path)
+                        .expect("only a known file grows");
+                    if let WriterFile::Segment(segment) = &mut record.file {
+                        entries.extend(segment.extend(&bytes).iter().cloned());
+                    }
+                    record.stamp = Some(stamp);
+                }
+                Found::Read { bytes, stamp } => {
+                    let file = WriterFile::parse(&bytes);
+                    match &file {
+                        WriterFile::Segment(segment) => {
+                            entries.extend(segment.entries.iter().cloned());
+                        }
+                        WriterFile::Snapshot(snapshot) if snapshot.writer == writer => {
+                            snapshots.push(Rc::clone(snapshot));
+                        }
+                        WriterFile::Snapshot(_) | WriterFile::Unreadable => {}
+                    }
+                    let old = folder.files.insert(path.clone(), Record { stamp, file });
+                    whole |= old.is_some_and(|old| old.file.holds_any());
+                }
             }
-            report.forks.extend(placement.forks);
+            self.unsaved.files.insert(path);
+            report.folder_changed = true;
+        }
+        if whole {
+            (snapshots, entries) = folder.contents(writer);
+            folder.log = WriterLog::new(writer);
+        }
+        folder.log.place(snapshots.clone(), entries.clone());
+        for (path, record) in &folder.files {
+            match &record.file {
+                WriterFile::Segment(segment) => {
+                    if let Some(stop) = &segment.stop {
+                        report.unreadable.push((path.clone(), Some(stop.clone())));
+                    }
+                }
+                WriterFile::Snapshot(snapshot) if snapshot.writer == writer => {}
+                WriterFile::Snapshot(_) | WriterFile::Unreadable => {
+                    report.unreadable.push((path.clone(), None));
+                }
+            }
+        }
+        let log = self.cached.log_mut(writer);
+        if whole {
+            log.forget_waiting();
+        }
+        if whole || !snapshots.is_empty() || !entries.is_empty() {
+            let placement = log.place(snapshots, entries);
+            report.changed |= placement.changed();
+            if !placement.placed.is_empty() {
+                let placed = placement.placed.iter().map(|entry| entry.hash()).collect();
+                report.placed.insert(writer, placed);
+            }
+            report.forks.extend(placement.forks.iter().copied());
+            self.unsaved.add(writer, &placement);
         }
         report.gaps.extend(log.gaps.iter().copied());
+        self.recount(writer, whole);
+    }
+
+    /// Brings [`Reader::removed`] up to date for `writer`: from scratch after its
+    /// files lost anything, else by dropping what its files now hold.
+    fn recount(&mut self, writer: WriterId, whole: bool) {
+        let folder = self.folder.get(&writer).map(|folder| &folder.log);
+        let saw = |hash: &EntryHash| folder.is_some_and(|folder| folder.saw(*hash));
+        let gone: BTreeSet<EntryHash> = match (whole, self.removed.remove(&writer)) {
+            (false, Some(mut gone)) => {
+                gone.retain(|hash| !saw(hash));
+                gone
+            }
+            (false, None) => BTreeSet::new(),
+            (true, _) => self
+                .cached
+                .writers
+                .get(&writer)
+                .map(|log| {
+                    log.chain
+                        .keys()
+                        .filter(|hash| !saw(hash))
+                        .copied()
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        if !gone.is_empty() {
+            self.removed.insert(writer, gone);
+        }
+    }
+
+    /// Keeps what the cached view gained in this writer's local directory: by
+    /// appending it to the journal, or by writing the whole view again when the
+    /// journal has grown too long or cannot be trusted.
+    pub fn save(&mut self, genesis: EntryHash) -> Task<'static, Result<()>> {
+        cache::save(self, genesis)
+    }
+
+    /// Writes the whole view, with what the reader knows of each file, as the
+    /// writer whose genesis entry is `genesis`.
+    pub fn checkpoint(&mut self, genesis: EntryHash) -> Task<'static, Result<()>> {
+        cache::checkpoint(self, genesis)
+    }
+}
+
+impl Folder {
+    fn new(writer: WriterId) -> Self {
+        Self {
+            files: BTreeMap::new(),
+            log: WriterLog::new(writer),
+            stale: true,
+        }
+    }
+
+    /// Every snapshot of `writer` and every entry the files hold.
+    fn contents(&self, writer: WriterId) -> (Vec<Rc<Snapshot>>, Vec<Rc<Entry>>) {
+        let (mut snapshots, mut entries) = (Vec::new(), Vec::new());
+        for record in self.files.values() {
+            match &record.file {
+                WriterFile::Segment(segment) => entries.extend(segment.entries.iter().cloned()),
+                WriterFile::Snapshot(snapshot) if snapshot.writer == writer => {
+                    snapshots.push(Rc::clone(snapshot));
+                }
+                WriterFile::Snapshot(_) | WriterFile::Unreadable => {}
+            }
+        }
+        (snapshots, entries)
     }
 }
 
 fn scan_writer<'a>(
     layout: &Layout,
     writer: WriterId,
-    stamps: Rc<BTreeMap<RelPath, Stamp>>,
+    known: Rc<BTreeMap<RelPath, Known>>,
 ) -> Flow<'a, Result<Listed>> {
     let dir = layout.writer(writer);
     flow::list(Root::Folder, &dir)
@@ -832,7 +1176,7 @@ fn scan_writer<'a>(
                 .filter_map(|entry| dir.join(&entry.name).ok())
                 .collect();
             flow::fold(paths.into_iter(), Vec::new(), move |mut files, path| {
-                let known = stamps.get(&path).cloned();
+                let known = known.get(&path).cloned();
                 scan_file(path, known).map_ok(move |found| {
                     files.extend(found);
                     files
@@ -842,62 +1186,126 @@ fn scan_writer<'a>(
         .map_ok(move |files| Listed { writer, files })
 }
 
-fn scan_file<'a>(path: RelPath, known: Option<Stamp>) -> Flow<'a, Result<Option<Scanned>>> {
-    flow::stat(Root::Folder, &path.clone()).and_then(move |meta| match meta {
-        Some(meta) if meta.kind == Kind::File => {
-            let full = Range {
-                offset: 0,
-                len: meta.len.min(MAX_FILE),
-            };
-            let Some(modified) = meta.modified else {
-                return read_scanned(path, None, full);
-            };
-            let tail = Range {
-                offset: meta.len.saturating_sub(line::ENDING),
-                len: meta.len.min(line::ENDING),
-            };
-            flow::read_present(Root::Folder, &path.clone(), tail).and_then(move |tail| {
-                let Some(tail) = tail else {
-                    return flow::ok(None);
-                };
-                let stamp = Stamp {
-                    len: meta.len,
-                    modified,
-                    tail,
-                };
-                match known == Some(stamp.clone()) {
-                    true => flow::ok(Some(Scanned {
-                        path,
-                        stamp: Some(stamp),
-                        found: Found::Unchanged,
-                    })),
-                    false => read_scanned(path, Some(stamp), full),
-                }
-            })
+/// The last [`line::ENDING`] bytes of a file `len` bytes long.
+fn tail_range(len: u64) -> Range {
+    Range {
+        offset: len.saturating_sub(line::ENDING),
+        len: len.min(line::ENDING),
+    }
+}
+
+fn scan_file<'a>(path: RelPath, known: Option<Known>) -> Flow<'a, Result<Option<Scanned>>> {
+    flow::stat(Root::Folder, &path.clone()).and_then(move |meta| {
+        let Some(meta) = meta.filter(|meta| meta.kind == Kind::File) else {
+            return flow::ok(None);
+        };
+        let Some(modified) = meta.modified else {
+            return read_whole(path, meta.len, None);
+        };
+        let stamp = move |tail: Vec<u8>| Stamp {
+            len: meta.len,
+            modified,
+            tail,
+        };
+        match known {
+            Some(known) if known.stamp.len == meta.len => {
+                flow::read_present(Root::Folder, &path.clone(), tail_range(meta.len)).and_then(
+                    move |tail| match tail.map(stamp) {
+                        None => flow::ok(None),
+                        Some(now) if now == known.stamp => flow::ok(Some(Scanned {
+                            path,
+                            found: Found::Unchanged,
+                        })),
+                        Some(_) => read_whole(path, meta.len, Some(modified)),
+                    },
+                )
+            }
+            Some(Known {
+                stamp: before,
+                resume: Some(resume),
+            }) if meta.len > before.len && meta.len <= MAX_FILE => {
+                read_grown(path, resume, meta.len, modified)
+            }
+            _ => read_whole(path, meta.len, Some(modified)),
         }
-        _ => flow::ok(None),
     })
 }
 
-fn read_scanned<'a>(
+/// The bytes past `resume.end`, once the bytes before it are confirmed to still
+/// end the last line read; otherwise the whole file.
+fn read_grown<'a>(
     path: RelPath,
-    stamp: Option<Stamp>,
-    range: Range,
+    resume: Resume,
+    len: u64,
+    modified: u64,
 ) -> Flow<'a, Result<Option<Scanned>>> {
-    flow::read_present(Root::Folder, &path.clone(), range).map_ok(move |bytes| {
-        bytes.map(|bytes| Scanned {
+    let offset = resume.end - line::ENDING;
+    let range = Range {
+        offset,
+        len: len - offset,
+    };
+    flow::read_present(Root::Folder, &path.clone(), range).and_then(move |bytes| {
+        let Some(bytes) = bytes else {
+            return flow::ok(None);
+        };
+        let ending = line::ENDING as usize;
+        if bytes.len() as u64 != range.len || bytes[..ending] != resume.ending[..] {
+            return read_whole(path, len, Some(modified));
+        }
+        let stamp = Stamp {
+            len,
+            modified,
+            tail: bytes[bytes.len() - ending..].to_vec(),
+        };
+        flow::ok(Some(Scanned {
             path,
-            stamp,
-            found: Found::Read(bytes),
+            found: Found::Grown {
+                bytes: bytes[ending..].to_vec(),
+                stamp,
+            },
+        }))
+    })
+}
+
+/// The file from its start, up to [`MAX_FILE`] bytes, stamped when the backend
+/// gave a modification time.
+fn read_whole<'a>(
+    path: RelPath,
+    len: u64,
+    modified: Option<u64>,
+) -> Flow<'a, Result<Option<Scanned>>> {
+    let range = Range {
+        offset: 0,
+        len: len.min(MAX_FILE),
+    };
+    flow::read_present(Root::Folder, &path.clone(), range).and_then(move |bytes| {
+        let Some(bytes) = bytes else {
+            return flow::ok(None);
+        };
+        let tail = tail_range(len);
+        let ends = (bytes.len() as u64 == len).then(|| bytes[tail.offset as usize..].to_vec());
+        let tail = match (modified, ends) {
+            (None, _) => flow::ok(None),
+            (Some(_), Some(ends)) => flow::ok(Some(ends)),
+            (Some(_), None) => flow::read_present(Root::Folder, &path.clone(), tail),
+        };
+        tail.map_ok(move |tail| {
+            let stamp = modified.zip(tail).map(|(modified, tail)| Stamp {
+                len,
+                modified,
+                tail,
+            });
+            let found = Found::Read { bytes, stamp };
+            Some(Scanned { path, found })
         })
     })
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::disk::MemDisk;
     use crate::io::Io;
+    use crate::line::Line;
     use crate::log::{Genesis, Logged};
     use crate::merge::Folded;
 
@@ -940,15 +1348,27 @@ mod tests {
         lines
     }
 
-    fn snapshot(lines: &[Line]) -> Snapshot {
-        Snapshot {
+    fn snapshot(lines: &[Line]) -> Rc<Snapshot> {
+        Rc::new(Snapshot {
             writer: W,
             label: "a".into(),
             at: at(9),
             folded: lines.iter().map(Line::hash).collect(),
             state: Folded::default(),
             unknown: BTreeMap::new(),
-        }
+        })
+    }
+
+    fn entries(lines: &[Line]) -> Vec<Rc<Entry>> {
+        lines
+            .iter()
+            .cloned()
+            .map(|line| Rc::new(Entry::linked(line)))
+            .collect()
+    }
+
+    fn placed(placement: &Placement) -> Vec<EntryHash> {
+        placement.placed.iter().map(|entry| entry.hash()).collect()
     }
 
     fn hashes(lines: &[Line]) -> Vec<EntryHash> {
@@ -956,15 +1376,15 @@ mod tests {
     }
 
     fn entry_hashes(log: &WriterLog) -> Vec<EntryHash> {
-        log.entries().iter().map(Entry::hash).collect()
+        log.entries().iter().map(|entry| entry.hash()).collect()
     }
 
     #[test]
     fn entries_arriving_in_any_order_are_placed_in_chain_order() {
         let lines = chain(3);
         let mut log = WriterLog::new(W);
-        let first = log.place(Vec::new(), vec![lines[3].clone(), lines[2].clone()]);
-        assert_eq!(first.placed, []);
+        let first = log.place(Vec::new(), entries(&[lines[3].clone(), lines[2].clone()]));
+        assert_eq!(placed(&first), []);
         assert_eq!(
             log.gaps(),
             [Gap {
@@ -973,8 +1393,9 @@ mod tests {
                 held: 2
             }]
         );
-        let second = log.place(Vec::new(), lines.iter().rev().cloned().collect());
-        assert_eq!(second.placed, hashes(&lines));
+        let reversed: Vec<Line> = lines.iter().rev().cloned().collect();
+        let second = log.place(Vec::new(), entries(&reversed));
+        assert_eq!(placed(&second), hashes(&lines));
         assert_eq!(entry_hashes(&log), hashes(&lines));
         assert_eq!(log.gaps(), []);
         assert_eq!(log.heads(), [lines[3].hash()]);
@@ -990,10 +1411,10 @@ mod tests {
         let mut log = WriterLog::new(W);
         let first = log.place(
             Vec::new(),
-            vec![lines[0].clone(), lines[1].clone(), a.clone()],
+            entries(&[lines[0].clone(), lines[1].clone(), a.clone()]),
         );
         assert_eq!(first.forks, []);
-        let second = log.place(Vec::new(), vec![b.clone()]);
+        let second = log.place(Vec::new(), entries(std::slice::from_ref(&b)));
         let mut branches = [a.hash(), b.hash()];
         branches.sort();
         let fork = Fork {
@@ -1004,7 +1425,10 @@ mod tests {
         assert_eq!(second.forks, [fork]);
         assert_eq!(log.forks(), [fork]);
         assert_eq!(log.heads().len(), 2);
-        let third = log.place(Vec::new(), vec![after(&lines[1], "c"), after(&a, "d")]);
+        let third = log.place(
+            Vec::new(),
+            entries(&[after(&lines[1], "c"), after(&a, "d")]),
+        );
         assert_eq!(third.forks, []);
         assert_eq!(log.forks(), [fork]);
     }
@@ -1014,8 +1438,8 @@ mod tests {
         let lines = chain(1);
         let (a, b) = (after(&lines[1], "a"), after(&lines[1], "b"));
         let mut log = WriterLog::new(W);
-        log.place(Vec::new(), vec![a.clone()]);
-        let found = log.place(Vec::new(), vec![b.clone()]);
+        log.place(Vec::new(), entries(std::slice::from_ref(&a)));
+        let found = log.place(Vec::new(), entries(std::slice::from_ref(&b)));
         assert_eq!(found.forks.len(), 1, "{found:?}");
         assert_eq!(log.gaps()[0].missing, lines[1].hash());
     }
@@ -1027,8 +1451,8 @@ mod tests {
         let lines = chain(3);
         let b = after(&lines[1], "clone");
         let mut log = WriterLog::new(W);
-        let placement = log.place(vec![snapshot(&lines)], vec![b.clone()]);
-        assert_eq!(placement.placed, [b.hash()]);
+        let placement = log.place(vec![snapshot(&lines)], entries(std::slice::from_ref(&b)));
+        assert_eq!(placed(&placement), [b.hash()]);
         assert_eq!(placement.forks.len(), 1);
         assert_eq!(placement.forks[0].prev, lines[1].hash());
         assert!(lines.iter().all(|line| log.holds(line.hash())));
@@ -1039,11 +1463,11 @@ mod tests {
     fn a_snapshot_replaces_the_entries_it_folds_and_only_grows() {
         let lines = chain(4);
         let mut log = WriterLog::new(W);
-        log.place(vec![snapshot(&lines[..2])], lines.clone());
+        log.place(vec![snapshot(&lines[..2])], entries(&lines));
         assert_eq!(entry_hashes(&log), hashes(&lines[2..]));
         let grown = log.place(vec![snapshot(&lines[..4])], Vec::new());
-        assert!(grown.changed, "a snapshot alone grows the log");
-        assert_eq!(grown.placed, []);
+        assert!(grown.changed(), "a snapshot alone grows the log");
+        assert_eq!(placed(&grown), []);
         assert_eq!(log.snapshots(), [snapshot(&lines[..4])]);
         assert_eq!(entry_hashes(&log), hashes(&lines[4..]));
         let older = log.place(vec![snapshot(&lines[..3])], Vec::new());
@@ -1062,9 +1486,12 @@ mod tests {
         let mut log = WriterLog::new(W);
         let placement = log.place(
             Vec::new(),
-            vec![lines[0].clone(), odd.clone(), next.clone()],
+            entries(&[lines[0].clone(), odd.clone(), next.clone()]),
         );
-        assert_eq!(placement.placed, [lines[0].hash(), odd.hash(), next.hash()]);
+        assert_eq!(
+            placed(&placement),
+            [lines[0].hash(), odd.hash(), next.hash()]
+        );
         assert!(matches!(log.entries()[1].kind, EntryKind::Unknown(_)));
     }
 
@@ -1076,7 +1503,7 @@ mod tests {
         let mut log = WriterLog::new(W);
         log.place(
             vec![snapshot(&lines[..2])],
-            vec![lines[2].clone(), lines[3].clone(), stray.clone(), fork],
+            entries(&[lines[2].clone(), lines[3].clone(), stray.clone(), fork]),
         );
         let view = CachedView {
             writers: BTreeMap::from([(W, log)]),
@@ -1096,15 +1523,16 @@ mod tests {
         let held = |entries: &[&Line]| {
             let entries: Vec<String> = entries
                 .iter()
-                .map(|line| format!("{}\t{}", line.json(), line.hash()))
+                .map(|line| format!(r#"[{},"{}"]"#, line.json(), line.hash()))
                 .collect();
-            serde_json::json!({ "writers": { W.to_string(): {
-                "snapshots": [], "entries": entries, "strays": [], "forks": [] } } })
-            .to_string()
+            format!(
+                r#"{{"writers":{{"{W}":{{"snapshots":[],"entries":[{}],"strays":[],"forks":[]}}}}}}"#,
+                entries.join(",")
+            )
         };
         let path = Layout::cached_view(lines[0].hash());
         assert!(CachedView::decode(&path, held(&[&lines[0], &lines[1]]).as_bytes()).is_ok());
-        let flipped = held(&[&lines[0]]).replace("\\\"a\\\"", "\\\"b\\\"");
+        let flipped = held(&[&lines[0]]).replace(r#""a""#, r#""b""#);
         for bytes in [
             held(&[&lines[0], &lines[2]]),
             flipped,
@@ -1129,21 +1557,17 @@ mod tests {
         torn.extend_from_slice(b"{\"prev\"");
         let snapshot = snapshot(&lines);
         let cases = [
-            (
-                Vec::new(),
-                WriterFile::Segment {
-                    lines: Vec::new(),
-                    stop: None,
-                },
-            ),
+            (Vec::new(), WriterFile::Segment(Segment::default())),
             (
                 segment.clone(),
-                WriterFile::Segment {
-                    lines: lines.clone(),
+                WriterFile::Segment(Segment {
+                    entries: entries(&lines),
+                    end: segment.len() as u64,
                     stop: None,
-                },
+                    sealed: false,
+                }),
             ),
-            (snapshot.encode(), WriterFile::Snapshot(Box::new(snapshot))),
+            (snapshot.encode(), WriterFile::Snapshot(snapshot)),
             (b"hello".to_vec(), WriterFile::Unreadable),
             (vec![0; 40], WriterFile::Unreadable),
         ];
@@ -1155,11 +1579,14 @@ mod tests {
                 String::from_utf8_lossy(&bytes)
             );
         }
-        let WriterFile::Segment { lines: read, stop } = WriterFile::parse(&torn) else {
+        let WriterFile::Segment(read) = WriterFile::parse(&torn) else {
             panic!("a torn segment is a segment")
         };
-        assert_eq!(read, lines);
-        assert_eq!(stop.map(|stop| stop.offset), Some(segment.len() as u64));
+        assert_eq!(read.entries, entries(&lines));
+        assert_eq!(
+            read.stop.map(|stop| stop.offset),
+            Some(segment.len() as u64)
+        );
     }
 
     #[test]
@@ -1167,7 +1594,7 @@ mod tests {
         use crate::env::{Random, SeededRandom};
         let lines = chain(3);
         let mut log = WriterLog::new(W);
-        log.place(vec![snapshot(&lines[..2])], lines[2..].to_vec());
+        log.place(vec![snapshot(&lines[..2])], entries(&lines[2..]));
         let view = CachedView {
             writers: BTreeMap::from([(W, log)]),
         };
@@ -1192,8 +1619,8 @@ mod tests {
             }
             let mut log = WriterLog::new(W);
             match WriterFile::parse(&bytes) {
-                WriterFile::Segment { lines, .. } => log.place(Vec::new(), lines),
-                WriterFile::Snapshot(snapshot) => log.place(vec![*snapshot], Vec::new()),
+                WriterFile::Segment(segment) => log.place(Vec::new(), segment.entries),
+                WriterFile::Snapshot(snapshot) => log.place(vec![snapshot], Vec::new()),
                 WriterFile::Unreadable => Placement::default(),
             };
             for head in log.heads() {
@@ -1273,6 +1700,119 @@ mod tests {
         assert_eq!(again.unreadable, report.unreadable);
     }
 
+    fn bytes_of(lines: &[&Line]) -> Vec<u8> {
+        lines.iter().flat_map(|line| line.to_bytes()).collect()
+    }
+
+    fn grow(disk: &MemDisk, path: &RelPath, bytes: &[u8]) {
+        let append = Io::Append {
+            root: Root::Folder,
+            path: path.clone(),
+            bytes: bytes.to_vec(),
+        };
+        disk.perform(append).unwrap();
+    }
+
+    #[test]
+    fn a_grown_segment_is_read_from_the_end_of_its_last_line() {
+        let layout = Layout::new(".lib").unwrap();
+        let disk = MemDisk::new();
+        let lines = chain(3);
+        let path = layout.writer(W).join("s.jsonl").unwrap();
+        put(&disk, &path, &bytes_of(&[&lines[0], &lines[1]]));
+        let mut backend = Counting(disk.clone(), 0);
+        let mut reader = Reader::new(layout, CachedView::default());
+        crate::blocking::run(&mut backend, reader.read()).unwrap();
+        let before = backend.1;
+        let gained = bytes_of(&[&lines[2], &lines[3]]);
+        grow(&disk, &path, &gained);
+
+        let report = crate::blocking::run(&mut backend, reader.read()).unwrap();
+        assert_eq!(report.placed[&W], hashes(&lines[2..]));
+        assert_eq!(backend.1 - before, line::ENDING + gained.len() as u64);
+        assert_eq!(report.forks, []);
+    }
+
+    #[test]
+    fn a_segment_whose_last_line_changed_as_it_grew_is_read_whole() {
+        let layout = Layout::new(".lib").unwrap();
+        let disk = MemDisk::new();
+        let lines = chain(1);
+        let (a, b) = (after(&lines[1], "a"), after(&lines[1], "bb"));
+        let path = layout.writer(W).join("s.jsonl").unwrap();
+        put(&disk, &path, &bytes_of(&[&lines[0], &lines[1], &a]));
+        let mut reader = Reader::new(layout, CachedView::default());
+        crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
+        let remove = Io::Remove {
+            root: Root::Folder,
+            path: path.clone(),
+        };
+        disk.perform(remove).unwrap();
+        let c = after(&b, "c");
+        put(&disk, &path, &bytes_of(&[&lines[0], &lines[1], &b, &c]));
+
+        let report = crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
+        assert_eq!(report.placed[&W], [b.hash(), c.hash()]);
+        assert_eq!(report.forks.len(), 1, "{report:?}");
+        assert_eq!(reader.removed().get(&W).map(BTreeSet::len), Some(1));
+    }
+
+    #[test]
+    fn a_torn_line_completed_later_is_read_from_where_the_lines_ended() {
+        let layout = Layout::new(".lib").unwrap();
+        let disk = MemDisk::new();
+        let lines = chain(2);
+        let path = layout.writer(W).join("s.jsonl").unwrap();
+        let whole = bytes_of(&[&lines[0], &lines[1], &lines[2]]);
+        let torn = lines[0].to_bytes().len() + lines[1].to_bytes().len() + 9;
+        put(&disk, &path, &whole[..torn]);
+        let mut reader = Reader::new(layout, CachedView::default());
+        let first = crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
+        assert_eq!(first.unreadable.len(), 1);
+        assert_eq!(first.placed[&W], hashes(&lines[..2]));
+        grow(&disk, &path, &whole[torn..]);
+
+        let mut backend = Counting(disk.clone(), 0);
+        let report = crate::blocking::run(&mut backend, reader.read()).unwrap();
+        assert_eq!(report.placed[&W], [lines[2].hash()]);
+        assert_eq!(report.unreadable, []);
+        let read_on = line::ENDING + lines[2].to_bytes().len() as u64;
+        assert_eq!(backend.1, read_on);
+    }
+
+    #[test]
+    fn a_sealed_segment_is_read_whole_once_anything_follows_its_marker() {
+        let layout = Layout::new(".lib").unwrap();
+        let disk = MemDisk::new();
+        let lines = chain(2);
+        let path = layout.writer(W).join("s.jsonl").unwrap();
+        let mut sealed = bytes_of(&[&lines[0], &lines[1]]);
+        let end = sealed.len() as u64;
+        sealed.extend(line::seal_marker(lines[1].hash()));
+        put(&disk, &path, &sealed);
+        let mut reader = Reader::new(layout, CachedView::default());
+        let first = crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
+        assert_eq!(first.unreadable, []);
+        let files = reader.files(W);
+        let [(_, _, WriterFile::Segment(segment))] = files.as_slice() else {
+            panic!("{files:?}")
+        };
+        assert!(segment.sealed);
+        grow(&disk, &path, &lines[2].to_bytes());
+
+        let mut backend = Counting(disk.clone(), 0);
+        let report = crate::blocking::run(&mut backend, reader.read()).unwrap();
+        assert_eq!(report.placed, BTreeMap::new());
+        let stops: Vec<u64> = report
+            .unreadable
+            .iter()
+            .filter_map(|(_, stop)| stop.as_ref().map(|stop| stop.offset))
+            .collect();
+        assert_eq!(stops, [end]);
+        let len = sealed.len() as u64 + lines[2].to_bytes().len() as u64;
+        assert_eq!(backend.1, len, "read whole");
+    }
+
     #[test]
     fn a_segment_replaced_at_its_length_and_time_is_read_again() {
         let layout = Layout::new(".lib").unwrap();
@@ -1317,7 +1857,7 @@ mod tests {
         let mut disk = MemDisk::new();
         let lines = chain(2);
         let mut log = WriterLog::new(W);
-        log.place(Vec::new(), lines.clone());
+        log.place(Vec::new(), entries(&lines));
         let view = CachedView {
             writers: BTreeMap::from([(W, log)]),
         };

@@ -5,32 +5,34 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{Error, Result};
-use crate::flow::{self, Flow};
-use crate::ids::{EntryHash, Nonce, SegmentName};
-use crate::io::{Io, Kind, Root, Task};
+use crate::flow::{self, Fallible, Flow};
+use crate::ids::{EntryHash, Nonce, WriterId};
+use crate::io::{Io, Range, Root, Task};
+use crate::line;
 use crate::merge::merge;
 use crate::path::RelPath;
-use crate::reader::{WriterFile, WriterLog, MAX_FILE};
+use crate::reader::{Reader, WriterFile, WriterLog};
 use crate::report::{Compacted, Rekey};
 use crate::schema::Raw;
 use crate::snapshot::Snapshot;
-use crate::writer::{holds, Writer};
+use crate::writer::Writer;
 
-/// Seals the open segment, confirms the folder holds this writer's head, and
-/// writes `snapshot-<name>.json` folding the chain up to it, durably (file and
-/// directory synced). Only once the folder holds that snapshot does it delete the
-/// segments in [`Writer::sealed`] whose every line it folds, and every snapshot in
-/// the writer's directory whose folded list starts its own. Returns the writer
-/// with the result.
+/// Confirms the folder holds this writer's head, seals the open segment, and
+/// writes `snapshot-<name>.json` folding the chain up to the head, durably (file
+/// and directory synced). Only once the folder holds that snapshot does it delete
+/// each segment of the writer's directory that ends with a seal marker and every
+/// line of which a snapshot in the directory folds, and each snapshot whose
+/// folded list starts the new one's. Each is checked again just before it is
+/// deleted, and left when it changed. Returns the writer with the result.
 ///
-/// `own` is this writer's log, read after its last append. Fails with
-/// [`Error::Rekey`] when `own` or the folder does not hold the writer's head,
-/// writing nothing, or when the folder loses the snapshot before anything is
-/// deleted. Branches of a forked history other than this writer's own are not
+/// `reader` must have read the writer's directory after its last append. Fails
+/// with [`Error::Rekey`] when the reader or the folder does not hold the
+/// writer's head, writing nothing, or when the folder loses the snapshot before
+/// a deletion. Branches of a forked history other than this writer's own are not
 /// folded.
 pub fn compact(
-    mut writer: Writer,
-    own: &WriterLog,
+    writer: Writer,
+    reader: &Reader,
     name: Nonce,
 ) -> Task<'static, (Writer, Result<Compacted>)> {
     let id = writer.id();
@@ -38,69 +40,78 @@ pub fn compact(
         writer: id,
         why: Rekey::Restored,
     };
-    let Some(snapshot) = fold(&writer, own) else {
+    let Some(snapshot) = reader.logs().get(&id).and_then(|own| fold(&writer, own)) else {
         return Task::ready((writer, Err(lost())));
     };
-    writer.seal();
     let layout = writer.layout.clone();
-    let dir = layout.writer(writer.id());
-    let path = layout.snapshot(writer.id(), name);
+    let path = layout.snapshot(id, name);
+    let open = writer
+        .open_segment()
+        .map(|open| layout.segment(id, open.name));
+    let doomed = Doomed::of(reader, id, &snapshot, open.as_ref());
+    let bytes = snapshot.encode();
+    let (len, tail) = (
+        bytes.len() as u64,
+        bytes[bytes.len() - ending(&bytes)..].to_vec(),
+    );
     let folded = snapshot.folded.len();
-    let sealed: BTreeSet<RelPath> = writer
-        .sealed()
-        .iter()
-        .map(|segment| layout.segment(writer.id(), *segment))
-        .collect();
-    let create = Io::Create {
-        root: Root::Folder,
-        path: path.clone(),
-        bytes: snapshot.encode(),
-    };
-    holds(&layout, id, writer.head())
-        .and_then(move |held| match held {
-            true => flow::act(create),
-            false => Flow::Done(Err(lost())),
+    let dir = layout.writer(id);
+    writer
+        .head_held()
+        .then(move |held| match held {
+            Ok(true) => writer.seal(),
+            Ok(false) => Flow::Done((writer, Err(lost()))),
+            Err(error) => Flow::Done((writer, Err(error))),
         })
-        .and_then({
-            let (path, dir) = (path.clone(), dir.clone());
-            move |()| {
-                flow::sync(Root::Folder, &path).and_then(move |()| flow::sync(Root::Folder, &dir))
-            }
-        })
-        .and_then({
-            let path = path.clone();
-            move |()| flow::stat(Root::Folder, &path)
-        })
-        .and_then(move |held| match held {
-            None => Flow::Done(Err(lost())),
-            Some(_) => superseded(dir.clone(), path, snapshot, sealed).and_then(move |removed| {
-                let removed_count = removed.len();
-                remove_all(removed.clone())
-                    .and_then(move |()| match removed_count {
-                        0 => flow::ok(()),
-                        _ => flow::sync(Root::Folder, &dir),
-                    })
-                    .map_ok(move |()| removed)
-            }),
-        })
-        .then(move |removed| {
-            let compacted = removed.map(|removed| {
-                let segments: Vec<SegmentName> = writer
-                    .sealed()
-                    .iter()
-                    .copied()
-                    .filter(|segment| removed.contains(&layout.segment(writer.id(), *segment)))
-                    .collect();
-                writer.sealed.retain(|segment| !segments.contains(segment));
-                Compacted {
-                    snapshot: name,
-                    folded,
-                    removed: segments,
+        .then(move |(mut writer, sealed)| {
+            let written = match sealed {
+                Ok(()) => write_snapshot(path.clone(), dir.clone(), bytes),
+                Err(error) => Flow::Done(Err(error)),
+            };
+            written.then(move |written| {
+                match written {
+                    Ok(true) => {}
+                    Ok(false) => return Flow::Done((writer, Err(lost()))),
+                    Err(error) => return Flow::Done((writer, Err(error))),
                 }
-            });
-            Flow::Done((writer, compacted))
+                writer.held_by(path.clone(), len, tail);
+                doomed
+                    .delete(path, lost)
+                    .and_then(move |removed| match removed.is_empty() {
+                        true => flow::ok(removed),
+                        false => flow::sync(Root::Folder, &dir).map_ok(move |()| removed),
+                    })
+                    .then(move |removed| {
+                        let compacted = removed.map(|removed| Compacted {
+                            snapshot: name,
+                            folded,
+                            removed,
+                        });
+                        Flow::Done((writer, compacted))
+                    })
+            })
         })
         .task()
+}
+
+/// How many of a snapshot's last bytes stand for it.
+fn ending(bytes: &[u8]) -> usize {
+    bytes.len().min(line::ENDING as usize)
+}
+
+/// Writes the snapshot durably; whether the folder then holds it.
+fn write_snapshot<'a>(path: RelPath, dir: RelPath, bytes: Vec<u8>) -> Fallible<'a, bool> {
+    flow::act(Io::Create {
+        root: Root::Folder,
+        path: path.clone(),
+        bytes,
+    })
+    .and_then({
+        let path = path.clone();
+        move |()| flow::sync(Root::Folder, &path).and_then(move |()| flow::sync(Root::Folder, &dir))
+    })
+    .and_then(move |()| flow::stat(Root::Folder, &path))
+    .map_ok(|held| held.is_some())
 }
 
 /// The snapshot of the chain from the genesis entry to the writer's head, with
@@ -115,13 +126,13 @@ fn fold(writer: &Writer, own: &WriterLog) -> Option<Snapshot> {
         .filter(|snapshot| snapshot.head().is_some_and(|head| on_chain.contains(&head)))
         .cloned()
         .collect();
-    let lines = own
+    let entries = own
         .entries()
         .iter()
         .filter(|entry| on_chain.contains(&entry.hash()))
-        .map(|entry| entry.line.clone())
+        .cloned()
         .collect();
-    chain.place(snapshots, lines);
+    chain.place(snapshots, entries);
     let at = chain.last_at()?;
     let mut unknown: BTreeMap<String, Raw> = BTreeMap::new();
     for (name, raw) in chain.snapshots().iter().flat_map(|old| &old.unknown) {
@@ -140,55 +151,174 @@ fn fold(writer: &Writer, own: &WriterLog) -> Option<Snapshot> {
     })
 }
 
-/// The files of `dir` the new snapshot at `path` supersedes: sealed segments every
-/// line of which it folds, and snapshots whose folded list starts its own.
-fn superseded<'a>(
-    dir: RelPath,
-    path: RelPath,
-    snapshot: Snapshot,
-    sealed: BTreeSet<RelPath>,
-) -> Flow<'a, Result<Vec<RelPath>>> {
-    let folded: BTreeSet<EntryHash> = snapshot.folded.iter().copied().collect();
-    flow::list(Root::Folder, &dir).and_then(move |entries| {
-        let candidates: Vec<RelPath> = entries
-            .into_iter()
-            .filter(|entry| entry.kind == Kind::File)
-            .filter_map(|entry| dir.join(&entry.name).ok())
-            .filter(|file| *file != path)
-            .filter(|file| {
-                sealed.contains(file) || file.name().is_some_and(|n| n.starts_with("snapshot-"))
-            })
-            .collect();
-        let judge =
-            std::rc::Rc::new(
-                move |file: &RelPath, bytes: &[u8]| match WriterFile::parse(bytes) {
-                    WriterFile::Segment { lines, stop: None } if sealed.contains(file) => {
-                        lines.iter().all(|line| folded.contains(&line.hash()))
-                    }
-                    WriterFile::Snapshot(old) => {
-                        old.writer == snapshot.writer && snapshot.extends(&old)
-                    }
-                    WriterFile::Segment { .. } | WriterFile::Unreadable => false,
-                },
-            );
-        flow::fold(
-            candidates.into_iter(),
-            Vec::new(),
-            move |mut removed, file| {
-                let judge = std::rc::Rc::clone(&judge);
-                flow::read_file(Root::Folder, &file, MAX_FILE).map_ok(move |bytes| {
-                    if bytes.is_some_and(|bytes| judge(&file, &bytes)) {
-                        removed.push(file);
-                    }
-                    removed
-                })
-            },
-        )
-    })
+/// The files of the writer's directory the new snapshot lets it delete, as the
+/// reader last found them.
+struct Doomed {
+    segments: Vec<Sealed>,
+    /// Snapshots whose folded list starts the new one's, with their lengths.
+    snapshots: Vec<(RelPath, u64)>,
 }
 
-fn remove_all<'a>(paths: Vec<RelPath>) -> Flow<'a, Result<()>> {
-    flow::each(paths.into_iter(), |path| {
-        flow::remove_if_present(Root::Folder, path)
+/// A segment ending with a seal marker, every line of which a snapshot folds.
+struct Sealed {
+    path: RelPath,
+    /// Its length with the marker.
+    len: u64,
+    last: EntryHash,
+    /// The other snapshot that folds it, with its length; `None` for the new one.
+    folder: Option<(RelPath, u64)>,
+}
+
+impl Doomed {
+    /// `open` is the segment this process has open, which compaction seals.
+    fn of(reader: &Reader, id: WriterId, new: &Snapshot, open: Option<&RelPath>) -> Self {
+        let files = reader.files(id);
+        let mut covering: Vec<(RelPath, u64, BTreeSet<EntryHash>)> = Vec::new();
+        let mut snapshots = Vec::new();
+        for (path, stamp, file) in &files {
+            let (WriterFile::Snapshot(old), Some(stamp)) = (file, stamp) else {
+                continue;
+            };
+            if old.writer != id {
+                continue;
+            }
+            match new.extends(old) {
+                true => snapshots.push(((*path).clone(), stamp.len)),
+                false => covering.push((
+                    (*path).clone(),
+                    stamp.len,
+                    old.folded.iter().copied().collect(),
+                )),
+            }
+        }
+        let folded: BTreeSet<EntryHash> = new.folded.iter().copied().collect();
+        let segments = files
+            .iter()
+            .filter_map(|(path, _, file)| {
+                let WriterFile::Segment(segment) = file else {
+                    return None;
+                };
+                let last = segment.entries.last()?.hash();
+                let sealed = segment.sealed || Some(*path) == open;
+                if !sealed || segment.stop.is_some() {
+                    return None;
+                }
+                let hashes = || segment.entries.iter().map(|entry| entry.hash());
+                let folder = match hashes().all(|hash| folded.contains(&hash)) {
+                    true => None,
+                    false => {
+                        let (path, len, _) = covering
+                            .iter()
+                            .find(|(_, _, folds)| hashes().all(|hash| folds.contains(&hash)))?;
+                        Some((path.clone(), *len))
+                    }
+                };
+                Some(Sealed {
+                    path: (*path).clone(),
+                    len: segment.end + line::SEAL_MARKER,
+                    last,
+                    folder,
+                })
+            })
+            .collect();
+        Self {
+            segments,
+            snapshots,
+        }
+    }
+
+    /// Deletes each file once the new snapshot at `path` is confirmed to be in
+    /// the folder still, and the file to be as the reader found it; a segment
+    /// also only while it ends with its seal marker and the snapshot that folds
+    /// it is there. Returns the deleted segments.
+    fn delete<'a>(
+        self,
+        path: RelPath,
+        lost: impl Fn() -> Error + Copy + 'a,
+    ) -> Fallible<'a, Vec<RelPath>> {
+        let confirm = move || {
+            flow::stat(Root::Folder, &path).and_then(move |held| match held {
+                Some(_) => flow::ok(()),
+                None => Flow::Done(Err(lost())),
+            })
+        };
+        let Doomed {
+            segments,
+            snapshots,
+        } = self;
+        let again = confirm.clone();
+        flow::fold(
+            segments.into_iter(),
+            Vec::new(),
+            move |mut removed, sealed| {
+                let Sealed {
+                    path,
+                    len,
+                    last,
+                    folder,
+                } = sealed;
+                confirm()
+                    .and_then(move |()| match folder {
+                        Some((folder, len)) => same_len(folder, len),
+                        None => flow::ok(true),
+                    })
+                    .and_then({
+                        let path = path.clone();
+                        move |covered| match covered {
+                            true => ends_sealed(path, len, last),
+                            false => flow::ok(false),
+                        }
+                    })
+                    .and_then(move |sealed| match sealed {
+                        true => {
+                            flow::remove_if_present(Root::Folder, path.clone()).map_ok(move |()| {
+                                removed.push(path);
+                                removed
+                            })
+                        }
+                        false => flow::ok(removed),
+                    })
+            },
+        )
+        .and_then(move |removed| {
+            flow::fold(
+                snapshots.into_iter(),
+                removed,
+                move |removed, (path, len)| {
+                    again()
+                        .and_then({
+                            let path = path.clone();
+                            move |()| same_len(path, len)
+                        })
+                        .and_then(move |same| match same {
+                            true => {
+                                flow::remove_if_present(Root::Folder, path).map_ok(|()| removed)
+                            }
+                            false => flow::ok(removed),
+                        })
+                },
+            )
+        })
+    }
+}
+
+/// Whether the file at `path` is `len` bytes long.
+fn same_len<'a>(path: RelPath, len: u64) -> Fallible<'a, bool> {
+    flow::stat(Root::Folder, &path).map_ok(move |meta| meta.is_some_and(|meta| meta.len == len))
+}
+
+/// Whether the segment at `path` is `len` bytes long and ends with the seal
+/// marker after the line `last` names.
+fn ends_sealed<'a>(path: RelPath, len: u64, last: EntryHash) -> Fallible<'a, bool> {
+    same_len(path.clone(), len).and_then(move |same| {
+        if !same {
+            return flow::ok(false);
+        }
+        let range = Range {
+            offset: len - line::SEAL_MARKER,
+            len: line::SEAL_MARKER,
+        };
+        flow::read_present(Root::Folder, &path, range)
+            .map_ok(move |bytes| bytes == Some(line::seal_marker(last)))
     })
 }

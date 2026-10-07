@@ -2,24 +2,22 @@
 //! own `w`, and it writes nowhere else in toshokan's root.
 //!
 //! A writer opens a new segment under a random name the first time it appends in a
-//! process, appends to it, and seals it when the process closes it cleanly. It
-//! deletes only segments this process opened and sealed. Before each append it
-//! confirms the folder still holds its head; after each, once the cached view
-//! holds the new entries, it records the head in the local root.
-
-use std::collections::BTreeMap;
+//! process, appends to it, and seals it with the seal marker when the process
+//! closes it cleanly or compacts. Before each append it confirms the folder still
+//! holds its head; after each, once the cached view holds the new entries, it
+//! records the head in the local root.
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Invalid, Refusal, Result};
-use crate::flow::{self, Flow};
+use crate::flow::{self, Fallible, Flow};
 use crate::ids::{EntryHash, Hlc, SegmentName, WriterId};
 use crate::io::{Io, Kind, Lock, Range, Root, Task};
 use crate::layout::Layout;
 use crate::line;
 use crate::log::{Entry, EntryKind, Genesis};
 use crate::path::RelPath;
-use crate::reader::{CachedView, WriterFile, WriterLog, MAX_FILE};
+use crate::reader::{Reader, WriterFile, WriterLog, MAX_FILE};
 use crate::report::{Rekey, Start};
 
 pub struct Writer {
@@ -28,7 +26,17 @@ pub struct Writer {
     genesis: EntryHash,
     head: EntryHash,
     open: Option<OpenSegment>,
-    pub(crate) sealed: Vec<SegmentName>,
+    /// A file this process knew to hold its head.
+    holder: Option<Holder>,
+}
+
+/// A file known to hold a writer's head while its length and last bytes are
+/// as they were.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Holder {
+    path: RelPath,
+    len: u64,
+    tail: Vec<u8>,
 }
 
 /// The segment this process appends to.
@@ -49,7 +57,7 @@ enum Confirmed {
     /// The open segment is as this process left it.
     Open(OpenSegment),
     /// The open segment no longer ends as this process left it, and the folder
-    /// holds the head: the segment is sealed, and a new one opened.
+    /// holds the head: the segment is left, and a new one opened.
     Changed,
     /// No segment is open, and the folder holds the head.
     Fresh,
@@ -73,10 +81,7 @@ impl Writer {
     /// [`Claimed::start`] reports it as [`Start::Rekeyed`]. A directory without a
     /// head record, left by a crash while a writer was created, is not in the pool.
     /// Writes nothing in the folder.
-    pub fn claim<'a>(
-        layout: &Layout,
-        logs: &'a BTreeMap<WriterId, WriterLog>,
-    ) -> Task<'a, Result<Claimed>> {
+    pub fn claim<'a>(layout: &Layout, reader: &'a Reader) -> Task<'a, Result<Claimed>> {
         let layout = layout.clone();
         flow::run(Self::pick())
             .and_then(move |picked| match picked {
@@ -84,7 +89,7 @@ impl Writer {
                     writer: None,
                     start: Start::New,
                 }),
-                Some(picked) => flow::run(picked.resume(layout, logs)),
+                Some(picked) => flow::run(picked.resume(layout, reader)),
             })
             .task()
     }
@@ -114,15 +119,16 @@ impl Writer {
 
     /// A new writer: its first segment, `segment`, holding its genesis entry, is
     /// made durable in the folder before its directory in the local root, and so
-    /// its id, exists anywhere else. `view` is kept as its cached view before its
-    /// head record, so a writer in the pool always has the view it started from.
+    /// its id, exists anywhere else. The view `view` writes for the genesis entry
+    /// is kept as its cached view before its head record, so a writer in the pool
+    /// always has the view it started from.
     pub fn create(
         layout: Layout,
         id: WriterId,
         segment: SegmentName,
         label: String,
         at: Hlc,
-        view: &CachedView,
+        view: impl FnOnce(EntryHash) -> Task<'static, Result<()>>,
     ) -> Task<'static, Result<Writer>> {
         let kind = EntryKind::Genesis(Genesis { writer: id, label });
         let entry = match Entry::encode(EntryHash::ZERO, at, kind) {
@@ -130,7 +136,7 @@ impl Writer {
             Err(_) => return Task::ready(Err(Error::Refused(Refusal::Invalid(Invalid::TooLong)))),
         };
         let genesis = entry.hash();
-        let saved = view.save(genesis);
+        let saved = view(genesis);
         let bytes = entry.line.to_bytes();
         let len = bytes.len() as u64;
         let dir = layout.writer(id);
@@ -143,12 +149,16 @@ impl Writer {
             RelPath::ROOT,
         ];
         let writer = Writer {
+            holder: Some(Holder {
+                path: path.clone(),
+                len,
+                tail: line::ending(genesis),
+            }),
             layout,
             id,
             genesis,
             head: genesis,
             open: Some(OpenSegment { name: segment, len }),
-            sealed: Vec::new(),
         };
         flow::act(Io::MakeDir {
             root: Root::Folder,
@@ -206,7 +216,7 @@ impl Writer {
     ///
     /// Refuses, appending nothing, an entry too long for a line, and fails with
     /// [`Error::Rekey`] when the folder no longer holds this writer's head. A
-    /// failed append seals the segment, so a torn line is never followed.
+    /// failed append leaves the segment, so a torn line is never followed.
     ///
     /// ⚠️ A failure syncing the entries comes after they reached the folder: the
     /// writer has moved on to them, and its next append confirms the folder still
@@ -240,7 +250,7 @@ impl Writer {
                     Err(error) => return Flow::Done((writer, Err(error))),
                     Ok(Confirmed::Open(open)) => Some(open),
                     Ok(Confirmed::Changed) => {
-                        writer.seal();
+                        writer.leave();
                         None
                     }
                     Ok(Confirmed::Fresh) => None,
@@ -250,17 +260,10 @@ impl Writer {
             .task()
     }
 
-    /// Ends the open segment: this process will not append to it again, and may
-    /// delete it once a snapshot folds it. No request.
-    pub fn seal(&mut self) {
-        if let Some(open) = self.open.take() {
-            self.sealed.push(open.name);
-        }
-    }
-
-    /// Segments this process opened and sealed: the only ones it may delete.
-    pub fn sealed(&self) -> &[SegmentName] {
-        &self.sealed
+    /// Stops appending to the open segment and leaves it without a seal marker:
+    /// the next append opens another. No request.
+    pub fn leave(&mut self) {
+        self.open = None;
     }
 
     /// Records this writer's head in the local root: `head.json`, replaced.
@@ -269,33 +272,83 @@ impl Writer {
     }
 
     /// Seals the open segment and releases the writer's lock.
-    pub fn close(&mut self) -> Task<'static, Result<()>> {
-        self.seal();
-        flow::act(Io::Unlock {
-            name: Layout::lock(self.genesis),
+    pub fn close(self) -> Task<'static, Result<()>> {
+        let genesis = self.genesis;
+        self.seal()
+            .then(move |(_, sealed)| {
+                flow::act(Io::Unlock {
+                    name: Layout::lock(genesis),
+                })
+                .then(move |unlocked| Flow::Done(sealed.and(unlocked)))
+            })
+            .task()
+    }
+
+    /// Appends the seal marker to the open segment and syncs it, once the segment
+    /// is confirmed as this process left it; otherwise leaves it without one.
+    /// Either way nothing more is appended to it. Returns the writer with the
+    /// result.
+    pub(crate) fn seal<'a>(mut self) -> Flow<'a, (Writer, Result<()>)> {
+        let Some(open) = self.open.take() else {
+            return Flow::Done((self, Ok(())));
+        };
+        let path = self.layout.segment(self.id, open.name);
+        let head = self.head;
+        let marked = flow::stat(Root::Folder, &path)
+            .and_then({
+                let path = path.clone();
+                move |meta| match meta {
+                    Some(meta) if meta.len == open.len => ends_with(path, open.len, head),
+                    _ => flow::ok(false),
+                }
+            })
+            .and_then({
+                let path = path.clone();
+                move |left| match left {
+                    false => flow::ok(false),
+                    true => flow::act(Io::Append {
+                        root: Root::Folder,
+                        path: path.clone(),
+                        bytes: line::seal_marker(head),
+                    })
+                    .and_then(move |()| flow::sync(Root::Folder, &path))
+                    .map_ok(|()| true),
+                }
+            });
+        marked.then(move |marked| {
+            if let Ok(true) = marked {
+                self.held_by(path, open.len + line::SEAL_MARKER, line::ending(head));
+            }
+            Flow::Done((self, marked.map(|_| ())))
         })
-        .task()
+    }
+
+    /// Remembers `path`, `len` bytes long and ending with `tail`, as holding
+    /// this writer's head.
+    pub(crate) fn held_by(&mut self, path: RelPath, len: u64, tail: Vec<u8>) {
+        self.holder = Some(Holder { path, len, tail });
     }
 
     /// Where to append, once the folder is confirmed to hold this writer's head.
     fn confirm<'a>(&self) -> Flow<'a, Result<Confirmed>> {
-        let (layout, id, head) = (self.layout.clone(), self.id, self.head);
+        let (id, head) = (self.id, self.head);
         let lost = move || {
             Err(Error::Rekey {
                 writer: id,
                 why: Rekey::Restored,
             })
         };
-        let path = self.open.map(|open| layout.segment(id, open.name));
+        let check = self.head_held();
         let held = move |confirmed| {
-            holds(&layout, id, head).and_then(move |held| match held {
+            check.and_then(move |held| match held {
                 true => flow::ok(confirmed),
                 false => Flow::Done(lost()),
             })
         };
-        let (Some(open), Some(path)) = (self.open, path) else {
+        let Some(open) = self.open else {
             return held(Confirmed::Fresh);
         };
+        let path = self.layout.segment(id, open.name);
         flow::stat(Root::Folder, &path).and_then(move |meta| match meta {
             Some(meta) if meta.len == open.len => {
                 ends_with(path, open.len, head).and_then(move |ends| match ends {
@@ -306,6 +359,32 @@ impl Writer {
             Some(meta) if meta.len > open.len => held(Confirmed::Changed),
             _ => Flow::Done(lost()),
         })
+    }
+
+    /// Whether a file of this writer's directory holds its head: the file it last
+    /// knew to hold it, unchanged, or any file, judged by its last bytes first.
+    pub(crate) fn head_held<'a>(&self) -> Fallible<'a, bool> {
+        let (layout, id, head) = (self.layout.clone(), self.id, self.head);
+        let any = move || holds(&layout, id, head);
+        let Some(holder) = self.holder.clone() else {
+            return any();
+        };
+        let tail = Range {
+            offset: holder.len.saturating_sub(line::ENDING),
+            len: holder.len.min(line::ENDING),
+        };
+        flow::stat(Root::Folder, &holder.path)
+            .and_then(move |meta| match meta {
+                Some(meta) if meta.len == holder.len => {
+                    flow::read_present(Root::Folder, &holder.path, tail)
+                        .map_ok(move |bytes| bytes == Some(holder.tail))
+                }
+                _ => flow::ok(false),
+            })
+            .and_then(move |unchanged| match unchanged {
+                true => flow::ok(true),
+                false => any(),
+            })
     }
 
     fn write(
@@ -322,23 +401,21 @@ impl Writer {
         let request = match open {
             Some(_) => Io::Append {
                 root: Root::Folder,
-                path,
+                path: path.clone(),
                 bytes,
             },
             None => {
                 synced.push(self.layout.writer(self.id));
                 Io::Create {
                     root: Root::Folder,
-                    path,
+                    path: path.clone(),
                     bytes,
                 }
             }
         };
         flow::act(request).then(move |landed| {
             if let Err(error) = landed {
-                if open.is_some() {
-                    self.seal();
-                }
+                self.leave();
                 return Flow::Done((self, Err(error)));
             }
             let start = open.map_or(0, |open| open.len);
@@ -347,9 +424,10 @@ impl Writer {
                 len: start + len,
             });
             self.head = entries.last().expect("at least one entry").hash();
+            self.held_by(path, start + len, line::ending(self.head));
             sync_all(Root::Folder, synced).then(move |result| match result {
                 Err(error) => {
-                    self.seal();
+                    self.leave();
                     Flow::Done((self, Err(error)))
                 }
                 Ok(()) => Flow::Done((self, Ok(entries))),
@@ -415,16 +493,12 @@ impl Picked {
     }
 
     /// Continues the writer if its history did not fork and the folder still
-    /// holds what it last wrote, or retires it. `logs` must be read from the
+    /// holds what it last wrote, or retires it. `reader` must have read the
     /// folder just before.
-    pub fn resume(
-        self,
-        layout: Layout,
-        logs: &BTreeMap<WriterId, WriterLog>,
-    ) -> Task<'static, Result<Claimed>> {
+    pub fn resume(self, layout: Layout, reader: &Reader) -> Task<'static, Result<Claimed>> {
         let Picked { genesis, record } = self;
         let id = record.writer;
-        let tip = match logs.get(&id) {
+        let tip = match reader.logs().get(&id) {
             Some(log) => tip(log, genesis, record.head),
             None => Err(Rekey::Restored),
         };
@@ -432,23 +506,47 @@ impl Picked {
             Ok(tip) => tip,
             Err(why) => return retire(genesis, id, why).task(),
         };
-        holds(&layout, id, tip)
+        let writer = Writer {
+            holder: holder(reader, id, tip),
+            layout,
+            id,
+            genesis,
+            head: tip,
+            open: None,
+        };
+        writer
+            .head_held()
             .and_then(move |held| match held {
                 false => retire(genesis, id, Rekey::Restored),
                 true => flow::ok(Claimed {
-                    writer: Some(Writer {
-                        layout,
-                        id,
-                        genesis,
-                        head: tip,
-                        open: None,
-                        sealed: Vec::new(),
-                    }),
+                    writer: Some(writer),
                     start: Start::Resumed(id),
                 }),
             })
             .task()
     }
+}
+
+/// A file the reader's last read found holding `head` of `writer`'s chain.
+fn holder(reader: &Reader, writer: WriterId, head: EntryHash) -> Option<Holder> {
+    reader
+        .files(writer)
+        .into_iter()
+        .find_map(|(path, stamp, file)| {
+            let stamp = stamp?;
+            let held = match file {
+                WriterFile::Segment(segment) => {
+                    segment.entries.iter().any(|entry| entry.hash() == head)
+                }
+                WriterFile::Snapshot(snapshot) => snapshot.writer == writer && snapshot.folds(head),
+                WriterFile::Unreadable => false,
+            };
+            held.then(|| Holder {
+                path: path.clone(),
+                len: stamp.len,
+                tail: stamp.tail.clone(),
+            })
+        })
 }
 
 /// Retires the writer whose genesis entry is `genesis`, which this process
@@ -518,30 +616,53 @@ fn ends_with<'a>(path: RelPath, len: u64, hash: EntryHash) -> Flow<'a, Result<bo
 }
 
 /// Whether a file in `writer`'s directory of the folder holds `hash` now, in a
-/// segment or folded in a snapshot.
+/// segment or folded in a snapshot: first any file whose last bytes end the line
+/// `hash` names, then any file read whole.
 pub(crate) fn holds<'a>(
     layout: &Layout,
     writer: WriterId,
     hash: EntryHash,
 ) -> Flow<'a, Result<bool>> {
     let dir = layout.writer(writer);
+    let ending = line::ending(hash);
     flow::list(Root::Folder, &dir).and_then(move |entries| {
         let paths: Vec<RelPath> = entries
             .into_iter()
             .filter(|entry| entry.kind == Kind::File)
             .filter_map(|entry| dir.join(&entry.name).ok())
             .collect();
+        let whole = paths.clone();
         flow::fold(paths.into_iter(), false, move |found, path| match found {
             true => flow::ok(true),
-            false => flow::read_file(Root::Folder, &path, MAX_FILE).map_ok(move |bytes| {
-                bytes.is_some_and(|bytes| match WriterFile::parse(&bytes) {
-                    WriterFile::Segment { lines, .. } => {
-                        lines.iter().any(|line| line.hash() == hash)
-                    }
-                    WriterFile::Snapshot(snapshot) => snapshot.folds(hash),
-                    WriterFile::Unreadable => false,
-                })
+            false => flow::stat(Root::Folder, &path.clone()).and_then({
+                let ending = ending.clone();
+                move |meta| {
+                    let Some(len) = meta.map(|meta| meta.len).filter(|len| *len >= line::ENDING)
+                    else {
+                        return flow::ok(false);
+                    };
+                    let tail = Range {
+                        offset: len - line::ENDING,
+                        len: line::ENDING,
+                    };
+                    flow::read_present(Root::Folder, &path, tail)
+                        .map_ok(move |bytes| bytes == Some(ending))
+                }
             }),
+        })
+        .and_then(move |found| {
+            flow::fold(whole.into_iter(), found, move |found, path| match found {
+                true => flow::ok(true),
+                false => flow::read_file(Root::Folder, &path, MAX_FILE).map_ok(move |bytes| {
+                    bytes.is_some_and(|bytes| match WriterFile::parse(&bytes) {
+                        WriterFile::Segment(segment) => {
+                            segment.entries.iter().any(|entry| entry.hash() == hash)
+                        }
+                        WriterFile::Snapshot(snapshot) => snapshot.folds(hash),
+                        WriterFile::Unreadable => false,
+                    })
+                }),
+            })
         })
     })
 }

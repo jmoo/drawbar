@@ -22,6 +22,8 @@ pub mod asynch;
 pub mod binding;
 pub mod blocking;
 #[doc(hidden)]
+pub mod cache;
+#[doc(hidden)]
 pub mod compaction;
 #[doc(hidden)]
 pub mod crash;

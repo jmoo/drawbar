@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use crate::binding::{self, Bindings, Scan};
+use crate::cache;
 use crate::drafts::{self, DraftRecord};
 use crate::effects::{self, Applied, EffectPlan, FileEnd};
 use crate::env::Env;
@@ -27,7 +28,7 @@ use crate::merge::{merge, Beyond, Folded, Part};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord};
 use crate::plan::{FactChange, FileChange, Plan};
-use crate::reader::{CachedView, ReadReport, Reader, WriterLog};
+use crate::reader::{Reader, WriterLog};
 use crate::recovery::{self, Settling};
 use crate::report::{
     By, Change, Committed, Compacted, DraftState, DraftStatus, Emptied, HistoryItem, Mode, Opened,
@@ -38,7 +39,7 @@ use crate::schema::Schema;
 use crate::trash::{self, Policy};
 use crate::undo::History;
 use crate::view::{FileState, Parts, View};
-use crate::writer::{self, Claimed, Writer};
+use crate::writer::{self, Claimed, Picked, Writer};
 
 pub struct Library {
     layout: Layout,
@@ -94,8 +95,9 @@ impl Library {
     ) -> Task<'static, Result<(Library, Opened)>> {
         flow::run(Writer::pick())
             .and_then(|picked| {
+                let own = picked.as_ref().map(Picked::genesis);
                 flow::run(Writer::pool())
-                    .and_then(|pool| flow::run(CachedView::load_all(pool)))
+                    .and_then(move |pool| flow::run(cache::load(pool, own)))
                     .map_ok(move |cached| (picked, cached))
             })
             .and_then(|(picked, cached)| {
@@ -105,11 +107,11 @@ impl Library {
                 })
             })
             .and_then(move |(picked, cached, let_go)| {
-                let mut reader = Reader::new(layout.clone(), cached);
+                let mut reader = Reader::open(layout.clone(), cached);
                 flow::run(reader.list()).and_then(move |listing| {
                     let report = reader.absorb(listing);
                     let claimed = match picked {
-                        Some(picked) => picked.resume(layout.clone(), reader.logs()),
+                        Some(picked) => picked.resume(layout.clone(), &reader),
                         None => Task::ready(Ok(Claimed {
                             writer: None,
                             start: Start::New,
@@ -129,8 +131,8 @@ impl Library {
                     })
                 })
             })
-            .and_then(|(library, report, start)| {
-                let saved = library.save_view(&report);
+            .and_then(|(mut library, report, start)| {
+                let saved = library.save_view();
                 flow::run(saved).and_then(move |()| {
                     recover(library).map_ok(move |library| (library, report, start))
                 })
@@ -363,7 +365,12 @@ impl Library {
             .reader
             .logs()
             .get(&writer.id())
-            .map(|log| log.entries().to_vec())
+            .map(|log| {
+                log.entries()
+                    .iter()
+                    .map(|entry| Entry::clone(entry))
+                    .collect()
+            })
             .unwrap_or_default();
         Ok((writer.id(), own))
     }
@@ -405,36 +412,40 @@ impl Library {
     /// view, attributed to its writer, or to nobody for outside changes, and what
     /// the folder no longer holds. Writes nothing in the folder.
     pub fn refresh(&mut self) -> Task<'_, Result<Refreshed>> {
-        let before = self.bindings.bound.clone();
+        let before = self.bindings.clone();
         flow::run(self.reader.list())
             .and_then(move |listing| {
                 let report = self.reader.absorb(listing);
-                let before = std::mem::take(&mut self.folded);
-                self.refold();
-                let changes = self.attribute(&before);
-                let now = self.env.now_ms();
-                self.clock = self.clock.observe(latest(&self.reader, now));
+                let read = report.changed || report.folder_changed;
+                let mut changes = Vec::new();
+                if read {
+                    let before = std::mem::take(&mut self.folded);
+                    self.refold();
+                    changes = self.attribute(&before);
+                    let now = self.env.now_ms();
+                    self.clock = self.clock.observe(latest(&self.reader, now));
+                }
                 let forked = self
                     .writer
                     .as_ref()
                     .is_some_and(|own| report.forks.iter().any(|fork| fork.writer == own.id()));
-                let saved = flow::run(self.save_view(&report));
+                let saved = flow::run(self.save_view());
                 let stopped = match forked {
                     true => self.stop_writing(),
                     false => ok(()),
                 };
-                saved
-                    .and_then(move |()| stopped)
-                    .and_then(move |()| rescan(self).map_ok(move |library| (library, changes)))
+                saved.and_then(move |()| stopped).and_then(move |()| {
+                    rescan(self).map_ok(move |library| (library, changes, read))
+                })
             })
-            .map_ok(move |(library, mut changes)| {
+            .map_ok(move |(library, mut changes, read)| {
                 let explained: BTreeSet<EntityId> = changes
                     .iter()
                     .filter(|change| change.what == What::File)
                     .map(|change| change.entity)
                     .collect();
                 for (entity, file) in &library.bindings.bound {
-                    if before.get(entity) != Some(file) && !explained.contains(entity) {
+                    if before.bound.get(entity) != Some(file) && !explained.contains(entity) {
                         changes.push(Change {
                             entity: *entity,
                             what: What::File,
@@ -442,7 +453,9 @@ impl Library {
                         });
                     }
                 }
-                library.show();
+                if read || library.bindings != before {
+                    library.show();
+                }
                 Refreshed {
                     changes,
                     removed: library.removed_facts(),
@@ -489,8 +502,9 @@ impl Library {
             .task()
     }
 
-    /// Folds this writer's own entries into a snapshot and deletes the segments
-    /// this process sealed that it folds. Undo reaches back only to the snapshot.
+    /// Folds this writer's own entries into a snapshot and deletes the sealed
+    /// segments of its directory a snapshot folds. Undo reaches back only to the
+    /// snapshot.
     pub fn compact(&mut self) -> Task<'_, Result<Compacted>> {
         if let Err(error) = self.writable() {
             return Task::ready(Err(error));
@@ -502,9 +516,8 @@ impl Library {
             .and_then(move |listing| {
                 self.reader.absorb(listing);
                 let writer = self.writer.take().expect("checked above");
-                let own = &self.reader.logs()[&id];
                 let name = self.env.nonce();
-                flow::run(crate::compaction::compact(writer, own, name)).then(
+                flow::run(crate::compaction::compact(writer, &self.reader, name)).then(
                     move |(writer, compacted)| match compacted {
                         Err(error @ Error::Rekey { .. }) => {
                             self.writer = Some(writer);
@@ -556,21 +569,21 @@ impl Library {
     /// lock. A library dropped without closing leaves its segment open, as a crash
     /// does.
     pub fn close(&mut self) -> Task<'_, Result<()>> {
-        let Some(mut writer) = self.writer.take() else {
+        let Some(writer) = self.writer.take() else {
             return Task::ready(Ok(()));
         };
-        let saved = self.reader.cached().save(writer.genesis());
+        let saved = self.reader.save(writer.genesis());
         flow::run(saved)
             .and_then(move |()| flow::run(writer.close()))
             .task()
     }
 
-    /// Keeps the cached view in this writer's local directory after a read that
-    /// changed it, so a crash does not take back what was shown.
-    fn save_view(&self, report: &ReadReport) -> Task<'static, Result<()>> {
-        match (&self.writer, report.changed) {
-            (Some(writer), true) => self.reader.cached().save(writer.genesis()),
-            _ => Task::ready(Ok(())),
+    /// Keeps what a read added to the cached view in this writer's local
+    /// directory, so a crash does not take back what was shown.
+    fn save_view(&mut self) -> Task<'static, Result<()>> {
+        match &self.writer {
+            Some(writer) => self.reader.save(writer.genesis()),
+            None => Task::ready(Ok(())),
         }
     }
 
@@ -825,7 +838,7 @@ impl Library {
                 .reader
                 .logs()
                 .get(&writer.id())
-                .map(|log| History::of(log.entries()))
+                .map(|log| History::of(log.entries().iter().map(|entry| &**entry)))
                 .unwrap_or_default(),
             None => History::default(),
         };
@@ -1170,14 +1183,10 @@ fn ensure_writer<'a>(
             return Flow::Done(Err(Error::Refused(Refusal::Invalid(Invalid::TooLong))));
         };
         let segment = library.env.segment_name();
-        let create = Writer::create(
-            library.layout.clone(),
-            id,
-            segment,
-            label,
-            at,
-            library.reader.cached(),
-        );
+        let reader = &mut library.reader;
+        let create = Writer::create(library.layout.clone(), id, segment, label, at, |genesis| {
+            reader.checkpoint(genesis)
+        });
         flow::run(create).map_ok(move |writer| {
             library.writer = Some(writer);
             library.absorb_own(&[genesis]);
@@ -1301,7 +1310,7 @@ fn appending<'a>(
             Ok(entries) => {
                 library.absorb_own(&entries);
                 let writer = library.writer.as_ref().expect("put back above");
-                let saved = library.reader.cached().save(writer.genesis());
+                let saved = library.reader.save(writer.genesis());
                 let recorded = writer.record();
                 flow::run(saved)
                     .and_then(move |()| flow::run(recorded))

@@ -27,8 +27,9 @@ impl Written {
             };
             let pairs = written.0.entry(writer).or_default();
             match WriterFile::parse(bytes) {
-                WriterFile::Segment { lines, .. } => {
-                    pairs.extend(lines.iter().map(|line| (line.hash(), line.prev())));
+                WriterFile::Segment(segment) => {
+                    let lines = segment.entries.iter();
+                    pairs.extend(lines.map(|entry| (entry.hash(), entry.prev())));
                 }
                 WriterFile::Snapshot(snapshot) => pairs.extend(snapshot.pairs()),
                 WriterFile::Unreadable => {}
@@ -161,9 +162,8 @@ fn check_delivered(origin: &Files, written: &Written, view: &CachedView, case: &
     );
 }
 
-/// What a reader with `cached` places from a folder holding `files`.
-fn read(files: &Files, cached: &CachedView) -> (CachedView, ReadReport) {
-    let mut disk = MemDisk::new();
+fn disk_of(files: &Files) -> MemDisk {
+    let disk = MemDisk::new();
     for (path, bytes) in files {
         let dir = path.parent().unwrap();
         disk.perform(Io::MakeDir {
@@ -178,9 +178,37 @@ fn read(files: &Files, cached: &CachedView) -> (CachedView, ReadReport) {
         })
         .unwrap();
     }
+    disk
+}
+
+/// What a reader with `cached` places from a folder holding `files`.
+fn read(files: &Files, cached: &CachedView) -> (CachedView, ReadReport) {
     let mut reader = Reader::new(layout(), cached.clone());
-    let report = run(&mut disk, reader.read()).unwrap();
+    let report = run(&mut disk_of(files), reader.read()).unwrap();
     (reader.cached().clone(), report)
+}
+
+/// A reader that read the folder before reads it again: it reads only the files
+/// that changed, and places what a reader with its cached view placing every file
+/// does.
+fn read_again(reader: &mut Reader, files: &Files, case: &str) -> ReadReport {
+    let mut cold = Reader::new(layout(), reader.cached().clone());
+    let report = run(&mut disk_of(files), reader.read()).unwrap();
+    let cold_report = run(&mut disk_of(files), cold.read()).unwrap();
+    assert_eq!(
+        reader.cached(),
+        cold.cached(),
+        "{case}: the cached views differ"
+    );
+    assert_eq!(reader.removed(), cold.removed(), "{case}");
+    let placed = |report: &ReadReport| -> BTreeSet<EntryHash> {
+        report.placed.values().flatten().copied().collect()
+    };
+    assert_eq!(placed(&report), placed(&cold_report), "{case}");
+    assert_eq!(report.forks, cold_report.forks, "{case}");
+    assert_eq!(report.gaps, cold_report.gaps, "{case}");
+    assert_eq!(report.unreadable, cold_report.unreadable, "{case}");
+    report
 }
 
 /// Every state one reader reaches from an empty folder by any sequence of sync
@@ -189,9 +217,11 @@ fn explore(origin: &Files, versions: &Versions, chaos: u32) {
     let written = Written::of(versions.iter());
     let mut delivered = 0;
     let mut seen = BTreeSet::new();
-    let mut stack = vec![(Files::new(), CachedView::default(), 0)];
-    while let Some((folder, view, spent)) = stack.pop() {
+    let start = Reader::new(layout(), CachedView::default());
+    let mut stack = vec![(Files::new(), start, 0)];
+    while let Some((folder, reader, spent)) = stack.pop() {
         let case = format!("{} files, chaos {spent}", folder.len());
+        let view = reader.cached().clone();
         if &folder == origin {
             check_delivered(origin, &written, &view, &case);
             delivered += 1;
@@ -203,12 +233,14 @@ fn explore(origin: &Files, versions: &Versions, chaos: u32) {
             }
             let mut next = folder.clone();
             apply(origin, versions, &mut next, &event);
-            let (after, report) = read(&next, &view);
             let case = format!("{case}, then {event:?}");
-            check_step(&view, &after, &report, &case);
-            check_state(&next, &after, &case);
+            let mut reader = reader.clone();
+            let report = read_again(&mut reader, &next, &case);
+            let after = reader.cached();
+            check_step(&view, after, &report, &case);
+            check_state(&next, after, &case);
             if seen.insert((next.clone(), after.encode(), spent)) {
-                stack.push((next, after, spent));
+                stack.push((next, reader, spent));
             }
         }
     }
@@ -362,10 +394,10 @@ fn run_seeded(seed: u64) {
 }
 
 fn step_reader(sim: &mut Simulator, reader: &mut Reader, r: usize, event: &SyncEvent, case: &str) {
-    let mut disk = sim.reader(r).clone();
+    let folder = sim.reader(r).files(Root::Folder);
     let before = reader.cached().clone();
-    let report = run(&mut disk, reader.read()).unwrap();
     let case = format!("{case}, reader {r} after {event:?}");
+    let report = read_again(reader, &folder, &case);
     check_step(&before, reader.cached(), &report, &case);
-    check_state(&disk.files(Root::Folder), reader.cached(), &case);
+    check_state(&folder, reader.cached(), &case);
 }

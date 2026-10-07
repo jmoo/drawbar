@@ -6,8 +6,9 @@ use std::collections::BTreeMap;
 
 use common::{files_under, fresh, held, layout, machine, Instance};
 use toshokan::blocking::run;
+use toshokan::compaction::compact;
 use toshokan::disk::Tail;
-use toshokan::line::Line;
+use toshokan::line::{ending, seal_marker, Line, ENDING};
 use toshokan::reader::{CachedView, Reader};
 use toshokan::report::{Rekey, Start};
 use toshokan::simulator::Machine;
@@ -87,7 +88,7 @@ fn create(disk: &mut MemDisk) -> toshokan::Result<Writer> {
         SegmentName::from_u128(8),
         "w".into(),
         Hlc::ZERO,
-        &CachedView::default(),
+        |genesis| CachedView::default().save(genesis),
     );
     run(disk, create)
 }
@@ -110,7 +111,7 @@ fn no_writer_joins_the_pool_before_its_genesis_entry_is_durable() {
                 let mut reader = Reader::new(layout(), CachedView::default());
                 run(&mut disk, reader.read()).unwrap();
                 let Claimed { start, .. } =
-                    run(&mut disk, Writer::claim(&layout(), reader.logs())).unwrap();
+                    run(&mut disk, Writer::claim(&layout(), &reader)).unwrap();
                 match start {
                     Start::New => assert!(after < operations, "{case}"),
                     Start::Resumed(id) => assert!(reader.logs()[&id].genesis().is_some(), "{case}"),
@@ -453,7 +454,7 @@ fn losing_the_local_root_starts_a_new_writer_and_leaves_the_old_one_alone() {
 }
 
 #[test]
-fn a_failed_append_seals_its_segment() {
+fn a_failed_append_leaves_its_segment() {
     let mut instance = Instance::open(machine(), 1);
     instance.write("a").unwrap();
     let id = instance.id();
@@ -467,7 +468,7 @@ fn a_failed_append_seals_its_segment() {
 }
 
 #[test]
-fn compaction_deletes_only_segments_this_process_sealed() {
+fn compaction_leaves_the_segment_a_crash_left_open() {
     let mut first = Instance::open(machine(), 1);
     let mut written = first.write("a").unwrap();
     let id = first.id();
@@ -483,7 +484,7 @@ fn compaction_deletes_only_segments_this_process_sealed() {
         1,
         "the crashed process's segment stays"
     );
-    assert!(second.writer.as_ref().unwrap().sealed().is_empty());
+    assert_eq!(second.writer.as_ref().unwrap().open_segment(), None);
 
     written.extend(second.write("c").unwrap());
     let again = second.compact().unwrap();
@@ -578,7 +579,7 @@ fn entries_that_reached_the_folder_before_a_failure_are_followed_not_forked() {
         };
         let mut writer = create(&mut backend.disk).unwrap();
         if !open {
-            writer.seal();
+            writer.leave();
         }
         backend.fail = true;
         let (writer, failed) = run(
@@ -600,4 +601,195 @@ fn entries_that_reached_the_folder_before_a_failure_are_followed_not_forked() {
             Some(3)
         );
     }
+}
+
+fn segment_paths(machine: &Machine, writer: WriterId) -> Vec<toshokan::RelPath> {
+    files_under(&machine.folder, &layout().writer(writer))
+        .into_iter()
+        .filter(|path| path.as_str().ends_with(".jsonl"))
+        .collect()
+}
+
+fn ends_with(machine: &Machine, path: &toshokan::RelPath, tail: &[u8]) -> bool {
+    machine.folder.files(Root::Folder)[path].ends_with(tail)
+}
+
+#[test]
+fn a_closed_segment_ends_with_a_seal_marker_and_a_crashed_one_does_not() {
+    let mut first = Instance::open(machine(), 1);
+    let a = first.write("a").unwrap();
+    let id = first.id();
+    let machine = first.close();
+    let [closed] = segment_paths(&machine, id).try_into().unwrap();
+    assert!(ends_with(
+        &machine,
+        &closed,
+        &seal_marker(*a.last().unwrap())
+    ));
+
+    let mut second = Instance::open(machine, 2);
+    let b = second.write("b").unwrap();
+    let machine = second.crash();
+    let crashed: Vec<_> = segment_paths(&machine, id)
+        .into_iter()
+        .filter(|path| *path != closed)
+        .collect();
+    assert_eq!(crashed.len(), 1);
+    assert!(ends_with(&machine, &crashed[0], &ending(b[0])));
+}
+
+#[test]
+fn compaction_deletes_the_sealed_segments_of_earlier_processes() {
+    let mut first = Instance::open(machine(), 1);
+    let mut written = first.write("a").unwrap();
+    let id = first.id();
+    let mut second = Instance::open(first.close(), 2);
+    written.extend(second.write("b").unwrap());
+    assert_eq!(segments(&second.machine, id), 2);
+    let compacted = second.compact().unwrap();
+    assert_eq!(compacted.removed.len(), 2);
+    let files = files_under(&second.machine.folder, &layout().writer(id));
+    assert_eq!(files.len(), 1, "the snapshot alone: {files:?}");
+    let view = fresh(&second.machine.folder);
+    assert_eq!(held(&view), written.iter().copied().collect());
+}
+
+// Sealed.cfg: without the marker the clone deletes the segment the original
+// still has open, and the original's next entry goes with it.
+#[test]
+fn compaction_leaves_a_segment_another_process_has_open() {
+    let mut original = Instance::open(machine(), 1);
+    let mut written = original.write("a1").unwrap();
+    let id = original.id();
+    let mut clone = Instance::open(original.machine.cloned(), 2);
+    written.extend(clone.write("b2").unwrap());
+    clone.compact().unwrap();
+    written.extend(original.write("a2").unwrap());
+    let view = fresh(&original.machine.folder);
+    assert_eq!(held(&view), written.iter().copied().collect());
+    assert_eq!(view.writers()[&id].forks().len(), 1);
+}
+
+// Folded.cfg: without the fold check the clone deletes a segment the original
+// sealed after the fork, though no snapshot folds the original's entry.
+#[test]
+fn compaction_leaves_a_sealed_segment_holding_an_entry_no_snapshot_folds() {
+    let mut original = Instance::open(machine(), 1);
+    let mut written = original.write("a1").unwrap();
+    let mut clone = Instance::open(original.machine.cloned(), 2);
+    written.extend(original.write("a2").unwrap());
+    let folder = original.close().folder;
+    written.extend(clone.write("b2").unwrap());
+    let compacted = clone.compact().unwrap();
+    assert_eq!(compacted.removed.len(), 1, "only the clone's own segment");
+    let view = fresh(&folder);
+    assert_eq!(held(&view), written.iter().copied().collect());
+}
+
+/// The folder of a machine, where a segment gains `bytes` once the snapshot is
+/// written: between compaction's judgement of it and its deletion.
+struct Meddling<'a> {
+    machine: &'a mut Machine,
+    segment: toshokan::RelPath,
+}
+
+impl toshokan::blocking::Backend for Meddling<'_> {
+    fn capabilities(&self, root: Root) -> toshokan::io::Capabilities {
+        toshokan::blocking::Backend::capabilities(self.machine, root)
+    }
+
+    fn perform(&mut self, io: toshokan::Io) -> toshokan::IoResult {
+        let snapshot = matches!(&io, toshokan::Io::Create { path, .. }
+            if path.name().is_some_and(|name| name.starts_with("snapshot-")));
+        let reply = self.machine.perform(io)?;
+        if snapshot {
+            let append = toshokan::Io::Append {
+                root: Root::Folder,
+                path: self.segment.clone(),
+                bytes: b"later".to_vec(),
+            };
+            self.machine.perform(append)?;
+        }
+        Ok(reply)
+    }
+}
+
+#[test]
+fn a_segment_that_changes_before_compaction_deletes_it_is_left() {
+    let mut first = Instance::open(machine(), 1);
+    first.write("a").unwrap();
+    let id = first.id();
+    let machine = first.close();
+    let [sealed] = segment_paths(&machine, id).try_into().unwrap();
+    let mut second = Instance::open(machine, 2);
+    second.write("b").unwrap();
+    let writer = second.writer.take().unwrap();
+    run(&mut second.machine, second.reader.read_writer(id)).unwrap();
+    let mut meddling = Meddling {
+        machine: &mut second.machine,
+        segment: sealed.clone(),
+    };
+    let name = toshokan::Nonce::from_u128(5);
+    let (_, compacted) = run(&mut meddling, compact(writer, &second.reader, name));
+    assert_eq!(compacted.unwrap().removed.len(), 1);
+    assert!(segment_paths(&second.machine, id).contains(&sealed));
+}
+
+/// Counts the bytes read in the folder.
+struct Reads<'a> {
+    machine: &'a mut Machine,
+    longest: u64,
+}
+
+impl toshokan::blocking::Backend for Reads<'_> {
+    fn capabilities(&self, root: Root) -> toshokan::io::Capabilities {
+        toshokan::blocking::Backend::capabilities(self.machine, root)
+    }
+
+    fn perform(&mut self, io: toshokan::Io) -> toshokan::IoResult {
+        if let toshokan::Io::Read {
+            root: Root::Folder,
+            range,
+            ..
+        } = &io
+        {
+            self.longest = self.longest.max(range.len);
+        }
+        self.machine.perform(io)
+    }
+}
+
+#[test]
+fn a_writer_confirms_its_head_from_the_end_of_the_file_that_holds_it() {
+    let mut first = Instance::open(machine(), 1);
+    for label in ["a", "b", "c"] {
+        first.write(label).unwrap();
+    }
+    first.compact().unwrap();
+    let mut machine = first.close();
+    let mut reader = Reader::new(layout(), CachedView::default());
+    run(&mut machine, reader.read()).unwrap();
+    let mut reads = Reads {
+        machine: &mut machine,
+        longest: 0,
+    };
+    let claimed = run(&mut reads, Writer::claim(&layout(), &reader)).unwrap();
+    assert!(matches!(claimed.start, Start::Resumed(_)));
+    let kind = toshokan::log::EntryKind::Intent(toshokan::log::Logged {
+        label: "d".into(),
+        ops: Vec::new(),
+        displaced: Vec::new(),
+        reverses: None,
+    });
+    let append = claimed
+        .writer
+        .unwrap()
+        .append(vec![(Hlc::ZERO, kind)], SegmentName::from_u128(77));
+    let (_, appended) = run(&mut reads, append);
+    appended.unwrap();
+    assert!(
+        reads.longest <= ENDING,
+        "read {} bytes at once",
+        reads.longest
+    );
 }

@@ -10,6 +10,7 @@
 //! <local>/<genesis>/           one writer of this install, by its genesis entry
 //!   head.json                  the head this writer last wrote
 //!   view.json                  the cached view
+//!   view.log                   what the cached view gained since
 //!   drafts/<entity>.json       unsaved edits
 //!   lock                       held while an instance writes as this writer
 //!   retired                    present once the writer is never written again
@@ -117,6 +118,12 @@ impl Layout {
         child(&Self::local(genesis), "view.json")
     }
 
+    /// What the cached view gained since `view.json` was written, one record a
+    /// line.
+    pub fn view_journal(genesis: EntryHash) -> RelPath {
+        child(&Self::local(genesis), "view.log")
+    }
+
     pub fn drafts(genesis: EntryHash) -> RelPath {
         child(&Self::local(genesis), "drafts")
     }
@@ -180,6 +187,7 @@ mod tests {
         for path in [
             Layout::head(genesis),
             Layout::cached_view(genesis),
+            Layout::view_journal(genesis),
             Layout::draft(genesis, entity),
             Layout::lock(genesis),
             Layout::retired(genesis),

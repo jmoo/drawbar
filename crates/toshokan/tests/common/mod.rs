@@ -403,7 +403,7 @@ impl Instance {
         let mut reader = Reader::new(layout(), CachedView::default());
         run(&mut machine, reader.read()).unwrap();
         let Claimed { writer, start } =
-            run(&mut machine, Writer::claim(&layout(), reader.logs())).unwrap();
+            run(&mut machine, Writer::claim(&layout(), &reader)).unwrap();
         Self {
             machine,
             reader,
@@ -436,14 +436,9 @@ impl Instance {
             let at = self.tick();
             let writer = run(
                 &mut self.machine,
-                Writer::create(
-                    layout(),
-                    id,
-                    segment,
-                    "instance".into(),
-                    at,
-                    &CachedView::default(),
-                ),
+                Writer::create(layout(), id, segment, "instance".into(), at, |genesis| {
+                    CachedView::default().save(genesis)
+                }),
             )?;
             made.push(writer.genesis());
             self.writer = Some(writer);
@@ -471,14 +466,13 @@ impl Instance {
         let name = Nonce::from_u128(self.random.next_u128());
         let writer = self.writer.take().expect("a writer");
         run(&mut self.machine, self.reader.read_writer(writer.id()))?;
-        let own = &self.reader.logs()[&writer.id()];
-        let (writer, compacted) = run(&mut self.machine, compact(writer, own, name));
+        let (writer, compacted) = run(&mut self.machine, compact(writer, &self.reader, name));
         self.writer = Some(writer);
         compacted
     }
 
     pub fn close(mut self) -> Machine {
-        if let Some(writer) = &mut self.writer {
+        if let Some(writer) = self.writer.take() {
             run(&mut self.machine, writer.close()).unwrap();
         }
         self.machine
@@ -504,7 +498,7 @@ pub fn held(view: &CachedView) -> BTreeSet<EntryHash> {
         .values()
         .flat_map(|log| {
             let folded = log.snapshots().iter().flat_map(|s| s.folded.clone());
-            let placed = log.entries().iter().map(Entry::hash);
+            let placed = log.entries().iter().map(|entry| entry.hash());
             folded.chain(placed).collect::<Vec<_>>()
         })
         .collect()

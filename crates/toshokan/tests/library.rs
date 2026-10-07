@@ -68,6 +68,10 @@ struct Seen {
     longest_pending_read: u64,
     /// Renames to this path fail, as a backend's might.
     refused: Option<RelPath>,
+    /// Bytes written in the local root.
+    local_written: u64,
+    /// The longest read of a file directly in a writer's directory.
+    log_read: u64,
 }
 
 /// One instance's storage: a machine, checked and counted.
@@ -96,6 +100,7 @@ impl Probe {
     /// this instance writes as. The directories holding every writer's may be
     /// made and synced.
     fn check(&self, io: &Io) {
+        self.count(io);
         if let Io::Read { path, range, .. } = io {
             if path.components().any(|name| name == "pending") {
                 let mut seen = self.seen.borrow_mut();
@@ -138,6 +143,25 @@ impl Probe {
                 _ if new => seen.own = Some(writer),
                 own => panic!("{io:?} writes in {writer}'s directory as {own:?}"),
             }
+        }
+    }
+
+    fn count(&self, io: &Io) {
+        let mut seen = self.seen.borrow_mut();
+        match io {
+            Io::Create { root, bytes, .. } | Io::Append { root, bytes, .. }
+                if *root == Root::Local =>
+            {
+                seen.local_written += bytes.len() as u64;
+            }
+            Io::Read {
+                root: Root::Folder,
+                path,
+                range,
+            } if path.parent().and_then(|dir| dir.parent()) == Some(layout().writers()) => {
+                seen.log_read = seen.log_read.max(range.len.min(self.len(path)));
+            }
+            _ => {}
         }
     }
 
@@ -409,6 +433,10 @@ through_both!(
     a_settlement_that_stops_partway_leaves_the_record_open_until_settled_again,
     a_folder_whose_renames_may_replace_is_written_and_says_so,
     a_view_is_read_on_other_threads,
+    a_commit_writes_to_the_local_root_only_what_it_adds,
+    a_refresh_that_finds_nothing_new_writes_nothing,
+    reopening_reads_only_the_ends_of_files_read_before,
+    a_writers_directory_stays_bounded_across_sessions,
 );
 
 /// One machine of a shared folder.
@@ -1604,8 +1632,8 @@ fn compaction_keeps_the_view_and_ends_undo_at_the_snapshot<F: Facade>() {
     );
     assert_eq!(
         compacted.removed.len(),
-        1,
-        "only the segment this process sealed"
+        2,
+        "the segment the first process sealed as it closed, and the one compaction sealed"
     );
     assert_eq!(facts(&a.view()), before);
     assert!(matches!(a.undo(), Err(Error::Refused(Refusal::Nothing))));
@@ -2312,4 +2340,102 @@ fn a_folder_whose_renames_may_replace_is_written_and_says_so<F: Facade>() {
         read(&folder, "taken.npno").as_deref(),
         Some(b"taken".as_slice())
     );
+}
+
+fn a_commit_writes_to_the_local_root_only_what_it_adds<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let seen = Rc::clone(&probe.seen);
+    let (mut a, _) = F::open(probe, env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    let long = "x".repeat(4096);
+    for n in 0..20 {
+        a.commit("Tag", |i| i.add(song, TAGS, format!("{n}{long}")))
+            .unwrap();
+    }
+    let before = seen.borrow().local_written;
+    a.commit("Tag", |i| i.add(song, TAGS, tag("last"))).unwrap();
+    let written = seen.borrow().local_written - before;
+    assert!(written < 2048, "{written} bytes for one short entry");
+}
+
+fn a_refresh_that_finds_nothing_new_writes_nothing<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let seen = Rc::clone(&probe.seen);
+    let (mut a, _) = F::open(probe, env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    a.commit("Tag", |i| i.add(song, TAGS, tag("a"))).unwrap();
+    a.refresh().unwrap();
+    let (written, view) = (seen.borrow().local_written, a.view());
+    let refreshed = a.refresh().unwrap();
+    assert_eq!(refreshed.changes, []);
+    assert_eq!(seen.borrow().local_written, written);
+    assert_eq!(facts(&a.view()), facts(&view));
+}
+
+fn reopening_reads_only_the_ends_of_files_read_before<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+    let song = create(&mut b, "song.npno", b"song");
+    b.commit("Tag", |i| i.add(song, TAGS, tag("b"))).unwrap();
+    b.close().unwrap();
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    for n in 0..3 {
+        a.commit("Tag", |i| i.add(song, TAGS, format!("a{n}")))
+            .unwrap();
+    }
+    a.refresh().unwrap();
+    let before = facts(&a.view());
+    a.close().unwrap();
+
+    let probe = Probe::new(&here);
+    let seen = Rc::clone(&probe.seen);
+    let (a, opened) = F::open(probe, env("a", 3, &clock)).unwrap();
+    assert!(matches!(opened.start, Start::Resumed(_)), "{opened:?}");
+    assert_eq!(facts(&a.view()), before);
+    let shortest = folder
+        .files(Root::Folder)
+        .into_iter()
+        .filter(|(path, _)| path.parent().and_then(|dir| dir.parent()) == Some(layout().writers()))
+        .map(|(_, bytes)| bytes.len() as u64)
+        .min()
+        .unwrap();
+    let read = seen.borrow().log_read;
+    let ends = toshokan::line::ENDING + toshokan::line::SEAL_MARKER;
+    assert!(ends < shortest, "{shortest}");
+    assert!(read <= ends, "read {read} bytes of one file");
+}
+
+fn a_writers_directory_stays_bounded_across_sessions<F: Facade>() {
+    let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    a.close().unwrap();
+    for n in 0..8 {
+        let (mut a, _) = F::open(Probe::new(&here), env("a", 10 + n, &clock)).unwrap();
+        a.commit("Tag", |i| i.add(song, TAGS, format!("t{n}")))
+            .unwrap();
+        if n % 2 == 1 {
+            a.compact().unwrap();
+        }
+        a.close().unwrap();
+    }
+    let logs: Vec<RelPath> = folder
+        .files(Root::Folder)
+        .into_keys()
+        .filter(|path| path.parent().and_then(|dir| dir.parent()) == Some(layout().writers()))
+        .collect();
+    assert_eq!(logs.len(), 1, "one snapshot: {logs:?}");
+    let (fresh, _) = F::open(Probe::new(&machine(&folder)), env("b", 99, &clock)).unwrap();
+    let shown = tags(&fresh.view(), song);
+    for n in 0..8 {
+        assert!(shown.contains(&format!("t{n}")), "t{n} in {shown:?}");
+    }
 }

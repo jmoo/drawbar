@@ -39,6 +39,7 @@ Each install keeps, per library, a local root of its own that is never synced:
 | -------------------------------- | -------------------------------------------- |
 | `<genesis>/head.json`            | The last entry this writer wrote             |
 | `<genesis>/view.json`            | The cached view                              |
+| `<genesis>/view.log`             | What the cached view gained since            |
 | `<genesis>/drafts/<entity>.json` | An unsaved edit                              |
 | `<genesis>/lock`                 | Held while an instance writes as this writer |
 | `<genesis>/retired`              | Empty; the writer is never written again     |
@@ -103,6 +104,12 @@ A line longer than 1 MiB, a line whose hash does not match, a final line without
 its LF, or a line starting with a zero byte ends the readable part of the file
 for now. Every line before it counts; a later read of the same file may get
 further.
+
+A process that closes a segment ends it with the **seal marker**: `sealed`, TAB,
+the hash of the segment's last line, LF. The marker is not a line, and nothing
+follows it. A segment ends with a seal marker when its last bytes are exactly
+the marker naming its last line; any other bytes after the last line end its
+readable part. The marker's last 34 bytes are those of the line it names.
 
 ## Entries
 
@@ -272,7 +279,10 @@ with a seal marker and every line of which a snapshot in its directory folds,
 and every snapshot in its directory whose `folded` list starts the new one's. A
 segment without a seal marker, such as one left open by a crash or a copy, is
 never deleted, and neither is a segment holding an entry that no snapshot in the
-directory folds.
+directory folds. Just before deleting each file it confirms that the new
+snapshot, and the snapshot that folds the segment, are still in the folder, and
+that the file still has the length it read and, for a segment, ends with its seal
+marker; a file that changed is left.
 
 ## Writers
 
@@ -293,27 +303,33 @@ synced. Only then does the writer get its directory in the local root, its lock,
 its cached view and, last, `head.json`.
 
 A process appends to one segment, named at random when it first appends, and
-seals it when it closes it or compacts: it appends a seal marker after the last
-line and syncs the segment. Nothing is appended to a sealed segment. Before each
-append, a writer confirms that the folder holds its last entry: its open segment
-has the length this process left it and ends with that entry's line. Otherwise,
-or with no segment open, a file in its directory must hold that entry, and the
-writer leaves the segment without a seal marker and appends to a new one. If no
-file holds it, the writer writes nothing and stops: a new writer takes over from
-the next write. After the append is synced it writes the cached view and then
-`head.json`, before the commit returns. An append that fails leaves the segment
-without a seal marker and appends nothing more to it, so nothing follows a torn
-line.
+seals it when it closes it or compacts: once the segment still has the length
+this process left it and ends with its last entry's line, it appends a seal
+marker and syncs the segment. Nothing is appended to a sealed segment. Before
+each append, a writer confirms that the folder holds its last entry: its open
+segment has the length this process left it and ends with that entry's line.
+Otherwise, or with no segment open, a file in its directory must hold that
+entry, and the writer leaves the segment without a seal marker and appends to a
+new one. It looks first at the file it last knew to hold the entry, unchanged in
+length and last 34 bytes, then at every file whose last 34 bytes end that
+entry's line, and only then reads files whole. If no file holds it, the writer
+writes nothing and stops: a new writer takes over from the next write. After the
+append is synced it writes the cached view and then `head.json`, before the
+commit returns. An append that fails leaves the segment without a seal marker
+and appends nothing more to it, so nothing follows a torn line.
 
 ## Reading
 
 A reader lists `writers/` and reads every file directly in each `writers/<w>/`,
 up to 256 MiB of it. A file whose length, modification time and last 34 bytes
 are unchanged is not read again; a segment's last 34 bytes are the tab, hash and
-LF that end its last line. A file is a segment when it is empty or its first
-line can be read, else a snapshot when it decodes as one; anything else is
-reported when the library opens, and read again next time. A snapshot whose
-`writer` is not `w` is reported, not used.
+LF that end its last line, or those of its seal marker. A segment without a seal
+marker that grew is read from the end of its last line on, once the 34 bytes
+before that point still end that line; any other changed file is read whole. A
+file is a segment when it is empty or its first line can be read, else a
+snapshot when it decodes as one; anything else is reported when the library
+opens, and read again next time. A snapshot whose `writer` is not `w` is
+reported, not used.
 
 A reader places an entry when its `prev` is all zeros, placed, or folded by a
 snapshot it has read. An entry whose predecessor it has not is held back, a gap,
@@ -321,30 +337,64 @@ reported with the missing hash. Two entries of one writer with one predecessor,
 among those placed, folded or ever held back, are a fork: both branches are
 merged, and the fork is reported once per predecessor.
 
-Each install keeps what it has placed as a cached view in `<genesis>/view.json`
-of its local root. A new writer writes it from the view its instance holds; it is
-written again after each read that kept a snapshot, placed an entry or held one
-back, after each append, and when the instance closes. Every open starts from
-the views of all the install's writers, live and retired, joined, so what any
-instance of the install has shown stays shown:
+Each install keeps what it has placed as a cached view in its local root:
+`<genesis>/view.json`, the whole view, and `<genesis>/view.log`, what the view
+gained since, one record a line. A new writer writes `view.json` from the view its
+instance holds. After each read that kept a snapshot, placed an entry, held one
+back or found a file changed, after each append, and when the instance closes,
+the instance appends a record of what the view gained to `view.log` and syncs it.
+It writes `view.json` again, and then removes `view.log`, when `view.log` has
+grown past half of `view.json` and 1 MiB more, when a record could not be
+appended or the last one is torn, and when the view holds what neither file
+does.
+
+Every open starts from the views of the install's writers joined, so what any
+instance of the install has shown stays shown: the view of the writer it
+continues, then those of the other live writers, then those of the retired
+writers that no view it has read holds already. `view.json` is:
 
 ```text
 {"writers":{"<w>":{
-  "snapshots":[<snapshot>, …],
-  "entries":["<json>\t<hash>", …],
-  "strays":[["<hash>","<prev>"], …],
-  "forks":[["<prev>",["<branch>","<branch>"]], …]
-}}}
+   "snapshots":[<snapshot>, …],
+   "entries":[[<json>,"<hash>"], …],
+   "strays":[["<hash>","<prev>"], …],
+   "forks":[["<prev>",["<branch>","<branch>"]], …]}},
+ "files":{"<path>":<file>, …},
+ "absorbed":["<genesis>", …]}
 ```
 
 `snapshots` are the snapshots read, none of whose folded lists starts
 another's; `entries` the placed lines no snapshot folds, each after its
-predecessor; `strays` the entries ever held back and never placed, so that a fork
-with one is found after its file is gone; `forks` every fork reported. The view
-only grows: a snapshot whose folded list starts a later one's is replaced by it,
-and the entries a snapshot folds leave `entries`. It never holds an entry whose
-predecessor it does not hold. A view that cannot be read this way is discarded,
-and the folder read from scratch.
+predecessor, each line's JSON verbatim with its hash; `strays` the entries ever
+held back and never placed, so that a fork with one is found after its file is
+gone; `forks` every fork reported. `absorbed` names the retired writers of the
+install whose views this one holds. `files` says what the reader last found in
+each file of the writers' directories, so that an open reads again only the files
+that changed:
+
+```text
+{"len":<n>,"modified":<n>,"tail":"<hex>","segment":{"count":<n>,"first":"<hash>",
+  "last":"<hash>","end":<n>,"sealed":<bool>,"lines":[[<json>,"<hash>"], …]}}
+{"len":<n>,"modified":<n>,"tail":"<hex>","snapshot":"<hash>"}
+```
+
+`len`, `modified` and `tail`, the last bytes in hexadecimal, are the file's
+stamp. A segment's lines are `count` entries of the writer's chain from `first`
+to `last`, each the successor of the one before; `end` is where its last line
+ends; `lines` holds whole the lines the view holds no entry for. A snapshot is
+the view's snapshot whose last folded entry is `snapshot`. A file the view
+cannot give the lines or the snapshot of is read again.
+
+A record of `view.log` has the same form: `writers` holds what each log gained,
+and `files` the files whose records changed, `null` for one that is gone. A
+reader replays the records in order onto `view.json`, up to the first that is
+torn. Replaying a record twice changes nothing, so a crash between writing
+`view.json` and removing `view.log` leaves a view that loads.
+
+The view only grows: a snapshot whose folded list starts a later one's is
+replaced by it, and the entries a snapshot folds leave `entries`. It never holds
+an entry whose predecessor it does not hold. A view that cannot be read this way
+is discarded, and the folder read from scratch.
 
 ### After a restore
 

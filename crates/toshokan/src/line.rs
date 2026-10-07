@@ -23,6 +23,16 @@ pub fn ending(hash: EntryHash) -> Vec<u8> {
     format!("\t{hash}\n").into_bytes()
 }
 
+/// What a process appends after the last line of a segment, `last`, when it
+/// closes it, the seal marker: `sealed`, a tab, `last` and LF. It is not a line,
+/// and its last [`ENDING`] bytes are those of the line it follows.
+pub fn seal_marker(last: EntryHash) -> Vec<u8> {
+    format!("sealed\t{last}\n").into_bytes()
+}
+
+/// How many bytes [`seal_marker`] writes.
+pub const SEAL_MARKER: u64 = ENDING + 6;
+
 /// One verified line.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Line {
@@ -172,22 +182,78 @@ pub struct Stop {
     pub error: LineError,
 }
 
-/// The lines of a file, up to the first that cannot be read.
-pub struct Lines<'a> {
-    rest: &'a [u8],
-    offset: u64,
-    stop: Option<Stop>,
+/// The lines of a segment's bytes from `offset` on, where `last` is the line
+/// before them, if any.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Read<T = Line> {
+    pub lines: Vec<T>,
+    /// The offset just past the last line read.
+    pub end: u64,
+    /// Why reading stopped before the last byte; `None` when every byte was read,
+    /// or when the bytes end with the seal marker after the last line.
+    pub stop: Option<Stop>,
+    /// Whether the bytes end with the seal marker after the last line.
+    pub sealed: bool,
 }
 
-pub fn lines(bytes: &[u8]) -> Lines<'_> {
-    Lines {
-        rest: bytes,
-        offset: 0,
-        stop: None,
+pub fn read(bytes: &[u8], offset: u64, last: Option<EntryHash>) -> Read {
+    read_with(bytes, offset, last, Line::parse, Line::hash)
+}
+
+/// As [`read`], each line taken by `parse`, which names it by `hash`.
+pub fn read_with<T>(
+    bytes: &[u8],
+    offset: u64,
+    last: Option<EntryHash>,
+    parse: impl FnMut(&[u8]) -> Result<T, LineError>,
+    hash: impl Fn(&T) -> EntryHash,
+) -> Read<T> {
+    let mut read = Lines::new(bytes, parse);
+    let found: Vec<T> = read.by_ref().collect();
+    let last = found.last().map(hash).or(last);
+    let Some(stop) = read.stop().cloned() else {
+        return Read {
+            lines: found,
+            end: offset + bytes.len() as u64,
+            stop: None,
+            sealed: false,
+        };
+    };
+    let rest = &bytes[stop.offset as usize..];
+    let sealed = last.is_some_and(|last| rest == seal_marker(last));
+    Read {
+        lines: found,
+        end: offset + stop.offset,
+        stop: (!sealed).then(|| Stop {
+            offset: offset + stop.offset,
+            error: stop.error,
+        }),
+        sealed,
     }
 }
 
-impl Lines<'_> {
+/// The lines of a file, up to the first that cannot be read.
+pub struct Lines<'a, F = fn(&[u8]) -> Result<Line, LineError>> {
+    rest: &'a [u8],
+    offset: u64,
+    stop: Option<Stop>,
+    parse: F,
+}
+
+pub fn lines(bytes: &[u8]) -> Lines<'_> {
+    Lines::new(bytes, Line::parse)
+}
+
+impl<'a, T, F: FnMut(&[u8]) -> Result<T, LineError>> Lines<'a, F> {
+    fn new(bytes: &'a [u8], parse: F) -> Self {
+        Self {
+            rest: bytes,
+            offset: 0,
+            stop: None,
+            parse,
+        }
+    }
+
     /// Why reading stopped early; `None` while lines remain or when every byte was
     /// read.
     pub fn stop(&self) -> Option<&Stop> {
@@ -195,10 +261,10 @@ impl Lines<'_> {
     }
 }
 
-impl Iterator for Lines<'_> {
-    type Item = Line;
+impl<T, F: FnMut(&[u8]) -> Result<T, LineError>> Iterator for Lines<'_, F> {
+    type Item = T;
 
-    fn next(&mut self) -> Option<Line> {
+    fn next(&mut self) -> Option<T> {
         if self.rest.is_empty() || self.stop.is_some() {
             return None;
         }
@@ -209,7 +275,7 @@ impl Iterator for Lines<'_> {
             .position(|&b| b == b'\n')
             .map_or(self.rest.len().min(MAX_LINE + 1), |at| at + 1);
         let (line, rest) = self.rest.split_at(end);
-        match Line::parse(line) {
+        match (self.parse)(line) {
             Ok(parsed) => {
                 self.rest = rest;
                 self.offset += end as u64;
@@ -323,6 +389,39 @@ mod tests {
             Line::seal(good.replace("1}", "1\n}")),
             Err(LineError::Unescaped)
         );
+    }
+
+    #[test]
+    fn a_seal_marker_ends_a_segment_only_after_the_line_it_names() {
+        let written = chain(2);
+        let mut sealed = bytes_of(&written);
+        let end = sealed.len() as u64;
+        sealed.extend(seal_marker(written[1].hash()));
+        assert_eq!(seal_marker(written[1].hash()).len() as u64, SEAL_MARKER);
+        assert_eq!(
+            sealed[sealed.len() - ENDING as usize..],
+            ending(written[1].hash())
+        );
+        let whole = read(&sealed, 0, None);
+        assert_eq!((whole.lines.len(), whole.end), (2, end));
+        assert_eq!((whole.stop, whole.sealed), (None, true));
+
+        let first = written[0].to_bytes().len();
+        let rest = read(&sealed[first..], first as u64, Some(written[0].hash()));
+        assert_eq!(rest.lines, written[1..]);
+        assert_eq!((rest.end, rest.sealed), (end, true));
+
+        let mut wrong = bytes_of(&written);
+        wrong.extend(seal_marker(written[0].hash()));
+        let mut followed = sealed.clone();
+        followed.extend(written[0].to_bytes());
+        for bytes in [wrong, followed] {
+            let read = read(&bytes, 0, None);
+            assert!(!read.sealed);
+            assert_eq!(read.stop.map(|stop| stop.offset), Some(end));
+        }
+        let alone = read(&seal_marker(written[1].hash()), 0, None);
+        assert!(!alone.sealed && alone.lines.is_empty());
     }
 
     #[test]

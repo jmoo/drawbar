@@ -118,13 +118,13 @@ them, resurrections, hidden files and conflicted copies under other names.
 
 | Property or rule | Checked by |
 | --- | --- |
-| `ChainOrder`, `NothingIgnored`, `Retained`, `DeliveredConverges`, `Monotone`, `ForksKept` | `tests/portable.rs`: every delivery order of small scenarios, and seeded interleavings of writes, compactions, crashes, clones and lost local roots with sync |
+| `ChainOrder`, `NothingIgnored`, `Retained`, `DeliveredConverges`, `Monotone`, `ForksKept` | `tests/portable.rs`: every delivery order of small scenarios, and seeded interleavings of writes, compactions, crashes, clones and lost local roots with sync; at each step a reader that reads only what changed places what one reading every file places |
 | `OwnDirectory` | `tests/library.rs`: every instance runs on a backend that panics on a write in another writer's directory |
 | `EffectAccounted` | `tests/crash.rs`: every effect crashed after every operation, under torn, zeroed and lost tails |
 | `DeliveredSettles` | `tests/crash.rs` and `tests/library.rs`: a crash, or the loss of the local root, at every step is settled once, by the writer itself or with consent by another |
 | `FoldHashes` | `tests/portable.rs`: a clone branches from an entry the original folds and deletes, in every delivery order |
 | `UniqueNames` | `tests/writer.rs`: one new, randomly named segment per process |
-| `SealedOnly`, `FoldedOnly` | `tests/writer.rs` and `tests/library.rs`: compaction deletes only segments this process sealed and its snapshot folds |
+| `SealedOnly`, `FoldedOnly` | `tests/writer.rs` and `tests/library.rs`: compaction leaves a segment another process has open, one a crash left open, and a sealed one holding an entry no snapshot folds, and deletes the sealed segments of earlier processes |
 | `CheckFirst` | `tests/writer.rs` and `tests/library.rs`: a writer whose last entry the folder lost appends and compacts nothing, and is replaced |
 | `Convergence` | Liveness is not tested; `DeliveredConverges` is checked at the end of every complete delivery |
 
@@ -135,7 +135,11 @@ code compares contents where it would otherwise trust a length:
 - Before appending to its open segment, a writer reads the segment's last line
   and confirms it is the writer's last entry (`tests/writer.rs`).
 - A reader skips a file it read before only while its length, modification
-  time and last line are unchanged (`src/reader.rs`).
+  time and last line are unchanged, and reads a grown segment from the end of
+  its last line only while the bytes there still end that line
+  (`src/reader.rs`).
+- Just before deleting a segment, compaction confirms that it still has the
+  length it read and ends with its seal marker (`tests/writer.rs`).
 
 What the model abstracts away is checked in Rust: the merge by
 `tests/facts.rs`, which compares every arrival order, split and compaction of
