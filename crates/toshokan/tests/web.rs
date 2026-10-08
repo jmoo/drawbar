@@ -373,3 +373,32 @@ async fn an_executor_refuses_to_start_outside_a_worker() {
         "the page cannot hold sync access handles"
     );
 }
+
+#[wasm_bindgen_test]
+async fn a_pause_gives_the_page_back_only_once_the_core_held_it_for_a_turn() {
+    use std::cell::Cell;
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::{JsCast, JsValue};
+
+    let place = Place::new(Kind::Private);
+    let local = path(&format!("{}/local", place.run));
+    let worker = Worker::start(place.folder().await, &local).await.unwrap();
+    let waiting = |ran: &Rc<Cell<bool>>| {
+        let channel = web_sys::MessageChannel::new().unwrap();
+        let ran = Rc::clone(ran);
+        let hear = Closure::once_into_js(move || ran.set(true));
+        channel.port1().set_onmessage(Some(hear.unchecked_ref()));
+        channel.port2().post_message(&JsValue::NULL).unwrap();
+        channel
+    };
+    let ran = Rc::new(Cell::new(false));
+    let _held = waiting(&ran);
+    let start = js_sys::Date::now();
+    while js_sys::Date::now() - start < 20.0 {}
+    worker.pause().await;
+    assert!(ran.get(), "a task waiting for the page ran");
+    let soon = Rc::new(Cell::new(false));
+    let _held = waiting(&soon);
+    worker.pause().await;
+    assert!(!soon.get(), "the core had not held the page for a turn");
+}
