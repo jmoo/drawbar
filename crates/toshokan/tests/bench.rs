@@ -38,12 +38,19 @@ wasm_bindgen_test_configure!(run_in_browser);
 #[wasm_bindgen(inline_js = r#"
 let watching = null;
 export function watch_start() {
-  const w = { last: performance.now(), gap: 0, tasks: [] };
+  const start = performance.now();
+  const w = { last: start, gap: 0, frame: start, frames: 0, tasks: [] };
   w.timer = setInterval(() => {
     const now = performance.now();
     w.gap = Math.max(w.gap, now - w.last);
     w.last = now;
   }, 1);
+  const frame = (now) => {
+    w.frames = Math.max(w.frames, now - w.frame);
+    w.frame = now;
+    w.request = requestAnimationFrame(frame);
+  };
+  w.request = requestAnimationFrame(frame);
   if (PerformanceObserver.supportedEntryTypes?.includes("longtask")) {
     w.observer = new PerformanceObserver((list) => {
       for (const task of list.getEntries()) w.tasks.push(task.duration);
@@ -55,13 +62,21 @@ export function watch_start() {
 export async function watch_stop() {
   const w = watching;
   watching = null;
-  await new Promise((done) => setTimeout(done, 0));
+  const end = performance.now();
+  await new Promise((done) => requestAnimationFrame(() => setTimeout(done, 0)));
   clearInterval(w.timer);
-  w.gap = Math.max(w.gap, performance.now() - w.last);
-  if (!w.observer) return [w.gap, -1, 0, 0];
+  cancelAnimationFrame(w.request);
+  const gaps = [Math.max(w.gap, end - w.last), Math.max(w.frames, end - w.frame)];
+  if (!w.observer) return [...gaps, -1, 0, 0];
   for (const task of w.observer.takeRecords()) w.tasks.push(task.duration);
   w.observer.disconnect();
-  return [w.gap, w.tasks.length, Math.max(0, ...w.tasks), w.tasks.reduce((a, b) => a + b, 0)];
+  const tasks = [w.tasks.length, Math.max(0, ...w.tasks), w.tasks.reduce((a, b) => a + b, 0)];
+  return [...gaps, ...tasks];
+}
+export function browser() {
+  const longtask = PerformanceObserver.supportedEntryTypes?.includes("longtask");
+  const give = typeof globalThis.scheduler?.yield === "function" ? "scheduler.yield" : "message";
+  return `${navigator.userAgent} | gives the thread back by ${give} | longtask ${longtask ? "reported" : "not reported"}`;
 }
 async function walk(path, create) {
   let dir = await navigator.storage.getDirectory();
@@ -109,6 +124,7 @@ extern "C" {
     fn memory(wasm: JsValue) -> JsValue;
     fn now() -> f64;
     fn say(line: &str);
+    fn browser() -> String;
 }
 
 const NAME: Register<String> = Register::new("name");
@@ -417,25 +433,17 @@ async fn ok(worker: &Worker, io: Io) -> Reply {
     }
 }
 
-async fn put(worker: &Worker, at: RelPath, bytes: Vec<u8>) {
+/// Writes `files`, making each directory once.
+async fn put(worker: &Worker, files: impl IntoIterator<Item = (RelPath, Vec<u8>)>) {
     let root = Root::Folder;
-    ok(
-        worker,
-        Io::MakeDir {
-            root,
-            path: at.parent().unwrap(),
-        },
-    )
-    .await;
-    ok(
-        worker,
-        Io::Create {
-            root,
-            path: at,
-            bytes,
-        },
-    )
-    .await;
+    let mut made = std::collections::BTreeSet::new();
+    for (path, bytes) in files {
+        let dir = path.parent().unwrap();
+        if made.insert(dir.clone()) {
+            ok(worker, Io::MakeDir { root, path: dir }).await;
+        }
+        ok(worker, Io::Create { root, path, bytes }).await;
+    }
 }
 
 fn ready_marker() -> Vec<String> {
@@ -458,9 +466,11 @@ async fn generate() {
     .await
     .unwrap();
     let start = now();
-    for i in 0..entities() {
-        put(&worker, file_path(i), file_bytes(i)).await;
-    }
+    put(
+        &worker,
+        (0..entities()).map(|i| (file_path(i), file_bytes(i))),
+    )
+    .await;
     say(&format!(
         "{} library files written in {:.0} ms",
         entities(),
@@ -498,9 +508,7 @@ async fn generate() {
         now() - start
     ));
     let start = now();
-    for (at, bytes) in log {
-        put(&worker, at, bytes).await;
-    }
+    put(&worker, log).await;
     say(&format!("log written in {:.0} ms", now() - start));
     let marker = Io::Create {
         root: Root::Local,
@@ -510,12 +518,13 @@ async fn generate() {
     ok(&worker, marker).await;
 }
 
-/// One operation's samples: wall time, and how long the page's thread went
-/// without running a timer, with the long tasks the browser reported.
+/// One operation's samples: wall time, the longest the page went without a
+/// frame and without running a timer, and the long tasks the browser reported.
 #[derive(Default)]
 struct Samples {
     wall: Vec<f64>,
-    blocked: Vec<f64>,
+    frames: Vec<f64>,
+    timers: Vec<f64>,
     long_tasks: i64,
     longest_task: f64,
     in_long_tasks: f64,
@@ -532,13 +541,14 @@ impl Samples {
             .map(|value| value.as_f64().unwrap())
             .collect();
         self.wall.push(wall);
-        self.blocked.push(watched[0]);
-        match watched[1] < 0.0 {
+        self.timers.push(watched[0]);
+        self.frames.push(watched[1]);
+        match watched[2] < 0.0 {
             true => self.long_tasks = -1,
-            false => self.long_tasks += watched[1] as i64,
+            false => self.long_tasks += watched[2] as i64,
         }
-        self.longest_task = self.longest_task.max(watched[2]);
-        self.in_long_tasks += watched[3];
+        self.longest_task = self.longest_task.max(watched[3]);
+        self.in_long_tasks += watched[4];
         output
     }
 
@@ -550,10 +560,12 @@ impl Samples {
                 self.longest_task, self.in_long_tasks
             ),
         };
+        let longest = |xs: &[f64]| xs.iter().copied().fold(0.0, f64::max);
         say(&format!(
-            "bench | {name} | {} | blocked {} | {tasks}",
+            "bench | {name} | {} | longest frame gap {:.0}, timer gap {:.0} | {tasks}",
             stats(&self.wall),
-            stats(&self.blocked),
+            longest(&self.frames),
+            longest(&self.timers),
         ));
     }
 }
@@ -633,6 +645,7 @@ async fn measure() {
         "no bench library at {}: run the generate test first",
         home()
     );
+    say(&format!("bench | {}", browser()));
     report_memory("before");
     let run = format!("{:08x}", CryptoRandom.next_u128() as u32);
 
