@@ -12,7 +12,7 @@
 //! entry between the cached view and what the folder holds.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use crate::cache::{self, Store};
@@ -300,6 +300,40 @@ impl WriterLog {
         self.grow(snapshots, entries, BTreeSet::new())
     }
 
+    /// Whether placing `snapshots` and `entries` in a new log would make this
+    /// one: they hold every entry it holds and no other, its snapshots are
+    /// theirs that no other of theirs extends, and it holds nothing back, stray
+    /// or forked.
+    fn is_placed_from(&self, snapshots: &[Rc<Snapshot>], entries: &[Rc<Entry>]) -> bool {
+        let settled = self.strays.is_empty() && self.waiting.is_empty() && self.forks.is_empty();
+        if !settled || !self.branches.is_empty() {
+            return false;
+        }
+        let latest = snapshots.iter().filter(|snapshot| {
+            let extended = snapshots.iter().any(|other| {
+                !Rc::ptr_eq(other, snapshot) && other.extends(snapshot) && !snapshot.extends(other)
+            });
+            !extended
+        });
+        let latest: Vec<&Rc<Snapshot>> = latest.collect();
+        let same = latest.len() == self.snapshots.len()
+            && self
+                .snapshots
+                .iter()
+                .all(|kept| latest.iter().any(|snapshot| Rc::ptr_eq(snapshot, kept)));
+        if !same {
+            return false;
+        }
+        let mut held = HashSet::with_capacity(self.chain.len());
+        held.extend(
+            snapshots
+                .iter()
+                .flat_map(|snapshot| snapshot.folded.iter().copied()),
+        );
+        held.extend(entries.iter().map(|entry| entry.hash()));
+        held.len() == self.chain.len() && held.iter().all(|hash| self.chain.contains_key(hash))
+    }
+
     /// Whether the log holds nothing: no snapshot, entry, stray or fork, and
     /// nothing held back.
     fn is_empty(&self) -> bool {
@@ -334,8 +368,10 @@ impl WriterLog {
         if !placement.kept.is_empty() {
             self.reindex(&mut touched);
         }
-        self.chain.reserve(entries.len());
-        self.next.reserve(entries.len());
+        if self.chain.is_empty() {
+            self.chain.reserve(entries.len());
+            self.next.reserve(entries.len());
+        }
         for entry in entries {
             let (hash, prev) = (entry.hash(), entry.prev());
             if self.holds(hash) {
@@ -1100,7 +1136,11 @@ impl Reader {
         }
         if whole {
             (snapshots, entries) = folder.contents(writer);
-            folder.log = WriterLog::new(writer);
+            let cached = self.cached.writers.get(&writer);
+            folder.log = match cached.filter(|log| log.is_placed_from(&snapshots, &entries)) {
+                Some(log) => log.clone(),
+                None => WriterLog::new(writer),
+            };
         }
         let in_folder = folder.log.place(snapshots.clone(), entries.clone());
         for (path, record) in &folder.files {
@@ -1622,6 +1662,46 @@ mod tests {
         assert!(lines.iter().all(|line| log.holds(line.hash())));
         assert_eq!(log.heads(), [lines[4].hash()]);
         assert_eq!(log.chain_to(lines[4].hash()), Some(hashes(&lines)));
+    }
+
+    #[test]
+    fn a_log_is_placed_from_exactly_what_it_holds() {
+        let lines = chain(4);
+        let snapshots = vec![snapshot(&lines[..2])];
+        let held = entries(&lines[2..]);
+        let mut log = WriterLog::new(W);
+        log.place(snapshots.clone(), held.clone());
+        assert!(log.is_placed_from(&snapshots, &held));
+        let older = snapshot(&lines[..1]);
+        let with_older = vec![Rc::clone(&older), Rc::clone(&snapshots[0])];
+        assert!(
+            log.is_placed_from(&with_older, &held),
+            "an older snapshot is extended"
+        );
+        let mut fresh = WriterLog::new(W);
+        fresh.place(with_older, held.clone());
+        assert_eq!(fresh, log);
+        assert_eq!(fresh.chain.len(), log.chain.len());
+        assert_eq!(fresh.heads(), log.heads());
+
+        let fork = entries(&[after(&lines[2], "other")]);
+        let stray = entries(&[after(&after(&lines[0], "lost"), "held")]);
+        let copy = vec![snapshot(&lines[..2])];
+        let lacking = &held[..1];
+        let more: Vec<Rc<Entry>> = held.iter().chain(&fork).cloned().collect();
+        for (case, snapshots, held) in [
+            ("an entry the files lack", &snapshots, lacking),
+            ("an entry the log lacks", &snapshots, &more[..]),
+            ("a snapshot read again", &copy, &held[..]),
+        ] {
+            assert!(!log.is_placed_from(snapshots, held), "{case}");
+        }
+        for (case, extra) in [("a fork", fork), ("a stray", stray)] {
+            let mut grown = log.clone();
+            grown.place(Vec::new(), extra.clone());
+            let all: Vec<Rc<Entry>> = held.iter().chain(&extra).cloned().collect();
+            assert!(!grown.is_placed_from(&snapshots, &all), "{case}");
+        }
     }
 
     #[test]
