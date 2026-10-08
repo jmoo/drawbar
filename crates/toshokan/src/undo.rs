@@ -51,11 +51,11 @@ impl History {
     /// is its undo; one reversing the latest undo is a redo, which the next undo
     /// reverses. Any other intent starts a new item and ends every redo.
     pub fn push(&mut self, entry: &Entry) {
-        let EntryKind::Intent(logged) = &entry.kind else {
+        let Some((label, reverses)) = entry.intent() else {
             return;
         };
         let hash = entry.hash();
-        let reversed = logged.reverses.and_then(|reverses| {
+        let reversed = reverses.and_then(|reverses| {
             let item = *self.origins.get(&reverses)?;
             if self.done.last() == Some(&reverses) {
                 self.done.pop();
@@ -78,8 +78,8 @@ impl History {
                 self.origins.insert(hash, self.items.len());
                 self.items.push(HistoryItem {
                     intent: hash,
-                    label: logged.label.clone(),
-                    at: entry.at,
+                    label,
+                    at: entry.at(),
                     undone: false,
                 });
                 self.done.push(hash);
@@ -121,7 +121,7 @@ fn reverse_latest(
 
 /// The plan that compensates `entry`, one of `writer`'s intents.
 pub fn reverse(entry: &Entry, writer: WriterId, folded: &Folded) -> Result<Plan, Refusal> {
-    let EntryKind::Intent(logged) = &entry.kind else {
+    let EntryKind::Intent(logged) = &entry.kind() else {
         return Err(Refusal::Nothing);
     };
     let reversing = Reversing {

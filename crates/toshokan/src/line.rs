@@ -121,6 +121,13 @@ impl Line {
         Self::checked(prev, json, hash)
     }
 
+    /// The line of `json`, whose `prev` is `prev` and hash `hash`, as an entry
+    /// verified when it was read keeps it.
+    pub(crate) fn verified(prev: EntryHash, json: String, hash: EntryHash) -> Self {
+        debug_assert_eq!(EntryHash::of(prev, json.as_bytes()), hash);
+        Self { prev, hash, json }
+    }
+
     pub fn prev(&self) -> EntryHash {
         self.prev
     }

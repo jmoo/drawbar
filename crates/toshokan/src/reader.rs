@@ -23,6 +23,7 @@ use crate::io::{Kind, Meta, Range, Root, Task};
 use crate::layout::{is_swap_file, Layout};
 use crate::line::{self, Stop};
 use crate::log::{Entry, EntryKind};
+use crate::merge::Folded;
 use crate::path::RelPath;
 use crate::report::{Fork, Gap};
 use crate::snapshot::Snapshot;
@@ -193,16 +194,17 @@ impl WriterLog {
     }
 
     /// From the genesis entry, once placed or folded.
-    pub fn label(&self) -> Option<&str> {
-        let folded = self
-            .snapshots
-            .first()
-            .map(|snapshot| snapshot.label.as_str());
-        folded.or_else(|| {
-            self.entries.iter().find_map(|entry| match &entry.kind {
-                EntryKind::Genesis(genesis) => Some(genesis.label.as_str()),
-                _ => None,
-            })
+    pub fn label(&self) -> Option<String> {
+        if let Some(snapshot) = self.snapshots.first() {
+            return Some(snapshot.label.clone());
+        }
+        let first = self
+            .entries
+            .iter()
+            .filter(|entry| entry.prev() == EntryHash::ZERO);
+        first.map(|entry| entry.kind()).find_map(|kind| match kind {
+            EntryKind::Genesis(genesis) => Some(genesis.label),
+            _ => None,
         })
     }
 
@@ -428,7 +430,7 @@ impl WriterLog {
 
     /// Every clock reading of the placed entries and the snapshots.
     pub fn readings(&self) -> impl Iterator<Item = Hlc> + '_ {
-        let entries = self.entries.iter().map(|entry| entry.at);
+        let entries = self.entries.iter().map(|entry| entry.at());
         entries.chain(self.snapshots.iter().map(|snapshot| snapshot.at))
     }
 
@@ -469,7 +471,7 @@ impl WriterLog {
         touched: &mut BTreeSet<EntryHash>,
     ) {
         if let Some(entry) = &entry {
-            self.last_at = self.last_at.max(Some(entry.at));
+            self.last_at = self.last_at.max(Some(entry.at()));
         }
         self.chain.insert(hash, Link { prev, entry });
         self.note(hash, prev, touched);
@@ -822,6 +824,7 @@ impl Reader {
             files,
             absorbed,
             store,
+            state: _,
         } = loaded;
         let mut reader = Self::new(layout, view);
         reader.absorbed = absorbed;
@@ -1152,15 +1155,25 @@ impl Reader {
 
     /// Keeps what the cached view gained in this writer's local directory: by
     /// appending it to the journal, or by writing the whole view again when the
-    /// journal has grown too long or cannot be trusted.
-    pub fn save(&mut self, genesis: EntryHash) -> Task<'static, Result<()>> {
-        cache::save(self, genesis)
+    /// journal has grown too long or cannot be trusted. `state`, when given, is
+    /// the merged state of every log of the view, kept with it when it is written
+    /// whole.
+    pub fn save(
+        &mut self,
+        genesis: EntryHash,
+        state: Option<&Folded>,
+    ) -> Task<'static, Result<()>> {
+        cache::save(self, genesis, state)
     }
 
-    /// Writes the whole view, with what the reader knows of each file, as the
-    /// writer whose genesis entry is `genesis`.
-    pub fn checkpoint(&mut self, genesis: EntryHash) -> Task<'static, Result<()>> {
-        cache::checkpoint(self, genesis)
+    /// Writes the whole view, with what the reader knows of each file and
+    /// `state`, as the writer whose genesis entry is `genesis`.
+    pub fn checkpoint(
+        &mut self,
+        genesis: EntryHash,
+        state: Option<&Folded>,
+    ) -> Task<'static, Result<()>> {
+        cache::checkpoint(self, genesis, state)
     }
 }
 
@@ -1177,7 +1190,7 @@ impl Folder {
     /// says: when the last read left it just where they begin, or they are all it
     /// holds. Whether it recorded them.
     fn appended(&mut self, path: &RelPath, entries: &[Rc<Entry>], stamp: Stamp) -> bool {
-        let added: u64 = entries.iter().map(|e| e.line.to_bytes().len() as u64).sum();
+        let added: u64 = entries.iter().map(|e| e.to_bytes().len() as u64).sum();
         let Some(start) = stamp.len.checked_sub(added) else {
             return false;
         };
@@ -1438,7 +1451,7 @@ mod tests {
             writer: W,
             label: "a".into(),
         });
-        Entry::encode(EntryHash::ZERO, at(0), kind).unwrap().line
+        Entry::encode(EntryHash::ZERO, at(0), kind).unwrap().line()
     }
 
     fn after(prev: &Line, label: &str) -> Line {
@@ -1450,7 +1463,7 @@ mod tests {
         });
         Entry::encode(prev.hash(), at(prev.json().len() as u64), kind)
             .unwrap()
-            .line
+            .line()
     }
 
     /// The genesis entry and `n` entries after it.
@@ -1515,7 +1528,7 @@ mod tests {
         assert_eq!(log.gaps(), []);
         assert_eq!(log.heads(), [lines[3].hash()]);
         assert_eq!(log.genesis(), Some(lines[0].hash()));
-        assert_eq!(log.label(), Some("a"));
+        assert_eq!(log.label().as_deref(), Some("a"));
         assert_eq!(log.chain_to(lines[2].hash()), Some(hashes(&lines[..3])));
     }
 
@@ -1571,7 +1584,7 @@ mod tests {
         assert_eq!(placement.forks.len(), 1);
         assert_eq!(placement.forks[0].prev, lines[1].hash());
         assert!(lines.iter().all(|line| log.holds(line.hash())));
-        assert_eq!(log.label(), Some("a"));
+        assert_eq!(log.label().as_deref(), Some("a"));
     }
 
     #[test]
@@ -1607,7 +1620,7 @@ mod tests {
             placed(&placement),
             [lines[0].hash(), odd.hash(), next.hash()]
         );
-        assert!(matches!(log.entries()[1].kind, EntryKind::Unknown(_)));
+        assert!(matches!(log.entries()[1].kind(), EntryKind::Unknown(_)));
     }
 
     #[test]
@@ -1630,38 +1643,6 @@ mod tests {
         assert_eq!(log.forks(), view.writers()[&W].forks());
         assert!(!log.holds(stray.hash()));
         assert_eq!(log.gaps(), []);
-    }
-
-    #[test]
-    fn a_cached_view_this_build_cannot_trust_is_corrupt() {
-        let lines = chain(2);
-        let held = |entries: &[&Line]| {
-            let entries: Vec<String> = entries
-                .iter()
-                .map(|line| format!(r#"[{},"{}"]"#, line.json(), line.hash()))
-                .collect();
-            format!(
-                r#"{{"writers":{{"{W}":{{"snapshots":[],"entries":[{}],"strays":[],"forks":[]}}}}}}"#,
-                entries.join(",")
-            )
-        };
-        let path = Layout::cached_view(lines[0].hash());
-        assert!(CachedView::decode(&path, held(&[&lines[0], &lines[1]]).as_bytes()).is_ok());
-        let flipped = held(&[&lines[0]]).replace(r#""a""#, r#""b""#);
-        for bytes in [
-            held(&[&lines[0], &lines[2]]),
-            flipped,
-            "{}".into(),
-            "[".into(),
-        ] {
-            assert!(
-                matches!(
-                    CachedView::decode(&path, bytes.as_bytes()),
-                    Err(Error::Corrupt { .. })
-                ),
-                "{bytes}"
-            );
-        }
     }
 
     #[test]

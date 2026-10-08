@@ -108,12 +108,7 @@ impl Writer {
             self.salt,
             self.own.len()
         );
-        let entry = Entry {
-            line: Line::seal(json).unwrap(),
-            at: self.clock,
-            kind,
-            unknown_members: false,
-        };
+        let entry = Entry::new(Line::seal(json).unwrap(), self.clock, kind, false);
         self.head = entry.hash();
         self.folded.apply(self.id, &entry);
         self.own.push(entry.clone());
@@ -142,7 +137,7 @@ impl Writer {
     }
 
     fn receive(&mut self, writer: WriterId, entry: &Entry) {
-        self.clock = self.clock.observe(entry.at);
+        self.clock = self.clock.observe(entry.at());
         self.folded.apply(writer, entry);
     }
 
@@ -527,7 +522,7 @@ fn undo_sets_a_field_back_and_redo_sets_it_again() {
 
     let undo = a.undo(3).unwrap();
     assert_eq!(name(&a, e), Field::Value("first".into()));
-    let EntryKind::Intent(logged) = &undo.kind else {
+    let EntryKind::Intent(logged) = &undo.kind() else {
         panic!();
     };
     assert_eq!(
@@ -997,7 +992,7 @@ fn every_part(mut edit: impl FnMut(&str) -> String) -> Vec<Entry> {
             counter: 0,
         };
         let canonical = Entry::encode(prev, at, kind).unwrap();
-        let line = Line::seal(edit(canonical.line.json())).unwrap();
+        let line = Line::seal(edit(&canonical.json())).unwrap();
         let entry = Entry::decode(line).unwrap();
         let hash = entry.hash();
         entries.push(entry);
@@ -1110,11 +1105,11 @@ fn members_no_build_knows_survive_merges_and_snapshots_at_every_level() {
             novel_entry(&mut novel, &mut entry);
             novel.render(&entry)
         });
-        assert!(entries.iter().all(|entry| entry.unknown_members));
+        assert!(entries.iter().all(|entry| entry.unknown_members()));
         let state = folded(&entries);
         let whole: BTreeSet<(EntryHash, Raw)> = entries
             .iter()
-            .map(|entry| (entry.hash(), Raw::new(entry.line.json()).unwrap()))
+            .map(|entry| (entry.hash(), Raw::new(&entry.json()).unwrap()))
             .collect();
         for (how, state) in [("applied", state.clone()), ("reread", reread(&state))] {
             let kept: BTreeSet<_> = state.extended().cloned().collect();
@@ -1126,7 +1121,7 @@ fn members_no_build_knows_survive_merges_and_snapshots_at_every_level() {
         }
 
         let canonical = every_part(str::to_owned);
-        assert!(canonical.iter().all(|entry| !entry.unknown_members));
+        assert!(canonical.iter().all(|entry| !entry.unknown_members()));
         let state = folded(&canonical[..3]);
         assert_eq!(state.extended().count(), 0, "seed {seed}");
         let mut value = serde_json::to_value(&state).unwrap();
@@ -1314,7 +1309,7 @@ impl Node {
                     let Ok(entry) = writer.commit(act(a), now) else {
                         continue;
                     };
-                    let EntryKind::Intent(logged) = &entry.kind else {
+                    let EntryKind::Intent(logged) = &entry.kind() else {
                         unreachable!();
                     };
                     if logged.ops.is_empty() {

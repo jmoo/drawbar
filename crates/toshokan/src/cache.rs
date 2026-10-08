@@ -1,6 +1,7 @@
-//! The cached view in the local root: `view.json`, a checkpoint of the whole view
-//! with what the reader knew of each file, and `view.log`, a journal of what the
-//! view gained since, one record a line.
+//! The cached view in the local root: `view.bin`, a checkpoint of the whole view
+//! with what the reader knew of each file and the merged state of the view, and
+//! `view.log`, a journal of what the view gained since, one record after another.
+//! Both are private to the install, in the binary encoding entries are held in.
 //!
 //! A save appends what the view gained to the journal and syncs it. The view is
 //! written whole again, and the journal removed, when the journal has grown past
@@ -9,14 +10,14 @@
 //! holds what another view of the install brought. Loading replays the journal
 //! onto the checkpoint; replaying a record twice changes nothing, so a crash
 //! between writing a checkpoint and removing the journal leaves a view that loads.
+//!
+//! Entries are kept as an install holds them, packed and verified when they were
+//! read, so loading neither parses nor hashes them again. Each record carries a
+//! checksum of its bytes instead.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write as _;
 use std::rc::Rc;
-
-use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
 
 use crate::error::{Error, Result};
 use crate::flow::{self, Fallible, Flow};
@@ -24,9 +25,10 @@ use crate::ids::{EntryHash, WriterId};
 use crate::io::{Io, IoError, Root, Task};
 use crate::layout::Layout;
 use crate::log::Entry;
+use crate::merge::Folded;
+use crate::pack::{self, bad_variant, Bad, In, Pack, Unpack, Unpacked};
 use crate::path::RelPath;
 use crate::reader::{self, CachedView, Reader, Record, Segment, Stamp, WriterFile, WriterLog};
-use crate::schema::Raw;
 use crate::snapshot::Snapshot;
 
 /// A stored view, or why it cannot be read.
@@ -35,6 +37,14 @@ type Parsed<T> = std::result::Result<T, String>;
 /// How far past half the checkpoint's length the journal grows before the view
 /// is written whole again.
 const JOURNAL_SLACK: u64 = 1 << 20;
+
+/// The first byte of every record this build writes; a record starting with
+/// another is not read. It changes with any change to what a record packs or
+/// how, since a record whose check holds is taken as this build packed it.
+const FORMAT: u8 = 1;
+
+/// How many bytes of a record's BLAKE3 hash follow its length.
+const CHECK: usize = 16;
 
 /// What this process knows of the view it saves to.
 #[derive(Clone, Debug, Default)]
@@ -56,6 +66,8 @@ pub struct Loaded {
     pub files: BTreeMap<RelPath, StoredFile>,
     pub absorbed: BTreeSet<EntryHash>,
     pub store: Store,
+    /// The merged state of every log of `view`, when each view loaded kept it.
+    pub state: Option<Folded>,
 }
 
 /// One writer's saved view.
@@ -63,6 +75,7 @@ pub(crate) struct Kept {
     pub(crate) view: CachedView,
     files: BTreeMap<RelPath, StoredFile>,
     absorbed: BTreeSet<EntryHash>,
+    state: Option<Folded>,
     checkpoint: u64,
     journal: u64,
     broken: bool,
@@ -93,6 +106,7 @@ pub fn load(pool: Vec<EntryHash>, own: Option<EntryHash>) -> Task<'static, Resul
                 due: own.is_some(),
                 ..Store::default()
             },
+            state: Some(Folded::default()),
         };
         flow::fold(ordered, start, move |mut loaded, (genesis, retired)| {
             if retired && loaded.absorbed.contains(&genesis) {
@@ -113,6 +127,13 @@ pub fn load(pool: Vec<EntryHash>, own: Option<EntryHash>) -> Task<'static, Resul
 
 impl Loaded {
     fn join(&mut self, genesis: EntryHash, retired: bool, own: Option<EntryHash>, kept: Kept) {
+        self.state = match (self.state.take(), kept.state) {
+            (Some(mut state), Some(theirs)) => {
+                state.join(&theirs);
+                Some(state)
+            }
+            _ => None,
+        };
         if Some(genesis) == own {
             self.store = Store {
                 genesis: own,
@@ -158,34 +179,52 @@ fn parse(checkpoint: Option<Vec<u8>>, journal: Option<Vec<u8>>) -> Parsed<Kept> 
         view: CachedView::default(),
         files: BTreeMap::new(),
         absorbed: BTreeSet::new(),
+        state: None,
         checkpoint: checkpoint.as_ref().map_or(0, |bytes| bytes.len() as u64),
         journal: journal.as_ref().map_or(0, |bytes| bytes.len() as u64),
         broken: false,
     };
     if let Some(bytes) = checkpoint {
-        let stored: StoredView = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let (payload, rest) = unframe(&bytes).ok_or("the checkpoint fails its check")?;
+        if !rest.is_empty() {
+            return Err("bytes follow the checkpoint".into());
+        }
+        let mut stored = StoredView::read(payload).map_err(|Bad(reason)| reason.to_owned())?;
         kept.absorbed = stored.absorbed.iter().copied().collect();
+        let state = stored.state.take();
         kept.apply(stored)?;
+        kept.state = state;
     }
     let journal = journal.unwrap_or_default();
     let mut rest = &journal[..];
     while !rest.is_empty() {
-        let Some(end) = rest.iter().position(|&b| b == b'\n') else {
+        let Some((payload, after)) = unframe(rest) else {
             kept.broken = true;
             break;
         };
-        let Ok(record) = serde_json::from_slice::<StoredView>(&rest[..end]) else {
+        let Ok(record) = StoredView::read(payload) else {
             kept.broken = true;
             break;
         };
         kept.apply(record)?;
-        rest = &rest[end + 1..];
+        rest = after;
     }
     Ok(kept)
 }
 
 impl Kept {
+    /// Places what `stored` holds, and folds what it gained into the state kept.
     fn apply(&mut self, stored: StoredView) -> Parsed<()> {
+        if let Some(state) = &mut self.state {
+            for (writer, log) in &stored.writers {
+                for snapshot in &log.snapshots {
+                    state.join(&snapshot.state);
+                }
+                for entry in &log.entries {
+                    state.apply(*writer, entry);
+                }
+            }
+        }
         restore_logs(&mut self.view, stored.writers)?;
         for (path, file) in stored.files {
             match file {
@@ -199,85 +238,193 @@ impl Kept {
 
 /// Places a stored view in `view`.
 pub(crate) fn restore(view: &mut CachedView, bytes: &[u8]) -> Parsed<()> {
-    let stored: StoredView = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    let (payload, rest) = unframe(bytes).ok_or("the view fails its check")?;
+    if !rest.is_empty() {
+        return Err("bytes follow the view".into());
+    }
+    let stored = StoredView::read(payload).map_err(|Bad(reason)| reason.to_owned())?;
     restore_logs(view, stored.writers)
 }
 
-fn restore_logs(view: &mut CachedView, logs: BTreeMap<WriterId, StoredLog>) -> Parsed<()> {
+fn restore_logs(view: &mut CachedView, logs: Vec<(WriterId, StoredLog)>) -> Parsed<()> {
     for (writer, stored) in logs {
-        let snapshots = stored
+        if stored
             .snapshots
             .iter()
-            .map(|raw| Snapshot::decode(raw.get().as_bytes()).map(Rc::new))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
-        if snapshots.iter().any(|snapshot| snapshot.writer != writer) {
+            .any(|snapshot| snapshot.writer != writer)
+        {
             return Err(format!("a snapshot of {writer} names another writer"));
         }
-        let entries = stored
-            .entries
-            .into_iter()
-            .map(|(json, hash)| decode_line(json, hash))
-            .collect::<Parsed<Vec<_>>>()?;
+        let snapshots = stored.snapshots.into_iter().map(Rc::new).collect();
+        let entries = stored.entries.into_iter().map(Rc::new).collect();
         view.restore(writer, snapshots, entries, stored.strays, stored.forks)?;
     }
     Ok(())
 }
 
-/// A line this install read and verified before, as it kept it.
-fn decode_line(json: Box<RawValue>, hash: EntryHash) -> Parsed<Rc<Entry>> {
-    let json = String::from(Box::<str>::from(json));
-    let entry = Entry::kept(json, hash).map_err(|error| error.to_string())?;
-    Ok(Rc::new(entry))
+/// `payload` as a record: its length, its check, then itself.
+fn frame(payload: &[u8]) -> Vec<u8> {
+    let len = u32::try_from(payload.len()).expect("a record within 4 GiB");
+    let mut record = Vec::with_capacity(4 + CHECK + payload.len());
+    record.extend_from_slice(&len.to_le_bytes());
+    record.extend_from_slice(&blake3::hash(payload).as_bytes()[..CHECK]);
+    record.extend_from_slice(payload);
+    record
 }
 
-/// A checkpoint or a journal record. A checkpoint holds every log whole; a
-/// record holds what each log gained, and files whose records changed.
-#[derive(Deserialize)]
+/// The payload of the record `bytes` start with, and what follows it; `None`
+/// when the record is torn or fails its check.
+fn unframe(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+    let (len, rest) = bytes.split_first_chunk::<4>()?;
+    let (check, rest) = rest.split_first_chunk::<CHECK>()?;
+    let len = usize::try_from(u32::from_le_bytes(*len)).ok()?;
+    let (payload, rest) = rest.split_at_checked(len)?;
+    (blake3::hash(payload).as_bytes()[..CHECK] == check[..]).then_some((payload, rest))
+}
+
+/// A checkpoint or a journal record. A checkpoint holds every log whole and the
+/// merged state of them all; a record holds what each log gained, and files
+/// whose records changed.
 struct StoredView {
-    writers: BTreeMap<WriterId, StoredLog>,
-    #[serde(default)]
-    files: BTreeMap<RelPath, Option<StoredFile>>,
-    #[serde(default)]
+    writers: Vec<(WriterId, StoredLog)>,
+    files: Vec<(RelPath, Option<StoredFile>)>,
     absorbed: Vec<EntryHash>,
+    state: Option<Folded>,
 }
 
-#[derive(Deserialize)]
+impl StoredView {
+    fn read(payload: &[u8]) -> Unpacked<Self> {
+        let mut input = In::new(payload);
+        if input.byte()? != FORMAT {
+            return Err(Bad("a format this build does not read"));
+        }
+        let view = Self {
+            writers: Unpack::unpack(&mut input)?,
+            files: Unpack::unpack(&mut input)?,
+            absorbed: Unpack::unpack(&mut input)?,
+            state: Unpack::unpack(&mut input)?,
+        };
+        input.end()?;
+        Ok(view)
+    }
+}
+
 struct StoredLog {
-    snapshots: Vec<Box<RawValue>>,
-    /// Each line's JSON verbatim, and its hash.
-    entries: Vec<(Box<RawValue>, EntryHash)>,
+    snapshots: Vec<Snapshot>,
+    entries: Vec<Entry>,
     strays: Vec<(EntryHash, EntryHash)>,
     forks: Vec<(EntryHash, [EntryHash; 2])>,
 }
 
+impl Unpack for StoredLog {
+    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
+        let snapshots = Unpack::unpack(input)?;
+        let entries = pack::list(input, Entry::unpack_from)?;
+        let strays = Unpack::unpack(input)?;
+        let forks: Vec<(EntryHash, (EntryHash, EntryHash))> = Unpack::unpack(input)?;
+        Ok(Self {
+            snapshots,
+            entries,
+            strays,
+            forks: forks
+                .into_iter()
+                .map(|(prev, (a, b))| (prev, [a, b]))
+                .collect(),
+        })
+    }
+}
+
 /// What a reader knew of one file: its stamp, and its lines or its snapshot.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct StoredFile {
     len: u64,
     modified: u64,
-    /// The file's last bytes, in hexadecimal.
-    tail: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    segment: Option<StoredSegment>,
+    /// The file's last bytes.
+    tail: Vec<u8>,
+    held: Held,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Held {
+    Segment(StoredSegment),
     /// The last entry the snapshot folds: the reader's kept snapshot with it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    snapshot: Option<EntryHash>,
+    Snapshot(EntryHash),
 }
 
 /// A segment as a run of the writer's chain, `count` entries from `first` to
 /// `last`. Lines the cached view holds no entry for are kept whole.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 struct StoredSegment {
     count: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     first: Option<EntryHash>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     last: Option<EntryHash>,
     end: u64,
     sealed: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    lines: Vec<(Raw, EntryHash)>,
+    lines: Vec<Entry>,
+}
+
+impl Pack for StoredFile {
+    fn pack(&self, out: &mut Vec<u8>) {
+        (self.len, self.modified).pack(out);
+        self.tail.pack(out);
+        match &self.held {
+            Held::Segment(segment) => {
+                out.push(0);
+                segment.pack(out);
+            }
+            Held::Snapshot(head) => {
+                out.push(1);
+                head.pack(out);
+            }
+        }
+    }
+}
+
+impl Unpack for StoredFile {
+    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
+        let (len, modified) = Unpack::unpack(input)?;
+        let tail = Unpack::unpack(input)?;
+        let held = match input.byte()? {
+            0 => Held::Segment(StoredSegment::unpack(input)?),
+            1 => Held::Snapshot(EntryHash::unpack(input)?),
+            _ => return bad_variant(),
+        };
+        Ok(Self {
+            len,
+            modified,
+            tail,
+            held,
+        })
+    }
+}
+
+impl Pack for StoredSegment {
+    fn pack(&self, out: &mut Vec<u8>) {
+        (self.count, (self.first, self.last)).pack(out);
+        (self.end, self.sealed).pack(out);
+        self.lines.len().pack(out);
+        for line in &self.lines {
+            line.pack_into(out);
+        }
+    }
+}
+
+impl Unpack for StoredSegment {
+    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
+        let count = u64::unpack(input)?;
+        let count = usize::try_from(count).map_err(|_| Bad("a count past memory"))?;
+        let (first, last) = Unpack::unpack(input)?;
+        let (end, sealed) = Unpack::unpack(input)?;
+        let lines = pack::list(input, Entry::unpack_from)?;
+        Ok(Self {
+            count,
+            first,
+            last,
+            end,
+            sealed,
+            lines,
+        })
+    }
 }
 
 impl StoredFile {
@@ -286,9 +433,9 @@ impl StoredFile {
     /// `log` keeps.
     fn of(record: &Record, log: Option<&WriterLog>) -> Option<Self> {
         let stamp = record.stamp.as_ref()?;
-        let (segment, snapshot) = match &record.file {
+        let held = match &record.file {
             WriterFile::Segment(segment) if segment.stop.is_none() && segment.contiguous() => {
-                (Some(StoredSegment::of(segment, log)?), None)
+                Held::Segment(StoredSegment::of(segment, log)?)
             }
             WriterFile::Snapshot(snapshot) => {
                 let head = snapshot.head()?;
@@ -296,19 +443,18 @@ impl StoredFile {
                     .snapshots()
                     .iter()
                     .any(|kept| kept.head() == Some(head));
-                (None, kept.then_some(head))
+                if !kept {
+                    return None;
+                }
+                Held::Snapshot(head)
             }
             WriterFile::Segment(_) | WriterFile::Unreadable => return None,
         };
-        if segment.is_none() && snapshot.is_none() {
-            return None;
-        }
         Some(Self {
             len: stamp.len,
             modified: stamp.modified,
-            tail: hex(&stamp.tail),
-            segment,
-            snapshot,
+            tail: stamp.tail.clone(),
+            held,
         })
     }
 
@@ -318,18 +464,17 @@ impl StoredFile {
         let stamp = Stamp {
             len: self.len,
             modified: self.modified,
-            tail: unhex(&self.tail)?,
+            tail: self.tail.clone(),
         };
-        let file = match (&self.segment, self.snapshot) {
-            (Some(segment), None) => WriterFile::Segment(segment.resolve(log)?),
-            (None, Some(head)) => {
+        let file = match &self.held {
+            Held::Segment(segment) => WriterFile::Segment(segment.resolve(log)?),
+            Held::Snapshot(head) => {
                 let kept = log
                     .snapshots()
                     .iter()
-                    .find(|kept| kept.head() == Some(head))?;
+                    .find(|kept| kept.head() == Some(*head))?;
                 WriterFile::Snapshot(Rc::clone(kept))
             }
-            _ => return None,
         };
         Some(Record {
             stamp: Some(stamp),
@@ -350,8 +495,7 @@ impl StoredSegment {
                 Some(log) if log.holds(hash) => return None,
                 _ => {}
             }
-            let json = Raw::new(entry.line.json()).expect("a verified line holds JSON");
-            whole.push((json, hash));
+            whole.push(Entry::clone(entry));
         }
         Some(Self {
             count: segment.entries.len(),
@@ -364,11 +508,11 @@ impl StoredSegment {
     }
 
     fn resolve(&self, log: &WriterLog) -> Option<Segment> {
-        let mut whole = BTreeMap::new();
-        for (json, hash) in &self.lines {
-            let entry = Entry::kept(json.as_str().to_owned(), *hash).ok()?;
-            whole.insert(*hash, Rc::new(entry));
-        }
+        let mut whole: BTreeMap<EntryHash, Rc<Entry>> = self
+            .lines
+            .iter()
+            .map(|entry| (entry.hash(), Rc::new(entry.clone())))
+            .collect();
         let mut entries = Vec::with_capacity(self.count);
         let mut at = self.last;
         while let Some(hash) = at.filter(|_| entries.len() < self.count) {
@@ -389,26 +533,12 @@ impl StoredSegment {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn unhex(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..text.len())
-        .step_by(2)
-        .map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok())
-        .collect()
-}
-
 /// One log, or what it gained, as written.
 struct LogOut<'a> {
     snapshots: &'a [Rc<Snapshot>],
     entries: &'a [Rc<Entry>],
     strays: Vec<(EntryHash, EntryHash)>,
-    forks: Vec<(EntryHash, [EntryHash; 2])>,
+    forks: Vec<(EntryHash, (EntryHash, EntryHash))>,
 }
 
 impl<'a> LogOut<'a> {
@@ -417,7 +547,7 @@ impl<'a> LogOut<'a> {
             snapshots: log.snapshots(),
             entries: log.entries(),
             strays: log.strays().iter().map(|(h, p)| (*h, *p)).collect(),
-            forks: log.forks().iter().map(|f| (f.prev, f.branches)).collect(),
+            forks: log.forks().iter().map(fork).collect(),
         }
     }
 
@@ -426,98 +556,72 @@ impl<'a> LogOut<'a> {
             snapshots: &placement.kept,
             entries: &placement.placed,
             strays: placement.strayed.clone(),
-            forks: placement
-                .forks
-                .iter()
-                .map(|f| (f.prev, f.branches))
-                .collect(),
+            forks: placement.forks.iter().map(fork).collect(),
         }
     }
 
-    /// Lines are written verbatim, not as JSON strings, so reading them back
-    /// unescapes nothing.
     fn write(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(b"{\"snapshots\":[");
-        for (n, snapshot) in self.snapshots.iter().enumerate() {
-            if n > 0 {
-                out.push(b',');
-            }
-            out.extend(snapshot.encode());
+        self.snapshots.len().pack(out);
+        for snapshot in self.snapshots {
+            snapshot.pack(out);
         }
-        out.extend_from_slice(b"],\"entries\":[");
-        for (n, entry) in self.entries.iter().enumerate() {
-            if n > 0 {
-                out.push(b',');
-            }
-            out.push(b'[');
-            out.extend_from_slice(entry.line.json().as_bytes());
-            write!(out, ",\"{}\"]", entry.hash()).expect("writing to memory");
+        self.entries.len().pack(out);
+        for entry in self.entries {
+            entry.pack_into(out);
         }
-        out.extend_from_slice(b"],\"strays\":");
-        serde_json::to_writer(&mut *out, &self.strays).expect("hashes are JSON");
-        out.extend_from_slice(b",\"forks\":");
-        serde_json::to_writer(&mut *out, &self.forks).expect("hashes are JSON");
-        out.push(b'}');
+        (&self.strays, &self.forks).pack(out);
     }
 }
 
-fn write_logs<'a>(out: &mut Vec<u8>, logs: impl Iterator<Item = (WriterId, LogOut<'a>)>) {
-    out.extend_from_slice(b"{\"writers\":{");
-    for (n, (writer, log)) in logs.enumerate() {
-        if n > 0 {
-            out.push(b',');
-        }
-        write!(out, "\"{writer}\":").expect("writing to memory");
-        log.write(out);
+fn fork(fork: &crate::report::Fork) -> (EntryHash, (EntryHash, EntryHash)) {
+    let [a, b] = fork.branches;
+    (fork.prev, (a, b))
+}
+
+/// A stored view's payload: its logs, the records of `files`, what was absorbed
+/// and the merged state.
+fn write_view<'a>(
+    logs: impl ExactSizeIterator<Item = (WriterId, LogOut<'a>)>,
+    files: Vec<(&RelPath, Option<StoredFile>)>,
+    absorbed: &BTreeSet<EntryHash>,
+    state: Option<&Folded>,
+) -> Vec<u8> {
+    let mut out = vec![FORMAT];
+    logs.len().pack(&mut out);
+    for (writer, log) in logs {
+        writer.pack(&mut out);
+        log.write(&mut out);
     }
-    out.push(b'}');
+    files.pack(&mut out);
+    absorbed.iter().collect::<Vec<_>>().pack(&mut out);
+    state.pack(&mut out);
+    frame(&out)
 }
 
 /// `view` as a checkpoint holding nothing else.
 pub(crate) fn encode_view(view: &CachedView) -> Vec<u8> {
-    let mut out = Vec::new();
     let logs = view.writers().iter();
-    write_logs(
-        &mut out,
-        logs.map(|(writer, log)| (*writer, LogOut::whole(log))),
-    );
-    out.push(b'}');
-    out
+    let logs = logs.map(|(writer, log)| (*writer, LogOut::whole(log)));
+    write_view(logs, Vec::new(), &BTreeSet::new(), None)
 }
 
-fn write_rest<T: Serialize>(out: &mut Vec<u8>, name: &str, value: &T) {
-    write!(out, ",\"{name}\":").expect("writing to memory");
-    serde_json::to_writer(&mut *out, value).expect("a stored view is JSON");
-}
-
-fn encode_checkpoint(reader: &Reader) -> Vec<u8> {
-    let mut out = Vec::new();
+fn encode_checkpoint(reader: &Reader, state: Option<&Folded>) -> Vec<u8> {
     let logs = reader.logs().iter();
-    write_logs(
-        &mut out,
-        logs.map(|(writer, log)| (*writer, LogOut::whole(log))),
-    );
-    let files: BTreeMap<&RelPath, StoredFile> = reader
+    let logs = logs.map(|(writer, log)| (*writer, LogOut::whole(log)));
+    let files = reader
         .records()
         .filter_map(|(path, record)| {
             let log = reader.writer_of(path).and_then(|w| reader.logs().get(&w));
-            Some((path, StoredFile::of(record, log)?))
+            Some((path, Some(StoredFile::of(record, log)?)))
         })
         .collect();
-    write_rest(&mut out, "files", &files);
-    write_rest(&mut out, "absorbed", &reader.absorbed);
-    out.push(b'}');
-    out
+    write_view(logs, files, &reader.absorbed, state)
 }
 
 fn encode_record(reader: &Reader) -> Vec<u8> {
-    let mut out = Vec::new();
     let logs = reader.unsaved.logs.iter();
-    write_logs(
-        &mut out,
-        logs.map(|(writer, gained)| (*writer, LogOut::gained(gained))),
-    );
-    let files: BTreeMap<&RelPath, Option<StoredFile>> = reader
+    let logs = logs.map(|(writer, gained)| (*writer, LogOut::gained(gained)));
+    let files = reader
         .unsaved
         .files
         .iter()
@@ -527,12 +631,16 @@ fn encode_record(reader: &Reader) -> Vec<u8> {
             (path, stored)
         })
         .collect();
-    write_rest(&mut out, "files", &files);
-    out.extend_from_slice(b"}\n");
-    out
+    write_view(logs, files, &BTreeSet::new(), None)
 }
 
-pub(crate) fn save(reader: &mut Reader, genesis: EntryHash) -> Task<'static, Result<()>> {
+/// Keeps what the view gained since its last save; `state` is the merged state
+/// of every log of the view, kept when the view is written whole.
+pub(crate) fn save(
+    reader: &mut Reader,
+    genesis: EntryHash,
+    state: Option<&Folded>,
+) -> Task<'static, Result<()>> {
     let folds = reader
         .unsaved
         .logs
@@ -547,7 +655,7 @@ pub(crate) fn save(reader: &mut Reader, genesis: EntryHash) -> Task<'static, Res
             || store.journal > store.checkpoint / 2 + JOURNAL_SLACK
     };
     if due {
-        return checkpoint(reader, genesis);
+        return checkpoint(reader, genesis, state);
     }
     if reader.unsaved.is_empty() {
         return Task::ready(Ok(()));
@@ -557,13 +665,17 @@ pub(crate) fn save(reader: &mut Reader, genesis: EntryHash) -> Task<'static, Res
     append_record(genesis, record, Rc::clone(&reader.store)).task()
 }
 
-pub(crate) fn checkpoint(reader: &mut Reader, genesis: EntryHash) -> Task<'static, Result<()>> {
-    let bytes = encode_checkpoint(reader);
+pub(crate) fn checkpoint(
+    reader: &mut Reader,
+    genesis: EntryHash,
+    state: Option<&Folded>,
+) -> Task<'static, Result<()>> {
+    let bytes = encode_checkpoint(reader, state);
     reader.unsaved = Default::default();
     write_checkpoint(genesis, bytes, Rc::clone(&reader.store)).task()
 }
 
-/// Replaces `view.json` with `bytes`, then removes the journal it holds.
+/// Replaces `view.bin` with `bytes`, then removes the journal it holds.
 pub(crate) fn write_checkpoint<'a>(
     genesis: EntryHash,
     bytes: Vec<u8>,
@@ -648,6 +760,11 @@ mod tests {
 
     const W: WriterId = WriterId::from_u128(0xa);
 
+    /// The merged state of every log `reader` holds, as a library keeps it.
+    fn merged(reader: &Reader) -> Folded {
+        crate::merge::merge(reader.logs().values())
+    }
+
     fn layout() -> Layout {
         Layout::new(".lib").unwrap()
     }
@@ -657,11 +774,9 @@ mod tests {
             writer: W,
             label: "a".into(),
         });
-        let mut lines = vec![
-            Entry::encode(EntryHash::ZERO, Hlc::ZERO, kind)
-                .unwrap()
-                .line,
-        ];
+        let mut lines = vec![Entry::encode(EntryHash::ZERO, Hlc::ZERO, kind)
+            .unwrap()
+            .line()];
         for i in 0..n {
             let kind = EntryKind::Intent(Logged {
                 label: format!("e{i}"),
@@ -670,7 +785,7 @@ mod tests {
                 reverses: None,
             });
             let prev = lines.last().unwrap().hash();
-            lines.push(Entry::encode(prev, Hlc::ZERO, kind).unwrap().line);
+            lines.push(Entry::encode(prev, Hlc::ZERO, kind).unwrap().line());
         }
         lines
     }
@@ -727,6 +842,14 @@ mod tests {
 
     fn open(disk: &MemDisk, pool: Vec<EntryHash>, own: EntryHash) -> Reader {
         let loaded = run(&mut disk.clone(), load(pool, Some(own))).unwrap();
+        if let Some(state) = &loaded.state {
+            let logs = loaded.view.writers().values();
+            assert_eq!(
+                state,
+                &crate::merge::merge(logs),
+                "kept as merged from scratch"
+            );
+        }
         Reader::open(layout(), loaded)
     }
 
@@ -777,12 +900,61 @@ mod tests {
         local(disk, genesis);
         let mut reader = Reader::new(layout(), CachedView::default());
         run(&mut disk.clone(), reader.read()).unwrap();
-        run(&mut disk.clone(), reader.checkpoint(genesis)).unwrap();
+        run(&mut disk.clone(), {
+            let state = merged(&reader);
+            reader.checkpoint(genesis, Some(&state))
+        })
+        .unwrap();
         grow(disk, &segment("b.jsonl"), lines[4].to_bytes());
         run(&mut disk.clone(), reader.read()).unwrap();
-        run(&mut disk.clone(), reader.save(genesis)).unwrap();
+        run(&mut disk.clone(), {
+            let state = merged(&reader);
+            reader.save(genesis, Some(&state))
+        })
+        .unwrap();
         assert!(present(disk, Layout::view_journal(genesis)));
         reader
+    }
+
+    #[test]
+    fn a_cached_view_this_build_cannot_trust_is_corrupt() {
+        let lines = chain(2);
+        let entries = |lines: &[&Line]| -> Vec<Rc<Entry>> {
+            let lines = lines.iter().map(|line| Entry::linked((*line).clone()));
+            lines.map(Rc::new).collect()
+        };
+        let held = |held: &[Rc<Entry>]| {
+            let log = LogOut {
+                snapshots: &[],
+                entries: held,
+                strays: Vec::new(),
+                forks: Vec::new(),
+            };
+            write_view([(W, log)].into_iter(), Vec::new(), &BTreeSet::new(), None)
+        };
+        let path = Layout::cached_view(lines[0].hash());
+        let good = held(&entries(&[&lines[0], &lines[1]]));
+        assert!(CachedView::decode(&path, &good).is_ok());
+        let mut flipped = good.clone();
+        *flipped.last_mut().unwrap() ^= 1;
+        let mut longer = good.clone();
+        longer.push(0);
+        for bytes in [
+            held(&entries(&[&lines[0], &lines[2]])),
+            flipped,
+            longer,
+            good[..good.len() - 1].to_vec(),
+            frame(&[FORMAT + 1]),
+            Vec::new(),
+        ] {
+            assert!(
+                matches!(
+                    CachedView::decode(&path, &bytes),
+                    Err(Error::Corrupt { .. })
+                ),
+                "{bytes:?}"
+            );
+        }
     }
 
     #[test]
@@ -817,7 +989,11 @@ mod tests {
         assert_eq!(reader.cached(), before.cached());
         grow(&disk, &segment("b.jsonl"), lines[5].to_bytes());
         run(&mut disk.clone(), reader.read()).unwrap();
-        run(&mut disk.clone(), reader.save(genesis)).unwrap();
+        run(&mut disk.clone(), {
+            let state = merged(&reader);
+            reader.save(genesis, Some(&state))
+        })
+        .unwrap();
         assert!(!present(&disk, journal), "written whole, without a journal");
         let again = open(&disk, vec![genesis], genesis);
         assert_eq!(again.cached(), reader.cached());
@@ -831,7 +1007,11 @@ mod tests {
         let mut reader = saved(&disk, &lines);
         let journal = Layout::view_journal(genesis);
         let kept = disk.files(Root::Local)[&journal].clone();
-        run(&mut disk.clone(), reader.checkpoint(genesis)).unwrap();
+        run(&mut disk.clone(), {
+            let state = merged(&reader);
+            reader.checkpoint(genesis, Some(&state))
+        })
+        .unwrap();
         assert!(!present(&disk, journal.clone()));
         put(&disk, Root::Local, &journal, kept);
         let again = open(&disk, vec![genesis], genesis);
@@ -848,7 +1028,11 @@ mod tests {
         local(&disk, retired);
         let mut old = Reader::new(layout(), CachedView::default());
         run(&mut disk.clone(), old.read()).unwrap();
-        run(&mut disk.clone(), old.checkpoint(retired)).unwrap();
+        run(&mut disk.clone(), {
+            let state = merged(&old);
+            old.checkpoint(retired, Some(&state))
+        })
+        .unwrap();
         put(&disk, Root::Local, &Layout::retired(retired), Vec::new());
         act(
             &disk,
@@ -866,7 +1050,11 @@ mod tests {
             old.cached(),
             "what the retired view showed"
         );
-        run(&mut disk.clone(), reader.save(live)).unwrap();
+        run(&mut disk.clone(), {
+            let state = merged(&reader);
+            reader.save(live, Some(&state))
+        })
+        .unwrap();
 
         let mut counting = Counting::new(&disk);
         let loaded = run(&mut counting, load(vec![retired, live], Some(live))).unwrap();
@@ -889,16 +1077,28 @@ mod tests {
         local(&disk, other);
         let mut first = Reader::new(layout(), CachedView::default());
         run(&mut disk.clone(), first.read()).unwrap();
-        run(&mut disk.clone(), first.checkpoint(own)).unwrap();
+        run(&mut disk.clone(), {
+            let state = merged(&first);
+            first.checkpoint(own, Some(&state))
+        })
+        .unwrap();
         grow(&disk, &path, lines[2].to_bytes());
         let mut second = Reader::new(layout(), CachedView::default());
         run(&mut disk.clone(), second.read()).unwrap();
-        run(&mut disk.clone(), second.checkpoint(other)).unwrap();
+        run(&mut disk.clone(), {
+            let state = merged(&second);
+            second.checkpoint(other, Some(&state))
+        })
+        .unwrap();
         grow(&disk, &path, lines[3].to_bytes());
 
         let mut reader = open(&disk, vec![own, other], own);
         run(&mut disk.clone(), reader.read()).unwrap();
-        run(&mut disk.clone(), reader.save(own)).unwrap();
+        run(&mut disk.clone(), {
+            let state = merged(&reader);
+            reader.save(own, Some(&state))
+        })
+        .unwrap();
         assert!(!present(&disk, Layout::view_journal(own)));
         let alone = open(&disk, vec![own], own);
         assert_eq!(alone.cached(), reader.cached());

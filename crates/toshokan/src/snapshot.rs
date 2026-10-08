@@ -8,6 +8,7 @@ use thiserror::Error as ThisError;
 
 use crate::ids::{EntryHash, Hlc, WriterId};
 use crate::merge::Folded;
+use crate::pack::{Bad, In, Pack, Unpack, Unpacked};
 use crate::reader::MAX_FILE;
 use crate::schema::Raw;
 
@@ -136,6 +137,35 @@ impl Snapshot {
     }
 }
 
+impl Pack for Snapshot {
+    fn pack(&self, out: &mut Vec<u8>) {
+        (self.writer, &self.label).pack(out);
+        (self.at, &self.folded).pack(out);
+        (&self.state, &self.unknown).pack(out);
+    }
+}
+
+/// Refuses what [`Snapshot::decode`] refuses.
+impl Unpack for Snapshot {
+    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
+        let (writer, label) = Unpack::unpack(input)?;
+        let (at, folded): (Hlc, Vec<EntryHash>) = Unpack::unpack(input)?;
+        let (state, unknown) = Unpack::unpack(input)?;
+        let distinct: BTreeSet<_> = folded.iter().collect();
+        if folded.is_empty() || distinct.len() != folded.len() {
+            return Err(Bad("`folded` is empty or repeats a hash"));
+        }
+        Ok(Self {
+            writer,
+            label,
+            at,
+            folded,
+            state,
+            unknown,
+        })
+    }
+}
+
 fn member<T: DeserializeOwned>(name: &str, raw: &Raw) -> Result<T, NotSnapshot> {
     raw.decode().map_err(|error| NotSnapshot {
         reason: format!("`{name}`: {error}"),
@@ -173,6 +203,18 @@ mod tests {
         let read = Snapshot::decode(&written.encode()).unwrap();
         assert_eq!(read, written);
         assert_eq!(read.encode(), written.encode());
+    }
+
+    #[test]
+    fn a_snapshot_packs_and_unpacks_whole() {
+        let mut written = snapshot(&[1, 2, 3]);
+        written
+            .unknown
+            .insert("later".into(), Raw::new(r#"{"x":[1,2]}"#).unwrap());
+        let packed = crate::pack::packed(&written);
+        assert_eq!(crate::pack::unpacked::<Snapshot>(&packed), Ok(written));
+        let repeated = crate::pack::packed(&snapshot(&[1, 1]));
+        assert!(crate::pack::unpacked::<Snapshot>(&repeated).is_err());
     }
 
     #[test]

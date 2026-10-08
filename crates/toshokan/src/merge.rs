@@ -30,6 +30,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
 use crate::log::{Displaced, Entry, EntryKind, FileFact, Op};
+use crate::pack::{bad_variant, pack_struct, Bad, In, Pack, Unpack, Unpacked};
 use crate::path::RelPath;
 use crate::reader::WriterLog;
 use crate::report::TrashItem;
@@ -52,11 +53,14 @@ pub struct Folded {
 /// The members of a record of a snapshot's state that this build does not know,
 /// by name. Few records have any, so they are held apart, and only while there
 /// are some.
+// Boxed, a pointer's width where a map is three.
+#[allow(clippy::box_collection)]
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 struct Extra(Option<Box<BTreeMap<String, Raw>>>);
 
 /// The [`Extra`] of each record under a key, where it has any; held apart, and
 /// only while some record has any.
+#[allow(clippy::box_collection)]
 #[derive(Clone, PartialEq, Debug)]
 struct Extras<K>(Option<Box<BTreeMap<K, Extra>>>);
 
@@ -651,19 +655,24 @@ impl From<FileValue> for FileFact {
 impl Folded {
     /// Folds one entry `writer` logged.
     pub fn apply(&mut self, writer: WriterId, entry: &Entry) {
+        self.fold(writer, entry, &entry.kind());
+    }
+
+    /// As [`Folded::apply`], with the entry's kind unpacked already.
+    pub fn fold(&mut self, writer: WriterId, entry: &Entry, kind: &EntryKind) {
         let hash = entry.hash();
         let stamp = Stamp {
-            at: entry.at,
+            at: entry.at(),
             by: writer,
         };
-        match &entry.kind {
+        match kind {
             EntryKind::Genesis(_) => {}
             EntryKind::Intent(logged) => {
                 for op in &logged.ops {
                     self.apply_op(hash, stamp, op);
                 }
                 for displaced in &logged.displaced {
-                    self.trash_item(writer, hash, entry.at, displaced, &Extra::default());
+                    self.trash_item(writer, hash, entry.at(), displaced, &Extra::default());
                 }
             }
             EntryKind::Settle(settle) => {
@@ -678,8 +687,8 @@ impl Folded {
                 self.unknown.insert((hash, raw.clone()));
             }
         }
-        if entry.unknown_members {
-            let whole = Raw::new(entry.line.json()).expect("a verified line holds JSON");
+        if entry.unknown_members() {
+            let whole = Raw::new(&entry.json()).expect("a verified line holds JSON");
             self.extended.insert((hash, whole));
         }
     }
@@ -1168,6 +1177,196 @@ pub fn merge<'a>(logs: impl IntoIterator<Item = &'a WriterLog>) -> Folded {
         }
     }
     folded
+}
+
+impl<K: Pack + Ord, V: Pack> Pack for SmallMap<K, V> {
+    fn pack(&self, out: &mut Vec<u8>) {
+        self.len().pack(out);
+        for (key, value) in self.iter() {
+            (key, value).pack(out);
+        }
+    }
+}
+
+/// Refuses keys out of order, which no packing writes.
+impl<K: Unpack + Ord, V: Unpack> Unpack for SmallMap<K, V> {
+    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
+        SmallMap::from_sorted(Unpack::unpack(input)?).ok_or(Bad("keys out of order"))
+    }
+}
+
+impl Pack for Key {
+    fn pack(&self, out: &mut Vec<u8>) {
+        self.as_str().pack(out);
+    }
+}
+
+impl Unpack for Key {
+    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
+        input.str().map(Key::of)
+    }
+}
+
+impl Pack for Extra {
+    fn pack(&self, out: &mut Vec<u8>) {
+        let members: Vec<(&String, &Raw)> = self.members().collect();
+        members.pack(out);
+    }
+}
+
+impl Unpack for Extra {
+    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
+        BTreeMap::unpack(input).map(Extra::from)
+    }
+}
+
+impl<K: Pack> Pack for Extras<K> {
+    fn pack(&self, out: &mut Vec<u8>) {
+        let extras: Vec<(&K, &Extra)> = self.0.iter().flat_map(|extras| extras.iter()).collect();
+        extras.pack(out);
+    }
+}
+
+impl<K: Unpack + Ord> Unpack for Extras<K> {
+    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
+        let extras = BTreeMap::<K, Extra>::unpack(input)?;
+        if extras.values().any(Extra::is_empty) {
+            return Err(Bad("an empty record of unknown members"));
+        }
+        Ok(Self((!extras.is_empty()).then(|| Box::new(extras))))
+    }
+}
+
+pack_struct!(Stamp { at, by });
+
+impl Pack for Existence {
+    fn pack(&self, out: &mut Vec<u8>) {
+        match self {
+            Self::Created => out.push(0),
+            Self::Deleted { observed } => {
+                out.push(1);
+                observed.pack(out);
+            }
+        }
+    }
+}
+
+impl Unpack for Existence {
+    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
+        match input.byte()? {
+            0 => Ok(Self::Created),
+            1 => {
+                let observed = Vec::<EntryHash>::unpack(input)?;
+                if !observed.windows(2).all(|pair| pair[0] < pair[1]) {
+                    return Err(Bad("observed writes out of order"));
+                }
+                Ok(Self::Deleted {
+                    observed: observed.into(),
+                })
+            }
+            _ => bad_variant(),
+        }
+    }
+}
+
+impl<V: Pack> Pack for Register<V> {
+    fn pack(&self, out: &mut Vec<u8>) {
+        (&self.writes, &self.replaced).pack(out);
+        (&self.extra, &self.write_extra).pack(out);
+    }
+}
+
+impl<V: Unpack> Unpack for Register<V> {
+    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
+        let (writes, replaced) = Unpack::unpack(input)?;
+        let (extra, write_extra) = Unpack::unpack(input)?;
+        Ok(Self {
+            writes,
+            replaced,
+            extra,
+            write_extra,
+        })
+    }
+}
+
+pack_struct!(OrSet {
+    adds,
+    removed,
+    extra,
+    add_extra,
+    removed_extra
+});
+pack_struct!(FileValue {
+    path,
+    identity,
+    len,
+    modified,
+    extra
+});
+pack_struct!(EntityState {
+    existence,
+    registers,
+    sets,
+    file,
+    extra
+});
+pack_struct!(Trashed {
+    entry,
+    at,
+    from,
+    identity,
+    len,
+    extra
+});
+
+impl Pack for Arc<EntityState> {
+    fn pack(&self, out: &mut Vec<u8>) {
+        (**self).pack(out);
+    }
+}
+
+impl Unpack for Arc<EntityState> {
+    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
+        EntityState::unpack(input).map(Arc::new)
+    }
+}
+
+/// How an install keeps a merged state for itself, beside snapshots and in its
+/// cached view; a snapshot in the folder is JSON.
+impl Pack for Folded {
+    fn pack(&self, out: &mut Vec<u8>) {
+        (&self.entities, &self.trash).pack(out);
+        let settled: Vec<&(WriterId, Nonce)> = self.settled.iter().collect();
+        let unknown: Vec<&(EntryHash, Raw)> = self.unknown.iter().collect();
+        let extended: Vec<&(EntryHash, Raw)> = self.extended.iter().collect();
+        (settled, (unknown, extended)).pack(out);
+        self.extra.pack(out);
+    }
+}
+
+impl Unpack for Folded {
+    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
+        let (entities, trash) = Unpack::unpack(input)?;
+        let (settled, (unknown, extended)) = Unpack::unpack(input)?;
+        Ok(Self {
+            entities,
+            trash,
+            settled: distinct(settled)?,
+            unknown: distinct(unknown)?,
+            extended: distinct(extended)?,
+            extra: Extra::unpack(input)?,
+        })
+    }
+}
+
+/// The set of `list`, refused when it names a member twice.
+fn distinct<T: Ord>(list: Vec<T>) -> Unpacked<BTreeSet<T>> {
+    let len = list.len();
+    let set: BTreeSet<T> = list.into_iter().collect();
+    match set.len() == len {
+        true => Ok(set),
+        false => Err(Bad("a member twice")),
+    }
 }
 
 const ENTITIES: &str = "entities";
@@ -1681,5 +1880,65 @@ impl<'de> Deserialize<'de> for Folded {
         }
         folded.extra = Extra::from(members);
         Ok(folded)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pack::{packed, unpacked};
+
+    fn h(n: u8) -> String {
+        format!("\"{n:032x}\"")
+    }
+
+    /// A state holding a record of every kind, each with a member no build knows.
+    fn every_record() -> String {
+        let (e, w, x) = (h(0xe), h(0xa), h(1));
+        let write = |more: &str| format!(r#"{{"entry":{x},"by":{w},"at":[1,0]{more},"z":1}}"#);
+        format!(
+            concat!(
+                r#"{{"entities":{{{e}:{{"#,
+                r#""existence":{{"writes":[{created},{deleted}],"replaced":[{x}],"y":2}},"#,
+                r#""registers":{{"name":{{"writes":[{value},{clear}],"replaced":[],"w":[1]}}}},"#,
+                r#""sets":{{"tags":{{"adds":[{{"value":"a","entry":{x},"by":{w},"at":[2,0],"q":1}}],"#,
+                r#""removed":[{{"value":"b","entry":{x},"by":{w},"at":[2,1],"remove":{w},"r":1}}],"s":1}}}},"#,
+                r#""file":{{"writes":[{file}],"replaced":[]}},"u":{{"v":1}}}}}},"#,
+                r#""trash":[{{"writer":{w},"item":{x},"entry":{x},"at":[3,0],"from":"a.bin","#,
+                r#""identity":{x},"len":4,"t":true}}],"#,
+                r#""settled":[[{w},{x}]],"unknown":[[{x},{{"op":"later"}}]],"#,
+                r#""extended":[[{w},{{"prev":{x}}}]],"top":null}}"#
+            ),
+            e = e,
+            w = w,
+            x = x,
+            created = write(""),
+            deleted = write(&format!(r#","deleted":[{w},{x}]"#))
+                .replace(&format!("\"entry\":{x}"), &format!("\"entry\":{w}")),
+            value = write(r#","value":{"b":1,"a":2}"#),
+            clear = write("").replace(&format!("\"entry\":{x}"), &format!("\"entry\":{e}")),
+            file = write(
+                r#","file":{"path":"a.bin","identity":"00000000000000000000000000000007","len":3,"modified":4,"p":0}"#
+            ),
+        )
+    }
+
+    #[test]
+    fn a_state_packs_and_unpacks_whole_with_members_no_build_knows() {
+        let state: Folded = serde_json::from_str(&every_record()).unwrap();
+        let text = serde_json::to_string(&state).unwrap();
+        for name in [
+            "\"y\"", "\"w\"", "\"z\"", "\"q\"", "\"r\"", "\"s\"", "\"u\"", "\"t\"", "\"p\"",
+            "\"top\"",
+        ] {
+            assert!(text.contains(name), "{name} kept in {text}");
+        }
+        let bytes = packed(&state);
+        let read: Folded = unpacked(&bytes).unwrap();
+        assert_eq!(read, state);
+        assert_eq!(serde_json::to_string(&read).unwrap(), text);
+        for cut in 0..bytes.len() {
+            assert!(unpacked::<Folded>(&bytes[..cut]).is_err(), "cut at {cut}");
+        }
     }
 }

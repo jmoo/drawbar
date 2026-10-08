@@ -66,7 +66,7 @@ Each install keeps, per library, a local root of its own that is never synced:
 | Path                             | Contents                                     |
 | -------------------------------- | -------------------------------------------- |
 | `<genesis>/head.json`            | The last entry this writer wrote             |
-| `<genesis>/view.json`            | The cached view                              |
+| `<genesis>/view.bin`             | The cached view                              |
 | `<genesis>/view.log`             | What the cached view gained since            |
 | `<genesis>/drafts/<entity>.json` | An unsaved edit                              |
 | `<genesis>/lock`                 | Held while an instance writes as this writer |
@@ -81,7 +81,7 @@ root are the install's pool of writers.
 `head.json` is `{"writer":"<writer id>","head":"<entry hash>"}`,
 `let-go.json` is `{"<writer id>":["<entry hash>",…]}`, and `identities.json` is
 `[["<library path>",<length>,<modification time or null>,"<identity>"],…]`.
-A file in the local root that is replaced, such as `head.json`, `view.json` or a
+A file in the local root that is replaced, such as `head.json`, `view.bin` or a
 draft, is first written beside it as `<name>.next` and synced; then `<name>` is
 removed and `<name>.next` renamed to it. A reader takes `<name>`, or
 `<name>.next` when `<name>` is missing.
@@ -393,65 +393,64 @@ among those placed, folded or ever held back, are a fork: both branches are
 merged, and the fork is reported once per predecessor.
 
 Each install keeps what it has placed as a cached view in its local root:
-`<genesis>/view.json`, the whole view, and `<genesis>/view.log`, what the view
-gained since, one record a line. A new writer writes `view.json` from the view its
-instance holds. After each read that kept a snapshot, placed an entry, held one
-back or found a file changed, after each append, and when the instance closes,
-the instance appends a record of what the view gained to `view.log` and syncs it.
-It writes `view.json` again, and then removes `view.log`, when `view.log` has
-grown past half of `view.json` and 1 MiB more, when a record could not be
-appended or the last one is torn, when the view keeps a new snapshot, which
-folds entries `view.json` holds whole, and when the view holds what neither
+`<genesis>/view.bin`, the whole view, and `<genesis>/view.log`, what the view
+gained since, one record after another. A new writer writes `view.bin` from the
+view its instance holds. After each read that kept a snapshot, placed an entry,
+held one back or found a file changed, after each append, and when the instance
+closes, the instance appends a record of what the view gained to `view.log` and
+syncs it. It writes `view.bin` again, and then removes `view.log`, when
+`view.log` has grown past half of `view.bin` and 1 MiB more, when a record could
+not be appended or the last one is torn, when the view keeps a new snapshot,
+which folds entries `view.bin` holds whole, and when the view holds what neither
 file does.
 
 Every open starts from the views of the install's writers joined, so what any
 instance of the install has shown stays shown: the view of the writer it
 continues, then those of the other live writers, then those of the retired
-writers that no view it has read holds already. `view.json` is:
+writers that no view it has read holds already. A view holds, for each writer,
+the snapshots read, none of whose folded lists starts another's; the placed
+entries no snapshot folds, each after its predecessor; the entries ever held
+back and never placed, so that a fork with one is found after its file is gone;
+and every fork reported. It also names the retired writers of the install whose
+views it holds, and says what the reader last found in each file of the writers'
+directories, or for a segment this instance appended to since, what the append
+left there when the stat after it found the length it left, so that a read reads
+again only the files that changed. A file's record is its length, modification
+time and last bytes, its stamp, and either the segment's lines, as `count`
+entries of the writer's chain from `first` to `last` ending at `end`, with the
+lines the view holds no entry for kept whole, or the head of the view's snapshot
+it holds. A file the view cannot give the lines or the snapshot of is read
+again.
 
-```text
-{"writers":{"<w>":{
-   "snapshots":[<snapshot>, …],
-   "entries":[[<json>,"<hash>"], …],
-   "strays":[["<hash>","<prev>"], …],
-   "forks":[["<prev>",["<branch>","<branch>"]], …]}},
- "files":{"<path>":<file>, …},
- "absorbed":["<genesis>", …]}
-```
+`view.bin` also holds the merged state of every entry and snapshot it holds,
+when the instance that wrote it showed every writer as its logs fold. An open
+that finds it shows that state with what the read since added, and folds
+nothing it read before; without it, the open folds every log again.
 
-`snapshots` are the snapshots read, none of whose folded lists starts
-another's; `entries` the placed lines no snapshot folds, each after its
-predecessor, each line's JSON verbatim with its hash; `strays` the entries ever
-held back and never placed, so that a fork with one is found after its file is
-gone; `forks` every fork reported. `absorbed` names the retired writers of the
-install whose views this one holds. `files` says what the reader last found in
-each file of the writers' directories, or for a segment this instance appended
-to since, what the append left there when the stat after it found the length it
-left, so that a read reads again only the files that changed:
+The cached view is private to the install, and only the build that wrote it
+reads it. Each file is a sequence of records: the length of the record's
+payload as 4 bytes little-endian, the first 16 bytes of the BLAKE3 hash of the
+payload, then the payload. The payload's first byte names its format, 1; the
+rest is the view, or what it gained, in this build's binary encoding: integers
+as LEB128, identifiers as their 16 bytes big-endian, text as its length and its
+UTF-8, lists as their length and their members, with each entry as its hash, its
+predecessor, its clock reading and its decoded kind. An entry keeps the JSON of
+its line only when that is not the JSON this build writes for its kind, so
+every line is given back byte for byte. Neither a line nor its hash is read or
+checked again: the record's hash stands for them. A record whose length, hash or
+format byte does not hold ends the readable part of `view.log`.
 
-```text
-{"len":<n>,"modified":<n>,"tail":"<hex>","segment":{"count":<n>,"first":"<hash>",
-  "last":"<hash>","end":<n>,"sealed":<bool>,"lines":[[<json>,"<hash>"], …]}}
-{"len":<n>,"modified":<n>,"tail":"<hex>","snapshot":"<hash>"}
-```
-
-`len`, `modified` and `tail`, the last bytes in hexadecimal, are the file's
-stamp. A segment's lines are `count` entries of the writer's chain from `first`
-to `last`, each the successor of the one before; `end` is where its last line
-ends; `lines` holds whole the lines the view holds no entry for. A snapshot is
-the view's snapshot whose last folded entry is `snapshot`. A file the view
-cannot give the lines or the snapshot of is read again.
-
-A record of `view.log` has the same form: `writers` holds what each log gained,
-and `files` the files whose records changed, `null` for one that is gone. A
-reader replays the records in order onto `view.json`, up to the first that is
-torn. Replaying a record twice changes nothing, so a crash between writing
-`view.json` and removing `view.log` leaves a view that loads.
+A record of `view.log` holds what each log gained, and the records of the files
+that changed, or none for one that is gone. A reader replays the records in
+order onto `view.bin`, up to the first that is torn, and folds the entries and
+snapshots each holds into the merged state. Replaying a record twice changes
+nothing, so a crash between writing `view.bin` and removing `view.log` leaves a
+view that loads.
 
 The view only grows: a snapshot whose folded list starts a later one's is
-replaced by it, and the entries a snapshot folds leave `entries`. It never holds
-an entry whose predecessor it does not hold. A view that cannot be read this way
-is discarded, and the folder read from scratch.
+replaced by it, and the entries a snapshot folds leave the view's entries. It
+never holds an entry whose predecessor it does not hold. A view that cannot be
+read this way is discarded, and the folder read from scratch.
 
 ### After a restore
 

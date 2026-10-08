@@ -12,6 +12,8 @@ const SPILL: usize = 32;
 #[derive(Clone)]
 pub(crate) enum SmallMap<K, V> {
     Few(Vec<(K, V)>),
+    // Boxed, so the map is no wider than its vector.
+    #[allow(clippy::box_collection)]
     Many(Box<BTreeMap<K, V>>),
 }
 
@@ -130,6 +132,19 @@ impl<K: Ord, V> SmallMap<K, V> {
 
     pub(crate) fn values(&self) -> impl Iterator<Item = &V> {
         self.iter().map(|(_, value)| value)
+    }
+}
+
+impl<K: Ord, V> SmallMap<K, V> {
+    /// The map of `pairs`, which must be in strictly increasing order of key.
+    pub(crate) fn from_sorted(pairs: Vec<(K, V)>) -> Option<Self> {
+        if !pairs.windows(2).all(|pair| pair[0].0 < pair[1].0) {
+            return None;
+        }
+        Some(match pairs.len() < SPILL {
+            true => Self::Few(pairs),
+            false => Self::Many(Box::new(pairs.into_iter().collect())),
+        })
     }
 }
 

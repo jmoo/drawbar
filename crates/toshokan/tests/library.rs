@@ -295,6 +295,8 @@ trait Facade: Sized {
 
     fn open(probe: Probe, env: Env) -> Result<(Self, Opened), Error>;
     fn view(&self) -> View;
+    /// What the view would show folded again from scratch.
+    fn refolded(&self) -> toshokan::merge::Folded;
     fn history(&self) -> Vec<HistoryItem>;
     fn commit<'a>(
         &'a mut self,
@@ -334,6 +336,9 @@ impl Facade for Blocking {
     }
     fn view(&self) -> View {
         self.0.view()
+    }
+    fn refolded(&self) -> toshokan::merge::Folded {
+        self.0.refolded()
     }
     fn history(&self) -> Vec<HistoryItem> {
         self.0.history().to_vec()
@@ -403,6 +408,9 @@ impl Facade for Async {
     }
     fn view(&self) -> View {
         self.0.view()
+    }
+    fn refolded(&self) -> toshokan::merge::Folded {
+        self.0.refolded()
     }
     fn history(&self) -> Vec<HistoryItem> {
         self.0.history().to_vec()
@@ -553,6 +561,7 @@ through_both!(
     what_any_writer_of_an_install_showed_survives_a_restore,
     what_a_commit_returned_current_survives_a_crash_and_a_restore,
     facts_a_restore_removed_are_shown_until_let_go,
+    what_is_shown_is_what_its_logs_fold_to,
     facts_a_restore_removed_are_republished_when_adopted,
     an_adoption_whose_let_go_cannot_be_kept_is_committed,
     one_intent_creates_entities_that_name_each_other,
@@ -1693,7 +1702,7 @@ fn committed_while_failing<F: Facade>(
 }
 
 fn a_commit_whose_view_cannot_be_saved_is_kept_and_undone_once<F: Facade>() {
-    const VIEW: &[&str] = &["view.log", "view.json.next"];
+    const VIEW: &[&str] = &["view.log", "view.bin.next"];
     let clock = TestClock::at(1_000);
     let folder = disk();
     let here = machine(&folder);
@@ -1959,7 +1968,7 @@ fn shelved(folder: &MemDisk, count: usize) -> Vec<(EntityId, RelPath)> {
         };
         let entry = Entry::encode(prev, at, kind).unwrap();
         prev = entry.hash();
-        segment.extend(entry.line.to_bytes());
+        segment.extend(entry.to_bytes());
     }
     let log = layout().writer(writer).join("log.jsonl").unwrap();
     put(folder, log.as_str(), &segment);
@@ -1980,7 +1989,7 @@ fn modified(folder: &MemDisk, at: &RelPath) -> u64 {
 fn binds(folder: &MemDisk, writer: WriterId) -> Vec<Entry> {
     let entries = segment_entries(folder, writer).into_iter();
     entries
-        .filter(|entry| matches!(entry.kind, EntryKind::Bind(_)))
+        .filter(|entry| matches!(entry.kind(), EntryKind::Bind(_)))
         .collect()
 }
 
@@ -2050,14 +2059,14 @@ fn a_commit_pins_any_number_of_moves_in_entries_within_the_line_limit() {
     let binds = binds(&folder, writer);
     let pinned: usize = binds
         .iter()
-        .map(|entry| match &entry.kind {
+        .map(|entry| match &entry.kind() {
             EntryKind::Bind(bound) => bound.ops.len(),
             kind => panic!("{kind:?}"),
         })
         .sum();
     assert_eq!((pinned, binds.len() > 1), (files.len(), true));
     for entry in &binds {
-        let len = entry.line.to_bytes().len();
+        let len = entry.to_bytes().len();
         assert!(len <= MAX_LINE, "{len} bytes");
     }
     let probe = Probe::new(&machine(&folder));
@@ -2352,7 +2361,7 @@ fn an_untrusted_folder_is_read_within_bounds_and_never_acted_on<F: Facade>() {
     });
     let from_the_future = Entry::encode(EntryHash::ZERO, last_reading, genesis)
         .unwrap()
-        .line
+        .line()
         .to_bytes();
     let mut random = SeededRandom::new(7);
     let mut noise = |len: usize| -> Vec<u8> {
@@ -2854,6 +2863,98 @@ fn label_of(view: &View, label: &str) -> WriterId {
         .writer
 }
 
+/// Two instances commit, refresh, compact, close, reopen and crash at random. At
+/// every step each shows what its logs fold to from scratch, however it got
+/// there: folded entry by entry, or kept in its cached view across a reopen.
+fn what_is_shown_is_what_its_logs_fold_to<F: Facade>() {
+    for seed in 0..12 {
+        let folder = disk();
+        let clock = TestClock::at(1_000);
+        let mut random = SeededRandom::new(seed);
+        let mut pick = |n: usize| (random.next_u128() % n as u128) as usize;
+        let mut machines = [machine(&folder), machine(&folder)];
+        let mut opened: [Option<F>; 2] = [None, None];
+        let mut entities: Vec<EntityId> = Vec::new();
+        let mut opens = 0;
+        for step in 0..40 {
+            let at = pick(2);
+            let Some(library) = &mut opened[at] else {
+                opens += 1;
+                let probe = Probe::new(&machines[at]);
+                let label = ["a", "b"][at];
+                opened[at] = Some(
+                    F::open(probe, env(label, seed * 100 + opens, &clock))
+                        .unwrap()
+                        .0,
+                );
+                continue;
+            };
+            clock.advance(1 + pick(3) as u64);
+            match pick(9) {
+                0 | 1 => {
+                    let name = format!("f{seed}-{step}.bin");
+                    entities.push(create(library, &name, name.as_bytes()));
+                }
+                2 | 3 if !entities.is_empty() => {
+                    let entity = entities[pick(entities.len())];
+                    let value = tag(["x", "y", "z"][pick(3)]);
+                    let _ = library.commit("Tag", |i| i.add(entity, TAGS, value));
+                }
+                4 if !entities.is_empty() => {
+                    let entity = entities[pick(entities.len())];
+                    let _ = library.commit("Origin", |i| i.set(entity, ORIGIN, format!("o{step}")));
+                }
+                5 if !entities.is_empty() => {
+                    let entity = entities[pick(entities.len())];
+                    let _ = library.commit("Untag", |i| i.remove(entity, TAGS, &tag("x")));
+                }
+                6 => {
+                    library.refresh().unwrap();
+                }
+                7 => {
+                    let _ = library.compact();
+                }
+                _ => {
+                    library.refresh().unwrap();
+                    let shown = facts(&library.view());
+                    let library = opened[at].take().unwrap();
+                    match pick(2) {
+                        0 => library.close().unwrap(),
+                        _ => {
+                            drop(library);
+                            machines[at] = Machine {
+                                folder: folder.clone(),
+                                local: machines[at].local.restart(),
+                            };
+                        }
+                    }
+                    opens += 1;
+                    let probe = Probe::new(&machines[at]);
+                    let label = ["a", "b"][at];
+                    let (again, _) =
+                        F::open(probe, env(label, seed * 100 + opens, &clock)).unwrap();
+                    assert_eq!(
+                        facts(&again.view()),
+                        shown,
+                        "seed {seed} step {step}: reopened"
+                    );
+                    opened[at] = Some(again);
+                }
+            }
+            for (index, library) in opened.iter().enumerate() {
+                if let Some(library) = library {
+                    let shown = library.view().folded().clone();
+                    assert_eq!(
+                        shown,
+                        library.refolded(),
+                        "seed {seed} step {step}: instance {index}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn facts_a_restore_removed_are_shown_until_let_go<F: Facade>() {
     let folder = disk();
     let clock = TestClock::at(1_000);
@@ -3254,14 +3355,14 @@ fn a_settlement_that_stops_partway_leaves_the_record_open_until_settled_again<F:
                 let settles = entries
                     .iter()
                     .filter(
-                        |e| matches!(&e.kind, EntryKind::Settle(s) if s.record == orphan.record),
+                        |e| matches!(&e.kind(), EntryKind::Settle(s) if s.record == orphan.record),
                     )
                     .count();
                 let saved = toshokan::Raw::of(&"saved").unwrap();
                 let adds = entries
                     .iter()
-                    .filter_map(|e| match &e.kind {
-                        EntryKind::Intent(logged) => Some(&logged.ops),
+                    .filter_map(|e| match e.kind() {
+                        EntryKind::Intent(logged) => Some(logged.ops),
                         _ => None,
                     })
                     .flatten()

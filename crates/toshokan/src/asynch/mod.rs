@@ -263,6 +263,11 @@ impl<F: Fs> Library<F> {
         self.core.view()
     }
 
+    #[doc(hidden)]
+    pub fn refolded(&self) -> crate::merge::Folded {
+        self.core.refolded()
+    }
+
     pub fn history(&self) -> &[HistoryItem] {
         self.core.history()
     }
