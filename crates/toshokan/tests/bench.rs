@@ -39,13 +39,14 @@ wasm_bindgen_test_configure!(run_in_browser);
 let watching = null;
 export function watch_start() {
   const start = performance.now();
-  const w = { last: start, gap: 0, frame: start, frames: 0, tasks: [] };
+  const w = { last: start, gap: 0, frame: start, frames: 0, drawn: false, tasks: [] };
   w.timer = setInterval(() => {
     const now = performance.now();
     w.gap = Math.max(w.gap, now - w.last);
     w.last = now;
   }, 1);
   const frame = (now) => {
+    w.drawn = true;
     w.frames = Math.max(w.frames, now - w.frame);
     w.frame = now;
     w.request = requestAnimationFrame(frame);
@@ -63,10 +64,14 @@ export async function watch_stop() {
   const w = watching;
   watching = null;
   const end = performance.now();
-  await new Promise((done) => requestAnimationFrame(() => setTimeout(done, 0)));
+  await new Promise((done) => {
+    requestAnimationFrame(() => setTimeout(done, 0));
+    setTimeout(done, 200);
+  });
   clearInterval(w.timer);
   cancelAnimationFrame(w.request);
-  const gaps = [Math.max(w.gap, end - w.last), Math.max(w.frames, end - w.frame)];
+  const frames = w.drawn ? Math.max(w.frames, end - w.frame) : -1;
+  const gaps = [Math.max(w.gap, end - w.last), frames];
   if (!w.observer) return [...gaps, -1, 0, 0];
   for (const task of w.observer.takeRecords()) w.tasks.push(task.duration);
   w.observer.disconnect();
@@ -560,10 +565,13 @@ impl Samples {
             ),
         };
         let longest = |xs: &[f64]| xs.iter().copied().fold(0.0, f64::max);
+        let frames = match self.frames.iter().any(|gap| *gap < 0.0) {
+            true => "no frames drawn".to_owned(),
+            false => format!("longest frame gap {:.0}", longest(&self.frames)),
+        };
         say(&format!(
-            "bench | {name} | {} | longest frame gap {:.0}, timer gap {:.0} | {tasks}",
+            "bench | {name} | {} | {frames}, timer gap {:.0} | {tasks}",
             stats(&self.wall),
-            longest(&self.frames),
             longest(&self.timers),
         ));
     }
