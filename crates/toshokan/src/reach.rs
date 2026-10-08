@@ -334,7 +334,7 @@ impl Linking {
     }
 
     fn sort(&mut self) -> Stage {
-        fn sorted<K: Ord>(mut list: Vec<(K, ())>) -> CowMap<K, ()> {
+        fn sorted<K: Ord + Clone>(mut list: Vec<(K, ())>) -> CowMap<K, ()> {
             list.sort_unstable_by(|a, b| a.0.cmp(&b.0));
             list.dedup_by(|a, b| a.0 == b.0);
             CowMap::from_sorted(list)

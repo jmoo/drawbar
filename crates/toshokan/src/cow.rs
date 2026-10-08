@@ -14,8 +14,9 @@ type Chunk<K, V> = Arc<Vec<(K, V)>>;
 /// copies the list of chunks and the chunk it changes, when another clone shares
 /// them.
 pub struct CowMap<K, V> {
-    /// Never holds an empty chunk.
-    chunks: Arc<Vec<Chunk<K, V>>>,
+    /// Each chunk with its last key, which a search compares without reading
+    /// the chunk. Never holds an empty chunk.
+    chunks: Arc<Vec<(K, Chunk<K, V>)>>,
     len: usize,
 }
 
@@ -85,19 +86,26 @@ impl<K: Ord + Clone, V: Clone> CowMap<K, V> {
     /// The value under `key`, its chunk copied first when a clone shares it.
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         let (chunk, at) = self.locate(&|other: &K| other.cmp(key));
-        if self.chunks.get(chunk)?.get(at)?.0 != *key {
+        self.held_mut(chunk, at, key)
+    }
+
+    /// The value at `at` of chunk `chunk`, when it is under `key`.
+    fn held_mut(&mut self, chunk: usize, at: usize, key: &K) -> Option<&mut V> {
+        if self.chunks.get(chunk)?.1.get(at)?.0 != *key {
             return None;
         }
         let chunks = Arc::make_mut(&mut self.chunks);
-        Some(&mut Arc::make_mut(&mut chunks[chunk])[at].1)
+        Some(&mut Arc::make_mut(&mut chunks[chunk].1)[at].1)
     }
 
     /// The value under `key`, first inserting what `new` makes when there is none.
     pub fn get_or_insert_with(&mut self, key: K, new: impl FnOnce() -> V) -> &mut V {
-        if !self.contains_key(&key) {
+        let (chunk, at) = self.locate(&|other: &K| other.cmp(&key));
+        if self.held_mut(chunk, at, &key).is_none() {
             self.insert(key.clone(), new());
+            return self.get_mut(&key).expect("inserted above");
         }
-        self.get_mut(&key).expect("inserted above")
+        self.held_mut(chunk, at, &key).expect("held above")
     }
 
     /// Each key this map or `before` holds, with its entry in each, in order of
@@ -114,11 +122,14 @@ impl<K: Ord + Clone, V: Clone> CowMap<K, V> {
     /// looks for, in order. `probe` orders each key against what it looks for.
     pub fn seek(&self, probe: impl Fn(&K) -> Ordering) -> impl Iterator<Item = &(K, V)> {
         let (chunk, at) = self.locate(&probe);
-        let first = self.chunks.get(chunk).map_or(&[][..], |chunk| &chunk[at..]);
+        let first = self
+            .chunks
+            .get(chunk)
+            .map_or(&[][..], |(_, chunk)| &chunk[at..]);
         let rest = self.chunks.get(chunk + 1..).unwrap_or_default();
         first
             .iter()
-            .chain(rest.iter().flat_map(|chunk| chunk.iter()))
+            .chain(rest.iter().flat_map(|(_, chunk)| chunk.iter()))
     }
 
     /// The entry whose key `probe` orders as equal.
@@ -133,24 +144,30 @@ impl<K: Ord + Clone, V: Clone> CowMap<K, V> {
         let (mut chunk, mut at) = self.locate(&|other: &K| other.cmp(&key));
         let chunks = Arc::make_mut(&mut self.chunks);
         if chunk == chunks.len() {
-            let Some(last) = chunks.last() else {
-                chunks.push(Arc::new(vec![(key, value)]));
+            let Some((_, last)) = chunks.last() else {
+                chunks.push((key.clone(), Arc::new(vec![(key, value)])));
                 self.len += 1;
                 return None;
             };
             (chunk, at) = (chunks.len() - 1, last.len());
         }
-        let entries = Arc::make_mut(&mut chunks[chunk]);
+        let (last, entries) = &mut chunks[chunk];
+        let entries = Arc::make_mut(entries);
         if let Some((found, old)) = entries.get_mut(at) {
             if *found == key {
                 return Some(std::mem::replace(old, value));
             }
         }
+        if at == entries.len() {
+            *last = key.clone();
+        }
         entries.insert(at, (key, value));
         self.len += 1;
         if entries.len() > CHUNK {
             let half = entries.split_off(entries.len() / 2);
-            chunks.insert(chunk + 1, Arc::new(half));
+            let left = entries.last().expect("half is not all").0.clone();
+            let right = std::mem::replace(last, left);
+            chunks.insert(chunk + 1, (right, Arc::new(half)));
         }
         None
     }
@@ -158,18 +175,25 @@ impl<K: Ord + Clone, V: Clone> CowMap<K, V> {
     /// Removes the entry under `key`, returning its value.
     pub fn remove(&mut self, key: &K) -> Option<V> {
         let (chunk, at) = self.locate(&|other: &K| other.cmp(key));
-        let found = self.chunks.get(chunk)?.get(at)?;
+        let found = self.chunks.get(chunk)?.1.get(at)?;
         if found.0 != *key {
             return None;
         }
         let chunks = Arc::make_mut(&mut self.chunks);
-        let (_, value) = Arc::make_mut(&mut chunks[chunk]).remove(at);
+        let (last, entries) = &mut chunks[chunk];
+        let entries = Arc::make_mut(entries);
+        let (_, value) = entries.remove(at);
         self.len -= 1;
-        let left = chunks[chunk].len();
-        if left == 0 {
-            chunks.remove(chunk);
-        } else if left < CHUNK / 4 {
-            join_small(chunks, chunk);
+        match entries.last() {
+            None => {
+                chunks.remove(chunk);
+            }
+            Some((kept, _)) => {
+                *last = kept.clone();
+                if entries.len() < CHUNK / 4 {
+                    join_small(chunks, chunk);
+                }
+            }
         }
         Some(value)
     }
@@ -178,12 +202,9 @@ impl<K: Ord + Clone, V: Clone> CowMap<K, V> {
     /// what it looks for; the number of chunks when there is none.
     fn locate(&self, probe: &impl Fn(&K) -> Ordering) -> (usize, usize) {
         let before = |key: &K| probe(key) == Ordering::Less;
-        let chunk = self.chunks.partition_point(|chunk| match chunk.last() {
-            Some((last, _)) => before(last),
-            None => unreachable!("no chunk is empty"),
-        });
+        let chunk = self.chunks.partition_point(|(last, _)| before(last));
         match self.chunks.get(chunk) {
-            Some(entries) => (chunk, entries.partition_point(|(key, _)| before(key))),
+            Some((_, entries)) => (chunk, entries.partition_point(|(key, _)| before(key))),
             None => (chunk, 0),
         }
     }
@@ -206,14 +227,14 @@ impl<K: Ord + Clone, V: Clone> std::ops::Index<&K> for CowMap<K, V> {
     }
 }
 
-impl<K: Ord, V, const N: usize> From<[(K, V); N]> for CowMap<K, V> {
+impl<K: Ord + Clone, V, const N: usize> From<[(K, V); N]> for CowMap<K, V> {
     fn from(entries: [(K, V); N]) -> Self {
         entries.into_iter().collect()
     }
 }
 
 /// Repeated keys keep the last value.
-impl<K: Ord, V> FromIterator<(K, V)> for CowMap<K, V> {
+impl<K: Ord + Clone, V> FromIterator<(K, V)> for CowMap<K, V> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(entries: I) -> Self {
         let mut entries: Vec<(K, V)> = entries.into_iter().collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -228,15 +249,16 @@ impl<K: Ord, V> FromIterator<(K, V)> for CowMap<K, V> {
     }
 }
 
-impl<K: Ord, V> CowMap<K, V> {
+impl<K: Ord + Clone, V> CowMap<K, V> {
     /// The map of `entries`, which must be in order of key and name each key once.
     pub fn from_sorted(mut entries: Vec<(K, V)>) -> Self {
         debug_assert!(entries.windows(2).all(|pair| pair[0].0 < pair[1].0));
         let len = entries.len();
         let mut chunks = Vec::with_capacity(len.div_ceil(CHUNK));
-        while !entries.is_empty() {
-            let last = (entries.len() - 1) / CHUNK * CHUNK;
-            chunks.push(Arc::new(entries.split_off(last)));
+        while let Some((last, _)) = entries.last() {
+            let last = last.clone();
+            let start = (entries.len() - 1) / CHUNK * CHUNK;
+            chunks.push((last, Arc::new(entries.split_off(start))));
         }
         chunks.reverse();
         Self {
@@ -254,13 +276,13 @@ pub struct Diff<'a, K, V> {
 
 /// A place in a map's chunks.
 struct Cursor<'a, K, V> {
-    chunks: &'a [Chunk<K, V>],
+    chunks: &'a [(K, Chunk<K, V>)],
     chunk: usize,
     at: usize,
 }
 
 impl<'a, K, V> Cursor<'a, K, V> {
-    fn new(chunks: &'a [Chunk<K, V>]) -> Self {
+    fn new(chunks: &'a [(K, Chunk<K, V>)]) -> Self {
         Self {
             chunks,
             chunk: 0,
@@ -269,7 +291,7 @@ impl<'a, K, V> Cursor<'a, K, V> {
     }
 
     fn peek(&self) -> Option<&'a (K, V)> {
-        self.chunks.get(self.chunk)?.get(self.at)
+        self.chunks.get(self.chunk)?.1.get(self.at)
     }
 
     fn step(&mut self) {
@@ -277,7 +299,7 @@ impl<'a, K, V> Cursor<'a, K, V> {
         if self
             .chunks
             .get(self.chunk)
-            .is_some_and(|c| self.at == c.len())
+            .is_some_and(|(_, chunk)| self.at == chunk.len())
         {
             self.skip();
         }
@@ -290,7 +312,8 @@ impl<'a, K, V> Cursor<'a, K, V> {
 
     /// The chunk this cursor is at the start of.
     fn starting(&self) -> Option<&'a Chunk<K, V>> {
-        self.chunks.get(self.chunk).filter(|_| self.at == 0)
+        let chunk = self.chunks.get(self.chunk).filter(|_| self.at == 0);
+        chunk.map(|(_, chunk)| chunk)
     }
 }
 
@@ -326,20 +349,21 @@ impl<'a, K: Ord, V> Iterator for Diff<'a, K, V> {
 }
 
 /// Joins the small chunk at `at` with a neighbor when both fit in one.
-fn join_small<K: Clone, V: Clone>(chunks: &mut Vec<Chunk<K, V>>, at: usize) {
-    let fits = |other: usize| chunks[other].len() + chunks[at].len() <= CHUNK;
+fn join_small<K: Clone, V: Clone>(chunks: &mut Vec<(K, Chunk<K, V>)>, at: usize) {
+    let fits = |other: usize| chunks[other].1.len() + chunks[at].1.len() <= CHUNK;
     let pair = match (at.checked_sub(1), at + 1 < chunks.len()) {
         (Some(before), _) if fits(before) => before,
         (_, true) if fits(at + 1) => at,
         _ => return,
     };
-    let next = chunks.remove(pair + 1);
-    let joined = Arc::make_mut(&mut chunks[pair]);
-    joined.extend(next.iter().cloned());
+    let (last, next) = chunks.remove(pair + 1);
+    let (joined_last, joined) = &mut chunks[pair];
+    Arc::make_mut(joined).extend(next.iter().cloned());
+    *joined_last = last;
 }
 
 fn entries<K, V>(map: &CowMap<K, V>) -> impl Iterator<Item = &(K, V)> {
-    map.chunks.iter().flat_map(|chunk| chunk.iter())
+    map.chunks.iter().flat_map(|(_, chunk)| chunk.iter())
 }
 
 impl<K: PartialEq, V: PartialEq> PartialEq for CowMap<K, V> {
@@ -381,10 +405,10 @@ mod tests {
         assert_eq!(entries, expected, "step {step}");
         assert_eq!(map.len, model.len(), "step {step}");
         assert!(
-            map.chunks
-                .iter()
-                .all(|chunk| !chunk.is_empty() && chunk.len() <= CHUNK),
-            "step {step}: chunk sizes"
+            map.chunks.iter().all(|(last, chunk)| !chunk.is_empty()
+                && chunk.len() <= CHUNK
+                && chunk.last().map(|(key, _)| key) == Some(last)),
+            "step {step}: chunk sizes and last keys"
         );
     }
 
@@ -397,8 +421,12 @@ mod tests {
             let mut kept: Vec<(CowMap<u64, u64>, BTreeMap<u64, u64>)> = Vec::new();
             for step in 0..4000 {
                 let key = rng.below(span);
-                match rng.below(5) {
+                match rng.below(6) {
                     0 | 1 => assert_eq!(map.remove(&key), model.remove(&key), "step {step}"),
+                    2 => {
+                        *map.get_or_insert_with(key, || step as u64) += 1;
+                        *model.entry(key).or_insert(step as u64) += 1;
+                    }
                     _ => assert_eq!(
                         map.insert(key, step as u64),
                         model.insert(key, step as u64),
