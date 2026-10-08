@@ -1142,25 +1142,37 @@ impl Reader {
 
     /// The reads of [`Reader::read`], for [`Reader::absorb`] to place.
     pub fn list(&self) -> Task<'static, Result<Listing>> {
-        let writers = flow::list(Root::Folder, &self.layout.writers()).map_ok(|listed| {
+        self.scan(self.writers(), true, false)
+    }
+
+    /// As [`Reader::list`], taking each sealed segment and snapshot it read
+    /// before as it was by its name alone, and asking the length and time only
+    /// of the other files; a few, unless the folder is new to it.
+    pub fn probe(&self) -> Task<'static, Result<Listing>> {
+        self.scan(self.writers(), true, true)
+    }
+
+    /// The writers whose directories the folder holds.
+    fn writers(&self) -> Flow<'static, Result<Vec<WriterId>>> {
+        flow::list(Root::Folder, &self.layout.writers()).map_ok(|listed| {
             listed
                 .into_iter()
                 .filter(|entry| entry.kind == Kind::Directory)
                 .filter_map(|entry| entry.name.parse().ok())
                 .collect()
-        });
-        self.scan(writers, true)
+        })
     }
 
     /// The reads of [`Reader::read_writer`], for [`Reader::absorb`] to place.
     pub fn list_writer(&self, writer: WriterId) -> Task<'static, Result<Listing>> {
-        self.scan(flow::ok(vec![writer]), false)
+        self.scan(flow::ok(vec![writer]), false, false)
     }
 
     fn scan(
         &self,
         writers: Flow<'static, Result<Vec<WriterId>>>,
         everyone: bool,
+        probe: bool,
     ) -> Task<'static, Result<Listing>> {
         let layout = self.layout.clone();
         let known: Rc<BTreeMap<RelPath, Known>> = Rc::new(
@@ -1184,7 +1196,8 @@ impl Reader {
         writers
             .and_then(move |writers| {
                 flow::fold(writers.into_iter(), Vec::new(), move |mut done, writer| {
-                    scan_writer(&layout, writer, Rc::clone(&known)).map_ok(move |listed| {
+                    let known = Rc::clone(&known);
+                    scan_writer(&layout, writer, known, probe).map_ok(move |listed| {
                         done.push(listed);
                         done
                     })
@@ -1579,9 +1592,14 @@ fn scan_writer<'a>(
     layout: &Layout,
     writer: WriterId,
     known: Rc<BTreeMap<RelPath, Known>>,
+    probe: bool,
 ) -> Flow<'a, Result<Listed>> {
     let dir = layout.writer(writer);
-    flow::list_stat(Root::Folder, &dir)
+    let listed = match probe {
+        true => probed(dir.clone(), Rc::clone(&known)),
+        false => flow::list_stat(Root::Folder, &dir),
+    };
+    listed
         .and_then(move |entries| {
             let files: Vec<Planned> = entries
                 .into_iter()
@@ -1597,6 +1615,63 @@ fn scan_writer<'a>(
         .and_then(|fetched| parsed(fetched).then(flow::ok))
         .map_ok(move |files| Listed { writer, files })
 }
+
+/// The most files of a writer's directory, other than the sealed segments and
+/// snapshots read before, that a probe asks the length and time of one at a time
+/// rather than all at once.
+const PROBED: usize = 16;
+
+/// The entries of the writer's directory `dir`, as a listing with their lengths
+/// and times gives them, where `known` gives those of sealed segments and
+/// snapshots by name.
+fn probed<'a>(
+    dir: RelPath,
+    known: Rc<BTreeMap<RelPath, Known>>,
+) -> Flow<'a, Result<Vec<(String, Meta)>>> {
+    flow::list(Root::Folder, &dir).and_then(move |entries| {
+        let kept = |name: &str| {
+            let path = dir.join(name).ok()?;
+            let known = known.get(&path).filter(|known| known.fixed)?;
+            Some(Meta {
+                kind: Kind::File,
+                len: known.stamp.len,
+                modified: Some(known.stamp.modified),
+            })
+        };
+        let mut listed = Vec::new();
+        let mut asked = Vec::new();
+        for entry in entries {
+            match (entry.kind, kept(&entry.name)) {
+                (Kind::Directory, _) => listed.push((entry.name, DIRECTORY)),
+                (Kind::File, Some(meta)) => listed.push((entry.name, meta)),
+                (Kind::File, None) => asked.push(entry.name),
+            }
+        }
+        if asked.len() > PROBED {
+            return flow::list_stat(Root::Folder, &dir);
+        }
+        flow::fold(asked.into_iter(), listed, move |mut listed, name| {
+            let Ok(path) = dir.join(&name) else {
+                return flow::ok(listed);
+            };
+            flow::stat(Root::Folder, &path).map_ok(move |meta| {
+                listed.extend(meta.map(|meta| (name, meta)));
+                listed
+            })
+        })
+        .map_ok(|mut listed| {
+            listed.sort_by(|a, b| a.0.cmp(&b.0));
+            listed
+        })
+    })
+}
+
+/// What a listing with lengths and times gives of a directory.
+const DIRECTORY: Meta = Meta {
+    kind: Kind::Directory,
+    len: 0,
+    modified: None,
+};
 
 /// Files fetched whole and not parsed yet, parsed a slice at a time.
 struct Parse {

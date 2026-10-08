@@ -546,7 +546,11 @@ impl Library {
     /// what changed since the view, so a look the app dropped partway is reported
     /// by the next.
     fn look(&mut self, scope: Look) -> Task<'_, Result<Refreshed>> {
-        flow::run(self.reader.list())
+        let listed = match scope {
+            Look::Everything => self.reader.list(),
+            Look::Logs | Look::Paths(_) => self.reader.probe(),
+        };
+        flow::run(listed)
             .and_then(move |listing| {
                 let report = self.reader.absorb(listing);
                 let moved = self.absorb_read(&report);

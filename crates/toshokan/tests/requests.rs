@@ -284,3 +284,38 @@ fn a_refresh_reads_nothing_of_sealed_segments_it_read_before() {
         .collect();
     assert_eq!(tails, [1], "only the open segment's tail");
 }
+
+#[test]
+fn a_refresh_asks_the_length_and_time_only_of_files_that_may_grow() {
+    let disk = saved_library(4);
+    let schema = Schema::of(&[NAME.key()]).unwrap();
+    let mut other = Library::open(disk.process(), layout(), &schema, env(3))
+        .unwrap()
+        .0;
+    let (note, _) = other.intent("Note").create(|e| {
+        e.set(NAME, "note".into());
+    });
+    note.commit().unwrap();
+    let recorded = Recorded::new(disk.process());
+    let (mut library, _) = Library::open(recorded.clone(), layout(), &schema, env(2)).unwrap();
+    library.rescan().unwrap();
+    recorded.take();
+    library.refresh().unwrap();
+    let asked: Vec<&'static str> = recorded
+        .take()
+        .iter()
+        .filter_map(|io| match io {
+            Io::ListStat { .. } => Some("ListStat"),
+            Io::Stat { .. } => Some("Stat"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asked, ["Stat"], "only the open segment's");
+    library.rescan().unwrap();
+    let listed = recorded.take();
+    let stats = listed.iter().filter(|io| matches!(io, Io::ListStat { .. }));
+    assert!(
+        stats.count() >= 2,
+        "a rescan asks of every writer's files: {listed:?}"
+    );
+}

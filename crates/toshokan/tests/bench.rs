@@ -679,7 +679,9 @@ async fn measure() {
     );
     say(&format!("bench | {}", browser()));
     report_memory("before");
-    opfs_remove(parts(&format!("{}/own", home()))).await.unwrap();
+    opfs_remove(parts(&format!("{}/own", home())))
+        .await
+        .unwrap();
     let run = format!("{:08x}", CryptoRandom.next_u128() as u32);
 
     let mut cold = Samples::default();

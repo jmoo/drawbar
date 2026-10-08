@@ -378,7 +378,11 @@ entries takes them from this install's view too.
 A reader lists `writers/` and reads every file directly in each `writers/<w>/`
 other than a swap file, up to 256 MiB of it. A sealed segment or a snapshot whose
 length and modification time are unchanged is not read again, since nothing
-writes either again: segments and snapshots get new random names. Any other file
+writes either again: segments and snapshots get new random names. A refresh
+takes a sealed segment or snapshot read before by its name alone, and asks the
+length and modification time only of the other files, so a file changed in
+place, as a restore of the folder from an older copy can leave one, is found by
+the next open or rescan, which ask them of every file. Any other file
 whose length, modification time and last 34 bytes are unchanged is not read
 again; a segment's last 34 bytes are the tab, hash and LF that end its last line,
 or those of its seal marker. A segment without a seal

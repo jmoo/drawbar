@@ -3175,7 +3175,7 @@ fn an_adoption_whose_let_go_cannot_be_kept_is_committed<F: Facade>() {
     a.rescan().unwrap();
     let shown = facts(&a.view());
     restore(&folder, &backup);
-    assert_ne!(a.refresh().unwrap().removed, []);
+    assert_ne!(a.rescan().unwrap().removed, []);
     fail(&probe, local_writes(&["let-go.json.next"]));
     let adopted = a.adopt("Keep what the restore removed");
     heal(&probe);
