@@ -695,6 +695,9 @@ async fn measure() {
 
     let mut a = open("own").await;
     report_memory("after open");
+    let mut first_scan = Samples::default();
+    first_scan.time(a.rescan()).await.unwrap();
+    first_scan.report("rescan after open");
     let ids: Vec<EntityId> = a.view().entities().iter().map(|e| e.id()).collect();
     let offset = (CryptoRandom.next_u128() % ids.len() as u128) as usize;
     let pick = |i: usize| ids[(offset + i * 7919) % ids.len()];

@@ -491,15 +491,16 @@ their identities:
    the other files only those whose length a file fact gained have their
    identities read. A refresh scans again only the paths named by the file facts
    the entries it read changed, before and after, and the paths those entities
-   were bound to, with the same identity reads. Opening, and a rescan, which
-   the app asks for when something outside may have changed the folder, scan
-   every file. A scan that fails once a commit's entries are durable does not
-   fail the commit. Until a scan of every file succeeds, the paths it would have
-   scanned and what is under them are unknown: no file there is bound, reported
-   or a candidate for a move. The entities bound there before the commit, and
-   those whose file facts name such a path, are bound to no file and shown at
-   their logged path as unscanned. Nothing about them is pinned, and each
-   refresh scans every file until a scan of every file succeeds.
+   were bound to, with the same identity reads. A rescan, which the app asks for
+   once a library opens and when something outside may have changed the folder,
+   scans every file. Opening scans none: until a scan of every file succeeds,
+   every library path is unknown. A scan that fails once a commit's entries are
+   durable does not fail the commit. Until a scan of every file succeeds, the
+   paths it would have scanned and what is under them are unknown: no file there
+   is bound, reported or a candidate for a move. The entities bound there before
+   the commit, and those whose file facts name such a path, are bound to no file
+   and shown at their logged path as unscanned. Nothing about them is pinned, and
+   each refresh scans every file until a scan of every file succeeds.
    A scan of every file lists one directory at a time and keeps what it listed.
    One that stops before every directory is listed binds nothing; the next goes
    on where it stopped, listing again each directory holding a path a commit or

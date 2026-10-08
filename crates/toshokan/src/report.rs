@@ -39,7 +39,6 @@ pub struct Opened {
     /// Pending records ignored: unreadable, naming a path outside the library, or
     /// not chained to their writer's log.
     pub ignored: Vec<RelPath>,
-    pub scan: ScanReport,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -199,7 +198,7 @@ pub enum Lag {
     /// as removed again.
     LetGo,
     /// The scan after the commit failed. The entities whose files its effects
-    /// touched are [`crate::FileState::Unscanned`] until a refresh scans every file.
+    /// touched are [`crate::FileState::Unscanned`] until a scan of every file.
     Scan,
     /// The commit's pending record is still in the folder. No reader reports it,
     /// since the log continues past it.
@@ -240,6 +239,9 @@ pub struct Refreshed {
     pub changes: Vec<Change>,
     /// As [`Opened::removed`], as of this refresh.
     pub removed: Vec<Change>,
+    /// What the files scanned so far hold against the logged facts; empty until
+    /// a scan of every file has succeeded.
+    pub scan: ScanReport,
 }
 
 /// One change to what a reader sees.

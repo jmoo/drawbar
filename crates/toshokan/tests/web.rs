@@ -425,6 +425,7 @@ async fn a_watched_folder_hints_the_paths_another_program_wrote() {
     let place = Place::new(Kind::Private);
     let clock = TestClock::at(1_000);
     let (mut a, _) = place.open("one", "a", 1, &clock).await;
+    a.rescan().await.unwrap();
     create(&mut a, "song.npno", b"song").await;
     let name = format!("{:032x}", CryptoRandom.next_u128());
     let mut hints = Hints::new(&name, Some(Duration::from_secs(20))).unwrap();
@@ -452,6 +453,7 @@ async fn a_refresh_reads_no_library_file_and_a_rescan_reads_them_all() {
     let place = Place::new(Kind::Private);
     let clock = TestClock::at(1_000);
     let (mut a, _) = place.open("one", "a", 1, &clock).await;
+    a.rescan().await.unwrap();
     create(&mut a, "song.npno", b"song").await;
     write_outside(&a, "copy.npno", b"song").await;
     a.refresh().await.unwrap();

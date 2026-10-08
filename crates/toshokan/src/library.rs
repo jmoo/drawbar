@@ -124,8 +124,10 @@ struct Resolved {
 
 impl Library {
     /// Claims a writer from the pool, starts from the cached views of every writer
-    /// of the pool joined, reads the folder, assesses recovery, scans the
-    /// library's files and checks drafts. `capabilities` are the folder's.
+    /// of the pool joined, reads the folder, assesses recovery and checks drafts.
+    /// No library file is scanned: each entity's file is
+    /// [`FileState::Unscanned`] at the path its facts give until
+    /// [`Library::rescan`] finishes. `capabilities` are the folder's.
     pub fn open(
         layout: Layout,
         schema: Schema,
@@ -193,7 +195,7 @@ impl Library {
                 })
             })
             .and_then(|(library, report, start)| {
-                rescan(library).map_ok(move |library| (library, report, start))
+                presumed_bound(library).then(move |library| ok((library, report, start)))
             })
             .and_then(|(library, report, start)| {
                 flow::run(library.presence_task()).and_then(move |presence| {
@@ -228,7 +230,6 @@ impl Library {
                             .map(|(path, _)| path)
                             .collect(),
                         ignored: library.ignored.clone(),
-                        scan: library.bindings.report.clone(),
                     };
                     (library, opened)
                 })
@@ -567,6 +568,7 @@ impl Library {
                 reshown(library).map_ok(move |library| Refreshed {
                     changes,
                     removed: library.removed_facts(),
+                    scan: library.bindings.report.clone(),
                 })
             })
             .task()
@@ -1591,6 +1593,15 @@ fn scan_for<'a>(
         true => ok(library),
         false => rescan_paths(library, paths),
     }
+}
+
+/// Binds every entity with a file where its facts say, knowing none of the
+/// library's files until a scan of every one succeeds.
+fn presumed_bound(mut library: Library) -> Flow<'static, Library> {
+    library.unscanned.add(vec![RelPath::ROOT], &library.bindings);
+    library.bind_due = true;
+    let scan = library.scan.clone();
+    rebound(library, scan)
 }
 
 /// Scans every library file, going on from where a scan that stopped left off,

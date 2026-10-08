@@ -52,9 +52,10 @@ pub enum FileState {
     ChangedOutside,
     /// No file the entity can be bound to is there.
     Missing,
-    /// Unknown: a scan of the path failed after this instance's own commit moved
-    /// files there or from there. The path is the logged one. A refresh that scans
-    /// every file binds it again.
+    /// Unknown: no scan of every file has succeeded since the library opened, or
+    /// a scan of the path failed after this instance's own commit moved files there
+    /// or from there. The path is the logged one. A scan of every file binds it
+    /// again.
     Unscanned,
 }
 

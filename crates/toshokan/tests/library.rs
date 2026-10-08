@@ -555,6 +555,7 @@ through_both!(
     a_commit_scans_only_what_it_moved_and_a_rescan_finds_the_rest,
     an_identity_read_for_a_new_time_is_read_once_per_install,
     opening_viewing_and_refreshing_write_nothing_in_the_folder,
+    opening_scans_no_library_file_and_the_first_refresh_scans_them_all,
     swap_files_a_browser_left_are_neither_scanned_nor_read,
     losing_the_local_root_at_any_step_loses_only_drafts,
     a_crash_at_any_step_is_settled_before_the_next_write,
@@ -744,9 +745,8 @@ fn two_writers_tag_one_library_and_converge<F: Facade>() {
         }),
         "{from_b:?}"
     );
-    let fresh = F::open(Probe::new(&machine(&folder)), env("c", 3, &clock))
-        .unwrap()
-        .0;
+    let (mut fresh, _) = F::open(Probe::new(&machine(&folder)), env("c", 3, &clock)).unwrap();
+    fresh.rescan().unwrap();
     assert_eq!(
         facts(&fresh.view()),
         facts(&a.view()),
@@ -791,9 +791,8 @@ fn what_refreshes_fold_in_is_what_a_fresh_open_shows<F: Facade>() {
             continue;
         }
         other.refresh().unwrap();
-        let fresh = F::open(Probe::new(&machine(&folder)), env("c", 3, &clock))
-            .unwrap()
-            .0;
+        let (mut fresh, _) = F::open(Probe::new(&machine(&folder)), env("c", 3, &clock)).unwrap();
+        fresh.rescan().unwrap();
         assert!(
             other.view().folded() == fresh.view().folded(),
             "step {step}: {:?}",
@@ -836,6 +835,7 @@ fn a_refresh_scans_only_the_files_other_writers_moved<F: Facade>() {
     let clock = TestClock::at(1_000);
     let probe = Probe::new(&machine(&folder));
     let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
     let song = create(&mut a, "song.npno", b"song");
     let others = 50;
     for i in 0..others {
@@ -1424,9 +1424,9 @@ fn a_copy_has_no_entity_until_one_is_said<F: Facade>() {
     );
     a.close().unwrap();
 
-    let (mut a, opened) = F::open(Probe::new(&machine(&folder)), env("a", 2, &clock)).unwrap();
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 2, &clock)).unwrap();
     assert_eq!(
-        opened.scan.copied,
+        a.rescan().unwrap().scan.copied,
         [toshokan::report::Copied {
             entity: song,
             copy: path("copy.npno")
@@ -1494,7 +1494,8 @@ fn a_move_keeps_its_tags_and_is_pinned_by_the_next_commit<F: Facade>() {
         by: By::This
     }));
     put(&folder, "song.npno", b"song");
-    let (b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+    let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+    b.rescan().unwrap();
     let file = b.view().entity(song).unwrap().file().unwrap();
     assert_eq!(
         file.path,
@@ -1858,6 +1859,7 @@ fn a_commit_whose_record_cannot_be_removed_is_kept<F: Facade>() {
     let clock = TestClock::at(1_000);
     let probe = Probe::new(&machine(&folder));
     let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
     let song = create(&mut a, "song.npno", b"song");
     fail(
         &probe,
@@ -2065,19 +2067,20 @@ fn an_identity_read_for_a_new_time_is_read_once_per_install<F: Facade>() {
     }
     let clock = TestClock::at(1_000);
     let here = machine(&folder);
-    let open = |seed| {
+    let scan = |seed| {
         let probe = Probe::new(&here);
-        let (library, opened) = F::open(probe.clone(), env("a", seed, &clock)).unwrap();
-        (library, opened, probe.file_reads())
+        let (mut library, _) = F::open(probe.clone(), env("a", seed, &clock)).unwrap();
+        let scanned = library.rescan().unwrap().scan;
+        (library, scanned, probe.file_reads())
     };
-    let (_, opened, reads) = open(1);
-    assert_eq!((reads, opened.scan.changed.len()), (20, 0));
-    let (_, opened, reads) = open(2);
-    assert_eq!((reads, opened.scan.changed.len()), (0, 0));
+    let (_, scanned, reads) = scan(1);
+    assert_eq!((reads, scanned.changed.len()), (20, 0));
+    let (_, scanned, reads) = scan(2);
+    assert_eq!((reads, scanned.changed.len()), (0, 0));
     let (song, at) = &files[0];
     put(&folder, at.as_str(), b"FILE 0");
-    let (_, opened, reads) = open(3);
-    assert_eq!((reads, opened.scan.changed), (1, vec![*song]));
+    let (_, scanned, reads) = scan(3);
+    assert_eq!((reads, scanned.changed), (1, vec![*song]));
 }
 
 #[test]
@@ -2090,8 +2093,9 @@ fn a_library_whose_files_all_have_new_modification_times_commits() {
     }
     let clock = TestClock::at(1_000);
     let probe = Probe::new(&machine(&folder));
-    let (mut a, opened) = Blocking::open(probe, env("a", 1, &clock)).unwrap();
-    assert_eq!((opened.scan.changed.len(), opened.scan.moved.len()), (0, 0));
+    let (mut a, _) = Blocking::open(probe, env("a", 1, &clock)).unwrap();
+    let scanned = a.rescan().unwrap().scan;
+    assert_eq!((scanned.changed.len(), scanned.moved.len()), (0, 0));
     let (song, _) = files[0];
     a.commit("Tag", |i| i.add(song, TAGS, tag("kept"))).unwrap();
     let writer = label_of(&a.view(), "a");
@@ -2133,8 +2137,9 @@ fn a_commit_pins_any_number_of_moves_in_entries_within_the_line_limit() {
         assert!(len <= MAX_LINE, "{len} bytes");
     }
     let probe = Probe::new(&machine(&folder));
-    let (b, opened) = Blocking::open(probe, env("b", 2, &clock)).unwrap();
-    assert_eq!(opened.scan.moved, [], "the pins say where each file went");
+    let (mut b, _) = Blocking::open(probe, env("b", 2, &clock)).unwrap();
+    let scanned = b.rescan().unwrap().scan;
+    assert_eq!(scanned.moved, [], "the pins say where each file went");
     let file = b.view().entity(song).unwrap().file().unwrap();
     assert_eq!(
         (file.path, file.state),
@@ -2158,8 +2163,8 @@ fn opening_viewing_and_refreshing_write_nothing_in_the_folder<F: Facade>() {
     .unwrap();
     put(&folder, "outside.npno", b"outside");
     let probe = Probe::new(&machine(&folder));
-    let (mut b, opened) = F::open(probe.clone(), env("b", 2, &clock)).unwrap();
-    assert_eq!(opened.scan.arrived, [path("outside.npno")]);
+    let (mut b, _) = F::open(probe.clone(), env("b", 2, &clock)).unwrap();
+    assert_eq!(b.rescan().unwrap().scan.arrived, [path("outside.npno")]);
     let _ = b.view();
     a.commit("Tag", |i| i.add(song, TAGS, tag("more"))).unwrap();
     b.refresh().unwrap();
@@ -2168,6 +2173,45 @@ fn opening_viewing_and_refreshing_write_nothing_in_the_folder<F: Facade>() {
     assert_eq!(probe.folder_writes(), 0);
     b.commit("Tag", |i| i.add(song, TAGS, tag("b"))).unwrap();
     assert!(probe.folder_writes() > 0);
+}
+
+fn opening_scans_no_library_file_and_the_first_refresh_scans_them_all<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    a.close().unwrap();
+    move_outside(&folder, "song.npno", "moved.npno");
+    put(&folder, "outside.npno", b"outside");
+
+    let probe = Probe::new(&machine(&folder));
+    let (mut b, _) = F::open(probe.clone(), env("b", 2, &clock)).unwrap();
+    assert_eq!(probe.library_reads(), 0);
+    let file = b.view().entity(song).unwrap().file().unwrap();
+    assert_eq!(
+        (file.path, file.state),
+        (path("song.npno"), FileState::Unscanned),
+        "presumed where its facts say"
+    );
+    assert_eq!(b.view().unbound(), [] as [RelPath; 0]);
+
+    let refreshed = b.refresh().unwrap();
+    assert!(probe.library_reads() > 0, "nothing scanned yet, so all");
+    let moved = Change {
+        entity: song,
+        what: What::File,
+        by: By::Outside,
+    };
+    assert_eq!(refreshed.changes, [moved]);
+    assert_eq!(refreshed.scan.arrived, [path("outside.npno")]);
+    let file = b.view().entity(song).unwrap().file().unwrap();
+    assert_eq!(
+        (file.path, file.state),
+        (path("moved.npno"), FileState::InSync)
+    );
+    let before = probe.library_reads();
+    b.refresh().unwrap();
+    assert_eq!(probe.library_reads(), before, "then only what entries move");
 }
 
 fn swap_files_a_browser_left_are_neither_scanned_nor_read<F: Facade>() {
@@ -2192,8 +2236,8 @@ fn swap_files_a_browser_left_are_neither_scanned_nor_read<F: Facade>() {
     ] {
         put(&folder, &at, bytes);
     }
-    let (a, opened) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
-    assert_eq!(opened.scan.arrived, [] as [RelPath; 0]);
+    let (mut a, opened) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    assert_eq!(a.rescan().unwrap().scan.arrived, [] as [RelPath; 0]);
     assert_eq!(opened.unreadable, [] as [RelPath; 0]);
     assert_eq!(opened.ignored, [] as [RelPath; 0]);
     assert_eq!(a.view().unbound(), [] as [RelPath; 0]);
@@ -2994,8 +3038,9 @@ fn what_is_shown_is_what_its_logs_fold_to<F: Facade>() {
                     opens += 1;
                     let probe = Probe::new(&machines[at]);
                     let label = ["a", "b"][at];
-                    let (again, _) =
+                    let (mut again, _) =
                         F::open(probe, env(label, seed * 100 + opens, &clock)).unwrap();
+                    again.rescan().unwrap();
                     assert_eq!(
                         facts(&again.view()),
                         shown,
@@ -3029,6 +3074,7 @@ fn facts_a_restore_removed_are_shown_until_let_go<F: Facade>() {
     restore(&folder, &backup);
 
     let (mut a, opened) = F::open(Probe::new(&here), env("a", 3, &clock)).unwrap();
+    a.rescan().unwrap();
     assert_eq!(facts(&a.view()), shown, "nothing is dropped silently");
     let by_b = By::Writer {
         writer: b,
@@ -3053,7 +3099,9 @@ fn facts_a_restore_removed_are_shown_until_let_go<F: Facade>() {
     assert_eq!(opened.removed.len(), 3, "{:?}", opened.removed);
 
     a.let_go().unwrap();
-    let (elsewhere, _) = F::open(Probe::new(&machine(&folder)), env("c", 4, &clock)).unwrap();
+    let (mut elsewhere, _) =
+        F::open(Probe::new(&machine(&folder)), env("c", 4, &clock)).unwrap();
+    elsewhere.rescan().unwrap();
     assert_eq!(tags(&a.view(), song), ["new"]);
     assert_eq!(facts(&a.view()), facts(&elsewhere.view()));
     assert_eq!(a.refresh().unwrap().removed, []);
@@ -3061,6 +3109,7 @@ fn facts_a_restore_removed_are_shown_until_let_go<F: Facade>() {
     here.crash();
     let (mut a, opened) = F::open(Probe::new(&here), env("a", 5, &clock)).unwrap();
     assert_eq!(opened.removed, [], "letting go holds across opens");
+    a.rescan().unwrap();
     assert_eq!(facts(&a.view()), facts(&elsewhere.view()));
     a.commit("Tag", |i| i.add(song, TAGS, tag("after")))
         .unwrap();
@@ -3095,15 +3144,18 @@ fn facts_a_restore_removed_are_republished_when_adopted<F: Facade>() {
     assert!(adopted.changes.iter().all(|change| change.entity == song));
     assert_eq!(facts(&a.view()), shown);
     assert_eq!(a.refresh().unwrap().removed, []);
-    let (elsewhere, _) = F::open(Probe::new(&machine(&folder)), env("d", 5, &clock)).unwrap();
+    let (mut elsewhere, _) =
+        F::open(Probe::new(&machine(&folder)), env("d", 5, &clock)).unwrap();
+    elsewhere.rescan().unwrap();
     assert_eq!(
         facts(&elsewhere.view()),
         shown,
         "the folder holds them again"
     );
     a.close().unwrap();
-    let (a, opened) = F::open(Probe::new(&here), env("a", 6, &clock)).unwrap();
+    let (mut a, opened) = F::open(Probe::new(&here), env("a", 6, &clock)).unwrap();
     assert_eq!(opened.removed, []);
+    a.rescan().unwrap();
     assert_eq!(facts(&a.view()), shown);
     assert!(matches!(
         F::open(Probe::new(&here), env("a", 7, &clock))
@@ -3122,6 +3174,7 @@ fn an_adoption_whose_let_go_cannot_be_kept_is_committed<F: Facade>() {
     a.close().unwrap();
     let probe = Probe::new(&here);
     let (mut a, _) = F::open(probe.clone(), env("a", 8, &clock)).unwrap();
+    a.rescan().unwrap();
     let shown = facts(&a.view());
     restore(&folder, &backup);
     assert_ne!(a.refresh().unwrap().removed, []);
@@ -3497,7 +3550,6 @@ fn reopening_reads_only_the_ends_of_files_read_before<F: Facade>() {
         a.commit("Tag", |i| i.add(song, TAGS, format!("a{n}")))
             .unwrap();
     }
-    a.refresh().unwrap();
     let before = facts(&a.view());
     a.close().unwrap();
 

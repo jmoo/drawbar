@@ -419,11 +419,12 @@ fn run_seeded(seed: u64) {
                     // A directory listed before the change shows it at the next rescan.
                     pollster::block_on(library.rescan()).unwrap();
                 }
-                let fresh = open(&folder, "fresh", seed * 10 + 2);
+                let mut fresh = open(&folder, "fresh", seed * 10 + 2);
+                pollster::block_on(fresh.rescan()).unwrap();
                 assert_eq!(
                     shown(&library.view()),
                     shown(&fresh.view()),
-                    "{case}: a resumed rescan shows what a fresh open does"
+                    "{case}: a resumed rescan shows what a fresh open and rescan do"
                 );
             }
         }

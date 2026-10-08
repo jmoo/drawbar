@@ -54,14 +54,17 @@ and every conflict (`conflicts`). Values compare by the JSON toshokan writes for
 them; `range` and `values` decode each distinct value of the key. Searching
 names or derived metadata is the app's.
 
+Opening scans no library file: each file is shown where its facts put it, as
+unscanned, until a scan of every file. `rescan` scans every library file, for
+what changed outside the app; a rescan the app drops, to commit or to close,
+goes on where it stopped at the next one. An app rescans once a library opens.
 `refresh` reads what other writers logged since, and scans only the files their
-entries moved. `rescan` also scans every library file, for what changed outside
-the app; a rescan the app drops, to commit or to close, goes on where it stopped
-at the next one. `rescan_paths` scans the files a watcher saw change.
+entries moved, or every file until one rescan has finished. `rescan_paths` scans
+the files a watcher saw change. Each reports what changed and, once every file
+was scanned, the files that arrived, moved or changed outside the app.
 
 `opened` reports what needs the user: effects another writer left unfinished,
-drafts, forks, facts a restore of the folder removed, and files that arrived,
-moved or changed outside the app. A view never changes, so an app can hand it to
+drafts, forks and facts a restore of the folder removed. A view never changes, so an app can hand it to
 other threads. A field read from a view is a value, a conflict between writers,
 or unreadable, so an app cannot show half a conflict by accident.
 

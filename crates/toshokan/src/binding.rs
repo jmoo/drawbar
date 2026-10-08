@@ -299,7 +299,8 @@ pub fn rescan(
 /// Whether `path` is one of `paths` or under one of them.
 fn under(path: &RelPath, paths: &BTreeSet<&str>) -> bool {
     let text = path.as_str();
-    paths.contains(text)
+    paths.contains(RelPath::ROOT.as_str())
+        || paths.contains(text)
         || text
             .match_indices('/')
             .any(|(at, _)| paths.contains(&text[..at]))
