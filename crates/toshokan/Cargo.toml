@@ -9,6 +9,11 @@ publish = false
 repository.workspace = true
 version = "0.1.0"
 
+# Features the Nix build must enable when running tests: the wire encoding's tests
+# run natively, and Clippy reads the browser code.
+[package.metadata.nix]
+testFeatures = ["web"]
+
 [features]
 # The browser backends: a dedicated worker over the origin private file system or
 # a folder the user picked.
