@@ -29,10 +29,14 @@ pub const WRITERS: &str = "writers";
 pub const PENDING: &str = "pending";
 pub const TRASH: &str = "trash";
 pub const TMP: &str = "tmp";
-/// Segments end in `.txt`. Chromium checks every file written in a picked folder
-/// with Safe Browsing at close unless its type is one it only samples, like
-/// `.txt` and `.json`: such a close takes about 1.6 ms, and one of an unlisted
-/// type, like `.jsonl`, about 45 ms.
+/// Segments end in `.txt`, a type whose writes in a picked folder Chromium's Safe
+/// Browsing check samples rather than always checks.
+// Confirmed on hardware.
+// A `.txt` close takes about 1.6 ms in Chrome; one of an unlisted type, such as
+// `.jsonl`, about 45 ms.
+// Reported by public documentation; not confirmed on hardware.
+// Chromium's `download_file_types.asciipb` samples `.txt` and `.json` with
+// probability 0.01, so about 1 close in 100 still pays the full check.
 pub const SEGMENT_EXTENSION: &str = ".txt";
 
 #[derive(Clone, PartialEq, Eq, Debug)]
