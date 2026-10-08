@@ -1047,6 +1047,19 @@ impl Folded {
         state.latest_file().map(|file| &file.path)
     }
 
+    /// Every entity shown after `after`, by id, with the path of its latest
+    /// surviving file write that names a file, if any.
+    pub(crate) fn shown_paths_after(
+        &self,
+        after: Option<EntityId>,
+    ) -> impl Iterator<Item = (EntityId, Option<&RelPath>)> {
+        let shown = self
+            .entities
+            .after(after)
+            .filter(|(_, state)| state.present());
+        shown.map(|(entity, state)| (*entity, state.latest_file().map(|file| &file.path)))
+    }
+
     /// How many entities the state holds anything of, shown or not.
     pub fn entity_count(&self) -> usize {
         self.entities.len()

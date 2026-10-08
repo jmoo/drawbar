@@ -57,6 +57,9 @@ struct Entries<'a> {
 #[derive(Default)]
 pub(crate) struct Indexing {
     stage: Stage,
+    /// The index whose values and conflicts are kept, when only the paths are
+    /// built again.
+    kept: Option<Index>,
     holding: BTreeMap<(KeyKind, String), Holding>,
     keys: BTreeMap<(KeyKind, String), Arc<KeyIndex>>,
     paths: Vec<((RelPath, EntityId), FileState)>,
@@ -76,6 +79,15 @@ enum Stage {
 }
 
 impl Indexing {
+    /// Builds the paths of an index again, and keeps the values and conflicts of
+    /// `kept`: for bindings that changed when the state did not.
+    pub(crate) fn paths(kept: &Index) -> Self {
+        Self {
+            kept: Some(kept.clone()),
+            ..Self::default()
+        }
+    }
+
     /// Takes the next `slice` entities of `folded`, bound as `bindings` says, or
     /// once every one is taken builds the indexes of keys holding about `slice`
     /// values; true once every index is built. Each step must be given the same
@@ -97,6 +109,9 @@ impl Indexing {
         after: Option<EntityId>,
         slice: usize,
     ) {
+        if self.kept.is_some() {
+            return self.take_paths(folded, bindings, after, slice);
+        }
         let mut entities = folded.each_shown_after(after);
         for (entity, shown) in entities.by_ref().take(slice) {
             self.stage = Stage::After(entity);
@@ -135,6 +150,30 @@ impl Indexing {
         }
     }
 
+    /// Takes the paths of the next `slice` entities, as [`Entries`] gives them.
+    fn take_paths(
+        &mut self,
+        folded: &Folded,
+        bindings: &Bindings,
+        after: Option<EntityId>,
+        slice: usize,
+    ) {
+        let mut entities = folded.shown_paths_after(after);
+        for (entity, logged) in entities.by_ref().take(slice) {
+            self.stage = Stage::After(entity);
+            let file = match bindings.bound.get(&entity) {
+                Some(file) => Some((&file.path, file.state)),
+                None => logged.map(|path| (path, FileState::Missing)),
+            };
+            if let Some((path, state)) = file {
+                self.paths.push(((path.clone(), entity), state));
+            }
+        }
+        if entities.next().is_none() {
+            self.stage = Stage::Keys;
+        }
+    }
+
     /// Builds the indexes of the next keys gathered, until they hold `slice`
     /// values, then of the paths.
     fn build(&mut self, slice: usize) {
@@ -153,10 +192,14 @@ impl Indexing {
     /// ⚠️ Before [`Indexing::step`] returns true, an index lacking what is not
     /// built yet.
     pub(crate) fn finish(self) -> Index {
-        Index {
-            keys: self.keys,
-            paths: CowMap::from_sorted(self.paths),
-            conflicts: self.conflicts.into_iter().collect(),
+        let paths = CowMap::from_sorted(self.paths);
+        match self.kept {
+            Some(kept) => Index { paths, ..kept },
+            None => Index {
+                keys: self.keys,
+                paths,
+                conflicts: self.conflicts.into_iter().collect(),
+            },
         }
     }
 }
@@ -169,30 +212,41 @@ impl Index {
         indexing.finish()
     }
 
-    /// Moves the entries of each entity that changed between `before`, the folded
-    /// state and bindings this index holds, and `after`. Builds the index again
-    /// when most entities changed.
+    /// Follows the change from `before`, the folded state and bindings this index
+    /// holds, to `after`, as [`Index::changed`] says.
     pub fn update(&mut self, before: (&Folded, &Bindings), after: (&Folded, &Bindings)) {
         match Self::changed(before, after) {
-            Some(entities) => self.move_entries(before, after, entities),
-            None => *self = Self::of(after.0, after.1),
+            Follow::Move(entities) => self.move_entries(before, after, entities),
+            Follow::Paths(entities) => {
+                let mut indexing = Indexing::paths(self);
+                while !indexing.step(after.0, after.1, usize::MAX) {}
+                *self = indexing.finish();
+                self.move_entries(before, after, entities);
+            }
+            Follow::Build => *self = Self::of(after.0, after.1),
         }
     }
 
-    /// The entities whose state or binding differs between `before` and
-    /// `after`; `None` when so many do that building the index again costs less
-    /// than moving their entries.
-    pub fn changed(
-        before: (&Folded, &Bindings),
-        after: (&Folded, &Bindings),
-    ) -> Option<Vec<EntityId>> {
+    /// What following the change from `before` to `after` takes: moving the
+    /// entries of the entities whose state or binding differs, unless so many do
+    /// that building them again costs less.
+    pub(crate) fn changed(before: (&Folded, &Bindings), after: (&Folded, &Bindings)) -> Follow {
+        let limit = REBUILT.max(after.0.entity_count() / 4);
         let mut entities = after.0.changed(before.0);
-        if !std::ptr::eq(before.1, after.1) {
-            entities.extend(rebound(&before.1.bound, &after.1.bound));
-            entities.sort_unstable();
-            entities.dedup();
+        if entities.len() > limit {
+            return Follow::Build;
         }
-        (entities.len() <= REBUILT.max(after.0.entity_count() / 4)).then_some(entities)
+        if std::ptr::eq(before.1, after.1) {
+            return Follow::Move(entities);
+        }
+        let rebound = rebound(&before.1.bound, &after.1.bound);
+        if rebound.len() > limit {
+            return Follow::Paths(entities);
+        }
+        entities.extend(rebound);
+        entities.sort_unstable();
+        entities.dedup();
+        Follow::Move(entities)
     }
 
     /// Moves the entries of `entities`, which [`Index::changed`] gave, from what
@@ -490,6 +544,18 @@ impl<'a> Entries<'a> {
 /// How many changed entities an update moves one at a time, at least.
 const REBUILT: usize = 1024;
 
+/// What an index does to follow a change.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Follow {
+    /// Move the entries of these entities.
+    Move(Vec<EntityId>),
+    /// Build the paths again from the bindings alone, which changed for most
+    /// entities, then move the entries of these entities, whose state changed.
+    Paths(Vec<EntityId>),
+    /// Build everything again.
+    Build,
+}
+
 /// The entities whose binding differs between `was` and `now`.
 fn rebound(was: &CowMap<EntityId, FileRef>, now: &CowMap<EntityId, FileRef>) -> Vec<EntityId> {
     let pairs = now.diff(was);
@@ -621,6 +687,50 @@ mod tests {
                 index.update((&folded, &bound), (&next, &rebound));
                 assert_eq!(index, Index::of(&next, &rebound), "seed {seed}, entry {n}");
                 (folded, bound) = (next, rebound);
+            }
+        }
+    }
+
+    #[test]
+    fn an_index_whose_paths_are_built_again_equals_one_built_at_once() {
+        for seed in 0..200 {
+            let mut random = SeededRandom::new(seed + 1000);
+            let mut folded = Folded::default();
+            let mut hashes = Vec::new();
+            for n in 0..30 {
+                let ops = (0..1 + below(&mut random, 3))
+                    .map(|_| op(&mut random, &hashes))
+                    .collect();
+                let line = Line::seal(format!(r#"{{"prev":"{}","n":{n}}}"#, EntryHash::ZERO));
+                let kind = EntryKind::Intent(Logged {
+                    label: String::new(),
+                    ops,
+                    displaced: Vec::new(),
+                    reverses: None,
+                });
+                let at = Hlc {
+                    wall_ms: n,
+                    counter: 0,
+                };
+                let entry = Entry::new(line.unwrap(), at, kind, false);
+                hashes.push(entry.hash());
+                let mut next = folded.clone();
+                next.apply(WriterId::from_u128(1), &entry);
+                if n % 3 == 0 {
+                    folded = next;
+                    continue;
+                }
+                let bound = bindings(&mut random, &folded);
+                let rebound = bindings(&mut random, &next);
+                let index = Index::of(&folded, &bound);
+                let mut indexing = Indexing::paths(&index);
+                let slice = 1 + below(&mut random, 4);
+                while !indexing.step(&next, &rebound, slice) {}
+                let mut index = indexing.finish();
+                let entities = next.changed(&folded);
+                index.move_entries((&folded, &bound), (&next, &rebound), entities);
+                assert_eq!(index, Index::of(&next, &rebound), "seed {seed}, entry {n}");
+                folded = next;
             }
         }
     }

@@ -23,7 +23,7 @@ use crate::env::Env;
 use crate::error::{Error, Invalid, Refusal, Result, Why};
 use crate::flow::{self, fold, ok, Fallible, Flow};
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
-use crate::index::{Index, Indexing};
+use crate::index::{Follow, Index, Indexing};
 use crate::intent;
 use crate::io::{Capabilities, Io, Kind, Lock, Root, Task};
 use crate::layout::Layout;
@@ -1590,8 +1590,8 @@ fn fold_opened(mut library: Library, merging: Option<Merging>) -> Flow<'static, 
 }
 
 /// Shows what changed since the view, if anything did: moves the entries of the
-/// entities that changed in the view's index, or builds it again a slice at a
-/// time when most did.
+/// entities that changed in the view's index, or builds its paths or all of it
+/// again a slice at a time when most did.
 fn reshown<'a, L: BorrowMut<Library> + 'a>(mut library: L) -> Fallible<'a, L> {
     let known = library.borrow_mut();
     known.bind_facts();
@@ -1604,11 +1604,15 @@ fn reshown<'a, L: BorrowMut<Library> + 'a>(mut library: L) -> Fallible<'a, L> {
         (&shown.folded, &*shown.bindings),
         (&known.folded, &*known.bindings),
     );
-    let Some(entities) = Index::changed(before, after) else {
-        return indexed(library).then(flow::ok);
-    };
     let mut index = Arc::clone(known.view.index());
-    Arc::make_mut(&mut index).move_entries(before, after, entities);
+    match Index::changed(before, after) {
+        Follow::Build => return indexed(library).then(flow::ok),
+        Follow::Paths(entities) => {
+            let indexing = Indexing::paths(&index);
+            return reindexed(library, indexing, entities).then(flow::ok);
+        }
+        Follow::Move(entities) => Arc::make_mut(&mut index).move_entries(before, after, entities),
+    }
     known.show_indexed(index);
     ok(library)
 }
@@ -1617,15 +1621,27 @@ fn reshown<'a, L: BorrowMut<Library> + 'a>(mut library: L) -> Fallible<'a, L> {
 /// entities at a time, and shows it.
 fn indexed<'a, L: BorrowMut<Library> + 'a>(mut library: L) -> Flow<'a, L> {
     library.borrow_mut().bind_facts();
-    let indexing = (library, Indexing::default());
-    flow::sliced(indexing, |(library, indexing)| {
+    reindexed(library, Indexing::default(), Vec::new())
+}
+
+/// Builds what `indexing` builds a slice of entities at a time, moves the
+/// entries of `entities` from the view's state to the library's, and shows it.
+fn reindexed<'a, L: BorrowMut<Library> + 'a>(
+    library: L,
+    indexing: Indexing,
+    entities: Vec<EntityId>,
+) -> Flow<'a, L> {
+    flow::sliced((library, indexing), |(library, indexing)| {
         let known = library.borrow();
         indexing.step(&known.folded, &known.bindings, INDEX_SLICE)
     })
     .then(|(mut library, indexing)| {
-        library
-            .borrow_mut()
-            .show_indexed(Arc::new(indexing.finish()));
+        let known = library.borrow_mut();
+        let mut index = indexing.finish();
+        let shown = known.view.parts();
+        let before = (&shown.folded, &*shown.bindings);
+        index.move_entries(before, (&known.folded, &known.bindings), entities);
+        known.show_indexed(Arc::new(index));
         Flow::Done(library)
     })
 }
