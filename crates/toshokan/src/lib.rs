@@ -46,6 +46,7 @@ pub mod line;
 pub mod log;
 #[doc(hidden)]
 pub mod merge;
+mod pack;
 pub mod path;
 #[doc(hidden)]
 pub mod pending;
@@ -58,6 +59,7 @@ pub mod report;
 pub mod schema;
 #[doc(hidden)]
 pub mod simulator;
+mod small;
 #[doc(hidden)]
 pub mod snapshot;
 pub mod trash;

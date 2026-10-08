@@ -121,6 +121,13 @@ impl Line {
         Self::checked(prev, json, hash)
     }
 
+    /// The line of `json`, whose `prev` is `prev` and hash `hash`, as an entry
+    /// verified when it was read keeps it.
+    pub(crate) fn verified(prev: EntryHash, json: String, hash: EntryHash) -> Self {
+        debug_assert_eq!(EntryHash::of(prev, json.as_bytes()), hash);
+        Self { prev, hash, json }
+    }
+
     pub fn prev(&self) -> EntryHash {
         self.prev
     }
@@ -152,9 +159,13 @@ pub(crate) fn split(line: &[u8]) -> Result<(&str, EntryHash), LineError> {
         return Err(LineError::Unterminated);
     };
     let text = std::str::from_utf8(body).map_err(|_| LineError::NotUtf8)?;
-    let (json, hash) = text.rsplit_once('\t').ok_or(LineError::NoHash)?;
+    let tab = text
+        .bytes()
+        .rposition(|b| b == b'\t')
+        .ok_or(LineError::NoHash)?;
+    let (json, hash) = (&text[..tab], &text[tab + 1..]);
     let hash: EntryHash = hash.parse().map_err(|_| LineError::BadHash)?;
-    if json.contains(['\t', '\n']) {
+    if json.bytes().any(|b| matches!(b, b'\t' | b'\n')) {
         return Err(LineError::Unescaped);
     }
     Ok((json, hash))

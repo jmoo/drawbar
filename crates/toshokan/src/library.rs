@@ -64,7 +64,7 @@ pub struct Library {
     /// install let go every entry of it the folder lost.
     folded: Folded,
     /// The snapshots `folded` joined, by writer and last folded entry.
-    joined: BTreeSet<(WriterId, Option<EntryHash>)>,
+    joined: Joined,
     /// Each writer's placed and folded entries no file in the folder held at the
     /// last read.
     lost: Let,
@@ -98,6 +98,15 @@ pub struct Library {
 }
 
 type Let = BTreeMap<WriterId, BTreeSet<EntryHash>>;
+
+/// Snapshots a merged state joined, by writer and last folded entry.
+type Joined = BTreeSet<(WriterId, Option<EntryHash>)>;
+
+/// The snapshots of `logs`, as [`Joined`].
+fn joined<'a>(logs: impl Iterator<Item = &'a WriterLog>) -> Joined {
+    logs.flat_map(|log| log.snapshots().iter().map(|s| (log.writer(), s.head())))
+        .collect()
+}
 
 /// An intent resolved against the view, before anything is written.
 struct Resolved {
@@ -137,7 +146,11 @@ impl Library {
                     (picked, cached, (let_go, remembered.unwrap_or_default()))
                 })
             })
-            .and_then(move |(picked, cached, kept)| {
+            .and_then(move |(picked, mut cached, kept)| {
+                let resumed = cached.state.take().map(|state| {
+                    let logs = cached.view.writers().values();
+                    (state, joined(logs))
+                });
                 let mut reader = Reader::open(layout.clone(), cached);
                 flow::run(reader.list()).and_then(move |listing| {
                     let report = reader.absorb(listing);
@@ -157,6 +170,7 @@ impl Library {
                             reader,
                             claimed.writer,
                             kept,
+                            resumed.map(|(state, joined)| (state, joined, &report)),
                         );
                         (library, report, claimed.start)
                     })
@@ -213,6 +227,9 @@ impl Library {
             .task()
     }
 
+    /// `resumed` is the merged state the cached view kept, with the snapshots it
+    /// joined, and what the read since placed.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         layout: Layout,
         schema: Schema,
@@ -221,6 +238,7 @@ impl Library {
         reader: Reader,
         writer: Option<Writer>,
         (let_go, remembered): (Let, Scan),
+        resumed: Option<(Folded, Joined, &ReadReport)>,
     ) -> Self {
         let mut library = Self {
             layout,
@@ -259,7 +277,10 @@ impl Library {
             }),
             behind: BTreeMap::new(),
         };
-        library.refold();
+        match resumed {
+            Some((state, joined, read)) => library.resume(state, joined, read),
+            None => library.refold(),
+        }
         library.follow(readings(&library.reader).collect::<Vec<_>>());
         let writable = capabilities.append;
         library.mode = match (&library.writer, writable) {
@@ -278,6 +299,14 @@ impl Library {
 
     pub fn view(&self) -> View {
         self.view.clone()
+    }
+
+    /// What the view would show if every log were folded again from scratch, as
+    /// tests compare with what it shows.
+    #[doc(hidden)]
+    pub fn refolded(&self) -> Folded {
+        let folder = self.shown_as_folder();
+        merge(shown_logs(&self.reader, |writer| folder.contains(&writer)))
     }
 
     /// An id for an entity an intent being built creates.
@@ -666,10 +695,11 @@ impl Library {
     /// Keeps what a read added to the cached view in this writer's local
     /// directory, so a crash does not take back what was shown.
     fn save_view(&mut self) -> Task<'static, Result<()>> {
-        match &self.writer {
-            Some(writer) => self.reader.save(writer.genesis()),
-            None => Task::ready(Ok(())),
-        }
+        let Some(writer) = &self.writer else {
+            return Task::ready(Ok(()));
+        };
+        let state = self.shown_as_folder().is_empty().then_some(&self.folded);
+        self.reader.save(writer.genesis(), state)
     }
 
     /// Whether `theirs`, another writer's record `name`, is still open: confined
@@ -837,11 +867,29 @@ impl Library {
         };
         self.reader.add(id, entries, written);
         for entry in entries {
-            self.folded.apply(id, entry);
+            let kind = entry.kind();
+            self.folded.fold(id, entry, &kind);
             self.history.push(entry);
-            self.clock = self.clock.observe(entry.at);
-            self.refile(entities(entry));
+            self.clock = self.clock.observe(entry.at());
+            self.refile(entities(&kind));
         }
+    }
+
+    /// Shows `state`, the merged state the cached view kept with the snapshots
+    /// it `joined`, and what `read` placed since; refolds instead while a writer
+    /// is shown as the folder holds it.
+    fn resume(&mut self, state: Folded, joined: Joined, read: &ReadReport) {
+        self.lost = self.reader.removed();
+        self.retain_let_go();
+        if !self.shown_as_folder().is_empty() {
+            return self.refold();
+        }
+        self.folded = state;
+        self.joined = joined;
+        self.fold_read(read);
+        self.facts = self.folded.files();
+        self.bind_due = true;
+        self.rehistory();
     }
 
     /// Folds what a read placed, and the snapshots it kept, into what is shown.
@@ -861,6 +909,24 @@ impl Library {
             return;
         }
         let own = self.writer.as_ref().map(Writer::id);
+        let (followed, joined, touched) = self.fold_read(report);
+        match joined {
+            true => {
+                self.facts = self.folded.files();
+                self.bind_due = true;
+            }
+            false => self.refile(touched.into_iter()),
+        }
+        if own.is_some_and(|own| joined || report.placed.contains_key(&own)) {
+            self.rehistory();
+        }
+        self.follow(followed);
+    }
+
+    /// Folds into what is shown the snapshots of the logs it has not joined and
+    /// the entries `report` placed. Returns their readings, whether it joined a
+    /// snapshot, and the entities the entries changed.
+    fn fold_read(&mut self, report: &ReadReport) -> (Vec<Hlc>, bool, BTreeSet<EntityId>) {
         let mut followed = Vec::new();
         let mut joined = false;
         let mut touched = BTreeSet::new();
@@ -875,22 +941,13 @@ impl Library {
         }
         for (writer, placed) in &report.placed {
             for entry in placed_entries(&self.reader.logs()[writer], placed) {
-                self.folded.apply(*writer, entry);
-                followed.push(entry.at);
-                touched.extend(entities(entry));
+                let kind = entry.kind();
+                self.folded.fold(*writer, entry, &kind);
+                followed.push(entry.at());
+                touched.extend(entities(&kind));
             }
         }
-        match joined {
-            true => {
-                self.facts = self.folded.files();
-                self.bind_due = true;
-            }
-            false => self.refile(touched.into_iter()),
-        }
-        if own.is_some_and(|own| joined || report.placed.contains_key(&own)) {
-            self.rehistory();
-        }
-        self.follow(followed);
+        (followed, joined, touched)
     }
 
     /// Moves the clock to the latest of `readings`, and of those it could not
@@ -1001,10 +1058,7 @@ impl Library {
         self.retain_let_go();
         let folder = self.shown_as_folder();
         let logs = shown_logs(&self.reader, |writer| folder.contains(&writer));
-        self.joined = logs
-            .iter()
-            .flat_map(|log| log.snapshots().iter().map(|s| (log.writer(), s.head())))
-            .collect();
+        self.joined = joined(logs.iter().copied());
         self.folded = merge(logs);
         self.facts = self.folded.files();
         self.bind_due = true;
@@ -1237,23 +1291,13 @@ fn shown_logs(reader: &Reader, folder: impl Fn(WriterId) -> bool) -> Vec<&Writer
 
 /// The entries of `log` among `hashes`, which it placed last.
 fn placed_entries<'a>(log: &'a WriterLog, hashes: &[EntryHash]) -> Vec<&'a Entry> {
-    let mut wanted: BTreeSet<EntryHash> = hashes.iter().copied().collect();
-    let mut found = Vec::with_capacity(wanted.len());
-    for entry in log.entries().iter().rev() {
-        if wanted.is_empty() {
-            break;
-        }
-        if wanted.remove(&entry.hash()) {
-            found.push(&**entry);
-        }
-    }
-    found.reverse();
-    found
+    let placed = hashes.iter().filter_map(|hash| log.entry(*hash));
+    placed.map(Rc::as_ref).collect()
 }
 
-/// The entities whose state folding `entry` changes.
-fn entities(entry: &Entry) -> impl Iterator<Item = EntityId> + '_ {
-    let ops = match &entry.kind {
+/// The entities whose state folding an entry of `kind` changes.
+fn entities(kind: &EntryKind) -> impl Iterator<Item = EntityId> + '_ {
+    let ops = match kind {
         EntryKind::Intent(logged) => logged.ops.as_slice(),
         EntryKind::Bind(bound) => bound.ops.as_slice(),
         EntryKind::Genesis(_) | EntryKind::Settle(_) | EntryKind::Unknown(_) => &[],
@@ -1473,7 +1517,8 @@ fn committed(
     outcome: Outcome,
     local: Local,
 ) -> std::result::Result<Committed, Box<Partial>> {
-    let ops = entries.iter().flat_map(|entry| match &entry.kind {
+    let kinds: Vec<EntryKind> = entries.iter().map(Entry::kind).collect();
+    let ops = kinds.iter().flat_map(|kind| match kind {
         EntryKind::Intent(Logged { ops, .. }) | EntryKind::Bind(Bound { ops }) => ops.as_slice(),
         EntryKind::Genesis(_) | EntryKind::Settle(_) | EntryKind::Unknown(_) => &[],
     });
@@ -1536,9 +1581,10 @@ fn ensure_writer<'a>(
             return Flow::Done(Err(Error::Refused(Refusal::Invalid(Invalid::TooLong))));
         };
         let segment = library.env.segment_name();
-        let reader = &mut library.reader;
+        let whole = library.shown_as_folder().is_empty();
+        let (reader, folded) = (&mut library.reader, &library.folded);
         let create = Writer::create(library.layout.clone(), id, segment, label, at, |genesis| {
-            reader.checkpoint(genesis)
+            reader.checkpoint(genesis, whole.then_some(folded))
         });
         flow::run(create).and_then(move |writer| {
             writer.stamp().then(move |written| {
@@ -1633,7 +1679,7 @@ fn tidy_staging(library: &mut Library) -> Fallible<'_, &mut Library> {
 fn planned(record: &PendingRecord) -> Logged {
     let decoded = Entry::decode(record.entry.clone())
         .ok()
-        .map(|entry| entry.kind);
+        .map(|entry| entry.kind());
     let mut logged = match decoded {
         Some(EntryKind::Intent(logged)) => logged,
         _ => Logged {
@@ -1816,7 +1862,12 @@ fn carry_out<'a>(
     let Ok(entry) = Entry::encode(head, at, EntryKind::Intent(logged.clone())) else {
         return Flow::Done(Err(Error::Refused(Refusal::Invalid(Invalid::TooLong))));
     };
-    let record = Rc::new(PendingRecord::new(id, &logged.label, entry.line, &effects));
+    let record = Rc::new(PendingRecord::new(
+        id,
+        &logged.label,
+        entry.line(),
+        &effects,
+    ));
     let layout = library.layout.clone();
     let identify = Rc::clone(&library.env.identify);
     let (name, journaled) = (effects.record, effects.moves_files());

@@ -350,7 +350,7 @@ impl Gen {
             id,
             genesis: entry.hash(),
             head: entry.hash(),
-            segment: entry.line.to_bytes(),
+            segment: entry.to_bytes(),
             in_segment: 1,
             bytes: 0,
             segments: 0,
@@ -368,7 +368,7 @@ impl Gen {
         let writer = &mut self.writers[w];
         let entry = Entry::encode(writer.head, at, EntryKind::Intent(logged)).unwrap();
         writer.head = entry.hash();
-        writer.segment.extend(entry.line.to_bytes());
+        writer.segment.extend(entry.to_bytes());
         writer.in_segment += 1;
         writer.entries += 1;
         if writer.in_segment >= self.segment_entries {
@@ -1257,7 +1257,7 @@ fn local_views(local: &mut dyn Backend) -> Vec<(String, Vec<u8>)> {
     };
     let mut views = Vec::new();
     for dir in dirs.into_iter().filter(|d| d.kind == Kind::Directory) {
-        let path = RelPath::new(&format!("{}/view.json", dir.name)).unwrap();
+        let path = RelPath::new(&format!("{}/view.bin", dir.name)).unwrap();
         let Ok(Reply::Stat(Some(meta))) = local.perform(Io::Stat {
             root: Root::Local,
             path: path.clone(),

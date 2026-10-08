@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -129,17 +130,18 @@ impl Schema {
 }
 
 /// JSON kept verbatim: a value that does not decode as its declared type, or
-/// anything else a newer writer wrote. Compared and ordered by its text.
+/// anything else a newer writer wrote. Compared and ordered by its text. Clones
+/// share the text.
 #[derive(Clone)]
-pub struct Raw(Box<RawValue>);
+pub struct Raw(Arc<RawValue>);
 
 impl Raw {
     pub fn new(json: &str) -> serde_json::Result<Self> {
-        RawValue::from_string(json.to_owned()).map(Self)
+        RawValue::from_string(json.to_owned()).map(Self::from)
     }
 
     pub fn of<T: Serialize>(value: &T) -> serde_json::Result<Self> {
-        serde_json::value::to_raw_value(value).map(Self)
+        serde_json::value::to_raw_value(value).map(Self::from)
     }
 
     pub fn decode<T: DeserializeOwned>(&self) -> serde_json::Result<T> {
@@ -153,7 +155,7 @@ impl Raw {
 
 impl PartialEq for Raw {
     fn eq(&self, other: &Self) -> bool {
-        self.as_str() == other.as_str()
+        Arc::ptr_eq(&self.0, &other.0) || self.as_str() == other.as_str()
     }
 }
 
@@ -185,13 +187,19 @@ impl fmt::Debug for Raw {
 
 impl Serialize for Raw {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-        self.0.serialize(serializer)
+        RawValue::serialize(&self.0, serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for Raw {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-        Box::<RawValue>::deserialize(deserializer).map(Self)
+        Box::<RawValue>::deserialize(deserializer).map(Self::from)
+    }
+}
+
+impl From<Box<RawValue>> for Raw {
+    fn from(json: Box<RawValue>) -> Self {
+        Self(Arc::from(json))
     }
 }
 

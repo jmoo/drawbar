@@ -143,7 +143,7 @@ impl Writer {
         };
         let genesis = entry.hash();
         let saved = view(genesis);
-        let bytes = entry.line.to_bytes();
+        let bytes = entry.to_bytes();
         let len = bytes.len() as u64;
         let dir = layout.writer(id);
         let path = layout.segment(id, segment);
@@ -265,10 +265,7 @@ impl Writer {
         if entries.is_empty() {
             return Task::ready((self, Ok(entries)));
         }
-        let bytes: Vec<u8> = entries
-            .iter()
-            .flat_map(|entry| entry.line.to_bytes())
-            .collect();
+        let bytes: Vec<u8> = entries.iter().flat_map(|entry| entry.to_bytes()).collect();
         let len = bytes.len() as u64;
         self.confirm()
             .then(move |confirmed| {

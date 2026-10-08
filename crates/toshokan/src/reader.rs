@@ -12,7 +12,7 @@
 //! entry between the cached view and what the folder holds.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use crate::cache::{self, Store};
@@ -23,6 +23,7 @@ use crate::io::{Kind, Meta, Range, Root, Task};
 use crate::layout::{is_swap_file, Layout};
 use crate::line::{self, Stop};
 use crate::log::{Entry, EntryKind};
+use crate::merge::Folded;
 use crate::path::RelPath;
 use crate::report::{Fork, Gap};
 use crate::snapshot::Snapshot;
@@ -116,15 +117,17 @@ pub struct WriterLog {
     /// No one extends another.
     snapshots: Vec<Rc<Snapshot>>,
     entries: Vec<Rc<Entry>>,
-    /// Every placed or folded entry, with its predecessor.
-    chain: BTreeMap<EntryHash, Link>,
+    /// Every placed or folded entry, with its predecessor. Hashed, since a log
+    /// holds every entry of its writer and is looked up a few times per entry;
+    /// nothing depends on its order.
+    chain: HashMap<EntryHash, Link>,
     /// Entries seen and never placed, with their predecessors, so that a fork with
     /// one of them is found after its file is gone.
     strays: BTreeMap<EntryHash, EntryHash>,
     /// The lines last offered and held back.
     waiting: BTreeMap<EntryHash, Rc<Entry>>,
     /// The first successor seen of each entry, among the chain and the strays.
-    next: BTreeMap<EntryHash, EntryHash>,
+    next: HashMap<EntryHash, EntryHash>,
     /// Every successor of each entry with more than one.
     branches: BTreeMap<EntryHash, BTreeSet<EntryHash>>,
     forks: Vec<Fork>,
@@ -175,10 +178,10 @@ impl WriterLog {
             writer,
             snapshots: Vec::new(),
             entries: Vec::new(),
-            chain: BTreeMap::new(),
+            chain: HashMap::new(),
             strays: BTreeMap::new(),
             waiting: BTreeMap::new(),
-            next: BTreeMap::new(),
+            next: HashMap::new(),
             branches: BTreeMap::new(),
             forks: Vec::new(),
             gaps: Vec::new(),
@@ -191,24 +194,28 @@ impl WriterLog {
     }
 
     /// From the genesis entry, once placed or folded.
-    pub fn label(&self) -> Option<&str> {
-        let folded = self
-            .snapshots
-            .first()
-            .map(|snapshot| snapshot.label.as_str());
-        folded.or_else(|| {
-            self.entries.iter().find_map(|entry| match &entry.kind {
-                EntryKind::Genesis(genesis) => Some(genesis.label.as_str()),
-                _ => None,
-            })
+    pub fn label(&self) -> Option<String> {
+        if let Some(snapshot) = self.snapshots.first() {
+            return Some(snapshot.label.clone());
+        }
+        let first = self
+            .entries
+            .iter()
+            .filter(|entry| entry.prev() == EntryHash::ZERO);
+        first.map(|entry| entry.kind()).find_map(|kind| match kind {
+            EntryKind::Genesis(genesis) => Some(genesis.label),
+            _ => None,
         })
     }
 
+    /// The least genesis entry placed or folded; more than one only in a forged
+    /// log.
     pub fn genesis(&self) -> Option<EntryHash> {
         self.chain
             .iter()
-            .find(|(_, link)| link.prev == EntryHash::ZERO)
+            .filter(|(_, link)| link.prev == EntryHash::ZERO)
             .map(|(hash, _)| *hash)
+            .min()
     }
 
     /// Whether `hash` is placed, or folded by a snapshot this install has seen.
@@ -261,14 +268,13 @@ impl WriterLog {
         &self.strays
     }
 
-    /// Placed or folded entries with no placed successor: one, unless forked.
+    /// Placed or folded entries with no placed successor, in order: one, unless
+    /// forked.
     pub fn heads(&self) -> Vec<EntryHash> {
         let prevs: BTreeSet<EntryHash> = self.chain.values().map(|link| link.prev).collect();
-        self.chain
-            .keys()
-            .filter(|hash| !prevs.contains(hash))
-            .copied()
-            .collect()
+        let heads = self.chain.keys().filter(|hash| !prevs.contains(hash));
+        let heads: BTreeSet<EntryHash> = heads.copied().collect();
+        heads.into_iter().collect()
     }
 
     pub fn last_at(&self) -> Option<Hlc> {
@@ -294,6 +300,50 @@ impl WriterLog {
         self.grow(snapshots, entries, BTreeSet::new())
     }
 
+    /// Whether placing `snapshots` and `entries` in a new log would make this
+    /// one: they hold every entry it holds and no other, its snapshots are
+    /// theirs that no other of theirs extends, and it holds nothing back, stray
+    /// or forked.
+    fn is_placed_from(&self, snapshots: &[Rc<Snapshot>], entries: &[Rc<Entry>]) -> bool {
+        let settled = self.strays.is_empty() && self.waiting.is_empty() && self.forks.is_empty();
+        if !settled || !self.branches.is_empty() {
+            return false;
+        }
+        let latest = snapshots.iter().filter(|snapshot| {
+            let extended = snapshots.iter().any(|other| {
+                !Rc::ptr_eq(other, snapshot) && other.extends(snapshot) && !snapshot.extends(other)
+            });
+            !extended
+        });
+        let latest: Vec<&Rc<Snapshot>> = latest.collect();
+        let same = latest.len() == self.snapshots.len()
+            && self
+                .snapshots
+                .iter()
+                .all(|kept| latest.iter().any(|snapshot| Rc::ptr_eq(snapshot, kept)));
+        if !same {
+            return false;
+        }
+        let mut held = HashSet::with_capacity(self.chain.len());
+        held.extend(
+            snapshots
+                .iter()
+                .flat_map(|snapshot| snapshot.folded.iter().copied()),
+        );
+        held.extend(entries.iter().map(|entry| entry.hash()));
+        held.len() == self.chain.len() && held.iter().all(|hash| self.chain.contains_key(hash))
+    }
+
+    /// Whether the log holds nothing: no snapshot, entry, stray or fork, and
+    /// nothing held back.
+    fn is_empty(&self) -> bool {
+        self.snapshots.is_empty()
+            && self.chain.is_empty()
+            && self.strays.is_empty()
+            && self.waiting.is_empty()
+            && self.forks.is_empty()
+    }
+
     /// Forgets the entries held back, so that the next placement offers again
     /// only what is held back then.
     fn forget_waiting(&mut self) {
@@ -317,6 +367,10 @@ impl WriterLog {
         }
         if !placement.kept.is_empty() {
             self.reindex(&mut touched);
+        }
+        if self.chain.is_empty() {
+            self.chain.reserve(entries.len());
+            self.next.reserve(entries.len());
         }
         for entry in entries {
             let (hash, prev) = (entry.hash(), entry.prev());
@@ -422,7 +476,7 @@ impl WriterLog {
 
     /// Every clock reading of the placed entries and the snapshots.
     pub fn readings(&self) -> impl Iterator<Item = Hlc> + '_ {
-        let entries = self.entries.iter().map(|entry| entry.at);
+        let entries = self.entries.iter().map(|entry| entry.at());
         entries.chain(self.snapshots.iter().map(|snapshot| snapshot.at))
     }
 
@@ -463,7 +517,7 @@ impl WriterLog {
         touched: &mut BTreeSet<EntryHash>,
     ) {
         if let Some(entry) = &entry {
-            self.last_at = self.last_at.max(Some(entry.at));
+            self.last_at = self.last_at.max(Some(entry.at()));
         }
         self.chain.insert(hash, Link { prev, entry });
         self.note(hash, prev, touched);
@@ -816,6 +870,7 @@ impl Reader {
             files,
             absorbed,
             store,
+            state: _,
         } = loaded;
         let mut reader = Self::new(layout, view);
         reader.absorbed = absorbed;
@@ -1081,9 +1136,13 @@ impl Reader {
         }
         if whole {
             (snapshots, entries) = folder.contents(writer);
-            folder.log = WriterLog::new(writer);
+            let cached = self.cached.writers.get(&writer);
+            folder.log = match cached.filter(|log| log.is_placed_from(&snapshots, &entries)) {
+                Some(log) => log.clone(),
+                None => WriterLog::new(writer),
+            };
         }
-        folder.log.place(snapshots.clone(), entries.clone());
+        let in_folder = folder.log.place(snapshots.clone(), entries.clone());
         for (path, record) in &folder.files {
             match &record.file {
                 WriterFile::Segment(segment) => {
@@ -1102,7 +1161,15 @@ impl Reader {
             log.forget_waiting();
         }
         if whole || !snapshots.is_empty() || !entries.is_empty() {
-            let placement = log.place(snapshots, entries);
+            // A view holding nothing of the writer places what the folder's log
+            // placed from nothing, and ends as that log does.
+            let placement = match whole && log.is_empty() {
+                true => {
+                    *log = folder.log.clone();
+                    in_folder
+                }
+                false => log.place(snapshots, entries),
+            };
             report.changed |= placement.changed();
             if !placement.placed.is_empty() {
                 let placed = placement.placed.iter().map(|entry| entry.hash()).collect();
@@ -1146,15 +1213,25 @@ impl Reader {
 
     /// Keeps what the cached view gained in this writer's local directory: by
     /// appending it to the journal, or by writing the whole view again when the
-    /// journal has grown too long or cannot be trusted.
-    pub fn save(&mut self, genesis: EntryHash) -> Task<'static, Result<()>> {
-        cache::save(self, genesis)
+    /// journal has grown too long or cannot be trusted. `state`, when given, is
+    /// the merged state of every log of the view, kept with it when it is written
+    /// whole.
+    pub fn save(
+        &mut self,
+        genesis: EntryHash,
+        state: Option<&Folded>,
+    ) -> Task<'static, Result<()>> {
+        cache::save(self, genesis, state)
     }
 
-    /// Writes the whole view, with what the reader knows of each file, as the
-    /// writer whose genesis entry is `genesis`.
-    pub fn checkpoint(&mut self, genesis: EntryHash) -> Task<'static, Result<()>> {
-        cache::checkpoint(self, genesis)
+    /// Writes the whole view, with what the reader knows of each file and
+    /// `state`, as the writer whose genesis entry is `genesis`.
+    pub fn checkpoint(
+        &mut self,
+        genesis: EntryHash,
+        state: Option<&Folded>,
+    ) -> Task<'static, Result<()>> {
+        cache::checkpoint(self, genesis, state)
     }
 }
 
@@ -1171,7 +1248,7 @@ impl Folder {
     /// says: when the last read left it just where they begin, or they are all it
     /// holds. Whether it recorded them.
     fn appended(&mut self, path: &RelPath, entries: &[Rc<Entry>], stamp: Stamp) -> bool {
-        let added: u64 = entries.iter().map(|e| e.line.to_bytes().len() as u64).sum();
+        let added: u64 = entries.iter().map(|e| e.to_bytes().len() as u64).sum();
         let Some(start) = stamp.len.checked_sub(added) else {
             return false;
         };
@@ -1432,7 +1509,7 @@ mod tests {
             writer: W,
             label: "a".into(),
         });
-        Entry::encode(EntryHash::ZERO, at(0), kind).unwrap().line
+        Entry::encode(EntryHash::ZERO, at(0), kind).unwrap().line()
     }
 
     fn after(prev: &Line, label: &str) -> Line {
@@ -1444,7 +1521,7 @@ mod tests {
         });
         Entry::encode(prev.hash(), at(prev.json().len() as u64), kind)
             .unwrap()
-            .line
+            .line()
     }
 
     /// The genesis entry and `n` entries after it.
@@ -1509,7 +1586,7 @@ mod tests {
         assert_eq!(log.gaps(), []);
         assert_eq!(log.heads(), [lines[3].hash()]);
         assert_eq!(log.genesis(), Some(lines[0].hash()));
-        assert_eq!(log.label(), Some("a"));
+        assert_eq!(log.label().as_deref(), Some("a"));
         assert_eq!(log.chain_to(lines[2].hash()), Some(hashes(&lines[..3])));
     }
 
@@ -1565,7 +1642,7 @@ mod tests {
         assert_eq!(placement.forks.len(), 1);
         assert_eq!(placement.forks[0].prev, lines[1].hash());
         assert!(lines.iter().all(|line| log.holds(line.hash())));
-        assert_eq!(log.label(), Some("a"));
+        assert_eq!(log.label().as_deref(), Some("a"));
     }
 
     #[test]
@@ -1588,6 +1665,46 @@ mod tests {
     }
 
     #[test]
+    fn a_log_is_placed_from_exactly_what_it_holds() {
+        let lines = chain(4);
+        let snapshots = vec![snapshot(&lines[..2])];
+        let held = entries(&lines[2..]);
+        let mut log = WriterLog::new(W);
+        log.place(snapshots.clone(), held.clone());
+        assert!(log.is_placed_from(&snapshots, &held));
+        let older = snapshot(&lines[..1]);
+        let with_older = vec![Rc::clone(&older), Rc::clone(&snapshots[0])];
+        assert!(
+            log.is_placed_from(&with_older, &held),
+            "an older snapshot is extended"
+        );
+        let mut fresh = WriterLog::new(W);
+        fresh.place(with_older, held.clone());
+        assert_eq!(fresh, log);
+        assert_eq!(fresh.chain.len(), log.chain.len());
+        assert_eq!(fresh.heads(), log.heads());
+
+        let fork = entries(&[after(&lines[2], "other")]);
+        let stray = entries(&[after(&after(&lines[0], "lost"), "held")]);
+        let copy = vec![snapshot(&lines[..2])];
+        let lacking = &held[..1];
+        let more: Vec<Rc<Entry>> = held.iter().chain(&fork).cloned().collect();
+        for (case, snapshots, held) in [
+            ("an entry the files lack", &snapshots, lacking),
+            ("an entry the log lacks", &snapshots, &more[..]),
+            ("a snapshot read again", &copy, &held[..]),
+        ] {
+            assert!(!log.is_placed_from(snapshots, held), "{case}");
+        }
+        for (case, extra) in [("a fork", fork), ("a stray", stray)] {
+            let mut grown = log.clone();
+            grown.place(Vec::new(), extra.clone());
+            let all: Vec<Rc<Entry>> = held.iter().chain(&extra).cloned().collect();
+            assert!(!grown.is_placed_from(&snapshots, &all), "{case}");
+        }
+    }
+
+    #[test]
     fn a_line_that_is_not_an_entry_still_links_the_chain() {
         let lines = chain(0);
         let odd = Line::seal(format!(r#"{{"prev":"{}"}}"#, lines[0].hash())).unwrap();
@@ -1601,7 +1718,7 @@ mod tests {
             placed(&placement),
             [lines[0].hash(), odd.hash(), next.hash()]
         );
-        assert!(matches!(log.entries()[1].kind, EntryKind::Unknown(_)));
+        assert!(matches!(log.entries()[1].kind(), EntryKind::Unknown(_)));
     }
 
     #[test]
@@ -1624,38 +1741,6 @@ mod tests {
         assert_eq!(log.forks(), view.writers()[&W].forks());
         assert!(!log.holds(stray.hash()));
         assert_eq!(log.gaps(), []);
-    }
-
-    #[test]
-    fn a_cached_view_this_build_cannot_trust_is_corrupt() {
-        let lines = chain(2);
-        let held = |entries: &[&Line]| {
-            let entries: Vec<String> = entries
-                .iter()
-                .map(|line| format!(r#"[{},"{}"]"#, line.json(), line.hash()))
-                .collect();
-            format!(
-                r#"{{"writers":{{"{W}":{{"snapshots":[],"entries":[{}],"strays":[],"forks":[]}}}}}}"#,
-                entries.join(",")
-            )
-        };
-        let path = Layout::cached_view(lines[0].hash());
-        assert!(CachedView::decode(&path, held(&[&lines[0], &lines[1]]).as_bytes()).is_ok());
-        let flipped = held(&[&lines[0]]).replace(r#""a""#, r#""b""#);
-        for bytes in [
-            held(&[&lines[0], &lines[2]]),
-            flipped,
-            "{}".into(),
-            "[".into(),
-        ] {
-            assert!(
-                matches!(
-                    CachedView::decode(&path, bytes.as_bytes()),
-                    Err(Error::Corrupt { .. })
-                ),
-                "{bytes}"
-            );
-        }
     }
 
     #[test]

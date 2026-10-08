@@ -10,7 +10,7 @@
 //!   tmp/<nonce>.<extension>    staged files, under their destination's extension
 //! <local>/<genesis>/           one writer of this install, by its genesis entry
 //!   head.json                  the head this writer last wrote
-//!   view.json                  the cached view
+//!   view.bin                   the cached view
 //!   view.log                   what the cached view gained since
 //!   drafts/<entity>.json       unsaved edits
 //!   lock                       held while an instance writes as this writer
@@ -146,11 +146,11 @@ impl Layout {
     }
 
     pub fn cached_view(genesis: EntryHash) -> RelPath {
-        child(&Self::local(genesis), "view.json")
+        child(&Self::local(genesis), "view.bin")
     }
 
-    /// What the cached view gained since `view.json` was written, one record a
-    /// line.
+    /// What the cached view gained since `view.bin` was written, one record after
+    /// another.
     pub fn view_journal(genesis: EntryHash) -> RelPath {
         child(&Self::local(genesis), "view.log")
     }
