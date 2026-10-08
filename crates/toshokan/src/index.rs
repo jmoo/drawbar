@@ -54,37 +54,66 @@ struct Entries<'a> {
 /// it.
 #[derive(Default)]
 pub(crate) struct Indexing {
-    /// The last entity taken.
-    after: Option<EntityId>,
-    holding: BTreeMap<KeyKind, BTreeMap<String, Holding>>,
+    stage: Stage,
+    holding: BTreeMap<(KeyKind, String), Holding>,
+    keys: BTreeMap<(KeyKind, String), Arc<KeyIndex>>,
     paths: Vec<((RelPath, EntityId), FileState)>,
     conflicts: Vec<(Conflicted, ())>,
 }
 
+#[derive(Default)]
+enum Stage {
+    /// Taking entities, from the first.
+    #[default]
+    Entities,
+    /// Taking entities, after this one.
+    After(EntityId),
+    /// Building the index of each key gathered.
+    Keys,
+    Done,
+}
+
 impl Indexing {
-    /// Takes the next `slice` entities of `folded`, bound as `bindings` says;
-    /// true once every one is taken. Each step must be given the same state.
+    /// Takes the next `slice` entities of `folded`, bound as `bindings` says, or
+    /// once every one is taken builds the indexes of keys holding about `slice`
+    /// values; true once every index is built. Each step must be given the same
+    /// state.
     pub(crate) fn step(&mut self, folded: &Folded, bindings: &Bindings, slice: usize) -> bool {
-        let mut entities = folded.each_shown_after(self.after);
+        match self.stage {
+            Stage::Entities => self.take(folded, bindings, None, slice),
+            Stage::After(after) => self.take(folded, bindings, Some(after), slice),
+            Stage::Keys => self.build(slice),
+            Stage::Done => {}
+        }
+        matches!(self.stage, Stage::Done)
+    }
+
+    fn take(
+        &mut self,
+        folded: &Folded,
+        bindings: &Bindings,
+        after: Option<EntityId>,
+        slice: usize,
+    ) {
+        let mut entities = folded.each_shown_after(after);
         for (entity, shown) in entities.by_ref().take(slice) {
-            self.after = Some(entity);
+            self.stage = Stage::After(entity);
             let Some(shown) = shown else {
                 continue;
             };
             let entries = Entries::from(entity, shown, bindings.bound.get(&entity));
             for under in entries.values.chunk_by(|a, b| (a.0, a.1) == (b.0, b.1)) {
                 let (kind, key) = (under[0].0, under[0].1);
-                let keys = self.holding.entry(kind).or_default();
-                let held = match keys.get_mut(key) {
-                    Some(held) => held,
-                    None => keys.entry(key.to_owned()).or_default(),
-                };
+                let held = self.holding.entry((kind, key.to_owned())).or_default();
                 held.holders.push(entity);
                 for (_, _, value) in under {
                     let named = held.named.len();
                     let at = match held.named.get(value.as_str()) {
                         Some(at) => *at,
-                        None => *held.named.entry(Text::from(value.as_str())).or_insert(named),
+                        None => *held
+                            .named
+                            .entry(Text::from(value.as_str()))
+                            .or_insert(named),
                     };
                     held.held.push((at, entity));
                 }
@@ -93,20 +122,35 @@ impl Indexing {
                 self.paths.push(((path.clone(), entity), state));
             }
             let conflicts = entries.conflicts.into_iter();
-            self.conflicts.extend(conflicts.map(|conflict| (conflict, ())));
+            self.conflicts
+                .extend(conflicts.map(|conflict| (conflict, ())));
         }
-        entities.next().is_none()
+        if entities.next().is_none() {
+            self.stage = Stage::Keys;
+        }
     }
 
-    /// ⚠️ Before [`Indexing::step`] returns true, the index of the entities taken.
+    /// Builds the indexes of the next keys gathered, until they hold `slice`
+    /// values, then of the paths.
+    fn build(&mut self, slice: usize) {
+        let mut built = 0;
+        while built < slice {
+            let Some((key, held)) = self.holding.pop_first() else {
+                self.paths.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                self.stage = Stage::Done;
+                return;
+            };
+            built += held.held.len();
+            self.keys.insert(key, Arc::new(KeyIndex::of(held)));
+        }
+    }
+
+    /// ⚠️ Before [`Indexing::step`] returns true, an index lacking what is not
+    /// built yet.
     pub(crate) fn finish(self) -> Index {
-        let keys = self.holding.into_iter().flat_map(|(kind, keys)| {
-            keys.into_iter()
-                .map(move |(key, held)| ((kind, key), Arc::new(KeyIndex::of(held))))
-        });
         Index {
-            keys: keys.collect(),
-            paths: self.paths.into_iter().collect(),
+            keys: self.keys,
+            paths: CowMap::from_sorted(self.paths),
             conflicts: self.conflicts.into_iter().collect(),
         }
     }
@@ -116,7 +160,7 @@ impl Index {
     /// The index of a view of `folded` and `bindings`, built at once.
     pub fn of(folded: &Folded, bindings: &Bindings) -> Self {
         let mut indexing = Indexing::default();
-        indexing.step(folded, bindings, usize::MAX);
+        while !indexing.step(folded, bindings, usize::MAX) {}
         indexing.finish()
     }
 
@@ -133,7 +177,10 @@ impl Index {
     /// The entities whose state or binding differs between `before` and
     /// `after`; `None` when so many do that building the index again costs less
     /// than moving their entries.
-    pub fn changed(before: (&Folded, &Bindings), after: (&Folded, &Bindings)) -> Option<Vec<EntityId>> {
+    pub fn changed(
+        before: (&Folded, &Bindings),
+        after: (&Folded, &Bindings),
+    ) -> Option<Vec<EntityId>> {
         let mut entities = after.0.changed(before.0);
         if !std::ptr::eq(before.1, after.1) {
             entities.extend(rebound(&before.1.bound, &after.1.bound));
@@ -295,6 +342,8 @@ struct Holding {
 }
 
 impl KeyIndex {
+    /// The index of what was gathered in order of entity, so that each value's
+    /// holders and the holders of any value are in order already.
     fn of(gathered: Holding) -> Self {
         let mut texts: Vec<(Text, usize)> = gathered.named.into_iter().collect();
         texts.sort_unstable_by(|a, b| a.0.cmp(&b.0));
@@ -302,28 +351,34 @@ impl KeyIndex {
         for (at, (_, named)) in texts.iter().enumerate() {
             rank[*named] = at;
         }
-        let mut each: Vec<Vec<EntityId>> = vec![Vec::new(); texts.len()];
-        for (named, entity) in gathered.held {
-            each[rank[named]].push(entity);
+        let mut ends = vec![0; texts.len()];
+        for (named, _) in &gathered.held {
+            ends[rank[*named]] += 1;
         }
         let mut counts = Vec::with_capacity(texts.len());
-        let mut holding = Vec::new();
-        for ((text, _), entities) in texts.into_iter().zip(each) {
-            counts.push((Arc::clone(&text), entities.len()));
-            holding.extend(
-                entities
-                    .into_iter()
-                    .map(|entity| ((Arc::clone(&text), entity), ())),
-            );
+        let mut start = 0;
+        for ((text, _), end) in texts.iter().zip(&mut ends) {
+            counts.push((Arc::clone(text), *end));
+            start += *end;
+            *end = start;
         }
+        let mut order: Vec<Option<EntityId>> = vec![None; gathered.held.len()];
+        for (named, entity) in gathered.held.into_iter().rev() {
+            let end = &mut ends[rank[named]];
+            *end -= 1;
+            order[*end] = Some(entity);
+        }
+        let mut holding = Vec::with_capacity(order.len());
+        let mut placed = order.into_iter().flatten();
+        for (text, count) in &counts {
+            let entities = placed.by_ref().take(*count);
+            holding.extend(entities.map(|entity| ((Arc::clone(text), entity), ())));
+        }
+        let holders = gathered.holders.into_iter().map(|entity| (entity, ()));
         Self {
-            holding: holding.into_iter().collect(),
-            counts: counts.into_iter().collect(),
-            holders: gathered
-                .holders
-                .into_iter()
-                .map(|entity| (entity, ()))
-                .collect(),
+            holding: CowMap::from_sorted(holding),
+            counts: CowMap::from_sorted(counts),
+            holders: CowMap::from_sorted(holders.collect()),
         }
     }
 

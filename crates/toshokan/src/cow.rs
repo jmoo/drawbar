@@ -137,6 +137,14 @@ impl<K: Ord, V> FromIterator<(K, V)> for CowMap<K, V> {
             }
             repeated
         });
+        Self::from_sorted(entries)
+    }
+}
+
+impl<K: Ord, V> CowMap<K, V> {
+    /// The map of `entries`, which must be in order of key and name each key once.
+    pub fn from_sorted(mut entries: Vec<(K, V)>) -> Self {
+        debug_assert!(entries.windows(2).all(|pair| pair[0].0 < pair[1].0));
         let len = entries.len();
         let mut chunks = Vec::with_capacity(len.div_ceil(CHUNK));
         while !entries.is_empty() {
