@@ -751,9 +751,10 @@ alone:
 | `no_replace`  | A rename refuses an existing destination in the same step      |
 | `fsync`       | A sync makes completed requests durable                        |
 
-Without `rename_dir`, a directory moves file by file (see File effects). Without
-`append` or `rename_file`, a library opens read-only. Without `fsync`, a sync is
-answered at once, and a completed request is as durable as the backend makes it.
+Without `rename_dir`, a directory moves file by file, and without `rename_file`
+each move copies and then removes its source (see File effects). Without
+`append`, a library opens read-only. Without `fsync`, a sync is answered at once,
+and a completed request is as durable as the backend makes it.
 
 ### Browsers
 
@@ -786,7 +787,7 @@ always a directory of the origin private file system.
   `.txt` and `.json`, so toshokan names its own files with those. A saved
   library file pays the check for its type: about 45 ms in Chrome and 0.1 to
   1.1 s in Brave for a type Chromium does not list. Brave cannot rename a file
-  outside the private file system.
+  outside the private file system, so there each move copies.
 - **Renames** replace a file at the destination in every browser, so none
   declares `no_replace`.
 - **Times.** Chromium and Firefox report a file's last change in milliseconds,
