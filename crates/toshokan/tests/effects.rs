@@ -12,6 +12,7 @@ use common::{
     HEAD, WRITER,
 };
 use toshokan::blocking::{self, Backend};
+use toshokan::crash::Streams;
 use toshokan::effects::{self, EffectStep, Moves};
 use toshokan::error::{Invalid, Mismatch};
 use toshokan::io::{Capabilities, IoError, Range, CHUNK};
@@ -871,6 +872,49 @@ fn a_staged_file_carries_the_extension_of_the_file_it_becomes() {
     created.sort();
     let extensions: Vec<&str> = created.iter().map(|(e, _)| e.as_str()).collect();
     assert_eq!(extensions, ["", "json", "syx"], "{created:?}");
+}
+
+#[test]
+fn a_fill_that_fails_leaves_no_writes_for_a_later_request_to_land() {
+    let disk = MemDisk::new();
+    put(
+        &mut common::BlockingMem(disk.clone()),
+        &[("a.syx", b"short")],
+    );
+    disk.set_capacity(Root::Folder, Some(5));
+    let splice = Splice {
+        from: path("a.syx"),
+        pieces: vec![Piece::Bytes(b"new ".to_vec()), kept(0, 6)],
+    };
+    let plan = effects::resolve(
+        &[save_over("a.syx", b"short")],
+        &bound(&[]),
+        &layout(),
+        Capabilities::ALL,
+        &mut env(1),
+    )
+    .unwrap();
+    let plan = Rc::new(plan);
+    let record = Rc::new(PendingRecord::new(WRITER, "Save", entry(HEAD), &plan));
+    let streams = &mut Streams::new(disk.clone());
+    let prepare = effects::prepare(&layout(), plan, record, identify());
+    let sources: Vec<Box<dyn blocking::Source<Streams>>> = vec![Box::new(splice)];
+    let failed = blocking::run_with(streams, sources, prepare);
+    assert!(
+        matches!(
+            failed,
+            Err(Error::Io {
+                error: IoError::SpliceRange,
+                ..
+            })
+        ),
+        "{failed:?}"
+    );
+    let listed = streams.perform(Io::List {
+        root: Root::Folder,
+        dir: RelPath::ROOT,
+    });
+    assert!(listed.is_ok(), "{listed:?}");
 }
 
 /// A folder another program writes in: once the pending record of an intent is

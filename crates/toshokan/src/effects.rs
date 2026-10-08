@@ -595,13 +595,7 @@ fn stage<'a>(layout: &Layout, writer: WriterId, plan: Rc<EffectPlan>) -> Fallibl
                     })
                     .and_then({
                         let (path, content) = (path.clone(), *content);
-                        move |()| {
-                            flow::act(Io::Fill {
-                                root: Root::Folder,
-                                path,
-                                content,
-                            })
-                        }
+                        move |()| fill(path, content)
                     }),
                     Staged::Copy(source) => flow::copy(Root::Folder, source, &path),
                 };
@@ -609,6 +603,22 @@ fn stage<'a>(layout: &Layout, writer: WriterId, plan: Rc<EffectPlan>) -> Fallibl
             })
         })
         .and_then(move |()| flow::sync(Root::Folder, &synced))
+}
+
+/// Fills the staged file at `path` from `content`. A fill that fails removes
+/// what it wrote, which also ends a stream it left open.
+fn fill<'a>(path: RelPath, content: Content) -> Fallible<'a, ()> {
+    let io = Io::Fill {
+        root: Root::Folder,
+        path: path.clone(),
+        content,
+    };
+    flow::act(io).then(move |filled| match filled {
+        Ok(()) => ok(()),
+        Err(error) => {
+            flow::remove_if_present(Root::Folder, path).then(move |_| Flow::Done(Err(error)))
+        }
+    })
 }
 
 /// The first precondition that does not hold, or a trash item a step needs that

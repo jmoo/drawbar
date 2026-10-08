@@ -580,7 +580,8 @@ A writer carries out an intent's steps in this order:
 1. Create each new file in `tmp/` and fill it, then sync it and `tmp/`.
    The app's bytes are written a chunk at a time by the driver, never held by
    the core; they may copy ranges of the file being rewritten. A copy out of
-   another writer's directory is made a chunk at a time.
+   another writer's directory is made a chunk at a time. A file whose filling
+   fails is removed.
 2. Check every precondition: a path holds nothing, or a file whose identity is
    the one the app expects; a directory satisfies neither. Check that every
    trash item a step restores is there. On failure, remove the staged files and
