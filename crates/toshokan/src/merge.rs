@@ -1027,10 +1027,15 @@ impl Folded {
         self.entities.get(&entity)?.shown()
     }
 
-    /// [`Folded::shown`] of every entity shown, by id.
-    pub fn each_shown(&self) -> impl Iterator<Item = (EntityId, Shown<'_>)> {
-        let entities = self.entities.iter();
-        entities.filter_map(|(entity, state)| Some((*entity, state.shown()?)))
+    /// [`Folded::shown`] of every entity shown after `after`, by id, each with
+    /// the id of every entity the iterator passed.
+    pub fn each_shown_after(
+        &self,
+        after: Option<EntityId>,
+    ) -> impl Iterator<Item = (EntityId, Option<Shown<'_>>)> {
+        let from = after.map_or(Bound::Unbounded, Bound::Excluded);
+        let entities = self.entities.range((from, Bound::Unbounded));
+        entities.map(|(entity, state)| (*entity, state.shown()))
     }
 
     /// The path of `entity`'s latest surviving file write that names a file, while
@@ -1310,7 +1315,8 @@ pub(crate) struct Merging {
     parts: std::vec::IntoIter<Fold>,
 }
 
-enum Fold {
+/// One part of what a merge folds.
+pub(crate) enum Fold {
     Join(Rc<Snapshot>),
     Apply(WriterId, Rc<Entry>),
 }
@@ -1323,8 +1329,13 @@ impl Merging {
             let entries = log.entries().iter().cloned();
             parts.extend(entries.map(|entry| Fold::Apply(log.writer(), entry)));
         }
+        Self::onto(Folded::default(), parts)
+    }
+
+    /// Folds `parts`, in order, into `folded`.
+    pub(crate) fn onto(folded: Folded, parts: Vec<Fold>) -> Self {
         Self {
-            folded: Folded::default(),
+            folded,
             parts: parts.into_iter(),
         }
     }

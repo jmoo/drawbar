@@ -50,52 +50,107 @@ struct Entries<'a> {
     conflicts: Vec<Conflicted>,
 }
 
-impl Index {
-    /// The index of a view of `folded` and `bindings`, built at once.
-    pub fn of(folded: &Folded, bindings: &Bindings) -> Self {
-        let mut holding: BTreeMap<(KeyKind, &str), Holding> = BTreeMap::new();
-        let (mut paths, mut conflicts) = (Vec::new(), Vec::new());
-        for (entity, shown) in folded.each_shown() {
+/// An index being built a slice of entities at a time, as [`Index::of`] builds
+/// it.
+#[derive(Default)]
+pub(crate) struct Indexing {
+    /// The last entity taken.
+    after: Option<EntityId>,
+    holding: BTreeMap<KeyKind, BTreeMap<String, Holding>>,
+    paths: Vec<((RelPath, EntityId), FileState)>,
+    conflicts: Vec<(Conflicted, ())>,
+}
+
+impl Indexing {
+    /// Takes the next `slice` entities of `folded`, bound as `bindings` says;
+    /// true once every one is taken. Each step must be given the same state.
+    pub(crate) fn step(&mut self, folded: &Folded, bindings: &Bindings, slice: usize) -> bool {
+        let mut entities = folded.each_shown_after(self.after);
+        for (entity, shown) in entities.by_ref().take(slice) {
+            self.after = Some(entity);
+            let Some(shown) = shown else {
+                continue;
+            };
             let entries = Entries::from(entity, shown, bindings.bound.get(&entity));
             for under in entries.values.chunk_by(|a, b| (a.0, a.1) == (b.0, b.1)) {
-                let held = holding.entry((under[0].0, under[0].1)).or_default();
+                let (kind, key) = (under[0].0, under[0].1);
+                let keys = self.holding.entry(kind).or_default();
+                let held = match keys.get_mut(key) {
+                    Some(held) => held,
+                    None => keys.entry(key.to_owned()).or_default(),
+                };
                 held.holders.push(entity);
                 for (_, _, value) in under {
                     let named = held.named.len();
-                    let at = *held.named.entry(value.as_str()).or_insert(named);
+                    let at = match held.named.get(value.as_str()) {
+                        Some(at) => *at,
+                        None => *held.named.entry(Text::from(value.as_str())).or_insert(named),
+                    };
                     held.held.push((at, entity));
                 }
             }
             if let Some((path, state)) = entries.file {
-                paths.push(((path.clone(), entity), state));
+                self.paths.push(((path.clone(), entity), state));
             }
-            conflicts.extend(entries.conflicts.into_iter().map(|conflict| (conflict, ())));
+            let conflicts = entries.conflicts.into_iter();
+            self.conflicts.extend(conflicts.map(|conflict| (conflict, ())));
         }
-        let keys = holding.into_iter().map(|((kind, key), held)| {
-            let index = KeyIndex::of(held);
-            ((kind, key.to_owned()), Arc::new(index))
+        entities.next().is_none()
+    }
+
+    /// ⚠️ Before [`Indexing::step`] returns true, the index of the entities taken.
+    pub(crate) fn finish(self) -> Index {
+        let keys = self.holding.into_iter().flat_map(|(kind, keys)| {
+            keys.into_iter()
+                .map(move |(key, held)| ((kind, key), Arc::new(KeyIndex::of(held))))
         });
-        Self {
+        Index {
             keys: keys.collect(),
-            paths: paths.into_iter().collect(),
-            conflicts: conflicts.into_iter().collect(),
+            paths: self.paths.into_iter().collect(),
+            conflicts: self.conflicts.into_iter().collect(),
         }
+    }
+}
+
+impl Index {
+    /// The index of a view of `folded` and `bindings`, built at once.
+    pub fn of(folded: &Folded, bindings: &Bindings) -> Self {
+        let mut indexing = Indexing::default();
+        indexing.step(folded, bindings, usize::MAX);
+        indexing.finish()
     }
 
     /// Moves the entries of each entity that changed between `before`, the folded
     /// state and bindings this index holds, and `after`. Builds the index again
     /// when most entities changed.
     pub fn update(&mut self, before: (&Folded, &Bindings), after: (&Folded, &Bindings)) {
+        match Self::changed(before, after) {
+            Some(entities) => self.move_entries(before, after, entities),
+            None => *self = Self::of(after.0, after.1),
+        }
+    }
+
+    /// The entities whose state or binding differs between `before` and
+    /// `after`; `None` when so many do that building the index again costs less
+    /// than moving their entries.
+    pub fn changed(before: (&Folded, &Bindings), after: (&Folded, &Bindings)) -> Option<Vec<EntityId>> {
         let mut entities = after.0.changed(before.0);
         if !std::ptr::eq(before.1, after.1) {
             entities.extend(rebound(&before.1.bound, &after.1.bound));
             entities.sort_unstable();
             entities.dedup();
         }
-        if entities.len() > REBUILT.max(after.0.entity_count() / 4) {
-            *self = Self::of(after.0, after.1);
-            return;
-        }
+        (entities.len() <= REBUILT.max(after.0.entity_count() / 4)).then_some(entities)
+    }
+
+    /// Moves the entries of `entities`, which [`Index::changed`] gave, from what
+    /// they were in `before` to what they are in `after`.
+    pub fn move_entries(
+        &mut self,
+        before: (&Folded, &Bindings),
+        after: (&Folded, &Bindings),
+        entities: Vec<EntityId>,
+    ) {
         for entity in entities {
             let was = Entries::of(before, entity);
             let now = Entries::of(after, entity);
@@ -231,9 +286,9 @@ impl Index {
 
 /// One key's values as [`Index::of`] gathers them, in order of entity.
 #[derive(Default)]
-struct Holding<'a> {
+struct Holding {
     /// Each value, numbered in the order first held.
-    named: HashMap<&'a str, usize>,
+    named: HashMap<Text, usize>,
     /// Each value held, by number, with its entity.
     held: Vec<(usize, EntityId)>,
     holders: Vec<EntityId>,
@@ -241,8 +296,8 @@ struct Holding<'a> {
 
 impl KeyIndex {
     fn of(gathered: Holding) -> Self {
-        let mut texts: Vec<(&str, usize)> = gathered.named.into_iter().collect();
-        texts.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        let mut texts: Vec<(Text, usize)> = gathered.named.into_iter().collect();
+        texts.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         let mut rank = vec![0; texts.len()];
         for (at, (_, named)) in texts.iter().enumerate() {
             rank[*named] = at;
@@ -253,8 +308,7 @@ impl KeyIndex {
         }
         let mut counts = Vec::with_capacity(texts.len());
         let mut holding = Vec::new();
-        for ((value, _), entities) in texts.into_iter().zip(each) {
-            let text = Text::from(value);
+        for ((text, _), entities) in texts.into_iter().zip(each) {
             counts.push((Arc::clone(&text), entities.len()));
             holding.extend(
                 entities
@@ -511,6 +565,43 @@ mod tests {
                 assert_eq!(index, Index::of(&next, &rebound), "seed {seed}, entry {n}");
                 (folded, bound) = (next, rebound);
             }
+        }
+    }
+
+    #[test]
+    fn an_index_built_a_slice_at_a_time_equals_one_built_at_once() {
+        for seed in 0..100 {
+            let mut random = SeededRandom::new(seed);
+            let mut folded = Folded::default();
+            let mut hashes = Vec::new();
+            for n in 0..40 {
+                let ops = (0..1 + below(&mut random, 3))
+                    .map(|_| op(&mut random, &hashes))
+                    .collect();
+                let line = Line::seal(format!(r#"{{"prev":"{}","n":{n}}}"#, EntryHash::ZERO));
+                let kind = EntryKind::Intent(Logged {
+                    label: String::new(),
+                    ops,
+                    displaced: Vec::new(),
+                    reverses: None,
+                });
+                let at = Hlc {
+                    wall_ms: n,
+                    counter: 0,
+                };
+                let entry = Entry::new(line.unwrap(), at, kind, false);
+                hashes.push(entry.hash());
+                folded.apply(WriterId::from_u128(1), &entry);
+            }
+            let bound = bindings(&mut random, &folded);
+            let slice = 1 + below(&mut random, 5);
+            let mut indexing = Indexing::default();
+            while !indexing.step(&folded, &bound, slice) {}
+            assert_eq!(
+                indexing.finish(),
+                Index::of(&folded, &bound),
+                "seed {seed}, {slice}-entity slices"
+            );
         }
     }
 }
