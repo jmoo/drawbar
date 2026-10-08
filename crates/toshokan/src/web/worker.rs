@@ -217,6 +217,11 @@ impl Fs for Worker {
         give_back().await;
         self.turn.set(now());
     }
+
+    fn own(&self, root: &RelPath) {
+        let message = object(&[("own", root.as_str().into())]);
+        let _ = self.worker.post_message(&message);
+    }
 }
 
 impl Drop for Worker {
@@ -256,7 +261,11 @@ pub async fn serve(start: JsValue) {
         running: Cell::new(false),
     });
     let hear = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
-        queue.push(event.data());
+        let data = event.data();
+        match field(&data, "own").and_then(|own| own.as_string()) {
+            Some(own) => queue.executor.own(&own),
+            None => queue.push(data),
+        }
     });
     scope.set_onmessage(Some(hear.as_ref().unchecked_ref()));
     // The handler lives as long as the worker.

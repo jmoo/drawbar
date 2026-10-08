@@ -52,6 +52,15 @@ struct Tree {
     top: Dir,
     writes: Writes,
     capabilities: Capabilities,
+    /// The directory at and under which no directory is removed or renamed:
+    /// all of the local root, and toshokan's root in the folder once the library
+    /// says which it is.
+    kept: RefCell<Option<RelPath>>,
+    /// The directories found there, by path. A browser can take milliseconds for
+    /// each step of a path.
+    // ⚠️ Firefox's handles follow a directory that moves, and fail once it is
+    // removed, so only directories nothing moves or removes are kept.
+    found: RefCell<BTreeMap<RelPath, Dir>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -100,31 +109,25 @@ impl Executor {
             fsync: chromium,
         };
         let folder = match folder {
-            Folder::Private(path) => Tree {
-                top: private_dir(&path).await?,
-                writes: Writes::Handles,
-                capabilities: private,
-            },
-            Folder::Picked { dir, rename } => Tree {
-                top: dir,
-                writes: Writes::Streams,
-                capabilities: Capabilities {
+            Folder::Private(path) => Tree::new(private_dir(&path).await?, Writes::Handles, private),
+            Folder::Picked { dir, rename } => Tree::new(
+                dir,
+                Writes::Streams,
+                Capabilities {
                     append: true,
                     rename_file: rename,
                     no_replace: false,
                     rename_dir: false,
                     fsync: false,
                 },
-            },
+            ),
         };
         let locks = Locks::new(local)?;
+        let local = Tree::new(private_dir(local).await?, Writes::Handles, private);
+        *local.kept.borrow_mut() = Some(RelPath::ROOT);
         Ok(Self {
             folder,
-            local: Tree {
-                top: private_dir(local).await?,
-                writes: Writes::Handles,
-                capabilities: private,
-            },
+            local,
             locks,
             filling: RefCell::new(None),
         })
@@ -132,6 +135,14 @@ impl Executor {
 
     pub fn capabilities(&self, root: Root) -> Capabilities {
         self.tree(root).capabilities
+    }
+
+    /// Takes `root`, toshokan's root in the folder, whose directories are never
+    /// removed or renamed: their handles are kept from request to request.
+    pub fn own(&self, root: &str) {
+        if let Ok(root) = RelPath::new(root) {
+            *self.folder.kept.borrow_mut() = Some(root);
+        }
     }
 
     pub async fn perform(&self, io: Io) -> IoResult {
@@ -230,14 +241,62 @@ impl Fs for Executor {
 }
 
 impl Tree {
-    /// The directory at `path`.
+    fn new(top: Dir, writes: Writes, capabilities: Capabilities) -> Self {
+        Self {
+            top,
+            writes,
+            capabilities,
+            kept: RefCell::new(None),
+            found: RefCell::new(BTreeMap::new()),
+        }
+    }
+
+    /// Whether the handle of the directory at `path` is kept.
+    fn keeps(&self, path: &RelPath) -> bool {
+        let kept = self.kept.borrow();
+        kept.as_ref().is_some_and(|kept| path.starts_with(kept))
+    }
+
+    /// The directory at `path`, found from the nearest directory kept above it.
     async fn dir(&self, path: &RelPath) -> Result<Dir, IoError> {
-        let mut dir = self.top.clone();
-        for name in path.components() {
-            dir = wait(dir.get_directory_handle(name))
+        self.walk(path, None).await
+    }
+
+    /// The directory at `path`, each directory on the way made where missing
+    /// when `make` says so.
+    async fn walk(
+        &self,
+        path: &RelPath,
+        make: Option<&FileSystemGetDirectoryOptions>,
+    ) -> Result<Dir, IoError> {
+        let names: Vec<&str> = path.components().collect();
+        let mut at = names.len();
+        let mut dir = loop {
+            let above = RelPath::new(&names[..at].join("/")).unwrap_or_default();
+            if let Some(found) = self.found.borrow().get(&above) {
+                break found.clone();
+            }
+            if at == 0 {
+                break self.top.clone();
+            }
+            at -= 1;
+        };
+        let mut walked = RelPath::new(&names[..at].join("/")).unwrap_or_default();
+        for name in &names[at..] {
+            let next = match make {
+                Some(make) => dir.get_directory_handle_with_options(name, make),
+                None => dir.get_directory_handle(name),
+            };
+            dir = wait(next)
                 .await
                 .map_err(|error| failure(&error, IoError::NotDirectory))?
                 .unchecked_into();
+            walked = walked
+                .join(name)
+                .map_err(|error| IoError::Other(error.to_string()))?;
+            if self.keeps(&walked) {
+                self.found.borrow_mut().insert(walked.clone(), dir.clone());
+            }
         }
         Ok(dir)
     }
@@ -314,24 +373,44 @@ impl Tree {
     }
 
     /// Each of `reads`, as [`Tree::read`] reads it, finding each directory they
-    /// name once: a browser can take milliseconds for each step of a path.
+    /// name once: a browser can take milliseconds for each step of a path. The
+    /// files of a directory kept that more than one read names are found by one
+    /// listing of it, which Firefox gives in about the time of one step.
     async fn read_many(&self, reads: &[(RelPath, Range)]) -> Vec<Result<Vec<u8>, IoError>> {
-        let mut dirs: BTreeMap<RelPath, Result<Dir, IoError>> = BTreeMap::new();
+        let mut named: BTreeMap<RelPath, usize> = BTreeMap::new();
         for parent in reads.iter().filter_map(|(path, _)| path.parent()) {
-            if let std::collections::btree_map::Entry::Vacant(slot) = dirs.entry(parent) {
-                let dir = self.dir(slot.key()).await;
-                slot.insert(dir);
-            }
+            *named.entry(parent).or_default() += 1;
         }
-        let dirs = &dirs;
+        let mut dirs: BTreeMap<RelPath, Result<Dir, IoError>> = BTreeMap::new();
+        let mut listed: BTreeMap<RelPath, BTreeMap<String, FileSystemFileHandle>> = BTreeMap::new();
+        for (parent, count) in named {
+            let dir = self.dir(&parent).await;
+            if let (Ok(found), true) = (&dir, count > 1 && self.keeps(&parent)) {
+                if let Ok(entries) = children(found).await {
+                    let files = entries.into_iter().filter_map(|(name, entry)| match entry {
+                        Entry::File(file) => Some((name, file)),
+                        Entry::Dir(_) => None,
+                    });
+                    listed.insert(parent.clone(), files.collect());
+                }
+            }
+            dirs.insert(parent, dir);
+        }
+        let (dirs, listed) = (&dirs, &listed);
         join(reads.iter().map(|(path, range)| async move {
             let (Some(parent), Some(name)) = (path.parent(), path.name()) else {
                 return Err(IoError::Other(ROOT_ITSELF.into()));
             };
             let dir = dirs[&parent].clone()?;
-            let file = wait(dir.get_file_handle(name)).await;
-            let file = file.map_err(|error| failure(&error, IoError::IsDirectory))?;
-            read_file(&file.unchecked_into(), *range).await
+            let known = listed.get(&parent).and_then(|files| files.get(name));
+            let file = match known {
+                Some(file) => file.clone(),
+                None => wait(dir.get_file_handle(name))
+                    .await
+                    .map_err(|error| failure(&error, IoError::IsDirectory))?
+                    .unchecked_into(),
+            };
+            read_file(&file, *range).await
         }))
         .await
     }
@@ -479,14 +558,7 @@ impl Tree {
     async fn make_dir(&self, path: &RelPath) -> Result<(), IoError> {
         let options = FileSystemGetDirectoryOptions::new();
         options.set_create(true);
-        let mut dir = self.top.clone();
-        for name in path.components() {
-            dir = wait(dir.get_directory_handle_with_options(name, &options))
-                .await
-                .map_err(|error| failure(&error, IoError::NotDirectory))?
-                .unchecked_into();
-        }
-        Ok(())
+        self.walk(path, Some(&options)).await.map(drop)
     }
 
     /// Flushes a file through a sync access handle. A directory's names cannot

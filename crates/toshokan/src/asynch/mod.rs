@@ -36,6 +36,11 @@ pub trait Fs {
     /// interface gives the thread back here once the core has held it long
     /// enough.
     async fn pause(&self) {}
+
+    /// Told, as a library opens, its root in the folder: only toshokan writes
+    /// there, and removes or renames no directory, so storage may keep the
+    /// directories it finds there for later requests.
+    fn own(&self, _root: &RelPath) {}
 }
 
 /// Answers `io` with `perform`, which takes only single requests:
@@ -258,6 +263,7 @@ pub struct Library<F> {
 
 impl<F: Fs> Library<F> {
     pub async fn open(fs: F, layout: Layout, schema: &Schema, env: Env) -> Result<(Self, Opened)> {
+        fs.own(layout.root());
         let capabilities = fs.capabilities(Root::Folder);
         let open = library::Library::open(layout, schema.clone(), env, capabilities);
         let (core, opened) = run(&fs, open).await?;
