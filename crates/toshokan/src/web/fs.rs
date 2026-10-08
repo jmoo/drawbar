@@ -86,9 +86,11 @@ impl Executor {
                 "a library's storage is written only from a dedicated worker".into(),
             ));
         }
-        // Chromium's `flush()` takes about a quarter of a millisecond and appears
-        // to reach the disk; Firefox's and WebKit's take microseconds, so they
-        // declare no sync. `userAgentData` exists only in Chromium.
+        // Inferred from specimens; not confirmed on hardware.
+        // Chromium's `flush()` takes about a quarter of a millisecond, as a write
+        // reaching the disk does; Firefox's and WebKit's take microseconds, so
+        // they declare no sync. A sync covers a file's contents only: see
+        // `Tree::sync`. `userAgentData` exists only in Chromium.
         let chromium = field(&navigator(), "userAgentData").is_some();
         let private = Capabilities {
             append: true,
@@ -478,8 +480,9 @@ impl Tree {
         Ok(())
     }
 
-    /// Flushes a file through a sync access handle. A directory's names need no
-    /// sync: the browser keeps them in its own database.
+    /// Flushes a file through a sync access handle. A directory's names cannot
+    /// be synced: the browser keeps them in its own database, as durable as it
+    /// makes them.
     async fn sync(&self, path: &RelPath) -> Result<(), IoError> {
         if path.is_root() {
             return Ok(());

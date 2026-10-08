@@ -11,11 +11,12 @@ insignificant whitespace.
 
 A backend says, for each of the folder and the local root, whether it can sync.
 Where it can, a file's contents are durable once a sync of the file returns,
-and a name made or removed once a sync of its directory returns. Where it
-cannot, toshokan counts a request as durable once it completes: what completed
-survives the app stopping, and what survives the machine or the browser stopping
-is the backend's business. Every use of durable in this document means this,
-and nothing toshokan reports promises more.
+and a name made or removed once a sync of its directory returns, except in a
+browser, which keeps names where toshokan cannot sync them (see Browsers).
+Where it cannot, toshokan counts a request as durable once it completes: what
+completed survives the app stopping, and what survives the machine or the
+browser stopping is the backend's business. Every use of durable in this
+document means this, and nothing toshokan reports promises more.
 
 A backend also says whether it can append, rename a file, rename a directory,
 and rename without replacing. toshokan plans from what it says, never from a
@@ -779,11 +780,15 @@ always a directory of the origin private file system.
 
 - **Private file system.** Files are read through `getFile()`, which takes no
   lock, and written, appended to and flushed through sync access handles, opened
-  for one request each. Chromium's `flush()` takes a fraction of a millisecond
-  and appears to reach the disk; Firefox's and WebKit's take microseconds, so
-  they declare no `fsync`. Directory names need no sync: the browser keeps them
-  in its own database. Chromium cannot rename a directory there, so no browser
-  declares `rename_dir`.
+  for one request each. Chromium's `flush()` takes a fraction of a millisecond,
+  as a write that reaches the disk does, and Firefox's and WebKit's take
+  microseconds, so only Chromium declares `fsync`. That Chromium's reaches the
+  disk is inferred from its cost, not confirmed. A directory's names live in
+  the browser's own database, which toshokan cannot sync, so a sync of a
+  directory returns at once, and a name made or removed is only as durable as
+  that database keeps it; that it survives the machine stopping is not
+  confirmed. Chromium cannot rename a directory there, so no browser declares
+  `rename_dir`.
 - **Picked folder.** Only Chromium-based browsers can open one. Files are read
   through `getFile()` and written through writable streams, which write a copy
   and put it in place at `close()`: that is the moment a write lands, and
