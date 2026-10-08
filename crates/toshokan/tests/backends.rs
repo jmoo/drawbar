@@ -411,6 +411,44 @@ for_every_backend!(suite:
     a_lock_excludes_other_processes_until_released,
 );
 
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+#[wasm_bindgen_test::wasm_bindgen_test]
+async fn a_picked_folder_whose_browser_refuses_move_cannot_rename_a_file() {
+    use js_sys::{Promise, Reflect};
+    use toshokan::env::Random;
+    use toshokan::web::{private_dir, CryptoRandom, Executor, Folder};
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsValue;
+
+    let run = format!("suites/{:032x}", CryptoRandom.next_u128());
+    let dir = private_dir(&path(&format!("{run}/folder"))).await.unwrap();
+    let folder = Folder::Picked { dir, rename: true };
+    let executor = Executor::new(folder, &path(&format!("{run}/local")))
+        .await
+        .unwrap();
+    executor
+        .perform(create(Root::Folder, "a", b"a"))
+        .await
+        .unwrap();
+
+    let refuse = Closure::<dyn Fn() -> Promise>::new(|| {
+        let error = js_sys::Error::new("refused by the test");
+        error.set_name("NotSupportedError");
+        Promise::reject(&error)
+    });
+    let handles = Reflect::get(&js_sys::global(), &"FileSystemFileHandle".into()).unwrap();
+    let prototype = Reflect::get(&handles, &"prototype".into()).unwrap();
+    let name = JsValue::from_str("move");
+    let move_file = Reflect::get(&prototype, &name).unwrap();
+    Reflect::set(&prototype, &name, refuse.as_ref()).unwrap();
+    let renamed = executor.perform(rename("a", "b")).await;
+    Reflect::set(&prototype, &name, &move_file).unwrap();
+
+    assert_eq!(renamed, Err(IoError::Unsupported(Capability::RenameFile)));
+    let kept = executor.perform(read("a", 0, 1)).await;
+    assert_eq!(kept, Ok(Reply::Bytes(b"a".to_vec())));
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_native_root_declares_no_replace_only_where_its_renames_refuse_a_destination() {

@@ -446,16 +446,18 @@ impl Tree {
             Entry::Dir(dir) => dir,
         };
         let refused = || IoError::Unsupported(capability);
+        let failed = |error: JsValue| match name_of(&error).as_str() {
+            "NotSupportedError" => refused(),
+            _ => failure(&error, IoError::AlreadyExists),
+        };
         let call: Function = field(handle, "move")
             .and_then(|call| call.dyn_into().ok())
             .ok_or_else(refused)?;
         let moved = call
             .call2(handle, &to_dir, &JsValue::from_str(to_name))
-            .map_err(|error| failure(&error, IoError::AlreadyExists))?;
+            .map_err(failed)?;
         let moved: Promise = moved.dyn_into().map_err(|_| refused())?;
-        wait(moved)
-            .await
-            .map_err(|error| failure(&error, IoError::AlreadyExists))?;
+        wait(moved).await.map_err(failed)?;
         Ok(())
     }
 

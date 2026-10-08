@@ -268,8 +268,9 @@ pub enum IoError {
     /// file longer than the largest offset.
     #[error("a splice keeps a range its source does not hold")]
     SpliceRange,
-    /// The backend does not declare the capability the request needs. Operations
-    /// plan from [`Capabilities`]; reaching this is a planning bug.
+    /// The backend cannot do what the request needs. Operations plan from
+    /// [`Capabilities`], so reaching this is a planning bug, or a browser refusing
+    /// what its backend declared from its brand.
     #[error("the backend cannot {0}")]
     Unsupported(Capability),
     /// An in-memory disk was told to crash. Every later request on it fails the same
