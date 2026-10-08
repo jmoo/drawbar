@@ -2840,6 +2840,74 @@ fn what_an_instance_has_shown_survives_its_crash<F: Facade>() {
     );
 }
 
+/// Rescans through the core, stopping the rescan once it has written `stop_at`
+/// requests to its saved view, then restores the folder to before another
+/// writer's commit and reopens. Returns the song's tags and what the open reports
+/// removed.
+fn rescan_dropped_while_saving_its_view(stop_at: Option<usize>) -> (Vec<String>, usize) {
+    use toshokan::library::Library as Core;
+    use toshokan::{Operation, Step};
+    let clock = TestClock::at(1_000);
+    let folder = disk();
+    let here = machine(&folder);
+    let (mut a, _) = Blocking::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    a.close().unwrap();
+    let backup = copy_folder(&folder);
+    let mut probe = Probe::new(&here);
+    let caps = Backend::capabilities(&probe, Root::Folder);
+    let open = Core::open(layout(), schema(), env("a", 2, &clock), caps);
+    let (mut core, opened) = blocking::run(&mut probe, open).unwrap();
+    resumed(&probe.seen, &opened);
+    let (mut b, _) = Blocking::open(Probe::new(&machine(&folder)), env("b", 3, &clock)).unwrap();
+    b.commit("Tag", |i| i.add(song, TAGS, tag("theirs")))
+        .unwrap();
+    b.compact().unwrap();
+    b.close().unwrap();
+    let mut task = core.rescan();
+    let mut result = None;
+    let mut view_writes = 0;
+    loop {
+        match task.resume(result.take()) {
+            Step::Done(done) => {
+                done.unwrap();
+                break;
+            }
+            Step::Pause => {}
+            Step::Io(io) => {
+                let saves_view = io.mutates()
+                    && io.root() == Root::Local
+                    && io.path().name().is_some_and(|n| n.starts_with("view."));
+                if saves_view && Some(view_writes) == stop_at {
+                    break;
+                }
+                view_writes += usize::from(saves_view);
+                result = Some(probe.perform(io));
+            }
+        }
+    }
+    drop(task);
+    blocking::run(&mut probe, core.close()).unwrap();
+    restore(&folder, &backup);
+    let (a, opened) = Blocking::open(Probe::new(&here), env("a", 4, &clock)).unwrap();
+    (tags(&a.view(), song), opened.removed.len())
+}
+
+#[test]
+fn a_rescan_dropped_while_saving_its_view_leaves_the_view_to_be_saved_whole() {
+    let (kept, removed) = rescan_dropped_while_saving_its_view(None);
+    assert_eq!(kept, ["new", "theirs"]);
+    assert!(removed > 0, "the open reports what the restore removed");
+    for stop_at in [0, 2] {
+        let dropped = rescan_dropped_while_saving_its_view(Some(stop_at));
+        assert_eq!(
+            dropped,
+            (kept.clone(), removed),
+            "dropped after {stop_at} view writes"
+        );
+    }
+}
+
 fn what_any_writer_of_an_install_showed_survives_a_restore<F: Facade>() {
     let folder = disk();
     let clock = TestClock::at(1_000);

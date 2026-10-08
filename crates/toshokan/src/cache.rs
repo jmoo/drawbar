@@ -144,6 +144,8 @@ pub struct Store {
     broken: bool,
     /// The view holds what the saved one does not: write it whole.
     due: bool,
+    /// A save took the view's unsaved changes and has not finished.
+    saving: bool,
 }
 
 /// What loading the local root found.
@@ -228,6 +230,7 @@ impl Loaded {
                 journal: kept.journal,
                 broken: kept.broken,
                 due: kept.checkpoint == 0,
+                saving: false,
             };
             self.view = kept.view;
             self.files = kept.files;
@@ -1091,6 +1094,7 @@ pub(crate) fn due(reader: &Reader, genesis: EntryHash) -> bool {
     let store = reader.store.borrow();
     store.genesis != Some(genesis)
         || store.due
+        || store.saving
         || store.broken
         || folds
         || store.journal > store.checkpoint / 2 + JOURNAL_SLACK
@@ -1103,6 +1107,7 @@ pub(crate) fn journal(reader: &mut Reader, genesis: EntryHash) -> Task<'static, 
     }
     let record = encode_record(reader);
     reader.unsaved = Default::default();
+    reader.store.borrow_mut().saving = true;
     append_record(genesis, record, Rc::clone(&reader.store)).task()
 }
 
@@ -1123,6 +1128,7 @@ pub(crate) fn keep_checkpoint(
     bytes: Vec<u8>,
 ) -> Task<'static, Result<()>> {
     reader.unsaved = Default::default();
+    reader.store.borrow_mut().saving = true;
     write_checkpoint(genesis, bytes, Rc::clone(&reader.store)).task()
 }
 
@@ -1184,7 +1190,10 @@ fn append_record<'a>(
         .then(move |result| {
             let mut store = store.borrow_mut();
             match result {
-                Ok(()) => store.journal += len,
+                Ok(()) => {
+                    store.journal += len;
+                    store.saving = false;
+                }
                 Err(_) => store.broken = true,
             }
             Flow::Done(result)
