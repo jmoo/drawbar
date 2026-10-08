@@ -366,8 +366,19 @@ pub(crate) fn remove<'a>(root: Root, path: &RelPath) -> Fallible<'a, ()> {
 }
 
 /// Makes `dir` exist durably: creates what is missing of it and syncs the
-/// directory holding each name it created.
+/// directory holding each name it created. A directory already there costs one
+/// request.
 pub(crate) fn ensure_dir<'a>(root: Root, dir: &RelPath) -> Fallible<'a, ()> {
+    let whole = dir.clone();
+    stat(root, dir).and_then(move |meta| match meta.map(|meta| meta.kind) {
+        Some(Kind::Directory) => ok(()),
+        _ => make_missing(root, &whole),
+    })
+}
+
+/// [`ensure_dir`] once `dir` is not a directory: looks for the first missing
+/// name from the top.
+fn make_missing<'a>(root: Root, dir: &RelPath) -> Fallible<'a, ()> {
     let mut chain: Vec<RelPath> =
         std::iter::successors(Some(dir.clone()), RelPath::parent).collect();
     chain.reverse();
@@ -898,6 +909,30 @@ mod tests {
         );
         let dirs = disk.restart().directories(Root::Folder);
         assert_eq!(dirs, [path("a"), path("a/b"), path("a/b/c")].into());
+    }
+
+    #[test]
+    fn making_a_directory_that_is_there_asks_one_request() {
+        let disk = MemDisk::new();
+        run(&disk, ensure_dir(Root::Folder, &path("a/b/c"))).unwrap();
+        let mut task = ensure_dir(Root::Folder, &path("a/b/c")).task();
+        let (mut asked, mut result) = (Vec::new(), None);
+        let done = loop {
+            match task.resume(result.take()) {
+                Step::Io(io) => {
+                    asked.push(io.clone());
+                    result = Some(disk.perform(io));
+                }
+                Step::Pause => {}
+                Step::Done(done) => break done,
+            }
+        };
+        assert!(done.is_ok());
+        let stat = Io::Stat {
+            root: Root::Folder,
+            path: path("a/b/c"),
+        };
+        assert_eq!(asked, [stat]);
     }
 
     #[test]
