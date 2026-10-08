@@ -29,6 +29,7 @@ use serde::de::{DeserializeOwned, Error as _};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::binding::{Fact, Facts};
 use crate::cow::CowMap;
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
 use crate::log::{Displaced, Entry, EntryKind, FileFact, Op};
@@ -613,12 +614,13 @@ impl EntityState {
     }
 
     /// The surviving file writes that say where the file is, oldest first.
-    fn file_facts(&self) -> Vec<Written<FileFact>> {
-        let facts = written(&self.file).into_iter().map(|write| Written {
-            value: FileFact::from(write.value),
-            by: write.by,
-            at: write.at,
-            entry: write.entry,
+    fn file_facts(&self) -> Box<[Fact]> {
+        let surviving = self.file.surviving().into_iter();
+        let facts = surviving.filter_map(|write| {
+            Some(Fact {
+                value: FileFact::from(write.value?),
+                entry: write.entry,
+            })
         });
         facts.collect()
     }
@@ -1175,8 +1177,8 @@ impl Folded {
 
     /// The surviving writes of every existing entity's file register that say
     /// where its file is. More than one is a conflict.
-    pub fn files(&self) -> BTreeMap<EntityId, Vec<Written<FileFact>>> {
-        let mut files = BTreeMap::new();
+    pub fn files(&self) -> Facts {
+        let mut files = Facts::default();
         self.files_slice(&mut files, &mut None, usize::MAX);
         files
     }
@@ -1186,7 +1188,7 @@ impl Folded {
     /// is left.
     pub(crate) fn files_slice(
         &self,
-        files: &mut BTreeMap<EntityId, Vec<Written<FileFact>>>,
+        files: &mut Facts,
         after: &mut Option<EntityId>,
         slice: usize,
     ) -> bool {
@@ -1207,7 +1209,7 @@ impl Folded {
     }
 
     /// [`Folded::files`] of one entity: empty unless it exists.
-    pub fn file(&self, entity: EntityId) -> Vec<Written<FileFact>> {
+    pub fn file(&self, entity: EntityId) -> Box<[Fact]> {
         self.entities
             .get(&entity)
             .filter(|state| state.present())
@@ -2313,10 +2315,10 @@ mod tests {
             while !merging.step(slice) {}
             assert_eq!(merging.folded(), whole, "{slice}-op slices");
             assert_eq!(merge(&logs), whole);
-            let (mut files, mut after) = (BTreeMap::new(), None);
+            let (mut files, mut after) = (Facts::new(), None);
             while !whole.files_slice(&mut files, &mut after, slice) {}
             let present = whole.entities.iter().filter(|(_, state)| state.present());
-            let expected: BTreeMap<_, _> = present
+            let expected: Facts = present
                 .map(|(entity, state)| (*entity, state.file_facts()))
                 .filter(|(_, writes)| !writes.is_empty())
                 .collect();

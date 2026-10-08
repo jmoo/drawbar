@@ -558,7 +558,8 @@ mod tests {
             FileState::ChangedOutside,
             FileState::Missing,
         ];
-        let bound = folded.files().into_keys().filter_map(|entity| {
+        let bound = folded.files().keys().copied().collect::<Vec<_>>();
+        let bound = bound.into_iter().filter_map(|entity| {
             let path = RelPath::new(["a", "b/c", "d"][below(random, 3)]).unwrap();
             let state = states[below(random, 3)];
             (below(random, 3) > 0).then_some((entity, FileRef { path, state }))

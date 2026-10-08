@@ -13,7 +13,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::binding::{self, Binding, Bindings, Facts, Resolving, Scan, Scanned, Unscanned, Walk};
+use crate::binding::{
+    self, Binding, Bindings, Fact, Facts, Resolving, Scan, Scanned, Unscanned, Walk,
+};
 use crate::cache::{self, Encoding};
 use crate::drafts::{self, DraftRecord};
 use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd};
@@ -26,7 +28,7 @@ use crate::intent;
 use crate::io::{Capabilities, Io, Kind, Lock, Root, Task};
 use crate::layout::Layout;
 use crate::line::MAX_LINE;
-use crate::log::{Bound, Entry, EntryKind, FileFact, Genesis, Logged, Op, Settle, Settlement};
+use crate::log::{Bound, Entry, EntryKind, Genesis, Logged, Op, Settle, Settlement};
 use crate::merge::{merge, Beyond, Fold, Folded, Merging, Part};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord};
@@ -39,7 +41,7 @@ use crate::report::{
     Mode, Opened, Orphan, Outcome, Partial, PartialReport, Presence, Refreshed, Settled, Start,
     TrashItem, What, WriterInfo,
 };
-use crate::schema::{Schema, Written};
+use crate::schema::Schema;
 use crate::trash::{self, Policy};
 use crate::undo::History;
 use crate::view::{FileRef, FileState, Parts, View};
@@ -1022,14 +1024,15 @@ impl Library {
             .into_iter()
             .filter(|entity| was.get(entity) != self.facts.get(entity));
         changed
-            .flat_map(|entity| self.fact_paths(entity, was.get(&entity)))
+            .flat_map(|entity| self.fact_paths(entity, was.get(&entity).map(|was| &was[..])))
             .collect()
     }
 
     /// The paths `was`, an entity's file facts before, named, those its facts name
     /// now, and where it was bound.
-    fn fact_paths(&self, entity: EntityId, was: Option<&Vec<Written<FileFact>>>) -> Vec<RelPath> {
-        let logged = was.into_iter().chain(self.facts.get(&entity)).flatten();
+    fn fact_paths(&self, entity: EntityId, was: Option<&[Fact]>) -> Vec<RelPath> {
+        let now = self.facts.get(&entity).map(|now| &now[..]);
+        let logged = was.into_iter().chain(now).flatten();
         let bound = self.bindings.bound.get(&entity).map(|file| &file.path);
         logged
             .map(|fact| &fact.value.path)
@@ -1073,7 +1076,7 @@ impl Library {
             let was = self
                 .reach
                 .refile(&mut self.facts, &self.scan, names, entity, now);
-            moved.extend(self.fact_paths(entity, was.as_ref()));
+            moved.extend(self.fact_paths(entity, was.as_deref()));
         }
         moved
     }

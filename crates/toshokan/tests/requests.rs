@@ -4,16 +4,13 @@
 
 mod common;
 
-use std::collections::BTreeMap;
-
 use common::{bound, commit, env, identify, layout, path, put, Driven, Fill, Recorded, WRITER};
-use toshokan::binding::{self, Facts, Scan};
+use toshokan::binding::{self, Fact, Facts, Scan};
 use toshokan::blocking::{self, Library};
 use toshokan::log::FileFact;
 use toshokan::plan::{Content, Expect, FileChange};
 use toshokan::reader::{CachedView, Reader};
 use toshokan::report::TrashItem;
-use toshokan::schema::Written;
 use toshokan::trash::{self, Policy};
 use toshokan::{EntityId, EntryHash, Hlc, Io, MemDisk, Nonce, Register, RelPath, Schema};
 
@@ -57,13 +54,11 @@ fn a_scan_asks_once_per_directory_and_reads_identities_together() {
         len: 4,
         modified: None,
     };
-    let written = Written {
+    let written = Fact {
         value: fact,
         entry: EntryHash::from_u128(1),
-        at: Hlc::default(),
-        by: WRITER,
     };
-    let facts: Facts = BTreeMap::from([(EntityId::from_u128(1), vec![written])]);
+    let facts = Facts::from([(EntityId::from_u128(1), vec![written].into())]);
     d.take();
     let scan = blocking::run(
         &mut d,

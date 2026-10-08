@@ -257,10 +257,10 @@ fn scanned_conflicts(view: &View) -> Vec<Conflicted> {
             conflicts.push(Conflicted::Existence { entity });
         }
     }
-    for (entity, files) in folded.files() {
+    for (entity, files) in &folded.files() {
         let facts = files.iter().map(|w| format!("{:?}", w.value)).collect();
         if distinct(facts) > 1 {
-            conflicts.push(Conflicted::File { entity });
+            conflicts.push(Conflicted::File { entity: *entity });
         }
     }
     conflicts.sort();

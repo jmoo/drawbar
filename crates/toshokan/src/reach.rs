@@ -13,13 +13,12 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::hash::{Hash, Hasher};
 
-use crate::binding::{self, Bindings, Facts, Scan, Scanned, Unscanned};
+use crate::binding::{self, Bindings, Fact, Facts, Scan, Scanned, Unscanned};
 use crate::cow::CowMap;
 use crate::env::Names;
 use crate::ids::{EntityId, Identity};
 use crate::log::{FileFact, Op};
 use crate::path::RelPath;
-use crate::schema::Written;
 
 /// The links between the facts and the files of the last binding of everything,
 /// kept up as either changes, and what changed since the last binding.
@@ -81,8 +80,8 @@ fn hashed(key: &str) -> u64 {
 }
 
 /// The facts `facts` holds of `entity`, none when it holds none.
-fn facts_of<'a>(facts: &'a Facts, entity: &EntityId) -> &'a [Written<FileFact>] {
-    facts.get(entity).map_or(&[], Vec::as_slice)
+fn facts_of<'a>(facts: &'a Facts, entity: &EntityId) -> &'a [Fact] {
+    facts.get(entity).map_or(&[], |written| &written[..])
 }
 
 impl Links {
@@ -93,7 +92,7 @@ impl Links {
         linking.finish()
     }
 
-    fn add_facts(&mut self, entity: EntityId, written: &[Written<FileFact>], names: &dyn Names) {
+    fn add_facts(&mut self, entity: EntityId, written: &[Fact], names: &dyn Names) {
         for fact in written.iter().map(|written| &written.value) {
             let key = hashed(&names.key(fact.path.as_str()));
             self.keys.insert((key, entity), ());
@@ -102,7 +101,7 @@ impl Links {
         }
     }
 
-    fn remove_facts(&mut self, entity: EntityId, written: &[Written<FileFact>], names: &dyn Names) {
+    fn remove_facts(&mut self, entity: EntityId, written: &[Fact], names: &dyn Names) {
         for fact in written.iter().map(|written| &written.value) {
             let key = hashed(&names.key(fact.path.as_str()));
             self.keys.remove(&(key, entity));
@@ -287,8 +286,7 @@ impl Linking {
         names: &dyn Names,
         slice: usize,
     ) -> Stage {
-        let from = after.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
-        let mut entities = facts.range((from, std::ops::Bound::Unbounded));
+        let mut entities = facts.after(after);
         let mut last = None;
         for (entity, written) in entities.by_ref().take(slice) {
             last = Some(*entity);
@@ -438,10 +436,10 @@ impl Reach {
         scan: &Scan,
         names: &dyn Names,
         entity: EntityId,
-        now: Vec<Written<FileFact>>,
-    ) -> Option<Vec<Written<FileFact>>> {
+        now: Box<[Fact]>,
+    ) -> Option<Box<[Fact]>> {
         self.before(facts, scan, names, Some(entity), None);
-        let lengths = |written: &[Written<FileFact>]| -> BTreeSet<u64> {
+        let lengths = |written: &[Fact]| -> BTreeSet<u64> {
             written.iter().map(|written| written.value.len).collect()
         };
         let gained: Vec<u64> = match &self.links {
@@ -656,7 +654,7 @@ pub(crate) fn resolve(
 mod tests {
     use super::*;
     use crate::env::{ExactNames, Random, SeededRandom};
-    use crate::ids::{EntryHash, Hlc, WriterId};
+    use crate::ids::EntryHash;
 
     /// Folds ASCII case.
     struct Folding;
@@ -686,20 +684,18 @@ mod tests {
             RelPath::new(PLACES[self.below(PLACES.len())]).unwrap()
         }
 
-        fn facts(&mut self) -> Vec<Written<FileFact>> {
+        fn facts(&mut self) -> Box<[Fact]> {
             (0..self.below(3))
                 .map(|_| {
                     let (identity, len) = CONTENTS[self.below(CONTENTS.len())];
                     self.entry += 1;
-                    Written {
+                    Fact {
                         value: FileFact {
                             path: self.path(),
                             identity: Identity::from_u128(identity),
                             len,
                             modified: Some(self.below(2) as u64),
                         },
-                        by: WriterId::from_u128(1),
-                        at: Hlc::ZERO,
                         entry: EntryHash::from_u128(self.entry),
                     }
                 })

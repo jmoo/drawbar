@@ -16,18 +16,25 @@ use crate::cow::CowMap;
 use crate::env::{Identify, Names};
 use crate::error::Result;
 use crate::flow::{self, fold, ok};
-use crate::ids::{EntityId, Identity};
+use crate::ids::{EntityId, EntryHash, Identity};
 use crate::io::{Kind, Meta, Root, Task};
 use crate::layout::{is_swap_file, Layout};
 use crate::log::{FileFact, Op};
 use crate::path::RelPath;
 use crate::report::{Ambiguous, Copied, Moved, ScanReport};
-use crate::schema::Written;
 use crate::view::{FileRef, FileState};
 
-/// Every entity's surviving file-register writes, as the merge gives them. More
-/// than one is a conflict.
-pub type Facts = BTreeMap<EntityId, Vec<Written<FileFact>>>;
+/// A surviving write of an entity's file register that says where its file is.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Fact {
+    pub value: FileFact,
+    /// The entry that wrote it, which a pin replaces.
+    pub entry: EntryHash,
+}
+
+/// Every entity's surviving file-register writes that say where its file is,
+/// oldest first, as the merge gives them. More than one is a conflict.
+pub type Facts = CowMap<EntityId, Box<[Fact]>>;
 
 /// One library file as a scan found it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -113,12 +120,7 @@ impl Unscanned {
 
     /// Whether `entity`, whose file facts are `written`, is left unknown; `paths`
     /// are those of `self`.
-    fn leaves_unknown(
-        &self,
-        paths: &BTreeSet<&str>,
-        entity: EntityId,
-        written: &[Written<FileFact>],
-    ) -> bool {
+    fn leaves_unknown(&self, paths: &BTreeSet<&str>, entity: EntityId, written: &[Fact]) -> bool {
         self.entities.contains(&entity) || written.iter().any(|w| under(&w.value.path, paths))
     }
 }
@@ -432,8 +434,7 @@ impl Resolving {
     }
 
     fn facts(&mut self, facts: &Facts, after: Option<EntityId>, slice: usize) -> Resolve {
-        let from = after.map_or(Bound::Unbounded, Bound::Excluded);
-        let mut entities = facts.range((from, Bound::Unbounded));
+        let mut entities = facts.after(after);
         let mut last = None;
         for (entity, written) in entities.by_ref().take(slice) {
             last = Some(*entity);
@@ -566,7 +567,7 @@ pub fn pins(facts: &Facts, bindings: &Bindings, scan: &Scan) -> Vec<Op> {
 
 fn pin(facts: &Facts, scan: &Scan, entity: EntityId, file: &FileRef) -> Option<Op> {
     let ([written], FileState::InSync) = (
-        facts.get(&entity).map_or(&[][..], Vec::as_slice),
+        facts.get(&entity).map_or(&[][..], |written| &written[..]),
         file.state,
     ) else {
         return None;
@@ -644,7 +645,7 @@ impl Binding {
             known.files.retain(|path, _| !under(path, &paths));
             let facts = facts
                 .iter()
-                .filter(|(entity, written)| !unscanned.leaves_unknown(&paths, **entity, written));
+                .filter(|(entity, written)| !unscanned.leaves_unknown(&paths, *entity, written));
             let facts = facts.map(|(entity, written)| (*entity, written.clone()));
             (facts.collect(), known, unscanned.clone())
         });
@@ -673,7 +674,8 @@ impl Binding {
             let budget = &mut budget;
             *stage = match std::mem::replace(stage, Stage::Done) {
                 Stage::Candidates(from) => {
-                    let taken = take_after(facts, from, budget, |&entity, written| {
+                    let facts_after = facts.after(from).map(|(entity, written)| (entity, written));
+                    let taken = take_from(facts_after, budget, |&entity, written| {
                         progress.candidate(scan, names, entity, written);
                     });
                     taken.map_or(Stage::Claims, |last| Stage::Candidates(Some(last)))
@@ -733,7 +735,8 @@ impl Binding {
                     };
                     let paths = unscanned.paths.iter().map(RelPath::as_str).collect();
                     let bound = &mut progress.bound;
-                    let taken = take_after(every, from, budget, |&entity, written| {
+                    let every_after = every.after(from).map(|(entity, written)| (entity, written));
+                    let taken = take_from(every_after, budget, |&entity, written| {
                         let latest = written.last();
                         let unknown =
                             latest.filter(|_| unscanned.leaves_unknown(&paths, entity, written));
@@ -777,10 +780,19 @@ fn take_after<K: Ord + Clone, V>(
     map: &BTreeMap<K, V>,
     from: Option<K>,
     budget: &mut usize,
-    mut take: impl FnMut(&K, &V),
+    take: impl FnMut(&K, &V),
 ) -> Option<K> {
     let start = from.as_ref().map_or(Bound::Unbounded, Bound::Excluded);
-    for (key, value) in map.range((start, Bound::Unbounded)) {
+    take_from(map.range((start, Bound::Unbounded)), budget, take)
+}
+
+/// As [`take_after`], of `entries`, the entries after the last key taken.
+fn take_from<'a, K: Clone + 'a, V: 'a>(
+    entries: impl Iterator<Item = (&'a K, &'a V)>,
+    budget: &mut usize,
+    mut take: impl FnMut(&K, &V),
+) -> Option<K> {
+    for (key, value) in entries {
         take(key, value);
         *budget = budget.saturating_sub(1);
         if *budget == 0 {
@@ -793,13 +805,7 @@ fn take_after<K: Ord + Clone, V>(
 impl Progress {
     /// Finds the files `entity`'s facts name: by path, else by the name the
     /// volume takes for it.
-    fn candidate(
-        &mut self,
-        scan: &Scan,
-        names: &dyn Names,
-        entity: EntityId,
-        written: &[Written<FileFact>],
-    ) {
+    fn candidate(&mut self, scan: &Scan, names: &dyn Names, entity: EntityId, written: &[Fact]) {
         let Some(first) = written.first() else {
             return;
         };
@@ -1001,7 +1007,7 @@ mod tests {
     use super::*;
     use crate::disk::MemDisk;
     use crate::env::{ExactNames, PrefixIdentity};
-    use crate::ids::{EntryHash, Hlc, WriterId};
+    use crate::ids::EntryHash;
     use crate::io::Io;
 
     fn path(text: &str) -> RelPath {
@@ -1021,18 +1027,20 @@ mod tests {
         }
     }
 
-    fn written(fact: FileFact, entry: u128) -> Written<FileFact> {
-        Written {
+    fn written(fact: FileFact, entry: u128) -> Fact {
+        Fact {
             value: fact,
-            by: WriterId::from_u128(1),
-            at: Hlc::ZERO,
             entry: EntryHash::from_u128(entry),
         }
     }
 
     /// A scan as [`scan`] reports it: identities only for lengths some fact has.
     fn scanned(files: &[(&str, usize)], facts: &Facts) -> Scan {
-        let lengths: BTreeSet<u64> = facts.values().flatten().map(|w| w.value.len).collect();
+        let lengths: BTreeSet<u64> = facts
+            .values()
+            .flat_map(|written| written.iter())
+            .map(|w| w.value.len)
+            .collect();
         let files = files
             .iter()
             .map(|&(at, content)| {
@@ -1066,13 +1074,13 @@ mod tests {
             let one = fact(places[first / 2], first % 2);
             facts_all.push(Facts::from([(
                 EntityId::from_u128(1),
-                vec![written(one.clone(), 1)],
+                vec![written(one.clone(), 1)].into(),
             )]));
             for second in 0..6 {
                 let two = fact(places[second / 2], second % 2);
                 facts_all.push(Facts::from([
-                    (EntityId::from_u128(1), vec![written(one.clone(), 1)]),
-                    (EntityId::from_u128(2), vec![written(two, 2)]),
+                    (EntityId::from_u128(1), vec![written(one.clone(), 1)].into()),
+                    (EntityId::from_u128(2), vec![written(two, 2)].into()),
                 ]));
             }
         }
@@ -1104,7 +1112,7 @@ mod tests {
             .map(|_| {
                 let mut facts = Facts::new();
                 for e in 1..=1 + pick(6) as u128 {
-                    let written: Vec<_> = (0..1 + pick(2))
+                    let written: Box<[Fact]> = (0..1 + pick(2))
                         .map(|i| written(fact(places[pick(6)], pick(3)), e * 10 + i as u128))
                         .collect();
                     facts.insert(EntityId::from_u128(e), written);
@@ -1160,10 +1168,13 @@ mod tests {
         let mut random = SeededRandom::new(12);
         for (mut facts, scan, _) in random_worlds(11, 1000) {
             let mut pick = |n: usize| (random.next_u128() % n as u128) as usize;
-            if let Some(written) = facts.values_mut().nth(pick(2)) {
+            let twinned = facts.keys().nth(pick(2)).copied();
+            if let Some(entity) = twinned {
+                let mut written = facts[&entity].to_vec();
                 let mut twin = written[0].clone();
                 twin.value.identity = Identity::from_u128(99);
                 written.push(twin);
+                facts.insert(entity, written.into());
             }
             let mut scan = scan;
             for file in scan.files.values_mut() {
@@ -1186,7 +1197,7 @@ mod tests {
             }
             let mut expected = fresh.clone();
             let mut known: BTreeMap<(RelPath, u64, Option<u64>), Identity> = BTreeMap::new();
-            for fact in facts.values().flatten() {
+            for fact in facts.values().flat_map(|written| written.iter()) {
                 let key = (fact.value.path.clone(), fact.value.len, fact.value.modified);
                 known.insert(key, fact.value.identity);
             }
@@ -1195,7 +1206,11 @@ mod tests {
                     known.insert((path.clone(), file.len, file.modified), identity);
                 }
             }
-            let lengths: BTreeSet<u64> = facts.values().flatten().map(|f| f.value.len).collect();
+            let lengths: BTreeSet<u64> = facts
+                .values()
+                .flat_map(|written| written.iter())
+                .map(|f| f.value.len)
+                .collect();
             let mut needed = Vec::new();
             for (path, file) in &mut expected.files {
                 if file.identity.is_none() {
@@ -1315,7 +1330,7 @@ mod tests {
                         let rivals = facts
                             .iter()
                             .filter(|(other, w)| {
-                                *other != entity && w[0].value.identity == fact.identity
+                                *other != *entity && w[0].value.identity == fact.identity
                             })
                             .count();
                         assert!(
@@ -1428,7 +1443,7 @@ mod tests {
     }
 
     fn one(at: &str) -> Facts {
-        Facts::from([(EntityId::from_u128(1), vec![written(fact(at, 0), 1)])])
+        Facts::from([(EntityId::from_u128(1), vec![written(fact(at, 0), 1)].into())])
     }
 
     #[test]
@@ -1462,7 +1477,10 @@ mod tests {
         assert_eq!(bindings.unbound, [path("a")]);
 
         let mut both = one("a");
-        both.insert(EntityId::from_u128(2), vec![written(fact("A", 0), 2)]);
+        both.insert(
+            EntityId::from_u128(2),
+            vec![written(fact("A", 0), 2)].into(),
+        );
         let bindings = bind(&both, &scanned(&[("a", 0)], &both), &Folding);
         assert!(
             bindings
@@ -1477,7 +1495,10 @@ mod tests {
     #[test]
     fn a_conflicted_file_register_binds_only_where_one_survivor_is_found() {
         let e = EntityId::from_u128(1);
-        let facts = Facts::from([(e, vec![written(fact("a", 0), 1), written(fact("b", 0), 2)])]);
+        let facts = Facts::from([(
+            e,
+            vec![written(fact("a", 0), 1), written(fact("b", 0), 2)].into(),
+        )]);
         let found = |files: &[(&str, usize)]| bind(&facts, &scanned(files, &facts), &ExactNames);
         assert_eq!(found(&[("b", 0)]).bound[&e].path, path("b"));
         let both = found(&[("a", 0), ("b", 0)]);

@@ -28,6 +28,16 @@ impl<K, V> Clone for CowMap<K, V> {
     }
 }
 
+impl<K, V> CowMap<K, V> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &K> {
+        entries(self).map(|(key, _)| key)
+    }
+}
+
 impl<K, V> Default for CowMap<K, V> {
     fn default() -> Self {
         Self {
@@ -193,6 +203,12 @@ impl<K: Ord + Clone, V: Clone> std::ops::Index<&K> for CowMap<K, V> {
 
     fn index(&self, key: &K) -> &V {
         self.get(key).expect("a key the map holds")
+    }
+}
+
+impl<K: Ord, V, const N: usize> From<[(K, V); N]> for CowMap<K, V> {
+    fn from(entries: [(K, V); N]) -> Self {
+        entries.into_iter().collect()
     }
 }
 
