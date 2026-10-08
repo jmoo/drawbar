@@ -35,6 +35,9 @@ pub struct Executor {
     /// A picked folder's file being filled by consecutive [`Io::Write`]s, kept
     /// open so each write does not copy the file again; closed before any other
     /// request.
+    ///
+    /// ⚠️ Its writes land only at that close, so a close that fails fails the
+    /// next request, whatever it asks.
     filling: RefCell<Option<Filling>>,
 }
 

@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::time::Duration;
 
 use toshokan::asynch::{Fs, Library};
 use toshokan::env::{Clock, ExactNames, Identify, PrefixIdentity, Random, SeededRandom, TestClock};
@@ -329,6 +330,27 @@ async fn a_commit_announced_in_one_tab_is_heard_in_another() {
     elsewhere.announce(toshokan::EntryHash::from_u128(8));
     said.announce(entry);
     assert_eq!(heard.next().await, Hint::Committed(entry));
+}
+
+#[wasm_bindgen_test]
+async fn a_page_watching_its_folder_looks_at_focus_and_on_a_period() {
+    let name = format!("{:032x}", CryptoRandom.next_u128());
+    let mut watching = Hints::new(&name, Some(Duration::from_millis(50))).unwrap();
+    assert_eq!(watching.next().await, Hint::Look, "the period passed");
+    drop(watching);
+    let mut watching = Hints::new(&name, Some(Duration::from_secs(3600))).unwrap();
+    let global = js_sys::global();
+    let get = |object: &wasm_bindgen::JsValue, name: &str| {
+        js_sys::Reflect::get(object, &name.into()).unwrap()
+    };
+    let event = js_sys::Reflect::construct(
+        &get(&global, "Event").into(),
+        &js_sys::Array::of1(&"focus".into()),
+    )
+    .unwrap();
+    let dispatch: js_sys::Function = get(&global, "dispatchEvent").into();
+    dispatch.call1(&global, &event).unwrap();
+    assert_eq!(watching.next().await, Hint::Look, "the page was focused");
 }
 
 #[wasm_bindgen_test]
