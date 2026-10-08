@@ -344,6 +344,42 @@ fn outside(folder: &MemDisk, chance: &mut SeededRandom) {
     }
 }
 
+/// Puts the folder back as `kept` holds it, as a restore from a backup would.
+fn restore(folder: &MemDisk, kept: &BTreeMap<RelPath, Vec<u8>>) {
+    let perform = |io: Io| {
+        let _ = folder.perform(io);
+    };
+    let now = folder.files(Root::Folder);
+    for path in now.keys().filter(|path| !kept.contains_key(*path)) {
+        perform(Io::Remove {
+            root: Root::Folder,
+            path: path.clone(),
+        });
+    }
+    for (path, bytes) in kept
+        .iter()
+        .filter(|(path, bytes)| now.get(*path) != Some(*bytes))
+    {
+        let mut dirs: Vec<RelPath> =
+            std::iter::successors(path.parent(), RelPath::parent).collect();
+        for dir in dirs.drain(..).rev() {
+            perform(Io::MakeDir {
+                root: Root::Folder,
+                path: dir,
+            });
+        }
+        perform(Io::Remove {
+            root: Root::Folder,
+            path: path.clone(),
+        });
+        perform(Io::Create {
+            root: Root::Folder,
+            path: path.clone(),
+            bytes: bytes.clone(),
+        });
+    }
+}
+
 /// One step a writer takes.
 fn write(library: &mut Library<Yielding>, chance: &mut SeededRandom, case: &str) {
     let view = library.view();
@@ -384,11 +420,12 @@ fn run_seeded(seed: u64) {
         open(&folder, "a", seed * 10),
         open(&folder, "b", seed * 10 + 1),
     ];
+    let mut backup = None;
     for step in 0..60 {
         let case = format!("seed {seed}, step {step}");
         let k = below(&mut chance, 2);
         let library = &mut libraries[k];
-        match below(&mut chance, 10) {
+        match below(&mut chance, 11) {
             0..=3 => write(library, &mut chance, &case),
             4 => outside(&folder, &mut chance),
             5 => {
@@ -400,6 +437,30 @@ fn run_seeded(seed: u64) {
             7 => {
                 let _ = pollster::block_on(library.undo());
             }
+            8 => match backup.take() {
+                None => backup = Some(folder.files(Root::Folder)),
+                Some(kept) => {
+                    restore(&folder, &kept);
+                    let adopts = below(&mut chance, 2) == 0;
+                    for (j, library) in libraries.iter_mut().enumerate() {
+                        pollster::block_on(library.rescan()).unwrap();
+                        match adopts && j == k {
+                            true => drop(pollster::block_on(library.adopt(&case))),
+                            false => pollster::block_on(library.let_go()).unwrap(),
+                        }
+                    }
+                    let library = &mut libraries[k];
+                    let elsewhere = vec![pick(&mut chance, &paths())];
+                    pollster::block_on(library.rescan_paths(elsewhere)).unwrap();
+                    let mut fresh = open(&folder, "fresh", seed * 10 + 2);
+                    pollster::block_on(fresh.rescan()).unwrap();
+                    assert_eq!(
+                        shown(&library.view()),
+                        shown(&fresh.view()),
+                        "{case}: what is shown after a restore is let go or adopted is what a fresh open and rescan show"
+                    );
+                }
+            },
             _ => {
                 let polls = 1 + below(&mut chance, 30);
                 if poll_at_most(library.rescan(), polls).is_some() {

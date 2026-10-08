@@ -985,8 +985,7 @@ impl Library {
         let (followed, joined, touched) = self.fold_read(report);
         let moved = match joined {
             true => {
-                let was = std::mem::replace(&mut self.facts, self.folded.files());
-                self.reach.everything();
+                let was = self.reach.refile_all(&mut self.facts, self.folded.files());
                 self.moved_since(&was)
             }
             false => self.refile(touched.into_iter()),
@@ -1264,8 +1263,7 @@ impl Library {
 
     /// Takes `facts`, the file facts of what is now shown.
     fn refiled(&mut self, facts: Facts) {
-        self.facts = facts;
-        self.reach.everything();
+        self.reach.refile_all(&mut self.facts, facts);
         self.rehistory();
     }
 

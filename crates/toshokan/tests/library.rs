@@ -586,6 +586,7 @@ through_both!(
     what_any_writer_of_an_install_showed_survives_a_restore,
     what_a_commit_returned_current_survives_a_crash_and_a_restore,
     facts_a_restore_removed_are_shown_until_let_go,
+    a_partial_scan_after_let_go_reads_files_of_the_lengths_let_go_restored,
     what_is_shown_is_what_its_logs_fold_to,
     what_is_bound_is_what_binding_afresh_binds,
     facts_a_restore_removed_are_republished_when_adopted,
@@ -3246,6 +3247,48 @@ fn what_is_bound_is_what_binding_afresh_binds<F: Facade>() {
             }
         }
     }
+}
+
+fn a_partial_scan_after_let_go_reads_files_of_the_lengths_let_go_restored<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    a.rescan().unwrap();
+    let backup = copy_folder(&folder);
+    clock.advance(10);
+    a.commit("Save", |i| {
+        i.save(
+            song,
+            &path("song.npno"),
+            b"longer!!".to_vec(),
+            Expect::Holds(identity(b"song")),
+        )
+    })
+    .unwrap();
+    restore(&folder, &backup);
+    put(&folder, "copy.npno", b"song");
+    folder
+        .perform(Io::Remove {
+            root: Root::Folder,
+            path: path("song.npno"),
+        })
+        .unwrap();
+    a.rescan_paths(vec![path("copy.npno"), path("song.npno")])
+        .unwrap();
+    assert_eq!(
+        a.view().entity(song).unwrap().file().unwrap().state,
+        FileState::Missing
+    );
+
+    a.let_go().unwrap();
+    a.rescan_paths(vec![path("other.npno")]).unwrap();
+    let (mut fresh, _) = F::open(Probe::new(&machine(&folder)), env("c", 4, &clock)).unwrap();
+    fresh.rescan().unwrap();
+    let file = |library: &F| library.view().entity(song).unwrap().file().unwrap();
+    assert_eq!(file(&a), file(&fresh));
+    assert_eq!(file(&a).path, path("copy.npno"));
 }
 
 fn facts_a_restore_removed_are_shown_until_let_go<F: Facade>() {

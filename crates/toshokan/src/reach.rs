@@ -373,6 +373,18 @@ impl Reach {
         self.due = Due::Everything;
     }
 
+    /// Replaces every fact with `now`; returns the facts it replaced.
+    pub(crate) fn refile_all(&mut self, facts: &mut Facts, now: Facts) -> Facts {
+        if let Some(links) = &self.links {
+            let lengths = now.values().flat_map(|written| written.iter());
+            let gained = lengths.map(|written| written.value.len);
+            self.gained
+                .extend(gained.filter(|len| !links.has_length(*len)));
+        }
+        self.everything();
+        std::mem::replace(facts, now)
+    }
+
     /// Everything was bound, and `links` are those of what was bound, or `None`
     /// when a failed scan left something unknown.
     pub(crate) fn bound(&mut self, links: Option<Links>) {
