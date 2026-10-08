@@ -74,6 +74,10 @@ let worker = Worker::start(folder, &local).await?;
 let (mut lib, opened) = Library::open(worker, layout, &schema, env).await?;
 ```
 
+Opening a large library parses, places and folds its logs and binds its files a
+slice at a time, and the page's driver gives the thread back to the browser
+every few milliseconds, so the page keeps drawing and answering input.
+
 The bundle must be built by wasm-bindgen with `--target web`. The worker loads it
 from a small script toshokan makes as a `blob:` URL, so a Content Security
 Policy must allow `blob:` workers. `web::Hints` tells a library's other tabs
@@ -93,7 +97,8 @@ GECKODRIVER=geckodriver \
 ## Design
 
 The core does no I/O. Every operation is a state machine that asks for reads,
-writes and syncs, and consumes their results. The `blocking` driver runs it on
+writes and syncs, consumes their results, and pauses between slices of a long
+computation. The `blocking` driver runs it on
 the machine's file system, and the `asynch` driver on any async backend, such as
 a browser's; both run it on an in-memory disk that models what survives a crash.
 A directory listing with every file's metadata is one request, and so are many

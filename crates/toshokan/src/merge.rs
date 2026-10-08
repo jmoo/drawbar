@@ -22,6 +22,8 @@ use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::btree_map::Entry as Slot;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use serde::de::{DeserializeOwned, Error as _};
@@ -36,6 +38,7 @@ use crate::reader::WriterLog;
 use crate::report::TrashItem;
 use crate::schema::{Raw, Written};
 use crate::small::{SmallMap, SmallSet};
+use crate::snapshot::Snapshot;
 
 /// The folded state of a set of entries. A clone shares each entity's state with
 /// the original until one of them changes it.
@@ -1061,12 +1064,33 @@ impl Folded {
     /// The surviving writes of every existing entity's file register that say
     /// where its file is. More than one is a conflict.
     pub fn files(&self) -> BTreeMap<EntityId, Vec<Written<FileFact>>> {
-        self.entities
-            .iter()
-            .filter(|(_, state)| state.present())
-            .map(|(&entity, state)| (entity, state.file_facts()))
-            .filter(|(_, writes)| !writes.is_empty())
-            .collect()
+        let mut files = BTreeMap::new();
+        self.files_slice(&mut files, &mut None, usize::MAX);
+        files
+    }
+
+    /// [`Folded::files`] a slice at a time: adds to `files` those of at most
+    /// `slice` entities after `after`, and moves `after` on; true once no entity
+    /// is left.
+    pub(crate) fn files_slice(
+        &self,
+        files: &mut BTreeMap<EntityId, Vec<Written<FileFact>>>,
+        after: &mut Option<EntityId>,
+        slice: usize,
+    ) -> bool {
+        let from = after.map_or(Bound::Unbounded, Bound::Excluded);
+        let mut entities = self.entities.range((from, Bound::Unbounded));
+        for (&entity, state) in entities.by_ref().take(slice) {
+            *after = Some(entity);
+            if !state.present() {
+                continue;
+            }
+            let writes = state.file_facts();
+            if !writes.is_empty() {
+                files.insert(entity, writes);
+            }
+        }
+        entities.next().is_none()
     }
 
     /// [`Folded::files`] of one entity: empty unless it exists.
@@ -1167,16 +1191,69 @@ fn file_write(write: Write<Option<FileValue>>) -> Write<Option<FileFact>> {
 
 /// The join of every writer's snapshots and placed entries.
 pub fn merge<'a>(logs: impl IntoIterator<Item = &'a WriterLog>) -> Folded {
-    let mut folded = Folded::default();
-    for log in logs {
-        for snapshot in log.snapshots() {
-            folded.join(&snapshot.state);
+    let mut merging = Merging::new(logs);
+    merging.step(usize::MAX);
+    merging.folded
+}
+
+/// What [`merge`] folds, taken from the logs, so that it can be folded a slice at
+/// a time.
+pub(crate) struct Merging {
+    folded: Folded,
+    parts: std::vec::IntoIter<Fold>,
+}
+
+enum Fold {
+    Join(Rc<Snapshot>),
+    Apply(WriterId, Rc<Entry>),
+}
+
+impl Merging {
+    pub(crate) fn new<'a>(logs: impl IntoIterator<Item = &'a WriterLog>) -> Self {
+        let mut parts = Vec::new();
+        for log in logs {
+            parts.extend(log.snapshots().iter().cloned().map(Fold::Join));
+            let entries = log.entries().iter().cloned();
+            parts.extend(entries.map(|entry| Fold::Apply(log.writer(), entry)));
         }
-        for entry in log.entries() {
-            folded.apply(log.writer(), entry);
+        Self {
+            folded: Folded::default(),
+            parts: parts.into_iter(),
         }
     }
-    folded
+
+    /// Folds what is next, until its weight reaches `slice` or nothing is left;
+    /// true once nothing is.
+    pub(crate) fn step(&mut self, slice: usize) -> bool {
+        let mut done = 0;
+        while done < slice {
+            let Some(part) = self.parts.next() else {
+                return true;
+            };
+            // A snapshot weighs its entities, and an entry its ops.
+            let weight = match part {
+                Fold::Join(snapshot) => {
+                    self.folded.join(&snapshot.state);
+                    snapshot.state.entities.len()
+                }
+                Fold::Apply(writer, entry) => {
+                    let kind = entry.kind();
+                    self.folded.fold(writer, &entry, &kind);
+                    match &kind {
+                        EntryKind::Intent(logged) => logged.ops.len() + logged.displaced.len(),
+                        _ => 1,
+                    }
+                }
+            };
+            done = done.saturating_add(weight.max(1));
+        }
+        self.parts.len() == 0
+    }
+
+    /// ⚠️ Before [`Merging::step`] returns true, the state of what it folded so far.
+    pub(crate) fn folded(self) -> Folded {
+        self.folded
+    }
 }
 
 impl<K: Pack + Ord, V: Pack> Pack for SmallMap<K, V> {
@@ -1886,6 +1963,8 @@ impl<'de> Deserialize<'de> for Folded {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::env::{Random, SeededRandom};
+    use crate::log::{Genesis, Logged};
     use crate::pack::{packed, unpacked};
 
     fn h(n: u8) -> String {
@@ -1939,6 +2018,122 @@ mod tests {
         assert_eq!(serde_json::to_string(&read).unwrap(), text);
         for cut in 0..bytes.len() {
             assert!(unpacked::<Folded>(&bytes[..cut]).is_err(), "cut at {cut}");
+        }
+    }
+
+    /// Logs of three writers with random ops on a few entities, each with a
+    /// snapshot of a random prefix of its entries.
+    fn logs(random: &mut SeededRandom) -> Vec<WriterLog> {
+        let mut pick = |n: usize| (random.next_u128() % n as u128) as usize;
+        let mut logs = Vec::new();
+        let mut seen: Vec<EntryHash> = Vec::new();
+        for w in 0..3u128 {
+            let writer = WriterId::from_u128(w + 1);
+            let at = |n: usize| Hlc {
+                wall_ms: n as u64,
+                counter: 0,
+            };
+            let genesis = EntryKind::Genesis(Genesis {
+                writer,
+                label: "w".into(),
+            });
+            let mut entries = vec![Entry::encode(EntryHash::ZERO, at(0), genesis).unwrap()];
+            for n in 1..1 + pick(40) {
+                let entity = EntityId::from_u128(1 + pick(4) as u128);
+                let replaces: Vec<EntryHash> = (0..pick(3))
+                    .filter_map(|_| seen.get(pick(seen.len().max(1))).copied())
+                    .collect();
+                let value = Raw::of(&format!("v{}", pick(3))).unwrap();
+                let ops = (0..1 + pick(3))
+                    .map(|_| match pick(5) {
+                        0 => Op::Create {
+                            entity,
+                            replaces: replaces.clone(),
+                        },
+                        1 => Op::Delete {
+                            entity,
+                            replaces: replaces.clone(),
+                            observed: replaces.clone(),
+                        },
+                        2 => Op::Write {
+                            entity,
+                            key: "k".into(),
+                            value: Some(value.clone()),
+                            replaces: replaces.clone(),
+                        },
+                        3 => Op::Add {
+                            entity,
+                            key: "s".into(),
+                            value: value.clone(),
+                        },
+                        _ => Op::Remove {
+                            entity,
+                            key: "s".into(),
+                            value: value.clone(),
+                            tags: replaces.clone(),
+                        },
+                    })
+                    .collect();
+                let logged = Logged {
+                    label: "e".into(),
+                    ops,
+                    displaced: Vec::new(),
+                    reverses: None,
+                };
+                let prev = entries.last().unwrap().hash();
+                let entry = Entry::encode(prev, at(n * 3 + w as usize), EntryKind::Intent(logged));
+                let entry = entry.unwrap();
+                seen.push(entry.hash());
+                entries.push(entry);
+            }
+            let cut = 1 + pick(entries.len());
+            let mut prefix = Folded::default();
+            for entry in &entries[..cut] {
+                prefix.apply(writer, entry);
+            }
+            let snapshot = Snapshot {
+                writer,
+                label: "w".into(),
+                at: entries[cut - 1].at(),
+                folded: entries[..cut].iter().map(Entry::hash).collect(),
+                state: prefix,
+                unknown: BTreeMap::new(),
+            };
+            let mut log = WriterLog::new(writer);
+            let rest = entries[cut..].iter().cloned().map(Rc::new).collect();
+            log.place(vec![Rc::new(snapshot)], rest);
+            logs.push(log);
+        }
+        logs
+    }
+
+    #[test]
+    fn merging_and_filing_in_slices_find_what_they_find_at_once() {
+        let mut random = SeededRandom::new(5);
+        for _ in 0..100 {
+            let logs = logs(&mut random);
+            let mut whole = Folded::default();
+            for log in &logs {
+                for snapshot in log.snapshots() {
+                    whole.join(&snapshot.state);
+                }
+                for entry in log.entries() {
+                    whole.apply(log.writer(), entry);
+                }
+            }
+            let slice = 1 + (random.next_u128() % 8) as usize;
+            let mut merging = Merging::new(&logs);
+            while !merging.step(slice) {}
+            assert_eq!(merging.folded(), whole, "{slice}-op slices");
+            assert_eq!(merge(&logs), whole);
+            let (mut files, mut after) = (BTreeMap::new(), None);
+            while !whole.files_slice(&mut files, &mut after, slice) {}
+            let present = whole.entities.iter().filter(|(_, state)| state.present());
+            let expected: BTreeMap<_, _> = present
+                .map(|(&entity, state)| (entity, state.file_facts()))
+                .filter(|(_, writes)| !writes.is_empty())
+                .collect();
+            assert_eq!(files, expected, "{slice}-entity slices of files");
         }
     }
 }

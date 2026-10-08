@@ -125,6 +125,7 @@ pub fn run_with<'s, O: Operation, B: Backend>(
     loop {
         let io = match operation.resume(result.take()) {
             Step::Done(output) => return output,
+            Step::Pause => continue,
             Step::Io(io) => io,
         };
         result = Some(match io {

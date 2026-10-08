@@ -51,7 +51,9 @@ web-sys = { version = "0.3", optional = true, features = [
   "FileSystemReadWriteOptions",
   "FileSystemSyncAccessHandle",
   "FileSystemWritableFileStream",
+  "MessageChannel",
   "MessageEvent",
+  "MessagePort",
   "StorageManager",
   "Url",
   "VisibilityState",
@@ -78,6 +80,11 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 [dev-dependencies]
 pollster = "0.4"
 tempfile = "3"
+
+# The browser benchmark, run only when named.
+[[test]]
+name = "bench"
+test = false
 
 # The browser suites, run by wasm-bindgen-cli's test runner.
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]

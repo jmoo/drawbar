@@ -31,6 +31,11 @@ pub trait Fs {
     fn capabilities(&self, root: Root) -> Capabilities;
 
     async fn perform(&self, io: Io) -> IoResult;
+
+    /// Awaited at each [`Step::Pause`]. Storage sharing its thread with a user
+    /// interface gives the thread back here once the core has held it long
+    /// enough.
+    async fn pause(&self) {}
 }
 
 /// Answers `io` with `perform`, which takes only single requests:
@@ -221,6 +226,10 @@ pub async fn run_with<'s, O: Operation, F: Fs>(
     loop {
         let io = match operation.resume(result.take()) {
             Step::Done(output) => return output,
+            Step::Pause => {
+                fs.pause().await;
+                continue;
+            }
             Step::Io(io) => io,
         };
         result = Some(match io {
@@ -387,6 +396,59 @@ mod tests {
             context.waker().wake_by_ref();
             Poll::Pending
         }
+    }
+
+    /// Pauses between requests: a stat, then `pauses` pauses, then a stat.
+    struct Pausing {
+        pauses: usize,
+        asked: usize,
+    }
+
+    impl Operation for Pausing {
+        type Output = usize;
+
+        fn resume(&mut self, _: Option<IoResult>) -> Step<usize> {
+            self.asked += 1;
+            let stat = Io::Stat {
+                root: Root::Folder,
+                path: RelPath::new("a").unwrap(),
+            };
+            match self.asked {
+                1 => Step::Io(stat),
+                n if n <= 1 + self.pauses => Step::Pause,
+                n if n == 2 + self.pauses => Step::Io(stat),
+                _ => Step::Done(self.asked),
+            }
+        }
+    }
+
+    /// Storage that counts the pauses it is handed, and is never ready at once.
+    struct Counting(MemDisk, Cell<usize>);
+
+    impl Fs for Counting {
+        fn capabilities(&self, root: Root) -> Capabilities {
+            Fs::capabilities(&self.0, root)
+        }
+
+        async fn perform(&self, io: Io) -> IoResult {
+            Fs::perform(&self.0, io).await
+        }
+
+        async fn pause(&self) {
+            Later(false).await;
+            self.1.set(self.1.get() + 1);
+        }
+    }
+
+    #[test]
+    fn the_async_driver_hands_each_pause_to_the_storage_and_resumes_after_it() {
+        let fs = Counting(MemDisk::new(), Cell::new(0));
+        let operation = Pausing {
+            pauses: 3,
+            asked: 0,
+        };
+        assert_eq!(pollster::block_on(run(&fs, operation)), 6);
+        assert_eq!(fs.1.get(), 3);
     }
 
     #[test]

@@ -32,6 +32,9 @@ use crate::snapshot::Snapshot;
 /// longer snapshot is not read.
 pub const MAX_FILE: u64 = 1 << 28;
 
+/// About how many bytes of lines one slice of parsing reads before it pauses.
+const PARSE_SLICE: usize = 1 << 17;
+
 /// What one file in a writer's directory holds, judged by its contents.
 #[derive(Clone, PartialEq, Debug)]
 pub enum WriterFile {
@@ -84,6 +87,61 @@ impl Segment {
         self.entries
             .windows(2)
             .all(|pair| pair[1].prev() == pair[0].hash())
+    }
+}
+
+/// A file parsed as [`WriterFile::parse`] parses it, a slice of its lines at a
+/// time.
+struct Parsing {
+    bytes: Vec<u8>,
+    segment: Segment,
+}
+
+impl Parsing {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            segment: Segment::default(),
+        }
+    }
+
+    /// The bytes read so far.
+    fn read(&self) -> usize {
+        self.segment.end as usize
+    }
+
+    /// Reads the lines in about the next `slice` bytes, up to the end of a line;
+    /// true once there is nothing left to read.
+    fn step(&mut self, slice: usize) -> bool {
+        let Self { bytes, segment } = self;
+        let rest = &bytes[segment.end as usize..];
+        let after = rest.get(slice..).unwrap_or_default();
+        let cut = after
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(rest.len(), |at| slice + at + 1);
+        segment.extend(&rest[..cut]);
+        if cut == rest.len() {
+            return true;
+        }
+        if segment.stop.is_some() || segment.sealed {
+            // The line reading stopped at is judged again with all that follows it.
+            segment.extend(&bytes[segment.end as usize..]);
+            return true;
+        }
+        false
+    }
+
+    /// ⚠️ Before [`Parsing::step`] returns true, what the lines read so far say.
+    fn finish(self) -> WriterFile {
+        let Self { bytes, segment } = self;
+        if !segment.entries.is_empty() || segment.stop.is_none() {
+            return WriterFile::Segment(segment);
+        }
+        match Snapshot::decode(&bytes) {
+            Ok(snapshot) => WriterFile::Snapshot(Rc::new(snapshot)),
+            Err(_) => WriterFile::Unreadable,
+        }
     }
 }
 
@@ -152,6 +210,24 @@ impl PartialEq for WriterLog {
             && self.strays == other.strays
             && self.forks == other.forks
     }
+}
+
+/// A placement under way, offered its entries a slice at a time.
+struct Growing {
+    entries: std::vec::IntoIter<Rc<Entry>>,
+    /// Once every entry is offered.
+    release: Option<Release>,
+    /// Entries offered or released so far.
+    worked: usize,
+    placement: Placement,
+    touched: BTreeSet<EntryHash>,
+}
+
+/// Entries held back, by the entry each waits for, and the waited-for entries
+/// placed but not yet released.
+struct Release {
+    after: BTreeMap<EntryHash, Vec<EntryHash>>,
+    ready: VecDeque<EntryHash>,
 }
 
 /// What [`WriterLog::place`] added.
@@ -357,8 +433,20 @@ impl WriterLog {
         &mut self,
         snapshots: Vec<Rc<Snapshot>>,
         entries: Vec<Rc<Entry>>,
-        mut touched: BTreeSet<EntryHash>,
+        touched: BTreeSet<EntryHash>,
     ) -> Placement {
+        let mut growing = self.growing(snapshots, entries, touched);
+        self.grow_slice(&mut growing, usize::MAX);
+        self.grown(growing)
+    }
+
+    /// Starts [`WriterLog::grow`]: keeps the snapshots and offers no entry yet.
+    fn growing(
+        &mut self,
+        snapshots: Vec<Rc<Snapshot>>,
+        entries: Vec<Rc<Entry>>,
+        mut touched: BTreeSet<EntryHash>,
+    ) -> Growing {
         let mut placement = Placement::default();
         for snapshot in snapshots {
             if self.keep(&snapshot) {
@@ -372,7 +460,30 @@ impl WriterLog {
             self.chain.reserve(entries.len());
             self.next.reserve(entries.len());
         }
-        for entry in entries {
+        Growing {
+            entries: entries.into_iter(),
+            release: None,
+            worked: 0,
+            placement,
+            touched,
+        }
+    }
+
+    /// Offers the next entries in order, then places those held back whose
+    /// predecessors are placed, at most `slice` in all; true once nothing is
+    /// left to place.
+    fn grow_slice(&mut self, growing: &mut Growing, slice: usize) -> bool {
+        let Growing {
+            entries,
+            release,
+            worked,
+            placement,
+            touched,
+        } = growing;
+        let mut budget = slice;
+        for entry in entries.by_ref().take(slice) {
+            budget -= 1;
+            *worked += 1;
             let (hash, prev) = (entry.hash(), entry.prev());
             if self.holds(hash) {
                 continue;
@@ -383,30 +494,56 @@ impl WriterLog {
             }
             self.waiting.remove(&hash);
             self.strays.remove(&hash);
-            self.link(hash, prev, Some(Rc::clone(&entry)), &mut touched);
+            self.link(hash, prev, Some(Rc::clone(&entry)), touched);
             placement.placed.push(entry);
         }
-        let mut after: BTreeMap<EntryHash, Vec<EntryHash>> = BTreeMap::new();
-        for (hash, entry) in &self.waiting {
-            after.entry(entry.prev()).or_default().push(*hash);
+        if entries.len() > 0 {
+            return false;
         }
-        let mut ready: VecDeque<EntryHash> = after
-            .keys()
-            .filter(|prev| **prev == EntryHash::ZERO || self.holds(**prev))
-            .copied()
-            .collect();
-        while let Some(prev) = ready.pop_front() {
-            for hash in after.remove(&prev).unwrap_or_default() {
+        let release = release.get_or_insert_with(|| self.held_back());
+        while budget > 0 {
+            let Some(prev) = release.ready.pop_front() else {
+                return true;
+            };
+            for hash in release.after.remove(&prev).unwrap_or_default() {
                 let entry = self
                     .waiting
                     .remove(&hash)
                     .expect("each waiting entry is placed once");
                 self.strays.remove(&hash);
-                self.link(hash, prev, Some(Rc::clone(&entry)), &mut touched);
+                self.link(hash, prev, Some(Rc::clone(&entry)), touched);
                 placement.placed.push(entry);
-                ready.push_back(hash);
+                release.ready.push_back(hash);
+                budget = budget.saturating_sub(1);
+                *worked += 1;
             }
         }
+        release.ready.is_empty()
+    }
+
+    /// The entries held back by the one each waits for, and the predecessors
+    /// placed already.
+    fn held_back(&self) -> Release {
+        let mut after: BTreeMap<EntryHash, Vec<EntryHash>> = BTreeMap::new();
+        for (hash, entry) in &self.waiting {
+            after.entry(entry.prev()).or_default().push(*hash);
+        }
+        let ready = after
+            .keys()
+            .filter(|prev| **prev == EntryHash::ZERO || self.holds(**prev))
+            .copied()
+            .collect();
+        Release { after, ready }
+    }
+
+    /// ⚠️ Before [`WriterLog::grow_slice`] returns true, entries offered are left
+    /// held back.
+    fn grown(&mut self, growing: Growing) -> Placement {
+        let Growing {
+            mut placement,
+            mut touched,
+            ..
+        } = growing;
         let held: Vec<(EntryHash, EntryHash)> = self
             .waiting
             .iter()
@@ -823,10 +960,23 @@ struct Resume {
 enum Found {
     Unchanged,
     Read {
-        bytes: Vec<u8>,
+        file: WriterFile,
         stamp: Option<Stamp>,
     },
     /// The bytes a segment gained past its readable lines.
+    Grown {
+        bytes: Vec<u8>,
+        stamp: Stamp,
+    },
+}
+
+/// What the reads of one file found, before its bytes are parsed.
+enum Fetched {
+    Unchanged,
+    Whole {
+        bytes: Vec<u8>,
+        stamp: Option<Stamp>,
+    },
     Grown {
         bytes: Vec<u8>,
         stamp: Stamp,
@@ -847,6 +997,33 @@ struct Listed {
 pub struct Listing {
     writers: Vec<Listed>,
     everyone: bool,
+}
+
+/// A read being placed by [`Reader::absorb_slice`], a slice of entries at a time.
+pub(crate) struct Absorbing {
+    listed: std::vec::IntoIter<Listed>,
+    placing: Option<Placing>,
+    report: ReadReport,
+}
+
+/// One writer's entries being placed: first in what the folder holds of it,
+/// then in the cached view.
+struct Placing {
+    writer: WriterId,
+    /// Whether what the folder holds of the writer is placed again from every
+    /// file.
+    whole: bool,
+    stage: Stage,
+    growing: Growing,
+}
+
+enum Stage {
+    /// What the folder holds; the cached view is offered these next.
+    Folder {
+        snapshots: Vec<Rc<Snapshot>>,
+        entries: Vec<Rc<Entry>>,
+    },
+    Cached,
 }
 
 impl Reader {
@@ -1045,6 +1222,14 @@ impl Reader {
 
     /// Places what [`Reader::list`] or [`Reader::list_writer`] read.
     pub fn absorb(&mut self, listing: Listing) -> ReadReport {
+        let mut absorbing = self.absorbing(listing);
+        self.absorb_slice(&mut absorbing, usize::MAX);
+        self.absorbed(absorbing)
+    }
+
+    /// Starts [`Reader::absorb`]: what the read found of writers' directories as a
+    /// whole is taken in, and no writer's files yet.
+    pub(crate) fn absorbing(&mut self, listing: Listing) -> Absorbing {
         let Listing {
             writers: listed,
             everyone,
@@ -1075,14 +1260,51 @@ impl Reader {
                 self.recount(writer, true);
             }
         }
-        for listed in listed {
-            self.absorb_writer(listed, &mut report);
+        Absorbing {
+            listed: listed.into_iter(),
+            placing: None,
+            report,
         }
-        self.drop_unsaved_without_store();
-        report
     }
 
-    fn absorb_writer(&mut self, listed: Listed, report: &mut ReadReport) {
+    /// Places about `slice` more entries; true once every writer's are placed.
+    pub(crate) fn absorb_slice(&mut self, absorbing: &mut Absorbing, slice: usize) -> bool {
+        let mut budget = slice;
+        while budget > 0 {
+            let mut placing = match absorbing.placing.take() {
+                Some(placing) => placing,
+                None => match absorbing.listed.next() {
+                    Some(listed) => self.gather(listed, &mut absorbing.report),
+                    None => return true,
+                },
+            };
+            let log = match placing.stage {
+                Stage::Folder { .. } => {
+                    &mut self.folder.get_mut(&placing.writer).expect("gathered").log
+                }
+                Stage::Cached => self.cached.log_mut(placing.writer),
+            };
+            let worked = placing.growing.worked;
+            let all = log.grow_slice(&mut placing.growing, budget);
+            budget = budget.saturating_sub(placing.growing.worked - worked);
+            if !all {
+                absorbing.placing = Some(placing);
+                return false;
+            }
+            absorbing.placing = self.placed(placing, &mut absorbing.report);
+        }
+        absorbing.placing.is_none() && absorbing.listed.len() == 0
+    }
+
+    /// Ends [`Reader::absorb`] once [`Reader::absorb_slice`] returned true.
+    pub(crate) fn absorbed(&mut self, absorbing: Absorbing) -> ReadReport {
+        self.drop_unsaved_without_store();
+        absorbing.report
+    }
+
+    /// Takes in what one writer's files gave, and starts placing it in what the
+    /// folder holds of the writer.
+    fn gather(&mut self, listed: Listed, report: &mut ReadReport) -> Placing {
         let Listed { writer, files } = listed;
         let folder = self
             .folder
@@ -1116,8 +1338,7 @@ impl Reader {
                     }
                     record.stamp = Some(stamp);
                 }
-                Found::Read { bytes, stamp } => {
-                    let file = WriterFile::parse(&bytes);
+                Found::Read { file, stamp } => {
                     match &file {
                         WriterFile::Segment(segment) => {
                             entries.extend(segment.entries.iter().cloned());
@@ -1142,7 +1363,80 @@ impl Reader {
                 None => WriterLog::new(writer),
             };
         }
-        let in_folder = folder.log.place(snapshots.clone(), entries.clone());
+        let growing = folder
+            .log
+            .growing(snapshots.clone(), entries.clone(), BTreeSet::new());
+        Placing {
+            writer,
+            whole,
+            stage: Stage::Folder { snapshots, entries },
+            growing,
+        }
+    }
+
+    /// Ends a placement [`Reader::gather`] started: in what the folder holds, then
+    /// in the cached view. The placement in the cached view to go on with, if any.
+    fn placed(&mut self, placing: Placing, report: &mut ReadReport) -> Option<Placing> {
+        let Placing {
+            writer,
+            whole,
+            stage,
+            growing,
+        } = placing;
+        match stage {
+            Stage::Folder { snapshots, entries } => {
+                let folder = self.folder.get_mut(&writer).expect("gathered");
+                let in_folder = folder.log.grown(growing);
+                self.report_unreadable(writer, report);
+                let folder = &self.folder[&writer].log;
+                let log = self.cached.log_mut(writer);
+                if whole {
+                    log.forget_waiting();
+                }
+                // A view holding nothing of the writer places what the folder's log
+                // placed from nothing, and ends as that log does.
+                if whole && log.is_empty() {
+                    *log = folder.clone();
+                    self.took(writer, &in_folder, report);
+                } else if whole || !snapshots.is_empty() || !entries.is_empty() {
+                    let growing = log.growing(snapshots, entries, BTreeSet::new());
+                    let stage = Stage::Cached;
+                    return Some(Placing {
+                        writer,
+                        whole,
+                        stage,
+                        growing,
+                    });
+                }
+            }
+            Stage::Cached => {
+                let placement = self.cached.log_mut(writer).grown(growing);
+                self.took(writer, &placement, report);
+            }
+        }
+        report
+            .gaps
+            .extend(self.cached.log_mut(writer).gaps.iter().copied());
+        self.recount(writer, whole);
+        None
+    }
+
+    /// Reports what `placement` placed in the cached view of `writer`, and keeps
+    /// it to save.
+    fn took(&mut self, writer: WriterId, placement: &Placement, report: &mut ReadReport) {
+        report.changed |= placement.changed();
+        if !placement.placed.is_empty() {
+            let placed = placement.placed.iter().map(|entry| entry.hash()).collect();
+            report.placed.insert(writer, placed);
+        }
+        report.forks.extend(placement.forks.iter().copied());
+        self.unsaved.add(writer, placement);
+    }
+
+    fn report_unreadable(&self, writer: WriterId, report: &mut ReadReport) {
+        let Some(folder) = self.folder.get(&writer) else {
+            return;
+        };
         for (path, record) in &folder.files {
             match &record.file {
                 WriterFile::Segment(segment) => {
@@ -1156,30 +1450,6 @@ impl Reader {
                 }
             }
         }
-        let log = self.cached.log_mut(writer);
-        if whole {
-            log.forget_waiting();
-        }
-        if whole || !snapshots.is_empty() || !entries.is_empty() {
-            // A view holding nothing of the writer places what the folder's log
-            // placed from nothing, and ends as that log does.
-            let placement = match whole && log.is_empty() {
-                true => {
-                    *log = folder.log.clone();
-                    in_folder
-                }
-                false => log.place(snapshots, entries),
-            };
-            report.changed |= placement.changed();
-            if !placement.placed.is_empty() {
-                let placed = placement.placed.iter().map(|entry| entry.hash()).collect();
-                report.placed.insert(writer, placed);
-            }
-            report.forks.extend(placement.forks.iter().copied());
-            self.unsaved.add(writer, &placement);
-        }
-        report.gaps.extend(log.gaps.iter().copied());
-        self.recount(writer, whole);
     }
 
     /// Brings [`Reader::removed`] up to date for `writer`: from scratch after its
@@ -1316,7 +1586,68 @@ fn scan_writer<'a>(
                 .collect();
             read_planned(files)
         })
+        .and_then(|fetched| parsed(fetched).then(flow::ok))
         .map_ok(move |files| Listed { writer, files })
+}
+
+/// Files fetched whole and not parsed yet, parsed a slice at a time.
+struct Parse {
+    fetched: std::vec::IntoIter<(RelPath, Fetched)>,
+    parsing: Option<(RelPath, Option<Stamp>, Parsing)>,
+    done: Vec<Scanned>,
+}
+
+impl Parse {
+    /// Parses about [`PARSE_SLICE`] bytes; true once every file is parsed.
+    fn slice(&mut self) -> bool {
+        let mut budget = PARSE_SLICE;
+        while budget > 0 {
+            let (path, stamp, mut parsing) = match self.parsing.take() {
+                Some(parsing) => parsing,
+                None => match self.fetched.next() {
+                    None => return true,
+                    Some((path, Fetched::Whole { bytes, stamp })) => {
+                        (path, stamp, Parsing::new(bytes))
+                    }
+                    Some((path, Fetched::Unchanged)) => {
+                        self.done.push(Scanned {
+                            path,
+                            found: Found::Unchanged,
+                        });
+                        continue;
+                    }
+                    Some((path, Fetched::Grown { bytes, stamp })) => {
+                        let found = Found::Grown { bytes, stamp };
+                        self.done.push(Scanned { path, found });
+                        continue;
+                    }
+                },
+            };
+            let before = parsing.read();
+            let finished = parsing.step(budget);
+            budget = budget.saturating_sub(parsing.read() - before);
+            match finished {
+                true => self.done.push(Scanned {
+                    path,
+                    found: Found::Read {
+                        file: parsing.finish(),
+                        stamp,
+                    },
+                }),
+                false => self.parsing = Some((path, stamp, parsing)),
+            }
+        }
+        self.parsing.is_none() && self.fetched.len() == 0
+    }
+}
+
+fn parsed<'a>(fetched: Vec<(RelPath, Fetched)>) -> Flow<'a, Vec<Scanned>> {
+    let parse = Parse {
+        fetched: fetched.into_iter(),
+        parsing: None,
+        done: Vec::new(),
+    };
+    flow::sliced(parse, Parse::slice).then(|parse| Flow::Done(parse.done))
 }
 
 /// A file a writer's directory listed, and what to read of it first.
@@ -1398,7 +1729,7 @@ fn whole_ranges(len: u64, modified: Option<u64>) -> Vec<Range> {
 /// Reads `files` as planned, in one [`crate::Io::ReadMany`], then whole in a
 /// second those whose tail or grown part showed the last read no longer holds.
 /// A file gone before its read is left out.
-fn read_planned<'a>(files: Vec<Planned>) -> Flow<'a, Result<Vec<Scanned>>> {
+fn read_planned<'a>(files: Vec<Planned>) -> Flow<'a, Result<Vec<(RelPath, Fetched)>>> {
     let reads = files.iter().flat_map(|file| {
         let ranges = file.plan.reads(file.meta.len, file.meta.modified);
         ranges.into_iter().map(|range| (file.path.clone(), range))
@@ -1413,10 +1744,7 @@ fn read_planned<'a>(files: Vec<Planned>) -> Flow<'a, Result<Vec<Scanned>>> {
                 .take(plan.reads(meta.len, meta.modified).len())
                 .collect();
             match planned(plan, &meta, parts) {
-                Some(Some(scanned)) => found.push(Scanned {
-                    path,
-                    found: scanned,
-                }),
+                Some(Some(fetched)) => found.push((path, fetched)),
                 Some(None) => again.push((path, meta)),
                 None => {}
             }
@@ -1431,7 +1759,7 @@ fn read_planned<'a>(files: Vec<Planned>) -> Flow<'a, Result<Vec<Scanned>>> {
                 let ranges = whole_ranges(meta.len, meta.modified).len();
                 let parts: Vec<Option<Vec<u8>>> = read.by_ref().take(ranges).collect();
                 if let Some(whole) = whole(&meta, parts) {
-                    found.push(Scanned { path, found: whole });
+                    found.push((path, whole));
                 }
             }
             found
@@ -1441,12 +1769,12 @@ fn read_planned<'a>(files: Vec<Planned>) -> Flow<'a, Result<Vec<Scanned>>> {
 
 /// What `parts`, read as `plan` asked, found: `None` when the file is gone, and
 /// `Some(None)` when it must be read whole.
-fn planned(plan: Plan, meta: &Meta, parts: Vec<Option<Vec<u8>>>) -> Option<Option<Found>> {
+fn planned(plan: Plan, meta: &Meta, parts: Vec<Option<Vec<u8>>>) -> Option<Option<Fetched>> {
     match plan {
         Plan::Whole => whole(meta, parts).map(Some),
         Plan::Tail(known) => {
             let tail = parts.into_iter().next()??;
-            Some((tail == known).then_some(Found::Unchanged))
+            Some((tail == known).then_some(Fetched::Unchanged))
         }
         Plan::Grown { resume, modified } => {
             let bytes = parts.into_iter().next()??;
@@ -1460,7 +1788,7 @@ fn planned(plan: Plan, meta: &Meta, parts: Vec<Option<Vec<u8>>>) -> Option<Optio
                 modified,
                 tail: bytes[bytes.len() - ending..].to_vec(),
             };
-            Some(Some(Found::Grown {
+            Some(Some(Fetched::Grown {
                 bytes: bytes[ending..].to_vec(),
                 stamp,
             }))
@@ -1470,7 +1798,7 @@ fn planned(plan: Plan, meta: &Meta, parts: Vec<Option<Vec<u8>>>) -> Option<Optio
 
 /// A file read whole as [`whole_ranges`] asks, stamped when the backend gave a
 /// modification time and its tail was read; `None` when the file is gone.
-fn whole(meta: &Meta, parts: Vec<Option<Vec<u8>>>) -> Option<Found> {
+fn whole(meta: &Meta, parts: Vec<Option<Vec<u8>>>) -> Option<Fetched> {
     let mut parts = parts.into_iter();
     let bytes = parts.next()??;
     let len = meta.len;
@@ -1483,7 +1811,7 @@ fn whole(meta: &Meta, parts: Vec<Option<Vec<u8>>>) -> Option<Found> {
         modified,
         tail,
     });
-    Some(Found::Read { bytes, stamp })
+    Some(Fetched::Whole { bytes, stamp })
 }
 
 #[cfg(test)]
@@ -1826,6 +2154,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_file_parsed_in_slices_is_judged_as_parsed_whole() {
+        use crate::env::{Random, SeededRandom};
+        let lines = chain(6);
+        let segment: Vec<u8> = lines.iter().flat_map(Line::to_bytes).collect();
+        let mut sealed = segment.clone();
+        sealed.extend(line::seal_marker(lines[6].hash()));
+        let seeds = [segment, sealed, snapshot(&lines).encode()];
+        let mut random = SeededRandom::new(11);
+        let mut pick = |n: usize| (random.next_u128() % n as u128) as usize;
+        for _ in 0..3000 {
+            let mut bytes = seeds[pick(seeds.len())].clone();
+            for _ in 0..pick(3) {
+                let at = pick(bytes.len().max(1));
+                match pick(5) {
+                    0 => bytes.truncate(at),
+                    1 if at < bytes.len() => bytes[at] ^= 1 << pick(8),
+                    2 => bytes.insert(at.min(bytes.len()), b"\t\n\0{}\"0"[pick(7)]),
+                    3 => bytes.extend(line::seal_marker(lines[pick(7)].hash())),
+                    _ => bytes.extend_from_within(at.min(bytes.len())..),
+                }
+            }
+            let mut parsing = Parsing::new(bytes.clone());
+            let slice = 1 + pick(400);
+            let mut steps = 0;
+            while !parsing.step(slice) {
+                steps += 1;
+                assert!(steps <= bytes.len(), "parsing stalls");
+            }
+            assert_eq!(
+                parsing.finish(),
+                WriterFile::parse(&bytes),
+                "{slice}-byte slices of {:?}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
+    }
+
     fn put(disk: &MemDisk, path: &RelPath, bytes: &[u8]) {
         let dir = path.parent().unwrap();
         disk.perform(Io::MakeDir {
@@ -1900,6 +2266,101 @@ mod tests {
 
     fn bytes_of(lines: &[&Line]) -> Vec<u8> {
         lines.iter().flat_map(|line| line.to_bytes()).collect()
+    }
+
+    /// What a reader holds that a read changes, comparable.
+    fn state(reader: &Reader) -> impl PartialEq + std::fmt::Debug {
+        let logs = |log: &WriterLog| {
+            let waiting: Vec<EntryHash> = log.waiting.keys().copied().collect();
+            (log.clone(), waiting, log.gaps.clone(), log.chain.len())
+        };
+        let cached: Vec<_> = reader.cached.writers.values().map(logs).collect();
+        let folder: Vec<_> = reader.folder.values().map(|f| logs(&f.log)).collect();
+        let files: Vec<_> = reader
+            .records()
+            .map(|(path, record)| (path.clone(), record.stamp.clone(), record.file.clone()))
+            .collect();
+        let unsaved = (reader.unsaved.logs.clone(), reader.unsaved.files.clone());
+        (cached, folder, files, reader.removed(), unsaved)
+    }
+
+    #[test]
+    fn a_read_placed_in_slices_places_what_it_places_at_once() {
+        use crate::env::{Random, SeededRandom};
+        let layout = Layout::new(".lib").unwrap();
+        let mut random = SeededRandom::new(3);
+        let mut pick = |n: usize| (random.next_u128() % n.max(1) as u128) as usize;
+        for _ in 0..60 {
+            let disk = MemDisk::new();
+            let mut files: Vec<(RelPath, Vec<u8>)> = Vec::new();
+            for w in 1..=1 + pick(3) as u128 {
+                let writer = WriterId::from_u128(w);
+                let genesis = EntryKind::Genesis(Genesis {
+                    writer,
+                    label: "w".into(),
+                });
+                let mut lines = vec![Entry::encode(EntryHash::ZERO, at(0), genesis).unwrap().line()];
+                for n in 1..pick(30) {
+                    let prev = &lines[pick(lines.len()).max(n.saturating_sub(2)).min(n - 1)];
+                    lines.push(after(prev, &format!("{w}-{n}")));
+                }
+                let mut order: Vec<&Line> = lines.iter().collect();
+                for i in (1..order.len()).rev() {
+                    order.swap(i, pick(i + 1));
+                }
+                let dir = layout.writer(writer);
+                for (i, part) in order.chunks(1 + pick(6)).enumerate() {
+                    files.push((dir.join(&format!("s{i}.txt")).unwrap(), bytes_of(part)));
+                }
+                if pick(3) == 0 {
+                    let mut snapshot = (*snapshot(&lines[..1 + pick(lines.len())])).clone();
+                    snapshot.writer = writer;
+                    files.push((dir.join("snap.json").unwrap(), snapshot.encode()));
+                }
+            }
+            let mut whole = Reader::new(layout.clone(), CachedView::default());
+            let mut sliced = whole.clone();
+            let mut grown: Vec<(RelPath, Vec<u8>)> = Vec::new();
+            for round in 0..3 {
+                for (path, bytes) in std::mem::take(&mut grown) {
+                    grow(&disk, &path, &bytes);
+                }
+                for (path, bytes) in std::mem::take(&mut files) {
+                    let ends = bytes.iter().enumerate().filter(|(_, b)| **b == b'\n');
+                    let ends: Vec<usize> = ends.map(|(at, _)| at + 1).collect();
+                    match pick(4) {
+                        0 if round < 2 => files.push((path, bytes)),
+                        1 if round < 2 && ends.len() > 1 => {
+                            let cut = ends[pick(ends.len() - 1)];
+                            put(&disk, &path, &bytes[..cut]);
+                            grown.push((path, bytes[cut..].to_vec()));
+                        }
+                        _ => put(&disk, &path, &bytes),
+                    }
+                }
+                if round == 2 && pick(2) == 0 {
+                    let gone = disk.files(Root::Folder).into_keys().next().unwrap();
+                    disk.perform(Io::Remove {
+                        root: Root::Folder,
+                        path: gone,
+                    })
+                    .unwrap();
+                }
+                let listing = crate::blocking::run(&mut disk.clone(), whole.list()).unwrap();
+                let expected = whole.absorb(listing);
+                let listing = crate::blocking::run(&mut disk.clone(), sliced.list()).unwrap();
+                let slice = 1 + pick(5);
+                let mut absorbing = sliced.absorbing(listing);
+                while !sliced.absorb_slice(&mut absorbing, slice) {}
+                let report = sliced.absorbed(absorbing);
+                assert_eq!(report, expected, "round {round}, {slice}-entry slices");
+                assert_eq!(
+                    state(&sliced),
+                    state(&whole),
+                    "round {round}, {slice}-entry slices"
+                );
+            }
+        }
     }
 
     fn grow(disk: &MemDisk, path: &RelPath, bytes: &[u8]) {

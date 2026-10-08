@@ -8,8 +8,8 @@
 //! file could be several entities', nothing is bound and it is reported. Scans
 //! never write; every commit pins the moves this writer found.
 
-use std::cell::OnceCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ops::Bound;
 use std::rc::Rc;
 
 use crate::env::{Identify, Names};
@@ -122,31 +122,9 @@ pub fn bind_known(
     names: &dyn Names,
     unscanned: &Unscanned,
 ) -> (Bindings, Vec<Op>) {
-    if unscanned.is_empty() {
-        let bindings = bind(facts, scan, names);
-        let pins = pins(facts, &bindings, scan);
-        return (bindings, pins);
-    }
-    let paths: BTreeSet<&str> = unscanned.paths.iter().map(RelPath::as_str).collect();
-    let mut known = scan.clone();
-    known.files.retain(|path, _| !under(path, &paths));
-    let (unknown, facts): (Facts, Facts) =
-        facts.clone().into_iter().partition(|(entity, written)| {
-            unscanned.entities.contains(entity)
-                || written.iter().any(|w| under(&w.value.path, &paths))
-        });
-    let mut bindings = bind(&facts, &known, names);
-    let pins = pins(&facts, &bindings, &known);
-    for (entity, written) in unknown {
-        if let Some(latest) = written.last() {
-            let file = FileRef {
-                path: latest.value.path.clone(),
-                state: FileState::Unscanned,
-            };
-            bindings.bound.insert(entity, file);
-        }
-    }
-    (bindings, pins)
+    let mut binding = Binding::new(facts, scan, unscanned);
+    binding.step(facts, scan, names, usize::MAX);
+    binding.finish()
 }
 
 /// Lists every library file outside toshokan's root, with the paths whose
@@ -318,42 +296,273 @@ fn holds(fact: &FileFact, file: &Scanned) -> bool {
 
 /// Binds every entity with a file fact to a file of `scan`, or to none.
 pub fn bind(facts: &Facts, scan: &Scan, names: &dyn Names) -> Bindings {
-    let mut bindings = Bindings::default();
-    let mut taken: BTreeMap<&RelPath, EntityId> = BTreeMap::new();
-    let mut departed: Vec<(EntityId, &FileFact)> = Vec::new();
-    let mut claims: BTreeMap<&RelPath, Vec<(EntityId, &FileFact)>> = BTreeMap::new();
-    let by_key = OnceCell::new();
-    let by_key = || {
-        by_key.get_or_init(|| {
-            let mut by_key: BTreeMap<String, Vec<&RelPath>> = BTreeMap::new();
-            for path in scan.files.keys() {
-                let key = names.key(path.as_str());
-                by_key.entry(key).or_default().push(path);
-            }
-            by_key
-        })
-    };
+    bind_known(facts, scan, names, &Unscanned::default()).0
+}
 
-    for (&entity, written) in facts {
-        let Some(first) = written.first() else {
-            continue;
-        };
-        let mut candidates: Vec<(&RelPath, &FileFact)> = Vec::new();
-        for fact in written.iter().map(|w| &w.value) {
-            let same = match scan.files.get_key_value(&fact.path) {
-                Some((path, _)) => vec![path],
-                None => by_key()
-                    .get(&names.key(fact.path.as_str()))
-                    .cloned()
-                    .unwrap_or_default(),
-            };
-            candidates.extend(same.into_iter().map(|path| (path, fact)));
+/// File-register writes for the moves `facts` do not already say: a file found in
+/// sync at another path. A new modification time alone is not pinned; it only
+/// saves reading an identity. Conflicted registers, changed files and missing
+/// ones are left for the user.
+pub fn pins(facts: &Facts, bindings: &Bindings, scan: &Scan) -> Vec<Op> {
+    let mut ops = Vec::new();
+    for (&entity, file) in &bindings.bound {
+        ops.extend(pin(facts, scan, entity, file));
+    }
+    ops
+}
+
+fn pin(facts: &Facts, scan: &Scan, entity: EntityId, file: &FileRef) -> Option<Op> {
+    let ([written], FileState::InSync) = (
+        facts.get(&entity).map_or(&[][..], Vec::as_slice),
+        file.state,
+    ) else {
+        return None;
+    };
+    let found = scan.files.get(&file.path)?;
+    if file.path == written.value.path {
+        return None;
+    }
+    let pinned = FileFact {
+        path: file.path.clone(),
+        identity: found.identity.unwrap_or(written.value.identity),
+        len: found.len,
+        modified: found.modified,
+    };
+    Some(Op::Pin {
+        entity,
+        file: pinned,
+        replaces: vec![written.entry],
+    })
+}
+
+/// [`bind_known`] a slice at a time. It holds no reference to the facts or the
+/// scan: each step is handed them, ⚠️ the same ones every time.
+pub struct Binding {
+    /// What is bound in place of the facts and the scan where a failed scan left
+    /// something unknown, with the entities it left unknown.
+    known: Option<(Facts, Scan, Facts)>,
+    stage: Stage,
+    progress: Progress,
+}
+
+/// Where a [`Binding`] is. A stage that walks the facts or the scan goes on after
+/// the last key it took.
+enum Stage {
+    Candidates(Option<EntityId>),
+    Claims,
+    Free(Option<RelPath>),
+    Departed,
+    Moves,
+    Unbound(Option<RelPath>),
+    Pins(Option<EntityId>),
+    Done,
+}
+
+/// What a [`Binding`] has found so far. A fact is named by its entity and its
+/// index among the entity's facts.
+#[derive(Default)]
+struct Progress {
+    bindings: Bindings,
+    taken: BTreeSet<RelPath>,
+    /// The entities naming each file, each by its one candidate.
+    claims: BTreeMap<RelPath, Vec<(EntityId, usize)>>,
+    /// The entities whose file was not found where they say, by the fact whose
+    /// identity is looked for.
+    departed: VecDeque<(EntityId, usize)>,
+    by_key: Option<BTreeMap<String, Vec<RelPath>>>,
+    /// Files bound by no path, by identity and length.
+    free: BTreeMap<(Identity, u64), Vec<RelPath>>,
+    /// How many departed entities each free file holds the identity of.
+    wanted: BTreeMap<RelPath, usize>,
+    moves: VecDeque<(EntityId, usize, Vec<RelPath>)>,
+    in_sync: Option<BTreeMap<Identity, Vec<EntityId>>>,
+    pins: Vec<Op>,
+}
+
+impl Binding {
+    pub fn new(facts: &Facts, scan: &Scan, unscanned: &Unscanned) -> Self {
+        let known = (!unscanned.is_empty()).then(|| {
+            let paths: BTreeSet<&str> = unscanned.paths.iter().map(RelPath::as_str).collect();
+            let mut known = scan.clone();
+            known.files.retain(|path, _| !under(path, &paths));
+            let (unknown, facts): (Facts, Facts) =
+                facts.clone().into_iter().partition(|(entity, written)| {
+                    unscanned.entities.contains(entity)
+                        || written.iter().any(|w| under(&w.value.path, &paths))
+                });
+            (facts, known, unknown)
+        });
+        Self {
+            known,
+            stage: Stage::Candidates(None),
+            progress: Progress::default(),
         }
-        candidates.sort_by_key(|(path, _)| *path);
-        candidates.dedup_by_key(|(path, _)| *path);
+    }
+
+    /// Binds about `slice` more entities or files of `facts` and `scan`; true once
+    /// every one is bound.
+    pub fn step(&mut self, facts: &Facts, scan: &Scan, names: &dyn Names, slice: usize) -> bool {
+        let Self {
+            known,
+            stage,
+            progress,
+        } = self;
+        let (facts, scan) = match known {
+            Some((facts, scan, _)) => (&*facts, &*scan),
+            None => (facts, scan),
+        };
+        let mut budget = slice;
+        while budget > 0 {
+            let budget = &mut budget;
+            *stage = match std::mem::replace(stage, Stage::Done) {
+                Stage::Candidates(from) => {
+                    let taken = take_after(facts, from, budget, |&entity, written| {
+                        progress.candidate(scan, names, entity, written);
+                    });
+                    taken.map_or(Stage::Claims, |last| Stage::Candidates(Some(last)))
+                }
+                Stage::Claims => match progress.claims.pop_first() {
+                    Some((path, claimants)) => {
+                        *budget -= 1;
+                        progress.claim(facts, scan, path, claimants);
+                        Stage::Claims
+                    }
+                    None => Stage::Free(None),
+                },
+                Stage::Free(from) => {
+                    let taken = take_after(&scan.files, from, budget, |path, file| {
+                        progress.free(path, file);
+                    });
+                    taken.map_or(Stage::Departed, |last| Stage::Free(Some(last)))
+                }
+                Stage::Departed => match progress.departed.pop_front() {
+                    Some((entity, fact)) => {
+                        *budget -= 1;
+                        progress.depart(facts, entity, fact);
+                        Stage::Departed
+                    }
+                    None => Stage::Moves,
+                },
+                Stage::Moves => match progress.moves.pop_front() {
+                    Some((entity, fact, matches)) => {
+                        *budget -= 1;
+                        progress.moved(facts, entity, fact, matches);
+                        Stage::Moves
+                    }
+                    None => Stage::Unbound(None),
+                },
+                Stage::Unbound(from) => {
+                    let taken = take_after(&scan.files, from, budget, |path, file| {
+                        progress.unbound(scan, path, file);
+                    });
+                    match taken {
+                        Some(last) => Stage::Unbound(Some(last)),
+                        None => {
+                            progress.reported();
+                            Stage::Pins(None)
+                        }
+                    }
+                }
+                Stage::Pins(from) => {
+                    let Progress { bindings, pins, .. } = progress;
+                    let taken = take_after(&bindings.bound, from, budget, |&entity, file| {
+                        pins.extend(pin(facts, scan, entity, file));
+                    });
+                    taken.map_or(Stage::Done, |last| Stage::Pins(Some(last)))
+                }
+                Stage::Done => return true,
+            };
+        }
+        matches!(stage, Stage::Done)
+    }
+
+    /// ⚠️ Before [`Binding::step`] returns true, what is bound so far.
+    pub fn finish(self) -> (Bindings, Vec<Op>) {
+        let Progress {
+            mut bindings, pins, ..
+        } = self.progress;
+        let unknown = self
+            .known
+            .map(|(_, _, unknown)| unknown)
+            .unwrap_or_default();
+        for (entity, written) in unknown {
+            if let Some(latest) = written.last() {
+                let file = FileRef {
+                    path: latest.value.path.clone(),
+                    state: FileState::Unscanned,
+                };
+                bindings.bound.insert(entity, file);
+            }
+        }
+        (bindings, pins)
+    }
+}
+
+/// Calls `take` on the entries of `map` after `from`, a unit of `budget` each,
+/// at least one, while it lasts: the last key taken, or `None` once every entry
+/// was.
+fn take_after<K: Ord + Clone, V>(
+    map: &BTreeMap<K, V>,
+    from: Option<K>,
+    budget: &mut usize,
+    mut take: impl FnMut(&K, &V),
+) -> Option<K> {
+    let start = from.as_ref().map_or(Bound::Unbounded, Bound::Excluded);
+    for (key, value) in map.range((start, Bound::Unbounded)) {
+        take(key, value);
+        *budget = budget.saturating_sub(1);
+        if *budget == 0 {
+            return Some(key.clone());
+        }
+    }
+    None
+}
+
+impl Progress {
+    /// Finds the files `entity`'s facts name: by path, else by the name the
+    /// volume takes for it.
+    fn candidate(
+        &mut self,
+        scan: &Scan,
+        names: &dyn Names,
+        entity: EntityId,
+        written: &[Written<FileFact>],
+    ) {
+        let Some(first) = written.first() else {
+            return;
+        };
+        let Self {
+            by_key,
+            claims,
+            departed,
+            bindings,
+            ..
+        } = self;
+        let gone = written
+            .iter()
+            .any(|w| !scan.files.contains_key(&w.value.path));
+        if gone && by_key.is_none() {
+            *by_key = Some(keyed(scan, names));
+        }
+        let mut candidates: Vec<(&RelPath, usize)> = Vec::new();
+        for (index, fact) in written.iter().map(|w| &w.value).enumerate() {
+            match scan.files.get_key_value(&fact.path) {
+                Some((path, _)) => candidates.push((path, index)),
+                None => {
+                    let key = names.key(fact.path.as_str());
+                    let same = by_key.as_ref().and_then(|by_key| by_key.get(&key));
+                    candidates.extend(same.into_iter().flatten().map(|path| (path, index)));
+                }
+            }
+        }
+        candidates.sort_by(|a, b| a.0.cmp(b.0));
+        candidates.dedup_by(|a, b| a.0 == b.0);
         match candidates.as_slice() {
-            [] => departed.push((entity, &first.value)),
-            [(path, fact)] => claims.entry(path).or_default().push((entity, fact)),
+            [] => departed.push_back((entity, 0)),
+            [(path, index)] => claims
+                .entry((*path).clone())
+                .or_default()
+                .push((entity, *index)),
             several => {
                 bindings.report.ambiguous.push(Ambiguous {
                     entity,
@@ -364,124 +573,148 @@ pub fn bind(facts: &Facts, scan: &Scan, names: &dyn Names) -> Bindings {
         }
     }
 
-    // Several entities naming one file: the one whose identity it holds, if only
-    // one does, has it. The others, or all when that does not decide, are bound
-    // by identity like entities whose path is gone.
-    for (path, claimants) in claims {
-        let file = &scan.files[path];
-        let holders: Vec<&(EntityId, &FileFact)> = claimants
+    /// Several entities naming one file: the one whose identity it holds, if only
+    /// one does, has it. The others, or all when that does not decide, are bound
+    /// by identity like entities whose path is gone.
+    fn claim(
+        &mut self,
+        facts: &Facts,
+        scan: &Scan,
+        path: RelPath,
+        claimants: Vec<(EntityId, usize)>,
+    ) {
+        let file = &scan.files[&path];
+        let held = |(entity, index): &(EntityId, usize)| holds(&facts[entity][*index].value, file);
+        let holders: Vec<EntityId> = claimants
             .iter()
-            .filter(|(_, fact)| holds(fact, file))
+            .filter(|claimant| held(claimant))
+            .map(|(entity, _)| *entity)
             .collect();
         let (entity, state) = match (claimants.as_slice(), holders.as_slice()) {
-            ([(entity, fact)], _) => (
-                *entity,
-                if holds(fact, file) {
-                    FileState::InSync
-                } else {
-                    FileState::ChangedOutside
-                },
-            ),
-            (_, [(entity, _)]) => (*entity, FileState::InSync),
+            ([only], _) if held(only) => (only.0, FileState::InSync),
+            ([only], _) => (only.0, FileState::ChangedOutside),
+            (_, [holder]) => (*holder, FileState::InSync),
             _ => {
-                departed.extend(claimants);
-                continue;
+                self.departed.extend(claimants);
+                return;
             }
         };
-        departed.extend(
-            claimants
-                .iter()
-                .filter(|(other, _)| *other != entity)
-                .copied(),
-        );
-        taken.insert(path, entity);
-        bindings.bound.insert(
-            entity,
-            FileRef {
-                path: path.clone(),
-                state,
-            },
-        );
+        let others = claimants.into_iter().filter(|(other, _)| *other != entity);
+        self.departed.extend(others);
+        self.taken.insert(path.clone());
+        self.bindings.bound.insert(entity, FileRef { path, state });
     }
 
-    let mut free: BTreeMap<(Identity, u64), Vec<&RelPath>> = BTreeMap::new();
-    for (path, file) in &scan.files {
-        if let (Some(identity), false) = (file.identity, taken.contains_key(path)) {
-            free.entry((identity, file.len)).or_default().push(path);
+    fn free(&mut self, path: &RelPath, file: &Scanned) {
+        if let (Some(identity), false) = (file.identity, self.taken.contains(path)) {
+            let free = self.free.entry((identity, file.len)).or_default();
+            free.push(path.clone());
         }
     }
-    let mut claims: BTreeMap<&RelPath, Vec<EntityId>> = BTreeMap::new();
-    let mut moves: Vec<(EntityId, &FileFact, &[&RelPath])> = Vec::new();
-    for (entity, fact) in departed {
-        let matches = free
-            .get(&(fact.identity, fact.len))
-            .map_or(&[][..], Vec::as_slice);
-        for path in matches {
-            claims.entry(path).or_default().push(entity);
+
+    /// Looks for the free files holding the identity `entity`'s fact gives.
+    fn depart(&mut self, facts: &Facts, entity: EntityId, index: usize) {
+        let fact = &facts[&entity][index].value;
+        let matches = self.free.get(&(fact.identity, fact.len));
+        let matches = matches.cloned().unwrap_or_default();
+        for path in &matches {
+            *self.wanted.entry(path.clone()).or_default() += 1;
         }
-        moves.push((entity, fact, matches));
+        self.moves.push_back((entity, index, matches));
     }
-    for (entity, fact, matches) in moves {
-        match matches {
-            [path] if claims[path].len() == 1 => {
-                taken.insert(path, entity);
+
+    /// Binds a departed entity to the one free file holding its identity, when no
+    /// other departed entity wants that file.
+    fn moved(&mut self, facts: &Facts, entity: EntityId, index: usize, matches: Vec<RelPath>) {
+        let fact = &facts[&entity][index].value;
+        let bindings = &mut self.bindings;
+        match matches.as_slice() {
+            [path] if self.wanted[path] == 1 => {
+                self.taken.insert(path.clone());
                 bindings.report.moved.push(Moved {
                     entity,
                     from: fact.path.clone(),
-                    to: (*path).clone(),
+                    to: path.clone(),
                 });
-                bindings.bound.insert(
-                    entity,
-                    FileRef {
-                        path: (*path).clone(),
-                        state: FileState::InSync,
-                    },
-                );
+                let file = FileRef {
+                    path: path.clone(),
+                    state: FileState::InSync,
+                };
+                bindings.bound.insert(entity, file);
             }
             [] => {
                 bindings.report.departed.push(entity);
                 bindings.bound.insert(entity, missing(fact));
             }
-            several => {
+            _ => {
                 bindings.report.ambiguous.push(Ambiguous {
                     entity,
-                    candidates: several.iter().map(|path| (*path).clone()).collect(),
+                    candidates: matches,
                 });
                 bindings.bound.insert(entity, missing(fact));
             }
         }
     }
 
-    let in_sync: BTreeMap<Identity, Vec<EntityId>> = bindings
-        .bound
-        .iter()
-        .filter(|(_, file)| file.state == FileState::InSync)
-        .filter_map(|(&entity, file)| Some((scan.files.get(&file.path)?.identity?, entity)))
-        .fold(BTreeMap::new(), |mut by, (identity, entity)| {
-            by.entry(identity).or_insert_with(Vec::new).push(entity);
-            by
-        });
-    for (path, file) in &scan.files {
-        if taken.contains_key(path) {
-            continue;
+    /// Keeps a file no entity is bound to, and reports it as a copy of each
+    /// entity bound in sync to a file with its identity.
+    fn unbound(&mut self, scan: &Scan, path: &RelPath, file: &Scanned) {
+        if self.taken.contains(path) {
+            return;
         }
+        let bindings = &mut self.bindings;
         bindings.unbound.push(path.clone());
-        let copied = file.identity.and_then(|identity| in_sync.get(&identity));
-        for &entity in copied.into_iter().flatten() {
+        let Some(identity) = file.identity else {
+            return;
+        };
+        let in_sync = self
+            .in_sync
+            .get_or_insert_with(|| in_sync(&bindings.bound, scan));
+        for &entity in in_sync.get(&identity).into_iter().flatten() {
             bindings.report.copied.push(Copied {
                 entity,
                 copy: path.clone(),
             });
         }
     }
-    bindings.report.arrived = bindings.unbound.clone();
-    bindings.report.changed = bindings
-        .bound
-        .iter()
-        .filter(|(_, file)| file.state == FileState::ChangedOutside)
-        .map(|(&entity, _)| entity)
-        .collect();
-    bindings
+
+    fn reported(&mut self) {
+        let bindings = &mut self.bindings;
+        bindings.report.arrived = bindings.unbound.clone();
+        bindings.report.changed = bindings
+            .bound
+            .iter()
+            .filter(|(_, file)| file.state == FileState::ChangedOutside)
+            .map(|(&entity, _)| entity)
+            .collect();
+    }
+}
+
+/// Every file of `scan` by the name the volume takes for its path.
+fn keyed(scan: &Scan, names: &dyn Names) -> BTreeMap<String, Vec<RelPath>> {
+    let mut by_key: BTreeMap<String, Vec<RelPath>> = BTreeMap::new();
+    for path in scan.files.keys() {
+        by_key
+            .entry(names.key(path.as_str()))
+            .or_default()
+            .push(path.clone());
+    }
+    by_key
+}
+
+/// The entities bound in sync, by the identity of their file.
+fn in_sync(bound: &BTreeMap<EntityId, FileRef>, scan: &Scan) -> BTreeMap<Identity, Vec<EntityId>> {
+    let mut by = BTreeMap::new();
+    for (&entity, file) in bound {
+        if file.state != FileState::InSync {
+            continue;
+        }
+        let Some(identity) = scan.files.get(&file.path).and_then(|found| found.identity) else {
+            continue;
+        };
+        by.entry(identity).or_insert_with(Vec::new).push(entity);
+    }
+    by
 }
 
 fn missing(fact: &FileFact) -> FileRef {
@@ -489,40 +722,6 @@ fn missing(fact: &FileFact) -> FileRef {
         path: fact.path.clone(),
         state: FileState::Missing,
     }
-}
-
-/// File-register writes for the moves `facts` do not already say: a file found in
-/// sync at another path. A new modification time alone is not pinned; it only
-/// saves reading an identity. Conflicted registers, changed files and missing
-/// ones are left for the user.
-pub fn pins(facts: &Facts, bindings: &Bindings, scan: &Scan) -> Vec<Op> {
-    let mut ops = Vec::new();
-    for (&entity, file) in &bindings.bound {
-        let ([written], FileState::InSync) = (
-            facts.get(&entity).map_or(&[][..], Vec::as_slice),
-            file.state,
-        ) else {
-            continue;
-        };
-        let Some(found) = scan.files.get(&file.path) else {
-            continue;
-        };
-        if file.path == written.value.path {
-            continue;
-        }
-        let pinned = FileFact {
-            path: file.path.clone(),
-            identity: found.identity.unwrap_or(written.value.identity),
-            len: found.len,
-            modified: found.modified,
-        };
-        ops.push(Op::Pin {
-            entity,
-            file: pinned,
-            replaces: vec![written.entry],
-        });
-    }
-    ops
 }
 
 #[cfg(test)]
@@ -621,6 +820,67 @@ mod tests {
         worlds
     }
 
+    /// Random worlds richer than the small ones: entities with conflicting file
+    /// facts, names the volume folds, identities read or not, and what a failed
+    /// scan left unknown.
+    fn random_worlds(seed: u64, count: usize) -> Vec<(Facts, Scan, Unscanned)> {
+        use crate::env::{Random, SeededRandom};
+        let mut random = SeededRandom::new(seed);
+        let mut pick = |n: usize| (random.next_u128() % n as u128) as usize;
+        let places = ["a", "A", "b", "c", "d/e", "d/E"];
+        (0..count)
+            .map(|_| {
+                let mut facts = Facts::new();
+                for e in 1..=1 + pick(6) as u128 {
+                    let written: Vec<_> = (0..1 + pick(2))
+                        .map(|i| written(fact(places[pick(6)], pick(3)), e * 10 + i as u128))
+                        .collect();
+                    facts.insert(EntityId::from_u128(e), written);
+                }
+                let mut files: Vec<(&str, usize)> = Vec::new();
+                for place in places {
+                    if pick(3) > 0 {
+                        files.push((place, pick(3)));
+                    }
+                }
+                let mut scan = scanned(&files, &facts);
+                for file in scan.files.values_mut() {
+                    if pick(4) == 0 {
+                        file.identity = None;
+                    }
+                }
+                let mut unscanned = Unscanned::default();
+                if pick(4) == 0 {
+                    unscanned.paths.insert(path(["a", "d", "c"][pick(3)]));
+                    unscanned
+                        .entities
+                        .insert(EntityId::from_u128(1 + pick(3) as u128));
+                }
+                (facts, scan, unscanned)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn binding_in_slices_binds_what_binding_at_once_binds() {
+        let small = worlds()
+            .into_iter()
+            .map(|(f, s)| (f, s, Unscanned::default()));
+        for (facts, scan, unscanned) in small.chain(random_worlds(9, 3000)) {
+            for names in [&ExactNames as &dyn Names, &Folding] {
+                let whole = bind_known(&facts, &scan, names, &unscanned);
+                for slice in 1..4 {
+                    let mut binding = Binding::new(&facts, &scan, &unscanned);
+                    while !binding.step(&facts, &scan, names, slice) {}
+                    assert_eq!(
+                        binding.finish(),
+                        whole,
+                        "{slice}-item slices of {facts:?} {scan:?} {unscanned:?}"
+                    );
+                }
+            }
+        }
+    }
     #[test]
     fn binding_never_guesses_in_any_small_world() {
         for (facts, scan) in worlds() {

@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::binding::{self, Bindings, Facts, Scan, Unscanned};
+use crate::binding::{self, Binding, Bindings, Facts, Scan, Unscanned};
 use crate::cache;
 use crate::drafts::{self, DraftRecord};
 use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd};
@@ -26,11 +26,11 @@ use crate::io::{Capabilities, Io, Kind, Lock, Root, Task};
 use crate::layout::Layout;
 use crate::line::MAX_LINE;
 use crate::log::{Bound, Entry, EntryKind, Genesis, Logged, Op, Settle, Settlement};
-use crate::merge::{merge, Beyond, Folded, Part};
+use crate::merge::{merge, Beyond, Folded, Merging, Part};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord};
 use crate::plan::{FactChange, FileChange, Plan};
-use crate::reader::{ReadReport, Reader, Stamp, WriterLog};
+use crate::reader::{Listing, ReadReport, Reader, Stamp, WriterLog};
 use crate::recovery::{self, Settling};
 use crate::report::{
     By, Change, Committed, Compacted, DraftState, DraftStatus, Emptied, HistoryItem, Lag, Local,
@@ -151,30 +151,35 @@ impl Library {
                     let logs = cached.view.writers().values();
                     (state, joined(logs))
                 });
-                let mut reader = Reader::open(layout.clone(), cached);
+                let reader = Reader::open(layout.clone(), cached);
                 flow::run(reader.list()).and_then(move |listing| {
-                    let report = reader.absorb(listing);
-                    let claimed = match picked {
-                        Some(picked) => picked.resume(layout.clone(), &reader),
-                        None => Task::ready(Ok(Claimed {
-                            writer: None,
-                            start: Start::New,
-                        })),
-                    };
-                    flow::run(claimed).map_ok(move |claimed| {
-                        let library = Library::new(
-                            layout,
-                            schema,
-                            env,
-                            capabilities,
-                            reader,
-                            claimed.writer,
-                            kept,
-                            resumed.map(|(state, joined)| (state, joined, &report)),
-                        );
-                        (library, report, claimed.start)
+                    absorbed(reader, listing).then(move |(reader, report)| {
+                        let claimed = match picked {
+                            Some(picked) => picked.resume(layout.clone(), &reader),
+                            None => Task::ready(Ok(Claimed {
+                                writer: None,
+                                start: Start::New,
+                            })),
+                        };
+                        flow::run(claimed).map_ok(move |claimed| {
+                            let library = Library::new(
+                                layout,
+                                schema,
+                                env,
+                                capabilities,
+                                reader,
+                                claimed.writer,
+                                kept,
+                            );
+                            (library, report, claimed.start, resumed)
+                        })
                     })
                 })
+            })
+            .and_then(|(mut library, report, start, resumed)| {
+                let resumed =
+                    resumed.is_some_and(|(state, joined)| library.resume(state, joined, &report));
+                fold_opened(library, resumed).then(move |library| ok((library, report, start)))
             })
             .and_then(|(mut library, report, start)| {
                 let saved = library.save_view();
@@ -227,9 +232,6 @@ impl Library {
             .task()
     }
 
-    /// `resumed` is the merged state the cached view kept, with the snapshots it
-    /// joined, and what the read since placed.
-    #[allow(clippy::too_many_arguments)]
     fn new(
         layout: Layout,
         schema: Schema,
@@ -238,9 +240,8 @@ impl Library {
         reader: Reader,
         writer: Option<Writer>,
         (let_go, remembered): (Let, Scan),
-        resumed: Option<(Folded, Joined, &ReadReport)>,
     ) -> Self {
-        let mut library = Self {
+        Self {
             layout,
             schema,
             env,
@@ -276,25 +277,19 @@ impl Library {
                 gaps: Vec::new(),
             }),
             behind: BTreeMap::new(),
-        };
-        match resumed {
-            Some((state, joined, read)) => library.resume(state, joined, read),
-            None => library.refold(),
         }
-        library.follow(readings(&library.reader).collect::<Vec<_>>());
-        let writable = capabilities.append;
-        library.mode = match (&library.writer, writable) {
+    }
+
+    /// Whether a library just opened may write.
+    fn mode_at_open(&self) -> Mode {
+        match (&self.writer, self.capabilities.append) {
             (_, false) => Mode::ReadOnly(Why::FolderNotWritable),
-            (Some(writer), true) => {
-                match newer_entry(&library.folded, &library.reader, writer.id()) {
-                    Some(entry) => Mode::ReadOnly(Why::NewerOwnHistory { entry }),
-                    None => Mode::Writable,
-                }
-            }
+            (Some(writer), true) => match newer_entry(&self.folded, &self.reader, writer.id()) {
+                Some(entry) => Mode::ReadOnly(Why::NewerOwnHistory { entry }),
+                None => Mode::Writable,
+            },
             (None, true) => Mode::Writable,
-        };
-        library.show();
-        library
+        }
     }
 
     pub fn view(&self) -> View {
@@ -876,20 +871,18 @@ impl Library {
     }
 
     /// Shows `state`, the merged state the cached view kept with the snapshots
-    /// it `joined`, and what `read` placed since; refolds instead while a writer
-    /// is shown as the folder holds it.
-    fn resume(&mut self, state: Folded, joined: Joined, read: &ReadReport) {
+    /// it `joined`, and what `read` placed since. False, taking nothing, while a
+    /// writer is shown as the folder holds it: everything is folded again then.
+    fn resume(&mut self, state: Folded, joined: Joined, read: &ReadReport) -> bool {
         self.lost = self.reader.removed();
         self.retain_let_go();
         if !self.shown_as_folder().is_empty() {
-            return self.refold();
+            return false;
         }
         self.folded = state;
         self.joined = joined;
         self.fold_read(read);
-        self.facts = self.folded.files();
-        self.bind_due = true;
-        self.rehistory();
+        true
     }
 
     /// Folds what a read placed, and the snapshots it kept, into what is shown.
@@ -1004,14 +997,6 @@ impl Library {
         flow::run(writer::retire_writer(writer.genesis()))
     }
 
-    /// Binds the facts to `scan`, unless neither changed.
-    fn rebind(&mut self, scan: Scan) {
-        if self.bind_due || scan != self.scan {
-            self.scan = scan;
-            self.bind();
-        }
-    }
-
     /// Binds again where the facts changed since the last binding.
     fn bind_facts(&mut self) {
         if self.bind_due {
@@ -1020,8 +1005,14 @@ impl Library {
     }
 
     fn bind(&mut self) {
-        let names = &*self.env.names;
-        let (bindings, pins) = binding::bind_known(&self.facts, &self.scan, names, &self.unscanned);
+        let mut binding = Binding::new(&self.facts, &self.scan, &self.unscanned);
+        binding.step(&self.facts, &self.scan, &*self.env.names, usize::MAX);
+        self.bound(binding);
+    }
+
+    /// Takes what a finished binding bound.
+    fn bound(&mut self, binding: Binding) {
+        let (bindings, pins) = binding.finish();
         self.pins = pins;
         self.bindings = Arc::new(bindings);
         self.bind_due = false;
@@ -1054,13 +1045,25 @@ impl Library {
     /// holds of it once every entry of it the folder lost was let go. Forgets
     /// let-go entries the folder holds again.
     fn refold(&mut self) {
+        let mut merging = self.unfold();
+        merging.step(usize::MAX);
+        self.folded = merging.folded();
+        self.refiled(self.folded.files());
+    }
+
+    /// The merge [`Library::refold`] folds.
+    fn unfold(&mut self) -> Merging {
         self.lost = self.reader.removed();
         self.retain_let_go();
         let folder = self.shown_as_folder();
         let logs = shown_logs(&self.reader, |writer| folder.contains(&writer));
         self.joined = joined(logs.iter().copied());
-        self.folded = merge(logs);
-        self.facts = self.folded.files();
+        Merging::new(logs)
+    }
+
+    /// Takes `facts`, the file facts of what is now shown.
+    fn refiled(&mut self, facts: Facts) {
+        self.facts = facts;
         self.bind_due = true;
         self.rehistory();
     }
@@ -1349,6 +1352,59 @@ fn change_of(op: &Op) -> Option<Change> {
     })
 }
 
+/// About how many entries one slice of placing offers.
+const PLACE_SLICE: usize = 1 << 11;
+
+/// About how many ops one slice of folding applies.
+const FOLD_SLICE: usize = 1 << 12;
+
+/// How many entities' file facts one slice takes.
+const FILE_SLICE: usize = 1 << 12;
+
+/// About how many entities or files one slice of binding takes.
+const BIND_SLICE: usize = 1 << 12;
+
+/// Places what a read of every writer's directory found, a slice at a time.
+fn absorbed<'a>(mut reader: Reader, listing: Listing) -> Flow<'a, (Reader, ReadReport)> {
+    let absorbing = reader.absorbing(listing);
+    let placing = flow::sliced((reader, absorbing), |(reader, absorbing)| {
+        reader.absorb_slice(absorbing, PLACE_SLICE)
+    });
+    placing.then(|(mut reader, absorbing)| {
+        let report = reader.absorbed(absorbing);
+        Flow::Done((reader, report))
+    })
+}
+
+/// Folds what a library just opened shows, a slice at a time, unless it
+/// `resumed` from the state its cached view kept, then follows its clock readings
+/// and decides whether it may write.
+fn fold_opened(mut library: Library, resumed: bool) -> Flow<'static, Library> {
+    let folded = match resumed {
+        true => Flow::Done(library),
+        false => {
+            let merging = library.unfold();
+            flow::sliced(merging, |merging| merging.step(FOLD_SLICE)).then(move |merging| {
+                library.folded = merging.folded();
+                Flow::Done(library)
+            })
+        }
+    };
+    folded
+        .then(|library| {
+            let filing = (library, Facts::new(), None);
+            flow::sliced(filing, |(library, facts, after)| {
+                library.folded.files_slice(facts, after, FILE_SLICE)
+            })
+        })
+        .then(|(mut library, facts, _)| {
+            library.refiled(facts);
+            library.follow(readings(&library.reader).collect::<Vec<_>>());
+            library.mode = library.mode_at_open();
+            Flow::Done(library)
+        })
+}
+
 /// Reads every writer's pending records and sorts out this writer's and the
 /// orphans. Writes nothing.
 fn recover(library: Library) -> Fallible<'static, Library> {
@@ -1383,8 +1439,27 @@ fn rescan<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
             known.bind_due = true;
         }
         known.behind.remove(&Lag::Scan);
-        known.rebind(scan);
-        remember(library, read).then(|(library, kept)| Flow::Done(kept.map(|()| library)))
+        rebound(library, scan).then(move |library| {
+            remember(library, read).then(|(library, kept)| Flow::Done(kept.map(|()| library)))
+        })
+    })
+}
+
+/// Binds the facts to `scan` a slice at a time, unless neither changed.
+fn rebound<'a, L: BorrowMut<Library> + 'a>(mut library: L, scan: Scan) -> Flow<'a, L> {
+    let known = library.borrow_mut();
+    if !known.bind_due && scan == known.scan {
+        return Flow::Done(library);
+    }
+    known.scan = scan;
+    let binding = Binding::new(&known.facts, &known.scan, &known.unscanned);
+    flow::sliced((library, binding), |(library, binding)| {
+        let known = library.borrow();
+        binding.step(&known.facts, &known.scan, &*known.env.names, BIND_SLICE)
+    })
+    .then(|(mut library, binding)| {
+        library.borrow_mut().bound(binding);
+        Flow::Done(library)
     })
 }
 
@@ -1429,10 +1504,8 @@ fn rebind_logged<'a>(
     unsure: Vec<RelPath>,
 ) -> Fallible<'a, &'a mut Library> {
     flow::run(scan).then(move |scanned| match scanned {
-        Ok((scan, read)) => {
-            library.rebind(scan);
-            remember(library, read).then(|(library, _)| ok(library))
-        }
+        Ok((scan, read)) => rebound(library, scan)
+            .then(move |library| remember(library, read).then(|(library, _)| ok(library))),
         Err(error) => {
             library.unscanned.add(unsure, &library.bindings);
             library.lag(Lag::Scan, &Err(error));

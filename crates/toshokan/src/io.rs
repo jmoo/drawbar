@@ -2,9 +2,11 @@
 //!
 //! An [`Operation`] never touches a file system. It returns [`Step::Io`] with a
 //! request, the driver performs it and resumes the operation with the
-//! [`IoResult`], until the operation returns [`Step::Done`]. The same operation runs
-//! under the blocking driver, the async driver, the in-memory disk and the
-//! simulator, and replays exactly.
+//! [`IoResult`], until the operation returns [`Step::Done`]. A long computation
+//! returns [`Step::Pause`] between slices, so a driver sharing its thread with a
+//! user interface can let it run. The same operation runs under the blocking
+//! driver, the async driver, the in-memory disk and the simulator, and replays
+//! exactly.
 
 use std::fmt;
 
@@ -385,15 +387,19 @@ impl Capabilities {
 #[derive(Debug)]
 pub enum Step<T> {
     Io(Io),
+    /// A slice of work that makes no request is done. The operation wants the
+    /// thread back only after anything else waiting for it has run.
+    Pause,
     Done(T),
 }
 
 /// A resumable operation of the core.
 ///
 /// The driver calls [`Operation::resume`] first with `None`, then with the result
-/// of each [`Io`] it returned, until it returns [`Step::Done`]. An operation keeps
-/// every decision it makes in its own state, so feeding it the same results
-/// produces the same requests.
+/// of each [`Io`] it returned, or `None` after a [`Step::Pause`], until it returns
+/// [`Step::Done`]. An operation keeps every decision it makes in its own state, so
+/// feeding it the same results produces the same requests. Where it pauses depends
+/// only on the work done, never on time.
 pub trait Operation {
     type Output;
 

@@ -22,7 +22,7 @@ use web_sys::{
     Url, WorkerOptions, WorkerType,
 };
 
-use super::{deferred, describe, field, object, wait, wire, Executor, Folder};
+use super::{deferred, describe, field, give_back, now, object, wait, wire, Executor, Folder};
 use crate::asynch::Fs;
 use crate::io::{Capabilities, Io, IoError, IoResult};
 use crate::path::RelPath;
@@ -37,7 +37,7 @@ self.onmessage = async ({ data }) => {
     await bundle.default({ module_or_path: data.module });
     await bundle.toshokanWorker(data);
   } catch (error) {
-    self.postMessage({ failed: String(error?.stack ?? error) });
+    self.postMessage({ failed: String(error?.stack || error) });
   }
 };
 "#;
@@ -49,12 +49,18 @@ extern "C" {
     static GLUE: String;
 }
 
+/// How long the core may hold the page's thread before a pause gives it back.
+const TURN_MS: f64 = 6.0;
+
 /// The storage of one library, performed by a dedicated worker. Dropping it ends
 /// the worker, which releases its locks.
 pub struct Worker {
     worker: web_sys::Worker,
     capabilities: [Capabilities; 2],
     replies: Rc<Replies>,
+    /// When the core last got the page's thread back: a reply came, or a pause
+    /// ended.
+    turn: Cell<f64>,
     _hear: Closure<dyn FnMut(MessageEvent)>,
     _fail: Closure<dyn FnMut(JsValue)>,
 }
@@ -145,6 +151,7 @@ impl Worker {
             worker,
             capabilities: [Capabilities::NONE; 2],
             replies,
+            turn: Cell::new(now()),
             _hear: hear,
             _fail: fail,
         };
@@ -194,13 +201,21 @@ impl Fs for Worker {
             self.replies.waiting.borrow_mut().remove(&id);
             return Err(IoError::Other(describe(&error)));
         }
-        let reply = wait(replied)
-            .await
-            .map_err(|error| IoError::Other(describe(&error)))?;
+        let reply = wait(replied).await;
+        self.turn.set(now());
+        let reply = reply.map_err(|error| IoError::Other(describe(&error)))?;
         match reply.dyn_into::<ArrayBuffer>() {
             Ok(buffer) => wire::decode_result(&Uint8Array::new(&buffer).to_vec()),
             Err(why) => Err(IoError::Other(describe(&why))),
         }
+    }
+
+    async fn pause(&self) {
+        if now() - self.turn.get() < TURN_MS {
+            return;
+        }
+        give_back().await;
+        self.turn.set(now());
     }
 }
 
