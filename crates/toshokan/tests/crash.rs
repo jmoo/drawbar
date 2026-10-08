@@ -1,7 +1,8 @@
 //! Every file effect crashed after every operation, under torn and zero-filled
 //! tails, renames done by copy and names made durable early, and in a folder
-//! that cannot rename, where every move copies and writes land only when their
-//! stream closes, as in a browser's picked folder.
+//! that cannot rename, where every move copies, writes land only when their
+//! stream closes, and a file is created empty before its bytes land, as in a
+//! browser's picked folder.
 //!
 //! Before recovery, no bytes have left the folder, and each user path holds its
 //! old bytes, its new bytes or nothing, and nothing only while a pending record
@@ -432,10 +433,7 @@ fn recover(disk: &MemDisk) -> Result<Vec<Outcome>, Error> {
         &logs,
         &BTreeSet::new(),
     ))?;
-    assert!(
-        found.orphaned.is_empty() && found.ignored.is_empty(),
-        "{found:?}"
-    );
+    assert!(found.orphaned.is_empty(), "{found:?}");
     let mut outcomes = Vec::new();
     for settling in &found.own {
         if !settling.logged {
@@ -452,12 +450,12 @@ fn recover(disk: &MemDisk) -> Result<Vec<Outcome>, Error> {
         d.run(effects::finish(&layout, settling.record, &settling.pending))?;
     }
     d.run(recovery::tidy(&layout, WRITER, &[]))?;
+    d.run(recovery::remove_empty(&layout, WRITER, &found.ignored))?;
     Ok(outcomes)
 }
 
-fn staged(files: &BTreeMap<RelPath, Vec<u8>>) -> Vec<&RelPath> {
-    let tmp = layout().tmp_dir(WRITER);
-    files.keys().filter(|p| p.starts_with(&tmp)).collect()
+fn kept_in<'f>(files: &'f BTreeMap<RelPath, Vec<u8>>, dir: &RelPath) -> Vec<&'f RelPath> {
+    files.keys().filter(|p| p.starts_with(dir)).collect()
 }
 
 #[test]
@@ -499,11 +497,10 @@ fn every_effect_crashed_anywhere_keeps_its_bytes_and_recovers_whole() {
                 );
                 let recovered = disk.files(Root::Folder);
                 case.kept(&shown, &recovered);
-                assert!(
-                    records(&disk, WRITER).is_empty(),
-                    "{shown}: a record is left"
-                );
-                assert!(staged(&recovered).is_empty(), "{shown}: staging is left");
+                let left = kept_in(&recovered, &layout().pending_dir(WRITER));
+                assert!(left.is_empty(), "{shown}: {left:?} is left");
+                let left = kept_in(&recovered, &layout().tmp_dir(WRITER));
+                assert!(left.is_empty(), "{shown}: staging {left:?} is left");
                 let holds = case.holds(&recovered);
                 let finished = !open.is_empty() || logs(&disk, WRITER)[&WRITER].closed;
                 let expected = case.state(finished);
@@ -591,9 +588,12 @@ fn settle_orphans(disk: &MemDisk, how: Settlement, stop: usize, seed: u64) -> (u
             &BTreeSet::new(),
         ))
         .unwrap();
+    assert!(found.own.is_empty(), "{found:?}");
+    let files = disk.files(Root::Folder);
+    let empty = |path: &RelPath| files.get(path).is_some_and(Vec::is_empty);
     assert!(
-        found.own.is_empty() && found.ignored.is_empty(),
-        "{found:?}"
+        found.ignored.iter().all(empty),
+        "only a record cut short before its bytes landed is ignored: {found:?}"
     );
     let mut env = env(seed);
     let mut stopped = false;

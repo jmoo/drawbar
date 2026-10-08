@@ -3,6 +3,7 @@
 use crate::blocking::Backend;
 use crate::disk::{MemDisk, Renames, Tail};
 use crate::io::{Capabilities, Io, IoError, IoResult, Reply, Root};
+use crate::path::RelPath;
 
 /// One crash to inject.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -85,6 +86,8 @@ pub fn sweep(
 /// A [`MemDisk`] whose folder lands writes as a browser's picked folder does:
 /// consecutive writes to one file are held in its writable stream until a
 /// request `Io::keeps_open` does not allow, and a crash before then loses them.
+/// A file created with bytes gets its name first and its bytes when a stream
+/// closes, so a crash between leaves it empty.
 pub struct Streams {
     disk: MemDisk,
     filling: Vec<Io>,
@@ -111,6 +114,26 @@ impl Streams {
         }
         Ok(())
     }
+
+    /// Makes the name, then writes and closes a stream, removing the name when
+    /// the bytes do not land.
+    fn create(&mut self, path: RelPath, bytes: Vec<u8>) -> IoResult {
+        let root = Root::Folder;
+        self.disk.perform(Io::Create {
+            root,
+            path: path.clone(),
+            bytes: Vec::new(),
+        })?;
+        let write = Io::Write {
+            root,
+            path: path.clone(),
+            offset: 0,
+            bytes,
+        };
+        self.disk.perform(write).inspect_err(|_| {
+            let _ = self.disk.perform(Io::Remove { root, path });
+        })
+    }
 }
 
 impl Backend for Streams {
@@ -133,7 +156,39 @@ impl Backend for Streams {
                 self.filling.push(io);
                 Ok(Reply::Done)
             }
+            Io::Create {
+                root: Root::Folder,
+                path,
+                bytes,
+            } if !bytes.is_empty() => self.create(path, bytes),
             io => self.disk.perform(io),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_crash_after_a_picked_folders_create_names_a_file_leaves_it_empty() {
+        let disk = MemDisk::with_capabilities(
+            Capabilities {
+                rename_file: false,
+                fsync: false,
+                ..Capabilities::ALL
+            },
+            Capabilities::ALL,
+        );
+        let path = RelPath::new("f").unwrap();
+        disk.crash_after(1);
+        let created = Streams::new(disk.clone()).perform(Io::Create {
+            root: Root::Folder,
+            path: path.clone(),
+            bytes: b"bytes".to_vec(),
+        });
+        assert!(matches!(created, Err(IoError::Crashed)), "{created:?}");
+        let files = disk.restart().files(Root::Folder);
+        assert_eq!(files.get(&path), Some(&Vec::new()));
     }
 }

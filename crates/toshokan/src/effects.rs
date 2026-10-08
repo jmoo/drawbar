@@ -525,7 +525,8 @@ pub fn check(
 
 /// Writes the record whole: staged and synced first, then renamed into place, so
 /// a crash never leaves part of one. A record that moves by copying is created in
-/// place, whole where a created file is.
+/// place, and a crash can leave it empty where a create makes a file's name
+/// before its bytes land: [`crate::recovery::remove_empty`] removes it.
 fn write_record<'a>(
     layout: &Layout,
     writer: WriterId,
