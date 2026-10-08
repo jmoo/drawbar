@@ -487,13 +487,23 @@ their identities:
    scans read while their files keep their length and time. After a commit, only
    the paths its file effects moved files from and to are scanned again, and of
    the other files only those whose length a file fact gained have their
-   identities read; opening and refreshing scan every file. A scan that fails
-   once a commit's entries are durable does not fail the commit. Until a scan of
-   every file succeeds, the paths it would have scanned and what is under them
-   are unknown: no file there is bound, reported or a candidate for a move. The
-   entities bound there before the commit, and those whose file facts name such
-   a path, are bound to no file and shown at their logged path as unscanned.
-   Nothing about them is pinned.
+   identities read. A refresh scans again only the paths named by the file facts
+   the entries it read changed, before and after, and the paths those entities
+   were bound to, with the same identity reads. Opening, and a rescan, which
+   the app asks for when something outside may have changed the folder, scan
+   every file. A scan that fails once a commit's entries are durable does not
+   fail the commit. Until a scan of every file succeeds, the paths it would have
+   scanned and what is under them are unknown: no file there is bound, reported
+   or a candidate for a move. The entities bound there before the commit, and
+   those whose file facts name such a path, are bound to no file and shown at
+   their logged path as unscanned. Nothing about them is pinned, and each
+   refresh scans every file until a scan of every file succeeds.
+   A scan of every file lists one directory at a time and keeps what it listed.
+   One that stops before every directory is listed binds nothing; the next goes
+   on where it stopped, listing again each directory holding a path a commit or
+   refresh scanned meanwhile, and each directory at or under such a path. A
+   change outside the app to a directory already listed shows at the next scan
+   of every file, or of its path.
 2. An entity whose file fact names a path a file is at is bound to it: in sync
    when the file holds the fact's identity (or, without one, its length and
    time), else changed outside. Paths compare under the volume's rules for case
@@ -842,6 +852,6 @@ always a directory of the origin private file system.
   the worker and released when it ends.
 - **Hints.** A tab that commits announces its newest entry on the
   `BroadcastChannel` `toshokan:<library>`, and the library's other tabs refresh.
-  A page whose folder another program may write also refreshes when it is shown
-  or focused, and periodically while it is visible.
+  A page whose folder another program may write also rescans every file when it
+  is shown or focused, and periodically while it is visible.
 

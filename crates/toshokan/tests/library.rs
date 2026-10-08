@@ -304,6 +304,7 @@ trait Facade: Sized {
     fn undo(&mut self) -> Result<Committed, Error>;
     fn redo(&mut self) -> Result<Committed, Error>;
     fn refresh(&mut self) -> Result<Refreshed, Error>;
+    fn rescan(&mut self) -> Result<Refreshed, Error>;
     fn let_go(&mut self) -> Result<(), Error>;
     fn adopt(&mut self, label: &str) -> Result<Committed, Error>;
     fn others(&mut self) -> Result<Vec<WriterInfo>, Error>;
@@ -353,6 +354,9 @@ impl Facade for Blocking {
     }
     fn refresh(&mut self) -> Result<Refreshed, Error> {
         self.0.refresh()
+    }
+    fn rescan(&mut self) -> Result<Refreshed, Error> {
+        self.0.rescan()
     }
     fn let_go(&mut self) -> Result<(), Error> {
         self.0.let_go()
@@ -422,6 +426,9 @@ impl Facade for Async {
     }
     fn refresh(&mut self) -> Result<Refreshed, Error> {
         pollster::block_on(self.0.refresh())
+    }
+    fn rescan(&mut self) -> Result<Refreshed, Error> {
+        pollster::block_on(self.0.rescan())
     }
     fn let_go(&mut self) -> Result<(), Error> {
         pollster::block_on(self.0.let_go())
@@ -515,6 +522,7 @@ through_both!(
     two_writers_tag_one_library_and_converge,
     what_refreshes_fold_in_is_what_a_fresh_open_shows,
     a_refresh_that_finds_nothing_new_writes_nothing,
+    a_refresh_scans_only_the_files_other_writers_moved,
     a_conflict_is_shown_and_resolved,
     a_clone_forks_and_both_branches_survive,
     a_restored_folder_makes_the_writer_rekey,
@@ -536,7 +544,7 @@ through_both!(
     a_commit_whose_record_cannot_be_removed_is_kept,
     a_settlement_whose_record_cannot_be_removed_is_logged_once,
     identities_a_failed_write_lost_are_kept_by_the_next_scan,
-    a_commit_scans_only_what_it_moved_and_a_refresh_finds_the_rest,
+    a_commit_scans_only_what_it_moved_and_a_rescan_finds_the_rest,
     an_identity_read_for_a_new_time_is_read_once_per_install,
     opening_viewing_and_refreshing_write_nothing_in_the_folder,
     swap_files_a_browser_left_are_neither_scanned_nor_read,
@@ -812,6 +820,61 @@ fn a_refresh_that_finds_nothing_new_writes_nothing<F: Facade>() {
         read <= toshokan::line::ENDING,
         "read {read} bytes of one file"
     );
+}
+
+fn a_refresh_scans_only_the_files_other_writers_moved<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    let others = 50;
+    for i in 0..others {
+        put(&folder, &format!("old/{i}.npno"), i.to_string().as_bytes());
+    }
+    let before = probe.library_reads();
+    a.refresh().unwrap();
+    assert_eq!(
+        probe.library_reads(),
+        before,
+        "nothing new, nothing scanned"
+    );
+    assert_eq!(a.view().unbound(), [] as [RelPath; 0]);
+
+    let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+    let tune = create(&mut b, "new/tune.npno", b"tune");
+    let moved = Expect::Holds(identity(b"song"));
+    b.commit("Move", |i| i.rename(song, &path("shelf/song.npno"), moved))
+        .unwrap();
+    let before = probe.library_reads();
+    let changes = a.refresh().unwrap().changes;
+    let reads = probe.library_reads() - before;
+    assert!(
+        reads < others,
+        "{reads} lists, stats and reads of library paths"
+    );
+    for (entity, at) in [(tune, "new/tune.npno"), (song, "shelf/song.npno")] {
+        let file = a.view().entity(entity).unwrap().file().unwrap();
+        assert_eq!((file.path, file.state), (path(at), FileState::InSync));
+        let filed = Change {
+            entity,
+            what: What::File,
+            by: By::Writer {
+                writer: b
+                    .view()
+                    .writers()
+                    .iter()
+                    .find(|w| w.label == "b")
+                    .unwrap()
+                    .writer,
+                label: "b".into(),
+            },
+        };
+        assert!(changes.contains(&filed), "{changes:?}");
+    }
+    assert_eq!(a.view().unbound(), [] as [RelPath; 0], "outside files wait");
+    a.rescan().unwrap();
+    assert_eq!(a.view().unbound().len() as u64, others);
 }
 
 fn a_view_is_read_on_other_threads<F: Facade>() {
@@ -1342,7 +1405,7 @@ fn a_copy_has_no_entity_until_one_is_said<F: Facade>() {
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     let song = create(&mut a, "song.npno", b"song");
     put(&folder, "copy.npno", b"song");
-    a.refresh().unwrap();
+    a.rescan().unwrap();
     let view = a.view();
     assert_eq!(view.unbound(), [path("copy.npno")]);
     assert_eq!(view.entities().len(), 1);
@@ -1398,7 +1461,7 @@ fn a_move_keeps_its_tags_and_is_pinned_by_the_next_commit<F: Facade>() {
         })
         .unwrap();
     move_outside(&folder, "song.npno", "moved/song.npno");
-    let changes = a.refresh().unwrap().changes;
+    let changes = a.rescan().unwrap().changes;
     assert_eq!(
         changes,
         [Change {
@@ -1445,7 +1508,7 @@ fn undoing_a_delete_binds_the_file_moved_while_deleted<F: Facade>() {
         })
         .unwrap();
     move_outside(&folder, "song.npno", "moved/song.npno");
-    a.refresh().unwrap();
+    a.rescan().unwrap();
     a.undo().unwrap();
     let file = a.view().entity(song).unwrap().file().unwrap();
     assert_eq!(
@@ -1490,7 +1553,7 @@ fn an_undo_is_committed_when_its_identity_read_fails<F: Facade>() {
         })
         .unwrap();
     move_outside(&folder, "song.npno", "moved/song.npno");
-    a.refresh().unwrap();
+    a.rescan().unwrap();
     blind_after_record(&probe);
     a.undo().unwrap();
     assert!(
@@ -1594,7 +1657,7 @@ fn a_failed_rescan_after_a_rename_binds_no_copy_in_its_place<F: Facade>() {
     let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
     let song = create(&mut a, "song.npno", b"song");
     put(&folder, "copy.npno", b"song");
-    a.refresh().unwrap();
+    a.rescan().unwrap();
     assert_eq!(a.view().unbound(), [path("copy.npno")]);
     blind_after_record(&probe);
     let renamed = a
@@ -1856,9 +1919,9 @@ fn identities_a_failed_write_lost_are_kept_by_the_next_scan<F: Facade>() {
     create(&mut a, "song.npno", b"song");
     put(&folder, "tune.npno", b"tune");
     fail(&probe, local_writes(&["identities.json.next"]));
-    assert!(a.refresh().is_err(), "the identities cannot be kept");
+    assert!(a.rescan().is_err(), "the identities cannot be kept");
     heal(&probe);
-    a.refresh().unwrap();
+    a.rescan().unwrap();
     let kept = local_file(&here, "identities.json").expect("kept by the next scan");
     assert!(
         String::from_utf8(kept).unwrap().contains("tune.npno"),
@@ -1866,7 +1929,7 @@ fn identities_a_failed_write_lost_are_kept_by_the_next_scan<F: Facade>() {
     );
 }
 
-fn a_commit_scans_only_what_it_moved_and_a_refresh_finds_the_rest<F: Facade>() {
+fn a_commit_scans_only_what_it_moved_and_a_rescan_finds_the_rest<F: Facade>() {
     let folder = disk();
     let clock = TestClock::at(1_000);
     let probe = Probe::new(&machine(&folder));
@@ -1876,7 +1939,7 @@ fn a_commit_scans_only_what_it_moved_and_a_refresh_finds_the_rest<F: Facade>() {
     for i in 0..others {
         put(&folder, &format!("old/{i}.npno"), i.to_string().as_bytes());
     }
-    a.refresh().unwrap();
+    a.rescan().unwrap();
     move_outside(&folder, "song.npno", "old/song.npno");
     let before = probe.library_reads();
     let new = create(&mut a, "new/one.npno", b"one");
@@ -1898,7 +1961,7 @@ fn a_commit_scans_only_what_it_moved_and_a_refresh_finds_the_rest<F: Facade>() {
         (path("shelf/new/one.npno"), FileState::InSync)
     );
 
-    let changes = a.refresh().unwrap().changes;
+    let changes = a.rescan().unwrap().changes;
     assert_eq!(
         changes,
         [Change {
@@ -2041,7 +2104,7 @@ fn a_commit_pins_any_number_of_moves_in_entries_within_the_line_limit() {
             to: path("shelf"),
         })
         .unwrap();
-    assert_eq!(a.refresh().unwrap().changes.len(), files.len());
+    assert_eq!(a.rescan().unwrap().changes.len(), files.len());
     let (song, _) = files[0];
     a.commit("Tag", |i| i.add(song, TAGS, tag("moved")))
         .unwrap();

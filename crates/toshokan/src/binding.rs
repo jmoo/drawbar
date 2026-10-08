@@ -165,6 +165,132 @@ pub fn scan(
         .task()
 }
 
+/// `found`, every library file a [`Walk`] listed, with the identities a scan
+/// reads, as [`scan`] gives them.
+pub fn identify(
+    found: Scan,
+    identify: &Rc<dyn Identify>,
+    facts: &Facts,
+    previous: &Scan,
+) -> Task<'static, Result<(Scan, Vec<RelPath>)>> {
+    let known = Known::of(facts, previous, |_| true);
+    identified(found, known, Rc::clone(identify)).task()
+}
+
+/// A scan of every library file a directory at a time, which keeps what it listed
+/// so that a scan that stopped goes on where it stopped.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Walk {
+    /// Each directory listed, with the files and the directories it held.
+    listed: BTreeMap<RelPath, Vec<(String, Meta)>>,
+    /// The directories to list.
+    queue: BTreeSet<RelPath>,
+}
+
+impl Default for Walk {
+    fn default() -> Self {
+        Self {
+            listed: BTreeMap::new(),
+            queue: BTreeSet::from([RelPath::ROOT]),
+        }
+    }
+}
+
+impl Walk {
+    /// The next directory to list; `None` once every directory is listed.
+    pub fn next(&self) -> Option<RelPath> {
+        self.queue.first().cloned()
+    }
+
+    /// Keeps what listing `dir` found, but toshokan's root and swap files, and
+    /// forgets the listings of directories under `dir` it no longer holds.
+    pub fn listed(&mut self, layout: &Layout, dir: RelPath, entries: Vec<(String, Meta)>) {
+        let entries: Vec<(String, Meta)> = entries
+            .into_iter()
+            .filter(|(name, meta)| match meta.kind {
+                Kind::Directory => dir.join(name).is_ok_and(|path| !layout.owns(&path)),
+                Kind::File => !is_swap_file(name),
+            })
+            .collect();
+        let dirs: BTreeSet<RelPath> = entries
+            .iter()
+            .filter(|(_, meta)| meta.kind == Kind::Directory)
+            .filter_map(|(name, _)| dir.join(name).ok())
+            .collect();
+        let gone: Vec<RelPath> = subtree(&self.listed, &dir)
+            .filter(|path| **path != dir && !dirs.iter().any(|kept| path.starts_with(kept)))
+            .cloned()
+            .collect();
+        for path in gone {
+            self.listed.remove(&path);
+        }
+        self.queue.remove(&dir);
+        let unlisted: Vec<RelPath> = dirs
+            .into_iter()
+            .filter(|sub| !self.listed.contains_key(sub))
+            .collect();
+        self.queue.extend(unlisted);
+        self.listed.insert(dir, entries);
+    }
+
+    /// Lists again what may have changed at `paths`: each one's directory, and each
+    /// directory at or under it.
+    pub fn forget(&mut self, paths: &[RelPath]) {
+        for path in paths {
+            let stale: Vec<RelPath> = subtree(&self.listed, path).cloned().collect();
+            for dir in stale {
+                self.listed.remove(&dir);
+            }
+            let queued: Vec<RelPath> = self
+                .queue
+                .iter()
+                .filter(|dir| dir.starts_with(path))
+                .cloned()
+                .collect();
+            for dir in queued {
+                self.queue.remove(&dir);
+            }
+            if let Some(parent) = path.parent() {
+                if self.listed.remove(&parent).is_some() {
+                    self.queue.insert(parent);
+                }
+            }
+        }
+        if self.listed.is_empty() {
+            self.queue.insert(RelPath::ROOT);
+        }
+    }
+
+    /// Every file listed, its identity unread.
+    pub fn found(&self) -> Scan {
+        let files = self.listed.iter().flat_map(|(dir, entries)| {
+            let files = entries.iter().filter(|(_, meta)| meta.kind == Kind::File);
+            files.filter_map(move |(name, meta)| {
+                let file = Scanned {
+                    len: meta.len,
+                    modified: meta.modified,
+                    identity: None,
+                };
+                Some((dir.join(name).ok()?, file))
+            })
+        });
+        Scan {
+            files: files.collect(),
+        }
+    }
+}
+
+/// The keys of `map` at `dir` or under it.
+fn subtree<'a, V>(
+    map: &'a BTreeMap<RelPath, V>,
+    dir: &'a RelPath,
+) -> impl Iterator<Item = &'a RelPath> + 'a {
+    let prefixed = map.range(dir.clone()..).map(|(path, _)| path);
+    prefixed
+        .take_while(move |path| path.as_str().starts_with(dir.as_str()))
+        .filter(move |path| path.starts_with(dir))
+}
+
 /// `previous` with each of `paths` scanned again: the file at a path, the files
 /// under a directory, or nothing; with the paths whose identities it read.
 /// Requests only [`crate::Io::Stat`], [`crate::Io::ListStat`] and
@@ -275,6 +401,7 @@ fn visit<'a>(layout: Rc<Layout>, path: RelPath, scan: Scan) -> flow::Fallible<'a
     }
     flow::stat(Root::Folder, &path).and_then(move |meta| match meta {
         Some(meta) if meta.kind == Kind::Directory => walk(layout, path, scan),
+        Some(_) if path.name().is_some_and(is_swap_file) => ok(scan),
         Some(meta) => ok(found(scan, path, meta)),
         None => ok(scan),
     })

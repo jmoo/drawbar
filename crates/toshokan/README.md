@@ -54,6 +54,11 @@ and every conflict (`conflicts`). Values compare by the JSON toshokan writes for
 them; `range` and `values` decode each distinct value of the key. Searching
 names or derived metadata is the app's.
 
+`refresh` reads what other writers logged since, and scans only the files their
+entries moved. `rescan` also scans every library file, for what changed outside
+the app; a rescan the app drops, to commit or to close, goes on where it stopped
+at the next one. `rescan_paths` scans the files a watcher saw change.
+
 `opened` reports what needs the user: effects another writer left unfinished,
 drafts, forks, facts a restore of the folder removed, and files that arrived,
 moved or changed outside the app. A view never changes, so an app can hand it to

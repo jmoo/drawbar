@@ -201,8 +201,20 @@ impl<B: Backend> Library<B> {
         run(&mut self.backend, self.core.settle(orphan, how))
     }
 
+    /// Reads other writers' new entries, and scans only the files their facts
+    /// moved.
     pub fn refresh(&mut self) -> Result<Refreshed> {
         run(&mut self.backend, self.core.refresh())
+    }
+
+    /// Refreshes and scans every library file, for what changed outside.
+    pub fn rescan(&mut self) -> Result<Refreshed> {
+        run(&mut self.backend, self.core.rescan())
+    }
+
+    /// Refreshes and scans the library files at `paths` and under them.
+    pub fn rescan_paths(&mut self, paths: Vec<RelPath>) -> Result<Refreshed> {
+        run(&mut self.backend, self.core.rescan_paths(paths))
     }
 
     /// Stops showing what [`Opened::removed`] reports, on every open of this

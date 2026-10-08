@@ -1086,6 +1086,9 @@ fn main() {
     for _ in 0..args.runs {
         bench.measure("refresh, nothing new", || lib.refresh().unwrap());
     }
+    for _ in 0..args.runs {
+        bench.measure("rescan, nothing new", || lib.rescan().unwrap());
+    }
     let foreign = match gen.writers.len() {
         1 => gen.add_writer(),
         _ => 1,

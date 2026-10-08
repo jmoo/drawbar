@@ -1,10 +1,14 @@
-//! Indexed lookups, against what scanning every entity finds, over seeded
-//! histories of two writers and outside changes.
+//! Indexed lookups and resumable rescans, against what scanning every entity and
+//! every file finds, over seeded histories of two writers, outside changes and
+//! rescans dropped partway.
 
 mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::pin::pin;
 use std::rc::Rc;
+use std::task::{Context, Poll, Waker};
 
 use common::Later;
 use toshokan::asynch::{self, Fs, Library};
@@ -80,6 +84,16 @@ fn open(folder: &MemDisk, label: &str, seed: u64) -> Library<Yielding> {
     let schema = schema();
     let opened = asynch::Library::open(Yielding(machine), layout(), &schema, env);
     pollster::block_on(opened).unwrap().0
+}
+
+/// Polls `future` at most `polls` times; its output if it finished.
+fn poll_at_most<F: Future>(future: F, polls: usize) -> Option<F::Output> {
+    let mut future = pin!(future);
+    let mut context = Context::from_waker(Waker::noop());
+    (0..polls).find_map(|_| match future.as_mut().poll(&mut context) {
+        Poll::Ready(output) => Some(output),
+        Poll::Pending => None,
+    })
 }
 
 fn pick<T: Clone>(chance: &mut SeededRandom, from: &[T]) -> T {
@@ -374,14 +388,43 @@ fn run_seeded(seed: u64) {
         let case = format!("seed {seed}, step {step}");
         let k = below(&mut chance, 2);
         let library = &mut libraries[k];
-        match below(&mut chance, 7) {
+        match below(&mut chance, 10) {
             0..=3 => write(library, &mut chance, &case),
             4 => outside(&folder, &mut chance),
             5 => {
                 pollster::block_on(library.refresh()).unwrap();
             }
-            _ => {
+            6 => {
+                pollster::block_on(library.rescan()).unwrap();
+            }
+            7 => {
                 let _ = pollster::block_on(library.undo());
+            }
+            _ => {
+                let polls = 1 + below(&mut chance, 30);
+                if poll_at_most(library.rescan(), polls).is_some() {
+                    continue;
+                }
+                let meanwhile = below(&mut chance, 4);
+                match meanwhile {
+                    0 => write(&mut libraries[k], &mut chance, &case),
+                    1 => write(&mut libraries[1 - k], &mut chance, &case),
+                    2 => outside(&folder, &mut chance),
+                    _ => {}
+                }
+                let library = &mut libraries[k];
+                check(&library.view(), &format!("{case}, rescan dropped"));
+                pollster::block_on(library.rescan()).unwrap();
+                if meanwhile == 2 {
+                    // A directory listed before the change shows it at the next rescan.
+                    pollster::block_on(library.rescan()).unwrap();
+                }
+                let fresh = open(&folder, "fresh", seed * 10 + 2);
+                assert_eq!(
+                    shown(&library.view()),
+                    shown(&fresh.view()),
+                    "{case}: a resumed rescan shows what a fresh open does"
+                );
             }
         }
         for (k, library) in libraries.iter().enumerate() {
@@ -389,8 +432,8 @@ fn run_seeded(seed: u64) {
         }
     }
     for library in &mut libraries {
-        pollster::block_on(library.refresh()).unwrap();
-        let again = pollster::block_on(library.refresh()).unwrap();
+        pollster::block_on(library.rescan()).unwrap();
+        let again = pollster::block_on(library.rescan()).unwrap();
         assert!(again.changes.is_empty(), "seed {seed}: {:?}", again.changes);
     }
     let [a, b] = &libraries;
@@ -399,7 +442,7 @@ fn run_seeded(seed: u64) {
 }
 
 #[test]
-fn indexed_lookups_match_full_scans_over_seeded_histories() {
+fn indexed_lookups_and_resumed_rescans_match_full_scans_over_seeded_histories() {
     for seed in 0..60 {
         run_seeded(seed);
     }
