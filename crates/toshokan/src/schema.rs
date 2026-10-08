@@ -196,6 +196,13 @@ impl Ord for Raw {
     }
 }
 
+/// A value compares, orders and hashes as its text.
+impl std::borrow::Borrow<str> for Raw {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
 impl Hash for Raw {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.as_str().hash(state);

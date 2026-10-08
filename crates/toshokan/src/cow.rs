@@ -251,16 +251,31 @@ impl<K: Ord + Clone, V> FromIterator<(K, V)> for CowMap<K, V> {
 
 impl<K: Ord + Clone, V> CowMap<K, V> {
     /// The map of `entries`, which must be in order of key and name each key once.
-    pub fn from_sorted(mut entries: Vec<(K, V)>) -> Self {
+    pub fn from_sorted(entries: Vec<(K, V)>) -> Self {
         debug_assert!(entries.windows(2).all(|pair| pair[0].0 < pair[1].0));
-        let len = entries.len();
-        let mut chunks = Vec::with_capacity(len.div_ceil(CHUNK));
-        while let Some((last, _)) = entries.last() {
-            let last = last.clone();
-            let start = (entries.len() - 1) / CHUNK * CHUNK;
-            chunks.push((last, Arc::new(entries.split_off(start))));
+        Self::from_sorted_iter(entries)
+    }
+
+    /// The map of `entries`, which must come in order of key and name each key
+    /// once, chunked as they come, without a list of them all.
+    pub fn from_sorted_iter(entries: impl IntoIterator<Item = (K, V)>) -> Self {
+        let mut chunks = Vec::new();
+        let mut chunk = Vec::with_capacity(CHUNK);
+        let mut len = 0;
+        for entry in entries {
+            len += 1;
+            chunk.push(entry);
+            if chunk.len() == CHUNK {
+                let full = std::mem::replace(&mut chunk, Vec::with_capacity(CHUNK));
+                let last = full[CHUNK - 1].0.clone();
+                chunks.push((last, Arc::new(full)));
+            }
         }
-        chunks.reverse();
+        if let Some((last, _)) = chunk.last() {
+            let last = last.clone();
+            chunk.shrink_to_fit();
+            chunks.push((last, Arc::new(chunk)));
+        }
         Self {
             chunks: Arc::new(chunks),
             len,

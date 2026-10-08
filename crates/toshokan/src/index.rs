@@ -17,8 +17,9 @@ use crate::quick::Quick;
 use crate::schema::{KeyKind, Raw};
 use crate::view::{Conflicted, FileRef, FileState};
 
-/// A value's JSON text, shared by every entry naming it.
-type Text = Arc<str>;
+/// A value's JSON text, shared with the merged state and by every entry naming
+/// it.
+type Text = Raw;
 
 /// The values one entity held under a key, and those it holds.
 type Moved<'a> = (Vec<&'a Raw>, Vec<&'a Raw>);
@@ -117,10 +118,7 @@ impl Indexing {
                     let named = held.named.len();
                     let at = match held.named.get(value.as_str()) {
                         Some(at) => *at,
-                        None => *held
-                            .named
-                            .entry(Text::from(value.as_str()))
-                            .or_insert(named),
+                        None => *held.named.entry((*value).clone()).or_insert(named),
                     };
                     held.held.push((at, entity));
                 }
@@ -275,7 +273,7 @@ impl Index {
         index
             .counts
             .iter()
-            .map(|(text, count)| (&**text, *count))
+            .map(|(text, count)| (text.as_str(), *count))
             .collect()
     }
 
@@ -365,7 +363,7 @@ impl KeyIndex {
         let mut counts = Vec::with_capacity(texts.len());
         let mut start = 0;
         for ((text, _), end) in texts.iter().zip(&mut ends) {
-            counts.push((Arc::clone(text), *end));
+            counts.push((text.clone(), *end));
             start += *end;
             *end = start;
         }
@@ -375,34 +373,42 @@ impl KeyIndex {
             *end -= 1;
             order[*end] = Some(entity);
         }
-        let mut holding = Vec::with_capacity(order.len());
         let mut placed = order.into_iter().flatten();
-        for (text, count) in &counts {
-            let entities = placed.by_ref().take(*count);
-            holding.extend(entities.map(|entity| ((Arc::clone(text), entity), ())));
-        }
+        let mut texts = counts.iter();
+        let mut text: Option<(&Text, usize)> = None;
+        let holding = std::iter::from_fn(|| loop {
+            if let Some((held, left)) = &mut text {
+                if *left > 0 {
+                    *left -= 1;
+                    return Some((((*held).clone(), placed.next()?), ()));
+                }
+            }
+            let (held, count) = texts.next()?;
+            text = Some((held, *count));
+        });
+        let holding = CowMap::from_sorted_iter(holding);
         let holders = gathered.holders.into_iter().map(|entity| (entity, ()));
         Self {
-            holding: CowMap::from_sorted(holding),
+            holding,
             counts: CowMap::from_sorted(counts),
-            holders: CowMap::from_sorted(holders.collect()),
+            holders: CowMap::from_sorted_iter(holders),
         }
     }
 
     fn holding_of<'a>(&'a self, text: &'a str) -> impl Iterator<Item = EntityId> + 'a {
-        let found = self.holding.seek(move |(held, _)| (**held).cmp(text));
+        let found = self.holding.seek(move |(held, _)| held.as_str().cmp(text));
         found
-            .take_while(move |((held, _), _)| **held == *text)
+            .take_while(move |((held, _), _)| held.as_str() == text)
             .map(|((_, entity), _)| *entity)
     }
 
     /// Moves `entity` from holding `was` to holding `now`, both sorted.
     fn replace(&mut self, entity: EntityId, was: &[&Raw], now: &[&Raw]) {
         for value in was.iter().filter(|value| now.binary_search(value).is_err()) {
-            self.remove(entity, value.as_str());
+            self.remove(entity, value);
         }
         for value in now.iter().filter(|value| was.binary_search(value).is_err()) {
-            self.add(entity, value.as_str());
+            self.add(entity, value);
         }
         match (was.is_empty(), now.is_empty()) {
             (true, false) => {
@@ -415,21 +421,18 @@ impl KeyIndex {
         }
     }
 
-    fn add(&mut self, entity: EntityId, value: &str) {
-        let (text, count) = match self.counts.get_by(|text| (**text).cmp(value)) {
-            Some((text, count)) => (Arc::clone(text), count + 1),
-            None => (Text::from(value), 1),
-        };
-        self.counts.insert(Arc::clone(&text), count);
-        self.holding.insert((text, entity), ());
+    fn add(&mut self, entity: EntityId, value: &Raw) {
+        let count = self.counts.get(value).map_or(1, |count| count + 1);
+        self.counts.insert(value.clone(), count);
+        self.holding.insert((value.clone(), entity), ());
     }
 
-    fn remove(&mut self, entity: EntityId, value: &str) {
-        let Some((text, count)) = self.counts.get_by(|text| (**text).cmp(value)) else {
+    fn remove(&mut self, entity: EntityId, value: &Raw) {
+        let Some(count) = self.counts.get(value).copied() else {
             return;
         };
-        let (text, count) = (Arc::clone(text), *count);
-        self.holding.remove(&(Arc::clone(&text), entity));
+        let text = value.clone();
+        self.holding.remove(&(text.clone(), entity));
         match count {
             1 => self.counts.remove(&text),
             _ => self.counts.insert(text, count - 1),
