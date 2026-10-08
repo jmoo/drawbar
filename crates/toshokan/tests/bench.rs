@@ -608,7 +608,8 @@ impl Samples {
         HELD.with(|held| held.set((start, 0.0)));
         let output = operation.await;
         let wall = now() - start;
-        self.held.push(HELD.with(|held| held.get().1));
+        let (since, longest) = HELD.with(std::cell::Cell::get);
+        self.held.push(longest.max(now() - since));
         let watched: Vec<f64> = js_sys::Array::from(&watch_stop().await)
             .iter()
             .map(|value| value.as_f64().unwrap())
