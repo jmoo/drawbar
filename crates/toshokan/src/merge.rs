@@ -20,6 +20,7 @@
 
 use std::collections::btree_map::Entry as Slot;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use serde::de::{DeserializeOwned, Error as _};
@@ -32,6 +33,7 @@ use crate::path::RelPath;
 use crate::reader::WriterLog;
 use crate::report::TrashItem;
 use crate::schema::{Raw, Written};
+use crate::snapshot::Snapshot;
 
 /// The folded state of a set of entries. A clone shares each entity's state with
 /// the original until one of them changes it.
@@ -1070,16 +1072,72 @@ fn file_write(write: Write<Option<FileValue>>) -> Write<Option<FileFact>> {
 
 /// The join of every writer's snapshots and placed entries.
 pub fn merge<'a>(logs: impl IntoIterator<Item = &'a WriterLog>) -> Folded {
-    let mut folded = Folded::default();
-    for log in logs {
-        for snapshot in log.snapshots() {
-            folded.join(&snapshot.state);
+    let mut merging = Merging::new(logs);
+    merging.step(usize::MAX);
+    merging.folded
+}
+
+/// What [`merge`] folds, taken from the logs, so that it can be folded a slice at
+/// a time.
+pub(crate) struct Merging {
+    folded: Folded,
+    parts: std::vec::IntoIter<Fold>,
+}
+
+enum Fold {
+    Join(Rc<Snapshot>),
+    Apply(WriterId, Rc<Entry>),
+}
+
+impl Fold {
+    /// How much folding it takes: a snapshot's entities, or an entry's ops.
+    fn weight(&self) -> usize {
+        match self {
+            Self::Join(snapshot) => snapshot.state.entities.len(),
+            Self::Apply(_, entry) => match &entry.kind {
+                EntryKind::Intent(logged) => logged.ops.len() + logged.displaced.len(),
+                _ => 1,
+            },
         }
-        for entry in log.entries() {
-            folded.apply(log.writer(), entry);
+        .max(1)
+    }
+}
+
+impl Merging {
+    pub(crate) fn new<'a>(logs: impl IntoIterator<Item = &'a WriterLog>) -> Self {
+        let mut parts = Vec::new();
+        for log in logs {
+            parts.extend(log.snapshots().iter().cloned().map(Fold::Join));
+            let entries = log.entries().iter().cloned();
+            parts.extend(entries.map(|entry| Fold::Apply(log.writer(), entry)));
+        }
+        Self {
+            folded: Folded::default(),
+            parts: parts.into_iter(),
         }
     }
-    folded
+
+    /// Folds what is next, until its weight reaches `slice` or nothing is left;
+    /// true once nothing is.
+    pub(crate) fn step(&mut self, slice: usize) -> bool {
+        let mut done = 0;
+        while done < slice {
+            let Some(part) = self.parts.next() else {
+                return true;
+            };
+            done = done.saturating_add(part.weight());
+            match part {
+                Fold::Join(snapshot) => self.folded.join(&snapshot.state),
+                Fold::Apply(writer, entry) => self.folded.apply(writer, &entry),
+            }
+        }
+        self.parts.len() == 0
+    }
+
+    /// ⚠️ Before [`Merging::step`] returns true, the state of what it folded so far.
+    pub(crate) fn folded(self) -> Folded {
+        self.folded
+    }
 }
 
 const ENTITIES: &str = "entities";
@@ -1593,5 +1651,120 @@ impl<'de> Deserialize<'de> for Folded {
         }
         folded.extra = Extra(members);
         Ok(folded)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::env::{Random, SeededRandom};
+    use crate::log::{Genesis, Logged};
+
+    /// Logs of three writers with random ops on a few entities, each with a
+    /// snapshot of a random prefix of its entries.
+    fn logs(random: &mut SeededRandom) -> Vec<WriterLog> {
+        let mut pick = |n: usize| (random.next_u128() % n as u128) as usize;
+        let mut logs = Vec::new();
+        let mut seen: Vec<EntryHash> = Vec::new();
+        for w in 0..3u128 {
+            let writer = WriterId::from_u128(w + 1);
+            let at = |n: usize| Hlc {
+                wall_ms: n as u64,
+                counter: 0,
+            };
+            let genesis = EntryKind::Genesis(Genesis {
+                writer,
+                label: "w".into(),
+            });
+            let mut entries = vec![Entry::encode(EntryHash::ZERO, at(0), genesis).unwrap()];
+            for n in 1..1 + pick(40) {
+                let entity = EntityId::from_u128(1 + pick(4) as u128);
+                let replaces: Vec<EntryHash> = (0..pick(3))
+                    .filter_map(|_| seen.get(pick(seen.len().max(1))).copied())
+                    .collect();
+                let value = Raw::of(&format!("v{}", pick(3))).unwrap();
+                let ops = (0..1 + pick(3))
+                    .map(|_| match pick(5) {
+                        0 => Op::Create {
+                            entity,
+                            replaces: replaces.clone(),
+                        },
+                        1 => Op::Delete {
+                            entity,
+                            replaces: replaces.clone(),
+                            observed: replaces.clone(),
+                        },
+                        2 => Op::Write {
+                            entity,
+                            key: "k".into(),
+                            value: Some(value.clone()),
+                            replaces: replaces.clone(),
+                        },
+                        3 => Op::Add {
+                            entity,
+                            key: "s".into(),
+                            value: value.clone(),
+                        },
+                        _ => Op::Remove {
+                            entity,
+                            key: "s".into(),
+                            value: value.clone(),
+                            tags: replaces.clone(),
+                        },
+                    })
+                    .collect();
+                let logged = Logged {
+                    label: "e".into(),
+                    ops,
+                    displaced: Vec::new(),
+                    reverses: None,
+                };
+                let prev = entries.last().unwrap().hash();
+                let entry = Entry::encode(prev, at(n * 3 + w as usize), EntryKind::Intent(logged));
+                let entry = entry.unwrap();
+                seen.push(entry.hash());
+                entries.push(entry);
+            }
+            let cut = 1 + pick(entries.len());
+            let mut prefix = Folded::default();
+            for entry in &entries[..cut] {
+                prefix.apply(writer, entry);
+            }
+            let snapshot = Snapshot {
+                writer,
+                label: "w".into(),
+                at: entries[cut - 1].at,
+                folded: entries[..cut].iter().map(Entry::hash).collect(),
+                state: prefix,
+                unknown: BTreeMap::new(),
+            };
+            let mut log = WriterLog::new(writer);
+            let rest = entries[cut..].iter().cloned().map(Rc::new).collect();
+            log.place(vec![Rc::new(snapshot)], rest);
+            logs.push(log);
+        }
+        logs
+    }
+
+    #[test]
+    fn merging_in_slices_folds_what_merging_at_once_folds() {
+        let mut random = SeededRandom::new(5);
+        for _ in 0..100 {
+            let logs = logs(&mut random);
+            let mut whole = Folded::default();
+            for log in &logs {
+                for snapshot in log.snapshots() {
+                    whole.join(&snapshot.state);
+                }
+                for entry in log.entries() {
+                    whole.apply(log.writer(), entry);
+                }
+            }
+            let slice = 1 + (random.next_u128() % 8) as usize;
+            let mut merging = Merging::new(&logs);
+            while !merging.step(slice) {}
+            assert_eq!(merging.folded(), whole, "{slice}-op slices");
+            assert_eq!(merge(&logs), whole);
+        }
     }
 }

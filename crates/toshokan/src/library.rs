@@ -26,11 +26,11 @@ use crate::io::{Capabilities, Io, Kind, Lock, Root, Task};
 use crate::layout::Layout;
 use crate::line::MAX_LINE;
 use crate::log::{Bound, Entry, EntryKind, Genesis, Logged, Op, Settle, Settlement};
-use crate::merge::{merge, Beyond, Folded, Part};
+use crate::merge::{merge, Beyond, Folded, Merging, Part};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord};
 use crate::plan::{FactChange, FileChange, Plan};
-use crate::reader::{ReadReport, Reader, Stamp, WriterLog};
+use crate::reader::{Listing, ReadReport, Reader, Stamp, WriterLog};
 use crate::recovery::{self, Settling};
 use crate::report::{
     By, Change, Committed, Compacted, DraftState, DraftStatus, Emptied, HistoryItem, Lag, Local,
@@ -138,29 +138,33 @@ impl Library {
                 })
             })
             .and_then(move |(picked, cached, kept)| {
-                let mut reader = Reader::open(layout.clone(), cached);
+                let reader = Reader::open(layout.clone(), cached);
                 flow::run(reader.list()).and_then(move |listing| {
-                    let report = reader.absorb(listing);
-                    let claimed = match picked {
-                        Some(picked) => picked.resume(layout.clone(), &reader),
-                        None => Task::ready(Ok(Claimed {
-                            writer: None,
-                            start: Start::New,
-                        })),
-                    };
-                    flow::run(claimed).map_ok(move |claimed| {
-                        let library = Library::new(
-                            layout,
-                            schema,
-                            env,
-                            capabilities,
-                            reader,
-                            claimed.writer,
-                            kept,
-                        );
-                        (library, report, claimed.start)
+                    absorbed(reader, listing).then(move |(reader, report)| {
+                        let claimed = match picked {
+                            Some(picked) => picked.resume(layout.clone(), &reader),
+                            None => Task::ready(Ok(Claimed {
+                                writer: None,
+                                start: Start::New,
+                            })),
+                        };
+                        flow::run(claimed).map_ok(move |claimed| {
+                            let library = Library::new(
+                                layout,
+                                schema,
+                                env,
+                                capabilities,
+                                reader,
+                                claimed.writer,
+                                kept,
+                            );
+                            (library, report, claimed.start)
+                        })
                     })
                 })
+            })
+            .and_then(|(library, report, start)| {
+                fold_opened(library).then(move |library| ok((library, report, start)))
             })
             .and_then(|(mut library, report, start)| {
                 let saved = library.save_view();
@@ -222,7 +226,7 @@ impl Library {
         writer: Option<Writer>,
         (let_go, remembered): (Let, Scan),
     ) -> Self {
-        let mut library = Self {
+        Self {
             layout,
             schema,
             env,
@@ -258,22 +262,19 @@ impl Library {
                 gaps: Vec::new(),
             }),
             behind: BTreeMap::new(),
-        };
-        library.refold();
-        library.follow(readings(&library.reader).collect::<Vec<_>>());
-        let writable = capabilities.append;
-        library.mode = match (&library.writer, writable) {
+        }
+    }
+
+    /// Whether a library just opened may write.
+    fn mode_at_open(&self) -> Mode {
+        match (&self.writer, self.capabilities.append) {
             (_, false) => Mode::ReadOnly(Why::FolderNotWritable),
-            (Some(writer), true) => {
-                match newer_entry(&library.folded, &library.reader, writer.id()) {
-                    Some(entry) => Mode::ReadOnly(Why::NewerOwnHistory { entry }),
-                    None => Mode::Writable,
-                }
-            }
+            (Some(writer), true) => match newer_entry(&self.folded, &self.reader, writer.id()) {
+                Some(entry) => Mode::ReadOnly(Why::NewerOwnHistory { entry }),
+                None => Mode::Writable,
+            },
             (None, true) => Mode::Writable,
-        };
-        library.show();
-        library
+        }
     }
 
     pub fn view(&self) -> View {
@@ -997,6 +998,13 @@ impl Library {
     /// holds of it once every entry of it the folder lost was let go. Forgets
     /// let-go entries the folder holds again.
     fn refold(&mut self) {
+        let mut merging = self.unfold();
+        merging.step(usize::MAX);
+        self.refolded(merging.folded());
+    }
+
+    /// The merge [`Library::refold`] folds.
+    fn unfold(&mut self) -> Merging {
         self.lost = self.reader.removed();
         self.retain_let_go();
         let folder = self.shown_as_folder();
@@ -1005,7 +1013,11 @@ impl Library {
             .iter()
             .flat_map(|log| log.snapshots().iter().map(|s| (log.writer(), s.head())))
             .collect();
-        self.folded = merge(logs);
+        Merging::new(logs)
+    }
+
+    fn refolded(&mut self, folded: Folded) {
+        self.folded = folded;
         self.facts = self.folded.files();
         self.bind_due = true;
         self.rehistory();
@@ -1302,6 +1314,36 @@ fn change_of(op: &Op) -> Option<Change> {
         entity,
         what,
         by: By::This,
+    })
+}
+
+/// About how many entries one slice of placing offers.
+const PLACE_SLICE: usize = 1 << 11;
+
+/// About how many ops one slice of folding applies.
+const FOLD_SLICE: usize = 1 << 12;
+
+/// Places what a read of every writer's directory found, a slice at a time.
+fn absorbed<'a>(mut reader: Reader, listing: Listing) -> Flow<'a, (Reader, ReadReport)> {
+    let absorbing = reader.absorbing(listing);
+    let placing = flow::sliced((reader, absorbing), |(reader, absorbing)| {
+        reader.absorb_slice(absorbing, PLACE_SLICE)
+    });
+    placing.then(|(mut reader, absorbing)| {
+        let report = reader.absorbed(absorbing);
+        Flow::Done((reader, report))
+    })
+}
+
+/// Folds what a library just opened shows, a slice at a time, then follows its
+/// clock readings and decides whether it may write.
+fn fold_opened(mut library: Library) -> Flow<'static, Library> {
+    let merging = library.unfold();
+    flow::sliced(merging, |merging| merging.step(FOLD_SLICE)).then(move |merging| {
+        library.refolded(merging.folded());
+        library.follow(readings(&library.reader).collect::<Vec<_>>());
+        library.mode = library.mode_at_open();
+        Flow::Done(library)
     })
 }
 
