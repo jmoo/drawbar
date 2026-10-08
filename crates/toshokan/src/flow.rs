@@ -234,6 +234,10 @@ pub(crate) fn list_stat<'a>(root: Root, dir: &RelPath) -> Fallible<'a, Vec<(Stri
 /// more.
 const MANY: u64 = 64 * CHUNK;
 
+/// The most bytes one read of a long file asks for: what a browser's page copies
+/// from its worker at once.
+const PIECE: u64 = 16 * CHUNK;
+
 /// The bytes of each of `reads`, in order; `None` where no file is there. The
 /// reads go in as few [`Io::ReadMany`] requests as [`MANY`] allows.
 pub(crate) fn read_many<'a>(
@@ -428,18 +432,29 @@ pub(crate) fn read_present<'a>(
 }
 
 /// At most `max` bytes of a file from its start; `None` when no file is there.
+/// A long file is read [`PIECE`] bytes at a time, so no one reply is larger.
 pub(crate) fn read_file<'a>(root: Root, path: &RelPath, max: u64) -> Fallible<'a, Option<Vec<u8>>> {
     let path = path.clone();
-    stat(root, &path).and_then(move |meta| match meta {
-        Some(meta) if meta.kind == Kind::File => read_present(
-            root,
-            &path,
-            Range {
-                offset: 0,
-                len: meta.len.min(max),
-            },
-        ),
-        _ => ok(None),
+    stat(root, &path).and_then(move |meta| {
+        let Some(meta) = meta.filter(|meta| meta.kind == Kind::File) else {
+            return ok(None);
+        };
+        let len = meta.len.min(max);
+        let pieces = (0..len.div_ceil(PIECE).max(1)).map(move |i| Range {
+            offset: i * PIECE,
+            len: PIECE.min(len - i * PIECE),
+        });
+        let start = Some(Vec::with_capacity(usize::try_from(len).unwrap_or_default()));
+        fold(pieces, start, move |read, range| {
+            let Some(mut read) = read else {
+                return ok(None);
+            };
+            read_present(root, &path, range).map_ok(move |piece| {
+                let piece = piece?;
+                read.extend_from_slice(&piece);
+                Some(read)
+            })
+        })
     })
 }
 
@@ -883,6 +898,39 @@ mod tests {
         );
         let dirs = disk.restart().directories(Root::Folder);
         assert_eq!(dirs, [path("a"), path("a/b"), path("a/b/c")].into());
+    }
+
+    #[test]
+    fn a_file_longer_than_a_piece_is_read_whole_a_piece_at_a_time() {
+        let disk = MemDisk::new();
+        let long: Vec<u8> = (0..PIECE * 2 + 5).map(|i| (i % 251) as u8).collect();
+        let create = Io::Create {
+            root: Root::Folder,
+            path: path("a"),
+            bytes: long.clone(),
+        };
+        run(&disk, act(create)).unwrap();
+        let mut reads = Vec::new();
+        let mut read = run_in_place(read_file(Root::Folder, &path("a"), u64::MAX).task());
+        let mut result = None;
+        let bytes = loop {
+            match read.resume(result.take()) {
+                Step::Io(io) => {
+                    if let Io::Read { range, .. } = &io {
+                        reads.push(range.len);
+                    }
+                    result = Some(disk.perform(io));
+                }
+                Step::Pause => {}
+                Step::Done(bytes) => break bytes.unwrap(),
+            }
+        };
+        assert_eq!(bytes, Some(long.clone()));
+        assert_eq!(reads, [PIECE, PIECE, 5]);
+        let first = run(&disk, read_file(Root::Folder, &path("a"), PIECE + 1)).unwrap();
+        assert_eq!(first.as_deref(), Some(&long[..PIECE as usize + 1]));
+        let none = run(&disk, read_file(Root::Folder, &path("b"), u64::MAX)).unwrap();
+        assert_eq!(none, None);
     }
 
     #[test]
