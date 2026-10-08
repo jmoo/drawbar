@@ -841,6 +841,13 @@ always a directory of the origin private file system.
   names Google Chrome and `navigator.brave` is absent; elsewhere each move
   copies, and each copy pays the check again. A rename the browser refuses
   although the folder declares it fails with `Unsupported`.
+- **Directories.** A library tells the worker its root as it opens. The worker
+  keeps the handles of the directories it finds under that root and in the
+  local root, where no writer removes or renames a directory, and finds each
+  other directory from the folder's top for every request. Several reads of one
+  such directory find its files by one listing of it. Firefox was measured to
+  take about 3.5 ms for each step of a path, and 6 ms for each file's handle,
+  once the origin holds 100k files.
 - **Renames** replace a file at the destination in every browser, so none
   declares `no_replace`. **Creates** check that nothing is there and then make
   the file, which opens one already there, so a file another program makes

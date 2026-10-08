@@ -125,7 +125,9 @@ the machine's file system, and the `asynch` driver on any async backend, such as
 a browser's; both run it on an in-memory disk that models what survives a crash.
 A directory listing with every file's metadata is one request, and so are many
 reads, so a scan of every file costs a request per directory rather than per
-file.
+file. A commit or a refresh binds files to entities again only as far as its
+changes reach: the entities and files that share a path, a name the volume
+takes for one, or an identity with what changed.
 Time, randomness, the app's identity function and the volume's name rules are
 injected, so the crash harness and the sync simulator replay every run exactly.
 
