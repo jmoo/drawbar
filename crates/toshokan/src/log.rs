@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::de::DeserializeOwned;
+use serde::de::{self, DeserializeOwned, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
 use serde_json::Value;
@@ -236,6 +236,225 @@ impl IntentLine<'_> {
     }
 }
 
+/// An intent line holding exactly what this build writes of one: each member
+/// once, none it does not know at any depth, and no member written as its
+/// default, which this build would leave out. Its members are taken as they come,
+/// so it reads as [`Entry::decode`] reads it, without unknown members. Any other
+/// line fails, and takes the general path.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExactLine<'a> {
+    prev: EntryHash,
+    at: Hlc,
+    #[serde(borrow)]
+    kind: &'a str,
+    label: String,
+    ops: Vec<ExactOp>,
+    #[serde(default, deserialize_with = "nonempty")]
+    displaced: Vec<ExactDisplaced>,
+    #[serde(default, deserialize_with = "not_null")]
+    reverses: Option<EntryHash>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExactDisplaced {
+    item: Nonce,
+    from: RelPath,
+    identity: Identity,
+    len: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExactFact {
+    path: RelPath,
+    identity: Identity,
+    len: u64,
+    #[serde(default, deserialize_with = "not_null")]
+    modified: Option<u64>,
+}
+
+impl From<ExactFact> for FileFact {
+    fn from(fact: ExactFact) -> Self {
+        let ExactFact {
+            path,
+            identity,
+            len,
+            modified,
+        } = fact;
+        Self {
+            path,
+            identity,
+            len,
+            modified,
+        }
+    }
+}
+
+/// A list that is not empty: an empty one this build leaves out.
+fn nonempty<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Vec<T>, D::Error> {
+    let list = Vec::<T>::deserialize(deserializer)?;
+    match list.is_empty() {
+        true => Err(de::Error::custom("an empty list this build leaves out")),
+        false => Ok(list),
+    }
+}
+
+/// A member that is there and not `null`: a `null` this build leaves out.
+fn not_null<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(deserializer).map(Some)
+}
+
+impl ExactLine<'_> {
+    /// The line's `prev`, `at` and intent, when it is one this build would write.
+    fn read(json: &str) -> Option<(EntryHash, Hlc, Logged)> {
+        let line: ExactLine = serde_json::from_str(json).ok()?;
+        if line.kind != "intent" {
+            return None;
+        }
+        let displaced = line.displaced.into_iter().map(|displaced| Displaced {
+            item: displaced.item,
+            from: displaced.from,
+            identity: displaced.identity,
+            len: displaced.len,
+        });
+        let mut ops: Vec<Op> = line.ops.into_iter().map(|op| op.0).collect();
+        ops.shrink_to_fit();
+        let logged = Logged {
+            label: line.label,
+            ops,
+            displaced: displaced.collect(),
+            reverses: line.reverses,
+        };
+        Some((line.prev, line.at, logged))
+    }
+}
+
+/// An op as [`OpOut`] writes it: `op` first, then each member of its kind once,
+/// and none other.
+struct ExactOp(Op);
+
+impl<'de> Deserialize<'de> for ExactOp {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(ExactOpVisitor)
+    }
+}
+
+struct ExactOpVisitor;
+
+/// The members of one op, each read at most once.
+#[derive(Default)]
+struct OpMembers {
+    entity: Option<EntityId>,
+    key: Option<String>,
+    value: Option<Raw>,
+    replaces: Option<Vec<EntryHash>>,
+    observed: Option<Vec<EntryHash>>,
+    tags: Option<Vec<EntryHash>>,
+    file: Option<FileFact>,
+}
+
+/// Reads the next value into `slot`, refusing a second one.
+fn once<'de, A: MapAccess<'de>, T: Deserialize<'de>>(
+    map: &mut A,
+    slot: &mut Option<T>,
+) -> Result<(), A::Error> {
+    if slot.is_some() {
+        return Err(de::Error::custom("a member named twice"));
+    }
+    *slot = Some(map.next_value()?);
+    Ok(())
+}
+
+impl<'de> Visitor<'de> for ExactOpVisitor {
+    type Value = ExactOp;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("an op as this build writes it")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<ExactOp, A::Error> {
+        let missing = || de::Error::custom("a member missing");
+        if map.next_key::<&str>()? != Some("op") {
+            return Err(de::Error::custom("`op` is not first"));
+        }
+        let name: &str = map.next_value()?;
+        let mut m = OpMembers::default();
+        while let Some(member) = map.next_key::<&str>()? {
+            match (name, member) {
+                (_, "entity") => once(&mut map, &mut m.entity)?,
+                ("write" | "add" | "remove", "key") => once(&mut map, &mut m.key)?,
+                ("write" | "add" | "remove", "value") => {
+                    let mut value: Option<Box<RawValue>> = None;
+                    once(&mut map, &mut value)?;
+                    if m.value.replace(Raw::from(value.expect("read"))).is_some() {
+                        return Err(de::Error::custom("a member named twice"));
+                    }
+                }
+                ("create" | "delete" | "write" | "file" | "pin", "replaces") => {
+                    once(&mut map, &mut m.replaces)?
+                }
+                ("delete", "observed") => once(&mut map, &mut m.observed)?,
+                ("remove", "tags") => once(&mut map, &mut m.tags)?,
+                ("file" | "pin", "file") => {
+                    let mut fact: Option<ExactFact> = None;
+                    once(&mut map, &mut fact)?;
+                    if m.file.replace(fact.expect("read").into()).is_some() {
+                        return Err(de::Error::custom("a member named twice"));
+                    }
+                }
+                _ => return Err(de::Error::custom("a member this build does not write")),
+            }
+        }
+        let entity = m.entity.ok_or_else(missing)?;
+        let op = match name {
+            "create" => Op::Create {
+                entity,
+                replaces: m.replaces.ok_or_else(missing)?,
+            },
+            "delete" => Op::Delete {
+                entity,
+                replaces: m.replaces.ok_or_else(missing)?,
+                observed: m.observed.ok_or_else(missing)?,
+            },
+            "write" => Op::Write {
+                entity,
+                key: m.key.ok_or_else(missing)?,
+                value: m.value,
+                replaces: m.replaces.ok_or_else(missing)?,
+            },
+            "add" => Op::Add {
+                entity,
+                key: m.key.ok_or_else(missing)?,
+                value: m.value.ok_or_else(missing)?,
+            },
+            "remove" => Op::Remove {
+                entity,
+                key: m.key.ok_or_else(missing)?,
+                value: m.value.ok_or_else(missing)?,
+                tags: m.tags.ok_or_else(missing)?,
+            },
+            "file" => Op::File {
+                entity,
+                file: m.file,
+                replaces: m.replaces.ok_or_else(missing)?,
+            },
+            "pin" => Op::Pin {
+                entity,
+                file: m.file.ok_or_else(missing)?,
+                replaces: m.replaces.ok_or_else(missing)?,
+            },
+            _ => return Err(de::Error::custom("an op this build does not know")),
+        };
+        Ok(ExactOp(op))
+    }
+}
+
 #[derive(Serialize)]
 struct Written<'a> {
     prev: EntryHash,
@@ -275,6 +494,10 @@ impl Entry {
     /// decoded as [`Entry::linked`] decodes it. An intent line is parsed once.
     pub fn parse(line: &[u8]) -> Result<Self, LineError> {
         let (json, hash) = crate::line::split(line)?;
+        if let Some((prev, at, logged)) = ExactLine::read(json) {
+            let line = Line::checked(prev, json.to_owned(), hash)?;
+            return Ok(Self::exact(line, at, logged));
+        }
         match IntentLine::read(json) {
             Some((prev, at, logged)) => {
                 let line = Line::checked(prev, json.to_owned(), hash)?;
@@ -287,6 +510,10 @@ impl Entry {
     /// A line this install verified before and kept as its JSON and hash. A
     /// damaged copy fails its hash and is refused.
     pub fn kept(json: String, hash: EntryHash) -> Result<Self, LineError> {
+        if let Some((prev, at, logged)) = ExactLine::read(&json) {
+            let line = Line::checked(prev, json, hash)?;
+            return Ok(Self::exact(line, at, logged));
+        }
         if let Some((prev, at, logged)) = IntentLine::read(&json) {
             let line = Line::checked(prev, json, hash)?;
             return Ok(Self::of(line, at, Some(EntryKind::Intent(logged))));
@@ -305,6 +532,17 @@ impl Entry {
             line,
             unknown_members: false,
         })
+    }
+
+    /// The entry of an intent line [`ExactLine`] read: it holds no member the
+    /// intent leaves out.
+    fn exact(line: Line, at: Hlc, logged: Logged) -> Self {
+        Self {
+            line,
+            at,
+            kind: EntryKind::Intent(logged),
+            unknown_members: false,
+        }
     }
 
     /// The entry of `line`, read at `at`, as `known` when its members decode.
@@ -1007,6 +1245,74 @@ mod tests {
                         "{json}"
                     );
                 }
+            }
+        }
+    }
+
+    /// Variations of `json`, an intent this build wrote: spacing, members it
+    /// does not know at every depth, members written as their defaults, members
+    /// named twice, and text that is no longer JSON.
+    fn variations(json: &str, random: &mut crate::env::SeededRandom) -> Vec<String> {
+        use crate::env::Random;
+        let mut pick = |n: usize| (random.next_u128() % n as u128) as usize;
+        let objects: Vec<usize> = json.match_indices('{').map(|(at, _)| at + 1).collect();
+        let commas: Vec<usize> = json.match_indices(',').map(|(at, _)| at).collect();
+        let end = json.len() - 1;
+        let insert = |at: usize, text: &str| format!("{}{text}{}", &json[..at], &json[at..]);
+        let label = json.find(r#""label""#).expect("an intent");
+        let mut found = vec![
+            json.replace(',', " , ").replace(':', ": "),
+            insert(objects[pick(objects.len())], r#""later":[1],"#),
+            insert(end, r#","displaced":[]"#),
+            insert(end, r#","reverses":null"#),
+            insert(end, r#","label":"again""#),
+            insert(label, r#""prev":"00000000000000000000000000000001","#),
+            insert(commas[pick(commas.len())], "]"),
+            json.replacen(r#""ops":[{"op""#, r#""ops":[{"o\u0070""#, 1),
+            json.replacen(r#""op":"add","#, r#""op":"add","op":"add","#, 1),
+            json.replacen(r#","replaces""#, r#","file":null,"replaces""#, 1),
+            json.replacen(r#""len":10"#, r#""len":10,"modified":null"#, 1),
+            json.replacen(r#""len":10"#, r#""len":10,"size":2"#, 1),
+        ];
+        found.retain(|variation| variation != json);
+        found
+    }
+
+    #[test]
+    fn a_line_read_in_one_pass_reads_as_the_general_path_reads_it() {
+        let mut random = crate::env::SeededRandom::new(11);
+        let ops = every_op();
+        for round in 0..300 {
+            use crate::env::Random;
+            let mut chosen: Vec<Op> = ops
+                .iter()
+                .filter(|_| random.next_u128() % 2 == 0)
+                .cloned()
+                .collect();
+            let turn = (round % ops.len()).min(chosen.len());
+            chosen.rotate_left(turn);
+            let kind = EntryKind::Intent(Logged {
+                label: format!("round {round}"),
+                ops: chosen,
+                displaced: match round % 3 {
+                    0 => vec![Displaced {
+                        item: Nonce::from_u128(3),
+                        from: RelPath::new("x.npno").unwrap(),
+                        identity: Identity::from_u128(4),
+                        len: 5,
+                    }],
+                    _ => Vec::new(),
+                },
+                reverses: (round % 4 == 0).then(|| hash(2)),
+            });
+            let written = Entry::encode(hash(1), at(round as u64), kind).unwrap();
+            let json = written.line.json().to_owned();
+            assert!(ExactLine::read(&json).is_some(), "read in one pass: {json}");
+            for text in std::iter::once(json.clone()).chain(variations(&json, &mut random)) {
+                let bytes = format!("{text}\t{}\n", EntryHash::of(hash(1), text.as_bytes()));
+                let once = Entry::parse(bytes.as_bytes());
+                let general = Line::parse(bytes.as_bytes()).map(Entry::linked);
+                assert_eq!(once, general, "round {round}: {text}");
             }
         }
     }
