@@ -37,7 +37,7 @@ self.onmessage = async ({ data }) => {
     await bundle.default({ module_or_path: data.module });
     await bundle.toshokanWorker(data);
   } catch (error) {
-    self.postMessage({ failed: String(error?.stack ?? error) });
+    self.postMessage({ failed: String(error?.stack || error) });
   }
 };
 "#;
