@@ -13,7 +13,7 @@ use crate::error::Result;
 use crate::flow::{self, fold, ok, Flow};
 use crate::ids::{EntryHash, Nonce, WriterId};
 use crate::io::{Kind, Root, Task};
-use crate::layout::Layout;
+use crate::layout::{is_swap_file, Layout};
 use crate::line::Line;
 use crate::path::RelPath;
 use crate::schema::Raw;
@@ -158,9 +158,9 @@ pub fn read_all(layout: &Layout, writer: WriterId) -> Task<'static, Result<Recor
                         .name
                         .strip_suffix(".json")
                         .and_then(|n| n.parse().ok());
-                    let marks = marker(&entry.name).is_some();
+                    let skipped = marker(&entry.name).is_some() || is_swap_file(&entry.name);
                     match (entry.kind, name) {
-                        (Kind::File, _) if marks => ok(found),
+                        (Kind::File, _) if skipped => ok(found),
                         (Kind::File, Some(name)) => {
                             read(path.clone(), writer).map_ok(move |record| {
                                 match record {

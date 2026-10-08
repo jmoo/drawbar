@@ -64,9 +64,10 @@ impl Layout {
     }
 
     /// Refuses a path in the folder that is not a library file: toshokan's root,
-    /// anything inside it, and the folder itself.
+    /// anything inside it, the folder itself, and a browser's swap file.
     pub fn check_library_path(&self, path: &RelPath) -> Result<()> {
-        match path.is_root() || self.owns(path) {
+        let swap = path.name().is_some_and(is_swap_file);
+        match path.is_root() || self.owns(path) || swap {
             true => Err(Error::InvalidPath {
                 path: path.as_str().to_owned(),
                 reason: "not a library file",
@@ -183,6 +184,18 @@ impl Layout {
     }
 }
 
+/// Whether `name` is a swap file Chromium writes beside a picked folder's file
+/// while a writable stream on it is open: bytes that never landed, which
+/// toshokan neither reads nor scans.
+// Confirmed on hardware.
+// Chromium shows the swap file `<name>.crswap` beside a file while a writable
+// stream on it is open.
+// Inferred from specimens; not confirmed on hardware.
+// A tab stopped while the stream is open leaves the swap file behind.
+pub(crate) fn is_swap_file(name: &str) -> bool {
+    name.ends_with(".crswap")
+}
+
 fn child(parent: &RelPath, name: &str) -> RelPath {
     parent
         .join(name)
@@ -254,9 +267,9 @@ mod tests {
     }
 
     #[test]
-    fn library_paths_exclude_the_root_and_the_folder() {
+    fn library_paths_exclude_the_root_the_folder_and_swap_files() {
         let layout = Layout::new(".drawbar").unwrap();
-        for text in [".drawbar", ".drawbar/writers", ""] {
+        for text in [".drawbar", ".drawbar/writers", "", "a.syx.crswap"] {
             let path = RelPath::new(text).unwrap();
             assert!(layout.check_library_path(&path).is_err(), "{text:?}");
         }

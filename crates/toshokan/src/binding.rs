@@ -17,7 +17,7 @@ use crate::error::Result;
 use crate::flow::{self, fold, ok};
 use crate::ids::{EntityId, Identity};
 use crate::io::{Kind, Meta, Root, Task};
-use crate::layout::Layout;
+use crate::layout::{is_swap_file, Layout};
 use crate::log::{FileFact, Op};
 use crate::path::RelPath;
 use crate::report::{Ambiguous, Copied, Moved, ScanReport};
@@ -287,6 +287,7 @@ fn walk<'a>(layout: Rc<Layout>, dir: RelPath, scan: Scan) -> flow::Fallible<'a, 
             match meta.kind {
                 Kind::Directory if layout.owns(&path) => ok(scan),
                 Kind::Directory => walk(Rc::clone(&layout), path, scan),
+                Kind::File if is_swap_file(&name) => ok(scan),
                 Kind::File => ok(found(scan, path, meta)),
             }
         })

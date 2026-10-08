@@ -50,10 +50,12 @@ its nonce alone, so a step names it without knowing where its bytes came from.
 
 Names of segments and snapshots are advisory. A reader reads every file directly
 in `writers/<w>/`, whatever its name, by its contents, so a sync client's
-conflicted copy is read like any other file.
+conflicted copy is read like any other file. A browser's swap file is the
+exception (see Browsers).
 
 A **library path** is a path in the folder outside the root, other than the
-folder itself. Only library paths are the user's files.
+folder itself and a browser's swap file. Only library paths are the user's
+files.
 
 Each install keeps, per library, a local root of its own that is never synced:
 
@@ -369,8 +371,8 @@ entries takes them from this install's view too.
 
 ## Reading
 
-A reader lists `writers/` and reads every file directly in each `writers/<w>/`,
-up to 256 MiB of it. A file whose length, modification time and last 34 bytes
+A reader lists `writers/` and reads every file directly in each `writers/<w>/`
+other than a swap file, up to 256 MiB of it. A file whose length, modification time and last 34 bytes
 are unchanged is not read again; a segment's last 34 bytes are the tab, hash and
 LF that end its last line, or those of its seal marker. A segment without a seal
 marker that grew is read from the end of its last line on, once the 34 bytes
@@ -821,6 +823,12 @@ always a directory of the origin private file system.
   the file, which opens one already there, so a file another program makes
   between the two is replaced by a copy's bytes, or removed when the copy finds
   it too long, as a rename replaces one.
+- **Swap files.** While a writable stream is open, Chromium keeps its bytes in
+  `<name>.crswap` beside the file, and a tab stopped meanwhile can leave that
+  file behind. That it shows while the stream is open was observed; that a
+  stopped tab leaves it is inferred, not confirmed. toshokan reads, scans and
+  reports no file whose name ends in `.crswap`, wherever it is, and refuses
+  such a name as a library path.
 - **Times.** Chromium and Firefox report a file's last change in milliseconds,
   WebKit in whole seconds: two changes that keep a file's length within that
   time look alike.

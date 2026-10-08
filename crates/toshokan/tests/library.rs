@@ -539,6 +539,7 @@ through_both!(
     a_commit_scans_only_what_it_moved_and_a_refresh_finds_the_rest,
     an_identity_read_for_a_new_time_is_read_once_per_install,
     opening_viewing_and_refreshing_write_nothing_in_the_folder,
+    swap_files_a_browser_left_are_neither_scanned_nor_read,
     losing_the_local_root_at_any_step_loses_only_drafts,
     a_crash_at_any_step_is_settled_before_the_next_write,
     an_empty_record_of_this_writer_is_removed_by_its_next_write,
@@ -2095,6 +2096,35 @@ fn opening_viewing_and_refreshing_write_nothing_in_the_folder<F: Facade>() {
     assert_eq!(probe.folder_writes(), 0);
     b.commit("Tag", |i| i.add(song, TAGS, tag("b"))).unwrap();
     assert!(probe.folder_writes() > 0);
+}
+
+fn swap_files_a_browser_left_are_neither_scanned_nor_read<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    create(&mut a, "song.npno", b"song");
+    a.close().unwrap();
+    let writers = layout().writers();
+    let own = folder
+        .files(Root::Folder)
+        .into_keys()
+        .find(|p| p.starts_with(&writers))
+        .and_then(|p| p.parent())
+        .unwrap();
+    let zero = "0".repeat(32);
+    for (at, bytes) in [
+        ("song.npno.crswap".to_owned(), &b"so"[..]),
+        (format!("{own}/{zero}.txt.crswap"), b"{\"prev\""),
+        (format!("{own}/pending/{zero}.json.crswap"), b"{"),
+    ] {
+        put(&folder, &at, bytes);
+    }
+    let (a, opened) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    assert_eq!(opened.scan.arrived, [] as [RelPath; 0]);
+    assert_eq!(opened.unreadable, [] as [RelPath; 0]);
+    assert_eq!(opened.ignored, [] as [RelPath; 0]);
+    assert_eq!(a.view().unbound(), [] as [RelPath; 0]);
 }
 
 /// The scenario losing the local root interrupts: every step a user might take.

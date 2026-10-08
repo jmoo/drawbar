@@ -20,7 +20,7 @@ use crate::error::{Error, Result};
 use crate::flow::{self, Flow};
 use crate::ids::{EntryHash, Hlc, WriterId};
 use crate::io::{Kind, Meta, Range, Root, Task};
-use crate::layout::Layout;
+use crate::layout::{is_swap_file, Layout};
 use crate::line::{self, Stop};
 use crate::log::{Entry, EntryKind};
 use crate::path::RelPath;
@@ -1230,7 +1230,7 @@ fn scan_writer<'a>(
         .and_then(move |entries| {
             let files: Vec<Planned> = entries
                 .into_iter()
-                .filter(|(_, meta)| meta.kind == Kind::File)
+                .filter(|(name, meta)| meta.kind == Kind::File && !is_swap_file(name))
                 .filter_map(|(name, meta)| {
                     let path = dir.join(&name).ok()?;
                     let plan = Plan::of(&meta, known.get(&path));
