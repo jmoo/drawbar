@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::binding::{self, Binding, Bindings, Facts, Scan, Unscanned};
+use crate::binding::{self, Binding, Bindings, Facts, Scan, Unscanned, Walk};
 use crate::cache;
 use crate::drafts::{self, DraftRecord};
 use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd};
@@ -25,7 +25,7 @@ use crate::intent;
 use crate::io::{Capabilities, Io, Kind, Lock, Root, Task};
 use crate::layout::Layout;
 use crate::line::MAX_LINE;
-use crate::log::{Bound, Entry, EntryKind, Genesis, Logged, Op, Settle, Settlement};
+use crate::log::{Bound, Entry, EntryKind, FileFact, Genesis, Logged, Op, Settle, Settlement};
 use crate::merge::{merge, Beyond, Folded, Merging, Part};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord};
@@ -37,7 +37,7 @@ use crate::report::{
     Mode, Opened, Orphan, Outcome, Partial, PartialReport, Presence, Refreshed, Settled, Start,
     TrashItem, What, WriterInfo,
 };
-use crate::schema::Schema;
+use crate::schema::{Schema, Written};
 use crate::trash::{self, Policy};
 use crate::undo::History;
 use crate::view::{FileRef, FileState, Parts, View};
@@ -85,6 +85,8 @@ pub struct Library {
     unkept: bool,
     /// What a failed scan left unknown, until a scan of every file succeeds.
     unscanned: Unscanned,
+    /// A scan of every file that stopped before it finished, to go on with.
+    walking: Option<Walk>,
     /// Bound from `facts`, `scan` and `unscanned` unless `bind_due`.
     bindings: Arc<Bindings>,
     bind_due: bool,
@@ -93,6 +95,8 @@ pub struct Library {
     presence: BTreeMap<WriterId, Presence>,
     history: History,
     view: View,
+    /// Whether a read folded in something the view does not show yet.
+    unshown: bool,
     /// The parts of this instance's state that lag what it committed, with why.
     behind: BTreeMap<Lag, String>,
 }
@@ -264,11 +268,13 @@ impl Library {
             remembered,
             unkept: false,
             unscanned: Unscanned::default(),
+            walking: None,
             bindings: Arc::default(),
             bind_due: false,
             pins: Vec::new(),
             presence: BTreeMap::new(),
             history: History::default(),
+            unshown: false,
             view: View::new(Parts {
                 folded: Folded::default(),
                 bindings: Arc::default(),
@@ -510,60 +516,87 @@ impl Library {
             .task()
     }
 
-    /// Reads other writers' new entries and rescans: what changed since the last
-    /// view, attributed to its writer, or to nobody for outside changes, and what
-    /// the folder no longer holds. Writes nothing in the folder.
+    /// Reads other writers' new entries: what changed since the last view,
+    /// attributed to its writer, or to nobody for outside changes, and what the
+    /// folder no longer holds. Of the library's files it scans again only those at
+    /// the paths whose file facts the entries changed, unless a scan failed since
+    /// the last scan of every file, which it then repeats. Writes nothing in the
+    /// folder.
     pub fn refresh(&mut self) -> Task<'_, Result<Refreshed>> {
-        let before = Arc::clone(&self.bindings);
+        self.look(Look::Logs)
+    }
+
+    /// Refreshes, and scans every library file, to find what changed outside. A
+    /// rescan that stops partway, as when the app drops it to commit, keeps what
+    /// it listed, and the next one goes on from there; nothing is bound from it
+    /// until every directory is listed, and the directories a commit or refresh
+    /// scanned meanwhile are listed again.
+    pub fn rescan(&mut self) -> Task<'_, Result<Refreshed>> {
+        self.look(Look::Everything)
+    }
+
+    /// Refreshes, and scans the library files at `paths` and under them, such as
+    /// those a watcher saw change.
+    pub fn rescan_paths(&mut self, paths: Vec<RelPath>) -> Task<'_, Result<Refreshed>> {
+        self.look(Look::Paths(paths))
+    }
+
+    /// Reads the writers' directories and scans what `scope` asks, then reports
+    /// what changed since the view, so a look the app dropped partway is reported
+    /// by the next.
+    fn look(&mut self, scope: Look) -> Task<'_, Result<Refreshed>> {
         flow::run(self.reader.list())
             .and_then(move |listing| {
                 let report = self.reader.absorb(listing);
-                let shown = self.folded.clone();
-                self.absorb_read(&report);
-                let changes = match report.anything_new() {
-                    true => self.attribute(&shown),
-                    false => Vec::new(),
-                };
+                let moved = self.absorb_read(&report);
+                self.unshown |= report.anything_new();
                 let forked = self
                     .writer
                     .as_ref()
                     .is_some_and(|own| report.forks.iter().any(|fork| fork.writer == own.id()));
-                let read = report.anything_new();
                 keep_local(self, false)
                     .then(move |(library, kept)| match (kept, forked) {
                         (Err(error), _) => Flow::Done(Err(error)),
                         (Ok(()), true) => library.stop_writing().map_ok(move |()| library),
                         (Ok(()), false) => ok(library),
                     })
-                    .and_then(rescan)
-                    .map_ok(move |library| (library, changes, read))
+                    .and_then(move |library| scan_for(library, scope, moved))
             })
-            .map_ok(move |(library, mut changes, read)| {
-                let explained: BTreeSet<EntityId> = changes
-                    .iter()
-                    .filter(|change| change.what == What::File)
-                    .map(|change| change.entity)
-                    .collect();
-                let rebound = !Arc::ptr_eq(&before, &library.bindings);
-                for (entity, file) in library.bindings.bound.iter().filter(|_| rebound) {
-                    let was = before.bound.get(entity).map(presumed);
-                    if was.as_ref() != Some(file) && !explained.contains(entity) {
-                        changes.push(Change {
-                            entity: *entity,
-                            what: What::File,
-                            by: By::Outside,
-                        });
-                    }
-                }
-                if read || rebound {
-                    library.show();
-                }
-                Refreshed {
-                    changes,
-                    removed: library.removed_facts(),
-                }
-            })
+            .map_ok(Library::refreshed)
             .task()
+    }
+
+    /// What changed since the view, which is then shown.
+    fn refreshed(&mut self) -> Refreshed {
+        let shown = self.view.clone();
+        let mut changes = match self.unshown {
+            true => self.attribute(shown.folded()),
+            false => Vec::new(),
+        };
+        let explained: BTreeSet<EntityId> = changes
+            .iter()
+            .filter(|change| change.what == What::File)
+            .map(|change| change.entity)
+            .collect();
+        let before = &shown.parts().bindings;
+        let rebound = !Arc::ptr_eq(before, &self.bindings);
+        for (entity, file) in self.bindings.bound.iter().filter(|_| rebound) {
+            let was = before.bound.get(entity).map(presumed);
+            if was.as_ref() != Some(file) && !explained.contains(entity) {
+                changes.push(Change {
+                    entity: *entity,
+                    what: What::File,
+                    by: By::Outside,
+                });
+            }
+        }
+        if self.unshown || rebound {
+            self.show();
+        }
+        Refreshed {
+            changes,
+            removed: self.removed_facts(),
+        }
     }
 
     /// Every writer with its last entry time, and whether another instance on this
@@ -887,33 +920,38 @@ impl Library {
 
     /// Folds what a read placed, and the snapshots it kept, into what is shown.
     /// Refolds every log while a writer is shown as the folder holds it, since
-    /// what the folder holds of it may have shrunk.
-    fn absorb_read(&mut self, report: &ReadReport) {
+    /// what the folder holds of it may have shrunk. Returns the library paths the
+    /// changed file facts name, and those where the entities they changed were
+    /// bound.
+    fn absorb_read(&mut self, report: &ReadReport) -> Vec<RelPath> {
         if !report.anything_new() {
             self.follow(Vec::new());
-            return;
+            return Vec::new();
         }
         let shown_as_folder = !self.shown_as_folder().is_empty();
         self.lost = self.reader.removed();
         self.retain_let_go();
         if shown_as_folder || !self.shown_as_folder().is_empty() {
+            let was = std::mem::take(&mut self.facts);
             self.refold();
             self.follow(readings(&self.reader).collect::<Vec<_>>());
-            return;
+            return self.moved_since(&was);
         }
         let own = self.writer.as_ref().map(Writer::id);
         let (followed, joined, touched) = self.fold_read(report);
-        match joined {
+        let moved = match joined {
             true => {
-                self.facts = self.folded.files();
+                let was = std::mem::replace(&mut self.facts, self.folded.files());
                 self.bind_due = true;
+                self.moved_since(&was)
             }
             false => self.refile(touched.into_iter()),
-        }
+        };
         if own.is_some_and(|own| joined || report.placed.contains_key(&own)) {
             self.rehistory();
         }
         self.follow(followed);
+        moved
     }
 
     /// Folds into what is shown the snapshots of the logs it has not joined and
@@ -943,6 +981,30 @@ impl Library {
         (followed, joined, touched)
     }
 
+    /// The paths of the file facts that differ between `was` and the facts now,
+    /// and those where the entities whose facts differ are bound.
+    fn moved_since(&self, was: &Facts) -> Vec<RelPath> {
+        let entities: BTreeSet<EntityId> = was.keys().chain(self.facts.keys()).copied().collect();
+        let changed = entities
+            .into_iter()
+            .filter(|entity| was.get(entity) != self.facts.get(entity));
+        changed
+            .flat_map(|entity| self.fact_paths(entity, was.get(&entity)))
+            .collect()
+    }
+
+    /// The paths `was`, an entity's file facts before, named, those its facts name
+    /// now, and where it was bound.
+    fn fact_paths(&self, entity: EntityId, was: Option<&Vec<Written<FileFact>>>) -> Vec<RelPath> {
+        let logged = was.into_iter().chain(self.facts.get(&entity)).flatten();
+        let bound = self.bindings.bound.get(&entity).map(|file| &file.path);
+        logged
+            .map(|fact| &fact.value.path)
+            .chain(bound)
+            .cloned()
+            .collect()
+    }
+
     /// Moves the clock to the latest of `readings`, and of those it could not
     /// follow before, no more than [`MAX_DRIFT_MS`] past this machine's clock.
     /// Later ones wait until they are not, so one wrong or forged clock cannot
@@ -961,8 +1023,10 @@ impl Library {
     }
 
     /// Takes the file facts of `entities` from what is shown, and binds again
-    /// before the next view if any changed.
-    fn refile(&mut self, entities: impl Iterator<Item = EntityId>) {
+    /// before the next view if any changed. Returns the paths those facts named
+    /// before and name now, and where their entities were bound.
+    fn refile(&mut self, entities: impl Iterator<Item = EntityId>) -> Vec<RelPath> {
+        let mut moved = Vec::new();
         for entity in entities {
             let now = self.folded.file(entity);
             if self
@@ -972,12 +1036,14 @@ impl Library {
             {
                 continue;
             }
-            match now.is_empty() {
+            let was = match now.is_empty() {
                 true => self.facts.remove(&entity),
                 false => self.facts.insert(entity, now),
             };
+            moved.extend(self.fact_paths(entity, was.as_ref()));
             self.bind_due = true;
         }
+        moved
     }
 
     /// Stops writing as this writer: it leaves the pool, and the next commit
@@ -1140,18 +1206,26 @@ impl Library {
 
     /// Rebuilds the view from the library's state.
     fn show(&mut self) {
+        self.unshown = false;
         self.bind_facts();
         self.removed = self.unkept();
         let logs = self.reader.logs().values();
         let forks = logs.clone().flat_map(|log| log.forks()).copied().collect();
         let gaps = logs.flat_map(|log| log.gaps()).copied().collect();
-        self.view = View::new(Parts {
+        let mut index = Arc::clone(self.view.index());
+        let shown = self.view.parts();
+        Arc::make_mut(&mut index).update(
+            (&shown.folded, &shown.bindings),
+            (&self.folded, &self.bindings),
+        );
+        let parts = Parts {
             folded: self.folded.clone(),
             bindings: Arc::clone(&self.bindings),
             writers: self.writer_infos(),
             forks,
             gaps,
-        });
+        };
+        self.view = View::indexed(parts, index);
     }
 
     fn writer_infos(&self) -> Vec<WriterInfo> {
@@ -1427,13 +1501,77 @@ fn recover(library: Library) -> Fallible<'static, Library> {
     })
 }
 
-/// Scans the library's files and binds them, what a failed scan left unknown
-/// included.
-fn rescan<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
-    let scan = library.borrow().scan_task();
-    flow::run(scan).and_then(move |(scan, read)| {
+/// What a refresh scans of the library's files.
+enum Look {
+    /// The paths whose file facts the entries it read changed.
+    Logs,
+    /// Those, and these paths.
+    Paths(Vec<RelPath>),
+    Everything,
+}
+
+/// Scans what `scope` asks of the library's files, given `moved`, the paths whose
+/// file facts the read changed, and binds. Everything is scanned while a failed
+/// scan left something unknown.
+fn scan_for<'a>(
+    library: &'a mut Library,
+    scope: Look,
+    mut moved: Vec<RelPath>,
+) -> Fallible<'a, &'a mut Library> {
+    if let Some(walking) = library.walking.as_mut() {
+        walking.forget(&moved);
+    }
+    let mut paths = match scope {
+        _ if !library.unscanned.is_empty() => return rescan(library),
+        Look::Everything => return rescan(library),
+        Look::Logs => moved,
+        Look::Paths(paths) => {
+            moved.extend(paths);
+            moved
+        }
+    };
+    paths.sort();
+    paths.dedup();
+    match paths.is_empty() && !library.bind_due {
+        true => ok(library),
+        false => rescan_paths(library, paths),
+    }
+}
+
+/// Scans every library file, going on from where a scan that stopped left off,
+/// and binds them, what a failed scan left unknown included.
+fn rescan<'a, L: BorrowMut<Library> + 'a>(mut library: L) -> Fallible<'a, L> {
+    let known = library.borrow_mut();
+    known.walking.get_or_insert_with(Walk::default);
+    walk(library)
+}
+
+/// Lists the directories the walk has left, one at a time, keeping each listing
+/// in the library, then binds every file listed.
+fn walk<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
+    let next = library.borrow().walking.as_ref().and_then(Walk::next);
+    let Some(dir) = next else {
+        return walked(library);
+    };
+    flow::list_stat(Root::Folder, &dir).and_then(move |entries| {
         let mut library = library;
         let known = library.borrow_mut();
+        if let Some(walking) = known.walking.as_mut() {
+            walking.listed(&known.layout, dir, entries);
+        }
+        walk(library)
+    })
+}
+
+/// Binds every file the finished walk listed.
+fn walked<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
+    let known = library.borrow();
+    let found = known.walking.as_ref().map(Walk::found).unwrap_or_default();
+    let identify = binding::identify(found, &known.env.identify, &known.facts, &known.scan);
+    flow::run(identify).and_then(move |(scan, read)| {
+        let mut library = library;
+        let known = library.borrow_mut();
+        known.walking = None;
         if !known.unscanned.is_empty() {
             known.unscanned = Unscanned::default();
             known.bind_due = true;
@@ -1503,6 +1641,9 @@ fn rebind_logged<'a>(
     scan: Task<'static, Result<(Scan, Vec<RelPath>)>>,
     unsure: Vec<RelPath>,
 ) -> Fallible<'a, &'a mut Library> {
+    if let Some(walking) = library.walking.as_mut() {
+        walking.forget(&unsure);
+    }
     flow::run(scan).then(move |scanned| match scanned {
         Ok((scan, read)) => rebound(library, scan)
             .then(move |library| remember(library, read).then(|(library, _)| ok(library))),

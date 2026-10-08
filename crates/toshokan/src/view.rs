@@ -1,19 +1,25 @@
 //! Views: immutable values the app renders from.
 
 use std::collections::BTreeSet;
+use std::ops::RangeBounds;
 use std::sync::Arc;
 
 use crate::binding::Bindings;
 use crate::ids::EntityId;
+use crate::index::Index;
 use crate::merge::Folded;
 use crate::path::RelPath;
 use crate::report::{Fork, Gap, WriterInfo};
-use crate::schema::{Field, Members, Raw, Register, Set, Value, Written};
+use crate::schema::{Field, Keyed, Members, Raw, Register, Set, Value, Written};
 
 /// The library as one reader sees it. Cheap to clone; never changes; can be sent
 /// to and shared between threads.
+///
+/// Lookups by value, by path and of conflicts are indexed: each costs a search
+/// plus a step per result. Values compare by their JSON text, as toshokan writes
+/// it for the key's type.
 #[derive(Clone)]
-pub struct View(Arc<Parts>);
+pub struct View(Arc<Parts>, Arc<Index>);
 
 /// What a view is built from.
 pub struct Parts {
@@ -52,6 +58,15 @@ pub enum FileState {
     Unscanned,
 }
 
+/// The distinct values of a key, each with how many entities hold it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Counts<T> {
+    /// Sorted.
+    pub values: Vec<(T, usize)>,
+    /// Values that do not decode as the key's type, sorted by text.
+    pub unreadable: Vec<(Raw, usize)>,
+}
+
 /// A key of an entity whose surviving writes disagree.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Conflicted {
@@ -62,7 +77,21 @@ pub enum Conflicted {
 
 impl View {
     pub fn new(parts: Parts) -> Self {
-        Self(Arc::new(parts))
+        let index = Index::of(&parts.folded, &parts.bindings);
+        Self(Arc::new(parts), Arc::new(index))
+    }
+
+    /// A view of `parts`, whose index `index` is.
+    pub(crate) fn indexed(parts: Parts, index: Arc<Index>) -> Self {
+        Self(Arc::new(parts), index)
+    }
+
+    pub(crate) fn index(&self) -> &Arc<Index> {
+        &self.1
+    }
+
+    pub(crate) fn parts(&self) -> &Parts {
+        &self.0
     }
 
     /// The merged facts the view shows.
@@ -87,39 +116,78 @@ impl View {
             .then_some(EntityView { view: self, id })
     }
 
-    /// The entities whose set `key` holds `value`, by id.
-    pub fn find<T: Value>(&self, key: Set<T>, value: &T) -> Vec<EntityId> {
-        self.entities()
-            .into_iter()
-            .filter(|entity| entity.members(key).values.binary_search(value).is_ok())
-            .map(|entity| entity.id)
+    /// The entities whose register or set `key` holds `value`, by id. A register
+    /// holds the value of each write that survives, so each side of a conflict is
+    /// found.
+    pub fn find<K: Keyed>(&self, key: K, value: &K::Value) -> Vec<EntityId> {
+        let key = key.key();
+        match Raw::of(value) {
+            Ok(raw) => self.1.find(key.kind, key.name, &raw),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// The entities whose register or set `key` holds any value, readable or not,
+    /// by id.
+    pub fn with<K: Keyed>(&self, key: K) -> Vec<EntityId> {
+        let key = key.key();
+        self.1.with(key.kind, key.name)
+    }
+
+    /// The entities whose register or set `key` holds a value within `range`, by
+    /// id. Each distinct value of the key is decoded to compare it.
+    pub fn range<K: Keyed>(&self, key: K, range: impl RangeBounds<K::Value>) -> Vec<EntityId> {
+        let key = key.key();
+        let values = self.1.values(key.kind, key.name).into_iter();
+        let within = values.filter(|(text, _)| {
+            serde_json::from_str::<K::Value>(text).is_ok_and(|value| range.contains(&value))
+        });
+        self.1
+            .holding(key.kind, key.name, within.map(|(text, _)| text))
+    }
+
+    /// Each distinct value of the register or set `key`, with how many entities
+    /// hold it.
+    pub fn values<K: Keyed>(&self, key: K) -> Counts<K::Value> {
+        let key = key.key();
+        let mut counts: Counts<K::Value> = Counts {
+            values: Vec::new(),
+            unreadable: Vec::new(),
+        };
+        for (text, count) in self.1.values(key.kind, key.name) {
+            match serde_json::from_str(text) {
+                Ok(value) => counts.values.push((value, count)),
+                Err(_) => counts
+                    .unreadable
+                    .push((Raw::new(text).expect("an indexed value is JSON"), count)),
+            }
+        }
+        counts.values.sort_by(|a, b| a.0.cmp(&b.0));
+        counts
+    }
+
+    /// The entity bound to the file at `path`, in sync or changed outside. Paths
+    /// compare exactly, as the view shows them.
+    pub fn at(&self, path: &RelPath) -> Option<EntityView<'_>> {
+        let mut bound = self
+            .1
+            .at(path)
+            .filter(|(_, state)| matches!(state, FileState::InSync | FileState::ChangedOutside));
+        bound.next().map(|(id, _)| EntityView { view: self, id })
+    }
+
+    /// The entities whose file, as [`EntityView::file`] gives it, is at `dir` or
+    /// under it, in order of path and then id.
+    pub fn under(&self, dir: &RelPath) -> Vec<EntityView<'_>> {
+        let under = self.1.under(dir);
+        under
+            .map(|(_, id, _)| EntityView { view: self, id })
             .collect()
     }
 
     /// Every conflict among the entities shown, sorted.
     pub fn conflicts(&self) -> Vec<Conflicted> {
-        let folded = &self.0.folded;
-        let mut conflicts = Vec::new();
-        for entity in folded.entities() {
-            for key in folded.registers(entity) {
-                if distinct(&folded.register(entity, key)) > 1 {
-                    conflicts.push(Conflicted::Field {
-                        entity,
-                        key: key.to_owned(),
-                    });
-                }
-            }
-            if folded.deletion_conflicted(entity) {
-                conflicts.push(Conflicted::Existence { entity });
-            }
-        }
-        for (entity, files) in folded.files() {
-            if distinct(&files) > 1 {
-                conflicts.push(Conflicted::File { entity });
-            }
-        }
-        conflicts.sort();
-        conflicts
+        self.1.conflicts()
     }
 
     pub fn forks(&self) -> &[Fork] {
@@ -139,16 +207,6 @@ impl View {
     pub fn unbound(&self) -> &[RelPath] {
         &self.0.bindings.unbound
     }
-}
-
-fn distinct<T: PartialEq>(writes: &[Written<T>]) -> usize {
-    let mut values: Vec<&T> = Vec::new();
-    for write in writes {
-        if !values.contains(&&write.value) {
-            values.push(&write.value);
-        }
-    }
-    values.len()
 }
 
 impl EntityView<'_> {
@@ -208,10 +266,8 @@ impl EntityView<'_> {
         if let Some(bound) = self.view.0.bindings.bound.get(&self.id) {
             return Some(bound.clone());
         }
-        let files = self.view.0.folded.file(self.id);
-        let latest = files.last()?;
         Some(FileRef {
-            path: latest.value.path.clone(),
+            path: self.view.0.folded.logged_path(self.id)?.clone(),
             state: FileState::Missing,
         })
     }

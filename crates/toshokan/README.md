@@ -45,6 +45,20 @@ let tags = view.entity(song).unwrap().members(TAGS);
 lib.undo()?;
 ```
 
+A view answers lookups from indexes it shares with the views before and after
+it, each in a search plus a step per result: the entities whose register or set
+holds a value (`find`), holds any value (`with`) or a value in a range
+(`range`), each value with how many entities hold it (`values`), the entity
+bound to a file (`at`), the entities whose files are under a folder (`under`),
+and every conflict (`conflicts`). Values compare by the JSON toshokan writes for
+them; `range` and `values` decode each distinct value of the key. Searching
+names or derived metadata is the app's.
+
+`refresh` reads what other writers logged since, and scans only the files their
+entries moved. `rescan` also scans every library file, for what changed outside
+the app; a rescan the app drops, to commit or to close, goes on where it stopped
+at the next one. `rescan_paths` scans the files a watcher saw change.
+
 `opened` reports what needs the user: effects another writer left unfinished,
 drafts, forks, facts a restore of the folder removed, and files that arrived,
 moved or changed outside the app. A view never changes, so an app can hand it to
@@ -80,8 +94,10 @@ every few milliseconds, so the page keeps drawing and answering input.
 
 The bundle must be built by wasm-bindgen with `--target web`. The worker loads it
 from a small script toshokan makes as a `blob:` URL, so a Content Security
-Policy must allow `blob:` workers. `web::Hints` tells a library's other tabs
-when to refresh. [SPEC.md](SPEC.md#browsers) lists what each browser can do.
+Policy must allow `blob:` workers. `web::Hints` says when to look again: a
+commit in another tab (`refresh`), the paths Chromium's file system observer saw
+change (`rescan_paths`), and focus or a period for a folder other programs write
+(`rescan`). [SPEC.md](SPEC.md#browsers) lists what each browser can do.
 
 The browser suites run headless in Chromium and Firefox with
 `nix build .#toshokan-web` on Linux. Elsewhere, from `crates/` in the

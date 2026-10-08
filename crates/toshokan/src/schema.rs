@@ -85,6 +85,29 @@ macro_rules! key_type {
 key_type!(Register, KeyKind::Register);
 key_type!(Set, KeyKind::Set);
 
+/// A typed key of either kind, as the lookups that read both take it.
+pub trait Keyed: Copy {
+    type Value: Value;
+
+    fn key(&self) -> Key;
+}
+
+impl<T: Value> Keyed for Register<T> {
+    type Value = T;
+
+    fn key(&self) -> Key {
+        Register::key(self)
+    }
+}
+
+impl<T: Value> Keyed for Set<T> {
+    type Value = T;
+
+    fn key(&self) -> Key {
+        Set::key(self)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum KeyKind {
     Register,

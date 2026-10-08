@@ -402,3 +402,60 @@ async fn a_pause_gives_the_page_back_only_once_the_core_held_it_for_a_turn() {
     worker.pause().await;
     assert!(!soon.get(), "the core had not held the page for a turn");
 }
+
+/// Writes `bytes` at `at` in `library`'s folder without logging anything, as
+/// another program would.
+async fn write_outside(library: &Lib, at: &str, bytes: &[u8]) {
+    let file = path(at);
+    let made = Io::MakeDir {
+        root: Root::Folder,
+        path: file.parent().unwrap(),
+    };
+    library.fs().perform(made).await.unwrap();
+    let created = Io::Create {
+        root: Root::Folder,
+        path: file,
+        bytes: bytes.to_vec(),
+    };
+    library.fs().perform(created).await.unwrap();
+}
+
+#[wasm_bindgen_test]
+async fn a_watched_folder_hints_the_paths_another_program_wrote() {
+    let place = Place::new(Kind::Private);
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = place.open("one", "a", 1, &clock).await;
+    create(&mut a, "song.npno", b"song").await;
+    let name = format!("{:032x}", CryptoRandom.next_u128());
+    let mut hints = Hints::new(&name, Some(Duration::from_secs(20))).unwrap();
+    let observer = js_sys::Reflect::get(&js_sys::global(), &"FileSystemObserver".into()).unwrap();
+    let watched = hints.watch(&place.folder().await).await.unwrap();
+    assert_eq!(watched, !observer.is_undefined(), "watches where it can");
+    if !watched {
+        return;
+    }
+    write_outside(&a, "shelf/copy.npno", b"song").await;
+    let paths = loop {
+        match hints.next().await {
+            Hint::Changed(paths) if paths.contains(&path("shelf/copy.npno")) => break paths,
+            Hint::Changed(_) => {}
+            other => panic!("the watcher said nothing of the new file: {other:?}"),
+        }
+    };
+    assert!(a.view().unbound().is_empty(), "nothing scanned it yet");
+    a.rescan_paths(paths).await.unwrap();
+    assert_eq!(a.view().unbound(), [path("shelf/copy.npno")]);
+}
+
+#[wasm_bindgen_test]
+async fn a_refresh_reads_no_library_file_and_a_rescan_reads_them_all() {
+    let place = Place::new(Kind::Private);
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = place.open("one", "a", 1, &clock).await;
+    create(&mut a, "song.npno", b"song").await;
+    write_outside(&a, "copy.npno", b"song").await;
+    a.refresh().await.unwrap();
+    assert!(a.view().unbound().is_empty(), "a refresh scans no file");
+    a.rescan().await.unwrap();
+    assert_eq!(a.view().unbound(), [path("copy.npno")]);
+}

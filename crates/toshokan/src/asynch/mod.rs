@@ -303,8 +303,22 @@ impl<F: Fs> Library<F> {
         run(&self.fs, self.core.settle(orphan, how)).await
     }
 
+    /// Reads other writers' new entries, and scans only the files their facts
+    /// moved.
     pub async fn refresh(&mut self) -> Result<Refreshed> {
         run(&self.fs, self.core.refresh()).await
+    }
+
+    /// Refreshes and scans every library file, for what changed outside. Dropping
+    /// the future stops the scan; the next rescan goes on where it stopped.
+    pub async fn rescan(&mut self) -> Result<Refreshed> {
+        run(&self.fs, self.core.rescan()).await
+    }
+
+    /// Refreshes and scans the library files at `paths` and under them, such as
+    /// those a watcher saw change.
+    pub async fn rescan_paths(&mut self, paths: Vec<RelPath>) -> Result<Refreshed> {
+        run(&self.fs, self.core.rescan_paths(paths)).await
     }
 
     /// Stops showing what [`Opened::removed`] reports, on every open of this

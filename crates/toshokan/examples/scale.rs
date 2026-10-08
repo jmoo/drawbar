@@ -372,6 +372,8 @@ impl Gen {
         writer.in_segment += 1;
         writer.entries += 1;
         if writer.in_segment >= self.segment_entries {
+            let marker = toshokan::line::seal_marker(writer.head);
+            writer.segment.extend(marker);
             self.flush(w);
         }
         entry.hash()
@@ -1013,6 +1015,19 @@ fn main() {
             view.find(TAGS, &"t7".to_owned()).len()
         });
         bench.measure("view: conflicts()", || view.conflicts().len());
+        bench.measure("view: with(rating)", || view.with(RATING).len());
+        bench.measure("view: values(tags)", || view.values(TAGS).values.len());
+        bench.measure("view: range(rating, 3..)", || view.range(RATING, 3..).len());
+        bench.measure("view: values(name)", || view.values(NAME).values.len());
+        bench.measure("view: under(lib/d0042)", || {
+            view.under(&RelPath::new("lib/d0042").unwrap()).len()
+        });
+        bench.measure("view: 1000 × at(path)", || {
+            sample
+                .iter()
+                .filter_map(|id| view.at(&view.entity(*id)?.file()?.path))
+                .count()
+        });
         bench.measure("view: 1000 × file()", || {
             sample
                 .iter()
@@ -1039,7 +1054,17 @@ fn main() {
             )
             .unwrap()
         });
-        bench.measure("bind", || binding::bind(&facts, &scanned, &ExactNames));
+        let bound = bench.measure("bind", || binding::bind(&facts, &scanned, &ExactNames));
+        let bindings = std::sync::Arc::new(bound);
+        bench.measure("view: index built at once", || {
+            toshokan::View::new(toshokan::view::Parts {
+                folded: view.folded().clone(),
+                bindings: std::sync::Arc::clone(&bindings),
+                writers: Vec::new(),
+                forks: Vec::new(),
+                gaps: Vec::new(),
+            })
+        });
         bench.measure("folded.files()", || view.folded().files().len());
     }
     let moved = Scan {
@@ -1062,6 +1087,9 @@ fn main() {
 
     for _ in 0..args.runs {
         bench.measure("refresh, nothing new", || lib.refresh().unwrap());
+    }
+    for _ in 0..args.runs {
+        bench.measure("rescan, nothing new", || lib.rescan().unwrap());
     }
     let foreign = match gen.writers.len() {
         1 => gen.add_writer(),
