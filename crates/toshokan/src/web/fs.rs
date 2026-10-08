@@ -142,10 +142,22 @@ impl Executor {
     pub fn own(&self, root: &str) {
         if let Ok(root) = RelPath::new(root) {
             *self.folder.kept.borrow_mut() = Some(root);
+            self.folder.found.borrow_mut().clear();
         }
     }
 
     pub async fn perform(&self, io: Io) -> IoResult {
+        let tree = self.tree(io.root());
+        let result = self.request(io).await;
+        // A kept handle to a directory removed from outside fails each request
+        // through it; the next request finds the path again.
+        if let Err(IoError::Other(_)) = result {
+            tree.found.borrow_mut().clear();
+        }
+        result
+    }
+
+    async fn request(&self, io: Io) -> IoResult {
         let open = self.filling.take();
         match open {
             Some(filling) if io.keeps_open(filling.root, &filling.path) => {
