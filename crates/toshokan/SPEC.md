@@ -855,6 +855,9 @@ always a directory of the origin private file system.
   the worker and released when it ends.
 - **Hints.** A tab that commits announces its newest entry on the
   `BroadcastChannel` `toshokan:<library>`, and the library's other tabs refresh.
-  A page whose folder another program may write also rescans every file when it
-  is shown or focused, and periodically while it is visible.
+  Where the browser has a `FileSystemObserver`, which only Chromium has, a page
+  watches its folder and rescans the paths the observer reports changed, or
+  every file when it cannot say which. A page whose folder another program may
+  write also rescans every file when it is shown or focused, and periodically
+  while it is visible.
 

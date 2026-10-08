@@ -411,6 +411,33 @@ async fn write_outside(place: &Place, at: &str, bytes: &[u8]) {
 }
 
 #[wasm_bindgen_test]
+async fn a_watched_folder_hints_the_paths_another_program_wrote() {
+    let place = Place::new(Kind::Private);
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = place.open("one", "a", 1, &clock).await;
+    create(&mut a, "song.npno", b"song").await;
+    let name = format!("{:032x}", CryptoRandom.next_u128());
+    let mut hints = Hints::new(&name, Some(Duration::from_secs(20))).unwrap();
+    let observer = js_sys::Reflect::get(&js_sys::global(), &"FileSystemObserver".into()).unwrap();
+    let watched = hints.watch(&place.folder().await).await.unwrap();
+    assert_eq!(watched, !observer.is_undefined(), "watches where it can");
+    if !watched {
+        return;
+    }
+    write_outside(&place, "shelf/copy.npno", b"song").await;
+    let paths = loop {
+        match hints.next().await {
+            Hint::Changed(paths) if paths.contains(&path("shelf/copy.npno")) => break paths,
+            Hint::Changed(_) => {}
+            other => panic!("the watcher said nothing of the new file: {other:?}"),
+        }
+    };
+    assert!(a.view().unbound().is_empty(), "nothing scanned it yet");
+    a.rescan_paths(paths).await.unwrap();
+    assert_eq!(a.view().unbound(), [path("shelf/copy.npno")]);
+}
+
+#[wasm_bindgen_test]
 async fn a_refresh_reads_no_library_file_and_a_rescan_reads_them_all() {
     let place = Place::new(Kind::Private);
     let clock = TestClock::at(1_000);

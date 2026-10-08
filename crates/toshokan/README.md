@@ -90,8 +90,10 @@ let (mut lib, opened) = Library::open(worker, layout, &schema, env).await?;
 
 The bundle must be built by wasm-bindgen with `--target web`. The worker loads it
 from a small script toshokan makes as a `blob:` URL, so a Content Security
-Policy must allow `blob:` workers. `web::Hints` tells a library's other tabs
-when to refresh. [SPEC.md](SPEC.md#browsers) lists what each browser can do.
+Policy must allow `blob:` workers. `web::Hints` says when to look again: a
+commit in another tab (`refresh`), the paths Chromium's file system observer saw
+change (`rescan_paths`), and focus or a period for a folder other programs write
+(`rescan`). [SPEC.md](SPEC.md#browsers) lists what each browser can do.
 
 The browser suites run headless in Chromium and Firefox with
 `nix build .#toshokan-web` on Linux. Elsewhere, from `crates/` in the
