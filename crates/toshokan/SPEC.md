@@ -436,16 +436,19 @@ nothing it read before; without it, the open folds every log again.
 
 The cached view is private to the install, and only the build that wrote it
 reads it. Each file is a sequence of records: the length of the record's
-payload as 4 bytes little-endian, the first 16 bytes of the BLAKE3 hash of the
-payload, then the payload. The payload's first byte names its format, 1; the
-rest is the view, or what it gained, in this build's binary encoding: integers
-as LEB128, identifiers as their 16 bytes big-endian, text as its length and its
-UTF-8, lists as their length and their members, with each entry as its hash, its
-predecessor, its clock reading and its decoded kind. An entry keeps the JSON of
-its line only when that is not the JSON this build writes for its kind, so
-every line is given back byte for byte. Neither a line nor its hash is read or
-checked again: the record's hash stands for them. A record whose length, hash or
-format byte does not hold ends the readable part of `view.log`.
+payload as 4 bytes little-endian, a 16-byte check of the payload, then the
+payload. The check finds a record a crash tore or a disk damaged; it does not
+guard against forgery, since only the install writes its local root. This build
+computes it in two lanes of 64-bit multiplies over the payload. The payload's
+first byte names its format, 1; the rest is the view, or what it gained, in this
+build's binary encoding: integers as LEB128, identifiers as their 16 bytes
+big-endian, text as its length and its UTF-8, lists as their length and their
+members, with each entry as its hash, its predecessor, its clock reading and its
+decoded kind. An entry keeps the JSON of its line only when that is not the JSON
+this build writes for its kind, so every line is given back byte for byte.
+Neither a line nor its hash is read or checked again: the record's check stands
+for them. A record whose length, check or format byte does not hold ends the
+readable part of `view.log`.
 
 A record of `view.log` holds what each log gained, and the records of the files
 that changed, or none for one that is gone. A reader replays the records in

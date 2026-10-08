@@ -44,8 +44,94 @@ const JOURNAL_SLACK: u64 = 1 << 20;
 /// how, since a record whose check holds is taken as this build packed it.
 const FORMAT: u8 = 1;
 
-/// How many bytes of a record's BLAKE3 hash follow its length.
+/// How many bytes of a record's [`Check`] follow its length.
 const CHECK: usize = 16;
+
+/// The check of a record's payload: two lanes that each take every other eight
+/// bytes by a multiply and a rotation, mixed with the length at the end by
+/// SplitMix64's finalizer. A view is private to the install, so the check need
+/// find only records a crash tore or a disk damaged, not forgeries, and costs a
+/// multiply per eight bytes where a cryptographic hash costs many.
+#[derive(Clone)]
+struct Check {
+    lanes: [u64; 2],
+    /// Bytes short of a block, from the end of what was taken.
+    held: [u8; 16],
+    holding: usize,
+    len: u64,
+}
+
+impl Default for Check {
+    fn default() -> Self {
+        Self {
+            // The fractional parts of the golden ratio and of the square root of 2.
+            lanes: [0x9e37_79b9_7f4a_7c15, 0x6a09_e667_f3bc_c909],
+            held: [0; 16],
+            holding: 0,
+            len: 0,
+        }
+    }
+}
+
+impl Check {
+    fn of(bytes: &[u8]) -> [u8; CHECK] {
+        let mut check = Self::default();
+        check.update(bytes);
+        check.finish()
+    }
+
+    fn update(&mut self, mut bytes: &[u8]) {
+        self.len += bytes.len() as u64;
+        if self.holding > 0 {
+            let taken = (16 - self.holding).min(bytes.len());
+            self.held[self.holding..][..taken].copy_from_slice(&bytes[..taken]);
+            self.holding += taken;
+            bytes = &bytes[taken..];
+            if self.holding < 16 {
+                return;
+            }
+            let block = self.held;
+            self.block(&block);
+            self.holding = 0;
+        }
+        let mut blocks = bytes.chunks_exact(16);
+        for block in &mut blocks {
+            self.block(block.try_into().expect("sixteen bytes"));
+        }
+        let rest = blocks.remainder();
+        self.held[..rest.len()].copy_from_slice(rest);
+        self.holding = rest.len();
+    }
+
+    fn block(&mut self, block: &[u8; 16]) {
+        let (low, high) = block.split_at(8);
+        let words = [low, high].map(|word| u64::from_le_bytes(word.try_into().expect("eight")));
+        self.lanes[0] = (self.lanes[0] ^ words[0])
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            .rotate_left(31);
+        self.lanes[1] = (self.lanes[1] ^ words[1])
+            .wrapping_mul(0x6a09_e667_f3bc_c909)
+            .rotate_left(29);
+    }
+
+    fn finish(mut self) -> [u8; CHECK] {
+        let mut last = [0; 16];
+        last[..self.holding].copy_from_slice(&self.held[..self.holding]);
+        self.block(&last);
+        let [low, high] = self.lanes;
+        let low = mixed(low ^ self.len);
+        let high = mixed(high ^ low);
+        let low = mixed(low ^ high);
+        (u128::from(high) << 64 | u128::from(low)).to_le_bytes()
+    }
+}
+
+/// SplitMix64's finalizer: every bit of `z` moves about half of the result's.
+fn mixed(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
 
 /// What this process knows of the view it saves to.
 #[derive(Clone, Debug, Default)]
@@ -203,7 +289,7 @@ struct Decoding {
 }
 
 enum Decode {
-    Check(Box<blake3::Hasher>),
+    Check(Box<Check>),
     Writers(usize),
     Files,
     State(Unpacking),
@@ -261,7 +347,7 @@ impl Decoding {
 
     /// Hashes about `slice` more bytes of the checkpoint's payload, then compares
     /// its check.
-    fn check(&mut self, mut hasher: Box<blake3::Hasher>, slice: usize) -> Decode {
+    fn check(&mut self, mut hasher: Box<Check>, slice: usize) -> Decode {
         let Some((len, check)) = frame_head(&self.checkpoint) else {
             return Decode::Done(Err("the checkpoint fails its check".into()));
         };
@@ -281,7 +367,7 @@ impl Decoding {
         if until < self.end {
             return Decode::Check(hasher);
         }
-        if hasher.finalize().as_bytes()[..CHECK] != check {
+        if hasher.finish() != check {
             return Decode::Done(Err("the checkpoint fails its check".into()));
         }
         if self.end != self.checkpoint.len() {
@@ -472,7 +558,7 @@ fn frame(payload: &[u8]) -> Vec<u8> {
     let len = u32::try_from(payload.len()).expect("a record within 4 GiB");
     let mut record = Vec::with_capacity(4 + CHECK + payload.len());
     record.extend_from_slice(&len.to_le_bytes());
-    record.extend_from_slice(&blake3::hash(payload).as_bytes()[..CHECK]);
+    record.extend_from_slice(&Check::of(payload));
     record.extend_from_slice(payload);
     record
 }
@@ -482,7 +568,7 @@ fn frame(payload: &[u8]) -> Vec<u8> {
 fn unframe(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
     let (len, check) = frame_head(bytes)?;
     let (payload, rest) = bytes[4 + CHECK..].split_at_checked(len)?;
-    (blake3::hash(payload).as_bytes()[..CHECK] == check).then_some((payload, rest))
+    (Check::of(payload) == check).then_some((payload, rest))
 }
 
 /// A record's length and check.
@@ -841,7 +927,7 @@ enum Encode {
     },
     Files,
     State(Option<EntityId>),
-    Check(Box<blake3::Hasher>, usize),
+    Check(Box<Check>, usize),
     Done,
 }
 
@@ -949,7 +1035,7 @@ impl Encoding {
                         let len = out.len() - 4 - CHECK;
                         let len = u32::try_from(len).expect("a record within 4 GiB");
                         out[..4].copy_from_slice(&len.to_le_bytes());
-                        out[4..4 + CHECK].copy_from_slice(&hasher.finalize().as_bytes()[..CHECK]);
+                        out[4..4 + CHECK].copy_from_slice(&hasher.finish());
                         Encode::Done
                     }
                 }
@@ -1279,6 +1365,45 @@ mod tests {
         .unwrap();
         assert!(present(disk, Layout::view_journal(genesis)));
         reader
+    }
+
+    #[test]
+    fn a_check_finds_any_change_and_takes_its_bytes_in_any_pieces() {
+        use crate::env::{Random, SeededRandom};
+        let mut random = SeededRandom::new(77);
+        let mut below = |n: usize| (random.next_u128() % n as u128) as usize;
+        for len in [0, 1, 15, 16, 17, 31, 32, 33, 100, 1000] {
+            let bytes: Vec<u8> = (0..len).map(|_| below(256) as u8).collect();
+            let whole = Check::of(&bytes);
+            let mut pieces = Check::default();
+            let mut rest = &bytes[..];
+            while !rest.is_empty() {
+                let (piece, after) = rest.split_at(1 + below(rest.len()));
+                pieces.update(piece);
+                rest = after;
+            }
+            assert_eq!(pieces.finish(), whole, "{len} bytes in pieces");
+            for at in 0..len {
+                let mut changed = bytes.clone();
+                changed[at] ^= 1 << below(8);
+                assert_ne!(
+                    Check::of(&changed),
+                    whole,
+                    "{len} bytes, bit flipped at {at}"
+                );
+            }
+            for cut in 0..len {
+                assert_ne!(Check::of(&bytes[..cut]), whole, "{len} bytes cut to {cut}");
+                let mut zeroed = bytes.clone();
+                zeroed[cut..].fill(0);
+                if zeroed != bytes {
+                    assert_ne!(Check::of(&zeroed), whole, "{len} bytes zeroed from {cut}");
+                }
+            }
+            let mut longer = bytes.clone();
+            longer.push(0);
+            assert_ne!(Check::of(&longer), whole, "{len} bytes and a zero");
+        }
     }
 
     #[test]
