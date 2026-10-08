@@ -757,6 +757,8 @@ pub struct Stamp {
 struct Known {
     stamp: Stamp,
     resume: Option<Resume>,
+    /// Whether nothing writes the file again: a sealed segment or a snapshot.
+    fixed: bool,
 }
 
 /// Where a segment's readable lines end, and the bytes that end them.
@@ -933,11 +935,17 @@ impl Reader {
             self.records()
                 .filter_map(|(path, record)| {
                     let stamp = record.stamp.clone()?;
-                    let resume = match &record.file {
-                        WriterFile::Segment(segment) => segment.resume(),
-                        _ => None,
+                    let (resume, fixed) = match &record.file {
+                        WriterFile::Segment(segment) => (segment.resume(), segment.sealed),
+                        WriterFile::Snapshot(_) => (None, true),
+                        WriterFile::Unreadable => (None, false),
                     };
-                    Some((path.clone(), Known { stamp, resume }))
+                    let known = Known {
+                        stamp,
+                        resume,
+                        fixed,
+                    };
+                    Some((path.clone(), known))
                 })
                 .collect(),
         );
@@ -1250,6 +1258,9 @@ struct Planned {
 }
 
 enum Plan {
+    /// Nothing: a sealed segment or a snapshot with the length and modification
+    /// time of the last read.
+    Kept,
     /// Its tail, to compare with that of the last read, whose length and
     /// modification time it still has.
     Tail(Vec<u8>),
@@ -1267,13 +1278,16 @@ impl Plan {
         let Some(modified) = meta.modified else {
             return Plan::Whole;
         };
+        let same = |stamp: &Stamp| stamp.len == meta.len && stamp.modified == modified;
         match known {
-            Some(Known { stamp, .. }) if stamp.len == meta.len && stamp.modified == modified => {
-                Plan::Tail(stamp.tail.clone())
-            }
+            Some(Known { stamp, fixed, .. }) if same(stamp) => match fixed {
+                true => Plan::Kept,
+                false => Plan::Tail(stamp.tail.clone()),
+            },
             Some(Known {
                 stamp,
                 resume: Some(resume),
+                ..
             }) if meta.len > stamp.len && meta.len <= MAX_FILE => Plan::Grown {
                 resume: resume.clone(),
                 modified,
@@ -1284,6 +1298,7 @@ impl Plan {
 
     fn reads(&self, len: u64, modified: Option<u64>) -> Vec<Range> {
         match self {
+            Plan::Kept => Vec::new(),
             Plan::Tail(_) => vec![tail_range(len)],
             Plan::Grown { resume, .. } => {
                 let offset = resume.end - line::ENDING;
@@ -1366,6 +1381,7 @@ fn read_planned<'a>(files: Vec<Planned>) -> Flow<'a, Result<Vec<Scanned>>> {
 /// `Some(None)` when it must be read whole.
 fn planned(plan: Plan, meta: &Meta, parts: Vec<Option<Vec<u8>>>) -> Option<Option<Found>> {
     match plan {
+        Plan::Kept => Some(Some(Found::Unchanged)),
         Plan::Whole => whole(meta, parts).map(Some),
         Plan::Tail(known) => {
             let tail = parts.into_iter().next()??;
@@ -1803,11 +1819,11 @@ mod tests {
         let first = backend.1;
 
         let again = crate::blocking::run(&mut backend, reader.read()).unwrap();
-        let ends = 2 * line::ENDING + 4;
+        let ends = line::ENDING + 4;
         assert_eq!(
             backend.1 - first,
             ends,
-            "unchanged files are read only at their ends"
+            "an unchanged segment is read at its end, the junk whole, the snapshot not at all"
         );
         assert_eq!(again.placed, BTreeMap::new());
         assert_eq!(again.unreadable, report.unreadable);

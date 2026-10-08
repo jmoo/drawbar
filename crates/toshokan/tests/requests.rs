@@ -258,3 +258,29 @@ fn a_backend_without_fsync_is_never_asked_to_sync() {
         "the disk counts every sync it is asked"
     );
 }
+
+#[test]
+fn a_refresh_reads_nothing_of_sealed_segments_it_read_before() {
+    let disk = saved_library(4);
+    let schema = Schema::of(&[NAME.key()]).unwrap();
+    let mut other = Library::open(disk.process(), layout(), &schema, env(3))
+        .unwrap()
+        .0;
+    let (note, _) = other.intent("Note").create(|e| {
+        e.set(NAME, "note".into());
+    });
+    note.commit().unwrap();
+    let recorded = Recorded::new(disk.process());
+    let (mut library, _) = Library::open(recorded.clone(), layout(), &schema, env(2)).unwrap();
+    recorded.take();
+    library.refresh().unwrap();
+    let tails: Vec<usize> = recorded
+        .take()
+        .iter()
+        .filter_map(|io| match io {
+            Io::ReadMany { reads, .. } => Some(reads.len()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tails, [1], "only the open segment's tail");
+}
