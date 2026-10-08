@@ -1,7 +1,7 @@
 use thiserror::Error as ThisError;
 
 use crate::ids::{EntityId, EntryHash, Identity, WriterId};
-use crate::io::{IoError, Root};
+use crate::io::{Capability, IoError, Root};
 use crate::path::RelPath;
 use crate::plan::Expect;
 use crate::report::{Partial, Rekey};
@@ -107,6 +107,10 @@ pub enum Refusal {
     /// The bytes an undo would bring back have left the trash.
     #[error("the trash no longer holds what undo needs")]
     Emptied,
+    /// The folder cannot do what settling another writer's effect needs, as
+    /// rename a directory that writer's folder renamed whole.
+    #[error("the folder cannot {0}")]
+    Unsupported(Capability),
 }
 
 /// What the intent expected at a path, and what was found; `None` is nothing.

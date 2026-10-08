@@ -957,6 +957,7 @@ pub fn finish(layout: &Layout, name: Nonce, record: &PendingRecord) -> Task<'sta
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub(crate) struct Observation {
     present: BTreeSet<RelPath>,
+    directories: BTreeSet<RelPath>,
     held: BTreeMap<(RelPath, RelPath), Held>,
     started: Option<usize>,
 }
@@ -965,6 +966,11 @@ impl Observation {
     /// Whether the folder holds `path`, one of the record's paths.
     pub(crate) fn holds(&self, path: &RelPath) -> bool {
         self.present.contains(path)
+    }
+
+    /// Whether `path`, one of the record's paths, is a directory.
+    pub(crate) fn is_directory(&self, path: &RelPath) -> bool {
+        self.directories.contains(path)
     }
 }
 
@@ -1024,15 +1030,23 @@ pub(crate) fn observe<'a>(
         }
     }
     started.and_then(move |started| {
-        fold(paths.into_iter(), BTreeSet::new(), |mut present, path| {
-            flow::stat(Root::Folder, &path).map_ok(move |meta| {
-                if meta.is_some() {
-                    present.insert(path);
-                }
-                present
-            })
-        })
-        .and_then(move |present| {
+        let found = (BTreeSet::new(), BTreeSet::new());
+        fold(
+            paths.into_iter(),
+            found,
+            |(mut present, mut directories), path| {
+                flow::stat(Root::Folder, &path).map_ok(move |meta| {
+                    if meta.is_some_and(|meta| meta.kind == Kind::Directory) {
+                        directories.insert(path.clone());
+                    }
+                    if meta.is_some() {
+                        present.insert(path);
+                    }
+                    (present, directories)
+                })
+            },
+        )
+        .and_then(move |(present, directories)| {
             let both: Vec<(RelPath, RelPath)> = pairs
                 .into_iter()
                 .filter(|(from, to)| present.contains(from) && present.contains(to))
@@ -1045,6 +1059,7 @@ pub(crate) fn observe<'a>(
             })
             .map_ok(move |held| Observation {
                 present,
+                directories,
                 held,
                 started,
             })

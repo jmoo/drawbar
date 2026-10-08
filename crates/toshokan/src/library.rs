@@ -16,7 +16,7 @@ use std::sync::Arc;
 use crate::binding::{self, Bindings, Facts, Scan, Unscanned};
 use crate::cache;
 use crate::drafts::{self, DraftRecord};
-use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd, Moves};
+use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd};
 use crate::env::Env;
 use crate::error::{Error, Invalid, Refusal, Result, Why};
 use crate::flow::{self, fold, ok, Fallible, Flow};
@@ -450,7 +450,9 @@ impl Library {
     /// Settles another writer's unfinished effect, with the user's consent, in
     /// this writer's own log: finishes it, rolls it back or dismisses it. Nothing
     /// is written in the other writer's directory. Effects that stop partway are
-    /// [`crate::Error::Partial`] and leave the effect open to settle again.
+    /// [`crate::Error::Partial`] and leave the effect open to settle again. Finishing
+    /// or rolling back a directory rename this folder cannot make is refused with
+    /// [`crate::Refusal::Unsupported`]; dismissing it is not.
     pub fn settle(&mut self, orphan: Orphan, how: Settlement) -> Task<'_, Result<Committed>> {
         if let Err(error) = self.writable() {
             return Task::ready(Err(error));
@@ -472,10 +474,13 @@ impl Library {
                         &theirs,
                         &reached,
                         how,
-                        Moves::of(library.capabilities),
+                        library.capabilities,
                         &mut library.env,
                     );
-                    settle_orphan(library, orphan, theirs, how, plan)
+                    match plan {
+                        Ok(plan) => settle_orphan(library, orphan, theirs, how, plan),
+                        Err(refusal) => Flow::Done(Err(Error::Refused(refusal))),
+                    }
                 })
             })
             .task()

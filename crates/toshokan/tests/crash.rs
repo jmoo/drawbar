@@ -24,13 +24,15 @@ use common::{
 use toshokan::binding::Bindings;
 use toshokan::crash::{self, Fault};
 use toshokan::disk::Tail;
-use toshokan::effects::{self, Moves};
-use toshokan::io::{Capabilities, Range, CHUNK};
+use toshokan::effects::{self, EffectPlan, Moves};
+use toshokan::io::{Capabilities, Capability, Range, CHUNK};
 use toshokan::log::Settlement;
 use toshokan::pending::{self, PendingRecord};
 use toshokan::plan::{Content, Expect, FileChange, Piece, Splice};
 use toshokan::recovery::{self, Chain};
-use toshokan::{EntityId, EntryHash, Error, MemDisk, Nonce, Outcome, RelPath, Root, WriterId};
+use toshokan::{
+    EntityId, EntryHash, Error, MemDisk, Nonce, Outcome, Refusal, RelPath, Root, WriterId,
+};
 
 const E: EntityId = EntityId::from_u128(0xe);
 const F: EntityId = EntityId::from_u128(0xf);
@@ -544,38 +546,47 @@ fn settle_orphans(disk: &MemDisk, how: Settlement, stop: usize, seed: u64) -> (u
         let reached = d
             .run(recovery::progress(&layout, orphan.record, &theirs))
             .unwrap();
-        let moves = Moves::of(d.capabilities(Root::Folder));
-        let mut plan = recovery::orphan_plan(&layout, &theirs, &reached, how, moves, &mut env);
+        let capabilities = d.capabilities(Root::Folder);
+        let mut plan =
+            recovery::orphan_plan(&layout, &theirs, &reached, how, capabilities, &mut env)
+                .expect("a folder settles what a folder like it wrote");
         stopped |= plan.steps.len() > stop;
         plan.steps.truncate(stop);
-        let plan = Rc::new(plan);
-        let record = Rc::new(PendingRecord::new(HEIR, "settle", entry(HEAD), &plan));
-        let prepared = d
-            .run(effects::prepare(
-                &layout,
-                Rc::clone(&plan),
-                Rc::clone(&record),
-                identify(),
-            ))
-            .unwrap();
-        assert_eq!(prepared, Ok(()));
-        if !plan.is_empty() {
-            let applied = d
-                .run(effects::apply(
-                    &layout,
-                    plan.record,
-                    Rc::clone(&record),
-                    0,
-                    identify(),
-                ))
-                .unwrap();
-            assert_eq!(applied.outcome, Outcome::Complete, "{how:?}");
-            d.run(effects::finish(&layout, plan.record, &record))
-                .unwrap();
-        }
+        carry_out(d, plan, how);
     }
     d.run(recovery::tidy(&layout, HEIR, &[])).unwrap();
     (found.orphaned.len(), stopped)
+}
+
+/// Commits `plan`, a settlement planned by `HEIR`, and carries out its steps.
+fn carry_out(d: &mut BlockingMem, plan: EffectPlan, how: Settlement) {
+    let layout = layout();
+    let plan = Rc::new(plan);
+    let record = Rc::new(PendingRecord::new(HEIR, "settle", entry(HEAD), &plan));
+    let prepared = d
+        .run(effects::prepare(
+            &layout,
+            Rc::clone(&plan),
+            Rc::clone(&record),
+            identify(),
+        ))
+        .unwrap();
+    assert_eq!(prepared, Ok(()));
+    if plan.is_empty() {
+        return;
+    }
+    let applied = d
+        .run(effects::apply(
+            &layout,
+            plan.record,
+            Rc::clone(&record),
+            0,
+            identify(),
+        ))
+        .unwrap();
+    assert_eq!(applied.outcome, Outcome::Complete, "{how:?}");
+    d.run(effects::finish(&layout, plan.record, &record))
+        .unwrap();
 }
 
 /// The files in `WRITER`'s directory.
@@ -673,6 +684,89 @@ fn a_settlement_stopped_at_any_step_and_settled_again_ends_as_one_settlement_doe
         }
     }
     assert!(stopped_short > 0, "some settlement stops short");
+}
+
+/// `disk`'s folder, in a folder that can do only what `folder` says.
+fn moved_to(disk: &MemDisk, folder: Capabilities) -> MemDisk {
+    let moved = MemDisk::with_capabilities(folder, folder);
+    let d = &mut BlockingMem(moved.clone());
+    for dir in disk.directories(Root::Folder) {
+        if !dir.is_root() {
+            d.ok(toshokan::Io::MakeDir {
+                root: Root::Folder,
+                path: dir,
+            });
+        }
+    }
+    let files = disk.files(Root::Folder);
+    let files: Vec<(&str, &[u8])> = files.iter().map(|(p, b)| (p.as_str(), &b[..])).collect();
+    common::put(d, &files);
+    moved
+}
+
+#[test]
+fn a_folder_that_cannot_rename_a_directory_refuses_to_settle_a_directory_rename() {
+    let layout = layout();
+    let case = renaming()
+        .into_iter()
+        .find(|case| case.name == "move a tree")
+        .unwrap();
+    let folders = [
+        COPYING,
+        Capabilities {
+            rename_dir: false,
+            ..Capabilities::ALL
+        },
+    ];
+    let mut refused = 0;
+    crash::sweep(
+        || case.disk(),
+        |disk| case.commit(disk),
+        |fault, crashed| {
+            crashed.lose_local();
+            for (folder, how) in folders
+                .iter()
+                .flat_map(|&f| [Settlement::Finished, Settlement::RolledBack].map(|how| (f, how)))
+            {
+                let shown = format!("{} at {fault:?}, {how:?} in {folder:?}", case.shown());
+                let disk = moved_to(&crashed, folder);
+                let d = &mut BlockingMem(disk.clone());
+                let logs = logs(&disk, WRITER);
+                let found = d
+                    .run(recovery::assess(&layout, None, &logs, &BTreeSet::new()))
+                    .unwrap();
+                for orphan in &found.orphaned {
+                    let theirs = d
+                        .run(pending::read_one(&layout, orphan.writer, orphan.record))
+                        .unwrap()
+                        .unwrap();
+                    let reached = d
+                        .run(recovery::progress(&layout, orphan.record, &theirs))
+                        .unwrap();
+                    let plan = |how| {
+                        recovery::orphan_plan(&layout, &theirs, &reached, how, folder, &mut env(9))
+                    };
+                    match plan(how) {
+                        Err(refusal) => {
+                            assert_eq!(
+                                refusal,
+                                Refusal::Unsupported(Capability::RenameDir),
+                                "{shown}"
+                            );
+                            assert!(plan(Settlement::Dismissed).is_ok(), "{shown}: dismissed");
+                            refused += 1;
+                        }
+                        Ok(plan) => {
+                            carry_out(d, plan, how);
+                            let holds = case.holds(&disk.files(Root::Folder));
+                            assert_eq!(holds, settled_state(&case, how), "{shown}");
+                        }
+                    }
+                }
+            }
+        },
+    );
+    assert!(refused > 0, "some settlement renames a directory");
 }
 
 #[test]

@@ -687,6 +687,11 @@ and its intent is logged with what they did, without the planned facts or a
 `settle` entry. The record stays open, and settling it again finds from the
 folder what remains. Only the record's writer removes it.
 
+A record written where directories rename may move a tree by one `rename`. A
+reader whose folder cannot rename directories refuses to finish that step or roll
+it back, and changes nothing; it can still dismiss the record, and a folder that
+renames directories can settle it.
+
 ## Undo and redo
 
 Each writer undoes only its own intents, most recent first, by committing a

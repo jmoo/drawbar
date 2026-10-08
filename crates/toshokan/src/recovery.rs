@@ -16,10 +16,10 @@ use std::rc::Rc;
 
 use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd, Moves, Progress, Staged};
 use crate::env::{Env, Identify};
-use crate::error::Result;
+use crate::error::{Refusal, Result};
 use crate::flow::{self, each, fold};
 use crate::ids::{EntryHash, Nonce, WriterId};
-use crate::io::{Kind, Root, Task};
+use crate::io::{Capabilities, Capability, Kind, Root, Task};
 use crate::layout::Layout;
 use crate::log::Settlement;
 use crate::path::RelPath;
@@ -303,6 +303,8 @@ pub struct Reached {
     progress: Progress,
     /// The library paths its `to_trash` steps move that hold nothing.
     vacant: BTreeSet<RelPath>,
+    /// The library paths its steps name that are directories.
+    directories: BTreeSet<RelPath>,
 }
 
 /// How far another writer's record `name`, `theirs`, got, for [`orphan_plan`].
@@ -323,20 +325,30 @@ pub fn progress(
                     _ => None,
                 })
                 .collect();
+            let directories = theirs
+                .steps
+                .iter()
+                .flat_map(EffectStep::library_paths)
+                .filter(|path| seen.is_directory(path))
+                .cloned()
+                .collect();
             Reached {
                 progress: effects::reached(&layout, &theirs, &seen),
                 vacant,
+                directories,
             }
         })
         .task()
 }
 
 /// The effects that settle another writer's record `theirs` as `how`, from how
-/// far it got, carried out by this writer like an intent's, moving files as
-/// `moves` says. Nothing is written in the other writer's directory: its staged and
-/// trashed bytes are copied, and library files the settlement displaces go to this
-/// writer's trash, the start of a copy their next step left included. Finishing
-/// skips moving to the trash a path that holds nothing. Dismissing changes no file.
+/// far it got, carried out by this writer like an intent's, in a folder that can
+/// do what `capabilities` says. Nothing is written in the other writer's
+/// directory: its staged and trashed bytes are copied, and library files the
+/// settlement displaces go to this writer's trash, the start of a copy their next
+/// step left included. Finishing skips moving to the trash a path that holds
+/// nothing. Dismissing changes no file. Finishing or rolling back a step that
+/// renames a directory is refused where `capabilities` cannot rename one.
 ///
 /// Planned again after a settlement stopped partway, it plans what remains. The
 /// caller commits the plan, then, once its effects complete, appends a
@@ -346,13 +358,16 @@ pub fn orphan_plan(
     theirs: &PendingRecord,
     reached: &Reached,
     how: Settlement,
-    moves: Moves,
+    capabilities: Capabilities,
     env: &mut Env,
-) -> EffectPlan {
+) -> std::result::Result<EffectPlan, Refusal> {
+    let moves = Moves::of(capabilities);
     Orphaned {
         layout,
         theirs,
         vacant: &reached.vacant,
+        directories: &reached.directories,
+        rename_dir: capabilities.rename_dir && moves.renames(),
         plan: EffectPlan {
             moves,
             ..EffectPlan::new(env.nonce())
@@ -366,14 +381,20 @@ struct Orphaned<'a> {
     layout: &'a Layout,
     theirs: &'a PendingRecord,
     vacant: &'a BTreeSet<RelPath>,
+    directories: &'a BTreeSet<RelPath>,
+    rename_dir: bool,
     plan: EffectPlan,
     env: &'a mut Env,
 }
 
 impl Orphaned<'_> {
-    fn plan(mut self, progress: &Progress, how: Settlement) -> EffectPlan {
+    fn plan(
+        mut self,
+        progress: &Progress,
+        how: Settlement,
+    ) -> std::result::Result<EffectPlan, Refusal> {
         if how == Settlement::Dismissed {
-            return self.plan;
+            return Ok(self.plan);
         }
         for stale in progress.leftover.iter().chain(&progress.partial) {
             if self.layout.check_library_path(stale).is_ok() {
@@ -384,7 +405,7 @@ impl Orphaned<'_> {
         match how {
             Settlement::Finished => {
                 for step in &steps[progress.done..] {
-                    self.finish(step);
+                    self.finish(step)?;
                 }
                 let done_after = self.plan.steps.len();
                 self.plan.files = self
@@ -399,15 +420,15 @@ impl Orphaned<'_> {
             }
             Settlement::RolledBack => {
                 for step in steps[..progress.done].iter().rev() {
-                    self.undo(step);
+                    self.undo(step)?;
                 }
             }
             Settlement::Dismissed => {}
         }
-        self.plan
+        Ok(self.plan)
     }
 
-    fn finish(&mut self, step: &EffectStep) {
+    fn finish(&mut self, step: &EffectStep) -> std::result::Result<(), Refusal> {
         let writer = self.theirs.writer;
         match step {
             EffectStep::ToTrash { path, .. } if self.vacant.contains(path) => {}
@@ -418,29 +439,38 @@ impl Orphaned<'_> {
             EffectStep::FromTrash { item, path } => {
                 self.copy(self.layout.trash(writer, *item), path)
             }
-            EffectStep::Rename { .. }
-            | EffectStep::MakeDir { .. }
-            | EffectStep::RemoveDir { .. } => {
+            EffectStep::Rename { from, to } => return self.rename(from, to),
+            EffectStep::MakeDir { .. } | EffectStep::RemoveDir { .. } => {
                 self.plan.steps.push(step.clone());
             }
         }
+        Ok(())
     }
 
-    fn undo(&mut self, step: &EffectStep) {
+    fn undo(&mut self, step: &EffectStep) -> std::result::Result<(), Refusal> {
         let writer = self.theirs.writer;
         match step {
             EffectStep::ToTrash { path, item } => self.copy(self.layout.trash(writer, *item), path),
             EffectStep::Place { path, .. } | EffectStep::FromTrash { path, .. } => self.trash(path),
-            EffectStep::Rename { from, to } => self.plan.steps.push(EffectStep::Rename {
-                from: to.clone(),
-                to: from.clone(),
-            }),
+            EffectStep::Rename { from, to } => return self.rename(to, from),
             EffectStep::MakeDir { .. } => {}
             EffectStep::RemoveDir { path } => self
                 .plan
                 .steps
                 .push(EffectStep::MakeDir { path: path.clone() }),
         }
+        Ok(())
+    }
+
+    fn rename(&mut self, from: &RelPath, to: &RelPath) -> std::result::Result<(), Refusal> {
+        if self.directories.contains(from) && !self.rename_dir {
+            return Err(Refusal::Unsupported(Capability::RenameDir));
+        }
+        self.plan.steps.push(EffectStep::Rename {
+            from: from.clone(),
+            to: to.clone(),
+        });
+        Ok(())
     }
 
     fn trash(&mut self, path: &RelPath) {
