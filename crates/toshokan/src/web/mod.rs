@@ -48,17 +48,33 @@ pub enum Folder {
 }
 
 impl Folder {
-    /// A folder the user picked, renaming where this browser can.
-    ///
-    /// Brave refuses `move()` outside the origin private file system, so there a
-    /// picked folder declares no rename. The check is for `navigator.brave`.
+    /// A folder the user picked, renaming only in a browser known to rename there.
     pub fn picked(dir: FileSystemDirectoryHandle) -> Self {
         let brave = field(&navigator(), "brave").is_some();
         Self::Picked {
             dir,
-            rename: !brave,
+            rename: moves_picked(&brands(), brave),
         }
     }
+}
+
+/// Whether `move()` works in a picked folder, from the browser's brands and
+/// whether it sets `navigator.brave`. Measured in Chrome, which moves there, and
+/// Brave, which refuses; every other browser is assumed to refuse.
+fn moves_picked(brands: &[String], brave: bool) -> bool {
+    !brave && brands.iter().any(|brand| brand == "Google Chrome")
+}
+
+/// The names in `navigator.userAgentData.brands`, which only Chromium has.
+fn brands() -> Vec<String> {
+    let brands = field(&navigator(), "userAgentData").and_then(|data| field(&data, "brands"));
+    let Some(brands) = brands.and_then(|brands| brands.dyn_into::<js_sys::Array>().ok()) else {
+        return Vec::new();
+    };
+    brands
+        .iter()
+        .filter_map(|brand| field(&brand, "brand")?.as_string())
+        .collect()
 }
 
 /// The directory at `path` in the origin private file system, made if missing.
@@ -173,4 +189,30 @@ fn object(fields: &[(&str, JsValue)]) -> JsValue {
         let _ = Reflect::set(&object, &JsValue::from_str(name), value);
     }
     object.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_chrome_declares_that_a_picked_folder_renames() {
+        let brands = |names: &[&str]| {
+            names
+                .iter()
+                .map(|&name| name.to_owned())
+                .collect::<Vec<_>>()
+        };
+        let chrome = brands(&["Not)A;Brand", "Google Chrome", "Chromium"]);
+        assert!(moves_picked(&chrome, false));
+        assert!(!moves_picked(&chrome, true), "Brave");
+        for other in [
+            brands(&["Brave", "Chromium"]),
+            brands(&["Microsoft Edge", "Chromium"]),
+            brands(&["Chromium"]),
+            brands(&[]),
+        ] {
+            assert!(!moves_picked(&other, false), "{other:?}");
+        }
+    }
 }

@@ -774,8 +774,8 @@ always a directory of the origin private file system.
 | ------------------------------------------- | -------- | ------------- | ------------ | ------------ | ------- |
 | Private file system, Chromium               | yes      | yes           | no           | no           | yes     |
 | Private file system, Firefox and WebKit     | yes      | yes           | no           | no           | no      |
-| Picked folder, Chromium other than Brave    | yes      | yes           | no           | no           | no      |
-| Picked folder, Brave                        | yes      | no            | no           | no           | no      |
+| Picked folder, Chrome                       | yes      | yes           | no           | no           | no      |
+| Picked folder, other Chromium browsers      | yes      | no            | no           | no           | no      |
 
 - **Private file system.** Files are read through `getFile()`, which takes no
   lock, and written, appended to and flushed through sync access handles, opened
@@ -795,8 +795,11 @@ always a directory of the origin private file system.
   names its own files with those. A saved
   library file pays the check for its type: about 45 ms in Chrome and 0.1 to
   1.1 s in Brave for a type Chromium does not list. Brave cannot rename a file
-  outside the private file system, so there each move copies, and each copy
-  pays the check again.
+  outside the private file system. Renaming there was measured only in Chrome
+  and Brave, so `Folder::picked` declares `rename_file` only where
+  `navigator.userAgentData` names Google Chrome and `navigator.brave` is absent;
+  elsewhere each move copies, and each copy pays the check again. A rename the
+  browser refuses although the folder declares it fails with `Unsupported`.
 - **Renames** replace a file at the destination in every browser, so none
   declares `no_replace`.
 - **Times.** Chromium and Firefox report a file's last change in milliseconds,
