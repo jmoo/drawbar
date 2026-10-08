@@ -115,6 +115,9 @@ export function say(line) {
 export function now() {
   return performance.now();
 }
+export function next_task() {
+  return new Promise((done) => setTimeout(done, 0));
+}
 export function memory(wasm) {
   return [wasm.buffer.byteLength, performance.memory?.usedJSHeapSize ?? -1];
 }
@@ -127,6 +130,7 @@ extern "C" {
     async fn opfs_remove(path: Vec<String>) -> Result<JsValue, JsValue>;
     fn memory(wasm: JsValue) -> JsValue;
     fn now() -> f64;
+    async fn next_task();
     fn say(line: &str);
     fn browser() -> String;
 }
@@ -690,6 +694,7 @@ async fn measure() {
         let library = cold.time(open(&install)).await;
         assert_eq!(library.view().entities().len(), entities());
         library.close().await.unwrap();
+        next_task().await;
         opfs_remove(parts(&format!("{}/{install}", home())))
             .await
             .unwrap();
@@ -788,12 +793,17 @@ async fn measure() {
     drop(view);
     a.close().await.unwrap();
 
+    next_task().await;
     let mut warm = Samples::default();
+    let mut closes = Samples::default();
     for _ in 0..3 {
         let library = warm.time(open("own")).await;
-        library.close().await.unwrap();
+        next_task().await;
+        closes.time(library.close()).await.unwrap();
+        next_task().await;
     }
     warm.report("open, existing install");
+    closes.report("close, dropping the library");
 
     let library = open("own").await;
     report_memory("with the library open");
