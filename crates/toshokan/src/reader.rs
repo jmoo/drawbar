@@ -12,7 +12,7 @@
 //! entry between the cached view and what the folder holds.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::Rc;
 
 use crate::cache::{self, Store};
@@ -116,15 +116,17 @@ pub struct WriterLog {
     /// No one extends another.
     snapshots: Vec<Rc<Snapshot>>,
     entries: Vec<Rc<Entry>>,
-    /// Every placed or folded entry, with its predecessor.
-    chain: BTreeMap<EntryHash, Link>,
+    /// Every placed or folded entry, with its predecessor. Hashed, since a log
+    /// holds every entry of its writer and is looked up a few times per entry;
+    /// nothing depends on its order.
+    chain: HashMap<EntryHash, Link>,
     /// Entries seen and never placed, with their predecessors, so that a fork with
     /// one of them is found after its file is gone.
     strays: BTreeMap<EntryHash, EntryHash>,
     /// The lines last offered and held back.
     waiting: BTreeMap<EntryHash, Rc<Entry>>,
     /// The first successor seen of each entry, among the chain and the strays.
-    next: BTreeMap<EntryHash, EntryHash>,
+    next: HashMap<EntryHash, EntryHash>,
     /// Every successor of each entry with more than one.
     branches: BTreeMap<EntryHash, BTreeSet<EntryHash>>,
     forks: Vec<Fork>,
@@ -175,10 +177,10 @@ impl WriterLog {
             writer,
             snapshots: Vec::new(),
             entries: Vec::new(),
-            chain: BTreeMap::new(),
+            chain: HashMap::new(),
             strays: BTreeMap::new(),
             waiting: BTreeMap::new(),
-            next: BTreeMap::new(),
+            next: HashMap::new(),
             branches: BTreeMap::new(),
             forks: Vec::new(),
             gaps: Vec::new(),
@@ -204,11 +206,14 @@ impl WriterLog {
         })
     }
 
+    /// The least genesis entry placed or folded; more than one only in a forged
+    /// log.
     pub fn genesis(&self) -> Option<EntryHash> {
         self.chain
             .iter()
-            .find(|(_, link)| link.prev == EntryHash::ZERO)
+            .filter(|(_, link)| link.prev == EntryHash::ZERO)
             .map(|(hash, _)| *hash)
+            .min()
     }
 
     /// Whether `hash` is placed, or folded by a snapshot this install has seen.
@@ -261,14 +266,13 @@ impl WriterLog {
         &self.strays
     }
 
-    /// Placed or folded entries with no placed successor: one, unless forked.
+    /// Placed or folded entries with no placed successor, in order: one, unless
+    /// forked.
     pub fn heads(&self) -> Vec<EntryHash> {
         let prevs: BTreeSet<EntryHash> = self.chain.values().map(|link| link.prev).collect();
-        self.chain
-            .keys()
-            .filter(|hash| !prevs.contains(hash))
-            .copied()
-            .collect()
+        let heads = self.chain.keys().filter(|hash| !prevs.contains(hash));
+        let heads: BTreeSet<EntryHash> = heads.copied().collect();
+        heads.into_iter().collect()
     }
 
     pub fn last_at(&self) -> Option<Hlc> {
@@ -318,6 +322,8 @@ impl WriterLog {
         if !placement.kept.is_empty() {
             self.reindex(&mut touched);
         }
+        self.chain.reserve(entries.len());
+        self.next.reserve(entries.len());
         for entry in entries {
             let (hash, prev) = (entry.hash(), entry.prev());
             if self.holds(hash) {
