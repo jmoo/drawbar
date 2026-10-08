@@ -8,7 +8,7 @@
 //! file could be several entities', nothing is bound and it is reported. Scans
 //! never write; every commit pins the moves this writer found.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Bound;
 use std::rc::Rc;
 
@@ -109,6 +109,17 @@ impl Unscanned {
     pub fn is_empty(&self) -> bool {
         self.paths.is_empty() && self.entities.is_empty()
     }
+
+    /// Whether `entity`, whose file facts are `written`, is left unknown; `paths`
+    /// are those of `self`.
+    fn leaves_unknown(
+        &self,
+        paths: &BTreeSet<&str>,
+        entity: EntityId,
+        written: &[Written<FileFact>],
+    ) -> bool {
+        self.entities.contains(&entity) || written.iter().any(|w| under(&w.value.path, paths))
+    }
 }
 
 /// Binds as [`bind`] does, with the pins of what it binds, but blind to what
@@ -136,23 +147,20 @@ pub fn scan(
     facts: &Facts,
     previous: &Scan,
 ) -> Task<'static, Result<(Scan, Vec<RelPath>)>> {
-    let known = Known::of(facts, previous, |_| true);
+    let (facts, previous) = (facts.clone(), previous.clone());
     let identify = Rc::clone(identify);
-    walk(Rc::new(layout.clone()), RelPath::ROOT, Scan::default())
-        .and_then(move |scan| identified(scan, known, identify))
+    list_all(layout)
+        .and_then(move |mut scan| {
+            let unknown = resolve(&mut scan, &facts, &previous);
+            identified(scan, unknown, &identify)
+        })
         .task()
 }
 
-/// `found`, every library file a [`Walk`] listed, with the identities a scan
-/// reads, as [`scan`] gives them.
-pub fn identify(
-    found: Scan,
-    identify: &Rc<dyn Identify>,
-    facts: &Facts,
-    previous: &Scan,
-) -> Task<'static, Result<(Scan, Vec<RelPath>)>> {
-    let known = Known::of(facts, previous, |_| true);
-    identified(found, known, Rc::clone(identify)).task()
+/// Every library file outside toshokan's root, without identities. Requests only
+/// [`crate::Io::ListStat`], one per directory.
+pub(crate) fn list_all<'a>(layout: &Layout) -> flow::Fallible<'a, Scan> {
+    walk(Rc::new(layout.clone()), RelPath::ROOT, Scan::default())
 }
 
 /// A scan of every library file a directory at a time, which keeps what it listed
@@ -240,21 +248,38 @@ impl Walk {
     }
 
     /// Every file listed, its identity unread.
-    pub fn found(&self) -> Scan {
-        let files = self.listed.iter().flat_map(|(dir, entries)| {
+    /// Adds to `scan` the files of the directories listed after `after`, until it
+    /// has added about `slice`. Returns the last directory taken, and whether
+    /// none is left.
+    pub fn found_after(
+        &self,
+        scan: &mut Scan,
+        after: Option<&RelPath>,
+        slice: usize,
+    ) -> (Option<RelPath>, bool) {
+        let from = after.map_or(Bound::Unbounded, Bound::Excluded);
+        let mut dirs = self.listed.range::<RelPath, _>((from, Bound::Unbounded));
+        let (mut added, mut last) = (0, None);
+        for (dir, entries) in dirs.by_ref() {
             let files = entries.iter().filter(|(_, meta)| meta.kind == Kind::File);
-            files.filter_map(move |(name, meta)| {
+            for (name, meta) in files {
+                let Ok(path) = dir.join(name) else {
+                    continue;
+                };
                 let file = Scanned {
                     len: meta.len,
                     modified: meta.modified,
                     identity: None,
                 };
-                Some((dir.join(name).ok()?, file))
-            })
-        });
-        Scan {
-            files: files.collect(),
+                scan.files.insert(path, file);
+                added += 1;
+            }
+            last = Some(dir);
+            if added >= slice {
+                break;
+            }
         }
+        (last.cloned(), dirs.next().is_none())
     }
 }
 
@@ -269,31 +294,21 @@ fn subtree<'a, V>(
         .filter(move |path| path.starts_with(dir))
 }
 
-/// `previous` with each of `paths` scanned again: the file at a path, the files
-/// under a directory, or nothing; with the paths whose identities it read.
-/// Requests only [`crate::Io::Stat`], [`crate::Io::ListStat`] and
-/// [`crate::Io::ReadMany`].
-pub fn rescan(
+/// `previous` with each of `paths` listed again, without identities: the file at
+/// a path, the files under a directory, or nothing. Requests only
+/// [`crate::Io::Stat`] and [`crate::Io::ListStat`].
+pub(crate) fn relist<'a>(
     layout: &Layout,
-    identify: &Rc<dyn Identify>,
-    facts: &Facts,
     previous: &Scan,
     paths: Vec<RelPath>,
-) -> Task<'static, Result<(Scan, Vec<RelPath>)>> {
+) -> flow::Fallible<'a, Scan> {
     let touched: BTreeSet<&str> = paths.iter().map(RelPath::as_str).collect();
     let mut scan = previous.clone();
     scan.files.retain(|path, _| !under(path, &touched));
-    let unread = |path: &RelPath| {
-        under(path, &touched) || scan.files.get(path).is_some_and(|f| f.identity.is_none())
-    };
-    let known = Known::of(facts, previous, unread);
-    let identify = Rc::clone(identify);
     let layout = Rc::new(layout.clone());
     fold(paths.into_iter(), scan, move |scan, path| {
         visit(Rc::clone(&layout), path, scan)
     })
-    .and_then(move |scan| identified(scan, known, identify))
-    .task()
 }
 
 /// Whether `path` is one of `paths` or under one of them.
@@ -306,54 +321,148 @@ fn under(path: &RelPath, paths: &BTreeSet<&str>) -> bool {
             .any(|(at, _)| paths.contains(&text[..at]))
 }
 
-/// What a scan knows without reading: the lengths of the files facts name, and
-/// the identity of a file at a path, length and time, from a fact or an earlier
-/// scan.
-struct Known {
-    lengths: BTreeSet<u64>,
-    identities: BTreeMap<(RelPath, u64, Option<u64>), Identity>,
+/// Gives each file of `scan` without an identity the one known for its path,
+/// length and time: from `previous`, an earlier scan, else from the last of
+/// `facts` that names them. Returns the files left without one whose length is a
+/// fact's, whose identities must be read.
+pub(crate) fn resolve(scan: &mut Scan, facts: &Facts, previous: &Scan) -> Vec<(RelPath, u64)> {
+    let mut resolving = Resolving::default();
+    while !resolving.step(scan, facts, previous, usize::MAX) {}
+    resolving.needed
 }
 
-impl Known {
-    /// Keeps identities only for paths `wanted` takes.
-    fn of(facts: &Facts, previous: &Scan, wanted: impl Fn(&RelPath) -> bool) -> Self {
-        let facts = facts.values().flatten().map(|fact| &fact.value);
-        let lengths = facts.clone().map(|fact| fact.len).collect();
-        let logged = facts
-            .filter(|fact| wanted(&fact.path))
-            .map(|fact| ((fact.path.clone(), fact.len, fact.modified), fact.identity));
-        let read = previous.files.iter().filter(|(path, _)| wanted(path));
-        let read = read.filter_map(|(path, file)| {
-            let identity = file.identity?;
-            Some(((path.clone(), file.len, file.modified), identity))
-        });
-        Self {
-            lengths,
-            identities: logged.chain(read).collect(),
+/// [`resolve`] a slice at a time.
+#[derive(Default)]
+pub(crate) struct Resolving {
+    stage: Resolve,
+    /// The files no earlier scan gives an identity, in order.
+    unknown: Vec<RelPath>,
+    /// What the facts naming an unknown file say of it, in order of the facts.
+    logged: HashMap<RelPath, Vec<(u64, Option<u64>, Identity)>>,
+    lengths: HashSet<u64>,
+    pub(crate) needed: Vec<(RelPath, u64)>,
+}
+
+#[derive(Default)]
+enum Resolve {
+    /// Taking identities from the earlier scan, after a path.
+    #[default]
+    Earlier,
+    EarlierAfter(RelPath),
+    /// Gathering what the facts say, after an entity.
+    Facts(Option<EntityId>),
+    /// Giving the unknown files from this one on what the facts say.
+    Logged(usize),
+    Done,
+}
+
+impl Resolving {
+    /// Resolves about `slice` more files or entities; true once every file is
+    /// resolved. Each step must be given the same facts and earlier scan.
+    pub(crate) fn step(
+        &mut self,
+        scan: &mut Scan,
+        facts: &Facts,
+        previous: &Scan,
+        slice: usize,
+    ) -> bool {
+        self.stage = match std::mem::take(&mut self.stage) {
+            Resolve::Earlier => self.earlier(scan, previous, Bound::Unbounded, slice),
+            Resolve::EarlierAfter(after) => {
+                self.earlier(scan, previous, Bound::Excluded(&after), slice)
+            }
+            Resolve::Facts(after) => self.facts(facts, after, slice),
+            Resolve::Logged(from) => self.logged(scan, from, slice),
+            Resolve::Done => Resolve::Done,
+        };
+        matches!(self.stage, Resolve::Done)
+    }
+
+    fn earlier(
+        &mut self,
+        scan: &mut Scan,
+        previous: &Scan,
+        after: Bound<&RelPath>,
+        slice: usize,
+    ) -> Resolve {
+        let mut earlier = previous
+            .files
+            .range::<RelPath, _>((after, Bound::Unbounded));
+        let mut earlier = earlier.by_ref().peekable();
+        let mut files = scan
+            .files
+            .range_mut::<RelPath, _>((after, Bound::Unbounded));
+        let mut last = None;
+        for (path, file) in files.by_ref().take(slice) {
+            last = Some(path);
+            while earlier.next_if(|(before, _)| *before < path).is_some() {}
+            if file.identity.is_some() {
+                continue;
+            }
+            let same = earlier.peek().filter(|(before, was)| {
+                *before == path && (was.len, was.modified) == (file.len, file.modified)
+            });
+            file.identity = same.and_then(|(_, was)| was.identity);
+            if file.identity.is_none() {
+                self.unknown.push(path.clone());
+            }
+        }
+        let more = files.next().is_some();
+        match (last.filter(|_| more), self.unknown.is_empty()) {
+            (Some(last), _) => Resolve::EarlierAfter(last.clone()),
+            (None, true) => Resolve::Done,
+            (None, false) => Resolve::Facts(None),
+        }
+    }
+
+    fn facts(&mut self, facts: &Facts, after: Option<EntityId>, slice: usize) -> Resolve {
+        let from = after.map_or(Bound::Unbounded, Bound::Excluded);
+        let mut entities = facts.range((from, Bound::Unbounded));
+        let mut last = None;
+        for (entity, written) in entities.by_ref().take(slice) {
+            last = Some(*entity);
+            for fact in written.iter().map(|fact| &fact.value) {
+                self.lengths.insert(fact.len);
+                if self.unknown.binary_search(&fact.path).is_ok() {
+                    let said = (fact.len, fact.modified, fact.identity);
+                    self.logged.entry(fact.path.clone()).or_default().push(said);
+                }
+            }
+        }
+        match entities.next() {
+            Some(_) => Resolve::Facts(last),
+            None => Resolve::Logged(0),
+        }
+    }
+
+    fn logged(&mut self, scan: &mut Scan, from: usize, slice: usize) -> Resolve {
+        let to = from.saturating_add(slice).min(self.unknown.len());
+        for path in &self.unknown[from..to] {
+            let file = scan.files.get_mut(path).expect("listed in an earlier step");
+            let said = self.logged.get(path).into_iter().flatten().rev();
+            let same =
+                said.filter(|(len, modified, _)| (*len, *modified) == (file.len, file.modified));
+            file.identity = same.map(|(_, _, identity)| *identity).next();
+            if file.identity.is_none() && self.lengths.contains(&file.len) {
+                self.needed.push((path.clone(), file.len));
+            }
+        }
+        match to == self.unknown.len() {
+            true => Resolve::Done,
+            false => Resolve::Logged(to),
         }
     }
 }
 
-/// `scan` with the identities `known` gives, and those it must read, of each file
-/// whose length is a fact's; with the paths whose identities it read.
-fn identified<'a>(
+/// `scan` with the identities of `unknown` read; with the paths read. A file gone
+/// before its read is left out.
+pub(crate) fn identified<'a>(
     mut scan: Scan,
-    known: Known,
-    identify: Rc<dyn Identify>,
+    unknown: Vec<(RelPath, u64)>,
+    identify: &Rc<dyn Identify>,
 ) -> flow::Fallible<'a, (Scan, Vec<RelPath>)> {
-    let unknown: Vec<(RelPath, u64)> = scan
-        .files
-        .iter_mut()
-        .filter(|(_, file)| file.identity.is_none())
-        .filter_map(|(path, file)| {
-            let key = (path.clone(), file.len, file.modified);
-            file.identity = known.identities.get(&key).copied();
-            let needed = file.identity.is_none() && known.lengths.contains(&file.len);
-            needed.then(|| (path.clone(), file.len))
-        })
-        .collect();
     let paths: Vec<RelPath> = unknown.iter().map(|(path, _)| path.clone()).collect();
-    flow::identities(Root::Folder, unknown, &identify).map_ok(move |identities| {
+    flow::identities(Root::Folder, unknown, identify).map_ok(move |identities| {
         let mut read = Vec::new();
         for (path, identity) in paths.into_iter().zip(identities) {
             match identity {
@@ -467,8 +576,8 @@ fn pin(facts: &Facts, scan: &Scan, entity: EntityId, file: &FileRef) -> Option<O
 /// scan: each step is handed them, ⚠️ the same ones every time.
 pub struct Binding {
     /// What is bound in place of the facts and the scan where a failed scan left
-    /// something unknown, with the entities it left unknown.
-    known: Option<(Facts, Scan, Facts)>,
+    /// something unknown, with what it left unknown.
+    known: Option<(Facts, Scan, Unscanned)>,
     stage: Stage,
     progress: Progress,
 }
@@ -483,6 +592,8 @@ enum Stage {
     Moves,
     Unbound(Option<RelPath>),
     Pins(Option<EntityId>),
+    /// Binding the entities a failed scan left unknown as unscanned.
+    Unknown(Option<EntityId>),
     Done,
 }
 
@@ -513,12 +624,11 @@ impl Binding {
             let paths: BTreeSet<&str> = unscanned.paths.iter().map(RelPath::as_str).collect();
             let mut known = scan.clone();
             known.files.retain(|path, _| !under(path, &paths));
-            let (unknown, facts): (Facts, Facts) =
-                facts.clone().into_iter().partition(|(entity, written)| {
-                    unscanned.entities.contains(entity)
-                        || written.iter().any(|w| under(&w.value.path, &paths))
-                });
-            (facts, known, unknown)
+            let facts = facts
+                .iter()
+                .filter(|(entity, written)| !unscanned.leaves_unknown(&paths, **entity, written));
+            let facts = facts.map(|(entity, written)| (*entity, written.clone()));
+            (facts.collect(), known, unscanned.clone())
         });
         Self {
             known,
@@ -535,8 +645,9 @@ impl Binding {
             stage,
             progress,
         } = self;
-        let (facts, scan) = match known {
-            Some((facts, scan, _)) => (&*facts, &*scan),
+        let every = facts;
+        let (facts, scan) = match &*known {
+            Some((facts, scan, _)) => (facts, scan),
             None => (facts, scan),
         };
         let mut budget = slice;
@@ -596,7 +707,27 @@ impl Binding {
                     let taken = take_after(&bindings.bound, from, budget, |&entity, file| {
                         pins.extend(pin(facts, scan, entity, file));
                     });
-                    taken.map_or(Stage::Done, |last| Stage::Pins(Some(last)))
+                    taken.map_or(Stage::Unknown(None), |last| Stage::Pins(Some(last)))
+                }
+                Stage::Unknown(from) => {
+                    let Some((_, _, unscanned)) = &*known else {
+                        return true;
+                    };
+                    let paths = unscanned.paths.iter().map(RelPath::as_str).collect();
+                    let bound = &mut progress.bindings.bound;
+                    let taken = take_after(every, from, budget, |&entity, written| {
+                        let latest = written.last();
+                        let unknown =
+                            latest.filter(|_| unscanned.leaves_unknown(&paths, entity, written));
+                        if let Some(latest) = unknown {
+                            let file = FileRef {
+                                path: latest.value.path.clone(),
+                                state: FileState::Unscanned,
+                            };
+                            bound.insert(entity, file);
+                        }
+                    });
+                    taken.map_or(Stage::Done, |last| Stage::Unknown(Some(last)))
                 }
                 Stage::Done => return true,
             };
@@ -606,22 +737,7 @@ impl Binding {
 
     /// ⚠️ Before [`Binding::step`] returns true, what is bound so far.
     pub fn finish(self) -> (Bindings, Vec<Op>) {
-        let Progress {
-            mut bindings, pins, ..
-        } = self.progress;
-        let unknown = self
-            .known
-            .map(|(_, _, unknown)| unknown)
-            .unwrap_or_default();
-        for (entity, written) in unknown {
-            if let Some(latest) = written.last() {
-                let file = FileRef {
-                    path: latest.value.path.clone(),
-                    state: FileState::Unscanned,
-                };
-                bindings.bound.insert(entity, file);
-            }
-        }
+        let Progress { bindings, pins, .. } = self.progress;
         (bindings, pins)
     }
 }
@@ -979,7 +1095,8 @@ mod tests {
                 }
                 let mut unscanned = Unscanned::default();
                 if pick(4) == 0 {
-                    unscanned.paths.insert(path(["a", "d", "c"][pick(3)]));
+                    let paths = [RelPath::ROOT, path("a"), path("d"), path("c")];
+                    unscanned.paths.insert(paths[pick(4)].clone());
                     unscanned
                         .entities
                         .insert(EntityId::from_u128(1 + pick(3) as u128));
@@ -1009,6 +1126,143 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn a_file_takes_the_identity_an_earlier_scan_else_the_last_fact_gives() {
+        use crate::env::{Random, SeededRandom};
+        let mut random = SeededRandom::new(12);
+        for (mut facts, scan, _) in random_worlds(11, 1000) {
+            let mut pick = |n: usize| (random.next_u128() % n as u128) as usize;
+            if let Some(written) = facts.values_mut().nth(pick(2)) {
+                let mut twin = written[0].clone();
+                twin.value.identity = Identity::from_u128(99);
+                written.push(twin);
+            }
+            let mut scan = scan;
+            for file in scan.files.values_mut() {
+                file.modified = Some(pick(2) as u64);
+            }
+            let mut previous = scan.clone();
+            previous.files.retain(|_, _| pick(3) > 0);
+            for file in previous.files.values_mut() {
+                match pick(4) {
+                    0 => file.identity = None,
+                    1 => file.len += 1,
+                    _ => {}
+                }
+            }
+            let mut fresh = scan.clone();
+            for file in fresh.files.values_mut() {
+                if pick(2) == 0 {
+                    file.identity = None;
+                }
+            }
+            let mut expected = fresh.clone();
+            let mut known: BTreeMap<(RelPath, u64, Option<u64>), Identity> = BTreeMap::new();
+            for fact in facts.values().flatten() {
+                let key = (fact.value.path.clone(), fact.value.len, fact.value.modified);
+                known.insert(key, fact.value.identity);
+            }
+            for (path, file) in &previous.files {
+                if let Some(identity) = file.identity {
+                    known.insert((path.clone(), file.len, file.modified), identity);
+                }
+            }
+            let lengths: BTreeSet<u64> = facts.values().flatten().map(|f| f.value.len).collect();
+            let mut needed = Vec::new();
+            for (path, file) in &mut expected.files {
+                if file.identity.is_none() {
+                    file.identity = known.get(&(path.clone(), file.len, file.modified)).copied();
+                    if file.identity.is_none() && lengths.contains(&file.len) {
+                        needed.push((path.clone(), file.len));
+                    }
+                }
+            }
+            let mut sliced = fresh.clone();
+            let unknown = resolve(&mut fresh, &facts, &previous);
+            assert_eq!(
+                (fresh, unknown),
+                (expected.clone(), needed.clone()),
+                "{facts:?} {previous:?}"
+            );
+            let slice = 1 + pick(3);
+            let mut resolving = Resolving::default();
+            while !resolving.step(&mut sliced, &facts, &previous, slice) {}
+            assert_eq!(
+                (sliced, resolving.needed),
+                (expected, needed),
+                "{slice}-item slices"
+            );
+        }
+    }
+
+    #[test]
+    fn a_walk_gives_its_files_in_slices_as_it_listed_them() {
+        use crate::env::{Random, SeededRandom};
+        let layout = Layout::new(".lib").unwrap();
+        let mut random = SeededRandom::new(13);
+        let mut pick = |n: usize| (random.next_u128() % n as u128) as usize;
+        for _ in 0..200 {
+            let mut walk = Walk::default();
+            let mut listed = BTreeMap::new();
+            while let Some(dir) = walk.next() {
+                let mut entries = Vec::new();
+                for i in 0..pick(5) {
+                    let kind = [Kind::File, Kind::File, Kind::Directory][pick(3)];
+                    let meta = Meta {
+                        kind,
+                        len: i as u64,
+                        modified: Some(1),
+                    };
+                    entries.push((format!("{}{i}", dir.as_str().len()), meta));
+                }
+                for (name, meta) in &entries {
+                    if meta.kind == Kind::File {
+                        let file = Scanned {
+                            len: meta.len,
+                            modified: meta.modified,
+                            identity: None,
+                        };
+                        listed.insert(dir.join(name).unwrap(), file);
+                    }
+                }
+                let deep = dir.components().count() > 2;
+                entries.retain(|(_, meta)| !deep || meta.kind == Kind::File);
+                walk.listed(&layout, dir, entries);
+            }
+            let slice = 1 + pick(4);
+            let (mut found, mut after) = (Scan::default(), None);
+            loop {
+                let (last, done) = walk.found_after(&mut found, after.as_ref(), slice);
+                after = last;
+                if done {
+                    break;
+                }
+            }
+            assert_eq!(found.files, listed, "{slice}-file slices");
+        }
+    }
+
+    #[test]
+    fn with_every_path_unknown_each_entity_is_presumed_at_its_latest_path() {
+        let everything = Unscanned {
+            paths: BTreeSet::from([RelPath::ROOT]),
+            entities: BTreeSet::new(),
+        };
+        for (facts, scan, _) in random_worlds(10, 300) {
+            let (bindings, pins) = bind_known(&facts, &scan, &ExactNames, &everything);
+            let presumed: BTreeMap<EntityId, FileRef> = facts
+                .iter()
+                .map(|(entity, written)| {
+                    let path = written.last().unwrap().value.path.clone();
+                    let state = FileState::Unscanned;
+                    (*entity, FileRef { path, state })
+                })
+                .collect();
+            assert_eq!(bindings.bound, presumed, "{facts:?}");
+            assert_eq!((bindings.unbound, pins), (Vec::new(), Vec::new()));
+        }
+    }
+
     #[test]
     fn binding_never_guesses_in_any_small_world() {
         for (facts, scan) in worlds() {

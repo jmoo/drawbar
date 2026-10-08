@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::binding::{self, Binding, Bindings, Facts, Scan, Unscanned, Walk};
+use crate::binding::{self, Binding, Bindings, Facts, Resolving, Scan, Unscanned, Walk};
 use crate::cache;
 use crate::drafts::{self, DraftRecord};
 use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd};
@@ -21,6 +21,7 @@ use crate::env::Env;
 use crate::error::{Error, Invalid, Refusal, Result, Why};
 use crate::flow::{self, fold, ok, Fallible, Flow};
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
+use crate::index::{Index, Indexing};
 use crate::intent;
 use crate::io::{Capabilities, Io, Kind, Lock, Root, Task};
 use crate::layout::Layout;
@@ -40,7 +41,6 @@ use crate::report::{
 use crate::schema::{Schema, Written};
 use crate::trash::{self, Policy};
 use crate::undo::History;
-use crate::index::{Index, Indexing};
 use crate::view::{FileRef, FileState, Parts, View};
 use crate::writer::{self, Claimed, Picked, Writer};
 
@@ -1121,8 +1121,8 @@ impl Library {
         (remembered != self.remembered || self.unkept).then_some(remembered)
     }
 
-    fn scan_task(&self) -> Task<'static, Result<(Scan, Vec<RelPath>)>> {
-        binding::scan(&self.layout, &self.env.identify, &self.facts, &self.scan)
+    fn scan_task(&self) -> Task<'static, Result<Scan>> {
+        binding::list_all(&self.layout).task()
     }
 
     /// Folds what is shown from scratch: each writer's log, or what the folder
@@ -1459,6 +1459,9 @@ const BIND_SLICE: usize = 1 << 12;
 /// How many entities one slice of indexing takes.
 const INDEX_SLICE: usize = 1 << 12;
 
+/// About how many files listed one slice of a scan of every file takes.
+const FOUND_SLICE: usize = 1 << 13;
+
 /// Places what a read of every writer's directory found, a slice at a time.
 fn absorbed<'a>(mut reader: Reader, listing: Listing) -> Flow<'a, (Reader, ReadReport)> {
     let absorbing = reader.absorbing(listing);
@@ -1598,7 +1601,9 @@ fn scan_for<'a>(
 /// Binds every entity with a file where its facts say, knowing none of the
 /// library's files until a scan of every one succeeds.
 fn presumed_bound(mut library: Library) -> Flow<'static, Library> {
-    library.unscanned.add(vec![RelPath::ROOT], &library.bindings);
+    library
+        .unscanned
+        .add(vec![RelPath::ROOT], &library.bindings);
     library.bind_due = true;
     let scan = library.scan.clone();
     rebound(library, scan)
@@ -1631,10 +1636,30 @@ fn walk<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
 
 /// Binds every file the finished walk listed.
 fn walked<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
-    let known = library.borrow();
-    let found = known.walking.as_ref().map(Walk::found).unwrap_or_default();
-    let identify = binding::identify(found, &known.env.identify, &known.facts, &known.scan);
-    flow::run(identify).and_then(move |(scan, read)| {
+    flow::sliced(
+        (library, Scan::default(), None),
+        |(library, found, after)| {
+            let Some(walk) = library.borrow().walking.as_ref() else {
+                return true;
+            };
+            let (last, finished) = walk.found_after(found, after.as_ref(), FOUND_SLICE);
+            *after = last;
+            finished
+        },
+    )
+    .then(|(library, found, _)| {
+        let resolving = (library, found, Resolving::default());
+        flow::sliced(resolving, |(library, found, resolving)| {
+            let known = library.borrow();
+            resolving.step(found, &known.facts, &known.scan, FOUND_SLICE)
+        })
+    })
+    .then(|(library, found, resolving)| {
+        let identify = &library.borrow().env.identify;
+        let identified = binding::identified(found, resolving.needed, identify);
+        identified.map_ok(move |read| (library, read))
+    })
+    .and_then(move |(library, (scan, read))| {
         let mut library = library;
         let known = library.borrow_mut();
         known.walking = None;
@@ -1687,15 +1712,8 @@ fn remember<'a, L: BorrowMut<Library> + 'a>(
 
 /// Once entries are durable, scans again only `paths`, and binds.
 fn rescan_paths(library: &mut Library, paths: Vec<RelPath>) -> Fallible<'_, &mut Library> {
-    let Library {
-        layout,
-        env,
-        facts,
-        scan,
-        ..
-    } = &*library;
-    let scan = binding::rescan(layout, &env.identify, facts, scan, paths.clone());
-    rebind_logged(library, scan, paths)
+    let listed = binding::relist(&library.layout, &library.scan, paths.clone()).task();
+    rebind_logged(library, listed, paths)
 }
 
 /// Once entries are durable, binds to what `scan` finds. A scan that fails does
@@ -1704,21 +1722,30 @@ fn rescan_paths(library: &mut Library, paths: Vec<RelPath>) -> Fallible<'_, &mut
 /// Identities it fails to keep in the local root are kept after the next scan.
 fn rebind_logged<'a>(
     library: &'a mut Library,
-    scan: Task<'static, Result<(Scan, Vec<RelPath>)>>,
+    listed: Task<'static, Result<Scan>>,
     unsure: Vec<RelPath>,
 ) -> Fallible<'a, &'a mut Library> {
     if let Some(walking) = library.walking.as_mut() {
         walking.forget(&unsure);
     }
-    flow::run(scan).then(move |scanned| match scanned {
-        Ok((scan, read)) => rebound(library, scan)
-            .then(move |library| remember(library, read).then(|(library, _)| ok(library))),
-        Err(error) => {
-            library.unscanned.add(unsure, &library.bindings);
-            library.lag(Lag::Scan, &Err(error));
-            library.bind_due = true;
-            ok(library)
-        }
+    flow::run(listed).then(move |listed| {
+        let identified = match listed {
+            Ok(mut scan) => {
+                let unknown = binding::resolve(&mut scan, &library.facts, &library.scan);
+                binding::identified(scan, unknown, &library.env.identify)
+            }
+            Err(error) => Flow::Done(Err(error)),
+        };
+        identified.then(move |scanned| match scanned {
+            Ok((scan, read)) => rebound(library, scan)
+                .then(move |library| remember(library, read).then(|(library, _)| ok(library))),
+            Err(error) => {
+                library.unscanned.add(unsure, &library.bindings);
+                library.lag(Lag::Scan, &Err(error));
+                library.bind_due = true;
+                ok(library)
+            }
+        })
     })
 }
 
