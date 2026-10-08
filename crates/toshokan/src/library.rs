@@ -1291,18 +1291,8 @@ fn shown_logs(reader: &Reader, folder: impl Fn(WriterId) -> bool) -> Vec<&Writer
 
 /// The entries of `log` among `hashes`, which it placed last.
 fn placed_entries<'a>(log: &'a WriterLog, hashes: &[EntryHash]) -> Vec<&'a Entry> {
-    let mut wanted: BTreeSet<EntryHash> = hashes.iter().copied().collect();
-    let mut found = Vec::with_capacity(wanted.len());
-    for entry in log.entries().iter().rev() {
-        if wanted.is_empty() {
-            break;
-        }
-        if wanted.remove(&entry.hash()) {
-            found.push(&**entry);
-        }
-    }
-    found.reverse();
-    found
+    let placed = hashes.iter().filter_map(|hash| log.entry(*hash));
+    placed.map(Rc::as_ref).collect()
 }
 
 /// The entities whose state folding an entry of `kind` changes.

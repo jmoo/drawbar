@@ -367,11 +367,11 @@ struct ExactOpVisitor;
 struct OpMembers {
     entity: Option<EntityId>,
     key: Option<String>,
-    value: Option<Raw>,
+    value: Option<Box<RawValue>>,
     replaces: Option<Vec<EntryHash>>,
     observed: Option<Vec<EntryHash>>,
     tags: Option<Vec<EntryHash>>,
-    file: Option<FileFact>,
+    file: Option<ExactFact>,
 }
 
 /// Reads the next value into `slot`, refusing a second one.
@@ -404,29 +404,19 @@ impl<'de> Visitor<'de> for ExactOpVisitor {
             match (name, member) {
                 (_, "entity") => once(&mut map, &mut m.entity)?,
                 ("write" | "add" | "remove", "key") => once(&mut map, &mut m.key)?,
-                ("write" | "add" | "remove", "value") => {
-                    let mut value: Option<Box<RawValue>> = None;
-                    once(&mut map, &mut value)?;
-                    if m.value.replace(Raw::from(value.expect("read"))).is_some() {
-                        return Err(de::Error::custom("a member named twice"));
-                    }
-                }
+                ("write" | "add" | "remove", "value") => once(&mut map, &mut m.value)?,
                 ("create" | "delete" | "write" | "file" | "pin", "replaces") => {
                     once(&mut map, &mut m.replaces)?
                 }
                 ("delete", "observed") => once(&mut map, &mut m.observed)?,
                 ("remove", "tags") => once(&mut map, &mut m.tags)?,
-                ("file" | "pin", "file") => {
-                    let mut fact: Option<ExactFact> = None;
-                    once(&mut map, &mut fact)?;
-                    if m.file.replace(fact.expect("read").into()).is_some() {
-                        return Err(de::Error::custom("a member named twice"));
-                    }
-                }
+                ("file" | "pin", "file") => once(&mut map, &mut m.file)?,
                 _ => return Err(de::Error::custom("a member this build does not write")),
             }
         }
         let entity = m.entity.ok_or_else(missing)?;
+        let value = m.value.map(Raw::from);
+        let file = m.file.map(FileFact::from);
         let op = match name {
             "create" => Op::Create {
                 entity,
@@ -440,28 +430,28 @@ impl<'de> Visitor<'de> for ExactOpVisitor {
             "write" => Op::Write {
                 entity,
                 key: m.key.ok_or_else(missing)?,
-                value: m.value,
+                value,
                 replaces: m.replaces.ok_or_else(missing)?,
             },
             "add" => Op::Add {
                 entity,
                 key: m.key.ok_or_else(missing)?,
-                value: m.value.ok_or_else(missing)?,
+                value: value.ok_or_else(missing)?,
             },
             "remove" => Op::Remove {
                 entity,
                 key: m.key.ok_or_else(missing)?,
-                value: m.value.ok_or_else(missing)?,
+                value: value.ok_or_else(missing)?,
                 tags: m.tags.ok_or_else(missing)?,
             },
             "file" => Op::File {
                 entity,
-                file: m.file,
+                file,
                 replaces: m.replaces.ok_or_else(missing)?,
             },
             "pin" => Op::Pin {
                 entity,
-                file: m.file.ok_or_else(missing)?,
+                file: file.ok_or_else(missing)?,
                 replaces: m.replaces.ok_or_else(missing)?,
             },
             _ => return Err(de::Error::custom("an op this build does not know")),
@@ -482,7 +472,7 @@ impl Entry {
     /// The entry of `line`, decoded as `kind` at `at`: what [`Entry::decode`]
     /// makes of a line, or anything a test needs.
     pub fn new(line: Line, at: Hlc, kind: EntryKind, unknown_members: bool) -> Self {
-        let canonical = !unknown_members && Self::written(line.prev(), at, &kind) == line.json();
+        let canonical = !unknown_members && writes_as(line.prev(), at, &kind, line.json());
         Self::assemble(line, at, &kind, unknown_members, canonical)
     }
 
@@ -598,7 +588,7 @@ impl Entry {
         let Some(kind) = known else {
             let raw = Raw::new(json).expect("a verified line holds a JSON object");
             let kind = EntryKind::Unknown(raw);
-            let canonical = Self::written(line.prev(), at, &kind) == json;
+            let canonical = writes_as(line.prev(), at, &kind, json);
             return Self::assemble(line, at, &kind, false, canonical);
         };
         let written = Written {
@@ -945,6 +935,29 @@ impl Unpack for Op {
             _ => return bad_variant(),
         })
     }
+}
+
+/// Whether this build writes `kind` read at `at` after `prev` as `json`, byte for
+/// byte; compared as it is written.
+fn writes_as(prev: EntryHash, at: Hlc, kind: &EntryKind, json: &str) -> bool {
+    struct Same<'a>(&'a [u8]);
+    impl std::io::Write for Same<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            match self.0.strip_prefix(bytes) {
+                Some(rest) => {
+                    self.0 = rest;
+                    Ok(bytes.len())
+                }
+                None => Err(std::io::ErrorKind::InvalidData.into()),
+            }
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut same = Same(json.as_bytes());
+    let written = serde_json::to_writer(&mut same, &Written { prev, at, kind });
+    written.is_ok() && same.0.is_empty()
 }
 
 fn members<T: DeserializeOwned>(json: &str) -> Option<T> {
