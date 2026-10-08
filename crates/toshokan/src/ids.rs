@@ -132,17 +132,42 @@ fn parse_hex128(what: &'static str, text: &str) -> Result<u128> {
         what,
         text: text.chars().take(64).collect(),
     };
-    if text.len() != 32 {
+    let digits = text.as_bytes();
+    if digits.len() != 32 {
         return Err(invalid());
     }
-    text.bytes().try_fold(0u128, |value, digit| {
-        let digit = match digit {
-            b'0'..=b'9' => digit - b'0',
-            b'a'..=b'f' => digit - b'a' + 10,
-            _ => return Err(invalid()),
-        };
-        Ok(value << 4 | u128::from(digit))
-    })
+    match (half_of(&digits[..16]), half_of(&digits[16..])) {
+        (Some(high), Some(low)) => Ok(u128::from(high) << 64 | u128::from(low)),
+        _ => Err(invalid()),
+    }
+}
+
+/// The value of each lowercase hexadecimal digit by its byte; [`NOT_HEX`] for
+/// any other byte.
+const NIBBLES: [u8; 256] = {
+    let mut nibbles = [NOT_HEX; 256];
+    let mut at = 0;
+    while at < 16 {
+        nibbles[b"0123456789abcdef"[at] as usize] = at as u8;
+        at += 1;
+    }
+    nibbles
+};
+
+const NOT_HEX: u8 = 0xff;
+
+/// The value of 16 lowercase hexadecimal digits. Ids are read and written as
+/// two halves of 64 bits: a 128-bit shift per digit is a call on wasm32.
+fn half_of(digits: &[u8]) -> Option<u64> {
+    let mut value = 0u64;
+    for digit in digits {
+        let nibble = NIBBLES[usize::from(*digit)];
+        if nibble == NOT_HEX {
+            return None;
+        }
+        value = value << 4 | u64::from(nibble);
+    }
+    Some(value)
 }
 
 /// The 32 lowercase hexadecimal digits of an id.
@@ -152,8 +177,11 @@ impl Hex {
     fn of(value: u128) -> Self {
         const DIGITS: &[u8; 16] = b"0123456789abcdef";
         let mut digits = [0; 32];
-        for (at, digit) in digits.iter_mut().enumerate() {
-            *digit = DIGITS[(value >> (124 - 4 * at)) as usize & 0xf];
+        let halves = [(value >> 64) as u64, value as u64];
+        for (half, out) in halves.iter().zip(digits.chunks_exact_mut(16)) {
+            for (at, digit) in out.iter_mut().enumerate() {
+                *digit = DIGITS[(half >> (60 - 4 * at)) as usize & 0xf];
+            }
         }
         Self(digits)
     }
@@ -229,6 +257,7 @@ mod tests {
         assert_eq!(id.to_string().parse::<WriterId>().unwrap(), id);
         for text in [
             "000000000000000000000000000000AB",
+            "A0000000000000000000000000000000",
             "00000000000000000000000000000ab",
             "0000000000000000000000000000000ab",
             "+00000000000000000000000000000ab",
