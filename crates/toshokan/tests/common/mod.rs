@@ -286,11 +286,10 @@ impl Driven for NativeDirs {
 }
 
 /// Runs each behavior on fresh, empty roots of every backend: natively, or in a
-/// browser with the `web` feature. A suite marked `renaming` skips the folder that
-/// cannot rename files.
+/// browser with the `web` feature.
 #[macro_export]
 macro_rules! for_every_backend {
-    (renaming $suite:ident: $($behavior:ident),* $(,)?) => {
+    ($suite:ident: $($behavior:ident),* $(,)?) => {
         mod blocking_mem {
             $(#[test] fn $behavior() { super::$suite::$behavior(&mut $crate::common::BlockingMem(toshokan::MemDisk::new())); })*
         }
@@ -306,9 +305,6 @@ macro_rules! for_every_backend {
         }
         $crate::for_web!(private_web, Kind::Private, $suite: $($behavior),*);
         $crate::for_web!(picked_web, Kind::Picked { rename: true }, $suite: $($behavior),*);
-    };
-    ($suite:ident: $($behavior:ident),* $(,)?) => {
-        $crate::for_every_backend!(renaming $suite: $($behavior),*);
         $crate::for_web!(picked_web_without_rename, Kind::Picked { rename: false }, $suite: $($behavior),*);
     };
 }
