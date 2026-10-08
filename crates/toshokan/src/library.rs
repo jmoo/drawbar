@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::binding::{self, Bindings, Facts, Scan, Unscanned};
+use crate::binding::{self, Binding, Bindings, Facts, Scan, Unscanned};
 use crate::cache;
 use crate::drafts::{self, DraftRecord};
 use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd};
@@ -948,14 +948,6 @@ impl Library {
         flow::run(writer::retire_writer(writer.genesis()))
     }
 
-    /// Binds the facts to `scan`, unless neither changed.
-    fn rebind(&mut self, scan: Scan) {
-        if self.bind_due || scan != self.scan {
-            self.scan = scan;
-            self.bind();
-        }
-    }
-
     /// Binds again where the facts changed since the last binding.
     fn bind_facts(&mut self) {
         if self.bind_due {
@@ -964,8 +956,14 @@ impl Library {
     }
 
     fn bind(&mut self) {
-        let names = &*self.env.names;
-        let (bindings, pins) = binding::bind_known(&self.facts, &self.scan, names, &self.unscanned);
+        let mut binding = Binding::new(&self.facts, &self.scan, &self.unscanned);
+        binding.step(&self.facts, &self.scan, &*self.env.names, usize::MAX);
+        self.bound(binding);
+    }
+
+    /// Takes what a finished binding bound.
+    fn bound(&mut self, binding: Binding) {
+        let (bindings, pins) = binding.finish();
         self.pins = pins;
         self.bindings = Arc::new(bindings);
         self.bind_due = false;
@@ -1327,6 +1325,9 @@ const FOLD_SLICE: usize = 1 << 12;
 /// How many entities' file facts one slice takes.
 const FILE_SLICE: usize = 1 << 12;
 
+/// About how many entities or files one slice of binding takes.
+const BIND_SLICE: usize = 1 << 12;
+
 /// Places what a read of every writer's directory found, a slice at a time.
 fn absorbed<'a>(mut reader: Reader, listing: Listing) -> Flow<'a, (Reader, ReadReport)> {
     let absorbing = reader.absorbing(listing);
@@ -1393,8 +1394,27 @@ fn rescan<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
             known.bind_due = true;
         }
         known.behind.remove(&Lag::Scan);
-        known.rebind(scan);
-        remember(library, read).then(|(library, kept)| Flow::Done(kept.map(|()| library)))
+        rebound(library, scan).then(move |library| {
+            remember(library, read).then(|(library, kept)| Flow::Done(kept.map(|()| library)))
+        })
+    })
+}
+
+/// Binds the facts to `scan` a slice at a time, unless neither changed.
+fn rebound<'a, L: BorrowMut<Library> + 'a>(mut library: L, scan: Scan) -> Flow<'a, L> {
+    let known = library.borrow_mut();
+    if !known.bind_due && scan == known.scan {
+        return Flow::Done(library);
+    }
+    known.scan = scan;
+    let binding = Binding::new(&known.facts, &known.scan, &known.unscanned);
+    flow::sliced((library, binding), |(library, binding)| {
+        let known = library.borrow();
+        binding.step(&known.facts, &known.scan, &*known.env.names, BIND_SLICE)
+    })
+    .then(|(mut library, binding)| {
+        library.borrow_mut().bound(binding);
+        Flow::Done(library)
     })
 }
 
@@ -1439,10 +1459,8 @@ fn rebind_logged<'a>(
     unsure: Vec<RelPath>,
 ) -> Fallible<'a, &'a mut Library> {
     flow::run(scan).then(move |scanned| match scanned {
-        Ok((scan, read)) => {
-            library.rebind(scan);
-            remember(library, read).then(|(library, _)| ok(library))
-        }
+        Ok((scan, read)) => rebound(library, scan)
+            .then(move |library| remember(library, read).then(|(library, _)| ok(library))),
         Err(error) => {
             library.unscanned.add(unsure, &library.bindings);
             library.lag(Lag::Scan, &Err(error));
