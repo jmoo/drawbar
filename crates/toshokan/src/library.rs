@@ -272,7 +272,6 @@ impl Library {
             }
             (None, true) => Mode::Writable,
         };
-        library.show();
         library
     }
 
@@ -1088,13 +1087,20 @@ impl Library {
         let logs = self.reader.logs().values();
         let forks = logs.clone().flat_map(|log| log.forks()).copied().collect();
         let gaps = logs.flat_map(|log| log.gaps()).copied().collect();
-        self.view = View::new(Parts {
+        let mut index = Arc::clone(self.view.index());
+        let shown = self.view.parts();
+        Arc::make_mut(&mut index).update(
+            (&shown.folded, &shown.bindings),
+            (&self.folded, &self.bindings),
+        );
+        let parts = Parts {
             folded: self.folded.clone(),
             bindings: Arc::clone(&self.bindings),
             writers: self.writer_infos(),
             forks,
             gaps,
-        });
+        };
+        self.view = View::indexed(parts, index);
     }
 
     fn writer_infos(&self) -> Vec<WriterInfo> {

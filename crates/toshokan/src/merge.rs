@@ -31,7 +31,7 @@ use crate::log::{Displaced, Entry, EntryKind, FileFact, Op};
 use crate::path::RelPath;
 use crate::reader::WriterLog;
 use crate::report::TrashItem;
-use crate::schema::{Raw, Written};
+use crate::schema::{KeyKind, Raw, Written};
 
 /// The folded state of a set of entries. A clone shares each entity's state with
 /// the original until one of them changes it.
@@ -536,6 +536,71 @@ impl EntityState {
             .any(|(_, _, existence)| *existence == Existence::Created);
         created || self.deletion_conflicted()
     }
+
+    /// The surviving file write that names a file, latest by clock, writer and
+    /// entry: the last of [`EntityState::file_facts`].
+    fn latest_file(&self) -> Option<&FileValue> {
+        let named = self.file.survivors().filter_map(|(entry, stamp, value)| {
+            Some(((stamp.at, stamp.by, entry), value.as_ref()?))
+        });
+        named.max_by_key(|(order, _)| *order).map(|(_, file)| file)
+    }
+
+    fn shown(&self) -> Option<Shown<'_>> {
+        let (mut created, mut deleted) = (false, false);
+        for (_, _, existence) in self.existence.survivors() {
+            match existence {
+                Existence::Created => created = true,
+                Existence::Deleted { .. } => deleted = true,
+            }
+        }
+        let deletion_conflicted = deleted && self.deletion_conflicted();
+        if !created && !deletion_conflicted {
+            return None;
+        }
+        let registers = self.registers.iter().flat_map(|(key, register)| {
+            let values = register
+                .survivors()
+                .filter_map(|(_, _, value)| value.as_ref());
+            values.map(|value| (KeyKind::Register, key.as_str(), value))
+        });
+        let sets = self.sets.iter().flat_map(|(key, set)| {
+            let members = set.adds.keys().map(|(value, _)| value);
+            members.map(|value| (KeyKind::Set, key.as_str(), value))
+        });
+        let mut values: Vec<_> = registers.chain(sets).collect();
+        values.sort_unstable();
+        values.dedup();
+        let mut files = self
+            .file
+            .survivors()
+            .filter_map(|(_, _, value)| value.as_ref());
+        let first = files.next();
+        Some(Shown {
+            values,
+            deletion_conflicted,
+            file_conflicted: files.any(|file| first.is_some_and(|first| !same_fact(first, file))),
+            logged: self.latest_file().map(|file| &file.path),
+        })
+    }
+}
+
+/// Whether two file writes say the same, members this build does not know aside.
+fn same_fact(a: &FileValue, b: &FileValue) -> bool {
+    (&a.path, a.identity, a.len, a.modified) == (&b.path, b.identity, b.len, b.modified)
+}
+
+/// What an entity shows that a view indexes.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Shown<'a> {
+    /// Each value it holds under each key: of a register, the values of its
+    /// surviving writes; of a set, its members. Sorted and once each.
+    pub values: Vec<(KeyKind, &'a str, &'a Raw)>,
+    pub deletion_conflicted: bool,
+    /// Whether its surviving file writes that name a file name different ones.
+    pub file_conflicted: bool,
+    /// The path of its latest surviving file write that names a file.
+    pub logged: Option<&'a RelPath>,
 }
 
 impl From<&FileFact> for FileValue {
@@ -839,6 +904,48 @@ impl Folded {
             }
         }
         found
+    }
+
+    /// The entities whose state differs from `before`'s, by id. A state a clone
+    /// still shares with `before` is unchanged without being compared, so this
+    /// costs a step per entity.
+    pub fn changed(&self, before: &Folded) -> Vec<EntityId> {
+        let mut changed = Vec::new();
+        let mut old = before.entities.iter().peekable();
+        for (&entity, now) in &self.entities {
+            while let Some((&gone, _)) = old.next_if(|(id, _)| **id < entity) {
+                changed.push(gone);
+            }
+            match old.next_if(|(id, _)| **id == entity) {
+                Some((_, was)) if Arc::ptr_eq(was, now) || was == now => {}
+                _ => changed.push(entity),
+            }
+        }
+        changed.extend(old.map(|(&gone, _)| gone));
+        changed
+    }
+
+    /// What `entity` shows that a view indexes; `None` unless it is shown.
+    pub fn shown(&self, entity: EntityId) -> Option<Shown<'_>> {
+        self.entities.get(&entity)?.shown()
+    }
+
+    /// [`Folded::shown`] of every entity shown, by id.
+    pub fn each_shown(&self) -> impl Iterator<Item = (EntityId, Shown<'_>)> {
+        let entities = self.entities.iter();
+        entities.filter_map(|(entity, state)| Some((*entity, state.shown()?)))
+    }
+
+    /// The path of `entity`'s latest surviving file write that names a file, while
+    /// it is shown.
+    pub fn logged_path(&self, entity: EntityId) -> Option<&RelPath> {
+        let state = self.entities.get(&entity).filter(|state| state.present())?;
+        state.latest_file().map(|file| &file.path)
+    }
+
+    /// How many entities the state holds anything of, shown or not.
+    pub fn entity_count(&self) -> usize {
+        self.entities.len()
     }
 
     /// Every entity that exists, or whose deletion is in conflict.

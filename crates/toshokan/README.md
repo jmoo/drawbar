@@ -45,6 +45,15 @@ let tags = view.entity(song).unwrap().members(TAGS);
 lib.undo()?;
 ```
 
+A view answers lookups from indexes it shares with the views before and after
+it, each in a search plus a step per result: the entities whose register or set
+holds a value (`find`), holds any value (`with`) or a value in a range
+(`range`), each value with how many entities hold it (`values`), the entity
+bound to a file (`at`), the entities whose files are under a folder (`under`),
+and every conflict (`conflicts`). Values compare by the JSON toshokan writes for
+them; `range` and `values` decode each distinct value of the key. Searching
+names or derived metadata is the app's.
+
 `opened` reports what needs the user: effects another writer left unfinished,
 drafts, forks, facts a restore of the folder removed, and files that arrived,
 moved or changed outside the app. A view never changes, so an app can hand it to

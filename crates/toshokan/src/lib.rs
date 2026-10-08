@@ -25,6 +25,7 @@ pub mod blocking;
 pub mod cache;
 #[doc(hidden)]
 pub mod compaction;
+mod cow;
 #[doc(hidden)]
 pub mod crash;
 pub mod disk;
@@ -36,6 +37,7 @@ pub mod env;
 pub mod error;
 mod flow;
 pub mod ids;
+mod index;
 pub mod intent;
 pub mod io;
 pub mod layout;
@@ -78,6 +80,6 @@ pub use layout::Layout;
 pub use path::RelPath;
 pub use plan::{Expect, Plan};
 pub use report::{Committed, Lag, Local, Opened, Outcome, Partial};
-pub use schema::{Field, Members, Raw, Register, Schema, Set, Value};
+pub use schema::{Field, Keyed, Members, Raw, Register, Schema, Set, Value};
 pub use trash::Policy;
-pub use view::{EntityView, FileRef, FileState, View};
+pub use view::{Counts, EntityView, FileRef, FileState, View};
