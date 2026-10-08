@@ -203,6 +203,9 @@ impl Links {
         entities: &mut Vec<EntityId>,
         files: &mut Vec<RelPath>,
     ) {
+        if let Some((path, _)) = scan.files.get_key_value(key) {
+            files.push(path.clone());
+        }
         let hash = hashed(key);
         if !seen.insert(hash) {
             return;
@@ -211,9 +214,6 @@ impl Links {
         let keyed = self.keyed.seek(|(other, _)| other.cmp(&hash));
         let keyed = keyed.take_while(|((other, _), _)| *other == hash);
         files.extend(keyed.map(|((_, path), _)| path.clone()));
-        if let Some((path, _)) = scan.files.get_key_value(key) {
-            files.push(path.clone());
-        }
     }
 
     fn by_identity(
@@ -675,6 +675,22 @@ mod tests {
         fn key(&self, path: &str) -> String {
             path.to_lowercase()
         }
+    }
+
+    #[test]
+    fn a_key_whose_hash_collides_with_one_reached_still_reaches_its_own_file() {
+        let file = Scanned {
+            len: 10,
+            modified: None,
+            identity: None,
+        };
+        let scan = Scan {
+            files: BTreeMap::from([(RelPath::new("b").unwrap(), file)]),
+        };
+        let mut seen = HashSet::from([hashed("b")]);
+        let (mut entities, mut files) = (Vec::new(), Vec::new());
+        Links::default().by_key("b", &scan, &mut seen, &mut entities, &mut files);
+        assert_eq!(files, [RelPath::new("b").unwrap()]);
     }
 
     const PLACES: [&str; 8] = ["a", "A", "b", "c", "d/e", "d/E", "d", "f/g"];
