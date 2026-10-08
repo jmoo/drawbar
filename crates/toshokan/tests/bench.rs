@@ -75,8 +75,7 @@ export async function watch_stop() {
 }
 export function browser() {
   const longtask = PerformanceObserver.supportedEntryTypes?.includes("longtask");
-  const give = typeof globalThis.scheduler?.yield === "function" ? "scheduler.yield" : "message";
-  return `${navigator.userAgent} | gives the thread back by ${give} | longtask ${longtask ? "reported" : "not reported"}`;
+  return `${navigator.userAgent} | longtask ${longtask ? "reported" : "not reported"}`;
 }
 async function walk(path, create) {
   let dir = await navigator.storage.getDirectory();

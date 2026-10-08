@@ -188,19 +188,11 @@ fn now() -> f64 {
         .unwrap_or_default()
 }
 
-/// Resolves once the event loop has run what was waiting for the thread:
-/// through `scheduler.yield()` where the browser has it, else a message to
-/// itself, which no timer clamps.
+/// Resolves once the event loop has run the tasks waiting for the thread, by a
+/// message the page posts to itself, which no timer clamps.
+// ⚠️ `scheduler.yield()` would run the core ahead of the waiting tasks: measured
+// in Chrome 151, frames then came about 100 ms apart while the core worked.
 async fn give_back() {
-    let scheduler = field(&js_sys::global(), "scheduler");
-    let give = scheduler.as_ref().and_then(|scheduler| {
-        let give: Function = field(scheduler, "yield")?.dyn_into().ok()?;
-        give.call0(scheduler).ok()?.dyn_into::<Promise>().ok()
-    });
-    if let Some(given) = give {
-        let _ = wait(given).await;
-        return;
-    }
     let Ok(channel) = MessageChannel::new() else {
         return;
     };
