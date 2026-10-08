@@ -37,7 +37,7 @@ pub struct Executor {
     /// [`Io::keeps_open`] does not allow.
     ///
     /// ⚠️ Its writes land only at that close, so a close that fails fails the
-    /// next request, whatever it asks.
+    /// next request, whatever it asks, with an error that names the filled file.
     filling: RefCell<Option<Filling>>,
 }
 
@@ -138,7 +138,7 @@ impl Executor {
             Some(filling) if io.keeps_open(filling.root, &filling.path) => {
                 *self.filling.borrow_mut() = Some(filling);
             }
-            Some(filling) => close(filling.stream).await?,
+            Some(filling) => land(filling).await?,
             None => {}
         }
         let done = |()| Reply::Done;
@@ -616,6 +616,14 @@ async fn write_stream(
         .await
         .map(drop)
         .map_err(|error| failure(&error, IoError::IsDirectory))
+}
+
+/// Closes the stream filling a file, failing as [`IoError::undelivered`].
+async fn land(filling: Filling) -> Result<(), IoError> {
+    let Filling { path, stream, .. } = filling;
+    close(stream)
+        .await
+        .map_err(|error| IoError::undelivered(&path, &error))
 }
 
 /// Puts what a stream wrote in place: the point at which it lands.

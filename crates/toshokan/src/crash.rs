@@ -104,7 +104,10 @@ impl Streams {
 
     fn land(&mut self) -> Result<(), IoError> {
         for write in std::mem::take(&mut self.filling) {
-            self.disk.perform(write)?;
+            let path = write.path().clone();
+            self.disk
+                .perform(write)
+                .map_err(|error| IoError::undelivered(&path, &error))?;
         }
         Ok(())
     }

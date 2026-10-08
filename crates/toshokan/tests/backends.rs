@@ -449,6 +449,70 @@ async fn a_picked_folder_whose_browser_refuses_move_cannot_rename_a_file() {
     assert_eq!(kept, Ok(Reply::Bytes(b"a".to_vec())));
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+#[wasm_bindgen_test::wasm_bindgen_test]
+async fn writes_that_fail_to_land_fail_the_next_request_as_their_own_file() {
+    use js_sys::{Promise, Reflect};
+    use toshokan::env::Random;
+    use toshokan::web::{private_dir, CryptoRandom, Executor, Folder};
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::{JsCast, JsValue};
+
+    let run = format!("suites/{:032x}", CryptoRandom.next_u128());
+    let dir = private_dir(&path(&format!("{run}/folder"))).await.unwrap();
+    let folder = Folder::Picked { dir, rename: false };
+    let executor = Executor::new(folder, &path(&format!("{run}/local")))
+        .await
+        .unwrap();
+    executor
+        .perform(create(Root::Folder, "f", b""))
+        .await
+        .unwrap();
+    let write = Io::Write {
+        root: Root::Folder,
+        path: path("f"),
+        offset: 0,
+        bytes: b"lost".to_vec(),
+    };
+    executor.perform(write).await.unwrap();
+
+    let refuse = Closure::<dyn Fn() -> Promise>::new(|| {
+        let error = js_sys::Error::new("refused by the test");
+        error.set_name("NotFoundError");
+        Promise::reject(&error)
+    });
+    let streams = Reflect::get(&js_sys::global(), &"FileSystemWritableFileStream".into()).unwrap();
+    let prototype: js_sys::Object = Reflect::get(&streams, &"prototype".into())
+        .unwrap()
+        .unchecked_into();
+    let name = JsValue::from_str("close");
+    let own = js_sys::Object::has_own(&prototype, &name);
+    let close = Reflect::get(&prototype, &name).unwrap();
+    Reflect::set(&prototype, &name, refuse.as_ref()).unwrap();
+    let listed = executor
+        .perform(Io::List {
+            root: Root::Folder,
+            dir: RelPath::ROOT,
+        })
+        .await;
+    match own {
+        true => Reflect::set(&prototype, &name, &close).unwrap(),
+        false => Reflect::delete_property(&prototype, &name).unwrap(),
+    };
+
+    assert_eq!(
+        listed,
+        Err(IoError::Other(
+            "writes to f did not land: nothing is there".into()
+        )),
+        "a listing that reports NotFound reads as an empty directory"
+    );
+    let Ok(Reply::Stat(Some(meta))) = executor.perform(stat("f")).await else {
+        panic!("f is missing");
+    };
+    assert_eq!(meta.len, 0, "the lost writes landed");
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_native_root_declares_no_replace_only_where_its_renames_refuse_a_destination() {

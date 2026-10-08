@@ -306,6 +306,16 @@ pub enum IoError {
     Other(String),
 }
 
+impl IoError {
+    /// The result of the request that closed a writable stream whose writes to
+    /// `path` failed to land with `error`. It names the file and keeps none of
+    /// the error's kind, which would read as that request's own outcome: a
+    /// listing's `NotFound` as an empty directory.
+    pub(crate) fn undelivered(path: &RelPath, error: &IoError) -> Self {
+        Self::Other(format!("writes to {path} did not land: {error}"))
+    }
+}
+
 /// One thing a backend may or may not be able to do.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Capability {
@@ -478,5 +488,21 @@ mod tests {
             root: Root::Folder,
             path: path("tmp/f"),
         }));
+    }
+
+    #[test]
+    fn writes_that_fail_to_land_name_their_file_and_no_kind_of_the_next_request() {
+        let filled = path("tmp/f");
+        let errors = [
+            IoError::NotFound,
+            IoError::NoSpace,
+            IoError::Other("AbortError".into()),
+        ];
+        for error in errors {
+            let IoError::Other(why) = IoError::undelivered(&filled, &error) else {
+                panic!("{error:?} kept its kind");
+            };
+            assert!(why.starts_with("writes to tmp/f did not land: "), "{why}");
+        }
     }
 }
