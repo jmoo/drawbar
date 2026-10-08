@@ -452,21 +452,27 @@ pub fn bind(facts: &Facts, scan: &Scan, names: &dyn Names) -> Bindings {
         }
     }
 
-    let in_sync: BTreeMap<Identity, Vec<EntityId>> = bindings
-        .bound
-        .iter()
-        .filter(|(_, file)| file.state == FileState::InSync)
-        .filter_map(|(&entity, file)| Some((scan.files.get(&file.path)?.identity?, entity)))
-        .fold(BTreeMap::new(), |mut by, (identity, entity)| {
-            by.entry(identity).or_insert_with(Vec::new).push(entity);
-            by
-        });
+    let in_sync: OnceCell<BTreeMap<Identity, Vec<EntityId>>> = OnceCell::new();
+    let in_sync = |bound: &BTreeMap<EntityId, FileRef>| {
+        in_sync.get_or_init(|| {
+            bound
+                .iter()
+                .filter(|(_, file)| file.state == FileState::InSync)
+                .filter_map(|(&entity, file)| Some((scan.files.get(&file.path)?.identity?, entity)))
+                .fold(BTreeMap::new(), |mut by, (identity, entity)| {
+                    by.entry(identity).or_insert_with(Vec::new).push(entity);
+                    by
+                })
+        })
+    };
     for (path, file) in &scan.files {
         if taken.contains_key(path) {
             continue;
         }
         bindings.unbound.push(path.clone());
-        let copied = file.identity.and_then(|identity| in_sync.get(&identity));
+        let copied = file
+            .identity
+            .and_then(|identity| in_sync(&bindings.bound).get(&identity));
         for &entity in copied.into_iter().flatten() {
             bindings.report.copied.push(Copied {
                 entity,
