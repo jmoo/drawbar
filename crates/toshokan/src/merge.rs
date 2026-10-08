@@ -18,6 +18,8 @@
 //!   members this build does not know. Every record of a snapshot's state keeps
 //!   the members this build does not know.
 
+use std::borrow::Borrow;
+use std::cell::RefCell;
 use std::collections::btree_map::Entry as Slot;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -32,6 +34,7 @@ use crate::path::RelPath;
 use crate::reader::WriterLog;
 use crate::report::TrashItem;
 use crate::schema::{Raw, Written};
+use crate::small::{SmallMap, SmallSet};
 
 /// The folded state of a set of entries. A clone shares each entity's state with
 /// the original until one of them changes it.
@@ -47,13 +50,63 @@ pub struct Folded {
 }
 
 /// The members of a record of a snapshot's state that this build does not know,
-/// by name.
+/// by name. Few records have any, so they are held apart, and only while there
+/// are some.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
-struct Extra(BTreeMap<String, Raw>);
+struct Extra(Option<Box<BTreeMap<String, Raw>>>);
 
-/// The [`Extra`] of each record under a key, where it has any.
+/// The [`Extra`] of each record under a key, where it has any; held apart, and
+/// only while some record has any.
 #[derive(Clone, PartialEq, Debug)]
-struct Extras<K>(BTreeMap<K, Extra>);
+struct Extras<K>(Option<Box<BTreeMap<K, Extra>>>);
+
+/// A key's name, shared by every record that holds it.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+struct Key(Arc<str>);
+
+/// How many names [`Key::of`] keeps to share. Past them a name is held alone, so
+/// a log naming ever more keys cannot grow what this thread keeps.
+const SHARED_NAMES: usize = 1024;
+
+impl Key {
+    /// The key named `name`, sharing the text of every other key of that name.
+    fn of(name: &str) -> Self {
+        thread_local! {
+            static NAMES: RefCell<BTreeSet<Arc<str>>> = const { RefCell::new(BTreeSet::new()) };
+        }
+        NAMES.with(|names| {
+            let mut names = names.borrow_mut();
+            if let Some(shared) = names.get(name) {
+                return Self(Arc::clone(shared));
+            }
+            let named: Arc<str> = name.into();
+            if names.len() < SHARED_NAMES {
+                names.insert(Arc::clone(&named));
+            }
+            Self(named)
+        })
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Borrow<str> for Key {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The value under the key named `name`, made empty when there is none.
+fn named<'a, V: Default>(map: &'a mut SmallMap<Key, V>, name: &str) -> &'a mut V {
+    map.slot(name, || (Key::of(name), V::default()))
+}
+
+/// As [`named`], for a key another state holds.
+fn keyed<'a, V: Default>(map: &'a mut SmallMap<Key, V>, key: &Key) -> &'a mut V {
+    map.slot(key.as_str(), || (key.clone(), V::default()))
+}
 
 /// Who wrote something, ordered for display: by clock, then by writer.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -65,8 +118,8 @@ struct Stamp {
 /// A multi-value register.
 #[derive(Clone, PartialEq, Debug)]
 struct Register<V> {
-    writes: BTreeMap<EntryHash, (Stamp, V)>,
-    replaced: BTreeSet<EntryHash>,
+    writes: SmallMap<EntryHash, (Stamp, V)>,
+    replaced: SmallSet<EntryHash>,
     extra: Extra,
     write_extra: Extras<EntryHash>,
 }
@@ -74,16 +127,19 @@ struct Register<V> {
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Existence {
     Created,
-    Deleted { observed: BTreeSet<EntryHash> },
+    /// Sorted, without repeats.
+    Deleted {
+        observed: Box<[EntryHash]>,
+    },
 }
 
 /// An observed-remove set. A tag is the entry that added the value.
 #[derive(Clone, PartialEq, Debug, Default)]
 struct OrSet {
     /// Only adds no remove names.
-    adds: BTreeMap<(Raw, EntryHash), Stamp>,
+    adds: SmallMap<(Raw, EntryHash), Stamp>,
     /// Each removed tag, with the earliest remove naming it.
-    removed: BTreeMap<(Raw, EntryHash), (Stamp, EntryHash)>,
+    removed: SmallMap<(Raw, EntryHash), (Stamp, EntryHash)>,
     extra: Extra,
     add_extra: Extras<(Raw, EntryHash)>,
     removed_extra: Extras<(Raw, EntryHash)>,
@@ -101,9 +157,8 @@ struct FileValue {
 #[derive(Clone, PartialEq, Debug, Default)]
 struct EntityState {
     existence: Register<Existence>,
-    // Boxed with the sets: a map node has room for eleven, and an entity has a few.
-    registers: BTreeMap<String, Box<Register<Option<Raw>>>>,
-    sets: BTreeMap<String, Box<OrSet>>,
+    registers: SmallMap<Key, Register<Option<Raw>>>,
+    sets: SmallMap<Key, OrSet>,
     file: Register<Option<FileValue>>,
     extra: Extra,
 }
@@ -157,8 +212,8 @@ pub struct Beyond {
 
 /// The values of `now` whose keys `old` does not hold.
 fn added<'a, K: Ord, V>(
-    now: &'a BTreeMap<K, V>,
-    old: Option<&'a BTreeMap<K, V>>,
+    now: &'a SmallMap<K, V>,
+    old: Option<&'a SmallMap<K, V>>,
 ) -> impl Iterator<Item = &'a V> {
     now.iter()
         .filter(move |(key, _)| !old.is_some_and(|old| old.contains_key(key)))
@@ -168,8 +223,12 @@ fn added<'a, K: Ord, V>(
 impl Extra {
     /// Keeps the greater text under each name, so joins commute.
     fn join(&mut self, other: &Self) {
-        for (name, raw) in &other.0 {
-            let kept = self.0.entry(name.clone()).or_insert_with(|| raw.clone());
+        let Some(theirs) = &other.0 else {
+            return;
+        };
+        let mine = self.0.get_or_insert_with(Box::default);
+        for (name, raw) in theirs.iter() {
+            let kept = mine.entry(name.clone()).or_insert_with(|| raw.clone());
             if raw > kept {
                 *kept = raw.clone();
             }
@@ -177,35 +236,58 @@ impl Extra {
     }
 
     fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.0.is_none()
+    }
+
+    fn members(&self) -> impl Iterator<Item = (&String, &Raw)> {
+        self.0.iter().flat_map(|members| members.iter())
+    }
+}
+
+impl From<BTreeMap<String, Raw>> for Extra {
+    fn from(members: BTreeMap<String, Raw>) -> Self {
+        Self((!members.is_empty()).then(|| Box::new(members)))
+    }
+}
+
+impl Serialize for Extra {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(self.members())
     }
 }
 
 impl<K> Default for Extras<K> {
     fn default() -> Self {
-        Self(BTreeMap::new())
+        Self(None)
     }
 }
 
 impl<K: Ord + Clone> Extras<K> {
     fn join_one(&mut self, key: &K, extra: &Extra) {
         if !extra.is_empty() {
-            self.0.entry(key.clone()).or_default().join(extra);
+            let extras = self.0.get_or_insert_with(Box::default);
+            extras.entry(key.clone()).or_default().join(extra);
         }
     }
 
     fn join(&mut self, other: &Self) {
-        for (key, extra) in &other.0 {
+        for (key, extra) in other.0.iter().flat_map(|extras| extras.iter()) {
             self.join_one(key, extra);
         }
     }
 
     fn of(&self, key: &K) -> Extra {
-        self.0.get(key).cloned().unwrap_or_default()
+        let extra = self.0.as_ref().and_then(|extras| extras.get(key));
+        extra.cloned().unwrap_or_default()
     }
 
     fn remove(&mut self, key: &K) {
-        self.0.remove(key);
+        if let Some(extras) = &mut self.0 {
+            extras.remove(key);
+            if extras.is_empty() {
+                self.0 = None;
+            }
+        }
     }
 }
 
@@ -236,8 +318,8 @@ impl Stamp {
 impl<V> Default for Register<V> {
     fn default() -> Self {
         Self {
-            writes: BTreeMap::new(),
-            replaced: BTreeSet::new(),
+            writes: SmallMap::default(),
+            replaced: SmallSet::default(),
             extra: Extra::default(),
             write_extra: Extras::default(),
         }
@@ -247,29 +329,29 @@ impl<V> Default for Register<V> {
 impl<V: Ord + Clone> Register<V> {
     fn write(&mut self, entry: EntryHash, stamp: Stamp, value: V, replaces: &[EntryHash]) {
         self.insert(entry, stamp, value);
-        self.replaced.extend(replaces);
+        self.replaced.extend(replaces.iter().copied());
     }
 
     /// Two writes under one entry hash only come from a forged or colliding log;
     /// the greater is kept so the join stays order-independent.
     fn insert(&mut self, entry: EntryHash, stamp: Stamp, value: V) {
-        match self.writes.entry(entry) {
-            Slot::Vacant(slot) => {
-                slot.insert((stamp, value));
+        match self.writes.get_mut(&entry) {
+            None => {
+                self.writes.insert(entry, (stamp, value));
             }
-            Slot::Occupied(mut slot) => {
-                if (stamp, &value) > (slot.get().0, &slot.get().1) {
-                    slot.insert((stamp, value));
+            Some(held) => {
+                if (stamp, &value) > (held.0, &held.1) {
+                    *held = (stamp, value);
                 }
             }
         }
     }
 
     fn join(&mut self, other: &Self) {
-        for (&entry, (stamp, value)) in &other.writes {
+        for (&entry, (stamp, value)) in other.writes.iter() {
             self.insert(entry, *stamp, value.clone());
         }
-        self.replaced.extend(&other.replaced);
+        self.replaced.extend(other.replaced.keys().copied());
         self.extra.join(&other.extra);
         self.write_extra.join(&other.write_extra);
     }
@@ -277,7 +359,7 @@ impl<V: Ord + Clone> Register<V> {
     fn survivors(&self) -> impl Iterator<Item = (EntryHash, Stamp, &V)> {
         self.writes
             .iter()
-            .filter(|(entry, _)| !self.replaced.contains(entry))
+            .filter(|(entry, _)| !self.replaced.contains_key(*entry))
             .map(|(&entry, (stamp, value))| (entry, *stamp, value))
     }
 
@@ -363,8 +445,12 @@ impl OrSet {
             return;
         }
         self.add_extra.join_one(&key, extra);
-        let kept = self.adds.entry(key).or_insert(stamp);
-        *kept = (*kept).max(stamp);
+        match self.adds.get_mut(&key) {
+            Some(kept) => *kept = (*kept).max(stamp),
+            None => {
+                self.adds.insert(key, stamp);
+            }
+        }
     }
 
     fn remove(&mut self, value: &Raw, tags: &[EntryHash], by: (Stamp, EntryHash)) {
@@ -372,8 +458,12 @@ impl OrSet {
             let key = (value.clone(), tag);
             self.adds.remove(&key);
             self.add_extra.remove(&key);
-            let kept = self.removed.entry(key).or_insert(by);
-            *kept = (*kept).min(by);
+            match self.removed.get_mut(&key) {
+                Some(kept) => *kept = (*kept).min(by),
+                None => {
+                    self.removed.insert(key, by);
+                }
+            }
         }
     }
 
@@ -417,11 +507,11 @@ impl OrSet {
     }
 
     fn join(&mut self, other: &Self) {
-        for ((value, tag), &by) in &other.removed {
+        for ((value, tag), &by) in other.removed.iter() {
             self.remove(value, &[*tag], by);
         }
         self.removed_extra.join(&other.removed_extra);
-        for (key, &stamp) in &other.adds {
+        for (key, &stamp) in other.adds.iter() {
             let (value, tag) = key;
             self.add(value.clone(), *tag, stamp, &other.add_extra.of(key));
         }
@@ -432,14 +522,11 @@ impl OrSet {
 impl EntityState {
     fn join(&mut self, other: &Self) {
         self.existence.join(&other.existence);
-        for (key, register) in &other.registers {
-            self.registers
-                .entry(key.clone())
-                .or_default()
-                .join(register);
+        for (key, register) in other.registers.iter() {
+            keyed(&mut self.registers, key).join(register);
         }
-        for (key, set) in &other.sets {
-            self.sets.entry(key.clone()).or_default().join(set);
+        for (key, set) in other.sets.iter() {
+            keyed(&mut self.sets, key).join(set);
         }
         self.file.join(&other.file);
         self.extra.join(&other.extra);
@@ -479,7 +566,7 @@ impl EntityState {
                 }
                 Existence::Deleted { observed: seen } => {
                     observed.insert(entry);
-                    observed.extend(seen);
+                    observed.extend(seen.iter().copied());
                 }
             }
         }
@@ -500,12 +587,12 @@ impl EntityState {
     fn newest_beyond(&self, old: &Self) -> Option<WriterId> {
         let none = Register::default();
         let registers = self.registers.iter().flat_map(|(key, register)| {
-            let old = old.registers.get(key).map_or(&none, Box::as_ref);
+            let old = old.registers.get(key.as_str()).unwrap_or(&none);
             register.beyond(old).map(|(stamp, _)| *stamp)
         });
         let empty = OrSet::default();
         let sets = self.sets.iter().flat_map(|(key, set)| {
-            let old = old.sets.get(key).map_or(&empty, Box::as_ref);
+            let old = old.sets.get(key.as_str()).unwrap_or(&empty);
             let adds = added(&set.adds, Some(&old.adds)).copied();
             adds.chain(added(&set.removed, Some(&old.removed)).map(|(stamp, _)| *stamp))
         });
@@ -609,7 +696,7 @@ impl Folded {
                 replaces,
                 observed,
             } => {
-                let observed = observed.iter().copied().collect();
+                let observed = sorted(observed.clone());
                 self.entity(*entity).existence.write(
                     hash,
                     stamp,
@@ -623,13 +710,11 @@ impl Folded {
                 value,
                 replaces,
             } => {
-                let register = self.entity(*entity).registers.entry(key.clone());
-                register
-                    .or_default()
-                    .write(hash, stamp, value.clone(), replaces);
+                let register = named(&mut self.entity(*entity).registers, key);
+                register.write(hash, stamp, value.clone(), replaces);
             }
             Op::Add { entity, key, value } => {
-                let set = self.entity(*entity).sets.entry(key.clone()).or_default();
+                let set = named(&mut self.entity(*entity).sets, key);
                 set.add(value.clone(), hash, stamp, &Extra::default());
             }
             Op::Remove {
@@ -638,7 +723,7 @@ impl Folded {
                 value,
                 tags,
             } => {
-                let set = self.entity(*entity).sets.entry(key.clone()).or_default();
+                let set = named(&mut self.entity(*entity).sets, key);
                 set.remove(value, tags, (stamp, hash));
             }
             Op::File {
@@ -737,19 +822,19 @@ impl Folded {
                 };
                 note(part, stamp);
             }
-            for (key, register) in &now.registers {
-                let old = old.and_then(|o| o.registers.get(key)).map(|o| &o.writes);
-                for (stamp, _) in added(&register.writes, old) {
-                    note(Part::Field(key.clone()), stamp);
+            for (key, register) in now.registers.iter() {
+                let old = old.and_then(|o| o.registers.get(key.as_str()));
+                for (stamp, _) in added(&register.writes, old.map(|o| &o.writes)) {
+                    note(Part::Field(key.as_str().to_owned()), stamp);
                 }
             }
-            for (key, set) in &now.sets {
-                let old = old.and_then(|o| o.sets.get(key));
+            for (key, set) in now.sets.iter() {
+                let old = old.and_then(|o| o.sets.get(key.as_str()));
                 for stamp in added(&set.adds, old.map(|o| &o.adds)) {
-                    note(Part::Field(key.clone()), stamp);
+                    note(Part::Field(key.as_str().to_owned()), stamp);
                 }
                 for (stamp, _) in added(&set.removed, old.map(|o| &o.removed)) {
-                    note(Part::Field(key.clone()), stamp);
+                    note(Part::Field(key.as_str().to_owned()), stamp);
                 }
             }
             for (stamp, _) in added(&now.file.writes, old.map(|o| &o.file.writes)) {
@@ -797,29 +882,29 @@ impl Folded {
                 (true, true) => {}
             }
             let empty = Register::default();
-            let keys: BTreeSet<&String> =
-                now.registers.keys().chain(old.registers.keys()).collect();
+            let keys = now.registers.keys().chain(old.registers.keys());
+            let keys: BTreeSet<&str> = keys.map(Key::as_str).collect();
             for key in keys {
-                let n = now.registers.get(key).map_or(&empty, Box::as_ref);
-                let o = old.registers.get(key).map_or(&empty, Box::as_ref);
+                let n = now.registers.get(key).unwrap_or(&empty);
+                let o = old.registers.get(key).unwrap_or(&empty);
                 if let Some((by, value, replaces)) = n.rewrite(o) {
-                    let key = key.clone();
                     let op = Op::Write {
                         entity,
-                        key: key.clone(),
+                        key: key.to_owned(),
                         value,
                         replaces,
                     };
-                    note(Part::Field(key), by, op);
+                    note(Part::Field(key.to_owned()), by, op);
                 }
             }
             let empty = OrSet::default();
-            let keys: BTreeSet<&String> = now.sets.keys().chain(old.sets.keys()).collect();
+            let keys = now.sets.keys().chain(old.sets.keys());
+            let keys: BTreeSet<&str> = keys.map(Key::as_str).collect();
             for key in keys {
-                let n = now.sets.get(key).map_or(&empty, Box::as_ref);
-                let o = old.sets.get(key).map_or(&empty, Box::as_ref);
+                let n = now.sets.get(key).unwrap_or(&empty);
+                let o = old.sets.get(key).unwrap_or(&empty);
                 for (by, op) in n.rewrite(o, entity, key) {
-                    note(Part::Field(key.clone()), by, op);
+                    note(Part::Field(key.to_owned()), by, op);
                 }
             }
             if let Some((by, file, replaces)) = now.file.rewrite(&old.file) {
@@ -921,11 +1006,7 @@ impl Folded {
     }
 
     fn register_of(&self, entity: EntityId, key: &str) -> Option<&Register<Option<Raw>>> {
-        self.entities
-            .get(&entity)?
-            .registers
-            .get(key)
-            .map(Box::as_ref)
+        self.entities.get(&entity)?.registers.get(key)
     }
 
     /// The members of a set as JSON, sorted and without duplicates.
@@ -965,7 +1046,7 @@ impl Folded {
     }
 
     fn set_of(&self, entity: EntityId, key: &str) -> Option<&OrSet> {
-        self.entities.get(&entity)?.sets.get(key).map(Box::as_ref)
+        self.entities.get(&entity)?.sets.get(key)
     }
 
     /// The surviving writes of every existing entity's file register that say
@@ -1010,7 +1091,7 @@ impl Folded {
     pub fn registers(&self, entity: EntityId) -> Vec<&str> {
         self.entities
             .get(&entity)
-            .map(|state| state.registers.keys().map(String::as_str).collect())
+            .map(|state| state.registers.keys().map(Key::as_str).collect())
             .unwrap_or_default()
     }
 
@@ -1051,6 +1132,13 @@ impl Folded {
     pub fn extended(&self) -> impl Iterator<Item = &(EntryHash, Raw)> {
         self.extended.iter()
     }
+}
+
+/// `hashes` sorted, without repeats.
+fn sorted(mut hashes: Vec<EntryHash>) -> Box<[EntryHash]> {
+    hashes.sort_unstable();
+    hashes.dedup();
+    hashes.into()
 }
 
 fn oldest_first<V>(writes: impl Iterator<Item = Write<V>>) -> Vec<Write<V>> {
@@ -1118,11 +1206,11 @@ impl<T: Serialize> Serialize for Record<T> {
             #[serde(flatten)]
             known: &'a T,
             #[serde(flatten)]
-            extra: &'a BTreeMap<String, Raw>,
+            extra: &'a Extra,
         }
         Out {
             known: &self.known,
-            extra: &self.extra.0,
+            extra: &self.extra,
         }
         .serialize(serializer)
     }
@@ -1136,7 +1224,7 @@ impl<'de, T: DeserializeOwned + Members> Deserialize<'de> for Record<T> {
         let known = raw.decode().map_err(D::Error::custom)?;
         let mut members: BTreeMap<String, Raw> = raw.decode().map_err(D::Error::custom)?;
         members.retain(|name, _| !T::MEMBERS.contains(&name.as_str()));
-        Ok(Self::new(known, Extra(members)))
+        Ok(Self::new(known, Extra::from(members)))
     }
 }
 
@@ -1212,7 +1300,7 @@ impl WriteRecord for ExistenceWrite {
     fn new(entry: EntryHash, stamp: Stamp, value: &Existence) -> Self {
         let deleted = match value {
             Existence::Created => None,
-            Existence::Deleted { observed } => Some(observed.iter().copied().collect()),
+            Existence::Deleted { observed } => Some(observed.to_vec()),
         };
         Self {
             entry,
@@ -1226,7 +1314,7 @@ impl WriteRecord for ExistenceWrite {
         let value = match self.deleted {
             None => Existence::Created,
             Some(observed) => Existence::Deleted {
-                observed: observed.into_iter().collect(),
+                observed: sorted(observed),
             },
         };
         let stamp = Stamp {
@@ -1403,7 +1491,7 @@ impl<W: WriteRecord<Value: Ord + Clone>> From<&Register<W::Value>> for Record<Re
         });
         let known = RegisterRecord {
             writes: writes.collect(),
-            replaced: register.replaced.iter().copied().collect(),
+            replaced: register.replaced.keys().copied().collect(),
         };
         Record::new(known, register.extra.clone())
     }
@@ -1430,12 +1518,12 @@ impl From<&EntityState> for Record<EntityRecord> {
             registers: state
                 .registers
                 .iter()
-                .map(|(key, register)| (key.clone(), register.as_ref().into()))
+                .map(|(key, register)| (key.as_str().to_owned(), register.into()))
                 .collect(),
             sets: state
                 .sets
                 .iter()
-                .map(|(key, set)| (key.clone(), set.as_ref().into()))
+                .map(|(key, set)| (key.as_str().to_owned(), set.into()))
                 .collect(),
             file: (&state.file).into(),
         };
@@ -1451,12 +1539,12 @@ impl From<Record<EntityRecord>> for EntityState {
             registers: known
                 .registers
                 .into_iter()
-                .map(|(key, register)| (key, Box::new(register.into())))
+                .map(|(key, register)| (Key::of(&key), register.into()))
                 .collect(),
             sets: known
                 .sets
                 .into_iter()
-                .map(|(key, set)| (key, Box::new(set.into())))
+                .map(|(key, set)| (Key::of(&key), set.into()))
                 .collect(),
             file: known.file.into(),
             extra: record.extra,
@@ -1545,13 +1633,13 @@ impl Serialize for Folded {
                 Record::new(record, trashed.extra.clone())
             })
             .collect();
-        let mut map = serializer.serialize_map(Some(5 + self.extra.0.len()))?;
+        let mut map = serializer.serialize_map(None)?;
         map.serialize_entry(ENTITIES, &entities)?;
         map.serialize_entry(TRASH, &trash)?;
         map.serialize_entry(SETTLED, &self.settled)?;
         map.serialize_entry(UNKNOWN, &self.unknown)?;
         map.serialize_entry(EXTENDED, &self.extended)?;
-        for (name, raw) in &self.extra.0 {
+        for (name, raw) in self.extra.members() {
             map.serialize_entry(name, raw)?;
         }
         map.end()
@@ -1591,7 +1679,7 @@ impl<'de> Deserialize<'de> for Folded {
         if let Some(raw) = members.remove(EXTENDED) {
             folded.extended = raw.decode().map_err(D::Error::custom)?;
         }
-        folded.extra = Extra(members);
+        folded.extra = Extra::from(members);
         Ok(folded)
     }
 }
