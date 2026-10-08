@@ -839,11 +839,11 @@ always a directory of the origin private file system.
   WebKit in whole seconds: two changes that keep a file's length within that
   time look alike.
 - **The page's thread.** An operation pauses between slices of work that makes
-  no request, such as parsing, placing and folding the logs it read. Once the
-  core has held the page's thread for 6 ms since a reply or the last pause, the
-  driver gives it back at the next pause, through `scheduler.yield()` where the
-  browser has it and else a message the page posts to itself. Where an
-  operation pauses depends only on its work, never on time.
+  no request, such as parsing, placing and folding the logs it read, and binding
+  the library's files. Once the core has held the page's thread for 6 ms since
+  a reply or the last pause, the driver gives it back at the next pause, through
+  `scheduler.yield()` where the browser has it and else a message the page posts
+  to itself. Where an operation pauses depends only on its work, never on time.
 - **Locks** are Web Locks named `toshokan:/<local root path>/<name>`, held by
   the worker and released when it ends.
 - **Hints.** A tab that commits announces its newest entry on the
