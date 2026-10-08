@@ -894,8 +894,9 @@ pub struct Reader {
 #[derive(Clone)]
 pub(crate) struct Folder {
     pub(crate) files: BTreeMap<RelPath, Record>,
-    /// What the files hold, placed without the cached view.
-    log: WriterLog,
+    /// What the files hold, placed without the cached view; `None` while that is
+    /// what the cached view holds of the writer, so the two are kept once.
+    log: Option<WriterLog>,
     /// Whether `log`, what the cached view holds back of this writer and the
     /// entries the folder lost must be found again from every file at the next
     /// read: until the first read, and after records loaded from the local root.
@@ -1092,7 +1093,11 @@ impl Reader {
     /// What `writer`'s files in the folder held at the last read, placed without
     /// the cached view; `None` when the folder held no file of it.
     pub fn folder_log(&self, writer: WriterId) -> Option<&WriterLog> {
-        self.folder.get(&writer).map(|folder| &folder.log)
+        let folder = self.folder.get(&writer)?;
+        folder
+            .log
+            .as_ref()
+            .or_else(|| self.cached.writers.get(&writer))
     }
 
     /// Each file of `writer`'s directory as the last read found it, with its
@@ -1222,7 +1227,9 @@ impl Reader {
             .folder
             .entry(writer)
             .or_insert_with(|| Folder::new(writer));
-        folder.log.place(Vec::new(), entries.clone());
+        if let Some(log) = &mut folder.log {
+            log.place(Vec::new(), entries.clone());
+        }
         if let Some((path, stamp)) = written {
             if folder.appended(&path, &entries, stamp) {
                 self.unsaved.files.insert(path);
@@ -1302,7 +1309,11 @@ impl Reader {
             };
             let log = match placing.stage {
                 Stage::Folder { .. } => {
-                    &mut self.folder.get_mut(&placing.writer).expect("gathered").log
+                    let folder = self.folder.get_mut(&placing.writer).expect("gathered");
+                    folder
+                        .log
+                        .as_mut()
+                        .expect("placed apart from the cached view")
                 }
                 Stage::Cached => self.cached.log_mut(placing.writer),
             };
@@ -1380,14 +1391,26 @@ impl Reader {
         if whole {
             (snapshots, entries) = folder.contents(writer);
             let cached = self.cached.writers.get(&writer);
-            folder.log = match cached.filter(|log| log.is_placed_from(&snapshots, &entries)) {
-                Some(log) => log.clone(),
-                None => WriterLog::new(writer),
-            };
+            let same = cached.is_some_and(|log| log.is_placed_from(&snapshots, &entries));
+            folder.log = (!same).then(|| WriterLog::new(writer));
         }
-        let growing = folder
-            .log
-            .growing(snapshots.clone(), entries.clone(), BTreeSet::new());
+        let Some(log) = &mut folder.log else {
+            // What the folder holds is what the cached view holds, and placing
+            // the same entries in each keeps them alike.
+            self.report_unreadable(writer, report);
+            let log = self.cached.log_mut(writer);
+            if whole {
+                log.forget_waiting();
+            }
+            let growing = log.growing(snapshots, entries, BTreeSet::new());
+            return Placing {
+                writer,
+                whole,
+                stage: Stage::Cached,
+                growing,
+            };
+        };
+        let growing = log.growing(snapshots.clone(), entries.clone(), BTreeSet::new());
         Placing {
             writer,
             whole,
@@ -1408,17 +1431,19 @@ impl Reader {
         match stage {
             Stage::Folder { snapshots, entries } => {
                 let folder = self.folder.get_mut(&writer).expect("gathered");
-                let in_folder = folder.log.grown(growing);
+                let placed_apart = folder.log.as_mut().expect("placed apart");
+                let in_folder = placed_apart.grown(growing);
                 self.report_unreadable(writer, report);
-                let folder = &self.folder[&writer].log;
+                let folder = self.folder.get_mut(&writer).expect("gathered");
                 let log = self.cached.log_mut(writer);
                 if whole {
                     log.forget_waiting();
                 }
                 // A view holding nothing of the writer places what the folder's log
-                // placed from nothing, and ends as that log does.
+                // placed from nothing, and ends as that log does: the log is then
+                // kept once, as the cached view's.
                 if whole && log.is_empty() {
-                    *log = folder.clone();
+                    *log = folder.log.take().expect("placed apart");
                     self.took(writer, &in_folder, report);
                 } else if whole || !snapshots.is_empty() || !entries.is_empty() {
                     let growing = log.growing(snapshots, entries, BTreeSet::new());
@@ -1477,7 +1502,12 @@ impl Reader {
     /// Brings [`Reader::removed`] up to date for `writer`: from scratch after its
     /// files lost anything, else by dropping what its files now hold.
     fn recount(&mut self, writer: WriterId, whole: bool) {
-        let folder = self.folder.get(&writer).map(|folder| &folder.log);
+        let folder = self.folder.get(&writer);
+        if folder.is_some_and(|folder| folder.log.is_none()) {
+            self.removed.remove(&writer);
+            return;
+        }
+        let folder = folder.and_then(|folder| folder.log.as_ref());
         let saw = |hash: &EntryHash| folder.is_some_and(|folder| folder.saw(*hash));
         let gone: BTreeSet<EntryHash> = match (whole, self.removed.remove(&writer)) {
             (false, Some(mut gone)) => {
@@ -1531,7 +1561,7 @@ impl Folder {
     fn new(writer: WriterId) -> Self {
         Self {
             files: BTreeMap::new(),
-            log: WriterLog::new(writer),
+            log: Some(WriterLog::new(writer)),
             stale: true,
         }
     }
@@ -2367,7 +2397,11 @@ mod tests {
             (log.clone(), waiting, log.gaps.clone(), log.chain.len())
         };
         let cached: Vec<_> = reader.cached.writers.values().map(logs).collect();
-        let folder: Vec<_> = reader.folder.values().map(|f| logs(&f.log)).collect();
+        let folder: Vec<_> = reader
+            .folder
+            .keys()
+            .map(|writer| logs(reader.folder_log(*writer).unwrap()))
+            .collect();
         let files: Vec<_> = reader
             .records()
             .map(|(path, record)| (path.clone(), record.stamp.clone(), record.file.clone()))
