@@ -15,7 +15,11 @@ and a name made or removed once a sync of its directory returns, except in a
 browser, which keeps names where toshokan cannot sync them (see Browsers).
 Where it cannot, toshokan counts a request as durable once it completes: what
 completed survives the app stopping, and what survives the machine or the
-browser stopping is the backend's business. Every use of durable in this
+browser stopping is the backend's business. A write to a file of a picked folder
+is the exception: it completes before it lands, and lands when the file's stream
+closes, before the backend performs any later request other than another write
+to that file or a read of another file (see Browsers). Stopping the app before
+then loses the write, as if it had not completed. Every use of durable in this
 document means this, and nothing toshokan reports promises more.
 
 A backend also says whether it can append, rename a file, rename a directory,
@@ -802,7 +806,9 @@ always a directory of the origin private file system.
   and put it in place at `close()`: that is the moment a write lands, and
   nothing is synced beyond it. An append copies the whole file, at about 1.5 ms
   per MiB, which the 1 MiB bound on segments keeps small. The writes that fill
-  one file share one stream, kept open while other files are read. Before
+  one file share one stream, kept open while other files are read. A file
+  created with bytes is named first and filled at its stream's close, so a tab
+  stopped between leaves it empty. Before
   putting a file in place, Chromium checks it with Safe Browsing, in full unless
   its type is one Chromium samples, such as `.txt` and `.json`, so toshokan
   names its own files with those. A `.txt` close was measured at about 1.6 ms in
