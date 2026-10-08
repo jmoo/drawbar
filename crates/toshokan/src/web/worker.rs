@@ -210,8 +210,8 @@ impl Drop for Worker {
     }
 }
 
-/// The worker's entry point, which [`BOOTSTRAP`] calls with the page's first
-/// message once the bundle is instantiated.
+/// The worker's entry point. The script [`Worker::start`] runs in the worker
+/// calls it with the page's first message, once the bundle is instantiated.
 #[wasm_bindgen(js_name = toshokanWorker)]
 pub async fn serve(start: JsValue) {
     let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();

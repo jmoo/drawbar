@@ -58,6 +58,38 @@ with `Error::Partial`, which says what it logged. Any other commit whose entries
 reached the folder succeeds, and `Committed::local` says what the instance keeps
 beside the folder that lags it until the next commit, refresh or close.
 
+## In the browser
+
+With the `web` feature, a library runs on the page through the async driver,
+and a dedicated worker running the same wasm bundle performs its requests on the
+origin private file system or on a folder the user picked:
+
+```rust,ignore
+use toshokan::asynch::Library;
+use toshokan::web::{DateClock, CryptoRandom, Folder, Worker};
+
+let local = RelPath::new("libraries/main/local")?;
+let folder = Folder::picked(handle); // or Folder::Private(path)
+let worker = Worker::start(folder, &local).await?;
+let (mut lib, opened) = Library::open(worker, layout, &schema, env).await?;
+```
+
+The bundle must be built by wasm-bindgen with `--target web`. The worker loads it
+from a small script toshokan makes as a `blob:` URL, so a Content Security
+Policy must allow `blob:` workers. `web::Hints` tells a library's other tabs
+when to refresh. [SPEC.md](SPEC.md#browsers) lists what each browser can do.
+
+The browser suites run headless in Chromium and Firefox with
+`nix build .#toshokan-web` on Linux. Elsewhere, from `crates/` in the
+development shell, with a WebDriver and its browser installed:
+
+```sh
+CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
+GECKODRIVER=geckodriver \
+  cargo test -p toshokan --features web --target wasm32-unknown-unknown \
+  --test backends --test effects --test web
+```
+
 ## Design
 
 The core does no I/O. Every operation is a state machine that asks for reads,
@@ -97,4 +129,5 @@ readers, and maps its properties to the tests that check the code.
    the app, so tests replay exactly.
 8. **Small.** The standard library, serde, BLAKE3 and thiserror, plus rustix on
    Linux and Apple systems, libc on Apple systems and windows-sys on Windows,
-   for a rename that never replaces.
+   for a rename that never replaces, and wasm-bindgen, js-sys and web-sys for
+   the browser.
