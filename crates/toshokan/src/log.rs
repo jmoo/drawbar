@@ -9,6 +9,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use serde::de::{self, DeserializeOwned, MapAccess, Visitor};
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
 use serde_json::Value;
@@ -460,12 +461,22 @@ impl<'de> Visitor<'de> for ExactOpVisitor {
     }
 }
 
-#[derive(Serialize)]
+/// An entry as this build writes its line's JSON: `prev`, `at`, then its kind's
+/// members.
 struct Written<'a> {
     prev: EntryHash,
     at: Hlc,
-    #[serde(flatten)]
     kind: &'a EntryKind,
+}
+
+impl Serialize for Written<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("prev", &self.prev)?;
+        map.serialize_entry("at", &self.at)?;
+        self.kind.members(&mut map)?;
+        map.end()
+    }
 }
 
 impl Entry {
@@ -983,43 +994,65 @@ fn holds_more(read: &Value, written: &Value) -> bool {
     }
 }
 
-#[derive(Serialize)]
-struct Tagged<'a, M> {
-    kind: &'static str,
-    #[serde(flatten)]
-    members: &'a M,
+impl EntryKind {
+    /// Writes `kind` and the members of this kind into `map`, in the order this
+    /// build writes them. An unknown kind writes every member of its object but
+    /// `prev` and `at`, in order of name.
+    fn members<M: SerializeMap>(&self, map: &mut M) -> Result<(), M::Error> {
+        match self {
+            Self::Genesis(Genesis { writer, label }) => {
+                map.serialize_entry("kind", "genesis")?;
+                map.serialize_entry("writer", writer)?;
+                map.serialize_entry("label", label)
+            }
+            Self::Intent(Logged {
+                label,
+                ops,
+                displaced,
+                reverses,
+            }) => {
+                map.serialize_entry("kind", "intent")?;
+                map.serialize_entry("label", label)?;
+                map.serialize_entry("ops", ops)?;
+                if !displaced.is_empty() {
+                    map.serialize_entry("displaced", displaced)?;
+                }
+                match reverses {
+                    Some(reverses) => map.serialize_entry("reverses", reverses),
+                    None => Ok(()),
+                }
+            }
+            Self::Settle(Settle {
+                writer,
+                record,
+                outcome,
+            }) => {
+                map.serialize_entry("kind", "settle")?;
+                map.serialize_entry("writer", writer)?;
+                map.serialize_entry("record", record)?;
+                map.serialize_entry("outcome", outcome)
+            }
+            Self::Bind(Bound { ops }) => {
+                map.serialize_entry("kind", "bind")?;
+                map.serialize_entry("ops", ops)
+            }
+            Self::Unknown(raw) => {
+                let members: BTreeMap<String, Raw> =
+                    raw.decode().map_err(serde::ser::Error::custom)?;
+                let mut kept = members
+                    .iter()
+                    .filter(|(name, _)| *name != "prev" && *name != "at");
+                kept.try_for_each(|(name, value)| map.serialize_entry(name, value))
+            }
+        }
+    }
 }
 
 impl Serialize for EntryKind {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::Genesis(genesis) => Tagged {
-                kind: "genesis",
-                members: genesis,
-            }
-            .serialize(serializer),
-            Self::Intent(logged) => Tagged {
-                kind: "intent",
-                members: logged,
-            }
-            .serialize(serializer),
-            Self::Settle(settle) => Tagged {
-                kind: "settle",
-                members: settle,
-            }
-            .serialize(serializer),
-            Self::Bind(bound) => Tagged {
-                kind: "bind",
-                members: bound,
-            }
-            .serialize(serializer),
-            Self::Unknown(raw) => {
-                let mut members: BTreeMap<String, Raw> =
-                    raw.decode().map_err(serde::ser::Error::custom)?;
-                members.retain(|name, _| name != "prev" && name != "at");
-                members.serialize(serializer)
-            }
-        }
+        let mut map = serializer.serialize_map(None)?;
+        self.members(&mut map)?;
+        map.end()
     }
 }
 
@@ -1477,6 +1510,94 @@ mod tests {
             e = e
         );
         assert_eq!(entry.json(), expected);
+    }
+
+    // The members of each kind, in the order SPEC.md gives them.
+    #[test]
+    fn every_kind_is_written_as_specified() {
+        let id = |n: u128| format!("{n:032x}");
+        let written = |prev: EntryHash, kind: EntryKind| {
+            Entry::encode(prev, at(5), kind)
+                .unwrap()
+                .json()
+                .into_owned()
+        };
+        let genesis = EntryKind::Genesis(Genesis {
+            writer: WriterId::from_u128(1),
+            label: "drawbar".into(),
+        });
+        assert_eq!(
+            written(EntryHash::ZERO, genesis),
+            format!(
+                r#"{{"prev":"{}","at":[5,0],"kind":"genesis","writer":"{}","label":"drawbar"}}"#,
+                id(0),
+                id(1)
+            )
+        );
+        let save = EntryKind::Intent(Logged {
+            label: "Save".into(),
+            ops: Vec::new(),
+            displaced: vec![Displaced {
+                item: Nonce::from_u128(3),
+                from: RelPath::new("x.npno").unwrap(),
+                identity: Identity::from_u128(4),
+                len: 5,
+            }],
+            reverses: Some(hash(2)),
+        });
+        assert_eq!(
+            written(hash(1), save),
+            format!(
+                concat!(
+                    r#"{{"prev":"{}","at":[5,0],"kind":"intent","label":"Save","ops":[],"#,
+                    r#""displaced":[{{"item":"{}","from":"x.npno","identity":"{}","len":5}}],"#,
+                    r#""reverses":"{}"}}"#
+                ),
+                id(1),
+                id(3),
+                id(4),
+                id(2)
+            )
+        );
+        let settle = EntryKind::Settle(Settle {
+            writer: WriterId::from_u128(2),
+            record: Nonce::from_u128(3),
+            outcome: Settlement::RolledBack,
+        });
+        assert_eq!(
+            written(hash(1), settle),
+            format!(
+                r#"{{"prev":"{}","at":[5,0],"kind":"settle","writer":"{}","record":"{}","outcome":"rolled-back"}}"#,
+                id(1),
+                id(2),
+                id(3)
+            )
+        );
+        let bind = EntryKind::Bind(Bound {
+            ops: vec![Op::Pin {
+                entity: EntityId::from_u128(7),
+                file: FileFact {
+                    path: RelPath::new("c.npno").unwrap(),
+                    identity: Identity::from_u128(12),
+                    len: 13,
+                    modified: None,
+                },
+                replaces: vec![hash(10)],
+            }],
+        });
+        assert_eq!(
+            written(hash(1), bind),
+            format!(
+                concat!(
+                    r#"{{"prev":"{}","at":[5,0],"kind":"bind","ops":[{{"op":"pin","entity":"{}","#,
+                    r#""file":{{"path":"c.npno","identity":"{}","len":13}},"replaces":["{}"]}}]}}"#
+                ),
+                id(1),
+                id(7),
+                id(12),
+                id(10)
+            )
+        );
     }
 
     #[test]
