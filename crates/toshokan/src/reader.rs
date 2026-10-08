@@ -2315,7 +2315,9 @@ mod tests {
                     writer,
                     label: "w".into(),
                 });
-                let mut lines = vec![Entry::encode(EntryHash::ZERO, at(0), genesis).unwrap().line()];
+                let mut lines = vec![Entry::encode(EntryHash::ZERO, at(0), genesis)
+                    .unwrap()
+                    .line()];
                 for n in 1..pick(30) {
                     let prev = &lines[pick(lines.len()).max(n.saturating_sub(2)).min(n - 1)];
                     lines.push(after(prev, &format!("{w}-{n}")));

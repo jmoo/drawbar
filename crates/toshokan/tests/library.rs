@@ -3099,8 +3099,7 @@ fn facts_a_restore_removed_are_shown_until_let_go<F: Facade>() {
     assert_eq!(opened.removed.len(), 3, "{:?}", opened.removed);
 
     a.let_go().unwrap();
-    let (mut elsewhere, _) =
-        F::open(Probe::new(&machine(&folder)), env("c", 4, &clock)).unwrap();
+    let (mut elsewhere, _) = F::open(Probe::new(&machine(&folder)), env("c", 4, &clock)).unwrap();
     elsewhere.rescan().unwrap();
     assert_eq!(tags(&a.view(), song), ["new"]);
     assert_eq!(facts(&a.view()), facts(&elsewhere.view()));
@@ -3144,8 +3143,7 @@ fn facts_a_restore_removed_are_republished_when_adopted<F: Facade>() {
     assert!(adopted.changes.iter().all(|change| change.entity == song));
     assert_eq!(facts(&a.view()), shown);
     assert_eq!(a.refresh().unwrap().removed, []);
-    let (mut elsewhere, _) =
-        F::open(Probe::new(&machine(&folder)), env("d", 5, &clock)).unwrap();
+    let (mut elsewhere, _) = F::open(Probe::new(&machine(&folder)), env("d", 5, &clock)).unwrap();
     elsewhere.rescan().unwrap();
     assert_eq!(
         facts(&elsewhere.view()),

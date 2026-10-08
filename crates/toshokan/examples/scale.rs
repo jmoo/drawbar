@@ -986,7 +986,9 @@ fn main() {
         drop(lib.close().unwrap());
     }
     let (mut lib, opened) = open_warm(&mut bench, &mut world, "open warm");
-    let scanned = bench.measure("rescan after open", || lib.rescan().unwrap()).scan;
+    let scanned = bench
+        .measure("rescan after open", || lib.rescan().unwrap())
+        .scan;
     eprintln!(
         "  start {:?}, scan: {} arrived, {} moved, {} changed, {} departed",
         opened.start,
