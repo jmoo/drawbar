@@ -300,6 +300,16 @@ impl WriterLog {
         self.grow(snapshots, entries, BTreeSet::new())
     }
 
+    /// Whether the log holds nothing: no snapshot, entry, stray or fork, and
+    /// nothing held back.
+    fn is_empty(&self) -> bool {
+        self.snapshots.is_empty()
+            && self.chain.is_empty()
+            && self.strays.is_empty()
+            && self.waiting.is_empty()
+            && self.forks.is_empty()
+    }
+
     /// Forgets the entries held back, so that the next placement offers again
     /// only what is held back then.
     fn forget_waiting(&mut self) {
@@ -1092,7 +1102,7 @@ impl Reader {
             (snapshots, entries) = folder.contents(writer);
             folder.log = WriterLog::new(writer);
         }
-        folder.log.place(snapshots.clone(), entries.clone());
+        let in_folder = folder.log.place(snapshots.clone(), entries.clone());
         for (path, record) in &folder.files {
             match &record.file {
                 WriterFile::Segment(segment) => {
@@ -1111,7 +1121,15 @@ impl Reader {
             log.forget_waiting();
         }
         if whole || !snapshots.is_empty() || !entries.is_empty() {
-            let placement = log.place(snapshots, entries);
+            // A view holding nothing of the writer places what the folder's log
+            // placed from nothing, and ends as that log does.
+            let placement = match whole && log.is_empty() {
+                true => {
+                    *log = folder.log.clone();
+                    in_folder
+                }
+                false => log.place(snapshots, entries),
+            };
             report.changed |= placement.changed();
             if !placement.placed.is_empty() {
                 let placed = placement.placed.iter().map(|entry| entry.hash()).collect();
