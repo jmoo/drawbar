@@ -372,6 +372,8 @@ impl Gen {
         writer.in_segment += 1;
         writer.entries += 1;
         if writer.in_segment >= self.segment_entries {
+            let marker = toshokan::line::seal_marker(writer.head);
+            writer.segment.extend(marker);
             self.flush(w);
         }
         entry.hash()
