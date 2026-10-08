@@ -17,11 +17,12 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
 use std::rc::Rc;
 
 use crate::error::{Error, Result};
 use crate::flow::{self, Fallible, Flow};
-use crate::ids::{EntryHash, WriterId};
+use crate::ids::{EntityId, EntryHash, WriterId};
 use crate::io::{Io, IoError, Root, Task};
 use crate::layout::Layout;
 use crate::log::Entry;
@@ -816,16 +817,153 @@ pub(crate) fn encode_view(view: &CachedView) -> Vec<u8> {
 }
 
 fn encode_checkpoint(reader: &Reader, state: Option<&Folded>) -> Vec<u8> {
-    let logs = reader.logs().iter();
-    let logs = logs.map(|(writer, log)| (*writer, LogOut::whole(log)));
-    let files = reader
-        .records()
-        .filter_map(|(path, record)| {
-            let log = reader.writer_of(path).and_then(|w| reader.logs().get(&w));
-            Some((path, Some(StoredFile::of(record, log)?)))
-        })
-        .collect();
-    write_view(logs, files, &reader.absorbed, state)
+    let mut encoding = Encoding::new(reader);
+    while !encoding.step(reader, state, usize::MAX, usize::MAX) {}
+    encoding.finish()
+}
+
+/// A checkpoint of a reader's view being encoded a slice at a time, as
+/// [`write_view`] encodes one: the logs a slice of entries at a time, the state a
+/// slice of entities at a time, then its check. Each step must be given the same
+/// reader and state.
+pub(crate) struct Encoding {
+    /// Room for the record's length and check, then the payload.
+    out: Vec<u8>,
+    stage: Encode,
+}
+
+enum Encode {
+    /// The logs from the writer after `after`; the first entries of `writer` are
+    /// written up to `entry`.
+    Logs {
+        after: Option<WriterId>,
+        writer: Option<(WriterId, usize)>,
+    },
+    Files,
+    State(Option<EntityId>),
+    Check(Box<blake3::Hasher>, usize),
+    Done,
+}
+
+impl Encoding {
+    pub(crate) fn new(reader: &Reader) -> Self {
+        let mut out = vec![0; 4 + CHECK];
+        out.push(FORMAT);
+        reader.logs().len().pack(&mut out);
+        let stage = Encode::Logs {
+            after: None,
+            writer: None,
+        };
+        Self { out, stage }
+    }
+
+    /// Encodes about `entries` more entries or entities, or checks about `bytes`
+    /// more; true once the checkpoint is encoded.
+    pub(crate) fn step(
+        &mut self,
+        reader: &Reader,
+        state: Option<&Folded>,
+        entries: usize,
+        bytes: usize,
+    ) -> bool {
+        let out = &mut self.out;
+        self.stage = match std::mem::replace(&mut self.stage, Encode::Done) {
+            Encode::Logs { after, writer } => match writer {
+                None => {
+                    let from = after.map_or(Bound::Unbounded, Bound::Excluded);
+                    match reader.logs().range((from, Bound::Unbounded)).next() {
+                        Some((id, log)) => {
+                            id.pack(out);
+                            log.snapshots().len().pack(out);
+                            for snapshot in log.snapshots() {
+                                snapshot.pack(out);
+                            }
+                            log.entries().len().pack(out);
+                            Encode::Logs {
+                                after,
+                                writer: Some((*id, 0)),
+                            }
+                        }
+                        None => Encode::Files,
+                    }
+                }
+                Some((id, from)) => {
+                    let log = &reader.logs()[&id];
+                    let to = from.saturating_add(entries).min(log.entries().len());
+                    for entry in &log.entries()[from..to] {
+                        entry.pack_into(out);
+                    }
+                    if to < log.entries().len() {
+                        Encode::Logs {
+                            after,
+                            writer: Some((id, to)),
+                        }
+                    } else {
+                        let whole = LogOut::whole(log);
+                        (&whole.strays, &whole.forks).pack(out);
+                        Encode::Logs {
+                            after: Some(id),
+                            writer: None,
+                        }
+                    }
+                }
+            },
+            Encode::Files => {
+                let files: Vec<(&RelPath, Option<StoredFile>)> = reader
+                    .records()
+                    .filter_map(|(path, record)| {
+                        let log = reader.writer_of(path).and_then(|w| reader.logs().get(&w));
+                        Some((path, Some(StoredFile::of(record, log)?)))
+                    })
+                    .collect();
+                files.pack(out);
+                reader.absorbed.iter().collect::<Vec<_>>().pack(out);
+                match state {
+                    Some(state) => {
+                        out.push(1);
+                        state.entity_count().pack(out);
+                        Encode::State(None)
+                    }
+                    None => {
+                        out.push(0);
+                        Encode::Check(Box::default(), 4 + CHECK)
+                    }
+                }
+            }
+            Encode::State(after) => {
+                let state = state.expect("a state is given to every step");
+                match state.pack_entities(after, entries, out) {
+                    Some(last) => Encode::State(Some(last)),
+                    None => {
+                        state.pack_rest(out);
+                        Encode::Check(Box::default(), 4 + CHECK)
+                    }
+                }
+            }
+            Encode::Check(mut hasher, from) => {
+                let to = from.saturating_add(bytes).min(out.len());
+                hasher.update(&out[from..to]);
+                match to < out.len() {
+                    true => Encode::Check(hasher, to),
+                    false => {
+                        let len = out.len() - 4 - CHECK;
+                        let len = u32::try_from(len).expect("a record within 4 GiB");
+                        out[..4].copy_from_slice(&len.to_le_bytes());
+                        out[4..4 + CHECK].copy_from_slice(&hasher.finalize().as_bytes()[..CHECK]);
+                        Encode::Done
+                    }
+                }
+            }
+            Encode::Done => Encode::Done,
+        };
+        matches!(self.stage, Encode::Done)
+    }
+
+    /// ⚠️ Before [`Encoding::step`] returns true, a checkpoint that fails its
+    /// check.
+    pub(crate) fn finish(self) -> Vec<u8> {
+        self.out
+    }
 }
 
 fn encode_record(reader: &Reader) -> Vec<u8> {
@@ -851,22 +989,29 @@ pub(crate) fn save(
     genesis: EntryHash,
     state: Option<&Folded>,
 ) -> Task<'static, Result<()>> {
+    match due(reader, genesis) {
+        true => checkpoint(reader, genesis, state),
+        false => journal(reader, genesis),
+    }
+}
+
+/// Whether the view is next written whole rather than appended to the journal.
+pub(crate) fn due(reader: &Reader, genesis: EntryHash) -> bool {
     let folds = reader
         .unsaved
         .logs
         .values()
         .any(|gained| !gained.kept.is_empty());
-    let due = {
-        let store = reader.store.borrow();
-        store.genesis != Some(genesis)
-            || store.due
-            || store.broken
-            || folds
-            || store.journal > store.checkpoint / 2 + JOURNAL_SLACK
-    };
-    if due {
-        return checkpoint(reader, genesis, state);
-    }
+    let store = reader.store.borrow();
+    store.genesis != Some(genesis)
+        || store.due
+        || store.broken
+        || folds
+        || store.journal > store.checkpoint / 2 + JOURNAL_SLACK
+}
+
+/// Appends what the view gained since its last save to the journal.
+pub(crate) fn journal(reader: &mut Reader, genesis: EntryHash) -> Task<'static, Result<()>> {
     if reader.unsaved.is_empty() {
         return Task::ready(Ok(()));
     }
@@ -881,6 +1026,16 @@ pub(crate) fn checkpoint(
     state: Option<&Folded>,
 ) -> Task<'static, Result<()>> {
     let bytes = encode_checkpoint(reader, state);
+    keep_checkpoint(reader, genesis, bytes)
+}
+
+/// Writes `bytes`, which [`Encoding`] encoded of the view as it is, as the view
+/// of the writer whose genesis entry is `genesis`.
+pub(crate) fn keep_checkpoint(
+    reader: &mut Reader,
+    genesis: EntryHash,
+    bytes: Vec<u8>,
+) -> Task<'static, Result<()>> {
     reader.unsaved = Default::default();
     write_checkpoint(genesis, bytes, Rc::clone(&reader.store)).task()
 }
@@ -1164,6 +1319,31 @@ mod tests {
                 ),
                 "{bytes:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_checkpoint_encoded_a_slice_at_a_time_is_the_view_written_whole() {
+        let disk = MemDisk::new();
+        let lines = chain(4);
+        let reader = saved(&disk, &lines);
+        let state = merged(&reader);
+        for state in [None, Some(&state)] {
+            let logs = reader.logs().iter();
+            let logs = logs.map(|(writer, log)| (*writer, LogOut::whole(log)));
+            let files = reader
+                .records()
+                .filter_map(|(path, record)| {
+                    let log = reader.writer_of(path).and_then(|w| reader.logs().get(&w));
+                    Some((path, Some(StoredFile::of(record, log)?)))
+                })
+                .collect();
+            let whole = write_view(logs, files, &reader.absorbed, state);
+            for slice in [1, 2, 7, usize::MAX] {
+                let mut encoding = Encoding::new(&reader);
+                while !encoding.step(&reader, state, slice, slice) {}
+                assert_eq!(encoding.finish(), whole, "{slice}-item slices");
+            }
         }
     }
 

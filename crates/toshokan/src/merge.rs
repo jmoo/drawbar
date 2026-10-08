@@ -1530,7 +1530,34 @@ impl Unpack for Arc<EntityState> {
 /// cached view; a snapshot in the folder is JSON.
 impl Pack for Folded {
     fn pack(&self, out: &mut Vec<u8>) {
-        (&self.entities, &self.trash).pack(out);
+        self.entities.len().pack(out);
+        self.pack_entities(None, usize::MAX, out);
+        self.pack_rest(out);
+    }
+}
+
+impl Folded {
+    /// Packs the next `slice` entities after `after`, as [`Pack::pack`] packs
+    /// them once it packed how many there are. Returns the last one packed;
+    /// `None` once none is left.
+    pub(crate) fn pack_entities(
+        &self,
+        after: Option<EntityId>,
+        slice: usize,
+        out: &mut Vec<u8>,
+    ) -> Option<EntityId> {
+        let from = after.map_or(Bound::Unbounded, Bound::Excluded);
+        let mut last = None;
+        for (entity, state) in self.entities.range((from, Bound::Unbounded)).take(slice) {
+            (entity, state).pack(out);
+            last = Some(*entity);
+        }
+        last
+    }
+
+    /// Packs what [`Pack::pack`] packs after the entities.
+    pub(crate) fn pack_rest(&self, out: &mut Vec<u8>) {
+        self.trash.pack(out);
         let settled: Vec<&(WriterId, Nonce)> = self.settled.iter().collect();
         let unknown: Vec<&(EntryHash, Raw)> = self.unknown.iter().collect();
         let extended: Vec<&(EntryHash, Raw)> = self.extended.iter().collect();
