@@ -8,17 +8,18 @@ use common::{files_under, fresh, held, layout, machine, Instance};
 use toshokan::blocking::run;
 use toshokan::compaction::compact;
 use toshokan::disk::Tail;
+use toshokan::layout::SEGMENT_EXTENSION;
 use toshokan::line::{ending, seal_marker, Line, ENDING};
 use toshokan::reader::{CachedView, Reader};
 use toshokan::report::{Rekey, Start};
 use toshokan::simulator::Machine;
-use toshokan::writer::{Claimed, Writer};
+use toshokan::writer::{Claimed, Writer, SEGMENT_BOUND};
 use toshokan::{Error, Hlc, MemDisk, Refusal, Root, SegmentName, WriterId};
 
 fn segments(machine: &Machine, writer: WriterId) -> usize {
     files_under(&machine.folder, &layout().writer(writer))
         .iter()
-        .filter(|path| path.as_str().ends_with(".jsonl"))
+        .filter(|path| path.as_str().ends_with(SEGMENT_EXTENSION))
         .count()
 }
 
@@ -309,7 +310,7 @@ fn replace_last_line(instance: &Instance) -> (toshokan::RelPath, Vec<u8>) {
     let files = instance.machine.folder.files(Root::Folder);
     let (path, bytes) = files
         .into_iter()
-        .find(|(path, _)| path.as_str().ends_with(".jsonl"))
+        .find(|(path, _)| path.as_str().ends_with(SEGMENT_EXTENSION))
         .unwrap();
     let text = String::from_utf8(bytes.clone()).unwrap();
     let last = text.lines().last().unwrap();
@@ -354,7 +355,10 @@ fn a_writer_whose_replaced_segment_survives_in_a_copy_appends_to_a_new_segment()
     let head = *instance.write("a2").unwrap().last().unwrap();
     let id = instance.id();
     let (path, original) = replace_last_line(&instance);
-    let copy = layout().writer(id).join("copy.jsonl").unwrap();
+    let copy = layout()
+        .writer(id)
+        .join(&format!("copy{SEGMENT_EXTENSION}"))
+        .unwrap();
     let put = toshokan::Io::Create {
         root: Root::Folder,
         path: copy,
@@ -676,7 +680,7 @@ fn entries_that_reached_the_folder_before_a_failure_are_followed_not_forked() {
 fn segment_paths(machine: &Machine, writer: WriterId) -> Vec<toshokan::RelPath> {
     files_under(&machine.folder, &layout().writer(writer))
         .into_iter()
-        .filter(|path| path.as_str().ends_with(".jsonl"))
+        .filter(|path| path.as_str().ends_with(SEGMENT_EXTENSION))
         .collect()
 }
 
@@ -706,6 +710,61 @@ fn a_closed_segment_ends_with_a_seal_marker_and_a_crashed_one_does_not() {
         .collect();
     assert_eq!(crashed.len(), 1);
     assert!(ends_with(&machine, &crashed[0], &ending(b[0])));
+}
+
+#[test]
+fn an_append_past_the_bound_seals_the_segment_and_opens_another() {
+    let mut instance = Instance::open(machine(), 1);
+    let label = "x".repeat(100 << 10);
+    let mut written = Vec::new();
+    for _ in 0..12 {
+        written.extend(instance.write(&label).unwrap());
+    }
+    let id = instance.id();
+    assert_eq!(segments(&instance.machine, id), 2, "12 entries of 100 KiB");
+    let files = instance.machine.folder.files(Root::Folder);
+    let sealed: Vec<_> = segment_paths(&instance.machine, id)
+        .into_iter()
+        .filter(|path| {
+            written
+                .iter()
+                .any(|entry| files[path].ends_with(&seal_marker(*entry)))
+        })
+        .collect();
+    assert_eq!(sealed.len(), 1, "the first segment is sealed");
+    assert!(files[&sealed[0]].len() as u64 <= SEGMENT_BOUND + seal_marker(written[0]).len() as u64);
+    let view = fresh(&instance.machine.folder);
+    assert_eq!(held(&view), written.iter().copied().collect());
+}
+
+#[test]
+fn a_crash_anywhere_in_an_append_that_seals_keeps_every_entry_before_it() {
+    let label = "x".repeat(100 << 10);
+    let setup = || {
+        let mut instance = Instance::open(machine(), 1);
+        let mut written = Vec::new();
+        for _ in 0..10 {
+            written.extend(instance.write(&label).unwrap());
+        }
+        (instance, written)
+    };
+    let (mut probe, _) = setup();
+    let before = probe.machine.folder.mutations();
+    probe.write(&label).unwrap();
+    assert_eq!(segments(&probe.machine, probe.id()), 2, "the append seals");
+    let operations = probe.machine.folder.mutations() - before;
+    for after in 0..operations {
+        let (mut instance, written) = setup();
+        instance.machine.folder.crash_after(after);
+        let _ = instance.write(&label);
+        let restarted = instance.machine.folder.restart();
+        let held = held(&fresh(&restarted));
+        assert!(
+            written.iter().all(|entry| held.contains(entry)),
+            "crash after {after}"
+        );
+        assert!(held.len() <= written.len() + 1, "crash after {after}");
+    }
 }
 
 #[test]

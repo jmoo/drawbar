@@ -3,7 +3,8 @@
 //!
 //! A writer opens a new segment under a random name the first time it appends in a
 //! process, appends to it, and seals it with the seal marker when the process
-//! closes it cleanly or compacts. Before each append it confirms the folder still
+//! closes it cleanly or compacts, or when an append would take it past
+//! [`SEGMENT_BOUND`]. Before each append it confirms the folder still
 //! holds its head; after each, once the cached view holds the new entries, it
 //! records the head in the local root.
 
@@ -19,6 +20,11 @@ use crate::log::{Entry, EntryKind, Genesis};
 use crate::path::RelPath;
 use crate::reader::{Reader, Stamp, WriterFile, WriterLog, MAX_FILE};
 use crate::report::{Rekey, Start};
+
+/// The length past which an append seals the open segment and opens another. A
+/// picked folder in Chromium copies a whole file to append to it, at about
+/// 1.5 ms per MiB by measurement, so this bounds an append's copy.
+pub const SEGMENT_BOUND: u64 = 1 << 20;
 
 pub struct Writer {
     pub(crate) layout: Layout,
@@ -263,11 +269,17 @@ impl Writer {
             .iter()
             .flat_map(|entry| entry.line.to_bytes())
             .collect();
+        let len = bytes.len() as u64;
         self.confirm()
             .then(move |confirmed| {
                 let mut writer = self;
                 let open = match confirmed {
                     Err(error) => return Flow::Done((writer, Err(error))),
+                    Ok(Confirmed::Open(open)) if open.len + len > SEGMENT_BOUND => {
+                        return writer
+                            .seal()
+                            .then(move |(writer, _)| writer.write(None, fresh, bytes, entries));
+                    }
                     Ok(Confirmed::Open(open)) => Some(open),
                     Ok(Confirmed::Changed) => {
                         writer.leave();

@@ -12,6 +12,7 @@ use toshokan::blocking::{self, Backend};
 use toshokan::env::{ExactNames, PrefixIdentity, SeededRandom, TestClock};
 use toshokan::intent::{Driver, Intent};
 use toshokan::io::{Capabilities, Range};
+use toshokan::layout::SEGMENT_EXTENSION;
 use toshokan::line::MAX_LINE;
 use toshokan::log::{Entry, EntryKind, FileFact, Genesis, Logged, Op, Settlement};
 use toshokan::report::{
@@ -2572,7 +2573,7 @@ fn what_an_instance_has_shown_survives_its_crash<F: Facade>() {
     let theirs = folder
         .files(Root::Folder)
         .into_keys()
-        .filter(|p| p.starts_with(&layout().writers()) && p.as_str().ends_with(".jsonl"))
+        .filter(|p| p.starts_with(&layout().writers()) && p.as_str().ends_with(SEGMENT_EXTENSION))
         .find(|p| {
             String::from_utf8_lossy(&folder.files(Root::Folder)[p]).contains(r#""value":"b""#)
         })
@@ -3072,7 +3073,9 @@ fn segment_entries(folder: &MemDisk, writer: WriterId) -> Vec<Entry> {
     folder
         .files(Root::Folder)
         .into_iter()
-        .filter(|(p, _)| p.parent().as_ref() == Some(&dir) && p.as_str().ends_with(".jsonl"))
+        .filter(|(p, _)| {
+            p.parent().as_ref() == Some(&dir) && p.as_str().ends_with(SEGMENT_EXTENSION)
+        })
         .flat_map(|(_, bytes)| toshokan::line::lines(&bytes).collect::<Vec<_>>())
         .map(|line| Entry::decode(line).unwrap())
         .collect()
