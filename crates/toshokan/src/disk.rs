@@ -134,7 +134,7 @@ struct Disk {
     processes: u64,
 }
 
-const ROOT_ITSELF: &str = "the root itself cannot be created, moved or removed";
+pub(crate) const ROOT_ITSELF: &str = "the root itself cannot be created, moved or removed";
 
 /// Why a backend refuses [`Io::Fill`].
 pub(crate) const FILLED_BY_DRIVERS: &str = "a driver fills a file, not a backend";

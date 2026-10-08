@@ -4,7 +4,7 @@
 mod common;
 
 use common::{path, Driven};
-use toshokan::io::{DirEntry, IoError, Kind, Lock, Meta, Range};
+use toshokan::io::{Capability, DirEntry, IoError, Kind, Lock, Meta, Range};
 use toshokan::{Io, IoResult, RelPath, Reply, Root};
 
 fn create(root: Root, text: &str, bytes: &[u8]) -> Io {
@@ -170,15 +170,17 @@ mod suite {
         let mut requests = vec![
             create(Root::Folder, "f", b"new"),
             create(Root::Folder, "gone/f", b""),
-            rename("d", "d/sub/in"),
             rename("gone", "x"),
         ];
         let mut expected = vec![
             Err(IoError::AlreadyExists),
             Err(IoError::NotFound),
-            Err(IoError::IntoItself),
             Err(IoError::NotFound),
         ];
+        if b.capabilities(Root::Folder).rename_dir {
+            requests.push(rename("d", "d/sub/in"));
+            expected.push(Err(IoError::IntoItself));
+        }
         if b.capabilities(Root::Folder).no_replace {
             requests.push(rename("d", "f"));
             expected.push(Err(IoError::AlreadyExists));
@@ -203,6 +205,12 @@ mod suite {
     pub fn a_directory_renames_with_its_contents(b: &mut impl Driven) {
         b.ok(make_dir(Root::Folder, "a/sub"));
         b.ok(create(Root::Folder, "a/sub/f", b"1"));
+        if !b.capabilities(Root::Folder).rename_dir {
+            let refused = Err(IoError::Unsupported(Capability::RenameDir));
+            assert_eq!(b.one(rename("a", "b")), refused);
+            assert_eq!(b.ok(read("a/sub/f", 0, 9)), Reply::Bytes(b"1".to_vec()));
+            return;
+        }
         b.ok(rename("a", "b"));
         assert_eq!(b.ok(read("b/sub/f", 0, 9)), Reply::Bytes(b"1".to_vec()));
         assert_eq!(b.ok(stat("a")), Reply::Stat(None));
@@ -328,7 +336,10 @@ mod suite {
                 Err(IoError::NotDirectory),
                 Err(IoError::NotFound),
                 Err(IoError::NotDirectory),
-                Err(IoError::NotFound),
+                match b.capabilities(Root::Folder).rename_file {
+                    true => Err(IoError::NotFound),
+                    false => Err(IoError::Unsupported(Capability::RenameFile)),
+                },
                 Err(IoError::NotFound),
                 match b.capabilities(Root::Folder).fsync {
                     true => Err(IoError::NotFound),
@@ -343,6 +354,12 @@ mod suite {
         b.ok(make_dir(Root::Folder, "a"));
         b.ok(make_dir(Root::Folder, "b/c"));
         b.ok(create(Root::Folder, "a/f", b"1"));
+        if !b.capabilities(Root::Folder).rename_file {
+            let refused = Err(IoError::Unsupported(Capability::RenameFile));
+            assert_eq!(b.one(rename("a/f", "b/c/g")), refused);
+            assert_eq!(b.ok(read("a/f", 0, 9)), Reply::Bytes(b"1".to_vec()));
+            return;
+        }
         b.ok(rename("a/f", "b/c/g"));
         for synced in ["b/c/g", "b/c", "a", ""] {
             b.ok(Io::Sync {
@@ -394,6 +411,7 @@ for_every_backend!(suite:
     a_lock_excludes_other_processes_until_released,
 );
 
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_native_root_declares_no_replace_only_where_its_renames_refuse_a_destination() {
     let mut native = common::NativeDirs::new();

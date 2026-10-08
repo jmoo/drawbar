@@ -9,11 +9,55 @@ publish = false
 repository.workspace = true
 version = "0.1.0"
 
+[features]
+# The browser backends: a dedicated worker over the origin private file system or
+# a folder the user picked.
+web = [
+  "dep:js-sys",
+  "dep:wasm-bindgen",
+  "dep:wasm-bindgen-futures",
+  "dep:web-sys",
+]
+
 [dependencies]
 blake3 = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 thiserror = "2"
+
+js-sys = { version = "0.3", optional = true }
+# Exact, as drawbar pins it: the test runner wasm-bindgen-cli ships must match.
+wasm-bindgen = { version = "=0.2.121", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+  "Blob",
+  "BlobPropertyBag",
+  "BroadcastChannel",
+  "DedicatedWorkerGlobalScope",
+  "Document",
+  "File",
+  "FileSystemCreateWritableOptions",
+  "FileSystemDirectoryHandle",
+  "FileSystemFileHandle",
+  "FileSystemGetDirectoryOptions",
+  "FileSystemGetFileOptions",
+  "FileSystemHandle",
+  "FileSystemHandleKind",
+  "FileSystemReadWriteOptions",
+  "FileSystemSyncAccessHandle",
+  "FileSystemWritableFileStream",
+  "MessageEvent",
+  "StorageManager",
+  "Url",
+  "VisibilityState",
+  "Window",
+  "Worker",
+  "WorkerOptions",
+  "WorkerType",
+  "WritableStream",
+  "WriteCommandType",
+  "WriteParams",
+] }
 
 # A rename that refuses to replace its destination, atomically, and whether a
 # volume's renames can.
@@ -29,3 +73,7 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 [dev-dependencies]
 pollster = "0.4"
 tempfile = "3"
+
+# The browser suites, run by wasm-bindgen-cli's test runner.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

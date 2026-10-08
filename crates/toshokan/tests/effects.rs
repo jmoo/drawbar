@@ -313,7 +313,7 @@ mod suite {
     }
 }
 
-for_every_backend!(suite:
+for_every_backend!(renaming suite:
     a_save_places_new_bytes_and_moves_the_old_into_the_trash,
     a_save_spliced_from_the_file_it_replaces_copies_its_kept_ranges,
     a_splice_past_the_end_of_its_source_fails_before_any_user_path_changes,
