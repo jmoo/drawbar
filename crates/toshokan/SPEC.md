@@ -795,19 +795,20 @@ always a directory of the origin private file system.
   nothing is synced beyond it. An append copies the whole file, at about 1.5 ms
   per MiB, which the 1 MiB bound on segments keeps small. The writes that fill
   one file share one stream, kept open while other files are read. Before
-  putting a file in place, Chromium checks it with Safe Browsing, in full
-  unless its type is one Chromium samples, such as `.txt` and `.json`, so
-  toshokan names its own files with those. A `.txt` close was measured at about
-  1.6 ms in Chrome; that `.json` is sampled too, and that about 1 close in 100
-  of a sampled type still pays the full check, is from Chromium's published
-  file-type policy, not measured. A saved library file pays the check for its
-  type: about 45 ms in Chrome and 0.1 to 1.1 s in Brave for a type Chromium
-  does not list. Brave cannot rename a file outside the private file system.
-  Renaming there was measured only in Chrome and Brave, so `Folder::picked`
-  declares `rename_file` only where `navigator.userAgentData` names Google
-  Chrome and `navigator.brave` is absent; elsewhere each move copies, and each
-  copy pays the check again. A rename the browser refuses although the folder
-  declares it fails with `Unsupported`.
+  putting a file in place, Chromium checks it with Safe Browsing, in full unless
+  its type is one Chromium samples, such as `.txt` and `.json`, so toshokan
+  names its own files with those. A `.txt` close was measured at about 1.6 ms in
+  Chrome; that `.json` is sampled too, and that about 1 close in 100 of a
+  sampled type still pays the full check, is from Chromium's published file-type
+  policy, not measured. A saved library file pays the full check, about 45 ms in
+  Chrome and 0.1 to 1.1 s in Brave, whatever its type, because it is written
+  under a staged name with no extension; toshokan never pays less for a user
+  file than the browser would. Brave cannot rename a file outside the private
+  file system. Renaming there was measured only in Chrome and Brave, so
+  `Folder::picked` declares `rename_file` only where `navigator.userAgentData`
+  names Google Chrome and `navigator.brave` is absent; elsewhere each move
+  copies, and each copy pays the check again. A rename the browser refuses
+  although the folder declares it fails with `Unsupported`.
 - **Renames** replace a file at the destination in every browser, so none
   declares `no_replace`. **Creates** check that nothing is there and then make
   the file, which opens one already there, so a file another program makes
