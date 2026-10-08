@@ -1,6 +1,7 @@
 //! Every file effect crashed after every operation, under torn and zero-filled
 //! tails, renames done by copy and names made durable early, and in a folder
-//! that cannot rename, where every move copies.
+//! that cannot rename, where every move copies and writes land only when their
+//! stream closes, as in a browser's picked folder.
 //!
 //! Before recovery, no bytes have left the folder, and each user path holds its
 //! old bytes, its new bytes or nothing, and nothing only while a pending record
@@ -22,7 +23,8 @@ use common::{
     HEAD, WRITER,
 };
 use toshokan::binding::Bindings;
-use toshokan::crash::{self, Fault};
+use toshokan::blocking;
+use toshokan::crash::{self, Fault, Streams};
 use toshokan::disk::Tail;
 use toshokan::effects::{self, EffectPlan, Moves};
 use toshokan::io::{Capabilities, Capability, Range, CHUNK};
@@ -30,9 +32,50 @@ use toshokan::log::Settlement;
 use toshokan::pending::{self, PendingRecord};
 use toshokan::plan::{Content, Expect, FileChange, Piece, Splice};
 use toshokan::recovery::{self, Chain};
+use toshokan::Operation;
 use toshokan::{
     EntityId, EntryHash, Error, MemDisk, Nonce, Outcome, Refusal, RelPath, Root, WriterId,
 };
+
+/// A process on a disk. Where its folder copies, the folder is a browser's picked
+/// folder, whose writes land only when their stream closes.
+enum Process {
+    Renaming(BlockingMem),
+    Copying(Streams),
+}
+
+fn process(disk: &MemDisk) -> Process {
+    match Moves::of(disk.capabilities(Root::Folder)) {
+        Moves::Rename => Process::Renaming(BlockingMem(disk.clone())),
+        Moves::Copy => Process::Copying(Streams::new(disk.clone())),
+    }
+}
+
+impl Driven for Process {
+    fn capabilities(&self, root: Root) -> Capabilities {
+        match self {
+            Self::Renaming(d) => d.capabilities(root),
+            Self::Copying(streams) => blocking::Backend::capabilities(streams, root),
+        }
+    }
+
+    fn run_filled<O: Operation>(&mut self, operation: O, contents: Vec<Fill>) -> O::Output {
+        match self {
+            Self::Renaming(d) => d.run_filled(operation, contents),
+            Self::Copying(streams) => {
+                let sources = contents.into_iter().map(Fill::blocking).collect();
+                blocking::run_with(streams, sources, operation)
+            }
+        }
+    }
+
+    fn other_process(&self) -> Self {
+        match self {
+            Self::Renaming(d) => Self::Renaming(d.other_process()),
+            Self::Copying(streams) => Self::Copying(Streams::new(streams.disk().process())),
+        }
+    }
+}
 
 const E: EntityId = EntityId::from_u128(0xe);
 const F: EntityId = EntityId::from_u128(0xf);
@@ -279,7 +322,7 @@ impl Case {
 
     /// Commits the intent, stopping at the first error.
     fn commit(&self, disk: &MemDisk) {
-        let d = &mut BlockingMem(disk.clone());
+        let d = &mut process(disk);
         let contents = self.contents.clone();
         let prepared = common::prepare(
             d,
@@ -365,7 +408,7 @@ fn records(disk: &MemDisk, writer: WriterId) -> Vec<(Nonce, PendingRecord)> {
 /// write.
 fn recover(disk: &MemDisk) -> Result<Vec<Outcome>, Error> {
     let layout = layout();
-    let d = &mut BlockingMem(disk.clone());
+    let d = &mut process(disk);
     let logs = logs(disk, WRITER);
     let found = d.run(recovery::assess(
         &layout,
@@ -523,7 +566,7 @@ const HEIR: WriterId = WriterId::from_u128(0x88);
 /// there were and whether a settlement stopped short.
 fn settle_orphans(disk: &MemDisk, how: Settlement, stop: usize, seed: u64) -> (usize, bool) {
     let layout = layout();
-    let d = &mut BlockingMem(disk.clone());
+    let d = &mut process(disk);
     let found = d
         .run(recovery::assess(
             &layout,
@@ -559,7 +602,7 @@ fn settle_orphans(disk: &MemDisk, how: Settlement, stop: usize, seed: u64) -> (u
 }
 
 /// Commits `plan`, a settlement planned by `HEIR`, and carries out its steps.
-fn carry_out(d: &mut BlockingMem, plan: EffectPlan, how: Settlement) {
+fn carry_out(d: &mut Process, plan: EffectPlan, how: Settlement) {
     let layout = layout();
     let plan = Rc::new(plan);
     let record = Rc::new(PendingRecord::new(HEIR, "settle", entry(HEAD), &plan));
@@ -730,7 +773,7 @@ fn a_folder_that_cannot_rename_a_directory_refuses_to_settle_a_directory_rename(
             {
                 let shown = format!("{} at {fault:?}, {how:?} in {folder:?}", case.shown());
                 let disk = moved_to(&crashed, folder);
-                let d = &mut BlockingMem(disk.clone());
+                let d = &mut process(&disk);
                 let logs = logs(&disk, WRITER);
                 let found = d
                     .run(recovery::assess(&layout, None, &logs, &BTreeSet::new()))

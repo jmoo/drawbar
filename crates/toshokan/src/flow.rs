@@ -789,6 +789,7 @@ fn compare<'a>(
 mod tests {
     use super::*;
     use crate::blocking;
+    use crate::crash::Streams;
     use crate::disk::MemDisk;
 
     fn path(text: &str) -> RelPath {
@@ -885,39 +886,6 @@ mod tests {
         );
     }
 
-    /// Holds consecutive writes to one file and lands them at the next other
-    /// request, as a browser's writable stream does at its close, which may fail.
-    struct LandedLater {
-        disk: MemDisk,
-        held: Vec<Io>,
-        landing_fails: bool,
-    }
-
-    impl blocking::Backend for LandedLater {
-        fn capabilities(&self, root: Root) -> crate::io::Capabilities {
-            blocking::Backend::capabilities(&self.disk, root)
-        }
-
-        fn perform(&mut self, io: Io) -> crate::io::IoResult {
-            let same_file = self
-                .held
-                .first()
-                .is_none_or(|held| held.path() == io.path());
-            if matches!(io, Io::Write { .. }) && same_file {
-                self.held.push(io);
-                return Ok(crate::io::Reply::Done);
-            }
-            let writes = std::mem::take(&mut self.held);
-            if self.landing_fails && !writes.is_empty() {
-                return Err(IoError::Other("the stream did not close".into()));
-            }
-            for write in writes {
-                self.disk.perform(write)?;
-            }
-            self.disk.perform(io)
-        }
-    }
-
     #[test]
     fn a_copy_whose_writes_fail_to_land_fails_and_removes_its_destination() {
         let disk = MemDisk::new();
@@ -927,13 +895,10 @@ mod tests {
             bytes: vec![7; 10],
         };
         run(&disk, act(create)).unwrap();
-        let mut later = LandedLater {
-            disk: disk.clone(),
-            held: Vec::new(),
-            landing_fails: true,
-        };
+        let mut streams = Streams::new(disk.clone());
+        disk.set_capacity(Root::Folder, Some(15));
         let copied = blocking::run(
-            &mut later,
+            &mut streams,
             copy(Root::Folder, &path("a"), &path("b")).task(),
         );
         assert!(copied.is_err(), "a copy that never landed succeeded");
@@ -941,9 +906,9 @@ mod tests {
             disk.files(Root::Folder).into_keys().collect::<Vec<_>>(),
             [path("a")]
         );
-        later.landing_fails = false;
+        disk.set_capacity(Root::Folder, None);
         blocking::run(
-            &mut later,
+            &mut streams,
             copy(Root::Folder, &path("a"), &path("b")).task(),
         )
         .unwrap();

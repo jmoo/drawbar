@@ -40,7 +40,7 @@ pub enum Fill {
 }
 
 impl Fill {
-    fn blocking<'s, B: Backend + 's>(self) -> Box<dyn blocking::Source<B> + 's> {
+    pub fn blocking<'s, B: Backend + 's>(self) -> Box<dyn blocking::Source<B> + 's> {
         match self {
             Self::Bytes(bytes) => Box::new(bytes),
             Self::Splice(splice) => Box::new(splice),

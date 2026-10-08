@@ -193,6 +193,30 @@ impl Io {
             error,
         }
     }
+
+    /// Whether a writable stream filling the file at `path` in `root` stays open
+    /// across this request: a write to that file, or a read of another, such as
+    /// the source of a copy or a splice between its chunks. Any other request
+    /// lands the stream's writes first.
+    pub(crate) fn keeps_open(&self, root: Root, path: &RelPath) -> bool {
+        let other = |read: &RelPath| read != path;
+        match self {
+            Self::Write {
+                root: at,
+                path: written,
+                ..
+            } => *at == root && written == path,
+            Self::Read {
+                root: at,
+                path: read,
+                ..
+            } => *at != root || other(read),
+            Self::ReadMany { root: at, reads } => {
+                *at != root || reads.iter().all(|(read, _)| other(read))
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -398,5 +422,61 @@ impl<T> Operation for Ready<T> {
 
     fn resume(&mut self, _: Option<IoResult>) -> Step<T> {
         Step::Done(self.0.take().expect("resumed after it was done"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path(text: &str) -> RelPath {
+        RelPath::new(text).unwrap()
+    }
+
+    const WHOLE: Range = Range {
+        offset: 0,
+        len: u64::MAX,
+    };
+
+    #[test]
+    fn a_stream_stays_open_across_writes_to_its_file_and_reads_of_others() {
+        let filled = path("tmp/f");
+        let keeps = |io: Io| io.keeps_open(Root::Folder, &filled);
+        let write = |root, at: &str| Io::Write {
+            root,
+            path: path(at),
+            offset: 0,
+            bytes: vec![1],
+        };
+        let read = |root, at: &str| Io::Read {
+            root,
+            path: path(at),
+            range: WHOLE,
+        };
+        assert!(keeps(write(Root::Folder, "tmp/f")));
+        assert!(keeps(read(Root::Folder, "song")), "the source of a copy");
+        assert!(keeps(read(Root::Local, "tmp/f")), "another root's file");
+        assert!(keeps(Io::ReadMany {
+            root: Root::Folder,
+            reads: vec![(path("a"), WHOLE), (path("b"), WHOLE)],
+        }));
+        assert!(
+            !keeps(read(Root::Folder, "tmp/f")),
+            "its own bytes land first"
+        );
+        assert!(!keeps(Io::ReadMany {
+            root: Root::Folder,
+            reads: vec![(path("a"), WHOLE), (path("tmp/f"), WHOLE)],
+        }));
+        assert!(!keeps(write(Root::Folder, "tmp/g")));
+        assert!(!keeps(write(Root::Local, "tmp/f")));
+        assert!(!keeps(Io::Stat {
+            root: Root::Folder,
+            path: path("tmp/f"),
+        }));
+        assert!(!keeps(Io::Sync {
+            root: Root::Folder,
+            path: path("tmp/f"),
+        }));
     }
 }

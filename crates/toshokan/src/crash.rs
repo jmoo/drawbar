@@ -1,7 +1,8 @@
 //! The crash harness: a scenario crashed at every operation under every fault.
 
+use crate::blocking::Backend;
 use crate::disk::{MemDisk, Renames, Tail};
-use crate::io::Root;
+use crate::io::{Capabilities, Io, IoError, IoResult, Reply, Root};
 
 /// One crash to inject.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -77,6 +78,59 @@ pub fn sweep(
                 };
                 check(fault, disk.restart());
             }
+        }
+    }
+}
+
+/// A [`MemDisk`] whose folder lands writes as a browser's picked folder does:
+/// consecutive writes to one file are held in its writable stream until a
+/// request `Io::keeps_open` does not allow, and a crash before then loses them.
+pub struct Streams {
+    disk: MemDisk,
+    filling: Vec<Io>,
+}
+
+impl Streams {
+    pub fn new(disk: MemDisk) -> Self {
+        Self {
+            disk,
+            filling: Vec::new(),
+        }
+    }
+
+    pub fn disk(&self) -> &MemDisk {
+        &self.disk
+    }
+
+    fn land(&mut self) -> Result<(), IoError> {
+        for write in std::mem::take(&mut self.filling) {
+            self.disk.perform(write)?;
+        }
+        Ok(())
+    }
+}
+
+impl Backend for Streams {
+    fn capabilities(&self, root: Root) -> Capabilities {
+        self.disk.capabilities(root)
+    }
+
+    fn perform(&mut self, io: Io) -> IoResult {
+        let open = self
+            .filling
+            .first()
+            .is_some_and(|filled| io.keeps_open(filled.root(), filled.path()));
+        if !open {
+            self.land()?;
+        }
+        match io {
+            Io::Write {
+                root: Root::Folder, ..
+            } => {
+                self.filling.push(io);
+                Ok(Reply::Done)
+            }
+            io => self.disk.perform(io),
         }
     }
 }
