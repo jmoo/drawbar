@@ -11,7 +11,10 @@
 //! ```
 //!
 //! `TOSHOKAN_BENCH_ENTITIES` at build time sets the size (default 100,000, with
-//! twice as many entries, a file per entity and three writers). The runner's
+//! twice as many entries, a file per entity and three writers). Each run starts
+//! from the library as generated: the writers earlier runs' installs added are
+//! removed. Beside the browser's own long tasks, where it reports them, each
+//! operation reports the longest the core held the page's thread. The runner's
 //! WebDriver mode starts each browser with a fresh profile, so it generates every
 //! time; `scripts/bench.py` keeps a profile per browser and reports tab memory.
 
@@ -95,6 +98,15 @@ export async function opfs_has(path) {
     return false;
   }
 }
+export async function opfs_list(path) {
+  try {
+    const names = [];
+    for await (const [name] of (await walk(path, false)).entries()) names.push(name);
+    return names;
+  } catch {
+    return [];
+  }
+}
 export async function opfs_remove(path) {
   try {
     await (await walk(path.slice(0, -1), false)).removeEntry(path[path.length - 1], { recursive: true });
@@ -126,6 +138,7 @@ extern "C" {
     fn watch_start();
     async fn watch_stop() -> JsValue;
     async fn opfs_has(path: Vec<String>) -> JsValue;
+    async fn opfs_list(path: Vec<String>) -> JsValue;
     #[wasm_bindgen(catch)]
     async fn opfs_remove(path: Vec<String>) -> Result<JsValue, JsValue>;
     fn memory(wasm: JsValue) -> JsValue;
@@ -142,6 +155,7 @@ const TAGS: Set<String> = Set::new("tags");
 const RELATED: Set<String> = Set::new("related");
 
 const WRITERS: usize = 3;
+const SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 const SEGMENT: usize = 500;
 const PER_DIR: usize = 100;
 
@@ -417,7 +431,7 @@ impl Gen {
 /// The library's log files, for `files`.
 fn log_files(files: &[Described]) -> Vec<(RelPath, Vec<u8>)> {
     let mut gen = Gen {
-        rng: Rng(0x9e3779b97f4a7c15),
+        rng: Rng(SEED),
         at: js_sys::Date::now() as u64 - 100_000_000,
         writers: Vec::new(),
         entities: Vec::new(),
@@ -453,6 +467,28 @@ async fn put(worker: &Worker, files: impl IntoIterator<Item = (RelPath, Vec<u8>)
             ok(worker, Io::MakeDir { root, path: dir }).await;
         }
         ok(worker, Io::Create { root, path, bytes }).await;
+    }
+}
+
+/// The writers the generator makes, the first ids it draws.
+fn generated_writers() -> Vec<String> {
+    let mut rng = Rng(SEED);
+    let ids = (0..WRITERS).map(|_| WriterId::from_u128(rng.id()).to_string());
+    ids.collect()
+}
+
+/// Removes the writers earlier runs' installs added to the library, so every
+/// run measures the library as generated.
+async fn only_generated_writers() {
+    let writers = format!("{}/folder/{}/writers", home(), layout().root());
+    let generated = generated_writers();
+    let listed = js_sys::Array::from(&opfs_list(parts(&writers)).await);
+    for name in listed.iter().filter_map(|name| name.as_string()) {
+        if !generated.contains(&name) {
+            opfs_remove(parts(&format!("{writers}/{name}")))
+                .await
+                .unwrap();
+        }
     }
 }
 
@@ -558,6 +594,8 @@ struct Samples {
     wall: Vec<f64>,
     frames: Vec<f64>,
     timers: Vec<f64>,
+    /// The longest the core held the page's thread at once.
+    held: Vec<f64>,
     long_tasks: i64,
     longest_task: f64,
     in_long_tasks: f64,
@@ -567,8 +605,10 @@ impl Samples {
     async fn time<T>(&mut self, operation: impl std::future::Future<Output = T>) -> T {
         watch_start();
         let start = now();
+        HELD.with(|held| held.set((start, 0.0)));
         let output = operation.await;
         let wall = now() - start;
+        self.held.push(HELD.with(|held| held.get().1));
         let watched: Vec<f64> = js_sys::Array::from(&watch_stop().await)
             .iter()
             .map(|value| value.as_f64().unwrap())
@@ -599,9 +639,10 @@ impl Samples {
             false => format!("longest frame gap {:.0}", longest(&self.frames)),
         };
         say(&format!(
-            "bench | {name} | {} | {frames}, timer gap {:.0} | {tasks}",
+            "bench | {name} | {} | {frames}, timer gap {:.0}, held {:.0} | {tasks}",
             stats(&self.wall),
             longest(&self.timers),
+            longest(&self.held),
         ));
     }
 }
@@ -629,7 +670,63 @@ fn report_memory(when: &str) {
     ));
 }
 
-type Lib = Library<Worker>;
+thread_local! {
+    /// When the core last got the page's thread back, and the longest it has
+    /// held it at once since a sample started.
+    static HELD: std::cell::Cell<(f64, f64)> = const { std::cell::Cell::new((0.0, 0.0)) };
+}
+
+/// The worker, timing how long the core holds the page's thread: from a reply
+/// or a pause that gave the thread back, or from the library's start, to the
+/// next request or such pause. It gives the thread back when the worker does:
+/// once the core has held it for [`TURN_MS`].
+struct Watched(Worker);
+
+/// As the worker's pause decides.
+const TURN_MS: f64 = 6.0;
+
+impl Watched {
+    fn holding(&self) {
+        HELD.with(|held| {
+            let (since, longest) = held.get();
+            held.set((since, longest.max(now() - since)));
+        });
+    }
+
+    fn resumed(&self) {
+        HELD.with(|held| held.set((now(), held.get().1)));
+    }
+}
+
+impl Fs for Watched {
+    fn capabilities(&self, root: Root) -> toshokan::io::Capabilities {
+        self.0.capabilities(root)
+    }
+
+    async fn perform(&self, io: Io) -> toshokan::IoResult {
+        self.holding();
+        let result = self.0.perform(io).await;
+        self.resumed();
+        result
+    }
+
+    async fn pause(&self) {
+        let gives_back = HELD.with(|held| now() - held.get().0 >= TURN_MS);
+        if gives_back {
+            self.holding();
+        }
+        self.0.pause().await;
+        if gives_back {
+            self.resumed();
+        }
+    }
+
+    fn own(&self, root: &RelPath) {
+        self.0.own(root);
+    }
+}
+
+type Lib = Library<Watched>;
 
 async fn open(install: &str) -> Lib {
     let home = home();
@@ -639,7 +736,9 @@ async fn open(install: &str) -> Lib {
     )
     .await
     .unwrap();
-    let (library, _) = Library::open(worker, layout(), &schema(), env(install))
+    let watched = Watched(worker);
+    watched.resumed();
+    let (library, _) = Library::open(watched, layout(), &schema(), env(install))
         .await
         .unwrap();
     library
@@ -763,6 +862,23 @@ async fn trace() {
         said("refresh, nothing new", &a, now() - start);
     }
     a.close().await.unwrap();
+    let worker = Worker::start(
+        Folder::Private(path(&format!("{home}/folder"))),
+        &path(&format!("{home}/own")),
+    )
+    .await
+    .unwrap();
+    let start = now();
+    let (b, _) = Library::open(
+        Traced(worker, RefCell::default()),
+        layout(),
+        &schema(),
+        env("own"),
+    )
+    .await
+    .unwrap();
+    said("open, existing install", &b, now() - start);
+    b.close().await.unwrap();
     say("trace | done");
 }
 
@@ -784,6 +900,7 @@ async fn measure() {
     opfs_remove(parts(&format!("{}/own", home())))
         .await
         .unwrap();
+    only_generated_writers().await;
     let run = format!("{:08x}", CryptoRandom.next_u128() as u32);
 
     let mut cold = Samples::default();
@@ -804,6 +921,7 @@ async fn measure() {
     let mut first_scan = Samples::default();
     first_scan.time(a.rescan()).await.unwrap();
     first_scan.report("rescan after open");
+    report_memory("after the first rescan");
     let ids: Vec<EntityId> = a.view().entities().iter().map(|e| e.id()).collect();
     let offset = (CryptoRandom.next_u128() % ids.len() as u128) as usize;
     let pick = |i: usize| ids[(offset + i * 7919) % ids.len()];
