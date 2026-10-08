@@ -290,7 +290,7 @@ impl Gen {
         self.writers.push(WriterGen {
             id,
             head: entry.hash(),
-            segment: entry.line.to_bytes(),
+            segment: entry.to_bytes(),
             in_segment: 1,
             entries: 1,
         });
@@ -301,10 +301,12 @@ impl Gen {
         let writer = &mut self.writers[w];
         let entry = Entry::encode(writer.head, at, EntryKind::Intent(logged)).unwrap();
         writer.head = entry.hash();
-        writer.segment.extend(entry.line.to_bytes());
+        writer.segment.extend(entry.to_bytes());
         writer.in_segment += 1;
         writer.entries += 1;
         if writer.in_segment >= SEGMENT {
+            let marker = toshokan::line::seal_marker(writer.head);
+            writer.segment.extend(marker);
             self.flush(w);
         }
     }
@@ -450,36 +452,59 @@ async fn put(worker: &Worker, files: impl IntoIterator<Item = (RelPath, Vec<u8>)
     }
 }
 
-fn ready_marker() -> Vec<String> {
+/// Written once the library files are.
+fn files_marker() -> Vec<String> {
     parts(&format!("{}/generated/ready", home()))
 }
 
-/// Writes the library unless an earlier run of this origin finished writing it.
+/// Written once the log is, in its current shape: rolled-over segments sealed.
+fn log_marker() -> Vec<String> {
+    parts(&format!("{}/generated/sealed-log", home()))
+}
+
+/// Writes what an earlier run of this origin did not finish writing: the library
+/// files, then the log. A new log starts the measured install afresh.
 #[wasm_bindgen_test]
 async fn generate() {
-    if opfs_has(ready_marker()).await.is_truthy() {
+    let files_cached = opfs_has(files_marker()).await.is_truthy();
+    if files_cached && opfs_has(log_marker()).await.is_truthy() {
         say(&format!("bench library {} is cached", home()));
         return;
     }
-    opfs_remove(parts(&home())).await.unwrap();
     let home = home();
+    if !files_cached {
+        opfs_remove(parts(&home)).await.unwrap();
+    }
     let worker = Worker::start(
         Folder::Private(path(&format!("{home}/folder"))),
         &path(&format!("{home}/generated")),
     )
     .await
     .unwrap();
-    let start = now();
-    put(
-        &worker,
-        (0..entities()).map(|i| (file_path(i), file_bytes(i))),
-    )
-    .await;
-    say(&format!(
-        "{} library files written in {:.0} ms",
-        entities(),
-        now() - start
-    ));
+    if !files_cached {
+        let start = now();
+        put(
+            &worker,
+            (0..entities()).map(|i| (file_path(i), file_bytes(i))),
+        )
+        .await;
+        say(&format!(
+            "{} library files written in {:.0} ms",
+            entities(),
+            now() - start
+        ));
+        let marker = Io::Create {
+            root: Root::Local,
+            path: path("ready"),
+            bytes: Vec::new(),
+        };
+        ok(&worker, marker).await;
+    }
+    let log_root = layout().root().to_string();
+    opfs_remove(parts(&format!("{home}/folder/{log_root}")))
+        .await
+        .unwrap();
+    opfs_remove(parts(&format!("{home}/own"))).await.unwrap();
     let mut files = Vec::new();
     for dir in 0..entities().div_ceil(PER_DIR) {
         let dir = path(&format!("lib/d{dir:04}"));
@@ -516,7 +541,7 @@ async fn generate() {
     say(&format!("log written in {:.0} ms", now() - start));
     let marker = Io::Create {
         root: Root::Local,
-        path: path("ready"),
+        path: path("sealed-log"),
         bytes: Vec::new(),
     };
     ok(&worker, marker).await;
@@ -648,7 +673,7 @@ thread_local! {
 #[wasm_bindgen_test]
 async fn measure() {
     assert!(
-        opfs_has(ready_marker()).await.is_truthy(),
+        opfs_has(log_marker()).await.is_truthy(),
         "no bench library at {}: run the generate test first",
         home()
     );
@@ -707,6 +732,11 @@ async fn measure() {
         refreshes.time(a.refresh()).await.unwrap();
     }
     refreshes.report("refresh, nothing new");
+    let mut rescans = Samples::default();
+    for _ in 0..3 {
+        rescans.time(a.rescan()).await.unwrap();
+    }
+    rescans.report("rescan, nothing new");
 
     let view = a.view();
     let mut find = Samples::default();
@@ -722,6 +752,24 @@ async fn measure() {
         conflicts.time(async { view.conflicts() }).await;
     }
     conflicts.report("conflicts()");
+    let lookups: [(&str, &dyn Fn() -> usize); 6] = [
+        ("with(rating)", &|| view.with(RATING).len()),
+        ("range(rating, 3..)", &|| view.range(RATING, 3..).len()),
+        ("values(tags)", &|| view.values(TAGS).values.len()),
+        ("values(name)", &|| view.values(NAME).values.len()),
+        ("under(lib/d0042)", &|| view.under(&path("lib/d0042")).len()),
+        ("1000 x at(path)", &|| {
+            let at = |i| view.at(&view.entity(pick(i))?.file()?.path);
+            (0..1000).filter_map(at).count()
+        }),
+    ];
+    for (name, lookup) in lookups {
+        let mut samples = Samples::default();
+        for _ in 0..3 {
+            assert!(samples.time(async { lookup() }).await > 0, "{name}");
+        }
+        samples.report(name);
+    }
     let mut files = Samples::default();
     files
         .time(async {
