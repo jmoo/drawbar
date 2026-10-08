@@ -151,6 +151,7 @@ impl<K: Ord + Clone, V: Clone> CowMap<K, V> {
             };
             (chunk, at) = (chunks.len() - 1, last.len());
         }
+        let final_chunk = chunk + 1 == chunks.len();
         let (last, entries) = &mut chunks[chunk];
         let entries = Arc::make_mut(entries);
         if let Some((found, old)) = entries.get_mut(at) {
@@ -164,7 +165,14 @@ impl<K: Ord + Clone, V: Clone> CowMap<K, V> {
         entries.insert(at, (key, value));
         self.len += 1;
         if entries.len() > CHUNK {
-            let half = entries.split_off(entries.len() / 2);
+            // Entries added in order fill each chunk before starting the next.
+            let appended = final_chunk && at + 1 == entries.len();
+            let from = match appended {
+                true => entries.len() - 1,
+                false => entries.len() / 2,
+            };
+            let half = entries.split_off(from);
+            entries.shrink_to(CHUNK);
             let left = entries.last().expect("half is not all").0.clone();
             let right = std::mem::replace(last, left);
             chunks.insert(chunk + 1, (right, Arc::new(half)));
@@ -523,6 +531,18 @@ mod tests {
             );
             assert_same(&was, &model, 0);
         }
+    }
+
+    #[test]
+    fn a_map_filled_in_order_fills_each_chunk() {
+        let mut map = CowMap::default();
+        for key in 0..1000u64 {
+            map.insert(key, key);
+        }
+        let model: BTreeMap<u64, u64> = (0..1000).map(|key| (key, key)).collect();
+        assert_same(&map, &model, 1000);
+        let sizes: Vec<usize> = map.chunks.iter().map(|(_, chunk)| chunk.len()).collect();
+        assert_eq!(sizes, [128, 128, 128, 128, 128, 128, 128, 104]);
     }
 
     #[test]
