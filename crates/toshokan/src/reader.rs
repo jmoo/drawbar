@@ -25,6 +25,7 @@ use crate::line::{self, Stop};
 use crate::log::{Entry, EntryKind};
 use crate::merge::Folded;
 use crate::path::RelPath;
+use crate::quick::Quick;
 use crate::report::{Fork, Gap};
 use crate::snapshot::Snapshot;
 
@@ -178,14 +179,14 @@ pub struct WriterLog {
     /// Every placed or folded entry, with its predecessor. Hashed, since a log
     /// holds every entry of its writer and is looked up a few times per entry;
     /// nothing depends on its order.
-    chain: HashMap<EntryHash, Link>,
+    chain: HashMap<EntryHash, Link, Quick>,
     /// Entries seen and never placed, with their predecessors, so that a fork with
     /// one of them is found after its file is gone.
     strays: BTreeMap<EntryHash, EntryHash>,
     /// The lines last offered and held back.
     waiting: BTreeMap<EntryHash, Rc<Entry>>,
     /// The first successor seen of each entry, among the chain and the strays.
-    next: HashMap<EntryHash, EntryHash>,
+    next: HashMap<EntryHash, EntryHash, Quick>,
     /// Every successor of each entry with more than one.
     branches: BTreeMap<EntryHash, BTreeSet<EntryHash>>,
     forks: Vec<Fork>,
@@ -254,10 +255,10 @@ impl WriterLog {
             writer,
             snapshots: Vec::new(),
             entries: Vec::new(),
-            chain: HashMap::new(),
+            chain: HashMap::default(),
             strays: BTreeMap::new(),
             waiting: BTreeMap::new(),
-            next: HashMap::new(),
+            next: HashMap::default(),
             branches: BTreeMap::new(),
             forks: Vec::new(),
             gaps: Vec::new(),

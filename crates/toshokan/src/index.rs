@@ -13,6 +13,7 @@ use crate::cow::CowMap;
 use crate::ids::EntityId;
 use crate::merge::{Folded, Shown};
 use crate::path::RelPath;
+use crate::quick::Quick;
 use crate::schema::{KeyKind, Raw};
 use crate::view::{Conflicted, FileRef, FileState};
 
@@ -104,7 +105,13 @@ impl Indexing {
             let entries = Entries::from(entity, shown, bindings.bound.get(&entity));
             for under in entries.values.chunk_by(|a, b| (a.0, a.1) == (b.0, b.1)) {
                 let (kind, key) = (under[0].0, under[0].1);
-                let held = self.holding.entry((kind, key.to_owned())).or_default();
+                let named = |(held, name): &(KeyKind, String)| *held == kind && name == key;
+                if !self.holding.keys().any(named) {
+                    self.holding
+                        .insert((kind, key.to_owned()), Holding::default());
+                }
+                let held = self.holding.iter_mut().find(|(held, _)| named(held));
+                let (_, held) = held.expect("inserted above");
                 held.holders.push(entity);
                 for (_, _, value) in under {
                     let named = held.named.len();
@@ -335,7 +342,7 @@ impl Index {
 #[derive(Default)]
 struct Holding {
     /// Each value, numbered in the order first held.
-    named: HashMap<Text, usize>,
+    named: HashMap<Text, usize, Quick>,
     /// Each value held, by number, with its entity.
     held: Vec<(usize, EntityId)>,
     holders: Vec<EntityId>,

@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
 use crate::path::RelPath;
+use crate::quick::Quick;
 use crate::schema::Raw;
 
 /// Why bytes do not unpack: truncated, or holding what no packing writes.
@@ -257,7 +258,7 @@ const SHARED_LEN: usize = 64;
 impl Unpack for Raw {
     fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
         thread_local! {
-            static SHARED: RefCell<HashMap<Box<str>, Raw>> = RefCell::new(HashMap::new());
+            static SHARED: RefCell<HashMap<Box<str>, Raw, Quick>> = RefCell::default();
         }
         let text = input.str()?;
         let read = || Raw::new(text).map_err(|_| Bad("JSON no packing writes"));
