@@ -501,8 +501,10 @@ pub(crate) fn read_all<'a>(root: Root, path: &RelPath, max: u64) -> Fallible<'a,
 }
 
 /// Copies the file `from` to a new file `to`, a chunk at a time. Something at
-/// `to` refuses it. A source that shrinks while it is copied fails the copy, and a
-/// copy that fails once `to` is made removes it.
+/// `to` refuses it. A source that shrinks while it is copied fails the copy, and so
+/// does a copy whose length is not the source's once written, as where a backend
+/// lands writes later and then fails to. A copy that fails once `to` is made
+/// removes it.
 pub(crate) fn copy<'a>(root: Root, from: &RelPath, to: &RelPath) -> Fallible<'a, ()> {
     let (from, to) = (from.clone(), to.clone());
     stat(root, &from).and_then(move |meta| {
@@ -530,6 +532,7 @@ pub(crate) fn copy<'a>(root: Root, from: &RelPath, to: &RelPath) -> Fallible<'a,
             bytes: Vec::new(),
         });
         let made = to.clone();
+        let written = to.clone();
         created.and_then(move |()| {
             each(chunks(len).into_iter(), move |range| {
                 let to = to.clone();
@@ -548,6 +551,20 @@ pub(crate) fn copy<'a>(root: Root, from: &RelPath, to: &RelPath) -> Fallible<'a,
                         offset: range.offset,
                         bytes,
                     })
+                })
+            })
+            .and_then(move |()| {
+                stat(root, &written).and_then(move |meta| match meta {
+                    Some(Meta {
+                        kind: Kind::File,
+                        len: copied,
+                        ..
+                    }) if copied == len => ok(()),
+                    _ => Flow::Done(Err(Error::Io {
+                        root,
+                        path: written,
+                        error: IoError::Other("the copy does not hold its source's length".into()),
+                    })),
                 })
             })
             .then(move |copied| match copied {
@@ -866,6 +883,71 @@ mod tests {
             disk.files(Root::Folder).into_keys().collect::<Vec<_>>(),
             [path("a")]
         );
+    }
+
+    /// Holds consecutive writes to one file and lands them at the next other
+    /// request, as a browser's writable stream does at its close, which may fail.
+    struct LandedLater {
+        disk: MemDisk,
+        held: Vec<Io>,
+        landing_fails: bool,
+    }
+
+    impl blocking::Backend for LandedLater {
+        fn capabilities(&self, root: Root) -> crate::io::Capabilities {
+            blocking::Backend::capabilities(&self.disk, root)
+        }
+
+        fn perform(&mut self, io: Io) -> crate::io::IoResult {
+            let same_file = self
+                .held
+                .first()
+                .is_none_or(|held| held.path() == io.path());
+            if matches!(io, Io::Write { .. }) && same_file {
+                self.held.push(io);
+                return Ok(crate::io::Reply::Done);
+            }
+            let writes = std::mem::take(&mut self.held);
+            if self.landing_fails && !writes.is_empty() {
+                return Err(IoError::Other("the stream did not close".into()));
+            }
+            for write in writes {
+                self.disk.perform(write)?;
+            }
+            self.disk.perform(io)
+        }
+    }
+
+    #[test]
+    fn a_copy_whose_writes_fail_to_land_fails_and_removes_its_destination() {
+        let disk = MemDisk::new();
+        let create = Io::Create {
+            root: Root::Folder,
+            path: path("a"),
+            bytes: vec![7; 10],
+        };
+        run(&disk, act(create)).unwrap();
+        let mut later = LandedLater {
+            disk: disk.clone(),
+            held: Vec::new(),
+            landing_fails: true,
+        };
+        let copied = blocking::run(
+            &mut later,
+            copy(Root::Folder, &path("a"), &path("b")).task(),
+        );
+        assert!(copied.is_err(), "a copy that never landed succeeded");
+        assert_eq!(
+            disk.files(Root::Folder).into_keys().collect::<Vec<_>>(),
+            [path("a")]
+        );
+        later.landing_fails = false;
+        blocking::run(
+            &mut later,
+            copy(Root::Folder, &path("a"), &path("b")).task(),
+        )
+        .unwrap();
+        assert_eq!(disk.files(Root::Folder)[&path("b")], vec![7; 10]);
     }
 
     #[test]
