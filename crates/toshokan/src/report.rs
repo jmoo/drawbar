@@ -123,7 +123,8 @@ pub struct Gap {
 }
 
 /// What a scan of the library's files found against the logged facts. A scan
-/// writes nothing.
+/// writes nothing. Files are listed in order of path, and entities in order of
+/// id.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct ScanReport {
     /// Files no entity is bound to.
@@ -131,7 +132,8 @@ pub struct ScanReport {
     /// Entities whose file is nowhere.
     pub departed: Vec<EntityId>,
     pub moved: Vec<Moved>,
-    /// Files that hold an entity's contents while the entity's own path still does.
+    /// Files that hold an entity's contents while the entity's own path still
+    /// does, by copy and then entity.
     pub copied: Vec<Copied>,
     /// Entities whose file is at its path with other contents.
     pub changed: Vec<EntityId>,

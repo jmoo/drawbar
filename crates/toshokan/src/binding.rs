@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Bound;
 use std::rc::Rc;
 
+use crate::cow::CowMap;
 use crate::env::{Identify, Names};
 use crate::error::Result;
 use crate::flow::{self, fold, ok};
@@ -47,7 +48,7 @@ pub struct Scan {
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Bindings {
     /// Every entity with a file fact, with where its file is.
-    pub bound: BTreeMap<EntityId, FileRef>,
+    pub bound: CowMap<EntityId, FileRef>,
     /// Library files no entity is bound to, sorted.
     pub unbound: Vec<RelPath>,
     pub report: ScanReport,
@@ -309,6 +310,21 @@ pub(crate) fn relist<'a>(
     fold(paths.into_iter(), scan, move |scan, path| {
         visit(Rc::clone(&layout), path, scan)
     })
+}
+
+/// The files of `scan` at or under each of `paths`.
+pub(crate) fn under_any(scan: &Scan, paths: &[RelPath]) -> Vec<RelPath> {
+    let mut found: BTreeSet<&RelPath> = BTreeSet::new();
+    for dir in paths {
+        let from = scan.files.range::<RelPath, _>(dir..);
+        let prefixed = from.take_while(|(path, _)| path.as_str().starts_with(dir.as_str()));
+        found.extend(
+            prefixed
+                .map(|(path, _)| path)
+                .filter(|path| path.starts_with(dir)),
+        );
+    }
+    found.into_iter().cloned().collect()
 }
 
 /// Whether `path` is one of `paths` or under one of them.
@@ -602,6 +618,8 @@ enum Stage {
 #[derive(Default)]
 struct Progress {
     bindings: Bindings,
+    /// What [`Bindings::bound`] will hold.
+    bound: BTreeMap<EntityId, FileRef>,
     taken: BTreeSet<RelPath>,
     /// The entities naming each file, each by its one candidate.
     claims: BTreeMap<RelPath, Vec<(EntityId, usize)>>,
@@ -703,8 +721,8 @@ impl Binding {
                     }
                 }
                 Stage::Pins(from) => {
-                    let Progress { bindings, pins, .. } = progress;
-                    let taken = take_after(&bindings.bound, from, budget, |&entity, file| {
+                    let Progress { bound, pins, .. } = progress;
+                    let taken = take_after(bound, from, budget, |&entity, file| {
                         pins.extend(pin(facts, scan, entity, file));
                     });
                     taken.map_or(Stage::Unknown(None), |last| Stage::Pins(Some(last)))
@@ -714,7 +732,7 @@ impl Binding {
                         return true;
                     };
                     let paths = unscanned.paths.iter().map(RelPath::as_str).collect();
-                    let bound = &mut progress.bindings.bound;
+                    let bound = &mut progress.bound;
                     let taken = take_after(every, from, budget, |&entity, written| {
                         let latest = written.last();
                         let unknown =
@@ -737,7 +755,17 @@ impl Binding {
 
     /// ⚠️ Before [`Binding::step`] returns true, what is bound so far.
     pub fn finish(self) -> (Bindings, Vec<Op>) {
-        let Progress { bindings, pins, .. } = self.progress;
+        let Progress {
+            mut bindings,
+            bound,
+            pins,
+            ..
+        } = self.progress;
+        bindings.bound = CowMap::from_sorted(bound.into_iter().collect());
+        let report = &mut bindings.report;
+        report.departed.sort();
+        report.moved.sort_by_key(|moved| moved.entity);
+        report.ambiguous.sort_by_key(|ambiguous| ambiguous.entity);
         (bindings, pins)
     }
 }
@@ -780,6 +808,7 @@ impl Progress {
             claims,
             departed,
             bindings,
+            bound,
             ..
         } = self;
         let gone = written
@@ -812,7 +841,7 @@ impl Progress {
                     entity,
                     candidates: several.iter().map(|(path, _)| (*path).clone()).collect(),
                 });
-                bindings.bound.insert(entity, missing(&first.value));
+                bound.insert(entity, missing(&first.value));
             }
         }
     }
@@ -846,7 +875,7 @@ impl Progress {
         let others = claimants.into_iter().filter(|(other, _)| *other != entity);
         self.departed.extend(others);
         self.taken.insert(path.clone());
-        self.bindings.bound.insert(entity, FileRef { path, state });
+        self.bound.insert(entity, FileRef { path, state });
     }
 
     fn free(&mut self, path: &RelPath, file: &Scanned) {
@@ -871,7 +900,7 @@ impl Progress {
     /// other departed entity wants that file.
     fn moved(&mut self, facts: &Facts, entity: EntityId, index: usize, matches: Vec<RelPath>) {
         let fact = &facts[&entity][index].value;
-        let bindings = &mut self.bindings;
+        let (bindings, bound) = (&mut self.bindings, &mut self.bound);
         match matches.as_slice() {
             [path] if self.wanted[path] == 1 => {
                 self.taken.insert(path.clone());
@@ -884,18 +913,18 @@ impl Progress {
                     path: path.clone(),
                     state: FileState::InSync,
                 };
-                bindings.bound.insert(entity, file);
+                bound.insert(entity, file);
             }
             [] => {
                 bindings.report.departed.push(entity);
-                bindings.bound.insert(entity, missing(fact));
+                bound.insert(entity, missing(fact));
             }
             _ => {
                 bindings.report.ambiguous.push(Ambiguous {
                     entity,
                     candidates: matches,
                 });
-                bindings.bound.insert(entity, missing(fact));
+                bound.insert(entity, missing(fact));
             }
         }
     }
@@ -911,9 +940,8 @@ impl Progress {
         let Some(identity) = file.identity else {
             return;
         };
-        let in_sync = self
-            .in_sync
-            .get_or_insert_with(|| in_sync(&bindings.bound, scan));
+        let bound = &self.bound;
+        let in_sync = self.in_sync.get_or_insert_with(|| in_sync(bound, scan));
         for &entity in in_sync.get(&identity).into_iter().flatten() {
             bindings.report.copied.push(Copied {
                 entity,
@@ -925,7 +953,7 @@ impl Progress {
     fn reported(&mut self) {
         let bindings = &mut self.bindings;
         bindings.report.arrived = bindings.unbound.clone();
-        bindings.report.changed = bindings
+        bindings.report.changed = self
             .bound
             .iter()
             .filter(|(_, file)| file.state == FileState::ChangedOutside)
@@ -1258,7 +1286,7 @@ mod tests {
                     (*entity, FileRef { path, state })
                 })
                 .collect();
-            assert_eq!(bindings.bound, presumed, "{facts:?}");
+            assert_eq!(bindings.bound, presumed.into_iter().collect(), "{facts:?}");
             assert_eq!((bindings.unbound, pins), (Vec::new(), Vec::new()));
         }
     }

@@ -481,23 +481,14 @@ impl<'a> Entries<'a> {
 const REBUILT: usize = 1024;
 
 /// The entities whose binding differs between `was` and `now`.
-fn rebound(
-    was: &BTreeMap<EntityId, crate::view::FileRef>,
-    now: &BTreeMap<EntityId, crate::view::FileRef>,
-) -> Vec<EntityId> {
-    let mut changed = Vec::new();
-    let mut old = was.iter().peekable();
-    for (entity, file) in now {
-        while let Some((gone, _)) = old.next_if(|(id, _)| *id < entity) {
-            changed.push(*gone);
-        }
-        match old.next_if(|(id, _)| *id == entity) {
-            Some((_, before)) if before == file => {}
-            _ => changed.push(*entity),
-        }
-    }
-    changed.extend(old.map(|(gone, _)| *gone));
-    changed
+fn rebound(was: &CowMap<EntityId, FileRef>, now: &CowMap<EntityId, FileRef>) -> Vec<EntityId> {
+    let pairs = now.diff(was);
+    let differ = pairs.filter_map(|pair| match pair {
+        (Some((_, now)), Some((_, was))) if now == was => None,
+        (Some((entity, _)), _) | (None, Some((entity, _))) => Some(*entity),
+        (None, None) => None,
+    });
+    differ.collect()
 }
 
 #[cfg(test)]

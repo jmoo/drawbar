@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::binding::{self, Binding, Bindings, Facts, Resolving, Scan, Unscanned, Walk};
+use crate::binding::{self, Binding, Bindings, Facts, Resolving, Scan, Scanned, Unscanned, Walk};
 use crate::cache::{self, Encoding};
 use crate::drafts::{self, DraftRecord};
 use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd};
@@ -31,6 +31,7 @@ use crate::merge::{merge, Beyond, Fold, Folded, Merging, Part};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord};
 use crate::plan::{FactChange, FileChange, Plan};
+use crate::reach::{self, Linking, Links, Reach};
 use crate::reader::{Listing, ReadReport, Reader, Stamp, WriterLog};
 use crate::recovery::{self, Settling};
 use crate::report::{
@@ -88,9 +89,11 @@ pub struct Library {
     unscanned: Unscanned,
     /// A scan of every file that stopped before it finished, to go on with.
     walking: Option<Walk>,
-    /// Bound from `facts`, `scan` and `unscanned` unless `bind_due`.
+    /// Bound from `facts`, `scan` and `unscanned` unless `reach` says a binding
+    /// is due.
     bindings: Arc<Bindings>,
-    bind_due: bool,
+    /// What changed in `facts` and `scan` since they were bound and resolved.
+    reach: Reach,
     /// The moves the bindings found that the facts do not say yet.
     pins: Vec<Op>,
     presence: BTreeMap<WriterId, Presence>,
@@ -271,7 +274,7 @@ impl Library {
             unscanned: Unscanned::default(),
             walking: None,
             bindings: Arc::default(),
-            bind_due: false,
+            reach: Reach::default(),
             pins: Vec::new(),
             presence: BTreeMap::new(),
             history: History::default(),
@@ -309,6 +312,17 @@ impl Library {
     pub fn refolded(&self) -> Folded {
         let folder = self.shown_as_folder();
         merge(shown_logs(&self.reader, |writer| folder.contains(&writer)))
+    }
+
+    /// What this instance binds, and what binding every fact of the view afresh
+    /// to the last scan binds, as tests compare them.
+    #[doc(hidden)]
+    pub fn rebound(&mut self) -> [(Bindings, Vec<Op>); 2] {
+        self.bind_facts();
+        let names = &*self.env.names;
+        let facts = self.folded.files();
+        let afresh = binding::bind_known(&facts, &self.scan, names, &self.unscanned);
+        [((*self.bindings).clone(), self.pins.clone()), afresh]
     }
 
     /// An id for an entity an intent being built creates.
@@ -593,9 +607,14 @@ impl Library {
             .map(|change| change.entity)
             .collect();
         let before = &shown.parts().bindings;
-        let rebound = !Arc::ptr_eq(before, &self.bindings);
-        for (entity, file) in self.bindings.bound.iter().filter(|_| rebound) {
-            let was = before.bound.get(entity).map(presumed);
+        if Arc::ptr_eq(before, &self.bindings) {
+            return changes;
+        }
+        for pair in self.bindings.bound.diff(&before.bound) {
+            let (Some((entity, file)), was) = pair else {
+                continue;
+            };
+            let was = was.map(|(_, was)| presumed(was));
             if was.as_ref() != Some(file) && !explained.contains(entity) {
                 changes.push(Change {
                     entity: *entity,
@@ -939,7 +958,7 @@ impl Library {
         let moved = match joined {
             true => {
                 let was = std::mem::replace(&mut self.facts, self.folded.files());
-                self.bind_due = true;
+                self.reach.everything();
                 self.moved_since(&was)
             }
             false => self.refile(touched.into_iter()),
@@ -1050,12 +1069,11 @@ impl Library {
             {
                 continue;
             }
-            let was = match now.is_empty() {
-                true => self.facts.remove(&entity),
-                false => self.facts.insert(entity, now),
-            };
+            let names = &*self.env.names;
+            let was = self
+                .reach
+                .refile(&mut self.facts, &self.scan, names, entity, now);
             moved.extend(self.fact_paths(entity, was.as_ref()));
-            self.bind_due = true;
         }
         moved
     }
@@ -1077,25 +1095,65 @@ impl Library {
         flow::run(writer::retire_writer(writer.genesis()))
     }
 
-    /// Binds again where the facts changed since the last binding.
+    /// Binds again where the facts or the scan changed since the last binding.
     fn bind_facts(&mut self) {
-        if self.bind_due {
+        if self.reach.due() {
             self.bind();
         }
     }
 
     fn bind(&mut self) {
+        if self.rebind_reached() {
+            return;
+        }
         let mut binding = Binding::new(&self.facts, &self.scan, &self.unscanned);
-        binding.step(&self.facts, &self.scan, &*self.env.names, usize::MAX);
-        self.bound(binding);
+        let names = &*self.env.names;
+        binding.step(&self.facts, &self.scan, names, usize::MAX);
+        let links = self
+            .unscanned
+            .is_empty()
+            .then(|| Links::of(&self.facts, &self.scan, names));
+        self.bound(binding, links);
     }
 
-    /// Takes what a finished binding bound.
-    fn bound(&mut self, binding: Binding) {
+    /// Binds again only what the changes since the last binding reach, when they
+    /// reach little; whether nothing is left to bind.
+    fn rebind_reached(&mut self) -> bool {
+        if !self.reach.due() {
+            return true;
+        }
+        if !self.unscanned.is_empty() || !self.reach.ready() {
+            return false;
+        }
+        let Some(seeds) = self.reach.take() else {
+            return false;
+        };
+        let mut bindings = Arc::clone(&self.bindings);
+        let names = &*self.env.names;
+        let (facts, scan) = (&self.facts, &self.scan);
+        let rebound = reach::rebind(
+            &self.reach,
+            seeds,
+            facts,
+            scan,
+            names,
+            Arc::make_mut(&mut bindings),
+            &mut self.pins,
+        );
+        match rebound {
+            Some(()) => self.bindings = bindings,
+            None => self.reach.everything(),
+        }
+        rebound.is_some()
+    }
+
+    /// Takes what a finished binding of everything bound, and the links of what
+    /// it bound unless a failed scan left something unknown.
+    fn bound(&mut self, binding: Binding, links: Option<Links>) {
         let (bindings, pins) = binding.finish();
         self.pins = pins;
         self.bindings = Arc::new(bindings);
-        self.bind_due = false;
+        self.reach.bound(links);
     }
 
     /// The identities the local root should keep of those scans read that no fact
@@ -1115,6 +1173,40 @@ impl Library {
                 .collect(),
         };
         (remembered != self.remembered || self.unkept).then_some(remembered)
+    }
+
+    /// Takes what relisting changed in the scan, with the identities `read`
+    /// gave the files whose identities were read: a file gone before its read is
+    /// gone. Returns the paths read.
+    fn rescanned(
+        &mut self,
+        mut changes: reach::Changes,
+        read: impl Iterator<Item = (RelPath, Option<Identity>)>,
+    ) -> Vec<RelPath> {
+        let mut paths = Vec::new();
+        for (path, identity) in read {
+            let Some(identity) = identity else {
+                changes.insert(path, None);
+                continue;
+            };
+            let entry = match changes.remove(&path) {
+                Some(changed) => changed,
+                None => self.scan.files.get(&path).copied(),
+            };
+            let file = entry.map(|file| Scanned {
+                identity: Some(identity),
+                ..file
+            });
+            changes.insert(path.clone(), file);
+            paths.push(path);
+        }
+        self.reach.resolved();
+        let names = &*self.env.names;
+        for (path, file) in changes {
+            self.reach
+                .rescan(&mut self.scan, &self.facts, names, path, file);
+        }
+        paths
     }
 
     fn scan_task(&self) -> Task<'static, Result<Scan>> {
@@ -1144,7 +1236,7 @@ impl Library {
     /// Takes `facts`, the file facts of what is now shown.
     fn refiled(&mut self, facts: Facts) {
         self.facts = facts;
-        self.bind_due = true;
+        self.reach.everything();
         self.rehistory();
     }
 
@@ -1624,7 +1716,7 @@ fn scan_for<'a>(
     };
     paths.sort();
     paths.dedup();
-    match paths.is_empty() && !library.bind_due {
+    match paths.is_empty() && !library.reach.due() {
         true => ok(library),
         false => rescan_paths(library, paths),
     }
@@ -1636,7 +1728,7 @@ fn presumed_bound(mut library: Library) -> Flow<'static, Library> {
     library
         .unscanned
         .add(vec![RelPath::ROOT], &library.bindings);
-    library.bind_due = true;
+    library.reach.everything();
     let scan = library.scan.clone();
     rebound(library, scan)
 }
@@ -1697,8 +1789,9 @@ fn walked<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
         known.walking = None;
         if !known.unscanned.is_empty() {
             known.unscanned = Unscanned::default();
-            known.bind_due = true;
+            known.reach.everything();
         }
+        known.reach.resolved();
         known.behind.remove(&Lag::Scan);
         rebound(library, scan).then(move |library| {
             remember(library, read).then(|(library, kept)| Flow::Done(kept.map(|()| library)))
@@ -1709,18 +1802,38 @@ fn walked<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
 /// Binds the facts to `scan` a slice at a time, unless neither changed.
 fn rebound<'a, L: BorrowMut<Library> + 'a>(mut library: L, scan: Scan) -> Flow<'a, L> {
     let known = library.borrow_mut();
-    if !known.bind_due && scan == known.scan {
+    if !known.reach.due() && scan == known.scan {
         return Flow::Done(library);
     }
     known.scan = scan;
+    known.reach.everything();
+    bind_everything(library)
+}
+
+/// Binds every fact to the scan a slice at a time, then links what it bound
+/// unless a failed scan left something unknown.
+fn bind_everything<'a, L: BorrowMut<Library> + 'a>(library: L) -> Flow<'a, L> {
+    let known = library.borrow();
     let binding = Binding::new(&known.facts, &known.scan, &known.unscanned);
     flow::sliced((library, binding), |(library, binding)| {
         let known = library.borrow();
         binding.step(&known.facts, &known.scan, &*known.env.names, BIND_SLICE)
     })
-    .then(|(mut library, binding)| {
-        library.borrow_mut().bound(binding);
-        Flow::Done(library)
+    .then(|(library, binding)| {
+        let linking = library.borrow().unscanned.is_empty().then(Linking::default);
+        flow::sliced((library, linking), |(library, linking)| {
+            let Some(linking) = linking else {
+                return true;
+            };
+            let known = library.borrow();
+            linking.step(&known.facts, &known.scan, &*known.env.names, BIND_SLICE)
+        })
+        .then(move |(mut library, linking)| {
+            library
+                .borrow_mut()
+                .bound(binding, linking.map(Linking::finish));
+            Flow::Done(library)
+        })
     })
 }
 
@@ -1742,10 +1855,68 @@ fn remember<'a, L: BorrowMut<Library> + 'a>(
     })
 }
 
-/// Once entries are durable, scans again only `paths`, and binds.
+/// Once entries are durable, scans again only `paths`, and binds: only what the
+/// changes reach, unless the facts changed wholesale or a failed scan left
+/// something unknown.
 fn rescan_paths(library: &mut Library, paths: Vec<RelPath>) -> Fallible<'_, &mut Library> {
-    let listed = binding::relist(&library.layout, &library.scan, paths.clone()).task();
-    rebind_logged(library, listed, paths)
+    if !library.reach.ready() || !library.unscanned.is_empty() {
+        let listed = binding::relist(&library.layout, &library.scan, paths.clone()).task();
+        return rebind_logged(library, listed, paths);
+    }
+    if let Some(walking) = library.walking.as_mut() {
+        walking.forget(&paths);
+    }
+    let listed = binding::relist(&library.layout, &Scan::default(), paths.clone());
+    listed.then(move |listed| {
+        let found = match listed {
+            Ok(found) => found,
+            Err(error) => return unscanned(library, paths, error),
+        };
+        let gone = binding::under_any(&library.scan, &paths);
+        let links = library.reach.links().expect("ready above");
+        let (changes, unknown) = reach::resolve(
+            &library.scan,
+            &library.facts,
+            links,
+            &*library.env.names,
+            gone,
+            found,
+            library.reach.gained(),
+        );
+        let reading: Vec<RelPath> = unknown.iter().map(|(path, _)| path.clone()).collect();
+        let identities = flow::identities(Root::Folder, unknown, &library.env.identify);
+        identities.then(move |identities| {
+            let identities = match identities {
+                Ok(identities) => identities,
+                Err(error) => return unscanned(library, paths, error),
+            };
+            let read = library.rescanned(changes, reading.into_iter().zip(identities));
+            bind_reached(library)
+                .then(move |library| remember(library, read).then(|(library, _)| ok(library)))
+        })
+    })
+}
+
+/// After a scan of `paths` failed once entries were durable: they, and the
+/// entities bound there, are unknown until a scan of every file succeeds.
+fn unscanned(
+    library: &mut Library,
+    paths: Vec<RelPath>,
+    error: Error,
+) -> Fallible<'_, &mut Library> {
+    library.unscanned.add(paths, &library.bindings);
+    library.lag(Lag::Scan, &Err(error));
+    library.reach.everything();
+    ok(library)
+}
+
+/// Binds again what changed reaches, or everything a slice at a time when it
+/// reaches too much.
+fn bind_reached<'a, L: BorrowMut<Library> + 'a>(mut library: L) -> Flow<'a, L> {
+    match library.borrow_mut().rebind_reached() {
+        true => Flow::Done(library),
+        false => bind_everything(library),
+    }
 }
 
 /// Once entries are durable, binds to what `scan` finds. A scan that fails does
@@ -1764,6 +1935,7 @@ fn rebind_logged<'a>(
         let identified = match listed {
             Ok(mut scan) => {
                 let unknown = binding::resolve(&mut scan, &library.facts, &library.scan);
+                library.reach.resolved();
                 binding::identified(scan, unknown, &library.env.identify)
             }
             Err(error) => Flow::Done(Err(error)),
@@ -1771,12 +1943,7 @@ fn rebind_logged<'a>(
         identified.then(move |scanned| match scanned {
             Ok((scan, read)) => rebound(library, scan)
                 .then(move |library| remember(library, read).then(|(library, _)| ok(library))),
-            Err(error) => {
-                library.unscanned.add(unsure, &library.bindings);
-                library.lag(Lag::Scan, &Err(error));
-                library.bind_due = true;
-                ok(library)
-            }
+            Err(error) => unscanned(library, unsure, error),
         })
     })
 }
@@ -1784,7 +1951,7 @@ fn rebind_logged<'a>(
 /// Once the facts changed, reads the identities they now need of the files the
 /// last scan found, and binds.
 fn reidentify(library: &mut Library) -> Fallible<'_, &mut Library> {
-    match library.bind_due {
+    match library.reach.due() {
         true => rescan_paths(library, Vec::new()),
         false => ok(library),
     }

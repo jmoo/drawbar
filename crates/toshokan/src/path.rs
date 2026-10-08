@@ -96,6 +96,13 @@ fn check_name(path: &str, name: &str) -> Result<()> {
     })
 }
 
+/// A path compares, orders and hashes as its text.
+impl std::borrow::Borrow<str> for RelPath {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
 /// The root prints as `.`; every other path prints as its text.
 impl fmt::Display for RelPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

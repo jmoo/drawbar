@@ -368,7 +368,7 @@ impl Resolver<'_> {
             .bound
             .iter()
             .filter(|(_, file)| file.state != FileState::Missing)
-            .map(|(&entity, file)| (&file.path, entity))
+            .map(|(entity, file)| (&file.path, *entity))
             .collect();
         let files: BTreeSet<&RelPath> = bound
             .keys()

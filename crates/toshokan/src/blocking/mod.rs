@@ -181,6 +181,11 @@ impl<B: Backend> Library<B> {
         self.core.refolded()
     }
 
+    #[doc(hidden)]
+    pub fn rebound(&mut self) -> [(crate::binding::Bindings, Vec<crate::log::Op>); 2] {
+        self.core.rebound()
+    }
+
     pub fn history(&self) -> &[HistoryItem] {
         self.core.history()
     }

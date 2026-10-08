@@ -22,7 +22,6 @@ use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::btree_map::Entry as Slot;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::Bound;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -30,6 +29,7 @@ use serde::de::{DeserializeOwned, Error as _};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::cow::CowMap;
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
 use crate::log::{Displaced, Entry, EntryKind, FileFact, Op};
 use crate::pack::{bad_variant, pack_struct, Bad, In, Pack, Unpack, Unpacked};
@@ -44,7 +44,7 @@ use crate::snapshot::Snapshot;
 /// the original until one of them changes it.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Folded {
-    entities: BTreeMap<EntityId, Arc<EntityState>>,
+    entities: CowMap<EntityId, Arc<EntityState>>,
     trash: BTreeMap<(WriterId, Nonce), Trashed>,
     settled: BTreeSet<(WriterId, Nonce)>,
     unknown: BTreeSet<(EntryHash, Raw)>,
@@ -854,17 +854,20 @@ impl Folded {
     }
 
     fn entity(&mut self, entity: EntityId) -> &mut EntityState {
-        Arc::make_mut(self.entities.entry(entity).or_default())
+        Arc::make_mut(self.entities.get_or_insert_with(entity, Arc::default))
     }
 
     pub fn join(&mut self, other: &Folded) {
-        for (&entity, state) in &other.entities {
-            match self.entities.entry(entity) {
-                Slot::Vacant(slot) => {
-                    slot.insert(Arc::clone(state));
+        for (entity, state) in other.entities.iter() {
+            match self.entities.get(entity) {
+                None => {
+                    self.entities.insert(*entity, Arc::clone(state));
                 }
-                Slot::Occupied(slot) if Arc::ptr_eq(slot.get(), state) => {}
-                Slot::Occupied(mut slot) => Arc::make_mut(slot.get_mut()).join(state),
+                Some(held) if Arc::ptr_eq(held, state) => {}
+                Some(_) => {
+                    let held = self.entities.get_mut(entity).expect("held above");
+                    Arc::make_mut(held).join(state);
+                }
             }
         }
         for (&key, trashed) in &other.trash {
@@ -885,8 +888,11 @@ impl Folded {
     /// the writer of that write, whether the write came in an entry or a snapshot.
     pub fn since(&self, before: &Folded) -> Vec<(EntityId, Part, WriterId)> {
         let mut found = Vec::new();
-        for (&entity, now) in &self.entities {
-            let old = before.entities.get(&entity);
+        for pair in self.entities.diff(&before.entities) {
+            let (Some((entity, now)), old) = pair else {
+                continue;
+            };
+            let (entity, old) = (*entity, old.map(|(_, old)| old));
             if old.is_some_and(|old| Arc::ptr_eq(old, now)) {
                 continue;
             }
@@ -927,7 +933,8 @@ impl Folded {
     pub fn beyond(&self, kept: &Folded) -> Vec<Beyond> {
         let none = Arc::default();
         let mut found = Vec::new();
-        for (&entity, now) in &self.entities {
+        for (entity, now) in self.entities.iter() {
+            let entity = *entity;
             let old = kept.entities.get(&entity).unwrap_or(&none);
             let Some(latest) = now.newest_beyond(old) else {
                 continue;
@@ -1007,19 +1014,13 @@ impl Folded {
     /// still shares with `before` is unchanged without being compared, so this
     /// costs a step per entity.
     pub fn changed(&self, before: &Folded) -> Vec<EntityId> {
-        let mut changed = Vec::new();
-        let mut old = before.entities.iter().peekable();
-        for (&entity, now) in &self.entities {
-            while let Some((&gone, _)) = old.next_if(|(id, _)| **id < entity) {
-                changed.push(gone);
-            }
-            match old.next_if(|(id, _)| **id == entity) {
-                Some((_, was)) if Arc::ptr_eq(was, now) || was == now => {}
-                _ => changed.push(entity),
-            }
-        }
-        changed.extend(old.map(|(&gone, _)| gone));
-        changed
+        let pairs = self.entities.diff(&before.entities);
+        let differ = pairs.filter_map(|pair| match pair {
+            (Some((_, now)), Some((_, was))) if Arc::ptr_eq(was, now) || was == now => None,
+            (Some((entity, _)), _) | (None, Some((entity, _))) => Some(*entity),
+            (None, None) => None,
+        });
+        differ.collect()
     }
 
     /// What `entity` shows that a view indexes; `None` unless it is shown.
@@ -1033,8 +1034,7 @@ impl Folded {
         &self,
         after: Option<EntityId>,
     ) -> impl Iterator<Item = (EntityId, Option<Shown<'_>>)> {
-        let from = after.map_or(Bound::Unbounded, Bound::Excluded);
-        let entities = self.entities.range((from, Bound::Unbounded));
+        let entities = self.entities.after(after);
         entities.map(|(entity, state)| (*entity, state.shown()))
     }
 
@@ -1055,7 +1055,7 @@ impl Folded {
         self.entities
             .iter()
             .filter(|(_, state)| state.present())
-            .map(|(&entity, _)| entity)
+            .map(|(entity, _)| *entity)
             .collect()
     }
 
@@ -1190,9 +1190,10 @@ impl Folded {
         after: &mut Option<EntityId>,
         slice: usize,
     ) -> bool {
-        let from = after.map_or(Bound::Unbounded, Bound::Excluded);
-        let mut entities = self.entities.range((from, Bound::Unbounded));
-        for (&entity, state) in entities.by_ref().take(slice) {
+        let from = *after;
+        let mut entities = self.entities.after(from);
+        for (entity, state) in entities.by_ref().take(slice) {
+            let entity = *entity;
             *after = Some(entity);
             if !state.present() {
                 continue;
@@ -1546,9 +1547,8 @@ impl Folded {
         slice: usize,
         out: &mut Vec<u8>,
     ) -> Option<EntityId> {
-        let from = after.map_or(Bound::Unbounded, Bound::Excluded);
         let mut last = None;
-        for (entity, state) in self.entities.range((from, Bound::Unbounded)).take(slice) {
+        for (entity, state) in self.entities.after(after).take(slice) {
             (entity, state).pack(out);
             last = Some(*entity);
         }
@@ -1613,7 +1613,7 @@ impl Unpacking {
         let trash = Unpack::unpack(input)?;
         let (settled, (unknown, extended)) = Unpack::unpack(input)?;
         Ok(Folded {
-            entities: self.entities.into_iter().collect(),
+            entities: CowMap::from_sorted(self.entities),
             trash,
             settled: distinct(settled)?,
             unknown: distinct(unknown)?,
@@ -2078,7 +2078,7 @@ impl Serialize for Folded {
         let entities: BTreeMap<EntityId, Record<EntityRecord>> = self
             .entities
             .iter()
-            .map(|(&entity, state)| (entity, Record::from(&**state)))
+            .map(|(entity, state)| (*entity, Record::from(&**state)))
             .collect();
         let trash: Vec<Record<TrashRecord>> = self
             .trash
@@ -2317,7 +2317,7 @@ mod tests {
             while !whole.files_slice(&mut files, &mut after, slice) {}
             let present = whole.entities.iter().filter(|(_, state)| state.present());
             let expected: BTreeMap<_, _> = present
-                .map(|(&entity, state)| (entity, state.file_facts()))
+                .map(|(entity, state)| (*entity, state.file_facts()))
                 .filter(|(_, writes)| !writes.is_empty())
                 .collect();
             assert_eq!(files, expected, "{slice}-entity slices of files");

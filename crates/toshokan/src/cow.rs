@@ -42,8 +42,62 @@ impl<K: Ord + Clone, V: Clone> CowMap<K, V> {
         self.len == 0
     }
 
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &(K, V)> {
         entries(self)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &V> {
+        entries(self).map(|(_, value)| value)
+    }
+
+    pub fn get(&self, key: &K) -> Option<&V> {
+        self.get_by(|other| other.cmp(key)).map(|(_, value)| value)
+    }
+
+    pub fn contains_key(&self, key: &K) -> bool {
+        self.get(key).is_some()
+    }
+
+    /// The entries after `after`, or every entry, in order.
+    pub fn after(&self, after: Option<K>) -> impl Iterator<Item = &(K, V)> {
+        let probe = after.clone();
+        let start = self.seek(move |key| match &probe {
+            Some(after) => key.cmp(after),
+            None => Ordering::Greater,
+        });
+        start.skip_while(move |(key, _)| Some(key) == after.as_ref())
+    }
+
+    /// The value under `key`, its chunk copied first when a clone shares it.
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        let (chunk, at) = self.locate(&|other: &K| other.cmp(key));
+        if self.chunks.get(chunk)?.get(at)?.0 != *key {
+            return None;
+        }
+        let chunks = Arc::make_mut(&mut self.chunks);
+        Some(&mut Arc::make_mut(&mut chunks[chunk])[at].1)
+    }
+
+    /// The value under `key`, first inserting what `new` makes when there is none.
+    pub fn get_or_insert_with(&mut self, key: K, new: impl FnOnce() -> V) -> &mut V {
+        if !self.contains_key(&key) {
+            self.insert(key.clone(), new());
+        }
+        self.get_mut(&key).expect("inserted above")
+    }
+
+    /// Each key this map or `before` holds, with its entry in each, in order of
+    /// key, but for the chunks the two share: those are skipped, so the cost
+    /// follows what changed since one was cloned from the other.
+    pub fn diff<'a>(&'a self, before: &'a Self) -> Diff<'a, K, V> {
+        Diff {
+            now: Cursor::new(&self.chunks),
+            was: Cursor::new(&before.chunks),
+        }
     }
 
     /// The entries from the first whose key `probe` does not place before what it
@@ -125,6 +179,23 @@ impl<K: Ord + Clone, V: Clone> CowMap<K, V> {
     }
 }
 
+impl<'a, K, V> IntoIterator for &'a CowMap<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = Box<dyn Iterator<Item = (&'a K, &'a V)> + 'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(entries(self).map(|(key, value)| (key, value)))
+    }
+}
+
+impl<K: Ord + Clone, V: Clone> std::ops::Index<&K> for CowMap<K, V> {
+    type Output = V;
+
+    fn index(&self, key: &K) -> &V {
+        self.get(key).expect("a key the map holds")
+    }
+}
+
 /// Repeated keys keep the last value.
 impl<K: Ord, V> FromIterator<(K, V)> for CowMap<K, V> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(entries: I) -> Self {
@@ -159,6 +230,85 @@ impl<K: Ord, V> CowMap<K, V> {
     }
 }
 
+/// What [`CowMap::diff`] gives: the entries of each key, now and before.
+pub struct Diff<'a, K, V> {
+    now: Cursor<'a, K, V>,
+    was: Cursor<'a, K, V>,
+}
+
+/// A place in a map's chunks.
+struct Cursor<'a, K, V> {
+    chunks: &'a [Chunk<K, V>],
+    chunk: usize,
+    at: usize,
+}
+
+impl<'a, K, V> Cursor<'a, K, V> {
+    fn new(chunks: &'a [Chunk<K, V>]) -> Self {
+        Self {
+            chunks,
+            chunk: 0,
+            at: 0,
+        }
+    }
+
+    fn peek(&self) -> Option<&'a (K, V)> {
+        self.chunks.get(self.chunk)?.get(self.at)
+    }
+
+    fn step(&mut self) {
+        self.at += 1;
+        if self
+            .chunks
+            .get(self.chunk)
+            .is_some_and(|c| self.at == c.len())
+        {
+            self.skip();
+        }
+    }
+
+    fn skip(&mut self) {
+        self.chunk += 1;
+        self.at = 0;
+    }
+
+    /// The chunk this cursor is at the start of.
+    fn starting(&self) -> Option<&'a Chunk<K, V>> {
+        self.chunks.get(self.chunk).filter(|_| self.at == 0)
+    }
+}
+
+impl<'a, K: Ord, V> Iterator for Diff<'a, K, V> {
+    type Item = (Option<&'a (K, V)>, Option<&'a (K, V)>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let (Some(now), Some(was)) = (self.now.starting(), self.was.starting()) {
+            if !Arc::ptr_eq(now, was) {
+                break;
+            }
+            self.now.skip();
+            self.was.skip();
+        }
+        let order = match (self.now.peek(), self.was.peek()) {
+            (None, None) => return None,
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (Some(now), Some(was)) => now.0.cmp(&was.0),
+        };
+        let now = (order != Ordering::Greater)
+            .then(|| self.now.peek())
+            .flatten();
+        let was = (order != Ordering::Less).then(|| self.was.peek()).flatten();
+        if now.is_some() {
+            self.now.step();
+        }
+        if was.is_some() {
+            self.was.step();
+        }
+        Some((now, was))
+    }
+}
+
 /// Joins the small chunk at `at` with a neighbor when both fit in one.
 fn join_small<K: Clone, V: Clone>(chunks: &mut Vec<Chunk<K, V>>, at: usize) {
     let fits = |other: usize| chunks[other].len() + chunks[at].len() <= CHUNK;
@@ -181,6 +331,8 @@ impl<K: PartialEq, V: PartialEq> PartialEq for CowMap<K, V> {
         self.len == other.len && entries(self).eq(entries(other))
     }
 }
+
+impl<K: Eq, V: Eq> Eq for CowMap<K, V> {}
 
 impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for CowMap<K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -246,6 +398,10 @@ mod tests {
                 let from: Vec<u64> = map.seek(|k| k.cmp(&probe)).map(|(k, _)| *k).collect();
                 let expected: Vec<u64> = model.range(probe..).map(|(k, _)| *k).collect();
                 assert_eq!(from, expected, "step {step}: from {probe}");
+                let after: Vec<u64> = map.after(Some(probe)).map(|(k, _)| *k).collect();
+                let beyond = (std::ops::Bound::Excluded(probe), std::ops::Bound::Unbounded);
+                let expected: Vec<u64> = model.range(beyond).map(|(k, _)| *k).collect();
+                assert_eq!(after, expected, "step {step}: after {probe}");
                 if step % 500 == 0 {
                     kept.push((map.clone(), model.clone()));
                 }
@@ -254,6 +410,59 @@ mod tests {
             for (step, (map, model)) in kept.iter().enumerate() {
                 assert_same(map, model, step * 500);
             }
+        }
+    }
+
+    /// Each key of `now` or `was` whose value differs, as both models hold it.
+    fn model_diff(
+        now: &BTreeMap<u64, u64>,
+        was: &BTreeMap<u64, u64>,
+    ) -> Vec<(u64, Option<u64>, Option<u64>)> {
+        let keys: std::collections::BTreeSet<u64> = now.keys().chain(was.keys()).copied().collect();
+        keys.into_iter()
+            .map(|key| (key, now.get(&key).copied(), was.get(&key).copied()))
+            .filter(|(_, now, was)| now != was)
+            .collect()
+    }
+
+    #[test]
+    fn a_diff_from_a_clone_gives_every_changed_key_and_skips_shared_chunks() {
+        for seed in 1..=20u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x2545_f491_4f6c_dd1d));
+            let span = [100, 2000, 20_000][seed as usize % 3];
+            let model: BTreeMap<u64, u64> = (0..span / 2).map(|k| (k * 2, k)).collect();
+            let was: CowMap<u64, u64> = model.iter().map(|(k, v)| (*k, *v)).collect();
+            let (mut now, mut changed) = (was.clone(), model.clone());
+            for step in 0..rng.below(40) {
+                let key = rng.below(span);
+                match rng.below(3) {
+                    0 => assert_eq!(now.remove(&key), changed.remove(&key)),
+                    1 => assert_eq!(now.insert(key, step), changed.insert(key, step)),
+                    _ => {
+                        if let Some(value) = now.get_mut(&key) {
+                            *value = step;
+                            changed.insert(key, step);
+                        }
+                    }
+                }
+            }
+            let mut differences = Vec::new();
+            let mut compared = 0;
+            for (n, w) in now.diff(&was) {
+                compared += 1;
+                let key = n.or(w).map(|(key, _)| *key).unwrap();
+                let (n, w) = (n.map(|(_, v)| *v), w.map(|(_, v)| *v));
+                if n != w {
+                    differences.push((key, n, w));
+                }
+            }
+            assert_eq!(differences, model_diff(&changed, &model), "seed {seed}");
+            let touched = model_diff(&changed, &model).len();
+            assert!(
+                compared <= (touched + 1) * 4 * CHUNK,
+                "seed {seed}: {compared} entries compared for {touched} changes"
+            );
+            assert_same(&was, &model, 0);
         }
     }
 

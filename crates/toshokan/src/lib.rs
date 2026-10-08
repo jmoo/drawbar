@@ -53,6 +53,7 @@ pub mod path;
 #[doc(hidden)]
 pub mod pending;
 pub mod plan;
+mod reach;
 #[doc(hidden)]
 pub mod reader;
 #[doc(hidden)]

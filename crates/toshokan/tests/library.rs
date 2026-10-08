@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use toshokan::asynch;
+use toshokan::binding::Bindings;
 use toshokan::blocking::{self, Backend};
 use toshokan::env::{ExactNames, PrefixIdentity, SeededRandom, TestClock};
 use toshokan::intent::{Driver, Intent};
@@ -307,6 +308,9 @@ trait Facade: Sized {
     fn redo(&mut self) -> Result<Committed, Error>;
     fn refresh(&mut self) -> Result<Refreshed, Error>;
     fn rescan(&mut self) -> Result<Refreshed, Error>;
+    fn rescan_paths(&mut self, paths: Vec<RelPath>) -> Result<Refreshed, Error>;
+    /// What the library binds, and what binding every fact afresh binds.
+    fn rebound(&mut self) -> [(Bindings, Vec<Op>); 2];
     fn let_go(&mut self) -> Result<(), Error>;
     fn adopt(&mut self, label: &str) -> Result<Committed, Error>;
     fn others(&mut self) -> Result<Vec<WriterInfo>, Error>;
@@ -362,6 +366,12 @@ impl Facade for Blocking {
     }
     fn rescan(&mut self) -> Result<Refreshed, Error> {
         self.0.rescan()
+    }
+    fn rescan_paths(&mut self, paths: Vec<RelPath>) -> Result<Refreshed, Error> {
+        self.0.rescan_paths(paths)
+    }
+    fn rebound(&mut self) -> [(Bindings, Vec<Op>); 2] {
+        self.0.rebound()
     }
     fn let_go(&mut self) -> Result<(), Error> {
         self.0.let_go()
@@ -437,6 +447,12 @@ impl Facade for Async {
     }
     fn rescan(&mut self) -> Result<Refreshed, Error> {
         pollster::block_on(self.0.rescan())
+    }
+    fn rescan_paths(&mut self, paths: Vec<RelPath>) -> Result<Refreshed, Error> {
+        pollster::block_on(self.0.rescan_paths(paths))
+    }
+    fn rebound(&mut self) -> [(Bindings, Vec<Op>); 2] {
+        self.0.rebound()
     }
     fn let_go(&mut self) -> Result<(), Error> {
         pollster::block_on(self.0.let_go())
@@ -571,6 +587,7 @@ through_both!(
     what_a_commit_returned_current_survives_a_crash_and_a_restore,
     facts_a_restore_removed_are_shown_until_let_go,
     what_is_shown_is_what_its_logs_fold_to,
+    what_is_bound_is_what_binding_afresh_binds,
     facts_a_restore_removed_are_republished_when_adopted,
     an_adoption_whose_let_go_cannot_be_kept_is_committed,
     one_intent_creates_entities_that_name_each_other,
@@ -3058,6 +3075,106 @@ fn what_is_shown_is_what_its_logs_fold_to<F: Facade>() {
                         "seed {seed} step {step}: instance {index}"
                     );
                 }
+            }
+        }
+    }
+}
+
+/// Two instances save, rename, trash and undo, refresh and rescan, while other
+/// programs copy, move, change and remove files. After every step each binds
+/// what binding every fact it shows afresh to its last scan binds, however few
+/// of its bindings the step bound again.
+fn what_is_bound_is_what_binding_afresh_binds<F: Facade>() {
+    const PLACES: [&str; 6] = ["x/a.bin", "x/b.bin", "y/a.bin", "y/c.bin", "z.bin", "x"];
+    const CONTENTS: [&[u8]; 3] = [b"one", b"two", b"three!"];
+    for seed in 0..12 {
+        let folder = disk();
+        let clock = TestClock::at(1_000);
+        let mut random = SeededRandom::new(seed + 700);
+        let mut pick = |n: usize| (random.next_u128() % n as u128) as usize;
+        let machines = [machine(&folder), machine(&folder)];
+        let mut opened: Vec<F> = Vec::new();
+        for (at, label) in ["a", "b"].into_iter().enumerate() {
+            let probe = Probe::new(&machines[at]);
+            let (mut library, _) =
+                F::open(probe, env(label, seed * 10 + at as u64, &clock)).unwrap();
+            library.rescan().unwrap();
+            opened.push(library);
+        }
+        for step in 0..60 {
+            clock.advance(1 + pick(3) as u64);
+            let library = &mut opened[pick(2)];
+            let view = library.view();
+            let files: Vec<(EntityId, RelPath)> = view
+                .entities()
+                .iter()
+                .filter_map(|entity| Some((entity.id(), entity.file()?.path)))
+                .collect();
+            let place = path(PLACES[pick(PLACES.len() - 1)]);
+            let other = PLACES[pick(PLACES.len())];
+            let bytes = CONTENTS[pick(CONTENTS.len())];
+            let chosen = (!files.is_empty()).then(|| files[pick(files.len())].clone());
+            let held = |at: &RelPath| match read(&folder, at.as_str()) {
+                Some(bytes) => Expect::Holds(identity(&bytes)),
+                None => Expect::Absent,
+            };
+            match (pick(12), chosen) {
+                (0 | 1, _) => {
+                    let _ = library.commit("Import", |intent| {
+                        let (intent, _) = intent.create(|e| {
+                            e.save(&place, bytes.to_vec(), held(&place));
+                        });
+                        intent
+                    });
+                }
+                (2 | 3, Some((entity, at))) => {
+                    let expect = held(&at);
+                    let _ = library.commit("Save", |i| i.save(entity, &at, bytes.to_vec(), expect));
+                }
+                (4, Some((entity, _))) => {
+                    let expect = held(&place);
+                    let _ = library.commit("Rename", |i| i.rename(entity, &place, expect));
+                }
+                (5, Some((entity, at))) => {
+                    let expect = held(&at);
+                    let _ = library.commit("Trash", |i| i.trash(entity, expect));
+                }
+                (6, _) => {
+                    let _ = library.undo();
+                }
+                (7, _) => {
+                    if let Some(bytes) = read(&folder, other) {
+                        put(&folder, place.as_str(), &bytes);
+                    }
+                }
+                (8, _) => {
+                    if read(&folder, other).is_some() && read(&folder, place.as_str()).is_none() {
+                        move_outside(&folder, other, place.as_str());
+                    }
+                }
+                (9, _) => {
+                    if read(&folder, place.as_str()).is_some() {
+                        put(&folder, place.as_str(), bytes);
+                    }
+                }
+                (10, _) => {
+                    let _ = folder.perform(Io::Remove {
+                        root: Root::Folder,
+                        path: place.clone(),
+                    });
+                }
+                _ => {
+                    match pick(3) {
+                        0 => library.refresh(),
+                        1 => library.rescan(),
+                        _ => library.rescan_paths(vec![path(other)]),
+                    }
+                    .unwrap();
+                }
+            }
+            for (index, library) in opened.iter_mut().enumerate() {
+                let [held, afresh] = library.rebound();
+                assert_eq!(held, afresh, "seed {seed} step {step}: instance {index}");
             }
         }
     }
