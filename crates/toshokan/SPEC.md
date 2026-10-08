@@ -593,9 +593,9 @@ A writer carries out an intent's steps in this order:
    A move that copies first creates the marker `pending/<nonce>.<i>`, where `i`
    is the step's index, and syncs `pending/`. It then creates the destination,
    refused when something is there, copies the source into it a chunk at a time,
-   syncs it and its directory, and only then removes the source and syncs the
-   source's directory. A copy that fails removes what it wrote. Each step runs
-   alone.
+   checks that it holds the source's length, syncs it and its directory, and
+   only then removes the source and syncs the source's directory. A copy that
+   fails removes what it wrote. Each step runs alone.
 5. Append the intent's entry.
 6. Remove the pending record.
 
@@ -781,13 +781,15 @@ always a directory of the origin private file system.
   through `getFile()` and written through writable streams, which write a copy
   and put it in place at `close()`: that is the moment a write lands, and
   nothing is synced beyond it. An append copies the whole file, at about 1.5 ms
-  per MiB, which the 1 MiB bound on segments keeps small. Consecutive writes to
-  one file share one stream. Before putting a file in place, Chromium checks it
-  with Safe Browsing unless its type is one Chromium only samples, such as
-  `.txt` and `.json`, so toshokan names its own files with those. A saved
+  per MiB, which the 1 MiB bound on segments keeps small. The writes that fill
+  one file share one stream, kept open while other files are read. Before
+  putting a file in place, Chromium checks it with Safe Browsing unless its
+  type is one Chromium only samples, such as `.txt` and `.json`, so toshokan
+  names its own files with those. A saved
   library file pays the check for its type: about 45 ms in Chrome and 0.1 to
   1.1 s in Brave for a type Chromium does not list. Brave cannot rename a file
-  outside the private file system, so there each move copies.
+  outside the private file system, so there each move copies, and each copy
+  pays the check again.
 - **Renames** replace a file at the destination in every browser, so none
   declares `no_replace`.
 - **Times.** Chromium and Firefox report a file's last change in milliseconds,
