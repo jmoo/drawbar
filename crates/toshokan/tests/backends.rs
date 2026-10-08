@@ -137,7 +137,18 @@ mod suite {
     pub fn several_reads_answer_each_as_it_would_alone(b: &mut impl Driven) {
         b.ok(make_dir(Root::Folder, "d"));
         b.ok(create(Root::Folder, "f", b"hello"));
-        let reads = [("f", 0, 5), ("none", 0, 1), ("d", 0, 1), ("f", 3, 10)];
+        b.ok(create(Root::Folder, "d/g", b"there"));
+        let reads = [
+            ("f", 0, 5),
+            ("none", 0, 1),
+            ("d", 0, 1),
+            ("f", 3, 10),
+            ("d/g", 1, 3),
+            ("none/x", 0, 1),
+            ("f/x", 0, 1),
+            ("d/none", 0, 1),
+            ("d/g", 0, 9),
+        ];
         let alone: Vec<IoResult> = reads
             .iter()
             .map(|&(at, offset, len)| b.one(read(at, offset, len)))

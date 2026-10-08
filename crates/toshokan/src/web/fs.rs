@@ -155,9 +155,8 @@ impl Executor {
                 self.tree(root).read(&path, range).await.map(Reply::Bytes)
             }
             Io::ReadMany { root, reads } => {
-                let tree = self.tree(root);
-                let reads = reads.iter().map(|(path, range)| tree.read(path, *range));
-                Ok(Reply::ReadMany(join(reads).await))
+                let read = self.tree(root).read_many(&reads).await;
+                Ok(Reply::ReadMany(read))
             }
             Io::Create { root, path, bytes } => {
                 self.tree(root).create(&path, &bytes).await.map(done)
@@ -314,23 +313,33 @@ impl Tree {
         Ok(found)
     }
 
+    /// Each of `reads`, as [`Tree::read`] reads it, finding each directory they
+    /// name once: a browser can take milliseconds for each step of a path.
+    async fn read_many(&self, reads: &[(RelPath, Range)]) -> Vec<Result<Vec<u8>, IoError>> {
+        let mut dirs: BTreeMap<RelPath, Result<Dir, IoError>> = BTreeMap::new();
+        for parent in reads.iter().filter_map(|(path, _)| path.parent()) {
+            if let std::collections::btree_map::Entry::Vacant(slot) = dirs.entry(parent) {
+                let dir = self.dir(slot.key()).await;
+                slot.insert(dir);
+            }
+        }
+        let dirs = &dirs;
+        join(reads.iter().map(|(path, range)| async move {
+            let (Some(parent), Some(name)) = (path.parent(), path.name()) else {
+                return Err(IoError::Other(ROOT_ITSELF.into()));
+            };
+            let dir = dirs[&parent].clone()?;
+            let file = wait(dir.get_file_handle(name)).await;
+            let file = file.map_err(|error| failure(&error, IoError::IsDirectory))?;
+            read_file(&file.unchecked_into(), *range).await
+        }))
+        .await
+    }
+
     /// Through `getFile()`, which takes no lock, so another tab writing the file
     /// does not refuse it.
     async fn read(&self, path: &RelPath, range: Range) -> Result<Vec<u8>, IoError> {
-        let file = snapshot(&self.file(path).await?).await?;
-        let size = file.size() as u64;
-        let start = range.offset.min(size);
-        let end = range.offset.saturating_add(range.len).min(size);
-        if start == end {
-            return Ok(Vec::new());
-        }
-        let slice = file
-            .slice_with_f64_and_f64(start as f64, end as f64)
-            .map_err(|error| failure(&error, IoError::IsDirectory))?;
-        let buffer = wait(slice.array_buffer())
-            .await
-            .map_err(|error| failure(&error, IoError::IsDirectory))?;
-        Ok(Uint8Array::new(&buffer).to_vec())
+        read_file(&self.file(path).await?, range).await
     }
 
     async fn create(&self, path: &RelPath, bytes: &[u8]) -> Result<(), IoError> {
@@ -548,6 +557,24 @@ async fn children(dir: &Dir) -> Result<Vec<(String, Entry)>, IoError> {
     }
     found.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(found)
+}
+
+/// `range` of `file`, as much of it as the file holds.
+async fn read_file(file: &FileSystemFileHandle, range: Range) -> Result<Vec<u8>, IoError> {
+    let file = snapshot(file).await?;
+    let size = file.size() as u64;
+    let start = range.offset.min(size);
+    let end = range.offset.saturating_add(range.len).min(size);
+    if start == end {
+        return Ok(Vec::new());
+    }
+    let slice = file
+        .slice_with_f64_and_f64(start as f64, end as f64)
+        .map_err(|error| failure(&error, IoError::IsDirectory))?;
+    let buffer = wait(slice.array_buffer())
+        .await
+        .map_err(|error| failure(&error, IoError::IsDirectory))?;
+    Ok(Uint8Array::new(&buffer).to_vec())
 }
 
 async fn snapshot(file: &FileSystemFileHandle) -> Result<File, IoError> {
