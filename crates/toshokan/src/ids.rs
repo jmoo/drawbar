@@ -33,7 +33,7 @@ macro_rules! id128 {
 
         impl fmt::Display for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{:032x}", self.0)
+                f.write_str(Hex::of(self.0).as_str())
             }
         }
 
@@ -56,7 +56,7 @@ macro_rules! id128 {
                 &self,
                 serializer: S,
             ) -> std::result::Result<S::Ok, S::Error> {
-                serializer.collect_str(self)
+                serializer.serialize_str(Hex::of(self.0).as_str())
             }
         }
 
@@ -128,16 +128,39 @@ impl EntryHash {
 }
 
 fn parse_hex128(what: &'static str, text: &str) -> Result<u128> {
-    let well_formed =
-        text.len() == 32 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
     let invalid = || Error::InvalidId {
         what,
         text: text.chars().take(64).collect(),
     };
-    if !well_formed {
+    if text.len() != 32 {
         return Err(invalid());
     }
-    u128::from_str_radix(text, 16).map_err(|_| invalid())
+    text.bytes().try_fold(0u128, |value, digit| {
+        let digit = match digit {
+            b'0'..=b'9' => digit - b'0',
+            b'a'..=b'f' => digit - b'a' + 10,
+            _ => return Err(invalid()),
+        };
+        Ok(value << 4 | u128::from(digit))
+    })
+}
+
+/// The 32 lowercase hexadecimal digits of an id.
+struct Hex([u8; 32]);
+
+impl Hex {
+    fn of(value: u128) -> Self {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let mut digits = [0; 32];
+        for (at, digit) in digits.iter_mut().enumerate() {
+            *digit = DIGITS[(value >> (124 - 4 * at)) as usize & 0xf];
+        }
+        Self(digits)
+    }
+
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.0).expect("hexadecimal digits are ASCII")
+    }
 }
 
 /// A hybrid logical clock reading: wall time in milliseconds since the Unix epoch,
@@ -215,6 +238,27 @@ mod tests {
         }
         assert_eq!(serde_json::to_string(&id).unwrap(), format!("\"{id}\""));
         assert!(serde_json::from_str::<WriterId>("\"AB\"").is_err());
+    }
+
+    #[test]
+    fn an_id_prints_and_parses_as_the_formatter_writes_it() {
+        let patterns = (0..128).flat_map(|bit| {
+            let one = 1u128 << bit;
+            [one, one - 1, !one, one.wrapping_mul(0x9e37_79b9_7f4a_7c15)]
+        });
+        for value in patterns {
+            let id = EntityId::from_u128(value);
+            let text = format!("{value:032x}");
+            assert_eq!(id.to_string(), text);
+            assert_eq!(text.parse::<EntityId>().unwrap(), id, "{text}");
+            assert_eq!(serde_json::to_string(&id).unwrap(), format!("\"{text}\""));
+        }
+        for text in [
+            "g0000000000000000000000000000000",
+            "0000000000000000000000000000000/",
+        ] {
+            assert!(text.parse::<EntityId>().is_err(), "{text:?} accepted");
+        }
     }
 
     // BLAKE3 of 16 zero bytes then `{}`, first 16 bytes; computed with b3sum.
