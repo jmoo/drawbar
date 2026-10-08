@@ -56,6 +56,11 @@ impl<'a> In<'a> {
         std::str::from_utf8(self.take(len)?).map_err(|_| Bad("text that is not UTF-8"))
     }
 
+    /// How many bytes are left to read.
+    pub fn left(&self) -> usize {
+        self.bytes.len()
+    }
+
     /// Fails unless every byte was read.
     pub fn end(self) -> Unpacked<()> {
         match self.bytes.is_empty() {
@@ -291,7 +296,7 @@ impl<T: Pack> Pack for Vec<T> {
 
 /// How many members a list makes room for before it reads them, so that a
 /// length naming more than a record could hold reserves no more than this.
-const RESERVED: usize = 1 << 16;
+pub(crate) const RESERVED: usize = 1 << 16;
 
 /// A list whose members `member` unpacks.
 pub fn list<'a, T>(

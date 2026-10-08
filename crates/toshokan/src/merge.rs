@@ -1541,10 +1541,52 @@ impl Pack for Folded {
 
 impl Unpack for Folded {
     fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
-        let (entities, trash) = Unpack::unpack(input)?;
+        let mut unpacking = Unpacking::start(input)?;
+        while !unpacking.step(input, usize::MAX)? {}
+        unpacking.finish(input)
+    }
+}
+
+/// A merged state being unpacked a slice of entities at a time.
+pub(crate) struct Unpacking {
+    entities: Vec<(EntityId, Arc<EntityState>)>,
+    left: usize,
+}
+
+impl Unpacking {
+    /// Starts unpacking a state [`Folded::pack`] packed: reads how many entities
+    /// it holds.
+    pub(crate) fn start(input: &mut In<'_>) -> Unpacked<Self> {
+        let left = input.len()?;
+        let entities = Vec::with_capacity(left.min(crate::pack::RESERVED));
+        Ok(Self { entities, left })
+    }
+
+    /// Unpacks up to `slice` more entities, refusing them out of order; true once
+    /// every one is.
+    pub(crate) fn step(&mut self, input: &mut In<'_>, slice: usize) -> Unpacked<bool> {
+        for _ in 0..slice.min(self.left) {
+            let (entity, state) = <(EntityId, Arc<EntityState>)>::unpack(input)?;
+            if self
+                .entities
+                .last()
+                .is_some_and(|(last, _)| *last >= entity)
+            {
+                return Err(Bad("keys out of order"));
+            }
+            self.entities.push((entity, state));
+            self.left -= 1;
+        }
+        Ok(self.left == 0)
+    }
+
+    /// ⚠️ Before [`Unpacking::step`] returns true, a state lacking entities.
+    /// Unpacks what follows the entities.
+    pub(crate) fn finish(self, input: &mut In<'_>) -> Unpacked<Folded> {
+        let trash = Unpack::unpack(input)?;
         let (settled, (unknown, extended)) = Unpack::unpack(input)?;
-        Ok(Self {
-            entities,
+        Ok(Folded {
+            entities: self.entities.into_iter().collect(),
             trash,
             settled: distinct(settled)?,
             unknown: distinct(unknown)?,

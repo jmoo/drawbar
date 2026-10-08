@@ -25,7 +25,7 @@ use crate::ids::{EntryHash, WriterId};
 use crate::io::{Io, IoError, Root, Task};
 use crate::layout::Layout;
 use crate::log::Entry;
-use crate::merge::Folded;
+use crate::merge::{Folded, Unpacking};
 use crate::pack::{self, bad_variant, Bad, In, Pack, Unpack, Unpacked};
 use crate::path::RelPath;
 use crate::reader::{self, CachedView, Reader, Record, Segment, Stamp, WriterFile, WriterLog};
@@ -164,52 +164,256 @@ pub(crate) fn load_one<'a>(genesis: EntryHash) -> Fallible<'a, Kept> {
     flow::read_replaced(Root::Local, path.clone()).and_then(move |checkpoint| {
         flow::read_file(Root::Local, &Layout::view_journal(genesis), u64::MAX).and_then(
             move |journal| {
-                let kept = parse(checkpoint, journal).map_err(|reason| Error::Corrupt {
-                    path: path.clone(),
-                    reason,
-                });
-                Flow::Done(kept)
+                let decoding = Decoding::new(checkpoint, journal);
+                flow::sliced(decoding, |decoding| decoding.step(CHECK_SLICE, STATE_SLICE)).then(
+                    move |decoding| {
+                        let kept = decoding.finish().map_err(|reason| Error::Corrupt {
+                            path: path.clone(),
+                            reason,
+                        });
+                        Flow::Done(kept)
+                    },
+                )
             },
         )
     })
 }
 
-fn parse(checkpoint: Option<Vec<u8>>, journal: Option<Vec<u8>>) -> Parsed<Kept> {
-    let mut kept = Kept {
-        view: CachedView::default(),
-        files: BTreeMap::new(),
-        absorbed: BTreeSet::new(),
-        state: None,
-        checkpoint: checkpoint.as_ref().map_or(0, |bytes| bytes.len() as u64),
-        journal: journal.as_ref().map_or(0, |bytes| bytes.len() as u64),
-        broken: false,
-    };
-    if let Some(bytes) = checkpoint {
-        let (payload, rest) = unframe(&bytes).ok_or("the checkpoint fails its check")?;
-        if !rest.is_empty() {
-            return Err("bytes follow the checkpoint".into());
+/// How many bytes of a checkpoint one slice of decoding checks.
+const CHECK_SLICE: usize = 1 << 22;
+
+/// How many entities of a checkpoint's state one slice of decoding reads.
+const STATE_SLICE: usize = 1 << 12;
+
+/// A checkpoint and its journal decoded a slice at a time: the checkpoint's
+/// check, its logs a writer at a time, its state a slice of entities at a time,
+/// then the journal a record at a time.
+struct Decoding {
+    checkpoint: Vec<u8>,
+    journal: Vec<u8>,
+    /// Where the checkpoint's payload ends.
+    end: usize,
+    /// Where the next read starts, in the checkpoint until the journal is read.
+    at: usize,
+    stage: Decode,
+    kept: Kept,
+    /// What was read of the checkpoint and is not placed yet.
+    stored: StoredView,
+}
+
+enum Decode {
+    Check(Box<blake3::Hasher>),
+    Writers(usize),
+    Files,
+    State(Unpacking),
+    Place,
+    Journal,
+    Done(Parsed<()>),
+}
+
+impl Decoding {
+    fn new(checkpoint: Option<Vec<u8>>, journal: Option<Vec<u8>>) -> Self {
+        let kept = Kept {
+            view: CachedView::default(),
+            files: BTreeMap::new(),
+            absorbed: BTreeSet::new(),
+            state: None,
+            checkpoint: checkpoint.as_ref().map_or(0, |bytes| bytes.len() as u64),
+            journal: journal.as_ref().map_or(0, |bytes| bytes.len() as u64),
+            broken: false,
+        };
+        let stage = match &checkpoint {
+            Some(_) => Decode::Check(Box::default()),
+            None => Decode::Journal,
+        };
+        Self {
+            checkpoint: checkpoint.unwrap_or_default(),
+            journal: journal.unwrap_or_default(),
+            end: 0,
+            at: 0,
+            stage,
+            kept,
+            stored: StoredView::default(),
         }
-        let mut stored = StoredView::read(payload).map_err(|Bad(reason)| reason.to_owned())?;
-        kept.absorbed = stored.absorbed.iter().copied().collect();
-        let state = stored.state.take();
-        kept.apply(stored)?;
-        kept.state = state;
     }
-    let journal = journal.unwrap_or_default();
-    let mut rest = &journal[..];
-    while !rest.is_empty() {
+
+    /// Checks `bytes` more, or reads `entities` more of the state, or one log or
+    /// record more; true once there is nothing left.
+    fn step(&mut self, bytes: usize, entities: usize) -> bool {
+        let stage = std::mem::replace(&mut self.stage, Decode::Done(Ok(())));
+        self.stage = match stage {
+            Decode::Check(hasher) => self.check(hasher, bytes),
+            Decode::Writers(left) => self.writers(left),
+            Decode::Files => self.files(),
+            Decode::State(unpacking) => self.state(unpacking, entities),
+            Decode::Place => self.place(),
+            Decode::Journal => self.record(),
+            done @ Decode::Done(_) => done,
+        };
+        matches!(self.stage, Decode::Done(_))
+    }
+
+    /// The checkpoint's bytes from where the next read starts.
+    fn input(checkpoint: &[u8], at: usize, end: usize) -> In<'_> {
+        In::new(&checkpoint[at..end])
+    }
+
+    /// Hashes about `slice` more bytes of the checkpoint's payload, then compares
+    /// its check.
+    fn check(&mut self, mut hasher: Box<blake3::Hasher>, slice: usize) -> Decode {
+        let Some((len, check)) = frame_head(&self.checkpoint) else {
+            return Decode::Done(Err("the checkpoint fails its check".into()));
+        };
+        let start = 4 + CHECK;
+        if self.end == 0 {
+            match start
+                .checked_add(len)
+                .filter(|end| *end <= self.checkpoint.len())
+            {
+                Some(end) => (self.end, self.at) = (end, start),
+                None => return Decode::Done(Err("the checkpoint fails its check".into())),
+            }
+        }
+        let until = self.at.saturating_add(slice).min(self.end);
+        hasher.update(&self.checkpoint[self.at..until]);
+        self.at = until;
+        if until < self.end {
+            return Decode::Check(hasher);
+        }
+        if hasher.finalize().as_bytes()[..CHECK] != check {
+            return Decode::Done(Err("the checkpoint fails its check".into()));
+        }
+        if self.end != self.checkpoint.len() {
+            return Decode::Done(Err("bytes follow the checkpoint".into()));
+        }
+        self.at = start;
+        let mut input = Self::input(&self.checkpoint, self.at, self.end);
+        let writers = match input.byte() {
+            Ok(FORMAT) => input.len(),
+            Ok(_) => Err(Bad("a format this build does not read")),
+            Err(bad) => Err(bad),
+        };
+        self.at = self.end - input.left();
+        match writers {
+            Ok(writers) => Decode::Writers(writers),
+            Err(Bad(reason)) => Decode::Done(Err(reason.to_owned())),
+        }
+    }
+
+    /// Reads one writer's log, if any is left.
+    fn writers(&mut self, left: usize) -> Decode {
+        if left == 0 {
+            return Decode::Files;
+        }
+        let mut input = Self::input(&self.checkpoint, self.at, self.end);
+        let read = <(WriterId, StoredLog)>::unpack(&mut input);
+        self.at = self.end - input.left();
+        match read {
+            Ok(log) => {
+                self.stored.writers.push(log);
+                Decode::Writers(left - 1)
+            }
+            Err(Bad(reason)) => Decode::Done(Err(reason.to_owned())),
+        }
+    }
+
+    fn files(&mut self) -> Decode {
+        let mut input = Self::input(&self.checkpoint, self.at, self.end);
+        let read = (|| {
+            self.stored.files = Unpack::unpack(&mut input)?;
+            self.stored.absorbed = Unpack::unpack(&mut input)?;
+            match input.byte()? {
+                0 => Ok(None),
+                1 => Unpacking::start(&mut input).map(Some),
+                _ => bad_variant(),
+            }
+        })();
+        let left = input.left();
+        self.at = self.end - left;
+        match read {
+            Ok(Some(unpacking)) => Decode::State(unpacking),
+            Ok(None) if left == 0 => Decode::Place,
+            Ok(None) => Decode::Done(Err("bytes after the end".into())),
+            Err(Bad(reason)) => Decode::Done(Err(reason.to_owned())),
+        }
+    }
+
+    /// Reads about `slice` more entities of the state, then what follows them.
+    fn state(&mut self, mut unpacking: Unpacking, slice: usize) -> Decode {
+        let mut input = Self::input(&self.checkpoint, self.at, self.end);
+        let read = match unpacking.step(&mut input, slice) {
+            Ok(false) => {
+                self.at = self.end - input.left();
+                return Decode::State(unpacking);
+            }
+            Ok(true) => unpacking.finish(&mut input),
+            Err(bad) => Err(bad),
+        };
+        let left = input.left();
+        self.at = self.end - left;
+        match read {
+            Ok(_) if left > 0 => Decode::Done(Err("bytes after the end".into())),
+            Ok(state) => {
+                self.stored.state = Some(state);
+                Decode::Place
+            }
+            Err(Bad(reason)) => Decode::Done(Err(reason.to_owned())),
+        }
+    }
+
+    /// Places one writer's log of the checkpoint, then its files and state.
+    fn place(&mut self) -> Decode {
+        if !self.stored.writers.is_empty() {
+            let log = self.stored.writers.remove(0);
+            return match restore_logs(&mut self.kept.view, vec![log]) {
+                Ok(()) => Decode::Place,
+                Err(reason) => Decode::Done(Err(reason)),
+            };
+        }
+        let stored = std::mem::take(&mut self.stored);
+        self.kept.absorbed = stored.absorbed.iter().copied().collect();
+        let state = stored.state;
+        let placed = self.kept.apply(StoredView {
+            state: None,
+            ..stored
+        });
+        self.kept.state = state;
+        self.at = 0;
+        match placed {
+            Ok(()) => Decode::Journal,
+            Err(reason) => Decode::Done(Err(reason)),
+        }
+    }
+
+    /// Replays the journal's next record, up to the first that is torn.
+    fn record(&mut self) -> Decode {
+        let rest = &self.journal[self.at..];
+        if rest.is_empty() {
+            return Decode::Done(Ok(()));
+        }
         let Some((payload, after)) = unframe(rest) else {
-            kept.broken = true;
-            break;
+            self.kept.broken = true;
+            return Decode::Done(Ok(()));
         };
         let Ok(record) = StoredView::read(payload) else {
-            kept.broken = true;
-            break;
+            self.kept.broken = true;
+            return Decode::Done(Ok(()));
         };
-        kept.apply(record)?;
-        rest = after;
+        self.at = self.journal.len() - after.len();
+        match self.kept.apply(record) {
+            Ok(()) => Decode::Journal,
+            Err(reason) => Decode::Done(Err(reason)),
+        }
     }
-    Ok(kept)
+
+    /// ⚠️ Before [`Decoding::step`] returns true, a view lacking what is not
+    /// decoded yet.
+    fn finish(self) -> Parsed<Kept> {
+        match self.stage {
+            Decode::Done(Err(reason)) => Err(reason),
+            _ => Ok(self.kept),
+        }
+    }
 }
 
 impl Kept {
@@ -275,16 +479,22 @@ fn frame(payload: &[u8]) -> Vec<u8> {
 /// The payload of the record `bytes` start with, and what follows it; `None`
 /// when the record is torn or fails its check.
 fn unframe(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+    let (len, check) = frame_head(bytes)?;
+    let (payload, rest) = bytes[4 + CHECK..].split_at_checked(len)?;
+    (blake3::hash(payload).as_bytes()[..CHECK] == check).then_some((payload, rest))
+}
+
+/// A record's length and check.
+fn frame_head(bytes: &[u8]) -> Option<(usize, [u8; CHECK])> {
     let (len, rest) = bytes.split_first_chunk::<4>()?;
-    let (check, rest) = rest.split_first_chunk::<CHECK>()?;
-    let len = usize::try_from(u32::from_le_bytes(*len)).ok()?;
-    let (payload, rest) = rest.split_at_checked(len)?;
-    (blake3::hash(payload).as_bytes()[..CHECK] == check[..]).then_some((payload, rest))
+    let (check, _) = rest.split_first_chunk::<CHECK>()?;
+    Some((usize::try_from(u32::from_le_bytes(*len)).ok()?, *check))
 }
 
 /// A checkpoint or a journal record. A checkpoint holds every log whole and the
 /// merged state of them all; a record holds what each log gained, and files
 /// whose records changed.
+#[derive(Default)]
 struct StoredView {
     writers: Vec<(WriterId, StoredLog)>,
     files: Vec<(RelPath, Option<StoredFile>)>,
@@ -955,6 +1165,42 @@ mod tests {
                 "{bytes:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_view_decoded_a_slice_at_a_time_is_the_view_decoded_at_once() {
+        let disk = MemDisk::new();
+        let lines = chain(4);
+        let genesis = lines[0].hash();
+        saved(&disk, &lines);
+        let files = disk.files(Root::Local);
+        let checkpoint = files[&Layout::cached_view(genesis)].clone();
+        let journal = files[&Layout::view_journal(genesis)].clone();
+        let decoded = |checkpoint: &[u8], slice: usize| {
+            let mut decoding = Decoding::new(Some(checkpoint.to_vec()), Some(journal.clone()));
+            while !decoding.step(slice, slice) {}
+            decoding.finish().map(|kept| {
+                let Kept {
+                    view,
+                    files,
+                    absorbed,
+                    state,
+                    broken,
+                    ..
+                } = kept;
+                (view, files, absorbed, state, broken)
+            })
+        };
+        let mut damaged = checkpoint.clone();
+        let middle = damaged.len() / 2;
+        damaged[middle] ^= 1;
+        for bytes in [&checkpoint, &damaged, &checkpoint[..middle].to_vec()] {
+            let whole = decoded(bytes, usize::MAX);
+            for slice in [1, 2, 7, 64] {
+                assert_eq!(decoded(bytes, slice), whole, "{slice}-byte slices");
+            }
+        }
+        assert!(decoded(&checkpoint, usize::MAX).is_ok());
     }
 
     #[test]
