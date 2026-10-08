@@ -11,7 +11,8 @@
 //! however often it is itself cut short. After the local root is lost, an
 //! unfinished effect is reported for consent, settling it never writes in its
 //! writer's directory, and settling it again after a settlement stopped partway
-//! ends as one settlement does.
+//! ends as one settlement does, whether the settler's moves are the writer's or
+//! the other kind.
 
 mod common;
 
@@ -306,6 +307,21 @@ impl Case {
         let files: Vec<(&str, &[u8])> = self.files.iter().map(|(p, b)| (p.as_str(), *b)).collect();
         common::put(&mut BlockingMem(disk.clone()), &files);
         disk.restart()
+    }
+
+    /// The folders a crash of this case is settled in: its own (`None`), and one
+    /// of the other kind, whose moves rename where the case's copy and copy where
+    /// they rename. A case that renames a directory has no other, since a folder
+    /// that copies refuses to settle it.
+    fn settlers(&self) -> Vec<Option<Capabilities>> {
+        let renames_dir = |change: &FileChange| matches!(change, FileChange::MoveTree { .. });
+        match Moves::of(self.folder) {
+            Moves::Copy => vec![None, Some(Capabilities::ALL)],
+            Moves::Rename if self.folder.rename_dir && self.changes.iter().any(renames_dir) => {
+                vec![None]
+            }
+            Moves::Rename => vec![None, Some(COPYING)],
+        }
     }
 
     fn bindings(&self) -> Bindings {
@@ -662,28 +678,33 @@ fn after_losing_the_local_root_an_unfinished_effect_is_reported_and_settled_only
             crash::sweep(
                 || case.disk(),
                 |disk| case.commit(disk),
-                |fault, disk| {
-                    let shown = format!("{} at {fault:?}, {how:?}", case.shown());
-                    disk.lose_local();
-                    let open =
-                        !records(&disk, WRITER).is_empty() && !logs(&disk, WRITER)[&WRITER].closed;
-                    let before = disk.files(Root::Folder);
-                    let holds = case.holds(&before);
-                    let (reported, _) = settle_orphans(&disk, how, usize::MAX, 9);
-                    assert_eq!(reported, usize::from(open), "{shown}: reported");
+                |fault, crashed| {
+                    crashed.lose_local();
+                    for settler in case.settlers() {
+                        let disk = settled_in(&crashed, settler);
+                        let moves = Moves::of(disk.capabilities(Root::Folder));
+                        let shown =
+                            format!("{} at {fault:?}, {how:?} where {moves:?}", case.shown());
+                        let open = !records(&disk, WRITER).is_empty()
+                            && !logs(&disk, WRITER)[&WRITER].closed;
+                        let before = disk.files(Root::Folder);
+                        let holds = case.holds(&before);
+                        let (reported, _) = settle_orphans(&disk, how, usize::MAX, 9);
+                        assert_eq!(reported, usize::from(open), "{shown}: reported");
 
-                    let after = disk.files(Root::Folder);
-                    assert_eq!(
-                        in_theirs(&after),
-                        in_theirs(&before),
-                        "{shown}: wrote in their directory"
-                    );
-                    case.kept(&shown, &after);
-                    let expected = match (open, how) {
-                        (false, _) | (true, Settlement::Dismissed) => holds,
-                        (true, how) => settled_state(&case, how),
-                    };
-                    assert_eq!(case.holds(&after), expected, "{shown}: settled");
+                        let after = disk.files(Root::Folder);
+                        assert_eq!(
+                            in_theirs(&after),
+                            in_theirs(&before),
+                            "{shown}: wrote in their directory"
+                        );
+                        case.kept(&shown, &after);
+                        let expected = match (open, how) {
+                            (false, _) | (true, Settlement::Dismissed) => holds,
+                            (true, how) => settled_state(&case, how),
+                        };
+                        assert_eq!(case.holds(&after), expected, "{shown}: settled");
+                    }
                 },
             );
         }
@@ -700,33 +721,47 @@ fn a_settlement_stopped_at_any_step_and_settled_again_ends_as_one_settlement_doe
                 |disk| case.commit(disk),
                 |fault, crashed| {
                     crashed.lose_local();
-                    for stop in 0.. {
-                        let shown =
-                            format!("{} at {fault:?}, {how:?} stopped at {stop}", case.shown());
-                        let disk = crashed.restart();
-                        let before = disk.files(Root::Folder);
-                        let (reported, stopped) = settle_orphans(&disk, how, stop, 9);
-                        if reported == 0 || !stopped {
-                            break;
-                        }
-                        stopped_short += 1;
-                        let (reported, _) = settle_orphans(&disk, how, usize::MAX, 10);
-                        assert_eq!(reported, 1, "{shown}: still reported");
+                    for settler in case.settlers() {
+                        for stop in 0.. {
+                            let disk = settled_in(&crashed, settler);
+                            let moves = Moves::of(disk.capabilities(Root::Folder));
+                            let shown = format!(
+                                "{} at {fault:?}, {how:?} where {moves:?} stopped at {stop}",
+                                case.shown()
+                            );
+                            let before = disk.files(Root::Folder);
+                            let (reported, stopped) = settle_orphans(&disk, how, stop, 9);
+                            if reported == 0 || !stopped {
+                                break;
+                            }
+                            stopped_short += 1;
+                            let (reported, _) = settle_orphans(&disk, how, usize::MAX, 10);
+                            assert_eq!(reported, 1, "{shown}: still reported");
 
-                        let after = disk.files(Root::Folder);
-                        assert_eq!(
-                            in_theirs(&after),
-                            in_theirs(&before),
-                            "{shown}: wrote in their directory"
-                        );
-                        case.kept(&shown, &after);
-                        assert_eq!(case.holds(&after), settled_state(&case, how), "{shown}");
+                            let after = disk.files(Root::Folder);
+                            assert_eq!(
+                                in_theirs(&after),
+                                in_theirs(&before),
+                                "{shown}: wrote in their directory"
+                            );
+                            case.kept(&shown, &after);
+                            assert_eq!(case.holds(&after), settled_state(&case, how), "{shown}");
+                        }
                     }
                 },
             );
         }
     }
     assert!(stopped_short > 0, "some settlement stops short");
+}
+
+/// A fresh copy of `crashed`, in a folder that can do only what `folder` says,
+/// where one is given.
+fn settled_in(crashed: &MemDisk, folder: Option<Capabilities>) -> MemDisk {
+    match folder {
+        None => crashed.restart(),
+        Some(folder) => moved_to(crashed, folder),
+    }
 }
 
 /// `disk`'s folder, in a folder that can do only what `folder` says.
