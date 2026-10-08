@@ -606,8 +606,8 @@ them, a move never replaces anything. Elsewhere a rename may replace, and the
 check before it is the only guard: a file another program makes at the
 destination between the check and the rename is replaced, and its bytes leave
 the folder. A move that copies creates its destination, which replaces nothing
-where the backend's creates refuse an existing file. Opening says which kind of
-folder it is.
+where the backend's creates refuse an existing file in the same step; a
+browser's do not (see Browsers). Opening says which kind of folder it is.
 
 If a step fails, the rest are not tried: staged files not placed are moved to
 `trash/<their nonce>`, replacing what a move cut short left there, the entry
@@ -801,7 +801,10 @@ always a directory of the origin private file system.
   elsewhere each move copies, and each copy pays the check again. A rename the
   browser refuses although the folder declares it fails with `Unsupported`.
 - **Renames** replace a file at the destination in every browser, so none
-  declares `no_replace`.
+  declares `no_replace`. **Creates** check that nothing is there and then make
+  the file, which opens one already there, so a file another program makes
+  between the two is replaced by a copy's bytes, or removed when the copy finds
+  it too long, as a rename replaces one.
 - **Times.** Chromium and Firefox report a file's last change in milliseconds,
   WebKit in whole seconds: two changes that keep a file's length within that
   time look alike.
