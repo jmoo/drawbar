@@ -652,8 +652,10 @@ its destination exists and its source does not, or both hold the same bytes. A
 the last done step's source still holds the same bytes as its destination, the
 source is removed. The remaining steps are carried out, the planned entry is
 appended with what the steps did, and the record is removed. Then every file in
-its `tmp/` that no open record places is removed. Settling twice ends as
-settling once.
+its `tmp/` that no open record places is removed, and so is every empty
+`pending/<nonce>.json` opening ignored: a record created in place and cut short
+before its bytes landed, before any of its steps ran. Any other record that does
+not decode stays. Settling twice ends as settling once.
 
 The steps of a record whose moves copy are found from its markers instead,
 since a later step may put bytes back where an earlier one copied them from.

@@ -541,6 +541,7 @@ through_both!(
     opening_viewing_and_refreshing_write_nothing_in_the_folder,
     losing_the_local_root_at_any_step_loses_only_drafts,
     a_crash_at_any_step_is_settled_before_the_next_write,
+    an_empty_record_of_this_writer_is_removed_by_its_next_write,
     an_untrusted_folder_is_read_within_bounds_and_never_acted_on,
     drafts_come_back_only_while_the_file_holds_their_base,
     the_trash_keeps_displaced_bytes_until_emptied,
@@ -2257,6 +2258,36 @@ fn a_crash_at_any_step_is_settled_before_the_next_write<F: Facade>() {
         }
     }
     assert!(settled > 0, "some crash interrupted an effect");
+}
+
+fn an_empty_record_of_this_writer_is_removed_by_its_next_write<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    let writer = label_of(&a.view(), "a");
+    a.close().unwrap();
+    let record = |n| layout().pending(writer, toshokan::Nonce::from_u128(n));
+    let (empty, newer) = (record(1), record(2));
+    put(&folder, empty.as_str(), b"");
+    put(&folder, newer.as_str(), br#"{"from":"a newer version"}"#);
+
+    let (mut a, opened) = F::open(Probe::new(&here), env("a", 2, &clock)).unwrap();
+    assert_eq!(opened.ignored, [empty.clone(), newer.clone()]);
+    a.commit("Tag", |i| i.add(song, TAGS, tag("x"))).unwrap();
+    assert_eq!(
+        read(&folder, empty.as_str()),
+        None,
+        "the empty record is left"
+    );
+    assert!(
+        read(&folder, newer.as_str()).is_some(),
+        "a record it cannot read is removed"
+    );
+    a.close().unwrap();
+    let (_, opened) = F::open(Probe::new(&here), env("a", 3, &clock)).unwrap();
+    assert_eq!(opened.ignored, [newer]);
 }
 
 fn an_untrusted_folder_is_read_within_bounds_and_never_acted_on<F: Facade>() {

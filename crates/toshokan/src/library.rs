@@ -1606,13 +1606,21 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
     })
 }
 
-/// Removes this writer's staged files that no record places: what a run cut short
-/// before writing its record left. Runs once settling has left no record open.
+/// Removes what a run cut short before its steps left: staged files no record
+/// places, and this writer's empty records. Runs once settling has left no
+/// record open.
 fn tidy_staging(library: &mut Library) -> Fallible<'_, &mut Library> {
     let Some(writer) = library.writer.as_ref().map(Writer::id) else {
         return ok(library);
     };
-    flow::run(recovery::tidy(&library.layout, writer, &[])).map_ok(move |()| library)
+    let layout = library.layout.clone();
+    let ignored = library.ignored.clone();
+    flow::run(recovery::tidy(&layout, writer, &[]))
+        .and_then(move |()| flow::run(recovery::remove_empty(&layout, writer, &ignored)))
+        .map_ok(move |removed| {
+            library.ignored.retain(|path| !removed.contains(path));
+            library
+        })
 }
 
 /// The intent a pending record planned to log, without the file ops its steps

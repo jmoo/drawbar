@@ -268,6 +268,35 @@ pub fn tidy(
         .task()
 }
 
+/// Removes those of `ignored` that are empty records of this writer, and returns
+/// them. A record whose moves copy is created in place, so a run cut short before
+/// its bytes landed leaves it empty, before any of its steps ran; no version
+/// writes an empty record. Any other record that does not decode stays.
+pub fn remove_empty(
+    layout: &Layout,
+    writer: WriterId,
+    ignored: &[RelPath],
+) -> Task<'static, Result<Vec<RelPath>>> {
+    let dir = layout.pending_dir(writer);
+    let records = ignored.iter().filter(|path| {
+        let name = path.name().and_then(|name| name.strip_suffix(".json"));
+        path.parent().as_ref() == Some(&dir) && name.is_some_and(|n| n.parse::<Nonce>().is_ok())
+    });
+    let records: Vec<RelPath> = records.cloned().collect();
+    fold(records.into_iter(), Vec::new(), |mut removed, path| {
+        flow::stat(Root::Folder, &path).and_then(move |meta| match meta {
+            Some(meta) if meta.kind == Kind::File && meta.len == 0 => {
+                flow::remove(Root::Folder, &path).map_ok(move |()| {
+                    removed.push(path);
+                    removed
+                })
+            }
+            _ => flow::ok(removed),
+        })
+    })
+    .task()
+}
+
 /// How far another writer's record got, as [`orphan_plan`] needs it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Reached {
