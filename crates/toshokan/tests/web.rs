@@ -46,7 +46,7 @@ fn schema() -> Schema {
 #[derive(Clone, Copy)]
 enum Kind {
     Private,
-    Picked,
+    Picked { rename: bool },
 }
 
 /// One test's folder, and the local roots of the installs that open it.
@@ -69,9 +69,9 @@ impl Place {
         let path = path(&format!("{}/folder", self.run));
         match self.kind {
             Kind::Private => Folder::Private(path),
-            Kind::Picked => Folder::Picked {
+            Kind::Picked { rename } => Folder::Picked {
                 dir: private_dir(&path).await.unwrap(),
-                rename: true,
+                rename,
             },
         }
     }
@@ -306,7 +306,10 @@ macro_rules! on_each_folder {
             $(#[super::wasm_bindgen_test] async fn $scenario() { super::$scenario(super::Kind::Private).await; })*
         }
         mod picked {
-            $(#[super::wasm_bindgen_test] async fn $scenario() { super::$scenario(super::Kind::Picked).await; })*
+            $(#[super::wasm_bindgen_test] async fn $scenario() { super::$scenario(super::Kind::Picked { rename: true }).await; })*
+        }
+        mod picked_without_rename {
+            $(#[super::wasm_bindgen_test] async fn $scenario() { super::$scenario(super::Kind::Picked { rename: false }).await; })*
         }
     };
 }
