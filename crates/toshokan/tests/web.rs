@@ -374,40 +374,21 @@ async fn an_executor_refuses_to_start_outside_a_worker() {
     );
 }
 
-/// Writes `bytes` at `at` in `place`'s private folder from the page, as another
-/// program writing the folder would.
-async fn write_outside(place: &Place, at: &str, bytes: &[u8]) {
-    use wasm_bindgen::JsCast;
-    let mut dir = private_dir(&path(&format!("{}/folder", place.run)))
-        .await
-        .unwrap();
+/// Writes `bytes` at `at` in `library`'s folder without logging anything, as
+/// another program would.
+async fn write_outside(library: &Lib, at: &str, bytes: &[u8]) {
     let file = path(at);
-    let made = web_sys::FileSystemGetDirectoryOptions::new();
-    made.set_create(true);
-    for name in file.parent().unwrap().components() {
-        let opened = dir.get_directory_handle_with_options(name, &made);
-        dir = wasm_bindgen_futures::JsFuture::from(opened)
-            .await
-            .unwrap()
-            .unchecked_into();
-    }
-    let created = web_sys::FileSystemGetFileOptions::new();
-    created.set_create(true);
-    let handle = dir.get_file_handle_with_options(file.name().unwrap(), &created);
-    let handle: web_sys::FileSystemFileHandle = wasm_bindgen_futures::JsFuture::from(handle)
-        .await
-        .unwrap()
-        .unchecked_into();
-    let stream: web_sys::FileSystemWritableFileStream =
-        wasm_bindgen_futures::JsFuture::from(handle.create_writable())
-            .await
-            .unwrap()
-            .unchecked_into();
-    let written = stream.write_with_u8_array(bytes).unwrap();
-    wasm_bindgen_futures::JsFuture::from(written).await.unwrap();
-    wasm_bindgen_futures::JsFuture::from(stream.close())
-        .await
-        .unwrap();
+    let made = Io::MakeDir {
+        root: Root::Folder,
+        path: file.parent().unwrap(),
+    };
+    library.fs().perform(made).await.unwrap();
+    let created = Io::Create {
+        root: Root::Folder,
+        path: file,
+        bytes: bytes.to_vec(),
+    };
+    library.fs().perform(created).await.unwrap();
 }
 
 #[wasm_bindgen_test]
@@ -424,7 +405,7 @@ async fn a_watched_folder_hints_the_paths_another_program_wrote() {
     if !watched {
         return;
     }
-    write_outside(&place, "shelf/copy.npno", b"song").await;
+    write_outside(&a, "shelf/copy.npno", b"song").await;
     let paths = loop {
         match hints.next().await {
             Hint::Changed(paths) if paths.contains(&path("shelf/copy.npno")) => break paths,
@@ -443,7 +424,7 @@ async fn a_refresh_reads_no_library_file_and_a_rescan_reads_them_all() {
     let clock = TestClock::at(1_000);
     let (mut a, _) = place.open("one", "a", 1, &clock).await;
     create(&mut a, "song.npno", b"song").await;
-    write_outside(&place, "copy.npno", b"song").await;
+    write_outside(&a, "copy.npno", b"song").await;
     a.refresh().await.unwrap();
     assert!(a.view().unbound().is_empty(), "a refresh scans no file");
     a.rescan().await.unwrap();
