@@ -64,6 +64,8 @@ pub mod trash;
 #[doc(hidden)]
 pub mod undo;
 pub mod view;
+#[cfg(feature = "web")]
+pub mod web;
 #[doc(hidden)]
 pub mod writer;
 

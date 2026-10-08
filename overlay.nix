@@ -22,6 +22,7 @@ let
     makeOverridable
     mapAttrs
     mapAttrs'
+    mapAttrsToList
     nameValuePair
     optional
     optionalAttrs
@@ -457,6 +458,62 @@ let
       }
     );
 
+  # toshokan's browser suites, run headless by wasm-bindgen's test runner in
+  # Chromium and Firefox. Linux only: a macOS build user has no window server, and
+  # Firefox there fails to start a session.
+  # ⚠️ The runner ships with wasm-bindgen-cli and must match toshokan's wasm-bindgen pin.
+  toshokan-web =
+    let
+      browsers = {
+        Chromium = "CHROMEDRIVER=${final.lib.getExe final.chromedriver}";
+        Firefox = "GECKODRIVER=${final.lib.getExe final.geckodriver}";
+      };
+      webdriver = final.writeText "webdriver.json" (
+        builtins.toJSON {
+          "goog:chromeOptions" = {
+            # Chromium's own sandbox cannot start inside the build sandbox.
+            args = [
+              "--disable-dev-shm-usage"
+              "--no-sandbox"
+            ];
+            binary = final.lib.getExe final.chromium;
+          };
+          "moz:firefoxOptions".binary = final.lib.getExe final.firefox;
+        }
+      );
+      args = commonArgs // {
+        CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
+        cargoExtraArgs = "--locked -p toshokan --features web";
+        # ⚠️ nixpkgs' rustc links wasm with the system `lld` and bundles none.
+        nativeBuildInputs = [ final.lld ];
+        pname = "toshokan-web";
+        inherit (manifests.toshokan) version;
+      };
+    in
+    crane.mkCargoDerivation (
+      args
+      // {
+        CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER = "wasm-bindgen-test-runner";
+        WASM_BINDGEN_TEST_TIMEOUT = "300";
+        WASM_BINDGEN_TEST_WEBDRIVER_JSON = webdriver;
+        buildPhaseCargoCommand = ''
+          export HOME="$TMPDIR/home"
+          mkdir -p "$HOME"
+          ${concatStringsSep "\n" (
+            mapAttrsToList (name: driver: ''
+              echo "toshokan's browser suites in ${name}"
+              env ${driver} cargo test $cargoExtraArgs --test backends --test effects --test web
+            '') browsers
+          )}
+        '';
+        cargoArtifacts = crane.buildDepsOnly args;
+        doInstallCargoArtifacts = false;
+        installPhaseCommand = ''touch "$out"'';
+        meta.description = "toshokan's suites in headless browsers";
+        nativeBuildInputs = args.nativeBuildInputs ++ [ final.wasm-bindgen-cli ];
+      }
+    );
+
   # `docs/book` is mdBook's own output directory, ignored by git; keeping it out
   # of the source means a local `mdbook build` cannot change this derivation.
   docs = final.stdenvNoCC.mkDerivation {
@@ -654,6 +711,8 @@ in
   nord =
     crates
     // crossed
+    # Not in `all`: it starts browsers, and only on Linux.
+    // optionalAttrs final.stdenv.hostPlatform.isLinux { inherit toshokan-web; }
     // mapAttrs' (name: nameValuePair "${name}-corpus") committed
     // mapAttrs' (name: nameValuePair "${name}-corpus-full") full
     // {

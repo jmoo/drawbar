@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! <folder>/<root>/writers/<w>/
-//!   <segment>.jsonl            log segments
+//!   <segment>.txt              log segments, one JSON entry a line
 //!   snapshot-<nonce>.json      snapshots
 //!   pending/<nonce>.json       journal records of multi-step effects
 //!   pending/<nonce>.<step>     a record's step that copies has started
@@ -29,6 +29,11 @@ pub const WRITERS: &str = "writers";
 pub const PENDING: &str = "pending";
 pub const TRASH: &str = "trash";
 pub const TMP: &str = "tmp";
+/// Segments end in `.txt`. Chromium checks every file written in a picked folder
+/// with Safe Browsing at close unless its type is one it only samples, like
+/// `.txt` and `.json`: such a close takes about 1.6 ms, and one of an unlisted
+/// type, like `.jsonl`, about 45 ms.
+pub const SEGMENT_EXTENSION: &str = ".txt";
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Layout {
@@ -73,7 +78,7 @@ impl Layout {
     }
 
     pub fn segment(&self, writer: WriterId, name: SegmentName) -> RelPath {
-        child(&self.writer(writer), &format!("{name}.jsonl"))
+        child(&self.writer(writer), &format!("{name}{SEGMENT_EXTENSION}"))
     }
 
     pub fn snapshot(&self, writer: WriterId, name: Nonce) -> RelPath {
@@ -179,7 +184,7 @@ mod tests {
         let expected = [
             (
                 layout.segment(w, SegmentName::from_u128(0xcd)),
-                format!("{dir}/{n}.jsonl"),
+                format!("{dir}/{n}.txt"),
             ),
             (layout.snapshot(w, n), format!("{dir}/snapshot-{n}.json")),
             (layout.pending(w, n), format!("{dir}/pending/{n}.json")),

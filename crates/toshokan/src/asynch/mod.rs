@@ -85,7 +85,7 @@ where
 }
 
 /// Every future's output, in order, the futures polled together.
-async fn join<T>(futures: impl Iterator<Item = impl Future<Output = T>>) -> Vec<T> {
+pub(crate) async fn join<T>(futures: impl Iterator<Item = impl Future<Output = T>>) -> Vec<T> {
     let mut running: Vec<_> = futures.map(Box::pin).collect();
     let mut outputs: Vec<Option<T>> = running.iter().map(|_| None).collect();
     std::future::poll_fn(|context| {

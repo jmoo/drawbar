@@ -8,7 +8,9 @@ use std::rc::Rc;
 
 use toshokan::asynch;
 use toshokan::binding::Bindings;
-use toshokan::blocking::{self, run, Backend, Native};
+#[cfg(not(target_arch = "wasm32"))]
+use toshokan::blocking::Native;
+use toshokan::blocking::{self, run, Backend};
 use toshokan::compaction::compact;
 use toshokan::effects::{self, Applied, EffectPlan};
 use toshokan::env::{ExactNames, PrefixIdentity, SeededRandom, TestClock};
@@ -244,11 +246,16 @@ impl Driven for Recorded {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+pub mod web;
+
+#[cfg(not(target_arch = "wasm32"))]
 pub struct NativeDirs {
     backend: Native,
     dirs: std::rc::Rc<[tempfile::TempDir; 2]>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl NativeDirs {
     pub fn new() -> Self {
         let dirs = std::rc::Rc::new([tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()]);
@@ -259,6 +266,7 @@ impl NativeDirs {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Driven for NativeDirs {
     fn capabilities(&self, root: Root) -> Capabilities {
         self.backend.capabilities(root)
@@ -277,10 +285,12 @@ impl Driven for NativeDirs {
     }
 }
 
-/// Runs each behavior on fresh, empty roots of every backend.
+/// Runs each behavior on fresh, empty roots of every backend: natively, or in a
+/// browser with the `web` feature. A suite marked `renaming` skips the folder that
+/// cannot rename files.
 #[macro_export]
 macro_rules! for_every_backend {
-    ($suite:ident: $($behavior:ident),* $(,)?) => {
+    (renaming $suite:ident: $($behavior:ident),* $(,)?) => {
         mod blocking_mem {
             $(#[test] fn $behavior() { super::$suite::$behavior(&mut $crate::common::BlockingMem(toshokan::MemDisk::new())); })*
         }
@@ -290,8 +300,33 @@ macro_rules! for_every_backend {
         mod async_unbatched {
             $(#[test] fn $behavior() { super::$suite::$behavior(&mut $crate::common::AsyncUnbatched(toshokan::MemDisk::new())); })*
         }
+        #[cfg(not(target_arch = "wasm32"))]
         mod native {
             $(#[test] fn $behavior() { super::$suite::$behavior(&mut $crate::common::NativeDirs::new()); })*
+        }
+        $crate::for_web!(private_web, Kind::Private, $suite: $($behavior),*);
+        $crate::for_web!(picked_web, Kind::Picked { rename: true }, $suite: $($behavior),*);
+    };
+    ($suite:ident: $($behavior:ident),* $(,)?) => {
+        $crate::for_every_backend!(renaming $suite: $($behavior),*);
+        $crate::for_web!(picked_web_without_rename, Kind::Picked { rename: false }, $suite: $($behavior),*);
+    };
+}
+
+/// Runs each behavior in a browser on fresh roots of one kind of folder.
+#[macro_export]
+macro_rules! for_web {
+    ($module:ident, $kind:expr, $suite:ident: $($behavior:ident),*) => {
+        #[cfg(all(target_arch = "wasm32", feature = "web"))]
+        mod $module {
+            use $crate::common::web::{Kind, WebDirs};
+            $(
+                #[wasm_bindgen_test::wasm_bindgen_test]
+                async fn $behavior() {
+                    let mut dirs = WebDirs::new($kind).await;
+                    super::$suite::$behavior(&mut dirs);
+                }
+            )*
         }
     };
 }

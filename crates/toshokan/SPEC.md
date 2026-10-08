@@ -31,7 +31,7 @@ table is relative to the root.
 
 | Path                                | Contents                                 |
 | ----------------------------------- | ---------------------------------------- |
-| `writers/<w>/<segment>.jsonl`       | A segment of writer `w`'s log            |
+| `writers/<w>/<segment>.txt`         | A segment of writer `w`'s log            |
 | `writers/<w>/snapshot-<nonce>.json` | A snapshot of writer `w`'s log           |
 | `writers/<w>/pending/<nonce>.json`  | The record of an unfinished file effect  |
 | `writers/<w>/pending/<nonce>.<i>`   | Empty: step `i` of `<nonce>` has begun   |
@@ -335,7 +335,8 @@ synced. Only then does the writer get its directory in the local root, its lock,
 its cached view and, last, `head.json`.
 
 A process appends to one segment, named at random when it first appends, and
-seals it when it closes it or compacts: once the segment still has the length
+seals it when it closes it, compacts, or would take it past 1 MiB with an
+append, which then goes to a new segment: once the segment still has the length
 this process left it and ends with its last entry's line, it appends a seal
 marker and syncs the segment. Nothing is appended to a sealed segment. Before
 each append, a writer confirms that the folder holds its last entry: its open
@@ -736,3 +737,65 @@ per process that crashed or was copied; trash items
 until the writer empties them; and the pending records of a writer that will
 never run again, settled or not. The local root keeps one directory per writer
 the install has used.
+
+## Backends
+
+A backend declares, for each root, what it can do, and the core plans from that
+alone:
+
+| Capability    | Meaning                                                        |
+| ------------- | -------------------------------------------------------------- |
+| `append`      | Bytes can be added to the end of a file                        |
+| `rename_file` | A file can be renamed atomically                               |
+| `rename_dir`  | A directory can be renamed atomically, with everything in it   |
+| `no_replace`  | A rename refuses an existing destination in the same step      |
+| `fsync`       | A sync makes completed requests durable                        |
+
+Without `rename_dir`, a directory moves file by file (see File effects). Without
+`append` or `rename_file`, a library opens read-only. Without `fsync`, a sync is
+answered at once, and a completed request is as durable as the backend makes it.
+
+### Browsers
+
+In a browser, the library runs on the page and a dedicated worker performs its
+requests, one at a time, in the order they were sent. The folder is a directory
+of the origin private file system or a folder the user picked; the local root is
+always a directory of the origin private file system.
+
+| Folder                                      | `append` | `rename_file` | `rename_dir` | `no_replace` | `fsync` |
+| ------------------------------------------- | -------- | ------------- | ------------ | ------------ | ------- |
+| Private file system, Chromium               | yes      | yes           | no           | no           | yes     |
+| Private file system, Firefox and WebKit     | yes      | yes           | no           | no           | no      |
+| Picked folder, Chromium other than Brave    | yes      | yes           | no           | no           | no      |
+| Picked folder, Brave                        | yes      | no            | no           | no           | no      |
+
+- **Private file system.** Files are read through `getFile()`, which takes no
+  lock, and written, appended to and flushed through sync access handles, opened
+  for one request each. Chromium's `flush()` takes a fraction of a millisecond
+  and appears to reach the disk; Firefox's and WebKit's take microseconds, so
+  they declare no `fsync`. Directory names need no sync: the browser keeps them
+  in its own database. Chromium cannot rename a directory there, so no browser
+  declares `rename_dir`.
+- **Picked folder.** Only Chromium-based browsers can open one. Files are read
+  through `getFile()` and written through writable streams, which write a copy
+  and put it in place at `close()`: that is the moment a write lands, and
+  nothing is synced beyond it. An append copies the whole file, at about 1.5 ms
+  per MiB, which the 1 MiB bound on segments keeps small. Consecutive writes to
+  one file share one stream. Before putting a file in place, Chromium checks it
+  with Safe Browsing unless its type is one Chromium only samples, such as
+  `.txt` and `.json`, so toshokan names its own files with those. A saved
+  library file pays the check for its type: about 45 ms in Chrome and 0.1 to
+  1.1 s in Brave for a type Chromium does not list. Brave cannot rename a file
+  outside the private file system.
+- **Renames** replace a file at the destination in every browser, so none
+  declares `no_replace`.
+- **Times.** Chromium and Firefox report a file's last change in milliseconds,
+  WebKit in whole seconds: two changes that keep a file's length within that
+  time look alike.
+- **Locks** are Web Locks named `toshokan:/<local root path>/<name>`, held by
+  the worker and released when it ends.
+- **Hints.** A tab that commits announces its newest entry on the
+  `BroadcastChannel` `toshokan:<library>`, and the library's other tabs refresh.
+  A page whose folder another program may write also refreshes when it is shown
+  or focused, and periodically while it is visible.
+

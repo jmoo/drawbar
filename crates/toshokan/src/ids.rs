@@ -85,7 +85,7 @@ id128!(
 );
 
 id128!(
-    /// The name of a log segment, `<name>.jsonl`. Random, so no two histories pick the
+    /// The name of a log segment, `<name>.txt`. Random, so no two histories pick the
     /// same name. Names are advisory: readers place entries by chain, not by name.
     SegmentName,
     "segment name"
