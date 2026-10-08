@@ -449,7 +449,7 @@ fn recover(disk: &MemDisk) -> Result<Vec<Outcome>, Error> {
         }
         d.run(effects::finish(&layout, settling.record, &settling.pending))?;
     }
-    d.run(recovery::tidy(&layout, WRITER, &[]))?;
+    d.run(recovery::tidy(&layout, WRITER))?;
     d.run(recovery::remove_empty(&layout, WRITER, &found.ignored))?;
     Ok(outcomes)
 }
@@ -613,7 +613,7 @@ fn settle_orphans(disk: &MemDisk, how: Settlement, stop: usize, seed: u64) -> (u
         plan.steps.truncate(stop);
         carry_out(d, plan, how);
     }
-    d.run(recovery::tidy(&layout, HEIR, &[])).unwrap();
+    d.run(recovery::tidy(&layout, HEIR)).unwrap();
     (found.orphaned.len(), stopped)
 }
 

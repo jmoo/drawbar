@@ -7,7 +7,7 @@
 //!   pending/<nonce>.json       journal records of multi-step effects
 //!   pending/<nonce>.<step>     a record's step that copies has started
 //!   trash/<nonce>              displaced user bytes
-//!   tmp/<nonce>                staged files
+//!   tmp/<nonce>.<extension>    staged files, under their destination's extension
 //! <local>/<genesis>/           one writer of this install, by its genesis entry
 //!   head.json                  the head this writer last wrote
 //!   view.json                  the cached view
@@ -38,6 +38,8 @@ pub const TMP: &str = "tmp";
 // Chromium's `download_file_types.asciipb` samples `.txt` and `.json` with
 // probability 0.01, so about 1 close in 100 still pays the full check.
 pub const SEGMENT_EXTENSION: &str = ".txt";
+/// The longest name, in bytes, that common file systems take.
+const MAX_NAME: usize = 255;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Layout {
@@ -115,8 +117,20 @@ impl Layout {
         child(&self.writer(writer), TMP)
     }
 
-    pub fn staged(&self, writer: WriterId, name: Nonce) -> RelPath {
-        child(&self.tmp_dir(writer), &name.to_string())
+    /// Where the file `name` that becomes `destination` is staged: under the
+    /// extension of `destination`'s name, so a browser judges it as the file it
+    /// becomes, unless that name has none or the staged name would be longer
+    /// than 255 bytes.
+    pub fn staged(&self, writer: WriterId, name: Nonce, destination: &RelPath) -> RelPath {
+        let staged = destination
+            .name()
+            .and_then(|named| named.rsplit_once('.'))
+            .map(|(_, extension)| extension)
+            .filter(|extension| !extension.is_empty())
+            .map(|extension| format!("{name}.{extension}"))
+            .filter(|staged| staged.len() <= MAX_NAME)
+            .unwrap_or_else(|| name.to_string());
+        child(&self.tmp_dir(writer), &staged)
     }
 
     /// This install's directory for the writer whose genesis entry is `genesis`, in
@@ -193,11 +207,33 @@ mod tests {
             (layout.snapshot(w, n), format!("{dir}/snapshot-{n}.json")),
             (layout.pending(w, n), format!("{dir}/pending/{n}.json")),
             (layout.trash(w, n), format!("{dir}/trash/{n}")),
-            (layout.staged(w, n), format!("{dir}/tmp/{n}")),
         ];
         for (path, text) in expected {
             assert_eq!(path.as_str(), text);
             assert!(path.starts_with(&layout.writer(w)), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_staged_file_takes_its_destinations_extension() {
+        let layout = Layout::new(".drawbar").unwrap();
+        let w = WriterId::from_u128(0xab);
+        let n = Nonce::from_u128(0xcd);
+        let tmp = format!(".drawbar/writers/{w}/tmp");
+        let long = format!("a.{}", "x".repeat(MAX_NAME - 33));
+        let longer = format!("a.{}", "x".repeat(MAX_NAME - 32));
+        for (destination, staged) in [
+            ("d/a.syx", format!("{n}.syx")),
+            ("a.tar.gz", format!("{n}.gz")),
+            (".profile", format!("{n}.profile")),
+            ("a", n.to_string()),
+            ("a.", n.to_string()),
+            (&long, format!("{n}.{}", "x".repeat(MAX_NAME - 33))),
+            (&longer, n.to_string()),
+        ] {
+            let path = layout.staged(w, n, &RelPath::new(destination).unwrap());
+            assert_eq!(path.as_str(), format!("{tmp}/{staged}"), "{destination}");
+            assert!(path.name().unwrap().len() <= MAX_NAME, "{destination}");
         }
     }
 

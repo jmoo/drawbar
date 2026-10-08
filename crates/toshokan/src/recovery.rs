@@ -236,27 +236,13 @@ pub fn settle(
         .task()
 }
 
-/// Removes this writer's staged files that no record in `open` will place: what
-/// a run cut short before its record was written left behind.
-pub fn tidy(
-    layout: &Layout,
-    writer: WriterId,
-    open: &[PendingRecord],
-) -> Task<'static, Result<()>> {
-    let keep: BTreeSet<String> = open
-        .iter()
-        .flat_map(|record| &record.steps)
-        .filter_map(|step| match step {
-            EffectStep::Place { staged, .. } => Some(staged.to_string()),
-            _ => None,
-        })
-        .collect();
+/// Removes every file in this writer's staging, once no record of its is open
+/// to place one: what a run cut short before its record was written left behind.
+pub fn tidy(layout: &Layout, writer: WriterId) -> Task<'static, Result<()>> {
     let dir = layout.tmp_dir(writer);
     flow::list(Root::Folder, &dir)
         .and_then(move |entries| {
-            let stale = entries
-                .into_iter()
-                .filter(move |entry| entry.kind == Kind::File && !keep.contains(&entry.name));
+            let stale = entries.into_iter().filter(|entry| entry.kind == Kind::File);
             each(stale, move |entry| {
                 flow::remove(
                     Root::Folder,
@@ -434,7 +420,7 @@ impl Orphaned<'_> {
             EffectStep::ToTrash { path, .. } if self.vacant.contains(path) => {}
             EffectStep::ToTrash { path, .. } => self.trash(path),
             EffectStep::Place { staged, path } => {
-                self.copy(self.layout.staged(writer, *staged), path)
+                self.copy(self.layout.staged(writer, *staged, path), path)
             }
             EffectStep::FromTrash { item, path } => {
                 self.copy(self.layout.trash(writer, *item), path)
@@ -483,10 +469,6 @@ impl Orphaned<'_> {
 
     fn copy(&mut self, source: RelPath, path: &RelPath) {
         let staged = self.env.nonce();
-        self.plan.staged.push((staged, Staged::Copy(source)));
-        self.plan.steps.push(EffectStep::Place {
-            staged,
-            path: path.clone(),
-        });
+        self.plan.place(staged, Staged::Copy(source), path.clone());
     }
 }

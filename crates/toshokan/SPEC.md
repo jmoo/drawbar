@@ -37,11 +37,16 @@ table is relative to the root.
 | `writers/<w>/pending/<nonce>.json`  | The record of an unfinished file effect  |
 | `writers/<w>/pending/<nonce>.<i>`   | Empty: step `i` of `<nonce>` has begun   |
 | `writers/<w>/trash/<nonce>`         | Bytes an intent of `w` displaced         |
-| `writers/<w>/tmp/<nonce>`           | A file `w` is staging                    |
+| `writers/<w>/tmp/<nonce>.<ext>`     | A file `w` is staging                    |
 
 Only writer `w` creates, appends to, renames or removes anything under
 `writers/<w>/`. Others only make and sync the directories `writers/` and the
 root. There is no file at the level of the library.
+
+A staged file is named by its nonce and the extension of the file it becomes:
+what follows the last `.` of that file's name, if anything does, and if the name
+stays within 255 bytes; otherwise by its nonce alone. A trash item is named by
+its nonce alone, so a step names it without knowing where its bytes came from.
 
 Names of segments and snapshots are advisory. A reader reads every file directly
 in `writers/<w>/`, whatever its name, by its contents, so a sync client's
@@ -551,7 +556,7 @@ effects are a list of steps, each of which moves one file or directory:
 | Step                                      | Moves                                   |
 | ----------------------------------------- | --------------------------------------- |
 | `{"step":"to_trash","path":p,"item":n}`   | `p` to `trash/n`                        |
-| `{"step":"place","staged":n,"path":p}`    | `tmp/n` to `p`                          |
+| `{"step":"place","staged":n,"path":p}`    | Staged file `n` to `p`                  |
 | `{"step":"rename","from":p,"to":q}`       | `p` to `q`                              |
 | `{"step":"from_trash","item":n,"path":p}` | `trash/n` to `p`                        |
 | `{"step":"make_dir","path":p}`            | Creates directory `p`                   |
@@ -572,7 +577,7 @@ out its steps, the writer resuming them included, moves the same way.
 
 A writer carries out an intent's steps in this order:
 
-1. Create each new file as `tmp/<nonce>` and fill it, then sync it and `tmp/`.
+1. Create each new file in `tmp/` and fill it, then sync it and `tmp/`.
    The app's bytes are written a chunk at a time by the driver, never held by
    the core; they may copy ranges of the file being rewritten. A copy out of
    another writer's directory is made a chunk at a time.
@@ -580,7 +585,7 @@ A writer carries out an intent's steps in this order:
    the one the app expects; a directory satisfies neither. Check that every
    trash item a step restores is there. On failure, remove the staged files and
    write nothing more.
-3. Write the pending record to `tmp/<nonce>`, sync it, and rename it to
+3. Write the pending record to `tmp/<nonce>.json`, sync it, and rename it to
    `pending/<nonce>.json`. A record whose moves copy is created at
    `pending/<nonce>.json` and synced with its directory.
 4. Carry out the steps in order. A move first creates the destination's
@@ -800,11 +805,12 @@ always a directory of the origin private file system.
   names its own files with those. A `.txt` close was measured at about 1.6 ms in
   Chrome; that `.json` is sampled too, and that about 1 close in 100 of a
   sampled type still pays the full check, is from Chromium's published file-type
-  policy, not measured. A saved library file pays the full check, about 45 ms in
-  Chrome and 0.1 to 1.1 s in Brave, whatever its type, because it is written
-  under a staged name with no extension; toshokan never pays less for a user
-  file than the browser would. Brave cannot rename a file outside the private
-  file system. Renaming there was measured only in Chrome and Brave, so
+  policy, not measured. A saved library file is staged under its own
+  extension, so it pays what the browser charges for its type: the full check,
+  about 45 ms in Chrome and 0.1 to 1.1 s in Brave, for a type Chromium does not
+  sample. A trash item has no extension, so where moves copy, each file moved
+  into the trash pays the full check. Brave cannot rename a file outside the
+  private file system. Renaming there was measured only in Chrome and Brave, so
   `Folder::picked` declares `rename_file` only where `navigator.userAgentData`
   names Google Chrome and `navigator.brave` is absent; elsewhere each move
   copies, and each copy pays the check again. A rename the browser refuses

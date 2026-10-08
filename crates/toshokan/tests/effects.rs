@@ -838,6 +838,41 @@ fn a_saved_file_streams_into_staging_without_passing_through_the_core() {
     assert!(staged == Some(expected), "the staged file holds the splice");
 }
 
+#[test]
+fn a_staged_file_carries_the_extension_of_the_file_it_becomes() {
+    let d = &mut common::Recorded::new(MemDisk::new());
+    put(d, &[("d/a.syx", b"old")]);
+    let save = |at: &str, content: usize, expect: Expect| FileChange::Save {
+        entity: EntityId::from_u128(content as u128 + 1),
+        path: path(at),
+        content: Content(content),
+        expect,
+    };
+    let changes = [
+        save("d/a.syx", 0, Expect::Holds(identity(b"old"))),
+        save("b", 1, Expect::Absent),
+    ];
+    let contents = vec![Fill::Bytes(b"new".to_vec()), Fill::Bytes(b"b".to_vec())];
+    d.take();
+    commit(d, &changes, contents, &bound(&[]), &mut env(1)).unwrap();
+    let tmp = layout().tmp_dir(WRITER);
+    let mut created: Vec<(String, String)> = d
+        .take()
+        .into_iter()
+        .filter_map(|io| match io {
+            Io::Create { path, .. } if path.parent() == Some(tmp.clone()) => {
+                let name = path.name().unwrap();
+                let (_, extension) = name.split_once('.').unwrap_or((name, ""));
+                Some((extension.to_owned(), name.to_owned()))
+            }
+            _ => None,
+        })
+        .collect();
+    created.sort();
+    let extensions: Vec<&str> = created.iter().map(|(e, _)| e.as_str()).collect();
+    assert_eq!(extensions, ["", "json", "syx"], "{created:?}");
+}
+
 /// A folder another program writes in: once the pending record of an intent is
 /// written, after its preconditions are checked, it makes a file at `at`.
 struct Intruder {

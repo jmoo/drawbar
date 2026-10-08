@@ -1620,7 +1620,7 @@ fn tidy_staging(library: &mut Library) -> Fallible<'_, &mut Library> {
     };
     let layout = library.layout.clone();
     let ignored = library.ignored.clone();
-    flow::run(recovery::tidy(&layout, writer, &[]))
+    flow::run(recovery::tidy(&layout, writer))
         .and_then(move |()| flow::run(recovery::remove_empty(&layout, writer, &ignored)))
         .map_ok(move |removed| {
             library.ignored.retain(|path| !removed.contains(path));

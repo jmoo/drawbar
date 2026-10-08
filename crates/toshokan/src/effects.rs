@@ -94,7 +94,9 @@ impl EffectStep {
     pub(crate) fn ends(&self, layout: &Layout, writer: WriterId) -> Option<(RelPath, RelPath)> {
         match self {
             Self::ToTrash { path, item } => Some((path.clone(), layout.trash(writer, *item))),
-            Self::Place { staged, path } => Some((layout.staged(writer, *staged), path.clone())),
+            Self::Place { staged, path } => {
+                Some((layout.staged(writer, *staged, path), path.clone()))
+            }
             Self::Rename { from, to } => Some((from.clone(), to.clone())),
             Self::FromTrash { item, path } => Some((layout.trash(writer, *item), path.clone())),
             Self::MakeDir { .. } | Self::RemoveDir { .. } => None,
@@ -163,8 +165,9 @@ pub struct EffectPlan {
     /// The name of the pending record.
     pub record: Nonce,
     pub checks: Vec<Precondition>,
-    /// Staged before anything else, by staged name.
-    pub staged: Vec<(Nonce, Staged)>,
+    /// Staged before anything else: each staged file's name, the path a step
+    /// places it at, and what fills it.
+    pub staged: Vec<(Nonce, RelPath, Staged)>,
     pub steps: Vec<EffectStep>,
     pub files: Vec<FileEnd>,
     pub moves: Moves,
@@ -191,6 +194,13 @@ impl EffectPlan {
     /// Whether the effects change the folder, and so need a pending record.
     pub fn moves_files(&self) -> bool {
         !self.steps.is_empty()
+    }
+
+    /// Stages a file named `staged`, filled from `fill`, and adds the step that
+    /// places it at `path`.
+    pub(crate) fn place(&mut self, staged: Nonce, fill: Staged, path: RelPath) {
+        self.staged.push((staged, path.clone(), fill));
+        self.steps.push(EffectStep::Place { staged, path });
     }
 }
 
@@ -271,11 +281,8 @@ impl Resolver<'_> {
                     });
                 }
                 let staged = env.nonce();
-                self.plan.staged.push((staged, Staged::Content(*content)));
-                self.step(EffectStep::Place {
-                    staged,
-                    path: path.clone(),
-                });
+                self.plan
+                    .place(staged, Staged::Content(*content), path.clone());
                 self.end(entity, Some(path));
             }
             FileChange::Trash { entity, expect } => {
@@ -503,7 +510,7 @@ pub fn prepare(
                 let staged: Vec<RelPath> = plan
                     .staged
                     .iter()
-                    .map(|(name, _)| layout.staged(writer, *name))
+                    .map(|(name, to, _)| layout.staged(writer, *name, to))
                     .collect();
                 each(staged.into_iter(), |path| flow::remove(Root::Folder, &path))
                     .map_ok(|()| Err(refusal))
@@ -533,8 +540,8 @@ fn write_record<'a>(
     name: Nonce,
     record: &PendingRecord,
 ) -> Fallible<'a, ()> {
-    let staged = layout.staged(writer, name);
     let path = layout.pending(writer, name);
+    let staged = layout.staged(writer, name, &path);
     if record.moves == Moves::Copy {
         let dir = layout.pending_dir(writer);
         let bytes = record.encode();
@@ -578,8 +585,8 @@ fn stage<'a>(layout: &Layout, writer: WriterId, plan: Rc<EffectPlan>) -> Fallibl
     flow::ensure_dir(Root::Folder, &dir)
         .and_then(move |()| {
             each(0..plan.staged.len(), move |i| {
-                let (name, staged) = &plan.staged[i];
-                let path = layout.staged(writer, *name);
+                let (name, to, staged) = &plan.staged[i];
+                let path = layout.staged(writer, *name, to);
                 let filled = match staged {
                     Staged::Content(content) => flow::act(Io::Create {
                         root: Root::Folder,
@@ -851,7 +858,7 @@ fn account<'a>(
             unplaced.into_iter(),
             Vec::new(),
             move |mut swept, (staged, path)| {
-                let from = sweeping.staged(writer, staged);
+                let from = sweeping.staged(writer, staged, &path);
                 let to = sweeping.trash(writer, staged);
                 flow::stat(Root::Folder, &from).and_then(move |meta| {
                     if meta.is_none() {
