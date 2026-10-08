@@ -32,9 +32,9 @@ pub struct Executor {
     folder: Tree,
     local: Tree,
     locks: Locks,
-    /// A picked folder's file being filled by consecutive [`Io::Write`]s, kept
-    /// open so each write does not copy the file again; closed before any other
-    /// request.
+    /// A picked folder's file being filled by [`Io::Write`]s, kept open so each
+    /// write does not copy the file again; closed before any request
+    /// [`Filling::continues`] does not allow.
     ///
     /// ⚠️ Its writes land only at that close, so a close that fails fails the
     /// next request, whatever it asks.
@@ -45,6 +45,34 @@ struct Filling {
     root: Root,
     path: RelPath,
     stream: FileSystemWritableFileStream,
+}
+
+impl Filling {
+    /// Whether `io` leaves the stream open: a write to the file, or a read of
+    /// another, such as the source of a copy or a splice between its chunks.
+    fn continues(&self, io: &Io) -> bool {
+        continues(self.root, &self.path, io)
+    }
+}
+
+fn continues(root: Root, path: &RelPath, io: &Io) -> bool {
+    let other = |read: &RelPath| read != path;
+    match io {
+        Io::Write {
+            root: at,
+            path: written,
+            ..
+        } => *at == root && written == path,
+        Io::Read {
+            root: at,
+            path: read,
+            ..
+        } => *at != root || other(read),
+        Io::ReadMany { root: at, reads } => {
+            *at != root || reads.iter().all(|(read, _)| other(read))
+        }
+        _ => false,
+    }
 }
 
 /// One root: its top directory, how its files are written, and what it declares.
@@ -133,13 +161,9 @@ impl Executor {
     }
 
     pub async fn perform(&self, io: Io) -> IoResult {
-        let continues = |filling: &Filling| match &io {
-            Io::Write { root, path, .. } => *root == filling.root && *path == filling.path,
-            _ => false,
-        };
         let open = self.filling.take();
         match open {
-            Some(filling) if continues(&filling) => {
+            Some(filling) if filling.continues(&io) => {
                 *self.filling.borrow_mut() = Some(filling);
             }
             Some(filling) => close(filling.stream).await?,
@@ -693,5 +717,61 @@ impl Locks {
         if let Some(release) = self.held.borrow_mut().remove(name) {
             let _ = release.call0(&JsValue::NULL);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path(text: &str) -> RelPath {
+        RelPath::new(text).unwrap()
+    }
+
+    const WHOLE: Range = Range {
+        offset: 0,
+        len: u64::MAX,
+    };
+
+    #[test]
+    fn a_stream_stays_open_across_writes_to_its_file_and_reads_of_others() {
+        let filled = path("tmp/f");
+        let keeps = |io: Io| continues(Root::Folder, &filled, &io);
+        let write = |root, at: &str| Io::Write {
+            root,
+            path: path(at),
+            offset: 0,
+            bytes: vec![1],
+        };
+        let read = |root, at: &str| Io::Read {
+            root,
+            path: path(at),
+            range: WHOLE,
+        };
+        assert!(keeps(write(Root::Folder, "tmp/f")));
+        assert!(keeps(read(Root::Folder, "song")), "the source of a copy");
+        assert!(keeps(read(Root::Local, "tmp/f")), "another root's file");
+        assert!(keeps(Io::ReadMany {
+            root: Root::Folder,
+            reads: vec![(path("a"), WHOLE), (path("b"), WHOLE)],
+        }));
+        assert!(
+            !keeps(read(Root::Folder, "tmp/f")),
+            "its own bytes land first"
+        );
+        assert!(!keeps(Io::ReadMany {
+            root: Root::Folder,
+            reads: vec![(path("a"), WHOLE), (path("tmp/f"), WHOLE)],
+        }));
+        assert!(!keeps(write(Root::Folder, "tmp/g")));
+        assert!(!keeps(write(Root::Local, "tmp/f")));
+        assert!(!keeps(Io::Stat {
+            root: Root::Folder,
+            path: path("tmp/f"),
+        }));
+        assert!(!keeps(Io::Sync {
+            root: Root::Folder,
+            path: path("tmp/f"),
+        }));
     }
 }
