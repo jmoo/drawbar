@@ -89,9 +89,7 @@ def run_phase(args, session, phase):
         "--target", "wasm32-unknown-unknown", "--test", "bench", "--", "--nocapture", phase,
     ]
     log = open(os.path.join(args.profile, f"runner-{phase}.log"), "w")
-    runner = subprocess.Popen(
-        command, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
-    )
+    runner = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT)
     try:
         def serving():
             with open(log.name) as text:
@@ -106,7 +104,12 @@ def run_phase(args, session, phase):
 
         return wait_for(finished, args.timeout, f"the {phase} test")
     finally:
-        os.killpg(runner.pid, signal.SIGTERM)
+        for pid, _, _ in descendants(runner.pid):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        runner.terminate()
         runner.wait()
 
 
