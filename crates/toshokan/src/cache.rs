@@ -42,7 +42,10 @@ const JOURNAL_SLACK: u64 = 1 << 20;
 /// The first byte of every record this build writes; a record starting with
 /// another is not read. It changes with any change to what a record packs or
 /// how, since a record whose check holds is taken as this build packed it.
-const FORMAT: u8 = 1;
+const FORMAT: u8 = 2;
+
+/// How many bytes of a record's length start it.
+const LEN: usize = 8;
 
 /// How many bytes of a record's [`Check`] follow its length.
 const CHECK: usize = 16;
@@ -354,7 +357,7 @@ impl Decoding {
         let Some((len, check)) = frame_head(&self.checkpoint) else {
             return Decode::Done(Err("the checkpoint fails its check".into()));
         };
-        let start = 4 + CHECK;
+        let start = LEN + CHECK;
         if self.end == 0 {
             match start
                 .checked_add(len)
@@ -558,8 +561,8 @@ fn restore_logs(view: &mut CachedView, logs: Vec<(WriterId, StoredLog)>) -> Pars
 
 /// `payload` as a record: its length, its check, then itself.
 fn frame(payload: &[u8]) -> Vec<u8> {
-    let len = u32::try_from(payload.len()).expect("a record within 4 GiB");
-    let mut record = Vec::with_capacity(4 + CHECK + payload.len());
+    let len = payload.len() as u64;
+    let mut record = Vec::with_capacity(LEN + CHECK + payload.len());
     record.extend_from_slice(&len.to_le_bytes());
     record.extend_from_slice(&Check::of(payload));
     record.extend_from_slice(payload);
@@ -570,15 +573,15 @@ fn frame(payload: &[u8]) -> Vec<u8> {
 /// when the record is torn or fails its check.
 fn unframe(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
     let (len, check) = frame_head(bytes)?;
-    let (payload, rest) = bytes[4 + CHECK..].split_at_checked(len)?;
+    let (payload, rest) = bytes[LEN + CHECK..].split_at_checked(len)?;
     (Check::of(payload) == check).then_some((payload, rest))
 }
 
 /// A record's length and check.
 fn frame_head(bytes: &[u8]) -> Option<(usize, [u8; CHECK])> {
-    let (len, rest) = bytes.split_first_chunk::<4>()?;
+    let (len, rest) = bytes.split_first_chunk::<LEN>()?;
     let (check, _) = rest.split_first_chunk::<CHECK>()?;
-    Some((usize::try_from(u32::from_le_bytes(*len)).ok()?, *check))
+    Some((usize::try_from(u64::from_le_bytes(*len)).ok()?, *check))
 }
 
 /// A checkpoint or a journal record. A checkpoint holds every log whole and the
@@ -813,7 +816,7 @@ impl StoredSegment {
             .iter()
             .map(|entry| (entry.hash(), Rc::new(entry.clone())))
             .collect();
-        let mut entries = Vec::with_capacity(self.count);
+        let mut entries = Vec::with_capacity(self.count.min(pack::RESERVED));
         let mut at = self.last;
         while let Some(hash) = at.filter(|_| entries.len() < self.count) {
             let entry = whole.remove(&hash).or_else(|| log.entry(hash).cloned())?;
@@ -936,7 +939,7 @@ enum Encode {
 
 impl Encoding {
     pub(crate) fn new(reader: &Reader) -> Self {
-        let mut out = vec![0; 4 + CHECK];
+        let mut out = vec![0; LEN + CHECK];
         out.push(FORMAT);
         reader.logs().len().pack(&mut out);
         let stage = Encode::Logs {
@@ -1015,7 +1018,7 @@ impl Encoding {
                     }
                     None => {
                         out.push(0);
-                        Encode::Check(Box::default(), 4 + CHECK)
+                        Encode::Check(Box::default(), LEN + CHECK)
                     }
                 }
             }
@@ -1025,7 +1028,7 @@ impl Encoding {
                     Some(last) => Encode::State(Some(last)),
                     None => {
                         state.pack_rest(out);
-                        Encode::Check(Box::default(), 4 + CHECK)
+                        Encode::Check(Box::default(), LEN + CHECK)
                     }
                 }
             }
@@ -1035,10 +1038,9 @@ impl Encoding {
                 match to < out.len() {
                     true => Encode::Check(hasher, to),
                     false => {
-                        let len = out.len() - 4 - CHECK;
-                        let len = u32::try_from(len).expect("a record within 4 GiB");
-                        out[..4].copy_from_slice(&len.to_le_bytes());
-                        out[4..4 + CHECK].copy_from_slice(&hasher.finish());
+                        let len = (out.len() - LEN - CHECK) as u64;
+                        out[..LEN].copy_from_slice(&len.to_le_bytes());
+                        out[LEN..LEN + CHECK].copy_from_slice(&hasher.finish());
                         Encode::Done
                     }
                 }
