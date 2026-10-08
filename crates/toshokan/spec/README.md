@@ -120,8 +120,8 @@ them, resurrections, hidden files and conflicted copies under other names.
 | --- | --- |
 | `ChainOrder`, `NothingIgnored`, `Retained`, `DeliveredConverges`, `Monotone`, `ForksKept` | `tests/portable.rs`: every delivery order of small scenarios, and seeded interleavings of writes, compactions, crashes, clones and lost local roots with sync; at each step a reader that reads only what changed places what one reading every file places |
 | `OwnDirectory` | `tests/library.rs`: every instance runs on a backend that panics on a write in another writer's directory |
-| `EffectAccounted` | `tests/crash.rs`: every effect crashed after every operation, under torn, zeroed and lost tails |
-| `DeliveredSettles` | `tests/crash.rs` and `tests/library.rs`: a crash, or the loss of the local root, at every step is settled once, by the writer itself or with consent by another |
+| `EffectAccounted` | `tests/crash.rs`: every effect crashed after every operation, under torn, zeroed and lost tails, where moves rename and where they copy |
+| `DeliveredSettles` | `tests/crash.rs` and `tests/library.rs`: a crash, or the loss of the local root, at every step is settled once, by the writer itself or with consent by another, where moves rename and where they copy |
 | `FoldHashes` | `tests/portable.rs`: a clone branches from an entry the original folds and deletes, in every delivery order |
 | `UniqueNames` | `tests/writer.rs`: one new, randomly named segment per process |
 | `SealedOnly`, `FoldedOnly` | `tests/writer.rs` and `tests/library.rs`: compaction leaves a segment another process has open, one a crash left open, and a sealed one holding an entry no snapshot folds, and deletes the sealed segments of earlier processes |

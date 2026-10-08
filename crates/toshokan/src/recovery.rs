@@ -14,10 +14,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd, Progress, Staged};
+use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd, Moves, Progress, Staged};
 use crate::env::{Env, Identify};
 use crate::error::Result;
-use crate::flow::{self, each, fold, ok};
+use crate::flow::{self, each, fold};
 use crate::ids::{EntryHash, Nonce, WriterId};
 use crate::io::{Kind, Root, Task};
 use crate::layout::Layout;
@@ -156,7 +156,7 @@ pub fn predict(
         recovery,
         move |mut recovery, (name, record)| {
             let layout = layout.clone();
-            effects::observe(&layout, &record).map_ok(move |seen| {
+            effects::observe(&layout, name, &record).map_ok(move |seen| {
                 let progress = effects::progress(&layout, &record, &seen);
                 let outcome = effects::predict(&layout, name, &record, &seen, &progress);
                 recovery.own.push(Settling {
@@ -211,9 +211,9 @@ fn standing(
 }
 
 /// Resumes this writer's open record `name` where its steps stopped, after
-/// removing a source the last done step left beside its destination. The caller
-/// then appends the record's entry with what [`Applied`] says and removes the
-/// record with [`effects::finish`].
+/// removing a source the last done step left beside its destination, and the start
+/// of a copy the next step left. The caller then appends the record's entry with
+/// what [`Applied`] says and removes the record with [`effects::finish`].
 pub fn settle(
     layout: &Layout,
     name: Nonce,
@@ -221,14 +221,15 @@ pub fn settle(
     identify: Rc<dyn Identify>,
 ) -> Task<'static, Result<Applied>> {
     let layout = layout.clone();
-    effects::observe(&layout, &record)
+    effects::observe(&layout, name, &record)
         .and_then(move |seen| {
-            let Progress { done, leftover } = effects::progress(&layout, &record, &seen);
-            let removed = match leftover {
-                Some(leftover) => flow::remove(Root::Folder, &leftover),
-                None => ok(()),
-            };
-            removed.and_then(move |()| {
+            let Progress {
+                done,
+                leftover,
+                partial,
+            } = effects::progress(&layout, &record, &seen);
+            let stale: Vec<RelPath> = leftover.into_iter().chain(partial).collect();
+            each(stale.into_iter(), |path| flow::remove(Root::Folder, &path)).and_then(move |()| {
                 flow::run(effects::apply(&layout, name, record, done, identify))
             })
         })
@@ -275,11 +276,15 @@ pub struct Reached {
     vacant: BTreeSet<RelPath>,
 }
 
-/// How far another writer's record `theirs` got, for [`orphan_plan`].
-pub fn progress(layout: &Layout, theirs: &PendingRecord) -> Task<'static, Result<Reached>> {
+/// How far another writer's record `name`, `theirs`, got, for [`orphan_plan`].
+pub fn progress(
+    layout: &Layout,
+    name: Nonce,
+    theirs: &PendingRecord,
+) -> Task<'static, Result<Reached>> {
     let layout = layout.clone();
     let theirs = theirs.clone();
-    effects::observe(&layout, &theirs)
+    effects::observe(&layout, name, &theirs)
         .map_ok(move |seen| {
             let vacant = theirs
                 .steps
@@ -290,7 +295,7 @@ pub fn progress(layout: &Layout, theirs: &PendingRecord) -> Task<'static, Result
                 })
                 .collect();
             Reached {
-                progress: effects::progress(&layout, &theirs, &seen),
+                progress: effects::reached(&layout, &theirs, &seen),
                 vacant,
             }
         })
@@ -298,11 +303,11 @@ pub fn progress(layout: &Layout, theirs: &PendingRecord) -> Task<'static, Result
 }
 
 /// The effects that settle another writer's record `theirs` as `how`, from how
-/// far it got, carried out by this writer like an intent's. Nothing is written in
-/// the other writer's directory: its staged and trashed bytes are copied, and
-/// library files the settlement displaces go to this writer's trash. Finishing
-/// skips moving to the trash a path that holds nothing. Dismissing changes no
-/// file.
+/// far it got, carried out by this writer like an intent's, moving files as
+/// `moves` says. Nothing is written in the other writer's directory: its staged and
+/// trashed bytes are copied, and library files the settlement displaces go to this
+/// writer's trash, the start of a copy their next step left included. Finishing
+/// skips moving to the trash a path that holds nothing. Dismissing changes no file.
 ///
 /// Planned again after a settlement stopped partway, it plans what remains. The
 /// caller commits the plan, then, once its effects complete, appends a
@@ -312,13 +317,17 @@ pub fn orphan_plan(
     theirs: &PendingRecord,
     reached: &Reached,
     how: Settlement,
+    moves: Moves,
     env: &mut Env,
 ) -> EffectPlan {
     Orphaned {
         layout,
         theirs,
         vacant: &reached.vacant,
-        plan: EffectPlan::new(env.nonce()),
+        plan: EffectPlan {
+            moves,
+            ..EffectPlan::new(env.nonce())
+        },
         env,
     }
     .plan(&reached.progress, how)
@@ -337,9 +346,9 @@ impl Orphaned<'_> {
         if how == Settlement::Dismissed {
             return self.plan;
         }
-        if let Some(leftover) = &progress.leftover {
-            if self.layout.check_library_path(leftover).is_ok() {
-                self.trash(leftover);
+        for stale in progress.leftover.iter().chain(&progress.partial) {
+            if self.layout.check_library_path(stale).is_ok() {
+                self.trash(stale);
             }
         }
         let steps = &self.theirs.steps;

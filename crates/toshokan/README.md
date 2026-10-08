@@ -75,7 +75,8 @@ whatever their files are called. Fields are multi-value registers and
 observed-remove sets, merged by a join. A file effect stages its bytes, writes a
 pending record, moves displaced bytes into the writer's trash, and logs what it
 did; recovery after a crash, or after losing the app's data, finishes or reports
-it.
+it. Where the folder cannot rename files, each move copies and then removes its
+source, under the same record.
 
 [SPEC.md](SPEC.md) specifies every file toshokan writes and how it is merged.
 [spec/](spec/README.md) model-checks, in TLA+, the protocol between writers and

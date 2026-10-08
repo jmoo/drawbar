@@ -75,7 +75,7 @@ pub enum Why {
     /// it cannot append without misrepresenting it.
     #[error("this writer's history was written by a newer version")]
     NewerOwnHistory { entry: EntryHash },
-    /// The folder cannot append to files or rename them, which writing needs.
+    /// The folder cannot append to files, which writing needs.
     #[error("the folder cannot be written")]
     FolderNotWritable,
     /// The clock cannot advance past this writer's last entry: it holds the last

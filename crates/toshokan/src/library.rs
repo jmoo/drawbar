@@ -16,7 +16,7 @@ use std::sync::Arc;
 use crate::binding::{self, Bindings, Facts, Scan, Unscanned};
 use crate::cache;
 use crate::drafts::{self, DraftRecord};
-use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd};
+use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd, Moves};
 use crate::env::Env;
 use crate::error::{Error, Invalid, Refusal, Result, Why};
 use crate::flow::{self, fold, ok, Fallible, Flow};
@@ -261,7 +261,7 @@ impl Library {
         };
         library.refold();
         library.follow(readings(&library.reader).collect::<Vec<_>>());
-        let writable = capabilities.append && capabilities.rename_file;
+        let writable = capabilities.append;
         library.mode = match (&library.writer, writable) {
             (_, false) => Mode::ReadOnly(Why::FolderNotWritable),
             (Some(writer), true) => {
@@ -465,13 +465,14 @@ impl Library {
                 let Some(theirs) = open else {
                     return Flow::Done(Err(Error::Refused(Refusal::Nothing)));
                 };
-                let reached = recovery::progress(&library.layout, &theirs);
+                let reached = recovery::progress(&library.layout, orphan.record, &theirs);
                 flow::run(reached).and_then(move |reached| {
                     let plan = recovery::orphan_plan(
                         &library.layout,
                         &theirs,
                         &reached,
                         how,
+                        Moves::of(library.capabilities),
                         &mut library.env,
                     );
                     settle_orphan(library, orphan, theirs, how, plan)
@@ -1558,7 +1559,7 @@ fn settle_own(library: &mut Library) -> Fallible<'_, &mut Library> {
 
 fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Library> {
     let layout = library.layout.clone();
-    let PendingRecord { writer, .. } = settling.pending;
+    let pending = settling.pending.clone();
     let name = settling.record;
     type Appended = Option<(String, Vec<Entry>, Outcome)>;
     let settled: Fallible<'_, (&mut Library, Appended)> = match settling.logged {
@@ -1589,7 +1590,7 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
         }
     };
     settled.and_then(move |(library, appended)| {
-        flow::run(effects::finish(&layout, writer, name)).then(move |removed| {
+        flow::run(effects::finish(&layout, name, &pending)).then(move |removed| {
             library.closed(name, &removed);
             let partial = appended.and_then(|(label, entries, outcome)| {
                 committed(label, &entries, Vec::new(), outcome, library.local()).err()
@@ -1871,7 +1872,7 @@ fn log_effects<'a>(
             }
         };
         let finish = match journaled {
-            true => effects::finish(&layout, record.writer, name),
+            true => effects::finish(&layout, name, &record),
             false => Task::ready(Ok(())),
         };
         flow::run(finish)
