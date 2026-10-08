@@ -1,0 +1,931 @@
+//! Every file effect crashed after every operation, under torn and zero-filled
+//! tails, renames done by copy and names made durable early, and in a folder
+//! that cannot rename, where every move copies, writes land only when their
+//! stream closes, and a file is created empty before its bytes land, as in a
+//! browser's picked folder.
+//!
+//! Before recovery, no bytes have left the folder, and each user path holds its
+//! old bytes, its new bytes or nothing, and nothing only while a pending record
+//! names it; where moves copy, also the start of its new bytes while a pending
+//! record names it. Recovery finishes every recorded effect, removes every
+//! record and staged file, changes nothing when run again, and ends the same
+//! however often it is itself cut short. After the local root is lost, an
+//! unfinished effect is reported for consent, settling it never writes in its
+//! writer's directory, and settling it again after a settlement stopped partway
+//! ends as one settlement does, whether the settler's moves are the writer's or
+//! the other kind.
+
+mod common;
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
+
+use common::{
+    bound, close, entry, env, identify, identity, layout, path, BlockingMem, Driven, Fill, COPYING,
+    HEAD, WRITER,
+};
+use toshokan::binding::Bindings;
+use toshokan::blocking;
+use toshokan::crash::{self, Fault, Streams};
+use toshokan::disk::Tail;
+use toshokan::effects::{self, EffectPlan, Moves};
+use toshokan::io::{Capabilities, Capability, Range, CHUNK};
+use toshokan::log::Settlement;
+use toshokan::pending::{self, PendingRecord};
+use toshokan::plan::{Content, Expect, FileChange, Piece, Splice};
+use toshokan::recovery::{self, Chain};
+use toshokan::Operation;
+use toshokan::{
+    EntityId, EntryHash, Error, MemDisk, Nonce, Outcome, Refusal, RelPath, Root, WriterId,
+};
+
+/// A process on a disk. Where its folder copies, the folder is a browser's picked
+/// folder, whose writes land only when their stream closes.
+enum Process {
+    Renaming(BlockingMem),
+    Copying(Streams),
+}
+
+fn process(disk: &MemDisk) -> Process {
+    match Moves::of(disk.capabilities(Root::Folder)) {
+        Moves::Rename => Process::Renaming(BlockingMem(disk.clone())),
+        Moves::Copy => Process::Copying(Streams::new(disk.clone())),
+    }
+}
+
+impl Driven for Process {
+    fn capabilities(&self, root: Root) -> Capabilities {
+        match self {
+            Self::Renaming(d) => d.capabilities(root),
+            Self::Copying(streams) => blocking::Backend::capabilities(streams, root),
+        }
+    }
+
+    fn run_filled<O: Operation>(&mut self, operation: O, contents: Vec<Fill>) -> O::Output {
+        match self {
+            Self::Renaming(d) => d.run_filled(operation, contents),
+            Self::Copying(streams) => {
+                let sources = contents.into_iter().map(Fill::blocking).collect();
+                blocking::run_with(streams, sources, operation)
+            }
+        }
+    }
+
+    fn other_process(&self) -> Self {
+        match self {
+            Self::Renaming(d) => Self::Renaming(d.other_process()),
+            Self::Copying(streams) => Self::Copying(Streams::new(streams.disk().process())),
+        }
+    }
+}
+
+const E: EntityId = EntityId::from_u128(0xe);
+const F: EntityId = EntityId::from_u128(0xf);
+const ITEM: Nonce = Nonce::from_u128(0x1);
+const OLD: &[u8] = b"old bytes";
+const NEW: &[u8] = b"new bytes!";
+const OTHER: &[u8] = b"other";
+/// `OLD` with its middle replaced, as a splice of it makes it.
+const SPLICED: &[u8] = b"old BYTES!s";
+
+/// A user path, what it holds before the intent and what after.
+type Change = (&'static str, Option<&'static [u8]>, Option<&'static [u8]>);
+
+/// One intent from a known folder.
+#[derive(Clone)]
+struct Case {
+    name: &'static str,
+    folder: Capabilities,
+    files: Vec<(String, &'static [u8])>,
+    bound: Vec<(EntityId, &'static str)>,
+    changes: Vec<FileChange>,
+    /// What the changes' saves are filled from.
+    contents: Vec<Fill>,
+    /// What each user path the intent touches holds before and after it.
+    paths: Vec<Change>,
+}
+
+/// Bytes that take two copies of a chunk to move, ending with `end`.
+fn long(end: &[u8]) -> &'static [u8] {
+    let start = (0..CHUNK).map(|i| (i % 251) as u8);
+    Box::leak(start.chain(end.iter().copied()).collect())
+}
+
+/// Each case where moves copy, with one whose files take two chunks to copy, then
+/// each where they rename.
+fn cases() -> Vec<Case> {
+    let renaming = renaming();
+    let (old, new) = (long(OLD), long(&[OLD, b"!"].concat()));
+    let long = Case {
+        name: "save over a long file with bytes that start with it",
+        folder: COPYING,
+        files: vec![("a".into(), old)],
+        bound: vec![],
+        contents: vec![Fill::Bytes(new.to_vec())],
+        changes: vec![FileChange::Save {
+            entity: E,
+            path: path("a"),
+            content: Content(0),
+            expect: Expect::Holds(identity(old)),
+        }],
+        paths: vec![("a", Some(old), Some(new))],
+    };
+    let copying = renaming.iter().map(|case| Case {
+        folder: COPYING,
+        ..case.clone()
+    });
+    copying.chain([long]).chain(renaming.clone()).collect()
+}
+
+fn renaming() -> Vec<Case> {
+    let item = layout().trash(WRITER, ITEM).as_str().to_owned();
+    let save = |at: &str, expect| FileChange::Save {
+        entity: E,
+        path: path(at),
+        content: Content(0),
+        expect,
+    };
+    let new = || vec![Fill::Bytes(NEW.to_vec())];
+    let kept = |offset, len| Piece::Kept(Range { offset, len });
+    let tree = FileChange::MoveTree {
+        from: path("x"),
+        to: path("z/x"),
+    };
+    let tree_paths = vec![
+        ("x/1", Some(OLD), None),
+        ("x/y/2", Some(OTHER), None),
+        ("z/x/1", None, Some(OLD)),
+        ("z/x/y/2", None, Some(OTHER)),
+    ];
+    vec![
+        Case {
+            name: "save over a file",
+            folder: Capabilities::ALL,
+            files: vec![("a".into(), OLD)],
+            bound: vec![],
+            contents: new(),
+            changes: vec![save("a", Expect::Holds(identity(OLD)))],
+            paths: vec![("a", Some(OLD), Some(NEW))],
+        },
+        Case {
+            name: "save a new file",
+            folder: Capabilities::ALL,
+            files: vec![],
+            bound: vec![],
+            contents: new(),
+            changes: vec![save("d/n", Expect::Absent)],
+            paths: vec![("d/n", None, Some(NEW))],
+        },
+        Case {
+            name: "save new files into one directory",
+            folder: Capabilities::ALL,
+            files: vec![],
+            bound: vec![],
+            contents: vec![Fill::Bytes(NEW.to_vec()), Fill::Bytes(OTHER.to_vec())],
+            changes: vec![
+                save("d/n", Expect::Absent),
+                FileChange::Save {
+                    entity: F,
+                    path: path("d/m"),
+                    content: Content(1),
+                    expect: Expect::Absent,
+                },
+            ],
+            paths: vec![("d/n", None, Some(NEW)), ("d/m", None, Some(OTHER))],
+        },
+        Case {
+            name: "trash",
+            folder: Capabilities::ALL,
+            files: vec![("a".into(), OLD)],
+            bound: vec![(E, "a")],
+            contents: vec![],
+            changes: vec![FileChange::Trash {
+                entity: E,
+                expect: Expect::Holds(identity(OLD)),
+            }],
+            paths: vec![("a", Some(OLD), None)],
+        },
+        Case {
+            name: "rename",
+            folder: Capabilities::ALL,
+            files: vec![("a".into(), OLD)],
+            bound: vec![(E, "a")],
+            contents: vec![],
+            changes: vec![FileChange::Rename {
+                entity: E,
+                to: path("b/c"),
+                expect: Expect::Holds(identity(OLD)),
+            }],
+            paths: vec![("a", Some(OLD), None), ("b/c", None, Some(OLD))],
+        },
+        Case {
+            name: "move a tree",
+            folder: Capabilities::ALL,
+            files: vec![("x/1".into(), OLD), ("x/y/2".into(), OTHER)],
+            bound: vec![(E, "x/1")],
+            contents: vec![],
+            changes: vec![tree.clone()],
+            paths: tree_paths.clone(),
+        },
+        Case {
+            name: "move a tree file by file",
+            folder: Capabilities {
+                rename_dir: false,
+                ..Capabilities::ALL
+            },
+            files: vec![("x/1".into(), OLD), ("x/y/2".into(), OTHER)],
+            bound: vec![(E, "x/1")],
+            contents: vec![],
+            changes: vec![tree],
+            paths: tree_paths,
+        },
+        Case {
+            name: "restore over a file",
+            folder: Capabilities::ALL,
+            files: vec![("a".into(), NEW), (item, OLD)],
+            bound: vec![],
+            contents: vec![],
+            changes: vec![FileChange::Restore {
+                entity: E,
+                item: ITEM,
+                to: path("a"),
+                expect: Expect::Holds(identity(NEW)),
+            }],
+            paths: vec![("a", Some(NEW), Some(OLD))],
+        },
+        Case {
+            name: "save and rename in one intent",
+            folder: Capabilities::ALL,
+            files: vec![("a".into(), OLD), ("b".into(), OTHER)],
+            bound: vec![(F, "b")],
+            contents: new(),
+            changes: vec![
+                save("a", Expect::Holds(identity(OLD))),
+                FileChange::Rename {
+                    entity: F,
+                    to: path("c"),
+                    expect: Expect::Holds(identity(OTHER)),
+                },
+            ],
+            paths: vec![
+                ("a", Some(OLD), Some(NEW)),
+                ("b", Some(OTHER), None),
+                ("c", None, Some(OTHER)),
+            ],
+        },
+        Case {
+            name: "rewrite a file through a splice of it",
+            folder: Capabilities::ALL,
+            files: vec![("a".into(), OLD)],
+            bound: vec![],
+            contents: vec![Fill::Splice(Splice {
+                from: path("a"),
+                pieces: vec![
+                    kept(0, 4),
+                    Piece::Bytes(b"BYTES".to_vec()),
+                    Piece::Bytes(b"!".to_vec()),
+                    kept(8, 1),
+                ],
+            })],
+            changes: vec![save("a", Expect::Holds(identity(OLD)))],
+            paths: vec![("a", Some(OLD), Some(SPLICED))],
+        },
+    ]
+}
+
+impl Case {
+    fn shown(&self) -> String {
+        match Moves::of(self.folder) {
+            Moves::Rename => self.name.to_owned(),
+            Moves::Copy => format!("{} by copying", self.name),
+        }
+    }
+
+    /// A disk whose roots are both [`Case::folder`], so that only the faults it
+    /// can show are swept.
+    fn disk(&self) -> MemDisk {
+        let disk = MemDisk::with_capabilities(self.folder, self.folder);
+        let files: Vec<(&str, &[u8])> = self.files.iter().map(|(p, b)| (p.as_str(), *b)).collect();
+        common::put(&mut BlockingMem(disk.clone()), &files);
+        disk.restart()
+    }
+
+    /// The folders a crash of this case is settled in: its own (`None`), and one
+    /// of the other kind, whose moves rename where the case's copy and copy where
+    /// they rename. A case that renames a directory has no other, since a folder
+    /// that copies refuses to settle it.
+    fn settlers(&self) -> Vec<Option<Capabilities>> {
+        let renames_dir = |change: &FileChange| matches!(change, FileChange::MoveTree { .. });
+        match Moves::of(self.folder) {
+            Moves::Copy => vec![None, Some(Capabilities::ALL)],
+            Moves::Rename if self.folder.rename_dir && self.changes.iter().any(renames_dir) => {
+                vec![None]
+            }
+            Moves::Rename => vec![None, Some(COPYING)],
+        }
+    }
+
+    fn bindings(&self) -> Bindings {
+        let mut bindings = bound(&self.bound);
+        let bound: BTreeSet<&str> = self.bound.iter().map(|(_, p)| *p).collect();
+        bindings.unbound = self
+            .files
+            .iter()
+            .filter(|(p, _)| !bound.contains(p.as_str()) && !layout().owns(&path(p)))
+            .map(|(p, _)| path(p))
+            .collect();
+        bindings
+    }
+
+    /// Commits the intent, stopping at the first error.
+    fn commit(&self, disk: &MemDisk) {
+        let d = &mut process(disk);
+        let contents = self.contents.clone();
+        let prepared = common::prepare(
+            d,
+            WRITER,
+            &self.changes,
+            contents,
+            &self.bindings(),
+            &mut env(7),
+        );
+        let Ok(Ok(run)) = prepared else {
+            return;
+        };
+        let _ = common::complete(d, &run);
+    }
+
+    fn state(&self, after: bool) -> Vec<Option<Vec<u8>>> {
+        self.paths
+            .iter()
+            .map(|&(_, before, then)| if after { then } else { before }.map(<[u8]>::to_vec))
+            .collect()
+    }
+
+    /// Whether `holds` is the start of `after`, as a move that copies leaves it
+    /// before it ends.
+    fn copying(&self, holds: &Option<Vec<u8>>, after: Option<&[u8]>) -> bool {
+        let started = |(holds, after): (&Vec<u8>, &[u8])| {
+            holds.len() < after.len() && after.starts_with(holds)
+        };
+        Moves::of(self.folder) == Moves::Copy && holds.as_ref().zip(after).is_some_and(started)
+    }
+
+    fn holds(&self, files: &BTreeMap<RelPath, Vec<u8>>) -> Vec<Option<Vec<u8>>> {
+        self.paths
+            .iter()
+            .map(|(p, _, _)| files.get(&path(p)).cloned())
+            .collect()
+    }
+
+    /// No bytes the folder held have left it.
+    fn kept(&self, case: &str, files: &BTreeMap<RelPath, Vec<u8>>) {
+        let present: BTreeSet<&[u8]> = files.values().map(Vec::as_slice).collect();
+        for (_, bytes) in &self.files {
+            assert!(
+                present.contains(bytes),
+                "{case}: {bytes:?} left the folder: {files:?}"
+            );
+        }
+    }
+}
+
+/// A writer's history as recovery sees it: its head, and whether the entry
+/// closing its record follows.
+struct Fake {
+    closed: bool,
+}
+
+impl Chain for Fake {
+    fn holds(&self, hash: EntryHash) -> bool {
+        hash == HEAD
+    }
+
+    fn continues(&self, hash: EntryHash) -> bool {
+        hash == HEAD && self.closed
+    }
+}
+
+fn logs(disk: &MemDisk, writer: WriterId) -> BTreeMap<WriterId, Fake> {
+    let dir = layout().writer(writer);
+    let closed = disk.files(Root::Folder).keys().any(|p| {
+        p.parent().as_ref() == Some(&dir) && p.name().is_some_and(|n| n.starts_with("closed-"))
+    });
+    BTreeMap::from([(writer, Fake { closed })])
+}
+
+fn records(disk: &MemDisk, writer: WriterId) -> Vec<(Nonce, PendingRecord)> {
+    BlockingMem(disk.clone())
+        .run(pending::read_all(&layout(), writer))
+        .unwrap()
+        .records
+}
+
+/// Opens as `WRITER` and settles its records, as the library does before its next
+/// write.
+fn recover(disk: &MemDisk) -> Result<Vec<Outcome>, Error> {
+    let layout = layout();
+    let d = &mut process(disk);
+    let logs = logs(disk, WRITER);
+    let found = d.run(recovery::assess(
+        &layout,
+        Some((WRITER, HEAD)),
+        &logs,
+        &BTreeSet::new(),
+    ))?;
+    assert!(found.orphaned.is_empty(), "{found:?}");
+    let mut outcomes = Vec::new();
+    for settling in &found.own {
+        if !settling.logged {
+            let applied = d.run(recovery::settle(
+                &layout,
+                settling.record,
+                Rc::new(settling.pending.clone()),
+                identify(),
+            ))?;
+            assert_eq!(applied.outcome, settling.outcome, "predicted");
+            outcomes.push(applied.outcome);
+            close(d, WRITER, settling.record)?;
+        }
+        d.run(effects::finish(&layout, settling.record, &settling.pending))?;
+    }
+    d.run(recovery::tidy(&layout, WRITER))?;
+    d.run(recovery::remove_empty(&layout, WRITER, &found.ignored))?;
+    Ok(outcomes)
+}
+
+fn kept_in<'f>(files: &'f BTreeMap<RelPath, Vec<u8>>, dir: &RelPath) -> Vec<&'f RelPath> {
+    files.keys().filter(|p| p.starts_with(dir)).collect()
+}
+
+#[test]
+fn every_effect_crashed_anywhere_keeps_its_bytes_and_recovers_whole() {
+    for case in cases() {
+        crash::sweep(
+            || case.disk(),
+            |disk| case.commit(disk),
+            |fault, disk| {
+                let shown = format!("{} at {fault:?}", case.shown());
+                let files = disk.files(Root::Folder);
+                case.kept(&shown, &files);
+                let open = records(&disk, WRITER);
+                let named: BTreeSet<RelPath> = open.iter().flat_map(|(_, r)| r.paths()).collect();
+                let holds = case.holds(&files);
+                let midway = holds != case.state(false) && holds != case.state(true);
+                for (holds, &(p, before, after)) in holds.iter().zip(&case.paths) {
+                    let allowed = [before, after, None].map(|b| b.map(<[u8]>::to_vec));
+                    if !allowed.contains(holds) && case.copying(holds, after) {
+                        assert!(
+                            named.contains(&path(p)),
+                            "{shown}: {p} holds part of a copy and no record names it"
+                        );
+                        continue;
+                    }
+                    assert!(allowed.contains(holds), "{shown}: {p} holds {holds:?}");
+                    if midway && holds.is_none() && before.is_some() {
+                        assert!(
+                            named.contains(&path(p)),
+                            "{shown}: {p} is empty and no record names it"
+                        );
+                    }
+                }
+
+                let outcomes = recover(&disk).unwrap_or_else(|e| panic!("{shown}: {e}"));
+                assert!(
+                    outcomes.iter().all(|o| *o == Outcome::Complete),
+                    "{shown}: {outcomes:?}"
+                );
+                let recovered = disk.files(Root::Folder);
+                case.kept(&shown, &recovered);
+                let left = kept_in(&recovered, &layout().pending_dir(WRITER));
+                assert!(left.is_empty(), "{shown}: {left:?} is left");
+                let left = kept_in(&recovered, &layout().tmp_dir(WRITER));
+                assert!(left.is_empty(), "{shown}: staging {left:?} is left");
+                let holds = case.holds(&recovered);
+                let finished = !open.is_empty() || logs(&disk, WRITER)[&WRITER].closed;
+                let expected = case.state(finished);
+                assert_eq!(holds, expected, "{shown}: recovered");
+
+                let operations = disk.mutations();
+                recover(&disk).unwrap();
+                assert_eq!(
+                    disk.mutations(),
+                    operations,
+                    "{shown}: recovering again wrote"
+                );
+                assert_eq!(
+                    disk.files(Root::Folder),
+                    recovered,
+                    "{shown}: recovering again"
+                );
+            },
+        );
+    }
+}
+
+/// The disk `case` leaves when it crashes as `fault` says.
+fn crashed(case: &Case, fault: Fault) -> MemDisk {
+    let disk = case.disk();
+    disk.set_tail(fault.tail);
+    disk.set_renames(fault.renames);
+    disk.set_eager_names(fault.eager_names);
+    disk.crash_after(fault.after);
+    case.commit(&disk);
+    disk.restart()
+}
+
+#[test]
+fn recovery_cut_short_anywhere_then_run_again_ends_as_one_run_does() {
+    for case in cases() {
+        for (renames, eager_names) in crash::faults(&case.disk()) {
+            let fault = |after| Fault {
+                after,
+                tail: Tail::Lost,
+                renames,
+                eager_names,
+            };
+            let count = case.disk();
+            count.set_renames(renames);
+            case.commit(&count);
+            for after in 0..=count.mutations() {
+                let once = crashed(&case, fault(after));
+                recover(&once).unwrap();
+                let expected = once.files(Root::Folder);
+                let operations = once.mutations();
+                for cut in 0..operations {
+                    let disk = crashed(&case, fault(after));
+                    disk.crash_after(cut);
+                    assert!(recover(&disk).is_err());
+                    let disk = disk.restart();
+                    recover(&disk).unwrap();
+                    assert_eq!(
+                        disk.files(Root::Folder),
+                        expected,
+                        "{} at {:?}, recovery cut after {cut}",
+                        case.shown(),
+                        fault(after)
+                    );
+                }
+            }
+        }
+    }
+}
+
+const HEIR: WriterId = WriterId::from_u128(0x88);
+
+/// Settles every orphan of `WRITER` as `HEIR` would with the user's consent,
+/// drawing names from `seed` and carrying out at most `stop` steps of each
+/// settlement, as one that fails at the next step does. Returns how many orphans
+/// there were and whether a settlement stopped short.
+fn settle_orphans(disk: &MemDisk, how: Settlement, stop: usize, seed: u64) -> (usize, bool) {
+    let layout = layout();
+    let d = &mut process(disk);
+    let found = d
+        .run(recovery::assess(
+            &layout,
+            None,
+            &logs(disk, WRITER),
+            &BTreeSet::new(),
+        ))
+        .unwrap();
+    assert!(found.own.is_empty(), "{found:?}");
+    let files = disk.files(Root::Folder);
+    let empty = |path: &RelPath| files.get(path).is_some_and(Vec::is_empty);
+    assert!(
+        found.ignored.iter().all(empty),
+        "only a record cut short before its bytes landed is ignored: {found:?}"
+    );
+    let mut env = env(seed);
+    let mut stopped = false;
+    for orphan in &found.orphaned {
+        let theirs = d
+            .run(pending::read_one(&layout, orphan.writer, orphan.record))
+            .unwrap()
+            .expect("the orphan's record is there");
+        let reached = d
+            .run(recovery::progress(&layout, orphan.record, &theirs))
+            .unwrap();
+        let capabilities = d.capabilities(Root::Folder);
+        let mut plan =
+            recovery::orphan_plan(&layout, &theirs, &reached, how, capabilities, &mut env)
+                .expect("a folder settles what a folder like it wrote");
+        stopped |= plan.steps.len() > stop;
+        plan.steps.truncate(stop);
+        carry_out(d, plan, how);
+    }
+    d.run(recovery::tidy(&layout, HEIR)).unwrap();
+    (found.orphaned.len(), stopped)
+}
+
+/// Commits `plan`, a settlement planned by `HEIR`, and carries out its steps.
+fn carry_out(d: &mut Process, plan: EffectPlan, how: Settlement) {
+    let layout = layout();
+    let plan = Rc::new(plan);
+    let record = Rc::new(PendingRecord::new(HEIR, "settle", entry(HEAD), &plan));
+    let prepared = d
+        .run(effects::prepare(
+            &layout,
+            Rc::clone(&plan),
+            Rc::clone(&record),
+            identify(),
+        ))
+        .unwrap();
+    assert_eq!(prepared, Ok(()));
+    if plan.is_empty() {
+        return;
+    }
+    let applied = d
+        .run(effects::apply(
+            &layout,
+            plan.record,
+            Rc::clone(&record),
+            0,
+            identify(),
+        ))
+        .unwrap();
+    assert_eq!(applied.outcome, Outcome::Complete, "{how:?}");
+    d.run(effects::finish(&layout, plan.record, &record))
+        .unwrap();
+}
+
+/// The files in `WRITER`'s directory.
+fn in_theirs(files: &BTreeMap<RelPath, Vec<u8>>) -> Vec<(RelPath, Vec<u8>)> {
+    let theirs = layout().writer(WRITER);
+    files
+        .iter()
+        .filter(|(p, _)| p.starts_with(&theirs))
+        .map(|(p, b)| (p.clone(), b.clone()))
+        .collect()
+}
+
+/// What each user path of `case` holds once an open effect is settled as `how`.
+fn settled_state(case: &Case, how: Settlement) -> Vec<Option<Vec<u8>>> {
+    match how {
+        Settlement::Finished => case.state(true),
+        Settlement::RolledBack => case.state(false),
+        Settlement::Dismissed => unreachable!("dismissing changes no file"),
+    }
+}
+
+#[test]
+fn after_losing_the_local_root_an_unfinished_effect_is_reported_and_settled_only_from_outside() {
+    for case in cases() {
+        for how in [
+            Settlement::Finished,
+            Settlement::RolledBack,
+            Settlement::Dismissed,
+        ] {
+            crash::sweep(
+                || case.disk(),
+                |disk| case.commit(disk),
+                |fault, crashed| {
+                    crashed.lose_local();
+                    for settler in case.settlers() {
+                        let disk = settled_in(&crashed, settler);
+                        let moves = Moves::of(disk.capabilities(Root::Folder));
+                        let shown =
+                            format!("{} at {fault:?}, {how:?} where {moves:?}", case.shown());
+                        let open = !records(&disk, WRITER).is_empty()
+                            && !logs(&disk, WRITER)[&WRITER].closed;
+                        let before = disk.files(Root::Folder);
+                        let holds = case.holds(&before);
+                        let (reported, _) = settle_orphans(&disk, how, usize::MAX, 9);
+                        assert_eq!(reported, usize::from(open), "{shown}: reported");
+
+                        let after = disk.files(Root::Folder);
+                        assert_eq!(
+                            in_theirs(&after),
+                            in_theirs(&before),
+                            "{shown}: wrote in their directory"
+                        );
+                        case.kept(&shown, &after);
+                        let expected = match (open, how) {
+                            (false, _) | (true, Settlement::Dismissed) => holds,
+                            (true, how) => settled_state(&case, how),
+                        };
+                        assert_eq!(case.holds(&after), expected, "{shown}: settled");
+                    }
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn a_settlement_stopped_at_any_step_and_settled_again_ends_as_one_settlement_does() {
+    let mut stopped_short = 0;
+    for case in cases() {
+        for how in [Settlement::Finished, Settlement::RolledBack] {
+            crash::sweep(
+                || case.disk(),
+                |disk| case.commit(disk),
+                |fault, crashed| {
+                    crashed.lose_local();
+                    for settler in case.settlers() {
+                        for stop in 0.. {
+                            let disk = settled_in(&crashed, settler);
+                            let moves = Moves::of(disk.capabilities(Root::Folder));
+                            let shown = format!(
+                                "{} at {fault:?}, {how:?} where {moves:?} stopped at {stop}",
+                                case.shown()
+                            );
+                            let before = disk.files(Root::Folder);
+                            let (reported, stopped) = settle_orphans(&disk, how, stop, 9);
+                            if reported == 0 || !stopped {
+                                break;
+                            }
+                            stopped_short += 1;
+                            let (reported, _) = settle_orphans(&disk, how, usize::MAX, 10);
+                            assert_eq!(reported, 1, "{shown}: still reported");
+
+                            let after = disk.files(Root::Folder);
+                            assert_eq!(
+                                in_theirs(&after),
+                                in_theirs(&before),
+                                "{shown}: wrote in their directory"
+                            );
+                            case.kept(&shown, &after);
+                            assert_eq!(case.holds(&after), settled_state(&case, how), "{shown}");
+                        }
+                    }
+                },
+            );
+        }
+    }
+    assert!(stopped_short > 0, "some settlement stops short");
+}
+
+/// A fresh copy of `crashed`, in a folder that can do only what `folder` says,
+/// where one is given.
+fn settled_in(crashed: &MemDisk, folder: Option<Capabilities>) -> MemDisk {
+    match folder {
+        None => crashed.restart(),
+        Some(folder) => moved_to(crashed, folder),
+    }
+}
+
+/// `disk`'s folder, in a folder that can do only what `folder` says.
+fn moved_to(disk: &MemDisk, folder: Capabilities) -> MemDisk {
+    let moved = MemDisk::with_capabilities(folder, folder);
+    let d = &mut BlockingMem(moved.clone());
+    for dir in disk.directories(Root::Folder) {
+        if !dir.is_root() {
+            d.ok(toshokan::Io::MakeDir {
+                root: Root::Folder,
+                path: dir,
+            });
+        }
+    }
+    let files = disk.files(Root::Folder);
+    let files: Vec<(&str, &[u8])> = files.iter().map(|(p, b)| (p.as_str(), &b[..])).collect();
+    common::put(d, &files);
+    moved
+}
+
+#[test]
+fn a_folder_that_cannot_rename_a_directory_refuses_to_settle_a_directory_rename() {
+    let layout = layout();
+    let case = renaming()
+        .into_iter()
+        .find(|case| case.name == "move a tree")
+        .unwrap();
+    let folders = [
+        COPYING,
+        Capabilities {
+            rename_dir: false,
+            ..Capabilities::ALL
+        },
+    ];
+    let mut refused = 0;
+    crash::sweep(
+        || case.disk(),
+        |disk| case.commit(disk),
+        |fault, crashed| {
+            crashed.lose_local();
+            for (folder, how) in folders
+                .iter()
+                .flat_map(|&f| [Settlement::Finished, Settlement::RolledBack].map(|how| (f, how)))
+            {
+                let shown = format!("{} at {fault:?}, {how:?} in {folder:?}", case.shown());
+                let disk = moved_to(&crashed, folder);
+                let d = &mut process(&disk);
+                let logs = logs(&disk, WRITER);
+                let found = d
+                    .run(recovery::assess(&layout, None, &logs, &BTreeSet::new()))
+                    .unwrap();
+                for orphan in &found.orphaned {
+                    let theirs = d
+                        .run(pending::read_one(&layout, orphan.writer, orphan.record))
+                        .unwrap()
+                        .unwrap();
+                    let reached = d
+                        .run(recovery::progress(&layout, orphan.record, &theirs))
+                        .unwrap();
+                    let plan = |how| {
+                        recovery::orphan_plan(&layout, &theirs, &reached, how, folder, &mut env(9))
+                    };
+                    match plan(how) {
+                        Err(refusal) => {
+                            assert_eq!(
+                                refusal,
+                                Refusal::Unsupported(Capability::RenameDir),
+                                "{shown}"
+                            );
+                            assert!(plan(Settlement::Dismissed).is_ok(), "{shown}: dismissed");
+                            refused += 1;
+                        }
+                        Ok(plan) => {
+                            carry_out(d, plan, how);
+                            let holds = case.holds(&disk.files(Root::Folder));
+                            assert_eq!(holds, settled_state(&case, how), "{shown}");
+                        }
+                    }
+                }
+            }
+        },
+    );
+    assert!(refused > 0, "some settlement renames a directory");
+}
+
+#[test]
+fn records_that_are_unchained_unconfined_or_settled_are_not_acted_on() {
+    let layout = layout();
+    let disk = MemDisk::new();
+    let d = &mut BlockingMem(disk.clone());
+    let write = |d: &mut BlockingMem, writer: WriterId, name: u128, after: EntryHash, to: &str| {
+        let plan = effects::EffectPlan {
+            steps: vec![effects::EffectStep::Rename {
+                from: path("a"),
+                to: path(to),
+            }],
+            ..effects::EffectPlan::new(Nonce::from_u128(name))
+        };
+        let record = PendingRecord::new(writer, "label", entry(after), &plan);
+        let dir = layout.pending_dir(writer);
+        d.ok(toshokan::Io::MakeDir {
+            root: Root::Folder,
+            path: dir,
+        });
+        d.ok(toshokan::Io::Create {
+            root: Root::Folder,
+            path: layout.pending(writer, Nonce::from_u128(name)),
+            bytes: record.encode(),
+        });
+    };
+    let other = WriterId::from_u128(0x99);
+    write(d, WRITER, 1, HEAD, "b");
+    write(d, WRITER, 2, EntryHash::from_u128(0x12), "b");
+    write(d, WRITER, 3, HEAD, ".t/writers/x");
+    write(d, other, 4, HEAD, "b");
+    write(d, other, 5, HEAD, "c");
+
+    struct Settled;
+    impl Chain for Settled {
+        fn holds(&self, hash: EntryHash) -> bool {
+            hash == HEAD
+        }
+        fn continues(&self, _: EntryHash) -> bool {
+            false
+        }
+    }
+    let logs: BTreeMap<WriterId, Settled> = [(WRITER, Settled), (other, Settled)].into();
+    let settled = BTreeSet::from([(other, Nonce::from_u128(5))]);
+    let written = disk.mutations();
+    let found = d
+        .run(recovery::assess(
+            &layout,
+            Some((WRITER, HEAD)),
+            &logs,
+            &settled,
+        ))
+        .unwrap();
+    assert_eq!(disk.mutations(), written, "assessing wrote");
+    let names = |s: &[recovery::Settling]| s.iter().map(|s| s.record.to_u128()).collect::<Vec<_>>();
+    assert_eq!(names(&found.own), [1]);
+    assert_eq!(
+        found.own[0].outcome,
+        Outcome::Partial(toshokan::report::PartialReport {
+            applied: 0,
+            stopped: path("b"),
+            error: toshokan::io::IoError::NotFound,
+            record: Some(Nonce::from_u128(1)),
+        }),
+        "the source is not there"
+    );
+    assert_eq!(
+        found
+            .orphaned
+            .iter()
+            .map(|o| (o.writer, o.record.to_u128()))
+            .collect::<Vec<_>>(),
+        [(other, 4)]
+    );
+    assert_eq!(found.orphaned[0].paths, [path("a"), path("b")]);
+    assert_eq!(
+        found.ignored,
+        [
+            layout.pending(WRITER, Nonce::from_u128(2)),
+            layout.pending(WRITER, Nonce::from_u128(3))
+        ]
+    );
+}

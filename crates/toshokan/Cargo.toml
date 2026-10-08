@@ -1,0 +1,91 @@
+[package]
+name = "toshokan"
+description = "Keep what a file cannot say about itself beside the file, for every writer"
+edition.workspace = true
+# `File::try_lock` for the writer lock.
+rust-version = "1.89"
+license.workspace = true
+publish = false
+repository.workspace = true
+version = "0.1.0"
+
+# Features the Nix build must enable when running tests: the wire encoding's tests
+# run natively, and Clippy reads the browser code.
+[package.metadata.nix]
+testFeatures = ["web"]
+
+[features]
+# The browser backends: a dedicated worker over the origin private file system or
+# a folder the user picked.
+web = [
+  "dep:js-sys",
+  "dep:wasm-bindgen",
+  "dep:wasm-bindgen-futures",
+  "dep:web-sys",
+]
+
+[dependencies]
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+thiserror = "2"
+
+js-sys = { version = "0.3", optional = true }
+# Exact, as drawbar pins it: the test runner wasm-bindgen-cli ships must match.
+wasm-bindgen = { version = "=0.2.121", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+  "Blob",
+  "BlobPropertyBag",
+  "BroadcastChannel",
+  "DedicatedWorkerGlobalScope",
+  "Document",
+  "File",
+  "FileSystemCreateWritableOptions",
+  "FileSystemDirectoryHandle",
+  "FileSystemFileHandle",
+  "FileSystemGetDirectoryOptions",
+  "FileSystemGetFileOptions",
+  "FileSystemHandle",
+  "FileSystemHandleKind",
+  "FileSystemReadWriteOptions",
+  "FileSystemSyncAccessHandle",
+  "FileSystemWritableFileStream",
+  "MessageChannel",
+  "MessageEvent",
+  "MessagePort",
+  "StorageManager",
+  "Url",
+  "VisibilityState",
+  "Window",
+  "Worker",
+  "WorkerOptions",
+  "WorkerType",
+  "WritableStream",
+  "WriteCommandType",
+  "WriteParams",
+] }
+
+# A rename that refuses to replace its destination, atomically, and whether a
+# volume's renames can.
+[target.'cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+pollster = "0.4"
+tempfile = "3"
+
+# The browser benchmark, run only when named.
+[[test]]
+name = "bench"
+test = false
+
+# The browser suites, run by wasm-bindgen-cli's test runner.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
