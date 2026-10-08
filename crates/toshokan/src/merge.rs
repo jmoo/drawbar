@@ -20,6 +20,7 @@
 
 use std::collections::btree_map::Entry as Slot;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -973,12 +974,33 @@ impl Folded {
     /// The surviving writes of every existing entity's file register that say
     /// where its file is. More than one is a conflict.
     pub fn files(&self) -> BTreeMap<EntityId, Vec<Written<FileFact>>> {
-        self.entities
-            .iter()
-            .filter(|(_, state)| state.present())
-            .map(|(&entity, state)| (entity, state.file_facts()))
-            .filter(|(_, writes)| !writes.is_empty())
-            .collect()
+        let mut files = BTreeMap::new();
+        self.files_slice(&mut files, &mut None, usize::MAX);
+        files
+    }
+
+    /// [`Folded::files`] a slice at a time: adds to `files` those of at most
+    /// `slice` entities after `after`, and moves `after` on; true once no entity
+    /// is left.
+    pub(crate) fn files_slice(
+        &self,
+        files: &mut BTreeMap<EntityId, Vec<Written<FileFact>>>,
+        after: &mut Option<EntityId>,
+        slice: usize,
+    ) -> bool {
+        let from = after.map_or(Bound::Unbounded, Bound::Excluded);
+        let mut entities = self.entities.range((from, Bound::Unbounded));
+        for (&entity, state) in entities.by_ref().take(slice) {
+            *after = Some(entity);
+            if !state.present() {
+                continue;
+            }
+            let writes = state.file_facts();
+            if !writes.is_empty() {
+                files.insert(entity, writes);
+            }
+        }
+        entities.next().is_none()
     }
 
     /// [`Folded::files`] of one entity: empty unless it exists.
@@ -1747,7 +1769,7 @@ mod tests {
     }
 
     #[test]
-    fn merging_in_slices_folds_what_merging_at_once_folds() {
+    fn merging_and_filing_in_slices_find_what_they_find_at_once() {
         let mut random = SeededRandom::new(5);
         for _ in 0..100 {
             let logs = logs(&mut random);
@@ -1765,6 +1787,14 @@ mod tests {
             while !merging.step(slice) {}
             assert_eq!(merging.folded(), whole, "{slice}-op slices");
             assert_eq!(merge(&logs), whole);
+            let (mut files, mut after) = (BTreeMap::new(), None);
+            while !whole.files_slice(&mut files, &mut after, slice) {}
+            let present = whole.entities.iter().filter(|(_, state)| state.present());
+            let expected: BTreeMap<_, _> = present
+                .map(|(&entity, state)| (entity, state.file_facts()))
+                .filter(|(_, writes)| !writes.is_empty())
+                .collect();
+            assert_eq!(files, expected, "{slice}-entity slices of files");
         }
     }
 }

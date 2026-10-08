@@ -1000,7 +1000,8 @@ impl Library {
     fn refold(&mut self) {
         let mut merging = self.unfold();
         merging.step(usize::MAX);
-        self.refolded(merging.folded());
+        self.folded = merging.folded();
+        self.refiled(self.folded.files());
     }
 
     /// The merge [`Library::refold`] folds.
@@ -1016,9 +1017,9 @@ impl Library {
         Merging::new(logs)
     }
 
-    fn refolded(&mut self, folded: Folded) {
-        self.folded = folded;
-        self.facts = self.folded.files();
+    /// Takes `facts`, the file facts of what is now shown.
+    fn refiled(&mut self, facts: Facts) {
+        self.facts = facts;
         self.bind_due = true;
         self.rehistory();
     }
@@ -1323,6 +1324,9 @@ const PLACE_SLICE: usize = 1 << 11;
 /// About how many ops one slice of folding applies.
 const FOLD_SLICE: usize = 1 << 12;
 
+/// How many entities' file facts one slice takes.
+const FILE_SLICE: usize = 1 << 12;
+
 /// Places what a read of every writer's directory found, a slice at a time.
 fn absorbed<'a>(mut reader: Reader, listing: Listing) -> Flow<'a, (Reader, ReadReport)> {
     let absorbing = reader.absorbing(listing);
@@ -1339,12 +1343,20 @@ fn absorbed<'a>(mut reader: Reader, listing: Listing) -> Flow<'a, (Reader, ReadR
 /// clock readings and decides whether it may write.
 fn fold_opened(mut library: Library) -> Flow<'static, Library> {
     let merging = library.unfold();
-    flow::sliced(merging, |merging| merging.step(FOLD_SLICE)).then(move |merging| {
-        library.refolded(merging.folded());
-        library.follow(readings(&library.reader).collect::<Vec<_>>());
-        library.mode = library.mode_at_open();
-        Flow::Done(library)
-    })
+    flow::sliced(merging, |merging| merging.step(FOLD_SLICE))
+        .then(move |merging| {
+            library.folded = merging.folded();
+            let filing = (library, Facts::new(), None);
+            flow::sliced(filing, |(library, facts, after)| {
+                library.folded.files_slice(facts, after, FILE_SLICE)
+            })
+        })
+        .then(|(mut library, facts, _)| {
+            library.refiled(facts);
+            library.follow(readings(&library.reader).collect::<Vec<_>>());
+            library.mode = library.mode_at_open();
+            Flow::Done(library)
+        })
 }
 
 /// Reads every writer's pending records and sorts out this writer's and the
