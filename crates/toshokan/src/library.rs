@@ -732,21 +732,47 @@ impl Library {
     }
 
     /// Writes the cached view and what else lags, seals the open segment and
-    /// releases the writer's lock. A library dropped without closing leaves its
-    /// segment open, as a crash does.
+    /// releases the writer's lock, then lets go of what the library holds a part
+    /// at a time: nothing is left to view, and the library only drops. A library
+    /// dropped without closing leaves its segment open, as a crash does.
     pub fn close(&mut self) -> Task<'_, Result<()>> {
-        if self.writer.is_none() {
-            return Task::ready(Ok(()));
-        }
+        let Some(writer) = self.writer.take() else {
+            return dismantled(self).then(|()| ok(())).task();
+        };
+        self.writer = Some(writer);
         keep_local(self, false)
             .then(|(library, kept)| {
-                let writer = library.writer.take().expect("checked above");
+                let writer = library.writer.take().expect("taken back above");
                 match kept {
-                    Ok(()) => flow::run(writer.close()),
+                    Ok(()) => flow::run(writer.close()).map_ok(move |()| library),
                     Err(error) => Flow::Done(Err(error)),
                 }
             })
+            .and_then(|library| dismantled(library).then(|()| ok(())))
             .task()
+    }
+
+    /// Lets go of part `part` of what the library holds, the largest first;
+    /// whether none is left.
+    fn shed(&mut self, part: usize) -> bool {
+        match part {
+            0 => drop(std::mem::replace(
+                &mut self.view,
+                View::new(Parts::default()),
+            )),
+            1 => drop(std::mem::take(&mut self.folded)),
+            2 => self.reader.shed_logs(),
+            3 => self.reader.shed_files(),
+            _ => {
+                drop(std::mem::take(&mut self.facts));
+                drop(std::mem::take(&mut self.scan));
+                drop(std::mem::take(&mut self.reach));
+                drop(std::mem::take(&mut self.bindings));
+                drop(std::mem::take(&mut self.history));
+                return true;
+            }
+        }
+        false
     }
 
     /// Whether `theirs`, another writer's record `name`, is still open: confined
@@ -1587,6 +1613,16 @@ fn fold_opened(mut library: Library, merging: Option<Merging>) -> Flow<'static, 
             library.mode = library.mode_at_open();
             Flow::Done(library)
         })
+}
+
+/// Lets go of what `library` holds a part at a time, pausing between parts.
+fn dismantled(library: &mut Library) -> Flow<'_, ()> {
+    flow::sliced((library, 0), |(library, part)| {
+        let done = library.shed(*part);
+        *part += 1;
+        done
+    })
+    .then(|_| Flow::Done(()))
 }
 
 /// Shows what changed since the view, if anything did: moves the entries of the

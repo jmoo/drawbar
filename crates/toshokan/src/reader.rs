@@ -1075,6 +1075,18 @@ impl Reader {
         reader
     }
 
+    /// Lets go of every log the reader placed, as a library closing does.
+    pub(crate) fn shed_logs(&mut self) {
+        drop(std::mem::take(&mut self.cached));
+    }
+
+    /// Lets go of what the reader found in each file, as a library closing does.
+    pub(crate) fn shed_files(&mut self) {
+        drop(std::mem::take(&mut self.folder));
+        drop(std::mem::take(&mut self.removed));
+        drop(std::mem::take(&mut self.unsaved));
+    }
+
     /// The writer whose directory holds `path`.
     pub(crate) fn writer_of(&self, path: &RelPath) -> Option<WriterId> {
         let dir = path.parent()?;

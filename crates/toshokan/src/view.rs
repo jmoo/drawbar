@@ -22,6 +22,7 @@ use crate::schema::{Field, Keyed, Members, Raw, Register, Set, Value, Written};
 pub struct View(Arc<Parts>, Arc<Index>);
 
 /// What a view is built from.
+#[derive(Default)]
 pub struct Parts {
     pub folded: Folded,
     pub bindings: Arc<Bindings>,
