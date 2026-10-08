@@ -64,9 +64,10 @@ the files a watcher saw change. Each reports what changed and, once every file
 was scanned, the files that arrived, moved or changed outside the app.
 
 `opened` reports what needs the user: effects another writer left unfinished,
-drafts, forks and facts a restore of the folder removed. A view never changes, so an app can hand it to
-other threads. A field read from a view is a value, a conflict between writers,
-or unreadable, so an app cannot show half a conflict by accident.
+drafts, forks and facts a restore of the folder removed. A view never changes,
+so an app can hand it to other threads. A field read from a view is a value, a
+conflict between writers, or unreadable, so an app cannot show half a conflict
+by accident.
 
 A save takes bytes or a source the driver streams into staging a chunk at a
 time, such as a `Splice` of the file being rewritten, so a file of hundreds of
@@ -91,9 +92,11 @@ let worker = Worker::start(folder, &local).await?;
 let (mut lib, opened) = Library::open(worker, layout, &schema, env).await?;
 ```
 
-Opening a large library parses, places and folds its logs and binds its files a
-slice at a time, and the page's driver gives the thread back to the browser
-every few milliseconds, so the page keeps drawing and answering input.
+Opening, rescanning and committing to a large library do their long work a
+slice at a time: reading the logs and the cached view, folding, indexing, and
+gathering and binding the library's files. The page's driver gives the thread
+back to the browser every few milliseconds, so the page keeps drawing and
+answering input.
 
 The bundle must be built by wasm-bindgen with `--target web`. The worker loads it
 from a small script toshokan makes as a `blob:` URL, so a Content Security
@@ -121,7 +124,8 @@ computation. The `blocking` driver runs it on
 the machine's file system, and the `asynch` driver on any async backend, such as
 a browser's; both run it on an in-memory disk that models what survives a crash.
 A directory listing with every file's metadata is one request, and so are many
-reads, so opening a library costs a request per directory rather than per file.
+reads, so a scan of every file costs a request per directory rather than per
+file.
 Time, randomness, the app's identity function and the volume's name rules are
 injected, so the crash harness and the sync simulator replay every run exactly.
 

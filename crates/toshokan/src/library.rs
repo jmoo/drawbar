@@ -519,19 +519,21 @@ impl Library {
 
     /// Reads other writers' new entries: what changed since the last view,
     /// attributed to its writer, or to nobody for outside changes, and what the
-    /// folder no longer holds. Of the library's files it scans again only those at
-    /// the paths whose file facts the entries changed, unless a scan failed since
-    /// the last scan of every file, which it then repeats. Writes nothing in the
-    /// folder.
+    /// folder no longer holds. A sealed segment or snapshot read before is taken
+    /// by its name. Of the library's files it scans again only those at the paths
+    /// whose file facts the entries changed, unless no scan of every file has
+    /// finished since the library opened or since a scan failed: then it scans
+    /// every file. Writes nothing in the folder.
     pub fn refresh(&mut self) -> Task<'_, Result<Refreshed>> {
         self.look(Look::Logs)
     }
 
-    /// Refreshes, and scans every library file, to find what changed outside. A
-    /// rescan that stops partway, as when the app drops it to commit, keeps what
-    /// it listed, and the next one goes on from there; nothing is bound from it
-    /// until every directory is listed, and the directories a commit or refresh
-    /// scanned meanwhile are listed again.
+    /// Refreshes, asking the length and time of every file in the writers'
+    /// directories, and scans every library file, to find what changed outside.
+    /// An app rescans once a library opens. A rescan that stops partway, as when
+    /// the app drops it to commit, keeps what it listed, and the next one goes on
+    /// from there; nothing is bound from it until every directory is listed, and
+    /// the directories a commit or refresh scanned meanwhile are listed again.
     pub fn rescan(&mut self) -> Task<'_, Result<Refreshed>> {
         self.look(Look::Everything)
     }
