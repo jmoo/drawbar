@@ -11,6 +11,10 @@
 //! counted by kind as it reaches the backend; a browser driver pays one async
 //! round trip per request, so the counts predict its cost.
 
+// Empty on wasm, which has no native backend or OS clock and randomness.
+#![cfg_attr(target_arch = "wasm32", no_main)]
+#![cfg(not(target_arch = "wasm32"))]
+
 use std::alloc::{GlobalAlloc, Layout as Alloc, System};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
