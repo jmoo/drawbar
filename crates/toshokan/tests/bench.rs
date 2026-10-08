@@ -645,8 +645,8 @@ async fn open(install: &str) -> Lib {
     library
 }
 
-/// The bytes at `at` now, read through the library's worker.
-async fn current(library: &Lib, at: &RelPath) -> Vec<u8> {
+/// The bytes at `at` now, read through the library's storage.
+async fn current<F: Fs>(library: &Library<F>, at: &RelPath) -> Vec<u8> {
     let stat = Io::Stat {
         root: Root::Folder,
         path: at.clone(),
@@ -666,6 +666,104 @@ async fn current(library: &Lib, at: &RelPath) -> Vec<u8> {
         panic!("{at} did not read");
     };
     bytes
+}
+
+/// The worker, with each request it performed and how long it took.
+struct Traced(Worker, RefCell<Vec<(String, f64)>>);
+
+impl Fs for Traced {
+    fn capabilities(&self, root: Root) -> toshokan::io::Capabilities {
+        self.0.capabilities(root)
+    }
+
+    async fn perform(&self, io: Io) -> toshokan::IoResult {
+        let shown = format!("{io:?}");
+        let kind = shown
+            .split([' ', '{'])
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        let what = format!("{kind} {:?} {}", io.root(), io.path());
+        let start = now();
+        let result = self.0.perform(io).await;
+        self.1.borrow_mut().push((what, now() - start));
+        result
+    }
+
+    async fn pause(&self) {
+        self.0.pause().await;
+    }
+
+    fn own(&self, root: &RelPath) {
+        self.0.own(root);
+    }
+}
+
+/// Says each request `library` made since the last call, with its time.
+fn said(name: &str, library: &Library<Traced>, total: f64) {
+    let requests = std::mem::take(&mut *library.fs().1.borrow_mut());
+    let spent: f64 = requests.iter().map(|(_, ms)| ms).sum();
+    say(&format!(
+        "trace | {name} | {total:.1} ms, {} requests, {spent:.1} ms in them",
+        requests.len()
+    ));
+    for (what, ms) in requests {
+        say(&format!("trace |   {ms:6.2} {what}"));
+    }
+}
+
+/// The requests of a commit, a save and a refresh on the measured install, each
+/// with its time.
+#[wasm_bindgen_test]
+async fn trace() {
+    let home = home();
+    let worker = Worker::start(
+        Folder::Private(path(&format!("{home}/folder"))),
+        &path(&format!("{home}/own")),
+    )
+    .await
+    .unwrap();
+    let traced = Traced(worker, RefCell::default());
+    let (mut a, _) = Library::open(traced, layout(), &schema(), env("own"))
+        .await
+        .unwrap();
+    say(&format!("trace | {}", browser()));
+    a.rescan().await.unwrap();
+    let ids: Vec<EntityId> = a.view().entities().iter().map(|e| e.id()).collect();
+    for i in 0..3 {
+        let entity = ids[(i * 7919) % ids.len()];
+        a.fs().1.borrow_mut().clear();
+        let start = now();
+        a.intent("Tag")
+            .add(entity, TAGS, format!("trace {i}"))
+            .commit()
+            .await
+            .unwrap();
+        said("one-field commit", &a, now() - start);
+    }
+    for i in 0..2 {
+        let entity = ids[(1000 + i * 7919) % ids.len()];
+        let file = a.view().entity(entity).unwrap().file().unwrap();
+        let old = current(&a, &file.path).await;
+        let mut new = old.clone();
+        new.extend_from_slice(format!("trace save {i}").as_bytes());
+        a.fs().1.borrow_mut().clear();
+        let start = now();
+        a.intent("Save")
+            .save(entity, &file.path, new, Expect::Holds(identity(&old)))
+            .commit()
+            .await
+            .unwrap();
+        said("one-file save", &a, now() - start);
+    }
+    for _ in 0..2 {
+        a.fs().1.borrow_mut().clear();
+        let start = now();
+        a.refresh().await.unwrap();
+        said("refresh, nothing new", &a, now() - start);
+    }
+    a.close().await.unwrap();
+    say("trace | done");
 }
 
 thread_local! {

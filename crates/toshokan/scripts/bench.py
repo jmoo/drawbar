@@ -159,12 +159,15 @@ def main():
     parser.add_argument("--port", type=int, default=8792)
     parser.add_argument("--entities", type=int)
     parser.add_argument("--timeout", type=int, default=3600)
+    parser.add_argument(
+        "--phase", action="append", help="tests to run in order (default: generate, measure)"
+    )
     args = parser.parse_args()
     args.profile = os.path.abspath(args.profile)
 
     driver, session = start_driver(args)
     try:
-        for phase in ["generate", "measure"]:
+        for phase in args.phase or ["generate", "measure"]:
             text = run_phase(args, session, phase)
             print(f"== {phase}\n{text}")
             if "panicked" in text or "test result: ok" not in text:
