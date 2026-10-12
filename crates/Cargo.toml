@@ -5,6 +5,7 @@ members = [
   "nord-cli",
   "nord-format",
   "nord-usb",
+  "toshokan",
 ]
 resolver = "2"
 
