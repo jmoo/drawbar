@@ -20,10 +20,11 @@ predecessor, so a writer's entries form a chain. A writer appends entries to
 segments, and a process that closes its segment seals it with a marker. A
 writer folds its own chain into a snapshot, and then deletes the snapshot the
 new one supersedes and the sealed segments that a snapshot in its directory
-folds. A multi-step effect writes a pending
-record, logs the entry that closes it, then deletes the record. Another writer
-that sees the record of an effect no entry closes reports it, and with the
-user's consent closes it in its own log; only the record's owner deletes it.
+folds. A multi-step effect writes a pending record and logs the entry that
+closes it. The record is then spent, and its owner deletes it at any later time,
+after beginning other effects or never. Another writer that sees the record of
+an effect no entry closes reports it, and with the user's consent closes it in
+its own log; only the record's owner deletes it.
 
 A reader takes every file in a writer's directory, whatever its name. It places
 an entry when its predecessor is placed or folded by a snapshot it sees, holds an
@@ -75,13 +76,13 @@ delivers files roughly in order.
 | Config | Scenario | Run by |
 | --- | --- | --- |
 | `Portable` | a clone, crashes, compaction | `toshokan-spec` |
-| `Recovery` | effects, a lost local root | `toshokan-spec` |
+| `Recovery` | two effects, a lost local root | `toshokan-spec` |
 | `Liveness` | a clone, a lost local root, one sync fault | `toshokan-spec` |
 | `Names`, `Anchors`, `Sealed`, `Folded`, `Unchecked`, `FreshView` | expected violations | `toshokan-spec` |
 | `PortableDeep` | `Portable` with five files | `toshokan-spec-deep` |
 | `Entries` | `Portable` with four entries | `toshokan-spec-deep` |
 | `Deep` | a clone, effects and a lost local root together | `toshokan-spec-deep` |
-| `Restore` | a restored folder, effects | `toshokan-spec-deep` |
+| `Restore` | a restored folder, two effects | `toshokan-spec-deep` |
 | `RestoreFork` | a restored folder, a clone | `toshokan-spec-deep` |
 | `Sync` | two sync faults: torn, hidden or resurrected files | `toshokan-spec-deep` |
 | `LivenessDeep` | `Liveness` with effects and more files | `toshokan-spec-deep` |
@@ -105,7 +106,9 @@ reader's obligations. [SPEC.md](../SPEC.md) states each in full.
 - No writer id is kept in the local root before its genesis entry is durable in
   the folder, and a writer that has to stop is replaced by a new random id.
 - Another writer's pending record is settled only with the user's consent, in
-  the settling writer's own log, and removed only by its owner.
+  the settling writer's own log, and removed only by its owner. An owner
+  removes a record only once its log holds the closing entry, and never after
+  it stops writing.
 - Each fork is reported once, found from the cached pairs of every entry ever
   seen rather than from the files present now.
 - After the local root is lost, the install reads from scratch as a new writer
