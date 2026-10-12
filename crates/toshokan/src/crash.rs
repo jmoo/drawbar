@@ -16,8 +16,8 @@ pub struct Fault {
     pub eager_names: bool,
 }
 
-/// What a crash leaves of unsynced appends: nothing, a byte, all of them, or
-/// zeros in their place.
+/// What a crash leaves of unsynced appends and writes: nothing, a byte, all of
+/// them, or zeros in their place.
 pub const TAILS: [Tail; 5] = [
     Tail::Lost,
     Tail::Torn(1),

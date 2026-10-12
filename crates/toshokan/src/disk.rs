@@ -16,9 +16,10 @@ pub enum Tail {
     /// Nothing of them.
     #[default]
     Lost,
-    /// Their first `n` bytes: a torn append.
+    /// Their first `n` bytes: a torn append or write.
     Torn(u64),
-    /// `n` zero bytes in their place: the file grew, its data did not.
+    /// `n` zero bytes in their place: the file's length or blocks changed, its
+    /// data did not.
     Zeroed(u64),
 }
 
@@ -56,9 +57,9 @@ pub enum Renames {
 /// file or directory. A directory's rename becomes durable whole when either
 /// directory it moved between is synced: no file system leaves a directory with
 /// two names. A crash keeps exactly the durable state, and what [`Tail`]
-/// says of bytes appended since the file's last sync. Without `fsync`, every
-/// completed operation is durable at once. With [`MemDisk::set_eager_names`], a new
-/// name is durable as soon as it is created.
+/// says of bytes appended or written over since the file's last sync. Without
+/// `fsync`, every completed operation is durable at once. With
+/// [`MemDisk::set_eager_names`], a new name is durable as soon as it is created.
 ///
 /// **Renames.** In a root without [`Capabilities::no_replace`], a file renamed onto
 /// a file replaces it, as a POSIX rename does.
@@ -67,9 +68,11 @@ pub enum Renames {
 /// whether or not it succeeds, and a [`Renames::CopyThenRemove`] file rename counts
 /// as two. After [`MemDisk::crash_after`]`(n)` the next `n` operations run and the
 /// one after fails with [`IoError::Crashed`] without effect, except that a
-/// crashing append lands as [`Tail`] says. From then on every request on every
-/// handle fails the same way. [`MemDisk::restart`] gives a handle on a new disk
-/// holding what survived, with every lock released.
+/// crashing append lands as [`Tail`] says, and so does a crashing write over the
+/// bytes the file holds, from the first it changes, though nothing it writes past
+/// them. From then on every request on every handle fails the same way.
+/// [`MemDisk::restart`] gives a handle on a new disk holding what survived, with
+/// every lock released.
 #[derive(Clone)]
 pub struct MemDisk {
     disk: Rc<RefCell<Disk>>,
@@ -350,14 +353,36 @@ impl Disk {
             self.mutations += 1;
             return Ok(());
         }
-        if let Some(Io::Append { root, path, bytes }) = io {
-            let kept = self.tail.keep(bytes);
-            let tree = self.tree_mut(*root);
-            if let Ok(ino) = tree.file(path) {
-                if let Content::File { data, .. } = &mut tree.nodes[ino].live {
-                    data.extend_from_slice(&kept);
+        let clock = self.clock;
+        match io {
+            Some(Io::Append { root, path, bytes }) => {
+                let kept = self.tail.keep(bytes);
+                let tree = self.tree_mut(*root);
+                if let Ok(ino) = tree.file(path) {
+                    if let Content::File { data, .. } = &mut tree.nodes[ino].live {
+                        data.extend_from_slice(&kept);
+                    }
                 }
             }
+            Some(Io::Write {
+                root,
+                path,
+                offset,
+                bytes,
+            }) => {
+                let range = Range {
+                    offset: *offset,
+                    len: bytes.len() as u64,
+                };
+                let held = self.tree(*root).read(path, range).unwrap_or_default();
+                let same = held.iter().zip(bytes).take_while(|(a, b)| a == b).count();
+                let kept = self.tail.keep(&bytes[same..held.len()]);
+                if !kept.is_empty() {
+                    let at = *offset + same as u64;
+                    let _ = self.tree_mut(*root).write(path, at, &kept, clock);
+                }
+            }
+            _ => {}
         }
         self.crashed = true;
         Err(IoError::Crashed)
@@ -759,24 +784,37 @@ impl Tree {
     }
 }
 
-/// What of a node survives a crash in a root with fsync.
+/// What of a node survives a crash in a root with fsync: of a file, its durable
+/// bytes with what [`Tail`] keeps of the span from the first byte its live bytes
+/// change to the last.
 fn survivor(node: &Node, tail: Tail) -> Content {
-    match (&node.durable, &node.live) {
-        (
-            Content::File {
-                data: durable,
-                modified,
-            },
-            Content::File { data: live, .. },
-        ) if live.len() > durable.len() && live.starts_with(durable) => {
-            let mut data = durable.clone();
-            data.extend(tail.keep(&live[durable.len()..]));
-            Content::File {
-                data,
-                modified: *modified,
-            }
-        }
-        _ => node.durable.clone(),
+    let (
+        Content::File {
+            data: durable,
+            modified,
+        },
+        Content::File { data: live, .. },
+    ) = (&node.durable, &node.live)
+    else {
+        return node.durable.clone();
+    };
+    let changed = |i: &usize| durable.get(*i) != live.get(*i);
+    let span = (0..live.len())
+        .find(changed)
+        .zip((0..live.len()).rfind(changed));
+    let Some((first, last)) = span else {
+        return node.durable.clone();
+    };
+    let kept = tail.keep(&live[first..=last]);
+    let mut data = durable.clone();
+    let end = first + kept.len();
+    if data.len() < end {
+        data.resize(end, 0);
+    }
+    data[first..end].copy_from_slice(&kept);
+    Content::File {
+        data,
+        modified: *modified,
     }
 }
 
@@ -1021,6 +1059,67 @@ mod tests {
                 disk.restart().files(Root::Folder),
                 files(&[("log", &expected)]),
                 "{tail:?}"
+            );
+        }
+    }
+
+    fn write(text: &str, offset: u64, bytes: &[u8]) -> Io {
+        Io::Write {
+            root: Root::Folder,
+            path: path(text),
+            offset,
+            bytes: bytes.to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_crash_tears_or_zeroes_an_unsynced_write_from_its_first_changed_byte() {
+        let cases = [
+            (Tail::Lost, b"head tail".to_vec()),
+            (Tail::Torn(1), b"heAd tail".to_vec()),
+            (Tail::Torn(99), b"heAD TAil".to_vec()),
+            (Tail::Zeroed(2), b"he\0\0 tail".to_vec()),
+            (Tail::Zeroed(99), b"he\0\0\0\0\0il".to_vec()),
+        ];
+        for (tail, expected) in cases {
+            let disk = MemDisk::new();
+            disk.set_tail(tail);
+            let f = Folder(&disk);
+            f.create("record", b"head tail");
+            f.sync("record");
+            f.sync("");
+            f.run(write("record", 0, b"heAD TA"));
+            assert_eq!(
+                disk.restart().files(Root::Folder),
+                files(&[("record", &expected)]),
+                "{tail:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_crashing_write_lands_as_the_tail_says_over_the_bytes_the_file_holds() {
+        let cases: [(Tail, u64, &[u8], &[u8]); 5] = [
+            (Tail::Torn(2), 1, b"BCD", b"aBCd"),
+            (Tail::Torn(1), 0, b"abXY", b"abXd"),
+            (Tail::Zeroed(1), 1, b"BCD", b"a\0cd"),
+            (Tail::Torn(u64::MAX), 2, b"CDEF", b"abCD"),
+            (Tail::Torn(u64::MAX), 4, b"EF", b"abcd"),
+        ];
+        for (tail, offset, bytes, expected) in cases {
+            let disk = no_fsync();
+            disk.set_tail(tail);
+            let f = Folder(&disk);
+            f.create("record", b"abcd");
+            disk.crash_after(0);
+            assert_eq!(
+                f.try_run(write("record", offset, bytes)),
+                Err(IoError::Crashed)
+            );
+            assert_eq!(
+                disk.restart().files(Root::Folder),
+                files(&[("record", expected)]),
+                "{tail:?} at {offset}"
             );
         }
     }
