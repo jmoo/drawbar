@@ -7,14 +7,16 @@ use std::collections::BTreeMap;
 use common::{files_under, fresh, held, layout, machine, Instance};
 use toshokan::blocking::run;
 use toshokan::compaction::compact;
+use toshokan::crash;
 use toshokan::disk::Tail;
-use toshokan::layout::SEGMENT_EXTENSION;
+use toshokan::io::Capabilities;
+use toshokan::layout::{Layout, SEGMENT_EXTENSION};
 use toshokan::line::{ending, seal_marker, Line, ENDING};
 use toshokan::reader::{CachedView, Reader};
 use toshokan::report::{Rekey, Start};
 use toshokan::simulator::Machine;
 use toshokan::writer::{Claimed, Writer, SEGMENT_BOUND};
-use toshokan::{Error, Hlc, MemDisk, Refusal, Root, SegmentName, WriterId};
+use toshokan::{EntryHash, Error, Hlc, MemDisk, Refusal, Root, SegmentName, WriterId};
 
 fn segments(machine: &Machine, writer: WriterId) -> usize {
     files_under(&machine.folder, &layout().writer(writer))
@@ -132,47 +134,91 @@ fn one_disk(disk: MemDisk) -> Machine {
     }
 }
 
-/// A writer resumed after a power loss; with `open`, it has appended once since,
-/// so its next append goes to an open segment.
-fn resumed(tail: Tail, open: bool) -> Instance {
-    let disk = MemDisk::new();
-    disk.set_tail(tail);
+/// A browser's private file system in Firefox: it renames files and cannot sync.
+const UNSYNCED: Capabilities = Capabilities {
+    rename_dir: false,
+    no_replace: false,
+    fsync: false,
+    ..Capabilities::ALL
+};
+
+/// A disk holding both roots, whose writer wrote once before a power loss.
+fn written_once(capabilities: Capabilities) -> MemDisk {
+    let disk = MemDisk::with_capabilities(capabilities, capabilities);
     let mut instance = Instance::open(one_disk(disk), 1);
     instance.write("a").unwrap();
-    let id = instance.id();
-    let mut instance = Instance::open(one_disk(instance.machine.folder.restart()), 2);
-    assert_eq!(instance.start, Start::Resumed(id));
-    if open {
-        instance.write("a2").unwrap();
-    }
-    instance
+    instance.machine.folder.restart()
+}
+
+/// `head.json` as SPEC.md gives it.
+fn head_record(writer: WriterId, head: EntryHash) -> Vec<u8> {
+    format!(r#"{{"writer":"{writer}","head":"{head}"}}"#).into_bytes()
 }
 
 #[test]
-fn an_interrupted_append_is_followed_by_a_new_segment() {
-    for open in [false, true] {
-        let mut probe = resumed(Tail::Lost, open);
-        let before = probe.machine.folder.mutations();
-        probe.write("b").unwrap();
-        let operations = probe.machine.folder.mutations() - before;
-        for after in 0..operations {
-            for tail in [Tail::Lost, Tail::Torn(7), Tail::Zeroed(7)] {
-                let case = format!("open {open}, crash after {after}, {tail:?}");
-                let mut instance = resumed(tail, open);
-                let id = instance.id();
-                instance.machine.folder.crash_after(after);
-                assert!(instance.write("b").is_err(), "{case}");
-                let restarted = one_disk(instance.machine.folder.restart());
-                let mut again = Instance::open(restarted, 3);
-                assert_eq!(again.start, Start::Resumed(id), "{case}");
-                let last = again.write("c").unwrap();
-                let view = fresh(&again.machine.folder);
-                let log = &view.writers()[&id];
-                assert_eq!(log.heads(), last, "{case}");
-                assert_eq!(log.forks(), [], "{case}");
-                assert!(log.chain_to(last[0]).is_some(), "{case}");
-            }
-        }
+fn a_commit_crashed_anywhere_is_continued_after_its_chains_last_entry_or_by_a_new_writer() {
+    for capabilities in [Capabilities::ALL, UNSYNCED] {
+        let id = Instance::open(one_disk(written_once(capabilities)), 2).id();
+        let (mut skipped, mut retired) = (0, 0);
+        crash::sweep(
+            || written_once(capabilities),
+            |disk| {
+                let mut instance = Instance::open(one_disk(disk.clone()), 2);
+                let _ = instance.write("b").and_then(|_| instance.write("c"));
+            },
+            |fault, disk| {
+                let shown = format!("{capabilities:?}, {fault:?}");
+                let before = fresh(&disk);
+                let [tip] = before.writers()[&id].heads()[..] else {
+                    panic!("{shown}: {:?}", before.writers()[&id].heads());
+                };
+                let chain = before.writers()[&id].chain_to(tip).unwrap();
+                let local = disk.files(Root::Local);
+                let recorded = ["head.json", "head.json.next"]
+                    .map(|name| Layout::local(chain[0]).join(name).unwrap())
+                    .into_iter()
+                    .find_map(|path| local.get(&path).cloned());
+                let mut again = Instance::open(one_disk(disk), 3);
+                let written = again.write("d").unwrap_or_else(|e| panic!("{shown}: {e}"));
+                let after = fresh(&again.machine.folder);
+                assert!(
+                    held(&before).is_subset(&held(&after)),
+                    "{shown}: the folder lost entries"
+                );
+                for log in after.writers().values() {
+                    assert_eq!(log.forks(), [], "{shown}");
+                }
+                match &again.start {
+                    Start::Resumed(resumed) => {
+                        assert_eq!(*resumed, id, "{shown}");
+                        assert_eq!(
+                            after.writers()[&id].predecessor(written[0]),
+                            Some(tip),
+                            "{shown}"
+                        );
+                        return;
+                    }
+                    Start::New => skipped += 1,
+                    Start::Rekeyed {
+                        old,
+                        why: Rekey::Restored,
+                    } if *old == id => retired += 1,
+                    start => panic!("{shown}: {start:?}"),
+                }
+                assert_ne!(again.id(), id, "{shown}");
+                assert_eq!(after.writers()[&id].heads(), [tip], "{shown}");
+                let mut named = chain.iter().map(|&entry| Some(head_record(id, entry)));
+                assert!(
+                    !named.any(|record| record == recorded),
+                    "{shown}: {:?} names an entry of the chain",
+                    recorded.map(String::from_utf8)
+                );
+            },
+        );
+        assert!(
+            skipped > 0 && retired > 0,
+            "{capabilities:?}: tears skip the writer {skipped} times and retire it {retired} times"
+        );
     }
 }
 

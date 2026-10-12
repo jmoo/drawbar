@@ -81,10 +81,15 @@ root are the install's pool of writers.
 `head.json` is `{"writer":"<writer id>","head":"<entry hash>"}`,
 `let-go.json` is `{"<writer id>":["<entry hash>",…]}`, and `identities.json` is
 `[["<library path>",<length>,<modification time or null>,"<identity>"],…]`.
-A file in the local root that is replaced, such as `head.json`, `view.bin` or a
-draft, is first written beside it as `<name>.next` and synced; then `<name>` is
-removed and `<name>.next` renamed to it. A reader takes `<name>`, or
-`<name>.next` when `<name>` is missing.
+A file in the local root that is replaced, such as `view.bin` or a draft, is
+first written beside it as `<name>.next` and synced; then `<name>` is removed
+and `<name>.next` renamed to it. A reader takes `<name>`, or `<name>.next` when
+`<name>` is missing. Every `head.json` of one writer has the same length, so a
+`head.json` with the new record's length is written over in place and synced;
+any other is replaced as above. A crash can tear that write. What it leaves is
+the old or the new record whole, bytes that do not read, which leave the writer
+out of the pool, or a record naming an entry no log holds, which retires the
+writer (see Writers).
 
 ## Identifiers and clocks
 
@@ -369,9 +374,10 @@ The entries are then durable, and the commit succeeds whatever fails after them
 instance writes it again at its next commit, refresh or close. A crash meanwhile
 loses nothing the folder holds. Reopening reads the folder into the cached view,
 and a `head.json` that names an earlier entry of the writer's chain still lets
-the instance continue the writer, after the chain's last entry. Until the view
-is written, a crash followed by a restore of the folder that takes the commit's
-entries takes them from this install's view too.
+the instance continue the writer, after the chain's last entry; one that a
+failed write tore starts a new writer. Until the view is written, a crash
+followed by a restore of the folder that takes the commit's entries takes them
+from this install's view too.
 
 ## Reading
 

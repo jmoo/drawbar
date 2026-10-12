@@ -193,8 +193,9 @@ pub enum Lag {
     /// The cached view in the local root lacks the commit. Reopening reads it
     /// from the folder.
     View,
-    /// `head.json` names an earlier entry. Reopening continues from the last entry
-    /// of the writer's chain in the folder.
+    /// `head.json` names an earlier entry, or a failed write tore it. Reopening
+    /// continues from the last entry of the writer's chain in the folder, or
+    /// starts a new writer when it is torn.
     Head,
     /// `let-go.json` lacks the entries an adoption let go. Reopening reports them
     /// as removed again.

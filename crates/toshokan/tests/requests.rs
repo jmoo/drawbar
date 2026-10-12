@@ -22,7 +22,11 @@ fn shapes(requests: &[Io]) -> Vec<(&'static str, String)> {
             let kind = match io {
                 Io::List { .. } => "List",
                 Io::ListStat { .. } => "ListStat",
+                Io::Stat { .. } => "Stat",
                 Io::ReadMany { reads, .. } => return ("ReadMany", reads.len().to_string()),
+                Io::Create { .. } => "Create",
+                Io::Write { .. } => "Write",
+                Io::Rename { .. } => "Rename",
                 Io::Remove { .. } => "Remove",
                 Io::Sync { .. } => "Sync",
                 other => panic!("unexpected {other:?}"),
@@ -312,5 +316,38 @@ fn a_refresh_asks_the_length_and_time_only_of_files_that_may_grow() {
     assert!(
         stats.count() >= 2,
         "a rescan asks of every writer's files: {listed:?}"
+    );
+}
+
+#[test]
+fn a_commit_writes_the_head_over_the_last_one_in_three_requests() {
+    let disk = saved_library(1);
+    let schema = Schema::of(&[NAME.key()]).unwrap();
+    let recorded = Recorded::new(disk.process());
+    let (mut library, _) = Library::open(recorded.clone(), layout(), &schema, env(2)).unwrap();
+    let (note, _) = library.intent("Note").create(|e| {
+        e.set(NAME, "note".into());
+    });
+    recorded.take();
+    note.commit().unwrap();
+    let head: Vec<Io> = recorded
+        .take()
+        .into_iter()
+        .filter(|io| {
+            let name = io.path().name().unwrap_or_default();
+            io.root() == toshokan::Root::Local && name.starts_with("head.json")
+        })
+        .collect();
+    let named: Vec<(&str, String)> = shapes(&head)
+        .into_iter()
+        .map(|(kind, at)| (kind, at.rsplit('/').next().unwrap_or_default().to_owned()))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            shape("Stat", "head.json"),
+            shape("Write", "head.json"),
+            shape("Sync", "head.json")
+        ]
     );
 }

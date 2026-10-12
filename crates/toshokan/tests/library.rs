@@ -194,7 +194,10 @@ impl Probe {
 
     fn count(&self, io: &Io) {
         let mut seen = self.seen.borrow_mut();
-        if let Io::Create { root, bytes, .. } | Io::Append { root, bytes, .. } = io {
+        if let Io::Create { root, bytes, .. }
+        | Io::Append { root, bytes, .. }
+        | Io::Write { root, bytes, .. } = io
+        {
             if *root == Root::Local {
                 seen.local_written += bytes.len() as u64;
             }
@@ -211,13 +214,8 @@ impl Probe {
 
     fn refuse(&self, io: &Io) -> Result<(), toshokan::IoError> {
         let mut seen = self.seen.borrow_mut();
-        if let Io::Rename {
-            root: Root::Local,
-            to,
-            ..
-        } = io
-        {
-            seen.blind |= seen.blind_after_record && to.name() == Some("head.json");
+        if io.root() == Root::Local && io.mutates() && io.path().name() == Some("head.json") {
+            seen.blind |= seen.blind_after_record;
         }
         if seen.blind && io.root() == Root::Folder && !io.mutates() && !layout().owns(io.path()) {
             return Err(toshokan::IoError::Other("blinded by the test".into()));
@@ -1830,7 +1828,7 @@ fn a_commit_whose_view_cannot_be_saved_is_kept_and_undone_once<F: Facade>() {
 }
 
 fn a_commit_whose_head_cannot_be_recorded_is_kept_and_continued<F: Facade>() {
-    const HEAD: &[&str] = &["head.json.next"];
+    const HEAD: &[&str] = &["head.json", "head.json.next"];
     let clock = TestClock::at(1_000);
     let folder = disk();
     let here = machine(&folder);

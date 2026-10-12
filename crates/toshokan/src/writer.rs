@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Invalid, Refusal, Result};
 use crate::flow::{self, Fallible, Flow};
 use crate::ids::{EntryHash, Hlc, SegmentName, WriterId};
-use crate::io::{Io, Kind, Lock, Range, Root, Task};
+use crate::io::{Io, Kind, Lock, Meta, Range, Root, Task};
 use crate::layout::Layout;
 use crate::line;
 use crate::log::{Entry, EntryKind, Genesis};
@@ -295,7 +295,7 @@ impl Writer {
         self.open = None;
     }
 
-    /// Records this writer's head in the local root: `head.json`, replaced.
+    /// Records this writer's head in the local root: `head.json`.
     pub fn record(&self) -> Task<'static, Result<()>> {
         record_head(self.id, self.genesis, self.head).task()
     }
@@ -621,9 +621,25 @@ pub(crate) fn head_record(bytes: &[u8]) -> Option<(WriterId, EntryHash)> {
     Some((record.writer, record.head))
 }
 
+/// Writes `head.json` over the last record when that has the new record's length,
+/// as every record of one writer has; otherwise replaces it.
 fn record_head<'a>(writer: WriterId, genesis: EntryHash, head: EntryHash) -> Flow<'a, Result<()>> {
     let bytes = serde_json::to_vec(&HeadRecord { writer, head }).expect("a head record is JSON");
-    flow::replace(Root::Local, Layout::head(genesis), bytes)
+    let path = Layout::head(genesis);
+    flow::stat(Root::Local, &path).and_then(move |meta| match meta {
+        Some(Meta {
+            kind: Kind::File,
+            len,
+            ..
+        }) if len == bytes.len() as u64 => flow::act(Io::Write {
+            root: Root::Local,
+            path: path.clone(),
+            offset: 0,
+            bytes,
+        })
+        .and_then(move |()| flow::sync(Root::Local, &path)),
+        _ => flow::replace(Root::Local, path, bytes),
+    })
 }
 
 fn sync_all<'a>(root: Root, paths: Vec<RelPath>) -> Flow<'a, Result<()>> {
