@@ -544,7 +544,7 @@ the user. A scan writes nothing in the folder.
 An intent is one user action: fact changes and file effects committed together.
 Opening, reading, refreshing, letting go and scanning write nothing in the
 folder; only committing an intent (an undo, a redo, a settlement or an adoption
-included), emptying the trash and compaction do.
+included), emptying the trash, tidying, compaction and closing do.
 
 A commit:
 
@@ -571,11 +571,9 @@ before its own intent is tried.
 Otherwise a commit whose entries are durable succeeds, whatever fails after
 them, and says which parts of the instance's own state lag it: the cached view,
 `head.json` or `let-go.json` not written, which the next commit, refresh or
-close writes again; the scan after it failed, which the next refresh repeats; or
-its pending record not removed, which the next write removes. A record whose
-intent is logged is not open, so no reader reports it meanwhile. Settling one of
-this writer's own effects, adopting, and settling another writer's effect commit
-in the same way.
+close writes again; or the scan after it failed, which the next refresh repeats.
+Settling one of this writer's own effects, adopting, and settling another
+writer's effect commit in the same way.
 
 An intent may also adopt a library file no entity is bound to: a precondition on
 its identity, no step, and a `pin` op giving the entity the file as it is.
@@ -636,7 +634,11 @@ A writer carries out an intent's steps in this order:
    only then removes the source and syncs the source's directory. A copy that
    fails removes what it wrote. Each step runs alone.
 5. Append the intent's entry.
-6. Remove the pending record.
+6. Keep the pending record, now spent: its entry is logged, so the record is
+   not open, and no reader that has the entry reports it. No commit removes it.
+   The writer removes its spent records, each after its markers, when the app
+   tidies, as an app does when idle, and when it closes. A record whose removal
+   fails stays spent for the next tidy or close.
 
 Where the folder's renames refuse an existing destination themselves, as
 `renameat2` with `RENAME_NOREPLACE`, `renamex_np` with `RENAME_EXCL` and
@@ -674,8 +676,8 @@ as it is, logged as a `pin` op rather than a `file` op. A reader reads at most
 ### Recovery
 
 A record is open while its writer's log holds the entry named by its entry's
-`prev` and no entry after it. A record that is not open is waiting only for its
-writer to remove it.
+`prev` and no entry after it. A record that is not open is spent, waiting only
+for its writer to remove it.
 
 A record is ignored when it does not decode, names another writer, names a path
 that is not a library path, or its `prev` is not in its writer's log. Opening
@@ -690,7 +692,7 @@ its destination exists and its source does not, or both hold the same bytes. A
 `place` whose staged file is in the trash under its own nonce is not done. When
 the last done step's source still holds the same bytes as its destination, the
 source is removed. The remaining steps are carried out, the planned entry is
-appended with what the steps did, and the record is removed. Then every file in
+appended with what the steps did, and the record is spent. Then every file in
 its `tmp/` that no open record places is removed, and so is every empty
 `pending/<nonce>.json` opening ignored: a record created in place and cut short
 before its bytes landed, before any of its steps ran. Any other record that does
@@ -780,8 +782,9 @@ drafts.
 The folder keeps, for the life of a writer: every entry, in a segment or folded
 in a snapshot; the hash of every folded entry, about 35 bytes each; one segment
 per process that crashed or was copied; trash items
-until the writer empties them; and the pending records of a writer that will
-never run again, settled or not. The local root keeps one directory per writer
+until the writer empties them; spent pending records until the writer tidies or
+closes; and the pending records of a writer that will never run again, settled
+or not. The local root keeps one directory per writer
 the install has used.
 
 ## Backends

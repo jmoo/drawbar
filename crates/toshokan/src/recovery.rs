@@ -1,12 +1,13 @@
 //! Recovery of interrupted effects, after a crash and after loss of the local root.
 //!
 //! Opening assesses and writes nothing in the folder. This writer's own records
-//! are settled before its next write: the steps resume where they stopped, the
-//! intent's entry is appended with what they did, and the record is removed. A
-//! record of a writer this install does not write as is reported as possibly
-//! still in progress elsewhere, and settled only with the user's consent, by this
-//! writer and in its own log; only its owner ever removes it. Settling twice
-//! equals settling once.
+//! are settled before its next write: the steps resume where they stopped, and
+//! the intent's entry is appended with what they did. The record is then spent,
+//! as is one whose entry the log already holds, and is removed only when the
+//! library tidies or closes. A record of a writer this install does not write as
+//! is reported as possibly still in progress elsewhere, and settled only with the
+//! user's consent, by this writer and in its own log; only its owner ever removes
+//! it. Settling twice equals settling once.
 //!
 //! A record is open while its writer's log ends at the head the record was
 //! written after: the entry that closes it is the next one the writer appends.
@@ -49,8 +50,10 @@ impl Chain for WriterLog {
 /// What opening found to recover.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Recovery {
-    /// This writer's records, with how each will be settled.
+    /// This writer's open records, with how each will be settled.
     pub own: Vec<Settling>,
+    /// This writer's records closed by an entry in its log, left to remove.
+    pub spent: Vec<(Nonce, PendingRecord)>,
     pub orphaned: Vec<Orphan>,
     /// Records ignored as unreadable, unchained or unconfined.
     pub ignored: Vec<RelPath>,
@@ -60,9 +63,6 @@ pub struct Recovery {
 pub struct Settling {
     pub record: Nonce,
     pub pending: PendingRecord,
-    /// The log already holds the entry closing the record, so settling only
-    /// removes it.
-    pub logged: bool,
     /// How settling will end if nothing else changes the folder first.
     pub outcome: Outcome,
 }
@@ -124,12 +124,7 @@ pub fn classify<C: Chain>(
             match standing(layout, own, chain, settled, name, &record) {
                 Standing::Ignored => recovery.ignored.push(layout.pending(writer, name)),
                 Standing::Closed => {}
-                Standing::Logged => recovery.own.push(Settling {
-                    record: name,
-                    pending: record,
-                    logged: true,
-                    outcome: Outcome::Complete,
-                }),
+                Standing::Spent => recovery.spent.push((name, record)),
                 Standing::Open => open.push((name, record)),
                 Standing::Orphan => recovery.orphaned.push(Orphan {
                     writer,
@@ -162,7 +157,6 @@ pub fn predict(
                 recovery.own.push(Settling {
                     record: name,
                     pending: record,
-                    logged: false,
                     outcome,
                 });
                 recovery
@@ -179,7 +173,7 @@ enum Standing {
     /// Closed, waiting for its writer to remove it.
     Closed,
     /// This writer's, closed by an entry in its log.
-    Logged,
+    Spent,
     /// This writer's, open after the head its local root recorded.
     Open,
     /// Another writer's, open.
@@ -201,7 +195,7 @@ fn standing(
     let closed = chain.continues(after);
     match own {
         Some((own, head)) if own == record.writer => match (closed, head == after) {
-            (true, _) => Standing::Logged,
+            (true, _) => Standing::Spent,
             (false, true) => Standing::Open,
             (false, false) => Standing::Ignored,
         },
@@ -213,7 +207,7 @@ fn standing(
 /// Resumes this writer's open record `name` where its steps stopped, after
 /// removing a source the last done step left beside its destination, and the start
 /// of a copy the next step left. The caller then appends the record's entry with
-/// what [`Applied`] says and removes the record with [`effects::finish`].
+/// what [`Applied`] says, after which [`effects::finish`] may remove the record.
 pub fn settle(
     layout: &Layout,
     name: Nonce,

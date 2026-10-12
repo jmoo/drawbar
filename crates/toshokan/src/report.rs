@@ -182,7 +182,7 @@ pub enum Local {
     Current,
     /// Each part that lags, with the failure that left it behind. The next commit,
     /// refresh or close saves the view, the head and what was let go again; a
-    /// refresh scans again; the next write removes the record.
+    /// refresh scans again.
     Behind(BTreeMap<Lag, String>),
 }
 
@@ -203,9 +203,6 @@ pub enum Lag {
     /// The scan after the commit failed. The entities whose files its effects
     /// touched are [`crate::FileState::Unscanned`] until a scan of every file.
     Scan,
-    /// The commit's pending record is still in the folder. No reader reports it,
-    /// since the log continues past it.
-    Record,
 }
 
 /// How an intent's file effects end: all made, or stopped partway.
@@ -315,6 +312,12 @@ pub struct TrashItem {
 pub struct Emptied {
     pub removed: Vec<Nonce>,
     pub bytes: u64,
+}
+
+/// This writer's spent pending records tidying removed, by name.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Tidied {
+    pub removed: Vec<Nonce>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

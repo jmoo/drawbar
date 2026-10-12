@@ -4,7 +4,9 @@
 
 mod common;
 
-use common::{bound, commit, env, identify, layout, path, put, Driven, Fill, Recorded, WRITER};
+use common::{
+    bound, commit, copying, env, identify, layout, path, put, Driven, Fill, Recorded, WRITER,
+};
 use toshokan::binding::{self, Fact, Facts, Scan};
 use toshokan::blocking::{self, Library};
 use toshokan::log::FileFact;
@@ -12,7 +14,7 @@ use toshokan::plan::{Content, Expect, FileChange};
 use toshokan::reader::{CachedView, Reader};
 use toshokan::report::TrashItem;
 use toshokan::trash::{self, Policy};
-use toshokan::{EntityId, EntryHash, Hlc, Io, MemDisk, Nonce, Register, RelPath, Schema};
+use toshokan::{EntityId, EntryHash, Hlc, Io, MemDisk, Nonce, Register, RelPath, Root, Schema};
 
 /// Each request's kind and the path it names.
 fn shapes(requests: &[Io]) -> Vec<(&'static str, String)> {
@@ -335,7 +337,7 @@ fn a_commit_writes_the_head_over_the_last_one_in_three_requests() {
         .into_iter()
         .filter(|io| {
             let name = io.path().name().unwrap_or_default();
-            io.root() == toshokan::Root::Local && name.starts_with("head.json")
+            io.root() == Root::Local && name.starts_with("head.json")
         })
         .collect();
     let named: Vec<(&str, String)> = shapes(&head)
@@ -349,5 +351,65 @@ fn a_commit_writes_the_head_over_the_last_one_in_three_requests() {
             shape("Write", "head.json"),
             shape("Sync", "head.json")
         ]
+    );
+}
+
+/// A library on `disk` whose writer saved `files` files, an intent each.
+fn saved_one_by_one(disk: MemDisk, files: usize) -> (Library<Recorded>, Recorded) {
+    let recorded = Recorded::new(disk);
+    let schema = Schema::of(&[NAME.key()]).unwrap();
+    let (mut library, _) = Library::open(recorded.clone(), layout(), &schema, env(1)).unwrap();
+    for i in 0..files {
+        let (save, _) = library.intent("Save").create(|e| {
+            e.save(&path(&format!("f{i}")), vec![i as u8], Expect::Absent);
+        });
+        save.commit().unwrap();
+    }
+    (library, recorded)
+}
+
+/// Every file in a writer's `pending/`.
+fn pending(recorded: &Recorded) -> Vec<RelPath> {
+    let files = recorded.disk.files(Root::Folder).into_keys();
+    files
+        .filter(|path| path.components().any(|c| c == "pending"))
+        .collect()
+}
+
+/// The files in a writer's `pending/` that `requests` remove, in order.
+fn removed_from_pending(requests: &[Io]) -> Vec<RelPath> {
+    let removed = requests.iter().filter_map(|io| match io {
+        Io::Remove { path, .. } if path.components().any(|c| c == "pending") => Some(path.clone()),
+        _ => None,
+    });
+    removed.collect()
+}
+
+#[test]
+fn no_commit_removes_a_pending_record_and_tidying_removes_each() {
+    let (mut library, recorded) = saved_one_by_one(MemDisk::new(), 2);
+    let (note, _) = library.intent("Note").create(|e| {
+        e.set(NAME, "note".into());
+    });
+    note.commit().unwrap();
+    assert_eq!(removed_from_pending(&recorded.take()), []);
+    let records = pending(&recorded);
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert_eq!(library.tidy().unwrap().removed.len(), 2);
+    assert_eq!(removed_from_pending(&recorded.take()), records);
+}
+
+#[test]
+fn tidying_removes_a_records_markers_before_the_record() {
+    let (mut library, recorded) = saved_one_by_one(copying(), 1);
+    let (records, markers): (Vec<RelPath>, Vec<RelPath>) = pending(&recorded)
+        .into_iter()
+        .partition(|path| path.as_str().ends_with(".json"));
+    assert_eq!((records.len(), markers.len()), (1, 1), "{markers:?}");
+    recorded.take();
+    library.tidy().unwrap();
+    assert_eq!(
+        removed_from_pending(&recorded.take()),
+        [markers, records].concat()
     );
 }

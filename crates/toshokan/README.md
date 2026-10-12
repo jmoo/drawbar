@@ -74,7 +74,9 @@ time, such as a `Splice` of the file being rewritten, so a file of hundreds of
 megabytes is never held whole. A commit whose file effects stop partway fails
 with `Error::Partial`, which says what it logged. Any other commit whose entries
 reached the folder succeeds, and `Committed::local` says what the instance keeps
-beside the folder that lags it until the next commit, refresh or close.
+beside the folder that lags it until the next commit, refresh or close. A commit
+leaves the pending record of its file effects in the folder; an app calls `tidy`
+when idle to remove such records, and closing removes what is left.
 
 ## In the browser
 

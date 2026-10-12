@@ -421,8 +421,8 @@ fn records(disk: &MemDisk, writer: WriterId) -> Vec<(Nonce, PendingRecord)> {
         .records
 }
 
-/// Opens as `WRITER` and settles its records, as the library does before its next
-/// write.
+/// Opens as `WRITER`, settles its records, as the library does before its next
+/// write, and removes them, as tidying does.
 fn recover(disk: &MemDisk) -> Result<Vec<Outcome>, Error> {
     let layout = layout();
     let d = &mut process(disk);
@@ -436,18 +436,19 @@ fn recover(disk: &MemDisk) -> Result<Vec<Outcome>, Error> {
     assert!(found.orphaned.is_empty(), "{found:?}");
     let mut outcomes = Vec::new();
     for settling in &found.own {
-        if !settling.logged {
-            let applied = d.run(recovery::settle(
-                &layout,
-                settling.record,
-                Rc::new(settling.pending.clone()),
-                identify(),
-            ))?;
-            assert_eq!(applied.outcome, settling.outcome, "predicted");
-            outcomes.push(applied.outcome);
-            close(d, WRITER, settling.record)?;
-        }
+        let applied = d.run(recovery::settle(
+            &layout,
+            settling.record,
+            Rc::new(settling.pending.clone()),
+            identify(),
+        ))?;
+        assert_eq!(applied.outcome, settling.outcome, "predicted");
+        outcomes.push(applied.outcome);
+        close(d, WRITER, settling.record)?;
         d.run(effects::finish(&layout, settling.record, &settling.pending))?;
+    }
+    for (name, record) in &found.spent {
+        d.run(effects::finish(&layout, *name, record))?;
     }
     d.run(recovery::tidy(&layout, WRITER))?;
     d.run(recovery::remove_empty(&layout, WRITER, &found.ignored))?;

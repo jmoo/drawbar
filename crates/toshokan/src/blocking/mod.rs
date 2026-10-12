@@ -19,7 +19,8 @@ use crate::log::Settlement;
 use crate::path::RelPath;
 use crate::plan::{Splice, Splicing};
 use crate::report::{
-    Committed, Compacted, Emptied, HistoryItem, Opened, Orphan, Refreshed, TrashItem, WriterInfo,
+    Committed, Compacted, Emptied, HistoryItem, Opened, Orphan, Refreshed, Tidied, TrashItem,
+    WriterInfo,
 };
 use crate::schema::Schema;
 use crate::trash::Policy;
@@ -250,6 +251,12 @@ impl<B: Backend> Library<B> {
 
     pub fn empty_trash(&mut self, policy: Policy) -> Result<Emptied> {
         run(&mut self.backend, self.core.empty_trash(policy))
+    }
+
+    /// Removes the pending records this writer's commits left once their entries
+    /// were logged. An app calls it when idle; closing removes what is left.
+    pub fn tidy(&mut self) -> Result<Tidied> {
+        run(&mut self.backend, self.core.tidy())
     }
 
     pub fn compact(&mut self) -> Result<Compacted> {
