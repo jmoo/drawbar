@@ -954,6 +954,10 @@ async fn measure() {
         saves.time(save).await.unwrap();
     }
     saves.report("one-file save");
+    let mut tidies = Samples::default();
+    let tidied = tidies.time(a.tidy()).await.unwrap();
+    assert_eq!(tidied.removed.len(), 10);
+    tidies.report("tidy, the saves' 10 spent records");
 
     let mut refreshes = Samples::default();
     for _ in 0..10 {
