@@ -3254,13 +3254,17 @@ fn a_file_draft_under_another_files_name_is_reported_unreadable<F: Facade>() {
         })
         .unwrap();
 
-    let (_, opened) = F::open(Probe::new(&here), env("a", 2, &clock)).unwrap();
+    let (mut a, opened) = F::open(Probe::new(&here), env("a", 2, &clock)).unwrap();
     let states: Vec<(Drafted, DraftState)> =
         opened.drafts.into_iter().map(|d| (d.of, d.state)).collect();
     assert_eq!(
         states,
         [(Drafted::File(path("loose.wav")), DraftState::Unreadable)]
     );
+    a.discard_draft(Drafted::File(path("loose.wav"))).unwrap();
+    a.close().unwrap();
+    let (_, opened) = F::open(Probe::new(&here), env("a", 3, &clock)).unwrap();
+    assert_eq!(opened.drafts, [], "discarding it removed the misnamed file");
 }
 
 fn drafts_come_back_only_while_the_file_holds_their_base<F: Facade>() {

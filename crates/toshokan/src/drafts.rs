@@ -155,13 +155,55 @@ pub fn put(genesis: EntryHash, of: &Drafted, record: &DraftRecord) -> Task<'stat
         .task()
 }
 
-/// Removes the draft of `of`; none kept is success.
+/// Removes the draft of `of`; none kept is success. A file's draft kept under
+/// another file's name, which [`read_all`] reports unreadable, goes too.
 pub fn discard(genesis: EntryHash, of: &Drafted) -> Task<'static, Result<()>> {
     let path = kept_at(genesis, of);
     let staged = flow::staged(&path);
-    flow::remove(Root::Local, &staged)
-        .and_then(move |()| flow::remove(Root::Local, &path))
+    let removed = flow::remove(Root::Local, &staged).and_then({
+        let path = path.clone();
+        move |()| flow::remove(Root::Local, &path)
+    });
+    let Drafted::File(at) = of.clone() else {
+        return removed.task();
+    };
+    removed
+        .and_then(move |()| misnamed(genesis, at, path))
+        .and_then(|misnamed| {
+            fold(misnamed.into_iter(), (), |(), path| {
+                flow::remove(Root::Local, &path)
+            })
+        })
         .task()
+}
+
+/// The drafts of the file at `at` kept under a name other than `named`.
+fn misnamed<'a>(
+    genesis: EntryHash,
+    at: RelPath,
+    named: RelPath,
+) -> flow::Fallible<'a, Vec<RelPath>> {
+    let drafts = Layout::drafts(genesis);
+    flow::list(Root::Local, &drafts).and_then(move |entries| {
+        let others: Vec<RelPath> = entries
+            .into_iter()
+            .filter_map(|entry| {
+                let name = entry.name.strip_prefix("file-")?.strip_suffix(".json")?;
+                let path = drafts.join(&format!("file-{name}.json")).ok()?;
+                (entry.kind == Kind::File && path != named).then_some(path)
+            })
+            .collect();
+        fold(others.into_iter(), Vec::new(), move |mut misnamed, path| {
+            let at = at.clone();
+            flow::read_replaced(Root::Local, path.clone()).map_ok(move |bytes| {
+                let record = bytes.and_then(|bytes| DraftRecord::decode(&path, &bytes).ok());
+                if record.is_some_and(|record| record.path.as_ref() == Some(&at)) {
+                    misnamed.push(path);
+                }
+                misnamed
+            })
+        })
+    })
 }
 
 #[cfg(test)]
