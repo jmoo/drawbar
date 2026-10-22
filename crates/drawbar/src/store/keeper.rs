@@ -77,8 +77,32 @@ impl Keeper {
                     result,
                 });
             }
+            Cmd::Draft { of, base, bytes } => {
+                if let Err(why) = self.draft(&of, |draft| draft.put(base, bytes)) {
+                    answer(Event::Unkept(why));
+                }
+            }
+            Cmd::Discard(of) => {
+                if let Err(why) = self.draft(&of, |draft| draft.discard()) {
+                    answer(Event::Unkept(why));
+                }
+            }
             Cmd::File(_) => unreachable!("the backend reads files itself"),
         }
+    }
+
+    /// Put or let go of the draft of the file `of` names.
+    fn draft(
+        &mut self,
+        of: &Key,
+        change: impl FnOnce(toshokan::drafts::Draft<&mut Library<Native>>) -> toshokan::Result<()>,
+    ) -> Result<(), String> {
+        let library = self.library.as_mut().ok_or("the library is not open")?;
+        let draft = match of {
+            Key::Entity(entity) => library.draft(*entity),
+            Key::File(path) => library.draft_file(&relative(path).ok_or_else(|| no_path(path))?),
+        };
+        change(draft).map_err(|e| e.to_string())
     }
 
     /// Scan what a file command wrote at `paths`, and answer what the view shows now.
@@ -119,7 +143,11 @@ impl Keeper {
         let dirs = folders(&self.folder);
         let viewed = viewed(&library, refreshed, Some(dirs));
         self.library = Some(library);
-        Ok(Opened { writable, viewed })
+        Ok(Opened {
+            writable,
+            viewed,
+            drafts: opened.drafts,
+        })
     }
 
     fn scanned(

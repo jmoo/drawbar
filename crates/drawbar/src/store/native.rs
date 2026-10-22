@@ -102,7 +102,7 @@ pub struct Backend {
 /// Whether a command writes the folder.
 fn writes(cmd: &Cmd) -> bool {
     match cmd {
-        Cmd::Open | Cmd::Rescan | Cmd::Refresh => false,
+        Cmd::Open | Cmd::Rescan | Cmd::Refresh | Cmd::Draft { .. } | Cmd::Discard(_) => false,
         Cmd::Intent(_) | Cmd::Undo | Cmd::Redo => true,
         Cmd::File(file) => file.writes(),
     }

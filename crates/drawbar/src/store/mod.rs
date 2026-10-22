@@ -30,6 +30,7 @@ mod cache;
 mod diff;
 #[cfg(any(target_arch = "wasm32", test))]
 mod dom;
+mod drafts;
 mod exec;
 mod ids;
 #[cfg(not(target_arch = "wasm32"))]
@@ -481,6 +482,16 @@ pub enum Cmd {
     Undo,
     /// Redo the intent undone last. Answered by [`Event::Committed`].
     Redo,
+    /// Keep an unsaved edit of the file `of` names, made over the file of identity
+    /// `base`, in this install's own state, never in the folder. Answered only on failure,
+    /// by [`Event::Unkept`].
+    Draft {
+        of: Key,
+        base: toshokan::Identity,
+        bytes: Vec<u8>,
+    },
+    /// Let go of the draft kept of the file `of` names. Answered only on failure.
+    Discard(Key),
     File(FileCmd),
 }
 
@@ -622,6 +633,9 @@ pub struct Opened {
     /// and every edit stays in memory.
     pub writable: Result<(), String>,
     pub viewed: Viewed,
+    /// The unsaved edits an earlier session kept, each with whether its file still holds
+    /// what the edit was made over.
+    pub drafts: Vec<toshokan::report::DraftStatus>,
 }
 
 /// The library as one answer left it.
@@ -692,6 +706,8 @@ pub enum Event {
     /// A command other than a save, a copy or a move failed: what it was doing, and
     /// why.
     Failed(String),
+    /// An unsaved edit could not be kept as a draft, or let go of: why.
+    Unkept(String),
 }
 
 impl Event {
@@ -706,6 +722,7 @@ impl Event {
             Event::Committed { result: Err(_), .. } => one("intent"),
             Event::Moved { result: Err(_), .. } => one("move"),
             Event::Failed(_) => one("write"),
+            Event::Unkept(_) => one("draft"),
             Event::Read(answers) => answers
                 .iter()
                 .filter_map(|(_, result)| result.as_ref().err())

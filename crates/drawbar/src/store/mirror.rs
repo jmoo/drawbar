@@ -14,6 +14,7 @@ use toshokan::{FileState, View};
 
 use super::cache::{self, Cache};
 use super::diff;
+use super::drafts::Draft;
 use super::exec::too_much;
 use super::ids::Ids;
 use super::keys::{Came, ORIGIN, TAGS, TAG_NAMES};
@@ -177,8 +178,12 @@ pub struct Store {
     rechecking: BTreeSet<u64>,
     /// The assets whose files the rescan in flight found moved or changed.
     moved: BTreeSet<u64>,
-    /// The user has been told that this build keeps no unsaved edit across a quit.
-    told_unkept: bool,
+    /// The unsaved edits kept as drafts, by asset: the key each is kept under, the stamp
+    /// of what it holds, and the identity of the file it was made over.
+    drafted: BTreeMap<u64, (Key, u64, toshokan::Identity)>,
+    /// The drafts an earlier session kept, each put back over its asset once its file is
+    /// read: under which key, and whether its file changed since the draft was made.
+    restoring: BTreeMap<u64, (Key, Draft, bool)>,
     /// Assets to remove now what was copied or saved of them over another has landed
     /// ([`Store::take_left`]).
     left: Vec<u64>,
@@ -247,7 +252,8 @@ impl Store {
             quietly: BTreeSet::new(),
             rechecking: BTreeSet::new(),
             moved: BTreeSet::new(),
-            told_unkept: false,
+            drafted: BTreeMap::new(),
+            restoring: BTreeMap::new(),
             focused: true,
             scanning: false,
             committing: 0,
@@ -356,15 +362,158 @@ impl Store {
         read_only && (browser.folders.changed() || !self.asks.is_empty())
     }
 
-    /// The names of the assets that letting this library go would lose: each unsaved
-    /// edit, which this build keeps nowhere, and where nothing may be written here, each
-    /// asset never written to a file. A library open for writing writes those at its last
-    /// pass.
+    /// The names of the assets that letting this library go would lose: where nothing
+    /// may be written here, each unsaved edit and each asset never written to a file, and
+    /// otherwise each unsaved edit of a file drawbar has not read, which no draft can be
+    /// made over. A library open for writing writes the rest, and keeps their edits as
+    /// drafts, at its last pass.
     pub fn unkept(&self, workspace: &Workspace) -> Vec<String> {
         let open = self.open();
         let unheld = self.unheld(workspace);
-        let lost = unheld.filter(|entity| !open || entity.is_unsaved());
+        let lost = unheld.filter(|entity| {
+            let undrafted = entity.is_unsaved() && self.base(entity.id).is_none();
+            !open || undrafted
+        });
         lost.map(|entity| entity.name.clone()).collect()
+    }
+
+    /// What a draft of an asset's unsaved edit is made over: the identity of its file, as
+    /// drawbar last read or wrote it, with no write over it in flight.
+    fn base(&self, id: u64) -> Option<toshokan::Identity> {
+        let record = self.records.get(&id).filter(|record| !record.saving)?;
+        record.fingerprint?.identity
+    }
+
+    /// Keep each unsaved edit as a draft where it changed since it was last kept, and let
+    /// go of the drafts of assets saved, gone or known by another key since.
+    fn keep_drafts(&mut self, workspace: &Workspace) {
+        if !self.open() {
+            return;
+        }
+        for (id, kept) in std::mem::take(&mut self.drafted) {
+            let unsaved = workspace.get(id).is_some_and(LocalEntity::is_unsaved);
+            match unsaved && self.ids.key(id) == Some(&kept.0) {
+                true => _ = self.drafted.insert(id, kept),
+                false => self.send(Cmd::Discard(kept.0)),
+            }
+        }
+        let gone: Vec<u64> = self
+            .restoring
+            .keys()
+            .copied()
+            .filter(|id| workspace.get(*id).is_none())
+            .collect();
+        for id in gone {
+            if let Some((key, _, _)) = self.restoring.remove(&id) {
+                self.send(Cmd::Discard(key));
+            }
+        }
+        for entity in workspace.listed().filter(|entity| entity.is_unsaved()) {
+            let (Some(key), Some(base)) = (self.ids.key(entity.id).cloned(), self.base(entity.id))
+            else {
+                continue;
+            };
+            let (draft, stamp) = match workspace.kept_edit(entity.id) {
+                Some((edit, stamp)) => (Draft::Edit(edit.clone()), stamp),
+                None => (Draft::Bytes(entity.bytes.to_vec()), entity.stamp),
+            };
+            if self.drafted.get(&entity.id) == Some(&(key.clone(), stamp, base)) {
+                continue;
+            }
+            let Ok(bytes) = draft.encode() else {
+                continue;
+            };
+            self.send(Cmd::Draft {
+                of: key.clone(),
+                base,
+                bytes,
+            });
+            self.drafted.insert(entity.id, (key, stamp, base));
+        }
+    }
+
+    /// Take in the drafts an earlier session kept: each is put back over its asset once
+    /// the asset's file is read, which is asked for now.
+    fn take_drafts(
+        &mut self,
+        drafts: Vec<toshokan::report::DraftStatus>,
+        workspace: &mut Workspace,
+        log: &mut Log,
+    ) {
+        use toshokan::report::DraftState;
+
+        for draft in drafts {
+            let key = match &draft.of {
+                toshokan::Drafted::Entity(entity) => Key::Entity(*entity),
+                toshokan::Drafted::File(path) => match LibPath::parse(path.as_str()) {
+                    Some(path) => Key::File(path),
+                    None => continue,
+                },
+            };
+            let (bytes, changed) = match draft.state {
+                DraftState::Applies { bytes } => (bytes, false),
+                DraftState::BaseChanged { bytes, .. } => (bytes, true),
+                DraftState::Unreadable => {
+                    log.trouble("An unsaved edit drawbar kept could not be read.");
+                    continue;
+                }
+            };
+            let id = self.ids.id(&key).filter(|id| workspace.get(*id).is_some());
+            let Some(id) = id else {
+                log.trouble(
+                    "An unsaved edit drawbar kept is of a file no longer in the library \
+                     folder. It is kept for when the file is back.",
+                );
+                continue;
+            };
+            match Draft::decode(&bytes) {
+                Ok(draft) => {
+                    self.restoring.insert(id, (key, draft, changed));
+                    workspace.hurry(id);
+                }
+                Err(why) => {
+                    let name = workspace.get(id).map(|entity| entity.name.clone());
+                    let name = name.unwrap_or_default();
+                    log.trouble(format!(
+                        "The unsaved edit of “{name}” could not be read: {why}."
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Put back the draft kept of an asset whose file is read now, and ask what to do
+    /// where the file changed since the draft was made.
+    fn restore_draft(
+        &mut self,
+        id: u64,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        log: &mut Log,
+    ) {
+        if workspace.get(id).is_none_or(LocalEntity::unread) {
+            return;
+        }
+        let Some((key, draft, changed)) = self.restoring.remove(&id) else {
+            return;
+        };
+        match draft {
+            Draft::Bytes(bytes) => workspace.replace_bytes(id, bytes, log),
+            Draft::Edit(edit) => workspace.hold_edit(id, Some(edit)),
+        }
+        let Some(entity) = workspace.get(id) else {
+            return;
+        };
+        if !entity.is_unsaved() {
+            return self.send(Cmd::Discard(key));
+        }
+        match changed {
+            true => conflict(id, workspace, browser, log),
+            false => log.say(format!(
+                "“{}” has the unsaved edit it had when drawbar last let it go.",
+                entity.name
+            )),
+        }
     }
 
     /// Each unsaved edit, and each asset never written to a file.
@@ -439,7 +588,6 @@ impl Store {
         self.recalled(workspace, browser, log);
         self.ask(workspace, browser, queue, log);
         self.ask_tags(workspace, browser, log);
-        self.tell_unkept(workspace, log);
         let mut released = false;
         while let Some(event) = self.backend.try_recv() {
             released |= self.react(event, workspace, browser, queue, log);
@@ -736,6 +884,9 @@ impl Store {
             record.summarized = None;
             workspace.took(id, found.bytes, found.file);
         }
+        for id in self.restoring.keys().copied().collect::<Vec<_>>() {
+            self.restore_draft(id, workspace, browser, log);
+        }
         if rechecked {
             return;
         }
@@ -882,6 +1033,12 @@ impl Store {
             }
             Event::Rewritten { id, path, result } => {
                 self.rewritten(id, path, result, workspace, browser, log)
+            }
+            Event::Unkept(why) => {
+                log.error(format!("keeping an unsaved edit: {why}"));
+                log.trouble(format!(
+                    "An unsaved edit could not be kept for later: {why}."
+                ));
             }
             Event::Failed(why) => {
                 log.error(why.as_str());
@@ -1065,7 +1222,11 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) {
-        let Opened { writable, viewed } = opened;
+        let Opened {
+            writable,
+            viewed,
+            drafts,
+        } = opened;
         self.phase = match writable {
             Ok(()) => Phase::Open,
             Err(why) => {
@@ -1077,6 +1238,7 @@ impl Store {
             }
         };
         self.viewed(viewed, workspace, browser, queue, log);
+        self.take_drafts(drafts, workspace, log);
         // The count This computer's badge shows, said even at 0 to replace the last library's.
         log.say(match browser.folders.count(None, workspace) {
             0 => "No files on this computer.".to_string(),
@@ -1492,17 +1654,6 @@ impl Store {
         }
         let moved = std::mem::take(&mut self.moved);
         std::mem::take(&mut self.send_waits) && self.release(&moved, queue, workspace, log)
-    }
-
-    /// Say once that an unsaved edit is lost at a quit: this build keeps none.
-    fn tell_unkept(&mut self, workspace: &Workspace, log: &mut Log) {
-        if self.told_unkept || !workspace.listed().any(LocalEntity::is_unsaved) {
-            return;
-        }
-        self.told_unkept = true;
-        log.trouble(
-            "This build keeps no unsaved edit when drawbar quits: save an edit to keep it.",
-        );
     }
 
     /// A file drawbar knew changed on disk: an unread one is only known to be another,
@@ -1974,6 +2125,7 @@ impl Store {
         if pass != Pass::Files {
             self.summarize(workspace);
             self.cache.write();
+            self.keep_drafts(workspace);
         }
         self.asks.extend(workspace.take_file_asks());
         if !self.open() {

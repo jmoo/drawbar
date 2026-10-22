@@ -3002,7 +3002,7 @@ fn a_resting_sample_changed_in_place_before_its_save_is_not_saved_over() {
     assert!(workspace.get(id).unwrap().is_unsaved());
     assert!(workspace.edit_of(id).is_some() && !workspace.saving_edit(id));
     assert_eq!(session.said("was not saved"), 1);
-    assert_eq!(root.names(""), ["Zoned.nsmp"], "no copy is left");
+    assert_eq!(root.names(""), [".drawbar", "Zoned.nsmp"], "no copy is left");
 }
 
 /// A plan over a piano library resting in its file is saved by laying the library out
@@ -3971,4 +3971,145 @@ fn a_tag_nothing_wears_is_kept_until_it_is_removed() {
     second.close();
     let third = Session::listed(&root);
     assert_eq!(third.tag_names(), ["Gig"]);
+}
+
+impl Session {
+    /// Edit the asset `id` held whole, leaving the edit unsaved.
+    fn edit(&mut self, id: u64, gain: &str) -> Vec<u8> {
+        let edited = with_gain(&self.bytes(id), gain);
+        let Bench { workspace, log, .. } = &mut self.bench;
+        workspace.replace_bytes(id, edited.clone(), log);
+        edited
+    }
+
+    /// The autosave's pass, and every command it sent run through.
+    fn autosave(&mut self) {
+        let Bench {
+            workspace, browser, ..
+        } = &mut self.bench;
+        self.store.sync(workspace, browser, Pass::Full);
+        self.settle();
+    }
+}
+
+/// Copy the folder at `from` to `to`, as it is now.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        match entry.file_type().unwrap().is_dir() {
+            true => copy_tree(&entry.path(), &target),
+            false => _ = fs::copy(entry.path(), target).unwrap(),
+        }
+    }
+}
+
+/// An unsaved edit is kept as a draft, outside the library folder, and is there again,
+/// still unsaved, when drawbar opens the library after a quit.
+#[test]
+fn an_unsaved_edit_comes_back_after_a_quit() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.sync();
+    let file = root.read("untitled.ne5p");
+    let edited = first.edit(id, "96");
+    first.close();
+    assert_eq!(root.read("untitled.ne5p"), file, "the file is not written");
+
+    let second = Session::open(&root);
+    let id = second.only();
+    let entity = second.bench.workspace.get(id).unwrap();
+    assert!(entity.is_unsaved());
+    assert!(second.bytes(id) == edited);
+    assert_eq!(second.said("has the unsaved edit it had"), 1);
+}
+
+/// The autosave keeps an unsaved edit as a draft, so a drawbar stopped without a quit
+/// finds it again, from the folder and this install's own state as it left them.
+#[test]
+fn an_unsaved_edit_the_autosave_kept_survives_a_crash() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.sync();
+    let edited = first.edit(id, "96");
+    first.autosave();
+    let crashed = Temp::new();
+    copy_tree(&root.0, &crashed.0);
+    copy_tree(&root.local(), &crashed.local());
+
+    let second = Session::open(&crashed);
+    let id = second.only();
+    assert!(second.bench.workspace.get(id).unwrap().is_unsaved());
+    assert!(second.bytes(id) == edited);
+}
+
+/// A draft over a file that changed outside drawbar since is shown over the file as it
+/// is now, and drawbar asks which to keep.
+#[test]
+fn an_unsaved_edit_over_a_file_changed_since_asks_which_to_keep() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.sync();
+    let file = root.read("untitled.ne5p");
+    let edited = first.edit(id, "96");
+    first.close();
+    fs::write(root.at("untitled.ne5p"), with_gain(&file, "12")).unwrap();
+
+    let second = Session::open(&root);
+    let id = second.only();
+    assert!(second.bytes(id) == edited, "the edit shows");
+    let (title, answers) = second.bench.browser.asking().expect("a question is asked");
+    assert_eq!(title, "“untitled.ne5p” changed on disk");
+    assert_eq!(answers, ["Keep mine", "Keep both", "Take theirs"]);
+}
+
+/// Saving an edit lets its draft go: the next open finds the file as it was saved, and
+/// nothing unsaved.
+#[test]
+fn a_saved_edit_leaves_no_draft() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.sync();
+    let edited = first.edit(id, "96");
+    first.autosave();
+    first.bench.workspace.mark_saved(id);
+    first.sync();
+    first.autosave();
+    first.close();
+
+    let second = Session::open(&root);
+    let id = second.only();
+    assert!(!second.bench.workspace.get(id).unwrap().is_unsaved());
+    assert!(second.bytes(id) == edited);
+    assert_eq!(second.said("has the unsaved edit it had"), 0);
+}
+
+/// An edit held of a sample instrument resting in its file comes back as that edit,
+/// over the file, which is not read whole.
+#[test]
+fn an_edit_of_a_resting_sample_comes_back_as_an_edit() {
+    let root = Temp::new();
+    let (mut first, id, _) = resting_sample(&root);
+    let sets = vec![("name".to_string(), "Vibes".to_string())];
+    let edit = crate::rewrite::Edit::Sample(sets);
+    first.bench.workspace.hold_edit(id, Some(edit.clone()));
+    first.close();
+
+    let (second, id, _) = resting_sample_again(&root);
+    let workspace = &second.bench.workspace;
+    assert!(workspace.get(id).unwrap().rests().is_some());
+    assert_eq!(workspace.kept_edit(id).map(|(held, _)| held), Some(&edit));
+}
+
+/// The library `resting_sample` made, opened again.
+fn resting_sample_again(root: &Temp) -> (Session, u64, ()) {
+    let mut session = Session::listed(root);
+    session.ask_all();
+    let id = session.only();
+    (session, id, ())
 }
