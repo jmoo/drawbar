@@ -4833,6 +4833,35 @@ fn an_unsaved_edit_follows_its_file_through_a_folder_rename_and_its_undo() {
     assert!(again.bytes(id) == edited, "the edit came back");
 }
 
+/// Two windows that kept unsaved edits of one file: the newer comes back, and the
+/// older is let go, with a word.
+#[test]
+fn of_two_windows_edits_of_one_file_the_newer_comes_back() {
+    let root = Temp::new();
+    fs::write(root.at("a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut first = Session::open(&root);
+    let mut second = Session::open(&root);
+    let a = first.named("a.ne5p");
+    first.edit(a, "12");
+    first.close();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let a = second.named("a.ne5p");
+    let newer = second.edit(a, "24");
+    second.close();
+
+    let again = Session::open(&root);
+    let a = again.named("a.ne5p");
+    assert!(again.bytes(a) == newer, "the newer edit");
+    assert_eq!(
+        again.said("the newer is shown, and the older was let go"),
+        1
+    );
+    again.close();
+    let last = Session::open(&root);
+    assert_eq!(last.said("the older was let go"), 0, "the older is gone");
+    assert!(last.bytes(last.named("a.ne5p")) == newer);
+}
+
 /// Two windows of this install keep their unsaved edits as two writers' drafts. Opened
 /// again with one window, both edits come back.
 #[test]

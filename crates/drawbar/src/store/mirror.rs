@@ -273,7 +273,7 @@ pub struct Store {
     drafted: BTreeMap<u64, (Key, u64, toshokan::Identity)>,
     /// The drafts an earlier session kept, each put back over its asset once its file is
     /// read: as it is kept, and whether its file changed since the draft was made.
-    restoring: BTreeMap<u64, (super::Kept, Draft, bool)>,
+    restoring: BTreeMap<u64, (super::Kept, Draft, bool, Option<u64>)>,
     /// Drafts put back that another writer kept, or under a key the asset no longer
     /// goes by, each let go of once this writer keeps the edit itself.
     superseded: BTreeMap<u64, super::Kept>,
@@ -521,7 +521,7 @@ impl Store {
             .filter(|id| !held(id))
             .collect();
         for id in gone {
-            if let Some((kept, _, _)) = self.restoring.remove(&id) {
+            if let Some((kept, ..)) = self.restoring.remove(&id) {
                 self.send(Cmd::Discard(kept));
             }
         }
@@ -743,6 +743,7 @@ impl Store {
                 of: key.clone(),
                 pooled: draft.pooled,
             };
+            let modified = draft.modified;
             let (bytes, changed) = match draft.state {
                 DraftState::Applies { bytes } => (bytes, false),
                 DraftState::BaseChanged { bytes, .. } => (bytes, true),
@@ -762,8 +763,7 @@ impl Store {
                 Key::File(path) => self.ids.id(&key).or_else(|| at(path)),
                 Key::Entity(_) => self.ids.id(&key),
             };
-            let id = id.filter(|id| workspace.get(*id).is_some());
-            let Some(id) = id.filter(|id| !self.restoring.contains_key(id)) else {
+            let Some(id) = id.filter(|id| workspace.get(*id).is_some()) else {
                 log.trouble(
                     "An unsaved edit drawbar kept is of a file no longer in the library \
                      folder. It is kept for when the file is back.",
@@ -772,7 +772,26 @@ impl Store {
             };
             match Draft::decode(&bytes) {
                 Ok(draft) => {
-                    self.restoring.insert(id, (kept, draft, changed));
+                    let restoring = (kept, draft, changed, modified);
+                    let older = match self.restoring.remove(&id) {
+                        Some(earlier) if earlier.3 > restoring.3 => {
+                            self.restoring.insert(id, earlier);
+                            Some(restoring.0)
+                        }
+                        earlier => {
+                            self.restoring.insert(id, restoring);
+                            earlier.map(|earlier| earlier.0)
+                        }
+                    };
+                    if let Some(older) = older {
+                        self.send(Cmd::Discard(older));
+                        let name = workspace.get(id).map(|entity| entity.name.clone());
+                        log.say(format!(
+                            "Two drawbar windows kept unsaved edits of “{}”: the newer is \
+                             shown, and the older was let go.",
+                            name.unwrap_or_default()
+                        ));
+                    }
                     workspace.hurry(id);
                 }
                 Err(why) => {
@@ -798,7 +817,7 @@ impl Store {
         if workspace.get(id).is_none_or(LocalEntity::unread) {
             return;
         }
-        let Some((kept, draft, changed)) = self.restoring.remove(&id) else {
+        let Some((kept, draft, changed, _)) = self.restoring.remove(&id) else {
             return;
         };
         match draft {
