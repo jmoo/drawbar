@@ -1620,7 +1620,15 @@ impl Store {
             }
         }
         for orphan in unfinished {
-            browser.ask_unfinished(orphan);
+            match orphan.live {
+                // ⚠️ Another window may be making it now: finishing or rolling it back
+                // would race it.
+                true => log.say(format!(
+                    "“{}” is in progress in another drawbar window.",
+                    orphan.label
+                )),
+                false => browser.ask_unfinished(orphan),
+            }
         }
     }
 
