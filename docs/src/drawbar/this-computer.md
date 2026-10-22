@@ -70,9 +70,11 @@ library keeps no unsaved edits.
 tags, and **Edit ▸ Redo** (⇧⌘Z) makes it again. Undo reaches back only to when
 this window opened the library: a change from before, or from another window,
 cannot be undone. The menu says which change it is, such as **Undo Rename
-“c3.ne5p”**. A save, a new sound, a copy, a rename or move, a deletion, and a
-change to tags can each be undone. One action is one step: moving or deleting
-several sounds at once, or making a tag and naming it, is one undo. An edit
+“c3.ne5p”**. A save, a new sound, a copy, a rename or move, a deletion, a new or
+removed folder, and a change to tags can each be undone. One action is one
+step: dropping, moving or deleting several sounds at once, unpacking a bundle,
+writing over a sound, removing a folder with what is in it, or making a tag and
+naming it, is one undo. An edit
 you have not saved is taken back with **Revert** instead.
 
 Deleting a sound, or saving over one, moves the old file into drawbar's trash in

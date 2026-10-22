@@ -493,11 +493,15 @@ reads files and makes folders through `exec::Fs` (`store/native.rs`).
 | `KeepSlot`, `DiscardSlot` | Only `Unkept`, on failure. |
 | `ReadSlot` | `SlotKept`: the edit kept of a slot's view, with the hash it was made over. |
 | `File(Read)` | `Read`: each file, held whole or resting, or why not. |
-| `File(MakeDir)`, `File(RemoveDir)` | Only `Failed`, on failure. Then `Viewed`. |
 
 The intents are `Tag`, `Untag`, `MakeTag`, `RenameTag`, `RemoveTag` and `Forget`
-for the facts, and `Save`, `Rewrite`, `Import`, `Move`, `MoveFolder` and `Delete`
-for the files; `Move` and `Delete` each name every file of one gesture. A commit
+for the facts; `Save`, `Rewrite`, `Import`, `Move`, `MoveFolder` and `Delete` for
+the files; and `MakeDir` and `RemoveDir` for folders, which an undo takes back
+too. `Batch` carries the changes of one gesture as one intent: the keeper builds
+them into one toshokan intent, answers each part as it would be answered alone,
+by whether its file or folder landed, and where a file a part copies could not be
+read before anything was written, answers that part and commits the rest without
+it. A commit
 may also answer `Trimmed`, the changes whose undo the trash no longer holds.
 Each view an answer carries is projected onto the workspace from what it changed
 since the view before (`toshokan::View::changed_since`); the view an answer
@@ -514,15 +518,16 @@ it (`workspace::FileAsk`): a save, which makes the file where the asset has none
 a move; and a delete. Following a change the library made, or one made outside
 drawbar, asks for nothing (`Workspace::follow`). Folder changes are queued the
 same way by the browser's folders (`folders::Op`), and copies by the workspace's
-arriving assets. `Store::sync` takes them in order and sends each as an intent.
+arriving assets. `Store::sync` takes them in order and gathers what one pass
+takes, which is one gesture's, into one intent.
 
 A change waits for the answer to one before it where it depends on it: a write
 over a file whose last write has not answered, and anything that touches a
 rename not yet answered, since were the rename refused, the change would act on
 whatever else has that name. A change that waits holds back every one after it.
-The moves, or the deletions, taken from the workspace at once, which are one
-gesture's, go as one intent (`Store::carry_out`), unless one of them waits for
-an answer: those after it go as an intent of their own.
+A change that waits for an answer splits its gesture: those after it go as an
+intent of their own. An overwrite deletes the file it came from in its own
+intent, and a tag on files the same pass saves new goes on them as they are made.
 While a rescan is in flight, `Store::sync` sends nothing, so the rescan's listing
 describes the files as the commands before it left them.
 
