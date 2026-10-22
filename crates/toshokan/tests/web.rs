@@ -30,13 +30,7 @@ fn path(text: &str) -> RelPath {
 }
 
 fn identity(bytes: &[u8]) -> Identity {
-    let len = bytes.len() as u64;
-    let parts: Vec<Vec<u8>> = IDENTIFY
-        .ranges(len)
-        .iter()
-        .map(|range| bytes[range.offset as usize..][..range.len as usize].to_vec())
-        .collect();
-    IDENTIFY.identify(len, &parts)
+    IDENTIFY.of_bytes(&RelPath::ROOT, bytes)
 }
 
 fn schema() -> Schema {

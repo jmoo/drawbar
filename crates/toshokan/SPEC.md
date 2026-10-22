@@ -106,9 +106,12 @@ Every identifier is 128 bits written as 32 hexadecimal digits.
 | entry hash | An entry's id, link and checksum                                     |
 | identity   | What the app's identity function says a file holds                   |
 
-The identity function is the app's: a cheap fingerprint of a file's contents
-from a few ranges of its bytes. toshokan compares identities and never computes
-one itself.
+The identity function is the app's: a fingerprint of a file's contents from the
+ranges of its bytes the app names for the file's path and length, so it may read
+a few ranges of a file whose format checksums its own contents and every byte of
+any other. toshokan reads those ranges and feeds them to the app's digest, a
+file at most 1 MiB of ranges together with others and a larger one 1 MiB at a
+time, and never computes an identity itself.
 
 A clock reading is the JSON array `[wall_ms, counter]`: milliseconds since the
 Unix epoch and a counter within the millisecond, a hybrid logical clock. A

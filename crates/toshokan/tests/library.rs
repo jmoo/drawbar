@@ -47,7 +47,7 @@ fn path(text: &str) -> RelPath {
 const IDENTIFY: PrefixIdentity = PrefixIdentity { prefix: 1 << 16 };
 
 fn identity(bytes: &[u8]) -> Identity {
-    IDENTIFY.identify(bytes.len() as u64, &[bytes.to_vec()])
+    IDENTIFY.of_bytes(&RelPath::ROOT, bytes)
 }
 
 fn env(label: &str, seed: u64, clock: &TestClock) -> Env {

@@ -589,7 +589,7 @@ impl Gen {
 fn identity_of(backend: &mut dyn Backend, path: &RelPath, len: u64) -> Identity {
     let identify = PrefixIdentity::default();
     let parts: Vec<Vec<u8>> = identify
-        .ranges(len)
+        .ranges(path, len)
         .into_iter()
         .map(|range| {
             let read = backend.perform(Io::Read {
@@ -603,7 +603,9 @@ fn identity_of(backend: &mut dyn Backend, path: &RelPath, len: u64) -> Identity 
             }
         })
         .collect();
-    identify.identify(len, &parts)
+    let mut digest = identify.digest(path, len);
+    parts.iter().for_each(|part| digest.update(part));
+    digest.finish()
 }
 
 fn stat(backend: &mut dyn Backend, path: &RelPath) -> (u64, Option<u64>) {

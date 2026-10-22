@@ -3,10 +3,12 @@
 //! this build.
 
 #[cfg(not(target_arch = "wasm32"))]
+use toshokan::env::{Blake3, Digest};
+#[cfg(not(target_arch = "wasm32"))]
 use toshokan::io::Range;
 use toshokan::Set;
 #[cfg(not(target_arch = "wasm32"))]
-use toshokan::{Identify, Identity, Layout, Schema};
+use toshokan::{Identify, Identity, Layout, RelPath, Schema};
 
 /// The tags on an asset, by name.
 pub const TAGS: Set<String> = Set::new("tags");
@@ -43,7 +45,7 @@ pub struct Contents;
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Identify for Contents {
-    fn ranges(&self, len: u64) -> Vec<Range> {
+    fn ranges(&self, _: &RelPath, len: u64) -> Vec<Range> {
         vec![
             Range {
                 offset: 0,
@@ -56,33 +58,27 @@ impl Identify for Contents {
         ]
     }
 
-    fn identify(&self, len: u64, parts: &[Vec<u8>]) -> Identity {
+    fn digest(&self, _: &RelPath, len: u64) -> Box<dyn Digest> {
         let mut hasher = blake3::Hasher::new();
         hasher.update(&len.to_le_bytes());
-        for part in parts {
-            hasher.update(&(part.len() as u64).to_le_bytes());
-            hasher.update(part);
-        }
-        let mut first = [0; 16];
-        first.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
-        Identity::from_u128(u128::from_le_bytes(first))
+        Box::new(Blake3(hasher))
     }
 }
 
-/// The identity of the file `file` opens.
+/// The identity of the library file at `path`, which `file` opens.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn identity_of(file: &mut std::fs::File) -> std::io::Result<Identity> {
+pub fn identity_of(path: &RelPath, file: &mut std::fs::File) -> std::io::Result<Identity> {
     use std::io::{Read as _, Seek as _, SeekFrom};
 
     let len = file.metadata()?.len();
-    let mut parts = Vec::new();
-    for range in Contents.ranges(len) {
+    let mut digest = Contents.digest(path, len);
+    for range in Contents.ranges(path, len) {
         file.seek(SeekFrom::Start(range.offset))?;
         let mut part = Vec::new();
         file.by_ref().take(range.len).read_to_end(&mut part)?;
-        parts.push(part);
+        digest.update(&part);
     }
-    Ok(Contents.identify(len, &parts))
+    Ok(digest.finish())
 }
 
 #[cfg(test)]
@@ -90,25 +86,16 @@ mod tests {
     use super::*;
 
     fn identity(bytes: &[u8]) -> Identity {
-        let len = bytes.len() as u64;
-        let parts: Vec<Vec<u8>> = Contents
-            .ranges(len)
-            .into_iter()
-            .map(|range| {
-                let start = range.offset as usize;
-                bytes[start..start + range.len as usize].to_vec()
-            })
-            .collect();
-        Contents.identify(len, &parts)
+        Contents.of_bytes(&RelPath::ROOT, bytes)
     }
 
     #[test]
     fn an_identity_reads_the_head_and_the_last_two_bytes_of_a_large_file() {
-        let ranges = Contents.ranges(10 << 20);
+        let ranges = Contents.ranges(&RelPath::ROOT, 10 << 20);
         let read: Vec<(u64, u64)> = ranges.iter().map(|r| (r.offset, r.len)).collect();
         assert_eq!(read, [(0, 64 << 10), ((10 << 20) - 2, 2)]);
         let short: Vec<(u64, u64)> = Contents
-            .ranges(1)
+            .ranges(&RelPath::ROOT, 1)
             .iter()
             .map(|r| (r.offset, r.len))
             .collect();
@@ -142,6 +129,7 @@ mod tests {
         let bytes = crate::testing::wav_bytes();
         std::fs::write(dir.at("a.wav"), &bytes).unwrap();
         let mut file = std::fs::File::open(dir.at("a.wav")).unwrap();
-        assert_eq!(identity_of(&mut file).unwrap(), identity(&bytes));
+        let path = RelPath::new("a.wav").unwrap();
+        assert_eq!(identity_of(&path, &mut file).unwrap(), identity(&bytes));
     }
 }

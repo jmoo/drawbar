@@ -393,9 +393,7 @@ pub fn put(d: &mut impl Driven, files: &[(&str, &[u8])]) {
 pub const IDENTIFY: PrefixIdentity = PrefixIdentity { prefix: 4 };
 
 pub fn identity(bytes: &[u8]) -> toshokan::Identity {
-    let len = bytes.len() as u64;
-    let prefix = bytes[..bytes.len().min(4)].to_vec();
-    IDENTIFY.identify(len, &[prefix])
+    IDENTIFY.of_bytes(&RelPath::ROOT, bytes)
 }
 
 pub fn identify() -> Rc<dyn Identify> {

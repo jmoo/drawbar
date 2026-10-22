@@ -206,14 +206,7 @@ fn env(label: &str) -> Env {
 }
 
 fn identity(bytes: &[u8]) -> Identity {
-    let identify = PrefixIdentity::default();
-    let len = bytes.len() as u64;
-    let parts: Vec<Vec<u8>> = identify
-        .ranges(len)
-        .iter()
-        .map(|r| bytes[r.offset as usize..][..r.len.min(len - r.offset) as usize].to_vec())
-        .collect();
-    identify.identify(len, &parts)
+    PrefixIdentity::default().of_bytes(&RelPath::ROOT, bytes)
 }
 
 fn file_path(i: usize) -> RelPath {

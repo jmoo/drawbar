@@ -215,7 +215,8 @@ fn relative(path: &LibPath) -> Option<RelPath> {
 fn identity(folder: &Path, path: &LibPath) -> std::io::Result<toshokan::Identity> {
     let mut at = folder.to_path_buf();
     at.extend(path.components());
-    keys::identity_of(&mut std::fs::File::open(at)?)
+    let relative = relative(path).ok_or(std::io::ErrorKind::InvalidInput)?;
+    keys::identity_of(&relative, &mut std::fs::File::open(at)?)
 }
 
 /// Every folder below `root` drawbar lists, in path order: none whose name starts with a
