@@ -42,14 +42,14 @@ impl Summary {
     /// describes its file.
     pub fn of(entity: &LocalEntity) -> Option<Summary> {
         if entity.unread() {
-            return entity.remembered.as_deref().cloned();
+            return entity.remembered().cloned();
         }
-        let verdict = Verdict::of(&entity.verify)?;
+        let verdict = Verdict::of(&entity.verify())?;
         let decoded = entity.entity.as_deref();
         Some(Summary {
             kind: Kind::of(entity),
             tag: entity.tag(),
-            crc32: entity.saved.crc32,
+            crc32: entity.saved.crc32(),
             plays: entity.plays,
             verdict,
             generation: entity.generation(),

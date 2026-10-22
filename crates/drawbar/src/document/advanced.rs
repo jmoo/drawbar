@@ -496,12 +496,12 @@ fn flag(
 /// Whether the bytes this app would write are the bytes it read. This is the only row
 /// of the record that is a claim; the others report what was read.
 fn verify(ui: &mut egui::Ui, entity: &LocalEntity) {
-    let ink = entity.verify.color(ui.visuals());
+    let ink = entity.verify().color(ui.visuals());
     fact(
         ui,
         "Verify",
-        entity.verify.badge(),
-        &entity.verify.detail(),
+        entity.verify().badge(),
+        &entity.verify().detail(),
         ink,
     );
     if let Some(e) = &entity.parse_error {
