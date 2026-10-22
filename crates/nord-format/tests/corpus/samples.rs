@@ -87,12 +87,13 @@ pub fn planned(plan: &nsmp::encode::Plan) -> [usize; 4] {
 /// Every stroke's decoded fields, in file order.
 pub fn audio(sample: &Sample) -> Result<Vec<Vec<i16>>, String> {
     let layout = sample.layout().context("layout")?;
+    let file_peak = sample.file_peak().context("file peak")?;
     sample
         .stroke_streams()
         .into_iter()
         .enumerate()
         .map(|(index, (at, stream))| {
-            nsmp::codec::decode(stream, at, layout)
+            nsmp::codec::decode(stream, at, layout, file_peak)
                 .map(|audio| audio.samples)
                 .context(format!("stroke {index}"))
         })
@@ -159,16 +160,6 @@ pub fn statistic_a(stroke: &[u8], peak: u64, gain: u64) -> Result<(), String> {
         &want[1..]
     );
     Ok(())
-}
-
-/// The file peak over every stroke, as statistic A measures it.
-pub fn peak(streams: &[(usize, &[u8])], layout: nsmp::codec::Layout) -> u64 {
-    streams
-        .iter()
-        .filter_map(|(_, s)| nsmp::codec::peak(s, layout))
-        .map(|p| u64::from(p.unsigned_abs()))
-        .max()
-        .unwrap_or(0)
 }
 
 /// The gain stroke `id` was built with, read from a wide render's decibel field.

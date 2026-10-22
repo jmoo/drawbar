@@ -166,7 +166,7 @@ impl Layout {
 /// Statistic A's mantissa: a 24-bit big-endian value in front of its exponent byte.
 pub(super) const MANTISSA_AT: usize = 9;
 
-/// Statistic A's exponent byte; [`shift`] recovers the quantizer scale from it.
+/// Statistic A's exponent byte; [`shift_against`] recovers the quantizer scale from it.
 pub(super) const STAT_A_EXP_AT: usize = 12;
 
 /// Statistic B: the content peak as a 24-bit big-endian value.
@@ -418,11 +418,33 @@ pub fn peak(stroke: &[u8], layout: Layout) -> Option<i32> {
     })
 }
 
-/// Signed quantizer shift recovered from statistic A's exponent and [`peak`].
+/// The largest magnitude of statistic B over `strokes`, which must be every stroke of
+/// one file. Each stroke's statistic A states its shift against this, not against the
+/// stroke's own statistic B; see [`shift_against`]. A stroke too short to hold the
+/// field adds nothing, and decoding it fails anyway.
+///
+/// Inferred from specimens; not confirmed on hardware.
+pub fn file_peak<'a>(strokes: impl IntoIterator<Item = &'a [u8]>, layout: Layout) -> u32 {
+    strokes
+        .into_iter()
+        .filter_map(|stroke| peak(stroke, layout))
+        .map(i32::unsigned_abs)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Signed quantizer shift recovered from statistic A's exponent against `file_peak`,
+/// the largest magnitude of statistic B over every stroke in the file ([`file_peak`]).
 /// Dequantizing applies the shift alone: statistic A's mantissa carries the zone's
 /// gain, which the instrument applies at playback, not the decoder.
-pub fn shift(stroke: &[u8], layout: Layout) -> Option<i32> {
-    let peak = peak(stroke, layout)?.unsigned_abs().max(1);
+///
+/// ⚠️ A stroke's own statistic B gives the same shift only when it is as wide as the
+/// file's. On a multi-zone instrument a narrower zone read against its own decodes a
+/// power of two or more too quiet.
+///
+/// Inferred from specimens; not confirmed on hardware.
+pub fn shift_against(stroke: &[u8], file_peak: u32) -> Option<i32> {
+    let peak = file_peak.max(1);
     let exponent = i32::from(*stroke.get(STAT_A_EXP_AT)?);
     let bits = peak.ilog2() as i32 + 1;
     let exact_power = i32::from(peak.is_power_of_two());
@@ -649,11 +671,18 @@ pub fn walk(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Stream, U
     Err(Unsupported::NoTerminator)
 }
 
-/// Decode a stroke at body offset `stroke_at` into [`FIELD_RATE`] audio.
-pub fn decode(stroke: &[u8], stroke_at: usize, layout: Layout) -> Result<Audio, Unsupported> {
+/// Decode a stroke at body offset `stroke_at` into [`FIELD_RATE`] audio, at the level
+/// [`shift_against`] reads against `file_peak`, the [`file_peak`] of the file the
+/// stroke belongs to.
+pub fn decode(
+    stroke: &[u8],
+    stroke_at: usize,
+    layout: Layout,
+    file_peak: u32,
+) -> Result<Audio, Unsupported> {
     let stream = walk(stroke, stroke_at, layout)?;
     let channels = stream.channels;
-    let shift = shift(stroke, layout).ok_or(Unsupported::Short)?;
+    let shift = shift_against(stroke, file_peak).ok_or(Unsupported::Short)?;
     if !(-SHIFT_LIMIT..=SHIFT_LIMIT).contains(&shift) {
         return Err(Unsupported::Shift { bits: shift });
     }
@@ -807,6 +836,11 @@ mod tests {
         }
     }
 
+    /// The file peak of a file holding `stroke` alone.
+    fn alone(stroke: &[u8], layout: Layout) -> u32 {
+        file_peak([stroke], layout)
+    }
+
     /// Build a stroke at body offset zero whose directory points at `chain`.
     fn stroke(layout: Layout, peak: i32, exponent: u8, lead: usize, chain: &[Vec<u8>]) -> Vec<u8> {
         let word = layout.word();
@@ -890,7 +924,8 @@ mod tests {
             assert_eq!(stream.channels, 2, "{layout:?}");
             assert_eq!(stream.cell, Some(2 * layout.cell()), "{layout:?}");
 
-            let audio = decode(&s, 0, layout).expect("the stereo stroke decodes");
+            let audio =
+                decode(&s, 0, layout, alone(&s, layout)).expect("the stereo stroke decodes");
             assert_eq!(audio.channels, 2, "{layout:?}");
             assert_eq!(audio.frames(), per, "{layout:?}");
             let got_l: Vec<i32> = audio
@@ -952,7 +987,7 @@ mod tests {
                     .collect()
             };
             let s = stereo_stroke_ordered(layout, 11, &diff(&l), &diff(&r));
-            let audio = decode(&s, 0, layout).expect("decodes");
+            let audio = decode(&s, 0, layout, alone(&s, layout)).expect("decodes");
             let got_l: Vec<i32> = audio
                 .samples
                 .iter()
@@ -1005,22 +1040,42 @@ mod tests {
             // whose exponent byte stays in range.
             for (peak, want) in [(8191i32, 2i32), (1, 0), (4096, 7), (255, -8), (12345, 3)] {
                 let s = stroke(layout, peak, exponent_for(peak, want), 0, &[]);
-                assert_eq!(shift(&s, layout), Some(want), "{layout:?} peak {peak}");
+                assert_eq!(
+                    shift_against(&s, alone(&s, layout)),
+                    Some(want),
+                    "{layout:?} peak {peak}"
+                );
             }
             // A peak of zero reads as one.
             let s = stroke(layout, 0, exponent_for(1, 5), 0, &[]);
-            assert_eq!(shift(&s, layout), Some(5), "{layout:?}");
+            assert_eq!(shift_against(&s, alone(&s, layout)), Some(5), "{layout:?}");
         }
+    }
+
+    #[test]
+    fn every_stroke_reads_its_shift_against_the_widest_statistic_b_in_the_file() {
+        for layout in BOTH {
+            let loud = stroke(layout, 8191, exponent_for(8191, 2), 0, &[]);
+            let quiet = stroke(layout, 255, exponent_for(8191, 2), 0, &[]);
+            let file = file_peak([loud.as_slice(), &quiet], layout);
+            assert_eq!(file, 8191, "{layout:?}");
+            assert_eq!(shift_against(&quiet, file), Some(2), "{layout:?}");
+            assert_eq!(shift_against(&quiet, alone(&quiet, layout)), Some(-3));
+        }
+        let negative = stroke(Layout::V3, -8191, exponent_for(8191, 2), 0, &[]);
+        let quiet = stroke(Layout::V3, 255, exponent_for(8191, 2), 0, &[]);
+        assert_eq!(file_peak([quiet.as_slice(), &negative], Layout::V3), 8191);
+        assert_eq!(file_peak([&[0u8; PEAK_AT][..]], Layout::V3), 0);
     }
 
     #[test]
     fn statistic_b_is_signed_in_the_wide_layout() {
         let s = stroke(Layout::V3, -8191, exponent_for(8191, 2), 0, &[]);
         assert_eq!(peak(&s, Layout::V3), Some(-8191));
-        assert_eq!(shift(&s, Layout::V3), Some(2));
+        assert_eq!(shift_against(&s, alone(&s, Layout::V3)), Some(2));
         let silent = stroke(Layout::V3, -1, exponent_for(1, 0), 0, &[]);
         assert_eq!(peak(&silent, Layout::V3), Some(-1));
-        assert_eq!(shift(&silent, Layout::V3), Some(0));
+        assert_eq!(shift_against(&silent, alone(&silent, Layout::V3)), Some(0));
         // The same bytes are a large positive peak in the narrow layout, which does
         // not sign the field.
         assert_eq!(peak(&silent, Layout::V2), Some(0xff_ffff));
@@ -1113,7 +1168,7 @@ mod tests {
                     block(layout, false, 13, 1, &hold),
                 ],
             );
-            let audio = decode(&s, 0, layout).unwrap();
+            let audio = decode(&s, 0, layout, alone(&s, layout)).unwrap();
             assert_eq!(audio.differenced, 2 * layout.cell(), "{layout:?}");
             // The level carries: every field of the differenced run holds the value
             // the 1:1 record settled on.
@@ -1141,7 +1196,7 @@ mod tests {
                     block(layout, false, 13, 2, &coast),
                 ],
             );
-            let audio = decode(&s, 0, layout).unwrap();
+            let audio = decode(&s, 0, layout, alone(&s, layout)).unwrap();
             let last = layout.cell() - 1;
             assert_eq!(audio.samples[last], 10 * last as i16, "{layout:?}");
             assert_eq!(
@@ -1183,7 +1238,7 @@ mod tests {
         let walked = walk(&s, 0, Layout::V4).unwrap();
         assert_eq!(walked.records[0].values, values);
         assert_eq!(walked.cell, Some(64));
-        let audio = decode(&s, 0, Layout::V4).unwrap();
+        let audio = decode(&s, 0, Layout::V4, alone(&s, Layout::V4)).unwrap();
         let interleaved = values[..33]
             .iter()
             .zip(&values[33..])
@@ -1254,7 +1309,10 @@ mod tests {
                 0,
                 &[block(layout, false, 13, 0, &values)],
             );
-            assert_eq!(decode(&s, 0, layout).unwrap().samples[..2], [200, -200]);
+            assert_eq!(
+                decode(&s, 0, layout, alone(&s, layout)).unwrap().samples[..2],
+                [200, -200]
+            );
         }
     }
 
@@ -1272,7 +1330,10 @@ mod tests {
                 0,
                 &[block(layout, false, 13, 0, &values)],
             );
-            assert_eq!(decode(&s, 0, layout).unwrap().samples[..2], [128, -128]);
+            assert_eq!(
+                decode(&s, 0, layout, alone(&s, layout)).unwrap().samples[..2],
+                [128, -128]
+            );
         }
     }
 
@@ -1288,7 +1349,7 @@ mod tests {
                 0,
                 &[block(layout, false, 13, 0, &values)],
             );
-            let audio = decode(&s, 0, layout).unwrap();
+            let audio = decode(&s, 0, layout, alone(&s, layout)).unwrap();
             assert_eq!(audio.samples[0], i16::MAX);
             assert_eq!(audio.clipped, 1);
         }
@@ -1381,7 +1442,7 @@ mod tests {
 
             let shifted = stroke(layout, 1, exponent_for(1, SHIFT_LIMIT + 1), 0, &[]);
             assert_eq!(
-                decode(&shifted, 0, layout),
+                decode(&shifted, 0, layout, alone(&shifted, layout)),
                 Err(Unsupported::Shift {
                     bits: SHIFT_LIMIT + 1
                 })
