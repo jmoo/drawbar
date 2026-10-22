@@ -8,12 +8,13 @@
 (* first entry of a chain) and the effect it closes, if any. Fact values   *)
 (* are not modeled: the merge is a join over entries, so a reader's state  *)
 (* is the set of entries whose effects it has merged (`acc`). An entry     *)
-(* also holds its number in its chain, 0 for the first.                    *)
+(* also holds its number in its chain, 0 for the first, and the entries it *)
+(* dismisses, if any.                                                      *)
 (*                                                                         *)
 (* A file is a segment (a growing sequence of entries, which the process   *)
 (* writing it seals when it closes it), a snapshot (anchored at its last   *)
 (* entry, it reflects the chain it folds but lets a reader chain only from *)
-(* its last `Window` entries and the lines it certified) or a pending      *)
+(* its anchor and recognize only the lines it certified) or a pending      *)
 (* record (one effect, in flight or spent: closed by a logged entry).      *)
 (* Files are never edited in place: segments only grow, and the owner      *)
 (* deletes whole files. Each reader sees each file through `vis`: nothing, *)
@@ -34,12 +35,14 @@ CONSTANTS
     MaxClones,      \* bound on cloned writer histories
     MaxLosses,      \* bound on lost local roots
     MaxWriters,     \* bound on writer ids, which name directories
-    MaxRestores,    \* bound on restores of the folder from its backup
-    Window,         \* how many of a chain's last entries a snapshot lets a reader chain from
+    MaxRestores,    \* bound on restores of the folder, or of one directory, from its backup
+    MaxDrops,       \* bound on files a sync client reverts to an earlier version
     Certify,        \* a snapshot certifies the lines it folds of its directory's files
-    Numbered,       \* a reader places an entry only within its window's reach
-    Classify,       \* a reader shows an entry whose predecessor it forgot
+    Carry,          \* a snapshot carries forward the certificates of the one before
+    Numbered,       \* a reader tells a gap from a run by the entry's number
+    CertForks,      \* a reader finds a fork where a tip certifies an entry's predecessor
     Grace,          \* a reader may drop what no file it sees holds
+    Guard,          \* ... only while it sees nothing newer of that writer
     UniqueNames,    \* no two histories give a segment the same name
     SealedOnly,     \* a writer deletes only segments with a seal marker
     FoldedOnly,     \* a writer deletes only segments one of its snapshots folds
@@ -58,6 +61,7 @@ VARIABLES
     losses,
     backup,     \* {} or {the folder as it was when backed up}
     restores,
+    drops,
     lost,       \* entries a restore took from the folder
     lostEffects,\* effects a restore took every trace of
     \* Instance state, kept in the instance's local root.
@@ -73,18 +77,19 @@ VARIABLES
     \* Reader state: its cached view, also in the local root, and `vis`, its
     \* copy of the folder.
     acc,        \* entries whose effects the reader has merged (a ghost)
-    known,      \* entries it remembers: those in flight
-    snaps,      \* the latest snapshot it accepted of each directory
-    reported,   \* forks it has reported
-    shown,      \* entries it shows as written on a basis it forgot
+    known,      \* the entries it placed after its tips' anchors, and its runs' entries
+    snaps,      \* the snapshots it took as tips
+    reported,   \* fork points it has found, as <<directory, entry>>
+    shown,      \* entries it shows as runs
+    dismissed,  \* entries of runs that a merged entry dismisses
     gaps,       \* entries it holds back after a gap
-    dup,        \* entries its last read placed though an accepted snapshot folds them
+    dup,        \* entries its last read placed though a tip folds them
     vis         \* vis[r][f]: how much of file f reader r sees
 
 writer == <<ents, files, nW, nEff, clones, losses, role, wid, head, seg, dying,
             lastSnap, nextName, inflight, spent>>
-reader == <<acc, known, snaps, reported, shown, gaps, dup, vis>>
-folder == <<backup, restores, lost, lostEffects>>
+reader == <<acc, known, snaps, reported, shown, dismissed, gaps, dup, vis>>
+folder == <<backup, restores, drops, lost, lostEffects>>
 vars == <<writer, reader, folder, chaos>>
 
 NoEffect == [eff |-> 0, rec |-> None, logged |-> FALSE]
@@ -118,42 +123,32 @@ Snaps(v) == {f \in Files : files[f].kind = "snap" /\ v[f] = 1}
 
 N(e) == ents[e].n
 
-\* What a snapshot lets a reader chain from: its anchor, its window and the
-\* entries of the files it certified. What it folds is a ghost no reader can
-\* list.
-Know(s) == files[s].win \cup files[s].certs \cup {files[s].anchor}
+\* What a snapshot lets a reader recognize: its anchor and the lines it
+\* certified. It chains only from its anchor. What it folds is a ghost: in
+\* the code a snapshot names its live writes, not every entry it folds.
+Know(s) == files[s].certs \cup {files[s].anchor}
 Roots(S) == UNION {Know(s) : s \in S}
 Folds(S) == UNION {files[s].folds : s \in S}
 
-\* Snapshots are ranked by the number of their anchor, then by its hash. The
-\* main snapshot of each directory among S is the one ranked highest.
-Rank(s) == N(files[s].anchor) * (MaxEntries + 1) + files[s].anchor
-Mains(S) ==
-    [d \in {files[s].dir : s \in S} |->
-        CHOOSE s \in S : files[s].dir = d /\ \A t \in S : files[t].dir = d => Rank(t) <= Rank(s)]
-\* A reader accepts each directory's main snapshot, and every snapshot whose
-\* anchor the main one lets it chain from or K holds.
-Accepted(S, K) ==
-    LET m == Mains(S) IN
-    {s \in S : s = m[files[s].dir] \/ files[s].anchor \in Know(m[files[s].dir]) \cup K}
+\* The tips among snapshots S: those no other snapshot of their directory
+\* certifies. Of two with one anchor, the one created first.
+Tips(S) ==
+    {s \in S : ~\E t \in S : /\ t # s
+                             /\ files[t].dir = files[s].dir
+                             /\ files[s].anchor \in Know(t)
+                             /\ files[t].anchor # files[s].anchor \/ t < s}
+TipsIn(T, d) == {t \in T : files[t].dir = d}
+Multi(T, d) == Cardinality(TipsIn(T, d)) > 1
+\* What every tip of directory d folds: the part of its branches they share.
+Common(T, d) == {x \in Folds(TipsIn(T, d)) : \A t \in TipsIn(T, d) : x \in files[t].folds}
 
-\* An entry is within reach unless an accepted snapshot of its directory
-\* may fold it out of sight: its number is at or below the bottom of the
-\* main snapshot's window. `B` maps each directory with one to the number
-\* of that snapshot's anchor.
-Bases(A) == LET m == Mains(A) IN [d \in DOMAIN m |-> N(files[m[d]].anchor)]
-Reach(B, x) ==
-    \/ ~Numbered
-    \/ ents[x].dir \notin DOMAIN B
-    \/ N(x) + Window > B[ents[x].dir]
-
-\* An entry is placed when it starts a chain or its predecessor is placed,
-\* and it is within reach. Nothing else is placed.
+\* An entry is placed when it starts a chain in a directory with no tip, or
+\* its predecessor is a tip's anchor or placed. Nothing else is placed.
 RECURSIVE Place(_, _, _)
-Place(B, K, P) ==
-    LET next == K \cup {x \in P : /\ ents[x].prev = None \/ ents[x].prev \in K
-                                  /\ Reach(B, x)}
-    IN IF next = K THEN K ELSE Place(B, next, P)
+Place(T, K, P) ==
+    LET next == K \cup {x \in P : \/ ents[x].prev = None /\ TipsIn(T, ents[x].dir) = {}
+                                  \/ ents[x].prev \in K}
+    IN IF next = K THEN K ELSE Place(T, next, P)
 
 RECURSIVE Spread(_, _)
 Spread(F, H) ==
@@ -165,67 +160,95 @@ ForksIn(E) ==
         x \in {y \in E : \E z \in E : z # y /\ ents[z].dir = ents[y].dir
                                           /\ ents[z].prev = ents[y].prev}}
 
-\* An entry a reader holds back is written on a forgotten basis when it is
-\* out of reach, or its predecessor is held by nothing and at or below the
-\* bottom of the window, or so is an entry before it.
-Forgot(held, K, B) ==
-    LET lostBasis ==
-            {x \in held : \/ ents[x].prev = None
-                          \/ ents[x].prev \in K
-                          \/ /\ ents[x].dir \in DOMAIN B
-                             /\ N(x) - 1 + Window <= B[ents[x].dir]}
-    IN IF Classify THEN Spread(lostBasis, held) ELSE {}
-Unplaced(v, A, folded, K) ==
-    IF Classify THEN Folds(Snaps(v) \ A) \ (folded \cup K) ELSE {}
-Outcome(P, a0, k0, A, K, folded, held, forgot, unplaced) ==
-    [acc |-> (a0 \ (forgot \cup unplaced)) \cup folded \cup K,
-     known |-> {x \in K : x \notin folded \cup P},
-     snaps |-> LET m == Mains(A) IN {m[d] : d \in DOMAIN m},
-     forks |-> ForksIn(K \cup P \cup UNION {files[s].win : s \in A}),
-     shown |-> forgot \cup unplaced,
-     gaps |-> held \ forgot,
-     dup |-> (K \ (k0 \cup Roots(A))) \cap folded]
+\* Whether entry x lies beyond one of the fork points FP: past a fork, no
+\* entry of that writer is merged, on either branch.
+Beyond(FP, x) ==
+    \E fp \in FP : fp[1] = ents[x].dir /\ (fp[2] = None \/ N(x) > N(fp[2]))
+
+\* Where the tips of directory d part: the highest entry every one of them
+\* certifies, or None when they share none.
+Parting(T, d) ==
+    LET shared == {x \in Roots(TipsIn(T, d)) : \A t \in TipsIn(T, d) : x \in Know(t)}
+    IN IF shared = {} THEN None
+       ELSE CHOOSE p \in shared : \A q \in shared : N(q) <= N(p)
+
+\* The highest number among the anchors of the tips of d.
+TipN(T, d) ==
+    LET ns == {N(files[t].anchor) : t \in TipsIn(T, d)}
+    IN CHOOSE m \in ns : \A k \in ns : k <= m
 
 \* What a reader makes of what it sees, `v`, and its cached view: what it
-\* merged (`a0`), the entries it remembers (`k0`) and the snapshots it
-\* accepted (`s0`). It places the entries of the files it sees afresh from
-\* what the snapshots let it chain from and what it remembers, and
-\* remembers only the entries in flight: placed, folded by no snapshot it
-\* accepted, and held by no file it sees. What it now shows as written on a
-\* forgotten basis it no longer merges.
-Read(v, a0, k0, s0) ==
+\* merged (`a0`), the entries it placed or shows (`k0`), its tips (`s0`) and the fork
+\* points it found (`f0`). `P` is what it sees in segments, `T` its tips, `K`
+\* what it places. Its fork points are those it found before, two successors
+\* of one entry, an entry whose predecessor a tip certified but that no tip
+\* folds, and where several tips of one writer part. An entry it holds back is a gap while its predecessor may come
+\* after the tip's anchor, and otherwise a run. Every entry beyond a fork
+\* point, and what one tip of several folds that another does not, is a run
+\* too. A dismissal in a merged entry takes a run's entries out of view.
+Outcome(P, a0, k0, T, K, f0) ==
+    LET cert == Roots(T)
+        single == {t \in T : ~Multi(T, files[t].dir)}
+        multi == T \ single
+        anchors == {files[t].anchor : t \in T}
+        held == (P \cup k0) \ (K \cup cert)
+        FP == f0 \cup ForksIn(K \cup P \cup k0)
+                 \cup {<<d, Parting(T, d)>> : d \in {files[t].dir : t \in T \ single}}
+                 \cup IF ~CertForks THEN {}
+                       ELSE {<<ents[x].dir, ents[x].prev>> :
+                                x \in {y \in held : ents[y].prev \in cert \ anchors}}
+        lostBasis ==
+            IF ~Numbered THEN held
+            ELSE {x \in held : \/ ents[x].prev = None
+                               \/ ents[x].prev \in K \cup cert
+                               \/ /\ TipsIn(T, ents[x].dir) # {}
+                                  /\ N(x) <= TipN(T, ents[x].dir) + 1}
+        segRuns == Spread(lostBasis, held)
+        tipped == Folds(single) \cup UNION {Common(T, files[t].dir) : t \in multi}
+        multiRuns == (Folds(multi) \ tipped)
+                         \cup {x \in K \ anchors : Multi(T, ents[x].dir)}
+        candidates == a0 \cup K \cup Folds(T) \cup held
+        forkRuns == {x \in candidates : Beyond(FP, x)}
+        branches == multiRuns \cup forkRuns
+        runs == segRuns \cup branches
+        merged == ((a0 \ runs) \cup tipped \cup K) \ branches
+        dis == UNION {ents[e].dis : e \in merged}
+    IN [acc |-> merged,
+        known |-> (K \ (anchors \cup cert)) \cup (held \cap runs),
+        snaps |-> T,
+        forks |-> FP,
+        shown |-> runs \ dis,
+        dismissed |-> runs \cap dis,
+        gaps |-> held \ runs,
+        dup |-> (K \ (k0 \cup anchors)) \cap Folds(T)]
+
+\* What a reader places from its tips' anchors, among the entries it sees
+\* and those it placed before, that no tip certifies.
+Placing(T, k0, P) ==
+    Place(T, {files[t].anchor : t \in T}, (P \cup k0) \ Roots(T))
+
+Read(v, a0, k0, s0, f0) ==
     LET P == Present(v)
-        S == Snaps(v) \cup s0
-        A1 == Accepted(S, k0)
-        K1 == Place(Bases(A1), k0 \cup Roots(A1), P)
-        A == Accepted(S, K1)
-        B == Bases(A)
-        K == Place(B, K1 \cup Roots(A), P)
-        folded == Folds(A)
-        held == P \ K
-    IN Outcome(P, a0, k0, A, K, folded, held, Forgot(held, K, B), Unplaced(v, A, folded, K))
+        T == Tips(Snaps(v) \cup s0)
+    IN Outcome(P, a0, k0, T, Placing(T, k0, P), f0)
 
 \* A reader reads after every change it sees, as `Read` says. Each step is
 \* bound once, so that TLC evaluates it once when it checks fairness.
 ReadWith(r, v, a0, k0, s0, f0) ==
-    \E P \in {Present(v)} : \E S \in {Snaps(v) \cup s0} :
-    \E A1 \in {Accepted(S, k0)} :
-    \E K1 \in {Place(Bases(A1), k0 \cup Roots(A1), P)} :
-    \E A \in {Accepted(S, K1)} : \E B \in {Bases(A)} :
-    \E K \in {Place(B, K1 \cup Roots(A), P)} :
-    \E folded \in {Folds(A)} : \E held \in {P \ K} :
-    \E forgot \in {Forgot(held, K, B)} : \E unplaced \in {Unplaced(v, A, folded, K)} :
-    \E new \in {Outcome(P, a0, k0, A, K, folded, held, forgot, unplaced)} :
+    \E P \in {Present(v)} : \E T \in {Tips(Snaps(v) \cup s0)} :
+    \E K \in {Placing(T, k0, P)} :
+    \E new \in {Outcome(P, a0, k0, T, K, f0)} :
         /\ acc' = [acc EXCEPT ![r] = new.acc]
         /\ known' = [known EXCEPT ![r] = new.known]
         /\ snaps' = [snaps EXCEPT ![r] = new.snaps]
-        /\ reported' = [reported EXCEPT ![r] = f0 \cup new.forks]
+        /\ reported' = [reported EXCEPT ![r] = new.forks]
         /\ shown' = [shown EXCEPT ![r] = new.shown]
+        /\ dismissed' = [dismissed EXCEPT ![r] = new.dismissed]
         /\ gaps' = [gaps EXCEPT ![r] = new.gaps]
         /\ dup' = [dup EXCEPT ![r] = new.dup]
 
 \* What a reader without a cached view makes of what it sees.
-Fresh(v) == Read(v, {}, {}, {})
+Fresh(v) == Read(v, {}, {}, {}, {})
 
 \* Entries the files a reader sees hold, in a segment or folded in a snapshot.
 VisHolds(v) == Present(v) \cup Folds(Snaps(v))
@@ -249,10 +272,9 @@ HeadLost(i) == head[i] # None /\ head[i] \notin Holds(files)
 \* before a deletion, also that the snapshot superseding the file is.
 Writable(i) == role[i] = "writer" /\ (CheckFirst => ~HeadLost(i))
 
-NewFile(kind, d, name, es, anchor, fo, win, certs, eff) ==
+NewFile(kind, d, name, es, anchor, fo, certs, eff) ==
     [kind |-> kind, dir |-> d, name |-> name, ents |-> es, anchor |-> anchor,
-     folds |-> fo, win |-> win, certs |-> certs, eff |-> eff, sealed |-> FALSE,
-     deleted |-> FALSE]
+     folds |-> fo, certs |-> certs, eff |-> eff, sealed |-> FALSE, deleted |-> FALSE]
 
 \* A segment of directory d that its writer may delete from folder fs: it
 \* ends with a seal marker, and a snapshot of d in fs certifies all it holds.
@@ -262,12 +284,11 @@ MayDelete(fs, d, f) ==
            \E s \in 1..Len(fs) : /\ fs[s].kind = "snap"
                                 /\ fs[s].dir = d
                                 /\ ~fs[s].deleted
-                                /\ Range(fs[f].ents) \subseteq
-                                       fs[s].win \cup fs[s].certs \cup {fs[s].anchor}
+                                /\ Range(fs[f].ents) \subseteq fs[s].certs \cup {fs[s].anchor}
 
 \* Appending to no open segment starts a new one; a fresh open never
 \* appends to a segment it did not start.
-AppendEntry(i, closes) ==
+AppendEntry(i, closes, dis) ==
     LET e == Len(ents) + 1
         new == seg[i] = None
         f == IF new THEN Len(files) + 1 ELSE seg[i]
@@ -275,10 +296,11 @@ AppendEntry(i, closes) ==
        /\ Len(ents) < MaxEntries
        /\ new => Len(files) < MaxFiles
        /\ ents' = Append(ents, [dir |-> wid[i], prev |-> head[i], closes |-> closes,
-                                 n |-> IF head[i] = None THEN 0 ELSE N(head[i]) + 1])
+                                 n |-> IF head[i] = None THEN 0 ELSE N(head[i]) + 1,
+                                 dis |-> dis, orphan |-> HeadLost(i)])
        /\ files' = IF new
                    THEN Append(files, NewFile("seg", wid[i],
-                            IF UniqueNames THEN f ELSE nextName[i], <<e>>, None, {}, {}, {}, 0))
+                            IF UniqueNames THEN f ELSE nextName[i], <<e>>, None, {}, {}, 0))
                    ELSE [files EXCEPT ![f].ents = Append(@, e)]
        /\ nextName' = IF new /\ ~UniqueNames
                       THEN [nextName EXCEPT ![i] = @ + 1] ELSE nextName
@@ -286,29 +308,42 @@ AppendEntry(i, closes) ==
        /\ head' = [head EXCEPT ![i] = e]
 
 Write(i) ==
-    /\ AppendEntry(i, 0)
+    /\ AppendEntry(i, 0, {})
     /\ UNCHANGED <<nW, nEff, clones, losses, role, wid, dying, lastSnap,
                    inflight, spent, reader, folder, chaos>>
 
 \* The owner seals its segment, folds its own chain into a snapshot, and
 \* deletes the snapshot the new one supersedes and the segments of its
-\* directory it may delete. The snapshot keeps the chain's last `Window`
-\* entries, and certifies the lines of the files of its directory that it
-\* folds.
+\* directory it may delete. The snapshot certifies the lines it folds of
+\* every segment of its directory, and of every segment its chain was written
+\* to since its last snapshot, deleted or not, which its cached view records;
+\* it names by hash each entry since then that no file holds; and it carries
+\* forward the certificates of its last snapshot, which its cached view
+\* holds, and of the snapshots of its directory on its chain.
 Compact(i) ==
     LET sealed == IF seg[i] = None THEN files
                   ELSE [files EXCEPT ![seg[i]].sealed = TRUE]
         s == Len(files) + 1
         chain == Chain(head[i])
+        tail == chain \ IF lastSnap[i] = None THEN {} ELSE files[lastSnap[i]].folds
         here == {f \in Files : sealed[f].dir = wid[i] /\ ~sealed[f].deleted}
+        held == {g \in here : sealed[g].kind = "snap" /\ sealed[g].anchor \in chain}
+                    \cup IF lastSnap[i] = None THEN {} ELSE {lastSnap[i]}
+        carried ==
+            IF ~Carry THEN {}
+            ELSE UNION {sealed[f].certs \cup {sealed[f].anchor} : f \in held}
         certs ==
             IF ~Certify THEN {}
-            ELSE UNION {Range(sealed[f].ents) \cap chain :
-                            f \in {g \in here : sealed[g].kind = "seg"}}
+            ELSE carried
+                 \cup UNION {Range(sealed[f].ents) \cap chain :
+                               f \in {g \in Files : /\ sealed[g].dir = wid[i]
+                                                    /\ sealed[g].kind = "seg"
+                                                    /\ g \in here \/ Range(sealed[g].ents) \cap tail # {}}}
                  \cup {sealed[f].anchor :
                             f \in {g \in here : sealed[g].kind = "snap" /\ sealed[g].anchor \in chain}}
-        win == {e \in chain : N(e) + Window > N(head[i])}
-        fs == Append(sealed, NewFile("snap", wid[i], s, <<>>, head[i], chain, win, certs, 0))
+                 \cup (tail \ UNION {Range(sealed[f].ents) :
+                                        f \in {g \in Files : sealed[g].kind = "seg"}})
+        fs == Append(sealed, NewFile("snap", wid[i], s, <<>>, head[i], chain, certs, 0))
         old == IF lastSnap[i] = None THEN {} ELSE {lastSnap[i]}
         superseded == {f \in Files : /\ fs[f].kind = "seg"
                                      /\ fs[f].dir = wid[i]
@@ -357,7 +392,7 @@ Begin(i) ==
     /\ Idle(i)
     /\ nEff < MaxEffects
     /\ Len(files) < MaxFiles
-    /\ files' = Append(files, NewFile("pend", wid[i], f, <<>>, None, {}, {}, {}, nEff + 1))
+    /\ files' = Append(files, NewFile("pend", wid[i], f, <<>>, None, {}, {}, nEff + 1))
     /\ inflight' = [inflight EXCEPT ![i] = [eff |-> nEff + 1, rec |-> f, logged |-> FALSE]]
     /\ spent' = [spent EXCEPT ![i] = Spent(i)]
     /\ nEff' = nEff + 1
@@ -367,7 +402,7 @@ Begin(i) ==
 Close(i) ==
     /\ inflight[i].eff # 0
     /\ ~inflight[i].logged
-    /\ AppendEntry(i, inflight[i].eff)
+    /\ AppendEntry(i, inflight[i].eff, {})
     /\ inflight' = [inflight EXCEPT ![i].logged = TRUE]
     /\ UNCHANGED <<nW, nEff, clones, losses, role, wid, dying, lastSnap,
                    spent, reader, folder, chaos>>
@@ -387,14 +422,24 @@ Unpend(i) ==
 \* deletes it. Consent is the choice to take this step.
 Settle(i) ==
     \E e \in Reported(i) :
-        /\ AppendEntry(i, e)
+        /\ AppendEntry(i, e, {})
         /\ UNCHANGED <<nW, nEff, clones, losses, role, wid, dying,
                        lastSnap, inflight, spent, reader, folder, chaos>>
 
+\* The user dismisses the runs a writer's reader shows, by an entry naming
+\* them. Taking a run's writes instead is an ordinary write.
+Dismiss(i) ==
+    /\ shown[i] # {}
+    /\ AppendEntry(i, 0, shown[i])
+    /\ UNCHANGED <<nW, nEff, clones, losses, role, wid, dying, lastSnap,
+                   inflight, spent, reader, folder, chaos>>
+
 \* A copied local root (a restored backup, a cloned disk, copied app data)
-\* opens on another machine as the same writer with the same history.
+\* opens on another machine as the same writer with the same history. A
+\* writer's local root exists only once its first entry is durable.
 Clone(i, j) ==
     /\ role[i] = "writer"
+    /\ head[i] # None
     /\ role[j] = "reader"
     /\ clones < MaxClones
     /\ clones' = clones + 1
@@ -453,13 +498,12 @@ LoseRoot(i) ==
     /\ ReadWith(i, vis[i], {}, {}, {}, {})
     /\ UNCHANGED <<ents, files, nEff, clones, role, vis, folder, chaos>>
 
-\* An instance that sees its own directory forked, or holding an entry it
-\* shows as written on a forgotten basis, takes a new writer id.
+\* An instance that sees an entry of its own directory with two successors
+\* takes a new writer id.
 LeaveFork(i) ==
     /\ role[i] = "writer"
     /\ Idle(i)
-    /\ \/ \E fk \in reported[i] : fk[1] = wid[i]
-       \/ \E x \in shown[i] : ents[x].dir = wid[i]
+    /\ \E fk \in reported[i] : fk[1] = wid[i]
     /\ Renew(i)
     /\ UNCHANGED <<ents, files, nEff, clones, losses, role, reader, folder, chaos>>
 
@@ -484,21 +528,48 @@ Backup ==
     /\ backup = {}
     /\ restores < MaxRestores
     /\ backup' = {files}
-    /\ UNCHANGED <<writer, reader, restores, lost, lostEffects, chaos>>
+    /\ UNCHANGED <<writer, reader, restores, drops, lost, lostEffects, chaos>>
+
+\* The folder becomes fs, and what it no longer holds is lost.
+Becomes(fs) ==
+    LET traced == {files[f].eff : f \in {g \in Files : fs[g].kind = "pend" /\ ~fs[g].deleted}}
+                      \cup {ents[e].closes : e \in Holds(fs)}
+    IN /\ files' = fs
+       /\ lost' = lost \cup (All \ Holds(fs))
+       /\ lostEffects' = lostEffects \cup ((1..nEff) \ traced)
+
+\* The folder as backup b holds it, in the directories `ds`.
+BackedUp(b, ds) ==
+    [f \in Files |-> IF files[f].dir \notin ds THEN files[f]
+                     ELSE IF f <= Len(b) THEN b[f]
+                     ELSE [files[f] EXCEPT !.deleted = TRUE]]
 
 Restore ==
     /\ restores < MaxRestores
-    /\ \E b \in backup :
-        LET fs == [f \in Files |-> IF f <= Len(b) THEN b[f]
-                                  ELSE [files[f] EXCEPT !.deleted = TRUE]]
-            traced == {files[f].eff : f \in {g \in Files : fs[g].kind = "pend" /\ ~fs[g].deleted}}
-                          \cup {ents[e].closes : e \in Holds(fs)}
-        IN /\ files' = fs
-           /\ lost' = lost \cup (All \ Holds(fs))
-           /\ lostEffects' = lostEffects \cup ((1..nEff) \ traced)
+    /\ \E b \in backup : Becomes(BackedUp(b, 0..MaxWriters))
     /\ restores' = restores + 1
     /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, seg, dying,
-                   lastSnap, nextName, inflight, spent, reader, backup, chaos>>
+                   lastSnap, nextName, inflight, spent, reader, backup, drops, chaos>>
+
+\* One writer's directory alone goes back to its backup.
+RestoreDir ==
+    /\ restores < MaxRestores
+    /\ \E b \in backup : \E d \in 1..nW : Becomes(BackedUp(b, {d}))
+    /\ restores' = restores + 1
+    /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, seg, dying,
+                   lastSnap, nextName, inflight, spent, reader, backup, drops, chaos>>
+
+\* A sync client keeps an earlier version of one segment: a shorter prefix,
+\* without a seal marker.
+DropVersion ==
+    /\ drops < MaxDrops
+    /\ \E f \in Files : \E k \in 1..(Len(files[f].ents) - 1) :
+        /\ files[f].kind = "seg"
+        /\ ~files[f].deleted
+        /\ Becomes([files EXCEPT ![f].ents = SubSeq(@, 1, k), ![f].sealed = FALSE])
+    /\ drops' = drops + 1
+    /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, seg, dying,
+                   lastSnap, nextName, inflight, spent, reader, backup, restores, chaos>>
 
 -----------------------------------------------------------------------------
 (* Sync. Each file reaches each reader independently. A file may show any  *)
@@ -527,13 +598,36 @@ DeliverAll(r) ==
         /\ Show(r, f, FileLen(f))
         /\ UNCHANGED chaos
 
-\* A reader whose view reflects an entry no file it sees holds, past the
-\* grace period, derives its view again from the files it sees. The model
-\* allows this at any such time.
+\* What reader r holds of directory d that no file it sees holds: entries in
+\* flight and the anchors of tips it no longer sees.
+Unheld(r, d) ==
+    {x \in known[r] : ents[x].dir = d /\ x \notin Present(vis[r])}
+        \cup {files[s].anchor : s \in {t \in snaps[r] : files[t].dir = d /\ vis[r][t] = 0}}
+\* Fork points of directory d that reader r remembers and the files it
+\* sees no longer show.
+UnheldForks(r, d) ==
+    {fp \in reported[r] : fp[1] = d} \ Fresh(vis[r]).forks
+
+\* Whether r sees an entry or a snapshot of directory d numbered above m.
+Newer(r, d, m) ==
+    \E x \in Present(vis[r]) \cup {files[s].anchor : s \in Snaps(vis[r])} :
+        ents[x].dir = d /\ N(x) > m
+
+\* Past the grace period, a reader drops what it holds of a writer that no
+\* file it sees holds, unless it sees something newer of that writer, forgets
+\* the writer's fork points, and derives what it shows of that writer again
+\* from its files. The model allows this at any such time.
 Forget(r) ==
     /\ Grace
-    /\ ~(acc[r] \subseteq VisHolds(vis[r]))
-    /\ ReadWith(r, vis[r], {}, {}, {}, reported[r])
+    /\ \E d \in 1..nW :
+        LET drop == {x \in Unheld(r, d) : Guard => ~Newer(r, d, N(x))}
+            tips == {t \in snaps[r] : ~(files[t].dir = d /\ vis[r][t] = 0 /\ files[t].anchor \in drop)}
+            placed == Placing(Tips(tips), known[r] \ drop, {})
+        IN /\ drop # {} \/ UnheldForks(r, d) # {}
+           /\ ReadWith(r, vis[r], {x \in acc[r] : ents[x].dir # d},
+                       {x \in known[r] : ents[x].dir # d}
+                           \cup {x \in placed : ents[x].dir = d /\ x \in known[r]},
+                       tips, {fp \in reported[r] : fp[1] # d})
     /\ UNCHANGED <<writer, folder, vis, chaos>>
 
 -----------------------------------------------------------------------------
@@ -548,6 +642,7 @@ Init ==
     /\ losses = 0
     /\ backup = {}
     /\ restores = 0
+    /\ drops = 0
     /\ lost = {}
     /\ lostEffects = {}
     /\ role = [i \in Instances |-> IF i = First THEN "writer" ELSE "reader"]
@@ -564,6 +659,7 @@ Init ==
     /\ snaps = [i \in Instances |-> {}]
     /\ reported = [i \in Instances |-> {}]
     /\ shown = [i \in Instances |-> {}]
+    /\ dismissed = [i \in Instances |-> {}]
     /\ gaps = [i \in Instances |-> {}]
     /\ dup = [i \in Instances |-> {}]
     /\ vis = [i \in Instances |-> [f \in 1..MaxFiles |-> 0]]
@@ -582,9 +678,12 @@ Next ==
         \/ LoseRoot(i)
         \/ LeaveFork(i)
         \/ LeaveRestored(i)
+        \/ Dismiss(i)
         \/ \E j \in Instances : Clone(i, j)
     \/ Backup
     \/ Restore
+    \/ RestoreDir
+    \/ DropVersion
     \/ \E r \in Instances : Deliver(r) \/ Forget(r)
 
 \* Writers may stop at any time; sync eventually delivers every file.
@@ -598,33 +697,71 @@ ChainOrder ==
     \A r \in Instances : \A e \in acc[r] :
         ents[e].prev = None \/ ents[e].prev \in acc[r]
 
-\* Every entry a reader sees is merged, held back as a gap and reported, or
-\* shown as written on a forgotten basis; a file under any name, including
-\* a sync conflicted copy, is read.
+\* Every entry a reader sees is merged, held back as a gap and reported,
+\* shown as a run, or dismissed; a file under any name, including a sync
+\* conflicted copy, is read.
 NothingIgnored ==
-    \A r \in Instances : Present(vis[r]) \subseteq acc[r] \cup gaps[r] \cup shown[r]
+    \A r \in Instances :
+        Present(vis[r]) \subseteq acc[r] \cup gaps[r] \cup shown[r] \cup dismissed[r]
 
-\* A reader never places an entry from a file when a snapshot it accepted
-\* already folds it: merging it again could bring back what it replaced.
+\* What a reader shows as a run it does not merge.
+ShownApart == \A r \in Instances : shown[r] \cap acc[r] = {}
+
+\* A reader never places an entry from a file when a tip already folds it:
+\* merging it again could bring back what it replaced.
 NoReapply == \A r \in Instances : dup[r] = {}
 
-\* An entry is shown as written on a forgotten basis only when its chain
-\* forked at or before it, when the reader remembers a snapshot a restore
-\* took, or when every file that shows it to the reader has been deleted:
-\* every segment it sees holding it, and, unless it merged the entry, every
-\* snapshot it sees folding it.
+\* Entry x lies on a branch: its chain forked at or before it.
 Forked(x) ==
     \E a \in Chain(x) : \E b \in All :
         b # a /\ ents[b].dir = ents[a].dir /\ ents[b].prev = ents[a].prev
-InSegment(v, f, x) ==
-    files[f].kind = "seg" /\ x \in {files[f].ents[k] : k \in 1..Shown(v, f)}
+
+\* The reader still holds what a restore or a dropped version took.
+Stale(r) == (Folds(snaps[r]) \cup known[r] \cup acc[r]) \cap lost # {}
+
+\* An entry is shown as a run only when its chain forked at or before it, a
+\* restore or a dropped version took it, or the reader still holds what one
+\* took.
 NoSpuriousConflict ==
-    \A r \in Instances : \A x \in shown[r] :
-        \/ Forked(x)
-        \/ Folds(snaps[r]) \cap lost # {}
-        \/ /\ \A f \in Files : InSegment(vis[r], f, x) => files[f].deleted
-           /\ x \notin acc[r] =>
-                  \A f \in Snaps(vis[r]) : x \in files[f].folds => files[f].deleted
+    \A r \in Instances : \A x \in shown[r] : Forked(x) \/ x \in lost \/ Stale(r)
+
+\* Once every file has reached a reader, it merges every kept entry that no
+\* fork precedes and that follows nothing a restore or a dropped version
+\* took, unless it still holds what one took.
+UnforkedMerged ==
+    \A r \in Instances : Delivered(r) /\ ~Stale(r) =>
+        \A x \in Kept : ~Forked(x) /\ Chain(x) \cap lost = {} => x \in acc[r]
+
+\* A writer never appends after an entry the folder no longer holds.
+NoOrphan == \A e \in All : ~ents[e].orphan
+
+\* Once every file has reached a reader, it merges and shows the same kept
+\* entries as a reader without a cached view, unless it still holds what a
+\* restore or a dropped version took, or a fork point its files no longer
+\* show, either of which the grace step drops.
+Agree ==
+    \A r \in Instances :
+        Delivered(r) /\ ~Stale(r) /\ (\A d \in 1..nW : UnheldForks(r, d) = {}) =>
+        LET F == Fresh(vis[r]) IN
+        /\ acc[r] \cap Kept = F.acc \cap Kept
+        /\ (shown[r] \cup dismissed[r]) \cap Kept = (F.shown \cup F.dismissed) \cap Kept
+
+\* Once every file has reached a reader, the files still show every fork
+\* point it remembers, unless a restore or a dropped version took one of the
+\* point's successors.
+ForksFromFiles ==
+    \A r \in Instances : Delivered(r) /\ ~Stale(r) =>
+        \A d \in 1..nW : \A fp \in UnheldForks(r, d) :
+            \E x \in lost : ents[x].dir = d /\ ents[x].prev = fp[2]
+
+\* A reader never merges two branches of one writer.
+NoMergedFork == \A r \in Instances : ForksIn(acc[r]) = {}
+
+\* Once every file has reached a reader, it shows no entry a kept, merged
+\* dismissal names.
+DismissalsHold ==
+    \A r \in Instances : Delivered(r) =>
+        shown[r] \cap UNION {ents[e].dis : e \in Kept \cap acc[r]} = {}
 
 \* A writer creates, appends to and deletes files only in its own directory.
 OwnDirectory ==
@@ -644,18 +781,20 @@ EffectAccounted ==
         \/ \E f \in Files : files[f].kind = "pend" /\ files[f].eff = x /\ ~files[f].deleted
         \/ \E e \in Kept : ents[e].closes = x
 
-\* Once every file has reached a reader, it merges or shows every entry the
-\* folder keeps, whatever the delivery order, holds back only what a restore
-\* took, and reports every fork among the kept entries it merged. A reader
-\* without a cached view merges or shows the same.
+\* Once every file has reached a reader, it merges, shows or has dismissed
+\* every entry the folder keeps, whatever the delivery order, holds back only
+\* what follows an entry a restore or a dropped version took, and reports every fork among the kept entries it
+\* sees. A reader without a cached view does the same.
+AfterLost == {x \in All : Chain(x) \cap lost # {}}
 Converged(r) ==
-    /\ Kept \subseteq acc[r] \cup shown[r]
-    /\ gaps[r] \subseteq lost
-    /\ ForksIn(Kept \cap acc[r]) \subseteq reported[r]
+    /\ Kept \subseteq acc[r] \cup shown[r] \cup dismissed[r] \cup (gaps[r] \cap AfterLost)
+    /\ gaps[r] \subseteq AfterLost
+    /\ ForksIn(Kept \cap Present(vis[r])) \subseteq reported[r]
 DeliveredConverges ==
     \A r \in Instances : Delivered(r) =>
         /\ Converged(r)
-        /\ Kept \subseteq Fresh(vis[r]).acc \cup Fresh(vis[r]).shown
+        /\ LET F == Fresh(vis[r]) IN
+               Kept \subseteq F.acc \cup F.shown \cup F.dismissed \cup (F.gaps \cap AfterLost)
 
 \* Once every file has reached a reader, every effect begun is closed,
 \* reported, or the reader's own effect in flight, unless a restore took it.
@@ -664,16 +803,44 @@ Settled(r) ==
         x \in Closed(r) \cup Reported(r) \cup {inflight[r].eff}
 DeliveredSettles == \A r \in Instances : Delivered(r) => Settled(r)
 
-\* A reader stops merging an entry only when no file it sees holds it, or
-\* when it now holds it back or shows it as written on a forgotten basis,
-\* unless its local root is lost or replaced by a copy. A fork is reported
-\* when it first appears, so it is reported once.
+\* A step that only derives a reader's view again after the grace period.
+GraceStep == Grace /\ UNCHANGED <<vis, writer>>
+
+\* A reader stops merging an entry only when it now shows it as a run or
+\* has dismissed it, when a restore or a dropped version took it, or when the
+\* grace step drops it, or leaves it waiting as a gap, with something it
+\* held at or above it that no file holds and nothing newer it sees. Unless
+\* its local root is lost or replaced by a copy.
 LocalRootKept(r) == ~((losses' > losses \/ clones' > clones) /\ wid'[r] # wid[r])
 Monotone ==
     [][\A r \in Instances : LocalRootKept(r) =>
-           acc[r] \ acc'[r] \subseteq (All \ VisHolds(vis'[r])) \cup shown'[r] \cup gaps'[r]]_vars
+           \A x \in acc[r] \ acc'[r] :
+               \/ x \in shown'[r] \cup dismissed'[r] \cup lost'
+               \/ /\ GraceStep
+                  /\ x \notin VisHolds(vis'[r]) \/ x \in gaps'[r]
+                  /\ \E y \in Unheld(r, ents[x].dir) :
+                         N(y) >= N(x) /\ ~Newer(r, ents[x].dir, N(y))]_vars
+
+\* A run stays shown until it is dismissed, no file the reader sees holds it,
+\* or the grace step derives the view again.
+NoFlip ==
+    [][\A r \in Instances : LocalRootKept(r) =>
+           \A x \in shown[r] :
+               \/ x \in shown'[r] \cup dismissed'[r]
+               \/ x \notin VisHolds(vis'[r])
+               \/ GraceStep]_vars
+
+\* A fork point, once found, stays found, except by the grace step.
 ForksKept ==
-    [][\A r \in Instances : LocalRootKept(r) => reported[r] \subseteq reported'[r]]_vars
+    [][\A r \in Instances : LocalRootKept(r) /\ ~GraceStep => reported[r] \subseteq reported'[r]]_vars
+
+\* A writer takes a new id for a fork only when an entry of its directory has
+\* two successors.
+OwnFileNoRetire ==
+    [][\A i \in Instances :
+           (role[i] = "writer" /\ wid[i] # 0 /\ wid'[i] # wid[i] /\ losses' = losses /\ ~HeadLost(i))
+               => \E x, y \in All : x # y /\ ents[x].dir = wid[i] /\ ents[y].dir = wid[i]
+                                       /\ ents[x].prev = ents[y].prev]_vars
 
 \* False: without a cached view, delivery order can hide entries a reader
 \* has shown, which is why readers keep one.
