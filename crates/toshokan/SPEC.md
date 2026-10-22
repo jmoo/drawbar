@@ -617,8 +617,10 @@ A writer carries out an intent's steps in this order:
    the core; they may copy ranges of the file being rewritten. A copy out of
    another writer's directory is made a chunk at a time. A file whose filling
    fails is removed.
-2. Check every precondition: a path holds nothing, or a file whose identity is
-   the one the app expects; a directory satisfies neither. Check that every
+2. Check every precondition: a path holds nothing, a file whose identity is the
+   one the app expects, or, for a file the app has not read, a file of the length
+   and modification time a scan listed; a directory satisfies none. An identity
+   is read at the check, never taken from a scan. Check that every
    trash item a step restores is there. On failure, remove the staged files and
    write nothing more.
 3. Write the pending record to `tmp/<nonce>.json`, sync it, and rename it to

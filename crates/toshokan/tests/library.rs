@@ -583,6 +583,7 @@ through_both!(
     opening_scans_no_library_file_and_the_first_refresh_scans_them_all,
     swap_files_a_browser_left_are_neither_scanned_nor_read,
     a_view_lists_each_library_files_length_once_scanned,
+    a_file_expected_as_listed_is_refused_once_its_length_or_time_moved,
     losing_the_local_root_at_any_step_loses_only_drafts,
     a_crash_at_any_step_is_settled_before_the_next_write,
     an_empty_record_of_this_writer_is_removed_by_its_next_write,
@@ -2395,6 +2396,42 @@ fn a_view_lists_each_library_files_length_once_scanned<F: Facade>() {
     assert_eq!(len("gone.wav"), None);
     let listed = view.listed(&path("a.wav")).unwrap();
     assert_eq!(listed.modified, Some(modified(&folder, &path("a.wav"))));
+}
+
+fn a_file_expected_as_listed_is_refused_once_its_length_or_time_moved<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    put(&folder, "a.wav", b"wave");
+    put(&folder, "b.wav", b"wave");
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    let listed = |view: &View, at: &str| {
+        let listed = view.listed(&path(at)).unwrap();
+        Expect::Listed {
+            len: listed.len,
+            modified: listed.modified,
+        }
+    };
+    let view = a.view();
+    let adopt = |a: &mut F, at: &str, expect| {
+        a.commit("Tag", |i| {
+            let (i, _) = i.create(|e| {
+                e.adopt(&path(at), expect).add(TAGS, tag("Sunday"));
+            });
+            i
+        })
+    };
+    put(&folder, "b.wav", b"wavy");
+    let refused = adopt(&mut a, "b.wav", listed(&view, "b.wav"));
+    assert!(
+        matches!(&refused, Err(Error::Refused(Refusal::Changed(m))) if m.path == path("b.wav")),
+        "{refused:?}"
+    );
+    adopt(&mut a, "a.wav", listed(&view, "a.wav")).unwrap();
+    assert_eq!(
+        tags(&a.view(), a.view().at(&path("a.wav")).unwrap().id()),
+        [tag("Sunday")]
+    );
 }
 
 /// The scenario losing the local root interrupts: every step a user might take.

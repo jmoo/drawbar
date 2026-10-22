@@ -19,6 +19,16 @@ pub enum Expect {
     Absent,
     /// A file whose identity is this is there.
     Holds(Identity),
+    /// A file of this length and modification time is there, as a scan listed it:
+    /// for a file the app has not read, whose identity it does not know.
+    Listed { len: u64, modified: Option<u64> },
+}
+
+impl Expect {
+    /// Whether a file is expected there.
+    pub fn present(&self) -> bool {
+        !matches!(self, Expect::Absent)
+    }
 }
 
 /// One intent: the unit of commit, undo and attribution.

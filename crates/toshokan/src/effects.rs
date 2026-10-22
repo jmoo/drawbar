@@ -25,7 +25,7 @@ use crate::env::{Env, Identify};
 use crate::error::{Error, Invalid, Mismatch, Refusal, Result};
 use crate::flow::{self, each, fold, ok, Fallible, Flow, Held};
 use crate::ids::{EntityId, Nonce, WriterId};
-use crate::io::{Capabilities, Io, IoError, Kind, Root, Task};
+use crate::io::{Capabilities, Io, IoError, Kind, Meta, Root, Task};
 use crate::layout::Layout;
 use crate::log::{Displaced, FileFact};
 use crate::path::RelPath;
@@ -274,7 +274,7 @@ impl Resolver<'_> {
                 let path = self.library(path)?;
                 self.claim(entity, &path)?;
                 self.check(&path, *expect);
-                if let Expect::Holds(_) = expect {
+                if expect.present() {
                     self.step(EffectStep::ToTrash {
                         path: path.clone(),
                         item: env.nonce(),
@@ -341,7 +341,7 @@ impl Resolver<'_> {
                 let to = self.library(to)?;
                 self.claim(*entity, &to)?;
                 self.check(&to, *expect);
-                if let Expect::Holds(_) = expect {
+                if expect.present() {
                     self.step(EffectStep::ToTrash {
                         path: to.clone(),
                         item: env.nonce(),
@@ -639,26 +639,31 @@ fn refusal<'a>(
         })
     });
     let checked = stated.and_then(move |metas| {
+        let identified = |check: &Precondition, meta: &Option<Meta>| match meta {
+            Some(meta) if meta.kind == Kind::File => !matches!(check.expect, Expect::Listed { .. }),
+            _ => false,
+        };
         let files = checks
             .iter()
             .zip(&metas)
-            .filter_map(|(check, meta)| match meta {
-                Some(meta) if meta.kind == Kind::File => Some((check.path.clone(), meta.len)),
-                _ => None,
-            });
+            .filter(|(check, meta)| identified(check, meta))
+            .filter_map(|(check, meta)| Some((check.path.clone(), meta.as_ref()?.len)));
         flow::identities(Root::Folder, files.collect(), &identify).map_ok(move |identities| {
             let mut identities = identities.into_iter();
             checks.into_iter().zip(metas).find_map(|(check, meta)| {
-                let found = match meta {
-                    None => None,
-                    Some(meta) if meta.kind == Kind::Directory => {
-                        return Some(Refusal::Directory(check.path));
-                    }
-                    Some(_) => identities.next().expect("an identity for each file"),
+                if meta.is_some_and(|meta| meta.kind == Kind::Directory) {
+                    return Some(Refusal::Directory(check.path));
+                }
+                let found = match identified(&check, &meta) {
+                    true => identities.next().expect("an identity for each file"),
+                    false => None,
                 };
-                let holds = match (check.expect, found) {
-                    (Expect::Absent, None) => true,
-                    (Expect::Holds(expected), Some(found)) => expected == found,
+                let holds = match (check.expect, meta, found) {
+                    (Expect::Absent, None, _) => true,
+                    (Expect::Holds(expected), _, Some(found)) => expected == found,
+                    (Expect::Listed { len, modified }, Some(meta), _) => {
+                        (meta.len, meta.modified) == (len, modified)
+                    }
                     _ => false,
                 };
                 (!holds).then(|| {
