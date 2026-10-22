@@ -1,10 +1,13 @@
 //! A bundle's container and manifest: what the writer puts down, what the reader
 //! refuses, and how a new bundle is laid out.
 
-use nord_format::bundle::archive::{copy_member, Directory, DosTime, Entry, Frame, Writer};
+use nord_format::bundle::archive::{
+    copy_member, ArchiveError, Directory, DosTime, Entry, Frame, Writer,
+};
 use nord_format::bundle::manifest::{Dependencies, Manifest};
 use nord_format::bundle::{electro5_path, Class, Item, Key, Plan};
 use nord_format::cbin::Header;
+use nord_format::error::{Error, ParseError};
 use std::io::{Cursor, Write};
 
 const MODIFIED: DosTime = DosTime {
@@ -27,6 +30,14 @@ fn archive(members: &[(&str, &[u8])]) -> Vec<u8> {
 
 fn read(bytes: &[u8]) -> Result<Directory, String> {
     Directory::read_from(&mut Cursor::new(bytes)).map_err(|e| e.to_string())
+}
+
+/// Why the reader refuses `bytes`, which it must.
+fn refusal(bytes: &[u8]) -> ArchiveError {
+    match Directory::read_from(&mut Cursor::new(bytes)) {
+        Err(Error::Parse(ParseError::Archive(why))) => why,
+        other => panic!("not an archive refusal: {other:?}"),
+    }
 }
 
 #[test]
@@ -160,35 +171,71 @@ fn one_member() -> Vec<u8> {
 
 #[test]
 fn only_nsm_shaped_archives_are_read() {
-    let refused = |what: &str, bytes: Vec<u8>| {
-        assert!(read(&bytes).is_err(), "{what} was read");
-    };
-
     let mut compressed = one_member();
     compressed[LOCAL_METHOD] = 8;
     compressed[CENTRAL_AT + 10] = 8;
-    refused("a deflated member", compressed);
+    assert_eq!(
+        refusal(&compressed).to_string(),
+        "member a is compressed (method 8); only stored members are read"
+    );
 
     let mut described = one_member();
     described[LOCAL_FLAGS] = 0x08;
     described[CENTRAL_AT + 8] = 0x08;
-    refused("a member with a data descriptor", described);
+    assert!(matches!(
+        refusal(&described),
+        ArchiveError::Flags { flags: 0x08, .. }
+    ));
 
     let mut mismatched = one_member();
     mismatched[LOCAL_FLAGS] = 0x08;
-    refused("a local header the directory does not describe", mismatched);
+    assert_eq!(
+        refusal(&mismatched).to_string(),
+        "member a's local header disagrees with its directory entry"
+    );
 
     let mut trailing = one_member();
     trailing.push(0);
-    refused("a byte after the end record", trailing);
+    assert_eq!(refusal(&trailing), ArchiveError::NoEndRecord);
+    assert_eq!(
+        ArchiveError::NoEndRecord.to_string(),
+        "not a stored ZIP: no end-of-central-directory record ends the file"
+    );
 
     let mut gapped = one_member();
     gapped.insert(CENTRAL_AT, 0);
-    refused("a byte between the last member and the directory", gapped);
+    assert!(matches!(
+        refusal(&gapped),
+        ArchiveError::DirectoryMisplaced { .. }
+    ));
 
     let bytes = one_member();
-    refused("a truncated archive", bytes[..bytes.len() - 1].to_vec());
-    refused("an empty file", Vec::new());
+    assert_eq!(
+        refusal(&bytes[..bytes.len() - 1]),
+        ArchiveError::NoEndRecord
+    );
+    assert_eq!(refusal(&[]), ArchiveError::NoEndRecord);
+}
+
+#[test]
+fn two_members_of_one_name_are_refused() {
+    let twice = archive(&[("meta.xml", b"a"), ("meta.xml", b"b")]);
+    assert_eq!(
+        refusal(&twice).to_string(),
+        "two members are both named meta.xml"
+    );
+}
+
+#[test]
+fn a_member_whose_path_leaves_the_bundle_is_refused() {
+    for name in ["../x", "a//b", "/abs", "a/./b", "a\\b", "C:/x", "a/.."] {
+        assert_eq!(
+            refusal(&archive(&[(name, b"")])),
+            ArchiveError::Outside { name: name.into() },
+            "{name:?}"
+        );
+    }
+    assert!(read(&archive(&[("Program/Bank 7/a:b.ne5p", b"")])).is_ok());
 }
 
 #[test]
@@ -399,12 +446,18 @@ fn a_header_longer_than_its_fields_can_be_is_refused() {
     let mut bytes = archive(&[("a", &body)]);
     let central = bytes.len() - 22 - (46 + 1);
     bytes[central + 20..central + 28].fill(0);
-    let refused = read(&bytes).unwrap_err();
-    assert!(refused.contains("room for its header"), "{refused}");
+    assert!(matches!(
+        refusal(&bytes),
+        ArchiveError::NoRoomForHeader { .. }
+    ));
 }
 
 #[test]
 fn a_directory_entry_is_not_a_member() {
-    let refused = read(&archive(&[("Program/", b"")])).unwrap_err();
-    assert!(refused.contains("a file's name"), "{refused}");
+    assert_eq!(
+        refusal(&archive(&[("Program/", b"")])),
+        ArchiveError::Folder {
+            name: "Program/".into()
+        }
+    );
 }

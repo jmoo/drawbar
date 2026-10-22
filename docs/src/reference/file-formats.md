@@ -59,8 +59,9 @@ Text notes are outside these tiers, because `nord-format` does not read them.
 drawbar treats a file it cannot decode as a note when its bytes are UTF-8 text
 of up to 256 KiB. In a note, Tab types a tab, and pasted control characters
 other than tab and line breaks are dropped.
-A file that begins with the magic of a format `nord-format` decodes is never a
-note, so one that fails to decode keeps its error. See
+A file that begins with the magic of a format `nord-format` decodes, or whose
+extension names one, is never a note, so one that fails to decode keeps its
+error. An empty file is a note only when it is a `.txt`. See
 [Editing](../drawbar/editing.md#notes).
 
 Both generations of the `CBIN` container are read and written: the current one

@@ -53,6 +53,14 @@ pub enum ParseError {
         got: u64,
         expected: u64,
     },
+
+    /// A bundle's ZIP container in a shape [`crate::bundle::archive`] does not read.
+    #[error(transparent)]
+    Archive(#[from] crate::bundle::archive::ArchiveError),
+
+    /// Audio too short or too long for one sample stroke.
+    #[error(transparent)]
+    Length(#[from] crate::formats::nsmp::encode::LengthError),
 }
 
 /// Lets an infallible decode sit alongside fallible ones behind the same `?`.

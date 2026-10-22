@@ -16,11 +16,11 @@ use nord_usb::envelope;
 use nord_usb::error::ErrKind;
 use nord_usb::session::ReadWrite;
 use nord_usb::transport::Transport;
-use nord_usb::wire::{AllocationUnit, Bank, ProgramInfo};
+use nord_usb::wire::{AllocationUnit, Bank, ProgramInfo, Status};
 use nord_usb::{op, Error, Location, ObjectClass, Session};
 
 use super::scratch::{Kept, Scratch};
-use super::{DeviceCmd, DeviceEvent, Fetched, Outgoing, Partition, Payload, Purpose};
+use super::{slot_label, DeviceCmd, DeviceEvent, Fetched, Outgoing, Partition, Payload, Purpose};
 use crate::strings::shown;
 use crate::workspace::Origin;
 
@@ -194,7 +194,7 @@ async fn execute<T: Transport>(
         DeviceCmd::Disconnect => Ok(None),
 
         DeviceCmd::ScanBank { class, bank } => {
-            let slots = scan_bank(device, class, bank)
+            let (status, slots) = scan_bank(device, class, bank)
                 .await
                 .map_err(spoil(fault, None))?;
             let filled = slots.iter().filter(|s| s.is_some()).count();
@@ -202,6 +202,11 @@ async fn execute<T: Transport>(
                 "bank {bank}: {filled} of {} slots hold something",
                 slots.len()
             );
+            emit.send(DeviceEvent::ClassStatus {
+                class,
+                status,
+                banks: None,
+            });
             emit.send(DeviceEvent::BankScanned { class, bank, slots });
             Ok(Some(note))
         }
@@ -395,9 +400,9 @@ async fn execute<T: Transport>(
     }
 }
 
-/// Read the occupant `info` describes into a new file from `scratch`, named as its
-/// rescue, a transfer chunk at a time, and close it, so it is on disk before anything is
-/// deleted. A read that fails leaves no file behind.
+/// Read the occupant `info` describes into a new file from `scratch`, a transfer chunk
+/// at a time, close it, check it whole, and only then give it its name as a rescue, so
+/// it is on disk before anything is deleted. A read that fails leaves no file behind.
 async fn back_up<T: Transport>(
     s: &mut Session<'_, T, ReadWrite>,
     scratch: &Scratch,
@@ -409,10 +414,13 @@ async fn back_up<T: Transport>(
         .create(&envelope::rescue_name_for(at, &info.format))
         .await
         .map_err(|e| format!("there was nowhere on this computer to keep it: {e}"))?;
-    let read = match op::read_into(s, at, &mut kept).await {
-        Ok(_) => kept.close().await.map_err(Error::Io),
-        Err(e) => Err(e),
-    };
+    let read: Result<(), Error> = async {
+        let received = op::read_into(s, at, &mut kept).await?;
+        kept.close().await?;
+        op::verify_read(&mut kept.source().await?, &received).await?;
+        Ok(kept.finish().await?)
+    }
+    .await;
     match read {
         Ok(()) => Ok(kept),
         Err(e) => {
@@ -662,33 +670,6 @@ fn wrote(class: ObjectClass, at: Location, what: &str, name: &str) -> String {
     }
 }
 
-/// Strip the format suffix from a local label, preserving the operator's text.
-/// Returns `None` for a blank name.
-fn slot_label(name: &str) -> Option<String> {
-    // Application bound; the instrument's maximum is unknown.
-    const LONGEST: usize = 64;
-
-    let mut label = name.trim();
-    if let Some((stem, tag)) = label.rsplit_once('.') {
-        // A format tag, not a name that happens to hold a dot: `Bass 2.0` keeps its `0`.
-        let is_tag = (2..=5).contains(&tag.len())
-            && tag.chars().all(|c| c.is_ascii_alphanumeric())
-            && tag.chars().any(|c| c.is_ascii_alphabetic());
-        if is_tag && !stem.trim().is_empty() {
-            label = stem;
-        }
-    }
-    let label = label.trim();
-    if label.is_empty() {
-        return None;
-    }
-    // A truncated UTF-8 name must still end on a character boundary.
-    let end = (0..=LONGEST.min(label.len()))
-        .rev()
-        .find(|end| label.is_char_boundary(*end))?;
-    Some(label[..end].trim_end().to_string())
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn put_one<T: Transport>(
     device: &mut Device<T>,
@@ -822,6 +803,11 @@ fn explain(e: Error, at: Location) -> String {
             "{} is occupied, and the instrument does not overwrite in place",
             shown(at)
         ),
+        Error::DeviceStatus(op::NAME_TAKEN) => format!(
+            "something else in the library already has the name this write gave {}, \
+             and the instrument keeps one of each name",
+            shown(at)
+        ),
         other => other.to_string(),
     }
 }
@@ -833,7 +819,8 @@ const SCAN_READ_LIMIT: Duration = Duration::from_secs(10);
 const MOST_OCCUPIED: u32 = op::ENUMERATION_LIMIT as u32;
 
 /// Scan the slots the instrument declares for this bank, or up to the device boundary
-/// where it declared the unbounded sentinel.
+/// where it declared the unbounded sentinel, with the class's counters read in the same
+/// session, since whatever changed the bank changed them too.
 ///
 /// The capacity comes from the [`Device`]'s geometry, not the UI's cache: a rescan after
 /// a mutation can run before the class has been walked, and walking a bounded bank as if
@@ -842,7 +829,7 @@ async fn scan_bank<T: Transport>(
     device: &mut Device<T>,
     class: ObjectClass,
     bank: u32,
-) -> Result<Vec<Option<ProgramInfo>>, Error> {
+) -> Result<(Status, Vec<Option<ProgramInfo>>), Error> {
     let declared = device
         .geometry()
         .await?
@@ -862,7 +849,8 @@ async fn scan_bank<T: Transport>(
     device
         .read(class, async |s| {
             s.set_read_limit(SCAN_READ_LIMIT);
-            walk(s, bank, extent, MOST_OCCUPIED).await
+            let status = op::status(s).await?;
+            Ok((status, walk(s, bank, extent, MOST_OCCUPIED).await?))
         })
         .await
 }
@@ -1247,10 +1235,12 @@ async fn fetch<T: Transport, C>(
     let extension = info.format.trim_end_matches('\0');
     let name = format!("fetched-{}-{}.{extension}", at.bank, at.slot);
     let mut kept = scratch.create(&name).await.map_err(Error::Io)?;
-    let read = match op::read_into(s, at, &mut kept).await {
-        Ok(_) => kept.close().await.map_err(Error::Io),
-        Err(e) => Err(e),
-    };
+    let read: Result<(), Error> = async {
+        op::read_into(s, at, &mut kept).await?;
+        kept.close().await?;
+        Ok(kept.finish().await?)
+    }
+    .await;
     let file = match read {
         Ok(()) => kept.outside().await.map_err(Error::Io),
         Err(e) => Err(e),
@@ -1328,38 +1318,6 @@ fn entity_name(info: &ProgramInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_slot_is_named_what_this_computer_calls_the_object() {
-        let label = |name: &str| slot_label(name);
-        assert_eq!(label("Africa-Split.ne5p").as_deref(), Some("Africa-Split"));
-        assert_eq!(label("Squabble B.ne5t").as_deref(), Some("Squabble B"));
-        assert_eq!(label("  Rotary Fast  ").as_deref(), Some("Rotary Fast"));
-        // A dot that is not a tag: a name is allowed to hold one.
-        assert_eq!(label("Bass 2.0").as_deref(), Some("Bass 2.0"));
-        assert_eq!(label("Mr. Hammond").as_deref(), Some("Mr. Hammond"));
-        assert_eq!(
-            label(".ne5p").as_deref(),
-            Some(".ne5p"),
-            "a bare tag is kept as the name"
-        );
-    }
-
-    #[test]
-    fn a_name_with_nothing_in_it_is_not_sent() {
-        for nothing in ["", "   ", "\t"] {
-            assert_eq!(slot_label(nothing), None, "{nothing:?}");
-        }
-    }
-
-    #[test]
-    fn a_long_name_is_cut_on_a_character_boundary() {
-        let long = "é".repeat(200);
-        let cut = slot_label(&long).expect("something is left");
-        assert!(cut.len() <= 64, "{} bytes", cut.len());
-        assert!(long.starts_with(&cut));
-        assert_eq!(cut.chars().count(), 32, "whole characters only");
-    }
 
     #[test]
     fn a_nameless_slot_still_gets_a_label() {
@@ -1454,9 +1412,14 @@ mod wire_tests {
         /// What every occupied slot reports holding: its body's length and format tag.
         /// A read of it answers [`occupant_byte`]s.
         occupant: (u32, &'static str),
-        /// A folder whose files are taken down, by name, when the first delete is heard.
+        /// A folder whose files are taken down, by name, when the first delete is heard,
+        /// and whose names are taken down at every read.
         watched: Option<std::path::PathBuf>,
         at_delete: Option<Vec<(String, Vec<u8>)>>,
+        at_reads: Vec<Vec<String>>,
+        /// A folder whose files each have a body byte changed when the second read is
+        /// heard, as a disk that does not keep what was written changes them.
+        spoiled: Option<std::path::PathBuf>,
         /// A folder removed when the first read is heard.
         pulled: Option<std::path::PathBuf>,
     }
@@ -1495,6 +1458,8 @@ mod wire_tests {
                 occupant: (121, "ne5p"),
                 watched: None,
                 at_delete: None,
+                at_reads: Vec::new(),
+                spoiled: None,
                 pulled: None,
             }
         }
@@ -1506,9 +1471,15 @@ mod wire_tests {
         }
 
         /// Takes down what `dir` holds when it hears the first delete, in
-        /// [`Puppet::at_delete`].
+        /// [`Puppet::at_delete`], and its names at every read, in [`Puppet::at_reads`].
         fn watching(mut self, dir: &crate::testing::Temp) -> Puppet {
             self.watched = Some(dir.0.clone());
+            self
+        }
+
+        /// Changes a body byte of each file in `dir` when it hears the second read.
+        fn spoiling(mut self, dir: &crate::testing::Temp) -> Puppet {
+            self.spoiled = Some(dir.0.clone());
             self
         }
 
@@ -1730,6 +1701,25 @@ mod wire_tests {
         }
     }
 
+    /// Where a type-1 file's body starts, behind its header.
+    const BODY_START: usize = 0x2c;
+
+    /// The names in `dir`, sorted.
+    fn listed(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("the watched folder")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
     fn words(of: &[u32]) -> Vec<u8> {
         of.iter().flat_map(|w| w.to_be_bytes()).collect()
     }
@@ -1809,6 +1799,23 @@ mod wire_tests {
             let read = matches!(msg.service, Service::Program) && msg.command == cmd::READ;
             if let Some(dir) = self.pulled.take_if(|_| read) {
                 std::fs::remove_dir_all(dir).expect("the pulled folder");
+            }
+            if let (true, Some(dir)) = (read, &self.watched) {
+                self.at_reads.push(listed(dir));
+            }
+            let again = read
+                && self.heard.iter().any(|heard| {
+                    heard.command == cmd::READ && matches!(heard.service, Service::Program)
+                });
+            if let Some(dir) = self.spoiled.take_if(|_| again) {
+                for name in listed(&dir) {
+                    let path = dir.join(name);
+                    let mut bytes = std::fs::read(&path).expect("a file reads");
+                    if let Some(byte) = bytes.get_mut(BODY_START) {
+                        *byte ^= 0xff;
+                        std::fs::write(&path, bytes).expect("a file writes");
+                    }
+                }
             }
             let delete = matches!(msg.service, Service::Program) && msg.command == cmd::DELETE;
             self.deaf |= self.hangs_up_on_delete && delete;
@@ -2133,6 +2140,71 @@ mod wire_tests {
         let occupant = envelope::wrap(format, at, OCCUPANT_VERSION, &occupant_body(len)).unwrap();
         assert!(held[0].1 == occupant, "the file is the occupant's");
         assert_eq!(dir.names(""), Vec::<String>::new(), "let go once written");
+    }
+
+    /// ⚠️ A process that dies while the occupant is read back leaves part of it in a
+    /// file, and the slot as it was. Until the read is whole that file has a partial name,
+    /// which is never offered as the slot's copy, and the delete waits for it to take its
+    /// own.
+    #[test]
+    fn the_slot_is_deleted_only_after_its_rescue_is_complete() {
+        let len = 3 * 32720 + 5;
+        let at = Location { bank: 0, slot: 3 };
+        let dir = crate::testing::Temp::new();
+        let mut device = Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")])
+            .holding(len, "ne5p")
+            .watching(&dir);
+        let (flow, _) = drive_keeping(
+            &mut device,
+            DeviceCmd::Put {
+                id: 1,
+                class: ObjectClass::Program,
+                at,
+                name: "Africa-Split.ne5p".into(),
+                payload: Payload::Bytes(a_program()),
+            },
+            &scratch_in(&dir),
+        );
+        assert!(flow == Flow::Continue);
+
+        assert_eq!(device.at_reads.len(), 4, "a read of four chunks");
+        for names in &device.at_reads {
+            assert_eq!(names, &["nord-rescued-1-4.ne5p.partial"]);
+        }
+        let held = device.at_delete.clone().expect("a delete was sent");
+        let names: Vec<&str> = held.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["nord-rescued-1-4.ne5p"]);
+        let occupant = envelope::wrap("ne5p", at, OCCUPANT_VERSION, &occupant_body(len)).unwrap();
+        assert!(held[0].1 == occupant, "the file is the occupant's, whole");
+    }
+
+    /// A backup that does not read back off the disk as it was read off the instrument is
+    /// not a copy of the slot, so the slot is left alone and the file is let go.
+    #[test]
+    fn a_backup_that_does_not_read_back_whole_leaves_the_slot_alone() {
+        let at = Location { bank: 0, slot: 3 };
+        let dir = crate::testing::Temp::new();
+        let mut device = Puppet::stocked(&[("Bank 1", 50)], &[(at, "Squabble B")])
+            .holding(2 * 32720, "ne5p")
+            .spoiling(&dir);
+        let (flow, events) = drive_keeping(
+            &mut device,
+            DeviceCmd::Put {
+                id: 1,
+                class: ObjectClass::Program,
+                at,
+                name: "Africa-Split.ne5p".into(),
+                payload: Payload::Bytes(a_program()),
+            },
+            &scratch_in(&dir),
+        );
+        assert!(flow == Flow::Continue);
+
+        assert_eq!(counted(&device, cmd::DELETE), 0, "nothing was deleted");
+        assert_eq!(counted(&device, cmd::BEGIN_WRITE), 0, "nothing was written");
+        let said = refused(events);
+        assert!(said.contains("left alone"), "{said}");
+        assert_eq!(dir.names(""), Vec::<String>::new(), "the file is let go");
     }
 
     /// ⚠️ The backup's entry in its folder must reach the disk before the delete, or a
@@ -2640,6 +2712,35 @@ mod wire_tests {
             "the declared four slots, not a walk to the host limit"
         );
         assert_eq!(counted(&device, cmd::INFO), 4);
+    }
+
+    #[test]
+    fn a_rescan_recounts_its_class_before_the_bank_lands() {
+        let held = [
+            (Location { bank: 0, slot: 1 }, "Africa Split"),
+            (Location { bank: 1, slot: 0 }, "Bright Grand"),
+        ];
+        let mut device = Puppet::stocked(&[("Bank 1", 4), ("Bank 2", 4)], &held);
+        let (flow, events) = drive(
+            &mut device,
+            DeviceCmd::ScanBank {
+                class: ObjectClass::Program,
+                bank: 1,
+            },
+        );
+
+        assert!(flow == Flow::Continue);
+        let said: Vec<String> = events
+            .try_iter()
+            .filter_map(|event| match event {
+                DeviceEvent::ClassStatus { status, banks, .. } => {
+                    Some(format!("count {} banks {banks:?}", status.count))
+                }
+                DeviceEvent::BankScanned { bank, .. } => Some(format!("bank {bank}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said, ["count 2 banks None", "bank 1"]);
     }
 
     #[test]

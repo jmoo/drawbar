@@ -8,7 +8,7 @@ desktop app.
 |---|---|
 | **Top bar** | Open, New and Save, the search box, **Send**, and **Connect instrument…** or your instrument's name. |
 | **Browser** (left) | **This computer** and, once connected, the instrument's folders. **Kinds** and **Tags** narrow the list. |
-| **Library** (center) | One table over both places. Sort by any column. |
+| **Library** (center) | One table over both places. Sort by any column. In a narrow window, other columns hide before the names shorten. |
 | **Documents** (center) | Every sound you open gets a tab. |
 | **Keyboard** (center) | The instrument's slots, bank by bank, once connected. |
 | **Inspector** (right) | What is selected and what you can do with it. |
@@ -33,7 +33,8 @@ went wrong. The copy button puts the whole log on the clipboard for a bug report
 Click a row to select it, ⌘-click to add more, ⇧-click to select a run, and
 double-click to open. Right-click for a menu that acts on everything selected.
 F2 renames. With more than 64 rows selected, the inspector sums them up: how
-many, how large, and how many of each kind.
+many, how large, and how many of each kind. A folder or tag selected on its own
+shows how many files it has.
 
 ## Reading the Library
 

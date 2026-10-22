@@ -79,6 +79,39 @@ use crate::error::{Error, ParseError};
 use crate::formats::nsmpproj;
 use crate::formats::predictor::DIFFERENCE;
 use std::borrow::Cow;
+use thiserror::Error as ThisError;
+
+/// Audio too short or too long for one stroke.
+#[derive(ThisError, Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum LengthError {
+    #[error("too short: {frames} frames, and the encoder needs at least {MIN_FRAMES}")]
+    TooShort { frames: usize },
+    /// Longer than a stroke holds even at the narrowest field width.
+    #[error(
+        "too long: {frames} frames, and a {} stroke holds at most {max} (about {:.1} s at \
+         {} kHz)",
+        if *.channels == 1 { "mono" } else { "stereo" },
+        seconds(*.max),
+        f64::from(codec::SOURCE_RATE) / 1000.0
+    )]
+    TooLong {
+        frames: usize,
+        channels: usize,
+        max: usize,
+    },
+    /// Within that ceiling, but the encoded audio still overflows the stroke.
+    #[error(
+        "too long: the audio encodes to {words} words, more than the {MAX_STREAM_WORDS} a \
+         stroke holds; about {fits:.1} s of it would fit"
+    )]
+    Stream { words: usize, fits: f64 },
+}
+
+/// Seconds of source audio in `frames`.
+fn seconds(frames: usize) -> f64 {
+    frames as f64 / f64::from(codec::SOURCE_RATE)
+}
 
 /// Content version this writes per generation: `format × 100 + revision`, at the
 /// revision the editor emits.
@@ -170,6 +203,14 @@ impl Units {
     /// Absolute field ceiling imposed by the stream directory and minimum width.
     const fn max_fields(self) -> usize {
         MAX_STREAM_WORDS * self.word_bits() / MIN_WIDTH as usize
+    }
+
+    /// The most source frames whose fields, ring-out included, stay within
+    /// [`Units::max_fields`]. [`fields_of`] rounds half up, so `frames` fit while
+    /// `frames·DEN/NUM < per_channel + ½`.
+    const fn max_frames(self) -> usize {
+        let per_channel = self.max_fields() / self.channels - RING_OUT;
+        ((2 * per_channel + 1) * PITCH_NUM as usize - 1) / (2 * PITCH_DEN as usize)
     }
 }
 
@@ -544,7 +585,7 @@ impl Plan {
         let fields = fields_of(frames)
             .and_then(|f| f.checked_add(RING_OUT))
             .and_then(|f| f.checked_mul(channels))
-            .ok_or_else(|| size_error(frames))?;
+            .ok_or_else(|| size_error(frames, Units { layout, channels }))?;
         let resync_at = Plan::resync_at(secondary_start, channels)?;
         Plan::lay_out(layout, frames, channels, fields, None, resync_at)
     }
@@ -578,6 +619,8 @@ impl Plan {
         }
         // Every landmark is placed per channel and scaled by the channel count, as the
         // encoder runs one plan interleaved.
+        let units = Units { layout, channels };
+        let size_error = |frames: usize| size_error(frames, units);
         let lattice = |n: usize| fields_of(n).and_then(|f| f.checked_mul(channels));
         let lattice_at = |n: f64| fields_at(n).and_then(|f| f.checked_mul(channels));
         let start = lattice(points.start).ok_or_else(|| size_error(points.start))?;
@@ -588,7 +631,6 @@ impl Plan {
         let end = start
             .checked_add(length)
             .ok_or_else(|| size_error(points.end))?;
-        let units = Units { layout, channels };
         let (cell, chunk) = (units.cell(), units.chunk());
         let resync_at = Plan::resync_at(secondary_start, channels)?;
         if resync_at > start {
@@ -702,14 +744,7 @@ impl Plan {
         if frames >= MIN_FRAMES {
             return Ok(());
         }
-        Err(ParseError::OutOfBounds {
-            value: format!("{frames} frames"),
-            bound: format!(
-                "the modeled range: at least {MIN_FRAMES} frames; below that the \
-                 stream opens in a way this crate has not modeled"
-            ),
-        }
-        .into())
+        Err(ParseError::from(LengthError::TooShort { frames }).into())
     }
 
     /// Place the warmup, the resync and the cells between them across everything ahead
@@ -724,7 +759,7 @@ impl Plan {
     ) -> Result<Plan, Error> {
         let units = Units { layout, channels };
         if fields > units.max_fields() {
-            return Err(size_error(frames).into());
+            return Err(size_error(frames, units).into());
         }
         let (cell, chunk) = (units.cell(), units.chunk());
         let band = |r: usize| band(r, cell, chunk);
@@ -794,11 +829,13 @@ fn frames_of(source: &[i16], channels: usize) -> Result<usize, Error> {
     Ok(source.len() / channels)
 }
 
-fn size_error(frames: usize) -> ParseError {
-    ParseError::OutOfBounds {
-        value: format!("{frames} frames"),
-        bound: format!("audio whose encoded stream fits {MAX_STREAM_WORDS} words"),
+fn size_error(frames: usize, units: Units) -> ParseError {
+    LengthError::TooLong {
+        frames,
+        channels: units.channels,
+        max: units.max_frames(),
     }
+    .into()
 }
 
 /// The 1:1 run length that preserves a landmark's cell phase, at either channel count.
@@ -1295,13 +1332,11 @@ fn pack(
     }
     let total = (payload - header) / word;
     if total > MAX_STREAM_WORDS {
-        return Err(ParseError::OutOfBounds {
-            value: format!("a stream of {total} words"),
-            bound: format!(
-                "{MAX_STREAM_WORDS} words, the reach of the stroke header's 16-bit word \
-                 directory"
-            ),
-        }
+        let lasts = plan.fields as f64 / plan.channels as f64 / f64::from(codec::FIELD_RATE);
+        return Err(ParseError::from(LengthError::Stream {
+            words: total,
+            fits: lasts * MAX_STREAM_WORDS as f64 / total as f64,
+        })
         .into());
     }
 
@@ -2516,13 +2551,92 @@ mod tests {
         assert_eq!(widths_at(&values, 8, Predictor::Plain, CELL, 1).len(), 1);
     }
 
+    fn length_error(result: Result<impl std::fmt::Debug, Error>) -> LengthError {
+        match result {
+            Err(Error::Parse(ParseError::Length(why))) => why,
+            other => panic!("not a length refusal: {other:?}"),
+        }
+    }
+
     #[test]
     fn short_input_is_refused() {
-        assert!(plan(MIN_FRAMES - 1, 1).is_err());
+        assert_eq!(
+            length_error(plan(MIN_FRAMES - 1, 1)),
+            LengthError::TooShort {
+                frames: MIN_FRAMES - 1
+            }
+        );
         assert!(plan(MIN_FRAMES, 1).is_ok());
-        assert!(plan(usize::MAX, 1).is_err());
         assert!(instrument(&[0i16; MIN_FRAMES - 1], &Options::new("Test")).is_err());
         assert!(instrument(&[0i16; MIN_FRAMES], &Options::new("Test")).is_ok());
+        assert_eq!(
+            LengthError::TooShort { frames: 10 }.to_string(),
+            "too short: 10 frames, and the encoder needs at least 92"
+        );
+    }
+
+    /// The ceiling a refusal states is the last length the field count admits.
+    #[test]
+    fn a_refused_length_states_the_most_a_stroke_holds() {
+        for layout in [Layout::V2, Layout::V3, Layout::V4] {
+            for channels in [1, 2] {
+                let max = Units { layout, channels }.max_frames();
+                let plan = |frames| {
+                    Plan::new(
+                        layout,
+                        frames,
+                        channels,
+                        default_secondary_start(frames, None),
+                    )
+                };
+                assert!(plan(max).is_ok(), "{layout:?} x{channels} at {max}");
+                assert_eq!(
+                    length_error(plan(max + 1)),
+                    LengthError::TooLong {
+                        frames: max + 1,
+                        channels,
+                        max
+                    },
+                    "{layout:?} x{channels}"
+                );
+            }
+        }
+        assert!(matches!(
+            length_error(plan(usize::MAX, 1)),
+            LengthError::TooLong { .. }
+        ));
+        let mono = Units {
+            layout: Layout::V2,
+            channels: 1,
+        }
+        .max_frames();
+        assert_eq!(
+            length_error(plan(mono + 1, 1)).to_string(),
+            format!(
+                "too long: {} frames, and a mono stroke holds at most {mono} (about 22.5 s \
+                 at 44.1 kHz)",
+                mono + 1
+            )
+        );
+    }
+
+    /// Noise needs wide fields, so it overflows the stroke well under the ceiling, and
+    /// the refusal estimates how much of it fits.
+    #[test]
+    fn audio_that_encodes_past_the_stroke_is_refused_with_what_fits() {
+        let mut state = 1u32;
+        let noise: Vec<i16> = (0..4 * codec::SOURCE_RATE as usize)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 16) as i16
+            })
+            .collect();
+        let refused = length_error(instrument(&noise, &Options::new("Noise")));
+        let LengthError::Stream { words, fits } = refused else {
+            panic!("refused for the wrong reason: {refused:?}");
+        };
+        assert!(words > MAX_STREAM_WORDS, "{words} words");
+        assert!((0.5..4.0).contains(&fits), "{fits} s would fit");
     }
 
     #[test]

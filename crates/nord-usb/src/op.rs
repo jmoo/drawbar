@@ -123,6 +123,21 @@ pub async fn read_into<T: Transport, C>(
     Ok(Received { info, body_crc32 })
 }
 
+/// Check that `file` holds the whole of what [`read_into`] took off the instrument as
+/// `received` says: its header and every byte of its body, which its stored checksum
+/// agrees with. Read back off a disk, it fails for a file the disk did not keep as
+/// written.
+pub async fn verify_read(file: &mut impl FileSource, received: &Received) -> Result<()> {
+    let whole = Generation::V1.body_start() + u64::from(received.info.body_len);
+    if file.len() != whole {
+        return Err(Error::Envelope(format!(
+            "the file holds {} of the {whole} bytes read into it",
+            file.len()
+        )));
+    }
+    envelope::verify(file).await.map(drop)
+}
+
 /// Read an entity's body off the instrument without wrapping it in a CBIN header.
 ///
 /// For formats whose header layout is unknown, such as CBIN type-0 (the legacy variant
@@ -683,6 +698,11 @@ pub const OUT_OF_RANGE: u32 = 0x3;
 /// Device status refusing a write into an occupied slot of a class that does not
 /// [overwrite in place](ObjectClass::overwrites_in_place). Confirmed on hardware.
 pub const OCCUPIED: u32 = 0x4;
+
+/// Device status refusing a library write named as another object of that library
+/// already is. The names are compared exactly, case included, and the slot written to
+/// makes no difference. Confirmed on hardware.
+pub const NAME_TAKEN: u32 = 0x18;
 
 /// Slot value meaning "from the bank's boundary": the bank's first occupied slot when
 /// walking forward, its last when walking backward.

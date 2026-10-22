@@ -773,7 +773,7 @@ fn body(ui: &Ui, entity: &Entity) {
 fn bundle(ui: &Ui, bundle: &nord_format::Bundle) {
     match bundle {
         nord_format::Bundle::Electro5(b) => {
-            ui.out(field(ui, 2, "type", "backup bundle (zip)"));
+            ui.out(field(ui, 2, "type", "Electro 5 bundle (zip)"));
             ui.out(field(
                 ui,
                 2,

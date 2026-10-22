@@ -11,11 +11,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::cache::{self, Cache};
 use super::diff::{self, match_files, Known};
-use super::exec::{too_much, working_name};
+use super::exec::{contents, too_much, working_name};
 use super::sidecar::{Keeps, Row, Sidecar, Working, VERSION};
 use super::{
     names, Backend, Cmd, Complete, CopyOf, Event, Failure, Fingerprint, Found, Holds, Left,
-    LibPath, Listing, Opened, Rescue, Source, Stale, Stat, MOST_BYTES,
+    LibPath, Listing, Opened, Rescue, Source, Stale, Unkept, MOST_BYTES,
 };
 use crate::browser::{Browser, Rescuing};
 use crate::folders::{Folders, Op, Where};
@@ -81,6 +81,8 @@ struct Loading {
     claimed: BTreeSet<u64>,
     /// The working copies not yet taken up, by id.
     working: BTreeMap<u64, Vec<u8>>,
+    /// The length and CRC-32 of every working copy read, by id, taken up or not.
+    prints: BTreeMap<u64, (u64, u32)>,
     /// The id the next file the index does not name takes, unless the workspace has
     /// given it out since.
     next: u64,
@@ -92,10 +94,13 @@ struct Loading {
     swept: usize,
     /// The slots' former occupants the open found in `.drawbar/tmp/`, offered once the
     /// listing is complete.
-    rescued: Vec<(String, Stat)>,
+    rescued: Vec<Rescue>,
     /// The working copies the open found with no index, asked about once the listing
     /// is complete.
     unindexed: usize,
+    /// The open found an index that does not read, asked about once the listing is
+    /// complete.
+    damaged: bool,
     /// Each rename sent while the listing is in flight that has not failed. A part the
     /// backend gathered before it ran names what it moved where it was.
     moves: Vec<Rename>,
@@ -264,6 +269,8 @@ struct Kept {
     /// The stamp of what the copy holds: the [`LocalEntity::stamp`] of the bytes, or
     /// the stamp of the edit (see [`Workspace::kept_edit`]).
     stamp: u64,
+    /// The length and CRC-32 of the copy's file.
+    holds: (u64, u32),
 }
 
 pub struct Store {
@@ -273,6 +280,9 @@ pub struct Store {
     next_generation: u64,
     /// The index as last sent, so an unchanged one is not written again.
     committed: Option<Sidecar>,
+    /// The last commit failure logged, so one every retry repeats is logged once, though
+    /// each retry writes its working copies under new names. Let go once a commit lands.
+    failing: Option<Unkept>,
     /// Assets to remove now what was copied or saved of them over another has landed
     /// ([`Store::take_left`]).
     left: Vec<u64>,
@@ -282,6 +292,11 @@ pub struct Store {
     indexed: bool,
     /// Whether the window had focus at the last [`Store::focus`].
     focused: bool,
+    /// The tags' revision when an answer was last folded in, so a change after it is
+    /// the user's.
+    tags_seen: u64,
+    /// The user changed a tag while nothing may be written.
+    tags_held: bool,
     /// A rescan, or a check of the files read so far, is in flight.
     scanning: bool,
     loading: Option<Loading>,
@@ -361,8 +376,11 @@ impl Store {
             records: BTreeMap::new(),
             next_generation: 1,
             committed: None,
+            failing: None,
             indexed: false,
             focused: true,
+            tags_seen: 0,
+            tags_held: false,
             scanning: false,
             loading: None,
             checking: BTreeSet::new(),
@@ -483,10 +501,37 @@ impl Store {
     }
 
     /// Whether letting the library go now, with no last pass, would lose an edit: one not
-    /// yet kept as a working copy, an asset never written to a file, or a write that has
-    /// not landed. A browser tab may close without that pass.
-    pub fn losing(&self, workspace: &Workspace) -> bool {
-        self.writing() || self.unheld(workspace).next().is_some()
+    /// yet kept as a working copy, an asset never written to a file, a write that has
+    /// not landed, or a change held in memory where nothing may be written. A browser tab
+    /// may close without that pass.
+    pub fn losing(&self, workspace: &Workspace, browser: &Browser) -> bool {
+        self.writing() || self.unheld(workspace).next().is_some() || self.held(workspace, browser)
+    }
+
+    /// Whether a change is held in memory only, where nothing may be written: a deletion,
+    /// a save, a rename or move, a folder change or a tag change.
+    fn held(&self, workspace: &Workspace, browser: &Browser) -> bool {
+        if !matches!(self.phase, Phase::ReadOnly(_)) {
+            return false;
+        }
+        let unwritten = |(id, record): (&u64, &Record)| {
+            let Some(path) = &record.path else {
+                return false;
+            };
+            workspace.get(*id).is_none_or(|entity| {
+                let saved = entity.saved.file.is_none() && entity.saved.stamp != record.saved;
+                saved || entity.path.as_ref() != Some(path)
+            })
+        };
+        let tags = self.tags_held || browser.tags.revision() != self.tags_seen;
+        tags || browser.folders.changed() || self.records.iter().any(unwritten)
+    }
+
+    /// Note a tag the user changed since the last answer was folded in, where nothing may
+    /// write it.
+    fn note_tags(&mut self, browser: &Browser) {
+        let changed = browser.tags.revision() != self.tags_seen;
+        self.tags_held |= changed && matches!(self.phase, Phase::ReadOnly(_));
     }
 
     /// The names of the assets that letting this library go would lose, where nothing
@@ -562,6 +607,7 @@ impl Store {
                 Phase::ReadOnly(why) => Some(format!("read-only: {why}")),
                 Phase::Failed(why) => Some(format!("not opened: {why}")),
             },
+            read_only: matches!(self.phase, Phase::ReadOnly(_)),
             opening: matches!(self.phase, Phase::Opening) || self.loading.is_some(),
             listing: self.loading.as_ref().map(|loading| loading.files),
         }
@@ -576,6 +622,7 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) -> bool {
+        self.note_tags(browser);
         self.recalled(workspace, browser, log);
         self.ask(workspace, browser, queue, log);
         self.walk(browser);
@@ -599,6 +646,7 @@ impl Store {
             workspace.ctx().request_repaint();
         }
         browser.folders.place = Some(self.place());
+        self.tags_seen = browser.tags.revision();
         released
     }
 
@@ -612,6 +660,7 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) -> bool {
+        self.note_tags(browser);
         match self.ready() {
             Some(event) => self.react(event, workspace, browser, queue, log),
             None => {
@@ -622,6 +671,7 @@ impl Store {
             }
         };
         browser.folders.place = Some(self.place());
+        self.tags_seen = browser.tags.revision();
         true
     }
 
@@ -1075,24 +1125,35 @@ impl Store {
                 self.rewritten(id, path, result, workspace, browser, log)
             }
             Event::ReadOnly(why) => self.refused(why, workspace, log),
-            Event::Failed(why) => {
-                log.error(why.clone());
-                log.trouble(format!(
-                    "The library folder did not change as asked: {why}."
-                ));
-                // Whatever failed may have been the index or a working copy, so both are
-                // written again, whole, at the next full pass, and that pass drops the
-                // copies it replaces.
-                self.committed = None;
-                for (id, record) in &mut self.records {
-                    if let Some(old) = record.working.take() {
-                        self.stale.push(working_name(*id, old.copy.generation));
-                    }
-                }
-                self.rescan();
+            Event::Committed(Ok(())) => self.failing = None,
+            Event::Committed(Err(unkept)) => {
+                let again = self.failing.as_ref().is_some_and(|last| last.same(&unkept));
+                self.unchanged(&unkept.to_string(), again, log);
+                self.failing = Some(unkept);
             }
+            Event::Failed(why) => self.unchanged(&why, false, log),
         }
         false
+    }
+
+    /// Say why the library did not change as asked, unless `quiet`, and write the index
+    /// and every working copy again.
+    fn unchanged(&mut self, why: &str, quiet: bool, log: &mut Log) {
+        if !quiet {
+            log.error(why);
+            log.trouble(format!(
+                "The library folder did not change as asked: {why}."
+            ));
+        }
+        // Whatever failed may have been the index or a working copy, so both are written
+        // again, whole, at the next full pass, and that pass drops the copies it replaces.
+        self.committed = None;
+        for (id, record) in &mut self.records {
+            if let Some(old) = record.working.take() {
+                self.stale.push(working_name(*id, old.copy.generation));
+            }
+        }
+        self.rescan();
     }
 
     /// Hold back an answer of the listing gathered before a rename that has not
@@ -1304,8 +1365,10 @@ impl Store {
         let Opened {
             writable,
             indexed,
+            damaged,
             sidecar,
             mut working,
+            mut prints,
             swept,
             stranded,
             rescued,
@@ -1314,8 +1377,8 @@ impl Store {
         if !stranded.is_empty() {
             let named: Vec<String> = stranded.iter().map(|dir| format!("“{dir}”")).collect();
             log.trouble(format!(
-                "An interrupted rename left {} under the name it moved through, and another \
-                 folder has its name, so it was left as it is.",
+                "An interrupted rename left {} under the name it moved through, and something \
+                 else has its name, so it was left as it is.",
                 named.join(", ")
             ));
         }
@@ -1351,6 +1414,9 @@ impl Store {
             if let Some(bytes) = working.remove(&id) {
                 working.insert(moved, bytes);
             }
+            if let Some(print) = prints.remove(&id) {
+                prints.insert(moved, print);
+            }
             if let Some(copy) = row.working {
                 self.renamed
                     .push((moved, working_name(id, copy.generation)));
@@ -1367,12 +1433,14 @@ impl Store {
             rows,
             claimed: BTreeSet::new(),
             working,
+            prints,
             next,
             dirs: Vec::new(),
             files: 0,
             swept,
             rescued,
             unindexed,
+            damaged,
             moves: Vec::new(),
             held: Default::default(),
         });
@@ -1493,7 +1561,8 @@ impl Store {
     }
 
     /// Put assets back in the workspace, with the edits their working copies kept over
-    /// their files, and record what each was restored as.
+    /// their files, and record what each was restored as. One whose file is missing holds
+    /// nothing saved, and counts as unsaved before its working copy is settled.
     fn restored(
         &mut self,
         back: Vec<Saved>,
@@ -1509,7 +1578,11 @@ impl Store {
             workspace.restore_edit(id, edit);
         }
         for id in ids {
-            self.settle(id, workspace, &loading.rows);
+            if self.records.get(&id).is_some_and(|record| record.missing) {
+                workspace.unsave(id);
+            }
+            let copy = loading.rows.get(&id).and_then(|row| row.working);
+            self.settle(id, workspace, copy.zip(loading.prints.get(&id).copied()));
             self.place_ahead(id, workspace, folders);
             self.recall(id, workspace);
         }
@@ -1626,7 +1699,7 @@ impl Store {
         let mut viewed = Vec::new();
         for (id, row) in loading.rows.iter().filter(|(_, row)| row.path.is_none()) {
             if let (Some(bytes), Some(copy)) = (loading.working.remove(id), row.working) {
-                viewed.push((*id, copy));
+                viewed.push((*id, copy, contents(&bytes)));
                 back.push(saved_from(*id, row, bytes));
             }
         }
@@ -1639,27 +1712,22 @@ impl Store {
         // A file gone since the walk listed it went somewhere the walk may not have
         // looked, so the tree is listed again.
         self.owes |= !complete.gone.is_empty();
-        for id in &missing {
-            workspace.unsave(*id);
-            browser.folders.missing.insert(*id);
-        }
-        for (id, copy) in viewed {
+        browser.folders.missing.extend(missing);
+        for (id, copy, holds) in viewed {
             let stamp = workspace.get(id).map_or(0, |entity| entity.stamp);
             let mut record = Record::of_file(LibPath::root(), None);
             record.path = None;
-            record.working = Some(Kept { copy, stamp });
+            record.working = Some(Kept { copy, stamp, holds });
             self.records.insert(id, record);
         }
         browser.folders.sync(&loading.dirs);
         flag_duplicates(workspace, browser, log);
-        let count = self.records.values().filter(|record| record.path.is_some());
-        let count = count.count();
-        if count > 0 {
-            log.say(match count {
-                1 => "1 file on this computer.".to_string(),
-                n => format!("{n} files on this computer."),
-            });
-        }
+        // The count This computer's badge shows, said even at 0 to replace the last library's.
+        log.say(match browser.folders.count(None, workspace) {
+            0 => "No files on this computer.".to_string(),
+            1 => "1 file on this computer.".to_string(),
+            n => format!("{n} files on this computer."),
+        });
         self.prune(browser);
         self.fetch_tracked(workspace, browser);
         if self.open() {
@@ -1671,21 +1739,21 @@ impl Store {
             let reachable = self.backend.reveal().is_some();
             browser.ask_unindexed(loading.unindexed, reachable);
         }
+        if loading.damaged {
+            browser.ask_damaged();
+        }
     }
 
     /// The rescues to offer: `in_tmp`, found in the library's `.drawbar/tmp/`, and those
     /// in drawbar's own data.
-    fn rescues(&self, in_tmp: Vec<(String, Stat)>) -> Vec<Rescue> {
-        let in_tmp = in_tmp.into_iter().map(|(name, stat)| Rescue {
-            name,
-            at: Left::Library(stat),
-        });
+    fn rescues(&self, in_tmp: Vec<Rescue>) -> Vec<Rescue> {
         #[cfg(not(target_arch = "wasm32"))]
-        let in_tmp = in_tmp.chain(self.shelved_rescues());
-        in_tmp.collect()
+        let in_tmp = in_tmp.into_iter().chain(self.shelved_rescues()).collect();
+        in_tmp
     }
 
-    /// The rescues in drawbar's own data, by name.
+    /// The rescues in drawbar's own data, by name, each read whole on this thread to
+    /// check it. A partial one is never a slot's only copy, and is deleted.
     #[cfg(not(target_arch = "wasm32"))]
     fn shelved_rescues(&self) -> Vec<Rescue> {
         let Some(entries) = self
@@ -1700,11 +1768,20 @@ impl Store {
             .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
             .filter_map(|entry| {
                 let name = entry.file_name().into_string().ok()?;
-                name.starts_with(nord_usb::envelope::RESCUED)
-                    .then(|| Rescue {
-                        name,
-                        at: Left::Shelf(entry.path()),
-                    })
+                let path = entry.path();
+                if !name.starts_with(nord_usb::envelope::RESCUED) {
+                    return None;
+                }
+                if !nord_usb::envelope::is_rescue(&name) {
+                    let _ = std::fs::remove_file(&path);
+                    return None;
+                }
+                let file = std::fs::File::open(&path).and_then(nord_usb::envelope::Positional::new);
+                Some(Rescue {
+                    name,
+                    broken: nord_usb::block_on(super::unwhole(file)),
+                    at: Left::Shelf(path),
+                })
             })
             .collect();
         found.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1738,6 +1815,12 @@ impl Store {
     /// without them. The library must be opened again after, since it opened read-only.
     pub fn drop_unindexed(&mut self) {
         self.write(Cmd::DropUnindexed);
+    }
+
+    /// Set aside the library's index, which does not read, to open it again without it.
+    /// The library must be opened again after, since it opened read-only.
+    pub fn set_aside(&mut self) {
+        self.write(Cmd::SetAside);
     }
 
     /// Move a rescue into the library's top level, under its own name or a free one, where
@@ -1815,14 +1898,14 @@ impl Store {
     }
 
     /// Record the stamps of an asset just restored, and the working copy it came back
-    /// with, so nothing is written again for it. A copy whose edit is no longer held is
-    /// dropped at the next full pass.
-    fn settle(&mut self, id: u64, workspace: &Workspace, rows: &BTreeMap<u64, Row>) {
+    /// with, read, and what that holds, so nothing is written again for it. A copy whose
+    /// edit is no longer held is dropped at the next full pass.
+    fn settle(&mut self, id: u64, workspace: &Workspace, kept: Option<(Working, (u64, u32))>) {
         let (Some(entity), Some(record)) = (workspace.get(id), self.records.get_mut(&id)) else {
             return;
         };
         record.saved = entity.saved.stamp;
-        let Some(copy) = rows.get(&id).and_then(|row| row.working) else {
+        let Some((copy, holds)) = kept else {
             record.working = None;
             return;
         };
@@ -1830,7 +1913,7 @@ impl Store {
             Keeps::Bytes => entity.is_unsaved().then_some(entity.stamp),
             Keeps::Edit => workspace.kept_edit(id).map(|(_, stamp)| stamp),
         };
-        record.working = stamp.map(|stamp| Kept { copy, stamp });
+        record.working = stamp.map(|stamp| Kept { copy, stamp, holds });
         if record.working.is_none() {
             self.stale.push(working_name(id, copy.generation));
         }
@@ -1920,6 +2003,7 @@ impl Store {
             touched.insert(id);
             self.changed(id, found, workspace, browser, log);
         }
+        let moved = matched.renamed.len();
         for (id, found) in matched.renamed {
             touched.insert(id);
             let before = workspace.get(id).map(|entity| entity.name.clone());
@@ -1939,11 +2023,17 @@ impl Store {
                 ));
             }
         }
+        let (mut deleted, mut missing) = (0, 0);
         for id in matched.vanished {
             touched.insert(id);
-            self.vanished(id, workspace, browser, queue, log);
+            match self.vanished(id, workspace, browser, queue, log) {
+                Vanished::Deleted => deleted += 1,
+                Vanished::Missing => missing += 1,
+                Vanished::Untouched => {}
+            }
         }
         let arrived: Vec<Found> = matched.arrived;
+        let appeared = arrived.len();
         if !arrived.is_empty() {
             let mut next = workspace.next_id();
             let mut back = Vec::new();
@@ -1952,16 +2042,16 @@ impl Store {
                 next = next.saturating_add(1);
             }
             let ids: Vec<u64> = back.iter().map(|saved| saved.id).collect();
-            log.say(match ids.len() {
-                1 => "1 file appeared in the library folder.".to_string(),
-                n => format!("{n} files appeared in the library folder."),
-            });
             workspace.restore(back, Some(next), log);
             for id in ids {
-                self.settle(id, workspace, &BTreeMap::new());
+                self.settle(id, workspace, None);
                 self.place_ahead(id, workspace, &browser.folders);
                 self.recall(id, workspace);
             }
+        }
+        // A file gone missing keeps the status line, which asks for it to be saved.
+        if let Some(said) = changed_outside(appeared, deleted, moved).filter(|_| missing == 0) {
+            log.say(said);
         }
         touched
     }
@@ -2027,15 +2117,15 @@ impl Store {
         browser: &mut Browser,
         queue: &Queue,
         log: &mut Log,
-    ) {
+    ) -> Vanished {
         let Some(record) = self.records.get_mut(&id) else {
-            return;
+            return Vanished::Untouched;
         };
         if record.missing {
-            return;
+            return Vanished::Untouched;
         }
         let Some(entity) = workspace.get(id) else {
-            return;
+            return Vanished::Untouched;
         };
         let name = entity.name.clone();
         let keep = precious(entity, queue)
@@ -2048,7 +2138,7 @@ impl Store {
                 "“{name}” is missing from the library folder. drawbar still holds it; save \
                  it to write it back."
             ));
-            return;
+            return Vanished::Missing;
         }
         if let Some(path) = self.records.remove(&id).and_then(|record| record.path) {
             self.cache.forget(&path);
@@ -2056,6 +2146,7 @@ impl Store {
         browser.tags.forget(id);
         workspace.remove(id, log);
         log.say(format!("“{name}” was deleted outside drawbar."));
+        Vanished::Deleted
     }
 
     fn saved(
@@ -2695,13 +2786,17 @@ impl Store {
                 .records
                 .remove(&entity.id)
                 .and_then(|record| record.working);
-            let stale = stale(
-                entity.id,
-                working.as_ref(),
-                Keeps::Bytes,
-                entity.saved.stamp,
-                || Some(bytes()),
-            );
+            let promote = promoted(entity.id, working.as_ref(), &entity.saved.bytes);
+            let stale = match promote {
+                Some(_) => None,
+                None => stale(
+                    entity.id,
+                    working.as_ref(),
+                    Keeps::Bytes,
+                    entity.saved.stamp,
+                    || Some(bytes()),
+                ),
+            };
             self.records.insert(
                 entity.id,
                 Record {
@@ -2717,6 +2812,7 @@ impl Store {
                 bytes: bytes(),
                 expect: None,
                 stale,
+                promote,
             });
             return true;
         }
@@ -2751,26 +2847,31 @@ impl Store {
         let save = (unsaved && !record.saving).then(|| {
             record.saved = entity.saved.stamp;
             record.saving = true;
-            let stale = stale(
-                entity.id,
-                record.working.as_ref(),
-                Keeps::Bytes,
-                entity.saved.stamp,
-                || Some(bytes()),
-            );
-            (record.fingerprint.filter(|_| !missing), stale)
+            let promote = promoted(entity.id, record.working.as_ref(), &entity.saved.bytes);
+            let stale = match promote {
+                Some(_) => None,
+                None => stale(
+                    entity.id,
+                    record.working.as_ref(),
+                    Keeps::Bytes,
+                    entity.saved.stamp,
+                    || Some(bytes()),
+                ),
+            };
+            (record.fingerprint.filter(|_| !missing), stale, promote)
         });
         if let Some(from) = from {
             self.cache.moved(&from, path);
             self.rename(from, path.clone(), Vec::new());
         }
-        if let Some((expect, stale)) = save {
+        if let Some((expect, stale, promote)) = save {
             self.write(Cmd::Save {
                 id: entity.id,
                 path: path.clone(),
                 bytes: bytes(),
                 expect,
                 stale,
+                promote,
             });
         }
         !waits
@@ -2867,11 +2968,21 @@ impl Store {
                 let Ok(bytes) = bytes else {
                     return;
                 };
+                let holds = contents(&bytes);
+                // A copy that holds these bytes already, under another stamp, keeps them.
+                if let Some(held) = record
+                    .working
+                    .as_mut()
+                    .filter(|held| (held.copy.keeps, held.holds) == (keeps, holds))
+                {
+                    held.stamp = stamp;
+                    return;
+                }
                 let generation = self.next_generation;
                 self.next_generation += 1;
                 writes.push((working_name(entity.id, generation), bytes));
                 let copy = Working { generation, keeps };
-                if let Some(old) = record.working.replace(Kept { copy, stamp }) {
+                if let Some(old) = record.working.replace(Kept { copy, stamp, holds }) {
                     drops.push(working_name(entity.id, old.copy.generation));
                 }
             }
@@ -3053,6 +3164,17 @@ fn stale(
     })
 }
 
+/// `id`'s working copy, by name, where it holds exactly `bytes`, the bytes a save is about
+/// to write, so the save can move it into place.
+fn promoted(id: u64, working: Option<&Kept>, bytes: &[u8]) -> Option<String> {
+    let held = working.filter(|held| {
+        held.copy.keeps == Keeps::Bytes
+            && held.holds.0 == bytes.len() as u64
+            && held.holds == contents(bytes)
+    })?;
+    Some(working_name(id, held.copy.generation))
+}
+
 /// The paths a change to the folders acts on, where it was and where it goes.
 fn ends(op: &Op) -> [&LibPath; 2] {
     match op {
@@ -3122,7 +3244,7 @@ fn beyond_files(sidecar: &Sidecar) -> bool {
 /// Flag the entries of one folder whose names are one name under [`names::key`], and
 /// warn once about each new pair. Nothing is renamed: renaming a user's files on open
 /// would be hostile, and either name may be the one other files refer to.
-fn flag_duplicates(workspace: &Workspace, browser: &mut Browser, log: &mut Log) {
+pub(crate) fn flag_duplicates(workspace: &Workspace, browser: &mut Browser, log: &mut Log) {
     let (flagged, groups) = duplicates(workspace, &browser.folders);
     for (dir, group) in groups {
         let ids: Vec<u64> = group.iter().filter_map(|(id, _)| *id).collect();
@@ -3135,7 +3257,8 @@ fn flag_duplicates(workspace: &Workspace, browser: &mut Browser, log: &mut Log) 
             false => dir.to_string(),
         };
         log.warn(format!(
-            "{} in {place} are one name on a disk that ignores case; rename one of them.",
+            "{} in {place} differ only by case and would collide on macOS or Windows; rename \
+             one of them.",
             names.join(" and ")
         ));
     }
@@ -3200,6 +3323,40 @@ pub(crate) fn duplicates(
         .flat_map(|(_, group)| group.iter().filter_map(|(id, _)| *id))
         .collect();
     (flagged, groups)
+}
+
+/// What became of an asset whose file a rescan found gone.
+enum Vanished {
+    Deleted,
+    /// Kept, since it holds something its file did not, and shown missing.
+    Missing,
+    /// Already known to be missing, or no longer held.
+    Untouched,
+}
+
+/// What a rescan found changed outside drawbar, in one line: `None` where nothing changed,
+/// or where the one change was a delete or a move that its own line has said.
+fn changed_outside(appeared: usize, deleted: usize, moved: usize) -> Option<String> {
+    let changes = [
+        (appeared, "appeared", "appeared"),
+        (deleted, "was deleted", "were deleted"),
+        (moved, "was moved", "were moved"),
+    ];
+    let said: Vec<String> = changes
+        .into_iter()
+        .filter(|(n, ..)| *n > 0)
+        .enumerate()
+        .map(|(at, (n, one, many))| match at {
+            0 => crate::strings::counted(n, &format!("file {one}"), &format!("files {many}")),
+            _ => crate::strings::counted(n, one, many),
+        })
+        .collect();
+    let said = crate::strings::listed(&said);
+    match (appeared, deleted + moved) {
+        (0, 0 | 1) => None,
+        (_, 0) => Some(format!("{said} in the library folder.")),
+        _ => Some(format!("Outside drawbar, {said}.")),
+    }
 }
 
 /// A file drawbar did not know, recorded under `id`, and the asset it becomes.

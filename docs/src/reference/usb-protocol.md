@@ -40,7 +40,9 @@ one, with a status word inserted before the echoed arguments. Two things bite.
 Request codes are not reliably even, so direction is recorded at decode time
 rather than inferred. And operations are generic primitives parameterized by
 object class (1 piano, 3 sample, 4 program, 5 set list, 6 live, 7 settings), so
-one `rename` or `move` command serves every class.
+one `delete` command serves every class. The piano and sample libraries refuse
+`rename` and `copy`, and refuse a write named like an object they already
+hold, matching case.
 
 The instrument reads a message until a short packet ends it. A frame that is an
 exact multiple of the packet size needs a zero-length packet after it, or the
@@ -56,10 +58,13 @@ path.
 The instrument does not overwrite an occupied program, set list, sample or piano
 slot in place, so a write there deletes the occupant first. drawbar and `nord`
 both read the occupant back before the delete and write it back if the new write
-fails. Both read it straight into a file synced before the delete, so a process
-that dies with the slot empty leaves the occupant on disk. `nord` writes its rescue
-file in the working directory, `nord-rescued-<bank>-<slot>.<tag>`, and deletes
-that file once the slot holds what it should; drawbar's handling is under
+fails. Both read it into a file under a `.partial` name, sync it, check its length
+and checksum, and only then rename it, all before the delete, so a process that
+dies with the slot empty leaves the whole occupant on disk, and one that dies
+during the read leaves only a `.partial` file and the slot as it was. `nord`
+writes its rescue file in the working directory,
+`nord-rescued-<bank>-<slot>.<tag>`, and deletes that file once the slot holds
+what it should; drawbar's handling is under
 [Reading by range](data-model.md#reading-by-range). Live slots and settings are
 written in place.
 

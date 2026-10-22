@@ -87,9 +87,113 @@ impl Pcm16 {
     }
 }
 
+const WAVE_FORMAT_PCM: u16 = 1;
+const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
+/// The length of the extensible extension: valid bits, channel mask and sub-format GUID.
+const EXTENSIBLE_CB_SIZE: u16 = 22;
+/// `KSDATAFORMAT_SUBTYPE_PCM`, 00000001-0000-0010-8000-00aa00389b71, as stored.
+const KSDATAFORMAT_SUBTYPE_PCM: [u8; 16] = [
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
+];
+
+/// The fmt chunk fields the reader checks, once its encoding is known to be PCM.
+struct Fmt {
+    channels: u16,
+    rate: u32,
+    byte_rate: u32,
+    block: u16,
+    bits: u16,
+}
+
+/// Read a fmt chunk that declares PCM, plainly or as `WAVE_FORMAT_EXTENSIBLE` with the
+/// PCM sub-format.
+fn read_fmt(fmt: &[u8]) -> Result<Fmt, Error> {
+    let u16_at = |at: usize| u16::from_le_bytes([fmt[at], fmt[at + 1]]);
+    let u32_at = |at: usize| u32::from_le_bytes([fmt[at], fmt[at + 1], fmt[at + 2], fmt[at + 3]]);
+
+    if fmt.len() < 16 {
+        return Err(ParseError::AssertFail(format!(
+            "fmt chunk is {} bytes; PCM requires at least 16",
+            fmt.len()
+        ))
+        .into());
+    }
+    let read = Fmt {
+        channels: u16_at(2),
+        rate: u32_at(4),
+        byte_rate: u32_at(8),
+        block: u16_at(12),
+        bits: u16_at(14),
+    };
+    match u16_at(0) {
+        WAVE_FORMAT_PCM => Ok(read),
+        WAVE_FORMAT_EXTENSIBLE => {
+            check_extensible(fmt, read.bits)?;
+            Ok(read)
+        }
+        encoding => Err(ParseError::AssertFail(format!(
+            "encoding {encoding} is not uncompressed PCM; only PCM (1) and extensible \
+             PCM (65534) are read"
+        ))
+        .into()),
+    }
+}
+
+/// Check the extension of a `WAVE_FORMAT_EXTENSIBLE` fmt chunk of at least 16 bytes.
+fn check_extensible(fmt: &[u8], bits: u16) -> Result<(), Error> {
+    let refuse = |why: String| Err(ParseError::AssertFail(why).into());
+    let Some(cb_size) = fmt.get(16..18) else {
+        return refuse(format!(
+            "the extensible fmt chunk is {} bytes, too short to declare its extension",
+            fmt.len()
+        ));
+    };
+    let cb_size = u16::from_le_bytes([cb_size[0], cb_size[1]]);
+    if cb_size != EXTENSIBLE_CB_SIZE {
+        return refuse(format!(
+            "the extensible fmt chunk declares a {cb_size}-byte extension; \
+             the extension is {EXTENSIBLE_CB_SIZE} bytes"
+        ));
+    }
+    let Some(extension) = fmt.get(18..18 + usize::from(EXTENSIBLE_CB_SIZE)) else {
+        return refuse(format!(
+            "the extensible fmt chunk is {} bytes, too short for its {EXTENSIBLE_CB_SIZE}-byte \
+             extension",
+            fmt.len()
+        ));
+    };
+    let sub_format: [u8; 16] = std::array::from_fn(|i| extension[6 + i]);
+    if sub_format != KSDATAFORMAT_SUBTYPE_PCM {
+        return refuse(format!(
+            "the extensible sub-format {} is not PCM; only PCM ({}) is read",
+            guid(&sub_format),
+            guid(&KSDATAFORMAT_SUBTYPE_PCM)
+        ));
+    }
+    let valid_bits = u16::from_le_bytes([extension[0], extension[1]]);
+    if valid_bits == 0 || valid_bits > bits {
+        return refuse(format!(
+            "the extensible fmt chunk declares {valid_bits} valid bits in a {bits}-bit sample"
+        ));
+    }
+    Ok(())
+}
+
+/// A stored GUID in its registry spelling: three little-endian fields, then eight bytes.
+fn guid(stored: &[u8; 16]) -> String {
+    let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    format!(
+        "{:08x}-{:04x}-{:04x}-{}-{}",
+        u32::from_le_bytes([stored[0], stored[1], stored[2], stored[3]]),
+        u16::from_le_bytes([stored[4], stored[5]]),
+        u16::from_le_bytes([stored[6], stored[7]]),
+        hex(&stored[8..10]),
+        hex(&stored[10..16])
+    )
+}
+
 /// Read uncompressed 16-bit PCM, preserving its stored channel count and rate.
 pub fn read_pcm16(bytes: &[u8]) -> Result<Pcm16, Error> {
-    let u16_at = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
     let u32_at =
         |at: usize| u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
 
@@ -124,22 +228,7 @@ pub fn read_pcm16(bytes: &[u8]) -> Result<Pcm16, Error> {
             .into());
         };
         match id {
-            b"fmt " if size >= 16 => {
-                format = Some((
-                    u16_at(body),
-                    u16_at(body + 2),
-                    u32_at(body + 4),
-                    u32_at(body + 8),
-                    u16_at(body + 12),
-                    u16_at(body + 14),
-                ))
-            }
-            b"fmt " => {
-                return Err(ParseError::AssertFail(format!(
-                    "fmt chunk is {size} bytes; PCM requires at least 16"
-                ))
-                .into())
-            }
+            b"fmt " => format = Some(body..end),
             b"data" => data = Some(body..end),
             _ => {}
         }
@@ -156,15 +245,16 @@ pub fn read_pcm16(bytes: &[u8]) -> Result<Pcm16, Error> {
         .into());
     }
 
-    let Some((encoding, channels, rate, byte_rate, block, bits)) = format else {
+    let Some(format) = format else {
         return Err(ParseError::AssertFail("no fmt chunk".into()).into());
     };
-    if encoding != 1 {
-        return Err(ParseError::AssertFail(format!(
-            "encoding {encoding} is not uncompressed PCM; only PCM (1) is read"
-        ))
-        .into());
-    }
+    let Fmt {
+        channels,
+        rate,
+        byte_rate,
+        block,
+        bits,
+    } = read_fmt(&bytes[format])?;
     if bits != 16 {
         return Err(
             ParseError::AssertFail(format!("{bits}-bit samples; only 16-bit PCM is read")).into(),
@@ -257,6 +347,94 @@ mod tests {
         let mut wav = mono_pcm16(&[1i16], 44_100).unwrap();
         wav[40..44].copy_from_slice(&999u32.to_le_bytes()); // data chunk overruns
         assert!(read_pcm16(&wav).is_err());
+    }
+
+    /// `wav` with its plain 16-byte fmt chunk rewritten as `WAVE_FORMAT_EXTENSIBLE`,
+    /// followed by `extension` as its cbSize-prefixed tail.
+    fn extensible(wav: &[u8], cb_size: u16, extension: &[u8]) -> Vec<u8> {
+        let mut fmt = wav[20..36].to_vec();
+        fmt[0..2].copy_from_slice(&0xFFFEu16.to_le_bytes());
+        fmt.extend_from_slice(&cb_size.to_le_bytes());
+        fmt.extend_from_slice(extension);
+        let mut out = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
+        out.extend_from_slice(&u32::try_from(fmt.len()).unwrap().to_le_bytes());
+        out.extend_from_slice(&fmt);
+        out.extend_from_slice(&wav[36..]);
+        let riff = u32::try_from(out.len() - 8).unwrap();
+        out[4..8].copy_from_slice(&riff.to_le_bytes());
+        out
+    }
+
+    /// Valid bits, channel mask, then the sub-format GUID as stored.
+    fn extension(valid_bits: u16, sub_format: [u8; 16]) -> Vec<u8> {
+        let mut out = valid_bits.to_le_bytes().to_vec();
+        out.extend_from_slice(&0x3u32.to_le_bytes());
+        out.extend_from_slice(&sub_format);
+        out
+    }
+
+    #[test]
+    fn extensible_pcm_reads_as_plain_pcm_does() {
+        let stereo = [1i16, -1, 2, -2];
+        let wav = pcm16(&stereo, 44_100, 2).unwrap();
+        let read = read_pcm16(&extensible(
+            &wav,
+            22,
+            &extension(16, KSDATAFORMAT_SUBTYPE_PCM),
+        ))
+        .unwrap();
+        assert_eq!((read.rate, read.channels), (44_100, 2));
+        assert_eq!(read.samples, stereo);
+
+        let twelve_bit = extensible(&wav, 22, &extension(12, KSDATAFORMAT_SUBTYPE_PCM));
+        assert_eq!(read_pcm16(&twelve_bit).unwrap().samples, stereo);
+    }
+
+    #[test]
+    fn extensible_formats_other_than_pcm_are_refused_by_sub_format() {
+        let wav = mono_pcm16(&[1i16], 44_100).unwrap();
+        let mut float = KSDATAFORMAT_SUBTYPE_PCM;
+        float[0] = 3;
+        let err = read_pcm16(&extensible(&wav, 22, &extension(16, float)))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("00000003-0000-0010-8000-00aa00389b71 is not PCM"),
+            "refused for the wrong reason: {err}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_extensible_fmt_chunk_is_refused() {
+        let wav = mono_pcm16(&[1i16], 44_100).unwrap();
+        let pcm = extension(16, KSDATAFORMAT_SUBTYPE_PCM);
+        let cases = [
+            (extensible(&wav, 0, &[]), "0-byte extension"),
+            (
+                extensible(&wav, 22, &pcm[..10]),
+                "too short for its 22-byte",
+            ),
+            (
+                extensible(&wav, 22, &extension(0, KSDATAFORMAT_SUBTYPE_PCM)),
+                "0 valid bits",
+            ),
+            (
+                extensible(&wav, 22, &extension(17, KSDATAFORMAT_SUBTYPE_PCM)),
+                "17 valid bits",
+            ),
+        ];
+        for (wav, reason) in cases {
+            let err = read_pcm16(&wav).unwrap_err().to_string();
+            assert!(err.contains(reason), "want {reason:?}, got {err}");
+        }
+
+        let mut no_cb_size = extensible(&wav, 0, &[]);
+        no_cb_size.drain(36..38);
+        no_cb_size[16..20].copy_from_slice(&16u32.to_le_bytes());
+        let riff = u32::try_from(no_cb_size.len() - 8).unwrap();
+        no_cb_size[4..8].copy_from_slice(&riff.to_le_bytes());
+        let err = read_pcm16(&no_cb_size).unwrap_err().to_string();
+        assert!(err.contains("too short to declare"), "{err}");
     }
 
     #[test]

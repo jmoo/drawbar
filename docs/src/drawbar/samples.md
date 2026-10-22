@@ -40,6 +40,10 @@ instrument. **New ▸ Sample instrument…** takes several WAVs, one zone each, 
 root key for each. **New ▸ Sample Editor project…** makes a project from them
 instead, and the Sample Editor expects the WAVs to stay beside it.
 
+The WAVs must be 16-bit PCM at 44.1 kHz, mono or stereo, in the plain or the
+extensible WAV format. Convert anything else, such as a 24-bit or 48 kHz file,
+first.
+
 drawbar can encode v2, v3 and v4 instruments.
 [What is supported](../getting-started/support.md) says which have been played
 on an instrument.

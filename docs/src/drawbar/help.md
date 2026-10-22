@@ -8,7 +8,8 @@ page.
 
 **Help ▸ Welcome** shows what works today, instrument by instrument, three
 places to start (connect an instrument, open files, or start with a demo) and
-the trademark disclaimer. In the browser it opens by itself the first time you
+the trademark disclaimer. With an instrument attached, the first card names it
+and opens the Keyboard tab. In the browser it opens by itself the first time you
 run drawbar there. [What is supported](../getting-started/support.md) covers the
 same claims in more detail.
 

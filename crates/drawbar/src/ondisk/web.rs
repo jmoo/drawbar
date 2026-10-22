@@ -220,12 +220,33 @@ pub(crate) async fn slice(file: &web_sys::File, range: Range<u64>) -> io::Result
     Ok(bytes.to_vec())
 }
 
+/// A file the browser gave, read by slices.
+pub(crate) struct Sliced {
+    file: web_sys::File,
+    len: u64,
+}
+
+impl Sliced {
+    pub(crate) fn new(file: web_sys::File) -> Sliced {
+        Sliced {
+            len: file.size() as u64,
+            file,
+        }
+    }
+}
+
+impl nord_usb::FileSource for Sliced {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        slice_into(&self.file, offset, buf).await
+    }
+}
+
 /// Fill `buf` with the bytes of `file` at `offset`.
-pub(crate) async fn slice_into(
-    file: &web_sys::File,
-    offset: u64,
-    buf: &mut [u8],
-) -> io::Result<()> {
+async fn slice_into(file: &web_sys::File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
     let end = offset
         .checked_add(buf.len() as u64)
         .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;

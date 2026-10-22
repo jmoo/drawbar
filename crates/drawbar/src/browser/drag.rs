@@ -89,9 +89,9 @@ impl Kind {
     /// ⚠️ Exhaustive over [`EntityKind`], so a family the library adds is a compile error
     /// here and never a nameless row.
     ///
-    /// Bytes that did not decode are a note when `document::text::is_text` said so on
-    /// arrival, and [`Kind::Other`] otherwise. An asset resting in its file is what its
-    /// index reads. One not read or decoded yet is what a read before found, where one is
+    /// Bytes that did not decode are a note when [`LocalEntity::is_text`] says so, and
+    /// [`Kind::Other`] otherwise. An asset resting in its file is what its index reads.
+    /// One not read or decoded yet is what a read before found, where one is
     /// [`remembered`](LocalEntity::remembered), and what its name says otherwise.
     pub fn of(entity: &LocalEntity) -> Kind {
         if entity.reading() || entity.unread() {
@@ -106,7 +106,7 @@ impl Kind {
             None => {}
         }
         let Some(decoded) = entity.entity.as_deref() else {
-            return match entity.is_text {
+            return match entity.is_text() {
                 true => Kind::Text,
                 false => Kind::Other,
             };
@@ -826,22 +826,51 @@ mod tests {
         }
     }
 
+    /// A file a format's extension names is never a note, so the note editor never
+    /// writes words into it.
+    #[test]
+    fn an_empty_program_file_is_not_a_note() {
+        let mut workspace = Workspace::new(egui::Context::default());
+        let mut log = crate::log::Log::default();
+        for (name, bytes) in [("zero.ne5p", &b""[..]), ("words.ne5p", b"Set 1\n")] {
+            let id = workspace.ingest(
+                name.to_string(),
+                crate::workspace::Origin::Fresh,
+                bytes.to_vec(),
+                &mut log,
+            );
+            let held = workspace.get(id).expect("it is on the list");
+            assert!(!held.is_text(), "{name} is a note");
+            assert_eq!(Kind::of(held), Kind::Other, "{name}");
+            assert!(held.parse_error.is_some(), "{name} reads as a program");
+        }
+    }
+
     #[test]
     fn what_did_not_decode_is_a_note_or_a_file() {
         let mut workspace = Workspace::new(egui::Context::default());
         let mut log = crate::log::Log::default();
-        let mut held = |bytes: Vec<u8>| {
+        let mut held = |name: &str, bytes: Vec<u8>| {
             let id = workspace.ingest(
-                "held".to_string(),
+                name.to_string(),
                 crate::workspace::Origin::Fresh,
                 bytes,
                 &mut log,
             );
             Kind::of(workspace.get(id).expect("it is on the list"))
         };
-        assert_eq!(held(b"Set 1\n".to_vec()), Kind::Text);
-        assert_eq!(held(Vec::new()), Kind::Text, "a new note holds nothing yet");
-        assert_eq!(held(vec![0x00, 0xff]), Kind::Other);
+        assert_eq!(held("held", b"Set 1\n".to_vec()), Kind::Text);
+        assert_eq!(
+            held("held.txt", Vec::new()),
+            Kind::Text,
+            "a new note holds nothing yet"
+        );
+        assert_eq!(held("held", vec![0x00, 0xff]), Kind::Other);
+        assert_eq!(
+            held("held", Vec::new()),
+            Kind::Other,
+            "nothing names it a note"
+        );
 
         for kind in Kind::ALL.iter().filter(|kind| **kind != Kind::Other) {
             assert_ne!(kind.chip(), Kind::Other.chip(), "{kind:?}");

@@ -61,6 +61,8 @@ pub struct Where {
     pub reveal: Option<String>,
     /// What state it is in, when that is not simply open.
     pub note: Option<String>,
+    /// Nothing may be written to it, so a change to it is held in memory only.
+    pub read_only: bool,
     /// It is still being read.
     pub opening: bool,
     /// How many files its listing has found, while it is still being listed.
@@ -106,7 +108,7 @@ struct Census {
     /// How many files drawbar opens each folder holds, everywhere below it. The root's
     /// count, under `None`, is the whole library's.
     counts: BTreeMap<Option<u64>, usize>,
-    /// The ids of the assets directly in each folder, in list order.
+    /// The ids of the assets directly in each folder, in path order.
     members: BTreeMap<Option<u64>, Vec<u64>>,
 }
 
@@ -120,7 +122,12 @@ impl Census {
             taken,
             ..Census::default()
         };
-        for entity in workspace.listed() {
+        let mut listed: Vec<&LocalEntity> = workspace.listed().collect();
+        listed.sort_by(|a, b| {
+            let unplaced = a.path.is_none().cmp(&b.path.is_none());
+            unplaced.then_with(|| a.path.cmp(&b.path))
+        });
+        for entity in listed {
             let parent = entity.path.as_ref().map(LibPath::parent);
             let holder = parent.as_ref().and_then(|dir| ids.get(dir).copied());
             census.members.entry(holder).or_default().push(entity.id);
@@ -233,8 +240,8 @@ impl Folders {
             .collect()
     }
 
-    /// The assets directly in `folder`, in list order. An asset with no file yet is in
-    /// the root.
+    /// The assets directly in `folder`, in path order. An asset with no file yet is in
+    /// the root, after those with one.
     pub(crate) fn members<'a>(
         &self,
         folder: Option<u64>,
@@ -586,6 +593,11 @@ impl Folders {
         self.list.retain(|folder| folder.id != id);
         self.generation += 1;
         self.ops.push(Op::RemoveDir(path));
+    }
+
+    /// Whether the open library is read-only, so a change to it is held in memory only.
+    pub(crate) fn read_only(&self) -> bool {
+        self.place.as_ref().is_some_and(|place| place.read_only)
     }
 
     /// Whether a change is waiting to be sent to the disk.

@@ -8,7 +8,8 @@ fn main() -> eframe::Result {
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 800.0])
         .with_min_inner_size([900.0, 560.0])
-        .with_title("drawbar");
+        .with_title("drawbar")
+        .with_app_id(drawbar::APP);
     // The top bar is the title bar. On the Mac the system still draws the traffic lights
     // over it; elsewhere the app draws its own window buttons.
     viewport = match Platform::current() {

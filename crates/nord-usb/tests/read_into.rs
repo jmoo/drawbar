@@ -331,3 +331,27 @@ fn a_body_that_fails_the_reported_checksum_gets_no_header() {
         "no header for a body that failed its check"
     );
 }
+
+/// A file read back off the disk is the read's only when it holds every byte the read
+/// handed it: one cut short, one whose header never landed, and one with a byte changed
+/// all fail the check.
+#[test]
+fn a_file_read_back_short_unheaded_or_changed_fails_its_check() {
+    let at = Location { bank: 0, slot: 158 };
+    let body = body(2 * CHUNK + 7);
+    let mut file = Vec::new();
+    let read = run(ObjectClass::Sample, sample_read(at, &body), async |s| {
+        op::read_into(s, at, &mut file).await
+    });
+    let received = read.result.unwrap();
+    let check = |bytes: &[u8]| pollster::block_on(op::verify_read(&mut { bytes }, &received));
+
+    assert!(check(&file).is_ok(), "{:?}", check(&file));
+    assert!(check(&file[..file.len() - 1]).is_err(), "one byte short");
+    let mut unheaded = file.clone();
+    unheaded[..BODY_START as usize].fill(0);
+    assert!(check(&unheaded).is_err(), "a header of zeros");
+    let mut changed = file.clone();
+    changed[BODY_START as usize + CHUNK] ^= 0xff;
+    assert!(check(&changed).is_err(), "a byte changed");
+}

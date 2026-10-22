@@ -77,7 +77,7 @@ enum Command {
     Inspect {
         /// Files to read, such as a program (.ne5p), live slot (.ne5l), set list
         /// (.ne5t), settings (.ne5s), piano (.npno), sample (.nsmp), Sample Editor
-        /// project (.nsmpproj), or a ZIP backup bundle.
+        /// project (.nsmpproj), or a ZIP bundle or backup (.ne5pbundle, .ne5tbundle).
         #[arg(required = true)]
         files: Vec<PathBuf>,
 
@@ -90,7 +90,7 @@ enum Command {
     ///
     /// A mismatch is reported with the offset of the first differing byte.
     Verify {
-        /// Files to round-trip. ZIP backup bundles cannot be re-encoded.
+        /// Files to round-trip. ZIP bundles and backups cannot be re-encoded.
         #[arg(required = true)]
         files: Vec<PathBuf>,
     },

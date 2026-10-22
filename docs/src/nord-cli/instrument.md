@@ -57,11 +57,16 @@ write and the put-back both fail, or `nord` is stopped partway, the file stays,
 and `put` takes it straight back. Live slots and settings are the exception: the
 instrument overwrites those in place.
 
+While the old sound is read, its file is named `nord-rescued-7-50.ne5p.partial`.
+It takes its own name only once it is complete, and the slot is not touched
+before then. A `.partial` file left by a stopped `nord` can be deleted.
+
 `--rescue-dir <DIR>`, or `NORD_RESCUE_DIR`, saves the old sound in another
 folder. Without a folder it can write to, `nord` leaves the slot alone.
 
 `put` checks that the file is intact before it touches the instrument.
 
 Every command closes its session even when it fails, so an error cannot leave the
-instrument stuck on its progress screen. If a run is interrupted, `nord device
-recover` releases the session.
+instrument stuck on its progress screen. If a run is interrupted, the next
+command may say the instrument answered out of step. `nord device recover`
+releases the session it still holds.

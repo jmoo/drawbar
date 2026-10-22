@@ -233,14 +233,20 @@ let
   # through the cc wrapper.
   targetEnv =
     spec:
-    optionalAttrs (needsLinker spec) {
-      # rustc needs a real linker for a foreign target; the cross set's cc is it.
-      "CARGO_TARGET_${envTriple (tripleOf spec)}_LINKER" =
-        let
-          inherit (spec.crossPkgs.stdenv) cc;
-        in
-        "${cc}/bin/${cc.targetPrefix}cc";
-    }
+    optionalAttrs (needsLinker spec) (
+      let
+        inherit (spec.crossPkgs.stdenv) cc;
+        triple = tripleOf spec;
+      in
+      {
+        # rustc needs a real linker for a foreign target; the cross set's cc is it.
+        "CARGO_TARGET_${envTriple triple}_LINKER" = "${cc}/bin/${cc.targetPrefix}cc";
+        # Build scripts that compile C, such as ring's, need the target's compiler and
+        # archiver too, or the `cc` crate builds host objects the target linker skips.
+        "CC_${triple}" = "${cc}/bin/${cc.targetPrefix}cc";
+        "AR_${triple}" = "${cc.bintools.bintools}/bin/${cc.targetPrefix}ar";
+      }
+    )
     // optionalAttrs (spec ? libs) {
       # Put static libs on rustc's path directly; the cc wrapper can miss rustc's own
       # `-l:` requests.
@@ -351,6 +357,7 @@ let
     # A CLI has no use on WASI.
     nord-cli = filter (t: t != "wasip1") (attrNames targets);
     nord-usb = [ "wasip1" ];
+    drawbar = [ "windows" ];
   };
 
   # Native rustc supplies bare wasm32; wasm-bindgen pairs drawbar/WebUSB with the page.
@@ -489,9 +496,13 @@ let
   # The GitHub Pages tree: the browser build at the root, the guide under /docs.
   # Copies, not links: the tree leaves the store as a tarball.
   # `web` is a parameter so the deployed tree can pair a released bundle with
-  # this checkout's guide; scripts/site.bash overrides it.
+  # this checkout's guide; scripts/site.bash overrides it, and passes the release
+  # before it as `previous`.
   site = makeOverridable (
-    { web }:
+    {
+      previous ? null,
+      web,
+    }:
     final.runCommand "drawbar-site-${web.version}"
       {
         meta.description = "drawbar and its guide, laid out for GitHub Pages";
@@ -511,6 +522,13 @@ let
             exit 1
           }
         done
+
+        ${optionalString (previous != null) ''
+          # A page cached before a deploy names the modules of the release before,
+          # which stay beside the new ones under their own hashed names.
+          chmod -R u+w "$out/pkg"
+          cp -rL --update=none ${previous}/pkg/. "$out/pkg/"
+        ''}
       ''
   ) { web = drawbar-web; };
 

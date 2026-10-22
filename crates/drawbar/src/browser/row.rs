@@ -29,7 +29,8 @@ pub struct Cells<'a> {
     pub faint: bool,
     /// It differs from what was last saved, which the name shows with a star.
     pub unsaved: bool,
-    /// The instrument's panel has this slot loaded.
+    /// The instrument's panel has this slot loaded. The ring is drawn in the triangle's
+    /// box a leaf skips, so the name keeps its column; only set it on a leaf.
     pub loaded: bool,
     /// A row inside a branch: shorter, with a smaller glyph and font.
     pub child: bool,
@@ -177,21 +178,20 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
         box_
     });
 
+    if cells.loaded {
+        let mark = cell_ink(selected, crate::app::good(&visuals), &visuals);
+        painter.circle_stroke(
+            egui::pos2(x - STEP + CHEVRON / 2.0, rect.center().y),
+            3.0,
+            egui::Stroke::new(1.5_f32, mark),
+        );
+    }
+
     if let Some(kind) = cells.glyph {
         let box_ =
             egui::Rect::from_min_size(egui::pos2(x, middle(glyph)), egui::Vec2::splat(glyph));
         painted(ui, kind, box_, strong.gamma_multiply(GLYPH_ALPHA));
         x += glyph + GAP;
-    }
-
-    if cells.loaded {
-        let mark = cell_ink(selected, crate::app::good(&visuals), &visuals);
-        painter.circle_stroke(
-            egui::pos2(x + 3.5, rect.center().y),
-            3.0,
-            egui::Stroke::new(1.5_f32, mark),
-        );
-        x += 10.0;
     }
 
     if let Some(at) = &cells.at {
@@ -282,7 +282,9 @@ pub(super) fn row(ui: &mut egui::Ui, selected: bool, cells: &Cells) -> Drawn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::browser::Kind;
     use crate::testing::{self, context};
+    use nord_usb::ObjectClass;
 
     #[test]
     fn an_unsaved_row_writes_its_name_with_a_star() {
@@ -306,6 +308,39 @@ mod tests {
         let said = testing::words(&output);
         assert!(said.contains(&"Africa Split".to_string()), "{said:?}");
         assert!(said.contains(&"Africa Split*".to_string()), "{said:?}");
+    }
+
+    #[test]
+    fn the_loaded_slot_keeps_its_name_in_the_column_of_its_neighbors() {
+        let output = testing::run(&context(), egui::RawInput::default(), |ctx| {
+            egui::SidePanel::left("places")
+                .exact_width(232.0)
+                .show(ctx, |ui| {
+                    for (at, name, loaded) in [
+                        ("7:14", "Africa Split", false),
+                        ("7:15", "Squabble B", true),
+                    ] {
+                        row(
+                            ui,
+                            false,
+                            &Cells {
+                                indent: 36.0,
+                                glyph: Some(Kind::from_class(ObjectClass::Program).glyph()),
+                                at: Some(at.into()),
+                                name,
+                                loaded,
+                                child: true,
+                                ..Cells::default()
+                            },
+                        );
+                    }
+                });
+        });
+
+        let painted = testing::painted(&output);
+        let left = |text| testing::where_(&painted, text).left();
+        assert_eq!(left("7:15"), left("7:14"));
+        assert_eq!(left("Squabble B"), left("Africa Split"));
     }
 
     /// ⚠️ A name too long for the panel is truncated so it does not paint over the count
