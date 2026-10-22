@@ -25,9 +25,10 @@ a file, and a move is a rename. Any folder can be opened as a library.
   every sign-in, so the library is `%LOCALAPPDATA%\drawbar\library` instead,
   falling back to the roaming folder when `LOCALAPPDATA` is unset
   (`store::native::default_root`).
-- **Browser:** the default library is the root of the origin private file system
-  (OPFS). In browsers with `showDirectoryPicker`, the user can also pick a folder
-  on the computer (`store::web::Root`).
+- **Browser:** this build opens no library (see [In the browser](#in-the-browser)).
+  The window still names one: the root of the origin private file system (OPFS),
+  or in browsers with `showDirectoryPicker` a folder the user picked
+  (`store::web::Root`).
 
 What a file cannot say lives in a hidden `.drawbar/` folder at the root, which
 holds toshokan's root, `.drawbar/library/`:
@@ -86,9 +87,12 @@ writer's `trash/`, where an undo finds them.
 What only this install needs is kept in drawbar's own data, never in the
 library (`store::native::local_root`): `libraries/<hash of the library's
 path>/`, beside `app.ron`. It holds toshokan's local root, with the cached view,
-the identities its scans read and the drafts of unsaved edits, and `rescued/`,
-for a slot's former occupant that a write to the instrument left. Losing it loses
-the drafts and nothing else. Two drawbars on one machine share it.
+the identities its scans read and the drafts of unsaved edits; `slots/`, for the
+unsaved edits of slot views; and `rescued/`, for a slot's former occupant that a
+write to the instrument left. Losing it loses the drafts and nothing else. Two
+drawbars on one machine share it, each writing as a writer of its own; one that
+opens takes up what an idle one left, its drafts and its unfinished effects
+included.
 
 A draft is the asset's unsaved bytes, or the edit held of a piano or sample
 instrument resting in its file, under a line that says which
@@ -171,7 +175,16 @@ A view is a working copy of a slot on the instrument. It is not listed, has no
 file, and goes when its tab closes. `Workspace::keep` promotes one into the
 list, and closing the tab of a view that holds an edit, or that waits in the
 send queue, promotes it instead of dropping it. A view has no file a draft could
-be made over, so an edit of one that is not kept is lost at a quit.
+be made over, so its unsaved edit is kept by its slot instead
+(`store/slots.rs`): in `slots/<instrument>-<class>-<bank>-<slot>`, named by the
+first 8 bytes of the BLAKE3 hash of the instrument's serial number, or its
+product name where it reports none, a line with the BLAKE3 hash of the bytes the
+view was opened over, then the view's bytes. A view seen for the first time asks
+for the edit kept of its slot, and keeps none of its own before the answer. One
+over the same bytes is put back unsaved; one over other bytes is put back, and
+the user is asked which to keep, as for a file changed on disk. Sending the
+view, reverting it, keeping it on this computer or closing it lets the edit
+go.
 
 ## An asset's lifecycle
 
@@ -473,13 +486,20 @@ reads files and makes folders through `exec::Fs` (`store/native.rs`).
 | `Refresh` | `Scanned`: what other drawbars wrote, scanning only the files their entries moved. |
 | `Intent` | A change to a file answers `Saved`, `Rewritten`, `Imported`, `Moved` or, for a delete that failed, `Failed`; then every intent answers `Committed`, with the view after it and whether it was made. |
 | `Undo`, `Redo` | `Committed`, with the files no entity is bound to that it moved. |
+| `Settle` | `Committed`: another drawbar's unfinished effect, finished, rolled back or left. |
 | `Draft`, `Discard` | Only `Unkept`, on failure. |
+| `KeepSlot`, `DiscardSlot` | Only `Unkept`, on failure. |
+| `ReadSlot` | `SlotKept`: the edit kept of a slot's view, with the hash it was made over. |
 | `File(Read)` | `Read`: each file, held whole or resting, or why not. |
 | `File(MakeDir)`, `File(RemoveDir)` | Only `Failed`, on failure. Then `Viewed`. |
 
 The intents are `Tag`, `Untag`, `MakeTag`, `RenameTag`, `RemoveTag` and `Forget`
 for the facts, and `Save`, `Rewrite`, `Import`, `Move`, `MoveFolder` and `Delete`
-for the files. A change to a file names it by its path; the backend finds the
+for the files; `Move` and `Delete` each name every file of one gesture. A commit
+may also answer `Trimmed`, the changes whose undo the trash no longer holds.
+Each view an answer carries is projected onto the workspace from what it changed
+since the view before (`toshokan::View::changed_since`); only the view after a
+scan of every file is projected whole. A change to a file names it by its path; the backend finds the
 entity bound there, if any, in the view it commits against. A new file whose
 asset came from a slot, a rescue or New is made as an entity's file, with its
 origin. A delete moves the file to the trash and ends its entity.
@@ -497,12 +517,17 @@ A change waits for the answer to one before it where it depends on it: a write
 over a file whose last write has not answered, and anything that touches a
 rename not yet answered, since were the rename refused, the change would act on
 whatever else has that name. A change that waits holds back every one after it.
+The moves, or the deletions, taken from the workspace at once, which are one
+gesture's, go as one intent (`Store::carry_out`).
 While a rescan is in flight, `Store::sync` sends nothing, so the rescan's listing
 describes the files as the commands before it left them.
 
 A change to the tags names an asset by the file the library knows it by. A tag
 for an asset whose file is still on its way waits for it; one for an asset whose
-file could not be written goes without it, and says so (`Store::writes`).
+file could not be written goes without it, and says so (`Store::writes`). A new
+tag put on assets is one intent with its making, and while its name's editor is
+open, it and every change to the tags after it wait, so the name chosen is the
+one made (`Tags::name_new`).
 
 ### Undo
 
@@ -513,8 +538,8 @@ changed the same thing since. The Edit menu names each step by its intent and
 what it names (`Intent::describe`), from the steps the library made
 (`Committed::made`); a change that failed is no step. The workspace follows what
 an undo moved or changed without a word about changes outside drawbar
-(`Viewed::undone`). A folder's rename is undone file by file, so the folder it was
-renamed to stays, empty.
+(`Viewed::undone`). A folder's rename is undone as one move back, which leaves
+no folder behind.
 
 ## Writes and crash safety
 
@@ -531,12 +556,15 @@ edit through a resting file is streamed a chunk at a time.
 
 Nothing reaches outside the library: a path through a folder that is a link is
 refused, on drawbar's reads and on toshokan's writes alike. A rename that only
-changes case goes through a free name beside the file, since on a disk that
-ignores case the new name reaches the file itself.
+changes case goes by way of the writer's trash, since on a disk that ignores case
+the new name reaches the file itself.
 
-The trash keeps what a delete or a save displaced for undo. Opening a library that
-may be written empties this writer's trash of what was displaced more than 30
-days ago, and then of the oldest past 1 GiB (`toshokan::Policy::default`).
+The trash keeps what a delete or a save displaced for undo. A commit that leaves
+this writer's trash past 1 GiB empties it of the oldest items, and the Edit menu
+stops at the first change whose undo needed one. Closing the library empties it
+of what this session's changes put there, since no later undo reaches them.
+Opening a library that may be written empties it of what was displaced more than
+30 days ago, and then of the oldest past 1 GiB (`toshokan::Policy::default`).
 
 ### Drafts
 
@@ -547,8 +575,9 @@ each edit that changed since it was last kept, and lets go of the drafts of
 assets saved, gone or known by another key since; at exit, `Store::close` waits
 for what is in flight, then runs a `Pass::Last`, repeating until nothing more is
 sent. A crash loses the edits made since the last full pass. A draft is made only
-over a file drawbar has read, by its identity, so an asset never written, or a
-view, has none. A library that cannot be written keeps no drafts, and says so when
+over a file drawbar has read, by its identity, so an asset never written has
+none; a view's edit is kept by its slot (see
+[Views and kept assets](#views-and-kept-assets)). A library that cannot be written keeps no drafts, and says so when
 it opens.
 
 At open, each draft is put back over its asset once the asset's file is read,
@@ -567,7 +596,14 @@ makes none read-only. Changes in a read-only library are held in memory only.
 
 Facts this install showed that no file in the folder holds now, as after a
 restore of the folder from a backup, are let go at open: the folder wins, and the
-log says so once.
+log says so once. They are let go only where every writer whose entries went still
+has its directory in the folder; otherwise the folder may not have synced yet,
+and they stay.
+
+An effect interrupted by a crash, of this instance's writer or an idle one of
+this install, is finished at open. One another install left is asked about:
+finish it, roll it back, or leave it (`Browser::ask_unfinished`, `Cmd::Settle`).
+A record that does not read is left, and the log says how many.
 
 ### In the browser
 

@@ -22,37 +22,25 @@ so back up the whole library folder. That folder says nothing about your other
 files, so it stays small however large the library is. Your unsaved edits are
 kept on this computer, in drawbar's own data, never in the library folder.
 
-In the browser, your library is kept in the browser's own storage for
-drawbar.app, where nothing else can see it. Clearing the site's data deletes it,
-so export what you want to keep.
+In the browser, this version keeps no library: what you open or make there
+lasts until you close the tab, so export what you want to keep, or use the
+desktop app.
 
 ## Opening another folder
 
-**File ▸ Open library folder…** opens any folder as your library: a Sample
-Editor project, a sample pack, a folder on a shared drive. **File ▸ Open recent
-library** switches back. drawbar opens the last library again when it starts,
-and changes nothing in a folder until you change something there. Unsaved edits
-stay with their library and come back when you open it again.
+On the desktop, **File ▸ Open library folder…** opens any folder as your
+library: a Sample Editor project, a sample pack, a folder on a shared drive.
+**File ▸ Open recent library** switches back. drawbar opens the last library
+again when it starts, and changes nothing in a folder until you change something
+there. Unsaved edits stay with their library and come back when you open it
+again.
 
 Several drawbars can use one library at once: on two computers that sync the
 folder, or in two windows. Each keeps its own record of what it changed in the
 hidden folder, so neither overwrites the other's. When you come back to the
 window, drawbar shows what the others changed, and the activity log says so.
 
-This works on the desktop and in Chrome and Edge. Firefox and Safari cannot open
-a folder. Brave can once you turn on `brave://flags/#file-system-access-api` and
-relaunch it. In Brave, saving or renaming a large piano takes a little longer.
-
-The first time you open a folder in the browser, drawbar reminds you not to open
-it in the desktop app at the same time.
-
-In Chrome and Edge, the browser asks whether drawbar may change the folder.
-Unless you allow it on every visit, it forgets when you close drawbar.app.
-Choose **File ▸ Reconnect** and the folder's name to get it back.
-
-Chrome makes each file and folder drawbar writes there readable only by you, and
-on macOS marks it as downloaded, so in a shared folder other people lose access
-to what you save.
+Opening a folder in the browser comes with a later version.
 
 ## Adding and making sounds
 
@@ -67,21 +55,32 @@ control at zero; it is not a factory sound.
 
 Edits land at once, and the name shows a `*` until you save. **Save** (⌘S)
 writes the file, and queues it for sending if the sound came from a slot on the
-connected instrument. **Revert** goes back to the last save. Unsaved edits are
-kept when you quit. drawbar also keeps them every few seconds, so after a crash
-you may lose the last few seconds.
+connected instrument. **Revert** goes back to the last save.
+
+Unsaved edits are kept when you quit: those of sounds in your library, and those
+of a sound you were viewing in a slot of the instrument. A slot's edits come
+back when you view that slot of the same instrument again with the same library
+open; if the slot changed since, drawbar asks which to keep. drawbar also keeps edits every
+few seconds, so after a crash you may lose the last few seconds. A read-only
+library keeps no unsaved edits.
 
 ## Undo
 
 **Edit ▸ Undo** (⌘Z) takes back the last change you made to your files and
-tags in this session, and **Edit ▸ Redo** (⇧⌘Z) makes it again. The menu says
-which change it is, such as **Undo Rename “c3.ne5p”**. A save, a new sound, a
-copy, a rename or move, a deletion, and a change to tags can each be undone, one
-at a time. An edit you have not saved is taken back with **Revert** instead.
+tags, and **Edit ▸ Redo** (⇧⌘Z) makes it again. Undo reaches back only to when
+this window opened the library: a change from before, or from another window,
+cannot be undone. The menu says which change it is, such as **Undo Rename
+“c3.ne5p”**. A save, a new sound, a copy, a rename or move, a deletion, and a
+change to tags can each be undone. One action is one step: moving or deleting
+several sounds at once, or making a tag and naming it, is one undo. An edit
+you have not saved is taken back with **Revert** instead.
 
-Deleting a sound moves its file into drawbar's trash in the hidden folder, where
-Undo finds it. drawbar empties the trash of what was deleted more than 30 days
-ago, and of the oldest past 1 GB, when the library opens.
+Deleting a sound, or saving over one, moves the old file into drawbar's trash in
+the hidden folder, where Undo finds it. The trash holds at most 1 GiB; past
+that, the oldest goes first, and the activity log says which change Undo no
+longer reaches. When you quit, drawbar empties the trash of what that window's
+changes put there. What a crash left there goes when the library next opens,
+once it is more than 30 days old, or past 1 GiB, oldest first.
 
 **Export…** saves a copy somewhere else. Rename with F2. If a name is taken,
 drawbar asks whether to **Overwrite** the file there or **Keep both**.
@@ -132,6 +131,12 @@ bring back any you deleted.
   has written its hidden folder. Hover the library's name for the reason.
   Changes you make in a read-only library are held in memory only, and are lost
   when you quit.
+- **A change left unfinished.** If drawbar on another computer stopped in the
+  middle of changing files in a shared library, drawbar asks when it opens the
+  library: **Finish** completes the change, **Roll back** puts the files back as
+  they were, **Leave as is** stops asking, and **Later** asks next time. What
+  drawbar left unfinished on this computer, after a crash or in another window,
+  is finished without asking.
 - **Restored from a backup.** When the library folder no longer holds changes
   drawbar showed before, as after a restore from a backup, drawbar shows the
   folder as it is and says so.
