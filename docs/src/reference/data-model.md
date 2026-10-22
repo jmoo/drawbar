@@ -179,10 +179,12 @@ be made over, so its unsaved edit is kept by its slot instead
 (`store/slots.rs`): in `slots/<instrument>-<class>-<bank>-<slot>`, named by the
 first 8 bytes of the BLAKE3 hash of the instrument's serial number, or its
 product name where it reports none, a line with the BLAKE3 hash of the bytes the
-view was opened over, then the view's bytes. A view seen for the first time asks
-for the edit kept of its slot, and keeps none of its own before the answer. One
-over the same bytes is put back unsaved; one over other bytes is put back, and
-the user is asked which to keep, as for a file changed on disk. Sending the
+view was opened over, then the view's bytes. A view asks for the edit kept of
+its slot at the first pass after it appears, and keeps none of its own before the
+answer. One over the same bytes is put back unsaved; one over other bytes is put
+back, and the user is asked which to keep, as for a file changed on disk. Where
+the view was edited before the answer, the user is asked whether to keep the
+edit, take the earlier one, or keep both, the earlier as a new asset. Sending the
 view, reverting it, keeping it on this computer or closing it lets the edit
 go.
 
