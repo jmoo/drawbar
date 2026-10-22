@@ -318,11 +318,6 @@ impl Folders {
         self.lost = lost;
     }
 
-    /// Drop a lost row, and whatever it kept.
-    pub(crate) fn forget(&mut self, id: u64) {
-        self.lost.retain(|lost| lost.id != id);
-    }
-
     fn next_id(&self) -> u64 {
         self.list.iter().map(|folder| folder.id).max().unwrap_or(0) + 1
     }

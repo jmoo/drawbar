@@ -4199,3 +4199,35 @@ fn a_folder_that_cannot_be_read_is_reported_and_the_rest_opens() {
     assert_eq!(names(&session), ["inside.ne5p", "outside.ne5p"]);
     assert!(session.bench.browser.folders.unwalked.is_empty());
 }
+
+/// A tagged file deleted outside drawbar stays a lost row under one id, rescan after
+/// rescan, until the user forgets it; the row goes once the library has let it go.
+#[test]
+fn a_lost_row_keeps_its_id_until_it_is_forgotten() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.tag(&[id], "Sunday");
+    first.close();
+    fs::remove_file(root.at("untitled.ne5p")).unwrap();
+
+    let mut session = Session::listed(&root);
+    let lost = |session: &Session| -> Vec<u64> {
+        let lost = session.bench.browser.folders.lost().iter();
+        lost.map(|lost| lost.id).collect()
+    };
+    let [row] = lost(&session)[..] else {
+        panic!("one row is lost: {:?}", lost(&session));
+    };
+    session.refocus();
+    session.refocus();
+    assert_eq!(lost(&session), [row], "the same id");
+
+    session.bench.act(vec![crate::browser::Act::Forget(row)]);
+    assert_eq!(lost(&session), [row], "shown until the library lets it go");
+    session.decided();
+    assert_eq!(lost(&session), Vec::<u64>::new());
+    session.close();
+    let again = Session::listed(&root);
+    assert_eq!(lost(&again), Vec::<u64>::new());
+}

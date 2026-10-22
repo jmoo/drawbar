@@ -1344,8 +1344,12 @@ impl Store {
         let mut touched = BTreeSet::new();
         let (mut moved, mut deleted, mut missing) = (0, 0, 0);
         let known: Vec<(u64, Key)> = self.ids.iter().map(|(id, key)| (id, key.clone())).collect();
+        let lost: BTreeSet<&toshokan::EntityId> =
+            listed.lost.iter().map(|(entity, _)| entity).collect();
         for (id, key) in known {
-            if workspace.get(id).is_none() && !self.records.contains_key(&id) {
+            // A lost row keeps its id while the library keeps its entity.
+            let shown = key.entity().is_some_and(|entity| lost.contains(&entity));
+            if workspace.get(id).is_none() && !self.records.contains_key(&id) && !shown {
                 self.ids.remove(id);
                 continue;
             }
