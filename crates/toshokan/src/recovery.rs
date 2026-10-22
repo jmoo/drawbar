@@ -355,6 +355,7 @@ pub fn orphan_plan(
             ..EffectPlan::new(env.nonce())
         },
         env,
+        relayed: BTreeMap::new(),
     }
     .plan(&reached.progress, how)
 }
@@ -367,6 +368,9 @@ struct Orphaned<'a> {
     rename_dir: bool,
     plan: EffectPlan,
     env: &'a mut Env,
+    /// The items of their trash a step finished here put in this writer's trash
+    /// instead, by theirs.
+    relayed: BTreeMap<Nonce, Nonce>,
 }
 
 impl Orphaned<'_> {
@@ -414,13 +418,22 @@ impl Orphaned<'_> {
         let writer = self.theirs.writer;
         match step {
             EffectStep::ToTrash { path, .. } if self.vacant.contains(path) => {}
-            EffectStep::ToTrash { path, .. } => self.trash(path),
+            EffectStep::ToTrash { path, item } => {
+                let ours = self.trash(path);
+                self.relayed.insert(*item, ours);
+            }
             EffectStep::Place { staged, path } => {
                 self.copy(self.layout.staged(writer, *staged, path), path)
             }
-            EffectStep::FromTrash { item, path } => {
-                self.copy(self.layout.trash(writer, *item), path)
-            }
+            // A way-point through the trash this settlement began is taken up from
+            // this writer's trash, where it put it.
+            EffectStep::FromTrash { item, path } => match self.relayed.get(item) {
+                Some(&ours) => self.plan.steps.push(EffectStep::FromTrash {
+                    item: ours,
+                    path: path.clone(),
+                }),
+                None => self.copy(self.layout.trash(writer, *item), path),
+            },
             EffectStep::Rename { from, to } => return self.rename(from, to),
             EffectStep::MakeDir { .. } | EffectStep::RemoveDir { .. } => {
                 self.plan.steps.push(step.clone());
@@ -433,7 +446,9 @@ impl Orphaned<'_> {
         let writer = self.theirs.writer;
         match step {
             EffectStep::ToTrash { path, item } => self.copy(self.layout.trash(writer, *item), path),
-            EffectStep::Place { path, .. } | EffectStep::FromTrash { path, .. } => self.trash(path),
+            EffectStep::Place { path, .. } | EffectStep::FromTrash { path, .. } => {
+                self.trash(path);
+            }
             EffectStep::Rename { from, to } => return self.rename(to, from),
             EffectStep::MakeDir { .. } => {}
             EffectStep::RemoveDir { path } => self
@@ -455,12 +470,13 @@ impl Orphaned<'_> {
         Ok(())
     }
 
-    fn trash(&mut self, path: &RelPath) {
+    fn trash(&mut self, path: &RelPath) -> Nonce {
         let item = self.env.nonce();
         self.plan.steps.push(EffectStep::ToTrash {
             path: path.clone(),
             item,
         });
+        item
     }
 
     fn copy(&mut self, source: RelPath, path: &RelPath) {

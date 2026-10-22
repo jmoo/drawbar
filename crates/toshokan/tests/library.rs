@@ -641,6 +641,7 @@ through_both!(
     two_windows_session_after_session_keep_a_pool_of_two,
     asking_who_else_writes_keeps_the_idle_writers_taken_up,
     an_effect_a_live_window_left_open_is_reported_live,
+    a_change_of_case_another_install_did_not_start_is_finished_by_another,
     a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept,
     losing_the_local_root_at_any_step_loses_only_drafts,
     a_crash_at_any_step_is_settled_before_the_next_write,
@@ -2909,6 +2910,49 @@ fn an_effect_a_live_window_left_open_is_reported_live<F: Facade>() {
         [(false, true)],
         "the first window holds its writer"
     );
+}
+
+fn a_change_of_case_another_install_did_not_start_is_finished_by_another<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    put(&folder, "Kick.wav", b"kick");
+    let probe = Probe::new(&machine(&folder));
+    let folding = |label, seed| Env {
+        names: Box::new(Folding),
+        ..env(label, seed, &clock)
+    };
+    let (mut theirs, _) = F::open(probe.clone(), folding("a", 1)).unwrap();
+    theirs.rescan().unwrap();
+    theirs
+        .commit("Tag", |i| i.create(|e| _ = e.add(TAGS, tag("x"))).0)
+        .unwrap();
+    // Its first step and its entry both fail: the record stays, and nothing moved.
+    let first_step = |io: &Io| matches!(io, Io::Rename { from, .. } if from.as_str() == "Kick.wav");
+    let logging = |io: &Io| io.root() == Root::Folder && io.path().as_str().ends_with(".txt");
+    fail(&probe, move |io| {
+        io.mutates() && (first_step(io) || logging(io))
+    });
+    let stopped = theirs.commit("Rename", |i| {
+        i.rename_file(
+            &path("Kick.wav"),
+            &path("kick.wav"),
+            Expect::Holds(identity(b"kick")),
+        )
+    });
+    heal(&probe);
+    assert!(stopped.is_err(), "{stopped:?}");
+    drop(theirs);
+
+    let (mut ours, opened) = F::open(Probe::new(&machine(&folder)), folding("b", 2)).unwrap();
+    let [orphan] = opened.orphaned.as_slice() else {
+        panic!("one orphan: {:?}", opened.orphaned);
+    };
+    ours.settle(orphan.clone(), Settlement::Finished).unwrap();
+    let files: Vec<String> = library_files(&folder)
+        .into_iter()
+        .map(|(path, bytes)| format!("{path:?} {}", String::from_utf8_lossy(&bytes)))
+        .collect();
+    assert_eq!(files, [r#"RelPath("kick.wav") kick"#]);
 }
 
 fn a_view_says_what_changed_since_the_view_before<F: Facade>() {

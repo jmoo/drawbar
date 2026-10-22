@@ -793,7 +793,9 @@ library path holding the start of a copy at the destination of the record's last
 marked step makes that step the one in progress and goes to the settler's trash
 first, as does a library path the last done step left beside its destination. It
 copies files out of the other writer's `tmp/` and `trash/` rather than moving
-them, and moves a library file it displaces into its own trash. Once its steps
+them, and moves a library file it displaces into its own trash. A `from_trash`
+of an item a `to_trash` it carried out itself put aside takes the file from its
+own trash, where that step put it. Once its steps
 are done, it appends a `settle` entry naming the writer and record, after which
 no reader reports the record. If its steps stop partway, the settlement fails
 and its intent is logged with what they did, without the planned facts or a
