@@ -4313,6 +4313,11 @@ fn a_change_of_case_alone_renames_a_file_and_a_folder() {
         .commit()
         .unwrap();
     assert_eq!(names("live"), ["C3.wav"]);
+    assert_eq!(
+        a.view().unbound(),
+        [path("d4.wav"), path("live/C3.wav")],
+        "the file is listed once, under its new name"
+    );
     a.undo().unwrap();
     assert_eq!(names("live"), ["c3.wav"]);
     a.intent("Rename")

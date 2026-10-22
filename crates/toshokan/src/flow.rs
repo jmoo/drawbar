@@ -186,6 +186,29 @@ pub(crate) fn stat<'a>(root: Root, path: &RelPath) -> Fallible<'a, Option<Meta>>
     })
 }
 
+/// Whether every name of `path`, which is there, is spelled as its directory lists it:
+/// a volume that ignores case finds a file by another spelling of its name too.
+pub(crate) fn spelled<'a>(root: Root, path: RelPath) -> Fallible<'a, bool> {
+    let prefixes: Vec<RelPath> = std::iter::successors(Some(path), RelPath::parent)
+        .take_while(|prefix| !prefix.is_root())
+        .collect();
+    fold(
+        prefixes.into_iter(),
+        true,
+        move |exactly, prefix| match exactly {
+            false => ok(false),
+            true => {
+                let parent = prefix.parent().expect("a name has a directory");
+                list(root, &parent).map_ok(move |entries| {
+                    entries
+                        .iter()
+                        .any(|entry| Some(&*entry.name) == prefix.name())
+                })
+            }
+        },
+    )
+}
+
 pub(crate) fn read<'a>(root: Root, path: &RelPath, range: Range) -> Fallible<'a, Vec<u8>> {
     let io = Io::Read {
         root,

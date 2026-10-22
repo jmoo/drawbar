@@ -833,7 +833,7 @@ fn refusal<'a>(
                     metas.push(meta);
                     return ok(metas);
                 }
-                spelled_so(path).map_ok(move |exactly| {
+                flow::spelled(Root::Folder, path).map_ok(move |exactly| {
                     metas.push(meta.filter(|_| exactly));
                     metas
                 })
@@ -893,28 +893,6 @@ fn refusal<'a>(
                 .map_ok(|meta| meta.is_none().then_some(Refusal::Emptied)),
         })
     })
-}
-
-/// Whether every name of `path`, which is there, is spelled as its directory lists it.
-fn spelled_so<'a>(path: RelPath) -> Fallible<'a, bool> {
-    let prefixes: Vec<RelPath> = std::iter::successors(Some(path), RelPath::parent)
-        .take_while(|prefix| !prefix.is_root())
-        .collect();
-    fold(
-        prefixes.into_iter(),
-        true,
-        |exactly, prefix| match exactly {
-            false => ok(false),
-            true => {
-                let parent = prefix.parent().expect("a name has a directory");
-                flow::list(Root::Folder, &parent).map_ok(move |entries| {
-                    entries
-                        .iter()
-                        .any(|entry| Some(&*entry.name) == prefix.name())
-                })
-            }
-        },
-    )
 }
 
 /// Carries out `record`'s steps from `start`, each destination durable before its

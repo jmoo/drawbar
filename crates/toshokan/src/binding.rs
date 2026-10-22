@@ -535,10 +535,17 @@ fn visit<'a>(layout: Rc<Layout>, path: RelPath, scan: Scan) -> flow::Fallible<'a
     if !path.is_root() && !layout.holds(&path) {
         return ok(scan);
     }
-    flow::stat(Root::Folder, &path).and_then(move |meta| match meta {
-        Some(meta) if meta.kind == Kind::Directory => walk(layout, path, scan),
-        Some(meta) => ok(found(scan, path, meta)),
-        None => ok(scan),
+    flow::stat(Root::Folder, &path).and_then(move |meta| {
+        let Some(meta) = meta else {
+            return ok(scan);
+        };
+        // A volume that ignores case finds the file by another spelling of its path too,
+        // which a listing would never give.
+        flow::spelled(Root::Folder, path.clone()).and_then(move |exactly| match exactly {
+            false => ok(scan),
+            true if meta.kind == Kind::Directory => walk(layout, path, scan),
+            true => ok(found(scan, path, meta)),
+        })
     })
 }
 
