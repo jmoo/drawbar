@@ -442,11 +442,13 @@ fn recover(disk: &MemDisk) -> Result<Vec<Outcome>, Error> {
     let layout = layout();
     let d = &mut process(disk);
     let logs = logs(disk, WRITER);
+    let capabilities = d.capabilities(Root::Folder);
     let found = d.run(recovery::assess(
         &layout,
         Some((WRITER, HEAD)),
         &logs,
         &BTreeSet::new(),
+        capabilities,
     ))?;
     assert!(found.orphaned.is_empty(), "{found:?}");
     let mut outcomes = Vec::new();
@@ -456,6 +458,7 @@ fn recover(disk: &MemDisk) -> Result<Vec<Outcome>, Error> {
             settling.record,
             Rc::new(settling.pending.clone()),
             identify(),
+            capabilities,
         ))?;
         assert_eq!(applied.outcome, settling.outcome, "predicted");
         outcomes.push(applied.outcome);
@@ -466,12 +469,86 @@ fn recover(disk: &MemDisk) -> Result<Vec<Outcome>, Error> {
         d.run(effects::finish(&layout, *name, record))?;
     }
     d.run(recovery::tidy(&layout, WRITER))?;
-    d.run(recovery::remove_empty(&layout, WRITER, &found.ignored))?;
+    d.run(recovery::remove_empty(
+        &layout,
+        WRITER,
+        &found.ignored,
+        capabilities,
+    ))?;
     Ok(outcomes)
 }
 
 fn kept_in<'f>(files: &'f BTreeMap<RelPath, Vec<u8>>, dir: &RelPath) -> Vec<&'f RelPath> {
     files.keys().filter(|p| p.starts_with(dir)).collect()
+}
+
+/// Each crash of `case` after which the marker of step `step` is there and `at`
+/// holds nothing, the disk restarted.
+fn marked_and_vacant(case: &Case, step: usize, at: &str) -> Vec<MemDisk> {
+    let count = case.disk();
+    case.commit(&count);
+    let marker = |path: &RelPath| {
+        path.name()
+            .is_some_and(|name| name.ends_with(&format!(".{step}")))
+    };
+    (0..count.mutations())
+        .map(|after| {
+            let disk = case.disk();
+            disk.set_eager_names(true);
+            disk.crash_after(after);
+            case.commit(&disk);
+            disk.restart()
+        })
+        .filter(|disk| {
+            let files = disk.files(Root::Folder);
+            let marked = kept_in(&files, &layout().pending_dir(WRITER))
+                .into_iter()
+                .any(marker);
+            marked && !files.contains_key(&path(at))
+        })
+        .collect()
+}
+
+#[test]
+fn a_file_put_where_a_copy_was_cut_short_is_set_aside_in_the_trash_or_kept() {
+    let case = renaming()
+        .into_iter()
+        .find(|case| case.name == "save over a file")
+        .map(|case| Case {
+            folder: SYNCED_COPYING,
+            ..case
+        })
+        .unwrap();
+    let crashes = marked_and_vacant(&case, 1, "a");
+    assert!(
+        !crashes.is_empty(),
+        "some crash leaves the place step marked"
+    );
+    let longer: &[u8] = b"outside, and longer";
+    for disk in crashes {
+        for outside in [&b"outside 10"[..], b"outs", longer] {
+            let disk = disk.restart();
+            common::put(&mut BlockingMem(disk.clone()), &[("a", outside)]);
+            let outcomes = recover(&disk).unwrap();
+            let files = disk.files(Root::Folder);
+            let trash = kept_in(&files, &layout().trash_dir(WRITER));
+            let shown = String::from_utf8_lossy(outside);
+            if outside == longer {
+                assert!(
+                    matches!(outcomes[..], [Outcome::Partial(_)]),
+                    "{shown}: {outcomes:?}"
+                );
+                assert_eq!(files[&path("a")], longer, "{shown}: kept where it was");
+                continue;
+            }
+            assert_eq!(outcomes, [Outcome::Complete], "{shown}");
+            assert_eq!(files[&path("a")], NEW, "{shown}");
+            assert!(
+                trash.iter().any(|item| files[*item] == outside),
+                "{shown} is set aside in the trash: {trash:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -602,6 +679,7 @@ fn settle_orphans(disk: &MemDisk, how: Settlement, stop: usize, seed: u64) -> (u
             None,
             &logs(disk, WRITER),
             &BTreeSet::new(),
+            d.capabilities(Root::Folder),
         ))
         .unwrap();
     assert!(found.own.is_empty(), "{found:?}");
@@ -619,7 +697,12 @@ fn settle_orphans(disk: &MemDisk, how: Settlement, stop: usize, seed: u64) -> (u
             .unwrap()
             .expect("the orphan's record is there");
         let reached = d
-            .run(recovery::progress(&layout, orphan.record, &theirs))
+            .run(recovery::progress(
+                &layout,
+                orphan.record,
+                &theirs,
+                d.capabilities(Root::Folder),
+            ))
             .unwrap();
         let capabilities = d.capabilities(Root::Folder);
         let mut plan =
@@ -827,7 +910,13 @@ fn a_folder_that_cannot_rename_a_directory_refuses_to_settle_a_directory_rename(
                 let d = &mut process(&disk);
                 let logs = logs(&disk, WRITER);
                 let found = d
-                    .run(recovery::assess(&layout, None, &logs, &BTreeSet::new()))
+                    .run(recovery::assess(
+                        &layout,
+                        None,
+                        &logs,
+                        &BTreeSet::new(),
+                        folder,
+                    ))
                     .unwrap();
                 for orphan in &found.orphaned {
                     let theirs = d
@@ -835,7 +924,7 @@ fn a_folder_that_cannot_rename_a_directory_refuses_to_settle_a_directory_rename(
                         .unwrap()
                         .unwrap();
                     let reached = d
-                        .run(recovery::progress(&layout, orphan.record, &theirs))
+                        .run(recovery::progress(&layout, orphan.record, &theirs, folder))
                         .unwrap();
                     let plan = |how| {
                         recovery::orphan_plan(&layout, &theirs, &reached, how, folder, &mut env(9))
@@ -913,6 +1002,7 @@ fn records_that_are_unchained_unconfined_or_settled_are_not_acted_on() {
             Some((WRITER, HEAD)),
             &logs,
             &settled,
+            Capabilities::ALL,
         ))
         .unwrap();
     assert_eq!(disk.mutations(), written, "assessing wrote");

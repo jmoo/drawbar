@@ -698,11 +698,12 @@ the last done step's source still holds the same bytes as its destination, the
 source is removed. The remaining steps are carried out, the planned entry is
 appended with what the steps did, and the record is spent. Then every file in
 its `tmp/` that no open record places is removed, and so is every
-`pending/<nonce>.json` opening ignored that is empty, holds a zero byte, or is
-the start of a JSON value: a record created in place and cut short before its
-bytes landed, before any of its steps ran. Any other record that does not decode
-stays. Settling twice ends as settling
-once.
+`pending/<nonce>.json` opening ignored that is a record created in place and cut
+short before its bytes landed, before any of its steps ran: one that is empty
+or, in a folder that syncs, one of at most 16 MiB that holds a zero byte or is
+the start of a JSON value. Any other record that does not decode stays.
+
+Settling twice ends as settling once.
 
 The steps of a record whose moves copy are found from its markers instead,
 since a later step may put bytes back where an earlier one copied them from.
@@ -710,19 +711,22 @@ Without a marker, no step is done. Otherwise every step before the last marked
 one is done, and that one is done when its source is gone and its destination
 is there, unless it is a `place` whose staged file is in the trash. When its
 source and destination hold the same bytes, it is done and the source is
-removed. Otherwise a destination no longer than its source is that step's copy
-cut short, whatever it holds, since the marker was synced before the destination
-was created and the create refuses an existing file: it is removed and the step
-carried out again. A destination longer than its source stays, and the step
+removed. Otherwise the destination is that step's copy cut short, since the
+marker was synced before the destination was created and the create refuses an
+existing file, while it holds the start of the source's bytes or, in a folder
+that syncs, where a crash zeroes or tears bytes not yet synced, anything no
+longer than them. A copy holding the start of the source's bytes is removed;
+any other is set aside in the writer's trash, under a name derived from the
+record and step that no entry names, so emptying the trash never removes it.
+Then the step is carried out again. Any other destination stays, and the step
 stops there.
 
-One case looks the same: another program makes the destination after the
-marker is synced and before the writer creates it. The create then fails, the
-step stops, and the intent logs its entry and reports that it stopped partway;
-the record is then spent, and no recovery touches the file. Only if the writer
-stops after that failure and before its entry is durable does recovery find the
-record open with that file at the destination. It cannot tell the file from its
-own copy cut short, and removes it unless it is longer than the source.
+The destination may instead be another program's file: one made after the
+marker was synced and before the writer's create, which then fails, or one put
+there between the crash and the next open, such as a file restored from a
+backup. Recovery cannot tell such a file from its own copy cut short. It keeps
+its bytes all the same: it sets the file aside in the trash, or removes it only
+where it holds the start of the source's bytes, which the source still holds.
 
 An open record of any other writer may belong to a live writer elsewhere, or to
 this install's own writer from before its local root was lost; a reader cannot

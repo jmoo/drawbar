@@ -546,6 +546,7 @@ fn a_copy_cut_short_where_another_program_then_made_a_file_leaves_that_file() {
             record,
             Rc::new(pending),
             identify(),
+            Capabilities::ALL,
         ))
         .unwrap();
     assert!(
@@ -610,7 +611,13 @@ fn staged_bytes_a_sweep_into_the_trash_left_half_copied_are_swept_again() {
     .unwrap();
     let applied = blocking::run(
         &mut again,
-        recovery::settle(&layout(), record, Rc::new(pending), identify()),
+        recovery::settle(
+            &layout(),
+            record,
+            Rc::new(pending),
+            identify(),
+            Capabilities::ALL,
+        ),
     )
     .unwrap();
     assert!(

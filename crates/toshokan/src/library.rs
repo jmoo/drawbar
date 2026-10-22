@@ -519,7 +519,12 @@ impl Library {
                 let Some(theirs) = open else {
                     return Flow::Done(Err(Error::Refused(Refusal::Nothing)));
                 };
-                let reached = recovery::progress(&library.layout, orphan.record, &theirs);
+                let reached = recovery::progress(
+                    &library.layout,
+                    orphan.record,
+                    &theirs,
+                    library.capabilities,
+                );
                 flow::run(reached).and_then(move |reached| {
                     let plan = recovery::orphan_plan(
                         &library.layout,
@@ -1741,7 +1746,13 @@ fn recover(library: Library) -> Fallible<'static, Library> {
         let settled = library.folded.settlements().clone();
         let (assessed, open) =
             recovery::classify(&library.layout, own, library.reader.logs(), &settled, found);
-        flow::run(recovery::predict(&library.layout, assessed, open)).map_ok(move |assessed| {
+        flow::run(recovery::predict(
+            &library.layout,
+            assessed,
+            open,
+            library.capabilities,
+        ))
+        .map_ok(move |assessed| {
             library.unsettled = assessed.own;
             library.spent = assessed.spent.into_iter().collect();
             library.orphaned = assessed.orphaned;
@@ -2185,7 +2196,13 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
     let name = settling.record;
     let record = Rc::new(settling.pending);
     let identify = Rc::clone(&library.env.identify);
-    let settled = recovery::settle(&library.layout, name, Rc::clone(&record), identify);
+    let settled = recovery::settle(
+        &library.layout,
+        name,
+        Rc::clone(&record),
+        identify,
+        library.capabilities,
+    );
     flow::run(settled)
         .and_then(move |applied| {
             let mut logged = planned(&record);
@@ -2250,8 +2267,16 @@ fn tidy_staging(library: &mut Library) -> Fallible<'_, &mut Library> {
     };
     let layout = library.layout.clone();
     let ignored = library.ignored.clone();
+    let capabilities = library.capabilities;
     flow::run(recovery::tidy(&layout, writer))
-        .and_then(move |()| flow::run(recovery::remove_empty(&layout, writer, &ignored)))
+        .and_then(move |()| {
+            flow::run(recovery::remove_empty(
+                &layout,
+                writer,
+                &ignored,
+                capabilities,
+            ))
+        })
         .map_ok(move |removed| {
             library.ignored.retain(|path| !removed.contains(path));
             library

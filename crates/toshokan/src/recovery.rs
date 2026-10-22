@@ -15,10 +15,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd, Moves, Progress, Staged};
+use crate::effects::{
+    self, Applied, Cut, EffectPlan, EffectStep, FileEnd, Moves, Progress, Staged,
+};
 use crate::env::{Env, Identify};
 use crate::error::{Refusal, Result};
-use crate::flow::{self, each, fold};
+use crate::flow::{self, each, fold, Fallible};
 use crate::ids::{EntryHash, Nonce, WriterId};
 use crate::io::{Capabilities, Capability, Kind, Root, Task};
 use crate::layout::Layout;
@@ -80,11 +82,12 @@ pub fn assess<'a, C: Chain>(
     own: Option<(WriterId, EntryHash)>,
     logs: &'a BTreeMap<WriterId, C>,
     settled: &'a BTreeSet<(WriterId, Nonce)>,
+    capabilities: Capabilities,
 ) -> Task<'a, Result<Recovery>> {
     flow::run(read(layout, logs.keys().copied().collect()))
         .and_then(move |found| {
             let (recovery, open) = classify(layout, own, logs, settled, found);
-            flow::run(predict(layout, recovery, open))
+            flow::run(predict(layout, recovery, open, capabilities))
         })
         .task()
 }
@@ -139,11 +142,12 @@ pub fn classify<C: Chain>(
 }
 
 /// Adds this writer's `open` records to `recovery`, each with how settling it
-/// will end.
+/// will end, in a folder that can do what `capabilities` says.
 pub fn predict(
     layout: &Layout,
     recovery: Recovery,
     open: Vec<(Nonce, PendingRecord)>,
+    capabilities: Capabilities,
 ) -> Task<'static, Result<Recovery>> {
     let layout = layout.clone();
     fold(
@@ -152,7 +156,7 @@ pub fn predict(
         move |mut recovery, (name, record)| {
             let layout = layout.clone();
             effects::observe(&layout, name, &record).map_ok(move |seen| {
-                let progress = effects::progress(&layout, &record, &seen);
+                let progress = effects::progress(&layout, &record, &seen, capabilities.fsync);
                 let outcome = effects::predict(&layout, name, &record, &seen, &progress);
                 recovery.own.push(Settling {
                     record: name,
@@ -204,15 +208,18 @@ fn standing(
     }
 }
 
-/// Resumes this writer's open record `name` where its steps stopped, after
-/// removing a source the last done step left beside its destination, and the start
-/// of a copy the next step left. The caller then appends the record's entry with
-/// what [`Applied`] says, after which [`effects::finish`] may remove the record.
+/// Resumes this writer's open record `name` where its steps stopped, in a folder
+/// that can do what `capabilities` says, after removing a source the last done
+/// step left beside its destination and the start of a copy the next step left,
+/// and setting aside in the trash any other copy cut short there. The caller then
+/// appends the record's entry with what [`Applied`] says, after which
+/// [`effects::finish`] may remove the record.
 pub fn settle(
     layout: &Layout,
     name: Nonce,
     record: Rc<PendingRecord>,
     identify: Rc<dyn Identify>,
+    capabilities: Capabilities,
 ) -> Task<'static, Result<Applied>> {
     let layout = layout.clone();
     effects::observe(&layout, name, &record)
@@ -221,13 +228,69 @@ pub fn settle(
                 done,
                 leftover,
                 partial,
-            } = effects::progress(&layout, &record, &seen);
-            let stale: Vec<RelPath> = leftover.into_iter().chain(partial).collect();
-            each(stale.into_iter(), |path| flow::remove(Root::Folder, &path)).and_then(move |()| {
-                flow::run(effects::apply(&layout, name, record, done, identify))
-            })
+            } = effects::progress(&layout, &record, &seen, capabilities.fsync);
+            let (start, aside): (Vec<Cut>, Vec<Cut>) =
+                partial.into_iter().partition(|cut| cut.start);
+            let stale = leftover
+                .into_iter()
+                .chain(start.into_iter().map(|cut| cut.path));
+            let set_aside = {
+                let (layout, record) = (layout.clone(), Rc::clone(&record));
+                move |()| {
+                    each(aside.into_iter(), move |cut| {
+                        let at = Aside {
+                            record: name,
+                            step: done,
+                            writer: record.writer,
+                        };
+                        set_aside(layout.clone(), at, cut.path, record.moves, 0)
+                    })
+                }
+            };
+            each(stale, |path| flow::remove(Root::Folder, &path))
+                .and_then(set_aside)
+                .and_then(move |()| {
+                    flow::run(effects::apply(&layout, name, record, done, identify))
+                })
         })
         .task()
+}
+
+/// The step of a record whose cut-short copy is set aside.
+#[derive(Clone, Copy)]
+struct Aside {
+    writer: WriterId,
+    record: Nonce,
+    step: usize,
+}
+
+impl Aside {
+    /// The name of the `n`th file set aside from this step in the trash: derived,
+    /// so that settling again finds the names used before, and named by no entry,
+    /// so that emptying the trash never removes it.
+    fn item(self, n: u32) -> Nonce {
+        let named = format!("aside {} {} {} {n}", self.writer, self.record, self.step);
+        let hash = blake3::hash(named.as_bytes());
+        let mut first = [0; 16];
+        first.copy_from_slice(&hash.as_bytes()[..16]);
+        Nonce::from_u128(u128::from_be_bytes(first))
+    }
+}
+
+/// Moves `path` to the first trash item of `at` from the `n`th on that is free,
+/// so that nothing set aside before is replaced.
+fn set_aside<'a>(
+    layout: Layout,
+    at: Aside,
+    path: RelPath,
+    moves: Moves,
+    n: u32,
+) -> Fallible<'a, ()> {
+    let item = layout.trash(at.writer, at.item(n));
+    flow::stat(Root::Folder, &item).and_then(move |found| match found {
+        Some(_) => set_aside(layout, at, path, moves, n + 1),
+        None => effects::relocate(moves, &path, &item),
+    })
 }
 
 /// Removes every file in this writer's staging, once no record of its is open
@@ -249,14 +312,17 @@ pub fn tidy(layout: &Layout, writer: WriterId) -> Task<'static, Result<()>> {
 }
 
 /// Removes those of `ignored` that are records of this writer cut short before
-/// their bytes landed ([`pending::cut_short`]), and returns them. A record whose
-/// moves copy is created in place and synced before any of its steps runs, so a
-/// crash before then leaves it empty, started or zeroed; no version writes such a
-/// record. Any other record that does not decode stays.
+/// their bytes landed, and returns them. A record whose moves copy is created in
+/// place and synced before any of its steps runs, so a crash before then leaves
+/// it empty or, in a folder that syncs, whose `capabilities` declare `fsync`,
+/// started or zeroed ([`pending::cut_short`]); no version writes such a record.
+/// Any other record that does not decode stays, and so does one longer than
+/// [`MAX_RECORD`].
 pub fn remove_empty(
     layout: &Layout,
     writer: WriterId,
     ignored: &[RelPath],
+    capabilities: Capabilities,
 ) -> Task<'static, Result<Vec<RelPath>>> {
     let dir = layout.pending_dir(writer);
     let records = ignored.iter().filter(|path| {
@@ -264,16 +330,30 @@ pub fn remove_empty(
         path.parent().as_ref() == Some(&dir) && name.is_some_and(|n| n.parse::<Nonce>().is_ok())
     });
     let records: Vec<RelPath> = records.cloned().collect();
-    fold(records.into_iter(), Vec::new(), |mut removed, path| {
-        flow::read_file(Root::Folder, &path, MAX_RECORD).and_then(move |bytes| {
-            match bytes.is_some_and(|bytes| pending::cut_short(&bytes)) {
-                true => flow::remove(Root::Folder, &path).map_ok(move |()| {
-                    removed.push(path);
-                    removed
-                }),
-                false => flow::ok(removed),
-            }
-        })
+    let cut_short = move |bytes: &[u8]| match capabilities.fsync {
+        true => pending::cut_short(bytes),
+        false => bytes.is_empty(),
+    };
+    fold(records.into_iter(), Vec::new(), move |mut removed, path| {
+        flow::stat(Root::Folder, &path)
+            .and_then({
+                let path = path.clone();
+                move |meta| match meta {
+                    Some(meta) if meta.kind == Kind::File && meta.len <= MAX_RECORD => {
+                        flow::read_file(Root::Folder, &path, MAX_RECORD)
+                    }
+                    _ => flow::ok(None),
+                }
+            })
+            .and_then(
+                move |bytes| match bytes.is_some_and(|bytes| cut_short(&bytes)) {
+                    true => flow::remove(Root::Folder, &path).map_ok(move |()| {
+                        removed.push(path);
+                        removed
+                    }),
+                    false => flow::ok(removed),
+                },
+            )
     })
     .task()
 }
@@ -293,6 +373,7 @@ pub fn progress(
     layout: &Layout,
     name: Nonce,
     theirs: &PendingRecord,
+    capabilities: Capabilities,
 ) -> Task<'static, Result<Reached>> {
     let layout = layout.clone();
     let theirs = theirs.clone();
@@ -314,7 +395,7 @@ pub fn progress(
                 .cloned()
                 .collect();
             Reached {
-                progress: effects::reached(&layout, &theirs, &seen),
+                progress: effects::reached(&layout, &theirs, &seen, capabilities.fsync),
                 vacant,
                 directories,
             }
@@ -377,7 +458,8 @@ impl Orphaned<'_> {
         if how == Settlement::Dismissed {
             return Ok(self.plan);
         }
-        for stale in progress.leftover.iter().chain(&progress.partial) {
+        let partial = progress.partial.iter().map(|cut| &cut.path);
+        for stale in progress.leftover.iter().chain(partial) {
             if self.layout.check_library_path(stale).is_ok() {
                 self.trash(stale);
             }
@@ -475,35 +557,62 @@ mod tests {
     use crate::disk::MemDisk;
     use crate::io::Io;
 
-    #[test]
-    fn a_record_cut_short_is_removed_and_any_other_unreadable_one_stays() {
+    /// Removes what [`remove_empty`] takes of records holding `made`, numbered
+    /// from 1, in a folder that can do what `capabilities` says, and returns their
+    /// numbers.
+    fn removed(made: &[Vec<u8>], capabilities: Capabilities) -> Vec<u128> {
         let layout = Layout::new(".t").unwrap();
         let writer = WriterId::from_u128(7);
         let mut disk = MemDisk::new();
-        let record = |n| layout.pending(writer, Nonce::from_u128(n));
-        let made: [(RelPath, &[u8]); 4] = [
-            (record(1), b""),
-            (record(2), &[0; 40]),
-            (record(3), b"{\"writer\":"),
-            (record(4), b"{\"from\":\"a newer version\"}"),
-        ];
+        let record = |n: usize| layout.pending(writer, Nonce::from_u128(n as u128 + 1));
         disk.perform(Io::MakeDir {
             root: Root::Folder,
             path: layout.pending_dir(writer),
         })
         .unwrap();
-        for (path, bytes) in &made {
+        for (n, bytes) in made.iter().enumerate() {
             let create = Io::Create {
                 root: Root::Folder,
-                path: path.clone(),
-                bytes: bytes.to_vec(),
+                path: record(n),
+                bytes: bytes.clone(),
             };
             disk.perform(create).unwrap();
         }
-        let ignored: Vec<RelPath> = made.iter().map(|(path, _)| path.clone()).collect();
-        let removed = run(&mut disk, remove_empty(&layout, writer, &ignored)).unwrap();
-        assert_eq!(removed, [record(1), record(2), record(3)]);
-        let left: Vec<RelPath> = disk.files(Root::Folder).into_keys().collect();
-        assert_eq!(left, [record(4)]);
+        let ignored: Vec<RelPath> = (0..made.len()).map(record).collect();
+        let removed = run(
+            &mut disk,
+            remove_empty(&layout, writer, &ignored, capabilities),
+        );
+        let names = removed.unwrap().into_iter().map(|path| {
+            let name = path.name().unwrap().strip_suffix(".json").unwrap();
+            name.parse::<Nonce>().unwrap().to_u128()
+        });
+        names.collect()
+    }
+
+    fn made() -> Vec<Vec<u8>> {
+        let mut long = b"{\"writer\":\"".to_vec();
+        long.resize(usize::try_from(MAX_RECORD).unwrap() + 1, b'x');
+        vec![
+            b"".to_vec(),
+            vec![0; 40],
+            b"{\"writer\":".to_vec(),
+            b"{\"from\":\"a newer version\"}".to_vec(),
+            long,
+        ]
+    }
+
+    #[test]
+    fn a_record_cut_short_is_removed_and_any_other_unreadable_one_stays() {
+        assert_eq!(removed(&made(), Capabilities::ALL), [1, 2, 3]);
+    }
+
+    #[test]
+    fn where_nothing_syncs_only_an_empty_record_is_cut_short() {
+        let unsynced = Capabilities {
+            fsync: false,
+            ..Capabilities::ALL
+        };
+        assert_eq!(removed(&made(), unsynced), [1]);
     }
 }

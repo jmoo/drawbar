@@ -214,6 +214,7 @@ pub fn cut_short(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::EntityId;
 
     #[test]
     fn a_record_cut_short_is_empty_zeroed_or_the_start_of_one() {
@@ -231,7 +232,6 @@ mod tests {
             assert!(!cut_short(kept), "{:?}", String::from_utf8_lossy(kept));
         }
     }
-    use crate::ids::EntityId;
 
     fn path(text: &str) -> RelPath {
         RelPath::new(text).unwrap()
