@@ -91,13 +91,13 @@ impl State {
     /// ⚠️ Both decodes walk the whole body, so they run when the bytes change and not per
     /// frame. A Stage 4 body declares hundreds of fields.
     pub fn follow(&mut self, entity: &LocalEntity) {
-        let read = (entity.id, entity.stamp, entity.saved.crc32);
+        let read = (entity.id, entity.stamp, entity.saved.crc32());
         if self.read == Some(read) {
             return;
         }
         self.read = Some(read);
-        self.settled = crate::fields::decoded(&entity.saved.bytes).unwrap_or_default();
-        self.pending = crate::fields::changed(&entity.saved.bytes, &entity.bytes);
+        self.settled = crate::fields::decoded(entity.saved.bytes()).unwrap_or_default();
+        self.pending = crate::fields::changed(entity.saved.bytes(), &entity.bytes);
     }
 
     /// The paths the working copy spells differently from the saved bytes.
