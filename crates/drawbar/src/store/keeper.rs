@@ -206,6 +206,7 @@ impl Keeper {
         let paths = paths.map(|moved| (path(moved.from), path(moved.to)));
         Ok(Viewed {
             undone: Some(paths.collect()),
+            dirs: Some(folders(&self.folder)),
             ..committed_view(library, committed.changes)
         })
     }

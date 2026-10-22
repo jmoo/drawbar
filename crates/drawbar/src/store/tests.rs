@@ -4419,3 +4419,38 @@ fn undo_and_redo_say_what_they_take_back() {
         "the refused delete is no step"
     );
 }
+
+/// Undoing a folder's rename puts its files back under the old name and leaves no
+/// folder of the new one; a redo moves them back under it.
+#[test]
+fn a_folder_rename_undone_leaves_no_folder_behind() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::create_dir_all(root.at("Live/Deep")).unwrap();
+    fs::write(root.at("Live/a.ne5p"), &program).unwrap();
+    fs::write(root.at("Live/Deep/b.ne5p"), &program).unwrap();
+    let mut session = Session::open(&root);
+    let live = LibPath::root().join("Live");
+    let folder = session.bench.browser.folders.id_of(&live).unwrap();
+    session.rename_folder(folder, "Gig");
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "Gig"]);
+
+    session.undo();
+    assert_eq!(root.names(""), [".drawbar", "Live"], "no Gig is left");
+    assert_eq!(root.names("Live"), ["Deep", "a.ne5p"]);
+    let dirs: Vec<&str> = session
+        .bench
+        .browser
+        .folders
+        .all()
+        .iter()
+        .map(|dir| dir.path.as_str())
+        .collect();
+    assert_eq!(dirs, ["Live", "Live/Deep"]);
+
+    session.redo();
+    session.refocus();
+    assert_eq!(root.names(""), [".drawbar", "Gig"]);
+    assert_eq!(root.names("Gig/Deep"), ["b.ne5p"]);
+}
