@@ -498,8 +498,9 @@ for the facts, and `Save`, `Rewrite`, `Import`, `Move`, `MoveFolder` and `Delete
 for the files; `Move` and `Delete` each name every file of one gesture. A commit
 may also answer `Trimmed`, the changes whose undo the trash no longer holds.
 Each view an answer carries is projected onto the workspace from what it changed
-since the view before (`toshokan::View::changed_since`); only the view after a
-scan of every file is projected whole. A change to a file names it by its path; the backend finds the
+since the view before (`toshokan::View::changed_since`); the view an answer
+carries with every folder listed again, after a rescan, an undo, a redo or a
+settlement, is projected whole. A change to a file names it by its path; the backend finds the
 entity bound there, if any, in the view it commits against. A new file whose
 asset came from a slot, a rescue or New is made as an entity's file, with its
 origin. A delete moves the file to the trash and ends its entity.
@@ -518,7 +519,8 @@ over a file whose last write has not answered, and anything that touches a
 rename not yet answered, since were the rename refused, the change would act on
 whatever else has that name. A change that waits holds back every one after it.
 The moves, or the deletions, taken from the workspace at once, which are one
-gesture's, go as one intent (`Store::carry_out`).
+gesture's, go as one intent (`Store::carry_out`), unless one of them waits for
+an answer: those after it go as an intent of their own.
 While a rescan is in flight, `Store::sync` sends nothing, so the rescan's listing
 describes the files as the commands before it left them.
 
@@ -567,6 +569,8 @@ stops at the first change whose undo needed one. Closing the library empties it
 of what this session's changes put there, since no later undo reaches them.
 Opening a library that may be written empties it of what was displaced more than
 30 days ago, and then of the oldest past 1 GiB (`toshokan::Policy::default`).
+Only the trash of the writer an instance writes as is emptied; an idle writer of
+the pool is written as again by the next window, which empties its trash then.
 
 ### Drafts
 

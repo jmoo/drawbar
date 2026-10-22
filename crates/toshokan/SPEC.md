@@ -631,7 +631,8 @@ as a tree move of its own, with a precondition on the identity of each entity's
 file the move carried, in place of renaming each file back: a single `rename`
 where directories rename, file by file elsewhere, which then removes each
 directory under `to`, and `to`, left holding nothing. A file no entity is bound
-to goes back with the tree as it is. The move back logs a `tree` op, so a redo
+to goes back with the tree as it is, and so does a file put in the tree after
+the move. The move back logs a `tree` op, so a redo
 moves the tree again.
 A `path` op changes no fact; undo reads it to rename the file back,
 bring its displaced bytes back from the trash, or trash the file it made.
