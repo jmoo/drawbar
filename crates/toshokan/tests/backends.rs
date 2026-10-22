@@ -576,3 +576,36 @@ fn a_native_local_root_missing_at_a_write_is_made_then() {
         "made again once removed"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_native_root_reaches_nothing_through_a_linked_directory() {
+    use toshokan::blocking::{Backend, Native};
+
+    let (folder, outside) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::write(outside.path().join("x"), b"outside").unwrap();
+    std::fs::write(folder.path().join("a"), b"inside").unwrap();
+    std::os::unix::fs::symlink(outside.path(), folder.path().join("linked")).unwrap();
+    let mut native = Native::new(folder.path(), folder.path().join(".local"));
+    for io in [
+        create(Root::Folder, "linked/new", b"new"),
+        read("linked/x", 0, 7),
+        rename("a", "linked/a"),
+        rename("linked/x", "x"),
+        Io::Remove {
+            root: Root::Folder,
+            path: path("linked/x"),
+        },
+    ] {
+        let done = native.perform(io.clone());
+        assert!(done.is_err(), "{io:?}: {done:?}");
+    }
+    let mut names: Vec<String> = std::fs::read_dir(outside.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["x"]);
+    assert_eq!(std::fs::read(outside.path().join("x")).unwrap(), b"outside");
+    assert_eq!(std::fs::read(folder.path().join("a")).unwrap(), b"inside");
+}

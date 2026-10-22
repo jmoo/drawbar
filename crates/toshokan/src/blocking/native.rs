@@ -15,7 +15,8 @@ use crate::path::RelPath;
 /// two directories, and locks as OS file locks on files in the local root.
 ///
 /// Symbolic links and special files are not library files: listings leave them
-/// out, and naming one fails. A root declares [`Capabilities::no_replace`] where
+/// out, and naming one fails, as does reading or changing a path through a
+/// directory that is a link. A root declares [`Capabilities::no_replace`] where
 /// its volume's renames refuse an existing destination themselves, as probed
 /// without writing: by file system type on Linux and Android, by the volume's
 /// capabilities on Apple systems, and on every volume on Windows. Elsewhere a
@@ -294,7 +295,47 @@ impl Backend for Native {
 }
 
 impl Native {
+    /// Refuses a read or a change of a path whose directories include a link, which
+    /// would reach outside the root. A link made between this look and the request is
+    /// still followed.
+    fn unlinked(&self, io: &Io) -> Result<(), IoError> {
+        let paths: Vec<&RelPath> = match io {
+            Io::Read { path, .. }
+            | Io::Create { path, .. }
+            | Io::Append { path, .. }
+            | Io::Write { path, .. }
+            | Io::Remove { path, .. }
+            | Io::RemoveDir { path, .. }
+            | Io::Sync { path, .. } => vec![path],
+            Io::ReadMany { reads, .. } => reads.iter().map(|(path, _)| path).collect(),
+            Io::Rename { from, to, .. } => vec![from, to],
+            _ => Vec::new(),
+        };
+        let top = self.top(io.root());
+        for path in paths {
+            let mut at = top.to_path_buf();
+            let mut dirs = path.components().peekable();
+            while let Some(name) = dirs.next() {
+                if dirs.peek().is_none() {
+                    break;
+                }
+                at.push(name);
+                match fs::symlink_metadata(&at) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        return Err(IoError::Other(
+                            "a directory on the way is a symbolic link".into(),
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn request(&mut self, io: Io) -> IoResult {
+        self.unlinked(&io)?;
         match io {
             Io::List { root, dir } => self.list(root, &dir).map(Reply::Listed),
             Io::Stat { root, path } => self.stat(root, &path).map(Reply::Stat),
