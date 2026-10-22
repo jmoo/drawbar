@@ -139,6 +139,10 @@ impl Keeper {
             Mode::Writable => Ok(()),
             Mode::ReadOnly(why) => Err(why.to_string()),
         };
+        let let_go = opened.removed.len();
+        if let_go > 0 {
+            library.let_go().map_err(|e| e.to_string())?;
+        }
         let refreshed = library.rescan().map_err(|e| e.to_string())?;
         let dirs = folders(&self.folder);
         let viewed = viewed(&library, refreshed, Some(dirs));
@@ -147,6 +151,7 @@ impl Keeper {
             writable,
             viewed,
             drafts: opened.drafts,
+            let_go,
         })
     }
 

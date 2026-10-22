@@ -1226,6 +1226,7 @@ impl Store {
             writable,
             viewed,
             drafts,
+            let_go,
         } = opened;
         self.phase = match writable {
             Ok(()) => Phase::Open,
@@ -1239,6 +1240,16 @@ impl Store {
         };
         self.viewed(viewed, workspace, browser, queue, log);
         self.take_drafts(drafts, workspace, log);
+        if let_go > 0 {
+            log.say(format!(
+                "The library folder no longer holds {} this computer showed, as after a \
+                 restore from a backup; drawbar shows the folder as it is.",
+                match let_go {
+                    1 => "1 change".to_string(),
+                    n => format!("{n} changes"),
+                }
+            ));
+        }
         // The count This computer's badge shows, said even at 0 to replace the last library's.
         log.say(match browser.folders.count(None, workspace) {
             0 => "No files on this computer.".to_string(),

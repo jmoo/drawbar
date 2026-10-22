@@ -4306,3 +4306,28 @@ fn a_tagged_file_saved_then_moved_outside_keeps_its_tags() {
     assert_eq!(session.path(id).as_deref(), Some("Moved/kept.ne5p"));
     assert_eq!(tagged(&session), [wears("kept.ne5p", &["Sunday"])]);
 }
+
+/// A library folder restored from a backup wins: what this computer showed of changes
+/// the backup does not hold is let go at the next open, which says so once.
+#[test]
+fn a_folder_restored_from_a_backup_is_shown_as_it_is() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    first.create();
+    first.close();
+    let backup = Temp::new();
+    copy_tree(&root.0, &backup.0);
+
+    let mut second = Session::open(&root);
+    second.tag(&[second.only()], "Sunday");
+    second.close();
+    fs::remove_dir_all(&root.0).unwrap();
+    copy_tree(&backup.0, &root.0);
+
+    let third = Session::listed(&root);
+    assert_eq!(tagged(&third), Vec::<(String, Vec<String>)>::new());
+    assert_eq!(third.said("no longer holds"), 1);
+    third.close();
+    let fourth = Session::listed(&root);
+    assert_eq!(fourth.said("no longer holds"), 0, "said once");
+}
