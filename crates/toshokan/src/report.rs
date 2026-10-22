@@ -86,12 +86,19 @@ pub struct Orphan {
     pub label: String,
     /// The library paths the effect touches.
     pub paths: Vec<RelPath>,
+    /// The writer is one of this install's pool that no instance writes as now, as
+    /// another window of the app wrote until it closed: its effect is this
+    /// install's to settle, with no one else to ask.
+    pub ours: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct DraftStatus {
     pub of: Drafted,
     pub state: DraftState,
+    /// The writer of this install's pool that kept the draft, where it is another
+    /// that no instance writes as now; `None` for this instance's own.
+    pub pooled: Option<WriterId>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

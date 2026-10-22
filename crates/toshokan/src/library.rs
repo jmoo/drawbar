@@ -67,6 +67,10 @@ pub struct Library {
     /// [`Library::tidy`] or [`Library::close`] removes them.
     spent: BTreeMap<Nonce, PendingRecord>,
     orphaned: Vec<Orphan>,
+    /// The other writers of this install's pool that no instance writes as now, by
+    /// id, with their geneses: their locks are held, and their drafts and effects
+    /// are this instance's to offer and settle.
+    pooled: BTreeMap<WriterId, EntryHash>,
     /// Pending records recovery would not act on.
     ignored: Vec<RelPath>,
     /// What is shown: each writer's log, or what the folder holds of it once the
@@ -205,7 +209,9 @@ impl Library {
             })
             .and_then(|(library, report, start)| {
                 saved_view(library).then(move |(library, saved)| match saved {
-                    Ok(()) => recover(library).map_ok(move |library| (library, report, start)),
+                    Ok(()) => idle_pool(library)
+                        .and_then(recover)
+                        .map_ok(move |library| (library, report, start)),
                     Err(error) => Flow::Done(Err(error)),
                 })
             })
@@ -273,6 +279,7 @@ impl Library {
             unsettled: Vec::new(),
             spent: BTreeMap::new(),
             orphaned: Vec::new(),
+            pooled: BTreeMap::new(),
             ignored: Vec::new(),
             folded: Folded::default(),
             joined: BTreeSet::new(),
@@ -787,6 +794,15 @@ impl Library {
         }
     }
 
+    /// Discards the draft another writer of this install's pool kept, as
+    /// [`DraftStatus::pooled`] names it.
+    pub fn discard_pooled_draft(&mut self, writer: WriterId, of: Drafted) -> Task<'_, Result<()>> {
+        match self.pooled.get(&writer) {
+            Some(genesis) => drafts::discard(*genesis, &of),
+            None => Task::ready(Ok(())),
+        }
+    }
+
     /// Removes this writer's spent pending records: those of its intents whose
     /// entries are logged, which commits leave in the folder. An app tidies when
     /// it is idle, and [`Library::close`] removes what is left. Every record is
@@ -990,6 +1006,7 @@ impl Library {
                 outcome: Outcome::Complete,
             }),
             false => self.orphaned.push(Orphan {
+                ours: self.pooled.contains_key(&record.writer),
                 writer: record.writer,
                 record: name,
                 label: record.label.clone(),
@@ -1503,9 +1520,12 @@ impl Library {
 
     /// The drafts kept for this writer, each with whether it still applies.
     fn drafts_task(&self) -> Task<'static, Result<Vec<DraftStatus>>> {
-        let Some(genesis) = self.writer.as_ref().map(Writer::genesis) else {
-            return Task::ready(Ok(Vec::new()));
-        };
+        let own = self.writer.as_ref().map(|writer| (None, writer.genesis()));
+        let pooled = self.pooled.iter();
+        let keepers: Vec<(Option<WriterId>, EntryHash)> = own
+            .into_iter()
+            .chain(pooled.map(|(writer, genesis)| (Some(*writer), *genesis)))
+            .collect();
         let files: BTreeMap<EntityId, RelPath> = self
             .bindings
             .bound
@@ -1514,15 +1534,27 @@ impl Library {
             .map(|(entity, file)| (*entity, file.path.clone()))
             .collect();
         let identify = Rc::clone(&self.env.identify);
-        flow::run(drafts::read_all(genesis))
-            .and_then(move |found| {
-                fold(found.into_iter(), Vec::new(), move |mut statuses, kept| {
+        let read = fold(
+            keepers.into_iter(),
+            Vec::new(),
+            |mut all, (pooled, genesis)| {
+                flow::run(drafts::read_all(genesis)).map_ok(move |found| {
+                    all.extend(found.into_iter().map(|kept| (pooled, kept)));
+                    all
+                })
+            },
+        );
+        read.and_then(move |found| {
+            fold(
+                found.into_iter(),
+                Vec::new(),
+                move |mut statuses, (pooled, kept)| {
                     let drafts::Kept { of, record } = kept;
                     let path = match &of {
                         Drafted::Entity(entity) => files.get(entity).cloned(),
                         Drafted::File(path) => Some(path.clone()),
                     };
-                    let status = move |state| DraftStatus { of, state };
+                    let status = move |state| DraftStatus { of, state, pooled };
                     let Some(record) = record else {
                         statuses.push(status(DraftState::Unreadable));
                         return ok(statuses);
@@ -1547,9 +1579,10 @@ impl Library {
                         }));
                         statuses
                     })
-                })
-            })
-            .task()
+                },
+            )
+        })
+        .task()
     }
 
     /// The changes the entries and snapshots read since `before` made, by writer.
@@ -1822,8 +1855,34 @@ fn recover(library: Library) -> Fallible<'static, Library> {
             library.unsettled = assessed.own;
             library.spent = assessed.spent.into_iter().collect();
             library.orphaned = assessed.orphaned;
+            for orphan in &mut library.orphaned {
+                orphan.ours = library.pooled.contains_key(&orphan.writer);
+            }
             library.ignored = assessed.ignored;
             library
+        })
+    })
+}
+
+/// Takes the lock of every other writer of this install's pool that no instance
+/// writes as now, and keeps it, so this instance offers their drafts and settles
+/// their effects, and no other does.
+fn idle_pool(library: Library) -> Fallible<'static, Library> {
+    let own = library.writer.as_ref().map(Writer::genesis);
+    flow::run(Writer::pool()).and_then(move |pool| {
+        let others = pool
+            .into_iter()
+            .filter(move |genesis| Some(*genesis) != own);
+        fold(others, library, |mut library, genesis| {
+            flow::lock(Layout::lock(genesis)).and_then(move |lock| match lock {
+                Lock::Held => ok(library),
+                Lock::Acquired => flow::run(Writer::id_of(genesis)).map_ok(move |writer| {
+                    if let Some(writer) = writer {
+                        library.pooled.insert(writer, genesis);
+                    }
+                    library
+                }),
+            })
         })
     })
 }

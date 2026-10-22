@@ -4542,3 +4542,102 @@ fn a_change_of_case_a_crash_stops_is_finished_at_the_next_open() {
         }
     }
 }
+
+/// Two windows of one install write as two writers of its pool. Opened again with one
+/// window, the install offers the drafts both kept, each from the writer that kept it,
+/// and the effect the other window left unfinished is its own to settle.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn one_window_takes_up_what_another_window_of_the_install_left() {
+    use std::panic::AssertUnwindSafe;
+    use toshokan::blocking::{Library, Native};
+
+    let (folder, local) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::write(folder.path().join("a.wav"), b"a").unwrap();
+    std::fs::write(folder.path().join("b.wav"), b"b").unwrap();
+    let clock = TestClock::at(1_000);
+    let open = |stops: &Stops, seed| {
+        let crashing = Crashing {
+            native: Native::new(folder.path(), local.path()),
+            stops: stops.clone(),
+            stopped: false,
+        };
+        Library::open(crashing, layout(), &schema(), env("w", seed, &clock)).unwrap()
+    };
+    let never: Stops = Rc::new(std::cell::Cell::new(None));
+    let crash: Stops = Rc::new(std::cell::Cell::new(None));
+    let (mut first, _) = open(&never, 1);
+    let (mut second, _) = open(&crash, 2);
+    for library in [&mut first, &mut second] {
+        library.rescan().unwrap();
+    }
+    first
+        .draft_file(&path("a.wav"))
+        .put(identity(b"a"), b"first's edit".to_vec())
+        .unwrap();
+    second
+        .draft_file(&path("b.wav"))
+        .put(identity(b"b"), b"second's edit".to_vec())
+        .unwrap();
+    first.close().unwrap();
+    crash.set(Some(|_, to| to.as_str() == "b.wav"));
+    let stopped = std::panic::catch_unwind(AssertUnwindSafe(move || {
+        let _ = second
+            .intent("Save")
+            .save_file(
+                &path("b.wav"),
+                b"saved".to_vec(),
+                Expect::Holds(identity(b"b")),
+            )
+            .commit();
+    }));
+    assert!(stopped.is_err(), "the crash stopped the save");
+
+    let (mut again, opened) = open(&never, 4);
+    let mut kept: Vec<(Drafted, bool)> = opened
+        .drafts
+        .iter()
+        .map(|draft| (draft.of.clone(), draft.pooled.is_some()))
+        .collect();
+    kept.sort_by(|a, b| a.0.cmp(&b.0));
+    let offered: Vec<&Drafted> = kept.iter().map(|(of, _)| of).collect();
+    assert_eq!(
+        offered,
+        [&Drafted::File(path("a.wav")), &Drafted::File(path("b.wav"))],
+        "both windows' drafts"
+    );
+    let pooled = kept.iter().filter(|(_, pooled)| *pooled).count();
+    assert_eq!(
+        pooled, 1,
+        "one kept by the writer this window does not write as"
+    );
+    // Whichever writer this window took, the save is this install's to finish.
+    match &opened.orphaned[..] {
+        [] => {
+            assert_eq!(opened.settled.len(), 1, "its own writer's effect");
+            again.settle_interrupted().unwrap();
+        }
+        [orphan] => {
+            assert!(orphan.ours, "another window of this install left it");
+            again.settle(orphan.clone(), Settlement::Finished).unwrap();
+        }
+        more => panic!("one effect to settle: {more:?}"),
+    }
+    assert_eq!(read_native(folder.path(), "b.wav"), b"saved");
+    let pooled = opened
+        .drafts
+        .iter()
+        .find(|draft| draft.pooled.is_some())
+        .unwrap();
+    again
+        .discard_pooled_draft(pooled.pooled.unwrap(), pooled.of.clone())
+        .unwrap();
+    again.close().unwrap();
+    let (_, opened) = open(&never, 5);
+    assert_eq!(opened.drafts.len(), 1, "the discarded draft is gone");
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_native(folder: &std::path::Path, name: &str) -> Vec<u8> {
+    std::fs::read(folder.join(name)).unwrap()
+}

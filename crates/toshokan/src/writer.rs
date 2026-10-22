@@ -107,6 +107,17 @@ impl Writer {
         flow::run(Self::pool()).and_then(pick_first).task()
     }
 
+    /// The id of the pool's writer `genesis`, from its head record, where that reads.
+    pub fn id_of(genesis: EntryHash) -> Task<'static, Result<Option<WriterId>>> {
+        flow::read_replaced(Root::Local, Layout::head(genesis))
+            .map_ok(|bytes| {
+                let record =
+                    bytes.and_then(|bytes| serde_json::from_slice::<HeadRecord>(&bytes).ok());
+                record.map(|record| record.writer)
+            })
+            .task()
+    }
+
     /// Every writer this install has a directory for in its local root, live or
     /// retired, by genesis entry in order.
     pub fn pool() -> Task<'static, Result<Vec<EntryHash>>> {

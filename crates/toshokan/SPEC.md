@@ -79,7 +79,11 @@ Each install keeps, per library, a local root of its own that is never synced:
 
 `<genesis>` is the hash of the writer's genesis entry. The directory is created
 only after that entry is durable in the folder, so the directories of the local
-root are the install's pool of writers.
+root are the install's pool of writers. An instance writes as the first writer
+of the pool whose lock it takes, and also takes and keeps the lock of every other
+writer no instance writes as now, as another window of the app wrote until it
+closed: it offers their drafts beside its own, and reports their open pending
+records as orphans that are the install's own (`ours`), to settle without asking.
 
 `head.json` is `{"writer":"<writer id>","head":"<entry hash>"}`,
 `let-go.json` is `{"<writer id>":["<entry hash>",…]}`, and `identities.json` is

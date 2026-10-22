@@ -10,7 +10,7 @@ use crate::disk::MemDisk;
 use crate::drafts::{Draft, Drafted};
 use crate::env::Env;
 use crate::error::Result;
-use crate::ids::{EntityId, Identity, Nonce};
+use crate::ids::{EntityId, Identity, Nonce, WriterId};
 use crate::intent::{Driver, Intent};
 use crate::io::{Capabilities, Io, IoError, IoResult, Operation, Range, Reply, Root, Step};
 use crate::layout::Layout;
@@ -238,6 +238,13 @@ impl<B: Backend> Library<B> {
     /// install, while the folder lacks it. Writes only in the local root.
     pub fn let_go(&mut self) -> Result<()> {
         run(&mut self.backend, self.core.let_go())
+    }
+
+    pub fn discard_pooled_draft(&mut self, writer: WriterId, of: Drafted) -> Result<()> {
+        run(
+            &mut self.backend,
+            self.core.discard_pooled_draft(writer, of),
+        )
     }
 
     pub fn settle_interrupted(&mut self) -> Result<()> {
