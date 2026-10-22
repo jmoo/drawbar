@@ -4231,3 +4231,58 @@ fn a_lost_row_keeps_its_id_until_it_is_forgotten() {
     let again = Session::listed(&root);
     assert_eq!(lost(&again), Vec::<u64>::new());
 }
+
+/// A rename that changes only case, on a disk that ignores case, leaves one asset with its
+/// tags under the new name, rescan after rescan, and deleting it leaves nothing behind.
+/// A disk that tells case apart has nothing to show here.
+#[test]
+fn a_rename_of_case_alone_leaves_one_asset() {
+    let root = Temp::new();
+    fs::write(root.at("probe"), b"").unwrap();
+    if !root.at("PROBE").exists() {
+        return;
+    }
+    fs::remove_file(root.at("probe")).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.place_at(id, "c3.ne5p");
+    session.sync();
+    let untagged = session.create();
+    session.place_at(untagged, "d3.ne5p");
+    session.sync();
+    session.tag(&[id], "Sunday");
+    session.place_at(id, "C3.ne5p");
+    session.place_at(untagged, "D3.ne5p");
+    session.sync();
+    session.refocus();
+    session.refocus();
+
+    let mut names: Vec<String> = session
+        .bench
+        .workspace
+        .listed()
+        .map(|entity| entity.name.clone())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["C3.ne5p", "D3.ne5p"], "one asset each");
+    assert_eq!(root.names(""), [".drawbar", "C3.ne5p", "D3.ne5p"]);
+    assert_eq!(tagged(&session), [wears("C3.ne5p", &["Sunday"])]);
+    assert_eq!(session.said("outside drawbar"), 0);
+
+    for id in [id, untagged] {
+        let Bench { workspace, log, .. } = &mut session.bench;
+        workspace.remove(id, log);
+    }
+    session.sync();
+    session.refocus();
+    assert_eq!(root.names(""), [".drawbar"]);
+    assert_eq!(session.bench.workspace.listed().count(), 0);
+}
+
+impl Session {
+    /// Put the asset `id`'s file at `name` in the top level, as a rename does.
+    fn place_at(&mut self, id: u64, name: &str) {
+        let path = LibPath::root().join(name);
+        self.bench.workspace.place(id, path);
+    }
+}
