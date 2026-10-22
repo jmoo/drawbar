@@ -681,6 +681,25 @@ impl Library {
             .task()
     }
 
+    /// Removes from this writer's trash the items of `items` it holds: those the app
+    /// knows no undo will need, as at the end of a session whose undo ends with it.
+    /// An undo that needs one is refused with [`Refusal::Emptied`].
+    pub fn remove_trash(&mut self, items: Vec<Nonce>) -> Task<'_, Result<Emptied>> {
+        if let Err(error) = self.writable() {
+            return Task::ready(Err(error));
+        }
+        let Some(writer) = self.writer.as_ref().map(Writer::id) else {
+            return Task::ready(Ok(Emptied::default()));
+        };
+        let listed = trash::list(&self.layout, writer, self.folded.trash(writer));
+        flow::run(listed)
+            .and_then(move |held| {
+                let removed = held.into_iter().filter(|held| items.contains(&held.item));
+                flow::run(trash::remove(&self.layout, writer, removed.collect()))
+            })
+            .task()
+    }
+
     /// Folds this writer's own entries into a snapshot and deletes the sealed
     /// segments of its directory a snapshot folds. Undo reaches back only to the
     /// snapshot. Refused with [`Refusal::Nothing`] when this instance writes as no

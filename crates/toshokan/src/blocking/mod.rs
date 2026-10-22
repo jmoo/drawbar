@@ -10,7 +10,7 @@ use crate::disk::MemDisk;
 use crate::drafts::{Draft, Drafted};
 use crate::env::Env;
 use crate::error::Result;
-use crate::ids::{EntityId, Identity};
+use crate::ids::{EntityId, Identity, Nonce};
 use crate::intent::{Driver, Intent};
 use crate::io::{Capabilities, Io, IoError, IoResult, Operation, Range, Reply, Root, Step};
 use crate::layout::Layout;
@@ -256,6 +256,10 @@ impl<B: Backend> Library<B> {
 
     pub fn empty_trash(&mut self, policy: Policy) -> Result<Emptied> {
         run(&mut self.backend, self.core.empty_trash(policy))
+    }
+
+    pub fn remove_trash(&mut self, items: Vec<Nonce>) -> Result<Emptied> {
+        run(&mut self.backend, self.core.remove_trash(items))
     }
 
     /// Removes the pending records this writer's commits left once their entries

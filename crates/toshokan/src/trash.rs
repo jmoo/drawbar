@@ -94,7 +94,15 @@ pub fn empty(
     policy: Policy,
     now_ms: u64,
 ) -> Task<'static, Result<Emptied>> {
-    let removed = expired(&items, policy, now_ms);
+    remove(layout, writer, expired(&items, policy, now_ms))
+}
+
+/// Removes `removed` from `writer`'s trash, then syncs the trash once.
+pub fn remove(
+    layout: &Layout,
+    writer: WriterId,
+    removed: Vec<TrashItem>,
+) -> Task<'static, Result<Emptied>> {
     let emptied = Emptied {
         removed: removed.iter().map(|item| item.item).collect(),
         bytes: removed

@@ -24,8 +24,8 @@ use toshokan::simulator::Machine;
 use toshokan::view::Conflicted;
 use toshokan::{
     Drafted, EntityId, EntryHash, Env, Error, Expect, Field, FileState, Hlc, Identify, Identity,
-    Invalid, Io, IoResult, Lag, Layout, Local, MemDisk, Policy, Random, Refusal, Register, RelPath,
-    Reply, Root, Schema, Set, View, WriterId,
+    Invalid, Io, IoResult, Lag, Layout, Local, MemDisk, Nonce, Policy, Random, Refusal, Register,
+    RelPath, Reply, Root, Schema, Set, View, WriterId,
 };
 
 const ORIGIN: Register<String> = Register::new("origin");
@@ -314,6 +314,7 @@ trait Facade: Sized {
     fn others(&mut self) -> Result<Vec<WriterInfo>, Error>;
     fn trash(&mut self) -> Result<Vec<TrashItem>, Error>;
     fn empty_trash(&mut self, policy: Policy) -> Result<Emptied, Error>;
+    fn remove_trash(&mut self, items: Vec<Nonce>) -> Result<Emptied, Error>;
     fn tidy(&mut self) -> Result<Tidied, Error>;
     fn compact(&mut self) -> Result<Compacted, Error>;
     fn put_draft(&mut self, entity: EntityId, base: Identity, bytes: &[u8]) -> Result<(), Error>;
@@ -387,6 +388,9 @@ impl Facade for Blocking {
     }
     fn empty_trash(&mut self, policy: Policy) -> Result<Emptied, Error> {
         self.0.empty_trash(policy)
+    }
+    fn remove_trash(&mut self, items: Vec<Nonce>) -> Result<Emptied, Error> {
+        self.0.remove_trash(items)
     }
     fn tidy(&mut self) -> Result<Tidied, Error> {
         self.0.tidy()
@@ -474,6 +478,9 @@ impl Facade for Async {
     }
     fn empty_trash(&mut self, policy: Policy) -> Result<Emptied, Error> {
         pollster::block_on(self.0.empty_trash(policy))
+    }
+    fn remove_trash(&mut self, items: Vec<Nonce>) -> Result<Emptied, Error> {
+        pollster::block_on(self.0.remove_trash(items))
     }
     fn tidy(&mut self) -> Result<Tidied, Error> {
         pollster::block_on(self.0.tidy())
@@ -602,6 +609,7 @@ through_both!(
     an_untrusted_folder_is_read_within_bounds_and_never_acted_on,
     drafts_come_back_only_while_the_file_holds_their_base,
     the_trash_keeps_displaced_bytes_until_emptied,
+    the_items_an_app_names_leave_the_trash,
     compaction_keeps_the_view_and_ends_undo_at_the_snapshot,
     others_on_this_machine_are_told_apart_from_others_elsewhere,
     a_refused_intent_changes_nothing,
@@ -3078,6 +3086,37 @@ fn the_trash_keeps_displaced_bytes_until_emptied<F: Facade>() {
         matches!(a.undo(), Err(Error::Refused(Refusal::Emptied))),
         "undo needs what was emptied"
     );
+}
+
+fn the_items_an_app_names_leave_the_trash<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"one");
+    for (from, to) in [(&b"one"[..], &b"two"[..]), (b"two", b"three")] {
+        a.commit("Save", |i| {
+            i.save(
+                song,
+                &path("song.npno"),
+                to.to_vec(),
+                Expect::Holds(identity(from)),
+            )
+        })
+        .unwrap();
+    }
+    let trash = a.trash().unwrap();
+    assert_eq!(trash.len(), 2);
+    let emptied = a.remove_trash(vec![trash[0].item]).unwrap();
+    assert_eq!((emptied.removed, emptied.bytes), (vec![trash[0].item], 3));
+    assert_eq!(a.trash().unwrap(), [trash[1].clone()]);
+    a.undo().unwrap();
+    assert_eq!(read(&folder, "song.npno").as_deref(), Some(&b"two"[..]));
+    let refused = a.undo();
+    assert!(
+        matches!(refused, Err(Error::Refused(_))),
+        "the earlier save's bytes are gone: {refused:?}"
+    );
+    assert_eq!(read(&folder, "song.npno").as_deref(), Some(&b"two"[..]));
 }
 
 fn compaction_keeps_the_view_and_ends_undo_at_the_snapshot<F: Facade>() {

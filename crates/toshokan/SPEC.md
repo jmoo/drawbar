@@ -805,8 +805,9 @@ intent staged and could not place. An item is listed with the entry whose
 `displaced` names it. Only its writer removes an item, and only by emptying:
 first every item displaced longer ago than the policy's age, by default 30 days,
 then the oldest items until the rest fit the policy's size, by default 1 GiB.
-An item no entry names is never emptied. Emptying removes the items, then syncs
-the trash once; an item whose removal a crash undid is removed by the next
+An item no entry names is never emptied. A writer may also remove the items an
+app names, as those whose undo ended with the app's session. Emptying removes the
+items, then syncs the trash once; an item whose removal a crash undid is removed by the next
 emptying.
 
 Emptying a trash is the only way bytes leave the folder.
