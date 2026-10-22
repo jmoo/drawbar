@@ -2340,11 +2340,13 @@ impl Store {
         });
         let held = held.map(|at| ops.split_off(at)).unwrap_or_default();
         // The files those changes move wait with them.
-        let mut waiting = self.moving.clone();
-        for op in &held {
-            let [from, to] = ends(op);
-            waiting.push((from.clone(), to.clone()));
-        }
+        let held_moves: Vec<(LibPath, LibPath)> = held
+            .iter()
+            .map(|op| {
+                let [from, to] = ends(op);
+                (from.clone(), to.clone())
+            })
+            .collect();
         let holds = !held.is_empty();
         browser.folders.hold(held);
         let (removals, ops): (Vec<Op>, Vec<Op>) = ops
@@ -2355,9 +2357,9 @@ impl Store {
         }
         crate::folders::place_new(workspace, &browser.folders);
         self.asks.extend(workspace.take_file_asks());
-        let mut done = self.arrivals(workspace, &waiting);
-        done &= self.carry_out(workspace, &waiting);
-        self.send_edits(workspace, &waiting);
+        let mut done = self.arrivals(workspace, &self.waiting(&held_moves));
+        done &= self.carry_out(workspace, &held_moves);
+        self.send_edits(workspace, &self.waiting(&held_moves));
         for op in removals {
             self.tree_op(op);
         }
@@ -2581,14 +2583,23 @@ impl Store {
         done
     }
 
+    /// The renames not answered yet, and the folder changes `held` back, each from and
+    /// to: what a change to a file under either waits for.
+    fn waiting(&self, held: &[(LibPath, LibPath)]) -> Vec<(LibPath, LibPath)> {
+        self.moving.iter().chain(held).cloned().collect()
+    }
+
     /// Carry out the changes to files asked for, in order. One that waits for an answer
     /// holds back every one after it. Returns whether none waits.
-    fn carry_out(&mut self, workspace: &mut Workspace, waiting: &[(LibPath, LibPath)]) -> bool {
+    fn carry_out(&mut self, workspace: &mut Workspace, held: &[(LibPath, LibPath)]) -> bool {
         while let Some(ask) = self.asks.front().cloned() {
+            // ⚠️ Taken afresh for each: a rename sent just before must answer before a
+            // change to what it moves goes out.
+            let waiting = self.waiting(held);
             let carried = match ask {
-                FileAsk::Save(id) => self.save(id, workspace, waiting),
-                FileAsk::Move { id, .. } => self.relocate(id, workspace, waiting),
-                FileAsk::Delete { id, path } => self.delete(id, &path, workspace, waiting),
+                FileAsk::Save(id) => self.save(id, workspace, &waiting),
+                FileAsk::Move { id, .. } => self.relocate(id, workspace, &waiting),
+                FileAsk::Delete { id, path } => self.delete(id, &path, workspace, &waiting),
             };
             if !carried {
                 return false;

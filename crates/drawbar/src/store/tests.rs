@@ -4706,3 +4706,31 @@ fn a_tagged_file_saved_back_keeps_its_tags() {
         "nothing is lost"
     );
 }
+
+/// A save asked for behind a rename waits for the rename's answer: where the rename is
+/// refused, as onto a file holding the same bytes, the save writes the file where it
+/// still is, and the other file is left as it was.
+#[test]
+fn a_save_behind_a_refused_rename_writes_the_file_where_it_is() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("a.ne5p"), &program).unwrap();
+    fs::write(root.at("b.ne5p"), &program).unwrap();
+    let mut session = Session::open(&root);
+    let a = session.named("a.ne5p");
+    session.place_at(a, "b.ne5p");
+    let edited = session.edit(a, "12");
+    session.bench.workspace.mark_saved(a);
+    while !session.settled() {
+        assert!(session.next(), "the library answered");
+    }
+
+    assert!(
+        root.read("b.ne5p") == program,
+        "the other file is left as it was"
+    );
+    assert!(
+        root.read("a.ne5p") == edited,
+        "the save landed where the file is"
+    );
+}
