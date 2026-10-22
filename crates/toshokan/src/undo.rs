@@ -112,18 +112,27 @@ fn reverse_latest(
     folded: &Folded,
 ) -> Result<Plan, Refusal> {
     let latest = stack.last().ok_or(Refusal::Nothing)?;
-    let entry = own
+    let at = own
         .iter()
-        .find(|entry| entry.hash() == *latest)
+        .position(|entry| entry.hash() == *latest)
         .ok_or(Refusal::Nothing)?;
-    reverse(entry, writer, folded)
+    reverse(&own[at..], writer, folded)
 }
 
-/// The plan that compensates `entry`, one of `writer`'s intents.
-pub fn reverse(entry: &Entry, writer: WriterId, folded: &Folded) -> Result<Plan, Refusal> {
-    let EntryKind::Intent(logged) = &entry.kind() else {
+/// The plan that compensates the first of `entries`, one of `writer`'s intents,
+/// which the rest follow in its chain: the `bind` entries right after it hold the
+/// file ops its own line had no room for.
+pub fn reverse(entries: &[Entry], writer: WriterId, folded: &Folded) -> Result<Plan, Refusal> {
+    let (entry, after) = entries.split_first().ok_or(Refusal::Nothing)?;
+    let EntryKind::Intent(mut logged) = entry.kind() else {
         return Err(Refusal::Nothing);
     };
+    let continued = after.iter().map_while(|entry| match entry.kind() {
+        EntryKind::Bind(bound) => Some(bound.ops),
+        _ => None,
+    });
+    logged.ops.extend(continued.flatten());
+    let logged = &logged;
     let reversing = Reversing {
         entry: entry.hash(),
         writer,

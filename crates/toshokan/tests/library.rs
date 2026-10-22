@@ -624,7 +624,8 @@ through_both!(
     an_effect_by_path_on_an_entitys_file_is_refused,
     a_tree_moved_with_files_no_entity_is_bound_to_is_moved_back_by_undo,
     a_tree_move_is_undone_by_one_rename_where_directories_rename,
-    a_tree_move_is_not_undone_once_a_file_it_moved_changed,
+    a_tree_move_is_not_undone_once_an_entitys_file_it_moved_changed,
+    a_file_no_entity_is_bound_to_goes_back_with_its_tree_as_it_is,
     files_rescanned_together_list_their_directory_once,
     a_view_says_what_changed_since_the_view_before,
     a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept,
@@ -2689,16 +2690,16 @@ fn a_tree_move_is_undone_by_one_rename_where_directories_rename<F: Facade>() {
     );
 }
 
-fn a_tree_move_is_not_undone_once_a_file_it_moved_changed<F: Facade>() {
+fn a_tree_move_is_not_undone_once_an_entitys_file_it_moved_changed<F: Facade>() {
     let folder = disk();
     let clock = TestClock::at(1_000);
     put(&folder, "old/a.wav", b"a");
-    put(&folder, "old/b.wav", b"b");
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     a.rescan().unwrap();
+    create(&mut a, "old/song.npno", b"song");
     a.commit("Move", |i| i.move_tree(&path("old"), &path("new")))
         .unwrap();
-    put(&folder, "new/b.wav", b"changed");
+    put(&folder, "new/song.npno", b"changed");
     let refused = a.undo();
     assert!(
         matches!(refused, Err(Error::Refused(Refusal::Changed(_)))),
@@ -2709,9 +2710,22 @@ fn a_tree_move_is_not_undone_once_a_file_it_moved_changed<F: Facade>() {
         files
             .map(|path| path.as_str().to_owned())
             .collect::<Vec<_>>(),
-        ["new/a.wav", "new/b.wav"],
+        ["new/a.wav", "new/song.npno"],
         "nothing moved back"
     );
+}
+
+fn a_file_no_entity_is_bound_to_goes_back_with_its_tree_as_it_is<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    put(&folder, "old/a.wav", b"a");
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    a.commit("Move", |i| i.move_tree(&path("old"), &path("new")))
+        .unwrap();
+    put(&folder, "new/a.wav", b"changed");
+    a.undo().unwrap();
+    assert_eq!(read(&folder, "old/a.wav").as_deref(), Some(&b"changed"[..]));
 }
 
 fn a_view_says_what_changed_since_the_view_before<F: Facade>() {
@@ -4819,4 +4833,90 @@ fn one_window_takes_up_what_another_window_of_the_install_left() {
 #[cfg(not(target_arch = "wasm32"))]
 fn read_native(folder: &std::path::Path, name: &str) -> Vec<u8> {
     std::fs::read(folder.join(name)).unwrap()
+}
+
+/// A folder of any size renames as one change: its files no entity is bound to are
+/// not logged one by one, and the entities' files it moves spill over into `bind`
+/// entries. Undo and redo each move it whole.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_folder_of_fifty_thousand_files_renames_and_undoes_as_one_change() {
+    use toshokan::blocking::{Library, Native};
+
+    const LOOSE: usize = 50_000;
+    const TAGGED: usize = 4_000;
+    let (folder, local) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::create_dir(folder.path().join("old")).unwrap();
+    for n in 0..LOOSE {
+        let name = format!("old/loose {n:05}.wav");
+        std::fs::write(folder.path().join(name), n.to_string()).unwrap();
+    }
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = Library::open(
+        Native::new(folder.path(), local.path()),
+        layout(),
+        &schema(),
+        env("a", 1, &clock),
+    )
+    .unwrap();
+    a.rescan().unwrap();
+    for batch in 0..TAGGED / 500 {
+        let mut intent = a.intent("Import");
+        for n in batch * 500..(batch + 1) * 500 {
+            let at = path(&format!("old/tagged/song {n:04}.npno"));
+            intent = intent
+                .create(|e| {
+                    e.save(&at, n.to_string().into_bytes(), Expect::Absent)
+                        .add(TAGS, tag("live"));
+                })
+                .0;
+        }
+        intent.commit().unwrap();
+    }
+    let count = |dir: &str| {
+        let mut files = 0;
+        let mut waiting = vec![folder.path().join(dir)];
+        while let Some(at) = waiting.pop() {
+            for entry in std::fs::read_dir(at).into_iter().flatten().flatten() {
+                match entry.file_type().unwrap().is_dir() {
+                    true => waiting.push(entry.path()),
+                    false => files += 1,
+                }
+            }
+        }
+        files
+    };
+    let bound_under = |a: &Library<Native>, dir: &str| {
+        let view = a.view();
+        let under = view.under(&path(dir));
+        under
+            .into_iter()
+            .filter(|entity| entity.file().is_some())
+            .count()
+    };
+
+    let moved = a
+        .intent("Rename")
+        .move_tree(&path("old"), &path("new"))
+        .commit()
+        .unwrap();
+    assert_eq!(moved.trees, [(path("old"), path("new"))]);
+    assert_eq!(moved.paths, [], "no file no entity is bound to is logged");
+    assert_eq!((count("old"), count("new")), (0, LOOSE + TAGGED));
+    assert_eq!(bound_under(&a, "new"), TAGGED);
+    let writers = folder.path().join(".t/writers");
+    let logs = std::fs::read_dir(&writers).unwrap().flatten();
+    let segments = logs.flat_map(|dir| std::fs::read_dir(dir.path()).unwrap().flatten());
+    let lines: String = segments
+        .filter(|file| file.path().extension().is_some_and(|ext| ext == "txt"))
+        .map(|file| std::fs::read_to_string(file.path()).unwrap())
+        .collect();
+    assert!(lines.contains(r#""kind":"bind""#), "file ops spill over");
+
+    a.undo().unwrap();
+    assert_eq!((count("old"), count("new")), (LOOSE + TAGGED, 0), "undone");
+    assert_eq!(bound_under(&a, "old"), TAGGED);
+    a.redo().unwrap();
+    assert_eq!((count("old"), count("new")), (0, LOOSE + TAGGED), "redone");
+    assert_eq!(bound_under(&a, "new"), TAGGED);
 }

@@ -191,8 +191,11 @@ pub struct Committed {
     /// The entities it created, in the order the intent created them.
     pub created: Vec<EntityId>,
     pub changes: Vec<Change>,
-    /// Each file no entity is bound to that it made, moved or trashed, in order.
+    /// Each file no entity is bound to that it made, moved or trashed, in order,
+    /// but for those under a tree it moved.
     pub paths: Vec<PathChange>,
+    /// Each tree it moved, from and to, in order.
+    pub trees: Vec<(RelPath, RelPath)>,
     /// ⚠️ Whether this instance's own state caught up with the commit. While it
     /// is [`Local::Behind`], a crash followed by a restore of the folder that
     /// takes the commit's entries can take them from this install's view too.

@@ -960,7 +960,7 @@ impl Library {
             .filter(|end| end.pin)
             .map(|end| end.entity)
             .collect();
-        applied
+        let ops = applied
             .files
             .iter()
             .map(|(entity, file)| {
@@ -986,12 +986,12 @@ impl Library {
             .chain(applied.unbound.iter().map(|(from, file)| Op::Path {
                 from: from.clone(),
                 file: file.clone(),
-            }))
-            .chain(applied.trees.iter().map(|(from, to)| Op::Tree {
-                from: from.clone(),
-                to: to.clone(),
-            }))
-            .collect()
+            }));
+        let trees = applied.trees.iter().map(|(from, to)| Op::Tree {
+            from: from.clone(),
+            to: to.clone(),
+        });
+        trees.chain(ops).collect()
     }
 
     /// Keeps an open pending record a failure left behind: this writer's is
@@ -2252,11 +2252,16 @@ fn committed(
         }),
         _ => None,
     });
+    let trees = ops.iter().filter_map(|op| match op {
+        Op::Tree { from, to } => Some((from.clone(), to.clone())),
+        _ => None,
+    });
     let committed = Committed {
         intent: entries[0].hash(),
         created,
         changes: distinct(ops.iter().copied().filter_map(change_of)),
         paths: paths.collect(),
+        trees: trees.collect(),
         local,
     };
     match outcome {
@@ -2550,6 +2555,25 @@ fn bound(pins: Vec<Op>) -> Vec<EntryKind> {
     kinds
 }
 
+/// Adds to `logged` as many of `file_ops`, in order, as keep its line within
+/// [`BIND_BYTES`], and returns the `bind` entries that hold the rest, to follow
+/// it: an intent moves any number of entities' files.
+fn fit(logged: &mut Logged, file_ops: Vec<Op>) -> Vec<EntryKind> {
+    let json_len = |json: serde_json::Result<String>| json.map_or(0, |json| json.len());
+    let mut size = json_len(serde_json::to_string(&*logged));
+    let mut rest = Vec::new();
+    for op in file_ops {
+        let len = json_len(serde_json::to_string(&op)) + 1;
+        if rest.is_empty() && size + len <= BIND_BYTES {
+            size += len;
+            logged.ops.push(op);
+        } else {
+            rest.push(op);
+        }
+    }
+    bound(rest)
+}
+
 /// The entries that log `logged`, closed by `closing` when there is one.
 fn closed(mut logged: Logged, closing: Option<Closing>) -> Vec<EntryKind> {
     let Some(Closing { mut facts, settle }) = closing else {
@@ -2658,11 +2682,16 @@ fn log_effects<'a>(
     pins: Vec<Op>,
 ) -> Fallible<'a, (&'a mut Library, Vec<Entry>, Outcome)> {
     let (name, journaled) = (effects.record, effects.moves_files());
-    logged.ops.extend(library.file_ops(&applied, &record.files));
+    let file_ops = library.file_ops(&applied, &record.files);
     logged.displaced = applied.displaced;
     let outcome = applied.outcome;
     let closing = closing.filter(|_| outcome == Outcome::Complete);
     let mut kinds = closed(logged, closing);
+    let overflow = match &mut kinds[0] {
+        EntryKind::Intent(logged) => fit(logged, file_ops),
+        _ => unreachable!("the entries start with the intent"),
+    };
+    kinds.splice(1..1, overflow);
     kinds.extend(bound(pins));
     let touched = moved_paths(&effects.steps);
     appending(library, kinds).then(move |(library, appended)| {

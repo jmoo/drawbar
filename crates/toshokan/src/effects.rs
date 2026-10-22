@@ -525,9 +525,10 @@ impl Resolver<'_> {
                     to: rebased(path),
                 });
             }
-            match bound.get(path) {
-                Some(&entity) => self.end(entity, Some(rebased(path))),
-                None => self.end_unbound(Some((*path).clone()), Some(rebased(path))),
+            // A file no entity is bound to has no facts: the tree's own end says where
+            // it went.
+            if let Some(&entity) = bound.get(path) {
+                self.end(entity, Some(rebased(path)));
             }
         }
         if !rename_dir && !files.contains(from) {

@@ -229,15 +229,18 @@ effect with the user's consent:
 | `outcome` | `"finished"`, `"rolled-back"` or `"dismissed"` |
 
 A **bind** entry pins moves this writer's reader found (see Binding), after the
-intent it committed with:
+intent it committed with, or holds the `file` ops of that intent its own line
+had no room for:
 
-| Member | Value         |
-| ------ | ------------- |
-| `ops`  | Its `pin` ops |
+| Member | Value                     |
+| ------ | ------------------------- |
+| `ops`  | Its `pin` or `file` ops   |
 
-Its ops are merged as an intent's are, and it is never undone. A commit spreads
-its pins over as many `bind` entries as keep each line within the limit, so any
-number of moves can be pinned.
+Its ops are merged as an intent's are. Its `pin` ops are never undone; its
+`file` ops are the intent's, and undo reads them with it. A commit keeps the
+intent's line within half the limit, spreads the `file` ops that do not fit over
+`bind` entries right after it, and its pins over as many more, so an intent can
+move any number of entities' files and any number of moves can be pinned.
 
 Nothing derived is logged: views, bindings a reader has not pinned, and the
 merged state exist only in readers and in snapshots.
@@ -607,13 +610,18 @@ path, without making it an entity: a file nothing is said about stays without
 one. Each is refused where an entity's file is. The intent logs a `path` op for
 each such file as the folder shows it afterwards, with where it was: `from` alone
 for a file trashed, `file` alone for a file made, both for a file renamed or
-saved over. A tree move logs one for each such file under the tree it moves. A commit
-reports each `path` op it logged, an undo's and a redo's included.
-A tree move also logs a `tree` op. Undo moves the tree back as a tree move of its
-own, with a precondition on the identity of each file the move carried, in place
-of renaming each file back: a single `rename` where directories rename, file by
-file elsewhere, which then removes each directory under `to`, and `to`, left
-holding nothing. The move back logs a `tree` op, so a redo moves the tree again.
+saved over. A commit reports each `path` op it logged, an undo's and a redo's
+included.
+
+A tree move logs a `tree` op, and a `file` op for each entity whose file it
+moves; the files under it no entity is bound to have no facts, and it logs no
+`path` op for them. A commit reports each tree it moved. Undo moves the tree back
+as a tree move of its own, with a precondition on the identity of each entity's
+file the move carried, in place of renaming each file back: a single `rename`
+where directories rename, file by file elsewhere, which then removes each
+directory under `to`, and `to`, left holding nothing. A file no entity is bound
+to goes back with the tree as it is. The move back logs a `tree` op, so a redo
+moves the tree again.
 A `path` op changes no fact; undo reads it to rename the file back,
 bring its displaced bytes back from the trash, or trash the file it made.
 
