@@ -375,7 +375,7 @@ impl Keeper {
         let library = self.library.as_mut().ok_or("the library is not open")?;
         let label = intent.label();
         let changes = match intent {
-            Intent::Tag { files, name } => {
+            Intent::Tag { files, name, make } => {
                 // ⚠️ A file another drawbar made an entity of since the last refresh would
                 // be adopted twice, as two entities in conflict. Reading what others wrote
                 // first leaves that only to one that adopts it in the moment between.
@@ -384,7 +384,11 @@ impl Keeper {
                     changes = library.refresh().map_err(|e| e.to_string())?.changes;
                 }
                 let mut committed = facts(library, label, |built, view| {
-                    tag(built, view, &files, &name)
+                    let built = tag(built, view, &files, &name)?;
+                    Ok(match make {
+                        true => list_tag(built, view, name),
+                        false => built,
+                    })
                 })?;
                 changes.append(&mut committed.changes);
                 Some(toshokan::Committed {
@@ -399,16 +403,7 @@ impl Keeper {
                 Ok(built)
             })?),
             Intent::MakeTag { name } => Some(facts(library, label, |built, view| {
-                Ok(match view.with(TAG_NAMES).into_iter().min() {
-                    Some(list) => built.add(list, TAG_NAMES, name),
-                    None => {
-                        built
-                            .create(|list| {
-                                list.add(TAG_NAMES, name);
-                            })
-                            .0
-                    }
-                })
+                Ok(list_tag(built, view, name))
             })?),
             Intent::RenameTag { entities, from, to } => {
                 Some(facts(library, label, |mut built, view| {
@@ -580,6 +575,20 @@ fn facts<'a>(
     let built = build(library.intent(label), &view)?;
     let committed = built.commit().map_err(|e| e.to_string())?;
     Ok(committed)
+}
+
+/// Add the tag `name` to the library's list of tags.
+fn list_tag<'l>(built: Built<'l>, view: &View, name: String) -> Built<'l> {
+    match view.with(TAG_NAMES).into_iter().min() {
+        Some(list) => built.add(list, TAG_NAMES, name),
+        None => {
+            built
+                .create(|list| {
+                    list.add(TAG_NAMES, name);
+                })
+                .0
+        }
+    }
 }
 
 /// Put a tag on each file of `files`: on its entity, the one bound to its path in `view`

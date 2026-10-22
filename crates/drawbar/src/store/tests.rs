@@ -4553,6 +4553,38 @@ fn a_tag_on_an_asset_with_no_file_is_refused_and_the_next_goes_on() {
     assert_eq!(tagged(&session), [wears("Grand.ne5p", &["Ballad"])]);
 }
 
+/// A new tag made on a selection and named in its editor is one change: one undo takes
+/// it off every asset and out of the list.
+#[test]
+fn a_new_tag_named_on_a_selection_is_one_undo_step() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let ids = [session.create(), session.create()];
+    session.sync();
+    let before = session.store.undo_label();
+    session
+        .bench
+        .act(vec![crate::browser::Act::NewTag(ids.to_vec())]);
+    session.decided();
+    let tag = session.bench.browser.tags.all()[0].id;
+    session.bench.act(vec![crate::browser::Act::RenameTag {
+        id: tag,
+        name: "Sunday".into(),
+    }]);
+    session.decided();
+    assert_eq!(session.worn(ids[0]), ["Sunday"]);
+    assert_eq!(session.worn(ids[1]), ["Sunday"]);
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo New tag “Sunday”")
+    );
+    session.undo();
+    assert_eq!(session.worn(ids[0]), Vec::<String>::new());
+    assert_eq!(session.worn(ids[1]), Vec::<String>::new());
+    assert_eq!(session.tag_names(), Vec::<String>::new(), "out of the list");
+    assert_eq!(session.store.undo_label(), before, "one step");
+}
+
 /// The Edit menu says what Undo takes back and Redo makes again: the change, and what it
 /// names. A change that failed is no step of either.
 #[test]
@@ -4572,7 +4604,8 @@ fn undo_and_redo_say_what_they_take_back() {
     session.undo();
     assert_eq!(
         session.store.undo_label().as_deref(),
-        Some("Undo Tag “Sunday”")
+        Some("Undo New tag “Sunday”"),
+        "a tag made and put on is one change"
     );
     assert_eq!(
         session.store.redo_label().as_deref(),

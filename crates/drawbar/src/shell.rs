@@ -2912,18 +2912,12 @@ mod tests {
         };
         assert_eq!(made.name, "Sunday");
         use crate::tags::Asked;
-        let asked = app.browser.tags.take_asked();
-        let [Asked::Make(made), Asked::Tag { assets, name }, Asked::Rename { from, to }] =
-            asked.as_slice()
-        else {
-            panic!("the row is tagged and the tag named: {asked:?}");
+        let asked = app.browser.take_tag_asks();
+        let [Asked::Tag { assets, name, make }] = asked.as_slice() else {
+            panic!("the row is tagged and the tag named in one change: {asked:?}");
         };
         assert_eq!(assets, &[named], "the row alone");
-        assert_eq!(
-            made, name,
-            "the tag is made under the name it is put on with"
-        );
-        assert_eq!((from, to), (name, &"Sunday".to_string()));
+        assert_eq!((name.as_str(), make), ("Sunday", &true));
     }
 
     /// A question raised outside the browser is asked with the browser hidden.

@@ -1488,6 +1488,10 @@ mod tests {
 
         bench.act(vec![Act::NewTag(Vec::new())]);
         let tag = bench.browser.tags().all()[0].id;
+        bench.act(vec![Act::RenameTag {
+            id: tag,
+            name: "Sunday".into(),
+        }]);
         let name = bench.browser.tags().name_of(tag).unwrap().to_string();
         assert!(
             !bench.browser.tags().on_all(&ids, tag),
@@ -1504,12 +1508,12 @@ mod tests {
         }]);
         let assets = ids.clone();
         assert_eq!(
-            bench.browser.tags.take_asked(),
+            bench.browser.take_tag_asks(),
             [
-                Asked::Make(name.clone()),
                 Asked::Tag {
                     assets: assets.clone(),
-                    name: name.clone()
+                    name: name.clone(),
+                    make: true
                 },
                 Asked::Untag { assets, name }
             ],

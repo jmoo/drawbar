@@ -549,8 +549,14 @@ pub enum Cmd {
 /// commits against, and checks the file holds what `expect` says before it writes.
 #[derive(Debug)]
 pub enum Intent {
-    /// Put a tag on each of these files, making an entity for each one without.
-    Tag { files: Vec<Key>, name: String },
+    /// Put a tag on each of these files, making an entity for each one without, and
+    /// where `make` says, add the tag to the library's list of tags as
+    /// [`Intent::MakeTag`] does.
+    Tag {
+        files: Vec<Key>,
+        name: String,
+        make: bool,
+    },
     /// Take a tag off each of these entities.
     Untag {
         entities: Vec<EntityId>,
@@ -641,6 +647,7 @@ impl Intent {
     /// What the history and other writers call it.
     pub fn label(&self) -> &'static str {
         match self {
+            Intent::Tag { make: true, .. } => "New tag",
             Intent::Tag { .. } => "Tag",
             Intent::Untag { .. } => "Untag",
             Intent::MakeTag { .. } => "New tag",

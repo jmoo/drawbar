@@ -19,9 +19,12 @@ pub type Tag = Named;
 pub enum Asked {
     /// A new tag, worn by nothing yet.
     Make(String),
+    /// Put a tag on these assets, and where `make` says, name it in the list of tags as
+    /// [`Asked::Make`] does: the tag is new.
     Tag {
         assets: Vec<u64>,
         name: String,
+        make: bool,
     },
     Untag {
         assets: Vec<u64>,
@@ -50,6 +53,9 @@ pub struct Tags {
     pending: Vec<(String, Option<String>)>,
     /// Counts changes to the names and to which asset wears which tag.
     revision: u64,
+    /// A new tag whose name its editor is still choosing, and the first change asked
+    /// for that waits for the name.
+    naming: Option<(u64, usize)>,
 }
 
 /// The tags of an untagged asset, so a caller need not tell absent from empty.
@@ -80,7 +86,36 @@ impl Tags {
         Some(id)
     }
 
+    /// Hold the changes asked for from the making of the new tag `id` on, until its name
+    /// is chosen: making it and naming it are one change.
+    pub(crate) fn name_new(&mut self, id: u64) {
+        let Some(name) = self.list.name_of(id) else {
+            return;
+        };
+        let made = self.asked.iter().rposition(|asked| match asked {
+            Asked::Make(made)
+            | Asked::Tag {
+                name: made,
+                make: true,
+                ..
+            } => made == name,
+            _ => false,
+        });
+        self.naming = made.map(|at| (id, at));
+    }
+
+    /// The new tag whose name its editor is still choosing.
+    pub(crate) fn naming(&self) -> Option<u64> {
+        self.naming.map(|(id, _)| id)
+    }
+
+    /// The editor of the new tag's name closed: what waited for it is asked for.
+    pub(crate) fn named(&mut self) {
+        self.naming = None;
+    }
+
     /// Rename a tag here, and ask the library to rename it on every asset that wears it.
+    /// A new tag whose name is being chosen is asked for under this name instead.
     pub(crate) fn rename(&mut self, id: u64, name: String) {
         let Some(from) = self.list.name_of(id).map(str::to_string) else {
             return;
@@ -90,6 +125,17 @@ impl Tags {
         }
         self.revision += 1;
         self.list.rename(id, name.clone());
+        if let Some((_, at)) = self.naming.take().filter(|(naming, _)| *naming == id) {
+            for asked in &mut self.asked[at..] {
+                match asked {
+                    Asked::Make(made) | Asked::Tag { name: made, .. } if *made == from => {
+                        made.clone_from(&name);
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
         self.pending.push((from.clone(), Some(name.clone())));
         self.asked.push(Asked::Rename { from, to: name });
     }
@@ -111,12 +157,17 @@ impl Tags {
         self.asked.push(Asked::Remove(name));
     }
 
-    /// Ask the library to put a tag on each of these assets.
+    /// Ask the library to put a tag on each of these assets: with its making, where that
+    /// was the last change asked for.
     pub(crate) fn tag(&mut self, assets: &[u64], tag: u64) {
         let name = self.list.name_of(tag).filter(|_| !assets.is_empty());
         if let Some(name) = name {
             let (assets, name) = (assets.to_vec(), name.to_string());
-            self.asked.push(Asked::Tag { assets, name });
+            let make = self.asked.last() == Some(&Asked::Make(name.clone()));
+            if make {
+                self.asked.pop();
+            }
+            self.asked.push(Asked::Tag { assets, name, make });
         }
     }
 
@@ -134,9 +185,13 @@ impl Tags {
         self.asked.push(Asked::Forget(asset));
     }
 
-    /// The changes asked for since the last call, in order.
+    /// The changes asked for since the last call, in order, but for those that wait for
+    /// a new tag's name.
     pub(crate) fn take_asked(&mut self) -> Vec<Asked> {
-        std::mem::take(&mut self.asked)
+        match &mut self.naming {
+            Some((_, at)) => self.asked.drain(..std::mem::take(at)).collect(),
+            None => std::mem::take(&mut self.asked),
+        }
     }
 
     /// The library has answered every change asked for: what it shows next is all there
@@ -253,13 +308,12 @@ mod tests {
         tags.tag(&[7, 8], sunday);
         assert_eq!(
             tags.take_asked(),
-            [
-                Asked::Make("Sunday".into()),
-                Asked::Tag {
-                    assets: vec![7, 8],
-                    name: "Sunday".into()
-                }
-            ]
+            [Asked::Tag {
+                assets: vec![7, 8],
+                name: "Sunday".into(),
+                make: true
+            }],
+            "made and put on in one change"
         );
         assert!(
             tags.worn(7).is_empty(),

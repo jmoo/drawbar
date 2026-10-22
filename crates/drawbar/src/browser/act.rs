@@ -661,6 +661,7 @@ pub fn apply(
                 // tags with one name would show as one row twice.
                 Some(id) => {
                     tag_all(browser, workspace, log, &ids, id);
+                    browser.tags.name_new(id);
                     let name = browser.tags.name_of(id).unwrap_or_default().to_string();
                     browser.start_rename(Item::Tag(id), &name);
                     browser.reveal(Item::Tag(id), workspace);

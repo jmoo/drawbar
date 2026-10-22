@@ -1976,7 +1976,7 @@ impl Store {
     /// Turn the changes to the tags the user asked for into intents, in order, each once
     /// every asset it names has a file the library lists and the one before has answered.
     fn ask_tags(&mut self, workspace: &mut Workspace, browser: &mut Browser, log: &mut Log) {
-        self.asked.extend(browser.tags.take_asked());
+        self.asked.extend(browser.take_tag_asks());
         // A tag waits on the file it names only while that file is still to be written.
         self.asks.extend(workspace.take_file_asks());
         if self.asked.is_empty() {
@@ -2027,7 +2027,7 @@ impl Store {
     /// Say which assets a tag that went did not reach: those with no file in the library
     /// and none on its way.
     fn tell_untagged(&self, asked: &Asked, workspace: &Workspace, log: &mut Log) {
-        let Asked::Tag { assets, name } = asked else {
+        let Asked::Tag { assets, name, .. } = asked else {
             return;
         };
         let missed = assets.iter().filter(|id| self.ids.key(**id).is_none());
@@ -2052,11 +2052,12 @@ impl Store {
         };
         let wearing = |name: &String| view.find(TAGS, name);
         let intent = match asked {
-            Asked::Tag { assets, name } => {
+            Asked::Tag { assets, name, make } => {
                 let waits = |id: &u64| self.ids.key(*id).is_none() && self.writes(*id, workspace);
                 if assets.iter().any(waits) {
                     return None;
                 }
+                let listed = !view.find(TAG_NAMES, name).is_empty();
                 let files: Vec<Key> = assets
                     .iter()
                     .filter_map(|id| self.ids.key(*id).cloned())
@@ -2065,10 +2066,16 @@ impl Store {
                         Key::File(_) => true,
                     })
                     .collect();
-                (!files.is_empty()).then(|| Intent::Tag {
-                    files,
-                    name: name.clone(),
-                })
+                let make = *make && !listed;
+                match (files.is_empty(), make) {
+                    (true, false) => None,
+                    (true, true) => Some(Intent::MakeTag { name: name.clone() }),
+                    (false, make) => Some(Intent::Tag {
+                        files,
+                        name: name.clone(),
+                        make,
+                    }),
+                }
             }
             Asked::Untag { assets, name } => {
                 let wear = wearing(name);

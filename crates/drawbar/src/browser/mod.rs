@@ -308,6 +308,18 @@ impl Browser {
         &self.tags
     }
 
+    /// The changes to the tags asked for since the last call, in order. Those from the
+    /// making of a new tag on wait while its name's editor is open.
+    pub(crate) fn take_tag_asks(&mut self) -> Vec<crate::tags::Asked> {
+        let editing = self.rename.as_ref().map(|rename| rename.what);
+        if let Some(naming) = self.tags.naming() {
+            if editing != Some(Item::Tag(naming)) {
+                self.tags.named();
+            }
+        }
+        self.tags.take_asked()
+    }
+
     /// A click on a row drawn outside the tree, with the same gestures on the same
     /// selection.
     pub fn pick(&mut self, ui: &egui::Ui, item: Item, list: &[Item]) {
@@ -1618,14 +1630,25 @@ mod tests {
         let Some(Item::Tag(tag)) = bench.browser.rename.as_ref().map(|r| r.what) else {
             panic!("a new tag opens its editor");
         };
-        let name = bench.browser.tags.name_of(tag).unwrap().to_string();
+        assert_eq!(
+            bench.browser.take_tag_asks(),
+            [],
+            "the name is chosen first"
+        );
+        bench.act(vec![Act::RenameTag {
+            id: tag,
+            name: "Sunday".into(),
+        }]);
+        bench.browser.rename = None;
         let assets = ids[..2].to_vec();
         assert_eq!(
-            bench.browser.tags.take_asked(),
-            [
-                crate::tags::Asked::Make(name.clone()),
-                crate::tags::Asked::Tag { assets, name }
-            ]
+            bench.browser.take_tag_asks(),
+            [crate::tags::Asked::Tag {
+                assets,
+                name: "Sunday".into(),
+                make: true
+            }],
+            "made, named and put on in one change"
         );
     }
 
@@ -1743,7 +1766,8 @@ mod tests {
             bench.browser.tags.take_asked(),
             [crate::tags::Asked::Tag {
                 assets: vec![id],
-                name
+                name,
+                make: false
             }]
         );
         let said = bench.log.transcript();
