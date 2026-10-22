@@ -4729,6 +4729,24 @@ fn a_new_tag_named_on_a_selection_is_one_undo_step() {
     assert_eq!(session.store.undo_label(), before, "one step");
 }
 
+/// Quitting while a new tag's name is still being typed keeps the tag, on the assets
+/// it was made on, under the name it had.
+#[test]
+fn a_new_tag_still_being_named_at_a_quit_is_kept() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session
+        .bench
+        .act(vec![crate::browser::Act::NewTag(vec![id])]);
+    session.decided();
+    session.close();
+
+    let again = Session::open(&root);
+    assert_eq!(again.worn(again.only()), ["New tag"]);
+}
+
 /// The Edit menu says what Undo takes back and Redo makes again: the change, and what it
 /// names. A change that failed is no step of either.
 #[test]

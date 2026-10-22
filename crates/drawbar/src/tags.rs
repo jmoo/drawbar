@@ -125,7 +125,8 @@ impl Tags {
         }
         self.revision += 1;
         self.list.rename(id, name.clone());
-        if let Some((_, at)) = self.naming.take().filter(|(naming, _)| *naming == id) {
+        if let Some((_, at)) = self.naming.filter(|(naming, _)| *naming == id) {
+            self.naming = None;
             for asked in &mut self.asked[at..] {
                 match asked {
                     Asked::Make(made) | Asked::Tag { name: made, .. } if *made == from => {
@@ -299,6 +300,28 @@ mod tests {
 
     fn names(of: &[&str]) -> BTreeSet<String> {
         of.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn renaming_another_tag_leaves_a_new_one_waiting_for_its_name() {
+        let mut tags = Tags::default();
+        let sunday = tags.make("Sunday").unwrap();
+        tags.take_asked();
+        let fresh = tags.make("New tag").unwrap();
+        tags.name_new(fresh);
+        tags.rename(sunday, "Monday".into());
+        assert_eq!(tags.take_asked(), [], "everything waits for the name");
+        tags.rename(fresh, "Tuesday".into());
+        assert_eq!(
+            tags.take_asked(),
+            [
+                Asked::Make("Tuesday".into()),
+                Asked::Rename {
+                    from: "Sunday".into(),
+                    to: "Monday".into()
+                }
+            ]
+        );
     }
 
     #[test]

@@ -1499,6 +1499,8 @@ impl Store {
         log: &mut Log,
     ) {
         const ROUNDS: usize = 8;
+        // A new tag still being named goes under the name it has.
+        browser.tags.named();
         self.ask_tags(workspace, browser, log);
         for _ in 0..ROUNDS {
             if !self.answered(workspace, browser, queue, log) {
