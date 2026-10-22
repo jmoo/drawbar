@@ -3939,3 +3939,42 @@ fn a_writers_directory_stays_bounded_across_sessions<F: Facade>() {
         assert!(shown.contains(&format!("t{n}")), "t{n} in {shown:?}");
     }
 }
+
+#[test]
+fn a_root_within_the_apps_own_directory_leaves_that_directory_unscanned() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let layout = Layout::within(".app", "library").unwrap();
+    put(&folder, "song.npno", b"song");
+    put(&folder, ".app/index.ron", b"an older build's index");
+    let (mut a, _) = blocking::Library::open(
+        machine(&folder),
+        layout.clone(),
+        &schema(),
+        env("a", 1, &clock),
+    )
+    .unwrap();
+    assert_eq!(a.rescan().unwrap().scan.arrived, [path("song.npno")]);
+    let (intent, _) = a.intent("Tag").create(|e| {
+        e.adopt(&path("song.npno"), Expect::Holds(identity(b"song")))
+            .add(TAGS, tag("Sunday"));
+    });
+    intent.commit().unwrap();
+    a.close().unwrap();
+
+    let written: Vec<RelPath> = folder.files(Root::Folder).into_keys().collect();
+    assert!(
+        written
+            .iter()
+            .filter(|at| at.starts_with(&path(".app")))
+            .all(|at| at.starts_with(layout.root()) || *at == path(".app/index.ron")),
+        "{written:?}"
+    );
+    let (mut b, _) =
+        blocking::Library::open(machine(&folder), layout, &schema(), env("b", 2, &clock)).unwrap();
+    b.rescan().unwrap();
+    let view = b.view();
+    assert_eq!(view.unbound(), [] as [RelPath; 0]);
+    let song = view.at(&path("song.npno")).expect("the tagged file");
+    assert_eq!(song.members(TAGS).values, [tag("Sunday")]);
+}

@@ -30,9 +30,10 @@ root must rename files.
 ## Layout
 
 The app chooses a library folder and the name of a root directory inside it,
-such as `.drawbar`. In the folder, toshokan writes only under that root, and in
-the library's files only as an intent's file effects ask. Every path in this
-table is relative to the root.
+such as `.drawbar`, or a root inside a directory of the app's own, such as
+`.drawbar/library` inside `.drawbar`. In the folder, toshokan writes only under
+that root, and in the library's files only as an intent's file effects ask.
+Every path in this table is relative to the root.
 
 | Path                                | Contents                                 |
 | ----------------------------------- | ---------------------------------------- |
@@ -44,8 +45,8 @@ table is relative to the root.
 | `writers/<w>/tmp/<nonce>.<ext>`     | A file `w` is staging                    |
 
 Only writer `w` creates, appends to, renames or removes anything under
-`writers/<w>/`. Others only make and sync the directories `writers/` and the
-root. There is no file at the level of the library.
+`writers/<w>/`. Others only make and sync the directories `writers/`, the
+root and the app's directory around it. There is no file at the level of the library.
 
 A staged file is named by its nonce and the extension of the file it becomes:
 what follows the last `.` of that file's name, if anything does, and if the name
@@ -57,8 +58,9 @@ in `writers/<w>/`, whatever its name, by its contents, so a sync client's
 conflicted copy is read like any other file. A browser's swap file is the
 exception (see Browsers).
 
-A **library path** is a path in the folder outside the root, other than the
-folder itself and a browser's swap file. Only library paths are the user's
+A **library path** is a path in the folder outside the root and outside the
+app's directory around it, other than the folder itself and a browser's swap
+file. Only library paths are the user's
 files.
 
 Each install keeps, per library, a local root of its own that is never synced:

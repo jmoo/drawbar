@@ -17,9 +17,10 @@
 //!   retired                    present once the writer is never written again
 //! ```
 //!
-//! The app names `<root>`. Only writer `w` writes under `writers/<w>/`. Names of
-//! segments and snapshots are advisory: every file directly in a writer's directory
-//! is read by its contents.
+//! The app names `<root>`: one directory of the folder, or one inside a directory of
+//! the app's own, which scans skip whole. Only writer `w` writes under
+//! `writers/<w>/`. Names of segments and snapshots are advisory: every file directly
+//! in a writer's directory is read by its contents.
 
 use crate::error::{Error, Result};
 use crate::ids::{EntityId, EntryHash, Nonce, SegmentName, WriterId};
@@ -44,13 +45,29 @@ const MAX_NAME: usize = 255;
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Layout {
     root: RelPath,
+    /// The directory of the folder that holds no library file: `root`, or the app's
+    /// own directory around it.
+    apart: RelPath,
 }
 
 impl Layout {
     /// The layout under `<folder>/<name>`; `name` is one path component.
     pub fn new(name: &str) -> Result<Self> {
+        let root = RelPath::ROOT.join(name)?;
         Ok(Self {
-            root: RelPath::ROOT.join(name)?,
+            apart: root.clone(),
+            root,
+        })
+    }
+
+    /// The layout under `<folder>/<dir>/<name>`, inside a directory of the app's own
+    /// that holds no library file, so the app may keep other files there. `dir` and
+    /// `name` are one path component each.
+    pub fn within(dir: &str, name: &str) -> Result<Self> {
+        let apart = RelPath::ROOT.join(dir)?;
+        Ok(Self {
+            root: apart.join(name)?,
+            apart,
         })
     }
 
@@ -58,13 +75,14 @@ impl Layout {
         &self.root
     }
 
-    /// Whether `path` in the folder is toshokan's: its root or anything under it.
+    /// Whether `path` in the folder holds no library file: toshokan's root or the
+    /// app's directory around it, or anything under it.
     pub fn owns(&self, path: &RelPath) -> bool {
-        path.starts_with(&self.root)
+        path.starts_with(&self.apart)
     }
 
-    /// Refuses a path in the folder that is not a library file: toshokan's root,
-    /// anything inside it, the folder itself, and a browser's swap file.
+    /// Refuses a path in the folder that is not a library file: what the layout
+    /// [owns](Layout::owns), the folder itself, and a browser's swap file.
     pub fn check_library_path(&self, path: &RelPath) -> Result<()> {
         let swap = path.name().is_some_and(is_swap_file);
         match path.is_root() || self.owns(path) || swap {
@@ -278,5 +296,23 @@ mod tests {
             assert!(layout.check_library_path(&path).is_ok(), "{text:?}");
         }
         assert!(Layout::new("a/b").is_err());
+    }
+
+    #[test]
+    fn a_root_within_the_apps_directory_keeps_all_of_it_apart() {
+        let layout = Layout::within(".drawbar", "library").unwrap();
+        assert_eq!(layout.root().as_str(), ".drawbar/library");
+        for text in [
+            ".drawbar",
+            ".drawbar/library.ron",
+            ".drawbar/library/writers",
+        ] {
+            let path = RelPath::new(text).unwrap();
+            assert!(layout.check_library_path(&path).is_err(), "{text:?}");
+        }
+        assert!(layout
+            .check_library_path(&RelPath::new(".drawbarx").unwrap())
+            .is_ok());
+        assert!(Layout::within(".drawbar", "a/b").is_err());
     }
 }

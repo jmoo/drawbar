@@ -147,13 +147,11 @@ impl Writer {
         let len = bytes.len() as u64;
         let dir = layout.writer(id);
         let path = layout.segment(id, segment);
-        let synced = vec![
-            path.clone(),
-            dir.clone(),
-            layout.writers(),
-            layout.root().clone(),
-            RelPath::ROOT,
-        ];
+        let mut synced = vec![path.clone(), dir.clone(), layout.writers()];
+        synced.extend(std::iter::successors(
+            Some(layout.root().clone()),
+            RelPath::parent,
+        ));
         let writer = Writer {
             holder: Some(Holder {
                 path: path.clone(),
