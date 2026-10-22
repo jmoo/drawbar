@@ -146,18 +146,82 @@ mod desktop {
             .hiding()
     }
 
-    /// How the volume a library is on compares names: as [`crate::store::names::key`]
-    /// does on macOS and Windows, whose volumes take two spellings for one name, and byte
-    /// for byte elsewhere, where a folder can hold both.
-    #[derive(Clone, Copy, Debug, Default)]
-    pub struct Volume;
+    /// How the volume a library is on compares names: ignoring case where a look at
+    /// the volume says it does, and in one normalization form on macOS, whose volumes
+    /// take two spellings of an accent for one name.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Volume {
+        pub folds_case: bool,
+        pub folds_form: bool,
+    }
+
+    impl Volume {
+        /// How the volume holding `folder` compares names, as a look at it, which
+        /// writes nothing, finds: a name's other case reaching the same entry. Where
+        /// nothing there has a name with a case to swap, as the system's volumes
+        /// usually do: ignoring case on macOS and Windows.
+        pub fn probe(folder: &std::path::Path) -> Volume {
+            let usual = cfg!(any(target_vendor = "apple", windows));
+            Volume {
+                folds_case: folds_case(folder).unwrap_or(usual),
+                folds_form: cfg!(target_vendor = "apple"),
+            }
+        }
+    }
+
+    /// Whether the volume holding `folder` takes a name in another case for the same
+    /// entry, by the first name with a case to swap: the folder's own, then those in
+    /// it. `None` where no name has one.
+    fn folds_case(folder: &std::path::Path) -> Option<bool> {
+        let own = folder
+            .parent()
+            .zip(folder.file_name().and_then(|name| name.to_str()))
+            .map(|(dir, name)| (dir.to_path_buf(), name.to_string()));
+        let inside = std::fs::read_dir(folder).into_iter().flatten().flatten();
+        let inside = inside.filter_map(|entry| {
+            Some((folder.to_path_buf(), entry.file_name().into_string().ok()?))
+        });
+        let (dir, twin) = own
+            .into_iter()
+            .chain(inside)
+            .take(64)
+            .find_map(|(dir, name)| {
+                let twin = swapped(&name);
+                (twin != name).then_some((dir, twin))
+            })?;
+        let reached = std::fs::symlink_metadata(dir.join(&twin)).is_ok();
+        let listed = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| entry.file_name().to_str() == Some(twin.as_str()));
+        Some(reached && !listed)
+    }
+
+    /// `name` with each letter's case swapped.
+    fn swapped(name: &str) -> String {
+        name.chars()
+            .flat_map(|c| match c.is_uppercase() {
+                true => c.to_lowercase().collect::<Vec<_>>(),
+                false => c.to_uppercase().collect::<Vec<_>>(),
+            })
+            .collect()
+    }
 
     impl toshokan::Names for Volume {
         fn key(&self, path: &str) -> String {
-            if !cfg!(any(target_vendor = "apple", windows)) {
-                return path.to_string();
-            }
-            let names: Vec<String> = path.split('/').map(crate::store::names::key).collect();
+            use unicode_normalization::UnicodeNormalization as _;
+            let name = |name: &str| {
+                let name = match self.folds_case {
+                    true => name.to_lowercase(),
+                    false => name.to_string(),
+                };
+                match self.folds_form {
+                    true => name.nfc().collect(),
+                    false => name,
+                }
+            };
+            let names: Vec<String> = path.split('/').map(name).collect();
             names.join("/")
         }
     }
@@ -276,14 +340,26 @@ mod tests {
     #[test]
     fn names_compare_as_the_volume_compares_them() {
         use toshokan::Names as _;
-        let (upper, lower) = (
-            Volume.key("Live/Flu\u{308}gel.NPNO"),
-            Volume.key("live/flügel.npno"),
-        );
-        match cfg!(any(target_vendor = "apple", windows)) {
-            true => assert_eq!(upper, lower),
-            false => assert_ne!(upper, lower),
-        }
+        let (upper, lower) = ("Live/Flu\u{308}gel.NPNO", "live/flügel.npno");
+        let folding = Volume {
+            folds_case: true,
+            folds_form: true,
+        };
+        assert_eq!(folding.key(upper), folding.key(lower));
+        let exact = Volume {
+            folds_case: false,
+            folds_form: false,
+        };
+        assert_ne!(exact.key(upper), exact.key(lower));
+    }
+
+    /// The probe agrees with what the volume does with a name in another case.
+    #[test]
+    fn a_volume_is_probed_for_folding_case_as_it_folds_it() {
+        let dir = crate::testing::Temp::new();
+        std::fs::write(dir.at("probe"), b"").unwrap();
+        let folds = dir.at("PROBE").exists();
+        assert_eq!(Volume::probe(&dir.0).folds_case, folds);
     }
 
     #[test]

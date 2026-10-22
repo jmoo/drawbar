@@ -4532,7 +4532,7 @@ fn a_change_another_install_left_unfinished_is_asked_about() {
         clock: Box::new(toshokan::env::SystemClock),
         random: Box::new(toshokan::env::OsRandom::new()),
         identify: std::rc::Rc::new(keys::Contents),
-        names: Box::new(keys::Volume),
+        names: Box::new(keys::Volume::probe(&root.0)),
         label: "drawbar".into(),
     };
     let (mut other, _) = Library::open(crashing, keys::layout(), &keys::schema(), env).unwrap();

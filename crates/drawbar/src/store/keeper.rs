@@ -232,7 +232,7 @@ impl Keeper {
             clock: (self.clock)(),
             random: Box::new(OsRandom::new()),
             identify: Rc::new(keys::Contents),
-            names: Box::new(keys::Volume),
+            names: Box::new(keys::Volume::probe(&self.folder)),
             label: LABEL.to_string(),
         };
         let native = Counted {
