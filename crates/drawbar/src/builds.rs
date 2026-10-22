@@ -307,8 +307,8 @@ fn held(entity: Option<&LocalEntity>) -> Held {
     let Some(entity) = entity else {
         return Held::Not("it is gone".to_string());
     };
-    if let VerifyState::NotRead(why) = &entity.verify {
-        return Held::Not(why.clone());
+    if let VerifyState::NotRead(why) = entity.verify() {
+        return Held::Not(why);
     }
     if entity.unread() {
         return Held::Unread;
