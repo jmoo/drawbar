@@ -4157,3 +4157,45 @@ fn a_large_tree_is_listed_whole() {
     let dirs: Vec<&str> = folders.all().iter().map(|dir| dir.path.as_str()).collect();
     assert_eq!(dirs, ["a", "b", "c", "c/d"]);
 }
+
+/// A folder drawbar may not read is reported and left out, and the rest of the library
+/// opens; once it can be read, a rescan lists what is in it.
+#[cfg(unix)]
+#[test]
+fn a_folder_that_cannot_be_read_is_reported_and_the_rest_opens() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::create_dir(root.at("Locked")).unwrap();
+    fs::write(root.at("Locked/inside.ne5p"), &program).unwrap();
+    fs::write(root.at("outside.ne5p"), &program).unwrap();
+    let mode = |mode| {
+        let locked = fs::Permissions::from_mode(mode);
+        fs::set_permissions(root.at("Locked"), locked).unwrap();
+    };
+    mode(0o000);
+    let mut session = Session::listed(&root);
+    mode(0o755);
+    let names = |session: &Session| {
+        let listed = session.bench.workspace.listed();
+        let mut names: Vec<String> = listed.map(|entity| entity.name.clone()).collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names(&session), ["outside.ne5p"]);
+    let unwalked: Vec<&str> = session
+        .bench
+        .browser
+        .folders
+        .unwalked
+        .iter()
+        .map(LibPath::as_str)
+        .collect();
+    assert_eq!(unwalked, ["Locked"]);
+    assert_eq!(session.said("drawbar could not read “Locked”"), 1);
+
+    session.refocus();
+    assert_eq!(names(&session), ["inside.ne5p", "outside.ne5p"]);
+    assert!(session.bench.browser.folders.unwalked.is_empty());
+}

@@ -1271,6 +1271,7 @@ impl Store {
             changes,
             moves,
             undone,
+            unlisted,
         } = viewed;
         let first = self.view.is_none();
         for (from, to) in &moves {
@@ -1287,6 +1288,20 @@ impl Store {
         let touched = self.project(&listed, first, workspace, browser, queue, log);
         if let Some(dirs) = dirs {
             browser.folders.sync(&dirs);
+        }
+        if let Some(unlisted) = unlisted {
+            let unlisted: BTreeSet<LibPath> = unlisted.into_iter().collect();
+            let new: Vec<String> = unlisted
+                .difference(&browser.folders.unwalked)
+                .map(|dir| format!("“{dir}”"))
+                .collect();
+            if !new.is_empty() {
+                log.trouble(format!(
+                    "drawbar could not read {}, so what is in it is not shown.",
+                    new.join(", ")
+                ));
+            }
+            browser.folders.unwalked = unlisted;
         }
         self.lose(&listed, workspace, browser);
         self.project_tags(&view, browser);

@@ -650,6 +650,9 @@ pub struct Viewed {
     /// What this session's undo or redo did, which the workspace follows without a
     /// word: each file no entity is bound to that it made, moved or trashed, from and to.
     pub undone: Option<Vec<(Option<LibPath>, Option<LibPath>)>>,
+    /// The folders a scan of every file could not list, where the answer scanned every
+    /// file. What is in them is not known.
+    pub unlisted: Option<Vec<LibPath>>,
 }
 
 impl std::fmt::Debug for Viewed {
@@ -659,6 +662,7 @@ impl std::fmt::Debug for Viewed {
             .field("changes", &self.changes)
             .field("moves", &self.moves)
             .field("undone", &self.undone)
+            .field("unlisted", &self.unlisted)
             .finish_non_exhaustive()
     }
 }

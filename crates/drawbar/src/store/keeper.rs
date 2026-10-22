@@ -742,6 +742,7 @@ fn committed_view(library: &Library<Native>, changes: Vec<toshokan::report::Chan
         changes,
         moves: Vec::new(),
         undone: None,
+        unlisted: None,
     }
 }
 
@@ -750,8 +751,11 @@ fn viewed(library: &Library<Native>, refreshed: Refreshed, dirs: Option<Vec<LibP
         let from = LibPath::parse(moved.from.as_str())?;
         Some((from, LibPath::parse(moved.to.as_str())?))
     });
+    let unlisted = refreshed.unlisted.iter();
+    let unlisted = unlisted.filter_map(|dir| LibPath::parse(dir.as_str()));
     Viewed {
         view: library.view(),
+        unlisted: dirs.is_some().then(|| unlisted.collect()),
         dirs,
         moves: moves.collect(),
         changes: refreshed.changes,
