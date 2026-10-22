@@ -969,13 +969,14 @@ pub fn finish(layout: &Layout, name: Nonce, record: &PendingRecord) -> Task<'sta
         .task()
 }
 
-/// Which of a record's paths the folder holds, what each step's destination holds
-/// of its source's bytes where both are there, and the last step of a record that
-/// copies whose marker is there.
+/// Which of a record's paths the folder holds, the length of each that is a file,
+/// what each step's destination holds of its source's bytes where both are there,
+/// and the last step of a record that copies whose marker is there.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub(crate) struct Observation {
     present: BTreeSet<RelPath>,
     directories: BTreeSet<RelPath>,
+    lens: BTreeMap<RelPath, u64>,
     held: BTreeMap<(RelPath, RelPath), Held>,
     started: Option<usize>,
 }
@@ -994,7 +995,7 @@ impl Observation {
 
 /// How far a record's steps got: the first `done`; a source the last of them
 /// left behind beside its destination with the same bytes; and the destination of
-/// the next, a copy of which stopped after the start of its source's bytes.
+/// the next, a copy of which was cut short.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Progress {
     pub done: usize,
@@ -1048,23 +1049,25 @@ pub(crate) fn observe<'a>(
         }
     }
     started.and_then(move |started| {
-        let found = (BTreeSet::new(), BTreeSet::new());
+        let found = (BTreeSet::new(), BTreeSet::new(), BTreeMap::new());
         fold(
             paths.into_iter(),
             found,
-            |(mut present, mut directories), path| {
+            |(mut present, mut directories, mut lens), path| {
                 flow::stat(Root::Folder, &path).map_ok(move |meta| {
-                    if meta.is_some_and(|meta| meta.kind == Kind::Directory) {
-                        directories.insert(path.clone());
+                    match meta.map(|meta| (meta.kind, meta.len)) {
+                        Some((Kind::Directory, _)) => drop(directories.insert(path.clone())),
+                        Some((Kind::File, len)) => drop(lens.insert(path.clone(), len)),
+                        None => {}
                     }
                     if meta.is_some() {
                         present.insert(path);
                     }
-                    (present, directories)
+                    (present, directories, lens)
                 })
             },
         )
-        .and_then(move |(present, directories)| {
+        .and_then(move |(present, directories, lens)| {
             let both: Vec<(RelPath, RelPath)> = pairs
                 .into_iter()
                 .filter(|(from, to)| present.contains(from) && present.contains(to))
@@ -1078,6 +1081,7 @@ pub(crate) fn observe<'a>(
             .map_ok(move |held| Observation {
                 present,
                 directories,
+                lens,
                 held,
                 started,
             })
@@ -1143,7 +1147,9 @@ fn scanned(layout: &Layout, record: &PendingRecord, seen: &Observation) -> Progr
 /// and its source is removed only once its destination holds all of the source's
 /// bytes, so the last marked step is the one in progress. Contents alone cannot
 /// tell which step that is, since a later step may put bytes back where an earlier
-/// one copied them from.
+/// one copied them from. The marked step's destination, which its create refused
+/// to find already there, is its own copy cut short while it is no longer than
+/// its source, whatever it holds: a crash zeroes or tears bytes not yet synced.
 fn copied(layout: &Layout, record: &PendingRecord, seen: &Observation) -> Progress {
     let Some(i) = seen.started else {
         return Progress::upto(0);
@@ -1158,13 +1164,15 @@ fn copied(layout: &Layout, record: &PendingRecord, seen: &Observation) -> Progre
         _ => false,
     };
     let held = seen.held.get(&(from.clone(), to.clone()));
+    let lens = seen.lens.get(&to).zip(seen.lens.get(&from));
+    let cut_short = lens.is_some_and(|(copied, whole)| copied <= whole);
     match (has(&from), has(&to), held) {
         (false, true, _) if !swept => Progress::upto(i + 1),
         (true, true, Some(Held::All)) => Progress {
             leftover: Some(from),
             ..Progress::upto(i + 1)
         },
-        (true, true, Some(Held::Start)) => Progress {
+        (true, true, _) if cut_short => Progress {
             partial: Some(to),
             ..Progress::upto(i)
         },

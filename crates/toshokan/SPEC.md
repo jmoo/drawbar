@@ -657,7 +657,9 @@ If a step fails, the rest are not tried: staged files not placed are moved to
 records the effects that were made, and the intent reports that it stopped
 partway. Each library path holds its old bytes, nothing, or its new bytes, and
 while it holds nothing a pending record names it. Where moves copy, a library
-path may also hold the start of its new bytes while a pending record names it.
+path may also hold a copy of its new bytes cut short while a pending record
+names it: no longer than them, holding their start or, where a crash zeroed or
+tore bytes the volume had not yet synced, anything else.
 
 Removing a record first removes its markers and syncs `pending/`.
 
@@ -695,10 +697,12 @@ its destination exists and its source does not, or both hold the same bytes. A
 the last done step's source still holds the same bytes as its destination, the
 source is removed. The remaining steps are carried out, the planned entry is
 appended with what the steps did, and the record is spent. Then every file in
-its `tmp/` that no open record places is removed, and so is every empty
-`pending/<nonce>.json` opening ignored: a record created in place and cut short
-before its bytes landed, before any of its steps ran. Any other record that does
-not decode stays. Settling twice ends as settling once.
+its `tmp/` that no open record places is removed, and so is every
+`pending/<nonce>.json` opening ignored that is empty, holds a zero byte, or is
+the start of a JSON value: a record created in place and cut short before its
+bytes landed, before any of its steps ran. Any other record that does not decode
+stays. Settling twice ends as settling
+once.
 
 The steps of a record whose moves copy are found from its markers instead,
 since a later step may put bytes back where an earlier one copied them from.
@@ -706,9 +710,19 @@ Without a marker, no step is done. Otherwise every step before the last marked
 one is done, and that one is done when its source is gone and its destination
 is there, unless it is a `place` whose staged file is in the trash. When its
 source and destination hold the same bytes, it is done and the source is
-removed. When the destination holds fewer of the source's bytes, from the start,
-the destination is removed and the step carried out again. Anything else at the
-destination stays, and the step stops there.
+removed. Otherwise a destination no longer than its source is that step's copy
+cut short, whatever it holds, since the marker was synced before the destination
+was created and the create refuses an existing file: it is removed and the step
+carried out again. A destination longer than its source stays, and the step
+stops there.
+
+One case looks the same: another program makes the destination after the
+marker is synced and before the writer creates it. The create then fails, the
+step stops, and the intent logs its entry and reports that it stopped partway;
+the record is then spent, and no recovery touches the file. Only if the writer
+stops after that failure and before its entry is durable does recovery find the
+record open with that file at the destination. It cannot tell the file from its
+own copy cut short, and removes it unless it is longer than the source.
 
 An open record of any other writer may belong to a live writer elsewhere, or to
 this install's own writer from before its local root was lost; a reader cannot
@@ -719,9 +733,9 @@ roll back, it reverses the done ones; to dismiss, it changes no file. It finds
 how far the steps got by checking them from the last, whichever way they move,
 since its own settling may have carried them further or reversed some; a
 `to_trash` of a record whose moves copy shows done as any other move does. A
-library path holding the start of a copy at the destination of the record's last
-marked step makes that step the one in progress and goes to the settler's trash
-first, as does a library path the last done step left beside its destination. It
+copy cut short, as above, at the destination of the record's last marked step
+makes that step the one in progress and goes to the settler's trash first, as
+does a library path the last done step left beside its destination. It
 copies files out of the other writer's `tmp/` and `trash/` rather than moving
 them, and moves a library file it displaces into its own trash. Once its steps
 are done, it appends a `settle` entry naming the writer and record, after which

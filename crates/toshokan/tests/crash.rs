@@ -1,13 +1,14 @@
 //! Every file effect crashed after every operation, under torn and zero-filled
-//! tails, renames done by copy and names made durable early, and in a folder
-//! that cannot rename, where every move copies, writes land only when their
-//! stream closes, and a file is created empty before its bytes land, as in a
-//! browser's picked folder.
+//! tails, renames done by copy and names made durable early; in a folder that
+//! cannot rename, where every move copies, writes land only when their stream
+//! closes, and a file is created empty before its bytes land, as in a browser's
+//! picked folder; and on a volume that syncs and cannot rename, as FAT and exFAT,
+//! where every move copies and a crash zeroes or tears what was not yet synced.
 //!
 //! Before recovery, no bytes have left the folder, and each user path holds its
 //! old bytes, its new bytes or nothing, and nothing only while a pending record
-//! names it; where moves copy, also the start of its new bytes while a pending
-//! record names it. Recovery finishes every recorded effect, removes every
+//! names it; where moves copy, also a copy of its new bytes cut short while a
+//! pending record names it. Recovery finishes every recorded effect, removes every
 //! record and staged file, changes nothing when run again, and ends the same
 //! however often it is itself cut short. After the local root is lost, an
 //! unfinished effect is reported for consent, settling it never writes in its
@@ -39,17 +40,17 @@ use toshokan::{
     EntityId, EntryHash, Error, MemDisk, Nonce, Outcome, Refusal, RelPath, Root, WriterId,
 };
 
-/// A process on a disk. Where its folder copies, the folder is a browser's picked
-/// folder, whose writes land only when their stream closes.
+/// A process on a disk. Where its folder copies and cannot sync, the folder is a
+/// browser's picked folder, whose writes land only when their stream closes.
 enum Process {
     Renaming(BlockingMem),
     Copying(Streams),
 }
 
 fn process(disk: &MemDisk) -> Process {
-    match Moves::of(disk.capabilities(Root::Folder)) {
-        Moves::Rename => Process::Renaming(BlockingMem(disk.clone())),
-        Moves::Copy => Process::Copying(Streams::new(disk.clone())),
+    match disk.capabilities(Root::Folder) {
+        COPYING => Process::Copying(Streams::new(disk.clone())),
+        _ => Process::Renaming(BlockingMem(disk.clone())),
     }
 }
 
@@ -111,8 +112,18 @@ fn long(end: &[u8]) -> &'static [u8] {
     Box::leak(start.chain(end.iter().copied()).collect())
 }
 
-/// Each case where moves copy, with one whose files take two chunks to copy, then
-/// each where they rename.
+/// A volume that keeps no journal of its names, as FAT and exFAT: it syncs, and
+/// every move copies.
+const SYNCED_COPYING: Capabilities = Capabilities {
+    rename_file: false,
+    no_replace: false,
+    rename_dir: false,
+    ..Capabilities::ALL
+};
+
+/// Each case where moves copy, in a browser's picked folder and on a volume that
+/// syncs, with one whose files take two chunks to copy, then each where they
+/// rename.
 fn cases() -> Vec<Case> {
     let renaming = renaming();
     let (old, new) = (long(OLD), long(&[OLD, b"!"].concat()));
@@ -130,11 +141,15 @@ fn cases() -> Vec<Case> {
         }],
         paths: vec![("a", Some(old), Some(new))],
     };
-    let copying = renaming.iter().map(|case| Case {
-        folder: COPYING,
-        ..case.clone()
-    });
-    copying.chain([long]).chain(renaming.clone()).collect()
+    let copying = |folder| {
+        let cases = renaming.iter().chain([&long]);
+        cases.map(move |case| Case {
+            folder,
+            ..case.clone()
+        })
+    };
+    let copying: Vec<Case> = copying(COPYING).chain(copying(SYNCED_COPYING)).collect();
+    copying.into_iter().chain(renaming.clone()).collect()
 }
 
 fn renaming() -> Vec<Case> {
@@ -295,9 +310,10 @@ fn renaming() -> Vec<Case> {
 
 impl Case {
     fn shown(&self) -> String {
-        match Moves::of(self.folder) {
-            Moves::Rename => self.name.to_owned(),
-            Moves::Copy => format!("{} by copying", self.name),
+        match (Moves::of(self.folder), self.folder.fsync) {
+            (Moves::Rename, _) => self.name.to_owned(),
+            (Moves::Copy, false) => format!("{} by copying", self.name),
+            (Moves::Copy, true) => format!("{} by copying on a volume that syncs", self.name),
         }
     }
 
@@ -362,13 +378,12 @@ impl Case {
             .collect()
     }
 
-    /// Whether `holds` is the start of `after`, as a move that copies leaves it
-    /// before it ends.
+    /// Whether `holds` may be a copy of `after` cut short: no longer than it,
+    /// holding its start or, where a crash zeroed or tore what the volume had
+    /// not yet written, anything else.
     fn copying(&self, holds: &Option<Vec<u8>>, after: Option<&[u8]>) -> bool {
-        let started = |(holds, after): (&Vec<u8>, &[u8])| {
-            holds.len() < after.len() && after.starts_with(holds)
-        };
-        Moves::of(self.folder) == Moves::Copy && holds.as_ref().zip(after).is_some_and(started)
+        let cut = |(holds, after): (&Vec<u8>, &[u8])| holds.len() <= after.len();
+        Moves::of(self.folder) == Moves::Copy && holds.as_ref().zip(after).is_some_and(cut)
     }
 
     fn holds(&self, files: &BTreeMap<RelPath, Vec<u8>>) -> Vec<Option<Vec<u8>>> {
@@ -478,7 +493,7 @@ fn every_effect_crashed_anywhere_keeps_its_bytes_and_recovers_whole() {
                     if !allowed.contains(holds) && case.copying(holds, after) {
                         assert!(
                             named.contains(&path(p)),
-                            "{shown}: {p} holds part of a copy and no record names it"
+                            "{shown}: {p} holds a copy cut short and no record names it"
                         );
                         continue;
                     }
@@ -591,9 +606,9 @@ fn settle_orphans(disk: &MemDisk, how: Settlement, stop: usize, seed: u64) -> (u
         .unwrap();
     assert!(found.own.is_empty(), "{found:?}");
     let files = disk.files(Root::Folder);
-    let empty = |path: &RelPath| files.get(path).is_some_and(Vec::is_empty);
+    let cut_short = |path: &RelPath| files.get(path).is_some_and(|b| pending::cut_short(b));
     assert!(
-        found.ignored.iter().all(empty),
+        found.ignored.iter().all(cut_short),
         "only a record cut short before its bytes landed is ignored: {found:?}"
     );
     let mut env = env(seed);

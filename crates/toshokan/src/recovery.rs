@@ -24,7 +24,7 @@ use crate::io::{Capabilities, Capability, Kind, Root, Task};
 use crate::layout::Layout;
 use crate::log::Settlement;
 use crate::path::RelPath;
-use crate::pending::{self, PendingRecord, Records};
+use crate::pending::{self, PendingRecord, Records, MAX_RECORD};
 use crate::reader::WriterLog;
 use crate::report::{Orphan, Outcome};
 
@@ -248,10 +248,11 @@ pub fn tidy(layout: &Layout, writer: WriterId) -> Task<'static, Result<()>> {
         .task()
 }
 
-/// Removes those of `ignored` that are empty records of this writer, and returns
-/// them. A record whose moves copy is created in place, so a run cut short before
-/// its bytes landed leaves it empty, before any of its steps ran; no version
-/// writes an empty record. Any other record that does not decode stays.
+/// Removes those of `ignored` that are records of this writer cut short before
+/// their bytes landed ([`pending::cut_short`]), and returns them. A record whose
+/// moves copy is created in place and synced before any of its steps runs, so a
+/// crash before then leaves it empty, started or zeroed; no version writes such a
+/// record. Any other record that does not decode stays.
 pub fn remove_empty(
     layout: &Layout,
     writer: WriterId,
@@ -264,14 +265,14 @@ pub fn remove_empty(
     });
     let records: Vec<RelPath> = records.cloned().collect();
     fold(records.into_iter(), Vec::new(), |mut removed, path| {
-        flow::stat(Root::Folder, &path).and_then(move |meta| match meta {
-            Some(meta) if meta.kind == Kind::File && meta.len == 0 => {
-                flow::remove(Root::Folder, &path).map_ok(move |()| {
+        flow::read_file(Root::Folder, &path, MAX_RECORD).and_then(move |bytes| {
+            match bytes.is_some_and(|bytes| pending::cut_short(&bytes)) {
+                true => flow::remove(Root::Folder, &path).map_ok(move |()| {
                     removed.push(path);
                     removed
-                })
+                }),
+                false => flow::ok(removed),
             }
-            _ => flow::ok(removed),
         })
     })
     .task()
@@ -464,5 +465,45 @@ impl Orphaned<'_> {
     fn copy(&mut self, source: RelPath, path: &RelPath) {
         let staged = self.env.nonce();
         self.plan.place(staged, Staged::Copy(source), path.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::blocking::run;
+    use crate::disk::MemDisk;
+    use crate::io::Io;
+
+    #[test]
+    fn a_record_cut_short_is_removed_and_any_other_unreadable_one_stays() {
+        let layout = Layout::new(".t").unwrap();
+        let writer = WriterId::from_u128(7);
+        let mut disk = MemDisk::new();
+        let record = |n| layout.pending(writer, Nonce::from_u128(n));
+        let made: [(RelPath, &[u8]); 4] = [
+            (record(1), b""),
+            (record(2), &[0; 40]),
+            (record(3), b"{\"writer\":"),
+            (record(4), b"{\"from\":\"a newer version\"}"),
+        ];
+        disk.perform(Io::MakeDir {
+            root: Root::Folder,
+            path: layout.pending_dir(writer),
+        })
+        .unwrap();
+        for (path, bytes) in &made {
+            let create = Io::Create {
+                root: Root::Folder,
+                path: path.clone(),
+                bytes: bytes.to_vec(),
+            };
+            disk.perform(create).unwrap();
+        }
+        let ignored: Vec<RelPath> = made.iter().map(|(path, _)| path.clone()).collect();
+        let removed = run(&mut disk, remove_empty(&layout, writer, &ignored)).unwrap();
+        assert_eq!(removed, [record(1), record(2), record(3)]);
+        let left: Vec<RelPath> = disk.files(Root::Folder).into_keys().collect();
+        assert_eq!(left, [record(4)]);
     }
 }
