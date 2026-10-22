@@ -19,10 +19,12 @@
 //!
 //! The app talks to a backend in [`Cmd`]s and hears back in [`Event`]s, in order, and
 //! never waits for one: the desktop runs them on a thread, and a browser's storage
-//! answers only asynchronously. A change to the facts is an [`Intent`], one undo step;
-//! files are still written by the commands that diff the workspace against them.
-//! [`Store`] is the app's side of that conversation: it projects the library's view
-//! onto the [`crate::workspace::Workspace`] and the browser's tags.
+//! answers only asynchronously. Every change the user makes to the files or the facts
+//! is an [`Intent`], one undo step, which toshokan checks against the files before it
+//! writes them. Only reading a file and making or removing an empty folder are not.
+//! [`Store`] is the app's side of that conversation: it turns what the user asked of
+//! the [`crate::workspace::Workspace`] into intents, and projects the library's view
+//! onto the workspace and the browser's tags.
 
 mod cache;
 mod diff;
@@ -225,24 +227,27 @@ pub struct Stat {
     pub modified: Option<u64>,
 }
 
-/// Enough about a file to tell whether it changed, and to recognize it at another path.
+/// Enough about a file to tell whether it changed.
 ///
 /// Its [`Stat`] is trusted: a file whose length and time are the ones taken holds what it
 /// held. Where they moved, the CRC decides, and a fingerprint without one says only that
 /// the file is not known to be the same.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Fingerprint {
     pub len: u64,
     pub modified: Option<u64>,
     /// CRC-32 over the whole file, once something has read all of it.
     pub crc: Option<u32>,
+    /// The file's identity as the library takes it, once drawbar has read or written it.
+    pub identity: Option<toshokan::Identity>,
 }
 
 impl Fingerprint {
-    pub fn of(stat: Stat, bytes: &[u8]) -> Fingerprint {
+    /// What `bytes`, written at `path` and found there with `stat`, are known by.
+    pub fn of(path: &LibPath, stat: Stat, bytes: &[u8]) -> Fingerprint {
         Fingerprint {
             crc: Some(nord_format::crc::crc32(bytes)),
+            identity: keys::identity_of_bytes(path, bytes),
             ..Fingerprint::unread(stat)
         }
     }
@@ -253,6 +258,19 @@ impl Fingerprint {
             len: stat.len,
             modified: stat.modified,
             crc: None,
+            identity: None,
+        }
+    }
+
+    /// What a change to the file expects to find: the file drawbar last read or wrote,
+    /// by its identity, or else by the length and time a listing found.
+    pub fn expect(&self) -> toshokan::Expect {
+        match self.identity {
+            Some(identity) => toshokan::Expect::Holds(identity),
+            None => toshokan::Expect::Listed {
+                len: self.len,
+                modified: self.modified,
+            },
         }
     }
 
@@ -300,6 +318,8 @@ pub struct Found {
     /// CRC-32 over the whole file, taken only where its contents decide something: its
     /// [`Stat`] moved from one whose CRC is known, or it may be a known file moved.
     pub crc: Option<u32>,
+    /// The file's identity, where its contents were read.
+    pub identity: Option<toshokan::Identity>,
 }
 
 impl Found {
@@ -311,6 +331,7 @@ impl Found {
             bytes: None,
             file: None,
             crc: None,
+            identity: None,
         }
     }
 
@@ -332,6 +353,7 @@ impl Found {
     pub fn fingerprint(&self) -> Fingerprint {
         Fingerprint {
             crc: self.crc,
+            identity: self.identity,
             ..Fingerprint::unread(self.stat)
         }
     }
@@ -414,7 +436,7 @@ pub enum CopyOf {
     Edited(Arc<OnDisk>, Arc<Rewrite>),
 }
 
-/// What a [`Cmd::Import`] copies.
+/// What an [`Intent::Import`] copies.
 #[derive(Debug)]
 pub enum Source {
     /// A file outside the library.
@@ -441,7 +463,7 @@ pub enum Cmd {
     /// Read what other writers logged since, scanning only the files their entries
     /// moved. Answered by [`Event::Scanned`].
     Refresh,
-    /// Answered by [`Event::Committed`].
+    /// Answered by [`Event::Committed`], after the answer of a change to a file.
     Intent(Intent),
     /// Undo this session's last intent not undone. Answered by [`Event::Committed`].
     Undo,
@@ -450,9 +472,11 @@ pub enum Cmd {
     File(FileCmd),
 }
 
-/// A change to the facts the user asked for, committed as one undo step. Each names the
-/// entities and files it changes as the view it was made from showed them.
-#[derive(Clone, PartialEq, Eq, Debug)]
+/// A change the user asked for, committed as one undo step. Each names the entities and
+/// files it changes as the view it was made from showed them. A change to a file names
+/// it by its path: the backend finds the entity bound to it, if any, in the view it
+/// commits against, and checks the file holds what `expect` says before it writes.
+#[derive(Debug)]
 pub enum Intent {
     /// Put a tag on each of these files, making an entity for each one without.
     Tag { files: Vec<Key>, name: String },
@@ -467,10 +491,49 @@ pub enum Intent {
         from: String,
         to: String,
     },
-    /// Move an entity's file to this writer's trash and end the entity.
-    Delete { entity: EntityId },
     /// End an entity whose file is gone.
     Forget { entity: EntityId },
+    /// Write a file whole: a new one where `expect` is [`toshokan::Expect::Absent`].
+    /// Answered by [`Event::Saved`].
+    Save {
+        id: u64,
+        path: LibPath,
+        bytes: Vec<u8>,
+        expect: toshokan::Expect,
+    },
+    /// Write over the file at `path` the file `edit` makes of `from`, the piano or
+    /// sample instrument resting there, read by range. Nothing is read or written whole.
+    /// Answered by [`Event::Rewritten`].
+    Rewrite {
+        id: u64,
+        path: LibPath,
+        from: Arc<OnDisk>,
+        edit: Arc<Rewrite>,
+        expect: toshokan::Expect,
+    },
+    /// Copy a file to `path`, as [`Intent::Save`] writes one. Nothing is read whole: a
+    /// piano or sample instrument is left resting in the copy, and any other file is
+    /// left unread. Answered by [`Event::Imported`].
+    Import {
+        id: u64,
+        path: LibPath,
+        from: Source,
+        expect: toshokan::Expect,
+    },
+    /// Rename a file. Refused where `to` already exists. Answered by [`Event::Moved`].
+    Move {
+        from: LibPath,
+        to: LibPath,
+        expect: toshokan::Expect,
+    },
+    /// Rename a folder with everything in it. Refused where `to` already exists.
+    /// Answered by [`Event::Moved`].
+    MoveFolder { from: LibPath, to: LibPath },
+    /// Move a file to this writer's trash, and end the entity bound to it.
+    Delete {
+        path: LibPath,
+        expect: toshokan::Expect,
+    },
 }
 
 impl Intent {
@@ -480,15 +543,23 @@ impl Intent {
             Intent::Tag { .. } => "Tag",
             Intent::Untag { .. } => "Untag",
             Intent::RenameTag { .. } => "Rename tag",
-            Intent::Delete { .. } => "Delete",
             Intent::Forget { .. } => "Forget",
+            Intent::Save { .. } | Intent::Rewrite { .. } => "Save",
+            Intent::Import { .. } => "Copy in",
+            Intent::Move { from, to, .. } | Intent::MoveFolder { from, to } => {
+                match from.parent() == to.parent() {
+                    true => "Rename",
+                    false => "Move",
+                }
+            }
+            Intent::Delete { .. } => "Delete",
         }
     }
 }
 
-/// What the app asks of a library's files, which the backend writes outside toshokan.
-/// Each that writes is followed by a scan of the paths it touched, answered by
-/// [`Event::Viewed`].
+/// What the app asks of a library's files outside toshokan: reads, and folders, which
+/// toshokan does not keep. Each that writes is followed by a scan of the paths it
+/// touched, answered by [`Event::Viewed`].
 #[derive(Debug)]
 pub enum FileCmd {
     /// Read each of these files for the asset whose id comes with it, reading at most
@@ -499,41 +570,8 @@ pub enum FileCmd {
         files: Vec<(u64, LibPath, Option<Fingerprint>)>,
         room: u64,
     },
-    /// Write a file whole: a new one when `expect` is `None`, otherwise over a file that
-    /// must still hold what `expect` says. Answered by [`Event::Saved`].
-    Save {
-        id: u64,
-        path: LibPath,
-        bytes: Vec<u8>,
-        expect: Option<Fingerprint>,
-    },
-    /// Rename a file or folder. Refused where `to` already exists. Answered by
-    /// [`Event::Moved`].
-    Move { from: LibPath, to: LibPath },
-    /// Write over the file at `path`, which must still hold what `expect` says, the file
-    /// `edit` makes of `from`, the piano or sample instrument resting there, read by range.
-    /// Nothing is read or written whole. Answered by [`Event::Rewritten`].
-    Rewrite {
-        id: u64,
-        path: LibPath,
-        from: Arc<OnDisk>,
-        edit: Arc<Rewrite>,
-        expect: Fingerprint,
-    },
-    /// Copy a file to `path`, as [`FileCmd::Save`] writes one: a new file when `expect`
-    /// is `None`, otherwise over a file that must still hold what `expect` says. Nothing
-    /// is read whole: a piano or sample instrument is left resting in the copy, and any
-    /// other file is left unread. Answered by [`Event::Imported`].
-    Import {
-        id: u64,
-        path: LibPath,
-        from: Source,
-        expect: Option<Fingerprint>,
-    },
     /// Answered only on failure.
     MakeDir(LibPath),
-    /// Delete a file that must still hold what `expect` says. Answered only on failure.
-    RemoveFile { path: LibPath, expect: Fingerprint },
     /// Delete an empty folder. Answered only on failure.
     RemoveDir(LibPath),
 }
@@ -548,13 +586,7 @@ impl FileCmd {
     pub fn touches(&self) -> Vec<LibPath> {
         match self {
             FileCmd::Read { .. } => Vec::new(),
-            FileCmd::Save { path, .. }
-            | FileCmd::Rewrite { path, .. }
-            | FileCmd::Import { path, .. }
-            | FileCmd::MakeDir(path)
-            | FileCmd::RemoveFile { path, .. }
-            | FileCmd::RemoveDir(path) => vec![path.clone()],
-            FileCmd::Move { from, to } => vec![from.clone(), to.clone()],
+            FileCmd::MakeDir(path) | FileCmd::RemoveDir(path) => vec![path.clone()],
         }
     }
 }
@@ -577,6 +609,9 @@ pub struct Viewed {
     pub changes: Vec<toshokan::report::Change>,
     /// The files the answer's scan found moved outside drawbar, from and to.
     pub moves: Vec<(LibPath, LibPath)>,
+    /// What this session's undo or redo did, which the workspace follows without a
+    /// word: each file no entity is bound to that it made, moved or trashed, from and to.
+    pub undone: Option<Vec<(Option<LibPath>, Option<LibPath>)>>,
 }
 
 impl std::fmt::Debug for Viewed {
@@ -585,6 +620,7 @@ impl std::fmt::Debug for Viewed {
             .field("dirs", &self.dirs)
             .field("changes", &self.changes)
             .field("moves", &self.moves)
+            .field("undone", &self.undone)
             .finish_non_exhaustive()
     }
 }
@@ -610,25 +646,27 @@ pub enum Event {
         path: LibPath,
         result: Result<Fingerprint, Failure>,
     },
-    /// What a [`FileCmd::Rewrite`] wrote, as a listing finds it.
+    /// What an [`Intent::Rewrite`] wrote, as a listing finds it.
     Rewritten {
         id: u64,
         path: LibPath,
         result: Result<Found, Failure>,
     },
-    /// What a [`FileCmd::Import`] copied, as a listing finds it.
+    /// What an [`Intent::Import`] copied, as a listing finds it.
     Imported {
         id: u64,
         path: LibPath,
         result: Result<Found, Failure>,
     },
-    /// Whether a [`FileCmd::Move`] moved anything, and why not.
+    /// Whether an [`Intent::Move`] or an [`Intent::MoveFolder`] moved anything, and why
+    /// not.
     Moved {
         from: LibPath,
         to: LibPath,
         result: Result<(), String>,
     },
-    /// A command other than a save or a move failed: what it was doing, and why.
+    /// A command other than a save, a copy or a move failed: what it was doing, and
+    /// why.
     Failed(String),
 }
 

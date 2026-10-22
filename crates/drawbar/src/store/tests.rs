@@ -783,9 +783,21 @@ fn a_rescue() -> Vec<u8> {
     nord_usb::envelope::wrap("npno", at, 0, b"a piano").unwrap()
 }
 
-/// Where an interrupted write to the instrument leaves a slot's former occupant while a
-/// library is open: this install's own folder for it.
-const RESCUED: &str = ".drawbar/install/rescued";
+/// Where an interrupted write to the instrument leaves a slot's former occupant while the
+/// library in `root` is open: this install's own folder for it.
+fn rescued(root: &Temp) -> std::path::PathBuf {
+    root.local().join("rescued")
+}
+
+/// The names in the folder at `dir`, sorted.
+fn names_at(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
 
 /// A library drawbar has written, with a slot's former occupant an interrupted write
 /// left in this install's folder for it.
@@ -793,12 +805,8 @@ fn with_rescue(root: &Temp) {
     let mut first = Session::open(root);
     first.create();
     first.close();
-    fs::create_dir_all(root.at(RESCUED)).unwrap();
-    fs::write(
-        root.at(&format!("{RESCUED}/nord-rescued-1-4.npno")),
-        a_rescue(),
-    )
-    .unwrap();
+    fs::create_dir_all(rescued(root)).unwrap();
+    fs::write(rescued(root).join("nord-rescued-1-4.npno"), a_rescue()).unwrap();
 }
 
 impl Session {
@@ -831,8 +839,8 @@ fn a_partial_rescue_file_is_never_offered() {
     first.create();
     first.close();
     let partial = "nord-rescued-1-4.npno.partial";
-    fs::create_dir_all(root.at(RESCUED)).unwrap();
-    fs::write(root.at(&format!("{RESCUED}/{partial}")), a_rescue()).unwrap();
+    fs::create_dir_all(rescued(&root)).unwrap();
+    fs::write(rescued(&root).join(partial), a_rescue()).unwrap();
     fs::write(shelf.at(partial), a_rescue()).unwrap();
     let bench = Bench::new();
     let store = Store::start(crate::testing::backend(&bench.ctx, &root));
@@ -843,7 +851,7 @@ fn a_partial_rescue_file_is_never_offered() {
     session.opened();
 
     assert_eq!(session.bench.browser.asking(), None, "nothing is offered");
-    assert_eq!(root.names(RESCUED), Vec::<String>::new());
+    assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
     assert_eq!(shelf.names(""), Vec::<String>::new());
 }
 
@@ -857,8 +865,8 @@ fn a_rescue_file_that_does_not_decode_is_reported_not_offered() {
     first.close();
     let mut half = a_rescue();
     half[..8].fill(0);
-    fs::create_dir_all(root.at(RESCUED)).unwrap();
-    fs::write(root.at(&format!("{RESCUED}/nord-rescued-1-4.npno")), half).unwrap();
+    fs::create_dir_all(rescued(&root)).unwrap();
+    fs::write(rescued(&root).join("nord-rescued-1-4.npno"), half).unwrap();
 
     let mut second = Session::open(&root);
     let (title, answers) = second.bench.browser.asking().expect("a question is asked");
@@ -866,7 +874,7 @@ fn a_rescue_file_that_does_not_decode_is_reported_not_offered() {
     assert!(title.contains("does not read"), "{title}");
     assert_eq!(answers, ["Later", "Show the file", "Discard"]);
     second.choose("Discard");
-    assert_eq!(root.names(RESCUED), Vec::<String>::new());
+    assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
 }
 
 /// Keep in library copies a rescue into the library's top level, where it is an asset
@@ -878,7 +886,7 @@ fn a_rescue_kept_moves_into_the_library_as_an_asset() {
 
     let mut second = Session::open(&root);
     second.choose("Keep in library");
-    assert_eq!(root.names(RESCUED), Vec::<String>::new());
+    assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
     assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue());
     let names: Vec<&str> = second
         .bench
@@ -906,9 +914,9 @@ fn a_rescue_discarded_is_deleted_once_confirmed() {
     second.choose("Discard…");
     let (title, _) = second.bench.browser.asking().expect("asked again");
     assert_eq!(title, "Discard “nord-rescued-1-4.npno”?");
-    assert_eq!(root.names(RESCUED), ["nord-rescued-1-4.npno"]);
+    assert_eq!(names_at(&rescued(&root)), ["nord-rescued-1-4.npno"]);
     second.choose("Discard");
-    assert_eq!(root.names(RESCUED), Vec::<String>::new());
+    assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
     assert!(!root
         .names("")
         .contains(&"nord-rescued-1-4.npno".to_string()));
@@ -989,21 +997,26 @@ fn an_asset_opened_while_rows_are_read_is_read_before_the_rest_of_them() {
     );
 }
 
-/// A save whose temporary cannot be made, where a folder has its name, leaves the file as
-/// it was and the edit unsaved.
+/// A save the folder refuses, which nothing may be added to or taken from, leaves the
+/// file as it was and the edit unsaved.
+#[cfg(unix)]
 #[test]
 fn a_write_that_fails_leaves_the_file_as_it_was() {
+    use std::os::unix::fs::PermissionsExt;
+
     let root = Temp::new();
     let mut session = Session::open(&root);
     let id = session.create();
     session.sync();
     let file = root.read("untitled.ne5p");
-    fs::create_dir(root.at(".untitled.ne5p.drawbar-tmp")).unwrap();
+    let mode = |mode| fs::set_permissions(&root.0, fs::Permissions::from_mode(mode)).unwrap();
+    mode(0o555);
     let edited = with_gain(&file, "96");
     let log = &mut session.bench.log;
     session.bench.workspace.replace_bytes(id, edited, log);
     session.bench.workspace.mark_saved(id);
     session.sync();
+    mode(0o755);
     assert_eq!(root.read("untitled.ne5p"), file, "the file was not touched");
     assert!(
         session.bench.workspace.get(id).unwrap().is_unsaved(),
@@ -1132,7 +1145,7 @@ fn an_asset_deleted_while_its_file_is_written_goes_without_coming_back() {
     assert_eq!(session.bench.workspace.listed().count(), 0);
     assert_eq!(session.said("appeared in the library folder"), 0);
     assert_eq!(session.said("deleted outside drawbar"), 0);
-    assert_eq!(root.names(""), Vec::<String>::new(), "the file is gone");
+    assert_eq!(root.names(""), [".drawbar"], "the file is gone");
 }
 
 #[test]
@@ -2899,7 +2912,11 @@ fn an_edit_of_a_resting_sample_is_saved_through_its_file() {
     assert!(!entity.is_unsaved() && !workspace.saving_edit(id));
     assert!(workspace.edit_of(id).is_none());
     assert_eq!(entity.held_whole(), 0);
-    assert_eq!(root.names(""), ["Zoned.nsmp"], "no copy is left");
+    assert_eq!(
+        root.names(""),
+        [".drawbar", "Zoned.nsmp"],
+        "no copy is left"
+    );
 }
 
 /// A file changed in place under its index, keeping its length and time, is not saved
@@ -3801,4 +3818,53 @@ fn a_tag_taken_off_its_last_asset_leaves_the_list() {
     session.decided();
     assert!(tagged(&session).is_empty());
     assert!(session.bench.browser.tags.all().is_empty());
+}
+
+/// Each change to a file is one undo step: undoing a delete, a rename, a save and the
+/// file's making puts the folder back as it was before each, and the asset follows its
+/// file without a word about changes outside drawbar.
+#[test]
+fn a_file_made_saved_renamed_and_deleted_is_undone_a_step_at_a_time() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let made = root.read("untitled.ne5p");
+    let saved = with_gain(&made, "96");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, saved.clone(), log);
+    workspace.mark_saved(id);
+    session.sync();
+    let renamed = LibPath::root().join("Renamed.ne5p");
+    session.bench.workspace.place(id, renamed);
+    session.sync();
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.remove(id, log);
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar"]);
+
+    session.undo();
+    session.refocus();
+    assert_eq!(root.read("Renamed.ne5p"), saved, "the delete is undone");
+    let back = session.only();
+    session.undo();
+    session.refocus();
+    assert_eq!(root.names(""), [".drawbar", "untitled.ne5p"]);
+    assert_eq!(
+        session.path(back).as_deref(),
+        Some("untitled.ne5p"),
+        "the asset follows its file back"
+    );
+    session.undo();
+    session.refocus();
+    session.read_all();
+    assert_eq!(root.read("untitled.ne5p"), made, "the save is undone");
+    assert_eq!(session.bytes(back), made);
+    session.undo();
+    session.refocus();
+    assert_eq!(root.names(""), [".drawbar"], "the making is undone");
+    assert_eq!(session.bench.workspace.listed().count(), 0);
+    for outside in ["outside drawbar", "changed on disk", "appeared"] {
+        assert_eq!(session.said(outside), 0, "{outside}");
+    }
 }

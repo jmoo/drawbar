@@ -1,14 +1,13 @@
 //! The app's side of a library: the library's view projected onto the workspace and the
-//! browser's tags, the intents the user's changes to the facts become, and the commands
-//! that bring the files level with the workspace.
+//! browser's tags, and the intents the user's changes become.
 //!
 //! What the facts say comes only from the view: a tag shows once its intent is
-//! committed, and another writer's change shows once a refresh reads it. The files are
-//! still written as before: [`Store::sync`] compares the workspace with what the files
-//! were last known to hold and sends what differs, a new asset's file, a save, a move or
-//! a deletion, and the scan after each lets the view follow.
+//! committed, and another writer's change shows once a refresh reads it. A change to a
+//! file is asked for where the user makes it ([`crate::workspace::FileAsk`]), and
+//! [`Store::sync`] makes each an intent in turn: a new asset's file, a save, a copy, a
+//! move or a deletion, each checked against what drawbar last read of the file.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use toshokan::report::{By, What};
 use toshokan::{FileState, View};
@@ -28,7 +27,9 @@ use crate::log::Log;
 use crate::queue::Queue;
 use crate::summary::Summary;
 use crate::tags::Asked;
-use crate::workspace::{precious, Content, Leaving, LocalEntity, Origin, Saved, Workspace};
+use crate::workspace::{
+    precious, Content, FileAsk, Leaving, LocalEntity, Origin, Saved, Workspace,
+};
 
 /// How far opening has got.
 enum Phase {
@@ -149,6 +150,15 @@ pub struct Store {
     view: Option<View>,
     /// Changes to the tags the user asked for that wait for a file to name.
     asked: Vec<Asked>,
+    /// Changes to files the user asked for, each carried out once the one before it has
+    /// gone and nothing it waits on is in flight.
+    asks: VecDeque<FileAsk>,
+    /// The projection in hand follows this session's undo or redo, and says nothing of
+    /// what it finds moved or changed.
+    quiet: bool,
+    /// Assets read again after an undo or redo changed their files, which take what the
+    /// files hold now without a word.
+    quietly: BTreeSet<u64>,
     /// Assets whose file changed outside drawbar while they held it, read again to see
     /// what it holds now.
     rechecking: BTreeSet<u64>,
@@ -219,6 +229,9 @@ impl Store {
             ids: Ids::default(),
             view: None,
             asked: Vec::new(),
+            asks: VecDeque::new(),
+            quiet: false,
+            quietly: BTreeSet::new(),
             rechecking: BTreeSet::new(),
             moved: BTreeSet::new(),
             told_unkept: false,
@@ -293,7 +306,9 @@ impl Store {
     /// so its last pass sends no save.
     pub fn settled(&mut self, workspace: &mut Workspace, browser: &mut Browser) -> bool {
         self.sync(workspace, browser, Pass::Files);
-        !self.scanning && !self.saving() && self.moving.is_empty() && self.committing == 0
+        let carried = self.asks.is_empty() || !self.open();
+        let idle = !self.scanning && !self.saving() && self.moving.is_empty();
+        carried && idle && self.committing == 0
     }
 
     fn saving(&self) -> bool {
@@ -309,7 +324,8 @@ impl Store {
     /// Whether anything sent to the disk has not landed yet: a command the backend has not
     /// run through, or a save or rename whose answer is not folded in.
     pub fn writing(&self) -> bool {
-        self.backend.busy() || self.saving() || !self.moving.is_empty()
+        let asked = !self.asks.is_empty() && self.open();
+        self.backend.busy() || self.saving() || !self.moving.is_empty() || asked
     }
 
     /// Whether letting the library go now, with no last pass, would lose an edit: an
@@ -317,25 +333,14 @@ impl Store {
     /// change held in memory where nothing may be written. A browser tab may close
     /// without that pass.
     pub fn losing(&self, workspace: &Workspace, browser: &Browser) -> bool {
-        self.writing() || self.unheld(workspace).next().is_some() || self.held(workspace, browser)
+        self.writing() || self.unheld(workspace).next().is_some() || self.held(browser)
     }
 
     /// Whether a change is held in memory only, where nothing may be written: a deletion,
     /// a save, a rename or move, or a folder change.
-    fn held(&self, workspace: &Workspace, browser: &Browser) -> bool {
-        if !matches!(self.phase, Phase::ReadOnly(_)) {
-            return false;
-        }
-        let unwritten = |(id, record): (&u64, &Record)| {
-            let Some(path) = &record.path else {
-                return false;
-            };
-            workspace.get(*id).is_none_or(|entity| {
-                let saved = entity.saved.file().is_none() && entity.saved.stamp() != record.saved;
-                saved || entity.path.as_ref() != Some(path)
-            })
-        };
-        browser.folders.changed() || self.records.iter().any(unwritten)
+    fn held(&self, browser: &Browser) -> bool {
+        let read_only = matches!(self.phase, Phase::ReadOnly(_));
+        read_only && (browser.folders.changed() || !self.asks.is_empty())
     }
 
     /// The names of the assets that letting this library go would lose: each unsaved
@@ -593,12 +598,15 @@ impl Store {
         self.backend.send(cmd);
     }
 
-    /// Rename a file or folder. A file the library knows by its path is known by the new
-    /// one from now on.
-    fn rename(&mut self, from: LibPath, to: LibPath) {
+    /// Rename a file that holds what `expect` says, or a folder where `expect` is `None`.
+    /// A file the library knows by its path is known by the new one from now on.
+    fn rename(&mut self, from: LibPath, to: LibPath, expect: Option<toshokan::Expect>) {
         self.ids.moved(&from, &to);
         self.moving.push((from.clone(), to.clone()));
-        self.write(FileCmd::Move { from, to });
+        self.write(match expect {
+            Some(expect) => Intent::Move { from, to, expect },
+            None => Intent::MoveFolder { from, to },
+        });
     }
 
     /// Put back where they were the paths a rename that failed had moved.
@@ -873,10 +881,10 @@ impl Store {
         false
     }
 
-    /// Send a command that writes a file.
-    fn write(&mut self, cmd: FileCmd) {
+    /// Send a change to the files.
+    fn write(&mut self, intent: Intent) {
         self.sent += 1;
-        self.send(Cmd::File(cmd));
+        self.commit(intent);
     }
 
     /// Send a change to the facts.
@@ -1087,10 +1095,17 @@ impl Store {
             dirs,
             changes,
             moves,
+            undone,
         } = viewed;
         let first = self.view.is_none();
         for (from, to) in &moves {
             self.cache.moved(from, to);
+        }
+        self.quiet = undone.is_some();
+        for (from, to) in undone.into_iter().flatten() {
+            if let (Some(from), Some(to)) = (from, to) {
+                self.follow_undone(&from, &to, workspace);
+            }
         }
         let listed = Listed::of(&view);
         browser.folders.others = listed.others.clone();
@@ -1105,7 +1120,22 @@ impl Store {
         }
         flag_duplicates(workspace, browser, log);
         self.view = Some(view);
+        self.quiet = false;
         touched
+    }
+
+    /// Follow a file no entity is bound to that this session's undo or redo moved from
+    /// `from` to `to`: its asset keeps its id, and moves with it.
+    fn follow_undone(&mut self, from: &LibPath, to: &LibPath, workspace: &mut Workspace) {
+        let Some(id) = self.ids.id(&Key::File(from.clone())) else {
+            return;
+        };
+        self.ids.insert(id, Key::File(to.clone()));
+        self.cache.moved(from, to);
+        if let Some(record) = self.records.get_mut(&id) {
+            record.path = Some(to.clone());
+        }
+        workspace.follow(id, to.clone());
     }
 
     /// Bring the workspace level with the files the view lists. Each file keeps the id it
@@ -1164,8 +1194,8 @@ impl Store {
                     self.cache.moved(&from, path);
                 }
                 let before = workspace.get(id).map(|entity| entity.name.clone());
-                workspace.place(id, browser.folders.ahead(path));
-                if let Some(before) = before {
+                workspace.follow(id, browser.folders.ahead(path));
+                if let Some(before) = before.filter(|_| !self.quiet) {
                     log.say(format!(
                         "“{before}” was moved to {path} outside drawbar; its tags went with it."
                     ));
@@ -1177,13 +1207,16 @@ impl Store {
             let known = record.fingerprint.map(|print| print.stat());
             if let Some(stat) = stat.filter(|stat| known != Some(*stat)) {
                 touched.insert(id);
+                if self.quiet {
+                    self.quietly.insert(id);
+                }
                 self.recheck(id, path.clone(), stat, workspace);
             }
         }
         let appeared = self.arrive(listed, workspace, browser, log);
         // A file gone missing keeps the status line, which asks for it to be saved.
         let said = changed_outside(appeared, deleted, moved).filter(|_| missing == 0);
-        if let Some(said) = said.filter(|_| !first) {
+        if let Some(said) = said.filter(|_| !first && !self.quiet) {
             log.say(said);
         }
         touched
@@ -1569,7 +1602,7 @@ impl Store {
         };
         let ahead = folders.ahead(path);
         if ahead != *path {
-            workspace.place(id, ahead);
+            workspace.follow(id, ahead);
         }
     }
 
@@ -1591,6 +1624,7 @@ impl Store {
         browser: &mut Browser,
         log: &mut Log,
     ) {
+        let quietly = self.quietly.remove(&id);
         if !found.read() {
             if let Some(record) = self.records.get_mut(&id) {
                 record.fingerprint = Some(found.fingerprint());
@@ -1620,6 +1654,7 @@ impl Store {
         // it is now, and one that file already holds leaves nothing to choose between.
         match unsaved && workspace.get(id).is_some_and(LocalEntity::is_unsaved) {
             true => conflict(id, workspace, browser, log),
+            false if quietly => {}
             false => log.say(format!(
                 "“{name}” changed on disk, and drawbar now shows it as it is there."
             )),
@@ -1668,8 +1703,10 @@ impl Store {
         if let Some(path) = self.records.remove(&id).and_then(|record| record.path) {
             self.cache.forget(&path);
         }
-        workspace.remove(id, log);
-        log.say(format!("“{name}” was deleted outside drawbar."));
+        workspace.forget(id);
+        if !self.quiet {
+            log.say(format!("“{name}” was deleted outside drawbar."));
+        }
         Vanished::Deleted
     }
 
@@ -1798,12 +1835,12 @@ impl Store {
                 continue;
             };
             record.saving = true;
-            self.write(FileCmd::Rewrite {
+            self.write(Intent::Rewrite {
                 id,
                 path,
                 from,
                 edit,
-                expect,
+                expect: expect.expect(),
             });
         }
     }
@@ -1896,9 +1933,9 @@ impl Store {
         }
     }
 
-    /// Bring the files level with the workspace, and return whether it did. A save that
-    /// must wait for the one before it to answer makes it return `false`, and the next
-    /// sync sends it.
+    /// Send, in order, the changes to the folders and files the user asked for, and
+    /// return whether every one went. One that must wait for the answer to one before it
+    /// makes it return `false`, and the next sync sends it.
     ///
     /// ⚠️ Nothing is sent while a rescan is in flight: its listing must describe the
     /// files as the commands before it left them, or a file moved after it was sent would
@@ -1908,6 +1945,7 @@ impl Store {
             self.summarize(workspace);
             self.cache.write();
         }
+        self.asks.extend(workspace.take_file_asks());
         if !self.open() {
             return true;
         }
@@ -1939,12 +1977,10 @@ impl Store {
             self.tree_op(op);
         }
         crate::folders::place_new(workspace, &browser.folders);
-        let mut done = true;
-        for entity in workspace.entities() {
-            done &= self.file(entity, workspace.arriving(entity.id), &waiting);
-        }
+        self.asks.extend(workspace.take_file_asks());
+        let mut done = self.arrivals(workspace, &waiting);
+        done &= self.carry_out(workspace, &waiting);
         self.send_edits(workspace, &waiting);
-        self.forget_gone(workspace);
         for op in removals {
             self.tree_op(op);
         }
@@ -2032,13 +2068,24 @@ impl Store {
     /// has been read and decoded, once per set of bytes.
     fn summarize(&mut self, workspace: &Workspace) {
         for (id, record) in &mut self.records {
-            let (Some(path), Some(print)) = (&record.path, record.fingerprint) else {
-                continue;
-            };
             let Some(entity) = workspace.get(*id) else {
                 continue;
             };
             let stamp = entity.saved.stamp();
+            // A fingerprint taken without its CRC learns it once the contents have been
+            // read through, while the baseline is still what the file holds.
+            if let Some(print) = record
+                .fingerprint
+                .as_mut()
+                .filter(|print| print.crc.is_none())
+            {
+                if !record.saving && stamp == record.saved {
+                    print.crc = entity.saved.whole_crc();
+                }
+            }
+            let (Some(path), Some(print)) = (&record.path, record.fingerprint) else {
+                continue;
+            };
             let clean = record.saved == stamp && !entity.is_unsaved();
             if record.summarized == Some(stamp) || !clean || record.saving || record.missing {
                 continue;
@@ -2110,8 +2157,8 @@ impl Store {
     /// flight is one the listing's end keeps or drops with the rest.
     fn tree_op(&mut self, op: Op) {
         match op {
-            Op::MakeDir(path) => self.write(FileCmd::MakeDir(path)),
-            Op::RemoveDir(path) => self.write(FileCmd::RemoveDir(path)),
+            Op::MakeDir(path) => self.folder(FileCmd::MakeDir(path)),
+            Op::RemoveDir(path) => self.folder(FileCmd::RemoveDir(path)),
             Op::MoveDir { from, to } => {
                 self.cache.moved(&from, &to);
                 for record in self.records.values_mut() {
@@ -2119,108 +2166,191 @@ impl Store {
                         record.path = Some(moved);
                     }
                 }
-                self.rename(from, to);
+                self.rename(from, to, None);
             }
         }
     }
 
-    /// Send what one asset's file needs: its first write, a move, a save, or the copy of
-    /// the file from outside it arrives from. Returns `false` when a save or a move has
-    /// to wait. `waiting` are the renames and other folder changes not settled yet, each
-    /// from and to.
-    fn file(
-        &mut self,
-        entity: &LocalEntity,
-        arriving: Option<&CopyOf>,
-        waiting: &[(LibPath, LibPath)],
-    ) -> bool {
-        let (true, Some(path)) = (entity.kept, &entity.path) else {
+    /// Make or remove an empty folder, which toshokan does not keep.
+    fn folder(&mut self, cmd: FileCmd) {
+        self.sent += 1;
+        self.send(Cmd::File(cmd));
+    }
+
+    /// Send the copy each arriving asset waits on. Returns `false` where one waits for a
+    /// save or a rename to answer first.
+    fn arrivals(&mut self, workspace: &Workspace, waiting: &[(LibPath, LibPath)]) -> bool {
+        let mut done = true;
+        let arriving: Vec<(u64, CopyOf)> = workspace
+            .arrivals()
+            .map(|(id, from)| (id, from.clone()))
+            .collect();
+        for (id, from) in arriving {
+            let Some(entity) = workspace.get(id) else {
+                continue;
+            };
+            let Some(path) = entity.path.clone().filter(|_| entity.kept) else {
+                continue;
+            };
+            let record = self.records.get(&id);
+            let at = record.and_then(|record| record.path.as_ref());
+            let held = [Some(&path), at].into_iter().flatten();
+            if held.into_iter().any(|at| unsettled(waiting, at)) {
+                done = false;
+                continue;
+            }
+            done &= self.import(entity, &path, &from, waiting);
+        }
+        done
+    }
+
+    /// Carry out the changes to files asked for, in order. One that waits for an answer
+    /// holds back every one after it. Returns whether none waits.
+    fn carry_out(&mut self, workspace: &mut Workspace, waiting: &[(LibPath, LibPath)]) -> bool {
+        while let Some(ask) = self.asks.front().cloned() {
+            let carried = match ask {
+                FileAsk::Save(id) => self.save(id, workspace, waiting),
+                FileAsk::Move { id, .. } => self.relocate(id, workspace, waiting),
+                FileAsk::Delete { id, path } => self.delete(id, &path, workspace, waiting),
+            };
+            if !carried {
+                return false;
+            }
+            self.asks.pop_front();
+        }
+        true
+    }
+
+    /// Write an asset's file with what it was saved as: a new file where it has none, and
+    /// nothing where the file holds it already. `false` while a write over the file waits
+    /// for the one before it.
+    fn save(&mut self, id: u64, workspace: &Workspace, waiting: &[(LibPath, LibPath)]) -> bool {
+        let Some(entity) = workspace.get(id).filter(|entity| entity.kept) else {
             return true;
         };
-        // ⚠️ A file written or moved into, or out of, a folder a rename has not answered
-        // for could land in whatever else has that name on disk.
-        let record = self.records.get(&entity.id);
-        let from = record.and_then(|record| record.path.as_ref());
-        let moves = from.is_none_or(|from| from != path);
-        if moves
-            && [Some(path), from]
-                .into_iter()
-                .flatten()
-                .any(|at| unsettled(waiting, at))
-        {
-            return false;
-        }
-        if let Some(from) = arriving {
-            return self.import(entity, path, from, waiting);
-        }
+        // An arriving asset's file is its copy's, and one with no file yet is asked for
+        // again once it is placed.
+        let Some(path) = entity
+            .path
+            .clone()
+            .filter(|_| workspace.arriving(id).is_none())
+        else {
+            return true;
+        };
+        let stamp = entity.saved.stamp();
         let bytes = || entity.saved.bytes().to_vec();
-        if !self
-            .records
-            .get(&entity.id)
-            .is_some_and(|record| record.path.is_some())
-        {
+        let Some(record) = self.records.get_mut(&id) else {
             self.records.insert(
-                entity.id,
+                id,
                 Record {
-                    saved: entity.saved.stamp(),
+                    saved: stamp,
                     saving: true,
                     ..Record::of_file(path.clone(), None)
                 },
             );
-            self.write(FileCmd::Save {
-                id: entity.id,
-                path: path.clone(),
-                bytes: bytes(),
-                expect: None,
-            });
-            return true;
-        }
-        let Some(record) = self.records.get_mut(&entity.id) else {
-            return true;
-        };
-        // A fingerprint taken without its CRC learns it once the contents have been read
-        // through, while the baseline is still what the file holds.
-        if let Some(print) = record
-            .fingerprint
-            .as_mut()
-            .filter(|print| print.crc.is_none())
-        {
-            if !record.saving && entity.saved.stamp() == record.saved {
-                print.crc = entity.saved.whole_crc();
-            }
-        }
-        let missing = record.missing;
-        let moved = record.path.as_ref() != Some(path);
-        let from = moved
-            .then(|| record.path.replace(path.clone()))
-            .flatten()
-            .filter(|_| !missing);
-        // A baseline resting in its file is what the file holds, and needs no write.
-        if entity.saved.file().is_some() {
-            record.saved = entity.saved.stamp();
-        }
-        let unsaved = entity.saved.stamp() != record.saved;
-        // ⚠️ The file's fingerprint is known only once the save before answers, and a
-        // save sent without it would be refused as a write over someone else's file.
-        let waits = unsaved && record.saving;
-        let save = (unsaved && !record.saving).then(|| {
-            record.saved = entity.saved.stamp();
-            record.saving = true;
-            record.fingerprint.filter(|_| !missing)
-        });
-        if let Some(from) = from {
-            self.cache.moved(&from, path);
-            self.rename(from, path.clone());
-        }
-        if let Some(expect) = save {
-            self.write(FileCmd::Save {
-                id: entity.id,
-                path: path.clone(),
+            let expect = toshokan::Expect::Absent;
+            self.write(Intent::Save {
+                id,
+                path,
                 bytes: bytes(),
                 expect,
             });
+            return true;
+        };
+        if record.saving {
+            return false;
         }
-        !waits
+        let at = record.path.clone().unwrap_or(path);
+        if unsettled(waiting, &at) {
+            return false;
+        }
+        // A baseline resting in its file is what the file holds, and needs no write.
+        if entity.saved.file().is_some() {
+            record.saved = stamp;
+            return true;
+        }
+        if record.saved == stamp && !record.missing {
+            return true;
+        }
+        let expect = match (record.missing, record.fingerprint) {
+            (false, Some(print)) => print.expect(),
+            _ => toshokan::Expect::Absent,
+        };
+        record.saved = stamp;
+        record.saving = true;
+        record.path = Some(at.clone());
+        self.write(Intent::Save {
+            id,
+            path: at,
+            bytes: bytes(),
+            expect,
+        });
+        true
+    }
+
+    /// Move an asset's file to where the asset is now. `false` while a write over the file
+    /// or a rename it is under waits for its answer.
+    fn relocate(&mut self, id: u64, workspace: &Workspace, waiting: &[(LibPath, LibPath)]) -> bool {
+        let to = workspace.get(id).and_then(|entity| entity.path.clone());
+        let (Some(to), Some(record)) = (to, self.records.get_mut(&id)) else {
+            return true;
+        };
+        if record.saving {
+            return false;
+        }
+        let Some(at) = record.path.clone().filter(|at| *at != to) else {
+            return true;
+        };
+        if unsettled(waiting, &at) || unsettled(waiting, &to) {
+            return false;
+        }
+        record.path = Some(to.clone());
+        let expect = record.fingerprint.map(|print| print.expect());
+        let (Some(expect), false) = (expect, record.missing) else {
+            return true;
+        };
+        self.cache.moved(&at, &to);
+        self.rename(at, to, Some(expect));
+        true
+    }
+
+    /// Move the file of an asset that is gone to this writer's trash, once no copy waits
+    /// to be made of it. An asset never written, or one whose file is missing, has
+    /// nothing to trash.
+    fn delete(
+        &mut self,
+        id: u64,
+        path: &LibPath,
+        workspace: &Workspace,
+        waiting: &[(LibPath, LibPath)],
+    ) -> bool {
+        if workspace.get(id).is_some() {
+            return true;
+        }
+        let Some(record) = self.records.get(&id) else {
+            return true;
+        };
+        // ⚠️ A file a copy is still to be made of waits until the copy answers: a copy
+        // that fails has nothing else to make it from.
+        let at = record.path.as_ref().unwrap_or(path);
+        if record.saving || workspace.copies_of(id).next().is_some() || unsettled(waiting, at) {
+            return false;
+        }
+        let Some(record) = self.records.remove(&id) else {
+            return true;
+        };
+        self.ids.remove(id);
+        let Some(at) = record.path else {
+            return true;
+        };
+        self.cache.forget(&at);
+        if let (Some(print), false) = (record.fingerprint, record.missing) {
+            self.write(Intent::Delete {
+                path: at,
+                expect: print.expect(),
+            });
+        }
+        true
     }
 
     /// Send the copy an arriving asset waits on: a new file at its path, or a copy over
@@ -2257,54 +2387,17 @@ impl Store {
         record.saving = true;
         record.saved = entity.saved.stamp();
         let path = record.path.get_or_insert_with(|| path.clone()).clone();
-        let expect = record.fingerprint.filter(|_| !record.missing);
-        self.write(FileCmd::Import {
+        let expect = match (record.missing, record.fingerprint) {
+            (false, Some(print)) => print.expect(),
+            _ => toshokan::Expect::Absent,
+        };
+        self.write(Intent::Import {
             id: entity.id,
             path,
             from,
             expect,
         });
         true
-    }
-
-    /// Delete the files of assets the workspace no longer holds.
-    fn forget_gone(&mut self, workspace: &Workspace) {
-        let gone: Vec<u64> = self
-            .records
-            .keys()
-            .copied()
-            .filter(|id| workspace.get(*id).is_none())
-            .collect();
-        for id in gone {
-            // ⚠️ A file a copy is still to be made of waits until the copy answers: a
-            // copy that fails has nothing else to make it from.
-            if workspace.copies_of(id).next().is_some() {
-                continue;
-            }
-            let Some(record) = self.records.get_mut(&id) else {
-                continue;
-            };
-            // ⚠️ The file is deleted by the pass after its save answers, since only then
-            // is its fingerprint known, and a pass is where nothing is sent while a rescan
-            // is in flight.
-            if record.saving {
-                continue;
-            }
-            let file = (record.path.clone(), record.fingerprint, record.missing);
-            self.records.remove(&id);
-            if let Some(path) = &file.0 {
-                self.cache.forget(path);
-            }
-            let key = self.ids.remove(id);
-            match (key, file) {
-                (_, (_, _, true)) => {}
-                (Some(Key::Entity(entity)), _) => self.commit(Intent::Delete { entity }),
-                (_, (Some(path), Some(expect), false)) => {
-                    self.write(FileCmd::RemoveFile { path, expect })
-                }
-                _ => {}
-            }
-        }
     }
 }
 

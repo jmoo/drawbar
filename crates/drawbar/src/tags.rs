@@ -2,10 +2,10 @@
 //!
 //! The library keeps them as names on the entity of each asset that wears them, so a tag
 //! follows its asset's file through a rename. What this list shows is what the library's
-//! view says: a change the user makes is asked for ([`Tags::take_asked`]) and shows once
-//! the library has committed it, but a rename or a removal shows at once, over the views
-//! that arrive until the library has answered it. A tag made here that nothing wears yet
-//! lives only here. An asset can have any number of tags.
+//! view says: a change the user makes is asked for, and shows once the library has
+//! committed it, but a rename or a removal shows at once, over the views that arrive
+//! until the library has answered it. A tag made here that nothing wears yet lives only
+//! here. An asset can have any number of tags.
 
 use std::collections::{BTreeMap, BTreeSet};
 

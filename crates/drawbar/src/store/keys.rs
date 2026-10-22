@@ -2,15 +2,14 @@
 //! the identity toshokan binds files by. Only the desktop opens a library's facts on
 //! this build.
 
-#[cfg(not(target_arch = "wasm32"))]
 use nord_format::formats;
-#[cfg(not(target_arch = "wasm32"))]
 use toshokan::env::{Blake3, Digest};
-#[cfg(not(target_arch = "wasm32"))]
 use toshokan::io::Range;
-use toshokan::Set;
+use toshokan::{Identify, Identity, RelPath, Set};
 #[cfg(not(target_arch = "wasm32"))]
-use toshokan::{Identify, Identity, Layout, RelPath, Schema};
+use toshokan::{Layout, Schema};
+
+use super::LibPath;
 
 /// The tags on an asset, by name.
 pub const TAGS: Set<String> = Set::new("tags");
@@ -31,10 +30,8 @@ pub fn layout() -> Layout {
 }
 
 /// How many bytes at the start of a Nord file its identity reads.
-#[cfg(not(target_arch = "wasm32"))]
 const HEAD: u64 = 64 << 10;
 /// How many bytes at the end of a Nord file its identity reads.
-#[cfg(not(target_arch = "wasm32"))]
 const TAIL: u64 = 2;
 
 /// A file's identity: BLAKE3 over its length and its bytes. A Nord file in its CBIN
@@ -45,19 +42,16 @@ const TAIL: u64 = 2;
 /// ⚠️ The two agree only while a Nord file's checksum is its contents', as every Nord
 /// application and drawbar keep it: an edit that leaves the checksum stale keeps the
 /// identity.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Contents;
 
 /// Whether the file at `path` is, by its name, a Nord file whose checksum covers it.
-#[cfg(not(target_arch = "wasm32"))]
 fn checksummed(path: &RelPath) -> bool {
     let extension = path.name().and_then(|name| name.rsplit_once('.'));
     let format = extension.and_then(|(_, extension)| formats::by_extension(extension));
     format.is_some_and(|format| nord_format::cbin_formats().any(|tag| tag == format.tag))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Identify for Contents {
     fn ranges(&self, path: &RelPath, len: u64) -> Vec<Range> {
         if !checksummed(path) {
@@ -99,6 +93,13 @@ impl toshokan::Names for Volume {
         let names: Vec<String> = path.split('/').map(super::names::key).collect();
         names.join("/")
     }
+}
+
+/// The identity of `bytes` as the library file at `path`, or `None` for a path toshokan
+/// does not take.
+pub fn identity_of_bytes(path: &LibPath, bytes: &[u8]) -> Option<Identity> {
+    let path = RelPath::new(path.as_str()).ok()?;
+    Some(Contents.of_bytes(&path, bytes))
 }
 
 /// The identity of the library file at `path`, which `file` opens.
