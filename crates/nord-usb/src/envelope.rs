@@ -64,6 +64,15 @@ pub fn rescue_name_for(at: Location, format: &str) -> String {
 /// Every rescued file's name starts with this.
 pub const RESCUED: &str = "nord-rescued-";
 
+/// What a rescue is called while it is being written: its own name, then this. Nothing is
+/// deleted until it is whole and renamed, so a file so named is never a slot's only copy.
+pub const PARTIAL: &str = ".partial";
+
+/// Whether `name` is a rescue's, written whole: a file that may be a slot's only copy.
+pub fn is_rescue(name: &str) -> bool {
+    name.starts_with(RESCUED) && !name.ends_with(PARTIAL)
+}
+
 fn rescued(at: Location, format: Option<&str>) -> String {
     format!(
         "{RESCUED}{}-{}.{}",
@@ -501,6 +510,14 @@ mod tests {
         file[8..12].copy_from_slice(b"ne5t");
         let at = Location { bank: 0, slot: 3 };
         assert_eq!(rescue_name(at, &file), "nord-rescued-1-4.ne5t");
+    }
+
+    #[test]
+    fn a_rescue_still_being_written_is_not_a_rescue() {
+        let name = rescue_name_for(Location::from_user(1, 159), "nsmp");
+        assert!(is_rescue(&name), "{name}");
+        assert!(!is_rescue(&format!("{name}{PARTIAL}")), "{name}{PARTIAL}");
+        assert!(!is_rescue("fetched-0-158.nsmp"));
     }
 
     /// Bytes that do not parse are still the only copy, so they must still get a name.

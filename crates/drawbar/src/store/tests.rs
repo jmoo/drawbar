@@ -579,16 +579,29 @@ fn a_library_is_losing_an_edit_until_its_working_copy_has_landed() {
     let root = Temp::new();
     fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
     let mut session = Session::open(&root);
-    assert!(!session.store.losing(&session.bench.workspace), "listed");
+    assert!(
+        !session
+            .store
+            .losing(&session.bench.workspace, &session.bench.browser),
+        "listed"
+    );
     let id = session.only();
     let edited = with_gain(&session.bytes(id), "96");
     let Bench { workspace, log, .. } = &mut session.bench;
     workspace.replace_bytes(id, edited, log);
-    assert!(session.store.losing(&session.bench.workspace), "edited");
+    assert!(
+        session
+            .store
+            .losing(&session.bench.workspace, &session.bench.browser),
+        "edited"
+    );
     session.autosave();
 
     let started = std::time::Instant::now();
-    while session.store.losing(&session.bench.workspace) {
+    while session
+        .store
+        .losing(&session.bench.workspace, &session.bench.browser)
+    {
         assert!(started.elapsed().as_secs() < 10, "the disk never caught up");
         std::thread::yield_now();
     }
@@ -605,7 +618,12 @@ fn a_library_only_read_is_never_losing() {
     let root = Temp::new();
     programs(&root, 300);
     let mut session = Session::opening(&root);
-    let losing = |session: &Session| session.store.losing(&session.bench.workspace);
+    let losing = |session: &Session| {
+        let Bench {
+            workspace, browser, ..
+        } = &session.bench;
+        session.store.losing(workspace, browser)
+    };
     assert!(!losing(&session), "while listing");
     session.listed_whole();
 
@@ -1018,6 +1036,37 @@ fn a_file_renamed_outside_keeps_its_id_and_tags() {
     assert_eq!(again.bench.workspace.listed().count(), 1);
 }
 
+/// A browser can hear the user leave and come back between two frames, as when a frame
+/// is not drawn while the tab is hidden. The library still rescans on the return.
+#[test]
+fn coming_back_to_a_picked_folder_rescans_it() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let mut presence = crate::presence::Presence::default();
+    session.store.focus(presence.read());
+
+    presence.heard(false);
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    presence.heard(true);
+    session.store.focus(presence.read());
+    assert!(
+        !session.store.scanning(),
+        "away for the frame that read the return"
+    );
+    session.store.focus(presence.read());
+    assert!(session.store.scanning(), "back at the next frame");
+    while session.store.scanning() {
+        assert!(session.next(), "the rescan answered");
+    }
+    let names: Vec<&str> = session
+        .bench
+        .workspace
+        .listed()
+        .map(|entity| entity.name.as_str())
+        .collect();
+    assert_eq!(names, ["Grand.ne5p"]);
+}
+
 /// A file with a tag that nothing has read is read in the background once the library is
 /// listed, and the index keeps its CRC, so the file keeps its tag through a rename outside
 /// drawbar, while drawbar runs and while it does not.
@@ -1310,12 +1359,18 @@ fn a_kept_occupant_is_not_swept() {
     let mut first = Session::open(&root);
     first.create();
     first.close();
-    fs::write(root.at(".drawbar/tmp/nord-rescued-1-1.npno"), b"a piano").unwrap();
+    fs::write(root.at(".drawbar/tmp/nord-rescued-1-1.npno"), a_rescue()).unwrap();
     fs::write(root.at(".drawbar/tmp/library.ron"), b"half an index").unwrap();
 
     let second = Session::open(&root);
     assert_eq!(root.names(exec::TMP), ["nord-rescued-1-1.npno"]);
     assert_eq!(second.said("removed 1 leftovers"), 1);
+}
+
+/// A whole file a write to the instrument could have left: a small piano's container.
+fn a_rescue() -> Vec<u8> {
+    let at = nord_usb::Location::from_user(1, 4);
+    nord_usb::envelope::wrap("npno", at, 0, b"a piano").unwrap()
 }
 
 /// A library drawbar has written, with a slot's former occupant an interrupted write
@@ -1324,7 +1379,7 @@ fn with_rescue(root: &Temp) {
     let mut first = Session::open(root);
     first.create();
     first.close();
-    fs::write(root.at(".drawbar/tmp/nord-rescued-1-4.npno"), b"a piano").unwrap();
+    fs::write(root.at(".drawbar/tmp/nord-rescued-1-4.npno"), a_rescue()).unwrap();
 }
 
 impl Session {
@@ -1362,6 +1417,52 @@ fn a_rescue_left_in_tmp_is_offered_on_open() {
     );
 }
 
+/// A rescue still being written when drawbar stopped is never the slot's only copy, since
+/// the slot is not touched until it is whole. It is not offered, and is deleted, in the
+/// library and in drawbar's own data alike.
+#[test]
+fn a_partial_rescue_file_is_never_offered() {
+    let (root, shelf) = (Temp::new(), Temp::new());
+    let mut first = Session::open(&root);
+    first.create();
+    first.close();
+    let partial = "nord-rescued-1-4.npno.partial";
+    fs::write(root.at(&format!("{}/{partial}", exec::TMP)), a_rescue()).unwrap();
+    fs::write(shelf.at(partial), a_rescue()).unwrap();
+    let bench = Bench::new();
+    let store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
+    let mut session = Session {
+        store: store.shelving(Some(shelf.0.clone())),
+        bench,
+    };
+    session.opened();
+
+    assert_eq!(session.bench.browser.asking(), None, "nothing is offered");
+    assert_eq!(root.names(exec::TMP), Vec::<String>::new());
+    assert_eq!(shelf.names(""), Vec::<String>::new());
+}
+
+/// A rescue file that does not read, such as one an older drawbar left half written, is
+/// no copy of the slot. It is said so, and offered only to be discarded.
+#[test]
+fn a_rescue_file_that_does_not_decode_is_reported_not_offered() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    first.create();
+    first.close();
+    let mut half = a_rescue();
+    half[..8].fill(0);
+    fs::write(root.at(".drawbar/tmp/nord-rescued-1-4.npno"), half).unwrap();
+
+    let mut second = Session::open(&root);
+    let (title, answers) = second.bench.browser.asking().expect("a question is asked");
+    assert!(title.contains("nord-rescued-1-4.npno"), "{title}");
+    assert!(title.contains("does not read"), "{title}");
+    assert_eq!(answers, ["Later", "Show the file", "Discard"]);
+    second.choose("Discard");
+    assert_eq!(root.names(exec::TMP), Vec::<String>::new());
+}
+
 /// A library whose folder for temporary files is a link offers the device no place in
 /// it for a rescue, so a rescue never lands outside the library.
 #[cfg(unix)]
@@ -1389,7 +1490,7 @@ fn a_rescue_kept_moves_into_the_library_as_an_asset() {
     let mut second = Session::open(&root);
     second.choose("Keep in library");
     assert_eq!(root.names(exec::TMP), Vec::<String>::new());
-    assert_eq!(root.read("nord-rescued-1-4.npno"), b"a piano");
+    assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue());
     let names: Vec<&str> = second
         .bench
         .workspace
@@ -1431,7 +1532,7 @@ fn a_rescue_discarded_is_deleted_once_confirmed() {
 fn a_rescue_in_drawbars_own_data_is_kept_or_discarded() {
     let (root, shelf) = (Temp::new(), Temp::new());
     for name in ["nord-rescued-1-4.npno", "nord-rescued-2-1.nsmp"] {
-        fs::write(shelf.at(name), name.as_bytes()).unwrap();
+        fs::write(shelf.at(name), a_rescue()).unwrap();
     }
     let bench = Bench::new();
     let store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
@@ -1444,7 +1545,7 @@ fn a_rescue_in_drawbars_own_data_is_kept_or_discarded() {
     let (title, _) = session.bench.browser.asking().expect("asked");
     assert!(title.contains("nord-rescued-1-4.npno"), "{title}");
     session.choose("Keep in library");
-    assert_eq!(root.read("nord-rescued-1-4.npno"), b"nord-rescued-1-4.npno");
+    assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue());
     assert_eq!(shelf.names(""), ["nord-rescued-2-1.nsmp"]);
 
     let (title, _) = session.bench.browser.asking().expect("asked");
@@ -1708,6 +1809,72 @@ fn a_library_opened_read_only_leaves_its_lock_to_a_drawbar_that_may_write_it() {
     let writing = Session::open(&root);
     assert_eq!(writing.store.read_only(), None);
     drop(reading);
+}
+
+/// A read-only library holds each change in memory only, so a tab on it asks before it
+/// closes, as it does for an unsaved edit. Reading it, and changes made outside it, do
+/// not.
+#[test]
+fn leaving_with_held_changes_asks_first() {
+    use crate::browser::Act;
+
+    let root = Temp::new();
+    fs::create_dir(root.at(".drawbar")).unwrap();
+    fs::write(root.at(exec::INDEX), "(version: 99)").unwrap();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let frame = |session: &mut Session| session.until(|_| true);
+    let losing = |session: &Session| {
+        let Bench {
+            workspace, browser, ..
+        } = &session.bench;
+        session.store.losing(workspace, browser)
+    };
+    type Change = fn(&mut Session, u64);
+    let changes: [(&str, Change); 5] = [
+        ("a deletion", |session, id| {
+            session.bench.act(vec![Act::Remove(id)])
+        }),
+        ("a save", |session, id| {
+            let edited = with_gain(&session.bytes(id), "96");
+            let Bench { workspace, log, .. } = &mut session.bench;
+            workspace.replace_bytes(id, edited, log);
+            session.bench.act(vec![Act::SaveDoc(id)]);
+            assert!(!session.bench.workspace.get(id).unwrap().is_unsaved());
+        }),
+        ("a rename", |session, id| {
+            let name = "Organ".to_string();
+            session.bench.act(vec![Act::RenameLocal { id, name }]);
+        }),
+        ("a tag", |session, id| {
+            let tag = session.bench.browser.tags.make("Sunday").unwrap();
+            session.bench.act(vec![Act::Tag { ids: vec![id], tag }]);
+        }),
+        ("a new folder", |session, _| {
+            session.bench.act(vec![Act::NewFolder])
+        }),
+    ];
+    for (change, make) in changes {
+        let mut session = Session::open(&root);
+        assert!(session.store.read_only().is_some());
+        frame(&mut session);
+        fs::write(root.at("Outside.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+        session.refocus();
+        frame(&mut session);
+        assert!(!losing(&session), "{change}: nothing is held before it");
+
+        let id = session.named("Grand.ne5p");
+        make(&mut session, id);
+        assert!(losing(&session), "{change}: held in the frame that made it");
+        frame(&mut session);
+        session.refocus();
+        assert!(losing(&session), "{change}: still held");
+        fs::remove_file(root.at("Outside.ne5p")).unwrap();
+    }
+    assert_eq!(
+        root.read(exec::INDEX),
+        b"(version: 99)",
+        "nothing was written"
+    );
 }
 
 #[test]

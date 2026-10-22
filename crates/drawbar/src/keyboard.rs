@@ -704,10 +704,13 @@ fn list(
     // here as well as in the send queue.
     if class == ObjectClass::Settings {
         if let Some(held) = waiting_in(queue, class) {
+            let name = workspace
+                .get(held.id)
+                .map_or("", |entity| entity.name.as_str());
             egui::TopBottomPanel::bottom("keyboard_settings")
                 .resizable(false)
                 .frame(egui::Frame::new())
-                .show_inside(ui, |ui| boxed(ui, |ui| crate::queue::table(ui, held)));
+                .show_inside(ui, |ui| boxed(ui, |ui| crate::queue::table(ui, held, name)));
         }
     }
 

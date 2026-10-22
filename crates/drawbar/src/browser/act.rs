@@ -832,7 +832,8 @@ pub fn apply(
     }
 }
 
-/// Take an asset off this computer, and its file with it.
+/// Take an asset off this computer, and its file with it, or off the list only where the
+/// library is read-only.
 fn remove(
     browser: &mut Browser,
     workspace: &mut Workspace,
@@ -847,7 +848,16 @@ fn remove(
     browser.forget_rename(Item::Local(id));
     browser.tags.forget(id);
     browser.folders.missing.remove(&id);
-    workspace.remove(id, log);
+    if !browser.folders.read_only() {
+        return workspace.remove(id, log);
+    }
+    if let Some(gone) = workspace.forget(id) {
+        log.say(format!(
+            "Removed “{}” from the list. The library is read-only, so its file stays in the \
+             library folder.",
+            gone.name
+        ));
+    }
 }
 
 /// How a folder is named in a sentence.
@@ -1627,17 +1637,22 @@ fn save_doc(
         return;
     };
     if entity.kept {
-        let name = entity.name.clone();
+        let saved = match browser.folders.read_only() {
+            false => format!("“{}” is saved on this computer.", entity.name),
+            true => format!(
+                "“{}” is saved in memory only. The library is read-only, so its file is \
+                 unchanged.",
+                entity.name
+            ),
+        };
         let spot = owed(entity);
         workspace.mark_saved(id);
         let waiting = queue.entry(id).map(|held| (held.class, held.at));
         match spot {
             // Already waiting for that slot, so the save only moved the baseline.
-            Some(spot) if waiting == Some(spot) => {
-                log.say(format!("“{name}” is saved on this computer."))
-            }
+            Some(spot) if waiting == Some(spot) => log.say(saved),
             Some((class, at)) => enqueue(workspace, device, queue, log, id, class, at),
-            None => log.say(format!("“{name}” is saved on this computer.")),
+            None => log.say(saved),
         }
         return;
     }
@@ -3039,6 +3054,41 @@ mod tests {
             !bench.browser.selection.holds(Item::Local(id)),
             "and the selection holds no removed row"
         );
+    }
+
+    /// Nothing may be written to a read-only library, so deleting or saving there only
+    /// changes what drawbar holds in memory, and the question and the status say so.
+    #[test]
+    fn a_read_only_library_never_reports_a_change_as_done() {
+        let mut bench = Bench::new();
+        bench.browser.folders.place = Some(crate::folders::Where {
+            read_only: true,
+            ..Default::default()
+        });
+        let id = bench
+            .workspace
+            .create(Fresh::Program, &mut bench.log)
+            .unwrap();
+        let name = bench.workspace.get(id).unwrap().name.clone();
+
+        bench.browser.ask_delete(id, &name);
+        let note = bench.browser.ask.take().and_then(|ask| ask.note);
+        let note = note.expect("a note");
+        assert!(note.contains("held in memory only"), "{note}");
+        bench.browser.ask_discard(&[Item::Local(id)], Vec::new());
+        let note = bench.browser.ask.take().and_then(|ask| ask.note);
+        let note = note.expect("a note");
+        assert!(note.contains("held in memory only"), "{note}");
+        assert!(!note.contains("deleted from this computer"), "{note}");
+
+        bench.act(vec![Act::SaveDoc(id)]);
+        let (_, said) = bench.log.status();
+        assert!(said.contains("in memory only"), "{said}");
+
+        bench.act(vec![Act::Remove(id)]);
+        let (_, said) = bench.log.status();
+        assert!(said.contains("from the list"), "{said}");
+        assert!(!said.contains("from this computer"), "{said}");
     }
 
     /// ⚠️ One view per slot. A second read of a slot already viewed would make two

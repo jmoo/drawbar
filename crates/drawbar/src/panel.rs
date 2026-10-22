@@ -51,6 +51,7 @@ const COUNT: f32 = 10.5;
 /// The width a table column asks for: a fixed width, a share of what the fixed columns
 /// leave, or a share that stops growing at `max` px and leaves the rest to the other
 /// shares.
+#[derive(Clone, Copy)]
 pub enum Track {
     Px(f32),
     Share(f32),

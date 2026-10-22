@@ -41,6 +41,8 @@ pub mod newproject;
 pub mod ondisk;
 pub mod panel;
 pub mod platform;
+#[cfg(any(test, target_arch = "wasm32"))]
+mod presence;
 pub mod queue;
 mod report;
 pub mod rewrite;
@@ -62,7 +64,8 @@ pub mod zoom;
 
 pub use app::DrawbarApp;
 
-/// The name eframe keeps this app's state under, which names its storage directory.
+/// The name eframe keeps this app's state under, which names its storage directory, and
+/// the window's app id. eframe names the directory after the app id when one is set.
 pub const APP: &str = "drawbar";
 
 /// Start the app on `canvas`. Called from `index.html` after the wasm module loads.

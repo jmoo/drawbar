@@ -712,9 +712,16 @@ impl Browser {
 
     /// Ask before an asset is deleted with its file.
     fn ask_delete(&mut self, id: u64, name: &str) {
+        let note = match self.folders.read_only() {
+            false => "It is deleted from this computer, with its file in the library folder.",
+            true => {
+                "The library is read-only, so its file stays in the library folder, and the \
+                 deletion is held in memory only."
+            }
+        };
         self.raise(Ask::new(
             format!("Delete “{name}”?"),
-            Some("It is deleted from this computer, with its file in the library folder.".into()),
+            Some(note.into()),
             Verb::Delete,
             vec![Act::Remove(id)],
         ));
@@ -806,27 +813,48 @@ impl Browser {
 
     /// Offer what to do with a slot's former occupant an interrupted write to the
     /// instrument left on this computer. Show the file is offered where the system can
-    /// show it.
+    /// show it. A file that does not read is said to be no copy, and offered only to be
+    /// discarded.
     pub(crate) fn ask_rescue(&mut self, rescue: Rescue) {
         let act = |what| vec![Act::Rescue(rescue.clone(), what)];
         let mut others = Vec::new();
         if rescue.shows() {
             others.push(("Show the file", act(Rescuing::Show)));
         }
-        others.push(("Discard…", act(Rescuing::Confirm)));
-        self.raise(Ask {
-            title: format!("A write to the instrument left “{}”", rescue.name),
-            note: Some(
-                "It may be the only copy of what that slot held. Keep in library puts it \
-                 in the library, where you can send it back."
-                    .into(),
-            ),
-            verb: Verb::Keep,
-            acts: act(Rescuing::Keep),
-            others,
-            cancel: "Later",
-            strong: Answer::Verb,
-        });
+        let ask = match &rescue.broken {
+            None => {
+                others.push(("Discard…", act(Rescuing::Confirm)));
+                Ask {
+                    title: format!("A write to the instrument left “{}”", rescue.name),
+                    note: Some(
+                        "It may be the only copy of what that slot held. Keep in library \
+                         puts it in the library, where you can send it back."
+                            .into(),
+                    ),
+                    verb: Verb::Keep,
+                    acts: act(Rescuing::Keep),
+                    others,
+                    cancel: "Later",
+                    strong: Answer::Verb,
+                }
+            }
+            Some(why) => Ask {
+                title: format!(
+                    "A write to the instrument left “{}”, which does not read",
+                    rescue.name
+                ),
+                note: Some(format!(
+                    "It is not a whole Nord file ({why}), so it is no copy of what that \
+                     slot held, and cannot be sent back."
+                )),
+                verb: Verb::Discard,
+                acts: act(Rescuing::Discard),
+                others,
+                cancel: "Later",
+                strong: Answer::Cancel,
+            },
+        };
+        self.raise(ask);
     }
 
     /// Say why a library whose index is missing opened read-only, keeping the `copies`
@@ -1028,15 +1056,24 @@ impl Browser {
                 "{n} items are removed from the instrument. There is no undo."
             )),
         }
-        match locals {
-            0 => {}
-            1 => note.push(
+        match (locals, self.folders.read_only()) {
+            (0, _) => {}
+            (1, false) => note.push(
                 "1 item is deleted from this computer, with its file in the library folder."
                     .to_string(),
             ),
-            n => note.push(format!(
+            (n, false) => note.push(format!(
                 "{n} items are deleted from this computer, with their files in the library \
                  folder."
+            )),
+            (1, true) => note.push(
+                "1 item leaves the list. The library is read-only, so its file stays in the \
+                 library folder, and the deletion is held in memory only."
+                    .to_string(),
+            ),
+            (n, true) => note.push(format!(
+                "{n} items leave the list. The library is read-only, so their files stay in \
+                 the library folder, and the deletions are held in memory only."
             )),
         }
         self.ask = Some(Ask::new(

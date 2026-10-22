@@ -15,7 +15,7 @@ use super::exec::{contents, too_much, working_name};
 use super::sidecar::{Keeps, Row, Sidecar, Working, VERSION};
 use super::{
     names, Backend, Cmd, Complete, CopyOf, Event, Failure, Fingerprint, Found, Holds, Left,
-    LibPath, Listing, Opened, Rescue, Source, Stale, Stat, Unkept, MOST_BYTES,
+    LibPath, Listing, Opened, Rescue, Source, Stale, Unkept, MOST_BYTES,
 };
 use crate::browser::{Browser, Rescuing};
 use crate::folders::{Folders, Op, Where};
@@ -94,7 +94,7 @@ struct Loading {
     swept: usize,
     /// The slots' former occupants the open found in `.drawbar/tmp/`, offered once the
     /// listing is complete.
-    rescued: Vec<(String, Stat)>,
+    rescued: Vec<Rescue>,
     /// The working copies the open found with no index, asked about once the listing
     /// is complete.
     unindexed: usize,
@@ -292,6 +292,11 @@ pub struct Store {
     indexed: bool,
     /// Whether the window had focus at the last [`Store::focus`].
     focused: bool,
+    /// The tags' revision when an answer was last folded in, so a change after it is
+    /// the user's.
+    tags_seen: u64,
+    /// The user changed a tag while nothing may be written.
+    tags_held: bool,
     /// A rescan, or a check of the files read so far, is in flight.
     scanning: bool,
     loading: Option<Loading>,
@@ -374,6 +379,8 @@ impl Store {
             failing: None,
             indexed: false,
             focused: true,
+            tags_seen: 0,
+            tags_held: false,
             scanning: false,
             loading: None,
             checking: BTreeSet::new(),
@@ -494,10 +501,37 @@ impl Store {
     }
 
     /// Whether letting the library go now, with no last pass, would lose an edit: one not
-    /// yet kept as a working copy, an asset never written to a file, or a write that has
-    /// not landed. A browser tab may close without that pass.
-    pub fn losing(&self, workspace: &Workspace) -> bool {
-        self.writing() || self.unheld(workspace).next().is_some()
+    /// yet kept as a working copy, an asset never written to a file, a write that has
+    /// not landed, or a change held in memory where nothing may be written. A browser tab
+    /// may close without that pass.
+    pub fn losing(&self, workspace: &Workspace, browser: &Browser) -> bool {
+        self.writing() || self.unheld(workspace).next().is_some() || self.held(workspace, browser)
+    }
+
+    /// Whether a change is held in memory only, where nothing may be written: a deletion,
+    /// a save, a rename or move, a folder change or a tag change.
+    fn held(&self, workspace: &Workspace, browser: &Browser) -> bool {
+        if !matches!(self.phase, Phase::ReadOnly(_)) {
+            return false;
+        }
+        let unwritten = |(id, record): (&u64, &Record)| {
+            let Some(path) = &record.path else {
+                return false;
+            };
+            workspace.get(*id).is_none_or(|entity| {
+                let saved = entity.saved.file.is_none() && entity.saved.stamp != record.saved;
+                saved || entity.path.as_ref() != Some(path)
+            })
+        };
+        let tags = self.tags_held || browser.tags.revision() != self.tags_seen;
+        tags || browser.folders.changed() || self.records.iter().any(unwritten)
+    }
+
+    /// Note a tag the user changed since the last answer was folded in, where nothing may
+    /// write it.
+    fn note_tags(&mut self, browser: &Browser) {
+        let changed = browser.tags.revision() != self.tags_seen;
+        self.tags_held |= changed && matches!(self.phase, Phase::ReadOnly(_));
     }
 
     /// The names of the assets that letting this library go would lose, where nothing
@@ -573,6 +607,7 @@ impl Store {
                 Phase::ReadOnly(why) => Some(format!("read-only: {why}")),
                 Phase::Failed(why) => Some(format!("not opened: {why}")),
             },
+            read_only: matches!(self.phase, Phase::ReadOnly(_)),
             opening: matches!(self.phase, Phase::Opening) || self.loading.is_some(),
             listing: self.loading.as_ref().map(|loading| loading.files),
         }
@@ -587,6 +622,7 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) -> bool {
+        self.note_tags(browser);
         self.recalled(workspace, browser, log);
         self.ask(workspace, browser, queue, log);
         self.walk(browser);
@@ -610,6 +646,7 @@ impl Store {
             workspace.ctx().request_repaint();
         }
         browser.folders.place = Some(self.place());
+        self.tags_seen = browser.tags.revision();
         released
     }
 
@@ -623,6 +660,7 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) -> bool {
+        self.note_tags(browser);
         match self.ready() {
             Some(event) => self.react(event, workspace, browser, queue, log),
             None => {
@@ -633,6 +671,7 @@ impl Store {
             }
         };
         browser.folders.place = Some(self.place());
+        self.tags_seen = browser.tags.revision();
         true
     }
 
@@ -1705,17 +1744,14 @@ impl Store {
 
     /// The rescues to offer: `in_tmp`, found in the library's `.drawbar/tmp/`, and those
     /// in drawbar's own data.
-    fn rescues(&self, in_tmp: Vec<(String, Stat)>) -> Vec<Rescue> {
-        let in_tmp = in_tmp.into_iter().map(|(name, stat)| Rescue {
-            name,
-            at: Left::Library(stat),
-        });
+    fn rescues(&self, in_tmp: Vec<Rescue>) -> Vec<Rescue> {
         #[cfg(not(target_arch = "wasm32"))]
-        let in_tmp = in_tmp.chain(self.shelved_rescues());
-        in_tmp.collect()
+        let in_tmp = in_tmp.into_iter().chain(self.shelved_rescues()).collect();
+        in_tmp
     }
 
-    /// The rescues in drawbar's own data, by name.
+    /// The rescues in drawbar's own data, by name, each read whole on this thread to
+    /// check it. A partial one is never a slot's only copy, and is deleted.
     #[cfg(not(target_arch = "wasm32"))]
     fn shelved_rescues(&self) -> Vec<Rescue> {
         let Some(entries) = self
@@ -1730,11 +1766,20 @@ impl Store {
             .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
             .filter_map(|entry| {
                 let name = entry.file_name().into_string().ok()?;
-                name.starts_with(nord_usb::envelope::RESCUED)
-                    .then(|| Rescue {
-                        name,
-                        at: Left::Shelf(entry.path()),
-                    })
+                let path = entry.path();
+                if !name.starts_with(nord_usb::envelope::RESCUED) {
+                    return None;
+                }
+                if !nord_usb::envelope::is_rescue(&name) {
+                    let _ = std::fs::remove_file(&path);
+                    return None;
+                }
+                let file = std::fs::File::open(&path).and_then(nord_usb::envelope::Positional::new);
+                Some(Rescue {
+                    name,
+                    broken: nord_usb::block_on(super::unwhole(file)),
+                    at: Left::Shelf(path),
+                })
             })
             .collect();
         found.sort_by(|a, b| a.name.cmp(&b.name));
