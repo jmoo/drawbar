@@ -1063,6 +1063,7 @@ fn main() {
             toshokan::View::new(toshokan::view::Parts {
                 folded: view.folded().clone(),
                 bindings: std::sync::Arc::clone(&bindings),
+                scan: std::sync::Arc::new(scanned.clone()),
                 writers: Vec::new(),
                 forks: Vec::new(),
                 gaps: Vec::new(),

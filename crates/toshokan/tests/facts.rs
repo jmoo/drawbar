@@ -64,6 +64,7 @@ fn view(folded: Folded) -> View {
     View::new(Parts {
         folded,
         bindings: Bindings::default().into(),
+        scan: Default::default(),
         writers: Vec::new(),
         forks: Vec::new(),
         gaps: Vec::new(),

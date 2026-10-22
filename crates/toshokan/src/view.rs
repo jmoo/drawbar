@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
-use crate::binding::Bindings;
+use crate::binding::{Bindings, Scan};
 use crate::ids::EntityId;
 use crate::index::Index;
 use crate::merge::Folded;
@@ -26,6 +26,8 @@ pub struct View(Arc<Parts>, Arc<Index>);
 pub struct Parts {
     pub folded: Folded,
     pub bindings: Arc<Bindings>,
+    /// The library files the last scan found.
+    pub scan: Arc<Scan>,
     pub writers: Vec<WriterInfo>,
     pub forks: Vec<Fork>,
     pub gaps: Vec<Gap>,
@@ -58,6 +60,14 @@ pub enum FileState {
     /// or from there. The path is the logged one. A scan of every file binds it
     /// again.
     Unscanned,
+}
+
+/// A library file as the last scan listed it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Listed {
+    pub len: u64,
+    /// When the file last changed, as [`crate::io::Meta::modified`] gives it.
+    pub modified: Option<u64>,
 }
 
 /// The distinct values of a key, each with how many entities hold it.
@@ -208,6 +218,16 @@ impl View {
     /// says something about them.
     pub fn unbound(&self) -> &[RelPath] {
         &self.0.bindings.unbound
+    }
+
+    /// The library file at `path` as the last scan listed it; `None` where it
+    /// listed none, and for every file until a scan of every file has succeeded.
+    pub fn listed(&self, path: &RelPath) -> Option<Listed> {
+        let file = self.0.scan.files.get(path)?;
+        Some(Listed {
+            len: file.len,
+            modified: file.modified,
+        })
     }
 }
 

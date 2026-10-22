@@ -582,6 +582,7 @@ through_both!(
     opening_viewing_and_refreshing_write_nothing_in_the_folder,
     opening_scans_no_library_file_and_the_first_refresh_scans_them_all,
     swap_files_a_browser_left_are_neither_scanned_nor_read,
+    a_view_lists_each_library_files_length_once_scanned,
     losing_the_local_root_at_any_step_loses_only_drafts,
     a_crash_at_any_step_is_settled_before_the_next_write,
     an_empty_record_of_this_writer_is_removed_by_its_next_write,
@@ -2372,6 +2373,28 @@ fn swap_files_a_browser_left_are_neither_scanned_nor_read<F: Facade>() {
     assert_eq!(opened.unreadable, [] as [RelPath; 0]);
     assert_eq!(opened.ignored, [] as [RelPath; 0]);
     assert_eq!(a.view().unbound(), [] as [RelPath; 0]);
+}
+
+fn a_view_lists_each_library_files_length_once_scanned<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    put(&folder, "a.wav", b"wave");
+    put(&folder, "d/b.syx", b"sysex!");
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    assert_eq!(
+        a.view().listed(&path("a.wav")),
+        None,
+        "nothing is scanned at open"
+    );
+    a.rescan().unwrap();
+    let view = a.view();
+    let len = |at: &str| view.listed(&path(at)).map(|listed| listed.len);
+    assert_eq!((len("a.wav"), len("d/b.syx")), (Some(4), Some(6)));
+    assert_eq!(len("d"), None, "a directory is no file");
+    assert_eq!(len("gone.wav"), None);
+    let listed = view.listed(&path("a.wav")).unwrap();
+    assert_eq!(listed.modified, Some(modified(&folder, &path("a.wav"))));
 }
 
 /// The scenario losing the local root interrupts: every step a user might take.

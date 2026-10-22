@@ -84,8 +84,9 @@ pub struct Library {
     ahead: BTreeSet<Hlc>,
     /// The file facts `folded` shows.
     facts: Facts,
-    /// The last scan; before the first, the identities `remembered` keeps.
-    scan: Scan,
+    /// The last scan; before the first, the identities `remembered` keeps. Shared
+    /// with the views.
+    scan: Arc<Scan>,
     /// The identities scans read that no fact gives, as the local root should keep
     /// them.
     remembered: Scan,
@@ -275,7 +276,7 @@ impl Library {
             removed: Vec::new(),
             ahead: BTreeSet::new(),
             facts: Facts::new(),
-            scan: remembered.clone(),
+            scan: Arc::new(remembered.clone()),
             remembered,
             unkept: false,
             unscanned: Unscanned::default(),
@@ -289,6 +290,7 @@ impl Library {
             view: View::new(Parts {
                 folded: Folded::default(),
                 bindings: Arc::default(),
+                scan: Arc::default(),
                 writers: Vec::new(),
                 forks: Vec::new(),
                 gaps: Vec::new(),
@@ -1243,8 +1245,13 @@ impl Library {
         self.reach.resolved();
         let names = &*self.env.names;
         for (path, file) in changes {
-            self.reach
-                .rescan(&mut self.scan, &self.facts, names, path, file);
+            self.reach.rescan(
+                Arc::make_mut(&mut self.scan),
+                &self.facts,
+                names,
+                path,
+                file,
+            );
         }
         paths
     }
@@ -1372,6 +1379,7 @@ impl Library {
         let parts = Parts {
             folded: self.folded.clone(),
             bindings: Arc::clone(&self.bindings),
+            scan: Arc::clone(&self.scan),
             writers: self.writer_infos(),
             forks,
             gaps,
@@ -1795,7 +1803,7 @@ fn presumed_bound(mut library: Library) -> Flow<'static, Library> {
         .unscanned
         .add(vec![RelPath::ROOT], &library.bindings);
     library.reach.everything();
-    let scan = library.scan.clone();
+    let scan = Scan::clone(&library.scan);
     rebound(library, scan)
 }
 
@@ -1868,10 +1876,10 @@ fn walked<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
 /// Binds the facts to `scan` a slice at a time, unless neither changed.
 fn rebound<'a, L: BorrowMut<Library> + 'a>(mut library: L, scan: Scan) -> Flow<'a, L> {
     let known = library.borrow_mut();
-    if !known.reach.due() && scan == known.scan {
+    if !known.reach.due() && scan == *known.scan {
         return Flow::Done(library);
     }
-    known.scan = scan;
+    known.scan = Arc::new(scan);
     known.reach.everything();
     bind_everything(library)
 }
