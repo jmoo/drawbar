@@ -474,8 +474,9 @@ impl Resolver<'_> {
                     to: rebased(path),
                 });
             }
-            if let Some(&entity) = bound.get(path) {
-                self.end(entity, Some(rebased(path)));
+            match bound.get(path) {
+                Some(&entity) => self.end(entity, Some(rebased(path))),
+                None => self.end_unbound(Some((*path).clone()), Some(rebased(path))),
             }
         }
         if !rename_dir {

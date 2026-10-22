@@ -594,6 +594,7 @@ through_both!(
     a_directory_that_cannot_be_listed_leaves_its_files_unknown_and_the_rest_scanned,
     a_file_no_entity_is_bound_to_is_saved_renamed_and_trashed_and_each_undone,
     an_effect_by_path_on_an_entitys_file_is_refused,
+    a_tree_moved_with_files_no_entity_is_bound_to_is_moved_back_by_undo,
     a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept,
     losing_the_local_root_at_any_step_loses_only_drafts,
     a_crash_at_any_step_is_settled_before_the_next_write,
@@ -2573,6 +2574,38 @@ fn an_effect_by_path_on_an_entitys_file_is_refused<F: Facade>() {
         "{refused:?}"
     );
     assert_eq!(read(&folder, "song.npno").as_deref(), Some(&b"song"[..]));
+}
+
+fn a_tree_moved_with_files_no_entity_is_bound_to_is_moved_back_by_undo<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    put(&folder, "old/a.wav", b"a");
+    put(&folder, "old/deep/b.wav", b"b");
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    create(&mut a, "old/song.npno", b"song");
+    let files = || {
+        let files = library_files(&folder).into_iter();
+        let files = files.map(|(path, _)| path.as_str().to_owned());
+        files.collect::<Vec<String>>()
+    };
+    a.commit("Move", |i| i.move_tree(&path("old"), &path("new")))
+        .unwrap();
+    assert_eq!(
+        files(),
+        ["new/a.wav", "new/deep/b.wav", "new/song.npno"],
+        "moved"
+    );
+    a.undo().unwrap();
+    assert_eq!(
+        files(),
+        ["old/a.wav", "old/deep/b.wav", "old/song.npno"],
+        "undone"
+    );
+    assert_eq!(
+        a.view().unbound(),
+        [path("old/a.wav"), path("old/deep/b.wav")]
+    );
 }
 
 /// The scenario losing the local root interrupts: every step a user might take.
