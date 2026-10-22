@@ -902,6 +902,60 @@ fn a_rescue_kept_moves_into_the_library_as_an_asset() {
         None,
         "nothing is left to offer"
     );
+    let kept = third.named("nord-rescued-1-4.npno");
+    let origin = &third.bench.workspace.get(kept).unwrap().origin;
+    assert!(
+        matches!(origin, Origin::Rescued { at } if *at == Location::from_user(1, 4)),
+        "{}",
+        origin.label()
+    );
+}
+
+/// A rescue's name says the slot it came off.
+#[test]
+fn a_rescue_names_the_slot_it_came_off() {
+    let slot = |name: &str| Rescue::slot_of(name);
+    assert_eq!(
+        slot("nord-rescued-3-12.ne5p"),
+        Some(Location::from_user(3, 12))
+    );
+    assert_eq!(
+        slot("nord-rescued-1-4 2.npno"),
+        Some(Location::from_user(1, 4))
+    );
+    assert_eq!(slot("nord-rescued-0-4.npno"), None);
+    assert_eq!(slot("Grand.npno"), None);
+}
+
+/// A copy fetched off a slot keeps saying which slot once drawbar opens the library
+/// again.
+#[test]
+fn a_copy_off_a_slot_still_says_which_once_reopened() {
+    let (root, fetched) = (Temp::new(), Temp::new());
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(fetched.at("Grand.ne5p"), &program).unwrap();
+    let mut first = Session::open(&root);
+    let at = Location::from_user(2, 7);
+    let origin = Origin::Device {
+        class: ObjectClass::Program,
+        at,
+    };
+    let len = program.len() as u64;
+    let to = LibPath::root().join("Grand.ne5p");
+    first
+        .bench
+        .workspace
+        .arrive_fetched(to, origin, fetched.at("Grand.ne5p"), len);
+    first.sync();
+    first.close();
+
+    let second = Session::open(&root);
+    let origin = &second.bench.workspace.get(second.only()).unwrap().origin;
+    assert!(
+        matches!(origin, Origin::Device { class: ObjectClass::Program, at: held } if *held == at),
+        "{}",
+        origin.label()
+    );
 }
 
 /// Discard asks first, and deletes the rescue only once that is answered.
@@ -1287,12 +1341,10 @@ fn a_move_carries_the_folder_and_what_is_in_it_and_nothing_beside_it() {
 /// An asset made with New keeps saying so once its file is written and drawbar opens
 /// the library again.
 #[test]
-#[ignore = "origins are not kept by toshokan yet"]
 fn a_new_asset_with_a_file_is_still_new_after_a_restart() {
     let root = Temp::new();
     let mut first = Session::open(&root);
-    let id = first.create();
-    first.tag(&[id], "Sunday");
+    first.create();
     first.close();
 
     let second = Session::open(&root);

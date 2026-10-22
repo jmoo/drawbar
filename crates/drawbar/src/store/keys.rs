@@ -3,16 +3,67 @@
 //! this build.
 
 use nord_format::formats;
+use nord_usb::{Location, ObjectClass};
+use serde::{Deserialize, Serialize};
 use toshokan::env::{Blake3, Digest};
 use toshokan::io::Range;
-use toshokan::{Identify, Identity, RelPath, Set};
+use toshokan::{Identify, Identity, Register, RelPath, Set};
 #[cfg(not(target_arch = "wasm32"))]
 use toshokan::{Layout, Schema};
 
 use super::LibPath;
+use crate::workspace::Origin;
 
 /// The tags on an asset, by name.
 pub const TAGS: Set<String> = Set::new("tags");
+
+/// Where an asset came from, where its file cannot say: made new in drawbar, copied off
+/// a slot, or the occupant a write to a slot could not put back. A file opened from
+/// anywhere else says nothing, and has no entity for it.
+pub const ORIGIN: Register<Came> = Register::new("origin");
+
+/// An [`ORIGIN`], as the library keeps it. A slot is its class's code and its bank and
+/// slot from zero, as the wire numbers them.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+#[serde(tag = "from", rename_all = "lowercase", deny_unknown_fields)]
+pub enum Came {
+    New,
+    Slot { class: u32, bank: u32, slot: u32 },
+    Rescued { bank: u32, slot: u32 },
+}
+
+impl Came {
+    /// What the library keeps of `origin`, where it keeps anything.
+    pub fn of(origin: &Origin) -> Option<Came> {
+        match origin {
+            Origin::File(_) => None,
+            Origin::Fresh => Some(Came::New),
+            Origin::Device { class, at } => Some(Came::Slot {
+                class: class.to_raw(),
+                bank: at.bank,
+                slot: at.slot,
+            }),
+            Origin::Rescued { at } => Some(Came::Rescued {
+                bank: at.bank,
+                slot: at.slot,
+            }),
+        }
+    }
+
+    /// The origin this says.
+    pub fn origin(self) -> Origin {
+        match self {
+            Came::New => Origin::Fresh,
+            Came::Slot { class, bank, slot } => Origin::Device {
+                class: ObjectClass::from_raw(class),
+                at: Location { bank, slot },
+            },
+            Came::Rescued { bank, slot } => Origin::Rescued {
+                at: Location { bank, slot },
+            },
+        }
+    }
+}
 
 /// The directory at the library's root that holds what is drawbar's own. An older
 /// build's index stays there, unread.
@@ -21,7 +72,7 @@ pub const DIR: &str = ".drawbar";
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn schema() -> Schema {
-    Schema::of(&[TAGS.key()]).expect("drawbar's keys are distinct")
+    Schema::of(&[TAGS.key(), ORIGIN.key()]).expect("drawbar's keys are distinct")
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -191,6 +242,23 @@ mod tests {
         let a = vec![7; 70_000];
         let b = vec![7; 70_001];
         assert_ne!(identity("a.npno", &a), identity("a.npno", &b));
+    }
+
+    #[test]
+    fn an_origin_the_library_keeps_comes_back_as_it_was() {
+        let at = Location::from_user(4, 2);
+        for origin in [
+            Origin::Fresh,
+            Origin::Device {
+                class: ObjectClass::Sample,
+                at,
+            },
+            Origin::Rescued { at },
+        ] {
+            let came = Came::of(&origin).expect("kept");
+            assert_eq!(came.origin().label(), origin.label());
+        }
+        assert_eq!(Came::of(&Origin::File("a.ne5p".into())), None);
     }
 
     #[test]

@@ -16,7 +16,7 @@ use super::cache::{self, Cache};
 use super::diff;
 use super::exec::too_much;
 use super::ids::Ids;
-use super::keys::TAGS;
+use super::keys::{Came, ORIGIN, TAGS};
 use super::{
     names, Backend, Cmd, CopyOf, Event, Failure, FileCmd, Fingerprint, Found, Holds, Intent, Key,
     LibPath, Opened, Rescue, Source, Stat, Viewed, MOST_BYTES,
@@ -86,8 +86,11 @@ struct Listed {
     files: BTreeMap<Key, (LibPath, Option<Stat>)>,
     /// Files drawbar does not open, in path order.
     others: Vec<LibPath>,
-    /// Entities whose file is nowhere, with where it was.
+    /// Entities wearing tags whose file is nowhere, with where it was. One that says only
+    /// where its file came from keeps nothing worth showing without the file.
     lost: Vec<(toshokan::EntityId, LibPath)>,
+    /// Where the asset of each entity that says so came from.
+    came: BTreeMap<toshokan::EntityId, Came>,
 }
 
 impl Listed {
@@ -98,7 +101,14 @@ impl Listed {
             files: BTreeMap::new(),
             others: Vec::new(),
             lost: Vec::new(),
+            came: BTreeMap::new(),
         };
+        for entity in view.with(ORIGIN) {
+            let came = view.entity(entity).map(|entity| entity.get(ORIGIN));
+            if let Some(came) = came.as_ref().and_then(toshokan::Field::shown) {
+                listed.came.insert(entity, *came);
+            }
+        }
         let shown = |path: &toshokan::RelPath| {
             let path = LibPath::parse(path.as_str())?;
             let hidden = path.components().any(|name| name.starts_with('.'));
@@ -118,13 +128,16 @@ impl Listed {
             let key = Key::File(LibPath::parse(path.as_str())?);
             Some((key, path.clone(), FileState::InSync))
         });
+        let tagged: BTreeSet<toshokan::EntityId> = view.with(TAGS).into_iter().collect();
         for (key, at, state) in bound.chain(unbound) {
             let Some(path) = shown(&at) else {
                 continue;
             };
             match (state, &key) {
-                (FileState::Missing, Key::Entity(entity)) => listed.lost.push((*entity, path)),
-                (FileState::Missing, Key::File(_)) => {}
+                (FileState::Missing, Key::Entity(entity)) if tagged.contains(entity) => {
+                    listed.lost.push((*entity, path));
+                }
+                (FileState::Missing, _) => {}
                 _ if !super::opens(path.leaf()) => listed.others.push(path),
                 _ => {
                     listed.files.insert(key, (path, stat(&at)));
@@ -1275,7 +1288,12 @@ impl Store {
         let mut next = workspace.next_id();
         let mut back = Vec::new();
         for (path, key, stat) in arrived {
-            back.push(newcomer(next, Found::unread(path, stat), &mut self.records));
+            let came = key.entity().and_then(|entity| listed.came.get(&entity));
+            let mut saved = newcomer(next, Found::unread(path, stat), &mut self.records);
+            if let Some(came) = came {
+                saved.origin = came.origin();
+            }
+            back.push(saved);
             self.ids.insert(next, key);
             next = next.saturating_add(1);
         }
@@ -1523,6 +1541,7 @@ impl Store {
                 }
                 let file = std::fs::File::open(&path).and_then(nord_usb::envelope::Positional::new);
                 Some(Rescue {
+                    slot: Rescue::slot_of(&name),
                     name,
                     broken: nord_usb::block_on(super::unwhole(file)),
                     at: path,
@@ -1580,7 +1599,10 @@ impl Store {
         let Some(len) = super::outside_len(&from) else {
             return log.trouble(format!("“{}” could not be read.", rescue.name));
         };
-        let origin = Origin::File(free);
+        let origin = match rescue.slot {
+            Some(at) => Origin::Rescued { at },
+            None => Origin::File(free),
+        };
         let id = workspace.arrive(to, origin, CopyOf::Outside(from.clone()), len);
         self.shelved.insert(id, from);
     }
@@ -2248,12 +2270,12 @@ impl Store {
                     ..Record::of_file(path.clone(), None)
                 },
             );
-            let expect = toshokan::Expect::Absent;
             self.write(Intent::Save {
                 id,
                 path,
                 bytes: bytes(),
-                expect,
+                expect: toshokan::Expect::Absent,
+                came: Came::of(&entity.origin),
             });
             return true;
         };
@@ -2284,6 +2306,7 @@ impl Store {
             path: at,
             bytes: bytes(),
             expect,
+            came: None,
         });
         true
     }
@@ -2391,11 +2414,13 @@ impl Store {
             (false, Some(print)) => print.expect(),
             _ => toshokan::Expect::Absent,
         };
+        let came = Came::of(&entity.origin).filter(|_| record.fingerprint.is_none());
         self.write(Intent::Import {
             id: entity.id,
             path,
             from,
             expect,
+            came,
         });
         true
     }

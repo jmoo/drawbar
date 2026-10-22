@@ -366,6 +366,8 @@ impl Found {
 pub struct Rescue {
     /// Its file's name: [`nord_usb::envelope::rescue_name`], numbered where taken.
     pub name: String,
+    /// The slot it came off, as its name says.
+    pub slot: Option<nord_usb::Location>,
     /// Where it is, outside every library.
     pub at: std::path::PathBuf,
     /// Why it does not read as one whole Nord file, where it does not. It is then no copy
@@ -384,6 +386,16 @@ async fn unwhole(file: std::io::Result<impl nord_usb::FileSource>) -> Option<Str
 }
 
 impl Rescue {
+    /// The slot a rescue named `name` came off: [`nord_usb::envelope::rescue_name`] numbers
+    /// its bank and slot from one.
+    pub fn slot_of(name: &str) -> Option<nord_usb::Location> {
+        let rest = name.strip_prefix(nord_usb::envelope::RESCUED)?;
+        let (bank, rest) = rest.split_once('-')?;
+        let slot: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        let (bank, slot) = (bank.parse().ok()?, slot.parse().ok()?);
+        (bank >= 1 && slot >= 1).then(|| nord_usb::Location::from_user(bank, slot))
+    }
+
     /// Whether the system's file manager can show it: only on the desktop.
     pub fn shows(&self) -> bool {
         cfg!(not(target_arch = "wasm32"))
@@ -493,13 +505,15 @@ pub enum Intent {
     },
     /// End an entity whose file is gone.
     Forget { entity: EntityId },
-    /// Write a file whole: a new one where `expect` is [`toshokan::Expect::Absent`].
-    /// Answered by [`Event::Saved`].
+    /// Write a file whole: a new one where `expect` is [`toshokan::Expect::Absent`],
+    /// with an entity saying where it came from where `came` says. Answered by
+    /// [`Event::Saved`].
     Save {
         id: u64,
         path: LibPath,
         bytes: Vec<u8>,
         expect: toshokan::Expect,
+        came: Option<keys::Came>,
     },
     /// Write over the file at `path` the file `edit` makes of `from`, the piano or
     /// sample instrument resting there, read by range. Nothing is read or written whole.
@@ -519,6 +533,7 @@ pub enum Intent {
         path: LibPath,
         from: Source,
         expect: toshokan::Expect,
+        came: Option<keys::Came>,
     },
     /// Rename a file. Refused where `to` already exists. Answered by [`Event::Moved`].
     Move {

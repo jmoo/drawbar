@@ -16,7 +16,7 @@ use toshokan::io::IoError;
 use toshokan::report::{Mode, Refreshed};
 use toshokan::{EntityId, Env, Error, Expect, RelPath, View};
 
-use super::keys::{self, TAGS};
+use super::keys::{self, Came, ORIGIN, TAGS};
 use super::native::locate;
 use super::{
     Cmd, Event, Failure, Fingerprint, Found, Intent, Key, LibPath, Opened, Part, Source, Stat,
@@ -181,17 +181,16 @@ impl Keeper {
                 path,
                 bytes,
                 expect,
+                came,
             } => {
                 let crc = nord_format::crc::crc32(&bytes);
                 let identity = keys::identity_of_bytes(&path, &bytes);
-                let wrote = write(
-                    library,
-                    &self.folder,
-                    label,
-                    &path,
-                    Fill::Bytes(bytes),
+                let to = To {
+                    path: &path,
                     expect,
-                );
+                    came,
+                };
+                let wrote = write(library, &self.folder, label, to, Fill::Bytes(bytes));
                 let result = wrote.map(|(stat, changes)| {
                     let print = Fingerprint {
                         crc: Some(crc),
@@ -210,7 +209,12 @@ impl Keeper {
                 expect,
             } => {
                 let fill = Fill::Edited(from, edit);
-                let wrote = write(library, &self.folder, label, &path, fill, expect);
+                let to = To {
+                    path: &path,
+                    expect,
+                    came: None,
+                };
+                let wrote = write(library, &self.folder, label, to, fill);
                 let result =
                     wrote.and_then(|(_, changes)| Ok((landed(&self.folder, &path)?, changes)));
                 answer_with(answer, result, |result| Event::Rewritten {
@@ -224,8 +228,14 @@ impl Keeper {
                 path,
                 from,
                 expect,
+                came,
             } => {
-                let result = import(library, &self.folder, label, &path, from, expect)
+                let to = To {
+                    path: &path,
+                    expect,
+                    came,
+                };
+                let result = import(library, &self.folder, label, to, from)
                     .and_then(|changes| Ok((landed(&self.folder, &path)?, changes)));
                 answer_with(answer, result, |result| Event::Imported {
                     id,
@@ -317,17 +327,25 @@ fn tag<'l>(
     Ok(built)
 }
 
-/// Write the file at `path` from `fill`, as the file of the entity bound there or as one
-/// no entity is bound to, and find it there. Returns its stat and what the commit
-/// changed.
+/// Where a write goes, what it expects to find there, and where a new file came from.
+#[derive(Clone, Copy)]
+struct To<'p> {
+    path: &'p LibPath,
+    expect: Expect,
+    came: Option<Came>,
+}
+
+/// Write the file `to` names from `fill`: as the file of the entity bound there, as a new
+/// entity's file where `to` says where it came from, or as one no entity is bound to.
+/// Returns the file's stat as it is found there, and what the commit changed.
 fn write(
     library: &mut Library<Native>,
     folder: &Path,
     label: &str,
-    path: &LibPath,
+    to: To<'_>,
     fill: Fill,
-    expect: Expect,
 ) -> Result<(Stat, Vec<toshokan::report::Change>), Failure> {
+    let To { path, expect, came } = to;
     let at = relative(path).ok_or_else(|| Failure::Io(no_path(path)))?;
     let view = library.view();
     let failed = Rc::new(RefCell::new(None));
@@ -337,9 +355,15 @@ fn write(
         failed: failed.clone(),
     });
     let built = library.intent(label);
-    let built = match bound_at(&view, &at) {
-        Some(entity) => built.save_from(entity, &at, source, expect),
-        None => built.save_file_from(&at, source, expect),
+    let built = match (bound_at(&view, &at), came) {
+        (Some(entity), _) => built.save_from(entity, &at, source, expect),
+        (None, Some(came)) => {
+            let (built, _) = built.create(|e| {
+                e.set(ORIGIN, came).save_from(&at, source, expect);
+            });
+            built
+        }
+        (None, None) => built.save_file_from(&at, source, expect),
     };
     let committed = built.commit().map_err(|e| failure(e, failed.take()))?;
     let stat = stat_at(folder, path)?;
@@ -352,9 +376,8 @@ fn import(
     library: &mut Library<Native>,
     folder: &Path,
     label: &str,
-    path: &LibPath,
+    to: To<'_>,
     from: Source,
-    expect: Expect,
 ) -> Result<Vec<toshokan::report::Change>, Failure> {
     let changed = || Failure::Io("the file it copies changed on disk".to_string());
     let fill = match from {
@@ -368,9 +391,9 @@ fn import(
             Fill::Library(source)
         }
     };
-    match write(library, folder, label, path, fill, expect) {
+    match write(library, folder, label, to, fill) {
         Ok((_, changes)) => Ok(changes),
-        Err(Failure::Moved) if expect == Expect::Absent => Err(Failure::Moved),
+        Err(Failure::Moved) if to.expect == Expect::Absent => Err(Failure::Moved),
         Err(Failure::Moved) => Err(changed()),
         Err(failure) => Err(failure),
     }
@@ -821,6 +844,7 @@ mod tests {
             path: path("c3.ne5p"),
             bytes: b"mine".to_vec(),
             expect: read,
+            came: None,
         }));
         assert!(
             matches!(
@@ -859,12 +883,14 @@ mod tests {
                 path: path("Linked/new.ne5p"),
                 bytes: b"saved".to_vec(),
                 expect: Expect::Absent,
+                came: None,
             },
             Intent::Save {
                 id: 2,
                 path: path("Linked/x.ne5p"),
                 bytes: b"saved".to_vec(),
                 expect: x,
+                came: None,
             },
             Intent::Import {
                 id: 3,
@@ -874,6 +900,7 @@ mod tests {
                     Fingerprint::unread(stat_at(&root.0, &path("a.ne5p")).unwrap()),
                 ),
                 expect: Expect::Absent,
+                came: None,
             },
             Intent::Move {
                 from: path("a.ne5p"),
@@ -1004,6 +1031,7 @@ mod tests {
             path: path(name),
             from,
             expect: Expect::Absent,
+            came: None,
         };
         let copied = import(
             "Copy.npno",
