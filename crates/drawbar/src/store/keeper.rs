@@ -3,7 +3,7 @@
 //! from a [`Fill`] as toshokan stages it.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -523,6 +523,31 @@ impl Keeper {
                 answer(Event::Moved { from, to, result });
                 changes
             }
+            Intent::MakeDir { path } => {
+                let made = facts(library, label, |built, _| {
+                    Ok(built.make_dir(&relative(&path).ok_or_else(|| no_path(&path))?))
+                });
+                made.map_or_else(
+                    |why| {
+                        answer(Event::Failed(format!("making {path}: {why}")));
+                        None
+                    },
+                    Some,
+                )
+            }
+            Intent::RemoveDir { path } => {
+                let removed = facts(library, label, |built, _| {
+                    Ok(built.remove_dir(&relative(&path).ok_or_else(|| no_path(&path))?))
+                });
+                removed.map_or_else(
+                    |why| {
+                        answer(Event::Failed(format!("removing {path}: {why}")));
+                        None
+                    },
+                    Some,
+                )
+            }
+            Intent::Batch(parts) => batch(library, &self.folder, label, parts, answer),
             Intent::Delete { files } => {
                 let trashed = facts(library, label, |mut built, view| {
                     for (path, expect) in &files {
@@ -662,33 +687,564 @@ fn write(
     to: To<'_>,
     fill: Fill,
 ) -> Result<(Stat, toshokan::Committed), Failure> {
-    let To { path, expect, came } = to;
-    let at = relative(path).ok_or_else(|| Failure::Io(no_path(path)))?;
+    let at = relative(to.path).ok_or_else(|| Failure::Io(no_path(to.path)))?;
     let view = library.view();
+    let built = library.intent(label);
+    let (built, failed) = save_part(built, &view, folder, &at, to, fill, &[]);
+    let committed = built.commit().map_err(|e| failure(e, failed.take()))?;
+    let stat = stat_at(folder, to.path)?;
+    Ok((stat, committed))
+}
+
+/// What a fill that failed found, kept to say why its write did not land.
+type FillFailure = Rc<RefCell<Option<io::Error>>>;
+
+/// `built` with the write of the file `to` names from `fill`: as the file of the
+/// entity bound there, as a new entity's file where `to` says where it came from, or
+/// as one no entity is bound to, unless `tags` are to go on it, which makes it an
+/// entity's.
+fn save_part<'l>(
+    built: Built<'l>,
+    view: &View,
+    folder: &Path,
+    at: &RelPath,
+    to: To<'_>,
+    fill: Fill,
+    tags: &[String],
+) -> (Built<'l>, FillFailure) {
+    let To { expect, came, .. } = to;
     let failed = Rc::new(RefCell::new(None));
     let source: Box<dyn Filled<Counted>> = Box::new(Filling {
         fill,
         folder: folder.to_path_buf(),
         failed: failed.clone(),
     });
-    let built = library.intent(label);
     let entity = view
-        .at(&at)
+        .at(at)
         .map(|entity| entity.id())
-        .or_else(|| missing_at(&view, &at));
+        .or_else(|| missing_at(view, at));
     let built = match (entity, came) {
-        (Some(entity), _) => built.save_from(entity, &at, source, expect),
+        (Some(entity), _) => {
+            let built = built.save_from(entity, at, source, expect);
+            tags.iter()
+                .fold(built, |built, name| built.add(entity, TAGS, name.clone()))
+        }
         (None, Some(came)) => {
             let (built, _) = built.create(|e| {
-                e.set(ORIGIN, came).save_from(&at, source, expect);
+                e.set(ORIGIN, came).save_from(at, source, expect);
+                for name in tags {
+                    e.add(TAGS, name.clone());
+                }
             });
             built
         }
-        (None, None) => built.save_file_from(&at, source, expect),
+        (None, None) if tags.is_empty() => built.save_file_from(at, source, expect),
+        (None, None) => {
+            let (built, _) = built.create(|e| {
+                e.save_from(at, source, expect);
+                for name in tags {
+                    e.add(TAGS, name.clone());
+                }
+            });
+            built
+        }
     };
-    let committed = built.commit().map_err(|e| failure(e, failed.take()))?;
-    let stat = stat_at(folder, path)?;
-    Ok((stat, committed))
+    (built, failed)
+}
+
+/// How one part of a batch is answered once the batch is committed: where it puts a
+/// file or a folder, by which it landed, and the event it answers with.
+struct Owed {
+    /// The part of the batch it is of, in order.
+    part: usize,
+    at: Option<RelPath>,
+    failed: Option<FillFailure>,
+    answer: Answering,
+}
+
+enum Answering {
+    Saved {
+        id: u64,
+        path: LibPath,
+        crc: u32,
+        identity: Option<toshokan::Identity>,
+    },
+    Rewritten {
+        id: u64,
+        path: LibPath,
+    },
+    Imported {
+        id: u64,
+        path: LibPath,
+    },
+    Moved {
+        from: LibPath,
+        to: LibPath,
+    },
+    /// Answered only where it did not land: what it was doing.
+    Quiet(String),
+}
+
+impl Answering {
+    /// The event that says the part did not land, because of `failure`.
+    fn refused(self, failure: Failure) -> Option<Event> {
+        let why = || match &failure {
+            Failure::Io(why) => why.clone(),
+            Failure::Moved => "the file changed on disk".to_string(),
+            Failure::Room(len) => format!("{len} bytes do not fit"),
+        };
+        Some(match self {
+            Answering::Saved { id, path, .. } => Event::Saved {
+                id,
+                path,
+                result: Err(failure),
+            },
+            Answering::Rewritten { id, path } => Event::Rewritten {
+                id,
+                path,
+                result: Err(failure),
+            },
+            Answering::Imported { id, path } => Event::Imported {
+                id,
+                path,
+                result: Err(failure),
+            },
+            Answering::Moved { from, to } => Event::Moved {
+                from,
+                to,
+                result: Err(why()),
+            },
+            Answering::Quiet(doing) => Event::Failed(format!("{doing}: {}", why())),
+        })
+    }
+
+    /// The event that says the part landed; none for one answered only on failure.
+    fn landed(self, folder: &Path) -> Option<Event> {
+        Some(match self {
+            Answering::Saved {
+                id,
+                path,
+                crc,
+                identity,
+            } => {
+                let result = stat_at(folder, &path).map(|stat| Fingerprint {
+                    crc: Some(crc),
+                    identity,
+                    ..Fingerprint::unread(stat)
+                });
+                Event::Saved { id, path, result }
+            }
+            Answering::Rewritten { id, path } => {
+                let result = landed(folder, &path);
+                Event::Rewritten { id, path, result }
+            }
+            Answering::Imported { id, path } => {
+                let result = landed(folder, &path);
+                Event::Imported { id, path, result }
+            }
+            Answering::Moved { from, to } => Event::Moved {
+                from,
+                to,
+                result: Ok(()),
+            },
+            Answering::Quiet(_) => return None,
+        })
+    }
+}
+
+/// Commit the parts of one gesture as one intent, and answer each as it would be
+/// answered alone: each by whether its file or folder landed. A part whose file could
+/// not be read before anything was written is answered so, and the rest committed
+/// without it. A tag on a file saved in the same batch goes on it as it is made.
+fn batch(
+    library: &mut Library<Counted>,
+    folder: &Path,
+    label: &str,
+    mut parts: Vec<Intent>,
+    answer: &mut impl FnMut(Event),
+) -> Option<toshokan::Committed> {
+    loop {
+        let again = parts.iter().any(Intent::reads).then(|| parts.clone());
+        let tried = attempt(library, folder, label, parts);
+        let unread: BTreeSet<usize> = tried
+            .owed
+            .iter()
+            .filter(|owed| {
+                owed.failed
+                    .as_ref()
+                    .is_some_and(|failed| failed.borrow().is_some())
+            })
+            .map(|owed| owed.part)
+            .collect();
+        let retry = again.filter(|_| tried.changes.is_none() && !unread.is_empty());
+        let Some(again) = retry else {
+            return tried.answer(folder, answer);
+        };
+        for owed in tried
+            .owed
+            .into_iter()
+            .filter(|owed| unread.contains(&owed.part))
+        {
+            let filled = owed
+                .failed
+                .and_then(|failed| failed.take())
+                .map(fill_failure);
+            answer_some(
+                answer,
+                owed.answer
+                    .refused(filled.unwrap_or(Failure::Io("not read".into()))),
+            );
+        }
+        parts = again
+            .into_iter()
+            .enumerate()
+            .filter(|(at, _)| !unread.contains(at))
+            .map(|(_, part)| part)
+            .collect();
+    }
+}
+
+/// One try at a batch: what each part is owed, and how the commit went.
+struct Tried {
+    owed: Vec<Owed>,
+    refused: Vec<Event>,
+    reached: Option<BTreeSet<RelPath>>,
+    changes: Option<toshokan::Committed>,
+    why: Option<Failure>,
+}
+
+impl Tried {
+    /// Answer each part, and return what the commit changed.
+    fn answer(self, folder: &Path, answer: &mut impl FnMut(Event)) -> Option<toshokan::Committed> {
+        let Tried {
+            owed,
+            refused,
+            reached,
+            changes,
+            why,
+        } = self;
+        for event in refused {
+            answer(event);
+        }
+        for Owed {
+            at,
+            failed,
+            answer: answering,
+            ..
+        } in owed
+        {
+            let landed = match (&reached, &at) {
+                (None, _) => true,
+                (Some(reached), Some(at)) => reached.contains(at),
+                (Some(_), None) => changes.is_some(),
+            };
+            let event = match landed {
+                true => answering.landed(folder),
+                false => {
+                    let filled = failed.and_then(|failed| failed.take()).map(fill_failure);
+                    let failure = filled.or_else(|| why.clone());
+                    answering.refused(failure.unwrap_or(Failure::Io("not made".to_string())))
+                }
+            };
+            answer_some(answer, event);
+        }
+        changes
+    }
+}
+
+fn attempt(
+    library: &mut Library<Counted>,
+    folder: &Path,
+    label: &str,
+    parts: Vec<Intent>,
+) -> Tried {
+    let view = library.view();
+    let saved: BTreeSet<LibPath> = parts
+        .iter()
+        .filter_map(|part| match part {
+            Intent::Save { path, .. } | Intent::Import { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut tags: BTreeMap<LibPath, Vec<String>> = BTreeMap::new();
+    for part in &parts {
+        let Intent::Tag { files, name, .. } = part else {
+            continue;
+        };
+        for key in files {
+            if let Key::File(path) = key {
+                if saved.contains(path) {
+                    tags.entry(path.clone()).or_default().push(name.clone());
+                }
+            }
+        }
+    }
+    let mut parting = Parting {
+        built: Some(library.intent(label)),
+        view: &view,
+        folder,
+        tags: &tags,
+        part: 0,
+        owed: Vec::new(),
+    };
+    let mut refused = Vec::new();
+    for (at, part) in parts.into_iter().enumerate() {
+        parting.part = at;
+        if let Err(event) = parting.add(part) {
+            refused.push(*event);
+        }
+    }
+    let Parting { built, owed, .. } = parting;
+    let built = built.expect("each part puts the intent back");
+    let (reached, changes, why) = match built.commit() {
+        Ok(committed) => (None, Some(committed), None),
+        Err(Error::Partial(partial)) => {
+            let reached: BTreeSet<RelPath> = partial.report.landed.iter().cloned().collect();
+            let why = format!("the change stopped at {}", partial.report.stopped);
+            (
+                Some(reached),
+                Some(partial.committed),
+                Some(Failure::Io(why)),
+            )
+        }
+        Err(e) => (Some(BTreeSet::new()), None, Some(failure(e, None))),
+    };
+    Tried {
+        owed,
+        refused,
+        reached,
+        changes,
+        why,
+    }
+}
+
+fn answer_some(answer: &mut impl FnMut(Event), event: Option<Event>) {
+    if let Some(event) = event {
+        answer(event);
+    }
+}
+
+/// One intent being built from the parts of a batch.
+struct Parting<'l, 'v> {
+    /// Taken while a part is built into it, and put back.
+    built: Option<Built<'l>>,
+    view: &'v View,
+    folder: &'v Path,
+    tags: &'v BTreeMap<LibPath, Vec<String>>,
+    /// The part being built.
+    part: usize,
+    owed: Vec<Owed>,
+}
+
+impl<'l> Parting<'l, '_> {
+    /// Build `part` into the intent, or say at once why it cannot be.
+    fn add(&mut self, part: Intent) -> Result<(), Box<Event>> {
+        let at = |path: &LibPath| relative(path).ok_or_else(|| no_path(path));
+        match part {
+            Intent::Save {
+                id,
+                path,
+                bytes,
+                expect,
+                came,
+            } => {
+                let answering = Answering::Saved {
+                    id,
+                    crc: nord_format::crc::crc32(&bytes),
+                    identity: keys::identity_of_bytes(&path, &bytes),
+                    path: path.clone(),
+                };
+                let to = To {
+                    path: &path,
+                    expect,
+                    came,
+                };
+                self.save(to, Fill::Bytes(bytes), answering)
+            }
+            Intent::Rewrite {
+                id,
+                path,
+                from,
+                edit,
+                expect,
+            } => {
+                let answering = Answering::Rewritten {
+                    id,
+                    path: path.clone(),
+                };
+                let to = To {
+                    path: &path,
+                    expect,
+                    came: None,
+                };
+                self.save(to, Fill::Edited(from, edit), answering)
+            }
+            Intent::Import {
+                id,
+                path,
+                from,
+                expect,
+                came,
+            } => {
+                let answering = Answering::Imported {
+                    id,
+                    path: path.clone(),
+                };
+                let fill = match from {
+                    Source::Outside(from) => Fill::Outside(from),
+                    Source::Part(part) => Fill::Part(part),
+                    Source::Edited(from, edit) => Fill::Edited(from, edit),
+                    Source::Library(source, known) => {
+                        let still = still(self.folder, &source, &known).unwrap_or(false);
+                        if !still {
+                            let changed = Failure::Io("the file it copies changed on disk".into());
+                            return Err(Box::new(
+                                answering.refused(changed).expect("a copy answers"),
+                            ));
+                        }
+                        Fill::Library(source)
+                    }
+                };
+                let to = To {
+                    path: &path,
+                    expect,
+                    came,
+                };
+                self.save(to, fill, answering)
+            }
+            Intent::Move { moves } => {
+                for moving in moves {
+                    let answering = Answering::Moved {
+                        from: moving.from.clone(),
+                        to: moving.to.clone(),
+                    };
+                    let (from, to) = match (at(&moving.from), at(&moving.to)) {
+                        (Ok(from), Ok(to)) => (from, to),
+                        (Err(why), _) | (_, Err(why)) => {
+                            let refused = answering.refused(Failure::Io(why));
+                            return Err(Box::new(refused.expect("a move answers")));
+                        }
+                    };
+                    let built = self.take();
+                    self.built = Some(match self.view.at(&from).map(|entity| entity.id()) {
+                        Some(entity) => built.rename(entity, &to, moving.expect),
+                        None => built.rename_file(&from, &to, moving.expect),
+                    });
+                    self.owe(Some(to), None, answering);
+                }
+                Ok(())
+            }
+            Intent::MoveFolder { from, to } => {
+                let answering = Answering::Moved {
+                    from: from.clone(),
+                    to: to.clone(),
+                };
+                let (from, to) = match (at(&from), at(&to)) {
+                    (Ok(from), Ok(to)) => (from, to),
+                    (Err(why), _) | (_, Err(why)) => {
+                        return Err(Box::new(
+                            answering.refused(Failure::Io(why)).expect("a move answers"),
+                        ));
+                    }
+                };
+                self.built = Some(self.take().move_tree(&from, &to));
+                self.owe(Some(to), None, answering);
+                Ok(())
+            }
+            Intent::Delete { files } => {
+                for (path, expect) in files {
+                    let doing = Answering::Quiet(format!("deleting {path}"));
+                    let at = at(&path).map_err(|why| {
+                        Box::new(Event::Failed(format!("deleting {path}: {why}")))
+                    })?;
+                    let built = self.take();
+                    self.built = Some(match self.view.at(&at).map(|entity| entity.id()) {
+                        Some(entity) => built.trash(entity, expect).delete(entity),
+                        None => built.trash_file(&at, expect),
+                    });
+                    self.owe(None, None, doing);
+                }
+                Ok(())
+            }
+            Intent::MakeDir { path } => {
+                let at = at(&path)
+                    .map_err(|why| Box::new(Event::Failed(format!("making {path}: {why}"))))?;
+                self.built = Some(self.take().make_dir(&at));
+                self.owe(Some(at), None, Answering::Quiet(format!("making {path}")));
+                Ok(())
+            }
+            Intent::RemoveDir { path } => {
+                let at = at(&path)
+                    .map_err(|why| Box::new(Event::Failed(format!("removing {path}: {why}"))))?;
+                self.built = Some(self.take().remove_dir(&at));
+                self.owe(None, None, Answering::Quiet(format!("removing {path}")));
+                Ok(())
+            }
+            Intent::Tag { files, name, make } => {
+                // A file this batch saves wears the tag as it is made.
+                let rest: Vec<Key> = files
+                    .into_iter()
+                    .filter(|key| !matches!(key, Key::File(path) if self.tags.contains_key(path)))
+                    .collect();
+                let taggable = |key: &Key| match key {
+                    Key::Entity(_) => true,
+                    Key::File(path) => relative(path).is_some_and(|at| {
+                        self.view.at(&at).is_some() || self.view.listed(&at).is_some()
+                    }),
+                };
+                if let Some(Key::File(path)) = rest.iter().find(|key| !taggable(key)) {
+                    return Err(Box::new(Event::Failed(format!(
+                        "tagging {path}: it is not listed"
+                    ))));
+                }
+                let built = tag(self.take(), self.view, &rest, &name)
+                    .expect("every file it tags is listed");
+                self.built = Some(match make {
+                    true => list_tag(built, self.view, name.clone()),
+                    false => built,
+                });
+                self.owe(
+                    None,
+                    None,
+                    Answering::Quiet(format!("tagging with “{name}”")),
+                );
+                Ok(())
+            }
+            other => Err(Box::new(Event::Failed(format!(
+                "{} cannot be made with other changes",
+                other.label()
+            )))),
+        }
+    }
+
+    fn save(&mut self, to: To<'_>, fill: Fill, answering: Answering) -> Result<(), Box<Event>> {
+        let Some(at) = relative(to.path) else {
+            let failure = Failure::Io(no_path(to.path));
+            return Err(Box::new(
+                answering.refused(failure).expect("a write answers"),
+            ));
+        };
+        let tags = self.tags.get(to.path).map_or(&[][..], Vec::as_slice);
+        let built = self.take();
+        let (built, failed) = save_part(built, self.view, self.folder, &at, to, fill, tags);
+        self.built = Some(built);
+        self.owe(Some(at), Some(failed), answering);
+        Ok(())
+    }
+
+    fn take(&mut self) -> Built<'l> {
+        self.built.take().expect("each part puts the intent back")
+    }
+
+    fn owe(&mut self, at: Option<RelPath>, failed: Option<FillFailure>, answer: Answering) {
+        let part = self.part;
+        self.owed.push(Owed {
+            part,
+            at,
+            failed,
+            answer,
+        });
+    }
 }
 
 /// Copy `from` to `path`, where the copy of a library file is refused once the file is
@@ -753,14 +1309,19 @@ fn still(folder: &Path, path: &LibPath, known: &Fingerprint) -> io::Result<bool>
 /// What failed to fill a file, or why toshokan refused the change, as the app tells it.
 fn failure(e: Error, filled: Option<io::Error>) -> Failure {
     if let Some(e) = filled {
-        return match rewrite::is_changed(&e) {
-            true => Failure::Moved,
-            false => Failure::Io(e.to_string()),
-        };
+        return fill_failure(e);
     }
     match e {
         Error::Refused(Refusal::Changed(_) | Refusal::Directory(_)) => Failure::Moved,
         e => Failure::Io(e.to_string()),
+    }
+}
+
+/// Why a fill that failed did not land.
+fn fill_failure(e: io::Error) -> Failure {
+    match rewrite::is_changed(&e) {
+        true => Failure::Moved,
+        false => Failure::Io(e.to_string()),
     }
 }
 

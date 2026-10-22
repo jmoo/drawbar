@@ -452,7 +452,7 @@ pub enum CopyOf {
 }
 
 /// What an [`Intent::Import`] copies.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Source {
     /// A file outside the library.
     Outside(Outside),
@@ -547,7 +547,7 @@ pub enum Cmd {
 /// files it changes as the view it was made from showed them. A change to a file names
 /// it by its path: the backend finds the entity bound to it, if any, in the view it
 /// commits against, and checks the file holds what `expect` says before it writes.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Intent {
     /// Put a tag on each of these files, making an entity for each one without, and
     /// where `make` says, add the tag to the library's list of tags as
@@ -618,6 +618,14 @@ pub enum Intent {
     Delete {
         files: Vec<(LibPath, toshokan::Expect)>,
     },
+    /// Make an empty folder where nothing is.
+    MakeDir { path: LibPath },
+    /// Remove a folder, empty but for the files the changes before it in its batch
+    /// move out.
+    RemoveDir { path: LibPath },
+    /// The changes of one gesture, in order, as one change: each is answered as it
+    /// would be alone, and those that did not land answer how they failed.
+    Batch(Vec<Intent>),
 }
 
 /// One rename of an [`Intent::Move`]: the file at `from`, which holds what `expect`
@@ -639,6 +647,14 @@ impl Intent {
             _ => format!("{} {} files", self.label(), paths.len()),
         };
         match self {
+            Intent::Batch(parts) => {
+                let label = self.label();
+                let files: usize = parts.iter().map(Intent::files).sum();
+                match parts.iter().all(|part| part.label() == label) && files > 1 {
+                    true => format!("{label} {files} files"),
+                    false => parts.first().map(Intent::describe).unwrap_or_default(),
+                }
+            }
             Intent::Move { moves } => files(moves.iter().map(|moving| &moving.from).collect()),
             Intent::Delete { files: deleted } => {
                 files(deleted.iter().map(|(path, _)| path).collect())
@@ -651,6 +667,8 @@ impl Intent {
             Intent::Save { path, .. }
             | Intent::Rewrite { path, .. }
             | Intent::Import { path, .. }
+            | Intent::MakeDir { path }
+            | Intent::RemoveDir { path }
             | Intent::MoveFolder { from: path, .. } => named(path),
             Intent::Forget { .. } => self.label().to_string(),
         }
@@ -684,6 +702,29 @@ impl Intent {
                 false => "Move",
             },
             Intent::Delete { .. } => "Delete",
+            Intent::MakeDir { .. } => "New folder",
+            Intent::RemoveDir { .. } => "Remove folder",
+            Intent::Batch(parts) => parts.first().map_or("Change", Intent::label),
+        }
+    }
+
+    /// Whether what it writes is filled from a file, whose read may fail before
+    /// anything is written.
+    pub fn reads(&self) -> bool {
+        match self {
+            Intent::Rewrite { .. } | Intent::Import { .. } => true,
+            Intent::Batch(parts) => parts.iter().any(Intent::reads),
+            _ => false,
+        }
+    }
+
+    /// How many files or folders it changes, for the name of a batch of them.
+    fn files(&self) -> usize {
+        match self {
+            Intent::Move { moves } => moves.len(),
+            Intent::Delete { files } => files.len(),
+            Intent::Batch(parts) => parts.iter().map(Intent::files).sum(),
+            _ => 1,
         }
     }
 }

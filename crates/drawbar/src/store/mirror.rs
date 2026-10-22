@@ -92,14 +92,12 @@ struct SlotView {
     kept: Option<(u64, blake3::Hash)>,
 }
 
-/// The renames, or the deletions, of the files one gesture asked for, sent as one
-/// change.
+/// The changes to files and folders one gesture asked for, sent as one change.
 #[derive(Default)]
 struct Batch {
     /// The take of the asks they came in.
     take: u64,
-    moves: Vec<Moving>,
-    deletes: Vec<(LibPath, toshokan::Expect)>,
+    parts: Vec<Intent>,
 }
 
 /// What a view lists that drawbar shows.
@@ -248,11 +246,14 @@ pub struct Store {
     /// Changes to files the user asked for, each carried out once the one before it has
     /// gone and nothing it waits on is in flight.
     asks: VecDeque<(FileAsk, u64)>,
-    /// How many times changes to files were taken from the workspace: the take each ask
-    /// came in, so the asks of one gesture, which come in one, are one change.
-    taken: u64,
-    /// The renames and the deletions to send as one change.
+    /// How many passes sent what they gathered: the asks taken before a pass ends are
+    /// one gesture's, and carry its number.
+    passes: u64,
+    /// The changes gathered to send as one change.
     batch: Batch,
+    /// The asset each overwrite came from, by the asset it overwrites, whose file the
+    /// overwrite's change deletes.
+    deleting_with: BTreeMap<u64, u64>,
     /// The projection in hand follows this session's undo or redo, and says nothing of
     /// what it finds moved or changed.
     quiet: bool,
@@ -353,8 +354,9 @@ impl Store {
             view: None,
             asked: Vec::new(),
             asks: VecDeque::new(),
-            taken: 0,
+            passes: 0,
             batch: Batch::default(),
+            deleting_with: BTreeMap::new(),
             quiet: false,
             quietly: BTreeSet::new(),
             history: History::default(),
@@ -1101,7 +1103,7 @@ impl Store {
     fn rename_folder(&mut self, from: LibPath, to: LibPath) {
         self.ids.moved(&from, &to);
         self.moving.push((from.clone(), to.clone()));
-        self.write(Intent::MoveFolder { from, to });
+        self.part(Intent::MoveFolder { from, to });
     }
 
     /// Put back where they were the paths a rename that failed had moved.
@@ -2419,6 +2421,7 @@ impl Store {
         browser: &mut Browser,
         log: &mut Log,
     ) {
+        self.deleted_with(id, result.is_ok());
         let Some(record) = self.records.get_mut(&id) else {
             return;
         };
@@ -2539,7 +2542,7 @@ impl Store {
                 continue;
             };
             record.saving = true;
-            self.write(Intent::Rewrite {
+            self.part(Intent::Rewrite {
                 id,
                 path,
                 from,
@@ -2562,6 +2565,7 @@ impl Store {
         log: &mut Log,
     ) {
         let from = workspace.arrived(id);
+        self.deleted_with(id, result.is_ok());
         let Some(record) = self.records.get_mut(&id) else {
             return;
         };
@@ -2645,6 +2649,8 @@ impl Store {
     /// files as the commands before it left them, or a file moved after it was sent would
     /// read as one deleted and another made.
     pub fn sync(&mut self, workspace: &mut Workspace, browser: &mut Browser, pass: Pass) -> bool {
+        // A tag asked for with the files it waits on can go in their change.
+        self.asked.extend(browser.take_tag_asks());
         if pass != Pass::Files {
             self.summarize(workspace);
             self.cache.write();
@@ -2681,6 +2687,8 @@ impl Store {
         let (removals, ops): (Vec<Op>, Vec<Op>) = ops
             .into_iter()
             .partition(|op| matches!(op, Op::RemoveDir(_)));
+        // The folder changes are this pass's gesture's, as its asks are.
+        self.batch.take = self.passes;
         for op in ops {
             self.tree_op(op);
         }
@@ -2692,6 +2700,8 @@ impl Store {
         for op in removals {
             self.tree_op(op);
         }
+        self.send_batch();
+        self.passes += 1;
         if pass == Pass::Full {
             self.fetch_tracked(workspace, browser);
         }
@@ -2865,8 +2875,8 @@ impl Store {
     /// flight is one the listing's end keeps or drops with the rest.
     fn tree_op(&mut self, op: Op) {
         match op {
-            Op::MakeDir(path) => self.folder(FileCmd::MakeDir(path)),
-            Op::RemoveDir(path) => self.folder(FileCmd::RemoveDir(path)),
+            Op::MakeDir(path) => self.part(Intent::MakeDir { path }),
+            Op::RemoveDir(path) => self.part(Intent::RemoveDir { path }),
             Op::MoveDir { from, to } => {
                 self.cache.moved(&from, &to);
                 for record in self.records.values_mut() {
@@ -2877,12 +2887,6 @@ impl Store {
                 self.rename_folder(from, to);
             }
         }
-    }
-
-    /// Make or remove an empty folder, which toshokan does not keep.
-    fn folder(&mut self, cmd: FileCmd) {
-        self.sent += 1;
-        self.send(Cmd::File(cmd));
     }
 
     /// Send the copy each arriving asset waits on. Returns `false` where one waits for a
@@ -2907,7 +2911,11 @@ impl Store {
                 done = false;
                 continue;
             }
-            done &= self.import(entity, &path, &from, waiting);
+            let sent = self.import(entity, &path, &from, waiting);
+            if sent {
+                self.delete_with(id, workspace);
+            }
+            done &= sent;
         }
         done
     }
@@ -2931,10 +2939,7 @@ impl Store {
             // change to what it moves goes out.
             let waiting = self.waiting(held);
             carried = match ask {
-                FileAsk::Save(id) => {
-                    self.send_batch();
-                    self.save(id, workspace, &waiting)
-                }
+                FileAsk::Save(id) => self.save(id, workspace, &waiting),
                 FileAsk::Move { id, .. } => self.relocate(id, workspace, &waiting),
                 FileAsk::Delete { id, path } => self.delete(id, &path, workspace, &waiting),
             };
@@ -2943,7 +2948,6 @@ impl Store {
             }
             self.asks.pop_front();
         }
-        self.send_batch();
         carried
     }
 
@@ -2953,21 +2957,66 @@ impl Store {
         if asks.is_empty() {
             return;
         }
-        self.taken += 1;
-        let take = self.taken;
+        let take = self.passes;
         self.asks.extend(asks.into_iter().map(|ask| (ask, take)));
     }
 
-    /// Send the renames, or the deletions, gathered as one change.
+    /// Send the changes gathered from one gesture as one change, with a tag waiting
+    /// for none but the new files it saves.
     fn send_batch(&mut self) {
-        let moves = std::mem::take(&mut self.batch.moves);
-        let files = std::mem::take(&mut self.batch.deletes);
-        if !moves.is_empty() {
-            self.write(Intent::Move { moves });
+        let mut parts = std::mem::take(&mut self.batch.parts);
+        self.absorb_tag(&mut parts);
+        match parts.len() {
+            0 => {}
+            1 => self.write(parts.remove(0)),
+            _ => self.write(Intent::Batch(parts)),
         }
-        if !files.is_empty() {
-            self.write(Intent::Delete { files });
+    }
+
+    /// Add a change to the one being gathered: a rename or a deletion to one of its
+    /// kind just before it.
+    fn part(&mut self, intent: Intent) {
+        match (self.batch.parts.last_mut(), intent) {
+            (Some(Intent::Move { moves }), Intent::Move { moves: more }) => moves.extend(more),
+            (Some(Intent::Delete { files }), Intent::Delete { files: more }) => files.extend(more),
+            (_, intent) => self.batch.parts.push(intent),
         }
+    }
+
+    /// Take into `parts` the next tag asked for, where every asset it names is one
+    /// `parts` saves as a new file: the files are made wearing it.
+    fn absorb_tag(&mut self, parts: &mut Vec<Intent>) {
+        let made: BTreeMap<u64, LibPath> = parts
+            .iter()
+            .filter_map(|part| match part {
+                Intent::Save {
+                    id,
+                    path,
+                    expect: toshokan::Expect::Absent,
+                    ..
+                }
+                | Intent::Import {
+                    id,
+                    path,
+                    expect: toshokan::Expect::Absent,
+                    ..
+                } => Some((*id, path.clone())),
+                _ => None,
+            })
+            .collect();
+        let Some(Asked::Tag { assets, name, make }) = self.asked.first() else {
+            return;
+        };
+        let Some(files) = assets
+            .iter()
+            .map(|id| made.get(id).map(|path| Key::File(path.clone())))
+            .collect::<Option<Vec<Key>>>()
+        else {
+            return;
+        };
+        let (name, make) = (name.clone(), *make);
+        self.asked.remove(0);
+        parts.push(Intent::Tag { files, name, make });
     }
 
     /// Write an asset's file with what it was saved as: a new file where it has none, and
@@ -2997,7 +3046,7 @@ impl Store {
                     ..Record::of_file(path.clone(), None)
                 },
             );
-            self.write(Intent::Save {
+            self.part(Intent::Save {
                 id,
                 path,
                 bytes: bytes(),
@@ -3028,14 +3077,47 @@ impl Store {
         record.saved = stamp;
         record.saving = true;
         record.path = Some(at.clone());
-        self.write(Intent::Save {
+        self.part(Intent::Save {
             id,
             path: at,
             bytes: bytes(),
             expect,
             came: None,
         });
+        self.delete_with(id, workspace);
         true
+    }
+
+    /// Delete, in the change that saves or copies over the file of `id`, the file of
+    /// the asset the overwrite came from, which goes once that change lands.
+    fn delete_with(&mut self, id: u64, workspace: &Workspace) {
+        let Some(from) = workspace.overwritten_from(id) else {
+            return;
+        };
+        let Some(record) = self.records.get(&from).filter(|record| !record.saving) else {
+            return;
+        };
+        let (Some(path), Some(print), false) =
+            (record.path.clone(), record.fingerprint, record.missing)
+        else {
+            return;
+        };
+        self.part(Intent::Delete {
+            files: vec![(path, print.expect())],
+        });
+        self.deleting_with.insert(id, from);
+    }
+
+    /// The overwrite of `id` answered: the asset it came from, whose file it deleted,
+    /// has no file now where it landed.
+    fn deleted_with(&mut self, id: u64, landed: bool) {
+        let Some(from) = self.deleting_with.remove(&id).filter(|_| landed) else {
+            return;
+        };
+        self.ids.remove(from);
+        if let Some(path) = self.records.remove(&from).and_then(|record| record.path) {
+            self.cache.forget(&path);
+        }
     }
 
     /// Move an asset's file to where the asset is now. `false` while a write over the file
@@ -3062,13 +3144,12 @@ impl Store {
         self.cache.moved(&at, &to);
         self.ids.moved(&at, &to);
         self.moving.push((at.clone(), to.clone()));
-        if !self.batch.deletes.is_empty() {
-            self.send_batch();
-        }
-        self.batch.moves.push(Moving {
-            from: at,
-            to,
-            expect,
+        self.part(Intent::Move {
+            moves: vec![Moving {
+                from: at,
+                to,
+                expect,
+            }],
         });
         true
     }
@@ -3104,10 +3185,9 @@ impl Store {
         };
         self.cache.forget(&at);
         if let (Some(print), false) = (record.fingerprint, record.missing) {
-            if !self.batch.moves.is_empty() {
-                self.send_batch();
-            }
-            self.batch.deletes.push((at, print.expect()));
+            self.part(Intent::Delete {
+                files: vec![(at, print.expect())],
+            });
         }
         true
     }
@@ -3151,7 +3231,7 @@ impl Store {
             _ => toshokan::Expect::Absent,
         };
         let came = Came::of(&entity.origin).filter(|_| record.fingerprint.is_none());
-        self.write(Intent::Import {
+        self.part(Intent::Import {
             id: entity.id,
             path,
             from,

@@ -2805,6 +2805,14 @@ impl Workspace {
         true
     }
 
+    /// The asset an overwrite of `id` comes from, while it is as it was when moved and
+    /// the overwrite's save or copy is still to answer.
+    pub fn overwritten_from(&self, id: u64) -> Option<u64> {
+        let saving = self.saving_over.get(&id).map(|(leaving, _)| leaving);
+        let leaving = saving.or_else(|| self.moving_over.get(&id))?;
+        self.unchanged(leaving).then_some(leaving.from)
+    }
+
     /// The asset a copy that has answered over the file of `id` was moved from, which
     /// goes where the copy landed and stays where it did not.
     pub fn moved_over(&mut self, id: u64) -> Option<Leaving> {

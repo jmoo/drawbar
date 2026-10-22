@@ -3172,7 +3172,8 @@ fn keep_both_writes_a_resting_samples_edit_beside_its_file() {
 }
 
 /// A sample instrument resting in its file, renamed onto a taken name and overwriting
-/// what is there, is copied over that file, which keeps its asset; its own file goes.
+/// what is there, is copied over that file, which keeps its asset; its own file goes in
+/// the same change, which one undo takes back.
 #[test]
 fn a_resting_sample_renamed_over_another_is_copied_over_its_file() {
     let root = Temp::new();
@@ -3194,7 +3195,6 @@ fn a_resting_sample_renamed_over_another_is_copied_over_its_file() {
     let acts = session.bench.browser.answer("Overwrite");
     session.bench.act(acts);
     session.sync();
-    assert!(root.at("Moved.nsmp").exists(), "kept until the copy lands");
     session.let_go();
     session.sync();
 
@@ -3208,6 +3208,14 @@ fn a_resting_sample_renamed_over_another_is_copied_over_its_file() {
     assert_eq!(session.worn(kept), ["Sunday"]);
     let entity = session.bench.workspace.get(kept).unwrap();
     assert!(entity.rests().is_some() && entity.held_whole() == 0);
+
+    session.undo();
+    session.settle();
+    assert!(
+        root.read("Kept.nsmp") == theirs,
+        "one undo puts back what was there"
+    );
+    assert!(root.read("Moved.nsmp") == ours, "and the file it came from");
 }
 
 /// A copy over another file that does not land leaves the asset it was moved from, and
@@ -4695,6 +4703,159 @@ fn a_selection_moved_together_is_one_undo_step() {
     session.settle();
     assert_eq!(root.names("Gig"), Vec::<String>::new(), "both moved back");
     assert_eq!(root.names(""), top, "beside the folder");
+}
+
+/// Files dropped together are one change: one undo takes every one back.
+#[test]
+fn files_dropped_together_are_one_undo_step() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let program = Fresh::Program.bytes().unwrap();
+    let dropped = ["a.ne5p", "b.ne5p"].map(|name| crate::browser::Act::Import {
+        name: name.into(),
+        bytes: program.clone(),
+    });
+    session.bench.act(dropped.into());
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "a.ne5p", "b.ne5p"]);
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo New 2 files")
+    );
+    session.undo();
+    assert_eq!(root.names(""), [".drawbar"], "both taken back");
+}
+
+/// A file renamed onto another's name and written over it is one change with the
+/// deletion of the file it came from: one undo puts both back.
+#[test]
+fn an_overwrite_and_the_file_it_came_from_are_one_undo_step() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let (ours, theirs) = (with_gain(&program, "96"), with_gain(&program, "12"));
+    fs::write(root.at("Kept.ne5p"), &theirs).unwrap();
+    fs::write(root.at("Moved.ne5p"), &ours).unwrap();
+    let mut session = Session::open(&root);
+    let moved = session.named("Moved.ne5p");
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id: moved,
+        name: "Kept.ne5p".into(),
+    }]);
+    let acts = session.bench.browser.answer("Overwrite");
+    session.bench.act(acts);
+    session.sync();
+    session.let_go();
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "Kept.ne5p"]);
+    assert!(root.read("Kept.ne5p") == ours);
+
+    session.undo();
+    session.settle();
+    assert!(root.read("Kept.ne5p") == theirs, "what was there");
+    assert!(root.read("Moved.ne5p") == ours, "and the file it came from");
+}
+
+/// A tag put on a view of a slot keeps the view on this computer and tags its new file
+/// in one change: one undo takes back both.
+#[test]
+fn a_tag_on_a_slot_view_is_one_undo_step() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let at = Location::from_user(1, 1);
+    let id = session.view_slot("N1", at, Fresh::Program.bytes().unwrap());
+    let tag = session.bench.browser.tags.make("Sunday").unwrap();
+    session
+        .bench
+        .act(vec![crate::browser::Act::Tag { ids: vec![id], tag }]);
+    session.sync();
+    session.decided();
+    assert_eq!(session.worn(id), ["Sunday"]);
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo New “Grand.ne5p”")
+    );
+    session.undo();
+    assert_eq!(
+        root.names(""),
+        [".drawbar"],
+        "the file and its tag are taken back"
+    );
+}
+
+/// A bundle unpacked into a new folder is one change: one undo takes back the folder
+/// and every file in it.
+#[test]
+fn a_bundle_unpacked_is_one_undo_step() {
+    let (root, outside) = (Temp::new(), Temp::new());
+    let program = Fresh::Program.bytes().unwrap();
+    let bundle = bundle_of(&[
+        ("Program/Bank 1/Grand.ne5p", &program),
+        ("Program/Bank 1/Upright.ne5p", &with_gain(&program, "12")),
+    ]);
+    fs::write(outside.at("Gig.ne5pbundle"), &bundle).unwrap();
+    let mut session = Session::open(&root);
+    session.bench.act(vec![crate::browser::Act::Take {
+        from: outside.at("Gig.ne5pbundle"),
+        dir: LibPath::root(),
+        name: "Gig.ne5pbundle".into(),
+    }]);
+    let unbundled = loop {
+        session.bench.workspace.poll(&mut session.bench.log);
+        let unbundled = session.bench.workspace.take_unbundled();
+        if !unbundled.is_empty() {
+            break unbundled;
+        }
+        std::thread::yield_now();
+    };
+    let unpack = unbundled.into_iter().map(crate::browser::Act::Unpack);
+    session.bench.act(unpack.collect());
+    session.sync();
+    assert_eq!(root.names("Gig"), ["Grand.ne5p", "Upright.ne5p"]);
+    session.undo();
+    session.settle();
+    assert_eq!(
+        root.names(""),
+        [".drawbar"],
+        "the folder and its files are taken back"
+    );
+}
+
+/// A new folder is a change of its own, which undo takes back.
+#[test]
+fn a_new_folder_is_undone() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    session.bench.act(vec![crate::browser::Act::NewFolder]);
+    session.sync();
+    let made = root.names("");
+    assert_eq!(made.len(), 2, "{made:?}");
+    session.undo();
+    session.settle();
+    assert_eq!(root.names(""), [".drawbar"], "the folder is gone");
+}
+
+/// Removing a folder that holds files and folders moves them up and removes it in one
+/// change: one undo puts everything back where it was.
+#[test]
+fn removing_a_folder_with_folders_in_it_is_one_undo_step() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::create_dir_all(root.at("Gig/Set")).unwrap();
+    fs::write(root.at("Gig/a.ne5p"), &program).unwrap();
+    fs::write(root.at("Gig/Set/b.ne5p"), with_gain(&program, "12")).unwrap();
+    let mut session = Session::open(&root);
+    let gig = LibPath::parse("Gig").unwrap();
+    let folder = session.bench.browser.folders.id_of(&gig).expect("listed");
+    session
+        .bench
+        .act(vec![crate::browser::Act::RemoveFolder(folder)]);
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "Set", "a.ne5p"]);
+    session.undo();
+    session.settle();
+    assert_eq!(root.names(""), [".drawbar", "Gig"]);
+    assert_eq!(root.names("Gig"), ["Set", "a.ne5p"]);
+    assert_eq!(root.names("Gig/Set"), ["b.ne5p"]);
 }
 
 /// A new tag made on a selection and named in its editor is one change: one undo takes
