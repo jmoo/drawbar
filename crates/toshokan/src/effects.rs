@@ -135,6 +135,10 @@ impl Moves {
 pub struct Precondition {
     pub path: RelPath,
     pub expect: Expect,
+    /// Only an entry of exactly this name counts: the path is a rename's
+    /// destination that the volume may take for its source's name, and finding
+    /// the source there is no clash.
+    pub spelled: bool,
 }
 
 /// What a staged file is filled from.
@@ -271,6 +275,11 @@ struct Resolver<'r> {
     bindings: &'r Bindings,
 }
 
+/// Whether the volume, by `env`'s names, takes the two paths for one.
+fn one_name(env: &Env, a: &RelPath, b: &RelPath) -> bool {
+    a != b && env.names.key(a.as_str()) == env.names.key(b.as_str())
+}
+
 fn invalid(invalid: Invalid) -> Refusal {
     Refusal::Invalid(invalid)
 }
@@ -320,20 +329,21 @@ impl Resolver<'_> {
                 self.claim(*entity, &from)?;
                 self.touch(&to)?;
                 self.check(&from, *expect);
-                self.check(&to, Expect::Absent);
-                self.step(EffectStep::Rename {
-                    from,
-                    to: to.clone(),
-                });
+                self.rename(&from, &to, env)?;
                 self.end(*entity, Some(to));
             }
             FileChange::MoveTree { from, to } => {
                 let (from, to) = (self.library(from)?, self.library(to)?);
                 self.touch(&from)?;
                 self.touch(&to)?;
-                self.check(&to, Expect::Absent);
                 let rename_dir = capabilities.rename_dir && self.plan.moves.renames();
-                self.move_tree(&from, &to, rename_dir)?;
+                match rename_dir && one_name(env, &from, &to) {
+                    true => self.move_tree_aside(&from, &to, env)?,
+                    false => {
+                        self.check(&to, Expect::Absent);
+                        self.move_tree(&from, &to, rename_dir)?;
+                    }
+                }
             }
             FileChange::Adopt {
                 entity,
@@ -396,11 +406,7 @@ impl Resolver<'_> {
                 let to = self.library(to)?;
                 self.touch(&to)?;
                 self.check(&from, *expect);
-                self.check(&to, Expect::Absent);
-                self.step(EffectStep::Rename {
-                    from: from.clone(),
-                    to: to.clone(),
-                });
+                self.rename(&from, &to, env)?;
                 self.end_unbound(Some(from), Some(to));
             }
             FileChange::TrashFile { path, expect } => {
@@ -498,6 +504,88 @@ impl Resolver<'_> {
         Ok(())
     }
 
+    /// Renames the file `from` to `to`, where nothing is. Where the volume may take
+    /// the two for one name, as a change of case alone on a volume that ignores
+    /// case, the file itself may be found at `to`: only an entry of exactly that
+    /// name clashes, and the file moves through a free name beside it, so that no
+    /// step finds its source and its destination one file.
+    fn rename(
+        &mut self,
+        from: &RelPath,
+        to: &RelPath,
+        env: &mut Env,
+    ) -> std::result::Result<(), Refusal> {
+        if !one_name(env, from, to) {
+            self.check(to, Expect::Absent);
+            self.step(EffectStep::Rename {
+                from: from.clone(),
+                to: to.clone(),
+            });
+            return Ok(());
+        }
+        let aside = self.aside(from, env)?;
+        self.spelled(to);
+        self.step(EffectStep::Rename {
+            from: from.clone(),
+            to: aside.clone(),
+        });
+        self.step(EffectStep::Rename {
+            from: aside,
+            to: to.clone(),
+        });
+        Ok(())
+    }
+
+    /// [`Resolver::move_tree`] by renaming the directory through a free name beside
+    /// it, where the volume takes `from` and `to` for one name.
+    fn move_tree_aside(
+        &mut self,
+        from: &RelPath,
+        to: &RelPath,
+        env: &mut Env,
+    ) -> std::result::Result<(), Refusal> {
+        let aside = self.aside(from, env)?;
+        self.spelled(to);
+        let (ends, unbound) = (self.plan.files.len(), self.plan.unbound.len());
+        self.move_tree(from, &aside, true)?;
+        self.step(EffectStep::Rename {
+            from: aside.clone(),
+            to: to.clone(),
+        });
+        let rebased = |path: &RelPath| path.rebase(&aside, to).expect("the file is under the tree");
+        let done_after = self.plan.steps.len();
+        for end in &mut self.plan.files[ends..] {
+            end.path = end.path.as_ref().map(rebased);
+            end.done_after = done_after;
+        }
+        for end in &mut self.plan.unbound[unbound..] {
+            end.path = end.path.as_ref().map(rebased);
+            end.done_after = done_after;
+        }
+        Ok(())
+    }
+
+    /// Checks nothing is at `to` under exactly its name.
+    fn spelled(&mut self, to: &RelPath) {
+        self.plan.checks.push(Precondition {
+            path: to.clone(),
+            expect: Expect::Absent,
+            spelled: true,
+        });
+    }
+
+    /// A free name beside `path` to move it through, checked to be free.
+    fn aside(&mut self, path: &RelPath, env: &mut Env) -> std::result::Result<RelPath, Refusal> {
+        let name = path.name().expect("a renamed path has a name");
+        let parent = path.parent().expect("a renamed path has a parent");
+        let aside = parent
+            .join(&format!(".{name}.{}", env.nonce()))
+            .map_err(|_| invalid(Invalid::ReservedPath(path.clone())))?;
+        self.touch(&aside)?;
+        self.check(&aside, Expect::Absent);
+        Ok(aside)
+    }
+
     /// Takes `path` for one effect on a file no entity is bound to: refused where
     /// an entity's file is.
     fn unbound(&mut self, path: &RelPath) -> std::result::Result<RelPath, Refusal> {
@@ -553,6 +641,7 @@ impl Resolver<'_> {
         self.plan.checks.push(Precondition {
             path: path.clone(),
             expect,
+            spelled: false,
         });
     }
 
@@ -731,13 +820,26 @@ fn refusal<'a>(
 ) -> Fallible<'a, Option<Refusal>> {
     let identify = Rc::clone(identify);
     let checks = plan.checks.clone();
-    let paths: Vec<RelPath> = checks.iter().map(|check| check.path.clone()).collect();
-    let stated = fold(paths.into_iter(), Vec::new(), |mut metas, path| {
-        flow::stat(Root::Folder, &path).map_ok(move |meta| {
-            metas.push(meta);
-            metas
-        })
-    });
+    let paths: Vec<(RelPath, bool)> = checks
+        .iter()
+        .map(|check| (check.path.clone(), check.spelled))
+        .collect();
+    let stated = fold(
+        paths.into_iter(),
+        Vec::new(),
+        |mut metas, (path, spelled)| {
+            flow::stat(Root::Folder, &path).and_then(move |meta| {
+                if !spelled || meta.is_none() {
+                    metas.push(meta);
+                    return ok(metas);
+                }
+                spelled_so(path).map_ok(move |exactly| {
+                    metas.push(meta.filter(|_| exactly));
+                    metas
+                })
+            })
+        },
+    );
     let checked = stated.and_then(move |metas| {
         let identified = |check: &Precondition, meta: &Option<Meta>| match meta {
             Some(meta) if meta.kind == Kind::File => !matches!(check.expect, Expect::Listed { .. }),
@@ -791,6 +893,28 @@ fn refusal<'a>(
                 .map_ok(|meta| meta.is_none().then_some(Refusal::Emptied)),
         })
     })
+}
+
+/// Whether every name of `path`, which is there, is spelled as its directory lists it.
+fn spelled_so<'a>(path: RelPath) -> Fallible<'a, bool> {
+    let prefixes: Vec<RelPath> = std::iter::successors(Some(path), RelPath::parent)
+        .take_while(|prefix| !prefix.is_root())
+        .collect();
+    fold(
+        prefixes.into_iter(),
+        true,
+        |exactly, prefix| match exactly {
+            false => ok(false),
+            true => {
+                let parent = prefix.parent().expect("a name has a directory");
+                flow::list(Root::Folder, &parent).map_ok(move |entries| {
+                    entries
+                        .iter()
+                        .any(|entry| Some(&*entry.name) == prefix.name())
+                })
+            }
+        },
+    )
 }
 
 /// Carries out `record`'s steps from `start`, each destination durable before its

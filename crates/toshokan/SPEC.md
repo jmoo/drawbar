@@ -623,6 +623,14 @@ destination; restoring a trash item over a file, `to_trash` then `from_trash`. A
 directory moves by one `rename` where the backend renames directories, otherwise
 by one `rename` per file the last scan saw, then `remove_dir` deepest first.
 
+A rename whose two paths the environment's `Names` take for one, as a change of
+case alone where names fold case, finds the renamed file itself at the
+destination on a volume that folds them too. Only an entry whose every name is
+spelled exactly as the destination's then clashes, and the move is two
+`rename`s through a free name `.<name>.<nonce>` beside the source, so that no
+step's source and destination are one file. A directory moves this way only
+where the backend renames directories.
+
 Where the folder cannot rename files, each move copies instead, and directories
 move file by file. The record says so with `"moves":"copy"`, and whoever carries
 out its steps, the writer resuming them included, moves the same way.

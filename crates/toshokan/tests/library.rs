@@ -4263,3 +4263,81 @@ fn a_root_within_the_apps_own_directory_leaves_that_directory_unscanned() {
     let song = view.at(&path("song.npno")).expect("the tagged file");
     assert_eq!(song.members(TAGS).values, [tag("Sunday")]);
 }
+
+/// Names as a volume that ignores case takes them.
+#[cfg(not(target_arch = "wasm32"))]
+struct Folding;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl toshokan::Names for Folding {
+    fn key(&self, path: &str) -> String {
+        path.to_lowercase()
+    }
+}
+
+/// A change of case alone renames a file, and is undone, and renames a folder, whether
+/// or not the volume tells the two names apart; a file already holding the new name
+/// exactly is left alone.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_change_of_case_alone_renames_a_file_and_a_folder() {
+    use toshokan::blocking::{Library, Native};
+
+    let (folder, local) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::create_dir(folder.path().join("live")).unwrap();
+    std::fs::write(folder.path().join("live/c3.wav"), b"c3").unwrap();
+    std::fs::write(folder.path().join("d4.wav"), b"d4").unwrap();
+    let clock = TestClock::at(1_000);
+    let env = Env {
+        names: Box::new(Folding),
+        ..env("a", 1, &clock)
+    };
+    let native = Native::new(folder.path(), local.path());
+    let (mut a, _) = Library::open(native, layout(), &schema(), env).unwrap();
+    a.rescan().unwrap();
+    let names = |dir: &str| {
+        let mut names: Vec<String> = std::fs::read_dir(folder.path().join(dir))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| !name.starts_with('.'))
+            .collect();
+        names.sort();
+        names
+    };
+    a.intent("Rename")
+        .rename_file(
+            &path("live/c3.wav"),
+            &path("live/C3.wav"),
+            Expect::Holds(identity(b"c3")),
+        )
+        .commit()
+        .unwrap();
+    assert_eq!(names("live"), ["C3.wav"]);
+    a.undo().unwrap();
+    assert_eq!(names("live"), ["c3.wav"]);
+    a.intent("Rename")
+        .move_tree(&path("live"), &path("Live"))
+        .commit()
+        .unwrap();
+    assert_eq!(names(""), ["Live", "d4.wav"]);
+    assert_eq!(names("Live"), ["c3.wav"]);
+
+    std::fs::write(folder.path().join("D4.wav"), b"other").unwrap();
+    if names("").len() == 3 {
+        a.rescan().unwrap();
+        let refused = a
+            .intent("Rename")
+            .rename_file(
+                &path("d4.wav"),
+                &path("D4.wav"),
+                Expect::Holds(identity(b"d4")),
+            )
+            .commit();
+        assert!(matches!(refused, Err(Error::Refused(_))), "{refused:?}");
+        assert_eq!(
+            std::fs::read(folder.path().join("D4.wav")).unwrap(),
+            b"other"
+        );
+        assert_eq!(std::fs::read(folder.path().join("d4.wav")).unwrap(), b"d4");
+    }
+}
