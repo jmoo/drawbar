@@ -14,7 +14,7 @@ use toshokan::env::{OsRandom, SystemClock};
 use toshokan::error::Refusal;
 use toshokan::io::IoError;
 use toshokan::report::{Mode, Refreshed};
-use toshokan::{EntityId, Env, Error, Expect, RelPath, View};
+use toshokan::{EntityId, Env, Error, Expect, Policy, RelPath, View};
 
 use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES};
 use super::native::locate;
@@ -41,6 +41,8 @@ pub struct Keeper {
     /// This install's own state for the library, never synced.
     local: PathBuf,
     library: Option<Library<Native>>,
+    /// The time the library is opened by.
+    clock: fn() -> Box<dyn toshokan::Clock>,
 }
 
 impl Keeper {
@@ -49,6 +51,7 @@ impl Keeper {
             folder,
             local,
             library: None,
+            clock: || Box::new(SystemClock),
         }
     }
 
@@ -126,7 +129,7 @@ impl Keeper {
 
     fn open(&mut self) -> Result<Opened, String> {
         let env = Env {
-            clock: Box::new(SystemClock),
+            clock: (self.clock)(),
             random: Box::new(OsRandom::new()),
             identify: Rc::new(keys::Contents),
             names: Box::new(keys::Volume),
@@ -143,6 +146,11 @@ impl Keeper {
         if let_go > 0 {
             library.let_go().map_err(|e| e.to_string())?;
         }
+        // Nothing an earlier session displaced can be undone now.
+        let emptied = match writable {
+            Ok(()) => library.empty_trash(Policy::default()).map(drop),
+            Err(_) => Ok(()),
+        };
         let refreshed = library.rescan().map_err(|e| e.to_string())?;
         let dirs = folders(&self.folder);
         let viewed = viewed(&library, refreshed, Some(dirs));
@@ -152,6 +160,7 @@ impl Keeper {
             viewed,
             drafts: opened.drafts,
             let_go,
+            emptied: emptied.map_err(|e| e.to_string()),
         })
     }
 
@@ -868,6 +877,41 @@ mod tests {
         assert!(listed("shown.ne5p"));
         assert!(!listed(".git/hidden.ne5p"));
         assert!(!listed(".DS_Store"));
+    }
+
+    /// The time a month and a day from now.
+    struct Later;
+
+    impl toshokan::Clock for Later {
+        fn now_ms(&mut self) -> u64 {
+            SystemClock.now_ms() + 31 * 24 * 60 * 60 * 1000
+        }
+    }
+
+    /// What an earlier session moved to the trash stays a month, and opening empties
+    /// what is older.
+    #[test]
+    fn opening_empties_the_trash_of_what_is_older_than_a_month() {
+        let root = Temp::new();
+        fs::write(root.at("c3.ne5p"), b"contents").unwrap();
+        let mut first = keeper(&root);
+        let expect = first.listed("c3.ne5p");
+        first.run_one(Cmd::Intent(Intent::Delete {
+            path: path("c3.ne5p"),
+            expect,
+        }));
+        first.close();
+        let trash = |keeper: &mut Keeper| keeper.library.as_mut().unwrap().trash().unwrap();
+
+        let mut soon = keeper(&root);
+        assert_eq!(trash(&mut soon).len(), 1, "kept for now");
+        soon.close();
+        let mut later = Keeper {
+            clock: || Box::new(Later),
+            ..Keeper::new(root.0.clone(), root.local())
+        };
+        later.run_one(Cmd::Open);
+        assert_eq!(trash(&mut later), []);
     }
 
     #[test]

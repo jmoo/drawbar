@@ -639,6 +639,9 @@ pub struct Opened {
     /// How many changes this install showed that the folder no longer holds, as after a
     /// restore of the folder from a backup, which opening let go of: the folder wins.
     pub let_go: usize,
+    /// Whether this writer's trash was emptied of what [`toshokan::Policy::default`]
+    /// does not keep, and why not.
+    pub emptied: Result<(), String>,
 }
 
 /// The library as one answer left it.

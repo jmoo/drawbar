@@ -1227,7 +1227,11 @@ impl Store {
             viewed,
             drafts,
             let_go,
+            emptied,
         } = opened;
+        if let Err(why) = emptied {
+            log.error(format!("emptying the library's trash: {why}"));
+        }
         self.phase = match writable {
             Ok(()) => Phase::Open,
             Err(why) => {
