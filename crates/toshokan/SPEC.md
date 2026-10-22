@@ -637,10 +637,10 @@ by one `rename` per file the last scan saw, then `remove_dir` deepest first.
 A rename whose two paths the environment's `Names` take for one, as a change of
 case alone where names fold case, finds the renamed file itself at the
 destination on a volume that folds them too. Only an entry whose every name is
-spelled exactly as the destination's then clashes, and the move is two
-`rename`s through a free name `.<name>.<nonce>` beside the source, so that no
-step's source and destination are one file. A directory moves this way only
-where the backend renames directories.
+spelled exactly as the destination's then clashes, and the move is a `to_trash`
+of the source and a `from_trash` to the destination, so that no step's source
+and destination are one file, and the way-point is the writer's own. A directory
+moves this way only where the backend renames directories.
 
 Where the folder cannot rename files, each move copies instead, and directories
 move file by file. The record says so with `"moves":"copy"`, and whoever carries
@@ -657,7 +657,8 @@ A writer carries out an intent's steps in this order:
    one the app expects, or, for a file the app has not read, a file of the length
    and modification time a scan listed; a directory satisfies none. An identity
    is read at the check, never taken from a scan. Check that every
-   trash item a step restores is there. On failure, remove the staged files and
+   trash item a step restores is there, unless an earlier step of the intent
+   puts it there. On failure, remove the staged files and
    write nothing more.
 3. Write the pending record to `tmp/<nonce>.json`, sync it, and rename it to
    `pending/<nonce>.json`. A record whose moves copy is created at
@@ -732,7 +733,10 @@ intent, undo, redo or settlement against the view: it finds how far the steps
 got by checking them from the last, and the first that shows done ends the done
 prefix. `to_trash` shows done when its trash item exists; any other move when
 its destination exists and its source does not, or both hold the same bytes. A
-`place` whose staged file is in the trash under its own nonce is not done. When
+`place` whose staged file is in the trash under its own nonce is not done. A
+path counts as there only under the spelling its directories list, since a
+volume that ignores case finds the destination of a change of case by its
+source's name. When
 the last done step's source still holds the same bytes as its destination, the
 source is removed. The remaining steps are carried out, the planned entry is
 appended with what the steps did, and the record is spent. Then every file in

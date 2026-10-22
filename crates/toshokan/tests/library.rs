@@ -4439,3 +4439,106 @@ fn a_change_of_case_alone_renames_a_file_and_a_folder() {
         assert_eq!(std::fs::read(folder.path().join("d4.wav")).unwrap(), b"d4");
     }
 }
+
+/// Which renames a crash follows, by their source and destination.
+#[cfg(not(target_arch = "wasm32"))]
+type Stops = Rc<std::cell::Cell<Option<fn(&RelPath, &RelPath) -> bool>>>;
+
+/// The machine's file system, stopped as a crash stops it: every request after a
+/// rename `stops` picks panics.
+#[cfg(not(target_arch = "wasm32"))]
+struct Crashing {
+    native: toshokan::blocking::Native,
+    stops: Stops,
+    stopped: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Backend for Crashing {
+    fn capabilities(&self, root: Root) -> Capabilities {
+        self.native.capabilities(root)
+    }
+
+    fn perform(&mut self, io: Io) -> IoResult {
+        assert!(!self.stopped, "crashed");
+        let stops = match (&io, self.stops.get()) {
+            (Io::Rename { from, to, .. }, Some(stops)) => stops(from, to),
+            _ => false,
+        };
+        let done = self.native.perform(io);
+        self.stopped = stops;
+        done
+    }
+}
+
+/// A change of case alone stopped by a crash after either of its steps, in a library
+/// that hides dot names, on a volume whose names fold case: the next open settles it,
+/// and the file and the folder are each listed once, at the new spelling.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_change_of_case_a_crash_stops_is_finished_at_the_next_open() {
+    use std::panic::AssertUnwindSafe;
+    use toshokan::blocking::{Library, Native};
+
+    let into: fn(&RelPath, &RelPath) -> bool = |_, to| to.as_str().contains("/trash/");
+    let out_of: fn(&RelPath, &RelPath) -> bool = |from, _| from.as_str().contains("/trash/");
+    for stops in [into, out_of] {
+        for (from, to, file) in [
+            ("live/c3.wav", "live/C3.wav", "live/C3.wav"),
+            ("live", "Live", "Live/c3.wav"),
+        ] {
+            let (folder, local) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            std::fs::create_dir(folder.path().join("live")).unwrap();
+            std::fs::write(folder.path().join("live/c3.wav"), b"c3").unwrap();
+            let clock = TestClock::at(1_000);
+            let layout = Layout::within(".app", "library").unwrap().hiding();
+            let open = |stop: &Stops, seed| {
+                let crashing = Crashing {
+                    native: Native::new(folder.path(), local.path()),
+                    stops: stop.clone(),
+                    stopped: false,
+                };
+                let env = Env {
+                    names: Box::new(Folding),
+                    ..env("a", seed, &clock)
+                };
+                Library::open(crashing, layout.clone(), &schema(), env)
+                    .unwrap()
+                    .0
+            };
+            let names = |dir: &str| {
+                let mut names: Vec<String> = std::fs::read_dir(folder.path().join(dir))
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                    .filter(|name| !name.starts_with('.'))
+                    .collect();
+                names.sort();
+                names
+            };
+            let stop = Rc::new(std::cell::Cell::new(None));
+            let mut crashing = open(&stop, 1);
+            crashing.rescan().unwrap();
+            let (from, to, file) = (path(from), path(to), path(file));
+            stop.set(Some(stops));
+            let target = to.clone();
+            let stopped = std::panic::catch_unwind(AssertUnwindSafe(move || {
+                let built = crashing.intent("Rename");
+                let built = match from.name() == Some("live") {
+                    true => built.move_tree(&from, &target),
+                    false => built.rename_file(&from, &target, Expect::Holds(identity(b"c3"))),
+                };
+                let _ = built.commit();
+            }));
+            assert!(stopped.is_err(), "the crash stopped the rename to {to}");
+
+            let mut b = open(&Rc::new(std::cell::Cell::new(None)), 2);
+            b.settle_interrupted().unwrap();
+            b.rescan().unwrap();
+            let dir = file.parent().unwrap();
+            assert_eq!(b.view().unbound(), std::slice::from_ref(&file), "to {to}");
+            assert_eq!(names(""), [dir.as_str()], "to {to}");
+            assert_eq!(names(dir.as_str()), [file.name().unwrap()], "to {to}");
+            b.close().unwrap();
+        }
+    }
+}

@@ -552,43 +552,47 @@ impl Resolver<'_> {
             });
             return Ok(());
         }
-        let aside = self.aside(from, env)?;
         self.spelled(to);
-        self.step(EffectStep::Rename {
-            from: from.clone(),
-            to: aside.clone(),
-        });
-        self.step(EffectStep::Rename {
-            from: aside,
-            to: to.clone(),
-        });
+        self.through_trash(from, to, env);
         Ok(())
     }
 
-    /// [`Resolver::move_tree`] by renaming the directory through a free name beside
-    /// it, where the volume takes `from` and `to` for one name.
+    /// Moves `from` to `to` by way of this writer's trash, which every reader and
+    /// recovery admits, so that no step's source and destination are one file.
+    fn through_trash(&mut self, from: &RelPath, to: &RelPath, env: &mut Env) {
+        let item = env.nonce();
+        self.step(EffectStep::ToTrash {
+            path: from.clone(),
+            item,
+        });
+        self.step(EffectStep::FromTrash {
+            item,
+            path: to.clone(),
+        });
+    }
+
+    /// [`Resolver::move_tree`] by moving the directory by way of this writer's trash,
+    /// where the volume takes `from` and `to` for one name.
     fn move_tree_aside(
         &mut self,
         from: &RelPath,
         to: &RelPath,
         env: &mut Env,
     ) -> std::result::Result<(), Refusal> {
-        let aside = self.aside(from, env)?;
         self.spelled(to);
-        let (ends, unbound) = (self.plan.files.len(), self.plan.unbound.len());
-        self.move_tree(from, &aside, true)?;
-        self.step(EffectStep::Rename {
-            from: aside.clone(),
-            to: to.clone(),
-        });
-        let rebased = |path: &RelPath| path.rebase(&aside, to).expect("the file is under the tree");
+        let (ends, unbound, steps) = (
+            self.plan.files.len(),
+            self.plan.unbound.len(),
+            self.plan.steps.len(),
+        );
+        self.move_tree(from, to, true)?;
+        self.plan.steps.truncate(steps);
+        self.through_trash(from, to, env);
         let done_after = self.plan.steps.len();
         for end in &mut self.plan.files[ends..] {
-            end.path = end.path.as_ref().map(rebased);
             end.done_after = done_after;
         }
         for end in &mut self.plan.unbound[unbound..] {
-            end.path = end.path.as_ref().map(rebased);
             end.done_after = done_after;
         }
         Ok(())
@@ -601,18 +605,6 @@ impl Resolver<'_> {
             expect: Expect::Absent,
             spelled: true,
         });
-    }
-
-    /// A free name beside `path` to move it through, checked to be free.
-    fn aside(&mut self, path: &RelPath, env: &mut Env) -> std::result::Result<RelPath, Refusal> {
-        let name = path.name().expect("a renamed path has a name");
-        let parent = path.parent().expect("a renamed path has a parent");
-        let aside = parent
-            .join(&format!(".{name}.{}", env.nonce()))
-            .map_err(|_| invalid(Invalid::ReservedPath(path.clone())))?;
-        self.touch(&aside)?;
-        self.check(&aside, Expect::Absent);
-        Ok(aside)
     }
 
     /// Takes `path` for one effect on a file no entity is bound to: refused where
@@ -916,11 +908,21 @@ fn refusal<'a>(
             })
         })
     });
+    let trashed: BTreeSet<Nonce> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            EffectStep::ToTrash { item, .. } => Some(*item),
+            _ => None,
+        })
+        .collect();
     let items: Vec<RelPath> = plan
         .steps
         .iter()
         .filter_map(|step| match step {
-            EffectStep::FromTrash { item, .. } => Some(layout.trash(writer, *item)),
+            EffectStep::FromTrash { item, .. } if !trashed.contains(item) => {
+                Some(layout.trash(writer, *item))
+            }
             _ => None,
         })
         .collect();
@@ -1328,14 +1330,21 @@ pub(crate) fn observe<'a>(
             paths.into_iter(),
             found,
             |(mut present, mut directories), path| {
-                flow::stat(Root::Folder, &path).map_ok(move |meta| {
-                    if meta.is_some_and(|meta| meta.kind == Kind::Directory) {
-                        directories.insert(path.clone());
-                    }
-                    if meta.is_some() {
-                        present.insert(path);
-                    }
-                    (present, directories)
+                flow::stat(Root::Folder, &path).and_then(move |meta| {
+                    let Some(meta) = meta else {
+                        return ok((present, directories));
+                    };
+                    // ⚠️ A volume that ignores case finds a path by another spelling,
+                    // as the destination of a change of case finds its source.
+                    flow::spelled(Root::Folder, path.clone()).map_ok(move |exactly| {
+                        if exactly && meta.kind == Kind::Directory {
+                            directories.insert(path.clone());
+                        }
+                        if exactly {
+                            present.insert(path);
+                        }
+                        (present, directories)
+                    })
                 })
             },
         )
