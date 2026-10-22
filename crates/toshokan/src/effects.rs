@@ -391,8 +391,8 @@ impl Resolver<'_> {
                 let unbound = unbound
                     .take_while(|(file, ())| file.as_str().starts_with(path.as_str()))
                     .map(|(file, ())| file);
-                let staying =
-                    |file: &&RelPath| file.starts_with(&path) && !self.touched.contains(file);
+                let moved = |file: &RelPath| self.touched.iter().any(|at| file.starts_with(at));
+                let staying = |file: &&RelPath| file.starts_with(&path) && !moved(file);
                 let held = known
                     .map(|file| &file.path)
                     .chain(unbound)
