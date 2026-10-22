@@ -1079,6 +1079,37 @@ fn a_write_that_fails_leaves_the_file_as_it_was() {
     assert_eq!(session.said("was not saved"), 1);
 }
 
+/// A library whose hidden folder holds, in this install's own log, a change a newer
+/// drawbar wrote opens read-only: this build would write past what it cannot read.
+#[test]
+fn a_library_a_newer_drawbar_wrote_opens_read_only() {
+    use toshokan::log::{Entry, EntryKind};
+
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    first.make_tag("Sunday");
+    first.close();
+    let writers = fs::read_dir(root.at(".drawbar/library/writers")).unwrap();
+    let writer = writers.map(|entry| entry.unwrap().path()).next().unwrap();
+    let segment = fs::read_dir(&writer)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|file| file.extension().is_some_and(|ext| ext == "txt"))
+        .expect("a segment of the writer's log");
+    let held = fs::read(&segment).unwrap();
+    let lines = held.split_inclusive(|byte| *byte == b'\n');
+    let head = lines.filter_map(|line| Entry::parse(line).ok()).next_back();
+    let head = head.expect("an entry");
+    // A later build seals this segment as this one did, and logs in one of its own.
+    let future = toshokan::Raw::new(r#"{"kind":"from a later build"}"#).unwrap();
+    let entry = Entry::encode(head.hash(), head.at(), EntryKind::Unknown(future)).unwrap();
+    fs::write(writer.join("later.txt"), entry.to_bytes()).unwrap();
+
+    let second = Session::open(&root);
+    let why = second.store.read_only().unwrap_or_default();
+    assert!(why.contains("newer version"), "opened read-only: {why:?}");
+}
+
 /// A delete that fails the same way twice is logged twice: only a commit's retries are
 /// quiet.
 #[test]
