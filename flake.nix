@@ -117,7 +117,10 @@
               // {
                 inherit (pkgs.nord) docs site;
               }
-              // pkgs.lib.optionalAttrs (pkgs.nord ? toshokan-web) { inherit (pkgs.nord) toshokan-web; };
+              // pkgs.lib.optionalAttrs (pkgs.nord ? toshokan-web) { inherit (pkgs.nord) toshokan-web; }
+              // pkgs.lib.optionalAttrs (pkgs.nord ? toshokan-power-loss) {
+                inherit (pkgs.nord) toshokan-power-loss toshokan-power-loss-smoke;
+              };
 
             treefmt = {
               programs = {
