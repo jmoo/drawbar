@@ -93,6 +93,8 @@ pub struct Kept {
     pub of: Drafted,
     /// `None` when it cannot be read.
     pub record: Option<DraftRecord>,
+    /// When it was last kept, as [`crate::io::Meta::modified`] gives it.
+    pub modified: Option<u64>,
 }
 
 /// Where the draft of `of` is kept, for the writer whose genesis entry is `genesis`.
@@ -123,7 +125,16 @@ pub fn read_all(genesis: EntryHash) -> Task<'static, Result<Vec<Kept>>> {
                 let path = drafts
                     .join(&format!("{stem}.json"))
                     .expect("a listed name is one component");
-                flow::read_replaced(Root::Local, path.clone()).map_ok(move |bytes| {
+                let stated = flow::stat(Root::Local, &path);
+                let read = stated.and_then({
+                    let path = path.clone();
+                    move |meta| {
+                        let modified = meta.and_then(|meta| meta.modified);
+                        flow::read_replaced(Root::Local, path)
+                            .map_ok(move |bytes| (modified, bytes))
+                    }
+                });
+                read.map_ok(move |(modified, bytes)| {
                     let record = bytes.and_then(|bytes| DraftRecord::decode(&path, &bytes).ok());
                     let (of, record) = match (entity, record) {
                         (Some(entity), record) => (Some(Drafted::Entity(entity)), record),
@@ -137,7 +148,11 @@ pub fn read_all(genesis: EntryHash) -> Task<'static, Result<Vec<Kept>>> {
                         },
                         (None, None) => (None, None),
                     };
-                    kept.extend(of.map(|of| Kept { of, record }));
+                    kept.extend(of.map(|of| Kept {
+                        of,
+                        record,
+                        modified,
+                    }));
                     kept
                 })
             })

@@ -1570,12 +1570,21 @@ impl Library {
                 found.into_iter(),
                 Vec::new(),
                 move |mut statuses, (pooled, kept)| {
-                    let drafts::Kept { of, record } = kept;
+                    let drafts::Kept {
+                        of,
+                        record,
+                        modified,
+                    } = kept;
                     let path = match &of {
                         Drafted::Entity(entity) => files.get(entity).cloned(),
                         Drafted::File(path) => Some(path.clone()),
                     };
-                    let status = move |state| DraftStatus { of, state, pooled };
+                    let status = move |state| DraftStatus {
+                        of,
+                        state,
+                        pooled,
+                        modified,
+                    };
                     let Some(record) = record else {
                         statuses.push(status(DraftState::Unreadable));
                         return ok(statuses);

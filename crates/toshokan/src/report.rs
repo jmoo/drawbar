@@ -102,6 +102,9 @@ pub struct DraftStatus {
     /// The writer of this install's pool that kept the draft, where it is another
     /// that no instance writes as now; `None` for this instance's own.
     pub pooled: Option<WriterId>,
+    /// When it was last kept, as the local root's clock says; `None` where it does
+    /// not say.
+    pub modified: Option<u64>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
