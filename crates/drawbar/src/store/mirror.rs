@@ -572,7 +572,11 @@ impl Store {
             label: self.backend.label(),
             reveal: self.backend.reveal(),
             note: match &self.phase {
-                Phase::Opening => Some("opening…".to_string()),
+                Phase::Opening => Some(match self.backend.listed() {
+                    0 => "opening…".to_string(),
+                    1 => "opening… 1 file found".to_string(),
+                    n => format!("opening… {n} files found"),
+                }),
                 Phase::Open => None,
                 Phase::ReadOnly(why) => Some(format!("read-only: {why}")),
                 Phase::Failed(why) => Some(format!("not opened: {why}")),
@@ -599,6 +603,11 @@ impl Store {
             released |= self.react(event, workspace, browser, queue, log);
         }
         browser.folders.place = Some(self.place());
+        // The count of files found moves with no answer to wake the window.
+        if self.listing() {
+            let soon = std::time::Duration::from_millis(250);
+            workspace.ctx().request_repaint_after(soon);
+        }
         released
     }
 

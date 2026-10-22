@@ -7,12 +7,14 @@ use std::fs::File;
 use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use toshokan::blocking::{Library, Native, Source as Filled, Staging};
+use toshokan::blocking::{Backend, Library, Native, Source as Filled, Staging};
 use toshokan::env::{OsRandom, SystemClock};
 use toshokan::error::Refusal;
 use toshokan::io::IoError;
+use toshokan::io::{Capabilities, Io, IoResult, Kind, Reply, Root};
 use toshokan::report::{Mode, Refreshed};
 use toshokan::{EntityId, Env, Error, Expect, Policy, RelPath, View};
 
@@ -40,18 +42,23 @@ pub struct Keeper {
     folder: PathBuf,
     /// This install's own state for the library, never synced.
     local: PathBuf,
-    library: Option<Library<Native>>,
+    library: Option<Library<Counted>>,
     /// The time the library is opened by.
     clock: fn() -> Box<dyn toshokan::Clock>,
+    /// How many files the listings of the folder have found.
+    listed: Arc<AtomicUsize>,
 }
 
 impl Keeper {
-    pub fn new(folder: PathBuf, local: PathBuf) -> Keeper {
+    /// The library in `folder`, with this install's own state for it in `local`, counting
+    /// into `listed` the files its listings find.
+    pub fn new(folder: PathBuf, local: PathBuf, listed: Arc<AtomicUsize>) -> Keeper {
         Keeper {
             folder,
             local,
             library: None,
             clock: || Box::new(SystemClock),
+            listed,
         }
     }
 
@@ -106,7 +113,7 @@ impl Keeper {
     fn draft(
         &mut self,
         of: &Key,
-        change: impl FnOnce(toshokan::drafts::Draft<&mut Library<Native>>) -> toshokan::Result<()>,
+        change: impl FnOnce(toshokan::drafts::Draft<&mut Library<Counted>>) -> toshokan::Result<()>,
     ) -> Result<(), String> {
         let library = self.library.as_mut().ok_or("the library is not open")?;
         let draft = match of {
@@ -143,7 +150,10 @@ impl Keeper {
             names: Box::new(keys::Volume),
             label: LABEL.to_string(),
         };
-        let native = Native::new(&self.folder, &self.local);
+        let native = Counted {
+            native: Native::new(&self.folder, &self.local),
+            listed: self.listed.clone(),
+        };
         let (mut library, opened) = Library::open(native, keys::layout(), &keys::schema(), env)
             .map_err(|e| e.to_string())?;
         let writable = match opened.mode {
@@ -174,7 +184,7 @@ impl Keeper {
 
     fn scanned(
         &mut self,
-        scan: fn(&mut Library<Native>) -> toshokan::Result<Refreshed>,
+        scan: fn(&mut Library<Counted>) -> toshokan::Result<Refreshed>,
         whole: bool,
     ) -> Result<Viewed, String> {
         let library = self.library.as_mut().ok_or("the library is not open")?;
@@ -187,7 +197,7 @@ impl Keeper {
     /// moved for the app to follow.
     fn undone(
         &mut self,
-        commit: fn(&mut Library<Native>) -> toshokan::Result<toshokan::Committed>,
+        commit: fn(&mut Library<Counted>) -> toshokan::Result<toshokan::Committed>,
     ) -> Result<Viewed, String> {
         let library = self.library.as_mut().ok_or("the library is not open")?;
         let committed = commit(library).map_err(|e| e.to_string())?;
@@ -371,12 +381,39 @@ impl Keeper {
     }
 }
 
-type Built<'l> = toshokan::intent::Intent<&'l mut Library<Native>>;
+/// toshokan's native backend, counting the files its listings of the folder find, so
+/// opening can say how far it has got.
+struct Counted {
+    native: Native,
+    listed: Arc<AtomicUsize>,
+}
+
+impl Backend for Counted {
+    fn capabilities(&self, root: Root) -> Capabilities {
+        self.native.capabilities(root)
+    }
+
+    fn perform(&mut self, io: Io) -> IoResult {
+        let folder = io.root() == Root::Folder;
+        let reply = self.native.perform(io);
+        let found = match &reply {
+            Ok(Reply::ListedStat(entries)) if folder => entries
+                .iter()
+                .filter(|(name, meta)| meta.kind == Kind::File && !name.starts_with('.'))
+                .count(),
+            _ => 0,
+        };
+        self.listed.fetch_add(found, Ordering::Relaxed);
+        reply
+    }
+}
+
+type Built<'l> = toshokan::intent::Intent<&'l mut Library<Counted>>;
 
 /// Commit an intent labeled `label` that `build` makes against the view as it stands,
 /// and return what it changed.
 fn facts<'a>(
-    library: &'a mut Library<Native>,
+    library: &'a mut Library<Counted>,
     label: &str,
     build: impl FnOnce(Built<'a>, &View) -> Result<Built<'a>, String>,
 ) -> Result<Vec<toshokan::report::Change>, String> {
@@ -434,7 +471,7 @@ struct To<'p> {
 /// entity's file where `to` says where it came from, or as one no entity is bound to.
 /// Returns the file's stat as it is found there, and what the commit changed.
 fn write(
-    library: &mut Library<Native>,
+    library: &mut Library<Counted>,
     folder: &Path,
     label: &str,
     to: To<'_>,
@@ -444,7 +481,7 @@ fn write(
     let at = relative(path).ok_or_else(|| Failure::Io(no_path(path)))?;
     let view = library.view();
     let failed = Rc::new(RefCell::new(None));
-    let source: Box<dyn Filled<Native>> = Box::new(Filling {
+    let source: Box<dyn Filled<Counted>> = Box::new(Filling {
         fill,
         folder: folder.to_path_buf(),
         failed: failed.clone(),
@@ -468,7 +505,7 @@ fn write(
 /// Copy `from` to `path`, where the copy of a library file is refused once the file is
 /// no longer what the app knew of it.
 fn import(
-    library: &mut Library<Native>,
+    library: &mut Library<Counted>,
     folder: &Path,
     label: &str,
     to: To<'_>,
@@ -497,7 +534,7 @@ fn import(
 /// Rename the file at `from` to `to`, as the entity bound there or as a file no entity
 /// is bound to.
 fn rename(
-    library: &mut Library<Native>,
+    library: &mut Library<Counted>,
     label: &str,
     from: &LibPath,
     to: &LibPath,
@@ -639,8 +676,8 @@ struct Filling {
     failed: Rc<RefCell<Option<io::Error>>>,
 }
 
-impl Filled<Native> for Filling {
-    fn fill(self: Box<Self>, staging: &mut Staging<'_, Native>) -> Result<(), IoError> {
+impl Filled<Counted> for Filling {
+    fn fill(self: Box<Self>, staging: &mut Staging<'_, Counted>) -> Result<(), IoError> {
         let Filling {
             fill,
             folder,
@@ -655,7 +692,7 @@ impl Filled<Native> for Filling {
 }
 
 impl Fill {
-    fn into(self, folder: &Path, staging: &mut Staging<'_, Native>) -> io::Result<()> {
+    fn into(self, folder: &Path, staging: &mut Staging<'_, Counted>) -> io::Result<()> {
         let mut put = |at: u64, bytes: Vec<u8>| {
             staging
                 .write(at, bytes)
@@ -773,7 +810,7 @@ fn copy(
     }
 }
 
-fn committed_view(library: &Library<Native>, changes: Vec<toshokan::report::Change>) -> Viewed {
+fn committed_view(library: &Library<Counted>, changes: Vec<toshokan::report::Change>) -> Viewed {
     Viewed {
         view: library.view(),
         dirs: None,
@@ -784,7 +821,7 @@ fn committed_view(library: &Library<Native>, changes: Vec<toshokan::report::Chan
     }
 }
 
-fn viewed(library: &Library<Native>, refreshed: Refreshed, dirs: Option<Vec<LibPath>>) -> Viewed {
+fn viewed(library: &Library<Counted>, refreshed: Refreshed, dirs: Option<Vec<LibPath>>) -> Viewed {
     let moves = refreshed.scan.moved.iter().filter_map(|moved| {
         let from = LibPath::parse(moved.from.as_str())?;
         Some((from, LibPath::parse(moved.to.as_str())?))
@@ -857,7 +894,7 @@ mod tests {
 
     /// A keeper of the library in `root`, open.
     fn keeper(root: &Temp) -> Keeper {
-        let mut keeper = Keeper::new(root.0.clone(), root.local());
+        let mut keeper = Keeper::new(root.0.clone(), root.local(), Arc::default());
         let opened = keeper.run_one(Cmd::Open);
         assert!(matches!(opened[..], [Event::Opened(Ok(_))]), "{opened:?}");
         keeper
@@ -912,6 +949,21 @@ mod tests {
         }
     }
 
+    /// Opening counts the files the scan finds as it goes, leaving out drawbar's own and
+    /// every other name that starts with a dot.
+    #[test]
+    fn opening_counts_the_files_it_finds() {
+        let root = Temp::new();
+        fs::create_dir(root.at("Live")).unwrap();
+        for name in ["a.ne5p", "Live/b.ne5p", "Live/c.wav", ".DS_Store"] {
+            fs::write(root.at(name), name).unwrap();
+        }
+        let listed = Arc::new(AtomicUsize::new(0));
+        let mut keeper = Keeper::new(root.0.clone(), root.local(), listed.clone());
+        keeper.run_one(Cmd::Open);
+        assert_eq!(listed.load(Ordering::Relaxed), 3);
+    }
+
     /// What an earlier session moved to the trash stays a month, and opening empties
     /// what is older.
     #[test]
@@ -932,7 +984,7 @@ mod tests {
         soon.close();
         let mut later = Keeper {
             clock: || Box::new(Later),
-            ..Keeper::new(root.0.clone(), root.local())
+            ..Keeper::new(root.0.clone(), root.local(), Arc::default())
         };
         later.run_one(Cmd::Open);
         assert_eq!(trash(&mut later), []);

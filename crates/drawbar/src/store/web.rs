@@ -228,6 +228,12 @@ impl Backend {
         self.events.borrow_mut().pop_front()
     }
 
+    /// How many files the listings of the folder have found so far: none, while the
+    /// browser opens no library.
+    pub fn listed(&self) -> usize {
+        0
+    }
+
     /// Whether a command that writes has been sent and not run through yet.
     pub fn busy(&self) -> bool {
         let inbox = self.inbox.borrow();

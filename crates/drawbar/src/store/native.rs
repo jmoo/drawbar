@@ -97,6 +97,8 @@ pub struct Backend {
     worker: Option<JoinHandle<()>>,
     /// Commands that write sent and not yet run through.
     unrun: Arc<AtomicUsize>,
+    /// How many files the listings of the folder have found.
+    listed: Arc<AtomicUsize>,
 }
 
 /// Whether a command writes the folder.
@@ -118,9 +120,11 @@ impl Backend {
         let (folder, kept) = (root.clone(), local.clone());
         let ctx = ctx.clone();
         let ran = unrun.clone();
+        let listed = Arc::new(AtomicUsize::new(0));
+        let counted = listed.clone();
         let worker = std::thread::spawn(move || {
             // toshokan's library stays on the thread that opened it.
-            let mut keeper = Keeper::new(folder, kept);
+            let mut keeper = Keeper::new(folder, kept, counted);
             let mut answer = |event| {
                 let _ = answers.send(event);
                 ctx.request_repaint();
@@ -148,6 +152,7 @@ impl Backend {
             rx,
             worker: Some(worker),
             unrun,
+            listed,
         }
     }
 
@@ -178,6 +183,11 @@ impl Backend {
                 self.unrun.fetch_sub(writes, Ordering::AcqRel);
             }
         }
+    }
+
+    /// How many files the listings of the folder have found so far.
+    pub fn listed(&self) -> usize {
+        self.listed.load(Ordering::Relaxed)
     }
 
     /// Whether a command that writes has been sent and not run through yet.
