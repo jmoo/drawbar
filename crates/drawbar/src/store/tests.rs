@@ -4553,6 +4553,58 @@ fn a_tag_on_an_asset_with_no_file_is_refused_and_the_next_goes_on() {
     assert_eq!(tagged(&session), [wears("Grand.ne5p", &["Ballad"])]);
 }
 
+/// Assets deleted together in one gesture are one change: one undo brings every file
+/// back. A deletion asked for later is a change of its own.
+#[test]
+fn a_selection_deleted_together_is_one_undo_step() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let ids = [session.create(), session.create(), session.create()];
+    session.sync();
+    let files = root.names("");
+    let acts = ids[..2].iter().map(|id| crate::browser::Act::Remove(*id));
+    session.bench.act(acts.collect());
+    session.sync();
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo Delete 2 files")
+    );
+    session.bench.act(vec![crate::browser::Act::Remove(ids[2])]);
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar"]);
+    session.undo();
+    session.undo();
+    assert_eq!(root.names(""), files, "two undos bring all three back");
+}
+
+/// Assets moved together in one gesture are one change: one undo moves every file back.
+#[test]
+fn a_selection_moved_together_is_one_undo_step() {
+    let root = Temp::new();
+    fs::create_dir(root.at("Gig")).unwrap();
+    let mut session = Session::open(&root);
+    let ids = [session.create(), session.create()];
+    session.sync();
+    let top = root.names("");
+    let gig = LibPath::parse("Gig").unwrap();
+    let folder = session.bench.browser.folders.id_of(&gig).expect("listed");
+    let acts = ids.iter().map(|id| crate::browser::Act::File {
+        id: *id,
+        folder: Some(folder),
+    });
+    session.bench.act(acts.collect());
+    session.sync();
+    assert_eq!(root.names("Gig").len(), 2, "both moved");
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo Move 2 files")
+    );
+    session.undo();
+    session.settle();
+    assert_eq!(root.names("Gig"), Vec::<String>::new(), "both moved back");
+    assert_eq!(root.names(""), top, "beside the folder");
+}
+
 /// A new tag made on a selection and named in its editor is one change: one undo takes
 /// it off every asset and out of the list.
 #[test]

@@ -20,7 +20,7 @@ use super::ids::Ids;
 use super::keys::{Came, ORIGIN, TAGS, TAG_NAMES};
 use super::{
     names, Backend, Cmd, CopyOf, Event, Failure, FileCmd, Fingerprint, Found, Holds, Intent, Key,
-    LibPath, Opened, Rescue, Source, Stat, Viewed, MOST_BYTES,
+    LibPath, Moving, Opened, Rescue, Source, Stat, Viewed, MOST_BYTES,
 };
 use crate::browser::{Browser, Rescuing};
 use crate::folders::{Folders, Op, Where};
@@ -90,6 +90,16 @@ struct SlotView {
     read: bool,
     /// The stamp of the edit kept, if one is, and the hash it was kept over.
     kept: Option<(u64, blake3::Hash)>,
+}
+
+/// The renames, or the deletions, of the files one gesture asked for, sent as one
+/// change.
+#[derive(Default)]
+struct Batch {
+    /// The take of the asks they came in.
+    take: u64,
+    moves: Vec<Moving>,
+    deletes: Vec<(LibPath, toshokan::Expect)>,
 }
 
 /// What a view lists that drawbar shows.
@@ -237,7 +247,12 @@ pub struct Store {
     asked: Vec<Asked>,
     /// Changes to files the user asked for, each carried out once the one before it has
     /// gone and nothing it waits on is in flight.
-    asks: VecDeque<FileAsk>,
+    asks: VecDeque<(FileAsk, u64)>,
+    /// How many times changes to files were taken from the workspace: the take each ask
+    /// came in, so the asks of one gesture, which come in one, are one change.
+    taken: u64,
+    /// The renames and the deletions to send as one change.
+    batch: Batch,
     /// The projection in hand follows this session's undo or redo, and says nothing of
     /// what it finds moved or changed.
     quiet: bool,
@@ -338,6 +353,8 @@ impl Store {
             view: None,
             asked: Vec::new(),
             asks: VecDeque::new(),
+            taken: 0,
+            batch: Batch::default(),
             quiet: false,
             quietly: BTreeSet::new(),
             history: History::default(),
@@ -1053,15 +1070,12 @@ impl Store {
         self.backend.send(cmd);
     }
 
-    /// Rename a file that holds what `expect` says, or a folder where `expect` is `None`.
-    /// A file the library knows by its path is known by the new one from now on.
-    fn rename(&mut self, from: LibPath, to: LibPath, expect: Option<toshokan::Expect>) {
+    /// Rename a folder. A file the library knows by its path is known by the new one from
+    /// now on.
+    fn rename_folder(&mut self, from: LibPath, to: LibPath) {
         self.ids.moved(&from, &to);
         self.moving.push((from.clone(), to.clone()));
-        self.write(match expect {
-            Some(expect) => Intent::Move { from, to, expect },
-            None => Intent::MoveFolder { from, to },
-        });
+        self.write(Intent::MoveFolder { from, to });
     }
 
     /// Put back where they were the paths a rename that failed had moved.
@@ -1978,7 +1992,7 @@ impl Store {
     fn ask_tags(&mut self, workspace: &mut Workspace, browser: &mut Browser, log: &mut Log) {
         self.asked.extend(browser.take_tag_asks());
         // A tag waits on the file it names only while that file is still to be written.
-        self.asks.extend(workspace.take_file_asks());
+        self.take_asks(workspace);
         if self.asked.is_empty() {
             return;
         }
@@ -2020,7 +2034,7 @@ impl Store {
             return false;
         };
         let saving = self.records.get(&id).is_some_and(|record| record.saving);
-        let asked = self.asks.contains(&FileAsk::Save(id));
+        let asked = self.asks.iter().any(|(ask, _)| *ask == FileAsk::Save(id));
         entity.path.is_none() || saving || asked || workspace.arriving(id).is_some()
     }
 
@@ -2604,7 +2618,7 @@ impl Store {
             self.keep_drafts(workspace);
             self.keep_slot_edits(workspace);
         }
-        self.asks.extend(workspace.take_file_asks());
+        self.take_asks(workspace);
         if !self.open() {
             return true;
         }
@@ -2638,7 +2652,7 @@ impl Store {
             self.tree_op(op);
         }
         crate::folders::place_new(workspace, &browser.folders);
-        self.asks.extend(workspace.take_file_asks());
+        self.take_asks(workspace);
         let mut done = self.arrivals(workspace, &self.waiting(&held_moves));
         done &= self.carry_out(workspace, &held_moves);
         self.send_edits(workspace, &self.waiting(&held_moves));
@@ -2827,7 +2841,7 @@ impl Store {
                         record.path = Some(moved);
                     }
                 }
-                self.rename(from, to, None);
+                self.rename_folder(from, to);
             }
         }
     }
@@ -2874,21 +2888,53 @@ impl Store {
     /// Carry out the changes to files asked for, in order. One that waits for an answer
     /// holds back every one after it. Returns whether none waits.
     fn carry_out(&mut self, workspace: &mut Workspace, held: &[(LibPath, LibPath)]) -> bool {
-        while let Some(ask) = self.asks.front().cloned() {
+        let mut carried = true;
+        while let Some((ask, take)) = self.asks.front().cloned() {
+            if self.batch.take != take {
+                self.send_batch();
+                self.batch.take = take;
+            }
             // ⚠️ Taken afresh for each: a rename sent just before must answer before a
             // change to what it moves goes out.
             let waiting = self.waiting(held);
-            let carried = match ask {
-                FileAsk::Save(id) => self.save(id, workspace, &waiting),
+            carried = match ask {
+                FileAsk::Save(id) => {
+                    self.send_batch();
+                    self.save(id, workspace, &waiting)
+                }
                 FileAsk::Move { id, .. } => self.relocate(id, workspace, &waiting),
                 FileAsk::Delete { id, path } => self.delete(id, &path, workspace, &waiting),
             };
             if !carried {
-                return false;
+                break;
             }
             self.asks.pop_front();
         }
-        true
+        self.send_batch();
+        carried
+    }
+
+    /// Take the changes to files the workspace asked for.
+    fn take_asks(&mut self, workspace: &mut Workspace) {
+        let asks = workspace.take_file_asks();
+        if asks.is_empty() {
+            return;
+        }
+        self.taken += 1;
+        let take = self.taken;
+        self.asks.extend(asks.into_iter().map(|ask| (ask, take)));
+    }
+
+    /// Send the renames, or the deletions, gathered as one change.
+    fn send_batch(&mut self) {
+        let moves = std::mem::take(&mut self.batch.moves);
+        let files = std::mem::take(&mut self.batch.deletes);
+        if !moves.is_empty() {
+            self.write(Intent::Move { moves });
+        }
+        if !files.is_empty() {
+            self.write(Intent::Delete { files });
+        }
     }
 
     /// Write an asset's file with what it was saved as: a new file where it has none, and
@@ -2981,7 +3027,16 @@ impl Store {
             return true;
         };
         self.cache.moved(&at, &to);
-        self.rename(at, to, Some(expect));
+        self.ids.moved(&at, &to);
+        self.moving.push((at.clone(), to.clone()));
+        if !self.batch.deletes.is_empty() {
+            self.send_batch();
+        }
+        self.batch.moves.push(Moving {
+            from: at,
+            to,
+            expect,
+        });
         true
     }
 
@@ -3016,10 +3071,10 @@ impl Store {
         };
         self.cache.forget(&at);
         if let (Some(print), false) = (record.fingerprint, record.missing) {
-            self.write(Intent::Delete {
-                path: at,
-                expect: print.expect(),
-            });
+            if !self.batch.moves.is_empty() {
+                self.send_batch();
+            }
+            self.batch.deletes.push((at, print.expect()));
         }
         true
     }

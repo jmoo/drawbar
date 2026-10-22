@@ -607,20 +607,26 @@ pub enum Intent {
         expect: toshokan::Expect,
         came: Option<keys::Came>,
     },
-    /// Rename a file. Refused where `to` already exists. Answered by [`Event::Moved`].
-    Move {
-        from: LibPath,
-        to: LibPath,
-        expect: toshokan::Expect,
-    },
+    /// Rename each of these files, all or none. Refused where a `to` already exists.
+    /// Answered by an [`Event::Moved`] for each.
+    Move { moves: Vec<Moving> },
     /// Rename a folder with everything in it. Refused where `to` already exists.
     /// Answered by [`Event::Moved`].
     MoveFolder { from: LibPath, to: LibPath },
-    /// Move a file to this writer's trash, and end the entity bound to it.
+    /// Move each of these files to this writer's trash, all or none, and end the entity
+    /// bound to each.
     Delete {
-        path: LibPath,
-        expect: toshokan::Expect,
+        files: Vec<(LibPath, toshokan::Expect)>,
     },
+}
+
+/// One rename of an [`Intent::Move`]: the file at `from`, which holds what `expect`
+/// says, to `to`.
+#[derive(Clone, Debug)]
+pub struct Moving {
+    pub from: LibPath,
+    pub to: LibPath,
+    pub expect: toshokan::Expect,
 }
 
 impl Intent {
@@ -628,7 +634,15 @@ impl Intent {
     pub fn describe(&self) -> String {
         let named = |path: &LibPath| format!("{} “{}”", self.label(), path.leaf());
         let tag = |name: &str| format!("{} “{name}”", self.label());
+        let files = |paths: Vec<&LibPath>| match paths[..] {
+            [path] => named(path),
+            _ => format!("{} {} files", self.label(), paths.len()),
+        };
         match self {
+            Intent::Move { moves } => files(moves.iter().map(|moving| &moving.from).collect()),
+            Intent::Delete { files: deleted } => {
+                files(deleted.iter().map(|(path, _)| path).collect())
+            }
             Intent::Tag { name, .. }
             | Intent::Untag { name, .. }
             | Intent::MakeTag { name }
@@ -637,8 +651,6 @@ impl Intent {
             Intent::Save { path, .. }
             | Intent::Rewrite { path, .. }
             | Intent::Import { path, .. }
-            | Intent::Delete { path, .. }
-            | Intent::Move { from: path, .. }
             | Intent::MoveFolder { from: path, .. } => named(path),
             Intent::Forget { .. } => self.label().to_string(),
         }
@@ -660,12 +672,17 @@ impl Intent {
             } => "New",
             Intent::Save { .. } | Intent::Rewrite { .. } => "Save",
             Intent::Import { .. } => "Copy in",
-            Intent::Move { from, to, .. } | Intent::MoveFolder { from, to } => {
-                match from.parent() == to.parent() {
+            Intent::Move { moves } => {
+                let renames = |moving: &Moving| moving.from.parent() == moving.to.parent();
+                match moves.iter().all(renames) {
                     true => "Rename",
                     false => "Move",
                 }
             }
+            Intent::MoveFolder { from, to } => match from.parent() == to.parent() {
+                true => "Rename",
+                false => "Move",
+            },
             Intent::Delete { .. } => "Delete",
         }
     }

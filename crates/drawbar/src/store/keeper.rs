@@ -23,8 +23,8 @@ use toshokan::{EntryHash, Env, Error, Expect, Policy, RelPath, View};
 use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES};
 use super::native::locate;
 use super::{
-    Cmd, Event, Failure, Fingerprint, Found, Intent, Kept, Key, LibPath, Opened, Part, Source,
-    Stat, Viewed,
+    Cmd, Event, Failure, Fingerprint, Found, Intent, Kept, Key, LibPath, Moving, Opened, Part,
+    Source, Stat, Viewed,
 };
 use crate::ondisk::OnDisk;
 use crate::rewrite::{self, Rewrite};
@@ -497,10 +497,18 @@ impl Keeper {
                 answer(Event::Imported { id, path, result });
                 made
             }
-            Intent::Move { from, to, expect } => {
-                let moved = rename(library, label, &from, &to, expect);
+            Intent::Move { moves } => {
+                let moved = facts(library, label, |mut built, view| {
+                    for moving in &moves {
+                        built = rename(built, view, moving)?;
+                    }
+                    Ok(built)
+                });
                 let (result, changes) = split(moved);
-                answer(Event::Moved { from, to, result });
+                for Moving { from, to, .. } in moves {
+                    let result = result.clone();
+                    answer(Event::Moved { from, to, result });
+                }
                 changes
             }
             Intent::MoveFolder { from, to } => {
@@ -512,17 +520,23 @@ impl Keeper {
                 answer(Event::Moved { from, to, result });
                 changes
             }
-            Intent::Delete { path, expect } => {
-                let trashed = facts(library, label, |built, view| {
-                    let at = relative(&path).ok_or_else(|| no_path(&path))?;
-                    Ok(match view.at(&at).map(|entity| entity.id()) {
-                        Some(entity) => built.trash(entity, expect).delete(entity),
-                        None => built.trash_file(&at, expect),
-                    })
+            Intent::Delete { files } => {
+                let trashed = facts(library, label, |mut built, view| {
+                    for (path, expect) in &files {
+                        let at = relative(path).ok_or_else(|| no_path(path))?;
+                        built = match view.at(&at).map(|entity| entity.id()) {
+                            Some(entity) => built.trash(entity, *expect).delete(entity),
+                            None => built.trash_file(&at, *expect),
+                        };
+                    }
+                    Ok(built)
                 });
                 trashed.map_or_else(
                     |why| {
-                        answer(Event::Failed(format!("deleting {path}: {why}")));
+                        let paths: Vec<String> =
+                            files.iter().map(|(path, _)| path.to_string()).collect();
+                        let paths = paths.join(", ");
+                        answer(Event::Failed(format!("deleting {paths}: {why}")));
                         None
                     },
                     Some,
@@ -705,22 +719,17 @@ fn import(
 
 /// Rename the file at `from` to `to`, as the entity bound there or as a file no entity
 /// is bound to.
-fn rename(
-    library: &mut Library<Counted>,
-    label: &str,
-    from: &LibPath,
-    to: &LibPath,
-    expect: Expect,
-) -> Result<toshokan::Committed, String> {
-    facts(library, label, |built, view| {
-        let (at, to) = (
-            relative(from).ok_or_else(|| no_path(from))?,
-            relative(to).ok_or_else(|| no_path(to))?,
-        );
-        Ok(match view.at(&at).map(|entity| entity.id()) {
-            Some(entity) => built.rename(entity, &to, expect),
-            None => built.rename_file(&at, &to, expect),
-        })
+/// `built` with the rename `moving` names: of its entity's file, or of the file no
+/// entity is bound to.
+fn rename<'l>(built: Built<'l>, view: &View, moving: &Moving) -> Result<Built<'l>, String> {
+    let Moving { from, to, expect } = moving;
+    let (at, to) = (
+        relative(from).ok_or_else(|| no_path(from))?,
+        relative(to).ok_or_else(|| no_path(to))?,
+    );
+    Ok(match view.at(&at).map(|entity| entity.id()) {
+        Some(entity) => built.rename(entity, &to, *expect),
+        None => built.rename_file(&at, &to, *expect),
     })
 }
 
@@ -1198,8 +1207,7 @@ mod tests {
         let mut first = keeper(&root);
         let expect = first.listed("c3.ne5p");
         first.run_one(Cmd::Intent(Intent::Delete {
-            path: path("c3.ne5p"),
-            expect,
+            files: vec![(path("c3.ne5p"), expect)],
         }));
         drop(first);
         let trash = |keeper: &mut Keeper| keeper.library.as_mut().unwrap().trash().unwrap();
@@ -1222,9 +1230,11 @@ mod tests {
         let mut keeper = keeper(&root);
         let expect = keeper.listed("c3.ne5p");
         let moved = keeper.run_one(Cmd::Intent(Intent::Move {
-            from: path("c3.ne5p"),
-            to: path("C3.ne5p"),
-            expect,
+            moves: vec![Moving {
+                from: path("c3.ne5p"),
+                to: path("C3.ne5p"),
+                expect,
+            }],
         }));
         assert!(
             matches!(moved[0], Event::Moved { result: Ok(()), .. }),
@@ -1247,9 +1257,11 @@ mod tests {
         let mut keeper = keeper(&root);
         let expect = keeper.listed("c3.ne5p");
         let moved = keeper.run_one(Cmd::Intent(Intent::Move {
-            from: path("c3.ne5p"),
-            to: path("C3.ne5p"),
-            expect,
+            moves: vec![Moving {
+                from: path("c3.ne5p"),
+                to: path("C3.ne5p"),
+                expect,
+            }],
         }));
         assert!(
             matches!(moved[0], Event::Moved { result: Err(_), .. }),
@@ -1285,8 +1297,7 @@ mod tests {
             "{saved:?}"
         );
         let deleted = keeper.run_one(Cmd::Intent(Intent::Delete {
-            path: path("c3.ne5p"),
-            expect: read,
+            files: vec![(path("c3.ne5p"), read)],
         }));
         assert!(matches!(deleted[0], Event::Failed(_)), "{deleted:?}");
         assert_eq!(root.read("c3.ne5p"), b"changed!");
@@ -1331,13 +1342,14 @@ mod tests {
                 came: None,
             },
             Intent::Move {
-                from: path("a.ne5p"),
-                to: path("Linked/a.ne5p"),
-                expect: a,
+                moves: vec![Moving {
+                    from: path("a.ne5p"),
+                    to: path("Linked/a.ne5p"),
+                    expect: a,
+                }],
             },
             Intent::Delete {
-                path: path("Linked/x.ne5p"),
-                expect: x,
+                files: vec![(path("Linked/x.ne5p"), x)],
             },
         ];
         for intent in intents {
