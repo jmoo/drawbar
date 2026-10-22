@@ -341,6 +341,7 @@ third-party/chromium/LICENSE.
             Holder {
                 notice: "Copyright (c) 2015 The Rust Project Developers",
                 crates: &[
+                    "unicode-normalization 0.1.26",
                     "unicode-segmentation 1.13.3",
                 ],
             },
@@ -1134,6 +1135,7 @@ licences; see files named LICENSE.*.txt for details."#,
                 notice: "Copyright © 1991-2023 Unicode, Inc.",
                 crates: &[
                     "unicode-ident 1.0.24",
+                    "unicode-normalization 0.1.26",
                 ],
             },
         ],
@@ -1572,6 +1574,7 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("tiny-skia", "0.11.4"),
     ("tiny-skia-path", "0.11.4"),
     ("tinystr", "0.8.3"),
+    ("tinyvec", "1.13.3"),
     ("toml_datetime", "1.1.1+spec-1.1.0"),
     ("toml_edit", "0.25.13+spec-1.1.0"),
     ("toml_parser", "1.1.3+spec-1.1.0"),
@@ -1582,6 +1585,7 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("type-map", "0.5.1"),
     ("uds_windows", "1.2.1"),
     ("unicode-ident", "1.0.24"),
+    ("unicode-normalization", "0.1.26"),
     ("unicode-segmentation", "1.13.3"),
     ("unicode-width", "0.2.2"),
     ("untrusted", "0.9.0"),

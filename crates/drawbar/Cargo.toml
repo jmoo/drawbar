@@ -42,6 +42,8 @@ serde = { version = "1", features = ["derive"] }
 toshokan = { path = "../toshokan", version = "0.1.0" }
 # A file's identity, and the name of a library's local root. toshokan builds it.
 blake3 = "1"
+# Names compared as macOS and Windows compare them: in one normalization form.
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 # `synthetic` lays out a piano library from a description: the piano editor's tests

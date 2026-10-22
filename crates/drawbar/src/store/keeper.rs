@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use toshokan::blocking::{Library, Native};
-use toshokan::env::{ExactNames, OsRandom, SystemClock};
+use toshokan::env::{OsRandom, SystemClock};
 use toshokan::report::{Mode, Refreshed};
 use toshokan::{Env, Expect, RelPath};
 
@@ -89,7 +89,7 @@ impl Keeper {
             clock: Box::new(SystemClock),
             random: Box::new(OsRandom::new()),
             identify: Rc::new(keys::Contents),
-            names: Box::new(ExactNames),
+            names: Box::new(keys::Volume),
             label: LABEL.to_string(),
         };
         let native = Native::new(&self.folder, &self.local);
