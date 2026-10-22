@@ -23,9 +23,9 @@ use toshokan::report::{
 use toshokan::simulator::Machine;
 use toshokan::view::Conflicted;
 use toshokan::{
-    EntityId, EntryHash, Env, Error, Expect, Field, FileState, Hlc, Identify, Identity, Invalid,
-    Io, IoResult, Lag, Layout, Local, MemDisk, Policy, Random, Refusal, Register, RelPath, Reply,
-    Root, Schema, Set, View, WriterId,
+    Drafted, EntityId, EntryHash, Env, Error, Expect, Field, FileState, Hlc, Identify, Identity,
+    Invalid, Io, IoResult, Lag, Layout, Local, MemDisk, Policy, Random, Refusal, Register, RelPath,
+    Reply, Root, Schema, Set, View, WriterId,
 };
 
 const ORIGIN: Register<String> = Register::new("origin");
@@ -317,7 +317,8 @@ trait Facade: Sized {
     fn tidy(&mut self) -> Result<Tidied, Error>;
     fn compact(&mut self) -> Result<Compacted, Error>;
     fn put_draft(&mut self, entity: EntityId, base: Identity, bytes: &[u8]) -> Result<(), Error>;
-    fn discard_draft(&mut self, entity: EntityId) -> Result<(), Error>;
+    fn discard_draft(&mut self, of: Drafted) -> Result<(), Error>;
+    fn put_file_draft(&mut self, at: &RelPath, base: Identity, bytes: &[u8]) -> Result<(), Error>;
     fn settle(
         &mut self,
         orphan: toshokan::report::Orphan,
@@ -396,8 +397,11 @@ impl Facade for Blocking {
     fn put_draft(&mut self, entity: EntityId, base: Identity, bytes: &[u8]) -> Result<(), Error> {
         self.0.draft(entity).put(base, bytes.to_vec())
     }
-    fn discard_draft(&mut self, entity: EntityId) -> Result<(), Error> {
-        self.0.draft(entity).discard()
+    fn discard_draft(&mut self, of: Drafted) -> Result<(), Error> {
+        toshokan::drafts::Draft::new(&mut self.0, of).discard()
+    }
+    fn put_file_draft(&mut self, at: &RelPath, base: Identity, bytes: &[u8]) -> Result<(), Error> {
+        self.0.draft_file(at).put(base, bytes.to_vec())
     }
     fn settle(
         &mut self,
@@ -480,8 +484,11 @@ impl Facade for Async {
     fn put_draft(&mut self, entity: EntityId, base: Identity, bytes: &[u8]) -> Result<(), Error> {
         pollster::block_on(self.0.draft(entity).put(base, bytes.to_vec()))
     }
-    fn discard_draft(&mut self, entity: EntityId) -> Result<(), Error> {
-        pollster::block_on(self.0.draft(entity).discard())
+    fn discard_draft(&mut self, of: Drafted) -> Result<(), Error> {
+        pollster::block_on(toshokan::drafts::Draft::new(&mut self.0, of).discard())
+    }
+    fn put_file_draft(&mut self, at: &RelPath, base: Identity, bytes: &[u8]) -> Result<(), Error> {
+        pollster::block_on(self.0.draft_file(at).put(base, bytes.to_vec()))
     }
     fn settle(
         &mut self,
@@ -2918,11 +2925,20 @@ fn drafts_come_back_only_while_the_file_holds_their_base<F: Facade>() {
     let folder = disk();
     let clock = TestClock::at(1_000);
     let here = machine(&folder);
+    put(&folder, "loose.wav", b"loose");
+    put(&folder, "gone.wav", b"gone");
     let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
-    assert!(matches!(
-        a.put_draft(EntityId::from_u128(1), identity(b"x"), b"x"),
-        Err(Error::NoWriter)
-    ));
+    a.put_file_draft(&path("loose.wav"), identity(b"loose"), b"edited loose")
+        .unwrap();
+    a.put_file_draft(&path("gone.wav"), identity(b"gone"), b"edited gone")
+        .unwrap();
+    assert!(
+        folder
+            .directories(Root::Folder)
+            .iter()
+            .any(|d| d.starts_with(&layout().writers())),
+        "a draft before the first commit starts the writer"
+    );
     let song = create(&mut a, "song.npno", b"song");
     let other = create(&mut a, "other.npno", b"other");
     a.put_draft(song, identity(b"song"), b"edited").unwrap();
@@ -2930,13 +2946,26 @@ fn drafts_come_back_only_while_the_file_holds_their_base<F: Facade>() {
         .unwrap();
     a.close().unwrap();
     put(&folder, "other.npno", b"changed outside");
+    let _ = folder.perform(Io::Remove {
+        root: Root::Folder,
+        path: path("gone.wav"),
+    });
 
     let (mut a, opened) = F::open(Probe::new(&here), env("a", 2, &clock)).unwrap();
-    let states: BTreeMap<EntityId, DraftState> = opened
-        .drafts
-        .into_iter()
-        .map(|d| (d.entity, d.state))
-        .collect();
+    let states: BTreeMap<Drafted, DraftState> =
+        opened.drafts.into_iter().map(|d| (d.of, d.state)).collect();
+    let file = |at: &str| Drafted::File(path(at));
+    assert_eq!(
+        states[&file("loose.wav")],
+        DraftState::Applies {
+            bytes: b"edited loose".to_vec()
+        }
+    );
+    assert_eq!(
+        states[&file("gone.wav")],
+        DraftState::BaseChanged { found: None }
+    );
+    let (song, other) = (Drafted::Entity(song), Drafted::Entity(other));
     assert_eq!(
         states[&song],
         DraftState::Applies {
@@ -2949,8 +2978,9 @@ fn drafts_come_back_only_while_the_file_holds_their_base<F: Facade>() {
             found: Some(identity(b"changed outside"))
         }
     );
-    a.discard_draft(song).unwrap();
-    a.discard_draft(other).unwrap();
+    for of in [song, other, file("loose.wav"), file("gone.wav")] {
+        a.discard_draft(of).unwrap();
+    }
     a.close().unwrap();
     let (_, opened) = F::open(Probe::new(&here), env("a", 3, &clock)).unwrap();
     assert_eq!(opened.drafts, []);

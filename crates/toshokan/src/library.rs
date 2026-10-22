@@ -19,7 +19,7 @@ use crate::binding::{
 };
 use crate::cache::{self, Encoding};
 use crate::cow::CowMap;
-use crate::drafts::{self, DraftRecord};
+use crate::drafts::{self, DraftRecord, Drafted};
 use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd};
 use crate::env::Env;
 use crate::error::{Error, Invalid, Refusal, Result, Why};
@@ -724,24 +724,36 @@ impl Library {
             .task()
     }
 
-    /// Keeps an unsaved edit of `entity` over a file holding `base`, in the local
-    /// root only. Fails with [`Error::NoWriter`] before this instance's first
-    /// commit, when it has no local directory to keep it in.
+    /// Keeps an unsaved edit of `of` over a file holding `base`, in the local root
+    /// only. An instance with no writer yet starts one, whose genesis entry is its
+    /// first write in the folder, so the draft has a local directory to be kept in.
     pub fn put_draft(
         &mut self,
-        entity: EntityId,
+        of: Drafted,
         base: Identity,
         bytes: Vec<u8>,
     ) -> Task<'_, Result<()>> {
-        match &self.writer {
-            Some(writer) => drafts::put(writer.genesis(), entity, &DraftRecord { base, bytes }),
-            None => Task::ready(Err(Error::NoWriter)),
+        if let Err(error) = self.writable() {
+            return Task::ready(Err(error));
         }
+        let path = match &of {
+            Drafted::Entity(_) => None,
+            Drafted::File(path) => Some(path.clone()),
+        };
+        let record = DraftRecord { base, path, bytes };
+        let nothing = EffectPlan::new(self.env.nonce());
+        ensure_writer(self, &nothing)
+            .and_then(move |library| {
+                let genesis = library.writer.as_ref().map(Writer::genesis);
+                let genesis = genesis.expect("a writer was just ensured");
+                flow::run(drafts::put(genesis, &of, &record))
+            })
+            .task()
     }
 
-    pub fn discard_draft(&mut self, entity: EntityId) -> Task<'_, Result<()>> {
+    pub fn discard_draft(&mut self, of: Drafted) -> Task<'_, Result<()>> {
         match &self.writer {
-            Some(writer) => drafts::discard(writer.genesis(), entity),
+            Some(writer) => drafts::discard(writer.genesis(), &of),
             None => Task::ready(Ok(())),
         }
     }
@@ -1472,16 +1484,20 @@ impl Library {
         flow::run(drafts::read_all(genesis))
             .and_then(move |found| {
                 fold(found.into_iter(), Vec::new(), move |mut statuses, kept| {
-                    let drafts::Kept { entity, record } = kept;
-                    let status = move |state| DraftStatus { entity, state };
-                    let (Some(record), Some(path)) = (record.clone(), files.get(&entity)) else {
+                    let drafts::Kept { of, record } = kept;
+                    let path = match &of {
+                        Drafted::Entity(entity) => files.get(entity).cloned(),
+                        Drafted::File(path) => Some(path.clone()),
+                    };
+                    let status = move |state| DraftStatus { of, state };
+                    let (Some(record), Some(path)) = (record.clone(), path) else {
                         statuses.push(status(match record {
                             Some(_) => DraftState::BaseChanged { found: None },
                             None => DraftState::Unreadable,
                         }));
                         return ok(statuses);
                     };
-                    flow::observe(Root::Folder, path, &identify).map_ok(move |seen| {
+                    flow::observe(Root::Folder, &path, &identify).map_ok(move |seen| {
                         let found = seen.map(|seen| seen.identity);
                         statuses.push(status(match found == Some(record.base) {
                             true => DraftState::Applies {

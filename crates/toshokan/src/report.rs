@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::drafts::Drafted;
 use crate::error::Why;
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
 use crate::io::IoError;
@@ -88,7 +89,7 @@ pub struct Orphan {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct DraftStatus {
-    pub entity: EntityId,
+    pub of: Drafted,
     pub state: DraftState,
 }
 

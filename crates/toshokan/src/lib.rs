@@ -76,6 +76,7 @@ pub mod web;
 pub mod writer;
 
 pub use disk::MemDisk;
+pub use drafts::Drafted;
 pub use env::{Clock, Env, ExactNames, Identify, Names, Random};
 pub use error::{Error, Invalid, Mismatch, Refusal, Result, Why};
 pub use ids::{EntityId, EntryHash, Hlc, Identity, Nonce, SegmentName, WriterId};

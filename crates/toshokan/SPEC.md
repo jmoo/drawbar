@@ -71,7 +71,7 @@ Each install keeps, per library, a local root of its own that is never synced:
 | `<genesis>/head.json`            | The last entry this writer wrote             |
 | `<genesis>/view.bin`             | The cached view                              |
 | `<genesis>/view.log`             | What the cached view gained since            |
-| `<genesis>/drafts/<entity>.json` | An unsaved edit                              |
+| `<genesis>/drafts/<entity>.json` | An unsaved edit; `file-<hash>.json` a file's |
 | `<genesis>/lock`                 | Held while an instance writes as this writer |
 | `<genesis>/retired`              | Empty; the writer is never written again     |
 | `let-go.json`                    | Entries the install let go, by writer        |
@@ -793,11 +793,13 @@ Emptying a trash is the only way bytes leave the folder.
 ## Drafts
 
 `<genesis>/drafts/<entity>.json` is the JSON line `{"base":"<identity>"}`, an LF,
-then the unsaved bytes. It is kept only in the local root, so losing the local
-root loses drafts and nothing else. Opening restores a draft only while the
-entity's file holds `base`; otherwise it reports what the file holds now. An
-instance that has never written has no directory in the local root and keeps no
-drafts.
+then the unsaved bytes. The draft of a file no entity is bound to is
+`drafts/file-<hash>.json`, named by the first 16 bytes of the BLAKE3 hash of its
+path in hexadecimal, and its line also holds `"path"`; an edit alone does not
+make a file an entity. A draft is kept only in the local root, so losing the
+local root loses drafts and nothing else. Opening restores a draft only while
+its file holds `base`; otherwise it reports what the file holds now. An instance
+that has never written starts its writer before it keeps its first draft.
 
 ## What stays
 

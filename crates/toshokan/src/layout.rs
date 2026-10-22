@@ -203,6 +203,17 @@ impl Layout {
         child(&Self::drafts(genesis), &format!("{entity}.json"))
     }
 
+    /// Where the draft of the file at `path`, which no entity is bound to, is kept:
+    /// named by the first 16 bytes of the BLAKE3 hash of the path.
+    pub fn file_draft(genesis: EntryHash, path: &RelPath) -> RelPath {
+        let hash = blake3::hash(path.as_str().as_bytes());
+        let name: String = hash.as_bytes()[..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        child(&Self::drafts(genesis), &format!("file-{name}.json"))
+    }
+
     pub fn lock(genesis: EntryHash) -> RelPath {
         child(&Self::local(genesis), "lock")
     }

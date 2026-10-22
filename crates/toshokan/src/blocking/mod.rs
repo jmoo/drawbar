@@ -7,7 +7,7 @@ mod native;
 pub use native::Native;
 
 use crate::disk::MemDisk;
-use crate::drafts::Draft;
+use crate::drafts::{Draft, Drafted};
 use crate::env::Env;
 use crate::error::Result;
 use crate::ids::{EntityId, Identity};
@@ -198,7 +198,12 @@ impl<B: Backend> Library<B> {
     }
 
     pub fn draft(&mut self, entity: EntityId) -> Draft<&mut Self> {
-        Draft::new(self, entity)
+        Draft::new(self, Drafted::Entity(entity))
+    }
+
+    /// The draft of the file at `path`, which no entity is bound to.
+    pub fn draft_file(&mut self, path: &RelPath) -> Draft<&mut Self> {
+        Draft::new(self, Drafted::File(path.clone()))
     }
 
     pub fn undo(&mut self) -> Result<Committed> {
@@ -293,15 +298,15 @@ impl<'l, B: Backend + 'l> Intent<&'l mut Library<B>> {
 
 impl<B: Backend> Draft<&mut Library<B>> {
     pub fn put(self, base: Identity, bytes: Vec<u8>) -> Result<()> {
-        let (library, entity) = self.into_parts();
+        let (library, of) = self.into_parts();
         run(
             &mut library.backend,
-            library.core.put_draft(entity, base, bytes),
+            library.core.put_draft(of, base, bytes),
         )
     }
 
     pub fn discard(self) -> Result<()> {
-        let (library, entity) = self.into_parts();
-        run(&mut library.backend, library.core.discard_draft(entity))
+        let (library, of) = self.into_parts();
+        run(&mut library.backend, library.core.discard_draft(of))
     }
 }
