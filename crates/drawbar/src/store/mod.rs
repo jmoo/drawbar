@@ -464,6 +464,21 @@ pub enum Source {
     Edited(Arc<OnDisk>, Arc<Rewrite>),
 }
 
+/// A draft as this install keeps it: of the file `of` names, by this instance's writer,
+/// or by the idle writer of the install's pool that kept it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Kept {
+    pub of: Key,
+    pub pooled: Option<toshokan::WriterId>,
+}
+
+impl Kept {
+    /// A draft this instance's writer keeps.
+    pub fn own(of: Key) -> Kept {
+        Kept { of, pooled: None }
+    }
+}
+
 /// What the app asks a backend to do. Each runs after the one sent before it.
 #[derive(Debug)]
 pub enum Cmd {
@@ -483,15 +498,22 @@ pub enum Cmd {
     /// Redo the intent undone last. Answered by [`Event::Committed`].
     Redo,
     /// Keep an unsaved edit of the file `of` names, made over the file of identity
-    /// `base`, in this install's own state, never in the folder. Answered only on failure,
-    /// by [`Event::Unkept`].
+    /// `base`, in this install's own state, never in the folder, and once it is kept,
+    /// let go of the draft it `replaces`. Answered only on failure, by [`Event::Unkept`].
     Draft {
         of: Key,
         base: toshokan::Identity,
         bytes: Vec<u8>,
+        replaces: Option<Kept>,
     },
-    /// Let go of the draft kept of the file `of` names. Answered only on failure.
-    Discard(Key),
+    /// Let go of a draft. Answered only on failure.
+    Discard(Kept),
+    /// Settle as `how` says a change another drawbar left unfinished. Answered by
+    /// [`Event::Committed`].
+    Settle {
+        orphan: toshokan::report::Orphan,
+        how: toshokan::log::Settlement,
+    },
     File(FileCmd),
 }
 
@@ -663,9 +685,13 @@ pub struct Opened {
     /// How many changes this install showed that the folder no longer holds, as after a
     /// restore of the folder from a backup, which opening let go of: the folder wins.
     pub let_go: usize,
-    /// Whether this writer's trash was emptied of what [`toshokan::Policy::default`]
-    /// does not keep, and why not.
-    pub emptied: Result<(), String>,
+    /// Changes other installs' drawbars left unfinished, which the user settles.
+    pub unfinished: Vec<toshokan::report::Orphan>,
+    /// How many pending records of other writers opening could not read.
+    pub ignored: usize,
+    /// What opening tried to tidy and could not: finishing a change a crash or
+    /// another window left, or emptying the trash.
+    pub trouble: Vec<String>,
 }
 
 /// The library as one answer left it.

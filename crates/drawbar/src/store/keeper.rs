@@ -16,14 +16,15 @@ use toshokan::env::{OsRandom, SystemClock};
 use toshokan::error::Refusal;
 use toshokan::io::IoError;
 use toshokan::io::{Capabilities, Io, IoResult, Kind, Reply, Root};
-use toshokan::report::{Mode, Refreshed};
+use toshokan::log::Settlement;
+use toshokan::report::{By, Mode, Refreshed};
 use toshokan::{EntryHash, Env, Error, Expect, Policy, RelPath, View};
 
 use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES};
 use super::native::locate;
 use super::{
-    Cmd, Event, Failure, Fingerprint, Found, Intent, Key, LibPath, Opened, Part, Source, Stat,
-    Viewed,
+    Cmd, Event, Failure, Fingerprint, Found, Intent, Kept, Key, LibPath, Opened, Part, Source,
+    Stat, Viewed,
 };
 use crate::ondisk::OnDisk;
 use crate::rewrite::{self, Rewrite};
@@ -92,13 +93,27 @@ impl Keeper {
                 let redone = self.undone(Library::redo);
                 self.made("Redo".to_string(), redone, answer);
             }
-            Cmd::Draft { of, base, bytes } => {
-                if let Err(why) = self.draft(&of, |draft| draft.put(base, bytes)) {
+            Cmd::Settle { orphan, how } => {
+                let settled = self.settled(orphan, how);
+                self.made("Settle".to_string(), settled, answer);
+            }
+            Cmd::Draft {
+                of,
+                base,
+                bytes,
+                replaces,
+            } => {
+                let kept = self.draft(&of, |draft| draft.put(base, bytes));
+                let replaced = kept.and_then(|()| match replaces {
+                    Some(replaced) => self.discard(replaced),
+                    None => Ok(()),
+                });
+                if let Err(why) = replaced {
                     answer(Event::Unkept(why));
                 }
             }
-            Cmd::Discard(of) => {
-                if let Err(why) = self.draft(&of, |draft| draft.discard()) {
+            Cmd::Discard(kept) => {
+                if let Err(why) = self.discard(kept) {
                     answer(Event::Unkept(why));
                 }
             }
@@ -152,6 +167,23 @@ impl Keeper {
             .iter()
             .filter(|item| emptied.removed.contains(&item.item));
         Some(Event::Trimmed(gone.map(|item| item.by).collect()))
+    }
+
+    /// Let go of a draft this instance's writer, or an idle writer of the pool, kept.
+    fn discard(&mut self, kept: Kept) -> Result<(), String> {
+        let Some(writer) = kept.pooled else {
+            return self.draft(&kept.of, |draft| draft.discard());
+        };
+        let library = self.library.as_mut().ok_or("the library is not open")?;
+        let of = match &kept.of {
+            Key::Entity(entity) => toshokan::Drafted::Entity(*entity),
+            Key::File(path) => {
+                toshokan::Drafted::File(relative(path).ok_or_else(|| no_path(path))?)
+            }
+        };
+        library
+            .discard_pooled_draft(writer, of)
+            .map_err(|e| e.to_string())
     }
 
     /// Put or let go of the draft of the file `of` names.
@@ -209,19 +241,38 @@ impl Keeper {
         };
         let (mut library, opened) = Library::open(native, keys::layout(), &keys::schema(), env)
             .map_err(|e| e.to_string())?;
-        let writable = match opened.mode {
+        let writable = match &opened.mode {
             Mode::Writable => Ok(()),
             Mode::ReadOnly(why) => Err(why.to_string()),
         };
-        let let_go = opened.removed.len();
+        let mut trouble = Vec::new();
+        let let_go = match self.restored(&opened) {
+            true => opened.removed.len(),
+            false => 0,
+        };
         if let_go > 0 {
             library.let_go().map_err(|e| e.to_string())?;
         }
-        // Nothing an earlier session displaced can be undone now.
-        let emptied = match writable {
-            Ok(()) => library.empty_trash(Policy::default()).map(drop),
-            Err(_) => Ok(()),
-        };
+        let mut unfinished = Vec::new();
+        if writable.is_ok() {
+            if !opened.settled.is_empty() {
+                let settled = library.settle_interrupted();
+                trouble.extend(settled.err().map(|e| format!("finishing a change: {e}")));
+            }
+            // Another window of this install left these: they are ours to finish.
+            for orphan in opened.orphaned {
+                match orphan.ours {
+                    true => {
+                        let settled = library.settle(orphan, Settlement::Finished);
+                        trouble.extend(settled.err().map(|e| format!("finishing a change: {e}")));
+                    }
+                    false => unfinished.push(orphan),
+                }
+            }
+            // Nothing an earlier session displaced can be undone now.
+            let emptied = library.empty_trash(Policy::default());
+            trouble.extend(emptied.err().map(|e| format!("emptying the trash: {e}")));
+        }
         let refreshed = library.rescan().map_err(|e| e.to_string())?;
         let dirs = folders(&self.folder);
         let viewed = viewed(&library, refreshed, Some(dirs));
@@ -231,8 +282,27 @@ impl Keeper {
             viewed,
             drafts: opened.drafts,
             let_go,
-            emptied: emptied.map_err(|e| e.to_string()),
+            unfinished,
+            ignored: opened.ignored.len(),
+            trouble,
         })
+    }
+
+    /// Whether what this install showed and the folder no longer holds was taken by a
+    /// restore of the folder, rather than not delivered yet by a sync: every writer
+    /// whose entries went has its directory in the folder.
+    fn restored(&self, opened: &toshokan::Opened) -> bool {
+        let layout = keys::layout();
+        let writers = opened.removed.iter().filter_map(|change| match &change.by {
+            By::Writer { writer, .. } => Some(*writer),
+            By::This | By::Outside => None,
+        });
+        let present = |writer| {
+            let mut at = self.folder.clone();
+            at.extend(layout.writer(writer).components());
+            at.is_dir()
+        };
+        writers.collect::<BTreeSet<_>>().into_iter().all(present)
     }
 
     fn scanned(
@@ -259,6 +329,21 @@ impl Keeper {
         let paths = paths.map(|moved| (path(moved.from), path(moved.to)));
         let viewed = Viewed {
             undone: Some(paths.collect()),
+            dirs: Some(folders(&self.folder)),
+            ..committed_view(library, committed.changes)
+        };
+        Ok((Some(committed.intent), viewed))
+    }
+
+    /// Settle another writer's unfinished change, and the view after it.
+    fn settled(
+        &mut self,
+        orphan: toshokan::report::Orphan,
+        how: Settlement,
+    ) -> Result<(Option<EntryHash>, Viewed), String> {
+        let library = self.library.as_mut().ok_or("the library is not open")?;
+        let committed = library.settle(orphan, how).map_err(|e| e.to_string())?;
+        let viewed = Viewed {
             dirs: Some(folders(&self.folder)),
             ..committed_view(library, committed.changes)
         };

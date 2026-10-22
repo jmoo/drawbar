@@ -186,8 +186,11 @@ pub struct Store {
     /// of what it holds, and the identity of the file it was made over.
     drafted: BTreeMap<u64, (Key, u64, toshokan::Identity)>,
     /// The drafts an earlier session kept, each put back over its asset once its file is
-    /// read: under which key, and whether its file changed since the draft was made.
-    restoring: BTreeMap<u64, (Key, Draft, bool)>,
+    /// read: as it is kept, and whether its file changed since the draft was made.
+    restoring: BTreeMap<u64, (super::Kept, Draft, bool)>,
+    /// Drafts put back that another writer kept, or under a key the asset no longer
+    /// goes by, each let go of once this writer keeps the edit itself.
+    superseded: BTreeMap<u64, super::Kept>,
     /// Assets to remove now what was copied or saved of them over another has landed
     /// ([`Store::take_left`]).
     left: Vec<u64>,
@@ -260,6 +263,7 @@ impl Store {
             moved: BTreeSet::new(),
             drafted: BTreeMap::new(),
             restoring: BTreeMap::new(),
+            superseded: BTreeMap::new(),
             focused: true,
             scanning: false,
             committing: 0,
@@ -400,18 +404,31 @@ impl Store {
             let unsaved = workspace.get(id).is_some_and(LocalEntity::is_unsaved);
             match unsaved && self.ids.key(id) == Some(&kept.0) {
                 true => _ = self.drafted.insert(id, kept),
-                false => self.send(Cmd::Discard(kept.0)),
+                false => self.send(Cmd::Discard(super::Kept::own(kept.0))),
             }
         }
+        let held = |id: &u64| workspace.get(*id).is_some();
+        let unsaved = |id: &u64| workspace.get(*id).is_some_and(LocalEntity::is_unsaved);
         let gone: Vec<u64> = self
             .restoring
             .keys()
             .copied()
-            .filter(|id| workspace.get(*id).is_none())
+            .filter(|id| !held(id))
             .collect();
         for id in gone {
-            if let Some((key, _, _)) = self.restoring.remove(&id) {
-                self.send(Cmd::Discard(key));
+            if let Some((kept, _, _)) = self.restoring.remove(&id) {
+                self.send(Cmd::Discard(kept));
+            }
+        }
+        let settled: Vec<u64> = self
+            .superseded
+            .keys()
+            .copied()
+            .filter(|id| !unsaved(id))
+            .collect();
+        for id in settled {
+            if let Some(kept) = self.superseded.remove(&id) {
+                self.send(Cmd::Discard(kept));
             }
         }
         for entity in workspace.listed().filter(|entity| entity.is_unsaved()) {
@@ -429,12 +446,29 @@ impl Store {
             let Ok(bytes) = draft.encode() else {
                 continue;
             };
+            let replaces = self.superseded.remove(&entity.id);
             self.send(Cmd::Draft {
                 of: key.clone(),
                 base,
                 bytes,
+                replaces,
             });
             self.drafted.insert(entity.id, (key, stamp, base));
+        }
+    }
+
+    /// Let go of the drafts of an asset whose save landed, unless an edit was made
+    /// since.
+    fn saved_draft(&mut self, id: u64, workspace: &Workspace) {
+        if workspace.get(id).is_some_and(LocalEntity::is_unsaved) {
+            return;
+        }
+        let own = self
+            .drafted
+            .remove(&id)
+            .map(|(key, _, _)| super::Kept::own(key));
+        for kept in own.into_iter().chain(self.superseded.remove(&id)) {
+            self.send(Cmd::Discard(kept));
         }
     }
 
@@ -456,6 +490,10 @@ impl Store {
                     None => continue,
                 },
             };
+            let kept = super::Kept {
+                of: key.clone(),
+                pooled: draft.pooled,
+            };
             let (bytes, changed) = match draft.state {
                 DraftState::Applies { bytes } => (bytes, false),
                 DraftState::BaseChanged { bytes, .. } => (bytes, true),
@@ -464,8 +502,19 @@ impl Store {
                     continue;
                 }
             };
-            let id = self.ids.id(&key).filter(|id| workspace.get(*id).is_some());
-            let Some(id) = id else {
+            // A file whose draft was kept by its path may have become an entity since.
+            let at = |path: &LibPath| {
+                let mut listed = workspace.listed();
+                listed
+                    .find(|entity| entity.path.as_ref() == Some(path))
+                    .map(|entity| entity.id)
+            };
+            let id = match &key {
+                Key::File(path) => self.ids.id(&key).or_else(|| at(path)),
+                Key::Entity(_) => self.ids.id(&key),
+            };
+            let id = id.filter(|id| workspace.get(*id).is_some());
+            let Some(id) = id.filter(|id| !self.restoring.contains_key(id)) else {
                 log.trouble(
                     "An unsaved edit drawbar kept is of a file no longer in the library \
                      folder. It is kept for when the file is back.",
@@ -474,7 +523,7 @@ impl Store {
             };
             match Draft::decode(&bytes) {
                 Ok(draft) => {
-                    self.restoring.insert(id, (key, draft, changed));
+                    self.restoring.insert(id, (kept, draft, changed));
                     workspace.hurry(id);
                 }
                 Err(why) => {
@@ -500,7 +549,7 @@ impl Store {
         if workspace.get(id).is_none_or(LocalEntity::unread) {
             return;
         }
-        let Some((key, draft, changed)) = self.restoring.remove(&id) else {
+        let Some((kept, draft, changed)) = self.restoring.remove(&id) else {
             return;
         };
         match draft {
@@ -511,7 +560,12 @@ impl Store {
             return;
         };
         if !entity.is_unsaved() {
-            return self.send(Cmd::Discard(key));
+            return self.send(Cmd::Discard(kept));
+        }
+        // This writer keeps the edit by the key the asset goes by now, and then lets
+        // go of the draft it came from, where that is another.
+        if kept.pooled.is_some() || self.ids.key(id) != Some(&kept.of) {
+            self.superseded.insert(id, kept);
         }
         match changed {
             true => conflict(id, workspace, browser, log),
@@ -1273,10 +1327,19 @@ impl Store {
             viewed,
             drafts,
             let_go,
-            emptied,
+            unfinished,
+            ignored,
+            trouble,
         } = opened;
-        if let Err(why) = emptied {
-            log.error(format!("emptying the library's trash: {why}"));
+        for why in trouble {
+            log.error(format!("opening the library: {why}"));
+        }
+        if ignored > 0 {
+            log.say(format!(
+                "drawbar left alone {ignored} unfinished change{} of other drawbars whose \
+                 record does not read.",
+                if ignored == 1 { "" } else { "s" }
+            ));
         }
         self.phase = match writable {
             Ok(()) => Phase::Open,
@@ -1314,6 +1377,24 @@ impl Store {
                 browser.ask_rescue(rescue);
             }
         }
+        for orphan in unfinished {
+            browser.ask_unfinished(orphan);
+        }
+    }
+
+    /// Settle as `how` says a change another drawbar left unfinished.
+    pub fn settle_unfinished(
+        &mut self,
+        orphan: toshokan::report::Orphan,
+        how: toshokan::log::Settlement,
+    ) {
+        if !self.open() {
+            return;
+        }
+        let change = format!("{} “{}”", settling(how), orphan.label);
+        self.committing += 1;
+        self.answering.push_back(Step::Change(change));
+        self.send(Cmd::Settle { orphan, how });
     }
 
     /// Take in what the library shows now: its files, their folders, its tags, and who
@@ -2027,6 +2108,7 @@ impl Store {
                 record.missing = false;
                 record.holds = Holds::Whole;
                 browser.folders.missing.remove(&id);
+                self.saved_draft(id, workspace);
                 return;
             }
             Err(Failure::Moved) if record.fingerprint.is_none() => {
@@ -2076,7 +2158,10 @@ impl Store {
                 record.summarized = None;
                 browser.folders.missing.remove(&id);
                 match found.file {
-                    Some(file) => workspace.edit_saved(id, file),
+                    Some(file) => {
+                        workspace.edit_saved(id, file);
+                        self.saved_draft(id, workspace);
+                    }
                     // A file that no longer indexes is read again like any other.
                     None => {
                         workspace.edit_not_saved(id);
@@ -2693,6 +2778,15 @@ impl Store {
             came,
         });
         true
+    }
+}
+
+/// What the Edit menu calls settling another drawbar's unfinished change as `how`.
+fn settling(how: toshokan::log::Settlement) -> &'static str {
+    match how {
+        toshokan::log::Settlement::Finished => "Finish",
+        toshokan::log::Settlement::RolledBack => "Roll back",
+        toshokan::log::Settlement::Dismissed => "Leave as is",
     }
 }
 

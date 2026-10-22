@@ -238,6 +238,8 @@ pub enum Act {
     /// Do this with a slot's former occupant an interrupted write left. The app runs
     /// it, not [`apply`], since it reaches the library's files.
     Rescue(crate::store::Rescue, Rescuing),
+    /// Settle a change another drawbar left unfinished.
+    Settle(toshokan::report::Orphan, toshokan::log::Settlement),
     /// Nothing happened, and this is why.
     Refused(String),
 }
@@ -346,6 +348,7 @@ impl Act {
             | Act::OpenLibrary(_)
             | Act::OpenLibraryDiscarding(_)
             | Act::Rescue(..)
+            | Act::Settle(..)
             | Act::Refused(_) => Vec::new(),
         }
     }
@@ -783,7 +786,8 @@ pub fn apply(
             Act::PickLibrary
             | Act::OpenLibrary(_)
             | Act::OpenLibraryDiscarding(_)
-            | Act::Rescue(..) => {}
+            | Act::Rescue(..)
+            | Act::Settle(..) => {}
         }
     }
 }

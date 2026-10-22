@@ -125,6 +125,7 @@ enum Verb {
     KeepBoth,
     TakeTheirs,
     Discard,
+    Finish,
 }
 
 impl Verb {
@@ -138,6 +139,7 @@ impl Verb {
             Verb::KeepBoth => "Keep both",
             Verb::TakeTheirs => "Take theirs",
             Verb::Discard => "Discard",
+            Verb::Finish => "Finish",
         }
     }
 
@@ -145,7 +147,9 @@ impl Verb {
     fn button(self, ui: &mut egui::Ui) -> egui::Response {
         let (label, glyph) = (self.label(), self.glyph());
         match self {
-            Verb::Save | Verb::Keep | Verb::KeepBoth => sheet::primary(ui, Some(glyph), label),
+            Verb::Save | Verb::Keep | Verb::KeepBoth | Verb::Finish => {
+                sheet::primary(ui, Some(glyph), label)
+            }
             Verb::Replace | Verb::Delete | Verb::Overwrite | Verb::TakeTheirs | Verb::Discard => {
                 sheet::destructive(ui, glyph, label)
             }
@@ -161,6 +165,7 @@ impl Verb {
             Verb::Overwrite => Glyph::Replace,
             Verb::KeepBoth => Glyph::Copy,
             Verb::TakeTheirs => Glyph::RotateCcw,
+            Verb::Finish => Glyph::Check,
         }
     }
 }
@@ -802,6 +807,40 @@ impl Browser {
     /// instrument left on this computer. Show the file is offered where the system can
     /// show it. A file that does not read is said to be no copy, and offered only to be
     /// discarded.
+    /// Ask what to do with a change another drawbar, of another computer or an earlier
+    /// install, left unfinished.
+    pub(crate) fn ask_unfinished(&mut self, orphan: toshokan::report::Orphan) {
+        use toshokan::log::Settlement;
+
+        const SHOWN: usize = 3;
+        let act = |how| vec![Act::Settle(orphan.clone(), how)];
+        let mut paths: Vec<String> = orphan
+            .paths
+            .iter()
+            .take(SHOWN)
+            .map(|path| format!("“{path}”"))
+            .collect();
+        if orphan.paths.len() > SHOWN {
+            paths.push(format!("{} more", orphan.paths.len() - SHOWN));
+        }
+        self.raise(Ask {
+            title: format!("Another drawbar left “{}” unfinished", orphan.label),
+            note: Some(format!(
+                "It was changing {}. Finish completes the change, Roll back puts the files \
+                 back as they were, and Leave as is stops asking.",
+                paths.join(", ")
+            )),
+            verb: Verb::Finish,
+            acts: act(Settlement::Finished),
+            others: vec![
+                ("Roll back", act(Settlement::RolledBack)),
+                ("Leave as is", act(Settlement::Dismissed)),
+            ],
+            cancel: "Later",
+            strong: Answer::Verb,
+        });
+    }
+
     pub(crate) fn ask_rescue(&mut self, rescue: Rescue) {
         let act = |what| vec![Act::Rescue(rescue.clone(), what)];
         let mut others = Vec::new();

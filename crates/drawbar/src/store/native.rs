@@ -109,7 +109,7 @@ pub struct Backend {
 fn writes(cmd: &Cmd) -> bool {
     match cmd {
         Cmd::Open | Cmd::Rescan | Cmd::Refresh | Cmd::Draft { .. } | Cmd::Discard(_) => false,
-        Cmd::Intent(_) | Cmd::Undo | Cmd::Redo => true,
+        Cmd::Intent(_) | Cmd::Undo | Cmd::Redo | Cmd::Settle { .. } => true,
         Cmd::File(file) => file.writes(),
     }
 }

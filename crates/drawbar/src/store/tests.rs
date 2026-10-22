@@ -4454,3 +4454,221 @@ fn a_folder_rename_undone_leaves_no_folder_behind() {
     assert_eq!(root.names(""), [".drawbar", "Gig"]);
     assert_eq!(root.names("Gig/Deep"), ["b.ne5p"]);
 }
+
+/// Two windows of this install keep their unsaved edits as two writers' drafts. Opened
+/// again with one window, both edits come back.
+#[test]
+fn both_windows_unsaved_edits_come_back_in_one() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("a.ne5p"), &program).unwrap();
+    fs::write(root.at("b.ne5p"), &program).unwrap();
+    let mut first = Session::open(&root);
+    let mut second = Session::open(&root);
+    let a = first.named("a.ne5p");
+    let edited_a = first.edit(a, "12");
+    let b = second.named("b.ne5p");
+    let edited_b = second.edit(b, "24");
+    first.close();
+    second.close();
+
+    let mut again = Session::open(&root);
+    let (a, b) = (again.named("a.ne5p"), again.named("b.ne5p"));
+    assert!(again.bytes(a) == edited_a, "the first window's edit");
+    assert!(again.bytes(b) == edited_b, "the second window's edit");
+    assert_eq!(again.said("has the unsaved edit it had"), 2);
+    again.autosave();
+    again.close();
+
+    let last = Session::open(&root);
+    let (a, b) = (last.named("a.ne5p"), last.named("b.ne5p"));
+    assert!(last.bytes(a) == edited_a && last.bytes(b) == edited_b);
+    assert_eq!(
+        last.said("has the unsaved edit it had"),
+        2,
+        "each edit is kept once, by the window that took it up"
+    );
+}
+
+/// toshokan's file system for a library, stopped as a crash stops it right after a
+/// file moves into a writer's trash.
+struct Crashing {
+    native: toshokan::blocking::Native,
+    stopped: bool,
+}
+
+impl toshokan::blocking::Backend for Crashing {
+    fn capabilities(&self, root: toshokan::Root) -> toshokan::io::Capabilities {
+        self.native.capabilities(root)
+    }
+
+    fn perform(&mut self, io: toshokan::Io) -> toshokan::IoResult {
+        assert!(!self.stopped, "crashed");
+        let stops =
+            matches!(&io, toshokan::Io::Rename { to, .. } if to.as_str().contains("/trash/"));
+        let done = self.native.perform(io);
+        self.stopped = stops;
+        done
+    }
+}
+
+/// A save another install's drawbar left unfinished, as on a computer that syncs the
+/// folder, is not settled behind the user's back: drawbar asks, and Finish completes
+/// it.
+#[test]
+fn a_change_another_install_left_unfinished_is_asked_about() {
+    use std::panic::AssertUnwindSafe;
+    use toshokan::blocking::{Library, Native};
+
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    let elsewhere = Temp::new();
+    let crashing = Crashing {
+        native: Native::new(&root.0, &elsewhere.0),
+        stopped: false,
+    };
+    let env = toshokan::Env {
+        clock: Box::new(toshokan::env::SystemClock),
+        random: Box::new(toshokan::env::OsRandom::new()),
+        identify: std::rc::Rc::new(keys::Contents),
+        names: Box::new(keys::Volume),
+        label: "drawbar".into(),
+    };
+    let (mut other, _) = Library::open(crashing, keys::layout(), &keys::schema(), env).unwrap();
+    other.rescan().unwrap();
+    let saved = with_gain(&program, "77");
+    let at = toshokan::RelPath::new("Grand.ne5p").unwrap();
+    let expect =
+        toshokan::Expect::Holds(keys::identity_of_bytes(&path("Grand.ne5p"), &program).unwrap());
+    let bytes = saved.clone();
+    let stopped = std::panic::catch_unwind(AssertUnwindSafe(move || {
+        let _ = other.intent("Save").save_file(&at, bytes, expect).commit();
+    }));
+    assert!(stopped.is_err(), "the other install stopped mid-save");
+
+    let mut session = Session::listed(&root);
+    let (title, answers) = session.bench.browser.asking().expect("a question is asked");
+    assert_eq!(title, "Another drawbar left “Save” unfinished");
+    assert_eq!(answers, ["Later", "Roll back", "Leave as is", "Finish"]);
+    for act in session.bench.browser.answer("Finish") {
+        let crate::browser::Act::Settle(orphan, how) = act else {
+            panic!("{act:?} settles nothing");
+        };
+        session.store.settle_unfinished(orphan, how);
+    }
+    session.decided();
+    assert!(root.read("Grand.ne5p") == saved, "the save is finished");
+}
+
+fn path(text: &str) -> LibPath {
+    LibPath::parse(text).unwrap()
+}
+
+/// A pending record of another writer that does not read is left alone, and said so
+/// once.
+#[test]
+fn a_record_that_does_not_read_is_left_alone_and_said_so() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    first.create();
+    first.close();
+    let writers = root.at(".drawbar/library/writers");
+    let other = writers.join("0123456789abcdef0123456789abcdef");
+    fs::create_dir_all(other.join("pending")).unwrap();
+    fs::write(
+        other.join("pending/fedcba9876543210fedcba9876543210.json"),
+        b"{\"not\":\"a record\"}",
+    )
+    .unwrap();
+
+    let second = Session::listed(&root);
+    assert_eq!(
+        second.said("drawbar left alone 1 unfinished change of other drawbars"),
+        1,
+        "{:?}",
+        second
+            .bench
+            .log
+            .iter()
+            .map(|entry| entry.text.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+impl Session {
+    /// Open the library as another install would, with its own state at `local`.
+    fn elsewhere(root: &Temp, local: &Temp) -> Session {
+        let bench = Bench::new();
+        let backend = Backend::start(&bench.ctx, root.0.clone(), local.0.clone());
+        let mut session = Session {
+            store: Store::start(backend),
+            bench,
+        };
+        session.opened();
+        session
+    }
+}
+
+/// What another install wrote and this computer showed is kept while the folder lacks
+/// that drawbar's history entirely, as while a sync has not brought it yet: only a
+/// folder that holds the history without those changes was restored.
+#[test]
+fn changes_a_sync_has_not_brought_yet_are_not_let_go() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let other = Temp::new();
+    let mut theirs = Session::elsewhere(&root, &other);
+    let grand = theirs.named("Grand.ne5p");
+    theirs.tag(&[grand], "Sunday");
+    theirs.close();
+    let mut ours = Session::listed(&root);
+    ours.refresh();
+    assert_eq!(tagged(&ours), [wears("Grand.ne5p", &["Sunday"])]);
+    ours.make_tag("Spare");
+    ours.close();
+    // Their writer's id is in their install's own state.
+    let genesis = fs::read_dir(&other.0)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let head = fs::read_to_string(genesis.join("head.json")).unwrap();
+    let id = head.split('"').nth(3).unwrap().to_string();
+    let held = Temp::new();
+    let theirs_dir = root.at(&format!(".drawbar/library/writers/{id}"));
+    fs::rename(&theirs_dir, held.0.join(&id)).unwrap();
+
+    let ours = Session::listed(&root);
+    assert_eq!(ours.said("no longer holds"), 0, "nothing is let go");
+    assert_eq!(tagged(&ours), [wears("Grand.ne5p", &["Sunday"])]);
+}
+
+/// An unsaved edit kept of a file by its path comes back though another drawbar made
+/// the file an entity since, and is kept by the entity from then on.
+#[test]
+fn an_edit_kept_by_path_comes_back_once_its_file_is_an_entity() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut first = Session::open(&root);
+    let grand = first.named("Grand.ne5p");
+    let edited = first.edit(grand, "12");
+    first.close();
+    let other = Temp::new();
+    let mut theirs = Session::elsewhere(&root, &other);
+    let grand = theirs.named("Grand.ne5p");
+    theirs.tag(&[grand], "Sunday");
+    theirs.close();
+
+    let mut again = Session::open(&root);
+    let grand = again.named("Grand.ne5p");
+    assert!(again.bytes(grand) == edited, "the edit is back");
+    assert_eq!(tagged(&again), [wears("Grand.ne5p", &["Sunday"])]);
+    again.autosave();
+    again.close();
+    let last = Session::open(&root);
+    let grand = last.named("Grand.ne5p");
+    assert!(last.bytes(grand) == edited);
+    assert_eq!(last.said("has the unsaved edit it had"), 1, "kept once");
+}
