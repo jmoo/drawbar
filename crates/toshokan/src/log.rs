@@ -140,6 +140,9 @@ pub enum Op {
         from: Option<RelPath>,
         file: Option<FileFact>,
     },
+    /// A file effect moved the tree at `from` to `to`, which it made. Facts are not
+    /// changed; undo reads it to remove `to` once it moved its files back.
+    Tree { from: RelPath, to: RelPath },
     /// An op this build does not know, or a known op whose members do not decode,
     /// as its JSON object.
     Unknown(Raw),
@@ -156,7 +159,7 @@ impl Op {
             | Self::Remove { entity, .. }
             | Self::File { entity, .. }
             | Self::Pin { entity, .. } => Some(*entity),
-            Self::Path { .. } | Self::Unknown(_) => None,
+            Self::Path { .. } | Self::Tree { .. } | Self::Unknown(_) => None,
         }
     }
 }
@@ -380,6 +383,8 @@ struct OpMembers {
     observed: Option<Vec<EntryHash>>,
     tags: Option<Vec<EntryHash>>,
     file: Option<ExactFact>,
+    from: Option<RelPath>,
+    to: Option<RelPath>,
 }
 
 /// Reads the next value into `slot`, refusing a second one.
@@ -418,13 +423,23 @@ impl<'de> Visitor<'de> for ExactOpVisitor {
                 }
                 ("delete", "observed") => once(&mut map, &mut m.observed)?,
                 ("remove", "tags") => once(&mut map, &mut m.tags)?,
-                ("file" | "pin", "file") => once(&mut map, &mut m.file)?,
+                ("file" | "pin" | "path", "file") => once(&mut map, &mut m.file)?,
+                ("path" | "tree", "from") => once(&mut map, &mut m.from)?,
+                ("tree", "to") => once(&mut map, &mut m.to)?,
                 _ => return Err(de::Error::custom("a member this build does not write")),
             }
         }
-        let entity = m.entity.ok_or_else(missing)?;
         let value = m.value.map(Raw::from);
         let file = m.file.map(FileFact::from);
+        match name {
+            "path" => return Ok(ExactOp(Op::Path { from: m.from, file })),
+            "tree" => {
+                let (from, to) = (m.from.ok_or_else(missing)?, m.to.ok_or_else(missing)?);
+                return Ok(ExactOp(Op::Tree { from, to }));
+            }
+            _ => {}
+        }
+        let entity = m.entity.ok_or_else(missing)?;
         let op = match name {
             "create" => Op::Create {
                 entity,
@@ -896,6 +911,10 @@ impl Pack for Op {
                 out.push(8);
                 (from, file).pack(out);
             }
+            Self::Tree { from, to } => {
+                out.push(9);
+                (from, to).pack(out);
+            }
         }
     }
 }
@@ -957,6 +976,10 @@ impl Unpack for Op {
             8 => {
                 let (from, file) = Unpack::unpack(input)?;
                 Self::Path { from, file }
+            }
+            9 => {
+                let (from, to) = Unpack::unpack(input)?;
+                Self::Tree { from, to }
             }
             _ => return bad_variant(),
         })
@@ -1118,6 +1141,10 @@ enum OpOut<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         file: Option<&'a FileFact>,
     },
+    Tree {
+        from: &'a RelPath,
+        to: &'a RelPath,
+    },
 }
 
 /// A write without `value` clears; one with `"value":null` writes `null`.
@@ -1186,6 +1213,7 @@ impl Serialize for Op {
                 from: from.as_ref(),
                 file: file.as_ref(),
             },
+            Self::Tree { from, to } => OpOut::Tree { from, to },
             Self::Unknown(raw) => return raw.serialize(serializer),
         };
         out.serialize(serializer)
@@ -1266,6 +1294,13 @@ struct PathIn {
     from: Option<RelPath>,
     #[serde(default)]
     file: Option<FileFact>,
+}
+
+#[derive(Deserialize)]
+struct TreeIn {
+    op: String,
+    from: RelPath,
+    to: RelPath,
 }
 
 #[derive(Deserialize)]
@@ -1377,6 +1412,8 @@ fn decode_op(json: &str) -> Option<Op> {
         ),
         "path" => op_members(json, name, |m: &PathIn| &m.op)
             .map(|PathIn { from, file, .. }| Op::Path { from, file }),
+        "tree" => op_members(json, name, |m: &TreeIn| &m.op)
+            .map(|TreeIn { from, to, .. }| Op::Tree { from, to }),
         _ => None,
     }
 }
@@ -1465,6 +1502,14 @@ mod tests {
                     modified: None,
                 },
                 replaces: vec![hash(10)],
+            },
+            Op::Path {
+                from: Some(RelPath::new("d.wav").unwrap()),
+                file: None,
+            },
+            Op::Tree {
+                from: RelPath::new("old").unwrap(),
+                to: RelPath::new("new/old").unwrap(),
             },
         ]
     }

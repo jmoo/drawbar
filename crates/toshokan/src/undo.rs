@@ -183,6 +183,10 @@ pub fn reverse(entry: &Entry, writer: WriterId, folded: &Folded) -> Result<Plan,
                 plan.files
                     .extend(reversing.path(from.as_ref(), file.as_ref()));
             }
+            Op::Tree { from, to } => plan.files.push(FileChange::Prune {
+                from: to.clone(),
+                to: from.clone(),
+            }),
             Op::Write { .. }
             | Op::Add { .. }
             | Op::Remove { .. }

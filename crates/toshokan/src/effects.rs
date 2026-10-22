@@ -174,6 +174,14 @@ pub struct UnboundEnd {
     pub done_after: usize,
 }
 
+/// A tree moved from `from` to `to` once the first `done_after` steps are done.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct TreeEnd {
+    pub from: RelPath,
+    pub to: RelPath,
+    pub done_after: usize,
+}
+
 /// The file effects of one intent, resolved against the bindings.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct EffectPlan {
@@ -186,6 +194,7 @@ pub struct EffectPlan {
     pub steps: Vec<EffectStep>,
     pub files: Vec<FileEnd>,
     pub unbound: Vec<UnboundEnd>,
+    pub trees: Vec<TreeEnd>,
     pub moves: Moves,
 }
 
@@ -199,6 +208,7 @@ impl EffectPlan {
             steps: Vec::new(),
             files: Vec::new(),
             unbound: Vec::new(),
+            trees: Vec::new(),
             moves: Moves::Rename,
         }
     }
@@ -235,6 +245,8 @@ pub struct Applied {
     /// Each file no entity is bound to that the effects done moved: where it was,
     /// and where it is and what it holds.
     pub unbound: Vec<(Option<RelPath>, Option<FileFact>)>,
+    /// Each tree the effects done moved, from and to.
+    pub trees: Vec<(RelPath, RelPath)>,
     pub outcome: Outcome,
 }
 
@@ -273,6 +285,21 @@ struct Resolver<'r> {
     claimed: BTreeSet<EntityId>,
     layout: &'r Layout,
     bindings: &'r Bindings,
+}
+
+/// The directories at and under `dir` that hold `files`, and `dir`, deepest first:
+/// those a move of every one of `files` out of `dir` leaves to remove.
+fn emptied(files: &[&RelPath], dir: &RelPath) -> Vec<RelPath> {
+    let mut dirs: Vec<RelPath> = files
+        .iter()
+        .flat_map(|path| std::iter::successors(path.parent(), RelPath::parent))
+        .filter(|parent| parent.starts_with(dir))
+        .chain([dir.clone()])
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    dirs.sort_by_key(|parent| std::cmp::Reverse(parent.components().count()));
+    dirs
 }
 
 /// Whether the volume, by `env`'s names, takes the two paths for one.
@@ -343,6 +370,18 @@ impl Resolver<'_> {
                         self.check(&to, Expect::Absent);
                         self.move_tree(&from, &to, rename_dir)?;
                     }
+                }
+                self.end_tree(from, to);
+            }
+            FileChange::Prune { from, to } => {
+                let from = self.library(from)?;
+                let known = self.bindings.bound.values();
+                let known = known.filter(|file| file.state != FileState::Missing);
+                let files = known.map(|file| &file.path).chain(&self.bindings.unbound);
+                let under: Vec<&RelPath> = files.filter(|path| path.starts_with(&from)).collect();
+                self.end_tree(from.clone(), to.clone());
+                for path in emptied(&under, &from) {
+                    self.step(EffectStep::RemoveDir { path });
                 }
             }
             FileChange::Adopt {
@@ -485,19 +524,9 @@ impl Resolver<'_> {
                 None => self.end_unbound(Some((*path).clone()), Some(rebased(path))),
             }
         }
-        if !rename_dir {
-            let mut dirs: Vec<RelPath> = files
-                .iter()
-                .flat_map(|path| std::iter::successors(path.parent(), RelPath::parent))
-                .filter(|dir| dir.starts_with(from))
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
-            dirs.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
-            if !files.contains(from) && !dirs.contains(from) {
-                dirs.push(from.clone());
-            }
-            for path in dirs {
+        if !rename_dir && !files.contains(from) {
+            let files: Vec<&RelPath> = files.iter().copied().collect();
+            for path in emptied(&files, from) {
                 self.step(EffectStep::RemoveDir { path });
             }
         }
@@ -647,6 +676,15 @@ impl Resolver<'_> {
 
     fn step(&mut self, step: EffectStep) {
         self.plan.steps.push(step);
+    }
+
+    fn end_tree(&mut self, from: RelPath, to: RelPath) {
+        let done_after = self.plan.steps.len();
+        self.plan.trees.push(TreeEnd {
+            from,
+            to,
+            done_after,
+        });
     }
 
     fn end_unbound(&mut self, from: Option<RelPath>, path: Option<RelPath>) {
@@ -1066,6 +1104,12 @@ fn account<'a>(
             .filter(|end| end.done_after <= progress.done)
             .cloned()
             .collect();
+        let trees: Vec<(RelPath, RelPath)> = record
+            .trees
+            .iter()
+            .filter(|end| end.done_after <= progress.done)
+            .map(|end| (end.from.clone(), end.to.clone()))
+            .collect();
         let outcome = match record.steps.get(progress.done) {
             None => Outcome::Complete,
             Some(step) => Outcome::Partial(PartialReport {
@@ -1162,6 +1206,7 @@ fn account<'a>(
                     displaced,
                     files,
                     unbound: unbound.collect(),
+                    trees,
                     outcome,
                 }
             })

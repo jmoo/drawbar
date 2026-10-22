@@ -2605,6 +2605,12 @@ fn a_tree_moved_with_files_no_entity_is_bound_to_is_moved_back_by_undo<F: Facade
         ["new/a.wav", "new/deep/b.wav", "new/song.npno"],
         "moved"
     );
+    let dirs = || {
+        let dirs = folder.directories(Root::Folder).into_iter();
+        let dirs = dirs.filter(|dir| !dir.starts_with(&path(".t")) && !dir.is_root());
+        dirs.map(|dir| dir.as_str().to_owned())
+            .collect::<Vec<String>>()
+    };
     a.undo().unwrap();
     assert_eq!(
         files(),
@@ -2615,6 +2621,14 @@ fn a_tree_moved_with_files_no_entity_is_bound_to_is_moved_back_by_undo<F: Facade
         a.view().unbound(),
         [path("old/a.wav"), path("old/deep/b.wav")]
     );
+    assert_eq!(dirs(), ["old", "old/deep"], "the tree's new name is gone");
+    a.redo().unwrap();
+    assert_eq!(
+        files(),
+        ["new/a.wav", "new/deep/b.wav", "new/song.npno"],
+        "redone"
+    );
+    assert_eq!(dirs(), ["new", "new/deep"], "and its old name");
 }
 
 /// The scenario losing the local root interrupts: every step a user might take.

@@ -94,6 +94,11 @@ pub enum FileChange {
     /// Moves everything under `from` to the same place under `to`. Refused when
     /// something is at `to`.
     MoveTree { from: RelPath, to: RelPath },
+    /// Removes the directories under `from`, and `from`, that hold nothing once
+    /// the changes before it in the plan have moved what was there back to `to`:
+    /// the end of undoing a tree move file by file. Logged as a tree move from
+    /// `from` to `to`.
+    Prune { from: RelPath, to: RelPath },
     /// Gives the entity the file at `path` as it is, moving nothing: for a library
     /// file no entity is bound to. Undo leaves the file where it is.
     Adopt {

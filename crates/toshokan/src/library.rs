@@ -942,6 +942,10 @@ impl Library {
                 from: from.clone(),
                 file: file.clone(),
             }))
+            .chain(applied.trees.iter().map(|(from, to)| Op::Tree {
+                from: from.clone(),
+                to: to.clone(),
+            }))
             .collect()
     }
 
@@ -1606,7 +1610,7 @@ fn change_of(op: &Op) -> Option<Change> {
         | Op::Add { entity, key, .. }
         | Op::Remove { entity, key, .. } => (*entity, What::Field(key.clone())),
         Op::File { entity, .. } | Op::Pin { entity, .. } => (*entity, What::File),
-        Op::Path { .. } | Op::Unknown(_) => return None,
+        Op::Path { .. } | Op::Tree { .. } | Op::Unknown(_) => return None,
     };
     Some(Change {
         entity,
@@ -2342,7 +2346,7 @@ fn planned(record: &PendingRecord) -> Logged {
     };
     logged
         .ops
-        .retain(|op| !matches!(op, Op::File { .. } | Op::Path { .. }));
+        .retain(|op| !matches!(op, Op::File { .. } | Op::Path { .. } | Op::Tree { .. }));
     logged.displaced.clear();
     logged
 }

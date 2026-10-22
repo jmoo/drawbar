@@ -199,6 +199,7 @@ Each op is an object whose `op` member names it:
 | `file`   | `entity`, `file`, `replaces`            | A file effect left the entity's file here; none without `file` |
 | `pin`    | `entity`, `file`, `replaces`            | A reader bound the entity's file here        |
 | `path`   | `from`, `file`, both optional           | A file effect moved a file no entity's from `from` to `file` |
+| `tree`   | `from`, `to`                            | A file effect moved the tree at `from` to `to`, which it made |
 
 `replaces`, `observed` and `tags` are arrays of entry hashes. A `value` is the
 app's JSON, kept byte for byte; `"value":null` writes `null`. A `file` is
@@ -604,6 +605,9 @@ each such file as the folder shows it afterwards, with where it was: `from` alon
 for a file trashed, `file` alone for a file made, both for a file renamed or
 saved over. A tree move logs one for each such file under the tree it moves. A commit
 reports each `path` op it logged, an undo's and a redo's included.
+A tree move also logs a `tree` op. Undo moves the tree's files back one by one,
+then removes each directory under `to`, and `to`, left holding nothing, and logs
+the move back as a `tree` op of its own, so a redo removes `from` the same way.
 A `path` op changes no fact; undo reads it to rename the file back,
 bring its displaced bytes back from the trash, or trash the file it made.
 
