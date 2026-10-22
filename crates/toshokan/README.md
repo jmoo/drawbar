@@ -52,7 +52,9 @@ holds a value (`find`), holds any value (`with`) or a value in a range
 bound to a file (`at`), the entities whose files are under a folder (`under`),
 and every conflict (`conflicts`). Values compare by the JSON toshokan writes for
 them; `range` and `values` decode each distinct value of the key. Searching
-names or derived metadata is the app's.
+names or derived metadata is the app's. `changed_since` gives the entities and
+files that differ from an earlier view, at a cost that follows the changes, so an
+app can redraw only those.
 
 Opening scans no library file: each file is shown where its facts put it, as
 unscanned, until a scan of every file. `rescan` scans every library file, for

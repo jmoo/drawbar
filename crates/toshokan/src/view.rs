@@ -235,6 +235,74 @@ impl View {
     pub fn listed(&self, path: &RelPath) -> Option<Listed> {
         self.0.listing.as_ref()?.get(path).copied()
     }
+
+    /// What differs from `before`, a view of the same library. Costs a step per
+    /// change where this view was made from `before`, as each view an instance
+    /// gives is made from the one before it, and a step per entity and file
+    /// otherwise.
+    pub fn changed_since(&self, before: &View) -> Changed {
+        let (now, was) = (&*self.0, &*before.0);
+        let mut entities: BTreeSet<EntityId> =
+            now.folded.changed(&was.folded).into_iter().collect();
+        let mut files = BTreeSet::new();
+        if !Arc::ptr_eq(&now.bindings, &was.bindings) {
+            entities.extend(differing(now.bindings.bound.diff(&was.bindings.bound)));
+            files.extend(either(&now.bindings.unbound, &was.bindings.unbound));
+        }
+        match (&now.listing, &was.listing) {
+            (Some(listing), Some(listed)) => files.extend(differing(listing.diff(listed))),
+            (listing, listed) => {
+                let every = |listing: &Option<CowMap<RelPath, Listed>>| {
+                    let paths = listing.iter().flat_map(|listing| listing.iter());
+                    paths.map(|(path, _)| path.clone()).collect::<Vec<_>>()
+                };
+                files.extend(every(listing).into_iter().chain(every(listed)));
+            }
+        }
+        Changed { entities, files }
+    }
+}
+
+/// What differs between two views of one library, as [`View::changed_since`]
+/// finds it.
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct Changed {
+    /// The entities whose state, or whose file's binding, differs.
+    pub entities: BTreeSet<EntityId>,
+    /// The library files whose listing differs, or that one view has as a file no
+    /// entity is bound to and the other does not.
+    pub files: BTreeSet<RelPath>,
+}
+
+/// The keys whose entries differ in a [`CowMap::diff`].
+fn differing<'a, K: Clone + 'a, V: PartialEq + 'a>(
+    pairs: impl Iterator<Item = (Option<&'a (K, V)>, Option<&'a (K, V)>)> + 'a,
+) -> impl Iterator<Item = K> + 'a {
+    pairs.filter_map(|pair| match pair {
+        (Some((_, now)), Some((_, was))) if now == was => None,
+        (Some((key, _)), _) | (None, Some((key, _))) => Some(key.clone()),
+        (None, None) => None,
+    })
+}
+
+/// The paths in one of two sorted lists and not the other.
+fn either(now: &[RelPath], was: &[RelPath]) -> Vec<RelPath> {
+    let (mut now, mut was) = (now.iter().peekable(), was.iter().peekable());
+    let mut either = Vec::new();
+    loop {
+        let path = match (now.peek(), was.peek()) {
+            (None, None) => return either,
+            (Some(a), Some(b)) if a == b => {
+                now.next();
+                was.next();
+                continue;
+            }
+            (Some(a), Some(b)) if a < b => now.next(),
+            (Some(_), None) => now.next(),
+            (_, Some(_)) => was.next(),
+        };
+        either.extend(path.cloned());
+    }
 }
 
 impl EntityView<'_> {

@@ -23,9 +23,9 @@ use toshokan::report::{
 use toshokan::simulator::Machine;
 use toshokan::view::Conflicted;
 use toshokan::{
-    Drafted, EntityId, EntryHash, Env, Error, Expect, Field, FileState, Hlc, Identify, Identity,
-    Invalid, Io, IoResult, Lag, Layout, Local, MemDisk, Nonce, Policy, Random, Refusal, Register,
-    RelPath, Reply, Root, Schema, Set, View, WriterId,
+    Changed, Drafted, EntityId, EntryHash, Env, Error, Expect, Field, FileState, Hlc, Identify,
+    Identity, Invalid, Io, IoResult, Lag, Layout, Local, MemDisk, Nonce, Policy, Random, Refusal,
+    Register, RelPath, Reply, Root, Schema, Set, View, WriterId,
 };
 
 const ORIGIN: Register<String> = Register::new("origin");
@@ -626,6 +626,7 @@ through_both!(
     a_tree_move_is_undone_by_one_rename_where_directories_rename,
     a_tree_move_is_not_undone_once_a_file_it_moved_changed,
     files_rescanned_together_list_their_directory_once,
+    a_view_says_what_changed_since_the_view_before,
     a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept,
     losing_the_local_root_at_any_step_loses_only_drafts,
     a_crash_at_any_step_is_settled_before_the_next_write,
@@ -2710,6 +2711,54 @@ fn a_tree_move_is_not_undone_once_a_file_it_moved_changed<F: Facade>() {
         ["new/a.wav", "new/b.wav"],
         "nothing moved back"
     );
+}
+
+fn a_view_says_what_changed_since_the_view_before<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    put(&folder, "a.wav", b"a");
+    put(&folder, "b.wav", b"b");
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    let scanned = a.view();
+    assert_eq!(
+        scanned.changed_since(&scanned),
+        Changed::default(),
+        "itself"
+    );
+
+    let song = create(&mut a, "song.npno", b"song");
+    let created = a.view();
+    let changed = created.changed_since(&scanned);
+    assert_eq!(changed.entities, BTreeSet::from([song]), "the entity made");
+    assert_eq!(
+        changed.files,
+        BTreeSet::from([path("song.npno")]),
+        "its file"
+    );
+
+    a.commit("Tag", |i| i.add(song, TAGS, tag("live"))).unwrap();
+    let tagged = a.view();
+    let changed = tagged.changed_since(&created);
+    assert_eq!(
+        changed.entities,
+        BTreeSet::from([song]),
+        "the entity tagged"
+    );
+    assert_eq!(changed.files, BTreeSet::new(), "no file");
+
+    put(&folder, "b.wav", b"bb");
+    put(&folder, "c.wav", b"c");
+    a.rescan_paths(vec![path("b.wav"), path("c.wav")]).unwrap();
+    let changed = a.view().changed_since(&tagged);
+    assert_eq!(changed.entities, BTreeSet::new(), "no entity");
+    assert_eq!(
+        changed.files,
+        BTreeSet::from([path("b.wav"), path("c.wav")]),
+        "the file changed and the file made"
+    );
+    let back = tagged.changed_since(&a.view());
+    assert_eq!(back.files, changed.files, "either way round");
 }
 
 fn files_rescanned_together_list_their_directory_once<F: Facade>() {
