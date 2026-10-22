@@ -2288,9 +2288,11 @@ mod tests {
                     name: format!("{NAME}.ne5p"),
                     path: Some(crate::store::LibPath::root().join(&format!("{NAME}.ne5p"))),
                     origin: crate::workspace::Origin::Fresh,
-                    saved: Vec::new(),
-                    file: None,
-                    unread: Some(1),
+                    content: crate::workspace::Content::Unread {
+                        len: 1,
+                        failed: None,
+                        slot_crc: None,
+                    },
                     unsaved: None,
                 };
                 app.workspace.restore(vec![saved], None, &mut app.log);

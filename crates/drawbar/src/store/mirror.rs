@@ -519,7 +519,7 @@ impl Store {
                 return false;
             };
             workspace.get(*id).is_none_or(|entity| {
-                let saved = entity.saved.file.is_none() && entity.saved.stamp != record.saved;
+                let saved = entity.saved.file().is_none() && entity.saved.stamp() != record.saved;
                 saved || entity.path.as_ref() != Some(path)
             })
         };
