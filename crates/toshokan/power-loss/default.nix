@@ -29,16 +29,8 @@ let
     xfs = "mkfs.xfs -q -f -K";
   };
 
-  # The states a replay samples between two flushes. exFAT keeps no journal: a
-  # crash between two flushes can leave a file at its full length holding zeros,
-  # which copying moves take for another program's file, or leave its allocation
-  # inconsistent. Only exFAT's flushes are replayed.
-  samples = {
-    btrfs = 16;
-    exfat = 0;
-    ext4 = 16;
-    xfs = 16;
-  };
+  # The states a replay samples between two flushes.
+  samples = 16;
 
   replay-log = runCommand "replay-log" { } ''
     mkdir -p "$out/bin"
@@ -173,7 +165,7 @@ in
         failed = []
         for workload in workloads:
             status, out = machine.execute(
-                f"power-loss-replay ${fs} '${mkfs.${fs}}' {workload} ${toString samples.${fs}} 1 2>&1", timeout=None
+                f"power-loss-replay ${fs} '${mkfs.${fs}}' {workload} ${toString samples} 1 2>&1", timeout=None
             )
             print(out)
             if status != 0:

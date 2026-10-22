@@ -159,9 +159,9 @@ nix build .#toshokan-power-loss.ext4   # on one
 ```
 
 The replay logs each workload's writes with dm-log-writes, then rebuilds the
-disk as it stood at every flush and, except on exFAT, at sampled sets of the
-writes between two flushes, and checks each state after the file system's own
-recovery.
+disk as it stood at every flush, and at sampled sets of the writes between two
+flushes, and checks each state after the file system's own recovery. An exFAT
+state that `fsck.exfat` finds corrupt is counted apart.
 [examples/power_loss.rs](examples/power_loss.rs) holds the workloads and the
 checker. Neither test covers APFS, NTFS or a browser's storage.
 

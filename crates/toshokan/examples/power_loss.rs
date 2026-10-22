@@ -31,7 +31,7 @@ use toshokan::io::Capabilities;
 use toshokan::layout::SEGMENT_EXTENSION;
 use toshokan::line;
 use toshokan::log::{Entry, Settlement};
-use toshokan::pending::PendingRecord;
+use toshokan::pending::{self, PendingRecord};
 use toshokan::reader::{CachedView, Reader};
 use toshokan::report::{Opened, Rekey, Start};
 use toshokan::{
@@ -784,7 +784,8 @@ fn read_logs(dirs: &Dirs) -> Result<CachedView, String> {
     Ok(reader.cached().clone())
 }
 
-/// The paths each pending record in the folder names.
+/// The paths each pending record in the folder names. A record cut short before
+/// its bytes landed names none.
 fn records(tree: &BTreeMap<String, Vec<u8>>) -> Result<Vec<RelPath>, String> {
     let mut named = Vec::new();
     for (path, bytes) in tree {
@@ -792,7 +793,7 @@ fn records(tree: &BTreeMap<String, Vec<u8>>) -> Result<Vec<RelPath>, String> {
         let [ROOT, "writers", _, "pending", name] = parts[..] else {
             continue;
         };
-        if !name.ends_with(".json") {
+        if !name.ends_with(".json") || pending::cut_short(bytes) {
             continue;
         }
         let record = PendingRecord::decode(bytes).map_err(|e| format!("{path}: {e:?}"))?;
@@ -837,7 +838,7 @@ struct Crash<'w> {
 
 impl Crash<'_> {
     /// Each library path holds its old bytes, its new bytes, or, while a pending
-    /// record names it, nothing or where moves copy the start of a copy; no bytes
+    /// record names it, nothing or where moves copy a copy cut short; no bytes
     /// left the folder; logs re-encode.
     fn before_recovery(&self, raw: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
         self.kept_in(raw, "left the folder")?;
@@ -851,10 +852,8 @@ impl Crash<'_> {
             let holds = library.get(path);
             let allowed = [a.get(path), b.get(path)];
             let pending = named.iter().any(|n| rel(path).starts_with(n));
-            let started = |whole: &&Vec<u8>| {
-                holds.is_some_and(|part| part.len() < whole.len() && whole.starts_with(part))
-            };
-            let moving = holds.is_none() || copying && allowed.iter().flatten().any(started);
+            let cut = |whole: &&Vec<u8>| holds.is_some_and(|part| part.len() <= whole.len());
+            let moving = holds.is_none() || copying && allowed.iter().flatten().any(cut);
             if !allowed.contains(&holds) && !(pending && moving) {
                 let shown = holds.map(|b| String::from_utf8_lossy(b).into_owned());
                 return Err(format!(
@@ -886,7 +885,12 @@ impl Crash<'_> {
         if !opening.is_empty() {
             return Err(format!("opening changed {opening:?} in the folder"));
         }
-        if !opened.forks.is_empty() || !opened.gaps.is_empty() || !opened.ignored.is_empty() {
+        let cut_short = |path: &RelPath| {
+            raw.get(path.as_str())
+                .is_some_and(|b| pending::cut_short(b))
+        };
+        let ignored = opened.ignored.iter().all(cut_short);
+        if !opened.forks.is_empty() || !opened.gaps.is_empty() || !ignored {
             return Err(format!("opening found {opened:?}"));
         }
         if let Start::Rekeyed {

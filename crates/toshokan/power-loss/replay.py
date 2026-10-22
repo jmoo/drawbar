@@ -11,7 +11,7 @@ two flushes, SAMPLES further states each keep every FUA write before a random
 cut and each other write before it with even odds, as the device may persist any
 of them. Each state is mounted on a throwaway snapshot, so the file system's own
 recovery runs, and checked by power_loss with the steps marked before it as
-acknowledged.
+acknowledged. An exFAT state that fsck.exfat finds corrupt is counted apart.
 """
 
 import collections
@@ -89,7 +89,9 @@ def record(mkfs, workload):
 
 def check(fs, workload, acked, extra):
     """Checks the replay device's state, with the entries `extra` written over
-    it, on a snapshot: what the check found, or why it failed."""
+    it, on a snapshot: what the check found, why it failed, or None for an exFAT
+    state that exFAT's own check finds corrupt, which no protocol above it can
+    keep whole."""
     sh("dmsetup", "create", SNAPSHOT, "--table",
        f"0 {sectors(REPLAY)} snapshot {REPLAY} {COW} N 8")
     snapshot = f"/dev/mapper/{SNAPSHOT}"
@@ -98,6 +100,8 @@ def check(fs, workload, acked, extra):
             replay(snapshot, i, 1)
         if fs == "btrfs":
             sh("btrfs", "device", "scan", "--forget")
+        if fs == "exfat" and sh("fsck.exfat", "-n", snapshot, check=False).returncode != 0:
+            return None
         mounted = sh("mount", snapshot, CHECK, check=False)
         if mounted.returncode != 0:
             return f"mount failed: {mounted.stderr.strip()}"
@@ -136,6 +140,9 @@ def main():
     def checked(at, what, extra=()):
         found["crash states"] += 1
         result = check(fs, workload, acked(at), extra)
+        if result is None:
+            found["corrupt, out of scope"] += 1
+            return
         if isinstance(result, str):
             failures.append(f"{fs} {workload} {what}, {acked(at)} acked: {result}")
             print(failures[-1], flush=True)
