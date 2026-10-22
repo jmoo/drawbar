@@ -1105,6 +1105,38 @@ mod tests {
         LibPath::parse(text).unwrap()
     }
 
+    /// A save to the path of a tagged file deleted outside drawbar writes that entity's
+    /// file, in sync, rather than a file of its own the entity then finds changed.
+    #[test]
+    fn a_save_where_a_tagged_file_went_missing_is_its_entitys_file() {
+        let root = Temp::new();
+        fs::write(root.at("Grand.ne5p"), b"grand").unwrap();
+        let mut keeper = keeper(&root);
+        keeper.run_one(Cmd::Intent(Intent::Tag {
+            files: vec![Key::File(path("Grand.ne5p"))],
+            name: "Sunday".into(),
+            make: false,
+        }));
+        fs::remove_file(root.at("Grand.ne5p")).unwrap();
+        keeper.run_one(Cmd::Rescan);
+        let view = keeper.library.as_ref().unwrap().view();
+        let entity = view.entities()[0].id();
+        assert_eq!(
+            view.entity(entity).unwrap().file().unwrap().state,
+            toshokan::FileState::Missing
+        );
+        keeper.run_one(Cmd::Intent(Intent::Save {
+            id: 1,
+            path: path("Grand.ne5p"),
+            bytes: b"grand, saved again".to_vec(),
+            expect: Expect::Absent,
+            came: None,
+        }));
+        let view = keeper.library.as_ref().unwrap().view();
+        let file = view.entity(entity).unwrap().file().unwrap();
+        assert_eq!(file.state, toshokan::FileState::InSync);
+    }
+
     /// A scan leaves out every name that starts with a dot, as drawbar never lists one:
     /// nothing under such a folder is read for its identity.
     #[test]
