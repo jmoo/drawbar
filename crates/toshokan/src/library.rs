@@ -221,6 +221,9 @@ impl Library {
             .and_then(|(library, report, start)| {
                 flow::run(library.presence_task()).and_then(move |presence| {
                     let mut library = library;
+                    for orphan in &mut library.orphaned {
+                        orphan.live = presence.get(&orphan.writer) == Some(&Presence::SameMachine);
+                    }
                     library.presence = presence;
                     indexed(library).then(move |library| ok((library, report, start)))
                 })
@@ -806,11 +809,15 @@ impl Library {
 
     /// Discards the draft another writer of this install's pool kept, as
     /// [`DraftStatus::pooled`] names it.
+    /// The writer is let go of once it holds nothing more to take up.
     pub fn discard_pooled_draft(&mut self, writer: WriterId, of: Drafted) -> Task<'_, Result<()>> {
-        match self.pooled.get(&writer) {
-            Some(genesis) => drafts::discard(*genesis, &of),
-            None => Task::ready(Ok(())),
-        }
+        let Some(genesis) = self.pooled.get(&writer).copied() else {
+            return Task::ready(Ok(()));
+        };
+        flow::run(drafts::discard(genesis, &of))
+            .and_then(move |()| release_if_idle(self, writer))
+            .map_ok(drop)
+            .task()
     }
 
     /// Removes this writer's spent pending records: those of its intents whose
@@ -1017,6 +1024,7 @@ impl Library {
             }),
             false => self.orphaned.push(Orphan {
                 ours: self.pooled.contains_key(&record.writer),
+                live: self.presence.get(&record.writer) == Some(&Presence::SameMachine),
                 writer: record.writer,
                 record: name,
                 label: record.label.clone(),
@@ -1494,16 +1502,19 @@ impl Library {
     }
 
     /// Which writers another instance on this machine holds: their locks, tried
-    /// and released at once.
+    /// and released at once. The locks this instance holds, its own and those of
+    /// the idle writers it took up, are not tried: a backend answers that a lock
+    /// its process holds is taken, and releasing it would let it go.
     fn presence_task(&self) -> Task<'static, Result<BTreeMap<WriterId, Presence>>> {
         let own = self.writer.as_ref().map(Writer::genesis);
+        let held: BTreeSet<EntryHash> = self.pooled.values().copied().chain(own).collect();
         flow::list(Root::Local, &RelPath::ROOT)
             .and_then(move |entries| {
                 let pool = entries
                     .into_iter()
                     .filter(|entry| entry.kind == Kind::Directory)
                     .filter_map(|entry| entry.name.parse::<EntryHash>().ok())
-                    .filter(move |genesis| Some(*genesis) != own);
+                    .filter(move |genesis| !held.contains(genesis));
                 fold(pool, BTreeMap::new(), |mut presence, genesis| {
                     flow::read_replaced(Root::Local, Layout::head(genesis)).and_then(move |head| {
                         let writer = head
@@ -1875,25 +1886,65 @@ fn recover(library: Library) -> Fallible<'static, Library> {
 }
 
 /// Takes the lock of every other writer of this install's pool that no instance
-/// writes as now, and keeps it, so this instance offers their drafts and settles
-/// their effects, and no other does.
+/// writes as now and that left something to take up, drafts or pending records,
+/// and keeps it, so this instance offers their drafts and settles their effects,
+/// and no other does. Every other idle writer's lock is let go at once, so another
+/// instance may write as it.
 fn idle_pool(library: Library) -> Fallible<'static, Library> {
     let own = library.writer.as_ref().map(Writer::genesis);
     flow::run(Writer::pool()).and_then(move |pool| {
         let others = pool
             .into_iter()
             .filter(move |genesis| Some(*genesis) != own);
-        fold(others, library, |mut library, genesis| {
+        fold(others, library, |library, genesis| {
             flow::lock(Layout::lock(genesis)).and_then(move |lock| match lock {
                 Lock::Held => ok(library),
-                Lock::Acquired => flow::run(Writer::id_of(genesis)).map_ok(move |writer| {
-                    if let Some(writer) = writer {
-                        library.pooled.insert(writer, genesis);
-                    }
-                    library
+                Lock::Acquired => flow::run(Writer::id_of(genesis)).and_then(move |writer| {
+                    let mut library = library;
+                    let Some(writer) = writer else {
+                        return unlock_idle(genesis).map_ok(move |()| library);
+                    };
+                    library.pooled.insert(writer, genesis);
+                    release_if_idle(library, writer)
                 }),
             })
         })
+    })
+}
+
+/// Lets go of the pooled writer `writer` once it holds nothing to take up: no
+/// draft and no pending record.
+fn release_if_idle<'a, L: BorrowMut<Library> + 'a>(
+    library: L,
+    writer: WriterId,
+) -> Fallible<'a, L> {
+    let Some(&genesis) = library.borrow().pooled.get(&writer) else {
+        return ok(library);
+    };
+    let pending = library.borrow().layout.pending_dir(writer);
+    flow::list(Root::Local, &Layout::drafts(genesis)).and_then(move |drafts| {
+        let drafted = drafts.iter().any(|entry| entry.kind == Kind::File);
+        flow::list(Root::Folder, &pending).and_then(move |records| {
+            let folded = &library.borrow().folded;
+            let open = records.iter().any(|entry| {
+                let name = entry.name.strip_suffix(".json");
+                let name = name.and_then(|name| name.parse::<Nonce>().ok());
+                let unsettled = name.is_some_and(|name| !folded.settled(writer, name));
+                entry.kind == Kind::File && unsettled
+            });
+            if drafted || open {
+                return ok(library);
+            }
+            let mut library = library;
+            library.borrow_mut().pooled.remove(&writer);
+            unlock_idle(genesis).map_ok(move |()| library)
+        })
+    })
+}
+
+fn unlock_idle<'a>(genesis: EntryHash) -> Fallible<'a, ()> {
+    flow::act(Io::Unlock {
+        name: Layout::lock(genesis),
     })
 }
 
@@ -2774,7 +2825,7 @@ fn settle_orphan(
                     library
                         .orphaned
                         .retain(|o| (o.writer, o.record) != (orphan.writer, orphan.record));
-                    ok(committed)
+                    release_if_idle(library, orphan.writer).map_ok(move |_| committed)
                 }
             }
         })

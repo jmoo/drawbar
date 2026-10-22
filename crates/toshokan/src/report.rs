@@ -90,6 +90,9 @@ pub struct Orphan {
     /// another window of the app wrote until it closed: its effect is this
     /// install's to settle, with no one else to ask.
     pub ours: bool,
+    /// Another instance on this machine held the writer's lock when this one
+    /// opened: it may be carrying the effect out still.
+    pub live: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

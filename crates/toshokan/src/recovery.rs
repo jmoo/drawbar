@@ -128,6 +128,7 @@ pub fn classify<C: Chain>(
                 Standing::Open => open.push((name, record)),
                 Standing::Orphan => recovery.orphaned.push(Orphan {
                     ours: false,
+                    live: false,
                     writer,
                     record: name,
                     label: record.label.clone(),

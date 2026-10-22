@@ -80,10 +80,17 @@ Each install keeps, per library, a local root of its own that is never synced:
 `<genesis>` is the hash of the writer's genesis entry. The directory is created
 only after that entry is durable in the folder, so the directories of the local
 root are the install's pool of writers. An instance writes as the first writer
-of the pool whose lock it takes, and also takes and keeps the lock of every other
-writer no instance writes as now, as another window of the app wrote until it
-closed: it offers their drafts beside its own, and reports their open pending
-records as orphans that are the install's own (`ours`), to settle without asking.
+of the pool whose lock it takes. It also takes the lock of every other writer no
+instance writes as now, as another window of the app wrote until it closed, and
+keeps it while that writer left something to take up: it offers their drafts
+beside its own, and reports their open pending records as orphans that are the
+install's own (`ours`), to settle without asking. It lets go of such a lock at
+once when the writer left nothing, and as soon as its drafts are discarded and
+its records settled, so the next instance writes as it and the pool stays as
+large as the instances that run at once. An orphan whose writer's lock another
+instance on this machine holds is `live`: that instance may be carrying it out
+still. Asking which writers other instances hold tries only the locks this
+instance does not hold itself.
 
 `head.json` is `{"writer":"<writer id>","head":"<entry hash>"}`,
 `let-go.json` is `{"<writer id>":["<entry hash>",…]}`, and `identities.json` is

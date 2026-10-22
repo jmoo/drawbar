@@ -638,6 +638,9 @@ through_both!(
     files_rescanned_together_list_their_directory_once,
     a_view_says_what_changed_since_the_view_before,
     adopting_a_file_reads_no_other_file_of_its_length,
+    two_windows_session_after_session_keep_a_pool_of_two,
+    asking_who_else_writes_keeps_the_idle_writers_taken_up,
+    an_effect_a_live_window_left_open_is_reported_live,
     a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept,
     losing_the_local_root_at_any_step_loses_only_drafts,
     a_crash_at_any_step_is_settled_before_the_next_write,
@@ -2810,6 +2813,101 @@ fn adopting_a_file_reads_no_other_file_of_its_length<F: Facade>() {
         read,
         BTreeSet::from([path("07.wav")]),
         "the adopted file alone is read"
+    );
+}
+
+fn two_windows_session_after_session_keep_a_pool_of_two<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let pool = || {
+        let dirs = here.local.directories(Root::Local).into_iter();
+        let writers = dirs.filter(|dir| dir.parent().is_some_and(|up| up.is_root()));
+        writers.count()
+    };
+    for session in 0..3 {
+        let mut windows = [1, 2].map(|n| {
+            let seed = 10 * session + n;
+            F::open(Probe::new(&here), env("w", seed, &clock))
+                .unwrap()
+                .0
+        });
+        for (n, window) in windows.iter_mut().enumerate() {
+            clock.advance(10);
+            let name = format!("{session}-{n}");
+            window
+                .commit("Tag", |i| i.create(|e| _ = e.add(TAGS, tag(&name))).0)
+                .unwrap();
+        }
+        for window in windows {
+            window.close().unwrap();
+        }
+        assert!(pool() <= 2, "session {session}: a pool of {}", pool());
+    }
+}
+
+fn asking_who_else_writes_keeps_the_idle_writers_taken_up<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    put(&folder, "a.wav", b"a");
+    let mut windows = [1, 2].map(|seed| {
+        F::open(Probe::new(&here), env("w", seed, &clock))
+            .unwrap()
+            .0
+    });
+    for (n, window) in windows.iter_mut().enumerate() {
+        window
+            .commit("Tag", |i| {
+                i.create(|e| _ = e.add(TAGS, tag(&n.to_string()))).0
+            })
+            .unwrap();
+    }
+    windows[1]
+        .put_file_draft(&path("a.wav"), identity(b"a"), b"edited")
+        .unwrap();
+    for window in windows {
+        window.close().unwrap();
+    }
+
+    let (mut first, opened) = F::open(Probe::new(&here), env("w", 3, &clock)).unwrap();
+    let pooled = opened.drafts.iter().filter(|draft| draft.pooled.is_some());
+    assert_eq!(pooled.count(), 1, "the idle writer's draft is taken up");
+    first.others().unwrap();
+    let (_, opened) = F::open(Probe::new(&here), env("w", 4, &clock)).unwrap();
+    assert_eq!(opened.drafts, [], "the first window still holds it");
+}
+
+fn an_effect_a_live_window_left_open_is_reported_live<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    put(&folder, "a.wav", b"a");
+    let probe = Probe::new(&here);
+    let (mut first, _) = F::open(probe.clone(), env("w", 1, &clock)).unwrap();
+    first.rescan().unwrap();
+    first
+        .commit("Tag", |i| i.create(|e| _ = e.add(TAGS, tag("x"))).0)
+        .unwrap();
+    // The effect is made, and its entry not logged: the record stays open.
+    let logging = |io: &Io| io.root() == Root::Folder && io.path().as_str().ends_with(".txt");
+    fail(&probe, move |io| io.mutates() && logging(io));
+    let stopped = first.commit("Rename", |i| {
+        i.rename_file(
+            &path("a.wav"),
+            &path("b.wav"),
+            Expect::Holds(identity(b"a")),
+        )
+    });
+    heal(&probe);
+    assert!(stopped.is_err(), "the entry was not logged: {stopped:?}");
+
+    let (_, opened) = F::open(Probe::new(&here), env("w", 2, &clock)).unwrap();
+    let orphans: Vec<(bool, bool)> = opened.orphaned.iter().map(|o| (o.ours, o.live)).collect();
+    assert_eq!(
+        orphans,
+        [(false, true)],
+        "the first window holds its writer"
     );
 }
 
