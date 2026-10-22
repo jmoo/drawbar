@@ -506,7 +506,12 @@ their identities:
    reads an identity only when a file's length is that of some file fact, and no
    fact, earlier scan or `identities.json` gives the identity for that path,
    length and time. The install keeps in `identities.json` the identities its
-   scans read while their files keep their length and time. After a commit, only
+   scans read while their files keep their length and time. A file rewritten
+   outside toshokan to the same length and the same modification time, as a
+   coarse clock or a tool that sets the time back allows, keeps the identity read
+   before until its length or time moves: a binding can then take it for what it
+   held. A precondition is never fooled, since it reads the identity at the
+   check. After a commit, only
    the paths its file effects moved files from and to are scanned again, and of
    the other files only those whose length a file fact gained have their
    identities read. A refresh scans again only the paths named by the file facts

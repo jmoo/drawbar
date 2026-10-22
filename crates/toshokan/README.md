@@ -63,6 +63,16 @@ entries moved, or every file until one rescan has finished. `rescan_paths` scans
 the files a watcher saw change. Each reports what changed and, once every file
 was scanned, the files that arrived, moved or changed outside the app.
 
+`Layout::new(".app")` keeps the library's own files in `.app/`.
+`Layout::within(".app", "library")` keeps them in `.app/library/` and leaves all
+of `.app/` out of scans, for an app with other files of its own there, and
+`hiding()` also leaves out every name that starts with a dot.
+
+An intent can save, rename and trash a file nothing is said about by its path,
+without making it an entity, and `Committed::paths` says where such files went,
+an undo's included. A draft of an unsaved edit is kept for an entity or for such
+a path.
+
 `opened` reports what needs the user: effects another writer left unfinished,
 drafts, forks and facts a restore of the folder removed. A view never changes,
 so an app can hand it to other threads. A field read from a view is a value, a

@@ -4264,6 +4264,46 @@ fn a_root_within_the_apps_own_directory_leaves_that_directory_unscanned() {
     assert_eq!(song.members(TAGS).values, [tag("Sunday")]);
 }
 
+/// A root within the app's own directory is made with its directory at the first
+/// commit, and a file where the root would be is left as it is: the library does not
+/// open, and nothing is written.
+#[test]
+fn a_root_within_a_directory_not_there_yet_is_made_at_the_first_commit() {
+    let clock = TestClock::at(1_000);
+    let layout = Layout::within(".app", "library").unwrap();
+    let commit = |folder: &MemDisk| -> Result<(), Error> {
+        let (mut a, _) = blocking::Library::open(
+            machine(folder),
+            layout.clone(),
+            &schema(),
+            env("a", 1, &clock),
+        )?;
+        a.rescan()?;
+        let (intent, _) = a.intent("Tag").create(|e| {
+            e.add(TAGS, tag("Sunday"));
+        });
+        intent.commit().map(drop)
+    };
+    let absent = disk();
+    put(&absent, "song.npno", b"song");
+    commit(&absent).unwrap();
+    let written: Vec<RelPath> = absent.files(Root::Folder).into_keys().collect();
+    assert!(
+        written.iter().any(|at| at.starts_with(layout.root())),
+        "{written:?}"
+    );
+
+    let blocked = disk();
+    put(&blocked, ".app/library", b"not a directory");
+    assert!(commit(&blocked).is_err());
+    let written: Vec<RelPath> = blocked.files(Root::Folder).into_keys().collect();
+    assert_eq!(written, [path(".app/library")]);
+    assert_eq!(
+        read(&blocked, ".app/library").as_deref(),
+        Some(&b"not a directory"[..])
+    );
+}
+
 /// Names as a volume that ignores case takes them.
 #[cfg(not(target_arch = "wasm32"))]
 struct Folding;
