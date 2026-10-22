@@ -3700,6 +3700,7 @@ fn a_failed_answer_counts_each_step_and_how_it_failed_once() {
     };
     assert_eq!(moved.faults(), ["move"].into());
     let refused = Event::Committed {
+        made: false,
         label: "Tag".into(),
         result: Err("read-only".into()),
     };
@@ -4378,4 +4379,43 @@ fn a_tag_on_an_asset_with_no_file_is_refused_and_the_next_goes_on() {
         1
     );
     assert_eq!(tagged(&session), [wears("Grand.ne5p", &["Ballad"])]);
+}
+
+/// The Edit menu says what Undo takes back and Redo makes again: the change, and what it
+/// names. A change that failed is no step of either.
+#[test]
+fn undo_and_redo_say_what_they_take_back() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    assert_eq!(session.store.undo_label(), None);
+    let id = session.create();
+    session.sync();
+    session.tag(&[id], "Sunday");
+    session.place_at(id, "Grand.ne5p");
+    session.sync();
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo Rename “untitled.ne5p”")
+    );
+    session.undo();
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo Tag “Sunday”")
+    );
+    assert_eq!(
+        session.store.redo_label().as_deref(),
+        Some("Redo Rename “untitled.ne5p”")
+    );
+    session.redo();
+    assert_eq!(session.store.redo_label(), None);
+
+    fs::write(root.at("Grand.ne5p"), b"changed outside").unwrap();
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.remove(id, log);
+    session.sync();
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo Rename “untitled.ne5p”"),
+        "the refused delete is no step"
+    );
 }

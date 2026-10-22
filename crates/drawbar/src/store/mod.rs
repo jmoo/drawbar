@@ -570,6 +570,26 @@ pub enum Intent {
 }
 
 impl Intent {
+    /// What the Edit menu calls it: its label and what it names.
+    pub fn describe(&self) -> String {
+        let named = |path: &LibPath| format!("{} “{}”", self.label(), path.leaf());
+        let tag = |name: &str| format!("{} “{name}”", self.label());
+        match self {
+            Intent::Tag { name, .. }
+            | Intent::Untag { name, .. }
+            | Intent::MakeTag { name }
+            | Intent::RemoveTag { name, .. }
+            | Intent::RenameTag { from: name, .. } => tag(name),
+            Intent::Save { path, .. }
+            | Intent::Rewrite { path, .. }
+            | Intent::Import { path, .. }
+            | Intent::Delete { path, .. }
+            | Intent::Move { from: path, .. }
+            | Intent::MoveFolder { from: path, .. } => named(path),
+            Intent::Forget { .. } => self.label().to_string(),
+        }
+    }
+
     /// What the history and other writers call it.
     pub fn label(&self) -> &'static str {
         match self {
@@ -579,6 +599,10 @@ impl Intent {
             Intent::RenameTag { .. } => "Rename tag",
             Intent::RemoveTag { .. } => "Remove tag",
             Intent::Forget { .. } => "Forget",
+            Intent::Save {
+                expect: toshokan::Expect::Absent,
+                ..
+            } => "New",
             Intent::Save { .. } | Intent::Rewrite { .. } => "Save",
             Intent::Import { .. } => "Copy in",
             Intent::Move { from, to, .. } | Intent::MoveFolder { from, to } => {
@@ -681,9 +705,12 @@ pub enum Event {
     Scanned(Result<Viewed, String>),
     /// What the scan after a file command found.
     Viewed(Viewed),
-    /// Whether an intent, an undo or a redo was committed, and why not.
+    /// Whether an intent, an undo or a redo was made, as a step this session's undo
+    /// takes back, and the view after it, or why not. A change to a file that failed is
+    /// told by its own answer, and is answered here with the view as it stands.
     Committed {
         label: String,
+        made: bool,
         result: Result<Viewed, String>,
     },
     /// What [`FileCmd::Read`] read, each with its asset's id. A file not where it was asked

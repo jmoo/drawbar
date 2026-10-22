@@ -173,6 +173,10 @@ pub struct Store {
     /// Assets read again after an undo or redo changed their files, which take what the
     /// files hold now without a word.
     quietly: BTreeSet<u64>,
+    /// This session's changes, as the Edit menu names them.
+    history: History,
+    /// What each change, undo or redo sent and not answered is, in order.
+    answering: VecDeque<Step>,
     /// Assets whose file changed outside drawbar while they held it, read again to see
     /// what it holds now.
     rechecking: BTreeSet<u64>,
@@ -250,6 +254,8 @@ impl Store {
             asks: VecDeque::new(),
             quiet: false,
             quietly: BTreeSet::new(),
+            history: History::default(),
+            answering: VecDeque::new(),
             rechecking: BTreeSet::new(),
             moved: BTreeSet::new(),
             drafted: BTreeMap::new(),
@@ -990,8 +996,16 @@ impl Store {
             Event::Viewed(viewed) => {
                 self.viewed(viewed, workspace, browser, queue, log);
             }
-            Event::Committed { label, result } => {
+            Event::Committed {
+                label,
+                made,
+                result,
+            } => {
                 self.committing = self.committing.saturating_sub(1);
+                let step = self.answering.pop_front();
+                if let (true, Some(step)) = (made, step) {
+                    self.history.took(step);
+                }
                 match result {
                     Ok(viewed) => {
                         self.viewed(viewed, workspace, browser, queue, log);
@@ -1060,23 +1074,38 @@ impl Store {
     /// Send a change to the facts.
     fn commit(&mut self, intent: Intent) {
         self.committing += 1;
+        self.answering.push_back(Step::Change(intent.describe()));
         self.send(Cmd::Intent(intent));
     }
 
-    /// Undo this session's last change to the facts not undone.
+    /// Undo this session's last change not undone.
     pub fn undo(&mut self) {
         if self.opened() {
             self.committing += 1;
+            self.answering.push_back(Step::Undo);
             self.send(Cmd::Undo);
         }
     }
 
-    /// Redo the change to the facts undone last.
+    /// Redo the change undone last.
     pub fn redo(&mut self) {
         if self.opened() {
             self.committing += 1;
+            self.answering.push_back(Step::Redo);
             self.send(Cmd::Redo);
         }
+    }
+
+    /// What Undo takes back now, as the Edit menu names it.
+    pub fn undo_label(&self) -> Option<String> {
+        let last = self.history.done.last()?;
+        Some(format!("Undo {last}"))
+    }
+
+    /// What Redo makes again now, as the Edit menu names it.
+    pub fn redo_label(&self) -> Option<String> {
+        let last = self.history.undone.last()?;
+        Some(format!("Redo {last}"))
     }
 
     /// Read what other drawbars wrote to the library since it was last read.
@@ -2647,6 +2676,36 @@ impl Store {
             came,
         });
         true
+    }
+}
+
+/// One answer of the library this session's undo history follows.
+enum Step {
+    /// A change, as the Edit menu names it.
+    Change(String),
+    Undo,
+    Redo,
+}
+
+/// This session's changes the library made: those an undo takes back, last last, and
+/// those a redo makes again.
+#[derive(Default)]
+struct History {
+    done: Vec<String>,
+    undone: Vec<String>,
+}
+
+impl History {
+    /// Follow a step the library made.
+    fn took(&mut self, step: Step) {
+        match step {
+            Step::Change(change) => {
+                self.done.push(change);
+                self.undone.clear();
+            }
+            Step::Undo => self.undone.extend(self.done.pop()),
+            Step::Redo => self.done.extend(self.undone.pop()),
+        }
     }
 }
 

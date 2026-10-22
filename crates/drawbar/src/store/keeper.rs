@@ -63,13 +63,20 @@ impl Keeper {
             Cmd::Refresh => answer(Event::Scanned(self.scanned(Library::refresh, false))),
             Cmd::Intent(intent) => {
                 let label = intent.label().to_string();
-                let result = self.commit(intent, answer);
-                answer(Event::Committed { label, result });
+                let committed = self.commit(intent, answer);
+                let made = matches!(committed, Ok((true, _)));
+                let result = committed.map(|(_, viewed)| viewed);
+                answer(Event::Committed {
+                    label,
+                    made,
+                    result,
+                });
             }
             Cmd::Undo => {
                 let result = self.undone(Library::undo);
                 answer(Event::Committed {
                     label: "Undo".to_string(),
+                    made: result.is_ok(),
                     result,
                 });
             }
@@ -77,6 +84,7 @@ impl Keeper {
                 let result = self.undone(Library::redo);
                 answer(Event::Committed {
                     label: "Redo".to_string(),
+                    made: result.is_ok(),
                     result,
                 });
             }
@@ -192,9 +200,14 @@ impl Keeper {
         })
     }
 
-    /// Commit an intent. A change to a file answers how it went first, and is answered
-    /// here with the view as it stands, whether it was made or not.
-    fn commit(&mut self, intent: Intent, answer: &mut impl FnMut(Event)) -> Result<Viewed, String> {
+    /// Commit an intent, and say whether it was made. A change to a file answers how it
+    /// went first, and is answered here with the view as it stands, whether it was made
+    /// or not.
+    fn commit(
+        &mut self,
+        intent: Intent,
+        answer: &mut impl FnMut(Event),
+    ) -> Result<(bool, Viewed), String> {
         let library = self.library.as_mut().ok_or("the library is not open")?;
         let label = intent.label();
         let changes = match intent {
@@ -209,15 +222,15 @@ impl Keeper {
                 changes.extend(facts(library, label, |built, view| {
                     tag(built, view, &files, &name)
                 })?);
-                changes
+                Some(changes)
             }
-            Intent::Untag { entities, name } => facts(library, label, |mut built, _| {
+            Intent::Untag { entities, name } => Some(facts(library, label, |mut built, _| {
                 for entity in entities {
                     built = built.remove(entity, TAGS, &name);
                 }
                 Ok(built)
-            })?,
-            Intent::MakeTag { name } => facts(library, label, |built, view| {
+            })?),
+            Intent::MakeTag { name } => Some(facts(library, label, |built, view| {
                 Ok(match view.with(TAG_NAMES).into_iter().min() {
                     Some(list) => built.add(list, TAG_NAMES, name),
                     None => {
@@ -228,9 +241,9 @@ impl Keeper {
                             .0
                     }
                 })
-            })?,
+            })?),
             Intent::RenameTag { entities, from, to } => {
-                facts(library, label, |mut built, view| {
+                Some(facts(library, label, |mut built, view| {
                     for entity in entities {
                         built = built
                             .remove(entity, TAGS, &from)
@@ -243,19 +256,21 @@ impl Keeper {
                                 .add(list, TAG_NAMES, to.clone());
                     }
                     Ok(built)
-                })?
+                })?)
             }
-            Intent::RemoveTag { entities, name } => facts(library, label, |mut built, view| {
-                for entity in entities {
-                    built = built.remove(entity, TAGS, &name);
-                }
-                for list in view.find(TAG_NAMES, &name) {
-                    built = built.remove(list, TAG_NAMES, &name);
-                }
-                Ok(built)
-            })?,
+            Intent::RemoveTag { entities, name } => {
+                Some(facts(library, label, |mut built, view| {
+                    for entity in entities {
+                        built = built.remove(entity, TAGS, &name);
+                    }
+                    for list in view.find(TAG_NAMES, &name) {
+                        built = built.remove(list, TAG_NAMES, &name);
+                    }
+                    Ok(built)
+                })?)
+            }
             Intent::Forget { entity } => {
-                facts(library, label, |built, _| Ok(built.delete(entity)))?
+                Some(facts(library, label, |built, _| Ok(built.delete(entity)))?)
             }
             Intent::Save {
                 id,
@@ -296,13 +311,10 @@ impl Keeper {
                     came: None,
                 };
                 let wrote = write(library, &self.folder, label, to, fill);
-                let result =
-                    wrote.and_then(|(_, changes)| Ok((landed(&self.folder, &path)?, changes)));
-                answer_with(answer, result, |result| Event::Rewritten {
-                    id,
-                    path,
-                    result,
-                })
+                let made = wrote.as_ref().ok().map(|(_, changes)| changes.clone());
+                let result = wrote.and_then(|_| landed(&self.folder, &path));
+                answer(Event::Rewritten { id, path, result });
+                made
             }
             Intent::Import {
                 id,
@@ -316,13 +328,11 @@ impl Keeper {
                     expect,
                     came,
                 };
-                let result = import(library, &self.folder, label, to, from)
-                    .and_then(|changes| Ok((landed(&self.folder, &path)?, changes)));
-                answer_with(answer, result, |result| Event::Imported {
-                    id,
-                    path,
-                    result,
-                })
+                let copied = import(library, &self.folder, label, to, from);
+                let made = copied.as_ref().ok().cloned();
+                let result = copied.and_then(|_| landed(&self.folder, &path));
+                answer(Event::Imported { id, path, result });
+                made
             }
             Intent::Move { from, to, expect } => {
                 let moved = rename(library, label, &from, &to, expect);
@@ -347,13 +357,17 @@ impl Keeper {
                         None => built.trash_file(&at, expect),
                     })
                 });
-                trashed.unwrap_or_else(|why| {
-                    answer(Event::Failed(format!("deleting {path}: {why}")));
-                    Vec::new()
-                })
+                trashed.map_or_else(
+                    |why| {
+                        answer(Event::Failed(format!("deleting {path}: {why}")));
+                        None
+                    },
+                    Some,
+                )
             }
         };
-        Ok(committed_view(library, changes))
+        let made = changes.is_some();
+        Ok((made, committed_view(library, changes.unwrap_or_default())))
     }
 }
 
@@ -534,10 +548,10 @@ fn answer_with<T>(
     answer: &mut impl FnMut(Event),
     result: Result<(T, Vec<toshokan::report::Change>), Failure>,
     event: impl FnOnce(Result<T, Failure>) -> Event,
-) -> Vec<toshokan::report::Change> {
+) -> Option<Vec<toshokan::report::Change>> {
     let (result, changes) = match result {
-        Ok((done, changes)) => (Ok(done), changes),
-        Err(failure) => (Err(failure), Vec::new()),
+        Ok((done, changes)) => (Ok(done), Some(changes)),
+        Err(failure) => (Err(failure), None),
     };
     answer(event(result));
     changes
@@ -545,10 +559,10 @@ fn answer_with<T>(
 
 fn split(
     result: Result<Vec<toshokan::report::Change>, String>,
-) -> (Result<(), String>, Vec<toshokan::report::Change>) {
+) -> (Result<(), String>, Option<Vec<toshokan::report::Change>>) {
     match result {
-        Ok(changes) => (Ok(()), changes),
-        Err(why) => (Err(why), Vec::new()),
+        Ok(changes) => (Ok(()), Some(changes)),
+        Err(why) => (Err(why), None),
     }
 }
 

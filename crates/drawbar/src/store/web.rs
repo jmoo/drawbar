@@ -331,6 +331,7 @@ fn unopened(cmd: Cmd) -> Event {
         Cmd::Rescan | Cmd::Refresh => Event::Scanned(Err(UNOPENED.to_string())),
         cmd => Event::Committed {
             label: format!("{cmd:?}"),
+            made: false,
             result: Err(UNOPENED.to_string()),
         },
     }
