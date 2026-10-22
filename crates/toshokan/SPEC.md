@@ -810,11 +810,10 @@ and a completed request is as durable as the backend makes it.
 The native backend tells a volume by the type of file system it reports. It
 declares `rename_file` and `rename_dir` except where the file system keeps no
 journal of its names, so that a crash can keep a rename's removal of the old
-name without the new one: FAT, exFAT, NTFS, HFS, HFS+ and UDF on Linux, and
-FAT, exFAT and NTFS on Apple systems. There every move copies. On Windows it
-does not tell volumes apart and declares both everywhere. It declares
-`no_replace` where renames also refuse an existing destination (see File
-effects).
+name without the new one: FAT, exFAT, NTFS, HFS, HFS+ and UDF on Linux, FAT,
+exFAT and NTFS on Apple systems, and FAT and exFAT on Windows. There every move
+copies. It declares `no_replace` where renames also refuse an existing
+destination (see File effects).
 
 ### Browsers
 

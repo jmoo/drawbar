@@ -17,13 +17,12 @@ use crate::path::RelPath;
 /// Symbolic links and special files are not library files: listings leave them
 /// out, and naming one fails. What a root's renames promise is probed without
 /// writing, from its volume's file system: by type on Linux and Android, by type
-/// and the volume's capabilities on Apple systems, and on Windows every volume is
-/// taken to rename atomically and refuse a destination. A volume that keeps no
-/// journal of its names, such as FAT or exFAT, declares no
+/// and the volume's capabilities on Apple systems, and by name on Windows. A
+/// volume that keeps no journal of its names, such as FAT or exFAT, declares no
 /// [`Capabilities::rename_file`] or [`Capabilities::rename_dir`], so that every
-/// move copies, and one whose renames refuse a destination declares
-/// [`Capabilities::no_replace`].
-/// On Windows a directory's names cannot be flushed, so `fsync` is not declared,
+/// move copies, and one whose renames refuse an existing destination declares
+/// [`Capabilities::no_replace`], as every other volume on Windows does. On
+/// Windows a directory's names cannot be flushed, so `fsync` is not declared,
 /// and names containing `\` or `:` are refused.
 pub struct Native {
     folder: PathBuf,
@@ -534,19 +533,59 @@ mod volume {
 
 #[cfg(windows)]
 mod volume {
+    use std::fs::OpenOptions;
     use std::io;
     use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
     use std::path::Path;
 
     use super::Renames;
 
-    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetVolumeInformationByHandleW, MoveFileExW, FILE_FLAG_BACKUP_SEMANTICS,
+    };
 
+    /// File systems by the name Windows gives them, whose renames are torn.
+    pub const TORN: [&str; 3] = ["FAT", "FAT32", "exFAT"];
+
+    /// What renames on a volume whose file system Windows names `name` promise.
     /// `MoveFileExW` refuses an existing destination on every volume unless asked
-    /// to replace it. ⚠️ A FAT or exFAT volume is not told apart, so its renames,
-    /// which a crash can tear, are taken to be atomic.
-    pub fn probe(_: &Path) -> Option<Renames> {
-        Some(Renames::Exclusive)
+    /// to replace it.
+    pub fn renames(name: &str) -> Renames {
+        match TORN.iter().any(|torn| torn.eq_ignore_ascii_case(name)) {
+            true => Renames::Torn,
+            false => Renames::Exclusive,
+        }
+    }
+
+    pub fn probe(dir: &Path) -> Option<Renames> {
+        // A directory opens only for backup semantics.
+        let dir = OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(dir)
+            .ok()?;
+        let mut name = [0u16; 64];
+        // SAFETY: the handle is open for the call, and `name` is a writable
+        // buffer of the length passed; the other outputs are not asked for.
+        let found = unsafe {
+            GetVolumeInformationByHandleW(
+                dir.as_raw_handle(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                name.as_mut_ptr(),
+                u32::try_from(name.len()).unwrap_or(0),
+            )
+        };
+        if found == 0 {
+            return None;
+        }
+        let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+        Some(renames(&String::from_utf16(&name[..len]).ok()?))
     }
 
     pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
@@ -625,6 +664,17 @@ mod tests {
         }
         assert_eq!(volume::renames("apfs", true), Renames::Exclusive);
         assert_eq!(volume::renames("smbfs", false), Renames::Replacing);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fat_and_exfat_volumes_move_by_copying_on_windows() {
+        for name in ["FAT", "FAT32", "exFAT"] {
+            assert_eq!(volume::renames(name), Renames::Torn, "{name}");
+        }
+        for name in ["NTFS", "ReFS"] {
+            assert_eq!(volume::renames(name), Renames::Exclusive, "{name}");
+        }
     }
 
     #[test]
