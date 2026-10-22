@@ -1187,16 +1187,13 @@ impl Browser {
             .count()
     }
 
-    /// An index row whose file is gone, for an asset this app does not hold. It keeps
-    /// something the file alone would not give back, until the user lets it go.
+    /// An asset whose file is gone, which this app does not hold. It keeps something the
+    /// file alone would not give back, until the user lets it go.
     fn lost_row(&mut self, ui: &mut egui::Ui, id: u64, acts: &mut Vec<Act>) {
         let Some(lost) = self.folders.lost().iter().find(|lost| lost.id == id) else {
             return;
         };
-        let name = match &lost.row.path {
-            Some(path) => path.to_string(),
-            None => lost.row.name.clone(),
-        };
+        let name = lost.path.to_string();
         let drawn = row(
             ui,
             false,

@@ -37,7 +37,7 @@ use super::{Connection, DeviceCmd};
 use crate::browser::{apply, Act};
 use crate::ondisk::OnDisk;
 use crate::queue::Diff;
-use crate::store::{Backend, Store};
+use crate::store::Store;
 use crate::strings::shown;
 use crate::testing::{largest_allocation_anywhere, Bench, Temp};
 
@@ -442,7 +442,7 @@ impl Rig {
             place(&library, name, from);
         }
         let bench = Bench::new();
-        let store = Store::start(Backend::start(&bench.ctx, library.0.clone()));
+        let store = Store::start(crate::testing::backend(&bench.ctx, &library));
         let mut rig = Rig {
             library,
             store,
@@ -608,7 +608,7 @@ impl Rig {
     }
 
     fn backups(&self) -> Vec<(String, u64)> {
-        let Ok(dir) = fs::read_dir(self.library.at(crate::store::TMP)) else {
+        let Some(Ok(dir)) = self.store.tmp().map(fs::read_dir) else {
             return Vec::new();
         };
         dir.filter_map(Result::ok)
@@ -1305,13 +1305,10 @@ fn s7_a_program_on_the_instrument_exports_as_nord_cli_bundles_it() {
                 rig.frame(arriving);
             }
             let Bench {
-                workspace,
-                browser,
-                queue,
-                ..
+                workspace, browser, ..
             } = &mut rig.bench;
             rig.store
-                .sync(workspace, browser, queue, crate::store::Pass::Files);
+                .sync(workspace, browser, crate::store::Pass::Files);
             if let Some(ids) = rig.bench.workspace.bundle_ready() {
                 return ids;
             }

@@ -56,6 +56,13 @@ impl Temp {
     }
 }
 
+/// The backend over the library in `root`, with this install's own state for it inside
+/// the library's hidden folder, which nothing scans.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn backend(ctx: &egui::Context, root: &Temp) -> crate::store::Backend {
+    crate::store::Backend::start(ctx, root.0.clone(), root.at(".drawbar/install"))
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for Temp {
     fn drop(&mut self) {

@@ -2723,13 +2723,13 @@ impl Workspace {
     }
 
     /// The copy of `id` did not land: say whether it was of a file the instrument was read
-    /// into, which then waits for the sweep of `.drawbar/tmp/` at the next open.
+    /// into, which then stays where it was read.
     pub fn fetched_copy_failed(&mut self, id: u64) -> bool {
         self.fetched.remove(&id).is_some()
     }
 
     /// The copy of `id` landed: delete the file it was fetched into, where it was. In the
-    /// browser the file waits for the sweep of `.drawbar/tmp/` at the next open.
+    /// browser the file stays where it was read.
     pub fn landed_copy(&mut self, id: u64) {
         let Some(_file) = self.fetched.remove(&id) else {
             return;

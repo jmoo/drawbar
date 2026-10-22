@@ -2,19 +2,20 @@
 //! browser drawbar runs in keeps for the page and nothing else can see, or a folder on
 //! this computer the user picked, in browsers that let a page open one.
 //!
+//! A library's facts do not open in the browser on this build: its commands on the facts
+//! are refused, and the app keeps what is made in memory.
+//!
 //! Reads and folder changes run on the page's one thread. A file is written under
 //! `.drawbar/tmp/` in chunks, then moved over its path. In the private file system it is
 //! written by `library-writer.js`, a dedicated worker served beside the page, because the
-//! handles that write in place exist only there. From the first write the worker also
-//! holds `.drawbar/lock` open, and a second tab that finds it held only reads the
-//! library. Those handles cannot reach a picked folder, so there the page writes through
-//! a writable stream, and a Web Lock named for the folder keeps a second tab to reading.
-//! Where the browser will not move a file in a picked folder, the staged file is copied
-//! over its path instead, and a rename copies the file and removes the old one.
+//! handles that write in place exist only there. Those handles cannot reach a picked
+//! folder, so there the page writes through a writable stream. Where the browser will not
+//! move a file in a picked folder, the staged file is copied over its path instead, and a
+//! rename copies the file and removes the old one.
 //!
 //! Commands run one at a time in a task of their own, in the order they were sent. A
-//! library let go runs the commands it was sent before it lets go of its lock, and the
-//! next library opens only then.
+//! library let go runs the commands it was sent before it lets go, and the next library
+//! opens only then.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -34,12 +35,12 @@ use web_sys::{
     File, FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemGetDirectoryOptions,
     FileSystemGetFileOptions, FileSystemHandle, FileSystemHandleKind,
     FileSystemHandlePermissionDescriptor, FileSystemPermissionMode, FileSystemWritableFileStream,
-    LockOptions, MessageEvent, StorageManager, Worker,
+    MessageEvent, StorageManager, Worker,
 };
 
 use super::dom::{self, failure, Moves};
-use super::exec::{self, Children, Fs, Kind, Over, Staged, TMP, WORKING};
-use super::{names, Cmd, Event, Failure, Fingerprint, Keeping, Stat, Unkept};
+use super::exec::{self, Fs, Over, Staged};
+use super::{names, Cmd, Event, Failure, FileCmd, Fingerprint, Stat};
 use crate::js::{describe, field};
 use crate::ondisk::OnDisk;
 use crate::rewrite::Pieces;
@@ -52,6 +53,10 @@ fn writer_url() -> String {
 }
 
 const LOCK: &str = ".drawbar/lock";
+
+/// Where a file is written before it is moved over its path, and where a write to the
+/// instrument leaves a slot's former occupant.
+pub(crate) const TMP: &str = ".drawbar/tmp";
 
 /// How much of a file crosses to the writer, or back from a read, at once.
 const CHUNK: usize = 4 * 1024 * 1024;
@@ -231,7 +236,8 @@ impl Backend {
     /// Whether a command that writes has been sent and not run through yet.
     pub fn busy(&self) -> bool {
         let inbox = self.inbox.borrow();
-        inbox.writing || inbox.cmds.iter().any(exec::writes)
+        let writes = |cmd: &Cmd| matches!(cmd, Cmd::File(file) if file.writes());
+        inbox.writing || inbox.cmds.iter().any(writes)
     }
 
     /// The next answer already here. The page cannot wait for one that is not.
@@ -262,21 +268,25 @@ async fn drive(
     ctx: egui::Context,
 ) {
     let private = root == Root::Private;
-    let mut fs = Folder::open(root, room.clone(), inbox.clone()).await;
+    let mut fs = Folder::open(root, room.clone()).await;
     while let Some(cmd) = next(&inbox).await {
         let mut answer = |event| {
             events.borrow_mut().push_back(event);
             ctx.request_repaint();
         };
-        inbox.borrow_mut().writing = exec::writes(&cmd);
+        let cmd = match cmd {
+            Cmd::File(file) => file,
+            cmd => {
+                answer(unopened(cmd));
+                continue;
+            }
+        };
+        inbox.borrow_mut().writing = cmd.writes();
         match &mut fs {
             Ok(fs) => {
                 // ⚠️ The folder handles outlast only the commands that read: a rescan
                 // looks again for what moved outside this tab, and a write may move it.
-                let reads = matches!(
-                    cmd,
-                    Cmd::Open | Cmd::Read { .. } | Cmd::Fingerprint(_) | Cmd::Walk(_)
-                );
+                let reads = !cmd.writes();
                 if !reads {
                     fs.dirs.borrow_mut().clear();
                 }
@@ -316,45 +326,50 @@ async fn next(inbox: &Rc<RefCell<Inbox>>) -> Option<Cmd> {
     }
 }
 
-/// The answer to a command when there is no library to run it on.
-fn refused(cmd: Cmd, why: &str) -> Event {
+/// Why a library in the browser does not open on this build.
+const UNOPENED: &str = "a library in the browser opens with a later build";
+
+/// The answer to a command on the library's facts, which the browser does not keep yet.
+fn unopened(cmd: Cmd) -> Event {
     match cmd {
-        Cmd::Open => Event::Opened(Err(why.to_string())),
-        Cmd::Scan { .. } => Event::Scanned(Err(why.to_string())),
-        Cmd::Check { .. } => Event::Checked(Err(why.to_string())),
-        Cmd::Walk(dir) => Event::Walked { dir, ran: 0 },
-        Cmd::Fingerprint(_) => Event::Fingerprinted(Vec::new()),
-        Cmd::Read { files, .. } => Event::Read(
+        Cmd::Open => Event::Opened(Err(UNOPENED.to_string())),
+        Cmd::Rescan | Cmd::Refresh => Event::Scanned(Err(UNOPENED.to_string())),
+        cmd => Event::Committed {
+            label: format!("{cmd:?}"),
+            result: Err(UNOPENED.to_string()),
+        },
+    }
+}
+
+/// The answer to a command when there is no library to run it on.
+fn refused(cmd: FileCmd, why: &str) -> Event {
+    match cmd {
+        FileCmd::Read { files, .. } => Event::Read(
             files
                 .into_iter()
                 .map(|(id, _, _)| (id, Err(Failure::Io(why.to_string()))))
                 .collect(),
         ),
-        Cmd::Save { id, path, .. } => Event::Saved {
+        FileCmd::Save { id, path, .. } => Event::Saved {
             id,
             path,
             result: Err(Failure::Io(why.to_string())),
         },
-        Cmd::Import { id, path, .. } => Event::Imported {
+        FileCmd::Import { id, path, .. } => Event::Imported {
             id,
             path,
             result: Err(Failure::Io(why.to_string())),
         },
-        Cmd::Rewrite { id, path, .. } => Event::Rewritten {
+        FileCmd::Rewrite { id, path, .. } => Event::Rewritten {
             id,
             path,
             result: Err(Failure::Io(why.to_string())),
         },
-        Cmd::Move { from, to } => Event::Moved {
+        FileCmd::Move { from, to } => Event::Moved {
             from,
             to,
             result: Err(why.to_string()),
         },
-        Cmd::Commit { .. } => Event::Committed(Err(Unkept {
-            step: Keeping::Index,
-            path: exec::INDEX.to_string(),
-            why: why.to_string(),
-        })),
         _ => Event::Failed(why.to_string()),
     }
 }
@@ -623,59 +638,13 @@ impl Drop for Writer {
     }
 }
 
-/// The Web Lock held while this tab writes a picked folder. Letting go of it releases
-/// the lock.
-struct Held(Function);
-
-impl Drop for Held {
-    fn drop(&mut self) {
-        let _ = self.0.call0(&JsValue::NULL);
-    }
-}
-
-/// Take the Web Lock `name` if no other tab of this site holds it, and hold it until the
-/// answer is dropped. `None` when another tab holds it.
-async fn hold(name: &str) -> io::Result<Option<Held>> {
-    let navigator = web_sys::window()
-        .ok_or_else(|| io::Error::other("the page has no window"))?
-        .navigator();
-    if field(&navigator, "locks").is_none() {
-        return Err(io::Error::other("this browser cannot lock a folder"));
-    }
-    let mut answer = None;
-    let answered = Promise::new(&mut |resolve, _| answer = Some(resolve));
-    let answer = answer.expect("a promise runs its executor at once");
-    let granted = Closure::once_into_js(move |lock: JsValue| -> Promise {
-        if lock.is_null() {
-            let _ = answer.call1(&JsValue::NULL, &JsValue::FALSE);
-            return Promise::resolve(&JsValue::UNDEFINED);
-        }
-        let mut release = None;
-        let holding = Promise::new(&mut |resolve, _| release = Some(resolve));
-        let _ = answer.call1(&JsValue::NULL, &release.into());
-        holding
-    });
-    let options = LockOptions::new();
-    options.set_if_available(true);
-    // Settles only once the lock is let go, or at once when the request is refused.
-    let requested = navigator.locks().request_with_options_and_callback(
-        name,
-        &options,
-        granted.unchecked_ref(),
-    );
-    let first = Promise::race(&Array::of2(&answered, &requested));
-    let answer = JsFuture::from(first).await.map_err(failed)?;
-    Ok(answer.dyn_into::<Function>().ok().map(Held))
-}
-
-/// How a library's files are written, and how a second tab is kept to reading it.
+/// How a library's files are written.
 enum Writes {
     /// Through `library-writer.js`, which holds `.drawbar/lock`. The origin private file
     /// system only. Started with the first write, since a library only read needs none.
     Worker(Option<Writer>),
-    /// Through a writable stream on the page, for a picked folder, under the Web Lock
-    /// named `lock` while `held`.
-    Streams { lock: String, held: Option<Held> },
+    /// Through a writable stream on the page, for a picked folder.
+    Streams,
 }
 
 /// A library's folder: the origin private file system's root, or a folder the user
@@ -688,17 +657,11 @@ struct Folder {
     root: FileSystemDirectoryHandle,
     writes: Writes,
     moves: Moves,
-    /// `.drawbar/` and its folders have been made, once, for this page.
-    prepared: bool,
-    /// The index as this backend last read or wrote it: see [`Fs::last_index`].
-    index: Option<(u64, u32)>,
     /// Names the next temporary file under `.drawbar/tmp/`.
     temps: u64,
     room: Rc<RefCell<Room>>,
     /// Whether the browser has been asked to keep the files.
     asked: bool,
-    /// The commands for this library, closed once it is let go.
-    inbox: Rc<RefCell<Inbox>>,
     /// The folders found so far, by path, so a path is not looked up again from the root
     /// one name at a time.
     ///
@@ -723,39 +686,25 @@ impl Folder {
             Writes::Worker(Some(writer)) => {
                 let _ = writer.ask("unlock", LOCK, &[]).await;
             }
-            Writes::Worker(None) => {}
-            Writes::Streams { held, .. } => drop(held.take()),
+            Writes::Worker(None) | Writes::Streams => {}
         }
     }
 
     /// The folder at `root`, or why this browser gives the page no storage. Some private
     /// windows refuse it.
-    async fn open(
-        root: Root,
-        room: Rc<RefCell<Room>>,
-        inbox: Rc<RefCell<Inbox>>,
-    ) -> Result<Folder, String> {
+    async fn open(root: Root, room: Rc<RefCell<Room>>) -> Result<Folder, String> {
         let (root, writes) = match root {
             Root::Private => (Folder::private().await?, Writes::Worker(None)),
-            Root::Picked(picked) => (
-                picked.handle,
-                Writes::Streams {
-                    lock: format!("drawbar library {}", picked.id),
-                    held: None,
-                },
-            ),
+            Root::Picked(picked) => (picked.handle, Writes::Streams),
         };
-        let moves = Moves::new(matches!(writes, Writes::Streams { .. }));
+        let moves = Moves::new(matches!(writes, Writes::Streams));
         Ok(Folder {
             root,
             writes,
             moves,
-            prepared: false,
-            index: None,
             temps: 0,
             room,
             asked: false,
-            inbox,
             dirs: RefCell::default(),
             resting: RefCell::default(),
         })
@@ -842,7 +791,7 @@ impl Folder {
         }
         let wrote = match &mut self.writes {
             Writes::Worker(writer) => started(writer)?.write(&temp, contents).await,
-            Writes::Streams { .. } => self.stream(&temp, contents).await,
+            Writes::Streams => self.stream(&temp, contents).await,
         };
         match wrote {
             Ok(()) => Ok(temp),
@@ -1285,121 +1234,6 @@ fn move_tree<'a>(
 }
 
 impl Fs for Folder {
-    fn stopped(&self) -> bool {
-        self.inbox.borrow().closed
-    }
-
-    fn waiting(&mut self) -> Option<Cmd> {
-        let mut inbox = self.inbox.borrow_mut();
-        let cmd = inbox.cmds.pop_front();
-        // A write run inside the command running counts until that command ends.
-        inbox.writing |= cmd.as_ref().is_some_and(exec::writes);
-        cmd
-    }
-
-    fn hold(&mut self, cmd: Cmd) {
-        self.inbox.borrow_mut().cmds.push_front(cmd);
-    }
-
-    async fn prepare(&mut self) -> io::Result<()> {
-        if self.prepared {
-            return Ok(());
-        }
-        for dir in [TMP, WORKING] {
-            self.dir(dir, true).await?;
-        }
-        if let Writes::Worker(writer) = &mut self.writes {
-            started(writer)?;
-        }
-        self.prepared = true;
-        Ok(())
-    }
-
-    async fn lock(&mut self) -> io::Result<bool> {
-        match &mut self.writes {
-            Writes::Worker(writer) => {
-                let held = started(writer)?.ask("lock", LOCK, &[]).await?;
-                Ok(held.as_bool() == Some(true))
-            }
-            Writes::Streams { held: Some(_), .. } => Ok(true),
-            Writes::Streams { lock, held } => {
-                *held = hold(lock).await?;
-                Ok(held.is_some())
-            }
-        }
-    }
-
-    async fn unlock(&mut self) {
-        self.let_go().await;
-    }
-
-    fn last_index(&mut self) -> &mut Option<(u64, u32)> {
-        &mut self.index
-    }
-
-    /// A picked folder is written only while the browser lets the page write it.
-    async fn probe(&mut self) -> io::Result<()> {
-        if matches!(self.writes, Writes::Worker(_)) {
-            return Ok(());
-        }
-        match permission(&self.root, false).await? {
-            true => Ok(()),
-            false => Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "this browser does not let drawbar write to the folder",
-            )),
-        }
-    }
-
-    /// Every file's snapshot is asked for before any is waited on, so the browser looks
-    /// them up together.
-    async fn children(
-        &self,
-        dir: &str,
-        room: usize,
-        known: &dyn Fn(&str) -> bool,
-    ) -> io::Result<Children> {
-        let found = entries(&self.dir(dir, false).await?).await?;
-        let more = found.len() > room;
-        let found: Vec<(String, FileSystemHandle)> = found.into_iter().take(room).collect();
-        let told: Vec<bool> = found
-            .iter()
-            .map(|(name, handle)| handle.kind() == FileSystemHandleKind::File && known(name))
-            .collect();
-        let snapshots: Vec<Option<JsFuture>> = found
-            .iter()
-            .zip(&told)
-            .map(|((name, handle), told)| {
-                let file = handle.kind() == FileSystemHandleKind::File && exec::opens(name);
-                (file && !told).then(|| {
-                    JsFuture::from(handle.unchecked_ref::<FileSystemFileHandle>().get_file())
-                })
-            })
-            .collect();
-        let mut children = Vec::new();
-        for (((name, handle), snapshot), told) in found.into_iter().zip(snapshots).zip(told) {
-            if told {
-                children.push((name, None));
-                continue;
-            }
-            let kind = match (handle.kind(), snapshot) {
-                (FileSystemHandleKind::Directory, _) => {
-                    let path = joined(dir, &name);
-                    self.dirs.borrow_mut().insert(path, handle.unchecked_into());
-                    Some(Kind::Dir)
-                }
-                (_, Some(snapshot)) => match snapshot.await.map_err(failed) {
-                    Ok(file) => Some(Kind::File(stat(file.unchecked_ref()))),
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-                    Err(e) => Some(Kind::Unread(e.to_string())),
-                },
-                _ => Some(Kind::Other),
-            };
-            children.push((name, kind));
-        }
-        Ok((children, more))
-    }
-
     async fn names(&self, dir: &str) -> io::Result<Vec<String>> {
         let dir = self.dir(dir, false).await?;
         Ok(entries(&dir)
@@ -1445,12 +1279,6 @@ impl Fs for Folder {
         Ok(crc.value())
     }
 
-    async fn source(&self, path: &str) -> io::Result<impl nord_usb::FileSource> {
-        Ok(crate::ondisk::Sliced::new(
-            snapshot(&self.file(path).await?).await?,
-        ))
-    }
-
     async fn stat(&self, path: &str) -> io::Result<Option<Stat>> {
         match self.handle(path).await {
             Ok(handle) if handle.kind() == FileSystemHandleKind::Directory => Ok(None),
@@ -1458,41 +1286,6 @@ impl Fs for Folder {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
-    }
-
-    /// Every file is asked for before any is waited on, and then every snapshot, so the
-    /// browser looks them up together.
-    async fn stats(&self, paths: &[&str]) -> Vec<io::Result<Option<Stat>>> {
-        let mut handles = Vec::with_capacity(paths.len());
-        for path in paths {
-            handles.push(match self.spot(path).await {
-                Ok((dir, leaf)) => Ok(JsFuture::from(dir.get_file_handle(&leaf))),
-                Err(e) => Err(e),
-            });
-        }
-        let mut snapshots = Vec::with_capacity(paths.len());
-        for handle in handles {
-            snapshots.push(match handle {
-                Ok(handle) => handle.await.map_err(failed).map(|handle| {
-                    JsFuture::from(handle.unchecked_into::<FileSystemFileHandle>().get_file())
-                }),
-                Err(e) => Err(e),
-            });
-        }
-        let mut stats = Vec::with_capacity(paths.len());
-        for (path, snapshot) in paths.iter().zip(snapshots) {
-            let snapshot = match snapshot {
-                Ok(snapshot) => snapshot.await.map_err(failed),
-                Err(e) => Err(e),
-            };
-            stats.push(match snapshot {
-                Ok(file) => Ok(Some(stat(file.unchecked_ref()))),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-                Err(e) if e.to_string().starts_with("TypeMismatchError") => self.stat(path).await,
-                Err(e) => Err(e),
-            });
-        }
-        stats
     }
 
     type Temp = String;
@@ -1574,24 +1367,6 @@ impl Fs for Folder {
             self.follow(from, to).await;
         }
         moved
-    }
-
-    /// Only in the private file system, where a move lands without reading the file.
-    async fn promote(&mut self, from: &str, path: &str, over: Over) -> io::Result<bool> {
-        if !matches!(self.writes, Writes::Worker(_)) {
-            return Ok(false);
-        }
-        if !over.replaces() && self.taken(path).await? {
-            return Err(io::ErrorKind::AlreadyExists.into());
-        }
-        let Ok(file) = self.file(from).await else {
-            return Ok(false);
-        };
-        if over.replaces() {
-            self.forget(path);
-        }
-        let (dir, leaf) = self.spot(path).await?;
-        Ok(move_to(&file, &dir, &leaf).await.is_ok())
     }
 
     async fn make_dir(&mut self, path: &str) -> io::Result<()> {

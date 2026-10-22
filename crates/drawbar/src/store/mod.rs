@@ -1,48 +1,50 @@
 //! "This computer", kept as a folder of real files.
 //!
 //! The library is a directory tree: a folder in the browser is a directory, an asset is a
-//! file, and a move is a rename. What a file cannot say (its tags, the slot it came off,
-//! an edit not yet saved) lives in a hidden `.drawbar/` folder at the root, and so does
-//! the id of each asset with any of those. Every other file is known by its listing.
+//! file, and a move is a rename. What a file cannot say (its tags) is kept by toshokan in
+//! a hidden `.drawbar/library/` folder at the root, as facts about the entities that say
+//! it; every other file is known by its listing alone. Every running drawbar writes its
+//! own log there, so several may write one library at once.
 //!
 //! ```text
 //! <root>/
 //!   .drawbar/
-//!     library.ron     the index: a row for each asset with something a file cannot say
-//!     lock            held while a drawbar writes this library
-//!     tmp/            writes in flight; emptied on open
-//!     working/        <id>-<generation>: an unsaved edit's bytes, never rewritten
+//!     library/        toshokan's root: each writer's log, pending effects and trash
 //!   Grand.npno
 //!   Cello/c3.wav
 //! ```
 //!
-//! `.drawbar/` is made at the first write, so any folder can be opened as a library and
-//! stays as it was until something in it is changed.
+//! Opening writes nothing in the folder: `.drawbar/library/` is made at the first fact
+//! said. An older build's `library.ron` beside it is neither read nor written.
 //!
 //! The app talks to a backend in [`Cmd`]s and hears back in [`Event`]s, in order, and
 //! never waits for one: the desktop runs them on a thread, and a browser's storage
-//! answers only asynchronously. [`Store`] is the app's side of that conversation: it
-//! mirrors the [`crate::workspace::Workspace`] onto the files and folds what it hears back
-//! into it.
+//! answers only asynchronously. A change to the facts is an [`Intent`], one undo step;
+//! files are still written by the commands that diff the workspace against them.
+//! [`Store`] is the app's side of that conversation: it projects the library's view
+//! onto the [`crate::workspace::Workspace`] and the browser's tags.
 
 mod cache;
 mod diff;
 #[cfg(any(target_arch = "wasm32", test))]
 mod dom;
 mod exec;
+mod ids;
+#[cfg(not(target_arch = "wasm32"))]
+mod keeper;
+mod keys;
 mod mirror;
 pub mod names;
-mod sidecar;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{default_root, openable, sync_dir, Backend};
+pub use native::{default_root, local_root, openable, sync_dir, Backend};
 
 #[cfg(target_arch = "wasm32")]
 mod web;
 #[cfg(target_arch = "wasm32")]
-pub(crate) use web::{buffer, move_to, private_root, settle, Writer};
+pub(crate) use web::{buffer, move_to, private_root, settle, Writer, TMP};
 #[cfg(target_arch = "wasm32")]
 pub use web::{default_root, permission, Backend, Picked, Root};
 
@@ -88,14 +90,14 @@ pub fn outside_len(from: &Outside) -> Option<u64> {
 #[cfg(target_arch = "wasm32")]
 pub use cache::keep_libraries;
 pub use cache::Cache;
-pub(crate) use exec::TMP;
-pub use exec::{opens, INDEX, MOST_BYTES, MOST_ENTRIES};
+pub use exec::{opens, MOST_BYTES};
+pub use ids::Key;
 pub use mirror::{Pass, Store};
-pub use sidecar::{Keeps, Row, Sidecar, Stored, Working};
 
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use toshokan::EntityId;
 
 use crate::ondisk::OnDisk;
 use crate::rewrite::Rewrite;
@@ -335,78 +337,6 @@ impl Found {
     }
 }
 
-/// The library's tree as the disk has it, or one part of it. `.drawbar/` and names
-/// starting with a dot are left out.
-#[derive(Clone, Debug, Default)]
-pub struct Listing {
-    /// Every folder below the root, in path order.
-    pub dirs: Vec<LibPath>,
-    /// Every file drawbar holds or opens, in path order.
-    pub files: Vec<Found>,
-    /// Files drawbar would have held that were not read, and why, in path order. They
-    /// are left out of `files`.
-    pub unread: Vec<(LibPath, String)>,
-    /// Files drawbar does not open, in path order, listed by name only.
-    pub others: Vec<LibPath>,
-    /// Folders whose contents were not all listed, because the library holds more
-    /// entries than a listing looks at or the folder could not be read. The root among
-    /// them means some of its own were left out.
-    pub unwalked: Vec<LibPath>,
-}
-
-impl Listing {
-    /// Take in another part of the same listing.
-    pub fn extend(&mut self, part: Listing) {
-        self.dirs.extend(part.dirs);
-        self.files.extend(part.files);
-        self.unread.extend(part.unread);
-        self.others.extend(part.others);
-        self.unwalked.extend(part.unwalked);
-    }
-
-    /// Put every list in path order.
-    pub fn sort(&mut self) {
-        self.dirs.sort();
-        self.files.sort_by(|a, b| a.path.cmp(&b.path));
-        self.unread.sort();
-        self.others.sort();
-        self.unwalked.sort();
-    }
-}
-
-/// What opening a library found before listing it.
-#[derive(Debug)]
-pub struct Opened {
-    /// `Err` with the reason when nothing may be written here. The library still opens,
-    /// and every edit stays in memory.
-    pub writable: Result<(), String>,
-    /// `.drawbar/` was there already. Where it was not, nothing has been written, and
-    /// the library's lock is taken at the first write.
-    pub indexed: bool,
-    /// The index does not read, which leaves the library read-only until it is set
-    /// aside: see [`Cmd::SetAside`].
-    pub damaged: bool,
-    /// The index, or an empty one for a library that has none or one this build must not
-    /// read.
-    pub sidecar: Sidecar,
-    /// The working copies the index names, by asset id. One that is not there is left
-    /// out, and one that did not read leaves the library read-only.
-    pub working: std::collections::BTreeMap<u64, Vec<u8>>,
-    /// The length and CRC-32 of each working copy in `working`, by asset id.
-    pub prints: std::collections::BTreeMap<u64, (u64, u32)>,
-    /// How many leftovers of interrupted writes were removed.
-    pub swept: usize,
-    /// Folders an interrupted rename left under the name it moved them through, that
-    /// could not be put back because another entry has their name.
-    pub stranded: Vec<LibPath>,
-    /// The slots' former occupants in `.drawbar/tmp/`, where the library may be written:
-    /// see [`Rescue`].
-    pub rescued: Vec<Rescue>,
-    /// How many working copies `.drawbar/working/` holds where there is no index, which
-    /// leaves the library read-only.
-    pub unindexed: usize,
-}
-
 /// A slot's former occupant that a write to the instrument left on this computer when
 /// neither the write nor putting the occupant back finished. It may be the only copy of
 /// what the slot held, so nothing sweeps it.
@@ -414,13 +344,15 @@ pub struct Opened {
 pub struct Rescue {
     /// Its file's name: [`nord_usb::envelope::rescue_name`], numbered where taken.
     pub name: String,
-    pub at: Left,
+    /// Where it is, outside every library.
+    pub at: std::path::PathBuf,
     /// Why it does not read as one whole Nord file, where it does not. It is then no copy
     /// of what the slot held, and is offered only to be discarded.
     pub broken: Option<String>,
 }
 
 /// Why `file` does not read as one whole Nord file, where it does not.
+#[cfg(not(target_arch = "wasm32"))]
 async fn unwhole(file: std::io::Result<impl nord_usb::FileSource>) -> Option<String> {
     let verified = match file {
         Ok(mut file) => nord_usb::envelope::verify(&mut file).await.map(drop),
@@ -429,45 +361,11 @@ async fn unwhole(file: std::io::Result<impl nord_usb::FileSource>) -> Option<Str
     verified.err().map(|e| e.to_string())
 }
 
-/// Where a [`Rescue`] was left.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Left {
-    /// In the open library's `.drawbar/tmp/`, holding this.
-    Library(Stat),
-    /// At this path in drawbar's own data, where no library could take it.
-    #[cfg(not(target_arch = "wasm32"))]
-    Shelf(std::path::PathBuf),
-}
-
 impl Rescue {
     /// Whether the system's file manager can show it: only on the desktop.
     pub fn shows(&self) -> bool {
         cfg!(not(target_arch = "wasm32"))
     }
-
-    /// Where it is in the library, for one left there.
-    fn path(&self) -> Option<LibPath> {
-        match self.at {
-            Left::Library(_) => LibPath::parse(&format!("{TMP}/{}", self.name)),
-            #[cfg(not(target_arch = "wasm32"))]
-            Left::Shelf(_) => None,
-        }
-    }
-}
-
-/// The end of an open's listing.
-#[derive(Debug)]
-pub struct Complete {
-    /// Files listed at paths the index does not name, each the length of a file it
-    /// names that is not where it says, and so maybe that file moved. Each comes with its
-    /// CRC, unread.
-    pub strangers: Vec<Found>,
-    /// Files of that kind that were gone by the time their CRC was to be taken.
-    pub gone: Vec<LibPath>,
-    /// How many temporary siblings of interrupted saves were removed.
-    pub swept: usize,
-    /// How many commands sent since the open had run when the listing ended.
-    pub ran: u64,
 }
 
 /// Why a save did not land.
@@ -531,49 +429,68 @@ pub enum Source {
     Edited(Arc<OnDisk>, Arc<Rewrite>),
 }
 
-/// A working copy the index names that holds an edit older than the save it goes with,
-/// and the copy of what that save writes. A save writes `copy` over it before the file,
-/// so a save that landed never leaves the index naming an older edit.
-#[derive(Debug)]
-pub struct Stale {
-    pub name: String,
-    pub copy: Vec<u8>,
-}
-
 /// What the app asks a backend to do. Each runs after the one sent before it.
-///
-/// Every command that writes first makes `.drawbar/` where there is none and takes the
-/// library's lock. Where it cannot, it runs no further and is answered by
-/// [`Event::ReadOnly`].
 #[derive(Debug)]
 pub enum Cmd {
-    /// Read the index, and list every file by its name, length and time. Nothing is read
-    /// but the file under each working copy the index names. Where `.drawbar/` exists,
-    /// take the lock before the index is read, and sweep interrupted writes before the
-    /// listing; where it does not, write nothing. Answered by [`Event::Opened`], then
-    /// the files the index names in [`Event::Listed`] parts, then the rest of the
-    /// listing in parts, breadth first, then [`Event::Complete`]. Only
-    /// [`Event::Opened`] answers an open that failed.
-    ///
-    /// Every command sent while the listing is in flight runs between two of its folders,
-    /// in the order sent, and the rest of the listing follows what it moved, made or
-    /// removed. A file a command wrote is not listed again.
+    /// Open the library as a writer of its own, and scan every file. Answered by
+    /// [`Event::Opened`].
     Open,
-    /// List the tree again. A file `known` holds whole or resting is read again where its
-    /// [`Stat`] is not the known one; no other file is read. Answered by
-    /// [`Event::Scanned`].
-    Scan {
-        known: std::collections::BTreeMap<LibPath, (Fingerprint, Holds)>,
+    /// Read what other writers logged since, and scan every file again for what changed
+    /// outside. Answered by [`Event::Scanned`].
+    Rescan,
+    /// Read what other writers logged since, scanning only the files their entries
+    /// moved. Answered by [`Event::Scanned`].
+    Refresh,
+    /// Answered by [`Event::Committed`].
+    Intent(Intent),
+    /// Undo this session's last intent not undone. Answered by [`Event::Committed`].
+    Undo,
+    /// Redo the intent undone last. Answered by [`Event::Committed`].
+    Redo,
+    File(FileCmd),
+}
+
+/// A change to the facts the user asked for, committed as one undo step. Each names the
+/// entities and files it changes as the view it was made from showed them.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Intent {
+    /// Put a tag on each of these files, making an entity for each one without.
+    Tag { files: Vec<Key>, name: String },
+    /// Take a tag off each of these entities.
+    Untag {
+        entities: Vec<EntityId>,
+        name: String,
     },
-    /// Look again at the files `known` names, as a rescan would, without listing the
-    /// tree: a file whose [`Stat`] is not the known one is read. Answered by
-    /// [`Event::Checked`].
-    Check {
-        known: std::collections::BTreeMap<LibPath, Fingerprint>,
+    /// Rename a tag on each of these entities, which wear it.
+    RenameTag {
+        entities: Vec<EntityId>,
+        from: String,
+        to: String,
     },
-    /// List this folder and everything below it ahead of the rest of an open's listing.
-    /// Answered by [`Event::Walked`] once its parts have been sent.
-    Walk(LibPath),
+    /// Move an entity's file to this writer's trash and end the entity.
+    Delete { entity: EntityId },
+    /// End an entity whose file is gone.
+    Forget { entity: EntityId },
+}
+
+impl Intent {
+    /// What the history and other writers call it.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Intent::Tag { .. } => "Tag",
+            Intent::Untag { .. } => "Untag",
+            Intent::RenameTag { .. } => "Rename tag",
+            Intent::Delete { .. } => "Delete",
+            Intent::Forget { .. } => "Forget",
+        }
+    }
+}
+
+/// What the app asks of a library's files, which the backend writes outside toshokan.
+/// Each that writes is followed by a scan of the paths it touched, answered by
+/// [`Event::Viewed`].
+#[derive(Debug)]
+pub enum FileCmd {
     /// Read each of these files for the asset whose id comes with it, reading at most
     /// `room` bytes whole between them. A piano or sample instrument may be left resting
     /// in its file instead, which takes none of `room`. The fingerprint is what drawbar
@@ -582,19 +499,6 @@ pub enum Cmd {
         files: Vec<(u64, LibPath, Option<Fingerprint>)>,
         room: u64,
     },
-    /// Take the CRC of each of these files, for the asset whose id comes with it, where
-    /// its [`Stat`] is still the one its fingerprint gives. Answered by
-    /// [`Event::Fingerprinted`].
-    Fingerprint(Vec<(u64, LibPath, Fingerprint)>),
-    /// Write the `working` copies, then the index, then delete the working copies in
-    /// `drop`. Working copies are named `<id>-<generation>`. Answered by
-    /// [`Event::Committed`], or, having written nothing, by [`Event::ReadOnly`] where the
-    /// index no longer holds what this backend last read or wrote.
-    Commit {
-        sidecar: Sidecar,
-        working: Vec<(String, Vec<u8>)>,
-        drop: Vec<String>,
-    },
     /// Write a file whole: a new one when `expect` is `None`, otherwise over a file that
     /// must still hold what `expect` says. Answered by [`Event::Saved`].
     Save {
@@ -602,11 +506,6 @@ pub enum Cmd {
         path: LibPath,
         bytes: Vec<u8>,
         expect: Option<Fingerprint>,
-        stale: Option<Stale>,
-        /// The working copy that holds exactly `bytes`, by name. Where the backend moves
-        /// files, it is moved into place in their stead, so the save takes no room of its
-        /// own, and it is gone once the save lands.
-        promote: Option<String>,
     },
     /// Rename a file or folder. Refused where `to` already exists. Answered by
     /// [`Event::Moved`].
@@ -620,12 +519,11 @@ pub enum Cmd {
         from: Arc<OnDisk>,
         edit: Arc<Rewrite>,
         expect: Fingerprint,
-        stale: Option<Stale>,
     },
-    /// Copy a file to `path`, as [`Cmd::Save`] writes one: a new file when `expect` is
-    /// `None`, otherwise over a file that must still hold what `expect` says. Nothing is
-    /// read whole: a piano or sample instrument is left resting in the copy, and any other
-    /// file is left unread. Answered by [`Event::Imported`].
+    /// Copy a file to `path`, as [`FileCmd::Save`] writes one: a new file when `expect`
+    /// is `None`, otherwise over a file that must still hold what `expect` says. Nothing
+    /// is read whole: a piano or sample instrument is left resting in the copy, and any
+    /// other file is left unread. Answered by [`Event::Imported`].
     Import {
         id: u64,
         path: LibPath,
@@ -638,114 +536,100 @@ pub enum Cmd {
     RemoveFile { path: LibPath, expect: Fingerprint },
     /// Delete an empty folder. Answered only on failure.
     RemoveDir(LibPath),
-    /// Delete every working copy, where there is still no index to name any. Answered
-    /// only on failure.
-    DropUnindexed,
-    /// Rename an index that does not read to `.drawbar/library.ron.damaged-<n>`, where
-    /// it is kept, so the library opens again without it. The working copies it names
-    /// are kept too: no open sweeps a working copy while an index set aside is there.
-    /// An index that reads again stays. Answered only on failure.
-    SetAside,
+}
+
+impl FileCmd {
+    /// Whether it changes the folder.
+    pub fn writes(&self) -> bool {
+        !matches!(self, FileCmd::Read { .. })
+    }
+
+    /// The library paths it changes.
+    pub fn touches(&self) -> Vec<LibPath> {
+        match self {
+            FileCmd::Read { .. } => Vec::new(),
+            FileCmd::Save { path, .. }
+            | FileCmd::Rewrite { path, .. }
+            | FileCmd::Import { path, .. }
+            | FileCmd::MakeDir(path)
+            | FileCmd::RemoveFile { path, .. }
+            | FileCmd::RemoveDir(path) => vec![path.clone()],
+            FileCmd::Move { from, to } => vec![from.clone(), to.clone()],
+        }
+    }
+}
+
+/// What opening found.
+#[derive(Debug)]
+pub struct Opened {
+    /// `Err` with the reason when nothing may be written here. The library still opens,
+    /// and every edit stays in memory.
+    pub writable: Result<(), String>,
+    pub viewed: Viewed,
+}
+
+/// The library as one answer left it.
+pub struct Viewed {
+    pub view: toshokan::View,
+    /// Every folder below the root, in path order, where the answer listed them.
+    pub dirs: Option<Vec<LibPath>>,
+    /// What changed since the view before, and who changed it.
+    pub changes: Vec<toshokan::report::Change>,
+    /// The files the answer's scan found moved outside drawbar, from and to.
+    pub moves: Vec<(LibPath, LibPath)>,
+}
+
+impl std::fmt::Debug for Viewed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Viewed")
+            .field("dirs", &self.dirs)
+            .field("changes", &self.changes)
+            .field("moves", &self.moves)
+            .finish_non_exhaustive()
+    }
 }
 
 /// What a backend answers.
 #[derive(Debug)]
 pub enum Event {
     Opened(Result<Opened, String>),
-    /// One part of an open's listing, gathered after the first `ran` commands sent since
-    /// the open had run, and before the next.
-    Listed {
-        part: Listing,
-        ran: u64,
+    /// What a [`Cmd::Rescan`] or a [`Cmd::Refresh`] found.
+    Scanned(Result<Viewed, String>),
+    /// What the scan after a file command found.
+    Viewed(Viewed),
+    /// Whether an intent, an undo or a redo was committed, and why not.
+    Committed {
+        label: String,
+        result: Result<Viewed, String>,
     },
-    Complete(Complete),
-    Scanned(Result<Listing, String>),
-    /// The files a [`Cmd::Check`] found where it looked.
-    Checked(Result<Vec<Found>, String>),
-    /// The folder a [`Cmd::Walk`] asked for, as it was after `ran` commands, is listed
-    /// whole.
-    Walked {
-        dir: LibPath,
-        ran: u64,
-    },
-    /// What [`Cmd::Read`] read, each with its asset's id. A file not where it was asked
+    /// What [`FileCmd::Read`] read, each with its asset's id. A file not where it was asked
     /// for answers [`Failure::Moved`].
     Read(Vec<(u64, Result<Found, Failure>)>),
-    /// The files a [`Cmd::Fingerprint`] found as their fingerprints said, each with its
-    /// asset's id and its fingerprint, now with its CRC. A file that moved, is gone or
-    /// did not read is left out.
-    Fingerprinted(Vec<(u64, LibPath, Fingerprint)>),
     Saved {
         id: u64,
         path: LibPath,
         result: Result<Fingerprint, Failure>,
     },
-    /// What a [`Cmd::Rewrite`] wrote, as a listing finds it.
+    /// What a [`FileCmd::Rewrite`] wrote, as a listing finds it.
     Rewritten {
         id: u64,
         path: LibPath,
         result: Result<Found, Failure>,
     },
-    /// What a [`Cmd::Import`] copied, as a listing finds it.
+    /// What a [`FileCmd::Import`] copied, as a listing finds it.
     Imported {
         id: u64,
         path: LibPath,
         result: Result<Found, Failure>,
     },
-    /// Whether a [`Cmd::Move`] moved anything, and why not.
+    /// Whether a [`FileCmd::Move`] moved anything, and why not.
     Moved {
         from: LibPath,
         to: LibPath,
         result: Result<(), String>,
     },
-    /// Whether a [`Cmd::Commit`] wrote everything it was sent to, and why not.
-    Committed(Result<(), Unkept>),
     /// A command other than a save or a move failed: what it was doing, and why.
     Failed(String),
-    /// A write found that nothing may be written after all, and why: another drawbar
-    /// took the lock first or changed the index, or the folder refused the sidecar. The
-    /// write did not run.
-    ReadOnly(String),
-}
-
-/// Why a [`Cmd::Commit`] did not write everything it was sent to.
-#[derive(Clone, Debug)]
-pub struct Unkept {
-    pub step: Keeping,
-    /// The file it failed on. A working copy is written under a new name at every
-    /// retry, so this differs between retries that fail the same way.
-    pub path: String,
-    pub why: String,
-}
-
-/// The step of a [`Cmd::Commit`] that failed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Keeping {
-    /// Writing a working copy.
-    Working,
-    /// Writing the index.
-    Index,
-    /// Deleting a working copy the index no longer names.
-    Dropping,
-}
-
-impl Unkept {
-    /// Whether `other` failed at the same step for the same cause, whichever file it
-    /// failed on.
-    pub fn same(&self, other: &Unkept) -> bool {
-        self.step == other.step && self.why == other.why
-    }
-}
-
-impl std::fmt::Display for Unkept {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let doing = match self.step {
-            Keeping::Working | Keeping::Index => "writing",
-            Keeping::Dropping => "deleting",
-        };
-        let Unkept { path, why, .. } = self;
-        write!(f, "keeping the library's index: {doing} {path}: {why}")
-    }
 }
 
 impl Event {
@@ -756,10 +640,10 @@ impl Event {
         match self {
             Event::Opened(Err(_)) => one("open"),
             Event::Opened(Ok(opened)) if opened.writable.is_err() => one("read-only"),
-            Event::ReadOnly(_) => one("read-only"),
-            Event::Scanned(Err(_)) | Event::Checked(Err(_)) => one("rescan"),
+            Event::Scanned(Err(_)) => one("rescan"),
+            Event::Committed { result: Err(_), .. } => one("intent"),
             Event::Moved { result: Err(_), .. } => one("move"),
-            Event::Failed(_) | Event::Committed(Err(_)) => one("write"),
+            Event::Failed(_) => one("write"),
             Event::Read(answers) => answers
                 .iter()
                 .filter_map(|(_, result)| result.as_ref().err())
@@ -769,13 +653,9 @@ impl Event {
             Event::Imported { result, .. } => IMPORT.failed(result),
             Event::Rewritten { result, .. } => REWRITE.failed(result),
             Event::Opened(Ok(_))
-            | Event::Listed { .. }
-            | Event::Complete(_)
             | Event::Scanned(Ok(_))
-            | Event::Checked(Ok(_))
-            | Event::Walked { .. }
-            | Event::Fingerprinted(_)
-            | Event::Committed(Ok(()))
+            | Event::Viewed(_)
+            | Event::Committed { result: Ok(_), .. }
             | Event::Moved { result: Ok(()), .. } => Default::default(),
         }
     }

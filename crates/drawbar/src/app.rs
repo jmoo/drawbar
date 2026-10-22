@@ -201,9 +201,9 @@ pub struct DrawbarApp {
     /// eframe's store still holds a library kept the old way, to empty at the first
     /// frame that can write it.
     leaving: bool,
-    /// The list's revision when the index was last written.
+    /// The list's revision at the last full pass.
     synced: u64,
-    /// When the index was last written, in egui time.
+    /// When the last full pass ran, in egui time.
     synced_at: f64,
     /// The selection's revision when its first assets were last asked for.
     picked: Option<u64>,
@@ -538,11 +538,11 @@ impl DrawbarApp {
     }
 
     /// Bring the library level with the list from the frame that changed it; an idle
-    /// egui window may not repaint. Files are written at once, and the working copies
-    /// and the index at most every few seconds, because dragging changes the list every
+    /// egui window may not repaint. Files are written at once, and what was read is
+    /// summarized at most every few seconds, because dragging changes the list every
     /// frame.
     fn keep_up(&mut self, ctx: &egui::Context) {
-        /// The least time between writes of the index, in seconds.
+        /// The least time between full passes, in seconds.
         const EVERY: f64 = 2.0;
 
         let Some(store) = &mut self.store else {
@@ -556,7 +556,7 @@ impl DrawbarApp {
             true => Pass::Full,
             false => Pass::Files,
         };
-        let synced = store.sync(&mut self.workspace, &mut self.browser, &self.queue, pass);
+        let synced = store.sync(&mut self.workspace, &mut self.browser, pass);
         // A full pass that could not finish, as during a rescan, waits out the cadence too,
         // since each one summarizes every asset.
         if pass == Pass::Full {
@@ -566,7 +566,7 @@ impl DrawbarApp {
             self.synced = self.workspace.revision();
             return;
         }
-        // Nothing else may request a frame, and the index is still to be written.
+        // Nothing else may request a frame, and a full pass is still to run.
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
     }
 }
@@ -579,7 +579,14 @@ fn library(ctx: &egui::Context, root: crate::store::Root) -> Store {
     #[cfg(target_arch = "wasm32")]
     let name = root.name();
     let cache = crate::store::Cache::open(ctx, &root);
-    let store = Store::start(crate::store::Backend::start(ctx, root)).remembering(cache);
+    #[cfg(not(target_arch = "wasm32"))]
+    let backend = {
+        let local = crate::store::local_root(&root);
+        crate::store::Backend::start(ctx, root, local)
+    };
+    #[cfg(target_arch = "wasm32")]
+    let backend = crate::store::Backend::start(ctx, root);
+    let store = Store::start(backend).remembering(cache);
     #[cfg(not(target_arch = "wasm32"))]
     let store = store.shelving(crate::device::shelf());
     match name {
@@ -617,24 +624,10 @@ impl DrawbarApp {
     }
 
     /// Run what the user chose to do with the slots' former occupants interrupted writes
-    /// left, and with the working copies of a library that lost its index, and pass the
-    /// rest on.
+    /// left, and pass the rest on.
     fn rescue(&mut self, ctx: &egui::Context, acts: Vec<browser::Act>) -> Vec<browser::Act> {
         let mut rest = Vec::new();
         for act in acts {
-            match act {
-                browser::Act::DropUnindexed {
-                    confirmed: true, ..
-                } => {
-                    self.reopen(ctx, Store::drop_unindexed);
-                    continue;
-                }
-                browser::Act::SetAside { confirmed: true } => {
-                    self.reopen(ctx, Store::set_aside);
-                    continue;
-                }
-                _ => {}
-            }
             let browser::Act::Rescue(rescue, what) = act else {
                 rest.push(act);
                 continue;
@@ -656,23 +649,11 @@ impl DrawbarApp {
         rest
     }
 
-    /// Send `fix` to the open library, which opened read-only, and open it again. The
-    /// open library runs what `fix` sent before it lets go.
-    fn reopen(&mut self, ctx: &egui::Context, fix: fn(&mut Store)) {
-        let Some(store) = self.store.as_mut() else {
-            return;
-        };
-        fix(store);
-        let root = store.root().to_owned();
-        self.switch_library(ctx, root);
-    }
-
     /// Open the library at `root` in place of the one open now.
     ///
-    /// The open library is written first, its unsaved edits as working copies in its own
-    /// `.drawbar/`, where they come back when it is opened again. Its assets then leave
-    /// the window; the views of slots stay. Where the open library cannot keep something
-    /// unsaved, it asks first unless `discard` says the user already agreed to lose it.
+    /// The open library is written first. Its assets then leave the window; the views of
+    /// slots stay. Where the open library cannot keep something unsaved, it asks first
+    /// unless `discard` says the user already agreed to lose it.
     ///
     /// ⚠️ On the desktop it waits for the library's saves in flight to land, as quitting
     /// does. The browser cannot wait, so there it is called once [`Store::settled`].
@@ -798,7 +779,7 @@ impl DrawbarApp {
             return;
         }
         let settled = match &mut self.store {
-            Some(store) => store.settled(&mut self.workspace, &mut self.browser, &self.queue),
+            Some(store) => store.settled(&mut self.workspace, &mut self.browser),
             None => true,
         };
         if let Some((root, discard)) = self.waiting.take_if(|_| settled) {
@@ -817,12 +798,7 @@ impl eframe::App for DrawbarApp {
     /// save.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         if let Some(store) = &mut self.store {
-            if store.sync(
-                &mut self.workspace,
-                &mut self.browser,
-                &self.queue,
-                Pass::Full,
-            ) {
+            if store.sync(&mut self.workspace, &mut self.browser, Pass::Full) {
                 self.synced = self.workspace.revision();
             }
         }
@@ -1476,7 +1452,7 @@ mod tests {
     fn opened_over(root: &crate::testing::Temp) -> (egui::Context, DrawbarApp) {
         let ctx = egui::Context::default();
         let cc = eframe::CreationContext::_new_kittest(ctx.clone());
-        let backend = crate::store::Backend::start(&ctx, root.0.clone());
+        let backend = crate::testing::backend(&ctx, root);
         let mut app = DrawbarApp::with_library(&cc, Some(Store::start(backend)));
         for _ in 0..500 {
             frame(&ctx, &mut app);
@@ -1506,8 +1482,8 @@ mod tests {
         );
     }
 
-    /// End to end through the app's own frames: New makes a file, quitting writes the
-    /// index, and the next run finds the asset where it was left.
+    /// End to end through the app's own frames: New makes a file, and the next run finds
+    /// the asset where it was left.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn what_is_made_in_one_run_is_a_file_the_next_run_opens() {
@@ -1525,7 +1501,6 @@ mod tests {
         app.save(&mut crate::testing::Fake::default());
         app.on_exit(None);
         assert_eq!(root.read("untitled.ne5p"), bytes);
-        assert!(root.at(".drawbar/library.ron").is_file());
 
         let (_, again) = opened_over(&root);
         let names: Vec<&str> = again
@@ -1564,82 +1539,24 @@ mod tests {
         assert_eq!(app.log.status().1, "No files on this computer.");
     }
 
-    /// Switching writes the library open until then, its unsaved edit as a working copy
-    /// in its own sidecar, and opening it again brings the edit back. A view of a slot
-    /// stays in the window and leaves nothing in the library it was open over.
+    /// A library keeps no unsaved edit once another opens in its place, so leaving it
+    /// asks first, and only a yes lets the edit go.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn switching_libraries_keeps_each_ones_unsaved_edits_in_its_own_folder() {
+    fn leaving_a_library_asks_before_its_unsaved_edits_are_lost() {
         let (first, second) = (crate::testing::Temp::new(), crate::testing::Temp::new());
         let (ctx, mut app) = opened_over(&first);
         let id = app
             .workspace
             .create(crate::workspace::Fresh::Program, &mut app.log)
             .unwrap();
-        frame(&ctx, &mut app);
-        let saved = app.workspace.get(id).unwrap().bytes.to_vec();
-        let edit = |bytes: &[u8]| {
-            crate::fields::apply(bytes, &[("center_panel.gain".into(), "96".into())])
-                .unwrap()
-                .1
-        };
-        let edited = edit(&saved);
-        app.workspace
-            .replace_bytes(id, edited.clone(), &mut app.log);
-        let at = nord_usb::Location { bank: 6, slot: 3 };
-        let view = app.workspace.view(
-            "Africa Split.ne5p".into(),
-            Origin::Device {
-                class: nord_usb::ObjectClass::Program,
-                at,
-            },
-            saved.clone(),
-            &mut app.log,
-        );
-        app.workspace
-            .replace_bytes(view, edited.clone(), &mut app.log);
-        app.tabs.open(view);
-
-        app.open_library(&ctx, second.0.clone(), false);
-        until_open(&ctx, &mut app);
-        assert_eq!(
-            first.read("untitled.ne5p"),
-            saved,
-            "the file is as last saved"
-        );
-        assert_eq!(
-            first.names(".drawbar/working").len(),
-            1,
-            "the asset's edit, not the view's"
-        );
-        assert!(app.workspace.get(id).is_none(), "it left with its library");
-        assert!(app.workspace.get(view).is_some(), "the view stays");
-        assert_eq!(app.workspace.listed().count(), 0);
-        let libraries = &app.browser.folders.libraries;
-        assert_eq!(libraries[0].root, second.0, "most recent first");
-        assert!(libraries[0].open);
-
-        app.open_library(&ctx, first.0.clone(), false);
-        until_open(&ctx, &mut app);
-        let back = app.workspace.listed().next().expect("the asset is back");
-        assert_eq!(back.bytes, edited, "with its edit");
-        assert!(back.is_unsaved());
-        assert!(back.id > view, "under an id this session has not given out");
-    }
-
-    /// A library nothing may be written to cannot keep what is unsaved in it, so leaving
-    /// it asks first, and only a yes lets the edit go.
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn leaving_a_read_only_library_asks_before_its_unsaved_edits_are_lost() {
-        let (first, second) = (crate::testing::Temp::new(), crate::testing::Temp::new());
-        std::fs::create_dir(first.at(".drawbar")).unwrap();
-        std::fs::write(first.at(".drawbar/library.ron"), "(version: 99)").unwrap();
-        let (ctx, mut app) = opened_over(&first);
-        let id = app
-            .workspace
-            .create(crate::workspace::Fresh::Program, &mut app.log)
-            .unwrap();
+        let edited = crate::fields::apply(
+            &app.workspace.get(id).unwrap().bytes,
+            &[("center_panel.gain".into(), "96".into())],
+        )
+        .unwrap()
+        .1;
+        app.workspace.replace_bytes(id, edited, &mut app.log);
 
         app.open_library(&ctx, second.0.clone(), false);
         let (title, answers) = app.browser.asking().expect("a question");

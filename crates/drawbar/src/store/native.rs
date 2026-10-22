@@ -1,17 +1,18 @@
 //! The desktop backend: a library is a directory, and commands run in order on a thread
-//! of their own.
+//! of their own, the library's facts through toshokan and its files through [`exec`].
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use eframe::egui;
 
-use super::exec::{self, Children, Fs, Kind, Over, Staged, TEMP, TMP, WORKING};
+use super::exec::{self, Fs, Over, Staged};
+use super::keeper::Keeper;
 use super::names;
 use super::{Cmd, Event, Fingerprint, Stat};
 use crate::ondisk::OnDisk;
@@ -44,6 +45,26 @@ fn beside_store() -> Option<PathBuf> {
     Some(eframe::storage_dir(crate::APP)?.join(LIBRARY))
 }
 
+/// What this install keeps of the library at `root` in drawbar's own data, never in the
+/// library: toshokan's local root, and the slots' former occupants a write to the
+/// instrument left. Named by the library's folder, so each library has its own. Where the
+/// system names no folder for drawbar's data, it is in the system's temporary folder, and
+/// lasts as long as that does.
+pub fn local_root(root: &Path) -> PathBuf {
+    let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let hash = blake3::hash(root.as_os_str().as_encoded_bytes());
+    let name: String = hash.as_bytes()[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let data =
+        eframe::storage_dir(crate::APP).unwrap_or_else(|| std::env::temp_dir().join(crate::APP));
+    data.join(LIBRARIES).join(name)
+}
+
+/// The folder of drawbar's own data that holds [`local_root`]s.
+const LIBRARIES: &str = "libraries";
+
 /// Make `root` ready to open as the library, or say why it cannot be. The default library,
 /// `default`, is made where it is missing, as a first start makes it; any other folder
 /// must already be there.
@@ -61,12 +82,12 @@ pub fn openable(root: &Path, default: Option<&Path>) -> Result<(), String> {
     ))
 }
 
-const LOCK: &str = ".drawbar/lock";
+/// What a save's temporary sibling ends in: `.<name>.drawbar-tmp`.
+const TEMP: &str = ".drawbar-tmp";
 
-/// Where [`Fs::stage`] writes before [`Fs::place`] renames: `.drawbar/tmp/` for
-/// the index's own files, and a hidden sibling in the same folder for a library file, so
-/// the rename never crosses a volume. Each `attempt` after the first takes another name
-/// the open's sweep still finds.
+/// Where [`Fs::stage`] writes before [`Fs::place`] renames: a hidden sibling in the same
+/// folder, so the rename never crosses a volume. Each `attempt` after the first takes
+/// another name.
 fn temp_for(path: &str, attempt: u32) -> String {
     let (parent, leaf) = match path.rsplit_once('/') {
         Some((parent, leaf)) => (Some(parent), leaf),
@@ -76,10 +97,9 @@ fn temp_for(path: &str, attempt: u32) -> String {
         0 => leaf.to_string(),
         n => format!("{leaf}.{n}"),
     };
-    match (path.starts_with(".drawbar/"), parent) {
-        (true, _) => format!("{TMP}/{leaf}"),
-        (false, Some(parent)) => format!("{parent}/.{leaf}{TEMP}"),
-        (false, None) => format!(".{leaf}{TEMP}"),
+    match parent {
+        Some(parent) => format!("{parent}/.{leaf}{TEMP}"),
+        None => format!(".{leaf}{TEMP}"),
     }
 }
 
@@ -91,57 +111,76 @@ fn folder_url(dir: &Path) -> Option<String> {
     url::Url::from_directory_path(dir).ok().map(String::from)
 }
 
-/// The thread that owns one library's files.
+/// The thread that owns one library's files and facts.
 pub struct Backend {
     root: PathBuf,
+    local: PathBuf,
     tx: Option<Sender<Cmd>>,
     rx: Receiver<Event>,
     worker: Option<JoinHandle<()>>,
-    /// Set once the library is let go, so a listing still running stops.
-    stop: Arc<AtomicBool>,
-    /// Commands that write ([`exec::writes`]) sent and not yet run through.
+    /// Commands that write sent and not yet run through.
     unrun: Arc<AtomicUsize>,
 }
 
+/// Whether a command writes the folder.
+fn writes(cmd: &Cmd) -> bool {
+    match cmd {
+        Cmd::Open | Cmd::Rescan | Cmd::Refresh => false,
+        Cmd::Intent(_) | Cmd::Undo | Cmd::Redo => true,
+        Cmd::File(file) => file.writes(),
+    }
+}
+
 impl Backend {
-    pub fn start(ctx: &egui::Context, root: PathBuf) -> Backend {
+    /// The library at `root`, with this install's own state for it at `local`.
+    pub fn start(ctx: &egui::Context, root: PathBuf, local: PathBuf) -> Backend {
         let (tx, commands) = channel::<Cmd>();
         let (answers, rx) = channel();
-        let stop = Arc::new(AtomicBool::new(false));
         let unrun = Arc::new(AtomicUsize::new(0));
-        let mut disk = Disk {
-            root: root.clone(),
-            prepared: false,
-            lock: None,
-            index: None,
-            stop: stop.clone(),
-            commands: Some(commands),
-            held: None,
-            taken: 0,
-        };
+        let mut disk = Disk { root: root.clone() };
+        let (folder, kept) = (root.clone(), local.clone());
         let ctx = ctx.clone();
         let ran = unrun.clone();
         let worker = std::thread::spawn(move || {
-            while let Some(cmd) = disk.next() {
-                exec::execute(&mut disk, cmd, &mut |event| {
-                    let _ = answers.send(event);
-                    ctx.request_repaint();
-                });
-                ran.fetch_sub(std::mem::take(&mut disk.taken), Ordering::Release);
+            // toshokan's library stays on the thread that opened it.
+            let mut keeper = Keeper::new(folder, kept);
+            let mut answer = |event| {
+                let _ = answers.send(event);
+                ctx.request_repaint();
+            };
+            while let Ok(cmd) = commands.recv() {
+                let wrote = writes(&cmd);
+                match cmd {
+                    Cmd::File(file) => {
+                        let touched = file.touches();
+                        exec::execute(&mut disk, file, &mut answer);
+                        if wrote {
+                            keeper.touched(touched, &mut answer);
+                        }
+                    }
+                    cmd => keeper.run(cmd, &mut answer),
+                }
+                ran.fetch_sub(usize::from(wrote), Ordering::Release);
             }
+            keeper.close();
         });
         Backend {
             root,
+            local,
             tx: Some(tx),
             rx,
             worker: Some(worker),
-            stop,
             unrun,
         }
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// This install's own state for the library.
+    pub fn local(&self) -> &Path {
+        &self.local
     }
 
     /// Where the library is, as the user would look for it.
@@ -156,7 +195,7 @@ impl Backend {
 
     pub fn send(&mut self, cmd: Cmd) {
         if let Some(tx) = &self.tx {
-            let writes = usize::from(exec::writes(&cmd));
+            let writes = usize::from(writes(&cmd));
             self.unrun.fetch_add(writes, Ordering::AcqRel);
             if tx.send(cmd).is_err() {
                 self.unrun.fetch_sub(writes, Ordering::AcqRel);
@@ -180,10 +219,8 @@ impl Backend {
             .ok()
     }
 
-    /// Run every command already sent, then let the library go. A listing in flight stops
-    /// where it is, since nothing will read the rest of it.
+    /// Run every command already sent, then let the library go.
     pub fn finish(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
         self.tx = None;
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -200,34 +237,9 @@ impl Drop for Backend {
 /// A library's files on this machine's disk.
 struct Disk {
     root: PathBuf,
-    /// `.drawbar/` and its folders have been made, once, for this session.
-    prepared: bool,
-    /// The lock file, held open, and locked, while this library is written.
-    lock: Option<File>,
-    /// The index as this backend last read or wrote it: see [`Fs::last_index`].
-    index: Option<(u64, u32)>,
-    stop: Arc<AtomicBool>,
-    /// The commands sent, in order. `None` in a test that runs commands one by one.
-    commands: Option<Receiver<Cmd>>,
-    /// A command a listing took and put back, to run next.
-    held: Option<Cmd>,
-    /// Commands that write taken from `commands` since the last one taken by
-    /// [`Disk::next`] began. They have all run once it returns.
-    taken: usize,
 }
 
 impl Disk {
-    /// The next command to run, waiting for one, or `None` once the library is let go and
-    /// every command sent has run.
-    fn next(&mut self) -> Option<Cmd> {
-        let cmd = self
-            .held
-            .take()
-            .or_else(|| self.commands.as_ref()?.recv().ok());
-        self.taken += usize::from(cmd.as_ref().is_some_and(exec::writes));
-        cmd
-    }
-
     /// Where `path` is on disk. A folder on the way to it that is a link is refused as
     /// [`io::ErrorKind::NotFound`], so nothing is read or written outside the library
     /// through one. The last name is left to each call: [`Fs::stat`] takes only a file.
@@ -369,47 +381,6 @@ impl Disk {
     }
 }
 
-/// The entries of one folder, by name. A name that is not Unicode cannot be named in the
-/// index, so it is left out.
-fn sorted(dir: &Path) -> io::Result<Vec<(String, fs::DirEntry)>> {
-    let mut found = Vec::new();
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        if let Ok(name) = entry.file_name().into_string() {
-            found.push((name, entry));
-        }
-    }
-    found.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(found)
-}
-
-/// What a listing says about one entry of a folder. `None` leaves it out: a link, which
-/// is neither a file nor a folder here, so a loop of links is never walked, and an entry
-/// gone since the folder was read.
-fn kind(entry: &fs::DirEntry, name: &str) -> Option<Kind> {
-    let unread = |e: io::Error| {
-        let gone = e.kind() == io::ErrorKind::NotFound;
-        (!gone && exec::opens(name)).then(|| Kind::Unread(e.to_string()))
-    };
-    let kind = match entry.file_type() {
-        Ok(kind) => kind,
-        Err(e) => return unread(e),
-    };
-    if kind.is_dir() {
-        return Some(Kind::Dir);
-    }
-    if !kind.is_file() {
-        return None;
-    }
-    if !exec::opens(name) {
-        return Some(Kind::Other);
-    }
-    match entry.metadata() {
-        Ok(meta) => Some(Kind::File(stat(&meta))),
-        Err(e) => unread(e),
-    }
-}
-
 fn stat(meta: &fs::Metadata) -> Stat {
     let modified = meta
         .modified()
@@ -453,91 +424,6 @@ fn parent(path: &Path) -> &Path {
 }
 
 impl Fs for Disk {
-    fn stopped(&self) -> bool {
-        self.stop.load(Ordering::Relaxed)
-    }
-
-    fn waiting(&mut self) -> Option<Cmd> {
-        let cmd = self
-            .held
-            .take()
-            .or_else(|| self.commands.as_ref()?.try_recv().ok());
-        self.taken += usize::from(cmd.as_ref().is_some_and(exec::writes));
-        cmd
-    }
-
-    fn hold(&mut self, cmd: Cmd) {
-        debug_assert!(self.held.is_none(), "one command is put back at a time");
-        self.taken = self.taken.saturating_sub(usize::from(exec::writes(&cmd)));
-        self.held = Some(cmd);
-    }
-
-    async fn prepare(&mut self) -> io::Result<()> {
-        if self.prepared {
-            return Ok(());
-        }
-        for dir in [TMP, WORKING] {
-            fs::create_dir_all(self.locate(dir)?)?;
-        }
-        self.prepared = true;
-        Ok(())
-    }
-
-    async fn lock(&mut self) -> io::Result<bool> {
-        // ⚠️ A second lock on its own handle would be refused by the one this already
-        // holds.
-        if self.lock.is_some() {
-            return Ok(true);
-        }
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(self.locate(LOCK)?)?;
-        match file.try_lock() {
-            Ok(()) => {
-                self.lock = Some(file);
-                Ok(true)
-            }
-            Err(fs::TryLockError::WouldBlock) => Ok(false),
-            Err(fs::TryLockError::Error(e)) => Err(e),
-        }
-    }
-
-    async fn unlock(&mut self) {
-        self.lock = None;
-    }
-
-    fn last_index(&mut self) -> &mut Option<(u64, u32)> {
-        &mut self.index
-    }
-
-    async fn children(
-        &self,
-        dir: &str,
-        room: usize,
-        known: &dyn Fn(&str) -> bool,
-    ) -> io::Result<Children> {
-        let found = match sorted(&self.locate(dir)?) {
-            // The default library is made at its first write.
-            Err(e)
-                if e.kind() == io::ErrorKind::NotFound && dir.is_empty() && !self.root.exists() =>
-            {
-                return Ok((Vec::new(), false));
-            }
-            found => found?,
-        };
-        let more = found.len() > room;
-        let children = found.into_iter().take(room).map(|(name, entry)| {
-            let file = entry.file_type().is_ok_and(|kind| kind.is_file());
-            let kind = (!(file && known(&name)))
-                .then(|| kind(&entry, &name))
-                .flatten();
-            (name, kind)
-        });
-        Ok((children.collect(), more))
-    }
-
     async fn names(&self, dir: &str) -> io::Result<Vec<String>> {
         let mut names = Vec::new();
         for entry in fs::read_dir(self.locate(dir)?)? {
@@ -555,10 +441,6 @@ impl Fs for Disk {
 
     async fn crc(&self, path: &str) -> io::Result<u32> {
         crate::ondisk::crc_of(&mut File::open(self.locate(path)?)?)
-    }
-
-    async fn source(&self, path: &str) -> io::Result<impl nord_usb::FileSource> {
-        nord_usb::envelope::Positional::new(File::open(self.locate(path)?)?)
     }
 
     async fn stat(&self, path: &str) -> io::Result<Option<Stat>> {
@@ -644,27 +526,6 @@ impl Fs for Disk {
         sync_dir(parent(&target))
     }
 
-    /// A working copy is renamed over its target, or linked where nothing may be there,
-    /// so nothing is written. Across volumes, or on one without links, nothing moves.
-    async fn promote(&mut self, from: &str, path: &str, over: Over) -> io::Result<bool> {
-        let (source, target) = (self.locate(from)?, self.locate(path)?);
-        let moved = match over.replaces() {
-            true => fs::rename(&source, &target),
-            false => fs::hard_link(&source, &target),
-        };
-        match moved {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
-            Err(_) => return Ok(false),
-        }
-        if !over.replaces() {
-            let _ = fs::remove_file(&source);
-        }
-        sync_dir(parent(&target))?;
-        sync_dir(parent(&source))?;
-        Ok(true)
-    }
-
     async fn make_dir(&mut self, path: &str) -> io::Result<()> {
         let target = self.locate(path)?;
         fs::create_dir_all(&target)?;
@@ -692,24 +553,18 @@ impl Fs for Disk {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::FileCmd;
     use crate::store::LibPath;
     use crate::testing::Temp;
 
     fn disk(root: &Temp) -> Disk {
         Disk {
             root: root.0.clone(),
-            prepared: false,
-            lock: None,
-            index: None,
-            stop: Arc::default(),
-            commands: None,
-            held: None,
-            taken: 0,
         }
     }
 
     /// Run a command that answers at most once.
-    fn execute(disk: &mut Disk, cmd: Cmd) -> Option<Event> {
+    fn execute(disk: &mut Disk, cmd: FileCmd) -> Option<Event> {
         let mut answers = Vec::new();
         exec::execute(disk, cmd, &mut |event| answers.push(event));
         assert!(answers.len() <= 1, "{answers:?}");
@@ -741,7 +596,7 @@ mod tests {
         fs::write(root.at("c3.ne5p"), b"lower").unwrap();
         let moved = execute(
             &mut disk(&root),
-            Cmd::Move {
+            FileCmd::Move {
                 from: LibPath::root().join("c3.ne5p"),
                 to: LibPath::root().join("C3.ne5p"),
             },
@@ -750,7 +605,7 @@ mod tests {
             matches!(moved, Some(Event::Moved { result: Ok(()), .. })),
             "{moved:?}"
         );
-        assert_eq!(root.names(""), [".drawbar", "C3.ne5p"]);
+        assert_eq!(root.names(""), ["C3.ne5p"]);
         assert_eq!(root.read("C3.ne5p"), b"lower");
     }
 
@@ -766,7 +621,7 @@ mod tests {
         }
         let moved = execute(
             &mut disk(&root),
-            Cmd::Move {
+            FileCmd::Move {
                 from: LibPath::root().join("c3.ne5p"),
                 to: LibPath::root().join("C3.ne5p"),
             },
@@ -793,7 +648,7 @@ mod tests {
         let remove = |crc| {
             execute(
                 &mut disk(&root),
-                Cmd::RemoveFile {
+                FileCmd::RemoveFile {
                     path: path.clone(),
                     expect: Fingerprint {
                         crc,
@@ -855,13 +710,12 @@ mod tests {
         let (answer, largest) = crate::testing::largest_allocation(|| {
             execute(
                 &mut disk(&root),
-                Cmd::Rewrite {
+                FileCmd::Rewrite {
                     id: 1,
                     path: LibPath::root().join("Grand.npno"),
                     from,
                     edit,
                     expect: Fingerprint::unread(stat),
-                    stale: None,
                 },
             )
         });
@@ -884,11 +738,7 @@ mod tests {
         assert_eq!(index.library().name().0, "Trimmed");
         let info = nord_format::cbin::inspect(&mut File::open(root.at("Grand.npno")).unwrap());
         assert!(info.unwrap().checksum_ok);
-        assert_eq!(
-            root.names(""),
-            [".drawbar", "Grand.npno"],
-            "no copy is left"
-        );
+        assert_eq!(root.names(""), ["Grand.npno"], "no copy is left");
     }
 
     /// A piano library of a vendor's size is copied byte for byte, and copied with an
@@ -909,7 +759,7 @@ mod tests {
         let mut library = index.library().clone();
         library.set_name("Edited").unwrap();
         let stat = stat(&fs::metadata(root.at("Grand.npno")).unwrap());
-        let import = |name: &str, from: Source| Cmd::Import {
+        let import = |name: &str, from: Source| FileCmd::Import {
             id: 1,
             path: LibPath::root().join(name),
             from,
@@ -958,7 +808,7 @@ mod tests {
             crc: Some(nord_format::crc::crc32(&bytes)),
         };
         drop(bytes);
-        let remove = Cmd::RemoveFile {
+        let remove = FileCmd::RemoveFile {
             path: LibPath::root().join("Grand.npno"),
             expect,
         };
@@ -987,13 +837,11 @@ mod tests {
 
         let saved = execute(
             &mut disk(&root),
-            Cmd::Save {
+            FileCmd::Save {
                 id: 1,
                 path: LibPath::root().join("Saved.ne5p"),
                 bytes: b"saved".to_vec(),
                 expect: None,
-                stale: None,
-                promote: None,
             },
         );
         assert!(
@@ -1003,7 +851,7 @@ mod tests {
         let stat = stat(&fs::metadata(root.at("Grand.ne5p")).unwrap());
         let copied = execute(
             &mut disk(&root),
-            Cmd::Import {
+            FileCmd::Import {
                 id: 2,
                 path: LibPath::root().join("Copy.ne5p"),
                 from: crate::store::Source::Library(
@@ -1021,10 +869,7 @@ mod tests {
         assert_eq!(outside.read("precious"), b"outside");
         assert_eq!(root.read("Saved.ne5p"), b"saved");
         assert_eq!(root.read("Copy.ne5p"), b"first");
-        assert_eq!(
-            root.names(""),
-            [".drawbar", "Copy.ne5p", "Grand.ne5p", "Saved.ne5p"]
-        );
+        assert_eq!(root.names(""), ["Copy.ne5p", "Grand.ne5p", "Saved.ne5p"]);
     }
 
     /// A folder of the library that is a link to one outside it is never written through:
@@ -1044,13 +889,11 @@ mod tests {
 
         let saved = execute(
             &mut disk,
-            Cmd::Save {
+            FileCmd::Save {
                 id: 1,
                 path: linked("new.ne5p"),
                 bytes: b"saved".to_vec(),
                 expect: None,
-                stale: None,
-                promote: None,
             },
         );
         assert!(
@@ -1059,13 +902,11 @@ mod tests {
         );
         let over = execute(
             &mut disk,
-            Cmd::Save {
+            FileCmd::Save {
                 id: 2,
                 path: linked("x.ne5p"),
                 bytes: b"saved".to_vec(),
                 expect: Some(Fingerprint::unread(x)),
-                stale: None,
-                promote: None,
             },
         );
         assert!(
@@ -1074,7 +915,7 @@ mod tests {
         );
         let copied = execute(
             &mut disk,
-            Cmd::Import {
+            FileCmd::Import {
                 id: 3,
                 path: linked("copy.ne5p"),
                 from: crate::store::Source::Library(
@@ -1090,7 +931,7 @@ mod tests {
         );
         let moved = execute(
             &mut disk,
-            Cmd::Move {
+            FileCmd::Move {
                 from: LibPath::root().join("a.ne5p"),
                 to: linked("a.ne5p"),
             },
@@ -1099,11 +940,11 @@ mod tests {
             matches!(moved, Some(Event::Moved { result: Err(_), .. })),
             "{moved:?}"
         );
-        let made = execute(&mut disk, Cmd::MakeDir(linked("Sub")));
+        let made = execute(&mut disk, FileCmd::MakeDir(linked("Sub")));
         assert!(matches!(made, Some(Event::Failed(_))), "{made:?}");
         execute(
             &mut disk,
-            Cmd::RemoveFile {
+            FileCmd::RemoveFile {
                 path: linked("x.ne5p"),
                 expect: Fingerprint::unread(x),
             },

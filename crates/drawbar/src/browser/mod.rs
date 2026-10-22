@@ -125,9 +125,6 @@ enum Verb {
     KeepBoth,
     TakeTheirs,
     Discard,
-    OpenWithout,
-    SetAside,
-    OpenWithoutIndex,
 }
 
 impl Verb {
@@ -141,9 +138,6 @@ impl Verb {
             Verb::KeepBoth => "Keep both",
             Verb::TakeTheirs => "Take theirs",
             Verb::Discard => "Discard",
-            Verb::OpenWithout => "Open without them…",
-            Verb::SetAside => "Set it aside and open without it…",
-            Verb::OpenWithoutIndex => "Open without it",
         }
     }
 
@@ -152,14 +146,9 @@ impl Verb {
         let (label, glyph) = (self.label(), self.glyph());
         match self {
             Verb::Save | Verb::Keep | Verb::KeepBoth => sheet::primary(ui, Some(glyph), label),
-            Verb::Replace
-            | Verb::Delete
-            | Verb::Overwrite
-            | Verb::TakeTheirs
-            | Verb::Discard
-            | Verb::OpenWithout
-            | Verb::SetAside
-            | Verb::OpenWithoutIndex => sheet::destructive(ui, glyph, label),
+            Verb::Replace | Verb::Delete | Verb::Overwrite | Verb::TakeTheirs | Verb::Discard => {
+                sheet::destructive(ui, glyph, label)
+            }
         }
     }
 
@@ -168,11 +157,10 @@ impl Verb {
             Verb::Save => Glyph::Save,
             Verb::Keep => Glyph::LibraryBig,
             Verb::Replace => Glyph::Replace,
-            Verb::Delete | Verb::Discard | Verb::OpenWithout => Glyph::Trash2,
+            Verb::Delete | Verb::Discard => Glyph::Trash2,
             Verb::Overwrite => Glyph::Replace,
             Verb::KeepBoth => Glyph::Copy,
             Verb::TakeTheirs => Glyph::RotateCcw,
-            Verb::SetAside | Verb::OpenWithoutIndex => Glyph::FolderOpen,
         }
     }
 }
@@ -788,7 +776,7 @@ impl Browser {
     }
 
     /// Ask before another library opens in place of one that cannot keep the assets
-    /// named in `unkept`, because nothing may be written to it.
+    /// named in `unkept`: their unsaved edits, or what nothing may be written for.
     pub(crate) fn ask_leave(&mut self, unkept: &[String], root: crate::store::Root) {
         const SHOWN: usize = 5;
         let mut names: Vec<String> = unkept
@@ -802,8 +790,7 @@ impl Browser {
         self.raise(Ask::new(
             "Discard what this library cannot keep?".to_string(),
             Some(format!(
-                "Nothing can be written to the library open now, so opening another \
-                 discards what is unsaved in it: {}.",
+                "Opening another library discards what is unsaved in the one open now: {}.",
                 names.join(", ")
             )),
             Verb::Discard,
@@ -855,82 +842,6 @@ impl Browser {
             },
         };
         self.raise(ask);
-    }
-
-    /// Say why a library whose index is missing opened read-only, keeping the `copies`
-    /// working copies it holds, and offer to open it without them. Putting the index back
-    /// is offered in words where the user can reach the library's files.
-    pub(crate) fn ask_unindexed(&mut self, copies: usize, reachable: bool) {
-        let back = match reachable {
-            true => format!(
-                " Put {} back from a backup and open the library again to get them back.",
-                crate::store::INDEX
-            ),
-            false => String::new(),
-        };
-        self.raise(Ask {
-            title: "This library lost the list of its unsaved edits".into(),
-            note: Some(format!(
-                "{} drawbar kept are still here, but the file that says which sounds they \
-                 belong to is missing, so the library stays read-only and keeps them.{back}",
-                edits(copies)
-            )),
-            verb: Verb::OpenWithout,
-            acts: vec![Act::DropUnindexed {
-                copies,
-                confirmed: false,
-            }],
-            others: Vec::new(),
-            cancel: "Keep read-only",
-            strong: Answer::Cancel,
-        });
-    }
-
-    /// Say why a library whose index does not read opened read-only, and offer to set the
-    /// index aside and open the library without it.
-    pub(crate) fn ask_damaged(&mut self) {
-        self.raise(Ask {
-            title: "This library's index is damaged".into(),
-            note: Some(
-                "drawbar cannot read the file that keeps this library's tags, where its \
-                 sounds came from, and which sounds its unsaved edits belong to, so the \
-                 library stays read-only."
-                    .into(),
-            ),
-            verb: Verb::SetAside,
-            acts: vec![Act::SetAside { confirmed: false }],
-            others: Vec::new(),
-            cancel: "Keep read-only",
-            strong: Answer::Cancel,
-        });
-    }
-
-    /// Ask before a library's damaged index is set aside.
-    pub(crate) fn ask_set_aside(&mut self) {
-        self.raise(Ask::new(
-            "Open the library without its index?".into(),
-            Some(
-                "Its sounds open without their tags, without where they came from, and \
-                 without their unsaved edits. The damaged index is kept, renamed, in the \
-                 library's hidden folder, and so are the unsaved edits."
-                    .into(),
-            ),
-            Verb::OpenWithoutIndex,
-            vec![Act::SetAside { confirmed: true }],
-        ));
-    }
-
-    /// Ask before a library's `copies` working copies with no index are deleted.
-    pub(crate) fn ask_drop_unindexed(&mut self, copies: usize) {
-        self.raise(Ask::new(
-            format!("Delete {}?", edits(copies)),
-            Some("They cannot be got back, and the library opens without them.".into()),
-            Verb::Delete,
-            vec![Act::DropUnindexed {
-                copies,
-                confirmed: true,
-            }],
-        ));
     }
 
     /// Ask before a slot's former occupant is deleted.
@@ -1085,14 +996,6 @@ impl Browser {
             Verb::Delete,
             acts,
         ));
-    }
-}
-
-/// `copies` unsaved edits, in words.
-fn edits(copies: usize) -> String {
-    match copies {
-        1 => "1 unsaved edit".to_string(),
-        n => format!("{n} unsaved edits"),
     }
 }
 
@@ -1640,7 +1543,7 @@ mod tests {
         );
     }
 
-    /// Two assets given a new tag have that tag, and the third does not.
+    /// A new tag on two assets asks the library to tag those two, and not the third.
     #[test]
     fn a_tag_put_on_a_multi_selection_is_on_exactly_those_assets() {
         let mut bench = Bench::new();
@@ -1657,8 +1560,12 @@ mod tests {
         let Some(Item::Tag(tag)) = bench.browser.rename.as_ref().map(|r| r.what) else {
             panic!("a new tag opens its editor");
         };
-        assert!(bench.browser.tags.on_all(&ids[..2], tag));
-        assert!(!bench.browser.tags.worn(ids[2]).contains(&tag));
+        let name = bench.browser.tags.name_of(tag).unwrap().to_string();
+        let assets = ids[..2].to_vec();
+        assert_eq!(
+            bench.browser.tags.take_asked(),
+            [crate::tags::Asked::Tag { assets, name }]
+        );
     }
 
     /// The question's verb runs what was asked, Cancel and Escape run nothing, and each
@@ -1746,9 +1653,9 @@ mod tests {
         assert!(bench.shell.browser_open, "the browser is open");
     }
 
-    /// ⚠️ A view is the only copy of its bytes and the store skips it, so a tag on a view
-    /// would be lost with its tab. Tagging keeps it on this computer first, and the log
-    /// says so.
+    /// ⚠️ A view is the only copy of its bytes and the library tags files, so a tag on a
+    /// view would be lost with its tab. Tagging keeps it on this computer first, and the
+    /// log says so.
     #[test]
     fn tagging_a_view_keeps_it_on_this_computer_first_and_says_so() {
         use crate::workspace::Origin;
@@ -1769,7 +1676,14 @@ mod tests {
 
         bench.act(vec![Act::Tag { ids: vec![id], tag }]);
         assert!(!bench.workspace.is_view(id), "it is kept on this computer");
-        assert!(bench.browser.tags.worn(id).contains(&tag));
+        let name = "Sunday".to_string();
+        assert_eq!(
+            bench.browser.tags.take_asked(),
+            [crate::tags::Asked::Tag {
+                assets: vec![id],
+                name
+            }]
+        );
         let said = bench.log.transcript();
         assert!(said.contains("Kept a copy on this computer"), "{said}");
     }

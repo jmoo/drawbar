@@ -834,6 +834,7 @@ fn faint(ui: &mut egui::Ui, said: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tags::Asked;
     use crate::testing::{self, context, Bench};
     use crate::workspace::Fresh;
     use nord_usb::wire::{Dependency, Status};
@@ -1487,6 +1488,7 @@ mod tests {
 
         bench.act(vec![Act::NewTag(Vec::new())]);
         let tag = bench.browser.tags().all()[0].id;
+        let name = bench.browser.tags().name_of(tag).unwrap().to_string();
         assert!(
             !bench.browser.tags().on_all(&ids, tag),
             "hollow to begin with"
@@ -1496,18 +1498,21 @@ mod tests {
             ids: ids.clone(),
             tag,
         }]);
-        assert!(
-            bench.browser.tags().on_all(&ids, tag),
-            "a hollow one goes on all"
-        );
-
         bench.act(vec![Act::Untag {
             ids: ids.clone(),
             tag,
         }]);
-        assert!(
-            !bench.browser.tags().on_all(&ids, tag),
-            "a solid one comes off"
+        let assets = ids.clone();
+        assert_eq!(
+            bench.browser.tags.take_asked(),
+            [
+                Asked::Tag {
+                    assets: assets.clone(),
+                    name: name.clone()
+                },
+                Asked::Untag { assets, name }
+            ],
+            "on all, then off all"
         );
     }
 }

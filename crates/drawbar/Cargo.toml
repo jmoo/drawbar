@@ -38,6 +38,10 @@ rfd = { version = "0.15", features = ["file-handle-inner"] }
 # The library's index. eframe's `persistence` already builds both.
 ron = "0.10"
 serde = { version = "1", features = ["derive"] }
+# The library's facts, beside its files.
+toshokan = { path = "../toshokan", version = "0.1.0" }
+# A file's identity, and the name of a library's local root. toshokan builds it.
+blake3 = "1"
 
 [dev-dependencies]
 # `synthetic` lays out a piano library from a description: the piano editor's tests

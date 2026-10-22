@@ -1,28 +1,33 @@
-//! The app's side of a library: what the files hold as far as drawbar knows, the
-//! commands that bring them level with the workspace, and the answers folded back in.
+//! The app's side of a library: the library's view projected onto the workspace and the
+//! browser's tags, the intents the user's changes to the facts become, and the commands
+//! that bring the files level with the workspace.
 //!
-//! The workspace stays the model the rest of the app edits. [`Store::sync`] compares it
-//! with what the files were last known to hold and sends what differs: a new asset's
-//! file, a save, a deletion, a working copy, the index. Folder changes arrive in order
-//! from [`crate::folders::Folders`], because a rename of a folder cannot be told from a
-//! move of everything in it by comparing the two states.
+//! What the facts say comes only from the view: a tag shows once its intent is
+//! committed, and another writer's change shows once a refresh reads it. The files are
+//! still written as before: [`Store::sync`] compares the workspace with what the files
+//! were last known to hold and sends what differs, a new asset's file, a save, a move or
+//! a deletion, and the scan after each lets the view follow.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use toshokan::report::{By, What};
+use toshokan::{FileState, View};
+
 use super::cache::{self, Cache};
-use super::diff::{self, match_files, Known};
-use super::exec::{contents, too_much, working_name};
-use super::sidecar::{Keeps, Row, Sidecar, Working, VERSION};
+use super::diff;
+use super::exec::too_much;
+use super::ids::Ids;
+use super::keys::TAGS;
 use super::{
-    names, Backend, Cmd, Complete, CopyOf, Event, Failure, Fingerprint, Found, Holds, Left,
-    LibPath, Listing, Opened, Rescue, Source, Stale, Unkept, MOST_BYTES,
+    names, Backend, Cmd, CopyOf, Event, Failure, FileCmd, Fingerprint, Found, Holds, Intent, Key,
+    LibPath, Opened, Rescue, Source, Stat, Viewed, MOST_BYTES,
 };
 use crate::browser::{Browser, Rescuing};
 use crate::folders::{Folders, Op, Where};
 use crate::log::Log;
 use crate::queue::Queue;
-use crate::rewrite::Edit;
 use crate::summary::Summary;
+use crate::tags::Asked;
 use crate::workspace::{precious, Content, Leaving, LocalEntity, Origin, Saved, Workspace};
 
 /// How far opening has got.
@@ -40,7 +45,7 @@ enum Phase {
 pub enum Pass {
     /// The files: new ones, saves, moves and deletions.
     Files,
-    /// The files, the working copies and the index, on the autosave cadence.
+    /// The files, and the cache of what was read, on the autosave cadence.
     Full,
     /// A full pass at exit, which runs even while a rescan is in flight, since nothing
     /// will read its answer.
@@ -49,7 +54,6 @@ pub enum Pass {
 
 /// What drawbar knows of one asset's file.
 struct Record {
-    /// `None` for a view of a slot, kept only as a working copy.
     path: Option<LibPath>,
     /// What the file held when drawbar last read or wrote it. `None` until the first
     /// save of a new file lands.
@@ -57,7 +61,6 @@ struct Record {
     /// The [`crate::workspace::Baseline::stamp`] of the bytes the file holds, or is
     /// being written with.
     saved: u64,
-    working: Option<Kept>,
     /// A save has been sent and not answered.
     saving: bool,
     /// The file went missing outside drawbar. Nothing writes it again until the asset
@@ -70,259 +73,102 @@ struct Record {
     summarized: Option<u64>,
 }
 
-/// An open whose listing is still arriving: the index's rows, as the files listed so far
-/// have claimed them.
-struct Loading {
-    /// Under the ids this session gives them.
-    rows: BTreeMap<u64, Row>,
-    /// The row naming each path.
-    by_path: BTreeMap<LibPath, u64>,
-    /// The rows a listed file has claimed.
-    claimed: BTreeSet<u64>,
-    /// The working copies not yet taken up, by id.
-    working: BTreeMap<u64, Vec<u8>>,
-    /// The length and CRC-32 of every working copy read, by id, taken up or not.
-    prints: BTreeMap<u64, (u64, u32)>,
-    /// The id the next file the index does not name takes, unless the workspace has
-    /// given it out since.
-    next: u64,
-    /// Every folder listed so far.
-    dirs: Vec<LibPath>,
-    /// How many files have come back so far.
-    files: usize,
-    /// How many leftovers of interrupted writes the open removed.
-    swept: usize,
-    /// The slots' former occupants the open found in `.drawbar/tmp/`, offered once the
-    /// listing is complete.
-    rescued: Vec<Rescue>,
-    /// The working copies the open found with no index, asked about once the listing
-    /// is complete.
-    unindexed: usize,
-    /// The open found an index that does not read, asked about once the listing is
-    /// complete.
-    damaged: bool,
-    /// Each rename sent while the listing is in flight that has not failed. A part the
-    /// backend gathered before it ran names what it moved where it was.
-    moves: Vec<Rename>,
-    /// Answers of the listing gathered before a rename that has not answered yet, in
-    /// order. Each waits to know whether the rename moved what it names.
-    held: std::collections::VecDeque<Event>,
+/// This install's folder, beside the library's local root, for the slots' former
+/// occupants a write to the instrument leaves while the library is open.
+#[cfg(not(target_arch = "wasm32"))]
+const RESCUED: &str = "rescued";
+
+/// What a view lists that drawbar shows.
+struct Listed {
+    /// Each file drawbar opens, by the key the library knows it by, with its path and
+    /// what the last scan found there.
+    files: BTreeMap<Key, (LibPath, Option<Stat>)>,
+    /// Files drawbar does not open, in path order.
+    others: Vec<LibPath>,
+    /// Entities whose file is nowhere, with where it was.
+    lost: Vec<(toshokan::EntityId, LibPath)>,
 }
 
-/// A rename sent while the listing is in flight.
-struct Rename {
-    /// The count of commands sent since the open that it brought to.
-    sent: u64,
-    from: LibPath,
-    to: LibPath,
-    /// The rows no file had claimed that it took along.
-    rows: Vec<u64>,
-    /// It answered that it moved.
-    moved: bool,
-}
-
-impl Loading {
-    /// Bring a path the backend gave after `ran` commands to where it is now.
-    ///
-    /// ⚠️ Only for a path no rename still to answer may have moved: see
-    /// [`Loading::waits`].
-    fn now(&self, ran: u64, path: &mut LibPath) {
-        for rename in self.moves.iter().filter(|rename| rename.sent > ran) {
-            if let Some(moved) = path.moved(&rename.from, &rename.to) {
-                *path = moved;
-            }
-        }
-    }
-
-    /// Whether an answer of the listing gathered after `ran` commands waits for a rename
-    /// sent after them to answer.
-    fn waits(&self, ran: u64) -> bool {
-        self.moves
-            .iter()
-            .any(|rename| !rename.moved && rename.sent > ran)
-    }
-
-    /// The rename that answered, as it answered: one that moved stays to bring the
-    /// parts gathered before it to where it put them, and one that failed goes.
-    fn answered(&mut self, from: &LibPath, to: &LibPath, moved: bool) -> Option<Rename> {
-        let at = self
-            .moves
-            .iter()
-            .position(|rename| !rename.moved && rename.from == *from && rename.to == *to)?;
-        match moved {
-            true => {
-                self.moves[at].moved = true;
-                None
-            }
-            false => Some(self.moves.remove(at)),
-        }
-    }
-
-    /// The next answer held back that no rename still to answer may have moved.
-    fn ready(&mut self) -> Option<Event> {
-        let ran = gathered(self.held.front()?)?;
-        match self.waits(ran) {
-            true => None,
-            false => self.held.pop_front(),
-        }
-    }
-
-    /// [`Loading::now`] for every path of a part, and forget the renames every part to
-    /// come has seen.
-    fn caught_up(&mut self, ran: u64, part: &mut Listing) {
-        let Listing {
-            dirs,
-            files,
-            unread,
-            others,
-            unwalked,
-        } = part;
-        let found = files.iter_mut().map(|found| &mut found.path);
-        let unread = unread.iter_mut().map(|(path, _)| path);
-        for path in dirs
-            .iter_mut()
-            .chain(found)
-            .chain(unread)
-            .chain(others)
-            .chain(unwalked)
-        {
-            self.now(ran, path);
-        }
-        self.moves.retain(|rename| rename.sent > ran);
-    }
-
-    /// Follow a folder renamed while the listing is in flight: the rows no file has
-    /// claimed yet, and the folders listed so far, move with it. Returns the rows it
-    /// moved.
-    fn relocate(&mut self, from: &LibPath, to: &LibPath) -> Vec<u64> {
-        let mut moved = Vec::new();
-        for (id, row) in &mut self.rows {
-            if let Some(at) = row.path.as_ref().and_then(|at| at.moved(from, to)) {
-                row.path = Some(at);
-                moved.push(*id);
-            }
-        }
-        self.by_path = by_path(&self.rows);
-        for dir in &mut self.dirs {
-            if let Some(at) = dir.moved(from, to) {
-                *dir = at;
-            }
-        }
-        moved
-    }
-
-    /// Put back what a rename that failed took along.
-    fn unmoved(&mut self, rename: Rename) {
-        let Rename { from, to, rows, .. } = rename;
-        for id in rows {
-            let Some(row) = self.rows.get_mut(&id) else {
+impl Listed {
+    /// What `view` lists, leaving out every path with a name that starts with a dot and
+    /// every path that is no [`LibPath`].
+    fn of(view: &View) -> Listed {
+        let mut listed = Listed {
+            files: BTreeMap::new(),
+            others: Vec::new(),
+            lost: Vec::new(),
+        };
+        let shown = |path: &toshokan::RelPath| {
+            let path = LibPath::parse(path.as_str())?;
+            let hidden = path.components().any(|name| name.starts_with('.'));
+            (!hidden).then_some(path)
+        };
+        let stat = |path: &toshokan::RelPath| {
+            view.listed(path).map(|listed| Stat {
+                len: listed.len,
+                modified: listed.modified,
+            })
+        };
+        let bound = view.entities().into_iter().filter_map(|entity| {
+            let file = entity.file()?;
+            Some((Key::Entity(entity.id()), file.path, file.state))
+        });
+        let unbound = view.unbound().iter().filter_map(|path| {
+            let key = Key::File(LibPath::parse(path.as_str())?);
+            Some((key, path.clone(), FileState::InSync))
+        });
+        for (key, at, state) in bound.chain(unbound) {
+            let Some(path) = shown(&at) else {
                 continue;
             };
-            if let Some(at) = row.path.as_ref().and_then(|at| at.moved(&to, &from)) {
-                row.path = Some(at);
+            match (state, &key) {
+                (FileState::Missing, Key::Entity(entity)) => listed.lost.push((*entity, path)),
+                (FileState::Missing, Key::File(_)) => {}
+                _ if !super::opens(path.leaf()) => listed.others.push(path),
+                _ => {
+                    listed.files.insert(key, (path, stat(&at)));
+                }
             }
         }
-        self.by_path = by_path(&self.rows);
-        for dir in &mut self.dirs {
-            if let Some(at) = dir.moved(&to, &from) {
-                *dir = at;
-            }
-        }
+        listed.others.sort();
+        listed
     }
 }
 
-/// How many commands had run when the backend gathered an answer of the listing, or
-/// `None` for any other answer.
-fn gathered(event: &Event) -> Option<u64> {
-    match event {
-        Event::Listed { ran, .. } | Event::Walked { ran, .. } => Some(*ran),
-        Event::Complete(complete) => Some(complete.ran),
-        _ => None,
-    }
-}
-
-/// The row naming each path: the first, where the index names one twice.
-fn by_path(rows: &BTreeMap<u64, Row>) -> BTreeMap<LibPath, u64> {
-    let mut by_path = BTreeMap::new();
-    for (id, row) in rows {
-        if let Some(path) = &row.path {
-            by_path.entry(path.clone()).or_insert(*id);
-        }
-    }
-    by_path
-}
-
-/// How many parts of a listing one [`Store::poll`] folds in, so a listing faster than the
-/// frames fills the tree over several of them.
-const PARTS_A_FRAME: usize = 4;
-
-/// How many files one [`Cmd::Fingerprint`] reads at most, and how many of their bytes.
-const PRINTS: (usize, u64) = (64, 64 << 20);
-
-/// How many files one background [`Cmd::Read`] asks for at most, and how many of their
-/// listed bytes. A read something needs runs after it.
+/// How many files one background [`FileCmd::Read`] asks for at most, and how many of
+/// their listed bytes. A read something needs runs after it.
 const FETCHES: (usize, u64) = (32, 16 << 20);
-
-/// An unsaved edit, as written to `working/`.
-struct Kept {
-    copy: Working,
-    /// The stamp of what the copy holds: the [`LocalEntity::stamp`] of the bytes, or
-    /// the stamp of the edit (see [`Workspace::kept_edit`]).
-    stamp: u64,
-    /// The length and CRC-32 of the copy's file.
-    holds: (u64, u32),
-}
 
 pub struct Store {
     backend: Backend,
     phase: Phase,
     records: BTreeMap<u64, Record>,
-    next_generation: u64,
-    /// The index as last sent, so an unchanged one is not written again.
-    committed: Option<Sidecar>,
-    /// The last commit failure logged, so one every retry repeats is logged once, though
-    /// each retry writes its working copies under new names. Let go once a commit lands.
-    failing: Option<Unkept>,
+    /// The key the library knows each asset's file by.
+    ids: Ids,
+    /// The library as the last answer showed it.
+    view: Option<View>,
+    /// Changes to the tags the user asked for that wait for a file to name.
+    asked: Vec<Asked>,
+    /// Assets whose file changed outside drawbar while they held it, read again to see
+    /// what it holds now.
+    rechecking: BTreeSet<u64>,
+    /// The assets whose files the rescan in flight found moved or changed.
+    moved: BTreeSet<u64>,
+    /// The user has been told that this build keeps no unsaved edit across a quit.
+    told_unkept: bool,
     /// Assets to remove now what was copied or saved of them over another has landed
     /// ([`Store::take_left`]).
     left: Vec<u64>,
-    /// `.drawbar/` exists, or drawbar has written here. Until then the index is written
-    /// only once it holds something no file does, so a folder opened and looked at is
-    /// left as it was.
-    indexed: bool,
     /// Whether the window had focus at the last [`Store::focus`].
     focused: bool,
-    /// The tags' revision when an answer was last folded in, so a change after it is
-    /// the user's.
-    tags_seen: u64,
-    /// The user changed a tag while nothing may be written.
-    tags_held: bool,
-    /// A rescan, or a check of the files read so far, is in flight.
+    /// A rescan or a refresh is in flight.
     scanning: bool,
-    loading: Option<Loading>,
-    /// The paths the check in flight looks at.
-    checking: BTreeSet<LibPath>,
-    /// A rescan is owed once the open's listing is complete.
-    owes: bool,
+    /// An intent, an undo or a redo is in flight.
+    committing: usize,
     /// A send is waiting for the rescan in flight.
     send_waits: bool,
-    /// An unsaved view of a slot is kept here as a working copy. Off once the library is
-    /// being handed over, since the view stays in the window and not in this library.
-    keeps_views: bool,
     /// The library's name for the browser, or `None` for This computer's own.
     name: Option<String>,
-    /// Working copies the index still names that nothing needs, to drop at the next
-    /// full pass.
-    stale: Vec<String>,
-    /// The new id of each row the open gave one, with a working copy, and that copy's
-    /// file, which the next full pass writes again under the new id.
-    renamed: Vec<(u64, String)>,
-    /// The assets whose file is still to be read for its CRC in the background, and
-    /// every asset asked for so far, each of which is asked for once.
-    unprinted: std::collections::VecDeque<u64>,
-    printed: BTreeSet<u64>,
-    /// A [`Cmd::Fingerprint`] is in flight.
-    fingerprinting: bool,
     /// The tracked assets whose file is still to be read in the background, and every
     /// one asked for so far, each asked for once unless it was refused for room. See
     /// [`Store::fetch_tracked`].
@@ -352,16 +198,12 @@ pub struct Store {
     pub(crate) looked_for_room: usize,
     /// How many writing commands have been sent.
     sent: u64,
-    /// How many commands have been sent since the open.
-    issued: u64,
     /// Where drawbar keeps a slot's former occupant no library could take, whose files
     /// are offered with the library's own: see [`Rescue`].
     #[cfg(not(target_arch = "wasm32"))]
     shelf: Option<std::path::PathBuf>,
-    /// Where each rescue being kept is moved to in the library.
-    keeping: Vec<LibPath>,
-    /// The rescues in drawbar's own data being copied into the library, by the asset
-    /// each becomes, each deleted once its copy lands.
+    /// The rescues being copied into the library, by the asset each becomes, each
+    /// deleted once its copy lands.
     #[cfg(not(target_arch = "wasm32"))]
     shelved: BTreeMap<u64, std::path::PathBuf>,
 }
@@ -374,25 +216,17 @@ impl Store {
             backend,
             phase: Phase::Opening,
             records: BTreeMap::new(),
-            next_generation: 1,
-            committed: None,
-            failing: None,
-            indexed: false,
+            ids: Ids::default(),
+            view: None,
+            asked: Vec::new(),
+            rechecking: BTreeSet::new(),
+            moved: BTreeSet::new(),
+            told_unkept: false,
             focused: true,
-            tags_seen: 0,
-            tags_held: false,
             scanning: false,
-            loading: None,
-            checking: BTreeSet::new(),
-            owes: false,
+            committing: 0,
             send_waits: false,
-            keeps_views: true,
             name: None,
-            stale: Vec::new(),
-            renamed: Vec::new(),
-            unprinted: Default::default(),
-            printed: BTreeSet::new(),
-            fingerprinting: false,
             unfetched: Default::default(),
             fetched: BTreeSet::new(),
             fetching: BTreeSet::new(),
@@ -407,10 +241,8 @@ impl Store {
             #[cfg(test)]
             looked_for_room: 0,
             sent: 0,
-            issued: 0,
             #[cfg(not(target_arch = "wasm32"))]
             shelf: None,
-            keeping: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             shelved: BTreeMap::new(),
             left: Vec::new(),
@@ -449,39 +281,19 @@ impl Store {
         self.backend.root()
     }
 
-    /// The library's folder for temporary files, while it may be written. drawbar makes
-    /// it at the library's first write, so it may not be there yet.
-    ///
-    /// ⚠️ `None` where a folder on the way is a link: a rescue written through it would
-    /// land outside the library, where the next open never offers it. The device keeps it
-    /// in drawbar's own data instead.
+    /// Where a slot's former occupant is kept while this library is open: this install's
+    /// own folder for it, outside the library, where the next open offers it.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn tmp(&self) -> Option<std::path::PathBuf> {
-        if !self.open() {
-            return None;
-        }
-        let mut at = self.root().to_path_buf();
-        for part in super::TMP.split('/') {
-            at.push(part);
-            let linked = std::fs::symlink_metadata(&at).is_ok_and(|meta| meta.is_symlink());
-            if linked {
-                return None;
-            }
-        }
-        Some(at)
+        self.open().then(|| self.backend.local().join(RESCUED))
     }
 
     /// Send the saves the files need, then say whether no save or rescan waits for its
     /// answer. A library whose answers cannot be waited for is let go only once settled,
-    /// so its last pass sends no save and the index it writes holds every save's answer.
-    pub fn settled(
-        &mut self,
-        workspace: &mut Workspace,
-        browser: &mut Browser,
-        queue: &Queue,
-    ) -> bool {
-        self.sync(workspace, browser, queue, Pass::Files);
-        !self.scanning && !self.saving() && self.moving.is_empty()
+    /// so its last pass sends no save.
+    pub fn settled(&mut self, workspace: &mut Workspace, browser: &mut Browser) -> bool {
+        self.sync(workspace, browser, Pass::Files);
+        !self.scanning && !self.saving() && self.moving.is_empty() && self.committing == 0
     }
 
     fn saving(&self) -> bool {
@@ -500,16 +312,16 @@ impl Store {
         self.backend.busy() || self.saving() || !self.moving.is_empty()
     }
 
-    /// Whether letting the library go now, with no last pass, would lose an edit: one not
-    /// yet kept as a working copy, an asset never written to a file, a write that has
-    /// not landed, or a change held in memory where nothing may be written. A browser tab
-    /// may close without that pass.
+    /// Whether letting the library go now, with no last pass, would lose an edit: an
+    /// unsaved one, an asset never written to a file, a write that has not landed, or a
+    /// change held in memory where nothing may be written. A browser tab may close
+    /// without that pass.
     pub fn losing(&self, workspace: &Workspace, browser: &Browser) -> bool {
         self.writing() || self.unheld(workspace).next().is_some() || self.held(workspace, browser)
     }
 
     /// Whether a change is held in memory only, where nothing may be written: a deletion,
-    /// a save, a rename or move, a folder change or a tag change.
+    /// a save, a rename or move, or a folder change.
     fn held(&self, workspace: &Workspace, browser: &Browser) -> bool {
         if !matches!(self.phase, Phase::ReadOnly(_)) {
             return false;
@@ -523,41 +335,26 @@ impl Store {
                 saved || entity.path.as_ref() != Some(path)
             })
         };
-        let tags = self.tags_held || browser.tags.revision() != self.tags_seen;
-        tags || browser.folders.changed() || self.records.iter().any(unwritten)
+        browser.folders.changed() || self.records.iter().any(unwritten)
     }
 
-    /// Note a tag the user changed since the last answer was folded in, where nothing may
-    /// write it.
-    fn note_tags(&mut self, browser: &Browser) {
-        let changed = browser.tags.revision() != self.tags_seen;
-        self.tags_held |= changed && matches!(self.phase, Phase::ReadOnly(_));
-    }
-
-    /// The names of the assets that letting this library go would lose, where nothing
-    /// may be written here: each edit not already kept as a working copy, and each asset
-    /// never written to a file. A library open for writing keeps every one at its last
+    /// The names of the assets that letting this library go would lose: each unsaved
+    /// edit, which this build keeps nowhere, and where nothing may be written here, each
+    /// asset never written to a file. A library open for writing writes those at its last
     /// pass.
     pub fn unkept(&self, workspace: &Workspace) -> Vec<String> {
-        if self.open() {
-            return Vec::new();
-        }
+        let open = self.open();
         let unheld = self.unheld(workspace);
-        unheld.map(|entity| entity.name.clone()).collect()
+        let lost = unheld.filter(|entity| !open || entity.is_unsaved());
+        lost.map(|entity| entity.name.clone()).collect()
     }
 
-    /// Each edit not kept as a working copy, and each asset never written to a file.
+    /// Each unsaved edit, and each asset never written to a file.
     fn unheld<'a>(&'a self, workspace: &'a Workspace) -> impl Iterator<Item = &'a LocalEntity> {
         workspace.listed().filter(|entity| {
             let record = self.records.get(&entity.id);
             let written = record.is_some_and(|record| record.fingerprint.is_some());
-            let stamp = workspace
-                .kept_edit(entity.id)
-                .map_or(entity.stamp, |(_, stamp)| stamp);
-            let held = record
-                .and_then(|record| record.working.as_ref())
-                .is_some_and(|working| working.stamp == stamp);
-            !written || (entity.is_unsaved() && !held)
+            !written || entity.is_unsaved()
         })
     }
 
@@ -608,13 +405,12 @@ impl Store {
                 Phase::Failed(why) => Some(format!("not opened: {why}")),
             },
             read_only: matches!(self.phase, Phase::ReadOnly(_)),
-            opening: matches!(self.phase, Phase::Opening) || self.loading.is_some(),
-            listing: self.loading.as_ref().map(|loading| loading.files),
+            opening: matches!(self.phase, Phase::Opening),
         }
     }
 
-    /// Fold in what the backend has answered, up to `PARTS_A_FRAME` parts of a
-    /// listing. Returns whether a send held by [`Store::hold_send`] may now go ahead.
+    /// Fold in what the backend has answered. Returns whether a send held by
+    /// [`Store::hold_send`] may now go ahead.
     pub fn poll(
         &mut self,
         workspace: &mut Workspace,
@@ -622,31 +418,15 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) -> bool {
-        self.note_tags(browser);
         self.recalled(workspace, browser, log);
         self.ask(workspace, browser, queue, log);
-        self.walk(browser);
+        self.ask_tags(workspace, browser, log);
+        self.tell_unkept(workspace, log);
         let mut released = false;
-        let mut parts = 0;
-        while parts < PARTS_A_FRAME {
-            let (event, held) = match self.ready() {
-                Some(event) => (event, true),
-                None => match self.backend.try_recv() {
-                    Some(event) => (event, false),
-                    None => break,
-                },
-            };
-            parts += usize::from(matches!(event, Event::Listed { .. }));
-            released |= match held {
-                true => self.react(event, workspace, browser, queue, log),
-                false => self.handle(event, workspace, browser, queue, log),
-            };
-        }
-        if parts == PARTS_A_FRAME {
-            workspace.ctx().request_repaint();
+        while let Some(event) = self.backend.try_recv() {
+            released |= self.react(event, workspace, browser, queue, log);
         }
         browser.folders.place = Some(self.place());
-        self.tags_seen = browser.tags.revision();
         released
     }
 
@@ -660,24 +440,13 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) -> bool {
-        self.note_tags(browser);
-        match self.ready() {
-            Some(event) => self.react(event, workspace, browser, queue, log),
-            None => {
-                let Some(event) = self.backend.recv() else {
-                    return false;
-                };
-                self.handle(event, workspace, browser, queue, log)
-            }
+        self.ask_tags(workspace, browser, log);
+        let Some(event) = self.backend.recv() else {
+            return false;
         };
+        self.react(event, workspace, browser, queue, log);
         browser.folders.place = Some(self.place());
-        self.tags_seen = browser.tags.revision();
         true
-    }
-
-    /// The next answer of the listing held back that may now be folded in.
-    fn ready(&mut self) -> Option<Event> {
-        self.loading.as_mut()?.ready()
     }
 
     /// Read at most this much of the library's files whole, in place of [`MOST_BYTES`].
@@ -741,7 +510,7 @@ impl Store {
             return;
         }
         self.reading = true;
-        self.send(Cmd::Read { files, room });
+        self.send(Cmd::File(FileCmd::Read { files, room }));
     }
 
     /// How many more bytes the assets may hold whole: the budget, less what they hold and
@@ -785,9 +554,9 @@ impl Store {
                 saved.is_some_and(|saved| record.rereadable(saved, &self.moving))
                     && !queue.holds(**id)
             })
-            .filter_map(|(id, record)| {
+            .filter_map(|(id, _)| {
                 let (seen, freed) = workspace.evictable(*id)?;
-                let tracked = tracked(*id, record, workspace, browser);
+                let tracked = tracked(*id, workspace, browser);
                 (evict == Evict::Any || !tracked).then_some((tracked, seen, *id, freed))
             })
             .collect();
@@ -816,44 +585,20 @@ impl Store {
         true
     }
 
-    /// Ask the backend to list the folders whose removal waits on what is in them. Once
-    /// the whole tree is listed, every folder is.
-    fn walk(&mut self, browser: &mut Browser) {
-        for dir in browser.folders.take_walks() {
-            match self.loading.is_some() {
-                true => self.send(Cmd::Walk(dir)),
-                false => browser.folders.walked(dir),
-            }
-        }
-    }
-
-    /// Send a command, counting it.
     fn send(&mut self, cmd: Cmd) {
-        self.issued += 1;
         #[cfg(test)]
-        if let Cmd::Read { files, .. } = &cmd {
+        if let Cmd::File(FileCmd::Read { files, .. }) = &cmd {
             self.asked_files += files.len();
         }
         self.backend.send(cmd);
     }
 
-    /// Rename a file or folder, with the rows no file has claimed yet that it takes
-    /// along.
-    fn rename(&mut self, from: LibPath, to: LibPath, rows: Vec<u64>) {
-        self.write(Cmd::Move {
-            from: from.clone(),
-            to: to.clone(),
-        });
+    /// Rename a file or folder. A file the library knows by its path is known by the new
+    /// one from now on.
+    fn rename(&mut self, from: LibPath, to: LibPath) {
+        self.ids.moved(&from, &to);
         self.moving.push((from.clone(), to.clone()));
-        if let Some(loading) = &mut self.loading {
-            loading.moves.push(Rename {
-                sent: self.issued,
-                from,
-                to,
-                rows,
-                moved: false,
-            });
-        }
+        self.write(FileCmd::Move { from, to });
     }
 
     /// Put back where they were the paths a rename that failed had moved.
@@ -875,11 +620,7 @@ impl Store {
             }
         }
         self.cache.moved(to, from);
-        if let Some(loading) = &mut self.loading {
-            if let Some(rename) = loading.answered(from, to, false) {
-                loading.unmoved(rename);
-            }
-        }
+        self.ids.moved(to, from);
         // ⚠️ The folder changes not yet sent have moved the workspace on already. Those
         // after a folder's rename name the folder by its new name, and are moved back
         // with it; a file's rename is undone where those changes have put the file.
@@ -895,12 +636,6 @@ impl Store {
         }
     }
 
-    /// Forget a rescue's move to `to`, now answered. `false` for a move that was not one.
-    fn answered_keep(&mut self, to: &LibPath) -> bool {
-        let at = self.keeping.iter().position(|kept| kept == to);
-        at.map(|at| self.keeping.remove(at)).is_some()
-    }
-
     /// Forget a rename now answered. `false` for one this store did not send.
     fn answered_move(&mut self, from: &LibPath, to: &LibPath) -> bool {
         let sent = self.moving.iter().position(|(a, b)| a == from && b == to);
@@ -914,12 +649,20 @@ impl Store {
         &mut self,
         answers: Vec<(u64, Result<Found, Failure>)>,
         workspace: &mut Workspace,
-        browser: &Browser,
+        browser: &mut Browser,
         queue: &Queue,
         log: &mut Log,
     ) {
+        let rechecked = answers.iter().all(|(id, _)| self.rechecking.contains(id));
         let background = answers.iter().any(|(id, _)| self.fetching.contains(id));
         for (id, answer) in answers {
+            if self.rechecking.remove(&id) {
+                match answer {
+                    Ok(found) => self.changed(id, found, workspace, browser, log),
+                    Err(_) => self.rescan(),
+                }
+                continue;
+            }
             let behind = self.fetching.remove(&id);
             let unread = self.records.get(&id).map(|record| record.holds) == Some(Holds::Unread);
             let mut found = match answer {
@@ -972,6 +715,9 @@ impl Store {
             record.summarized = None;
             workspace.took(id, found.bytes, found.file);
         }
+        if rechecked {
+            return;
+        }
         match background {
             true => self.next_fetches(workspace),
             false => {
@@ -1002,9 +748,21 @@ impl Store {
         self.scanning
     }
 
-    /// Whether the open's listing is still arriving.
+    /// Whether the library is still opening.
     pub fn listing(&self) -> bool {
-        self.loading.is_some()
+        matches!(self.phase, Phase::Opening)
+    }
+
+    /// The key the library knows an asset's file by.
+    #[cfg(test)]
+    pub fn key(&self, id: u64) -> Option<Key> {
+        self.ids.key(id).cloned()
+    }
+
+    /// Whether a change to the facts waits to be sent or answered.
+    #[cfg(test)]
+    pub fn deciding(&self) -> bool {
+        !self.asked.is_empty() || self.committing > 0
     }
 
     /// Whether a send is held for a rescan or check still in flight.
@@ -1022,20 +780,6 @@ impl Store {
         }
     }
 
-    fn handle(
-        &mut self,
-        event: Event,
-        workspace: &mut Workspace,
-        browser: &mut Browser,
-        queue: &Queue,
-        log: &mut Log,
-    ) -> bool {
-        match self.hold(event) {
-            Some(event) => self.react(event, workspace, browser, queue, log),
-            None => false,
-        }
-    }
-
     /// Fold in one answer, in its turn. Returns whether a send held by
     /// [`Store::hold_send`] may now go ahead.
     fn react(
@@ -1050,26 +794,7 @@ impl Store {
             crate::telemetry::fault("library", kind);
         }
         match event {
-            Event::Opened(Ok(opened)) => self.begin(opened, workspace, browser, log),
-            Event::Listed { part, ran } => self.listed(part, ran, workspace, browser, log),
-            Event::Complete(complete) => {
-                self.complete(complete, workspace, browser, queue, log);
-                self.pay();
-            }
-            Event::Walked { mut dir, ran } => {
-                if let Some(loading) = &self.loading {
-                    loading.now(ran, &mut dir);
-                }
-                browser.folders.walked(dir);
-            }
-            Event::Checked(Ok(files)) => {
-                self.scanning = false;
-                let moved = self.checked(files, workspace, browser, queue, log);
-                self.pay();
-                if std::mem::take(&mut self.send_waits) {
-                    return self.release(&moved, queue, workspace, log);
-                }
-            }
+            Event::Opened(Ok(opened)) => self.begin(opened, workspace, browser, queue, log),
             Event::Opened(Err(why)) => {
                 log.error(format!("opening the library: {why}"));
                 log.trouble(format!(
@@ -1078,34 +803,47 @@ impl Store {
                 ));
                 self.phase = Phase::Failed(why);
             }
-            Event::Scanned(Ok(listing)) => {
-                self.scanning = false;
-                let moved = self.rescanned(listing, workspace, browser, queue, log);
-                if std::mem::take(&mut self.send_waits) {
-                    return self.release(&moved, queue, workspace, log);
-                }
+            Event::Scanned(Ok(viewed)) => {
+                let moved = self.viewed(viewed, workspace, browser, queue, log);
+                self.moved.extend(moved);
+                return self.scanned(queue, workspace, log);
             }
-            Event::Scanned(Err(why)) | Event::Checked(Err(why)) => {
+            Event::Scanned(Err(why)) => {
                 self.scanning = false;
                 self.send_waits = false;
+                self.moved.clear();
                 log.error(format!("reading the library again: {why}"));
                 log.trouble("The library folder could not be read, so nothing was sent.");
             }
-            Event::Read(answers) => self.took(answers, workspace, browser, queue, log),
-            Event::Fingerprinted(files) => self.fingerprinted(files),
-            Event::Moved { from, to, result } => match result {
-                _ if !self.answered_move(&from, &to) => {}
-                Ok(()) => {
-                    if let Some(loading) = &mut self.loading {
-                        loading.answered(&from, &to, true);
+            Event::Viewed(viewed) => {
+                self.viewed(viewed, workspace, browser, queue, log);
+            }
+            Event::Committed { label, result } => {
+                self.committing = self.committing.saturating_sub(1);
+                match result {
+                    Ok(viewed) => {
+                        self.viewed(viewed, workspace, browser, queue, log);
                     }
-                    if self.answered_keep(&to) {
-                        log.say(format!("“{}” is in the library.", to.leaf()));
-                        self.rescan();
+                    Err(why) => {
+                        log.error(format!("{label}: {why}"));
+                        log.trouble(format!("The library did not change as asked: {why}."));
+                        if let Some(view) = self.view.clone() {
+                            self.project_tags(&view, browser);
+                        }
                     }
                 }
+            }
+            Event::Read(answers) => {
+                let rechecked = answers.iter().all(|(id, _)| self.rechecking.contains(id));
+                self.took(answers, workspace, browser, queue, log);
+                if rechecked && self.scanning {
+                    return self.scanned(queue, workspace, log);
+                }
+            }
+            Event::Moved { from, to, result } => match result {
+                _ if !self.answered_move(&from, &to) => {}
+                Ok(()) => {}
                 Err(why) => {
-                    self.answered_keep(&to);
                     let why = format!("moving {from} to {to}: {why}");
                     log.error(why.clone());
                     log.trouble(format!(
@@ -1124,81 +862,52 @@ impl Store {
             Event::Rewritten { id, path, result } => {
                 self.rewritten(id, path, result, workspace, browser, log)
             }
-            Event::ReadOnly(why) => self.refused(why, workspace, log),
-            Event::Committed(Ok(())) => self.failing = None,
-            Event::Committed(Err(unkept)) => {
-                let again = self.failing.as_ref().is_some_and(|last| last.same(&unkept));
-                self.unchanged(&unkept.to_string(), again, log);
-                self.failing = Some(unkept);
+            Event::Failed(why) => {
+                log.error(why.as_str());
+                log.trouble(format!(
+                    "The library folder did not change as asked: {why}."
+                ));
+                self.rescan();
             }
-            Event::Failed(why) => self.unchanged(&why, false, log),
         }
         false
     }
 
-    /// Say why the library did not change as asked, unless `quiet`, and write the index
-    /// and every working copy again.
-    fn unchanged(&mut self, why: &str, quiet: bool, log: &mut Log) {
-        if !quiet {
-            log.error(why);
-            log.trouble(format!(
-                "The library folder did not change as asked: {why}."
-            ));
-        }
-        // Whatever failed may have been the index or a working copy, so both are written
-        // again, whole, at the next full pass, and that pass drops the copies it replaces.
-        self.committed = None;
-        for (id, record) in &mut self.records {
-            if let Some(old) = record.working.take() {
-                self.stale.push(working_name(*id, old.copy.generation));
-            }
-        }
-        self.rescan();
+    /// Send a command that writes a file.
+    fn write(&mut self, cmd: FileCmd) {
+        self.sent += 1;
+        self.send(Cmd::File(cmd));
     }
 
-    /// Hold back an answer of the listing gathered before a rename that has not
-    /// answered, and any behind one held already, so the answers stay in order. Returns
-    /// the answer where it is not held.
-    fn hold(&mut self, event: Event) -> Option<Event> {
-        let Some(loading) = &mut self.loading else {
-            return Some(event);
-        };
-        let Some(ran) = gathered(&event) else {
-            return Some(event);
-        };
-        if loading.held.is_empty() && !loading.waits(ran) {
-            return Some(event);
-        }
-        loading.held.push_back(event);
-        None
+    /// Send a change to the facts.
+    fn commit(&mut self, intent: Intent) {
+        self.committing += 1;
+        self.send(Cmd::Intent(intent));
     }
 
-    /// A write found the library closed to it: another drawbar took the lock first, or
-    /// the folder refused the sidecar. Every save in flight counts as unsaved again.
-    fn refused(&mut self, why: String, workspace: &mut Workspace, log: &mut Log) {
-        if !self.open() {
+    /// Undo this session's last change to the facts not undone.
+    pub fn undo(&mut self) {
+        if self.opened() {
+            self.committing += 1;
+            self.send(Cmd::Undo);
+        }
+    }
+
+    /// Redo the change to the facts undone last.
+    pub fn redo(&mut self) {
+        if self.opened() {
+            self.committing += 1;
+            self.send(Cmd::Redo);
+        }
+    }
+
+    /// Read what other drawbars wrote to the library since it was last read.
+    pub fn refresh(&mut self) {
+        if !self.opened() || self.scanning {
             return;
         }
-        log.trouble(format!(
-            "This computer's library is read-only now: {why}. Edits stay in memory until \
-             you quit."
-        ));
-        for (id, record) in &mut self.records {
-            if std::mem::take(&mut record.saving) {
-                workspace.unsave(*id);
-                if let Some(entity) = workspace.get(*id) {
-                    record.saved = entity.saved.stamp();
-                }
-            }
-        }
-        self.phase = Phase::ReadOnly(why);
-    }
-
-    /// Send a command that writes. The first one makes `.drawbar/`.
-    fn write(&mut self, cmd: Cmd) {
-        self.indexed = true;
-        self.sent += 1;
-        self.send(cmd);
+        self.scanning = true;
+        self.send(Cmd::Refresh);
     }
 
     /// Rescan when the window comes back into focus, since anything may have changed
@@ -1221,49 +930,21 @@ impl Store {
         true
     }
 
-    /// List the tree again, to fold in what changed outside drawbar. While the open's
-    /// listing is in flight, the files read so far are looked at again instead, and the
-    /// rescan is owed until the listing is complete.
+    /// Scan the tree again, to fold in what changed outside drawbar and what other
+    /// drawbars wrote.
     pub(crate) fn rescan(&mut self) {
         if !self.opened() || self.scanning {
             return;
         }
-        if self.loading.is_some() {
-            self.owes = true;
-            let known: BTreeMap<LibPath, Fingerprint> = self
-                .records
-                .values()
-                .filter(|record| record.holds != Holds::Unread)
-                .filter_map(|record| Some((record.path.clone()?, record.fingerprint?)))
-                .collect();
-            self.checking = known.keys().cloned().collect();
-            self.scanning = true;
-            return self.send(Cmd::Check { known });
-        }
-        let mut known = BTreeMap::new();
-        for record in self.records.values() {
-            let (Some(path), Some(print)) = (&record.path, record.fingerprint) else {
-                continue;
-            };
-            known.insert(path.clone(), (print, record.holds));
-        }
         self.scanning = true;
-        self.send(Cmd::Scan { known });
-    }
-
-    /// Send the rescan owed, once nothing stands in its way.
-    fn pay(&mut self) {
-        if self.owes && self.loading.is_none() && !self.scanning {
-            self.owes = false;
-            self.rescan();
-        }
+        self.send(Cmd::Rescan);
     }
 
     /// Write everything, waiting for the saves in flight to answer, then let the library
     /// go. It blocks, so it is for the end of a session.
     ///
-    /// ⚠️ An index sent beside a save carries the file's fingerprint from before it, so a
-    /// pass that sent anything is followed by another once the saves have answered.
+    /// ⚠️ A pass that sent anything is followed by another once its saves have answered,
+    /// since a save may leave another asset to remove.
     pub fn close(
         &mut self,
         workspace: &mut Workspace,
@@ -1272,12 +953,13 @@ impl Store {
         log: &mut Log,
     ) {
         const ROUNDS: usize = 8;
+        self.ask_tags(workspace, browser, log);
         for _ in 0..ROUNDS {
             if !self.answered(workspace, browser, queue, log) {
                 break;
             }
             let sent = self.sent;
-            self.sync(workspace, browser, queue, Pass::Last);
+            self.sync(workspace, browser, Pass::Last);
             if self.sent == sent {
                 break;
             }
@@ -1296,14 +978,14 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) -> bool {
-        while self.saving() || !self.moving.is_empty() {
+        while self.saving() || !self.moving.is_empty() || self.committing > 0 {
             match self.backend.recv() {
                 None => return false,
-                // ⚠️ A listing taken before the last pass's moves would read each as a
+                // ⚠️ A scan taken before the last pass's moves would read each as a
                 // deletion, and nothing needs it now.
-                Some(Event::Scanned(_) | Event::Checked(_)) => self.scanning = false,
+                Some(Event::Scanned(_)) => self.scanning = false,
                 Some(event) => {
-                    self.handle(event, workspace, browser, queue, log);
+                    self.react(event, workspace, browser, queue, log);
                 }
             }
         }
@@ -1311,8 +993,7 @@ impl Store {
     }
 
     /// Write everything, as [`Store::close`] does, before another library takes this one's
-    /// place. The views of slots stay in the window, so their working copies leave this
-    /// library.
+    /// place.
     pub fn hand_over(
         mut self,
         workspace: &mut Workspace,
@@ -1320,7 +1001,6 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) {
-        self.keeps_views = false;
         self.close(workspace, browser, queue, log);
     }
 
@@ -1354,34 +1034,17 @@ impl Store {
         false
     }
 
-    /// Take in what an open found before its listing: the index, and the working copies.
+    /// Take in what opening found: whether the library may be written, and every file
+    /// its view lists.
     fn begin(
         &mut self,
         opened: Opened,
         workspace: &mut Workspace,
         browser: &mut Browser,
+        queue: &Queue,
         log: &mut Log,
     ) {
-        let Opened {
-            writable,
-            indexed,
-            damaged,
-            sidecar,
-            mut working,
-            mut prints,
-            swept,
-            stranded,
-            rescued,
-            unindexed,
-        } = opened;
-        if !stranded.is_empty() {
-            let named: Vec<String> = stranded.iter().map(|dir| format!("“{dir}”")).collect();
-            log.trouble(format!(
-                "An interrupted rename left {} under the name it moved through, and something \
-                 else has its name, so it was left as it is.",
-                named.join(", ")
-            ));
-        }
+        let Opened { writable, viewed } = opened;
         self.phase = match writable {
             Ok(()) => Phase::Open,
             Err(why) => {
@@ -1392,334 +1055,7 @@ impl Store {
                 Phase::ReadOnly(why)
             }
         };
-        self.indexed = indexed;
-        self.next_generation = sidecar.next_generation.max(1);
-        let Sidecar { tags, assets, .. } = sidecar;
-
-        // A row under an id this session has already given out, to an asset made while
-        // the library was opening or one of a library open before, takes the next free
-        // one, so nothing still naming that id reaches this asset.
-        let floor = workspace.next_id();
-        let mut next = floor
-            .max(sidecar.next_id)
-            .max(assets.keys().max().map_or(0, |id| id.saturating_add(1)));
-        let mut rows: BTreeMap<u64, Row> = BTreeMap::new();
-        for (id, row) in assets {
-            if id >= floor {
-                rows.insert(id, row);
-                continue;
-            }
-            let moved = next;
-            next = next.saturating_add(1);
-            if let Some(bytes) = working.remove(&id) {
-                working.insert(moved, bytes);
-            }
-            if let Some(print) = prints.remove(&id) {
-                prints.insert(moved, print);
-            }
-            if let Some(copy) = row.working {
-                self.renamed
-                    .push((moved, working_name(id, copy.generation)));
-            }
-            rows.insert(moved, row);
-        }
-        workspace.reserve(next);
-        browser.tags.restore(
-            tags,
-            rows.iter().map(|(id, row)| (*id, row.tags.iter().copied())),
-        );
-        self.loading = Some(Loading {
-            by_path: by_path(&rows),
-            rows,
-            claimed: BTreeSet::new(),
-            working,
-            prints,
-            next,
-            dirs: Vec::new(),
-            files: 0,
-            swept,
-            rescued,
-            unindexed,
-            damaged,
-            moves: Vec::new(),
-            held: Default::default(),
-        });
-    }
-
-    /// Fold in one part of the open's listing, gathered after `ran` commands: each file
-    /// the index names comes back as its asset, and each it does not as a new one.
-    fn listed(
-        &mut self,
-        mut part: Listing,
-        ran: u64,
-        workspace: &mut Workspace,
-        browser: &mut Browser,
-        log: &mut Log,
-    ) {
-        let Some(mut loading) = self.loading.take() else {
-            return;
-        };
-        loading.next = loading.next.max(workspace.next_id());
-        loading.caught_up(ran, &mut part);
-        let Listing {
-            dirs,
-            files,
-            unread,
-            others,
-            unwalked,
-        } = part;
-        // The folder changes not yet sent have moved what the browser shows on already.
-        let ahead = |paths: Vec<LibPath>| -> Vec<LibPath> {
-            paths
-                .iter()
-                .map(|path| browser.folders.ahead(path))
-                .collect()
-        };
-        let (shown, others, unwalked) = (ahead(dirs.clone()), ahead(others), ahead(unwalked));
-        let unread: Vec<(LibPath, String)> = unread
-            .into_iter()
-            .map(|(path, why)| (browser.folders.ahead(&path), why))
-            .collect();
-        beside(&browser.folders, &unread, &unwalked, log);
-        let folders = &mut browser.folders;
-        folders.unread.extend(unread);
-        folders.others.extend(others);
-        folders.unwalked.extend(unwalked);
-        folders.add(&shown);
-        loading.dirs.extend(dirs);
-
-        let mut back = Vec::new();
-        let mut edits = Vec::new();
-        let mut conflicts = Vec::new();
-        loading.files += files.len();
-        for found in files {
-            let Some(id) = loading.by_path.get(&found.path).copied() else {
-                let id = loading.next;
-                loading.next = id.saturating_add(1);
-                back.push(newcomer(id, found, &mut self.records));
-                continue;
-            };
-            loading.claimed.insert(id);
-            let print = loading.rows.get(&id).and_then(|row| row.fingerprint);
-            let changed = !diff::same(print, &found);
-            if let Some((saved, edit, conflicted)) = self.claim(&mut loading, id, found, changed) {
-                back.push(saved);
-                edits.extend(edit.map(|edit| (id, edit)));
-                if conflicted {
-                    conflicts.push(id);
-                }
-            }
-        }
-        self.restored(back, edits, &loading, workspace, &browser.folders, log);
-        // An edit the file already holds was let go as it came back.
-        for id in conflicts {
-            if workspace.get(id).is_some_and(LocalEntity::is_unsaved) {
-                conflict(id, workspace, browser, log);
-            }
-        }
-        self.loading = Some(loading);
-    }
-
-    /// A listed file at the path of a row, or one matched to a row it moved from: the
-    /// asset it comes back as, with the bytes or the edit its working copy holds over it,
-    /// and whether that is over a file that changed.
-    fn claim(
-        &mut self,
-        loading: &mut Loading,
-        id: u64,
-        found: Found,
-        changed: bool,
-    ) -> Option<(Saved, Option<Edit>, bool)> {
-        let row = loading.rows.get(&id)?;
-        let print = diff::kept(row.fingerprint, &found);
-        let copy = loading.working.remove(&id);
-        let (mine, edit) = match (row.working.map(|copy| copy.keeps), copy) {
-            // The open read every edit's copy through, so this one reads.
-            (Some(Keeps::Edit), Some(copy)) => (None, Edit::from_working(&copy).ok()),
-            (_, mine) => {
-                let mine = mine.filter(|mine| match (&found.bytes, &found.file) {
-                    (Some(bytes), _) => mine != bytes,
-                    (None, Some(file)) => !file.holds(mine),
-                    (None, None) => found.crc != Some(nord_format::crc::crc32(mine)),
-                });
-                (mine, None)
-            }
-        };
-        let conflicted = changed && (mine.is_some() || edit.is_some());
-        self.records.insert(id, Record::of_found(&found, print));
-        let saved = Saved {
-            id,
-            name: found.path.leaf().to_string(),
-            content: Content::found(found.bytes, found.file, found.stat.len),
-            path: Some(found.path),
-            origin: row.origin(),
-            unsaved: mine,
-        };
-        Some((saved, edit, conflicted))
-    }
-
-    /// Put assets back in the workspace, with the edits their working copies kept over
-    /// their files, and record what each was restored as. One whose file is missing holds
-    /// nothing saved, and counts as unsaved before its working copy is settled.
-    fn restored(
-        &mut self,
-        back: Vec<Saved>,
-        edits: Vec<(u64, Edit)>,
-        loading: &Loading,
-        workspace: &mut Workspace,
-        folders: &Folders,
-        log: &mut Log,
-    ) {
-        let ids: Vec<u64> = back.iter().map(|saved| saved.id).collect();
-        workspace.restore(back, Some(loading.next), log);
-        for (id, edit) in edits {
-            workspace.restore_edit(id, edit);
-        }
-        for id in ids {
-            if self.records.get(&id).is_some_and(|record| record.missing) {
-                workspace.unsave(id);
-            }
-            let copy = loading.rows.get(&id).and_then(|row| row.working);
-            self.settle(id, workspace, copy.zip(loading.prints.get(&id).copied()));
-            self.place_ahead(id, workspace, folders);
-            self.recall(id, workspace);
-        }
-    }
-
-    /// Put an asset just restored where the folder changes not yet sent will put its
-    /// file. Its record keeps the path the disk has now, and those changes move it.
-    fn place_ahead(&self, id: u64, workspace: &mut Workspace, folders: &Folders) {
-        let Some(path) = self
-            .records
-            .get(&id)
-            .and_then(|record| record.path.as_ref())
-        else {
-            return;
-        };
-        let ahead = folders.ahead(path);
-        if ahead != *path {
-            workspace.place(id, ahead);
-        }
-    }
-
-    /// The open's listing is complete: the files that may be ones moved are matched to
-    /// the rows no file claimed, and whatever is left of the index is let go or kept.
-    fn complete(
-        &mut self,
-        mut complete: Complete,
-        workspace: &mut Workspace,
-        browser: &mut Browser,
-        queue: &Queue,
-        log: &mut Log,
-    ) {
-        let Some(mut loading) = self.loading.take() else {
-            return;
-        };
-        loading.next = loading.next.max(workspace.next_id());
-        let strangers = complete.strangers.iter_mut().map(|found| &mut found.path);
-        for path in strangers.chain(&mut complete.gone) {
-            loading.now(complete.ran, path);
-        }
-        let swept = loading.swept + complete.swept;
-        if swept > 0 {
-            log.info(format!("removed {swept} leftovers of interrupted writes"));
-        }
-        let known = loading
-            .rows
-            .iter()
-            .filter(|(id, _)| !loading.claimed.contains(*id))
-            .filter_map(|(id, row)| {
-                Some((
-                    *id,
-                    Known {
-                        path: row.path.clone()?,
-                        fingerprint: row.fingerprint,
-                    },
-                ))
-            })
-            .collect();
-        // Each file that may be a row moved was listed as an asset of its own, which it
-        // gives up to the row it turns out to be, unless something has changed it since.
-        let listed: BTreeMap<LibPath, u64> = self
-            .records
-            .iter()
-            .filter(|(id, _)| !loading.rows.contains_key(*id))
-            .filter_map(|(id, record)| Some((record.path.clone()?, *id)))
-            .collect();
-        let strangers = complete.strangers.into_iter().filter(|found| {
-            let entity = listed.get(&found.path).and_then(|id| workspace.get(*id));
-            entity.is_some_and(|entity| !precious(entity, queue))
-        });
-        let matched = match_files(&known, strangers.collect());
-        let mut back = Vec::new();
-        let mut edits = Vec::new();
-        for (id, found) in matched.renamed {
-            let Some(stranger) = listed.get(&found.path).copied() else {
-                continue;
-            };
-            if let Some(from) = loading.rows.get(&id).and_then(|row| row.path.as_ref()) {
-                self.cache.moved(from, &found.path);
-            }
-            self.records.remove(&stranger);
-            workspace.forget(stranger);
-            for tag in browser.tags.worn(stranger).clone() {
-                browser.tags.set(id, tag, true);
-            }
-            browser.tags.forget(stranger);
-            if let Some((saved, edit, _)) = self.claim(&mut loading, id, found, false) {
-                back.push(saved);
-                edits.extend(edit.map(|edit| (id, edit)));
-            }
-        }
-        let mut missing = Vec::new();
-        for id in matched.vanished {
-            let Some(row) = loading.rows.get(&id) else {
-                continue;
-            };
-            // An edit's copy has no file to be made over, so its row is kept, naming the
-            // copy, as any precious row is.
-            let keeps = row.working.map(|copy| copy.keeps);
-            match (keeps, loading.working.remove(&id)) {
-                (Some(Keeps::Bytes), Some(bytes)) => {
-                    let mut record = Record::of_file(row.path.clone().unwrap_or_default(), None);
-                    record.fingerprint = row.fingerprint;
-                    record.missing = true;
-                    self.records.insert(id, record);
-                    missing.push(id);
-                    back.push(saved_from(id, row, bytes));
-                }
-                _ if row.precious() => browser.folders.lose(id, row.clone()),
-                _ => {}
-            }
-        }
-        // Rows with no path are views of slots that held an edit; each comes back as a
-        // file on this computer. Its working copy stays until that file is written.
-        let mut viewed = Vec::new();
-        for (id, row) in loading.rows.iter().filter(|(_, row)| row.path.is_none()) {
-            if let (Some(bytes), Some(copy)) = (loading.working.remove(id), row.working) {
-                viewed.push((*id, copy, contents(&bytes)));
-                back.push(saved_from(*id, row, bytes));
-            }
-        }
-        self.restored(back, edits, &loading, workspace, &browser.folders, log);
-        for path in &complete.gone {
-            if let Some(id) = listed.get(path) {
-                self.vanished(*id, workspace, browser, queue, log);
-            }
-        }
-        // A file gone since the walk listed it went somewhere the walk may not have
-        // looked, so the tree is listed again.
-        self.owes |= !complete.gone.is_empty();
-        browser.folders.missing.extend(missing);
-        for (id, copy, holds) in viewed {
-            let stamp = workspace.get(id).map_or(0, |entity| entity.stamp);
-            let mut record = Record::of_file(LibPath::root(), None);
-            record.path = None;
-            record.working = Some(Kept { copy, stamp, holds });
-            self.records.insert(id, record);
-        }
-        browser.folders.sync(&loading.dirs);
-        flag_duplicates(workspace, browser, log);
+        self.viewed(viewed, workspace, browser, queue, log);
         // The count This computer's badge shows, said even at 0 to replace the last library's.
         log.say(match browser.folders.count(None, workspace) {
             0 => "No files on this computer.".to_string(),
@@ -1728,41 +1064,419 @@ impl Store {
         });
         self.prune(browser);
         self.fetch_tracked(workspace, browser);
+        #[cfg(not(target_arch = "wasm32"))]
         if self.open() {
-            for rescue in self.rescues(loading.rescued) {
+            for rescue in self.shelved_rescues() {
                 browser.ask_rescue(rescue);
             }
         }
-        if loading.unindexed > 0 {
-            let reachable = self.backend.reveal().is_some();
-            browser.ask_unindexed(loading.unindexed, reachable);
+    }
+
+    /// Take in what the library shows now: its files, their folders, its tags, and who
+    /// changed what. Returns the assets whose files moved or changed.
+    fn viewed(
+        &mut self,
+        viewed: Viewed,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        queue: &Queue,
+        log: &mut Log,
+    ) -> BTreeSet<u64> {
+        let Viewed {
+            view,
+            dirs,
+            changes,
+            moves,
+        } = viewed;
+        let first = self.view.is_none();
+        for (from, to) in &moves {
+            self.cache.moved(from, to);
         }
-        if loading.damaged {
-            browser.ask_damaged();
+        let listed = Listed::of(&view);
+        browser.folders.others = listed.others.clone();
+        let touched = self.project(&listed, first, workspace, browser, queue, log);
+        if let Some(dirs) = dirs {
+            browser.folders.sync(&dirs);
+        }
+        self.lose(&listed, workspace, browser);
+        self.project_tags(&view, browser);
+        if !first {
+            self.attribute(&changes, workspace, log);
+        }
+        flag_duplicates(workspace, browser, log);
+        self.view = Some(view);
+        touched
+    }
+
+    /// Bring the workspace level with the files the view lists. Each file keeps the id it
+    /// had: by its entity, or by its path, or as the file drawbar wrote there. Returns
+    /// the assets whose files moved or changed.
+    fn project(
+        &mut self,
+        listed: &Listed,
+        first: bool,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        queue: &Queue,
+        log: &mut Log,
+    ) -> BTreeSet<u64> {
+        self.rekey(listed);
+        let mut touched = BTreeSet::new();
+        let (mut moved, mut deleted, mut missing) = (0, 0, 0);
+        let known: Vec<(u64, Key)> = self.ids.iter().map(|(id, key)| (id, key.clone())).collect();
+        for (id, key) in known {
+            if workspace.get(id).is_none() && !self.records.contains_key(&id) {
+                self.ids.remove(id);
+                continue;
+            }
+            let Some(record) = self.records.get(&id) else {
+                continue;
+            };
+            let unsettled_at = |path: &LibPath| unsettled(&self.moving, path);
+            if record.saving || record.path.as_ref().is_some_and(unsettled_at) {
+                continue;
+            }
+            let Some((path, stat)) = listed.files.get(&key) else {
+                touched.insert(id);
+                match self.vanished(id, workspace, browser, queue, log) {
+                    Vanished::Deleted => {
+                        deleted += 1;
+                        self.ids.remove(id);
+                    }
+                    Vanished::Missing => missing += 1,
+                    Vanished::Untouched => {}
+                }
+                continue;
+            };
+            if unsettled_at(path) {
+                continue;
+            }
+            let Some(record) = self.records.get_mut(&id) else {
+                continue;
+            };
+            if std::mem::take(&mut record.missing) {
+                browser.folders.missing.remove(&id);
+            }
+            if record.path.as_ref() != Some(path) {
+                touched.insert(id);
+                moved += 1;
+                if let Some(from) = record.path.replace(path.clone()) {
+                    self.cache.moved(&from, path);
+                }
+                let before = workspace.get(id).map(|entity| entity.name.clone());
+                workspace.place(id, browser.folders.ahead(path));
+                if let Some(before) = before {
+                    log.say(format!(
+                        "“{before}” was moved to {path} outside drawbar; its tags went with it."
+                    ));
+                }
+            }
+            let Some(record) = self.records.get_mut(&id) else {
+                continue;
+            };
+            let known = record.fingerprint.map(|print| print.stat());
+            if let Some(stat) = stat.filter(|stat| known != Some(*stat)) {
+                touched.insert(id);
+                self.recheck(id, path.clone(), stat, workspace);
+            }
+        }
+        let appeared = self.arrive(listed, workspace, browser, log);
+        // A file gone missing keeps the status line, which asks for it to be saved.
+        let said = changed_outside(appeared, deleted, moved).filter(|_| missing == 0);
+        if let Some(said) = said.filter(|_| !first) {
+            log.say(said);
+        }
+        touched
+    }
+
+    /// Give each asset the key the library knows its file by now, where that changed: a
+    /// file an intent made an entity of, an entity whose file was let go of, or a file
+    /// drawbar wrote that the view lists for the first time.
+    fn rekey(&mut self, listed: &Listed) {
+        let by_path: BTreeMap<&LibPath, &Key> = listed
+            .files
+            .iter()
+            .map(|(key, (path, _))| (path, key))
+            .collect();
+        let unlisted = self
+            .ids
+            .iter()
+            .filter(|(_, key)| !listed.files.contains_key(*key))
+            .map(|(id, _)| id);
+        let unkeyed = self
+            .records
+            .keys()
+            .copied()
+            .filter(|id| self.ids.key(*id).is_none());
+        let mut rekeyed = Vec::new();
+        for id in unlisted.chain(unkeyed) {
+            let path = self
+                .records
+                .get(&id)
+                .and_then(|record| record.path.as_ref());
+            let key = path.and_then(|path| by_path.get(path));
+            if let Some(key) = key.filter(|key| self.ids.id(key).is_none()) {
+                rekeyed.push((id, (*key).clone()));
+            }
+        }
+        for (id, key) in rekeyed {
+            self.ids.insert(id, key);
         }
     }
 
-    /// The rescues to offer: `in_tmp`, found in the library's `.drawbar/tmp/`, and those
-    /// in drawbar's own data.
-    fn rescues(&self, in_tmp: Vec<Rescue>) -> Vec<Rescue> {
-        #[cfg(not(target_arch = "wasm32"))]
-        let in_tmp = in_tmp.into_iter().chain(self.shelved_rescues()).collect();
-        in_tmp
+    /// Take in each file the view lists that no asset stands for. Returns how many.
+    fn arrive(
+        &mut self,
+        listed: &Listed,
+        workspace: &mut Workspace,
+        browser: &Browser,
+        log: &mut Log,
+    ) -> usize {
+        let mut arrived: Vec<(LibPath, Key, Stat)> = listed
+            .files
+            .iter()
+            .filter(|(key, _)| self.ids.id(key).is_none())
+            .filter_map(|(key, (path, stat))| Some((path.clone(), key.clone(), (*stat)?)))
+            .collect();
+        arrived.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut next = workspace.next_id();
+        let mut back = Vec::new();
+        for (path, key, stat) in arrived {
+            back.push(newcomer(next, Found::unread(path, stat), &mut self.records));
+            self.ids.insert(next, key);
+            next = next.saturating_add(1);
+        }
+        let ids: Vec<u64> = back.iter().map(|saved| saved.id).collect();
+        workspace.restore(back, Some(next), log);
+        for id in &ids {
+            self.settle(*id, workspace);
+            self.place_ahead(*id, workspace, &browser.folders);
+            self.recall(*id, workspace);
+        }
+        ids.len()
     }
 
-    /// The rescues in drawbar's own data, by name, each read whole on this thread to
-    /// check it. A partial one is never a slot's only copy, and is deleted.
+    /// Show each entity whose file is nowhere, which no asset stands for, as lost, with
+    /// its tags, until the user lets it go.
+    fn lose(&mut self, listed: &Listed, workspace: &mut Workspace, browser: &mut Browser) {
+        let mut lost = Vec::new();
+        for (entity, path) in &listed.lost {
+            let key = Key::Entity(*entity);
+            let id = match self.ids.id(&key) {
+                Some(id) if workspace.get(id).is_some() => continue,
+                Some(id) => id,
+                None => {
+                    let id = workspace.next_id();
+                    workspace.reserve(id.saturating_add(1));
+                    self.ids.insert(id, key);
+                    id
+                }
+            };
+            lost.push(crate::folders::Lost {
+                id,
+                path: path.clone(),
+            });
+        }
+        browser.folders.set_lost(lost);
+    }
+
+    /// Bring the browser's tags level with the view, which is all there is once no change
+    /// to them waits to be answered.
+    fn project_tags(&self, view: &View, browser: &mut Browser) {
+        if self.asked.is_empty() && self.committing == 0 {
+            browser.tags.settle();
+        }
+        let names = view.values(TAGS).values.into_iter().map(|(name, _)| name);
+        let mut worn = BTreeMap::new();
+        for entity in view.with(TAGS) {
+            let Some(id) = self.ids.id(&Key::Entity(entity)) else {
+                continue;
+            };
+            let Some(members) = view.entity(entity).map(|entity| entity.members(TAGS)) else {
+                continue;
+            };
+            worn.insert(id, members.values.into_iter().collect());
+        }
+        browser.tags.project(names.collect(), worn);
+    }
+
+    /// Say which tags another drawbar changed.
+    fn attribute(
+        &self,
+        changes: &[toshokan::report::Change],
+        workspace: &Workspace,
+        log: &mut Log,
+    ) {
+        let tags = What::Field(TAGS.name().to_string());
+        for change in changes.iter().filter(|change| change.what == tags) {
+            let By::Writer { label, .. } = &change.by else {
+                continue;
+            };
+            let id = self.ids.id(&Key::Entity(change.entity));
+            let Some(entity) = id.and_then(|id| workspace.get(id)) else {
+                continue;
+            };
+            log.say(format!(
+                "Another {label} changed the tags of “{}”.",
+                entity.name
+            ));
+        }
+    }
+
+    /// Turn the changes to the tags the user asked for into intents, in order, each once
+    /// every asset it names has a file the library lists and the one before has answered.
+    fn ask_tags(&mut self, workspace: &Workspace, browser: &mut Browser, log: &mut Log) {
+        self.asked.extend(browser.tags.take_asked());
+        if self.asked.is_empty() {
+            return;
+        }
+        match &self.phase {
+            Phase::Opening => return,
+            Phase::Open => {}
+            Phase::ReadOnly(why) | Phase::Failed(why) => {
+                let why = why.clone();
+                self.asked.clear();
+                return log.trouble(format!("The tags did not change: {why}."));
+            }
+        }
+        // ⚠️ Each is made against the view the one before left, so they wait in turn: a
+        // rename asked right after a tag renames what the tag put on.
+        while self.committing == 0 {
+            let Some(view) = self.view.clone() else {
+                return;
+            };
+            let Some(asked) = self.asked.first() else {
+                return;
+            };
+            match self.intend(asked, &view, workspace) {
+                None => return,
+                Some(intent) => {
+                    self.asked.remove(0);
+                    if let Some(intent) = intent {
+                        self.commit(intent);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The intent `asked` makes against `view`: `Some(None)` where it changes nothing,
+    /// and `None` while an asset it names waits for its file.
+    fn intend(&self, asked: &Asked, view: &View, workspace: &Workspace) -> Option<Option<Intent>> {
+        let entities = |assets: &[u64]| -> Vec<toshokan::EntityId> {
+            let keys = assets.iter().filter_map(|id| self.ids.key(*id));
+            keys.filter_map(Key::entity).collect()
+        };
+        let wearing = |name: &String| view.find(TAGS, name);
+        let intent = match asked {
+            Asked::Tag { assets, name } => {
+                let waits = |id: &u64| {
+                    let kept = workspace.get(*id).is_some_and(|entity| entity.kept);
+                    kept && self.ids.key(*id).is_none()
+                };
+                if assets.iter().any(waits) {
+                    return None;
+                }
+                let files: Vec<Key> = assets
+                    .iter()
+                    .filter_map(|id| self.ids.key(*id).cloned())
+                    .filter(|key| match key {
+                        Key::Entity(entity) => !wearing(name).contains(entity),
+                        Key::File(_) => true,
+                    })
+                    .collect();
+                (!files.is_empty()).then(|| Intent::Tag {
+                    files,
+                    name: name.clone(),
+                })
+            }
+            Asked::Untag { assets, name } => {
+                let wear = wearing(name);
+                let entities: Vec<_> = entities(assets)
+                    .into_iter()
+                    .filter(|entity| wear.contains(entity))
+                    .collect();
+                (!entities.is_empty()).then(|| Intent::Untag {
+                    entities,
+                    name: name.clone(),
+                })
+            }
+            Asked::Rename { from, to } => {
+                let entities = wearing(from);
+                (!entities.is_empty()).then(|| Intent::RenameTag {
+                    entities,
+                    from: from.clone(),
+                    to: to.clone(),
+                })
+            }
+            Asked::Remove(name) => {
+                let entities = wearing(name);
+                (!entities.is_empty()).then(|| Intent::Untag {
+                    entities,
+                    name: name.clone(),
+                })
+            }
+            Asked::Forget(id) => match self.ids.key(*id) {
+                Some(Key::Entity(entity)) => Some(Intent::Forget { entity: *entity }),
+                _ => None,
+            },
+        };
+        Some(intent)
+    }
+
+    /// A rescan has answered: once each file it found changed has been read again, it
+    /// is done, and a send held for it goes ahead unless what it would send moved.
+    fn scanned(&mut self, queue: &Queue, workspace: &Workspace, log: &mut Log) -> bool {
+        self.scanning = !self.rechecking.is_empty();
+        if self.scanning {
+            return false;
+        }
+        let moved = std::mem::take(&mut self.moved);
+        std::mem::take(&mut self.send_waits) && self.release(&moved, queue, workspace, log)
+    }
+
+    /// Say once that an unsaved edit is lost at a quit: this build keeps none.
+    fn tell_unkept(&mut self, workspace: &Workspace, log: &mut Log) {
+        if self.told_unkept || !workspace.listed().any(LocalEntity::is_unsaved) {
+            return;
+        }
+        self.told_unkept = true;
+        log.trouble(
+            "This build keeps no unsaved edit when drawbar quits: save an edit to keep it.",
+        );
+    }
+
+    /// A file drawbar knew changed on disk: an unread one is only known to be another,
+    /// and one drawbar holds is read again to see what it holds now.
+    fn recheck(&mut self, id: u64, path: LibPath, stat: Stat, workspace: &mut Workspace) {
+        let Some(record) = self.records.get_mut(&id) else {
+            return;
+        };
+        if record.holds == Holds::Unread {
+            record.fingerprint = Some(Fingerprint::unread(stat));
+            record.summarized = None;
+            workspace.stale(id);
+            return;
+        }
+        self.rechecking.insert(id);
+        let files = vec![(id, path, record.fingerprint)];
+        let room = self.budget;
+        self.send(Cmd::File(FileCmd::Read { files, room }));
+    }
+
+    /// The rescues in this install's own folders, by name, each read whole on this thread
+    /// to check it. A partial one is never a slot's only copy, and is deleted.
     #[cfg(not(target_arch = "wasm32"))]
     fn shelved_rescues(&self) -> Vec<Rescue> {
-        let Some(entries) = self
-            .shelf
-            .as_ref()
-            .and_then(|shelf| std::fs::read_dir(shelf).ok())
-        else {
-            return Vec::new();
-        };
-        let mut found: Vec<Rescue> = entries
+        let local = self.backend.local().join(RESCUED);
+        let shelves = [Some(local), self.shelf.clone()];
+        let entries = shelves
+            .into_iter()
             .flatten()
+            .filter_map(|shelf| std::fs::read_dir(shelf).ok())
+            .flatten()
+            .flatten();
+        let mut found: Vec<Rescue> = entries
             .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
             .filter_map(|entry| {
                 let name = entry.file_name().into_string().ok()?;
@@ -1778,7 +1492,7 @@ impl Store {
                 Some(Rescue {
                     name,
                     broken: nord_usb::block_on(super::unwhole(file)),
-                    at: Left::Shelf(path),
+                    at: path,
                 })
             })
             .collect();
@@ -1799,30 +1513,19 @@ impl Store {
         match what {
             Rescuing::Keep => self.keep_rescue(rescue, workspace, browser, log),
             Rescuing::Show => {
-                let url = self.rescue_url(&rescue);
+                let url = rescue_url(&rescue);
                 browser.ask_rescue(rescue);
                 return url;
             }
             Rescuing::Confirm => browser.ask_discard_rescue(rescue),
-            Rescuing::Discard => self.discard_rescue(rescue, log),
+            Rescuing::Discard => discard_rescue(rescue, log),
         }
         None
     }
 
-    /// Delete the working copies of a library whose index is missing, to open it again
-    /// without them. The library must be opened again after, since it opened read-only.
-    pub fn drop_unindexed(&mut self) {
-        self.write(Cmd::DropUnindexed);
-    }
-
-    /// Set aside the library's index, which does not read, to open it again without it.
-    /// The library must be opened again after, since it opened read-only.
-    pub fn set_aside(&mut self) {
-        self.write(Cmd::SetAside);
-    }
-
-    /// Move a rescue into the library's top level, under its own name or a free one, where
-    /// the next listing finds it as an asset.
+    /// Copy a rescue into the library's top level, under its own name or a free one, and
+    /// delete it once the copy lands.
+    #[cfg(not(target_arch = "wasm32"))]
     fn keep_rescue(
         &mut self,
         rescue: Rescue,
@@ -1840,218 +1543,42 @@ impl Store {
             .folders
             .free(&LibPath::root(), &rescue.name, workspace);
         let to = LibPath::root().join(&free);
-        match rescue.at {
-            Left::Library(_) => {
-                let Some(from) = rescue.path() else {
-                    return;
-                };
-                self.keeping.push(to.clone());
-                self.rename(from, to, Vec::new());
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            Left::Shelf(from) => {
-                let Some(len) = super::outside_len(&from) else {
-                    return log.trouble(format!("“{}” could not be read.", rescue.name));
-                };
-                let origin = Origin::File(free);
-                let id = workspace.arrive(to, origin, CopyOf::Outside(from.clone()), len);
-                self.shelved.insert(id, from);
-            }
-        }
-    }
-
-    fn discard_rescue(&mut self, rescue: Rescue, log: &mut Log) {
-        let name = rescue.name.clone();
-        match rescue.at {
-            Left::Library(stat) => {
-                let Some(path) = rescue.path() else {
-                    return;
-                };
-                let expect = Fingerprint::unread(stat);
-                self.write(Cmd::RemoveFile { path, expect });
-                // The delete answers only when it fails, and that answer says so.
-                log.say(format!("Discarding “{name}”."));
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            Left::Shelf(path) => match std::fs::remove_file(&path) {
-                Ok(()) => log.say(format!("Discarded “{name}”.")),
-                Err(e) => log.trouble(format!("“{name}” could not be deleted: {e}.")),
-            },
-        }
-    }
-
-    /// The URL that shows the folder a rescue is in.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn rescue_url(&self, rescue: &Rescue) -> Option<String> {
-        let dir = match &rescue.at {
-            Left::Library(_) => self.root().join(super::TMP),
-            Left::Shelf(path) => path.parent()?.to_path_buf(),
+        let from = rescue.at;
+        let Some(len) = super::outside_len(&from) else {
+            return log.trouble(format!("“{}” could not be read.", rescue.name));
         };
-        url::Url::from_directory_path(dir).ok().map(String::from)
+        let origin = Origin::File(free);
+        let id = workspace.arrive(to, origin, CopyOf::Outside(from.clone()), len);
+        self.shelved.insert(id, from);
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn rescue_url(&self, _: &Rescue) -> Option<String> {
-        None
+    fn keep_rescue(&mut self, rescue: Rescue, _: &mut Workspace, _: &mut Browser, log: &mut Log) {
+        log.trouble(format!("“{}” stays where it is.", rescue.name));
     }
 
-    /// Record the stamps of an asset just restored, and the working copy it came back
-    /// with, read, and what that holds, so nothing is written again for it. A copy whose
-    /// edit is no longer held is dropped at the next full pass.
-    fn settle(&mut self, id: u64, workspace: &Workspace, kept: Option<(Working, (u64, u32))>) {
+    /// Put an asset just restored where the folder changes not yet sent will put its
+    /// file. Its record keeps the path the disk has now, and those changes move it.
+    fn place_ahead(&self, id: u64, workspace: &mut Workspace, folders: &Folders) {
+        let Some(path) = self
+            .records
+            .get(&id)
+            .and_then(|record| record.path.as_ref())
+        else {
+            return;
+        };
+        let ahead = folders.ahead(path);
+        if ahead != *path {
+            workspace.place(id, ahead);
+        }
+    }
+
+    /// Record the stamp of an asset just restored, so nothing is written again for it.
+    fn settle(&mut self, id: u64, workspace: &Workspace) {
         let (Some(entity), Some(record)) = (workspace.get(id), self.records.get_mut(&id)) else {
             return;
         };
         record.saved = entity.saved.stamp();
-        let Some((copy, holds)) = kept else {
-            record.working = None;
-            return;
-        };
-        let stamp = match copy.keeps {
-            Keeps::Bytes => entity.is_unsaved().then_some(entity.stamp),
-            Keeps::Edit => workspace.kept_edit(id).map(|(_, stamp)| stamp),
-        };
-        record.working = stamp.map(|stamp| Kept { copy, stamp, holds });
-        if record.working.is_none() {
-            self.stale.push(working_name(id, copy.generation));
-        }
-    }
-
-    /// Fold a new listing in, and return the assets whose files moved or changed.
-    fn rescanned(
-        &mut self,
-        listing: Listing,
-        workspace: &mut Workspace,
-        browser: &mut Browser,
-        queue: &Queue,
-        log: &mut Log,
-    ) -> BTreeSet<u64> {
-        let Listing {
-            dirs,
-            files,
-            unread,
-            others,
-            unwalked,
-        } = listing;
-        beside(&browser.folders, &unread, &unwalked, log);
-        browser.folders.unread = unread;
-        browser.folders.others = others;
-        browser.folders.unwalked = unwalked.into_iter().collect();
-        let touched = self.fold(|_| true, files, workspace, browser, queue, log);
-        browser.folders.sync(&dirs);
-        flag_duplicates(workspace, browser, log);
-        touched
-    }
-
-    /// Fold in what a check found of the files read so far, and return the assets whose
-    /// files moved or changed.
-    fn checked(
-        &mut self,
-        files: Vec<Found>,
-        workspace: &mut Workspace,
-        browser: &mut Browser,
-        queue: &Queue,
-        log: &mut Log,
-    ) -> BTreeSet<u64> {
-        let checking = std::mem::take(&mut self.checking);
-        let looked = |path: &LibPath| checking.contains(path);
-        self.fold(looked, files, workspace, browser, queue, log)
-    }
-
-    /// Match the files found to the records whose paths `looked` at, and fold in where
-    /// each landed. Returns the assets whose files moved or changed.
-    fn fold(
-        &mut self,
-        looked: impl Fn(&LibPath) -> bool,
-        files: Vec<Found>,
-        workspace: &mut Workspace,
-        browser: &mut Browser,
-        queue: &Queue,
-        log: &mut Log,
-    ) -> BTreeSet<u64> {
-        let known = self
-            .records
-            .iter()
-            .filter_map(|(id, record)| {
-                let path = record.path.clone().filter(|path| looked(path))?;
-                Some((
-                    *id,
-                    Known {
-                        path,
-                        fingerprint: record.fingerprint,
-                    },
-                ))
-            })
-            .collect();
-        let matched = match_files(&known, files);
-        let mut touched = BTreeSet::new();
-        for (id, found) in matched.same {
-            let Some(record) = self.records.get_mut(&id) else {
-                continue;
-            };
-            if let Some(print) = &mut record.fingerprint {
-                print.len = found.stat.len;
-                print.modified = found.stat.modified;
-            }
-            if std::mem::take(&mut record.missing) {
-                browser.folders.missing.remove(&id);
-            }
-        }
-        for (id, found) in matched.changed {
-            touched.insert(id);
-            self.changed(id, found, workspace, browser, log);
-        }
-        let moved = matched.renamed.len();
-        for (id, found) in matched.renamed {
-            touched.insert(id);
-            let before = workspace.get(id).map(|entity| entity.name.clone());
-            workspace.place(id, browser.folders.ahead(&found.path));
-            if let Some(record) = self.records.get_mut(&id) {
-                if let Some(from) = record.path.replace(found.path.clone()) {
-                    self.cache.moved(&from, &found.path);
-                }
-                if let Some(print) = &mut record.fingerprint {
-                    *print = diff::kept(Some(*print), &found);
-                }
-            }
-            if let Some(before) = before {
-                log.say(format!(
-                    "“{before}” was moved to {} outside drawbar; its tags went with it.",
-                    found.path
-                ));
-            }
-        }
-        let (mut deleted, mut missing) = (0, 0);
-        for id in matched.vanished {
-            touched.insert(id);
-            match self.vanished(id, workspace, browser, queue, log) {
-                Vanished::Deleted => deleted += 1,
-                Vanished::Missing => missing += 1,
-                Vanished::Untouched => {}
-            }
-        }
-        let arrived: Vec<Found> = matched.arrived;
-        let appeared = arrived.len();
-        if !arrived.is_empty() {
-            let mut next = workspace.next_id();
-            let mut back = Vec::new();
-            for found in arrived {
-                back.push(newcomer(next, found, &mut self.records));
-                next = next.saturating_add(1);
-            }
-            let ids: Vec<u64> = back.iter().map(|saved| saved.id).collect();
-            workspace.restore(back, Some(next), log);
-            for id in ids {
-                self.settle(id, workspace, None);
-                self.place_ahead(id, workspace, &browser.folders);
-                self.recall(id, workspace);
-            }
-        }
-        // A file gone missing keeps the status line, which asks for it to be saved.
-        if let Some(said) = changed_outside(appeared, deleted, moved).filter(|_| missing == 0) {
-            log.say(said);
-        }
-        touched
     }
 
     /// A file drawbar knew now holds something else. One drawbar has not read is only
@@ -2141,7 +1668,6 @@ impl Store {
         if let Some(path) = self.records.remove(&id).and_then(|record| record.path) {
             self.cache.forget(&path);
         }
-        browser.tags.forget(id);
         workspace.remove(id, log);
         log.say(format!("“{name}” was deleted outside drawbar."));
         Vanished::Deleted
@@ -2268,21 +1794,16 @@ impl Store {
             if record.saving || unsettled(waiting, &path) {
                 continue;
             }
-            let stale = workspace.kept_edit(id).and_then(|(edit, stamp)| {
-                let copy = || edit.working().ok();
-                stale(id, record.working.as_ref(), Keeps::Edit, stamp, copy)
-            });
             let Some((from, edit)) = workspace.send_edit(id) else {
                 continue;
             };
             record.saving = true;
-            self.write(Cmd::Rewrite {
+            self.write(FileCmd::Rewrite {
                 id,
                 path,
                 from,
                 edit,
                 expect,
-                stale,
             });
         }
     }
@@ -2382,13 +1903,7 @@ impl Store {
     /// ⚠️ Nothing is sent while a rescan is in flight: its listing must describe the
     /// files as the commands before it left them, or a file moved after it was sent would
     /// read as one deleted and another made.
-    pub fn sync(
-        &mut self,
-        workspace: &mut Workspace,
-        browser: &mut Browser,
-        queue: &Queue,
-        pass: Pass,
-    ) -> bool {
+    pub fn sync(&mut self, workspace: &mut Workspace, browser: &mut Browser, pass: Pass) -> bool {
         if pass != Pass::Files {
             self.summarize(workspace);
             self.cache.write();
@@ -2399,7 +1914,6 @@ impl Store {
         if self.scanning && pass != Pass::Last {
             return false;
         }
-        let full = pass != Pass::Files;
         let mut ops = browser.folders.take_ops();
         // ⚠️ A change that touches a rename still to answer waits for it, with every change
         // after it: were the rename refused, the change would act on whatever else has that
@@ -2425,75 +1939,19 @@ impl Store {
             self.tree_op(op);
         }
         crate::folders::place_new(workspace, &browser.folders);
-        let mut writes = Vec::new();
-        if full {
-            self.renumber(&mut writes);
-        }
-        let mut drops = match full {
-            true => std::mem::take(&mut self.stale),
-            false => Vec::new(),
-        };
         let mut done = true;
         for entity in workspace.entities() {
             done &= self.file(entity, workspace.arriving(entity.id), &waiting);
-            if full {
-                let edit = workspace.kept_edit(entity.id);
-                self.working(entity, edit, queue, &mut writes, &mut drops);
-            }
         }
         self.send_edits(workspace, &waiting);
-        self.forget_gone(workspace, &mut drops);
+        self.forget_gone(workspace);
         for op in removals {
             self.tree_op(op);
         }
-        if full {
-            let sidecar = self.sidecar(workspace, browser);
-            let wanted = self.indexed || !writes.is_empty() || beyond_files(&sidecar);
-            let changed = self.committed.as_ref() != Some(&sidecar)
-                || !writes.is_empty()
-                || !drops.is_empty();
-            if wanted && changed {
-                self.write(Cmd::Commit {
-                    sidecar: sidecar.clone(),
-                    working: writes,
-                    drop: drops,
-                });
-                self.committed = Some(sidecar);
-            }
-        }
         if pass == Pass::Full {
-            self.fingerprint_precious(workspace, browser);
             self.fetch_tracked(workspace, browser);
         }
         done && !holds
-    }
-
-    /// Read in the background, for its CRC, each file that holds something no file can
-    /// say (a tag, an unsaved edit, the slot it came off) where no CRC is known, so that
-    /// a rename made outside drawbar keeps it. Once the listing is complete, a few files
-    /// at a time. A file waiting for [`Store::fetch_tracked`] to read it whole is left to
-    /// that read.
-    fn fingerprint_precious(&mut self, workspace: &Workspace, browser: &Browser) {
-        if self.loading.is_some() || self.fingerprinting || !self.cache.loaded() {
-            return;
-        }
-        if self.unprinted.is_empty() {
-            let wanted: Vec<u64> = self
-                .records
-                .iter()
-                .filter(|(id, record)| {
-                    tracked(**id, record, workspace, browser)
-                        && record.unprinted()
-                        && !self.printed.contains(id)
-                        && !self.fetching.contains(id)
-                        && !self.unfetched.contains(id)
-                })
-                .map(|(id, _)| *id)
-                .collect();
-            self.printed.extend(&wanted);
-            self.unprinted.extend(wanted);
-        }
-        self.next_prints();
     }
 
     /// Read and decode in the background each unread file the index tracks (a tag, a
@@ -2504,8 +1962,7 @@ impl Store {
     /// the next full pass. Files the index does not track are read once something needs
     /// them.
     fn fetch_tracked(&mut self, workspace: &mut Workspace, browser: &Browser) {
-        let waits = self.loading.is_some() || !self.cache.loaded();
-        if waits || !self.opened() || !self.fetching.is_empty() {
+        if !self.cache.loaded() || !self.opened() || !self.fetching.is_empty() {
             return;
         }
         if self.unfetched.is_empty() {
@@ -2518,7 +1975,7 @@ impl Store {
                         .is_some_and(|entity| entity.unread() && entity.reading());
                     record.holds == Holds::Unread
                         && waits
-                        && tracked(**id, record, workspace, browser)
+                        && tracked(**id, workspace, browser)
                         && !self.fetched.contains(id)
                 })
                 .map(|(id, _)| *id)
@@ -2598,9 +2055,8 @@ impl Store {
     /// Forget in the cache every file the open's listing did not find, once both are
     /// here and the listing reached every folder.
     fn prune(&mut self, browser: &Browser) {
-        let listed = self.opened() && self.loading.is_none();
         let whole = browser.folders.unwalked.is_empty();
-        if self.pruned || !listed || !self.cache.loaded() || !whole {
+        if self.pruned || !self.opened() || !self.cache.loaded() || !whole {
             return;
         }
         self.pruned = true;
@@ -2647,87 +2103,15 @@ impl Store {
         if files.is_empty() {
             return;
         }
-        self.send(Cmd::Read { files, room });
-    }
-
-    /// Ask for the CRCs of the next few files waiting for one.
-    fn next_prints(&mut self) {
-        let (most, most_bytes) = PRINTS;
-        let mut files = Vec::new();
-        let mut bytes = 0;
-        while files.len() < most && bytes < most_bytes {
-            let Some(id) = self.unprinted.pop_front() else {
-                break;
-            };
-            let Some(record) = self.records.get(&id).filter(|record| record.unprinted()) else {
-                continue;
-            };
-            let (Some(path), Some(print)) = (&record.path, record.fingerprint) else {
-                continue;
-            };
-            bytes += print.len;
-            files.push((id, path.clone(), print));
-        }
-        if files.is_empty() {
-            return;
-        }
-        self.fingerprinting = true;
-        self.send(Cmd::Fingerprint(files));
-    }
-
-    /// Take in the CRCs of files whose fingerprint is still the one sent.
-    fn fingerprinted(&mut self, files: Vec<(u64, LibPath, Fingerprint)>) {
-        self.fingerprinting = false;
-        for (id, path, print) in files {
-            let Some(record) = self.records.get_mut(&id) else {
-                continue;
-            };
-            let same = record.fingerprint.map(|known| known.stat()) == Some(print.stat());
-            if record.unprinted() && same && record.path.as_ref() == Some(&path) {
-                record.fingerprint = Some(print);
-            }
-        }
-        if self.opened() && !self.reading {
-            self.next_prints();
-        }
-    }
-
-    /// Write again under its new id each working copy of a row the open gave one, and
-    /// drop the old copy once the index no longer names it. A row a listed file has
-    /// claimed writes its edit afresh; one no file has claimed yet is written as it was
-    /// read, since the index keeps that row under the new id.
-    fn renumber(&mut self, writes: &mut Vec<(String, Vec<u8>)>) {
-        for (id, old) in std::mem::take(&mut self.renamed) {
-            match self.records.get_mut(&id) {
-                Some(record) => record.working = None,
-                None => writes.extend(self.loading.as_ref().and_then(|loading| {
-                    let generation = loading.rows.get(&id)?.working?.generation;
-                    Some((
-                        working_name(id, generation),
-                        loading.working.get(&id)?.clone(),
-                    ))
-                })),
-            }
-            self.stale.push(old);
-        }
+        self.send(Cmd::File(FileCmd::Read { files, room }));
     }
 
     /// Send one change to the folders. One made or removed while the open's listing is in
     /// flight is one the listing's end keeps or drops with the rest.
     fn tree_op(&mut self, op: Op) {
         match op {
-            Op::MakeDir(path) => {
-                if let Some(loading) = &mut self.loading {
-                    loading.dirs.push(path.clone());
-                }
-                self.write(Cmd::MakeDir(path))
-            }
-            Op::RemoveDir(path) => {
-                if let Some(loading) = &mut self.loading {
-                    loading.dirs.retain(|dir| *dir != path);
-                }
-                self.write(Cmd::RemoveDir(path))
-            }
+            Op::MakeDir(path) => self.write(FileCmd::MakeDir(path)),
+            Op::RemoveDir(path) => self.write(FileCmd::RemoveDir(path)),
             Op::MoveDir { from, to } => {
                 self.cache.moved(&from, &to);
                 for record in self.records.values_mut() {
@@ -2735,11 +2119,7 @@ impl Store {
                         record.path = Some(moved);
                     }
                 }
-                let rows = self
-                    .loading
-                    .as_mut()
-                    .map(|loading| loading.relocate(&from, &to));
-                self.rename(from, to, rows.unwrap_or_default());
+                self.rename(from, to);
             }
         }
     }
@@ -2779,38 +2159,19 @@ impl Store {
             .get(&entity.id)
             .is_some_and(|record| record.path.is_some())
         {
-            // A view that held an edit comes with its working copy.
-            let working = self
-                .records
-                .remove(&entity.id)
-                .and_then(|record| record.working);
-            let promote = promoted(entity.id, working.as_ref(), entity.saved.bytes());
-            let stale = match promote {
-                Some(_) => None,
-                None => stale(
-                    entity.id,
-                    working.as_ref(),
-                    Keeps::Bytes,
-                    entity.saved.stamp(),
-                    || Some(bytes()),
-                ),
-            };
             self.records.insert(
                 entity.id,
                 Record {
                     saved: entity.saved.stamp(),
                     saving: true,
-                    working,
                     ..Record::of_file(path.clone(), None)
                 },
             );
-            self.write(Cmd::Save {
+            self.write(FileCmd::Save {
                 id: entity.id,
                 path: path.clone(),
                 bytes: bytes(),
                 expect: None,
-                stale,
-                promote,
             });
             return true;
         }
@@ -2845,31 +2206,18 @@ impl Store {
         let save = (unsaved && !record.saving).then(|| {
             record.saved = entity.saved.stamp();
             record.saving = true;
-            let promote = promoted(entity.id, record.working.as_ref(), entity.saved.bytes());
-            let stale = match promote {
-                Some(_) => None,
-                None => stale(
-                    entity.id,
-                    record.working.as_ref(),
-                    Keeps::Bytes,
-                    entity.saved.stamp(),
-                    || Some(bytes()),
-                ),
-            };
-            (record.fingerprint.filter(|_| !missing), stale, promote)
+            record.fingerprint.filter(|_| !missing)
         });
         if let Some(from) = from {
             self.cache.moved(&from, path);
-            self.rename(from, path.clone(), Vec::new());
+            self.rename(from, path.clone());
         }
-        if let Some((expect, stale, promote)) = save {
-            self.write(Cmd::Save {
+        if let Some(expect) = save {
+            self.write(FileCmd::Save {
                 id: entity.id,
                 path: path.clone(),
                 bytes: bytes(),
                 expect,
-                stale,
-                promote,
             });
         }
         !waits
@@ -2910,7 +2258,7 @@ impl Store {
         record.saved = entity.saved.stamp();
         let path = record.path.get_or_insert_with(|| path.clone()).clone();
         let expect = record.fingerprint.filter(|_| !record.missing);
-        self.write(Cmd::Import {
+        self.write(FileCmd::Import {
             id: entity.id,
             path,
             from,
@@ -2919,85 +2267,8 @@ impl Store {
         true
     }
 
-    /// Write a working copy for an edit not yet saved, or drop the one a save made
-    /// unnecessary. `edit` is the edit held over the file the asset rests in, and its
-    /// stamp, which the copy keeps in place of the bytes.
-    fn working(
-        &mut self,
-        entity: &LocalEntity,
-        edit: Option<(&Edit, u64)>,
-        queue: &Queue,
-        writes: &mut Vec<(String, Vec<u8>)>,
-        drops: &mut Vec<String>,
-    ) {
-        // A view is kept only while it holds something the slot does not.
-        let unsaved = match entity.kept {
-            true => entity.stamp != entity.saved.stamp(),
-            false => self.keeps_views && precious(entity, queue),
-        };
-        let needs = match edit {
-            Some((_, stamp)) => Some((Keeps::Edit, stamp)),
-            None => unsaved.then_some((Keeps::Bytes, entity.stamp)),
-        };
-        if !entity.kept && needs.is_some() && !self.records.contains_key(&entity.id) {
-            self.records.insert(
-                entity.id,
-                Record {
-                    path: None,
-                    ..Record::of_file(LibPath::root(), None)
-                },
-            );
-        }
-        let Some(record) = self.records.get_mut(&entity.id) else {
-            return;
-        };
-        let held = record
-            .working
-            .as_ref()
-            .map(|held| (held.copy.keeps, held.stamp));
-        match needs {
-            Some(needs) if held == Some(needs) => {}
-            Some((keeps, stamp)) => {
-                let bytes = match edit {
-                    Some((edit, _)) => edit.working(),
-                    None => Ok(entity.bytes.to_vec()),
-                };
-                // An edit that does not write is left to the copy before it.
-                let Ok(bytes) = bytes else {
-                    return;
-                };
-                let holds = contents(&bytes);
-                // A copy that holds these bytes already, under another stamp, keeps them.
-                if let Some(held) = record
-                    .working
-                    .as_mut()
-                    .filter(|held| (held.copy.keeps, held.holds) == (keeps, holds))
-                {
-                    held.stamp = stamp;
-                    return;
-                }
-                let generation = self.next_generation;
-                self.next_generation += 1;
-                writes.push((working_name(entity.id, generation), bytes));
-                let copy = Working { generation, keeps };
-                if let Some(old) = record.working.replace(Kept { copy, stamp, holds }) {
-                    drops.push(working_name(entity.id, old.copy.generation));
-                }
-            }
-            None if !record.saving => {
-                if let Some(old) = record.working.take() {
-                    drops.push(working_name(entity.id, old.copy.generation));
-                }
-                if record.path.is_none() {
-                    self.records.remove(&entity.id);
-                }
-            }
-            None => {}
-        }
-    }
-
     /// Delete the files of assets the workspace no longer holds.
-    fn forget_gone(&mut self, workspace: &Workspace, drops: &mut Vec<String>) {
+    fn forget_gone(&mut self, workspace: &Workspace) {
         let gone: Vec<u64> = self
             .records
             .keys()
@@ -3019,71 +2290,20 @@ impl Store {
             if record.saving {
                 continue;
             }
-            if let Some(old) = record.working.take() {
-                drops.push(working_name(id, old.copy.generation));
-            }
             let file = (record.path.clone(), record.fingerprint, record.missing);
             self.records.remove(&id);
             if let Some(path) = &file.0 {
                 self.cache.forget(path);
             }
-            if let (Some(path), Some(expect), false) = file {
-                self.write(Cmd::RemoveFile { path, expect });
+            let key = self.ids.remove(id);
+            match (key, file) {
+                (_, (_, _, true)) => {}
+                (Some(Key::Entity(entity)), _) => self.commit(Intent::Delete { entity }),
+                (_, (Some(path), Some(expect), false)) => {
+                    self.write(FileCmd::RemoveFile { path, expect })
+                }
+                _ => {}
             }
-        }
-    }
-
-    fn sidecar(&self, workspace: &Workspace, browser: &Browser) -> Sidecar {
-        let mut assets = BTreeMap::new();
-        for (id, record) in &self.records {
-            let Some(entity) = workspace.get(*id) else {
-                continue;
-            };
-            let row = Row::of(
-                record.path.clone(),
-                &entity.name,
-                record.fingerprint,
-                browser.tags.worn(*id).clone(),
-                &entity.origin,
-                record.working.as_ref().map(|held| held.copy),
-            );
-            assets.insert(*id, row);
-        }
-        let again = |id: u64, row: &Row| {
-            let (path, tags) = (row.path.clone(), browser.tags.worn(id).clone());
-            Row::of(
-                path,
-                &row.name,
-                row.fingerprint,
-                tags,
-                &row.origin(),
-                row.working,
-            )
-        };
-        for lost in browser.folders.lost() {
-            assets.insert(lost.id, again(lost.id, &lost.row));
-        }
-        // ⚠️ An index written before the listing is complete keeps the rows no file has
-        // claimed yet, or a quit while opening would forget them.
-        let unclaimed = self.loading.iter().flat_map(|loading| {
-            let claimed = &loading.claimed;
-            loading.rows.iter().filter(|(id, _)| !claimed.contains(*id))
-        });
-        for (id, row) in unclaimed {
-            assets.entry(*id).or_insert_with(|| again(*id, row));
-        }
-        assets.retain(|_, row| row.indexed());
-        Sidecar {
-            version: VERSION,
-            next_id: workspace.next_id(),
-            next_generation: self.next_generation,
-            tags: browser
-                .tags
-                .all()
-                .iter()
-                .map(|tag| (tag.id, tag.name.clone()))
-                .collect(),
-            assets,
         }
     }
 }
@@ -3094,7 +2314,6 @@ impl Record {
             path: Some(path),
             fingerprint: fingerprint.into(),
             saved: 0,
-            working: None,
             saving: false,
             missing: false,
             holds: Holds::Whole,
@@ -3103,23 +2322,16 @@ impl Record {
     }
 
     /// Whether drawbar holds its file whole as last read or written, under the baseline
-    /// stamped `saved`, with no save, working copy or rename over it: what it holds can
-    /// be read again from the file.
+    /// stamped `saved`, with no save or rename over it: what it holds can be read again
+    /// from the file.
     fn rereadable(&self, saved: u64, moving: &[(LibPath, LibPath)]) -> bool {
         let still = self.saved == saved && self.fingerprint.is_some();
         let settled = self
             .path
             .as_ref()
             .is_some_and(|path| !unsettled(moving, path));
-        let idle = !self.saving && !self.missing && self.working.is_none();
+        let idle = !self.saving && !self.missing;
         self.holds == Holds::Whole && still && settled && idle
-    }
-
-    /// Whether its file is one drawbar knows, has not seen go missing, and holds
-    /// contents whose CRC was never taken.
-    fn unprinted(&self) -> bool {
-        let print = self.fingerprint.filter(|print| print.crc.is_none());
-        self.path.is_some() && print.is_some() && !self.missing
     }
 
     /// Recorded from what a listing found.
@@ -3145,34 +2357,6 @@ fn leave(left: &mut Vec<u64>, leaving: Leaving, workspace: &Workspace, log: &mut
     }
 }
 
-/// `id`'s working copy, where it keeps `keeps` from before `stamp`, the stamp of the save
-/// about to be sent, with `copy` to write over it. A copy of the same edit already
-/// matches the file the save writes, and a newer one holds edits the save does not.
-fn stale(
-    id: u64,
-    working: Option<&Kept>,
-    keeps: Keeps,
-    stamp: u64,
-    copy: impl FnOnce() -> Option<Vec<u8>>,
-) -> Option<Stale> {
-    let held = working.filter(|held| held.copy.keeps == keeps && held.stamp < stamp)?;
-    Some(Stale {
-        name: working_name(id, held.copy.generation),
-        copy: copy()?,
-    })
-}
-
-/// `id`'s working copy, by name, where it holds exactly `bytes`, the bytes a save is about
-/// to write, so the save can move it into place.
-fn promoted(id: u64, working: Option<&Kept>, bytes: &[u8]) -> Option<String> {
-    let held = working.filter(|held| {
-        held.copy.keeps == Keeps::Bytes
-            && held.holds.0 == bytes.len() as u64
-            && held.holds == contents(bytes)
-    })?;
-    Some(working_name(id, held.copy.generation))
-}
-
 /// The paths a change to the folders acts on, where it was and where it goes.
 fn ends(op: &Op) -> [&LibPath; 2] {
     match op {
@@ -3185,17 +2369,17 @@ fn ends(op: &Op) -> [&LibPath; 2] {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Evict {
     Any,
-    /// Only those the index does not track, for a read in the background.
+    /// Only those the library does not track, for a read in the background.
     Untracked,
 }
 
-/// Whether the index holds something about this asset that no file says: a tag, an
-/// unsaved edit kept as a working copy, or the slot it came off.
-fn tracked(id: u64, record: &Record, workspace: &Workspace, browser: &Browser) -> bool {
+/// Whether drawbar knows something about this asset that no file says: a tag, or the
+/// slot it came off.
+fn tracked(id: u64, workspace: &Workspace, browser: &Browser) -> bool {
     let slot = workspace
         .get(id)
         .is_some_and(|entity| entity.origin.slot().is_some());
-    slot || record.working.is_some() || !browser.tags.worn(id).is_empty()
+    slot || !browser.tags.worn(id).is_empty()
 }
 
 /// How many bytes the assets hold whole, counting each read in flight at its file's listed
@@ -3211,32 +2395,6 @@ fn unsettled(moving: &[(LibPath, LibPath)], path: &LibPath) -> bool {
     moving
         .iter()
         .any(|(from, to)| path.is_in(from) || from.is_in(path) || path.is_in(to) || to.is_in(path))
-}
-
-/// Say what is new in what a listing found beside the assets: a file that did not read,
-/// and a library too large to list whole.
-fn beside(
-    folders: &crate::folders::Folders,
-    unread: &[(LibPath, String)],
-    unwalked: &[LibPath],
-    log: &mut Log,
-) {
-    for (path, why) in unread {
-        if !folders.unread.contains(&(path.clone(), why.clone())) {
-            log.warn(format!("{path}: {why}"));
-        }
-    }
-    if !unwalked.is_empty() && folders.unwalked.is_empty() {
-        log.say(
-            "Some of the library folder is not listed: it holds more than drawbar lists, or \
-             folders drawbar cannot read.",
-        );
-    }
-}
-
-/// Whether an index holds anything a listing cannot give back: a tag's name, or a row.
-fn beyond_files(sidecar: &Sidecar) -> bool {
-    !sidecar.tags.is_empty() || !sidecar.assets.is_empty()
 }
 
 /// Flag the entries of one folder whose names are one name under [`names::key`], and
@@ -3370,23 +2528,6 @@ fn newcomer(id: u64, found: Found, records: &mut BTreeMap<u64, Record>) -> Saved
     }
 }
 
-/// An asset brought back from its working copy alone: the working copy is all there is,
-/// so it is also what the asset counts as saved.
-fn saved_from(id: u64, row: &Row, bytes: Vec<u8>) -> Saved {
-    let name = match &row.path {
-        Some(path) => path.leaf().to_string(),
-        None => row.name.clone(),
-    };
-    Saved {
-        id,
-        name,
-        path: row.path.clone(),
-        origin: row.origin(),
-        content: Content::whole(bytes),
-        unsaved: None,
-    }
-}
-
 /// Ask what to do about a file changed on disk under an unsaved edit.
 fn conflict(id: u64, workspace: &Workspace, browser: &mut Browser, log: &mut Log) {
     let Some(entity) = workspace.get(id) else {
@@ -3403,4 +2544,25 @@ fn conflict(id: u64, workspace: &Workspace, browser: &mut Browser, log: &mut Log
         ));
     }
     browser.ask_conflict(id, &entity.name);
+}
+
+/// Delete a slot's former occupant.
+fn discard_rescue(rescue: Rescue, log: &mut Log) {
+    let name = rescue.name;
+    match std::fs::remove_file(&rescue.at) {
+        Ok(()) => log.say(format!("Discarded “{name}”.")),
+        Err(e) => log.trouble(format!("“{name}” could not be deleted: {e}.")),
+    }
+}
+
+/// The URL that shows the folder a rescue is in.
+#[cfg(not(target_arch = "wasm32"))]
+fn rescue_url(rescue: &Rescue) -> Option<String> {
+    let dir = rescue.at.parent()?;
+    url::Url::from_directory_path(dir).ok().map(String::from)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn rescue_url(_: &Rescue) -> Option<String> {
+    None
 }
