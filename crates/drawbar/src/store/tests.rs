@@ -4352,3 +4352,30 @@ fn a_file_tagged_by_another_drawbar_meanwhile_is_tagged_on_its_entity() {
         [wears("Grand.ne5p", &["Ballad", "Sunday"])]
     );
 }
+
+/// A tag asked for an asset whose file could not be written is not waited on forever:
+/// it is said not to reach that asset, and the tags asked after it go on.
+#[cfg(unix)]
+#[test]
+fn a_tag_on_an_asset_with_no_file_is_refused_and_the_next_goes_on() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let mode = |mode| fs::set_permissions(&root.0, fs::Permissions::from_mode(mode)).unwrap();
+    mode(0o555);
+    let homeless = session.create();
+    session.sync();
+    mode(0o755);
+    session.tag(&[homeless], "Sunday");
+    let grand = session.named("Grand.ne5p");
+    session.tag(&[grand], "Ballad");
+
+    assert!(!session.store.deciding(), "nothing waits");
+    assert_eq!(
+        session.said("“untitled.ne5p” has no file in the library, so “Sunday” was not put on it."),
+        1
+    );
+    assert_eq!(tagged(&session), [wears("Grand.ne5p", &["Ballad"])]);
+}

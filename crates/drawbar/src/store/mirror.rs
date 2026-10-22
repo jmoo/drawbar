@@ -1574,8 +1574,10 @@ impl Store {
 
     /// Turn the changes to the tags the user asked for into intents, in order, each once
     /// every asset it names has a file the library lists and the one before has answered.
-    fn ask_tags(&mut self, workspace: &Workspace, browser: &mut Browser, log: &mut Log) {
+    fn ask_tags(&mut self, workspace: &mut Workspace, browser: &mut Browser, log: &mut Log) {
         self.asked.extend(browser.tags.take_asked());
+        // A tag waits on the file it names only while that file is still to be written.
+        self.asks.extend(workspace.take_file_asks());
         if self.asked.is_empty() {
             return;
         }
@@ -1600,12 +1602,43 @@ impl Store {
             match self.intend(asked, &view, workspace) {
                 None => return,
                 Some(intent) => {
-                    self.asked.remove(0);
+                    let asked = self.asked.remove(0);
+                    self.tell_untagged(&asked, workspace, log);
                     if let Some(intent) = intent {
                         self.commit(intent);
                     }
                 }
             }
+        }
+    }
+
+    /// Whether the file of a kept asset is still to be written: placed and saved, or
+    /// copied in, with nothing to stop it.
+    fn writes(&self, id: u64, workspace: &Workspace) -> bool {
+        let Some(entity) = workspace.get(id).filter(|entity| entity.kept) else {
+            return false;
+        };
+        let saving = self.records.get(&id).is_some_and(|record| record.saving);
+        let asked = self.asks.contains(&FileAsk::Save(id));
+        entity.path.is_none() || saving || asked || workspace.arriving(id).is_some()
+    }
+
+    /// Say which assets a tag that went did not reach: those with no file in the library
+    /// and none on its way.
+    fn tell_untagged(&self, asked: &Asked, workspace: &Workspace, log: &mut Log) {
+        let Asked::Tag { assets, name } = asked else {
+            return;
+        };
+        let missed = assets.iter().filter(|id| self.ids.key(**id).is_none());
+        let names: Vec<String> = missed
+            .filter_map(|id| workspace.get(*id))
+            .map(|entity| format!("“{}”", entity.name))
+            .collect();
+        if !names.is_empty() {
+            log.trouble(format!(
+                "{} has no file in the library, so “{name}” was not put on it.",
+                names.join(", ")
+            ));
         }
     }
 
@@ -1619,10 +1652,7 @@ impl Store {
         let wearing = |name: &String| view.find(TAGS, name);
         let intent = match asked {
             Asked::Tag { assets, name } => {
-                let waits = |id: &u64| {
-                    let kept = workspace.get(*id).is_some_and(|entity| entity.kept);
-                    kept && self.ids.key(*id).is_none()
-                };
+                let waits = |id: &u64| self.ids.key(*id).is_none() && self.writes(*id, workspace);
                 if assets.iter().any(waits) {
                     return None;
                 }
