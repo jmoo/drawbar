@@ -40,8 +40,8 @@ use crate::reader::{Listing, ReadReport, Reader, Stamp, WriterLog};
 use crate::recovery::{self, Settling};
 use crate::report::{
     By, Change, Committed, Compacted, DraftState, DraftStatus, Emptied, HistoryItem, Lag, Local,
-    Mode, Opened, Orphan, Outcome, Partial, PartialReport, Presence, Refreshed, Settled, Start,
-    Tidied, TrashItem, What, WriterInfo,
+    Mode, Opened, Orphan, Outcome, Partial, PartialReport, PathChange, Presence, Refreshed,
+    Settled, Start, Tidied, TrashItem, What, WriterInfo,
 };
 use crate::schema::Schema;
 use crate::trash::{self, Policy};
@@ -2152,10 +2152,19 @@ fn committed(
         EntryKind::Intent(Logged { ops, .. }) | EntryKind::Bind(Bound { ops }) => ops.as_slice(),
         EntryKind::Genesis(_) | EntryKind::Settle(_) | EntryKind::Unknown(_) => &[],
     });
+    let ops: Vec<&Op> = ops.collect();
+    let paths = ops.iter().filter_map(|op| match op {
+        Op::Path { from, file } => Some(PathChange {
+            from: from.clone(),
+            to: file.as_ref().map(|file| file.path.clone()),
+        }),
+        _ => None,
+    });
     let committed = Committed {
         intent: entries[0].hash(),
         created,
-        changes: distinct(ops.filter_map(change_of)),
+        changes: distinct(ops.iter().copied().filter_map(change_of)),
+        paths: paths.collect(),
         local,
     };
     match outcome {

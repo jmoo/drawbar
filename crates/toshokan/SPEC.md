@@ -595,7 +595,8 @@ path, without making it an entity: a file nothing is said about stays without
 one. Each is refused where an entity's file is. The intent logs a `path` op for
 each such file as the folder shows it afterwards, with where it was: `from` alone
 for a file trashed, `file` alone for a file made, both for a file renamed or
-saved over. A tree move logs one for each such file under the tree it moves.
+saved over. A tree move logs one for each such file under the tree it moves. A commit
+reports each `path` op it logged, an undo's and a redo's included.
 A `path` op changes no fact; undo reads it to rename the file back,
 bring its displaced bytes back from the trash, or trash the file it made.
 

@@ -17,8 +17,8 @@ use toshokan::layout::SEGMENT_EXTENSION;
 use toshokan::line::MAX_LINE;
 use toshokan::log::{Entry, EntryKind, FileFact, Genesis, Logged, Op, Settlement};
 use toshokan::report::{
-    By, Change, Committed, Compacted, DraftState, Emptied, HistoryItem, Opened, Presence,
-    Refreshed, Rekey, Start, Tidied, TrashItem, What, WriterInfo,
+    By, Change, Committed, Compacted, DraftState, Emptied, HistoryItem, Opened, PathChange,
+    Presence, Refreshed, Rekey, Start, Tidied, TrashItem, What, WriterInfo,
 };
 use toshokan::simulator::Machine;
 use toshokan::view::Conflicted;
@@ -2529,14 +2529,20 @@ fn a_file_no_entity_is_bound_to_is_saved_renamed_and_trashed_and_each_undone<F: 
         )
     })
     .unwrap();
-    a.commit("Rename", |i| {
-        i.rename_file(
-            &path("a.wav"),
-            &path("b.wav"),
-            Expect::Holds(identity(b"wavy")),
-        )
-    })
-    .unwrap();
+    let renamed = a
+        .commit("Rename", |i| {
+            i.rename_file(
+                &path("a.wav"),
+                &path("b.wav"),
+                Expect::Holds(identity(b"wavy")),
+            )
+        })
+        .unwrap();
+    let moved = |from: &str, to: &str| PathChange {
+        from: Some(path(from)),
+        to: Some(path(to)),
+    };
+    assert_eq!(renamed.paths, [moved("a.wav", "b.wav")]);
     a.commit("Delete", |i| {
         i.trash_file(&path("new.syx"), Expect::Holds(identity(b"new")))
     })
@@ -2550,8 +2556,11 @@ fn a_file_no_entity_is_bound_to_is_saved_renamed_and_trashed_and_each_undone<F: 
         &[("a.wav", b"wave")],
     ];
     for (n, expected) in undone.iter().enumerate() {
-        a.undo().unwrap();
+        let undid = a.undo().unwrap();
         assert_eq!(files(), held(expected), "undo {}", n + 1);
+        if n == 1 {
+            assert_eq!(undid.paths, [moved("b.wav", "a.wav")], "undo of the rename");
+        }
     }
     a.redo().unwrap();
     assert_eq!(files(), held(&[("a.wav", b"wave"), ("new.syx", b"new")]));

@@ -165,6 +165,15 @@ pub struct Ambiguous {
     pub candidates: Vec<RelPath>,
 }
 
+/// Where a file no entity is bound to was before a commit and is after it: `from`
+/// alone for a file trashed, `to` alone for a file made, both for one moved or saved
+/// over.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PathChange {
+    pub from: Option<RelPath>,
+    pub to: Option<RelPath>,
+}
+
 /// A committed intent, its file effects all made. Its entries are durable in the
 /// folder and shown.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -174,6 +183,8 @@ pub struct Committed {
     /// The entities it created, in the order the intent created them.
     pub created: Vec<EntityId>,
     pub changes: Vec<Change>,
+    /// Each file no entity is bound to that it made, moved or trashed, in order.
+    pub paths: Vec<PathChange>,
     /// ⚠️ Whether this instance's own state caught up with the commit. While it
     /// is [`Local::Behind`], a crash followed by a restore of the folder that
     /// takes the commit's entries can take them from this install's view too.
