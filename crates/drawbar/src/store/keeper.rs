@@ -198,9 +198,19 @@ impl Keeper {
         let library = self.library.as_mut().ok_or("the library is not open")?;
         let label = intent.label();
         let changes = match intent {
-            Intent::Tag { files, name } => facts(library, label, |built, view| {
-                tag(built, view, &files, &name)
-            })?,
+            Intent::Tag { files, name } => {
+                // ⚠️ A file another drawbar made an entity of since the last refresh would
+                // be adopted twice, as two entities in conflict. Reading what others wrote
+                // first leaves that only to one that adopts it in the moment between.
+                let mut changes = Vec::new();
+                if files.iter().any(|key| matches!(key, Key::File(_))) {
+                    changes = library.refresh().map_err(|e| e.to_string())?.changes;
+                }
+                changes.extend(facts(library, label, |built, view| {
+                    tag(built, view, &files, &name)
+                })?);
+                changes
+            }
             Intent::Untag { entities, name } => facts(library, label, |mut built, _| {
                 for entity in entities {
                     built = built.remove(entity, TAGS, &name);

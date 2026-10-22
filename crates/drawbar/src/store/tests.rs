@@ -4331,3 +4331,24 @@ fn a_folder_restored_from_a_backup_is_shown_as_it_is() {
     let fourth = Session::listed(&root);
     assert_eq!(fourth.said("no longer holds"), 0, "said once");
 }
+
+/// A file another drawbar tagged since this one last looked is tagged again on the
+/// entity that one made, and is not made an entity a second time.
+#[test]
+fn a_file_tagged_by_another_drawbar_meanwhile_is_tagged_on_its_entity() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut first = Session::listed(&root);
+    let mut second = Session::listed(&root);
+    let grand = second.named("Grand.ne5p");
+    second.tag(&[grand], "Ballad");
+    let grand = first.named("Grand.ne5p");
+    first.tag(&[grand], "Sunday");
+
+    assert_eq!(tagged(&first), [wears("Grand.ne5p", &["Ballad", "Sunday"])]);
+    second.refresh();
+    assert_eq!(
+        tagged(&second),
+        [wears("Grand.ne5p", &["Ballad", "Sunday"])]
+    );
+}
