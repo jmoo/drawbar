@@ -112,9 +112,11 @@ Every identifier is 128 bits written as 32 hexadecimal digits.
 | identity   | What the app's identity function says a file holds                   |
 
 The identity function is the app's: a fingerprint of a file's contents from the
-ranges of its bytes the app names for the file's path and length, so it may read
-a few ranges of a file whose format checksums its own contents and every byte of
-any other. toshokan reads those ranges and feeds them to the app's digest, a
+ranges of its bytes the app names for the file's path and length. It may read
+only a few ranges of a file only where the file's format holds a checksum that
+covers every other byte of the file, and must read every byte of any other: an
+identity of part of a file would take a file changed elsewhere for the one it
+was. toshokan reads those ranges and feeds them to the app's digest, a
 file at most 1 MiB of ranges together with others and a larger one 1 MiB at a
 time, and never computes an identity itself.
 

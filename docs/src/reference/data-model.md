@@ -527,7 +527,9 @@ for an asset whose file is still on its way waits for it; one for an asset whose
 file could not be written goes without it, and says so (`Store::writes`). A new
 tag put on assets is one intent with its making, and while its name's editor is
 open, it and every change to the tags after it wait, so the name chosen is the
-one made (`Tags::name_new`).
+one made (`Tags::name_new`). The tag list is the one part of the workspace that
+runs ahead of the library: a new tag, a rename or a removal shows at once, and
+the names the library's view holds come back if the library refuses it.
 
 ### Undo
 
