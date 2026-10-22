@@ -1012,8 +1012,8 @@ impl Store {
             } => {
                 self.committing = self.committing.saturating_sub(1);
                 let step = self.answering.pop_front();
-                if let (true, Some(step)) = (made, step) {
-                    self.history.took(step);
+                if let (Some(entry), Some(step)) = (made, step) {
+                    self.history.took(step, entry);
                 }
                 match result {
                     Ok(viewed) => {
@@ -1056,6 +1056,14 @@ impl Store {
             }
             Event::Rewritten { id, path, result } => {
                 self.rewritten(id, path, result, workspace, browser, log)
+            }
+            Event::Trimmed(entries) => {
+                if let Some(change) = self.history.trim(&entries) {
+                    log.say(format!(
+                        "Undo no longer reaches “{change}” or what came before it: \
+                         drawbar keeps at most 1 GiB of what your changes replaced."
+                    ));
+                }
             }
             Event::Unkept(why) => {
                 log.error(format!("keeping an unsaved edit: {why}"));
@@ -1107,13 +1115,13 @@ impl Store {
 
     /// What Undo takes back now, as the Edit menu names it.
     pub fn undo_label(&self) -> Option<String> {
-        let last = self.history.done.last()?;
+        let (last, _) = self.history.done.last()?;
         Some(format!("Undo {last}"))
     }
 
     /// What Redo makes again now, as the Edit menu names it.
     pub fn redo_label(&self) -> Option<String> {
-        let last = self.history.undone.last()?;
+        let (last, _) = self.history.undone.last()?;
         Some(format!("Redo {last}"))
     }
 
@@ -2697,24 +2705,48 @@ enum Step {
 }
 
 /// This session's changes the library made: those an undo takes back, last last, and
-/// those a redo makes again.
+/// those a redo makes again, each as the Edit menu names it, with the entry the undo
+/// or the redo reverses.
 #[derive(Default)]
 struct History {
-    done: Vec<String>,
-    undone: Vec<String>,
+    done: Vec<(String, toshokan::EntryHash)>,
+    undone: Vec<(String, toshokan::EntryHash)>,
 }
 
 impl History {
-    /// Follow a step the library made.
-    fn took(&mut self, step: Step) {
+    /// Follow a step the library made, which `entry` logged.
+    fn took(&mut self, step: Step, entry: toshokan::EntryHash) {
         match step {
             Step::Change(change) => {
-                self.done.push(change);
+                self.done.push((change, entry));
                 self.undone.clear();
             }
-            Step::Undo => self.undone.extend(self.done.pop()),
-            Step::Redo => self.done.extend(self.undone.pop()),
+            Step::Undo => {
+                if let Some((change, _)) = self.done.pop() {
+                    self.undone.push((change, entry));
+                }
+            }
+            Step::Redo => {
+                if let Some((change, _)) = self.undone.pop() {
+                    self.done.push((change, entry));
+                }
+            }
         }
+    }
+
+    /// Let go of the steps whose undo or redo needs what `entries` displaced, and of
+    /// every step behind them. Returns the latest change Undo no longer reaches.
+    fn trim(&mut self, entries: &[toshokan::EntryHash]) -> Option<String> {
+        let cut = |steps: &mut Vec<(String, toshokan::EntryHash)>| {
+            let at = steps
+                .iter()
+                .rposition(|(_, entry)| entries.contains(entry))?;
+            let kept = steps.split_off(at + 1);
+            let gone = std::mem::replace(steps, kept);
+            gone.last().map(|(change, _)| change.clone())
+        };
+        cut(&mut self.undone);
+        cut(&mut self.done)
     }
 }
 
@@ -2975,4 +3007,35 @@ fn rescue_url(rescue: &Rescue) -> Option<String> {
 #[cfg(target_arch = "wasm32")]
 fn rescue_url(_: &Rescue) -> Option<String> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(n: u128) -> toshokan::EntryHash {
+        toshokan::EntryHash::from_u128(n)
+    }
+
+    /// A step whose undo needs what the trash let go goes, with every step behind it,
+    /// and the Edit menu names the latest change it no longer reaches.
+    #[test]
+    fn a_trimmed_step_and_every_one_behind_it_leave_the_history() {
+        let mut history = History::default();
+        for (n, change) in ["Save “a”", "Save “b”", "Rename “c”"]
+            .into_iter()
+            .enumerate()
+        {
+            history.took(Step::Change(change.to_string()), entry(n as u128));
+        }
+        history.took(Step::Undo, entry(9));
+        assert_eq!(history.trim(&[entry(5)]), None, "nothing needed it");
+        assert_eq!(
+            history.trim(&[entry(1)]).as_deref(),
+            Some("Save “b”"),
+            "the latest change no longer reached"
+        );
+        assert!(history.done.is_empty());
+        assert_eq!(history.undone.len(), 1, "the redo needs none of it");
+    }
 }

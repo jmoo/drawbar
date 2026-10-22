@@ -706,13 +706,16 @@ pub enum Event {
     /// What the scan after a file command found.
     Viewed(Viewed),
     /// Whether an intent, an undo or a redo was made, as a step this session's undo
-    /// takes back, and the view after it, or why not. A change to a file that failed is
+    /// takes back, by the entry that logged it, and the view after it, or why not. A change to a file that failed is
     /// told by its own answer, and is answered here with the view as it stands.
     Committed {
         label: String,
-        made: bool,
+        made: Option<toshokan::EntryHash>,
         result: Result<Viewed, String>,
     },
+    /// The trash grew past what it holds in a session, and its oldest items went: the
+    /// entries whose undo needed them.
+    Trimmed(Vec<toshokan::EntryHash>),
     /// What [`FileCmd::Read`] read, each with its asset's id. A file not where it was asked
     /// for answers [`Failure::Moved`].
     Read(Vec<(u64, Result<Found, Failure>)>),
@@ -769,6 +772,7 @@ impl Event {
             Event::Imported { result, .. } => IMPORT.failed(result),
             Event::Rewritten { result, .. } => REWRITE.failed(result),
             Event::Opened(Ok(_))
+            | Event::Trimmed(_)
             | Event::Scanned(Ok(_))
             | Event::Viewed(_)
             | Event::Committed { result: Ok(_), .. }

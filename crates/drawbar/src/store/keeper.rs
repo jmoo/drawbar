@@ -3,6 +3,7 @@
 //! from a [`Fill`] as toshokan stages it.
 
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -16,7 +17,7 @@ use toshokan::error::Refusal;
 use toshokan::io::IoError;
 use toshokan::io::{Capabilities, Io, IoResult, Kind, Reply, Root};
 use toshokan::report::{Mode, Refreshed};
-use toshokan::{Env, Error, Expect, Policy, RelPath, View};
+use toshokan::{EntryHash, Env, Error, Expect, Policy, RelPath, View};
 
 use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES};
 use super::native::locate;
@@ -47,7 +48,15 @@ pub struct Keeper {
     clock: fn() -> Box<dyn toshokan::Clock>,
     /// How many files the listings of the folder have found.
     listed: Arc<AtomicUsize>,
+    /// The entries this session logged, whose undo ends with it.
+    session: BTreeSet<EntryHash>,
+    /// The most bytes this writer's trash holds before its oldest go.
+    trash: u64,
 }
+
+/// The most bytes a writer's trash holds in a session: the size toshokan's policy
+/// keeps.
+const TRASH: u64 = 1 << 30;
 
 impl Keeper {
     /// The library in `folder`, with this install's own state for it in `local`, counting
@@ -59,6 +68,8 @@ impl Keeper {
             library: None,
             clock: || Box::new(SystemClock),
             listed,
+            session: BTreeSet::new(),
+            trash: TRASH,
         }
     }
 
@@ -71,29 +82,15 @@ impl Keeper {
             Cmd::Intent(intent) => {
                 let label = intent.label().to_string();
                 let committed = self.commit(intent, answer);
-                let made = matches!(committed, Ok((true, _)));
-                let result = committed.map(|(_, viewed)| viewed);
-                answer(Event::Committed {
-                    label,
-                    made,
-                    result,
-                });
+                self.made(label, committed, answer);
             }
             Cmd::Undo => {
-                let result = self.undone(Library::undo);
-                answer(Event::Committed {
-                    label: "Undo".to_string(),
-                    made: result.is_ok(),
-                    result,
-                });
+                let undone = self.undone(Library::undo);
+                self.made("Undo".to_string(), undone, answer);
             }
             Cmd::Redo => {
-                let result = self.undone(Library::redo);
-                answer(Event::Committed {
-                    label: "Redo".to_string(),
-                    made: result.is_ok(),
-                    result,
-                });
+                let redone = self.undone(Library::redo);
+                self.made("Redo".to_string(), redone, answer);
             }
             Cmd::Draft { of, base, bytes } => {
                 if let Err(why) = self.draft(&of, |draft| draft.put(base, bytes)) {
@@ -107,6 +104,54 @@ impl Keeper {
             }
             Cmd::File(_) => unreachable!("the backend reads files itself"),
         }
+    }
+
+    /// Answer a change, an undo or a redo, and keep this writer's trash within
+    /// [`TRASH`] once it was made.
+    fn made(
+        &mut self,
+        label: String,
+        committed: Result<(Option<EntryHash>, Viewed), String>,
+        answer: &mut impl FnMut(Event),
+    ) {
+        let made = committed.as_ref().ok().and_then(|(made, _)| *made);
+        self.session.extend(made);
+        answer(Event::Committed {
+            label,
+            made,
+            result: committed.map(|(_, viewed)| viewed),
+        });
+        if made.is_some() {
+            if let Some(trimmed) = self.trim() {
+                answer(trimmed);
+            }
+        }
+    }
+
+    /// Empty the oldest of this writer's trash where it holds more than [`TRASH`], and
+    /// say which changes' undo needed what went.
+    fn trim(&mut self) -> Option<Event> {
+        let library = self.library.as_mut()?;
+        let held = library.trash().ok()?;
+        let bytes = held
+            .iter()
+            .map(|item| item.len)
+            .fold(0, u64::saturating_add);
+        if bytes <= self.trash {
+            return None;
+        }
+        let policy = Policy {
+            max_age_ms: u64::MAX,
+            max_bytes: self.trash,
+        };
+        let emptied = match library.empty_trash(policy) {
+            Ok(emptied) => emptied,
+            Err(e) => return Some(Event::Unkept(format!("emptying the trash: {e}"))),
+        };
+        let gone = held
+            .iter()
+            .filter(|item| emptied.removed.contains(&item.item));
+        Some(Event::Trimmed(gone.map(|item| item.by).collect()))
     }
 
     /// Put or let go of the draft of the file `of` names.
@@ -135,11 +180,19 @@ impl Keeper {
         }
     }
 
-    /// Let the library go cleanly, once every command has run.
+    /// Let the library go cleanly, once every command has run: this session's undo
+    /// ends now, and the trash lets go of what only it needed.
     pub fn close(&mut self) {
-        if let Some(library) = self.library.take() {
-            let _ = library.close();
+        let Some(mut library) = self.library.take() else {
+            return;
+        };
+        if let Ok(held) = library.trash() {
+            let ended = held
+                .into_iter()
+                .filter(|item| self.session.contains(&item.by));
+            let _ = library.remove_trash(ended.map(|item| item.item).collect());
         }
+        let _ = library.close();
     }
 
     fn open(&mut self) -> Result<Opened, String> {
@@ -198,27 +251,28 @@ impl Keeper {
     fn undone(
         &mut self,
         commit: fn(&mut Library<Counted>) -> toshokan::Result<toshokan::Committed>,
-    ) -> Result<Viewed, String> {
+    ) -> Result<(Option<EntryHash>, Viewed), String> {
         let library = self.library.as_mut().ok_or("the library is not open")?;
         let committed = commit(library).map_err(|e| e.to_string())?;
         let path = |path: Option<RelPath>| path.and_then(|path| LibPath::parse(path.as_str()));
         let paths = committed.paths.into_iter();
         let paths = paths.map(|moved| (path(moved.from), path(moved.to)));
-        Ok(Viewed {
+        let viewed = Viewed {
             undone: Some(paths.collect()),
             dirs: Some(folders(&self.folder)),
             ..committed_view(library, committed.changes)
-        })
+        };
+        Ok((Some(committed.intent), viewed))
     }
 
-    /// Commit an intent, and say whether it was made. A change to a file answers how it
-    /// went first, and is answered here with the view as it stands, whether it was made
-    /// or not.
+    /// Commit an intent, and say which entry logged it, where it was made. A change to a
+    /// file answers how it went first, and is answered here with the view as it stands,
+    /// whether it was made or not.
     fn commit(
         &mut self,
         intent: Intent,
         answer: &mut impl FnMut(Event),
-    ) -> Result<(bool, Viewed), String> {
+    ) -> Result<(Option<EntryHash>, Viewed), String> {
         let library = self.library.as_mut().ok_or("the library is not open")?;
         let label = intent.label();
         let changes = match intent {
@@ -230,10 +284,14 @@ impl Keeper {
                 if files.iter().any(|key| matches!(key, Key::File(_))) {
                     changes = library.refresh().map_err(|e| e.to_string())?.changes;
                 }
-                changes.extend(facts(library, label, |built, view| {
+                let mut committed = facts(library, label, |built, view| {
                     tag(built, view, &files, &name)
-                })?);
-                Some(changes)
+                })?;
+                changes.append(&mut committed.changes);
+                Some(toshokan::Committed {
+                    changes,
+                    ..committed
+                })
             }
             Intent::Untag { entities, name } => Some(facts(library, label, |mut built, _| {
                 for entity in entities {
@@ -377,8 +435,9 @@ impl Keeper {
                 )
             }
         };
-        let made = changes.is_some();
-        Ok((made, committed_view(library, changes.unwrap_or_default())))
+        let intent = changes.as_ref().map(|committed| committed.intent);
+        let changes = changes.map(|committed| committed.changes);
+        Ok((intent, committed_view(library, changes.unwrap_or_default())))
     }
 }
 
@@ -417,11 +476,11 @@ fn facts<'a>(
     library: &'a mut Library<Counted>,
     label: &str,
     build: impl FnOnce(Built<'a>, &View) -> Result<Built<'a>, String>,
-) -> Result<Vec<toshokan::report::Change>, String> {
+) -> Result<toshokan::Committed, String> {
     let view = library.view();
     let built = build(library.intent(label), &view)?;
     let committed = built.commit().map_err(|e| e.to_string())?;
-    Ok(committed.changes)
+    Ok(committed)
 }
 
 /// Put a tag on each file of `files`: on its entity, the one bound to its path in `view`
@@ -477,7 +536,7 @@ fn write(
     label: &str,
     to: To<'_>,
     fill: Fill,
-) -> Result<(Stat, Vec<toshokan::report::Change>), Failure> {
+) -> Result<(Stat, toshokan::Committed), Failure> {
     let To { path, expect, came } = to;
     let at = relative(path).ok_or_else(|| Failure::Io(no_path(path)))?;
     let view = library.view();
@@ -500,7 +559,7 @@ fn write(
     };
     let committed = built.commit().map_err(|e| failure(e, failed.take()))?;
     let stat = stat_at(folder, path)?;
-    Ok((stat, committed.changes))
+    Ok((stat, committed))
 }
 
 /// Copy `from` to `path`, where the copy of a library file is refused once the file is
@@ -511,7 +570,7 @@ fn import(
     label: &str,
     to: To<'_>,
     from: Source,
-) -> Result<Vec<toshokan::report::Change>, Failure> {
+) -> Result<toshokan::Committed, Failure> {
     let changed = || Failure::Io("the file it copies changed on disk".to_string());
     let fill = match from {
         Source::Outside(from) => Fill::Outside(from),
@@ -540,7 +599,7 @@ fn rename(
     from: &LibPath,
     to: &LibPath,
     expect: Expect,
-) -> Result<Vec<toshokan::report::Change>, String> {
+) -> Result<toshokan::Committed, String> {
     facts(library, label, |built, view| {
         let (at, to) = (
             relative(from).ok_or_else(|| no_path(from))?,
@@ -584,9 +643,9 @@ fn failure(e: Error, filled: Option<io::Error>) -> Failure {
 /// Answer how a change to a file went, and return what it changed.
 fn answer_with<T>(
     answer: &mut impl FnMut(Event),
-    result: Result<(T, Vec<toshokan::report::Change>), Failure>,
+    result: Result<(T, toshokan::Committed), Failure>,
     event: impl FnOnce(Result<T, Failure>) -> Event,
-) -> Option<Vec<toshokan::report::Change>> {
+) -> Option<toshokan::Committed> {
     let (result, changes) = match result {
         Ok((done, changes)) => (Ok(done), Some(changes)),
         Err(failure) => (Err(failure), None),
@@ -596,8 +655,8 @@ fn answer_with<T>(
 }
 
 fn split(
-    result: Result<Vec<toshokan::report::Change>, String>,
-) -> (Result<(), String>, Option<Vec<toshokan::report::Change>>) {
+    result: Result<toshokan::Committed, String>,
+) -> (Result<(), String>, Option<toshokan::Committed>) {
     match result {
         Ok(changes) => (Ok(()), Some(changes)),
         Err(why) => (Err(why), None),
@@ -928,6 +987,61 @@ mod tests {
         assert!(!listed(".DS_Store"));
     }
 
+    /// The trash keeps what a session's undo needs up to its size, and empties the
+    /// oldest past it, naming the change whose undo needed them. Closing empties what
+    /// only this session's undo needed, and keeps what a session stopped short left.
+    #[test]
+    fn the_trash_keeps_what_undo_needs_within_its_size_and_no_longer() {
+        let root = Temp::new();
+        fs::write(root.at("c3.ne5p"), b"first").unwrap();
+        let save = |keeper: &mut Keeper, bytes: &[u8]| {
+            let expect = keeper.listed("c3.ne5p");
+            let answers = keeper.run_one(Cmd::Intent(Intent::Save {
+                id: 1,
+                path: path("c3.ne5p"),
+                bytes: bytes.to_vec(),
+                expect,
+                came: None,
+            }));
+            let made = answers.iter().find_map(|event| match event {
+                Event::Committed { made, .. } => *made,
+                _ => None,
+            });
+            (made.expect("the save was made"), answers)
+        };
+        let trash = |keeper: &mut Keeper| keeper.library.as_mut().unwrap().trash().unwrap();
+        let mut first = keeper(&root);
+        first.trash = 8;
+        let (saved, answers) = save(&mut first, b"second");
+        assert!(!answers
+            .iter()
+            .any(|event| matches!(event, Event::Trimmed(_))));
+        let (_, answers) = save(&mut first, b"third");
+        assert!(
+            answers
+                .iter()
+                .any(|event| matches!(event, Event::Trimmed(entries) if *entries == [saved])),
+            "{answers:?}"
+        );
+        assert_eq!(trash(&mut first).len(), 1, "what the last save replaced");
+        drop(first);
+
+        let mut second = keeper(&root);
+        assert_eq!(
+            trash(&mut second).len(),
+            1,
+            "a session stopped short leaves it"
+        );
+        save(&mut second, b"fourth");
+        second.close();
+        let mut third = keeper(&root);
+        assert_eq!(
+            trash(&mut third).len(),
+            1,
+            "only what the closed session's undo needed went"
+        );
+    }
+
     /// The time a month and a day from now.
     struct Later;
 
@@ -952,8 +1066,8 @@ mod tests {
         assert_eq!(listed.load(Ordering::Relaxed), 3);
     }
 
-    /// What an earlier session moved to the trash stays a month, and opening empties
-    /// what is older.
+    /// What a session stopped short left in the trash stays a month, and opening
+    /// empties what is older.
     #[test]
     fn opening_empties_the_trash_of_what_is_older_than_a_month() {
         let root = Temp::new();
@@ -964,7 +1078,7 @@ mod tests {
             path: path("c3.ne5p"),
             expect,
         }));
-        first.close();
+        drop(first);
         let trash = |keeper: &mut Keeper| keeper.library.as_mut().unwrap().trash().unwrap();
 
         let mut soon = keeper(&root);

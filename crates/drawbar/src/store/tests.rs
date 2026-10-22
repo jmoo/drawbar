@@ -3700,7 +3700,7 @@ fn a_failed_answer_counts_each_step_and_how_it_failed_once() {
     };
     assert_eq!(moved.faults(), ["move"].into());
     let refused = Event::Committed {
-        made: false,
+        made: None,
         label: "Tag".into(),
         result: Err("read-only".into()),
     };
