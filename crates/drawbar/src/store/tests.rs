@@ -4286,3 +4286,23 @@ impl Session {
         self.bench.workspace.place(id, path);
     }
 }
+
+/// A tagged file saved in drawbar and then moved outside it keeps its tags at its new
+/// name: the library knows it by what drawbar wrote.
+#[test]
+fn a_tagged_file_saved_then_moved_outside_keeps_its_tags() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.tag(&[id], "Sunday");
+    session.edit(id, "96");
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    fs::create_dir(root.at("Moved")).unwrap();
+    fs::rename(root.at("untitled.ne5p"), root.at("Moved/kept.ne5p")).unwrap();
+    session.refocus();
+
+    assert_eq!(session.path(id).as_deref(), Some("Moved/kept.ne5p"));
+    assert_eq!(tagged(&session), [wears("kept.ne5p", &["Sunday"])]);
+}
