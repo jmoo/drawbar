@@ -546,3 +546,33 @@ fn a_native_root_declares_no_replace_only_where_its_renames_refuse_a_destination
         );
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_native_local_root_missing_at_a_write_is_made_then() {
+    use toshokan::blocking::{Backend, Native};
+
+    let (folder, data) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let local = data.path().join("libraries/one");
+    let mut native = Native::new(folder.path(), &local);
+    let listed = native.perform(Io::List {
+        root: Root::Local,
+        dir: RelPath::ROOT,
+    });
+    assert!(!local.exists(), "a read makes nothing: {listed:?}");
+    native.perform(make_dir(Root::Local, "a/b")).unwrap();
+    native
+        .perform(create(Root::Local, "c.json", b"{}"))
+        .unwrap();
+    assert!(local.join("a/b").is_dir());
+    assert_eq!(std::fs::read(local.join("c.json")).unwrap(), b"{}");
+
+    std::fs::remove_dir_all(&local).unwrap();
+    let name = path("lock");
+    let locked = native.perform(Io::Lock { name });
+    assert_eq!(
+        locked,
+        Ok(Reply::Lock(Lock::Acquired)),
+        "made again once removed"
+    );
+}

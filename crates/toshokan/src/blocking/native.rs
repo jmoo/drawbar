@@ -21,10 +21,13 @@ use crate::path::RelPath;
 /// capabilities on Apple systems, and on every volume on Windows. Elsewhere a
 /// rename may replace what another program made at the destination after the
 /// core's check. On Windows a directory's names cannot be flushed, so `fsync` is
-/// not declared, and names containing `\` or `:` are refused.
+/// not declared, and names containing `\` or `:` are refused. The local root's
+/// directory, and those it is in, are made where missing at its first change or lock.
 pub struct Native {
     folder: PathBuf,
     local: PathBuf,
+    /// Whether the local root's directory is known to be there.
+    local_made: bool,
     locks: BTreeMap<RelPath, File>,
     /// Each root's [`Capabilities::no_replace`], once a probe could tell.
     no_replace: [Cell<Option<bool>>; 2],
@@ -36,6 +39,7 @@ impl Native {
         Self {
             folder: folder.into(),
             local: local.into(),
+            local_made: false,
             locks: BTreeMap::new(),
             no_replace: Default::default(),
         }
@@ -272,6 +276,25 @@ impl Backend for Native {
     }
 
     fn perform(&mut self, io: Io) -> IoResult {
+        let local = io.root() == Root::Local && (io.mutates() || matches!(io, Io::Lock { .. }));
+        if !local {
+            return self.request(io);
+        }
+        if !self.local_made {
+            fs::create_dir_all(&self.local).map_err(io_error)?;
+            self.local_made = true;
+        }
+        let result = self.request(io.clone());
+        if result != Err(IoError::NotFound) || self.local.is_dir() {
+            return result;
+        }
+        fs::create_dir_all(&self.local).map_err(io_error)?;
+        self.request(io)
+    }
+}
+
+impl Native {
+    fn request(&mut self, io: Io) -> IoResult {
         match io {
             Io::List { root, dir } => self.list(root, &dir).map(Reply::Listed),
             Io::Stat { root, path } => self.stat(root, &path).map(Reply::Stat),
