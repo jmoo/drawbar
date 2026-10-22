@@ -5,9 +5,14 @@ synced folder and how every reader merges them. TLC checks it against a sync
 layer that delivers each file to each reader independently and in any order.
 
 ```sh
-nix build .#nord.toshokan-spec       # small bounds; `nix flake check` runs it
-nix build .#nord.toshokan-spec-deep  # larger bounds, about four and a half hours
+nix build .#nord.toshokan-spec       # small bounds, about six minutes; `nix flake check` runs it
+nix build .#nord.toshokan-spec-deep  # larger bounds, several hours
 ```
+
+This model prototypes the bounded retention of [RETENTION.md](../RETENTION.md):
+snapshots that keep a window of hashes instead of every folded hash. The Rust
+code still follows [SPEC.md](../SPEC.md), so the refinement below holds for the
+previous model, not this one, until the code changes.
 
 To run one config by hand, `nix shell nixpkgs#tlaplus`, then
 `tlc -workers auto -config Portable.cfg Portable.tla` in this directory.
@@ -26,10 +31,18 @@ after beginning other effects or never. Another writer that sees the record of
 an effect no entry closes reports it, and with the user's consent closes it in
 its own log; only the record's owner deletes it.
 
+Each entry carries its number in its writer's chain. A snapshot lets a reader
+chain from its last `Window` entries and from the lines it certifies: those it
+folds of every file left in its directory.
+
 A reader takes every file in a writer's directory, whatever its name. It places
-an entry when its predecessor is placed or folded by a snapshot it sees, holds an
-entry after a gap back, and reports a fork when two entries share a predecessor.
-It keeps a cached view that only grows.
+an entry when its predecessor is placed or a snapshot it accepted lets it chain
+from it, and the entry is within reach of that snapshot's window. It holds an
+entry after a gap back, shows an entry whose predecessor it can no longer know
+as written on a forgotten basis, and reports a fork when two placed entries share
+a predecessor. Its cached view remembers the snapshots it accepted and the
+entries in flight, and may drop, after a grace period, what no file it sees
+holds.
 
 A copied local root (a restored backup, a cloned disk) makes two instances write
 one directory: a fork. A copy may be taken at any time, even before the writer's
@@ -38,12 +51,14 @@ deleted. An instance that sees its own directory forked, whose last entry is no
 longer in the folder, or that has lost its local root, continues under a new
 writer id and never writes its old directory again.
 
-The protocol needs five rules beyond that. Each is a constant, and a config that
-drops it shows the failure it prevents:
+The protocol needs these rules beyond that. Each is a constant, and a config
+that drops it shows the failure it prevents:
 
 | Rule | Constant | Without it |
 | --- | --- | --- |
-| A snapshot records the hash of every entry it folds, with its predecessor. | `FoldHashes` | [`Anchors.cfg`](Anchors.cfg): the original and a clone each write a first entry, and the original folds its own into a snapshot and deletes the segment. The snapshot names that entry but not its predecessor, so the reader never sees that the two entries share one and never reports the fork. |
+| A reader shows an entry whose predecessor it can no longer know as written on a forgotten basis. | `Classify` | [`Anchors.cfg`](Anchors.cfg): a clone made before the first write writes a genesis entry that the original's snapshot has folded out of reach, and the reader holds it back forever. |
+| A snapshot certifies the lines it folds of every file left in its directory, and a writer deletes only what a snapshot certifies. | `Certify` | [`Uncertified.cfg`](Uncertified.cfg): a writer cannot delete a sealed segment whose lines fall below its snapshot's window, and a reader shows those folded lines as forgotten. |
+| A reader places an entry only within reach of the main snapshot's window. | `Numbered` | [`Unnumbered.cfg`](Unnumbered.cfg): a segment deleted two compactions ago arrives late, and its genesis entry is placed on top of a snapshot that folds it. |
 | No two histories give a segment the same name: a segment's name is random. | `UniqueNames` | [`Names.cfg`](Names.cfg): the original and the clone each start a segment under the next counter name. Sync keeps both, one as a conflicted copy, and the original's deletion of its own segment by name removes the clone's. |
 | A writer deletes only segments that end with a seal marker, which the process that closed the segment wrote. The segment open when a process crashed, or when its local root was copied, has none and is never deleted. | `SealedOnly` | [`Sealed.cfg`](Sealed.cfg): the clone compacts and deletes the segment the original still has open, and the original's next entry goes with it. |
 | A writer deletes only segments every entry of which a snapshot in its directory folds. | `FoldedOnly` | [`Folded.cfg`](Folded.cfg): the original seals a segment after the fork, and the clone compacts and deletes it, though no snapshot folds the original's entry. |
@@ -62,23 +77,27 @@ delivers files roughly in order.
 | Property | Meaning |
 | --- | --- |
 | `ChainOrder` | A reader never accepts an entry before its predecessor. |
-| `NothingIgnored` | Every entry a reader sees is merged or held back and reported. A reader names no file, so this holds by construction. |
+| `NothingIgnored` | Every entry a reader sees is merged, held back and reported, or shown as written on a forgotten basis. A reader names no file, so this holds by construction. |
+| `NoReapply` | A reader never places an entry from a file while a snapshot it accepted folds it. |
+| `NoSpuriousConflict` | An entry is shown as forgotten only when its chain forked at or before it, when every file that shows it to the reader has been deleted, or while the reader remembers a snapshot a restore took. |
 | `OwnDirectory` | A writer creates, appends to and deletes files only in its own directory. |
 | `Retained` | The folder keeps every entry written, in a segment or folded in a snapshot, unless a restore took it. |
 | `EffectAccounted` | Every effect begun has a pending record or a closing entry in the folder, unless a restore took both. |
-| `DeliveredConverges` | Once every file has reached a reader, it has accepted every entry the folder keeps, holds back only entries a restore took, and reports every fork among the kept entries, whatever the delivery order. A reader without a cached view computes the same entries. This is the evidence that every chained entry in the folder is merged or reported. |
+| `DeliveredConverges` | Once every file has reached a reader, it merges or shows every entry the folder keeps, holds back only entries a restore took, and reports every fork among the kept entries it merged, whatever the delivery order. A reader without a cached view merges or shows the same. This is the evidence that every chained entry in the folder is merged or reported. |
 | `DeliveredSettles` | Once every file has reached a reader, every effect is closed, reported, or that reader's own effect in flight; this includes the effects of a writer whose local root was lost. |
-| `Monotone` | A reader's view never loses an entry, unless its local root is lost or replaced by a copy. |
+| `Monotone` | A reader stops merging an entry only when no file it sees holds it, or when it now holds it back or shows it as forgotten, unless its local root is lost or replaced by a copy. |
 | `ForksKept` | A reader never retracts a fork it has reported, under the same exception, so it reports each fork once. |
 | `Convergence` | With fair delivery, every reader eventually converges and settles or reports every effect. |
 | `FreshMonotone` | False, as [`FreshView.cfg`](FreshView.cfg) shows: without a cached view, a deletion that arrives before the snapshot that replaces the file hides entries a reader has shown. |
 
 | Config | Scenario | Run by |
 | --- | --- | --- |
-| `Portable` | a clone, crashes, compaction | `toshokan-spec` |
+| `Portable` | a clone, crashes, compaction, a window of one | `toshokan-spec` |
 | `Recovery` | two effects, a lost local root | `toshokan-spec` |
 | `Liveness` | a clone, a lost local root, one sync fault | `toshokan-spec` |
-| `Names`, `Anchors`, `Sealed`, `Folded`, `Unchecked`, `FreshView` | expected violations | `toshokan-spec` |
+| `Grace` | a restored folder, and readers that drop what no file they see holds | `toshokan-spec` |
+| `Names`, `Anchors`, `Sealed`, `Folded`, `Unchecked`, `FreshView`, `Uncertified`, `Unnumbered` | expected violations | `toshokan-spec` |
+| `PortableWide` | `Portable` with four files | `toshokan-spec-deep` |
 | `PortableDeep` | `Portable` with five files | `toshokan-spec-deep` |
 | `Entries` | `Portable` with four entries | `toshokan-spec-deep` |
 | `Deep` | a clone, effects and a lost local root together | `toshokan-spec-deep` |
@@ -167,16 +186,13 @@ this one through its sync client, which must then reconcile the writer's newer
 segment with the older copy; that is the excluded case below of a client that
 keeps one of two conflicting versions.
 
-After a restore, a reader with a cached view keeps the entries the folder lost,
-as `Monotone` requires, while a reader that opens later never sees them. Both
-count as converged. The model accepts this divergence; the code surfaces it and
-waits for consent. A reader keeps showing the facts whose entries no file in the
-folder holds, and reports them as removed by a restore. The user either lets
-them go, which shows their writers as the folder holds them on that install, or
-adopts them, which republishes them as new entries in the reader's own log.
-Neither happens silently: a restore is often deliberate. Letting go changes what
-is shown, not the cached view, which still only grows. `tests/library.rs` checks
-both choices through both drivers.
+After a restore, a reader with a cached view keeps the entries the folder lost
+until a grace period passes, and then derives its view again from the files it
+sees, so the folder wins. The model allows that step at any time some merged
+entry is held by no file the reader sees (`Grace`), which also covers a sync
+client slower than the grace period. A reader that opens later never sees the
+lost entries. The code does not do this yet: it keeps the lost facts and asks
+the user to let them go or adopt them, which RETENTION.md drops.
 
 The model does not cover these cases, and the code does not prevent what they
 cause:

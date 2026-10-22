@@ -763,19 +763,23 @@ in
       );
 
       # The portable-root protocol, model-checked. `nix flake check` runs the
-      # small configs; the deep ones take about four and a half hours.
+      # small configs, in about six minutes; the deep ones take several hours.
       toshokan-spec = toshokanSpec "toshokan-spec" [
         "Portable"
         "Recovery"
         "Liveness"
+        "Grace"
         "Names"
         "Anchors"
         "Sealed"
         "Folded"
         "Unchecked"
         "FreshView"
+        "Uncertified"
+        "Unnumbered"
       ];
       toshokan-spec-deep = toshokanSpec "toshokan-spec-deep" [
+        "PortableWide"
         "PortableDeep"
         "Entries"
         "Deep"
