@@ -32,6 +32,19 @@ writes while copying the file through. An edited piano library is written by
 file; `npno::Index::still_matches` first says whether the file still holds the
 directory the index read.
 
+## Converting between generations
+
+`nord_format::convert` moves a sample instrument between v2, v3 and v4 through one
+model whose audio stays as the stream stores it: each stroke's fields on the
+35,002 Hz lattice, its quantizer shift, and the landmarks its stream marks. A
+conversion lays those fields out again in the target's units, so it never
+resamples, and where the target's shift rule is coarser the result is the
+stream the Sample Editor renders in that generation. `convert::plan` reads the
+source and reports, before anything is written, what the target drops, holds
+differently or fills in by rule, naming fields as the library does and unread
+bytes by section and range. A loss the target can meet more than one way is a
+choice the caller makes, and `Plan::apply` refuses while one is open.
+
 ## The support map
 
 The authoritative list is in the `formats` module documentation on

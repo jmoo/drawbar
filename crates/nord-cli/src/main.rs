@@ -12,14 +12,16 @@
 //! plus `edit`. The hidden `nord raw --class N` is [`slot_action`] with the class given
 //! as a number.
 //!
-//! `inspect`, `verify` and `edit` dispatch on the file format, so they sit at the top
-//! level. `edit` is how the formats with no noun of their own (the Stage bodies, the
-//! Sample Editor project) are edited.
+//! `inspect`, `verify`, `edit` and `convert` dispatch on the file format, so they sit at
+//! the top level. `edit` is how the formats with no noun of their own (the Stage bodies,
+//! the Sample Editor project) are edited, and `convert` writes a sample instrument in
+//! another of its generations.
 //!
 //! ⚠️ `raw` is hidden but supported: it is the only way to reach a class with no noun of
 //! its own.
 
 mod bundle;
+mod convert;
 mod device;
 mod edit;
 mod editors;
@@ -101,6 +103,16 @@ enum Command {
     /// have no command of their own: Stage programs and presets, and Sample Editor
     /// projects. `--fields` lists what the file offers.
     Edit(file_edit::FileEditArgs),
+
+    /// Convert an instrument file to another format, reporting what does not survive.
+    ///
+    /// Sample instruments convert between their generations (`--to nsmp`, `nsmp3` or
+    /// `nsmp4`) without re-encoding: the stored audio is laid out again in the target's
+    /// units. The report on stderr lists what the target drops, what it holds
+    /// differently, and what it fills in by rule. A drop needs `--force`. A loss the
+    /// target can meet more than one way needs its own flag, even with `--force`. The
+    /// input is never overwritten.
+    Convert(convert::ConvertArgs),
 
     /// Nord Sound Manager bundles (`.ne5pbundle`, `.ne5tbundle`): programs or a set list
     /// in one file with the pianos and samples they play.
@@ -718,6 +730,7 @@ fn main() -> ExitCode {
         Command::Inspect { files, raw } => inspect(&ui, &files, raw),
         Command::Verify { files } => verify(&ui, &files),
         Command::Edit(args) => file_edit::run(&ui, args),
+        Command::Convert(args) => convert::run(&ui, args),
         Command::Bundle { action } => match action {
             BundleAction::Get { root, slots, out } => {
                 let class = match root {
@@ -977,6 +990,18 @@ mod tests {
             .is_some_and(|raw| raw.is_hide_set()));
         let help = Cli::command().render_help().to_string();
         assert!(!help.contains(" raw "), "{help}");
+    }
+
+    /// The file tools that dispatch on the file sit at the top level, conversion among
+    /// them, since it crosses classes.
+    #[test]
+    fn the_class_agnostic_file_tools_are_top_level_commands() {
+        use clap::CommandFactory;
+
+        let cli = Cli::command();
+        for tool in ["inspect", "verify", "edit", "convert"] {
+            assert!(cli.find_subcommand(tool).is_some(), "no nord {tool}");
+        }
     }
 
     #[test]

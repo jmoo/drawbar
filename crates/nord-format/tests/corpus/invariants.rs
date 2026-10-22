@@ -152,6 +152,11 @@ pub const INVARIANTS: &[Invariant] = &[
     claim(Kind::Sample, "an overlong name is refused", overlong_name),
     claim(
         Kind::Sample,
+        "converts to its own generation keeping its fields",
+        own_generation,
+    ),
+    claim(
+        Kind::Sample,
         "stream directories name walked landmarks",
         directories,
     ),
@@ -472,6 +477,41 @@ fn ne5_drawbars(bytes: &[u8], _: &Entity) -> Result<(), String> {
 
 /// The read stops at the terminator within the generation's name span, and the write
 /// covers that span, so writing the name back changes nothing.
+/// Converted to its own generation, the early chain's being v2, every zone holds the
+/// source's fields. The choices are the ones that move no field. A stream past its
+/// directory's reach is refused instead.
+fn own_generation(_: &[u8], entity: &Entity) -> Result<(), String> {
+    use nord_format::convert::{self, Choices, GainChoice, LoopMarkChoice, NameChoice};
+    use nord_format::convert::{OverlapChoice, Target};
+
+    let sample = samples::sample(entity)?;
+    let choices = Choices {
+        gain: Some(GainChoice::Clamp),
+        name: Some(NameChoice::Truncate),
+        overlap: Some(OverlapChoice::Lower),
+        loop_mark: Some(LoopMarkChoice::Resync),
+    };
+    let layout = sample.layout().context("layout")?;
+    let converted =
+        convert::plan(entity, Target::Nsmp(layout), &choices).and_then(convert::Plan::apply);
+    let converted = match (converted, samples::past_directory_reach(sample)?) {
+        (Err(_), true) => return Ok(()),
+        (Ok(_), true) => return Err("a stream past its directory's reach converts".into()),
+        (converted, false) => converted.context("convert")?,
+    };
+    let (before, after) = (samples::lattices(sample)?, samples::lattices(&converted)?);
+    ensure!(
+        before.len() == after.len(),
+        "{} zones of {}",
+        after.len(),
+        before.len()
+    );
+    for (index, (source, ours)) in before.iter().zip(&after).enumerate() {
+        samples::holds_fields(source, ours).context(format!("zone {index}"))?;
+    }
+    Ok(())
+}
+
 fn rename_to_itself(bytes: &[u8], entity: &Entity) -> Result<(), String> {
     let name = samples::sample(entity)?.name().context("name")?;
     if name.is_empty() {
