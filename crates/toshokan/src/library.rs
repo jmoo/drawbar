@@ -442,6 +442,16 @@ impl Library {
             .task()
     }
 
+    /// Settles now this writer's effects a crash interrupted, as
+    /// [`Opened::settled`] reports them, rather than before its next write, so the
+    /// files they moved are where their outcome puts them.
+    pub fn settle_interrupted(&mut self) -> Task<'_, Result<()>> {
+        if let Err(error) = self.writable() {
+            return Task::ready(Err(error));
+        }
+        settle_first(self).map_ok(drop).task()
+    }
+
     /// Commits what `resolve` makes of the library once this writer's
     /// interrupted effects are settled.
     fn commit_with<'a>(

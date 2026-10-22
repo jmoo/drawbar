@@ -21,7 +21,8 @@ pub struct Opened {
     pub start: Start,
     /// This writer's effects that a crash interrupted. Opening writes nothing in
     /// the folder, so each is finished before this writer's next write, as its
-    /// outcome predicts.
+    /// outcome predicts, or when the app settles them sooner
+    /// (`settle_interrupted`).
     pub settled: Vec<Settled>,
     /// Unfinished effects of writers this install no longer writes as. They may
     /// still be in progress elsewhere, so they are settled only with the user's

@@ -344,6 +344,10 @@ impl<F: Fs> Library<F> {
         run(&self.fs, self.core.let_go()).await
     }
 
+    pub async fn settle_interrupted(&mut self) -> Result<()> {
+        run(&self.fs, self.core.settle_interrupted()).await
+    }
+
     /// Republishes what [`Opened::removed`] reports as an intent labeled `label`,
     /// then lets it go: the folder holds again what this install showed.
     pub async fn adopt(&mut self, label: &str) -> Result<Committed> {

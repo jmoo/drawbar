@@ -240,6 +240,10 @@ impl<B: Backend> Library<B> {
         run(&mut self.backend, self.core.let_go())
     }
 
+    pub fn settle_interrupted(&mut self) -> Result<()> {
+        run(&mut self.backend, self.core.settle_interrupted())
+    }
+
     /// Republishes what [`Opened::removed`] reports as an intent labeled `label`,
     /// then lets it go: the folder holds again what this install showed.
     pub fn adopt(&mut self, label: &str) -> Result<Committed> {
