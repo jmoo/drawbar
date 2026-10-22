@@ -815,19 +815,12 @@ impl Browser {
     /// named in `unkept`: their unsaved edits, or what nothing may be written for.
     pub(crate) fn ask_leave(&mut self, unkept: &[String], root: crate::store::Root) {
         const SHOWN: usize = 5;
-        let mut names: Vec<String> = unkept
-            .iter()
-            .take(SHOWN)
-            .map(|name| format!("“{name}”"))
-            .collect();
-        if unkept.len() > SHOWN {
-            names.push(format!("and {} more", unkept.len() - SHOWN));
-        }
+        let names = crate::strings::quoted_some(unkept, SHOWN);
         self.raise(Ask::new(
             "Discard what this library cannot keep?".to_string(),
             Some(format!(
                 "Opening another library discards what is unsaved in the one open now: {}.",
-                names.join(", ")
+                names
             )),
             Verb::Discard,
             vec![Act::OpenLibraryDiscarding(root)],
@@ -845,21 +838,13 @@ impl Browser {
 
         const SHOWN: usize = 3;
         let act = |how| vec![Act::Settle(orphan.clone(), how)];
-        let mut paths: Vec<String> = orphan
-            .paths
-            .iter()
-            .take(SHOWN)
-            .map(|path| format!("“{path}”"))
-            .collect();
-        if orphan.paths.len() > SHOWN {
-            paths.push(format!("{} more", orphan.paths.len() - SHOWN));
-        }
+        let paths = crate::strings::quoted_some(&orphan.paths, SHOWN);
         self.raise(Ask {
             title: format!("Another drawbar left “{}” unfinished", orphan.label),
             note: Some(format!(
                 "It was changing {}. Finish completes the change, Roll back puts the files \
                  back as they were, and Leave as is stops asking.",
-                paths.join(", ")
+                paths
             )),
             verb: Verb::Finish,
             acts: act(Settlement::Finished),

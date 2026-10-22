@@ -1688,14 +1688,12 @@ impl Store {
         }
         if let Some(unlisted) = unlisted {
             let unlisted: BTreeSet<LibPath> = unlisted.into_iter().collect();
-            let new: Vec<String> = unlisted
-                .difference(&browser.folders.unwalked)
-                .map(|dir| format!("“{dir}”"))
-                .collect();
+            const SHOWN: usize = 3;
+            let new: Vec<&LibPath> = unlisted.difference(&browser.folders.unwalked).collect();
             if !new.is_empty() {
                 log.trouble(format!(
                     "drawbar could not read {}, so what is in it is not shown.",
-                    new.join(", ")
+                    crate::strings::quoted_some(&new, SHOWN)
                 ));
             }
             browser.folders.unwalked = unlisted;

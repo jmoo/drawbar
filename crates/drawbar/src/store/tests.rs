@@ -4261,6 +4261,32 @@ fn a_large_tree_is_listed_whole() {
     assert_eq!(dirs, ["a", "b", "c", "c/d"]);
 }
 
+/// Many folders drawbar may not read are reported in one line that names the first few
+/// and counts the rest.
+#[cfg(unix)]
+#[test]
+fn many_folders_that_cannot_be_read_are_named_a_few_at_a_time() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Temp::new();
+    let locked = ["A", "B", "C", "D", "E"];
+    let mode = |mode| {
+        for dir in locked {
+            fs::set_permissions(root.at(dir), fs::Permissions::from_mode(mode)).unwrap();
+        }
+    };
+    for dir in locked {
+        fs::create_dir(root.at(dir)).unwrap();
+    }
+    mode(0o000);
+    let session = Session::listed(&root);
+    mode(0o755);
+    assert_eq!(
+        session.said("drawbar could not read “A”, “B”, “C” and 2 more, so"),
+        1
+    );
+}
+
 /// A folder drawbar may not read is reported and left out, and the rest of the library
 /// opens; once it can be read, a rescan lists what is in it.
 #[cfg(unix)]
