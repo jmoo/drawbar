@@ -85,6 +85,8 @@ struct Seen {
     local_written: u64,
     /// The longest read of a file directly in a writer's directory.
     log_read: u64,
+    /// Renames from one library path to another.
+    library_renames: u64,
 }
 
 type Picks = dyn Fn(&Io) -> bool;
@@ -131,6 +133,10 @@ impl Probe {
 
     fn file_reads(&self) -> u64 {
         self.seen.borrow().file_reads
+    }
+
+    fn library_renames(&self) -> u64 {
+        self.seen.borrow().library_renames
     }
 
     /// Panics on a write under toshokan's root outside the directory of the writer
@@ -204,6 +210,12 @@ impl Probe {
         }
         if io.root() != Root::Folder {
             return;
+        }
+        match io {
+            Io::Rename { from, to, .. } if !layout().owns(from) && !layout().owns(to) => {
+                seen.library_renames += 1;
+            }
+            _ => {}
         }
         for (path, range) in reads(io) {
             if path.parent().and_then(|dir| dir.parent()) == Some(layout().writers()) {
@@ -602,6 +614,8 @@ through_both!(
     a_file_no_entity_is_bound_to_is_saved_renamed_and_trashed_and_each_undone,
     an_effect_by_path_on_an_entitys_file_is_refused,
     a_tree_moved_with_files_no_entity_is_bound_to_is_moved_back_by_undo,
+    a_tree_move_is_undone_by_one_rename_where_directories_rename,
+    a_tree_move_is_not_undone_once_a_file_it_moved_changed,
     a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept,
     losing_the_local_root_at_any_step_loses_only_drafts,
     a_crash_at_any_step_is_settled_before_the_next_write,
@@ -2637,6 +2651,55 @@ fn a_tree_moved_with_files_no_entity_is_bound_to_is_moved_back_by_undo<F: Facade
         "redone"
     );
     assert_eq!(dirs(), ["new", "new/deep"], "and its old name");
+}
+
+fn a_tree_move_is_undone_by_one_rename_where_directories_rename<F: Facade>() {
+    let folder = MemDisk::with_capabilities(Capabilities::ALL, Capabilities::ALL);
+    let clock = TestClock::at(1_000);
+    for name in ["a", "b", "c"] {
+        put(&folder, &format!("old/{name}.wav"), name.as_bytes());
+    }
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    create(&mut a, "old/song.npno", b"song");
+    a.commit("Move", |i| i.move_tree(&path("old"), &path("new")))
+        .unwrap();
+    let before = probe.library_renames();
+    a.undo().unwrap();
+    assert_eq!(probe.library_renames() - before, 1, "renames of the undo");
+    let files = library_files(&folder).into_keys();
+    assert_eq!(
+        files
+            .map(|path| path.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        ["old/a.wav", "old/b.wav", "old/c.wav", "old/song.npno"]
+    );
+}
+
+fn a_tree_move_is_not_undone_once_a_file_it_moved_changed<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    put(&folder, "old/a.wav", b"a");
+    put(&folder, "old/b.wav", b"b");
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    a.commit("Move", |i| i.move_tree(&path("old"), &path("new")))
+        .unwrap();
+    put(&folder, "new/b.wav", b"changed");
+    let refused = a.undo();
+    assert!(
+        matches!(refused, Err(Error::Refused(Refusal::Changed(_)))),
+        "{refused:?}"
+    );
+    let files = library_files(&folder).into_keys();
+    assert_eq!(
+        files
+            .map(|path| path.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        ["new/a.wav", "new/b.wav"],
+        "nothing moved back"
+    );
 }
 
 /// The scenario losing the local root interrupts: every step a user might take.

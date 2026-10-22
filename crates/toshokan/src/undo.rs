@@ -143,6 +143,18 @@ pub fn reverse(entry: &Entry, writer: WriterId, folded: &Folded) -> Result<Plan,
         reverses: Some(entry.hash()),
         ..Plan::default()
     };
+    let mut trees: Vec<MovedBack> = logged
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Tree { from, to } => Some(MovedBack {
+                from: to.clone(),
+                to: from.clone(),
+                held: Vec::new(),
+            }),
+            _ => None,
+        })
+        .collect();
     for op in &logged.ops {
         match op {
             Op::Create { entity, .. } => {
@@ -176,25 +188,66 @@ pub fn reverse(entry: &Entry, writer: WriterId, folded: &Folded) -> Result<Plan,
                 file,
                 replaces,
             } => {
+                let change = reversing.file(*entity, file.as_ref(), replaces)?;
                 plan.files
-                    .extend(reversing.file(*entity, file.as_ref(), replaces)?);
+                    .extend(carried(&mut trees, file.as_ref(), change));
             }
             Op::Path { from, file } => {
+                let change = reversing.path(from.as_ref(), file.as_ref());
                 plan.files
-                    .extend(reversing.path(from.as_ref(), file.as_ref()));
+                    .extend(carried(&mut trees, file.as_ref(), change));
             }
-            Op::Tree { from, to } => plan.files.push(FileChange::Prune {
-                from: to.clone(),
-                to: from.clone(),
-            }),
-            Op::Write { .. }
+            Op::Tree { .. }
+            | Op::Write { .. }
             | Op::Add { .. }
             | Op::Remove { .. }
             | Op::Pin { .. }
             | Op::Unknown(_) => {}
         }
     }
+    plan.files
+        .extend(trees.into_iter().map(|tree| FileChange::MoveBack {
+            from: tree.from,
+            to: tree.to,
+            held: tree.held,
+        }));
     Ok(plan)
+}
+
+/// A tree move being undone as one move back, with the files it carries back.
+struct MovedBack {
+    from: RelPath,
+    to: RelPath,
+    held: Vec<(RelPath, Expect)>,
+}
+
+impl MovedBack {
+    /// Takes `change` when it renames the file at `at` to where the move back
+    /// carries it, keeping only what it expects there.
+    fn takes(&mut self, at: &RelPath, change: &FileChange) -> bool {
+        let (FileChange::Rename { to, expect, .. } | FileChange::RenameFile { to, expect, .. }) =
+            change
+        else {
+            return false;
+        };
+        let carried = at.rebase(&self.from, &self.to).as_ref() == Some(to);
+        if carried {
+            self.held.push((at.clone(), *expect));
+        }
+        carried
+    }
+}
+
+/// `change` to the file `file` describes, unless one of `trees` carries it back.
+fn carried(
+    trees: &mut [MovedBack],
+    file: Option<&FileFact>,
+    change: Option<FileChange>,
+) -> Option<FileChange> {
+    let change = change?;
+    let taken =
+        file.is_some_and(|file| trees.iter_mut().any(|tree| tree.takes(&file.path, &change)));
+    (!taken).then_some(change)
 }
 
 struct Reversing<'a> {

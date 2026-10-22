@@ -360,29 +360,13 @@ impl Resolver<'_> {
                 self.end(*entity, Some(to));
             }
             FileChange::MoveTree { from, to } => {
-                let (from, to) = (self.library(from)?, self.library(to)?);
-                self.touch(&from)?;
-                self.touch(&to)?;
-                let rename_dir = capabilities.rename_dir && self.plan.moves.renames();
-                match rename_dir && one_name(env, &from, &to) {
-                    true => self.move_tree_aside(&from, &to, env)?,
-                    false => {
-                        self.check(&to, Expect::Absent);
-                        self.move_tree(&from, &to, rename_dir)?;
-                    }
-                }
-                self.end_tree(from, to);
+                self.move_tree_whole(from, to, capabilities, env)?
             }
-            FileChange::Prune { from, to } => {
-                let from = self.library(from)?;
-                let known = self.bindings.bound.values();
-                let known = known.filter(|file| file.state != FileState::Missing);
-                let files = known.map(|file| &file.path).chain(&self.bindings.unbound);
-                let under: Vec<&RelPath> = files.filter(|path| path.starts_with(&from)).collect();
-                self.end_tree(from.clone(), to.clone());
-                for path in emptied(&under, &from) {
-                    self.step(EffectStep::RemoveDir { path });
+            FileChange::MoveBack { from, to, held } => {
+                for (path, expect) in held {
+                    self.check(path, *expect);
                 }
+                self.move_tree_whole(from, to, capabilities, env)?;
             }
             FileChange::Adopt {
                 entity,
@@ -474,6 +458,28 @@ impl Resolver<'_> {
                 self.end_unbound(from, Some(to));
             }
         }
+        Ok(())
+    }
+
+    fn move_tree_whole(
+        &mut self,
+        from: &RelPath,
+        to: &RelPath,
+        capabilities: Capabilities,
+        env: &mut Env,
+    ) -> std::result::Result<(), Refusal> {
+        let (from, to) = (self.library(from)?, self.library(to)?);
+        self.touch(&from)?;
+        self.touch(&to)?;
+        let rename_dir = capabilities.rename_dir && self.plan.moves.renames();
+        match rename_dir && one_name(env, &from, &to) {
+            true => self.move_tree_aside(&from, &to, env)?,
+            false => {
+                self.check(&to, Expect::Absent);
+                self.move_tree(&from, &to, rename_dir)?;
+            }
+        }
+        self.end_tree(from, to);
         Ok(())
     }
 

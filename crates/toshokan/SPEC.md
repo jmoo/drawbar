@@ -609,9 +609,11 @@ each such file as the folder shows it afterwards, with where it was: `from` alon
 for a file trashed, `file` alone for a file made, both for a file renamed or
 saved over. A tree move logs one for each such file under the tree it moves. A commit
 reports each `path` op it logged, an undo's and a redo's included.
-A tree move also logs a `tree` op. Undo moves the tree's files back one by one,
-then removes each directory under `to`, and `to`, left holding nothing, and logs
-the move back as a `tree` op of its own, so a redo removes `from` the same way.
+A tree move also logs a `tree` op. Undo moves the tree back as a tree move of its
+own, with a precondition on the identity of each file the move carried, in place
+of renaming each file back: a single `rename` where directories rename, file by
+file elsewhere, which then removes each directory under `to`, and `to`, left
+holding nothing. The move back logs a `tree` op, so a redo moves the tree again.
 A `path` op changes no fact; undo reads it to rename the file back,
 bring its displaced bytes back from the trash, or trash the file it made.
 
