@@ -16,7 +16,7 @@ use toshokan::error::Refusal;
 use toshokan::io::IoError;
 use toshokan::io::{Capabilities, Io, IoResult, Kind, Reply, Root};
 use toshokan::report::{Mode, Refreshed};
-use toshokan::{EntityId, Env, Error, Expect, Policy, RelPath, View};
+use toshokan::{Env, Error, Expect, Policy, RelPath, View};
 
 use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES};
 use super::native::locate;
@@ -362,7 +362,7 @@ impl Keeper {
             Intent::Delete { path, expect } => {
                 let trashed = facts(library, label, |built, view| {
                     let at = relative(&path).ok_or_else(|| no_path(&path))?;
-                    Ok(match bound_at(view, &at) {
+                    Ok(match view.at(&at).map(|entity| entity.id()) {
                         Some(entity) => built.trash(entity, expect).delete(entity),
                         None => built.trash_file(&at, expect),
                     })
@@ -440,7 +440,7 @@ fn tag<'l>(
             Key::File(path) => path,
         };
         let at = relative(path).ok_or_else(|| no_path(path))?;
-        if let Some(entity) = bound_at(view, &at) {
+        if let Some(entity) = view.at(&at).map(|entity| entity.id()) {
             built = built.add(entity, TAGS, name.to_string());
             continue;
         }
@@ -487,7 +487,7 @@ fn write(
         failed: failed.clone(),
     });
     let built = library.intent(label);
-    let built = match (bound_at(&view, &at), came) {
+    let built = match (view.at(&at).map(|entity| entity.id()), came) {
         (Some(entity), _) => built.save_from(entity, &at, source, expect),
         (None, Some(came)) => {
             let (built, _) = built.create(|e| {
@@ -545,7 +545,7 @@ fn rename(
             relative(from).ok_or_else(|| no_path(from))?,
             relative(to).ok_or_else(|| no_path(to))?,
         );
-        Ok(match bound_at(view, &at) {
+        Ok(match view.at(&at).map(|entity| entity.id()) {
             Some(entity) => built.rename(entity, &to, expect),
             None => built.rename_file(&at, &to, expect),
         })
@@ -601,19 +601,6 @@ fn split(
         Ok(changes) => (Ok(()), Some(changes)),
         Err(why) => (Err(why), None),
     }
-}
-
-/// The entity bound to the file at `path` in `view`, if one is.
-fn bound_at(view: &View, path: &RelPath) -> Option<EntityId> {
-    let entities = view.entities().into_iter();
-    entities
-        .filter(|entity| {
-            entity.file().is_some_and(|file| {
-                file.path == *path && file.state != toshokan::FileState::Missing
-            })
-        })
-        .map(|entity| entity.id())
-        .next()
 }
 
 /// The file just written at `path`, as a listing finds it: resting, where it is a piano

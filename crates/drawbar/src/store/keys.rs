@@ -8,8 +8,6 @@ use serde::{Deserialize, Serialize};
 use toshokan::env::{Blake3, Digest};
 use toshokan::io::Range;
 use toshokan::{Identify, Identity, Register, RelPath, Set};
-#[cfg(not(target_arch = "wasm32"))]
-use toshokan::{Layout, Schema};
 
 use super::LibPath;
 use crate::workspace::Origin;
@@ -69,25 +67,6 @@ impl Came {
     }
 }
 
-/// The directory at the library's root that holds what is drawbar's own. An older
-/// build's index stays there, unread.
-#[cfg(not(target_arch = "wasm32"))]
-pub const DIR: &str = ".drawbar";
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn schema() -> Schema {
-    Schema::of(&[TAGS.key(), TAG_NAMES.key(), ORIGIN.key()]).expect("drawbar's keys are distinct")
-}
-
-/// Where toshokan keeps the library's facts, in [`DIR`], and what its scans leave out:
-/// every name that starts with a dot, which drawbar never lists.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn layout() -> Layout {
-    Layout::within(DIR, "library")
-        .expect("the root's names are single components")
-        .hiding()
-}
-
 /// How many bytes at the start of a Nord file its identity reads.
 const HEAD: u64 = 64 << 10;
 /// How many bytes at the end of a Nord file its identity reads.
@@ -136,24 +115,6 @@ impl Identify for Contents {
     }
 }
 
-/// How the volume a library is on compares names: as [`super::names::key`] does on
-/// macOS and Windows, whose volumes take two spellings for one name, and byte for byte
-/// elsewhere, where a folder can hold both.
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Volume;
-
-#[cfg(not(target_arch = "wasm32"))]
-impl toshokan::Names for Volume {
-    fn key(&self, path: &str) -> String {
-        if !cfg!(any(target_vendor = "apple", windows)) {
-            return path.to_string();
-        }
-        let names: Vec<String> = path.split('/').map(super::names::key).collect();
-        names.join("/")
-    }
-}
-
 /// The identity of `bytes` as the library file at `path`, or `None` for a path toshokan
 /// does not take.
 pub fn identity_of_bytes(path: &LibPath, bytes: &[u8]) -> Option<Identity> {
@@ -161,21 +122,64 @@ pub fn identity_of_bytes(path: &LibPath, bytes: &[u8]) -> Option<Identity> {
     Some(Contents.of_bytes(&path, bytes))
 }
 
-/// The identity of the library file at `path`, which `file` opens.
+/// What only the desktop, which opens a library's facts on this build, needs.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn identity_of(path: &RelPath, file: &mut std::fs::File) -> std::io::Result<Identity> {
-    use std::io::{Read as _, Seek as _, SeekFrom};
+mod desktop {
+    use toshokan::{Identify, Identity, Layout, RelPath, Schema};
 
-    let len = file.metadata()?.len();
-    let mut digest = Contents.digest(path, len);
-    for range in Contents.ranges(path, len) {
-        file.seek(SeekFrom::Start(range.offset))?;
-        let mut part = Vec::new();
-        file.by_ref().take(range.len).read_to_end(&mut part)?;
-        digest.update(&part);
+    use super::{Contents, ORIGIN, TAGS, TAG_NAMES};
+
+    /// The directory at the library's root that holds what is drawbar's own. An older
+    /// build's index stays there, unread.
+    pub const DIR: &str = ".drawbar";
+
+    pub fn schema() -> Schema {
+        Schema::of(&[TAGS.key(), TAG_NAMES.key(), ORIGIN.key()])
+            .expect("drawbar's keys are distinct")
     }
-    Ok(digest.finish())
+
+    /// Where toshokan keeps the library's facts, in [`DIR`], and what its scans leave out:
+    /// every name that starts with a dot, which drawbar never lists.
+    pub fn layout() -> Layout {
+        Layout::within(DIR, "library")
+            .expect("the root's names are single components")
+            .hiding()
+    }
+
+    /// How the volume a library is on compares names: as [`crate::store::names::key`]
+    /// does on macOS and Windows, whose volumes take two spellings for one name, and byte
+    /// for byte elsewhere, where a folder can hold both.
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct Volume;
+
+    impl toshokan::Names for Volume {
+        fn key(&self, path: &str) -> String {
+            if !cfg!(any(target_vendor = "apple", windows)) {
+                return path.to_string();
+            }
+            let names: Vec<String> = path.split('/').map(crate::store::names::key).collect();
+            names.join("/")
+        }
+    }
+
+    /// The identity of the library file at `path`, which `file` opens.
+    pub fn identity_of(path: &RelPath, file: &mut std::fs::File) -> std::io::Result<Identity> {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+
+        let len = file.metadata()?.len();
+        let mut digest = Contents.digest(path, len);
+        for range in Contents.ranges(path, len) {
+            file.seek(SeekFrom::Start(range.offset))?;
+            let mut part = Vec::new();
+            file.by_ref().take(range.len).read_to_end(&mut part)?;
+            digest.update(&part);
+        }
+        Ok(digest.finish())
+    }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use desktop::*;
 
 #[cfg(test)]
 mod tests {

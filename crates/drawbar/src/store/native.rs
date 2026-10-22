@@ -51,6 +51,10 @@ fn beside_store() -> Option<PathBuf> {
 /// instrument left. Named by the library's folder, so each library has its own. Where the
 /// system names no folder for drawbar's data, it is in the system's temporary folder, and
 /// lasts as long as that does.
+///
+/// ⚠️ Two drawbars running at once on one machine share it. Each writes as a writer of
+/// its own, but the identities its scans read and what it let go of are kept in one file
+/// each, and the one that writes last keeps its own.
 pub fn local_root(root: &Path) -> PathBuf {
     let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let hash = blake3::hash(root.as_os_str().as_encoded_bytes());
