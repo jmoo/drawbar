@@ -632,7 +632,11 @@ fn write(
         failed: failed.clone(),
     });
     let built = library.intent(label);
-    let built = match (view.at(&at).map(|entity| entity.id()), came) {
+    let entity = view
+        .at(&at)
+        .map(|entity| entity.id())
+        .or_else(|| missing_at(&view, &at));
+    let built = match (entity, came) {
         (Some(entity), _) => built.save_from(entity, &at, source, expect),
         (None, Some(came)) => {
             let (built, _) = built.create(|e| {
@@ -746,6 +750,17 @@ fn split(
         Ok(changes) => (Ok(()), Some(changes)),
         Err(why) => (Err(why), None),
     }
+}
+
+/// The entity whose file is missing from `path`: one whose file a save writes back.
+fn missing_at(view: &View, path: &RelPath) -> Option<toshokan::EntityId> {
+    let mut entities = view.entities().into_iter();
+    let missing = entities.find(|entity| {
+        entity
+            .file()
+            .is_some_and(|file| file.path == *path && file.state == toshokan::FileState::Missing)
+    });
+    missing.map(|entity| entity.id())
 }
 
 /// The file just written at `path`, as a listing finds it: resting, where it is a piano

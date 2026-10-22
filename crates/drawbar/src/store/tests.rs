@@ -4672,3 +4672,37 @@ fn an_edit_kept_by_path_comes_back_once_its_file_is_an_entity() {
     assert!(last.bytes(grand) == edited);
     assert_eq!(last.said("has the unsaved edit it had"), 1, "kept once");
 }
+
+/// A tagged file deleted outside drawbar and saved back from drawbar is its entity's
+/// file again: its tags stay with it.
+#[test]
+fn a_tagged_file_saved_back_keeps_its_tags() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let grand = session.named("Grand.ne5p");
+    session.tag(&[grand], "Sunday");
+    fs::remove_file(root.at("Grand.ne5p")).unwrap();
+    session.refocus();
+    assert!(session.bench.browser.folders.missing.contains(&grand));
+    session.edit(grand, "12");
+    session.bench.workspace.mark_saved(grand);
+    session.sync();
+    let listed: Vec<u64> = session
+        .bench
+        .workspace
+        .listed()
+        .map(|entity| entity.id)
+        .collect();
+    assert_eq!(listed, [grand], "one asset, and its file is back");
+    assert_eq!(tagged(&session), [wears("Grand.ne5p", &["Sunday"])]);
+    assert!(!session.bench.browser.folders.missing.contains(&grand));
+    session.close();
+
+    let again = Session::listed(&root);
+    assert_eq!(tagged(&again), [wears("Grand.ne5p", &["Sunday"])]);
+    assert!(
+        again.bench.browser.folders.lost().is_empty(),
+        "nothing is lost"
+    );
+}
