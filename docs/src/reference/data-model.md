@@ -8,7 +8,10 @@ consistent with changes made outside drawbar. What a user sees of it is on
 The code is in `crates/drawbar/src`: `store/` holds the library on disk,
 `workspace.rs` the assets in memory, `folders.rs` the folder tree, `ondisk.rs`
 the files left on disk and read by range, and `summary.rs` with
-`store/cache.rs` what drawbar remembers of a read between sessions.
+`store/cache.rs` what drawbar remembers of a read between sessions. What a file
+cannot say, and every change to the files, goes through
+[toshokan](https://github.com/jmoo/drawbar/tree/master/crates/toshokan), whose
+`SPEC.md` describes its format and guarantees.
 
 ## The library on disk
 
@@ -26,7 +29,8 @@ a file, and a move is a rename. Any folder can be opened as a library.
   (OPFS). In browsers with `showDirectoryPicker`, the user can also pick a folder
   on the computer (`store::web::Root`).
 
-What a file cannot say lives in a hidden `.drawbar/` folder at the root:
+What a file cannot say lives in a hidden `.drawbar/` folder at the root, which
+holds toshokan's root, `.drawbar/library/`:
 
 ```mermaid
 flowchart LR
@@ -35,128 +39,74 @@ flowchart LR
     root --> grand["Grand.npno"]
     root --> cello["Cello/"]
     cello --> c3["c3.wav"]
-    cello --> temp[".c3.wav.drawbar-tmp<br/><i>a desktop save in flight</i>"]
-    sidecar --> index["library.ron<br/><i>the index</i>"]
-    sidecar --> lock["lock<br/><i>held by the one writer</i>"]
-    sidecar --> tmp["tmp/<br/><i>writes in flight</i>"]
-    sidecar --> working["working/"]
-    working --> copy["7-12<br/><i>asset 7, generation 12</i>"]
+    sidecar --> library["library/<br/><i>toshokan's root</i>"]
+    library --> writers["writers/&lt;writer&gt;/<br/><i>each drawbar's log, staging,<br/>pending effects and trash</i>"]
 ```
 
-`.drawbar/` is made at the first write, never on open, so a folder opened and
-looked at stays as it was. The default library's folder is also made at its
-first write.
+`.drawbar/library/` is made at the first change, never on open, so a folder
+opened and looked at stays as it was. The default library's folder is also made
+at its first change. A scan leaves out all of `.drawbar/`, and every other name
+that starts with a dot (`store::keys::layout`). An older build's
+`.drawbar/library.ron` and `working/` stay where they are, unread.
 
-### The index
+### What the library keeps
 
-`.drawbar/library.ron` is one [RON](https://github.com/ron-rs/ron) file,
-rewritten whole, so writing it is a single commit point. It is written in id
-order, so one library always serializes to the same text
-(`store/sidecar.rs`).
+Every running drawbar writes as a writer of its own: it appends to a log of its
+own under `writers/`, and reads the others' logs. Nothing is written in place, so
+several drawbars may change one library at once, on one computer or on several
+that sync the folder, and each sees what the others did when it reads their logs
+again. toshokan merges every log to the same state, whatever order a sync client
+delivers them in.
 
-The index holds a row only for an asset with something its file cannot say:
-tags, an unsaved edit, or the slot it came off. It also holds one for a file of
-a kind drawbar does not open but holds because it made the file or was given
-it. Every other file is known from the listing alone, so an untouched library's
-index is a few lines, and it grows with tags and edits, not with the number of
-files. A row that stops holding any of these is dropped at the next write. A
-field with nothing in it is not written. Abridged:
+The facts are fields of entities (`store/keys.rs`):
+
+| Key | Kind | Meaning |
+|---|---|---|
+| `tags` | set of names | The tags an asset wears. |
+| `tag names` | set of names | The library's list of tags, every one made, worn or not. Two drawbars that make a list at once each keep one, and the tags are all their names together. |
+| `origin` | register | Where an asset came from, where its file cannot say: `{"from":"new"}` for New, `{"from":"slot","class":…,"bank":…,"slot":…}` for a copy off a slot, `{"from":"rescued","bank":…,"slot":…}` for a rescue kept. Banks and slots are numbered from zero, as the wire numbers them. |
+
+An entity is made only for a file with something its file cannot say: tags, an
+origin, or the list of tags itself. Every other file is known from the listing
+alone, by its path, so a library of untouched files keeps nothing about them, and
+the hidden folder grows with tags, not with the number of files. toshokan binds
+each entity to its file by path, and where the file moved, by the file's
+identity (`store::keys::Contents`): BLAKE3 over a flag, the file's length and its
+bytes. A Nord file in its CBIN container is read only at its first 64 KiB and its
+last two bytes, which hold its checksum, so a piano library's identity costs a
+small read; any other file is read whole.
+
+A change the user makes is an intent: one undo step, logged with what it changed,
+checked against the files before anything is written. Each file it writes is
+staged in the writer's `tmp/`, and bytes it would write over or delete move to the
+writer's `trash/`, where an undo finds them.
+
+### This install's own state
+
+What only this install needs is kept in drawbar's own data, never in the
+library (`store::native::local_root`): `libraries/<hash of the library's
+path>/`, beside `app.ron`. It holds toshokan's local root, with the cached view,
+the identities its scans read and the drafts of unsaved edits, and `rescued/`,
+for a slot's former occupant that a write to the instrument left. Losing it loses
+the drafts and nothing else. Two drawbars on one machine share it.
+
+A draft is the asset's unsaved bytes, or the edit held of a piano or sample
+instrument resting in its file, under a line that says which
+(`store/drafts.rs`), kept with the identity of the file it was made over. An
+edit is kept as RON text under a version of its own (`rewrite::Edit::working`):
 
 ```text
 (
     version: 1,
-    next_id: 9,
-    next_generation: 13,
-    tags: {
-        1: "Gig",
-    },
-    assets: {
-        7: (
-            path: Some("Cello/c3.wav"),
-            fingerprint: Some((
-                len: 88244,
-                modified: Some(1727712000123456789),
-                crc: Some(3735928559),
-            )),
-            tags: [1],
-            working: Some((
-                generation: 12,
-                keeps: Bytes,
-            )),
-        ),
-    },
+    edit: Sample([
+        ("name", "Vibes"),
+    ]),
 )
 ```
 
-| Field | Meaning |
-|---|---|
-| `version` | The index version. This build writes 1. |
-| `next_id` | The id the next new asset takes. |
-| `next_generation` | The generation the next working copy is written under. |
-| `tags` | Tag names, by tag id. |
-| `assets` | One row per asset that holds something its file cannot say, by asset id. |
-| `path` | Where the asset's file is, `/`-joined from the root. `None` for a view of a slot kept only as a working copy. |
-| `name` | The asset's name, written only for a row with no path. |
-| `fingerprint` | Length, modification time in nanoseconds, and CRC-32 of the file when drawbar last read or wrote it. The CRC is `None` until something has read the whole file. |
-| `tags` | Tag ids. |
-| `origin` | Written only where the path does not say it: `Device(class, bank, slot)`, `Rescued(bank, slot)`, `Fresh` for a row with a path made with New, or `File(name)` for a row with no path. A row with a path and no origin came from its file; one with neither is fresh. |
-| `working` | The asset's working copy, while it holds an unsaved edit: its generation, and what it keeps, `Bytes` or `Edit`. |
-
-A path read from the index is checked on the way in: every component must be a
-real name, never empty, `.` or `..`, and never holding `/`, `\` or NUL
-(`store::LibPath`). The index is a file anyone can edit, and a `..` would reach
-outside the library. A link would too, so on the desktop every folder a path
-passes through below the root is looked at first, and one that is a link
-refuses the operation as not found: an index row through one reads as missing.
-A folder made a link between that look and the operation is still followed. In
-the browser no handle reaches through a link: the private file system holds
-none, and Chromium hides a link at any depth below a picked folder.
-
-The version is read first, on its own. An index with a higher version opens the
-library read-only and is never rewritten, so a newer drawbar's index survives an
-older one being run over it. So does an index of this version that holds a
-field, or a kind of origin or working copy, this build does not know: rewriting
-it would drop what a newer build added. An index that does not parse also opens
-the library read-only, and can be set aside (see [Opening, the lock and
-read-only](#opening-the-lock-and-read-only)).
-
-### Working copies, `tmp/` and `lock`
-
-- `working/<id>-<generation>` holds an unsaved edit. An edit whose bytes differ
-  from the copy's gets a new generation, and the old file is deleted once the
-  index stops naming it; one the copy already holds, as at every launch, writes
-  none. A copy is rewritten only by a save of a later edit, just before the save
-  lands (see [The order of a pass](#the-order-of-a-pass)), and moved into place
-  by a save of exactly what it holds. One that `keeps: Bytes` holds
-  the asset's bytes whole. One that `keeps: Edit` holds an edit of a piano
-  library or sample instrument resting in its file, as RON text under a version
-  of its own (`rewrite::Edit::working`):
-
-  ```text
-  (
-      version: 1,
-      edit: Sample([
-          ("name", "Vibes"),
-      ]),
-  )
-  ```
-
-  A sample's edit is the `path = value` sets made since it was saved, and a
-  piano's is its plan (`document::piano::Plan`), the format's banks and kinds
-  written by their codes. A copy of another version does not read, and opens
-  the library read-only.
-- `tmp/` holds the temporary files of writes in flight. On the desktop that is
-  only the index's own files; a library file is staged as a hidden sibling,
-  `.<name>.drawbar-tmp`, so its rename never crosses a volume. A temporary is
-  made only where no entry is, after removing a stale one, so a link left at its
-  name is never written through; a name taken again gives way to
-  `.<name>.<n>.drawbar-tmp`. In the browser
-  every write is staged in `tmp/`. It also holds a slot's occupant while a write
-  to the instrument replaces it, as `nord-rescued-…`, which the open's sweep
-  leaves and offers once the listing is complete, unless it is still named
-  `.partial`.
-- `lock` is held by the one drawbar that may write the library, so a second
-  drawbar opens it read-only.
+A sample's edit is the `path = value` sets made since it was saved, and a piano's
+is its plan (`document::piano::Plan`), the format's banks and kinds written by
+their codes.
 
 ## The in-memory model
 
@@ -167,7 +117,7 @@ every asset as a `LocalEntity`. The fields that matter here:
 
 | Field | Meaning |
 |---|---|
-| `id` | Names the asset to the index, the selection and the send queue. See [Ids](#ids). |
+| `id` | Names the asset to the store, the selection and the send queue. See [Ids](#ids). |
 | `name` | Its name. While `path` is set, it is the path's last component. |
 | `path` | Where its file is. `None` for a view, and for a kept asset not yet placed. |
 | `origin` | Where it came from: a file, a slot, the New menu, or a rescue. |
@@ -208,29 +158,20 @@ meanwhile shows as unsaved.
 
 ### Ids
 
-The workspace hands out ids from `next_id`. A row keeps its id from session to
-session; a file with no row takes a new id each time the library is listed,
-since nothing refers to it. `next_id` is kept in the index so a row's id is
-never given to another asset. When a library opens, every row
-whose id is below the workspace's `next_id` takes the next free id instead
-(`Store::begin`). That happens when a view of a slot was opened first, or when
-another library was open before in the same window: its views stay, and their
-ids must not reach an asset of the new library. A renumbered row's working copy
-is written again under the new id at the next full pass, and the old one is
-dropped.
+The workspace hands out ids from `next_id`, for the session only. The store maps
+each id to how the library knows its file (`store::Key`, `store/ids.rs`): by the
+entity bound to it, or by its path. An asset keeps its id when its file becomes
+an entity, when it moves, inside drawbar or outside it, and when an undo moves it
+back. A lost row, an entity whose file is gone, keeps its id while the library
+keeps the entity.
 
 ### Views and kept assets
 
 A view is a working copy of a slot on the instrument. It is not listed, has no
 file, and goes when its tab closes. `Workspace::keep` promotes one into the
 list, and closing the tab of a view that holds an edit, or that waits in the
-send queue, promotes it instead of dropping it.
-
-A view that holds an edit is still kept in the index, as a row with no path and
-a working copy. When the library next opens, that row comes back as a file on
-this computer, placed in the root, and its working copy stays until the file is
-written. When another library takes the window, the views stay in the window,
-so their working copies leave the library being closed (`Store::hand_over`).
+send queue, promotes it instead of dropping it. A view has no file a draft could
+be made over, so an edit of one that is not kept is lost at a quit.
 
 ## An asset's lifecycle
 
@@ -266,8 +207,8 @@ stateDiagram-v2
   of the file, taken at the length and time it has now. It draws its kind, tag,
   slot checksum, the library it plays and its verdict from that summary, and its
   verify state is `Remembered`. A row in view does not read it.
-- **Reading.** Something needs it, or the index tracks it and it is read in the
-  background. A `Cmd::Read` for its file is in flight.
+- **Reading.** Something needs it, or it wears tags or came off a slot and is
+  read in the background. A `FileCmd::Read` for its file is in flight.
 - **Whole.** Its bytes are in memory. They are decoded off the frame, up to eight
   jobs of 64 files or 16 MiB at once on the desktop, and one job of 16 files or
   2 MiB a frame in the browser. An act about to use the decode runs it at once
@@ -280,15 +221,14 @@ stateDiagram-v2
   limit at start (`ondisk::raise_open_files`). In the browser it holds the `File`
   snapshot the page took of it.
 - **Unsaved.** Its stamp differs from its baseline's. At the next full pass its
-  bytes are written to `working/` under a new generation, unless its working copy
-  holds them already. An asset whose file is missing counts as unsaved as soon as
-  it is restored, so its copy is kept as it was. An edit of a resting
-  asset stays an edit held over its file, and the asset stays resting until the
-  save writes the file again; its working copy keeps the edit, not the bytes.
-- **Saving.** Saving moves the baseline to the current bytes, and the store
-  writes the baseline to the file. A baseline that rests in its file needs no
-  write. A save refused because the file changed, one that failed, and one sent
-  as the library turned read-only all leave the asset unsaved again.
+  bytes are kept as a draft, unless the draft holds them already. An edit of a
+  resting asset stays an edit held over its file, and the asset stays resting
+  until the save writes the file again; its draft keeps the edit, not the
+  bytes.
+- **Saving.** Saving moves the baseline to the current bytes and asks the store
+  to write it (`workspace::FileAsk::Save`). A baseline that rests in its file
+  needs no write. A save refused because the file changed, and one that failed,
+  leave the asset unsaved again.
 - **Missing.** Its file went missing while it held something precious: tags, an
   unsaved edit, the slot it came off, or a place in the send queue. Nothing
   writes its file again until it is saved, and that save creates the file anew.
@@ -307,22 +247,20 @@ and it is Listed again.
 
 ### The metadata walk
 
-Opening a library lists every file by its name, length and time, and reads
-nothing but the files under working copies (`store/exec.rs`).
+Opening a library lists every file by its name, length and time, through
+toshokan's scan, and reads a file only for its identity, where its length is that
+of a file the library knows and nothing earlier gives it. The header counts the
+files found as the scan goes.
 
-1. The index's rows are looked at first, where the index says they are, in parts
-   of 256, and sent before the walk begins. A row's file that is gone lends its
-   length to a set the walk checks for moved files.
-2. The tree is walked breadth first, one folder at a time, so the top of a large
-   tree arrives first. A file a row already found is not looked at again. Entries
-   are sent in `Event::Listed` parts of 256, and the app folds in four parts a
-   frame.
-3. Anything under a name that starts with a dot is left out of the listing, and
-   a dot folder is not entered. The `.drawbar-tmp` siblings of interrupted saves
-   are gathered on the way, to be swept.
-4. A listing looks at no more than 1,000,000 entries, counting files, folders and
-   entries left out (`exec::MOST_ENTRIES`). A folder past that, or one that
-   cannot be read, is reported as not all listed.
+1. Each folder is listed with every file's length and time in one request.
+2. Anything under a name that starts with a dot is left out, and a dot folder is
+   not entered.
+3. A scan looks at no more than 1,000,000 entries. A folder past that, or one
+   that cannot be listed, is reported as not all listed, the log names it, and
+   the rest of the library opens.
+
+The folders themselves are listed by the backend beside the scan, since toshokan
+keeps no folders (`store::keeper`).
 
 A file's kind is decided by its extension alone: `store::opens` matches it,
 ignoring case, against the formats `nord-format` names by extension
@@ -332,7 +270,7 @@ folder's `others`, and shown with **Show all files**.
 ### Lazy reads
 
 A listed asset is read once something needs it. The workspace keeps each one
-wanted with how much it is needed, and the store keeps one `Cmd::Read` in flight:
+wanted with how much it is needed, and the store keeps one `FileCmd::Read` in flight:
 when it answers, the next goes out with the most needed of what is wanted then,
 at most 32 files or 8 MiB. Nothing is asked until the cache has said what it
 remembers. In order of need, these ask:
@@ -352,16 +290,13 @@ An asset needed this frame or the last, or selected, is not evicted.
 ### Background reads
 
 Once the listing is complete and the cache has answered, and again at each full
-pass, the store reads the unread files the index tracks, whole: those with tags,
-a working copy or a slot they came off (`Store::fetch_tracked`). Reading them
-decodes them and takes their slot checksum, so they match their slots on the
-instrument before anything shows them. A remembered file is skipped, since its
-summary already carries that checksum. They go 32 files or 16 MiB at a time,
-and a read the user waits on runs after the batch in flight. A tracked file
-whose CRC the index does not know, and that no background read will cover, has
-its CRC taken alone, 64 files or 64 MiB at a time
-(`Cmd::Fingerprint`), so that an outside rename keeps its row. Neither starts
-a batch while a read something needs is wanted or in flight.
+pass, the store reads the unread files it tracks, whole: those with tags or a
+slot they came off (`Store::fetch_tracked`). Reading them decodes them and takes
+their slot checksum, so they match their slots on the instrument before anything
+shows them. A remembered file is skipped, since its summary already carries that
+checksum. They go 32 files or 16 MiB at a time, and a read the user waits on runs
+after the batch in flight. None starts while a read something needs is wanted or
+in flight.
 
 ### The memory budget
 
@@ -370,10 +305,11 @@ The assets may hold at most 1 GiB of a library's files whole
 where they are not the same allocation, plus the listed length of every read in
 flight. A file resting in its file takes none of it.
 
-Each `Cmd::Read` carries the room left. The backend reads its files in order,
+Each `FileCmd::Read` carries the room left. The backend reads its files in order,
 and answers each one that would not fit in what is left with `Failure::Room`.
 The store then makes room by evicting clean assets, the least recently needed
-first, and those the index tracks only after the rest (`Store::make_room`). It
+first, and those with tags or a slot they came off only after the rest
+(`Store::make_room`). It
 evicts nothing unless that makes the room. A background read evicts only
 untracked assets.
 
@@ -383,7 +319,7 @@ These are never evicted:
 - one unread already, or resting in its file;
 - one needed this frame or the last, or selected;
 - one in the send queue;
-- one with a save in flight, a working copy, or a missing file;
+- one with a save in flight, or a missing file;
 - one whose path is under a rename not yet answered.
 
 A read that cannot fit even then marks the asset not read, and it is retried,
@@ -401,13 +337,11 @@ decode can say why.
 The index does not verify the container checksum. The resting check does, in
 one streaming pass that also takes the whole file's CRC-32 for its fingerprint
 (`OnDisk::verify`). Until it has, a resting file is not known to hold any
-bytes (`OnDisk::holds`), and nothing takes its CRC on the frame. A file whose
-stat moved is told to hold what drawbar knew by its CRC, taken in one streaming
-pass (`Fs::crc`). A save, a copy over a file and a rewrite look at the file
-again once the new contents are staged, just before the rename, and refuse one
-whose stat moved (`exec::put`); a window of one stat and one rename remains,
-since no portable rename checks what it replaces. Where the browser copies
-instead of moving, the copy looks again just before it lands. A resting file changed on disk under an unsaved edit is not
+bytes (`OnDisk::holds`), and nothing takes its CRC on the frame. A save, a copy
+over a file and a rewrite are each checked by toshokan, once the new contents are
+staged and before anything is written over, against the file as drawbar last
+read or wrote it (see [Identities and expectations](#identities-and-expectations)).
+A resting file changed on disk under an unsaved edit is not
 read whole to keep the edit apart: the asset rests in the new file, and the
 workspace makes the edit again over it (`rewrite::Edit::over`). An edit the new
 file already holds is let go. One that no longer applies is kept as it was,
@@ -429,16 +363,14 @@ tab makes takes the snapshot again where the file went, and a file written over
 is indexed again.
 
 A file from outside, dropped or picked with File ▸ Open…, is copied into the
-library by `Cmd::Import` and never held (`Act::Take`). Its asset waits unread
+library by `Intent::Import` and never held (`Act::Take`). Its asset waits unread
 until the copy lands (`Workspace::arrive`), then rests where it is a piano or
 sample instrument and is read on demand otherwise. A name already taken asks, as
 a rename does: Overwrite copies over the file there (`Act::TakeOver`), with the
 same check a save makes, and Keep both copies under a free name. A copy whose name
-something took first is placed again, and one that fails, as at a library that
-turns read-only, is read into memory instead. On the desktop the copy streams
-into a hidden sibling and is linked into place; in the browser the page slices the
-`File` and hands each slice to the writer, or to the picked folder's writable
-stream, without passing it through the tab's memory. The browser catches a drop on its way to the canvas
+something took first is placed again, and one that fails is read into memory
+instead. The copy streams into toshokan's staging a chunk at a time, and never
+passes through memory whole. The browser catches a drop on its way to the canvas
 (`dropped.rs`), since eframe reads a dropped file whole, and lands it in the
 folder whose tree row it fell on. The desktop windowing reports no drop point, so
 there a drop lands at the top level unless the pointer moved over the window while
@@ -453,30 +385,24 @@ the sets or the plan (`rewrite::Edit`), and the rewrite that saves it into the
 file the asset rests in (`Workspace::hold_edit`, `rewrite.rs`). An editor takes
 up the workspace's edit wherever the asset rests in a file its own edit was not
 made over. A save sends
-`Cmd::Rewrite`: the backend writes the file again from itself into a temporary,
-then puts it over the file, and the asset rests in what it wrote. A sample's
+`Intent::Rewrite`: toshokan stages the file the edit makes of the one the asset
+rests in, a chunk at a time (`store::keeper`), moves the old file to the trash and
+puts the new one in its place, and the asset rests in what it wrote. A sample's
 copy splices the edited sections in and restates the checksum
 (`cbin::Patch::copy`); a piano's is laid out by `npno::Library::write_from`,
-which reads one kept stroke at a time by its range. In the browser the copy is
-laid out first as the ranges of the file it keeps and the bytes the edit holds,
-recording a piano's layout with a writer that keeps each stroke's range rather
-than its audio, and each range is sliced from the `File` and handed to the
-writer; a piano's checksum is taken as the copy streams (`cbin::Verifier::seal`)
-and written last. A sample's copy checks its checksum as it streams, so a file
-changed since its index was read is refused. A piano's copy reads the file's
-prefix and stroke directory again first (`npno::Index::still_matches`), and
-refuses one that is not the directory its index read; its audio is not compared. Either kind is refused
-where the file's stat moved while the copy was written. Nothing is put over the
-file then. In the browser a file written since its `File` was taken fails to
-read at all. An export or send of an asset holding such an edit waits for it to be
-saved first. An edit held this way is kept across a quit as a working copy of
-the edit itself, and the next open makes it again over the file.
+which reads one kept stroke at a time by its range. A sample's copy checks its
+checksum as it streams, so a file changed since its index was read is refused. A
+piano's copy reads the file's prefix and stroke directory again first
+(`npno::Index::still_matches`), and refuses one that is not the directory its
+index read; its audio is not compared. Nothing is put over the file then. An
+export or send of an asset holding such an edit waits for it to be saved first.
+An edit held this way is kept across a quit as a draft of the edit itself, and
+the next open makes it again over the file.
 
 Duplicate, Keep both, and an Overwrite that puts a resting file over another, are
-copies the library makes too (`Workspace::arrive`, `store::CopyOf`): `Cmd::Import`
-copies the library's own file byte for byte (on the desktop a clone where the
-disk can make one and a streamed copy otherwise, and slice by slice through the
-writer in the browser), or writes the edit held of it through as it copies. The copy's
+copies the library makes too (`Workspace::arrive`, `store::CopyOf`):
+`Intent::Import` copies the library's own file byte for byte, a chunk at a time,
+or writes the edit held of it through as it copies. The copy's
 asset is unread until it lands, then rests in it. A file a copy is still to be
 made of is not deleted until the copy answers, and the asset an Overwrite moved
 over another file goes only once its copy has landed: one that fails leaves it. Exporting a resting file copies it across
@@ -498,11 +424,12 @@ its folder synced, all before the delete. A process that dies with the slot empt
 leaves the whole occupant on disk, and one that dies during the read leaves only
 a `.partial` file and the slot as it was. A power cut is covered only where the
 folder sync is: on macOS and Linux, not on Windows, and not in the browser, which
-offers no sync at all. The file (`device::scratch`) is in the
-library's `.drawbar/tmp/` on the desktop while the library may be written, made
-where missing, or a `rescued` folder of drawbar's own data (`eframe::storage_dir`)
-otherwise, never the system's temporary folder, and in `.drawbar/tmp/` of the
-private storage in the browser, through a `library-writer.js` of the device's own.
+offers no sync at all. The file (`device::scratch`) is in `rescued/` of this
+install's own state for the library on the desktop while the library may be
+written, or a `rescued` folder of drawbar's own data (`eframe::storage_dir`)
+otherwise, never the system's temporary folder or the library, and in
+`.drawbar/tmp/` of the private storage in the browser, through a
+`library-writer.js` of the device's own.
 The restore runs in a session of its own once the failed write's session has
 closed (`worker::put_back`): the instrument drops a write left unfinished when its
 session closes, but keeps it as an object in another slot when a second write
@@ -510,22 +437,18 @@ follows it in the same session. The file is deleted once the slot holds what it
 should. Where the restore fails as well, or a delete may have landed, it stays,
 `DeviceEvent::Kept` names it in the log, and the next open offers it. It is the
 only copy drawbar keeps. The file is named as its rescue,
-`nord-rescued-<bank>-<slot>.<tag>`, numbered where that name is taken, and the
-open's sweep of `tmp/` leaves those names, since one left by an interrupted write
-is the slot's only copy. It removes the `.partial` ones, which never are, as the
-open does in the `rescued` folder.
+`nord-rescued-<bank>-<slot>.<tag>`, numbered where that name is taken. An open
+removes the `.partial` ones, which never are a slot's only copy.
 
-Once an open's listing is complete, in a library that may be written, each file
-named that way in its `tmp/` and, on the desktop, in the `rescued` folder is
-offered in a question (`Browser::ask_rescue`). Each is read through first and
-checked against its stored checksum (`envelope::verify`). One that does not read
-is said to be no copy of the slot, and offered only to be discarded. **Keep in
-library** renames one
-in `tmp/` into the library's top level under its own name, or a free one, and
-rescans; one in `rescued` is copied in as a file from outside and deleted once
-the copy lands. **Show the file** opens its folder and asks again. **Discard**
-asks once more, then deletes it. **Later** leaves it to be offered at the next
-open.
+Once a library that may be written opens, each file named that way in both
+`rescued` folders is offered in a question (`Browser::ask_rescue`). Each is read
+through first and checked against its stored checksum (`envelope::verify`). One
+that does not read is said to be no copy of the slot, and offered only to be
+discarded. **Keep in library** copies it into the library's top level under its
+own name, or a free one, with the slot its name gives as its origin, and deletes
+it once the copy lands. **Show the file** opens its folder and asks again.
+**Discard** asks once more, then deletes it. **Later** leaves it to be offered at
+the next open.
 
 The queue compares a resting file with a slot's occupant by the checksum its
 check took, so its diff says only whether the bodies differ. The instrument
@@ -536,347 +459,160 @@ same length is read through `op::read_into` into `std::io::sink()`
 
 ## The store protocol
 
-`Store` (`store/mirror.rs`) is the app's side of a library. It mirrors the
-workspace onto the files and folds what it hears back into it. A backend runs
-what it is told against the files. They talk in `Cmd`s and `Event`s
-(`store/mod.rs`), and the app never waits for an answer: the desktop backend
-runs on a thread of its own, and the browser's storage answers only
-asynchronously.
+`Store` (`store/mirror.rs`) is the app's side of a library. It turns what the
+user asked of the workspace into intents, and folds what it hears back into the
+workspace. A backend runs what it is told. They talk in `Cmd`s and `Event`s
+(`store/mod.rs`), and the app never waits for an answer: the desktop backend runs
+on a thread of its own, which owns the toshokan library (`store/keeper.rs`), and
+reads files and makes folders through `exec::Fs` (`store/native.rs`).
 
 | Command | Answered by |
 |---|---|
-| `Open` | `Opened`, then `Listed` parts, then `Complete`. Only `Opened(Err)` if it failed. |
-| `Scan` | `Scanned`: the whole tree again, rereading only held files whose stat moved. |
-| `Check` | `Checked`: the named files again, without listing the tree. |
-| `Walk(dir)` | `Walked`, once `dir` is listed whole ahead of the rest of an open. |
-| `Read` | `Read`: each file, held whole or resting, or why not. |
-| `Fingerprint` | `Fingerprinted`: the CRCs of files whose stat has not moved. |
-| `Save` | `Saved`: the new fingerprint, or why not. |
-| `Rewrite` | `Rewritten`: a resting file written again with an edit, found as a listing finds it, or why not. |
-| `Import` | `Imported`: a copy of a file from outside or of the library's own, found as a listing finds it, or why not. |
-| `Move` | `Moved`: whether the rename happened. |
-| `Commit` | `Committed`: whether the working copies and the index were written, or the step that failed, its file and why (`Unkept`). A failure at the same step for the same cause is logged once, though each retry names a new working copy, until a commit lands. `ReadOnly` where another drawbar changed the index. |
-| `MakeDir`, `RemoveFile`, `RemoveDir`, `DropUnindexed`, `SetAside` | Only `Failed`, on failure. |
+| `Open` | `Opened`: whether the library may be written, the view after a scan of every file, the drafts an earlier session kept, and how many changes a restored folder no longer holds. |
+| `Rescan` | `Scanned`: what other drawbars wrote, and every file scanned again. |
+| `Refresh` | `Scanned`: what other drawbars wrote, scanning only the files their entries moved. |
+| `Intent` | A change to a file answers `Saved`, `Rewritten`, `Imported`, `Moved` or, for a delete that failed, `Failed`; then every intent answers `Committed`, with the view after it and whether it was made. |
+| `Undo`, `Redo` | `Committed`, with the files no entity is bound to that it moved. |
+| `Draft`, `Discard` | Only `Unkept`, on failure. |
+| `File(Read)` | `Read`: each file, held whole or resting, or why not. |
+| `File(MakeDir)`, `File(RemoveDir)` | Only `Failed`, on failure. Then `Viewed`. |
 
-Every command that writes first makes `.drawbar/` and takes the lock. Where it
-cannot, it runs no further and is answered by `Event::ReadOnly`.
+The intents are `Tag`, `Untag`, `MakeTag`, `RenameTag`, `RemoveTag` and `Forget`
+for the facts, and `Save`, `Rewrite`, `Import`, `Move`, `MoveFolder` and `Delete`
+for the files. A change to a file names it by its path; the backend finds the
+entity bound there, if any, in the view it commits against. A new file whose
+asset came from a slot, a rescue or New is made as an entity's file, with its
+origin. A delete moves the file to the trash and ends its entity.
 
-Both backends implement one async trait, `exec::Fs`: list a folder, stat, read,
-create, replace, rename, make and remove. `exec::run` executes every command
-against it, so the protocol's behavior is one piece of code. The desktop's
-calls finish before they return, and `exec::execute` blocks on them on the
-backend's thread (`store/native.rs`). The browser runs them in a task of its own
-on the page's thread (`store/web.rs`).
+### Asking for changes
 
-### Ordering
+The workspace records each change to a file the user makes, where the user makes
+it (`workspace::FileAsk`): a save, which makes the file where the asset has none;
+a move; and a delete. Following a change the library made, or one made outside
+drawbar, asks for nothing (`Workspace::follow`). Folder changes are queued the
+same way by the browser's folders (`folders::Op`), and copies by the workspace's
+arriving assets. `Store::sync` takes them in order and sends each as an intent.
 
-Commands run in the order sent, each after the one before. An open's listing can
-take a long time, so the commands sent while it is in flight run between two of
-its folders, and the rest of the listing follows what they did:
+A change waits for the answer to one before it where it depends on it: a write
+over a file whose last write has not answered, and anything that touches a
+rename not yet answered, since were the rename refused, the change would act on
+whatever else has that name. A change that waits holds back every one after it.
+While a rescan is in flight, `Store::sync` sends nothing, so the rescan's listing
+describes the files as the commands before it left them.
 
-- A rename moves the folders still to be listed, and a file it moved is not
-  listed again at its new path.
-- A file a save wrote is not listed again.
-- A folder made or removed is added to or dropped from the walk.
-- A `Walk(dir)` moves `dir` and what is in it to the front of the queue. A
-  folder's removal waits on it, since the folder must be listed whole before the
-  app knows it is empty.
+A change to the tags names an asset by the file the library knows it by. A tag
+for an asset whose file is still on its way waits for it; one for an asset whose
+file could not be written goes without it, and says so (`Store::writes`).
 
-Each `Listed` part carries `ran`: how many commands sent since the open had run
-when it was gathered. A part gathered before a rename names what the rename
-moved by its old path. The store counts the commands it sends, so it can bring
-such a path to where it is now. It does so only once the rename has answered
-`Moved` with success; until then, every part gathered before it is held back, in
-order (`Loading::waits`). A rename that failed leaves the paths where they were.
+### Undo
 
-```mermaid
-sequenceDiagram
-    participant Store
-    participant Backend
-    participant Disk
-    Store->>Backend: Open
-    Backend->>Disk: lock, read the index and working copies, sweep
-    Backend-->>Store: Opened
-    Backend-->>Store: Listed (the index's rows, ran 0)
-    Note over Store: the user renames Kits to Drums
-    Store->>Backend: Move Kits to Drums (command 1)
-    Backend->>Disk: list one folder
-    Backend-->>Store: Listed (Kits/a.ne5p, ran 0)
-    Note over Store: held: gathered before a rename not yet answered
-    Backend->>Disk: rename Kits to Drums
-    Backend-->>Store: Moved, ok
-    Note over Store: release the held part, as Drums/a.ne5p
-    Backend->>Disk: list Drums/Low, where Kits/Low was queued
-    Backend-->>Store: Listed (Drums/Low/b.ne5p, ran 1)
-    Backend-->>Store: Complete (ran 1)
-```
-
-A change that depends on a rename not yet answered is not sent until it
-answers. Were the rename refused, the change would act on whatever else has that
-name on disk. `Store::sync` holds back the first folder change that touches an
-unsettled rename, and every change after it, and holds a file's save or move
-into or out of such a folder for the next sync.
-
-While a rescan is in flight, `Store::sync` sends nothing. The rescan's listing
-must describe the files as the commands before it left them, or a file moved
-after it was sent would read as one deleted and another made.
+Every intent is one step of this session's undo, and only this session's: an
+undo takes back the last change this drawbar made and has not undone, with
+toshokan restoring what the trash holds, and refuses where another drawbar
+changed the same thing since. The Edit menu names each step by its intent and
+what it names (`Intent::describe`), from the steps the library made
+(`Committed::made`); a change that failed is no step. The workspace follows what
+an undo moved or changed without a word about changes outside drawbar
+(`Viewed::undone`). A folder's rename is undone file by file, so the folder it was
+renamed to stays, empty.
 
 ## Writes and crash safety
 
-Every write rests on two operations of `Fs`. `create` writes a new file and
-appears whole or not at all, refusing a name already taken. `replace` writes
-over a file, and after it, or after a crash at any point, the path holds the old
-contents or the new, never part of either.
+Every write to a library file is toshokan's, as its `SPEC.md` describes: the new
+file is staged in the writer's `tmp/` and synced, every precondition is checked,
+a pending record says what will happen, then displaced bytes move to the writer's
+`trash/` and the staged file is moved into place, each move durable before the
+next. A crash at any point leaves each path holding its old bytes or its new
+ones, and the next open finishes or rolls back what the record says. On macOS and
+Linux every step survives a power cut; Windows cannot sync a folder, so there a
+move survives a crash but may not survive a power cut. A file is never read whole
+to write it: bytes held whole are written from memory, and every copy and every
+edit through a resting file is streamed a chunk at a time.
 
-### On the desktop
+Nothing reaches outside the library: a path through a folder that is a link is
+refused, on drawbar's reads and on toshokan's writes alike. A rename that only
+changes case goes through a free name beside the file, since on a disk that
+ignores case the new name reaches the file itself.
 
-`replace` writes the temporary file, syncs it to the disk, renames it over the
-target, and then syncs the target's folder, so on macOS and Linux the rename
-survives a power cut as well as a crash. Windows cannot open a folder to sync it,
-so there a rename survives a crash but may not survive a power cut. `create` does the same with a hard link in place of the
-rename, because a link refuses a name already taken; on a volume without links
-it falls back to a check and a rename. A rename is refused where another entry
-is at the target, except a rename that only changes case, which finds the entry
-itself there. Folder syncs run on Unix only.
+The trash keeps what a delete or a save displaced for undo. Opening a library that
+may be written empties this writer's trash of what was displaced more than 30
+days ago, and then of the oldest past 1 GiB (`toshokan::Policy::default`).
 
-### The order of a pass
+### Drafts
 
-`Store::sync` brings the files level with the workspace. A `Pass::Files` writes
-the files at once, on any frame that changed the list. A `Pass::Full` also
-writes the working copies and the index, at most every 2 seconds and on
-eframe's 5-second autosave, so a crash loses the edits made since the last one. At exit, `Store::close` waits for the saves and
-renames in flight, then runs a `Pass::Last`, repeating until nothing more is
-sent, so the last index carries every save's fingerprint. One pass sends, in
-order:
+An unsaved edit is kept as a toshokan draft in this install's own state, never in
+the library (see [This install's own state](#this-installs-own-state)). A
+`Pass::Full`, at most every 2 seconds and on eframe's 5-second autosave, keeps
+each edit that changed since it was last kept, and lets go of the drafts of
+assets saved, gone or known by another key since; at exit, `Store::close` waits
+for what is in flight, then runs a `Pass::Last`, repeating until nothing more is
+sent. A crash loses the edits made since the last full pass. A draft is made only
+over a file drawbar has read, by its identity, so an asset never written, or a
+view, has none. A library that cannot be written keeps no drafts, and says so when
+it opens.
 
-1. the folder changes, except removals;
-2. each asset's new file, rename, or save;
-3. the deletions of assets gone from the workspace;
-4. the folder removals, once what was in them has moved;
-5. one `Commit`: the new working copies, then the index, then the deletions of
-   the working copies the index no longer names.
+At open, each draft is put back over its asset once the asset's file is read,
+which the open asks for. A draft whose file no longer holds what it was made over
+is put back over the file as it is now, and the user is asked which to keep (see
+[Conflicts](#conflicts)). One whose file is gone is kept for when it is back.
 
-So a working copy exists before an index names it, and is deleted only after
-the index stops naming it. An unsaved edit's working copy is dropped only once
-its save has answered. A save whose working copy holds an older edit carries it
-(`store::Stale`) and writes the copy of what it saves over that copy before the
-file, so a crash after a save lands and before the next index leaves a working
-copy of what the file holds. The next open sees that and does not count the asset
-as unsaved. A copy newer than the save is left alone, and after a crash it comes
-back over the file as a change made outside drawbar would. A save whose working
-copy holds exactly the bytes it writes (`store::Cmd::Save`'s `promote`) moves the
-copy into place instead of writing the bytes again: on the desktop by a rename,
-or a hard link where the file is new, and in the browser's private storage by
-`move()`. It needs no room of its own, so a save on a nearly full disk does not
-fail for want of the room the copy already takes. Where the backend cannot move
-it, as in a picked folder, across volumes or on one without links, the save
-writes the bytes as any other does.
+### Opening and read-only
 
-A save over a file sends the file's fingerprint and lands only where the file
-still holds it: its stat is the one taken, or else its CRC is. A file that moved
-or changed answers `Failure::Moved`, the edit stays unsaved, and a rescan
-follows. A deletion checks the same way, and a file that changed is left. A
-save of a new file that finds its name taken puts the asset under a free name
-in the library's top level at the next sync.
+Opening reads the logs and this install's cached view, then scans every file.
+Opening writes nothing in the folder: a writer's directory is made at its first
+change. A library opens read-only where toshokan finds it cannot write: the
+folder cannot be written, or this writer's own log holds entries a newer build
+wrote. Several drawbars may write one library at once, so another drawbar's open
+makes none read-only. Changes in a read-only library are held in memory only.
 
-The index is written only once it holds something no file says (tags, a
-working copy, or a slot an asset came off), or once drawbar has written to the
-library. An unchanged index is not written again.
-
-### Opening, the lock and read-only
-
-Where `.drawbar/` exists, opening takes the lock first, then reads the index and
-the working copies it names, so no other drawbar changes them in between. Nothing
-else is written before the index is read. A library that opens read-only lets
-the lock go. One that may be written is swept: everything in `tmp/` but the
-rescues, every working copy the index does not name, and, once the walk has
-found them, the `.drawbar-tmp` siblings. A library drawbar has never written
-holds nothing to sweep, and its lock is taken at the first write.
-
-On the desktop the lock is an exclusive `File::try_lock` on `.drawbar/lock`,
-held for as long as the backend lives. A library opens read-only when its index
-is newer, holds what this build does not know, or does not read, when a working copy the index names does not read,
-when the index is missing but `working/` is not, or when another drawbar holds
-the lock. Working copies are found only through the index, so a sweep without it
-would delete every one, and an index put back finds them only where they were.
-Once listed, such a library asks (`Browser::ask_unindexed`): **Keep read-only**,
-or **Open without them**, which, confirmed with the number of edits it loses,
-sends `Cmd::DropUnindexed` and opens the library again. The command deletes the
-copies only while there is still no index. In the browser's private storage
-that answer is the only way to them short of clearing the site's data.
-
-An index that does not parse is damaged. The library opens read-only, and once
-listed it asks (`Browser::ask_damaged`): **Keep read-only**, or **Set it aside
-and open without it**, which, confirmed, sends `Cmd::SetAside` and opens the
-library again. The command renames the index to
-`.drawbar/library.ron.damaged-<n>`, the first free `n`, unless it reads again by
-then; nothing deletes it. While a set-aside index is in `.drawbar/`, the working
-copies it named are kept: a missing index does not make the library read-only,
-no open sweeps `working/`, and the next generation is always above every copy
-there, so none is written over.
-
-A write can also find the library closed to it later: another drawbar took the
-lock first, `.drawbar/` could not be made, or another drawbar wrote the index.
-A lock does not reach every writer: a browser's Web Lock is unseen by another
-browser and by the desktop app. So before a commit writes anything, it compares
-the length and CRC-32 of the index on disk with those this backend last read or
-wrote (`Fs::last_index`), or checks that there is still none, and the index is
-put only over the file it looked at. Where they differ, the commit writes
-nothing, not even its working copies. Then the library turns read-only, every
-save in flight counts as unsaved again, and edits stay in memory. An open that
-fails outright keeps nothing.
+Facts this install showed that no file in the folder holds now, as after a
+restore of the folder from a backup, are let go at open: the folder wins, and the
+log says so once.
 
 ### In the browser
 
-Files in the private file system are written by
-`crates/drawbar/library-writer.js`, a dedicated worker, because the sync access
-handles that write in place exist only in workers. The page drives it with one
-request at a time, each answered once:
+The browser opens no library on this build: what is made in a tab lasts until
+the tab closes, and the store's commands to a library are refused with that
+reason. A later build runs toshokan in a worker on the private file system or a
+picked folder.
 
-| Request | Does |
-|---|---|
-| `lock` | Hold `.drawbar/lock` open for as long as the worker lives. False when another worker holds it. |
-| `begin` | Create or empty a file and hold it open for writing. |
-| `write` | Write a transferred `ArrayBuffer` at an offset. |
-| `end` | Flush the file and let it go. |
-| `abandon` | Let a file go, if it is held, and delete it. |
-| `unlock` | Let go of the lock and every file held, as the library is let go, so the next library's lock, which may be this library's again, never finds them still held. |
+## Identities and expectations
 
-```mermaid
-sequenceDiagram
-    participant Page
-    participant Worker as library-writer.js
-    participant OPFS
-    Page->>Worker: begin .drawbar/tmp/3.ne5p
-    Worker->>OPFS: createSyncAccessHandle, truncate
-    loop each 4 MiB chunk
-        Page->>Worker: write (at, data)
-        Worker->>OPFS: write at offset
-    end
-    Page->>Worker: end
-    Worker->>OPFS: flush, close
-    Page->>OPFS: move(folder, name) over the target
-    Note over Page,Worker: on failure, abandon deletes it
-```
-
-Every file is staged under `.drawbar/tmp/` with its target's extension, since
-Chrome reads a file moved to a new extension whole, for a Safe Browsing check,
-before the move lands. Then `move(folder, name)` puts it in place, replacing a
-file already there. In a picked folder the page writes through
-`createWritable`, which applies to the file only as the stream closes, and a
-Web Lock named for the folder, taken with `ifAvailable`, keeps a second tab to
-reading. Reads go through `File` snapshots in 4 MiB slices.
-
-Brave refuses `move()` everywhere but the private file system. The first
-`NotSupportedError` in a picked folder is remembered for the library, and from
-then on nothing is moved there (`store::dom::Moves`). A save writes its target
-in place through `createWritable`: Chromium writes the stream to a swap file
-beside it, `<name>.crswap`, and moves that over the file as the stream closes,
-so a file already there still changes all at once, and the staged copy is then
-removed. A save over a file looks at it again just before the stream closes,
-and aborts where its stat moved. A new file is made empty first, so a crash
-before its stream closes leaves it empty; one found already holding bytes is
-another program's, refused as taken, and a failed write removes only an empty
-file it made, untouched since. A rename copies the file to its new name and
-then removes the old one, so one interrupted between the two leaves the file at
-both names, none lost. The old file is looked at again before it is removed,
-and one that changed while it was copied is kept and fails the rename. A folder
-moves this way file by file, and stops at the first file that changed. A
-rename that changes only a file's case goes through `<name>.<n>.drawbar-move`
-as well, and the next open puts a file it left there back, as it does a
-folder.
-
-Two things differ from the desktop. A new file's write checks the name and then
-moves, in two steps, so in a picked folder another program can write between
-them. Chrome cannot move a folder whole, so a folder moves file by file, and an
-interrupted move leaves its files split between the two names, none lost. A
-rename that changes only case moves through a free name beside the folder,
-`<name>.<n>.drawbar-move`, since on a disk that ignores case the new name reaches
-the folder itself, and a folder is never removed where it is the one moved into.
-
-A closing tab gets no last pass: the browser runs nothing of the page once it has
-gone, and waits for none of its asynchronous writes. eframe saves when the page
-loses focus or is hidden, which sends a pass, but nothing waits for it to land.
-So while `Store::losing` says that letting the library go would lose an edit (one
-no working copy holds yet, an asset never written, a command the backend has
-not run through, or, in a read-only library, a deletion, save, rename, folder or
-tag change held in memory), a `beforeunload` listener cancels the event
-(`closing.rs`), and the browser asks whether to leave. The page keeps running while it asks, so
-staying lets the writes land. A browser asks only after the user has interacted
-with the page, and may close without asking when it discards a tab or quits.
-A folder or file such a rename left under that name when the tab closed is put
-back at the next open, under the spelling the index's rows use, before the
-listing looks for them; where something else has the name it stays, and the log
-says so. Only the top level and the folders that hold a row are looked in. The
-first write to the private file system also asks the browser to keep it through
-a shortage of space. A tab opens a new library only once the one before it has
-run its last command and let go of its lock.
-
-## Fingerprints, reconciliation and conflicts
-
-A fingerprint is a file's length and modification time, nanoseconds on the
-desktop and milliseconds in the browser, plus a CRC-32 once something has read
-the whole file (`store::Fingerprint`). Length and time are trusted: a file whose
-stat is the one taken holds what it held. Where they moved, the CRC decides,
-and a fingerprint without one says only that the file is not known to be the
-same.
-
-The CRC is taken only where the contents decide something:
-
-- matching a file at a new path to a row whose file went missing;
-- checking that a file still holds what drawbar read before a save or deletion
-  over it;
-- the resting check of a piano or sample instrument, and any whole read;
-- in the background, for tracked rows that lack one.
-
-Every read takes the CRC afresh, so a file rewritten under its old length and
-time is fingerprinted by what it now holds. The derived cache holds no CRC; a
-fingerprint's CRC only ever comes from reading the file.
+A fingerprint (`store::Fingerprint`) is what drawbar knows of a file it read or
+wrote: its length and modification time, its CRC-32 once something read the
+whole file, and its identity once drawbar read or wrote it. A change to the file
+expects that file (`Fingerprint::expect`): by its identity where drawbar has it,
+and by the length and time a listing found otherwise, for a file drawbar has not
+read. toshokan reads the identity afresh at the check, so a file rewritten
+outside drawbar under its old length and time is not written over.
 
 ### When drawbar looks again
 
 The store rescans when the window comes back into focus, and before a send to
 the instrument, which waits for the answer and goes ahead only if nothing in the
-send queue changed on disk (`Store::hold_send`). It also rescans after a
-failure that may mean the disk changed: a save refused because the file
-changed, a refused rename, a failed command, or a read of a file that is gone.
-While an open's listing is in flight, a rescan looks only at the files read so
-far (`Cmd::Check`), and the full rescan follows once the listing is complete.
+send queue changed on disk (`Store::hold_send`). It also rescans after a failure
+that may mean the disk changed: a save refused because the file changed, a
+refused rename, a failed command, or a read of a file that is gone. A rescan
+reads what other drawbars wrote, and the log says whose change to the tags it
+was.
 
-A rescan rereads a file drawbar holds only where its stat moved. An unread
-file's new stat replaces its fingerprint, and nothing reads it.
+A rescan rereads a file drawbar holds only where its stat moved. An unread file's
+new stat replaces its fingerprint, and nothing reads it.
 
-### Matching
+### Following changes outside
 
-`store::diff::match_files` decides which file is which asset:
+toshokan binds each entity to its file: at the path its facts give, or, where the
+file moved, at the file the scan found with the identity it last had. An entity's
+file renamed or moved outside drawbar is followed, and the asset keeps its id, its
+tags and its origin. A file no entity is bound to is known by its path alone, so
+its rename outside reads as one file gone and another arrived, and it has nothing
+to lose.
 
-```mermaid
-flowchart LR
-    found["a listed file"] --> named{"known path?"}
-    named -- yes --> stat{"stat as known?"}
-    stat -- yes --> same["unchanged"]
-    stat -- no --> crc{"CRCs known<br/>and equal?"}
-    crc -- yes --> same
-    crc -- no --> edited{"unsaved edit?"}
-    edited -- no --> adopt["changed: shown<br/>as it is now"]
-    edited -- yes --> conflict["changed: rebased,<br/>and the user is asked"]
-    named -- no --> match{"length and CRC<br/>match one missing<br/>row, one to one?"}
-    match -- yes --> renamed["renamed outside drawbar:<br/>id, tags and origin follow"]
-    match -- no --> arrived["a new asset"]
-```
-
-A row whose file is nowhere, and that no new file matches, has vanished. One
+A file drawbar knew that is gone, and that no new file matches, has vanished. One
 with nothing precious leaves the list as deleted outside drawbar. One with tags,
 an unsaved edit, a slot it came off or a place in the queue stays, marked
-missing. At open, a vanished row with a working copy comes back from that copy,
-marked missing, and one without a copy but with something precious is kept in
-the index as a lost row, shown as missing.
-
-At open, a new file can be a row moved only where its length is that of a row
-not found whose CRC is known. Such a file is listed as an asset of its own, and
-once the walk ends, its CRC is taken a few files at a time. It then gives itself
-up to the row it matches, unless it was edited or queued meanwhile, and its tags
-move to the row.
+missing. After a restart an entity whose file is gone and that wears tags shows
+as a lost row, with its tags, until the user forgets it.
 
 ### Conflicts
 
@@ -884,17 +620,17 @@ A file changed on disk under an unsaved edit is rebased: the file's contents
 become the baseline, and the edit stays. The user is then asked:
 
 - **Keep mine** leaves it so. The next save writes the edit over the file, whose
-  new fingerprint it now expects.
+  new identity it now expects.
 - **Take theirs** reverts to the new baseline.
 - **Keep both** writes the edit as a new file beside it under a free name, and
   reverts the original.
 
 Neither revert writes the changed file again.
 
-At open, a file that changed under a working copy raises the same question,
-unless the working copy holds what the file now holds. An edit's copy is made
-again over the file as it is now, and asks only where the file changed and does
-not already hold the edit. One that no longer applies is kept as it was.
+At open, a draft over a file that changed since raises the same question. An
+edit's draft is made again over the file as it is now, and asks only where the
+file does not already hold the edit. One that no longer applies is kept as it
+was.
 
 ## Names
 
@@ -917,10 +653,11 @@ characters go, spaces and dots are trimmed from the ends, a device name gains a
 leading `_`, and an overlong name is cut, keeping its extension.
 
 Two names in one folder collide when they are equal lowercased by Unicode's
-mapping (`names::key`), since APFS and NTFS compare names without case. No
-normalization form is applied, so a precomposed `é` and `e` with a combining
-accent are two keys. A free name is numbered before the extension: `c3 2.wav`,
-then `c3 3.wav` (`names::free`).
+mapping and in normalization form C (`names::key`), since APFS and NTFS compare
+names without case, and APFS takes a precomposed `é` and `e` with a combining
+accent for one name. toshokan compares a library's paths the same way on macOS
+and Windows, and byte for byte elsewhere (`store::keys::Volume`). A free name is
+numbered before the extension: `c3 2.wav`, then `c3 3.wav` (`names::free`).
 
 The name box in a document's header edits the name a sample or piano stores
 inside itself, and leaves the file's name alone. An instrument from the original
@@ -945,7 +682,7 @@ start. The recent list always offers the default library. A picked folder is
 called by its folder's name where the default library says This computer.
 
 Switching runs the last pass of the library being left, so its unsaved edits
-stay in its working copies and come back unsaved at its next open. Views stay in
+stay in its drafts and come back unsaved at its next open. Views stay in
 the window (see [Views and kept assets](#views-and-kept-assets)), and the left
 library's assets come off the send queue. A read-only library cannot keep
 unsaved edits, so leaving one asks before discarding them. A library that cannot
@@ -980,7 +717,8 @@ In the browser:
 | What | Desktop | Browser |
 |---|---|---|
 | Library files | The library folder | The private file system's root, or the picked folder |
-| Index, working copies, temporary files, lock | `.drawbar/` in the library | `.drawbar/` in the library |
+| Tags, origins, each drawbar's log, staging and trash | `.drawbar/library/` in the library | A later build |
+| Drafts, the cached view, identities, rescues | `libraries/<hash>/` beside `app.ron` | A later build |
 | Theme, panels, Show all files | eframe's store: `app.ron` in the app's data folder | eframe's store, in local storage |
 | MIDI on or off, recent libraries | eframe's store (`drawbar.midi`, `drawbar.libraries`) | |
 | Recent picked folders, as handles | | IndexedDB: database `drawbar`, store `libraries`, key `recent`: `{id, handle, warned}` |
@@ -1004,14 +742,14 @@ drawbar remembers what a read of each file found, so a file it does not read
 this session still draws as it did once read (`summary.rs`, `store/cache.rs`).
 Everything in the cache can be read again from the library, so losing it costs
 only reads. It is never kept in the library. Where it lives on each system is
-under [On the desktop](#on-the-desktop-1) and [In the browser](#in-the-browser-1)
+under [On the desktop](#on-the-desktop) and [In the browser](#in-the-browser-1)
 below.
 
 ### What an entry holds
 
 An entry is a file's length and modification time when it was read, and a
-`Summary` of what the read found. It holds no whole-file CRC, so nothing taken
-from the cache reaches the index's fingerprints:
+`Summary` of what the read found. It holds no whole-file CRC or identity, so
+nothing taken from the cache reaches a fingerprint:
 
 | Field | Meaning |
 |---|---|
@@ -1061,14 +799,12 @@ finds an unread file changed takes its summary away (`Workspace::stale`).
 
 No read is asked, in the foreground or behind, until the cache has answered, so
 a file it remembers is not read meanwhile. A tracked file it remembers is not
-read in the background; its CRC, where the index lacks one, is still taken
-from the file.
+read in the background.
 
 ### Following the library
 
 Entries follow the paths of their files: a rename drawbar makes, of a file or a
-folder, moves them, and so does an outside rename matched by its CRC, at open or
-on a rescan. A rename that failed moves them back, and a file deleted, inside or
+folder, moves them, and so does a move outside drawbar that a scan reports. A rename that failed moves them back, and a file deleted, inside or
 outside drawbar, takes its entry with it. Changes made while the entries are
 still loading are made again over them as they arrive, and an entry put
 meanwhile stands over the one kept.

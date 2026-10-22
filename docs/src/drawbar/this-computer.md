@@ -16,10 +16,11 @@ On the desktop, your library is a folder in drawbar's own data:
 - Windows: `%LOCALAPPDATA%\drawbar\library`
 
 **File ▸ Show the library folder** opens it. Finder, your backups and Nord
-Sample Editor see the same files and folders drawbar does. drawbar keeps tags
-and unsaved edits in a hidden folder beside them, so back up the whole library
-folder. That folder holds nothing about your other files, so it stays small
-however large the library is.
+Sample Editor see the same files and folders drawbar does. drawbar keeps your
+tags, and where each sound came from, in a hidden `.drawbar` folder beside them,
+so back up the whole library folder. That folder says nothing about your other
+files, so it stays small however large the library is. Your unsaved edits are
+kept on this computer, in drawbar's own data, never in the library folder.
 
 In the browser, your library is kept in the browser's own storage for
 drawbar.app, where nothing else can see it. Clearing the site's data deletes it,
@@ -32,6 +33,11 @@ Editor project, a sample pack, a folder on a shared drive. **File ▸ Open recen
 library** switches back. drawbar opens the last library again when it starts,
 and changes nothing in a folder until you change something there. Unsaved edits
 stay with their library and come back when you open it again.
+
+Several drawbars can use one library at once: on two computers that sync the
+folder, or in two windows. Each keeps its own record of what it changed in the
+hidden folder, so neither overwrites the other's. When you come back to the
+window, drawbar shows what the others changed, and the activity log says so.
 
 This works on the desktop and in Chrome and Edge. Firefox and Safari cannot open
 a folder. Brave can once you turn on `brave://flags/#file-system-access-api` and
@@ -61,11 +67,21 @@ control at zero; it is not a factory sound.
 
 Edits land at once, and the name shows a `*` until you save. **Save** (⌘S)
 writes the file, and queues it for sending if the sound came from a slot on the
-connected instrument. **Revert** goes back to the last save.
-It is the only undo. Unsaved edits are kept when you quit. drawbar also keeps
-them every few seconds, so after a crash you may lose the last few seconds. In
-the browser, closing the tab before drawbar has kept your latest edit makes the
-browser ask whether to leave. Stay a moment, and the edit is kept.
+connected instrument. **Revert** goes back to the last save. Unsaved edits are
+kept when you quit. drawbar also keeps them every few seconds, so after a crash
+you may lose the last few seconds.
+
+## Undo
+
+**Edit ▸ Undo** (⌘Z) takes back the last change you made to your files and
+tags in this session, and **Edit ▸ Redo** (⇧⌘Z) makes it again. The menu says
+which change it is, such as **Undo Rename “c3.ne5p”**. A save, a new sound, a
+copy, a rename or move, a deletion, and a change to tags can each be undone, one
+at a time. An edit you have not saved is taken back with **Revert** instead.
+
+Deleting a sound moves its file into drawbar's trash in the hidden folder, where
+Undo finds it. drawbar empties the trash of what was deleted more than 30 days
+ago, and of the oldest past 1 GB, when the library opens.
 
 **Export…** saves a copy somewhere else. Rename with F2. If a name is taken,
 drawbar asks whether to **Overwrite** the file there or **Keep both**.
@@ -91,9 +107,8 @@ slot. The activity log lists anything the bundle had to leave out.
 ## Changes made outside drawbar
 
 You can rename, move, edit and delete your files in Finder or any other app.
-drawbar notices when you come back to its window or tab, and a renamed sound
-keeps its tags. drawbar reads a tagged file once in the background; a rename
-before that shows as a new file.
+drawbar notices when you come back to its window or tab, and a renamed or moved
+sound keeps its tags and where it came from.
 
 drawbar never writes over a change made outside it without asking. If a file
 changed while you had unsaved edits to it, drawbar asks what to do:
@@ -113,24 +128,17 @@ bring back any you deleted.
 
 ## If something goes wrong
 
-- **Read-only.** Another copy of drawbar has this library open, in another window
-  or browser tab. Close it. Hover the library's name for the reason. Changes you
-  make in a read-only library are held in memory only, and the browser asks
-  before you leave a tab that holds some. A browser tab cannot tell that the
-  desktop app, or another browser, has a folder open, so open a folder in only
-  one of them at a time. If both write to it anyway, the one that writes second
-  turns read-only instead of undoing the other's changes. drawbar also opens a
-  library read-only when its hidden folder has lost the file that lists your
-  unsaved edits, so they are not deleted. On the desktop, put that file back
-  from a backup to get them back. **Open without them** deletes those edits and
-  opens the library as usual.
-- **Damaged index.** The file that keeps your tags, where each sound came from
-  and which sounds have unsaved edits cannot be read, so the library opens
-  read-only. **Set it aside and open without it** renames that file and opens the
-  library without them. The renamed file and the unsaved edits stay in the
-  hidden folder.
+- **Read-only.** drawbar cannot write the library folder, or a newer drawbar
+  has written its hidden folder. Hover the library's name for the reason.
+  Changes you make in a read-only library are held in memory only, and are lost
+  when you quit.
+- **Restored from a backup.** When the library folder no longer holds changes
+  drawbar showed before, as after a restore from a backup, drawbar shows the
+  folder as it is and says so.
 - **Missing.** The file was deleted outside drawbar, but it had tags or unsaved
   edits, or came from your keyboard. Save it to bring the file back, or delete it.
+  After a restart, a missing file with tags shows as lost, with its tags, until
+  you let it go.
 - **A write to the instrument left a file.** If drawbar stopped, or could not
   put the old sound back, while it replaced a sound on your keyboard, the sound
   that was there may now be only on this computer. drawbar offers it when the library opens: **Keep in
@@ -141,7 +149,8 @@ bring back any you deleted.
   lower case, such as `Pad.ne5p` and `pad.ne5p`. macOS and Windows hold only one
   of them, so rename one to keep the library whole on every computer.
 - **Not read** or **not all listed.** drawbar could not read that file or
-  folder.
+  folder, and the activity log names it. What is in such a folder is not shown
+  until drawbar can read it.
 - **Failed verification.** The sample or piano file is damaged. drawbar will not
   send it.
 - **No storage in the browser.** Some private windows give drawbar none. drawbar

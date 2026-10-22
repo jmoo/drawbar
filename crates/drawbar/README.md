@@ -25,7 +25,8 @@ cargo install drawbar
   side, with the pianos and samples they play, as one.
 - Keep a text note beside the sounds for the set list and the cues.
 - On the desktop, or in Chrome and Edge, open any folder as the library, such
-  as a Sample Editor project. Nothing in it changes until you change something.
+  as a Sample Editor project. Nothing in it changes until you change something,
+  and every change to your files can be undone.
 
 Start with [The window](../../docs/src/drawbar/overview.md) in the user guide,
 and read [What is supported](../../docs/src/getting-started/support.md) before

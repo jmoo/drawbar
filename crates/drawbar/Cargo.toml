@@ -35,7 +35,7 @@ nord-format = { path = "../nord-format", version = "0.8.0", features = [
 # `file-handle-inner`: a picked file is copied into the library from its path, or from
 # the browser's `File`, never read whole first.
 rfd = { version = "0.15", features = ["file-handle-inner"] }
-# The library's index. eframe's `persistence` already builds both.
+# Drafts of edits, and the derived cache. eframe's `persistence` already builds both.
 ron = "0.10"
 serde = { version = "1", features = ["derive"] }
 # The library's facts, beside its files.
