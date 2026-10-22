@@ -18,7 +18,7 @@ use crate::error::Result;
 use crate::flow::{self, fold, ok};
 use crate::ids::{EntityId, EntryHash, Identity};
 use crate::io::{Kind, Meta, Root, Task};
-use crate::layout::{is_swap_file, Layout};
+use crate::layout::Layout;
 use crate::log::{FileFact, Op};
 use crate::path::RelPath;
 use crate::report::{Ambiguous, Copied, Moved, ScanReport};
@@ -174,21 +174,50 @@ pub struct Walk {
     listed: BTreeMap<RelPath, Vec<(String, Meta)>>,
     /// The directories to list.
     queue: BTreeSet<RelPath>,
+    /// The directories left out of this walk: a listing failed for them, or the
+    /// walk listed its most entries before it reached them.
+    unlistable: BTreeSet<RelPath>,
+    /// The entries listed so far, and the most a walk lists.
+    entries: usize,
+    most: usize,
 }
+
+/// The most entries, files and directories alike, a walk lists: a guard against a
+/// folder no library is, such as a whole disk.
+pub const MOST_ENTRIES: usize = 1_000_000;
 
 impl Default for Walk {
     fn default() -> Self {
-        Self {
-            listed: BTreeMap::new(),
-            queue: BTreeSet::from([RelPath::ROOT]),
-        }
+        Self::within(MOST_ENTRIES)
     }
 }
 
 impl Walk {
+    /// A walk that lists at most `most` entries.
+    pub fn within(most: usize) -> Self {
+        Self {
+            listed: BTreeMap::new(),
+            queue: BTreeSet::from([RelPath::ROOT]),
+            unlistable: BTreeSet::new(),
+            entries: 0,
+            most,
+        }
+    }
+
     /// The next directory to list; `None` once every directory is listed.
     pub fn next(&self) -> Option<RelPath> {
         self.queue.first().cloned()
+    }
+
+    /// Leaves `dir`, whose listing failed, out of this walk.
+    pub fn unlistable(&mut self, dir: RelPath) {
+        self.queue.remove(&dir);
+        self.unlistable.insert(dir);
+    }
+
+    /// The directories left out of the walk, in order.
+    pub fn unlisted(self) -> Vec<RelPath> {
+        self.unlistable.into_iter().collect()
     }
 
     /// Keeps what listing `dir` found, but toshokan's root and swap files, and
@@ -196,11 +225,9 @@ impl Walk {
     pub fn listed(&mut self, layout: &Layout, dir: RelPath, entries: Vec<(String, Meta)>) {
         let entries: Vec<(String, Meta)> = entries
             .into_iter()
-            .filter(|(name, meta)| match meta.kind {
-                Kind::Directory => dir.join(name).is_ok_and(|path| !layout.owns(&path)),
-                Kind::File => !is_swap_file(name),
-            })
+            .filter(|(name, _)| dir.join(name).is_ok_and(|path| layout.holds(&path)))
             .collect();
+        self.entries = self.entries.saturating_add(entries.len());
         let dirs: BTreeSet<RelPath> = entries
             .iter()
             .filter(|(_, meta)| meta.kind == Kind::Directory)
@@ -220,6 +247,10 @@ impl Walk {
             .collect();
         self.queue.extend(unlisted);
         self.listed.insert(dir, entries);
+        if self.entries >= self.most {
+            let rest = std::mem::take(&mut self.queue);
+            self.unlistable.extend(rest);
+        }
     }
 
     /// Lists again what may have changed at `paths`: each one's directory, and each
@@ -501,12 +532,11 @@ pub(crate) fn identified<'a>(
 /// `scan` with what is at `path`: a file, every file under a directory, or
 /// nothing.
 fn visit<'a>(layout: Rc<Layout>, path: RelPath, scan: Scan) -> flow::Fallible<'a, Scan> {
-    if layout.owns(&path) {
+    if !path.is_root() && !layout.holds(&path) {
         return ok(scan);
     }
     flow::stat(Root::Folder, &path).and_then(move |meta| match meta {
         Some(meta) if meta.kind == Kind::Directory => walk(layout, path, scan),
-        Some(_) if path.name().is_some_and(is_swap_file) => ok(scan),
         Some(meta) => ok(found(scan, path, meta)),
         None => ok(scan),
     })
@@ -517,9 +547,8 @@ fn walk<'a>(layout: Rc<Layout>, dir: RelPath, scan: Scan) -> flow::Fallible<'a, 
         fold(entries.into_iter(), scan, move |scan, (name, meta)| {
             let path = dir.join(&name).expect("a listed name is one component");
             match meta.kind {
-                Kind::Directory if layout.owns(&path) => ok(scan),
+                _ if !layout.holds(&path) => ok(scan),
                 Kind::Directory => walk(Rc::clone(&layout), path, scan),
-                Kind::File if is_swap_file(&name) => ok(scan),
                 Kind::File => ok(found(scan, path, meta)),
             }
         })
@@ -1236,6 +1265,52 @@ mod tests {
                 "{slice}-item slices"
             );
         }
+    }
+
+    fn entry(name: &str, kind: Kind) -> (String, Meta) {
+        let meta = Meta {
+            kind,
+            len: 1,
+            modified: Some(1),
+        };
+        (name.to_owned(), meta)
+    }
+
+    #[test]
+    fn a_walk_past_its_most_entries_leaves_the_directories_it_did_not_reach() {
+        let layout = Layout::new(".lib").unwrap();
+        let mut walk = Walk::within(3);
+        let dirs = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| entry(name, Kind::Directory))
+                .collect()
+        };
+        walk.listed(&layout, RelPath::ROOT, dirs(&["a", "b"]));
+        assert_eq!(walk.next(), Some(path("a")));
+        walk.listed(&layout, path("a"), vec![entry("x.npno", Kind::File)]);
+        assert_eq!(walk.next(), None, "three entries listed");
+        assert_eq!(walk.unlisted(), [path("b")]);
+    }
+
+    #[test]
+    fn a_hiding_walk_lists_no_name_that_starts_with_a_dot() {
+        let layout = Layout::new(".lib").unwrap().hiding();
+        let mut walk = Walk::default();
+        let entries = vec![
+            entry(".git", Kind::Directory),
+            entry(".DS_Store", Kind::File),
+            entry("Live", Kind::Directory),
+            entry("a.npno", Kind::File),
+        ];
+        walk.listed(&layout, RelPath::ROOT, entries);
+        assert_eq!(walk.next(), Some(path("Live")));
+        walk.listed(&layout, path("Live"), Vec::new());
+        assert_eq!(walk.next(), None, ".git is not entered");
+        let mut found = Scan::default();
+        walk.found_after(&mut found, None, usize::MAX);
+        let files: Vec<&RelPath> = found.files.keys().collect();
+        assert_eq!(files, [&path("a.npno")]);
     }
 
     #[test]

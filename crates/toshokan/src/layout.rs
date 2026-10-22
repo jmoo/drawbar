@@ -48,6 +48,8 @@ pub struct Layout {
     /// The directory of the folder that holds no library file: `root`, or the app's
     /// own directory around it.
     apart: RelPath,
+    /// Whether a name that starts with a dot is left out of the library.
+    hiding: bool,
 }
 
 impl Layout {
@@ -57,6 +59,7 @@ impl Layout {
         Ok(Self {
             apart: root.clone(),
             root,
+            hiding: false,
         })
     }
 
@@ -68,7 +71,18 @@ impl Layout {
         Ok(Self {
             root: apart.join(name)?,
             apart,
+            hiding: false,
         })
+    }
+
+    /// The same layout, leaving out of the library every file and directory whose
+    /// name starts with a dot, as a file manager hides them: scans neither list nor
+    /// enter them.
+    pub fn hiding(self) -> Self {
+        Self {
+            hiding: true,
+            ..self
+        }
     }
 
     pub fn root(&self) -> &RelPath {
@@ -81,11 +95,19 @@ impl Layout {
         path.starts_with(&self.apart)
     }
 
-    /// Refuses a path in the folder that is not a library file: what the layout
-    /// [owns](Layout::owns), the folder itself, and a browser's swap file.
-    pub fn check_library_path(&self, path: &RelPath) -> Result<()> {
+    /// Whether `path` in the folder can hold library files: neither what the layout
+    /// [owns](Layout::owns), nor a browser's swap file, nor, where the layout is
+    /// [hiding](Layout::hiding), a name that starts with a dot.
+    pub fn holds(&self, path: &RelPath) -> bool {
         let swap = path.name().is_some_and(is_swap_file);
-        match path.is_root() || self.owns(path) || swap {
+        let hidden = self.hiding && path.components().any(|name| name.starts_with('.'));
+        !(self.owns(path) || swap || hidden)
+    }
+
+    /// Refuses a path in the folder that is not a library file: the folder itself,
+    /// and a path the layout does not [hold](Layout::holds).
+    pub fn check_library_path(&self, path: &RelPath) -> Result<()> {
+        match path.is_root() || !self.holds(path) {
             true => Err(Error::InvalidPath {
                 path: path.as_str().to_owned(),
                 reason: "not a library file",
@@ -314,5 +336,16 @@ mod tests {
             .check_library_path(&RelPath::new(".drawbarx").unwrap())
             .is_ok());
         assert!(Layout::within(".drawbar", "a/b").is_err());
+    }
+
+    #[test]
+    fn a_hiding_layout_holds_no_path_with_a_name_that_starts_with_a_dot() {
+        let layout = Layout::within(".drawbar", "library").unwrap().hiding();
+        for text in [".git/config", "Live/.DS_Store", ".hidden.npno"] {
+            assert!(!layout.holds(&RelPath::new(text).unwrap()), "{text}");
+        }
+        assert!(layout.holds(&RelPath::new("Live/a.npno").unwrap()));
+        let plain = Layout::within(".drawbar", "library").unwrap();
+        assert!(plain.holds(&RelPath::new(".git/config").unwrap()));
     }
 }

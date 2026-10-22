@@ -18,6 +18,7 @@ use crate::binding::{
     self, Binding, Bindings, Fact, Facts, Resolving, Scan, Scanned, Unscanned, Walk,
 };
 use crate::cache::{self, Encoding};
+use crate::cow::CowMap;
 use crate::drafts::{self, DraftRecord};
 use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd};
 use crate::env::Env;
@@ -45,7 +46,7 @@ use crate::report::{
 use crate::schema::Schema;
 use crate::trash::{self, Policy};
 use crate::undo::History;
-use crate::view::{FileRef, FileState, Parts, View};
+use crate::view::{FileRef, FileState, Listed, Parts, View};
 use crate::writer::{self, Claimed, Picked, Writer};
 
 pub struct Library {
@@ -84,9 +85,13 @@ pub struct Library {
     ahead: BTreeSet<Hlc>,
     /// The file facts `folded` shows.
     facts: Facts,
-    /// The last scan; before the first, the identities `remembered` keeps. Shared
-    /// with the views.
-    scan: Arc<Scan>,
+    /// The last scan; before the first, the identities `remembered` keeps.
+    scan: Scan,
+    /// Each file the last scan listed, as the views show it; `None` until a scan of
+    /// every file has run.
+    listing: Option<CowMap<RelPath, Listed>>,
+    /// The directories the last scan of every file could not list.
+    unlisted: Vec<RelPath>,
     /// The identities scans read that no fact gives, as the local root should keep
     /// them.
     remembered: Scan,
@@ -276,7 +281,9 @@ impl Library {
             removed: Vec::new(),
             ahead: BTreeSet::new(),
             facts: Facts::new(),
-            scan: Arc::new(remembered.clone()),
+            scan: remembered.clone(),
+            listing: None,
+            unlisted: Vec::new(),
             remembered,
             unkept: false,
             unscanned: Unscanned::default(),
@@ -290,7 +297,7 @@ impl Library {
             view: View::new(Parts {
                 folded: Folded::default(),
                 bindings: Arc::default(),
-                scan: Arc::default(),
+                listing: None,
                 writers: Vec::new(),
                 forks: Vec::new(),
                 gaps: Vec::new(),
@@ -598,6 +605,7 @@ impl Library {
                     changes,
                     removed: library.removed_facts(),
                     scan: library.bindings.report.clone(),
+                    unlisted: library.unlisted.clone(),
                 })
             })
             .task()
@@ -1245,13 +1253,14 @@ impl Library {
         self.reach.resolved();
         let names = &*self.env.names;
         for (path, file) in changes {
-            self.reach.rescan(
-                Arc::make_mut(&mut self.scan),
-                &self.facts,
-                names,
-                path,
-                file,
-            );
+            if let Some(listing) = self.listing.as_mut() {
+                match file {
+                    Some(file) => _ = listing.insert(path.clone(), Listed::of(&file)),
+                    None => _ = listing.remove(&path),
+                }
+            }
+            self.reach
+                .rescan(&mut self.scan, &self.facts, names, path, file);
         }
         paths
     }
@@ -1379,7 +1388,7 @@ impl Library {
         let parts = Parts {
             folded: self.folded.clone(),
             bindings: Arc::clone(&self.bindings),
-            scan: Arc::clone(&self.scan),
+            listing: self.listing.clone(),
             writers: self.writer_infos(),
             forks,
             gaps,
@@ -1803,7 +1812,7 @@ fn presumed_bound(mut library: Library) -> Flow<'static, Library> {
         .unscanned
         .add(vec![RelPath::ROOT], &library.bindings);
     library.reach.everything();
-    let scan = Scan::clone(&library.scan);
+    let scan = library.scan.clone();
     rebound(library, scan)
 }
 
@@ -1822,11 +1831,14 @@ fn walk<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
     let Some(dir) = next else {
         return walked(library);
     };
-    flow::list_stat(Root::Folder, &dir).and_then(move |entries| {
+    flow::list_stat(Root::Folder, &dir).then(move |listed| {
         let mut library = library;
         let known = library.borrow_mut();
         if let Some(walking) = known.walking.as_mut() {
-            walking.listed(&known.layout, dir, entries);
+            match listed {
+                Ok(entries) => walking.listed(&known.layout, dir, entries),
+                Err(_) => walking.unlistable(dir),
+            }
         }
         walk(library)
     })
@@ -1860,11 +1872,22 @@ fn walked<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
     .and_then(move |(library, (scan, read))| {
         let mut library = library;
         let known = library.borrow_mut();
-        known.walking = None;
-        if !known.unscanned.is_empty() {
+        let unlisted = known
+            .walking
+            .take()
+            .map(|walk| walk.unlisted())
+            .unwrap_or_default();
+        let listing = scan
+            .files
+            .iter()
+            .map(|(path, file)| (path.clone(), Listed::of(file)));
+        known.listing = Some(CowMap::from_sorted_iter(listing));
+        if !known.unscanned.is_empty() || !unlisted.is_empty() {
             known.unscanned = Unscanned::default();
+            known.unscanned.add(unlisted.clone(), &known.bindings);
             known.reach.everything();
         }
+        known.unlisted = unlisted;
         known.reach.resolved();
         known.behind.remove(&Lag::Scan);
         rebound(library, scan).then(move |library| {
@@ -1876,10 +1899,10 @@ fn walked<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
 /// Binds the facts to `scan` a slice at a time, unless neither changed.
 fn rebound<'a, L: BorrowMut<Library> + 'a>(mut library: L, scan: Scan) -> Flow<'a, L> {
     let known = library.borrow_mut();
-    if !known.reach.due() && scan == *known.scan {
+    if !known.reach.due() && scan == known.scan {
         return Flow::Done(library);
     }
-    known.scan = Arc::new(scan);
+    known.scan = scan;
     known.reach.everything();
     bind_everything(library)
 }

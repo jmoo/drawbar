@@ -584,6 +584,8 @@ through_both!(
     swap_files_a_browser_left_are_neither_scanned_nor_read,
     a_view_lists_each_library_files_length_once_scanned,
     a_file_expected_as_listed_is_refused_once_its_length_or_time_moved,
+    a_directory_that_cannot_be_listed_leaves_its_files_unknown_and_the_rest_scanned,
+    a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept,
     losing_the_local_root_at_any_step_loses_only_drafts,
     a_crash_at_any_step_is_settled_before_the_next_write,
     an_empty_record_of_this_writer_is_removed_by_its_next_write,
@@ -2432,6 +2434,58 @@ fn a_file_expected_as_listed_is_refused_once_its_length_or_time_moved<F: Facade>
         tags(&a.view(), a.view().at(&path("a.wav")).unwrap().id()),
         [tag("Sunday")]
     );
+}
+
+fn a_directory_that_cannot_be_listed_leaves_its_files_unknown_and_the_rest_scanned<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let kept = create(&mut a, "locked/kept.npno", b"kept");
+    put(&folder, "open.wav", b"open");
+    put(&folder, "locked/new.wav", b"new");
+    let locked = path("locked");
+    fail(&probe, move |io| {
+        matches!(io, Io::List { .. } | Io::ListStat { .. }) && io.path().starts_with(&locked)
+    });
+    let refreshed = a.rescan().unwrap();
+    assert_eq!(refreshed.unlisted, [path("locked")]);
+    let view = a.view();
+    assert_eq!(view.unbound(), [path("open.wav")], "the rest is scanned");
+    let file = view.entity(kept).unwrap().file().unwrap();
+    assert_eq!(
+        (file.path, file.state),
+        (path("locked/kept.npno"), FileState::Unscanned),
+        "unknown, not missing"
+    );
+    heal(&probe);
+    let refreshed = a.rescan().unwrap();
+    assert_eq!(refreshed.unlisted, [] as [RelPath; 0]);
+    let view = a.view();
+    assert_eq!(view.unbound(), [path("locked/new.wav"), path("open.wav")]);
+    let file = view.entity(kept).unwrap().file().unwrap();
+    assert_eq!(file.state, FileState::InSync);
+}
+
+fn a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    create(&mut a, "song.npno", b"song");
+    put(&folder, "copy.npno", b"song");
+    put(&folder, "same.npno", b"sang");
+    a.rescan().unwrap();
+    a.close().unwrap();
+    assert!(
+        local_file(&here, "identities.json").is_some(),
+        "the scan kept the identities it read"
+    );
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    assert_eq!(a.view().listed(&path("same.npno")), None);
+    assert_eq!(a.view().listed(&path("song.npno")), None);
+    a.rescan().unwrap();
+    assert_eq!(a.view().listed(&path("same.npno")).map(|l| l.len), Some(4));
 }
 
 /// The scenario losing the local root interrupts: every step a user might take.

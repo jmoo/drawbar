@@ -242,6 +242,9 @@ pub struct Refreshed {
     /// What the files scanned so far hold against the logged facts; empty until
     /// a scan of every file has succeeded.
     pub scan: ScanReport,
+    /// The directories the last scan of every file could not list. What is under
+    /// them is unknown, as after a failed scan, until a scan lists them.
+    pub unlisted: Vec<RelPath>,
 }
 
 /// One change to what a reader sees.
