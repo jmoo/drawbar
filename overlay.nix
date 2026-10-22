@@ -732,7 +732,8 @@ in
     # Not in `all`: each boots VMs, and replaying takes long.
     // optionalAttrs (final.stdenv.hostPlatform.system == "x86_64-linux") {
       toshokan-power-loss =
-        final.linkFarm "toshokan-power-loss" toshokanPowerLoss.replay // toshokanPowerLoss.replay;
+        (final.linkFarm "toshokan-power-loss" toshokanPowerLoss.replay).overrideAttrs
+          { passthru = toshokanPowerLoss.replay; };
       toshokan-power-loss-smoke = toshokanPowerLoss.smoke;
     }
     // mapAttrs' (name: nameValuePair "${name}-corpus") committed

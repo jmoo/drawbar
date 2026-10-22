@@ -4,6 +4,7 @@
 {
   coreutils,
   gnugrep,
+  gnused,
   lib,
   lvm2,
   power-loss,
@@ -60,12 +61,13 @@ let
   };
 
   # Checks every run of round ROUND on FS whose setup was marked, with the steps
-  # it marked as acknowledged.
+  # it marked, and the entries they name, as acknowledged.
   smoke-check = writeShellApplication {
     name = "power-loss-smoke-check";
     runtimeInputs = [
       coreutils
       gnugrep
+      gnused
       power-loss
     ];
     text = ''
@@ -75,8 +77,9 @@ let
         name=$(basename "$marks")
         workload=''${name#r*-*-}
         acked=$(grep -c '^step-' "$marks" || true)
+        mapfile -t entries < <(sed -n 's/^step-[0-9]*://p' "$marks")
         checked=$((checked + 1))
-        power_loss check "$workload" "/mnt/$fs/$name" "$acked" || failed=$((failed + 1))
+        power_loss check "$workload" "/mnt/$fs/$name" "$acked" "''${entries[@]}" || failed=$((failed + 1))
       done
       echo "$fs round $round: $checked runs checked, $failed failed"
       [ "$checked" -gt 0 ] && [ "$failed" -eq 0 ]

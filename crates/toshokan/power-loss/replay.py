@@ -7,11 +7,14 @@ MKFS is the command that makes FS on the device appended to it.
 The workload runs on FS over a dm-log-writes target, which logs every write,
 flush and FUA, and the marks power_loss drops once each step returns. The log is
 then replayed onto a fresh device up to each flush after the setup mark. Between
-two flushes, SAMPLES further states each keep every FUA write before a random
-cut and each other write before it with even odds, as the device may persist any
-of them. Each state is mounted on a throwaway snapshot, so the file system's own
-recovery runs, and checked by power_loss with the steps marked before it as
-acknowledged. An exFAT state that fsck.exfat finds corrupt is counted apart.
+two flushes, the device may persist any of the writes: one state each keeps all
+of them but one, and SAMPLES further states each keep every FUA write before a
+random cut and each other write before it with even odds. A write itself is
+replayed whole. Each state is mounted on a throwaway snapshot, so the file
+system's own recovery runs, and checked by power_loss with the steps marked
+before it as acknowledged, and the entries their marks name. An exFAT state that
+fsck.exfat finds corrupt is checked too, but counted apart and never fails the
+run: no protocol above the file system can keep it whole.
 """
 
 import collections
@@ -73,6 +76,7 @@ def entries():
 
 
 def record(mkfs, workload):
+    """Runs the workload over the logging target; the labels of its step marks."""
     sh("blkdiscard", "-f", "-z", DATA)
     sh("blkdiscard", "-f", "-z", REPLAY)
     sh("dmsetup", "create", LOGGED, "--table",
@@ -81,38 +85,50 @@ def record(mkfs, workload):
     sh(*mkfs.split(), logged)
     sh("mkdir", "-p", RUN)
     sh("mount", "-o", "noatime", logged, RUN)
-    sh("power_loss", "run", workload, f"{RUN}/{workload}", f"dm:{LOGGED}")
+    ran = sh("power_loss", "run", workload, f"{RUN}/{workload}", f"dm:{LOGGED}")
     sh("dmsetup", "message", LOGGED, "0", "mark", "end")
     sh("umount", RUN)
     remove(LOGGED)
+    return ran.stdout.split()
 
 
-def check(fs, workload, acked, extra):
-    """Checks the replay device's state, with the entries `extra` written over
-    it, on a snapshot: what the check found, why it failed, or None for an exFAT
-    state that exFAT's own check finds corrupt, which no protocol above it can
-    keep whole."""
+def runs(kept, flags):
+    """`kept`, ascending log entries, as runs (first, count) that also take in
+    the marks between them, which write nothing."""
+    found = []
+    for i in kept:
+        if found and all(flags[j] & MARK for j in range(sum(found[-1]), i)):
+            found[-1] = (found[-1][0], i - found[-1][0] + 1)
+        else:
+            found.append((i, 1))
+    return found
+
+
+def check(fs, workload, labels, extra):
+    """Checks the replay device's state, with the runs of log entries `extra`
+    written over it, on a snapshot, once the steps `labels` mark returned: whether
+    fsck.exfat finds it corrupt, and what the check found or why it failed."""
     sh("dmsetup", "create", SNAPSHOT, "--table",
        f"0 {sectors(REPLAY)} snapshot {REPLAY} {COW} N 8")
     snapshot = f"/dev/mapper/{SNAPSHOT}"
     try:
-        for i in extra:
-            replay(snapshot, i, 1)
+        for start, count in extra:
+            replay(snapshot, start, count)
         if fs == "btrfs":
             sh("btrfs", "device", "scan", "--forget")
-        if fs == "exfat" and sh("fsck.exfat", "-n", snapshot, check=False).returncode != 0:
-            return None
+        corrupt = fs == "exfat" and sh("fsck.exfat", "-n", snapshot, check=False).returncode != 0
         mounted = sh("mount", snapshot, CHECK, check=False)
         if mounted.returncode != 0:
-            return f"mount failed: {mounted.stderr.strip()}"
+            return corrupt, f"mount failed: {mounted.stderr.strip()}"
+        entries = [label.split(":")[1] for label in labels if ":" in label]
         try:
-            checked = sh("power_loss", "check", workload,
-                         f"{CHECK}/{workload}", str(acked), check=False)
+            checked = sh("power_loss", "check", workload, f"{CHECK}/{workload}",
+                         str(len(labels)), *entries, check=False)
         finally:
             sh("umount", CHECK)
         if checked.returncode != 0:
-            return checked.stderr.strip()
-        return dict(f.split("=") for f in checked.stdout.split()[2:])
+            return corrupt, checked.stderr.strip()
+        return corrupt, dict(f.split("=") for f in checked.stdout.split()[2:])
     finally:
         remove(SNAPSHOT)
 
@@ -121,31 +137,31 @@ def main():
     fs, mkfs, workload, samples, seed = sys.argv[1:]
     samples = int(samples)
     rng = random.Random(f"{seed} {fs} {workload}")
-    steps = dict(
-        line.split() for line in sh("power_loss", "list").stdout.splitlines()
-    )[workload]
     started = time.monotonic()
-    record(mkfs, workload)
+    labels = record(mkfs, workload)
     flags = entries()
-    marks = [find_mark(f"step-{i}") for i in range(1, int(steps) + 1)]
+    marks = [(find_mark(label), label) for label in labels]
     setup = find_mark("setup")
     sh("mkdir", "-p", CHECK)
 
     def acked(before):
-        return sum(1 for mark in marks if mark < before)
+        return [label for mark, label in marks if mark < before]
 
     failures = []
     found = collections.Counter()
 
     def checked(at, what, extra=()):
         found["crash states"] += 1
-        result = check(fs, workload, acked(at), extra)
-        if result is None:
-            found["corrupt, out of scope"] += 1
-            return
+        corrupt, result = check(fs, workload, acked(at), runs(extra, flags))
+        found["flagged by fsck.exfat"] += corrupt
         if isinstance(result, str):
-            failures.append(f"{fs} {workload} {what}, {acked(at)} acked: {result}")
-            print(failures[-1], flush=True)
+            shown = f"{fs} {workload} {what}, {len(acked(at))} acked: {result}"
+            if corrupt:
+                found["flagged and failed"] += 1
+                print(f"out of scope, flagged by fsck.exfat: {shown}", flush=True)
+                return
+            failures.append(shown)
+            print(shown, flush=True)
             return
         found[f"start {result['start']}"] += 1
         found["in flight"] += result["model"] != result["acked"]
@@ -161,6 +177,11 @@ def main():
         if point < cur:
             continue
         writes = [i for i in range(cur, point) if not flags[i] & MARK]
+        for lost in writes if len(writes) > 1 else []:
+            if flags[lost] & FUA:
+                continue
+            kept = [i for i in writes if i != lost]
+            checked(writes[-1] + 1, f"entries {writes[0]}..{writes[-1]} but {lost}", kept)
         for _ in range(samples if len(writes) > 1 else 0):
             cut = rng.randint(1, len(writes))
             kept = [i for i in writes[:cut]

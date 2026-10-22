@@ -5,13 +5,15 @@
 //! ```text
 //! power_loss list                  # the workloads, and how many steps each takes
 //! power_loss run WORKLOAD DIR MARK # MARK is dm:<device> or file:<path>
-//! power_loss check WORKLOAD DIR N  # N steps were acknowledged before the crash
+//! power_loss check WORKLOAD DIR N [ENTRY…]
 //! ```
 //!
 //! `run` performs the workload's setup in `DIR` and marks `setup`, then marks
-//! `step-<i>` once step `i` returns, as a dm-log-writes mark or a synced line.
-//! `check` opens what a crash left in `DIR` as the same install, with the
-//! workload's hand-written model as the oracle of what each step changed.
+//! `step-<i>` once step `i` returns, as a dm-log-writes mark or a synced line,
+//! and prints each mark. A step that commits an entry marks `step-<i>:<entry>`.
+//! `check` opens what a crash left in `DIR` as the same install, once `N` steps
+//! returned, committing the `ENTRY`s their marks name, with the workload's
+//! hand-written model as the oracle of what each step changed.
 
 // Empty on wasm, which has no native backend.
 #![cfg_attr(target_arch = "wasm32", no_main)]
@@ -526,9 +528,13 @@ impl Runner {
         id
     }
 
-    fn perform(&mut self, step: Step, before: &Model) -> Result<(), String> {
+    /// Performs `step` and returns the entry it committed, if it commits one.
+    fn perform(&mut self, step: Step, before: &Model) -> Result<Option<EntryHash>, String> {
         let shown = |e: toshokan::Error| format!("{step:?}: {e}");
-        match step {
+        let committed = |done: toshokan::Result<toshokan::Committed>| {
+            done.map(|committed| Some(committed.intent)).map_err(shown)
+        };
+        let entry = match step {
             Step::Open => {
                 let backend = Stopping {
                     native: Native::new(&self.dirs.folder, &self.dirs.local),
@@ -541,56 +547,59 @@ impl Runner {
                     Library::open(backend, layout(), &schema(), env).map_err(shown)?;
                 self.library = Some(library);
                 self.opened = Some(opened);
+                None
             }
             Step::Close => {
                 let library = self.library.take().expect("open");
                 library.close().map_err(shown)?;
+                None
             }
             Step::Import { name, path, bytes } => {
                 let (intent, _) = self.library().intent("Import").create(|e| {
                     e.save(&rel(path), bytes.to_vec(), Expect::Absent)
                         .set(NAME, name.into());
                 });
-                intent.commit().map_err(shown)?;
+                committed(intent.commit())?
             }
             Step::Tag { name, tag } => {
                 let id = self.entity(name);
                 let intent = self.library().intent("Tag").add(id, TAGS, tag.into());
-                intent.commit().map_err(shown)?;
+                committed(intent.commit())?
             }
             Step::Save { name, bytes } => {
                 let id = self.entity(name);
                 let (path, old) = before.file(name);
                 let expect = Expect::Holds(identity(&old));
                 let intent = self.library().intent("Save");
-                intent
-                    .save(id, &rel(&path), bytes.to_vec(), expect)
-                    .commit()
-                    .map_err(shown)?;
+                committed(
+                    intent
+                        .save(id, &rel(&path), bytes.to_vec(), expect)
+                        .commit(),
+                )?
             }
             Step::Rename { name, to } => {
                 let id = self.entity(name);
                 let expect = Expect::Holds(identity(&before.file(name).1));
                 let intent = self.library().intent("Rename").rename(id, &rel(to), expect);
-                intent.commit().map_err(shown)?;
+                committed(intent.commit())?
             }
             Step::MoveTree { from, to } => {
                 let intent = self
                     .library()
                     .intent("Move")
                     .move_tree(&rel(from), &rel(to));
-                intent.commit().map_err(shown)?;
+                committed(intent.commit())?
             }
             Step::Trash { name } => {
                 let id = self.entity(name);
                 let expect = Expect::Holds(identity(&before.file(name).1));
                 let intent = self.library().intent("Trash").trash(id, expect);
-                intent.commit().map_err(shown)?;
+                committed(intent.commit())?
             }
-            Step::Undo => drop(self.library().undo().map_err(shown)?),
-            Step::Redo => drop(self.library().redo().map_err(shown)?),
-            Step::Tidy => drop(self.library().tidy().map_err(shown)?),
-            Step::Compact => drop(self.library().compact().map_err(shown)?),
+            Step::Undo => committed(self.library().undo())?,
+            Step::Redo => committed(self.library().redo())?,
+            Step::Tidy => self.library().tidy().map(|_| None).map_err(shown)?,
+            Step::Compact => self.library().compact().map(|_| None).map_err(shown)?,
             Step::EmptyTrash => {
                 let all = Policy {
                     max_age_ms: 0,
@@ -600,6 +609,7 @@ impl Runner {
                 if emptied.removed.is_empty() {
                     return Err(format!("{step:?} removed nothing"));
                 }
+                None
             }
             Step::Interrupt { name, bytes } => {
                 let id = self.entity(name);
@@ -617,21 +627,22 @@ impl Runner {
                 self.library = None;
                 fs::remove_dir_all(&self.dirs.local).map_err(|e| format!("{step:?}: {e}"))?;
                 make_dirs(&self.dirs.local)?;
+                None
             }
             Step::Settle => {
                 let orphans = self.opened.as_ref().expect("open").orphaned.clone();
                 if orphans.is_empty() {
                     return Err(format!("{step:?}: no orphan was reported"));
                 }
+                let mut settled = None;
                 for orphan in orphans {
-                    self.library()
-                        .settle(orphan, Settlement::Finished)
-                        .map_err(shown)?;
+                    settled = committed(self.library().settle(orphan, Settlement::Finished))?;
                 }
+                settled
             }
-        }
+        };
         self.clock.advance(1000);
-        Ok(())
+        Ok(entry)
     }
 }
 
@@ -743,7 +754,7 @@ fn run(workload: &Workload, dir: &Path, marks: &mut Marks) -> Result<(), String>
         if i == workload.setup.len() {
             marks.mark("setup")?;
         }
-        runner.perform(step, &models[i])?;
+        let entry = runner.perform(step, &models[i])?;
         settling = match step {
             Step::Interrupt { .. } => true,
             Step::Settle => false,
@@ -751,7 +762,12 @@ fn run(workload: &Workload, dir: &Path, marks: &mut Marks) -> Result<(), String>
         };
         verify(&runner, &models[i + 1], settling).map_err(|e| format!("after {step:?}: {e}"))?;
         if let Some(n) = i.checked_sub(workload.setup.len()) {
-            marks.mark(&format!("step-{}", n + 1))?;
+            let label = match entry {
+                Some(entry) => format!("step-{}:{entry}", n + 1),
+                None => format!("step-{}", n + 1),
+            };
+            marks.mark(&label)?;
+            println!("{label}");
         }
     }
     Ok(())
@@ -852,8 +868,8 @@ impl Crash<'_> {
             let holds = library.get(path);
             let allowed = [a.get(path), b.get(path)];
             let pending = named.iter().any(|n| rel(path).starts_with(n));
-            let cut = |whole: &&Vec<u8>| holds.is_some_and(|part| part.len() <= whole.len());
-            let moving = holds.is_none() || copying && allowed.iter().flatten().any(cut);
+            let cut = |new: &Vec<u8>| holds.is_some_and(|part| part.len() <= new.len());
+            let moving = holds.is_none() || copying && b.get(path).is_some_and(cut);
             if !allowed.contains(&holds) && !(pending && moving) {
                 let shown = holds.map(|b| String::from_utf8_lossy(b).into_owned());
                 return Err(format!(
@@ -1032,8 +1048,14 @@ fn continued(
     Ok(writer)
 }
 
-/// Checks what a crash left in `dir` once `acked` steps of `workload` returned.
-fn check(workload: &Workload, dir: &Path, acked: usize) -> Result<Checked, String> {
+/// Checks what a crash left in `dir` once `acked` steps of `workload` returned,
+/// committing `entries`.
+fn check(
+    workload: &Workload,
+    dir: &Path,
+    acked: usize,
+    entries: &[EntryHash],
+) -> Result<Checked, String> {
     let models = models(workload);
     let last = models.len() - 1;
     let reached = workload.setup.len() + acked;
@@ -1053,6 +1075,12 @@ fn check(workload: &Workload, dir: &Path, acked: usize) -> Result<Checked, Strin
     let raw = tree(&crash.dirs.folder)?;
     crash.before_recovery(&raw)?;
     let before = read_logs(&crash.dirs)?;
+    let held_before = held(&before);
+    if let Some(lost) = entries.iter().find(|entry| !held_before.contains(entry)) {
+        return Err(format!(
+            "the folder lacks {lost}, an acknowledged step's entry"
+        ));
+    }
     let (mut library, opened) = crash.open(&raw)?;
     let (intent, _) = library.intent("Probe").create(|e| {
         e.set(NAME, PROBE.into());
@@ -1094,9 +1122,13 @@ fn main() -> ExitCode {
             let mut marks = Marks::parse(marks)?;
             run(&workload, Path::new(dir), &mut marks)
         }),
-        ["check", name, dir, acked] => workload(name).and_then(|workload| {
+        ["check", name, dir, acked, ref entries @ ..] => workload(name).and_then(|workload| {
             let acked: usize = acked.parse().map_err(|e| format!("{acked}: {e}"))?;
-            let checked = check(&workload, Path::new(dir), acked)?;
+            let entries = entries
+                .iter()
+                .map(|entry| entry.parse().map_err(|e| format!("{entry}: {e:?}")))
+                .collect::<Result<Vec<EntryHash>, String>>()?;
+            let checked = check(&workload, Path::new(dir), acked, &entries)?;
             let start = match checked.start {
                 Start::Resumed(_) => "resumed",
                 Start::New => "new",
@@ -1108,7 +1140,9 @@ fn main() -> ExitCode {
             );
             Ok(())
         }),
-        _ => Err("usage: power_loss list | run WORKLOAD DIR MARK | check WORKLOAD DIR N".into()),
+        _ => Err(
+            "usage: power_loss list | run WORKLOAD DIR MARK | check WORKLOAD DIR N [ENTRY…]".into(),
+        ),
     };
     match done {
         Ok(()) => ExitCode::SUCCESS,
