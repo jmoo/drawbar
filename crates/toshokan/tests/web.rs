@@ -437,9 +437,15 @@ async fn a_watched_folder_hints_the_paths_another_program_wrote() {
             other => panic!("the watcher said nothing of the new file: {other:?}"),
         }
     };
-    assert!(a.view().unbound().is_empty(), "nothing scanned it yet");
+    assert!(
+        a.view().unbound().cloned().collect::<Vec<_>>().is_empty(),
+        "nothing scanned it yet"
+    );
     a.rescan_paths(paths).await.unwrap();
-    assert_eq!(a.view().unbound(), [path("shelf/copy.npno")]);
+    assert_eq!(
+        a.view().unbound().cloned().collect::<Vec<_>>(),
+        [path("shelf/copy.npno")]
+    );
 }
 
 #[wasm_bindgen_test]
@@ -451,7 +457,13 @@ async fn a_refresh_reads_no_library_file_and_a_rescan_reads_them_all() {
     create(&mut a, "song.npno", b"song").await;
     write_outside(&a, "copy.npno", b"song").await;
     a.refresh().await.unwrap();
-    assert!(a.view().unbound().is_empty(), "a refresh scans no file");
+    assert!(
+        a.view().unbound().cloned().collect::<Vec<_>>().is_empty(),
+        "a refresh scans no file"
+    );
     a.rescan().await.unwrap();
-    assert_eq!(a.view().unbound(), [path("copy.npno")]);
+    assert_eq!(
+        a.view().unbound().cloned().collect::<Vec<_>>(),
+        [path("copy.npno")]
+    );
 }

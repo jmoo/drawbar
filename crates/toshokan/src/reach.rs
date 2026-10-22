@@ -27,9 +27,10 @@ pub(crate) struct Reach {
     /// `None` until a binding of every fact to a full scan.
     links: Option<Links>,
     due: Due,
-    /// The lengths the facts gained since the files' identities were last
-    /// resolved. Every file a resolve leaves without an identity has a length no
-    /// fact gave, so only files of these lengths may need one.
+    /// The lengths of the facts whose files are not where they say since the
+    /// files' identities were last resolved: a file of one of these lengths may be
+    /// one of them, moved, and needs its identity. A fact its file holds in place
+    /// reads nothing more, so adopting a file reads only that file.
     gained: BTreeSet<u64>,
 }
 
@@ -451,17 +452,14 @@ impl Reach {
         now: Box<[Fact]>,
     ) -> Option<Box<[Fact]>> {
         self.before(facts, scan, names, Some(entity), None);
-        let lengths = |written: &[Fact]| -> BTreeSet<u64> {
-            written.iter().map(|written| written.value.len).collect()
-        };
-        let gained: Vec<u64> = match &self.links {
-            Some(links) => lengths(&now)
-                .into_iter()
-                .filter(|len| !links.has_length(*len))
-                .collect(),
-            None => Vec::new(),
-        };
-        self.gained.extend(gained);
+        let away = now.iter().map(|written| &written.value).filter(|fact| {
+            let there = scan.files.get(&fact.path);
+            !there.is_some_and(|file| binding::holds(fact, file))
+        });
+        let gained: Vec<u64> = away.map(|fact| fact.len).collect();
+        if self.links.is_some() {
+            self.gained.extend(gained);
+        }
         let was = match now.is_empty() {
             true => facts.remove(&entity),
             false => facts.insert(entity, now),
@@ -558,18 +556,14 @@ fn splice(
     for (entity, file) in found.bound.iter() {
         bindings.bound.insert(*entity, file.clone());
     }
-    let mut unbound: Vec<RelPath> = bindings
-        .unbound
-        .iter()
-        .filter(|path| !region.files.contains(*path))
-        .cloned()
-        .chain(found.unbound)
-        .collect();
-    unbound.sort();
-    bindings.unbound = unbound;
+    for path in &region.files {
+        bindings.unbound.remove(path);
+    }
+    for (path, ()) in found.unbound.iter() {
+        bindings.unbound.insert(path.clone(), ());
+    }
     let report = &mut bindings.report;
     let found = found.report;
-    report.arrived = bindings.unbound.clone();
     report.departed.retain(outside);
     report.departed.extend(found.departed);
     report.departed.sort();
@@ -817,7 +811,7 @@ mod tests {
     }
 
     #[test]
-    fn resolving_what_was_relisted_resolves_what_resolving_every_file_does() {
+    fn resolving_what_a_change_reaches_resolves_it_as_resolving_every_file_does() {
         for seed in 0..1500 {
             let mut world = World {
                 random: SeededRandom::new(seed),
@@ -863,6 +857,20 @@ mod tests {
                 .retain(|path, _| !relisted.iter().any(|dir| path.starts_with(dir)));
             whole.files.extend(found.files.clone());
             let whole_needed = binding::resolve(&mut whole, &facts, &previous);
+            // A file neither relisted nor of a length a fact away from its file gives
+            // is left for the next scan of every file.
+            let reached = |path: &RelPath, len: u64| {
+                relisted.iter().any(|dir| path.starts_with(dir)) || reach.gained.contains(&len)
+            };
+            for (path, file) in &mut whole.files {
+                if !reached(path, file.len) {
+                    *file = previous.files[path];
+                }
+            }
+            let whole_needed: Vec<(RelPath, u64)> = whole_needed
+                .into_iter()
+                .filter(|(path, len)| reached(path, *len))
+                .collect();
 
             let links = reach.links.as_ref().unwrap();
             let gone = binding::under_any(&previous, &relisted);

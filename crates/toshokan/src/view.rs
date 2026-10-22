@@ -224,10 +224,15 @@ impl View {
         &self.0.writers
     }
 
-    /// Library files no entity is bound to. They get an entity only when an intent
-    /// says something about them.
-    pub fn unbound(&self) -> &[RelPath] {
-        &self.0.bindings.unbound
+    /// Library files no entity is bound to, in order. They get an entity only when
+    /// an intent says something about them.
+    pub fn unbound(&self) -> impl Iterator<Item = &RelPath> {
+        self.0.bindings.unbound.iter().map(|(path, ())| path)
+    }
+
+    /// Whether the library file at `path` is one no entity is bound to.
+    pub fn is_unbound(&self, path: &RelPath) -> bool {
+        self.0.bindings.unbound.contains_key(path)
     }
 
     /// The library file at `path` as the last scan listed it; `None` where it
@@ -247,7 +252,7 @@ impl View {
         let mut files = BTreeSet::new();
         if !Arc::ptr_eq(&now.bindings, &was.bindings) {
             entities.extend(differing(now.bindings.bound.diff(&was.bindings.bound)));
-            files.extend(either(&now.bindings.unbound, &was.bindings.unbound));
+            files.extend(differing(now.bindings.unbound.diff(&was.bindings.unbound)));
         }
         match (&now.listing, &was.listing) {
             (Some(listing), Some(listed)) => files.extend(differing(listing.diff(listed))),
@@ -283,26 +288,6 @@ fn differing<'a, K: Clone + 'a, V: PartialEq + 'a>(
         (Some((key, _)), _) | (None, Some((key, _))) => Some(key.clone()),
         (None, None) => None,
     })
-}
-
-/// The paths in one of two sorted lists and not the other.
-fn either(now: &[RelPath], was: &[RelPath]) -> Vec<RelPath> {
-    let (mut now, mut was) = (now.iter().peekable(), was.iter().peekable());
-    let mut either = Vec::new();
-    loop {
-        let path = match (now.peek(), was.peek()) {
-            (None, None) => return either,
-            (Some(a), Some(b)) if a == b => {
-                now.next();
-                was.next();
-                continue;
-            }
-            (Some(a), Some(b)) if a < b => now.next(),
-            (Some(_), None) => now.next(),
-            (_, Some(_)) => was.next(),
-        };
-        either.extend(path.cloned());
-    }
 }
 
 impl EntityView<'_> {

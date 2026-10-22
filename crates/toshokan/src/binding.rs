@@ -56,8 +56,10 @@ pub struct Scan {
 pub struct Bindings {
     /// Every entity with a file fact, with where its file is.
     pub bound: CowMap<EntityId, FileRef>,
-    /// Library files no entity is bound to, sorted.
-    pub unbound: Vec<RelPath>,
+    /// Library files no entity is bound to. Shared between the bindings a change
+    /// makes of one another, so a change copies only what it touches.
+    pub unbound: CowMap<RelPath, ()>,
+    /// What binding found, but for [`ScanReport::arrived`], which `unbound` holds.
     pub report: ScanReport,
 }
 
@@ -589,7 +591,7 @@ fn found(mut scan: Scan, path: RelPath, meta: Meta) -> Scan {
 }
 
 /// Whether `file` holds what `fact` says.
-fn holds(fact: &FileFact, file: &Scanned) -> bool {
+pub(crate) fn holds(fact: &FileFact, file: &Scanned) -> bool {
     file.len == fact.len
         && match file.identity {
             Some(identity) => identity == fact.identity,
@@ -991,7 +993,7 @@ impl Progress {
             return;
         }
         let bindings = &mut self.bindings;
-        bindings.unbound.push(path.clone());
+        bindings.unbound.insert(path.clone(), ());
         let Some(identity) = file.identity else {
             return;
         };
@@ -1007,7 +1009,6 @@ impl Progress {
 
     fn reported(&mut self) {
         let bindings = &mut self.bindings;
-        bindings.report.arrived = bindings.unbound.clone();
         bindings.report.changed = self
             .bound
             .iter()
@@ -1397,7 +1398,7 @@ mod tests {
                 })
                 .collect();
             assert_eq!(bindings.bound, presumed.into_iter().collect(), "{facts:?}");
-            assert_eq!((bindings.unbound, pins), (Vec::new(), Vec::new()));
+            assert_eq!((bindings.unbound.len(), pins), (0, Vec::new()));
         }
     }
 
@@ -1481,7 +1482,7 @@ mod tests {
                 facts.len(),
                 "{shown}: an entity is unaccounted for"
             );
-            let unbound: BTreeSet<&RelPath> = bindings.unbound.iter().collect();
+            let unbound: BTreeSet<&RelPath> = bindings.unbound.iter().map(|(p, ())| p).collect();
             for path in scan.files.keys() {
                 assert_ne!(
                     owners.contains_key(path),
@@ -1497,6 +1498,7 @@ mod tests {
                 for copy in bindings
                     .unbound
                     .iter()
+                    .map(|(p, ())| p)
                     .filter(|p| scan.files[*p].identity == identity)
                 {
                     let copied = Copied {
@@ -1569,7 +1571,8 @@ mod tests {
         let scan = scanned(&[("A", 0), ("a", 0)], &facts);
         let bindings = bind(&facts, &scan, &Folding);
         assert_eq!(bindings.bound[&e].path, path("A"));
-        assert_eq!(bindings.unbound, [path("a")]);
+        let unbound: Vec<&RelPath> = bindings.unbound.iter().map(|(p, ())| p).collect();
+        assert_eq!(unbound, [&path("a")]);
 
         let mut both = one("a");
         both.insert(

@@ -89,6 +89,8 @@ struct Seen {
     library_renames: u64,
     /// How often each library directory was listed.
     listed: BTreeMap<RelPath, u64>,
+    /// Each library file whose bytes were read.
+    read_files: BTreeSet<RelPath>,
 }
 
 type Picks = dyn Fn(&Io) -> bool;
@@ -139,6 +141,10 @@ impl Probe {
 
     fn library_renames(&self) -> u64 {
         self.seen.borrow().library_renames
+    }
+
+    fn read_files(&self) -> BTreeSet<RelPath> {
+        self.seen.borrow().read_files.clone()
     }
 
     fn listed(&self) -> BTreeMap<RelPath, u64> {
@@ -225,6 +231,9 @@ impl Probe {
                 *seen.listed.entry(dir.clone()).or_default() += 1;
             }
             _ => {}
+        }
+        for (path, _) in reads(io).filter(|(path, _)| !layout().owns(path)) {
+            seen.read_files.insert(path.clone());
         }
         for (path, range) in reads(io) {
             if path.parent().and_then(|dir| dir.parent()) == Some(layout().writers()) {
@@ -628,6 +637,7 @@ through_both!(
     a_file_no_entity_is_bound_to_goes_back_with_its_tree_as_it_is,
     files_rescanned_together_list_their_directory_once,
     a_view_says_what_changed_since_the_view_before,
+    adopting_a_file_reads_no_other_file_of_its_length,
     a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept,
     losing_the_local_root_at_any_step_loses_only_drafts,
     a_crash_at_any_step_is_settled_before_the_next_write,
@@ -924,7 +934,10 @@ fn a_refresh_scans_only_the_files_other_writers_moved<F: Facade>() {
         before,
         "nothing new, nothing scanned"
     );
-    assert_eq!(a.view().unbound(), [] as [RelPath; 0]);
+    assert_eq!(
+        a.view().unbound().cloned().collect::<Vec<_>>(),
+        [] as [RelPath; 0]
+    );
 
     let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
     let tune = create(&mut b, "new/tune.npno", b"tune");
@@ -957,9 +970,16 @@ fn a_refresh_scans_only_the_files_other_writers_moved<F: Facade>() {
         };
         assert!(changes.contains(&filed), "{changes:?}");
     }
-    assert_eq!(a.view().unbound(), [] as [RelPath; 0], "outside files wait");
+    assert_eq!(
+        a.view().unbound().cloned().collect::<Vec<_>>(),
+        [] as [RelPath; 0],
+        "outside files wait"
+    );
     a.rescan().unwrap();
-    assert_eq!(a.view().unbound().len() as u64, others);
+    assert_eq!(
+        a.view().unbound().cloned().collect::<Vec<_>>().len() as u64,
+        others
+    );
 }
 
 fn a_view_is_read_on_other_threads<F: Facade>() {
@@ -1492,7 +1512,10 @@ fn a_copy_has_no_entity_until_one_is_said<F: Facade>() {
     put(&folder, "copy.npno", b"song");
     a.rescan().unwrap();
     let view = a.view();
-    assert_eq!(view.unbound(), [path("copy.npno")]);
+    assert_eq!(
+        view.unbound().cloned().collect::<Vec<_>>(),
+        [path("copy.npno")]
+    );
     assert_eq!(view.entities().len(), 1);
     assert_eq!(
         view.entity(song).unwrap().file().unwrap().path,
@@ -1519,7 +1542,10 @@ fn a_copy_has_no_entity_until_one_is_said<F: Facade>() {
         .unwrap();
     let copy = committed.created[0];
     let view = a.view();
-    assert_eq!(view.unbound(), [] as [RelPath; 0]);
+    assert_eq!(
+        view.unbound().cloned().collect::<Vec<_>>(),
+        [] as [RelPath; 0]
+    );
     assert_eq!(tags(&view, copy), ["copy"]);
     assert_eq!(
         view.entity(copy).unwrap().file().unwrap().path,
@@ -1531,7 +1557,10 @@ fn a_copy_has_no_entity_until_one_is_said<F: Facade>() {
         b"song",
         "undoing an adoption leaves the file"
     );
-    assert_eq!(a.view().unbound(), [path("copy.npno")]);
+    assert_eq!(
+        a.view().unbound().cloned().collect::<Vec<_>>(),
+        [path("copy.npno")]
+    );
 }
 
 fn a_move_keeps_its_tags_and_is_pinned_by_the_next_commit<F: Facade>() {
@@ -1578,7 +1607,10 @@ fn a_move_keeps_its_tags_and_is_pinned_by_the_next_commit<F: Facade>() {
         path("moved/song.npno"),
         "the pinned path wins over a copy at the old one"
     );
-    assert_eq!(b.view().unbound(), [path("song.npno")]);
+    assert_eq!(
+        b.view().unbound().cloned().collect::<Vec<_>>(),
+        [path("song.npno")]
+    );
 }
 
 fn undoing_a_delete_binds_the_file_moved_while_deleted<F: Facade>() {
@@ -1744,7 +1776,10 @@ fn a_failed_rescan_after_a_rename_binds_no_copy_in_its_place<F: Facade>() {
     let song = create(&mut a, "song.npno", b"song");
     put(&folder, "copy.npno", b"song");
     a.rescan().unwrap();
-    assert_eq!(a.view().unbound(), [path("copy.npno")]);
+    assert_eq!(
+        a.view().unbound().cloned().collect::<Vec<_>>(),
+        [path("copy.npno")]
+    );
     blind_after_record(&probe);
     let renamed = a
         .commit("Rename", |i| {
@@ -1784,7 +1819,10 @@ fn a_failed_rescan_after_a_rename_binds_no_copy_in_its_place<F: Facade>() {
     );
     let file = a.view().entity(song).unwrap().file().unwrap();
     assert_eq!((file.path, file.state), (path("b.npno"), FileState::InSync));
-    assert_eq!(a.view().unbound(), [path("copy.npno")]);
+    assert_eq!(
+        a.view().unbound().cloned().collect::<Vec<_>>(),
+        [path("copy.npno")]
+    );
     let next = a.commit("Tag", |i| i.add(song, TAGS, tag("y"))).unwrap();
     assert_eq!(next.local, Local::Current);
 }
@@ -2373,7 +2411,10 @@ fn opening_scans_no_library_file_and_the_first_refresh_scans_them_all<F: Facade>
         (path("song.npno"), FileState::Unscanned),
         "presumed where its facts say"
     );
-    assert_eq!(b.view().unbound(), [] as [RelPath; 0]);
+    assert_eq!(
+        b.view().unbound().cloned().collect::<Vec<_>>(),
+        [] as [RelPath; 0]
+    );
 
     let refreshed = b.refresh().unwrap();
     assert!(probe.library_reads() > 0, "nothing scanned yet, so all");
@@ -2420,7 +2461,10 @@ fn swap_files_a_browser_left_are_neither_scanned_nor_read<F: Facade>() {
     assert_eq!(a.rescan().unwrap().scan.arrived, [] as [RelPath; 0]);
     assert_eq!(opened.unreadable, [] as [RelPath; 0]);
     assert_eq!(opened.ignored, [] as [RelPath; 0]);
-    assert_eq!(a.view().unbound(), [] as [RelPath; 0]);
+    assert_eq!(
+        a.view().unbound().cloned().collect::<Vec<_>>(),
+        [] as [RelPath; 0]
+    );
 }
 
 fn a_view_lists_each_library_files_length_once_scanned<F: Facade>() {
@@ -2496,7 +2540,11 @@ fn a_directory_that_cannot_be_listed_leaves_its_files_unknown_and_the_rest_scann
     let refreshed = a.rescan().unwrap();
     assert_eq!(refreshed.unlisted, [path("locked")]);
     let view = a.view();
-    assert_eq!(view.unbound(), [path("open.wav")], "the rest is scanned");
+    assert_eq!(
+        view.unbound().cloned().collect::<Vec<_>>(),
+        [path("open.wav")],
+        "the rest is scanned"
+    );
     let file = view.entity(kept).unwrap().file().unwrap();
     assert_eq!(
         (file.path, file.state),
@@ -2507,7 +2555,10 @@ fn a_directory_that_cannot_be_listed_leaves_its_files_unknown_and_the_rest_scann
     let refreshed = a.rescan().unwrap();
     assert_eq!(refreshed.unlisted, [] as [RelPath; 0]);
     let view = a.view();
-    assert_eq!(view.unbound(), [path("locked/new.wav"), path("open.wav")]);
+    assert_eq!(
+        view.unbound().cloned().collect::<Vec<_>>(),
+        [path("locked/new.wav"), path("open.wav")]
+    );
     let file = view.entity(kept).unwrap().file().unwrap();
     assert_eq!(file.state, FileState::InSync);
 }
@@ -2653,7 +2704,7 @@ fn a_tree_moved_with_files_no_entity_is_bound_to_is_moved_back_by_undo<F: Facade
         "undone"
     );
     assert_eq!(
-        a.view().unbound(),
+        a.view().unbound().cloned().collect::<Vec<_>>(),
         [path("old/a.wav"), path("old/deep/b.wav")]
     );
     assert_eq!(dirs(), ["old", "old/deep"], "the tree's new name is gone");
@@ -2726,6 +2777,40 @@ fn a_file_no_entity_is_bound_to_goes_back_with_its_tree_as_it_is<F: Facade>() {
     put(&folder, "new/a.wav", b"changed");
     a.undo().unwrap();
     assert_eq!(read(&folder, "old/a.wav").as_deref(), Some(&b"changed"[..]));
+}
+
+fn adopting_a_file_reads_no_other_file_of_its_length<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    for n in 0..20 {
+        put(
+            &folder,
+            &format!("{n:02}.wav"),
+            format!("{n:02}").as_bytes(),
+        );
+    }
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    let before = probe.read_files();
+    let committed = a
+        .commit("Tag", |i| {
+            i.create(|e| {
+                e.adopt(&path("07.wav"), Expect::Holds(identity(b"07")))
+                    .add(TAGS, tag("live"));
+            })
+            .0
+        })
+        .unwrap();
+    let song = committed.created[0];
+    let file = a.view().entity(song).unwrap().file().unwrap();
+    assert_eq!((file.path, file.state), (path("07.wav"), FileState::InSync));
+    let read: BTreeSet<RelPath> = probe.read_files().difference(&before).cloned().collect();
+    assert_eq!(
+        read,
+        BTreeSet::from([path("07.wav")]),
+        "the adopted file alone is read"
+    );
 }
 
 fn a_view_says_what_changed_since_the_view_before<F: Facade>() {
@@ -4505,7 +4590,10 @@ fn a_root_within_the_apps_own_directory_leaves_that_directory_unscanned() {
         blocking::Library::open(machine(&folder), layout, &schema(), env("b", 2, &clock)).unwrap();
     b.rescan().unwrap();
     let view = b.view();
-    assert_eq!(view.unbound(), [] as [RelPath; 0]);
+    assert_eq!(
+        view.unbound().cloned().collect::<Vec<_>>(),
+        [] as [RelPath; 0]
+    );
     let song = view.at(&path("song.npno")).expect("the tagged file");
     assert_eq!(song.members(TAGS).values, [tag("Sunday")]);
 }
@@ -4600,7 +4688,7 @@ fn a_change_of_case_alone_renames_a_file_and_a_folder() {
         .unwrap();
     assert_eq!(names("live"), ["C3.wav"]);
     assert_eq!(
-        a.view().unbound(),
+        a.view().unbound().cloned().collect::<Vec<_>>(),
         [path("d4.wav"), path("live/C3.wav")],
         "the file is listed once, under its new name"
     );
@@ -4728,7 +4816,11 @@ fn a_change_of_case_a_crash_stops_is_finished_at_the_next_open() {
             b.settle_interrupted().unwrap();
             b.rescan().unwrap();
             let dir = file.parent().unwrap();
-            assert_eq!(b.view().unbound(), std::slice::from_ref(&file), "to {to}");
+            assert_eq!(
+                b.view().unbound().cloned().collect::<Vec<_>>(),
+                std::slice::from_ref(&file),
+                "to {to}"
+            );
             assert_eq!(names(""), [dir.as_str()], "to {to}");
             assert_eq!(names(dir.as_str()), [file.name().unwrap()], "to {to}");
             b.close().unwrap();

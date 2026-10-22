@@ -153,7 +153,7 @@ impl Listed {
             let key = Key::File(at);
             self.forget(&key);
             keys.insert(key);
-            if view.unbound().binary_search(path).is_ok() {
+            if view.is_unbound(path) {
                 self.file(view, path);
             }
         }

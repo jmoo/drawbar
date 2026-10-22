@@ -332,7 +332,7 @@ impl Case {
             .files
             .iter()
             .filter(|(p, _)| !bound.contains(p.as_str()) && !layout().owns(&path(p)))
-            .map(|(p, _)| path(p))
+            .map(|(p, _)| (path(p), ()))
             .collect();
         bindings
     }

@@ -521,8 +521,10 @@ their identities:
    held. A precondition is never fooled, since it reads the identity at the
    check. After a commit, only
    the paths its file effects moved files from and to are scanned again, and of
-   the other files only those whose length a file fact gained have their
-   identities read. A refresh scans again only the paths named by the file facts
+   the other files only those of the length of a file fact the commit wrote
+   whose file is not at its path, holding it, have their identities read: such a
+   file may be that entity's, moved. Adopting a file reads that file alone; the
+   other files of its length are read by the next scan of every file. A refresh scans again only the paths named by the file facts
    the entries it read changed, before and after, and the paths those entities
    were bound to, with the same identity reads. Such a path is found only under
    the spelling its directories list, since a volume that ignores case finds a

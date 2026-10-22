@@ -496,10 +496,12 @@ impl Resolver<'_> {
             .filter(|(_, file)| file.state != FileState::Missing)
             .map(|(entity, file)| (&file.path, *entity))
             .collect();
+        let unbound = self.bindings.unbound.seek(|path| path.cmp(from));
+        let unbound = unbound.take_while(|(path, ())| path.as_str().starts_with(from.as_str()));
         let files: BTreeSet<&RelPath> = bound
             .keys()
             .copied()
-            .chain(&self.bindings.unbound)
+            .chain(unbound.map(|(path, ())| path))
             .filter(|path| path.starts_with(from))
             .collect();
         for &entity in bound

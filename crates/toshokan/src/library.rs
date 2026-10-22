@@ -41,7 +41,7 @@ use crate::recovery::{self, Settling};
 use crate::report::{
     By, Change, Committed, Compacted, DraftState, DraftStatus, Emptied, HistoryItem, Lag, Local,
     Mode, Opened, Orphan, Outcome, Partial, PartialReport, PathChange, Presence, Refreshed,
-    Settled, Start, Tidied, TrashItem, What, WriterInfo,
+    ScanReport, Settled, Start, Tidied, TrashItem, What, WriterInfo,
 };
 use crate::schema::Schema;
 use crate::trash::{self, Policy};
@@ -327,6 +327,16 @@ impl Library {
 
     pub fn view(&self) -> View {
         self.view.clone()
+    }
+
+    /// What the last binding found, with every file no entity is bound to as
+    /// arrived.
+    fn scan_report(&self) -> ScanReport {
+        let unbound = self.bindings.unbound.iter();
+        ScanReport {
+            arrived: unbound.map(|(path, ())| path.clone()).collect(),
+            ..self.bindings.report.clone()
+        }
     }
 
     /// What the view would show if every log were folded again from scratch, as
@@ -621,7 +631,7 @@ impl Library {
                 reshown(library).map_ok(move |library| Refreshed {
                     changes,
                     removed: library.removed_facts(),
-                    scan: library.bindings.report.clone(),
+                    scan: library.scan_report(),
                     unlisted: library.unlisted.clone(),
                 })
             })
