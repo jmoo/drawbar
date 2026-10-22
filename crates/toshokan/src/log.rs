@@ -133,6 +133,13 @@ pub enum Op {
         file: FileFact,
         replaces: Vec<EntryHash>,
     },
+    /// A file effect on a file no entity is bound to: where it was, if anywhere,
+    /// and where it is after the effect and what it holds, if anywhere. Facts are
+    /// not changed; undo reads it.
+    Path {
+        from: Option<RelPath>,
+        file: Option<FileFact>,
+    },
     /// An op this build does not know, or a known op whose members do not decode,
     /// as its JSON object.
     Unknown(Raw),
@@ -149,7 +156,7 @@ impl Op {
             | Self::Remove { entity, .. }
             | Self::File { entity, .. }
             | Self::Pin { entity, .. } => Some(*entity),
-            Self::Unknown(_) => None,
+            Self::Path { .. } | Self::Unknown(_) => None,
         }
     }
 }
@@ -885,6 +892,10 @@ impl Pack for Op {
                 out.push(7);
                 raw.pack(out);
             }
+            Self::Path { from, file } => {
+                out.push(8);
+                (from, file).pack(out);
+            }
         }
     }
 }
@@ -943,6 +954,10 @@ impl Unpack for Op {
                 }
             }
             7 => Self::Unknown(Raw::unpack(input)?),
+            8 => {
+                let (from, file) = Unpack::unpack(input)?;
+                Self::Path { from, file }
+            }
             _ => return bad_variant(),
         })
     }
@@ -1097,6 +1112,12 @@ enum OpOut<'a> {
         file: &'a FileFact,
         replaces: &'a [EntryHash],
     },
+    Path {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from: Option<&'a RelPath>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file: Option<&'a FileFact>,
+    },
 }
 
 /// A write without `value` clears; one with `"value":null` writes `null`.
@@ -1160,6 +1181,10 @@ impl Serialize for Op {
                 entity: *entity,
                 file,
                 replaces,
+            },
+            Self::Path { from, file } => OpOut::Path {
+                from: from.as_ref(),
+                file: file.as_ref(),
             },
             Self::Unknown(raw) => return raw.serialize(serializer),
         };
@@ -1232,6 +1257,15 @@ struct FileIn {
     #[serde(default)]
     file: Option<FileFact>,
     replaces: Vec<EntryHash>,
+}
+
+#[derive(Deserialize)]
+struct PathIn {
+    op: String,
+    #[serde(default)]
+    from: Option<RelPath>,
+    #[serde(default)]
+    file: Option<FileFact>,
 }
 
 #[derive(Deserialize)]
@@ -1341,6 +1375,8 @@ fn decode_op(json: &str) -> Option<Op> {
                 replaces,
             },
         ),
+        "path" => op_members(json, name, |m: &PathIn| &m.op)
+            .map(|PathIn { from, file, .. }| Op::Path { from, file }),
         _ => None,
     }
 }

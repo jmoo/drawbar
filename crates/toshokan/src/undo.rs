@@ -179,6 +179,10 @@ pub fn reverse(entry: &Entry, writer: WriterId, folded: &Folded) -> Result<Plan,
                 plan.files
                     .extend(reversing.file(*entity, file.as_ref(), replaces)?);
             }
+            Op::Path { from, file } => {
+                plan.files
+                    .extend(reversing.path(from.as_ref(), file.as_ref()));
+            }
             Op::Write { .. }
             | Op::Add { .. }
             | Op::Remove { .. }
@@ -296,6 +300,36 @@ impl Reversing<'_> {
             key: key.to_owned(),
             value: value.clone(),
         })
+    }
+
+    /// The file effect that puts back what an effect on a file no entity is bound
+    /// to changed: the displaced bytes from the trash, the old name, or the trash
+    /// for a file the effect added.
+    fn path(&self, from: Option<&RelPath>, file: Option<&FileFact>) -> Option<FileChange> {
+        let restore = |path: &RelPath, expect| {
+            let item = self.displaced.iter().find(|item| item.from == *path)?;
+            Some(FileChange::RestoreFile {
+                item: item.item,
+                to: path.clone(),
+                expect,
+            })
+        };
+        match (from, file) {
+            (Some(from), Some(file)) if *from == file.path => {
+                restore(from, Expect::Holds(file.identity))
+            }
+            (Some(from), Some(file)) => Some(FileChange::RenameFile {
+                from: file.path.clone(),
+                to: from.clone(),
+                expect: Expect::Holds(file.identity),
+            }),
+            (None, Some(file)) => Some(FileChange::TrashFile {
+                path: file.path.clone(),
+                expect: Expect::Holds(file.identity),
+            }),
+            (Some(from), None) => restore(from, Expect::Absent),
+            (None, None) => None,
+        }
     }
 
     /// The file effect that puts back what a file write changed: the displaced

@@ -192,6 +192,43 @@ impl<L: Driver> Intent<L> {
         });
         self
     }
+
+    /// Writes `bytes` as the file at `path`, which no entity is bound to: a file
+    /// nothing is said about stays without an entity.
+    pub fn save_file(self, path: &RelPath, bytes: Vec<u8>, expect: Expect) -> Self {
+        self.save_file_from(path, L::bytes(bytes), expect)
+    }
+
+    /// Writes the file at `path`, which no entity is bound to, from `source`; see
+    /// [`Intent::save_from`].
+    pub fn save_file_from(mut self, path: &RelPath, source: L::Source, expect: Expect) -> Self {
+        self.plan.files.push(FileChange::SaveFile {
+            path: path.clone(),
+            content: Content(self.sources.len()),
+            expect,
+        });
+        self.sources.push(source);
+        self
+    }
+
+    /// Renames the file at `from`, which no entity is bound to.
+    pub fn rename_file(mut self, from: &RelPath, to: &RelPath, expect: Expect) -> Self {
+        self.plan.files.push(FileChange::RenameFile {
+            from: from.clone(),
+            to: to.clone(),
+            expect,
+        });
+        self
+    }
+
+    /// Moves the file at `path`, which no entity is bound to, to the trash.
+    pub fn trash_file(mut self, path: &RelPath, expect: Expect) -> Self {
+        self.plan.files.push(FileChange::TrashFile {
+            path: path.clone(),
+            expect,
+        });
+        self
+    }
 }
 
 impl<S> Creating<'_, S> {

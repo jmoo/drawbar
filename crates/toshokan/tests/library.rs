@@ -23,9 +23,9 @@ use toshokan::report::{
 use toshokan::simulator::Machine;
 use toshokan::view::Conflicted;
 use toshokan::{
-    EntityId, EntryHash, Env, Error, Expect, Field, FileState, Hlc, Identify, Identity, Io,
-    IoResult, Lag, Layout, Local, MemDisk, Policy, Random, Refusal, Register, RelPath, Reply, Root,
-    Schema, Set, View, WriterId,
+    EntityId, EntryHash, Env, Error, Expect, Field, FileState, Hlc, Identify, Identity, Invalid,
+    Io, IoResult, Lag, Layout, Local, MemDisk, Policy, Random, Refusal, Register, RelPath, Reply,
+    Root, Schema, Set, View, WriterId,
 };
 
 const ORIGIN: Register<String> = Register::new("origin");
@@ -585,6 +585,8 @@ through_both!(
     a_view_lists_each_library_files_length_once_scanned,
     a_file_expected_as_listed_is_refused_once_its_length_or_time_moved,
     a_directory_that_cannot_be_listed_leaves_its_files_unknown_and_the_rest_scanned,
+    a_file_no_entity_is_bound_to_is_saved_renamed_and_trashed_and_each_undone,
+    an_effect_by_path_on_an_entitys_file_is_refused,
     a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept,
     losing_the_local_root_at_any_step_loses_only_drafts,
     a_crash_at_any_step_is_settled_before_the_next_write,
@@ -2488,6 +2490,84 @@ fn a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept<F
     assert_eq!(a.view().listed(&path("same.npno")).map(|l| l.len), Some(4));
 }
 
+fn a_file_no_entity_is_bound_to_is_saved_renamed_and_trashed_and_each_undone<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    put(&folder, "a.wav", b"wave");
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    let files = || {
+        let files = library_files(&folder);
+        let files = files
+            .into_iter()
+            .map(|(path, bytes)| (path.as_str().to_owned(), bytes));
+        files.collect::<Vec<(String, Vec<u8>)>>()
+    };
+    let held = |pairs: &[(&str, &[u8])]| -> Vec<(String, Vec<u8>)> {
+        let pairs = pairs
+            .iter()
+            .map(|(at, bytes)| (at.to_string(), bytes.to_vec()));
+        pairs.collect()
+    };
+    a.commit("Add", |i| {
+        i.save_file(&path("new.syx"), b"new".to_vec(), Expect::Absent)
+    })
+    .unwrap();
+    a.commit("Save", |i| {
+        i.save_file(
+            &path("a.wav"),
+            b"wavy".to_vec(),
+            Expect::Holds(identity(b"wave")),
+        )
+    })
+    .unwrap();
+    a.commit("Rename", |i| {
+        i.rename_file(
+            &path("a.wav"),
+            &path("b.wav"),
+            Expect::Holds(identity(b"wavy")),
+        )
+    })
+    .unwrap();
+    a.commit("Delete", |i| {
+        i.trash_file(&path("new.syx"), Expect::Holds(identity(b"new")))
+    })
+    .unwrap();
+    assert_eq!(files(), held(&[("b.wav", b"wavy")]));
+    assert!(a.view().entities().is_empty(), "no file became an entity");
+    let undone: [&[(&str, &[u8])]; 4] = [
+        &[("b.wav", b"wavy"), ("new.syx", b"new")],
+        &[("a.wav", b"wavy"), ("new.syx", b"new")],
+        &[("a.wav", b"wave"), ("new.syx", b"new")],
+        &[("a.wav", b"wave")],
+    ];
+    for (n, expected) in undone.iter().enumerate() {
+        a.undo().unwrap();
+        assert_eq!(files(), held(expected), "undo {}", n + 1);
+    }
+    a.redo().unwrap();
+    assert_eq!(files(), held(&[("a.wav", b"wave"), ("new.syx", b"new")]));
+    assert!(a.view().entities().is_empty());
+}
+
+fn an_effect_by_path_on_an_entitys_file_is_refused<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    create(&mut a, "song.npno", b"song");
+    let refused = a.commit("Delete", |i| {
+        i.trash_file(&path("song.npno"), Expect::Holds(identity(b"song")))
+    });
+    assert!(
+        matches!(
+            &refused,
+            Err(Error::Refused(Refusal::Invalid(Invalid::Bound(at)))) if *at == path("song.npno")
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(read(&folder, "song.npno").as_deref(), Some(&b"song"[..]));
+}
+
 /// The scenario losing the local root interrupts: every step a user might take.
 fn steps<F: Facade>(library: &mut F, clock: &TestClock, done: &mut usize) -> Result<(), Error> {
     let song = library
@@ -2517,6 +2597,21 @@ fn steps<F: Facade>(library: &mut F, clock: &TestClock, done: &mut usize) -> Res
     library.commit("Move", |i| i.move_tree(&path("a"), &path("c")))?;
     clock.advance(1);
     library.commit("Trash", |i| i.trash(song, Expect::Holds(identity(b"two"))))?;
+    let loose = path("loose.syx");
+    library.commit("Add", |i| {
+        i.save_file(&loose, b"loose".to_vec(), Expect::Absent)
+    })?;
+    library.commit("Rename", |i| {
+        i.rename_file(
+            &loose,
+            &path("d/loose.syx"),
+            Expect::Holds(identity(b"loose")),
+        )
+    })?;
+    library.undo()?;
+    library.commit("Delete", |i| {
+        i.trash_file(&loose, Expect::Holds(identity(b"loose")))
+    })?;
     Ok(())
 }
 

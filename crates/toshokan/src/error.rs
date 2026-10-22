@@ -128,6 +128,8 @@ pub enum Invalid {
     NoEntity(EntityId),
     #[error("{0} has no file")]
     NoFile(EntityId),
+    #[error("{0} is an entity's file")]
+    Bound(RelPath),
     #[error("{0} is not declared in the schema")]
     UndeclaredKey(String),
     #[error("a value for {key} cannot be written as JSON: {reason}")]

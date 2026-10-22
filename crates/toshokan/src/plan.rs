@@ -108,6 +108,29 @@ pub enum FileChange {
         to: RelPath,
         expect: Expect,
     },
+    /// Writes `content` at `path`, where no entity's file is. Bytes it displaces go
+    /// to this writer's trash.
+    SaveFile {
+        path: RelPath,
+        content: Content,
+        expect: Expect,
+    },
+    /// Renames the file at `from`, which is no entity's. Refused when something is
+    /// at `to`.
+    RenameFile {
+        from: RelPath,
+        to: RelPath,
+        expect: Expect,
+    },
+    /// Moves the file at `path`, which is no entity's, to this writer's trash.
+    TrashFile { path: RelPath, expect: Expect },
+    /// Brings displaced bytes back from this writer's trash to `to`, as no entity's
+    /// file.
+    RestoreFile {
+        item: Nonce,
+        to: RelPath,
+        expect: Expect,
+    },
 }
 
 /// A file's new contents made from an existing file, `from`, as an edit of a large

@@ -159,6 +159,17 @@ pub struct FileEnd {
     pub pin: bool,
 }
 
+/// Where a file no entity is bound to is once the first `done_after` steps are
+/// done, and where it was: at `path`, or nowhere.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct UnboundEnd {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<RelPath>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<RelPath>,
+    pub done_after: usize,
+}
+
 /// The file effects of one intent, resolved against the bindings.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct EffectPlan {
@@ -170,6 +181,7 @@ pub struct EffectPlan {
     pub staged: Vec<(Nonce, RelPath, Staged)>,
     pub steps: Vec<EffectStep>,
     pub files: Vec<FileEnd>,
+    pub unbound: Vec<UnboundEnd>,
     pub moves: Moves,
 }
 
@@ -182,13 +194,17 @@ impl EffectPlan {
             staged: Vec::new(),
             steps: Vec::new(),
             files: Vec::new(),
+            unbound: Vec::new(),
             moves: Moves::Rename,
         }
     }
 
     /// Whether the intent has no file effects at all.
     pub fn is_empty(&self) -> bool {
-        self.steps.is_empty() && self.checks.is_empty() && self.files.is_empty()
+        self.steps.is_empty()
+            && self.checks.is_empty()
+            && self.files.is_empty()
+            && self.unbound.is_empty()
     }
 
     /// Whether the effects change the folder, and so need a pending record.
@@ -212,6 +228,9 @@ pub struct Applied {
     pub displaced: Vec<Displaced>,
     /// What each entity's file register should say, for the effects that are done.
     pub files: Vec<(EntityId, Option<FileFact>)>,
+    /// Each file no entity is bound to that the effects done moved: where it was,
+    /// and where it is and what it holds.
+    pub unbound: Vec<(Option<RelPath>, Option<FileFact>)>,
     pub outcome: Outcome,
 }
 
@@ -353,6 +372,62 @@ impl Resolver<'_> {
                 });
                 self.end(*entity, Some(to));
             }
+            FileChange::SaveFile {
+                path,
+                content,
+                expect,
+            } => {
+                let path = self.unbound(path)?;
+                self.check(&path, *expect);
+                if expect.present() {
+                    self.step(EffectStep::ToTrash {
+                        path: path.clone(),
+                        item: env.nonce(),
+                    });
+                }
+                let staged = env.nonce();
+                self.plan
+                    .place(staged, Staged::Content(*content), path.clone());
+                let from = expect.present().then(|| path.clone());
+                self.end_unbound(from, Some(path));
+            }
+            FileChange::RenameFile { from, to, expect } => {
+                let from = self.unbound(from)?;
+                let to = self.library(to)?;
+                self.touch(&to)?;
+                self.check(&from, *expect);
+                self.check(&to, Expect::Absent);
+                self.step(EffectStep::Rename {
+                    from: from.clone(),
+                    to: to.clone(),
+                });
+                self.end_unbound(Some(from), Some(to));
+            }
+            FileChange::TrashFile { path, expect } => {
+                let path = self.unbound(path)?;
+                self.check(&path, *expect);
+                self.step(EffectStep::ToTrash {
+                    path: path.clone(),
+                    item: env.nonce(),
+                });
+                self.end_unbound(Some(path), None);
+            }
+            FileChange::RestoreFile { item, to, expect } => {
+                let to = self.unbound(to)?;
+                self.check(&to, *expect);
+                if expect.present() {
+                    self.step(EffectStep::ToTrash {
+                        path: to.clone(),
+                        item: env.nonce(),
+                    });
+                }
+                self.step(EffectStep::FromTrash {
+                    item: *item,
+                    path: to.clone(),
+                });
+                let from = expect.present().then(|| to.clone());
+                self.end_unbound(from, Some(to));
+            }
         }
         Ok(())
     }
@@ -422,6 +497,21 @@ impl Resolver<'_> {
         Ok(())
     }
 
+    /// Takes `path` for one effect on a file no entity is bound to: refused where
+    /// an entity's file is.
+    fn unbound(&mut self, path: &RelPath) -> std::result::Result<RelPath, Refusal> {
+        let path = self.library(path)?;
+        let bound = self.bindings.bound.values();
+        if let Some(file) = bound
+            .into_iter()
+            .find(|file| file.path == path && file.state != FileState::Missing)
+        {
+            return Err(invalid(Invalid::Bound(file.path.clone())));
+        }
+        self.touch(&path)?;
+        Ok(path)
+    }
+
     fn library(&self, path: &RelPath) -> std::result::Result<RelPath, Refusal> {
         match self.layout.check_library_path(path) {
             Ok(()) => Ok(path.clone()),
@@ -467,6 +557,15 @@ impl Resolver<'_> {
 
     fn step(&mut self, step: EffectStep) {
         self.plan.steps.push(step);
+    }
+
+    fn end_unbound(&mut self, from: Option<RelPath>, path: Option<RelPath>) {
+        let done_after = self.plan.steps.len();
+        self.plan.unbound.push(UnboundEnd {
+            from,
+            path,
+            done_after,
+        });
     }
 
     fn end(&mut self, entity: EntityId, path: Option<RelPath>) {
@@ -858,6 +957,12 @@ fn account<'a>(
             .filter(|end| end.done_after <= progress.done)
             .cloned()
             .collect();
+        let unbound: Vec<UnboundEnd> = record
+            .unbound
+            .iter()
+            .filter(|end| end.done_after <= progress.done)
+            .cloned()
+            .collect();
         let outcome = match record.steps.get(progress.done) {
             None => Outcome::Complete,
             Some(step) => Outcome::Partial(PartialReport {
@@ -918,7 +1023,9 @@ fn account<'a>(
             }
         })
         .and_then(move |displaced| {
-            let paths = ends.iter().filter_map(|end| end.path.clone());
+            let paths = ends.iter().map(|end| end.path.clone());
+            let paths = paths.chain(unbound.iter().map(|end| end.path.clone()));
+            let paths = paths.flatten();
             flow::observe_all(Root::Folder, paths.collect(), &identify).map_ok(move |seen| {
                 let mut seen = seen.into_iter();
                 let files = ends.into_iter().filter_map(|end| {
@@ -934,9 +1041,24 @@ fn account<'a>(
                     };
                     Some((end.entity, Some(fact)))
                 });
+                let files = files.collect();
+                let unbound = unbound.into_iter().filter_map(|end| {
+                    let Some(path) = end.path else {
+                        return Some((end.from, None));
+                    };
+                    let seen = seen.next().expect("an observation for each path")?;
+                    let fact = FileFact {
+                        path,
+                        identity: seen.identity,
+                        len: seen.len,
+                        modified: seen.modified,
+                    };
+                    Some((end.from, Some(fact)))
+                });
                 Applied {
                     displaced,
-                    files: files.collect(),
+                    files,
+                    unbound: unbound.collect(),
                     outcome,
                 }
             })

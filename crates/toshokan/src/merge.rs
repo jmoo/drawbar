@@ -828,6 +828,7 @@ impl Folded {
             Op::Unknown(raw) => {
                 self.unknown.insert((hash, raw.clone()));
             }
+            Op::Path { .. } => {}
         }
     }
 

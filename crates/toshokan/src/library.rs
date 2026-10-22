@@ -926,6 +926,10 @@ impl Library {
                     },
                 }
             })
+            .chain(applied.unbound.iter().map(|(from, file)| Op::Path {
+                from: from.clone(),
+                file: file.clone(),
+            }))
             .collect()
     }
 
@@ -1579,7 +1583,7 @@ fn change_of(op: &Op) -> Option<Change> {
         | Op::Add { entity, key, .. }
         | Op::Remove { entity, key, .. } => (*entity, What::Field(key.clone())),
         Op::File { entity, .. } | Op::Pin { entity, .. } => (*entity, What::File),
-        Op::Unknown(_) => return None,
+        Op::Path { .. } | Op::Unknown(_) => return None,
     };
     Some(Change {
         entity,
@@ -2304,7 +2308,9 @@ fn planned(record: &PendingRecord) -> Logged {
             reverses: None,
         },
     };
-    logged.ops.retain(|op| !matches!(op, Op::File { .. }));
+    logged
+        .ops
+        .retain(|op| !matches!(op, Op::File { .. } | Op::Path { .. }));
     logged.displaced.clear();
     logged
 }

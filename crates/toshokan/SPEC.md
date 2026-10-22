@@ -198,6 +198,7 @@ Each op is an object whose `op` member names it:
 | `remove` | `entity`, `key`, `value`, `tags`        | A set loses the adds of `value` `tags` names |
 | `file`   | `entity`, `file`, `replaces`            | A file effect left the entity's file here; none without `file` |
 | `pin`    | `entity`, `file`, `replaces`            | A reader bound the entity's file here        |
+| `path`   | `from`, `file`, both optional           | A file effect moved a file no entity's from `from` to `file` |
 
 `replaces`, `observed` and `tags` are arrays of entry hashes. A `value` is the
 app's JSON, kept byte for byte; `"value":null` writes `null`. A `file` is
@@ -588,6 +589,14 @@ writer's effect commit in the same way.
 
 An intent may also adopt a library file no entity is bound to: a precondition on
 its identity, no step, and a `pin` op giving the entity the file as it is.
+
+An intent may save, rename or trash a library file no entity is bound to, by its
+path, without making it an entity: a file nothing is said about stays without
+one. Each is refused where an entity's file is. The intent logs a `path` op for
+each such file as the folder shows it afterwards, with where it was: `from` alone
+for a file trashed, `file` alone for a file made, both for a file renamed or
+saved over. A `path` op changes no fact; undo reads it to rename the file back,
+bring its displaced bytes back from the trash, or trash the file it made.
 
 ## File effects and pending records
 

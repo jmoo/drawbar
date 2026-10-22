@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error as ThisError;
 
-use crate::effects::{EffectPlan, EffectStep, FileEnd, Moves};
+use crate::effects::{EffectPlan, EffectStep, FileEnd, Moves, UnboundEnd};
 use crate::error::Result;
 use crate::flow::{self, fold, ok, Flow};
 use crate::ids::{EntryHash, Nonce, WriterId};
@@ -32,6 +32,7 @@ pub struct PendingRecord {
     pub label: String,
     pub steps: Vec<EffectStep>,
     pub files: Vec<FileEnd>,
+    pub unbound: Vec<UnboundEnd>,
     /// How the steps move files, whoever carries them out.
     pub moves: Moves,
 }
@@ -43,6 +44,8 @@ struct Wire {
     label: String,
     steps: Vec<EffectStep>,
     files: Vec<FileEnd>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    unbound: Vec<UnboundEnd>,
     #[serde(default, skip_serializing_if = "Moves::renames")]
     moves: Moves,
 }
@@ -61,6 +64,7 @@ impl PendingRecord {
             label: label.to_owned(),
             steps: plan.steps.clone(),
             files: plan.files.clone(),
+            unbound: plan.unbound.clone(),
             moves: plan.moves,
         }
     }
@@ -84,6 +88,7 @@ impl PendingRecord {
             label: wire.label,
             steps: wire.steps,
             files: wire.files,
+            unbound: wire.unbound,
             moves: wire.moves,
         })
     }
@@ -95,6 +100,7 @@ impl PendingRecord {
             label: self.label.clone(),
             steps: self.steps.clone(),
             files: self.files.clone(),
+            unbound: self.unbound.clone(),
             moves: self.moves,
         };
         serde_json::to_vec(&wire).expect("a record serializes")
@@ -105,6 +111,9 @@ impl PendingRecord {
     pub fn is_confined(&self, layout: &Layout) -> bool {
         let steps = self.steps.iter().flat_map(EffectStep::library_paths);
         let ends = self.files.iter().filter_map(|end| end.path.as_ref());
+        let unbound = self.unbound.iter();
+        let unbound = unbound.flat_map(|end| end.from.iter().chain(end.path.iter()));
+        let ends = ends.chain(unbound);
         steps
             .chain(ends)
             .all(|path| layout.check_library_path(path).is_ok())
@@ -229,6 +238,7 @@ mod tests {
                 done_after: 2,
                 pin: false,
             }],
+            unbound: Vec::new(),
             moves: Moves::Rename,
         }
     }
