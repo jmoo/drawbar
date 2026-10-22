@@ -799,8 +799,9 @@ then the unsaved bytes. The draft of a file no entity is bound to is
 path in hexadecimal, and its line also holds `"path"`; an edit alone does not
 make a file an entity. A draft is kept only in the local root, so losing the
 local root loses drafts and nothing else. Opening restores a draft only while
-its file holds `base`; otherwise it reports what the file holds now. An instance
-that has never written starts its writer before it keeps its first draft.
+its file holds `base`; otherwise it reports what the file holds now, with the
+draft's bytes. An instance that has never written starts its writer before it
+keeps its first draft.
 
 ## What stays
 

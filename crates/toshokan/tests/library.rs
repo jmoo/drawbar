@@ -2996,7 +2996,10 @@ fn drafts_come_back_only_while_the_file_holds_their_base<F: Facade>() {
     );
     assert_eq!(
         states[&file("gone.wav")],
-        DraftState::BaseChanged { found: None }
+        DraftState::BaseChanged {
+            found: None,
+            bytes: b"edited gone".to_vec()
+        }
     );
     let (song, other) = (Drafted::Entity(song), Drafted::Entity(other));
     assert_eq!(
@@ -3008,7 +3011,8 @@ fn drafts_come_back_only_while_the_file_holds_their_base<F: Facade>() {
     assert_eq!(
         states[&other],
         DraftState::BaseChanged {
-            found: Some(identity(b"changed outside"))
+            found: Some(identity(b"changed outside")),
+            bytes: b"edited too".to_vec()
         }
     );
     for of in [song, other, file("loose.wav"), file("gone.wav")] {

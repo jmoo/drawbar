@@ -98,9 +98,13 @@ pub enum DraftState {
     /// The entity's file still holds the base the draft was made over: the draft's
     /// bytes, to restore.
     Applies { bytes: Vec<u8> },
-    /// The file changed since; `None` when it is gone. The draft is kept until it
-    /// is discarded.
-    BaseChanged { found: Option<Identity> },
+    /// The file changed since; `found` is `None` when it is gone. The draft's
+    /// bytes come with it, to show beside the file as it is now, and it is kept
+    /// until it is discarded.
+    BaseChanged {
+        found: Option<Identity>,
+        bytes: Vec<u8>,
+    },
     /// The draft cannot be read. It is kept until it is discarded.
     Unreadable,
 }

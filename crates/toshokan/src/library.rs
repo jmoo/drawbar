@@ -1490,10 +1490,14 @@ impl Library {
                         Drafted::File(path) => Some(path.clone()),
                     };
                     let status = move |state| DraftStatus { of, state };
-                    let (Some(record), Some(path)) = (record.clone(), path) else {
-                        statuses.push(status(match record {
-                            Some(_) => DraftState::BaseChanged { found: None },
-                            None => DraftState::Unreadable,
+                    let Some(record) = record else {
+                        statuses.push(status(DraftState::Unreadable));
+                        return ok(statuses);
+                    };
+                    let Some(path) = path else {
+                        statuses.push(status(DraftState::BaseChanged {
+                            found: None,
+                            bytes: record.bytes,
                         }));
                         return ok(statuses);
                     };
@@ -1503,7 +1507,10 @@ impl Library {
                             true => DraftState::Applies {
                                 bytes: record.bytes,
                             },
-                            false => DraftState::BaseChanged { found },
+                            false => DraftState::BaseChanged {
+                                found,
+                                bytes: record.bytes,
+                            },
                         }));
                         statuses
                     })
