@@ -844,6 +844,23 @@ mod tests {
         LibPath::parse(text).unwrap()
     }
 
+    /// A scan leaves out every name that starts with a dot, as drawbar never lists one:
+    /// nothing under such a folder is read for its identity.
+    #[test]
+    fn a_scan_leaves_out_names_that_start_with_a_dot() {
+        let root = Temp::new();
+        fs::create_dir(root.at(".git")).unwrap();
+        fs::write(root.at(".git/hidden.ne5p"), b"hidden").unwrap();
+        fs::write(root.at(".DS_Store"), b"hidden").unwrap();
+        fs::write(root.at("shown.ne5p"), b"shown").unwrap();
+        let keeper = keeper(&root);
+        let view = keeper.library.as_ref().unwrap().view();
+        let listed = |path: &str| view.listed(&RelPath::new(path).unwrap()).is_some();
+        assert!(listed("shown.ne5p"));
+        assert!(!listed(".git/hidden.ne5p"));
+        assert!(!listed(".DS_Store"));
+    }
+
     #[test]
     fn a_rename_that_changes_only_case_goes_through() {
         let root = Temp::new();

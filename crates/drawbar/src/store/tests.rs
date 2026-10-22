@@ -3002,7 +3002,11 @@ fn a_resting_sample_changed_in_place_before_its_save_is_not_saved_over() {
     assert!(workspace.get(id).unwrap().is_unsaved());
     assert!(workspace.edit_of(id).is_some() && !workspace.saving_edit(id));
     assert_eq!(session.said("was not saved"), 1);
-    assert_eq!(root.names(""), [".drawbar", "Zoned.nsmp"], "no copy is left");
+    assert_eq!(
+        root.names(""),
+        [".drawbar", "Zoned.nsmp"],
+        "no copy is left"
+    );
 }
 
 /// A plan over a piano library resting in its file is saved by laying the library out
@@ -4112,4 +4116,44 @@ fn resting_sample_again(root: &Temp) -> (Session, u64, ()) {
     session.ask_all();
     let id = session.only();
     (session, id, ())
+}
+
+/// A library past ten thousand entries is listed whole, however deep its files are, and
+/// a file drawbar holds keeps its tags wherever it is. A folder whose name starts with a
+/// dot is not listed at all.
+#[test]
+fn a_large_tree_is_listed_whole() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    for dir in ["a", "b", "c", "c/d", ".git"] {
+        fs::create_dir(root.at(dir)).unwrap();
+    }
+    fs::write(root.at("top.ne5p"), &program).unwrap();
+    fs::write(root.at("c/d/kept.ne5p"), with_gain(&program, "12")).unwrap();
+    fs::write(root.at(".git/hidden.ne5p"), &program).unwrap();
+    let mut first = Session::listed(&root);
+    let kept = first.named("kept.ne5p");
+    first.tag(&[kept], "Sunday");
+    first.close();
+
+    const PAST: usize = 10_001;
+    for n in 0..PAST {
+        fs::write(root.at(&format!("a/{n:05}.jpg")), b"").unwrap();
+    }
+    fs::write(root.at("b/deep.ne5p"), &program).unwrap();
+    let session = Session::listed(&root);
+    let folders = &session.bench.browser.folders;
+    assert!(folders.unwalked.is_empty(), "{:?}", folders.unwalked);
+    assert_eq!(folders.others.len(), PAST);
+    let mut names: Vec<&str> = session
+        .bench
+        .workspace
+        .listed()
+        .map(|entity| entity.name.as_str())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["deep.ne5p", "kept.ne5p", "top.ne5p"]);
+    assert_eq!(tagged(&session), [wears("kept.ne5p", &["Sunday"])]);
+    let dirs: Vec<&str> = folders.all().iter().map(|dir| dir.path.as_str()).collect();
+    assert_eq!(dirs, ["a", "b", "c", "c/d"]);
 }

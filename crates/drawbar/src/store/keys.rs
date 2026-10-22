@@ -79,9 +79,13 @@ pub fn schema() -> Schema {
     Schema::of(&[TAGS.key(), TAG_NAMES.key(), ORIGIN.key()]).expect("drawbar's keys are distinct")
 }
 
+/// Where toshokan keeps the library's facts, in [`DIR`], and what its scans leave out:
+/// every name that starts with a dot, which drawbar never lists.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn layout() -> Layout {
-    Layout::within(DIR, "library").expect("the root's names are single components")
+    Layout::within(DIR, "library")
+        .expect("the root's names are single components")
+        .hiding()
 }
 
 /// How many bytes at the start of a Nord file its identity reads.
