@@ -125,13 +125,17 @@ pub fn read_all(genesis: EntryHash) -> Task<'static, Result<Vec<Kept>>> {
                     .expect("a listed name is one component");
                 flow::read_replaced(Root::Local, path.clone()).map_ok(move |bytes| {
                     let record = bytes.and_then(|bytes| DraftRecord::decode(&path, &bytes).ok());
-                    let of = match (entity, &record) {
-                        (Some(entity), _) => Some(Drafted::Entity(entity)),
-                        (None, Some(DraftRecord { path: Some(at), .. })) => {
-                            (Layout::file_draft(genesis, at) == path)
-                                .then(|| Drafted::File(at.clone()))
-                        }
-                        (None, _) => None,
+                    let (of, record) = match (entity, record) {
+                        (Some(entity), record) => (Some(Drafted::Entity(entity)), record),
+                        (None, Some(record)) => match record.path.clone() {
+                            // A draft under another file's name does not read as this one's.
+                            Some(at) if Layout::file_draft(genesis, &at) == path => {
+                                (Some(Drafted::File(at)), Some(record))
+                            }
+                            Some(at) => (Some(Drafted::File(at)), None),
+                            None => (None, None),
+                        },
+                        (None, None) => (None, None),
                     };
                     kept.extend(of.map(|of| Kept { of, record }));
                     kept

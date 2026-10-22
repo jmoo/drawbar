@@ -633,6 +633,7 @@ through_both!(
     an_empty_record_of_this_writer_is_removed_by_its_next_write,
     an_untrusted_folder_is_read_within_bounds_and_never_acted_on,
     drafts_come_back_only_while_the_file_holds_their_base,
+    a_file_draft_under_another_files_name_is_reported_unreadable,
     the_trash_keeps_displaced_bytes_until_emptied,
     the_items_an_app_names_leave_the_trash,
     compaction_keeps_the_view_and_ends_undo_at_the_snapshot,
@@ -3128,6 +3129,39 @@ fn an_untrusted_folder_is_read_within_bounds_and_never_acted_on<F: Facade>() {
         assert_eq!(probe.folder_writes(), 0, "seed {seed}");
         assert!(opened.orphaned.is_empty(), "seed {seed}");
     }
+}
+
+fn a_file_draft_under_another_files_name_is_reported_unreadable<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    put(&folder, "loose.wav", b"loose");
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    a.put_file_draft(&path("loose.wav"), identity(b"loose"), b"edited loose")
+        .unwrap();
+    a.close().unwrap();
+    let local = here.local.files(Root::Local);
+    let kept = local
+        .keys()
+        .find(|at| at.name().is_some_and(|name| name.starts_with("file-")))
+        .expect("the draft is kept")
+        .clone();
+    let elsewhere = kept.parent().unwrap().join("file-0.json").unwrap();
+    here.local
+        .perform(Io::Rename {
+            root: Root::Local,
+            from: kept,
+            to: elsewhere,
+        })
+        .unwrap();
+
+    let (_, opened) = F::open(Probe::new(&here), env("a", 2, &clock)).unwrap();
+    let states: Vec<(Drafted, DraftState)> =
+        opened.drafts.into_iter().map(|d| (d.of, d.state)).collect();
+    assert_eq!(
+        states,
+        [(Drafted::File(path("loose.wav")), DraftState::Unreadable)]
+    );
 }
 
 fn drafts_come_back_only_while_the_file_holds_their_base<F: Facade>() {

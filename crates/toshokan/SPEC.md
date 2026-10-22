@@ -828,7 +828,8 @@ Emptying a trash is the only way bytes leave the folder.
 then the unsaved bytes. The draft of a file no entity is bound to is
 `drafts/file-<hash>.json`, named by the first 16 bytes of the BLAKE3 hash of its
 path in hexadecimal, and its line also holds `"path"`; an edit alone does not
-make a file an entity. A draft is kept only in the local root, so losing the
+make a file an entity. A draft whose name is not the one its `"path"` gives is
+reported unreadable. A draft is kept only in the local root, so losing the
 local root loses drafts and nothing else. Opening restores a draft only while
 its file holds `base`; otherwise it reports what the file holds now, with the
 draft's bytes. An instance that has never written starts its writer before it
