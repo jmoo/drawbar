@@ -25,7 +25,9 @@ document means this, and nothing toshokan reports promises more.
 A backend also says whether it can append, rename a file, rename a directory,
 and rename without replacing. toshokan plans from what it says, never from a
 request that failed. A folder that cannot append is opened read-only. The local
-root must rename files.
+root must rename files. Where a crash can tear a rename, as on FAT and exFAT, a
+crash while a file of the local root is replaced can lose that file, as losing
+the local root would.
 
 ## Layout
 
@@ -804,6 +806,15 @@ Without `rename_dir`, a directory moves file by file, and without `rename_file`
 each move copies and then removes its source (see File effects). Without
 `append`, a library opens read-only. Without `fsync`, a sync is answered at once,
 and a completed request is as durable as the backend makes it.
+
+The native backend tells a volume by the type of file system it reports. It
+declares `rename_file` and `rename_dir` except where the file system keeps no
+journal of its names, so that a crash can keep a rename's removal of the old
+name without the new one: FAT, exFAT, NTFS, HFS, HFS+ and UDF on Linux, and
+FAT, exFAT and NTFS on Apple systems. There every move copies. On Windows it
+does not tell volumes apart and declares both everywhere. It declares
+`no_replace` where renames also refuse an existing destination (see File
+effects).
 
 ### Browsers
 
