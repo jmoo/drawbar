@@ -514,6 +514,22 @@ let
       }
     );
 
+  # The power-loss harness's workloads and checker, and the VM tests that crash
+  # and replay real file systems under them. x86_64 Linux only: they need KVM.
+  toshokanPowerLoss = final.callPackage ./crates/toshokan/power-loss {
+    power-loss = crane.buildPackage (
+      commonArgs
+      // {
+        inherit cargoArtifacts;
+        cargoExtraArgs = "--locked -p toshokan --example power_loss";
+        doCheck = false;
+        installPhaseCommand = ''install -D target/release/examples/power_loss "$out/bin/power_loss"'';
+        pname = "toshokan-power-loss";
+        inherit (manifests.toshokan) version;
+      }
+    );
+  };
+
   # `docs/book` is mdBook's own output directory, ignored by git; keeping it out
   # of the source means a local `mdbook build` cannot change this derivation.
   docs = final.stdenvNoCC.mkDerivation {
@@ -713,6 +729,13 @@ in
     // crossed
     # Not in `all`: it starts browsers, and only on Linux.
     // optionalAttrs final.stdenv.hostPlatform.isLinux { inherit toshokan-web; }
+    # Not in `all`: each boots VMs, and replaying takes long.
+    // optionalAttrs (final.stdenv.hostPlatform.system == "x86_64-linux") {
+      toshokan-power-loss =
+        (final.linkFarm "toshokan-power-loss" toshokanPowerLoss.replay).overrideAttrs
+          { passthru = toshokanPowerLoss.replay; };
+      toshokan-power-loss-smoke = toshokanPowerLoss.smoke;
+    }
     // mapAttrs' (name: nameValuePair "${name}-corpus") committed
     // mapAttrs' (name: nameValuePair "${name}-corpus-full") full
     // {

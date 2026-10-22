@@ -25,7 +25,9 @@ document means this, and nothing toshokan reports promises more.
 A backend also says whether it can append, rename a file, rename a directory,
 and rename without replacing. toshokan plans from what it says, never from a
 request that failed. A folder that cannot append is opened read-only. The local
-root must rename files.
+root must rename files. Where a crash can tear a rename, as on FAT and exFAT, a
+crash while a file of the local root is replaced can lose that file, as losing
+the local root would.
 
 ## Layout
 
@@ -725,7 +727,9 @@ If a step fails, the rest are not tried: staged files not placed are moved to
 records the effects that were made, and the intent reports that it stopped
 partway. Each library path holds its old bytes, nothing, or its new bytes, and
 while it holds nothing a pending record names it. Where moves copy, a library
-path may also hold the start of its new bytes while a pending record names it.
+path may also hold a copy of its new bytes cut short while a pending record
+names it: no longer than them, holding their start or, where a crash zeroed or
+tore bytes the volume had not yet synced, anything else.
 
 Removing a record first removes its markers and syncs `pending/`.
 
@@ -766,10 +770,13 @@ source's name. When
 the last done step's source still holds the same bytes as its destination, the
 source is removed. The remaining steps are carried out, the planned entry is
 appended with what the steps did, and the record is spent. Then every file in
-its `tmp/` that no open record places is removed, and so is every empty
-`pending/<nonce>.json` opening ignored: a record created in place and cut short
-before its bytes landed, before any of its steps ran. Any other record that does
-not decode stays. Settling twice ends as settling once.
+its `tmp/` that no open record places is removed, and so is every
+`pending/<nonce>.json` opening ignored that is a record created in place and cut
+short before its bytes landed, before any of its steps ran: one that is empty
+or, in a folder that syncs, one of at most 16 MiB that holds a zero byte or is
+the start of a JSON value. Any other record that does not decode stays.
+
+Settling twice ends as settling once.
 
 The steps of a record whose moves copy are found from its markers instead,
 since a later step may put bytes back where an earlier one copied them from.
@@ -777,9 +784,22 @@ Without a marker, no step is done. Otherwise every step before the last marked
 one is done, and that one is done when its source is gone and its destination
 is there, unless it is a `place` whose staged file is in the trash. When its
 source and destination hold the same bytes, it is done and the source is
-removed. When the destination holds fewer of the source's bytes, from the start,
-the destination is removed and the step carried out again. Anything else at the
-destination stays, and the step stops there.
+removed. Otherwise the destination is that step's copy cut short, since the
+marker was synced before the destination was created and the create refuses an
+existing file, while it holds the start of the source's bytes or, in a folder
+that syncs, where a crash zeroes or tears bytes not yet synced, anything no
+longer than them. A copy holding the start of the source's bytes is removed;
+any other is set aside in the writer's trash, under a name derived from the
+record and step that no entry names, so emptying the trash never removes it.
+Then the step is carried out again. Any other destination stays, and the step
+stops there.
+
+The destination may instead be another program's file: one made after the
+marker was synced and before the writer's create, which then fails, or one put
+there between the crash and the next open, such as a file restored from a
+backup. Recovery cannot tell such a file from its own copy cut short. It keeps
+its bytes all the same: it sets the file aside in the trash, or removes it only
+where it holds the start of the source's bytes, which the source still holds.
 
 An open record of any other writer may belong to a live writer elsewhere, or to
 this install's own writer from before its local root was lost; a reader cannot
@@ -790,9 +810,9 @@ roll back, it reverses the done ones; to dismiss, it changes no file. It finds
 how far the steps got by checking them from the last, whichever way they move,
 since its own settling may have carried them further or reversed some; a
 `to_trash` of a record whose moves copy shows done as any other move does. A
-library path holding the start of a copy at the destination of the record's last
-marked step makes that step the one in progress and goes to the settler's trash
-first, as does a library path the last done step left beside its destination. It
+copy cut short, as above, at the destination of the record's last marked step
+makes that step the one in progress and goes to the settler's trash first, as
+does a library path the last done step left beside its destination. It
 copies files out of the other writer's `tmp/` and `trash/` rather than moving
 them, and moves a library file it displaces into its own trash. A `from_trash`
 of an item a `to_trash` it carried out itself put aside takes the file from its
@@ -884,6 +904,21 @@ Without `rename_dir`, a directory moves file by file, and without `rename_file`
 each move copies and then removes its source (see File effects). Without
 `append`, a library opens read-only. Without `fsync`, a sync is answered at once,
 and a completed request is as durable as the backend makes it.
+
+The native backend tells a volume by the type of file system it reports, read at
+the root or, before the root exists, at the nearest directory above it. It
+declares `rename_file` and `rename_dir` except where the file system keeps no
+journal of its names, so that a crash can keep a rename's removal of the old
+name without the new one, and where it cannot tell: FAT, exFAT, NTFS, HFS, HFS+
+and UDF on Linux; FAT, exFAT, NTFS and UDF on Apple systems; FAT, exFAT and UDF
+on Windows; every FUSE file system, which hides what it stores to; and a volume
+whose type cannot be read. There every move copies. The type is all it reads:
+ext2, and ext4 made without a journal, report ext4's type and are taken to
+rename atomically, as is any file system not named here. It declares
+`no_replace` where renames also refuse an existing destination (see File
+effects). On Windows it declares no `fsync`, so a copy cut short is told only by
+holding the start of its source's bytes, and a record cut short only by being
+empty (see Recovery).
 
 ### Browsers
 
