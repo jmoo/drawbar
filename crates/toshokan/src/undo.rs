@@ -164,6 +164,9 @@ pub fn reverse(entries: &[Entry], writer: WriterId, folded: &Folded) -> Result<P
             _ => None,
         })
         .collect();
+    // The file changes undo in the reverse of the order the intent made them, as one
+    // made a directory before moving files into it; a tree moves back where it moved.
+    let mut undone: Vec<Option<FileChange>> = Vec::new();
     for op in &logged.ops {
         match op {
             Op::Create { entity, .. } => {
@@ -198,28 +201,34 @@ pub fn reverse(entries: &[Entry], writer: WriterId, folded: &Folded) -> Result<P
                 replaces,
             } => {
                 let change = reversing.file(*entity, file.as_ref(), replaces)?;
-                plan.files
-                    .extend(carried(&mut trees, file.as_ref(), change));
+                undone.extend(carried(&mut trees, file.as_ref(), change).map(Some));
             }
             Op::Path { from, file } => {
                 let change = reversing.path(from.as_ref(), file.as_ref());
-                plan.files
-                    .extend(carried(&mut trees, file.as_ref(), change));
+                undone.extend(carried(&mut trees, file.as_ref(), change).map(Some));
             }
-            Op::Tree { .. }
-            | Op::Write { .. }
+            Op::Dir { path, made } => undone.push(Some(match made {
+                true => FileChange::RemoveDir { path: path.clone() },
+                false => FileChange::MakeDir { path: path.clone() },
+            })),
+            Op::Tree { .. } => undone.push(None),
+            Op::Write { .. }
             | Op::Add { .. }
             | Op::Remove { .. }
             | Op::Pin { .. }
             | Op::Unknown(_) => {}
         }
     }
-    plan.files
-        .extend(trees.into_iter().map(|tree| FileChange::MoveBack {
-            from: tree.from,
-            to: tree.to,
-            held: tree.held,
-        }));
+    let mut trees = trees.into_iter().map(|tree| FileChange::MoveBack {
+        from: tree.from,
+        to: tree.to,
+        held: tree.held,
+    });
+    let in_order: Vec<FileChange> = undone
+        .into_iter()
+        .filter_map(|change| change.or_else(|| trees.next()))
+        .collect();
+    plan.files.extend(in_order.into_iter().rev());
     Ok(plan)
 }
 

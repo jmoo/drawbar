@@ -143,6 +143,9 @@ pub enum Op {
     /// A file effect moved the tree at `from` to `to`, which it made. Facts are not
     /// changed; undo reads it to remove `to` once it moved its files back.
     Tree { from: RelPath, to: RelPath },
+    /// A file effect made the directory `path` where `made`, or removed it, empty.
+    /// Facts are not changed; undo reads it to do the opposite.
+    Dir { path: RelPath, made: bool },
     /// An op this build does not know, or a known op whose members do not decode,
     /// as its JSON object.
     Unknown(Raw),
@@ -159,7 +162,7 @@ impl Op {
             | Self::Remove { entity, .. }
             | Self::File { entity, .. }
             | Self::Pin { entity, .. } => Some(*entity),
-            Self::Path { .. } | Self::Tree { .. } | Self::Unknown(_) => None,
+            Self::Path { .. } | Self::Tree { .. } | Self::Dir { .. } | Self::Unknown(_) => None,
         }
     }
 }
@@ -385,6 +388,8 @@ struct OpMembers {
     file: Option<ExactFact>,
     from: Option<RelPath>,
     to: Option<RelPath>,
+    path: Option<RelPath>,
+    made: Option<bool>,
 }
 
 /// Reads the next value into `slot`, refusing a second one.
@@ -426,6 +431,8 @@ impl<'de> Visitor<'de> for ExactOpVisitor {
                 ("file" | "pin" | "path", "file") => once(&mut map, &mut m.file)?,
                 ("path" | "tree", "from") => once(&mut map, &mut m.from)?,
                 ("tree", "to") => once(&mut map, &mut m.to)?,
+                ("dir", "path") => once(&mut map, &mut m.path)?,
+                ("dir", "made") => once(&mut map, &mut m.made)?,
                 _ => return Err(de::Error::custom("a member this build does not write")),
             }
         }
@@ -436,6 +443,10 @@ impl<'de> Visitor<'de> for ExactOpVisitor {
             "tree" => {
                 let (from, to) = (m.from.ok_or_else(missing)?, m.to.ok_or_else(missing)?);
                 return Ok(ExactOp(Op::Tree { from, to }));
+            }
+            "dir" => {
+                let (path, made) = (m.path.ok_or_else(missing)?, m.made.ok_or_else(missing)?);
+                return Ok(ExactOp(Op::Dir { path, made }));
             }
             _ => {}
         }
@@ -915,6 +926,10 @@ impl Pack for Op {
                 out.push(9);
                 (from, to).pack(out);
             }
+            Self::Dir { path, made } => {
+                out.push(10);
+                (path, made).pack(out);
+            }
         }
     }
 }
@@ -980,6 +995,10 @@ impl Unpack for Op {
             9 => {
                 let (from, to) = Unpack::unpack(input)?;
                 Self::Tree { from, to }
+            }
+            10 => {
+                let (path, made) = Unpack::unpack(input)?;
+                Self::Dir { path, made }
             }
             _ => return bad_variant(),
         })
@@ -1145,6 +1164,10 @@ enum OpOut<'a> {
         from: &'a RelPath,
         to: &'a RelPath,
     },
+    Dir {
+        path: &'a RelPath,
+        made: bool,
+    },
 }
 
 /// A write without `value` clears; one with `"value":null` writes `null`.
@@ -1214,6 +1237,7 @@ impl Serialize for Op {
                 file: file.as_ref(),
             },
             Self::Tree { from, to } => OpOut::Tree { from, to },
+            Self::Dir { path, made } => OpOut::Dir { path, made: *made },
             Self::Unknown(raw) => return raw.serialize(serializer),
         };
         out.serialize(serializer)
@@ -1301,6 +1325,13 @@ struct TreeIn {
     op: String,
     from: RelPath,
     to: RelPath,
+}
+
+#[derive(Deserialize)]
+struct DirIn {
+    op: String,
+    path: RelPath,
+    made: bool,
 }
 
 #[derive(Deserialize)]
@@ -1414,6 +1445,8 @@ fn decode_op(json: &str) -> Option<Op> {
             .map(|PathIn { from, file, .. }| Op::Path { from, file }),
         "tree" => op_members(json, name, |m: &TreeIn| &m.op)
             .map(|TreeIn { from, to, .. }| Op::Tree { from, to }),
+        "dir" => op_members(json, name, |m: &DirIn| &m.op)
+            .map(|DirIn { path, made, .. }| Op::Dir { path, made }),
         _ => None,
     }
 }
@@ -1510,6 +1543,10 @@ mod tests {
             Op::Tree {
                 from: RelPath::new("old").unwrap(),
                 to: RelPath::new("new/old").unwrap(),
+            },
+            Op::Dir {
+                path: RelPath::new("Gig").unwrap(),
+                made: true,
             },
         ]
     }

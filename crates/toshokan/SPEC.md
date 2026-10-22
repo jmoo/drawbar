@@ -215,6 +215,7 @@ Each op is an object whose `op` member names it:
 | `pin`    | `entity`, `file`, `replaces`            | A reader bound the entity's file here        |
 | `path`   | `from`, `file`, both optional           | A file effect moved a file no entity's from `from` to `file` |
 | `tree`   | `from`, `to`                            | A file effect moved the tree at `from` to `to`, which it made |
+| `dir`    | `path`, `made`                          | A file effect made the directory `path` (`true`) or removed it (`false`) |
 
 `replaces`, `observed` and `tags` are arrays of entry hashes. A `value` is the
 app's JSON, kept byte for byte; `"value":null` writes `null`. A `file` is
@@ -604,7 +605,14 @@ Building an intent writes nothing, but draws the id of each entity it creates,
 so one intent can create entities that name each other.
 
 A commit whose file effects stop partway is logged with what they did, and
-fails, saying where they stopped. When settling one of this writer's unfinished
+fails, saying where they stopped and which library paths its finished changes
+put files at, made directories at or moved trees to.
+
+An intent may make a directory where nothing is, and remove one that holds no
+file the library knows but those its earlier changes move out; anything else in
+it keeps it, and the removal is then not logged. Neither touches a path, so one
+intent can make a directory and move files into it, or move them out and remove
+it. Each logs a `dir` op as the folder shows it afterwards. When settling one of this writer's unfinished
 effects at step 4 stops partway, that settlement is logged and the commit fails
 before its own intent is tried.
 
@@ -842,6 +850,11 @@ reverses the latest undo while the writer has committed nothing else since.
   from the trash, under a precondition on what the path holds now; the old name;
   or the trash, for a file the intent added.
 - `pin` ops are left alone, so undoing an adoption leaves the file.
+- A `dir` op is reversed by removing the directory it made or making the one it
+  removed.
+
+An intent's file changes are undone in the reverse of the order it made them, so
+one that made a directory and moved files into it moves them out first.
 
 An undo or redo is refused, naming the writer and entry, where another writer
 changed the same thing since: a register no longer holds only what the intent

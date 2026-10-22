@@ -185,6 +185,23 @@ impl<L: Driver> Intent<L> {
         self
     }
 
+    /// Makes the directory `path` where nothing is; undo removes it.
+    pub fn make_dir(mut self, path: &RelPath) -> Self {
+        self.plan
+            .files
+            .push(FileChange::MakeDir { path: path.clone() });
+        self
+    }
+
+    /// Removes the directory `path`, which holds no file the library knows; undo
+    /// makes it again.
+    pub fn remove_dir(mut self, path: &RelPath) -> Self {
+        self.plan
+            .files
+            .push(FileChange::RemoveDir { path: path.clone() });
+        self
+    }
+
     pub fn move_tree(mut self, from: &RelPath, to: &RelPath) -> Self {
         self.plan.files.push(FileChange::MoveTree {
             from: from.clone(),

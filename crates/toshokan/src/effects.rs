@@ -174,6 +174,15 @@ pub struct UnboundEnd {
     pub done_after: usize,
 }
 
+/// The directory `path` made, where `made`, or removed once the first
+/// `done_after` steps are done.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct DirEnd {
+    pub path: RelPath,
+    pub made: bool,
+    pub done_after: usize,
+}
+
 /// A tree moved from `from` to `to` once the first `done_after` steps are done.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct TreeEnd {
@@ -195,6 +204,7 @@ pub struct EffectPlan {
     pub files: Vec<FileEnd>,
     pub unbound: Vec<UnboundEnd>,
     pub trees: Vec<TreeEnd>,
+    pub dirs: Vec<DirEnd>,
     pub moves: Moves,
 }
 
@@ -209,6 +219,7 @@ impl EffectPlan {
             files: Vec::new(),
             unbound: Vec::new(),
             trees: Vec::new(),
+            dirs: Vec::new(),
             moves: Moves::Rename,
         }
     }
@@ -247,6 +258,8 @@ pub struct Applied {
     pub unbound: Vec<(Option<RelPath>, Option<FileFact>)>,
     /// Each tree the effects done moved, from and to.
     pub trees: Vec<(RelPath, RelPath)>,
+    /// Each directory the effects done made, or removed, as the folder shows it.
+    pub dirs: Vec<(RelPath, bool)>,
     pub outcome: Outcome,
 }
 
@@ -361,6 +374,34 @@ impl Resolver<'_> {
             }
             FileChange::MoveTree { from, to } => {
                 self.move_tree_whole(from, to, capabilities, env)?
+            }
+            // A directory change touches no path, so one intent may make a directory
+            // and move files into it, or move them out and remove it.
+            FileChange::MakeDir { path } => {
+                let path = self.library(path)?;
+                self.check(&path, Expect::Absent);
+                self.step(EffectStep::MakeDir { path: path.clone() });
+                self.end_dir(path, true);
+            }
+            FileChange::RemoveDir { path } => {
+                let path = self.library(path)?;
+                let known = self.bindings.bound.values();
+                let known = known.filter(|file| file.state != FileState::Missing);
+                let unbound = self.bindings.unbound.seek(|file| file.cmp(&path));
+                let unbound = unbound
+                    .take_while(|(file, ())| file.as_str().starts_with(path.as_str()))
+                    .map(|(file, ())| file);
+                let staying =
+                    |file: &&RelPath| file.starts_with(&path) && !self.touched.contains(file);
+                let held = known
+                    .map(|file| &file.path)
+                    .chain(unbound)
+                    .any(|file| staying(&file));
+                if held {
+                    return Err(invalid(Invalid::NotEmpty(path)));
+                }
+                self.step(EffectStep::RemoveDir { path: path.clone() });
+                self.end_dir(path, false);
             }
             FileChange::MoveBack { from, to, held } => {
                 for (path, expect) in held {
@@ -677,6 +718,15 @@ impl Resolver<'_> {
 
     fn step(&mut self, step: EffectStep) {
         self.plan.steps.push(step);
+    }
+
+    fn end_dir(&mut self, path: RelPath, made: bool) {
+        let done_after = self.plan.steps.len();
+        self.plan.dirs.push(DirEnd {
+            path,
+            made,
+            done_after,
+        });
     }
 
     fn end_tree(&mut self, from: RelPath, to: RelPath) {
@@ -1123,6 +1173,12 @@ fn account<'a>(
             .filter(|end| end.done_after <= progress.done)
             .map(|end| (end.from.clone(), end.to.clone()))
             .collect();
+        let dirs: Vec<DirEnd> = record
+            .dirs
+            .iter()
+            .filter(|end| end.done_after <= progress.done)
+            .cloned()
+            .collect();
         let outcome = match record.steps.get(progress.done) {
             None => Outcome::Complete,
             Some(step) => Outcome::Partial(PartialReport {
@@ -1130,6 +1186,7 @@ fn account<'a>(
                 stopped: step.path().clone(),
                 error: failed.unwrap_or(IoError::NotFound),
                 record: Some(name),
+                landed: Vec::new(),
             }),
         };
         let sweeping = layout.clone();
@@ -1183,6 +1240,19 @@ fn account<'a>(
             }
         })
         .and_then(move |displaced| {
+            // A directory a step made or removed is logged as the folder shows it.
+            fold(dirs.into_iter(), Vec::new(), |mut shown, end| {
+                flow::stat(Root::Folder, &end.path).map_ok(move |meta| {
+                    let there = meta.is_some_and(|meta| meta.kind == Kind::Directory);
+                    if there == end.made {
+                        shown.push((end.path, end.made));
+                    }
+                    shown
+                })
+            })
+            .map_ok(move |dirs| (displaced, dirs))
+        })
+        .and_then(move |(displaced, dirs)| {
             let paths = ends.iter().map(|end| end.path.clone());
             let paths = paths.chain(unbound.iter().map(|end| end.path.clone()));
             let paths = paths.flatten();
@@ -1220,6 +1290,7 @@ fn account<'a>(
                     files,
                     unbound: unbound.collect(),
                     trees,
+                    dirs,
                     outcome,
                 }
             })
@@ -1539,6 +1610,7 @@ pub(crate) fn predict(
             stopped: step.path().clone(),
             error,
             record: Some(name),
+            landed: Vec::new(),
         });
     }
     Outcome::Complete

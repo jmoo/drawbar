@@ -1013,7 +1013,11 @@ impl Library {
             from: from.clone(),
             to: to.clone(),
         });
-        trees.chain(ops).collect()
+        let dirs = applied.dirs.iter().map(|(path, made)| Op::Dir {
+            path: path.clone(),
+            made: *made,
+        });
+        trees.chain(dirs).chain(ops).collect()
     }
 
     /// Keeps an open pending record a failure left behind: this writer's is
@@ -1707,7 +1711,7 @@ fn change_of(op: &Op) -> Option<Change> {
         | Op::Add { entity, key, .. }
         | Op::Remove { entity, key, .. } => (*entity, What::Field(key.clone())),
         Op::File { entity, .. } | Op::Pin { entity, .. } => (*entity, What::File),
-        Op::Path { .. } | Op::Tree { .. } | Op::Unknown(_) => return None,
+        Op::Path { .. } | Op::Tree { .. } | Op::Dir { .. } | Op::Unknown(_) => return None,
     };
     Some(Change {
         entity,
@@ -2347,14 +2351,29 @@ fn committed(
     };
     match outcome {
         Outcome::Complete => Ok(committed),
-        Outcome::Partial(report) => Err(Box::new(Partial {
-            label,
-            committed,
-            report: PartialReport {
-                record: None,
-                ..report
-            },
-        })),
+        Outcome::Partial(report) => {
+            let landed = ops.iter().filter_map(|op| match op {
+                Op::File {
+                    file: Some(file), ..
+                }
+                | Op::Pin { file, .. }
+                | Op::Path {
+                    file: Some(file), ..
+                } => Some(file.path.clone()),
+                Op::Tree { to, .. } => Some(to.clone()),
+                Op::Dir { path, made: true } => Some(path.clone()),
+                _ => None,
+            });
+            Err(Box::new(Partial {
+                label,
+                committed,
+                report: PartialReport {
+                    record: None,
+                    landed: landed.collect(),
+                    ..report
+                },
+            }))
+        }
     }
 }
 
@@ -2532,9 +2551,12 @@ fn planned(record: &PendingRecord) -> Logged {
             reverses: None,
         },
     };
-    logged
-        .ops
-        .retain(|op| !matches!(op, Op::File { .. } | Op::Path { .. } | Op::Tree { .. }));
+    logged.ops.retain(|op| {
+        !matches!(
+            op,
+            Op::File { .. } | Op::Path { .. } | Op::Tree { .. } | Op::Dir { .. }
+        )
+    });
     logged.displaced.clear();
     logged
 }

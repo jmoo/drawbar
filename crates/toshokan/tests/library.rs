@@ -642,6 +642,9 @@ through_both!(
     asking_who_else_writes_keeps_the_idle_writers_taken_up,
     an_effect_a_live_window_left_open_is_reported_live,
     a_change_of_case_another_install_did_not_start_is_finished_by_another,
+    a_directory_made_and_filled_in_one_change_is_undone_in_one,
+    removing_an_empty_directory_is_undone_and_one_with_files_is_refused,
+    an_intent_that_stops_partway_says_what_landed,
     a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept,
     losing_the_local_root_at_any_step_loses_only_drafts,
     a_crash_at_any_step_is_settled_before_the_next_write,
@@ -2953,6 +2956,84 @@ fn a_change_of_case_another_install_did_not_start_is_finished_by_another<F: Faca
         .map(|(path, bytes)| format!("{path:?} {}", String::from_utf8_lossy(&bytes)))
         .collect();
     assert_eq!(files, [r#"RelPath("kick.wav") kick"#]);
+}
+
+fn a_directory_made_and_filled_in_one_change_is_undone_in_one<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    put(&folder, "a.wav", b"a");
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    let dirs = || {
+        let dirs = folder.directories(Root::Folder).into_iter();
+        let dirs = dirs.filter(|dir| !dir.starts_with(&path(".t")) && !dir.is_root());
+        dirs.map(|dir| dir.as_str().to_owned()).collect::<Vec<_>>()
+    };
+    a.commit("Move", |i| {
+        i.make_dir(&path("Gig")).rename_file(
+            &path("a.wav"),
+            &path("Gig/a.wav"),
+            Expect::Holds(identity(b"a")),
+        )
+    })
+    .unwrap();
+    assert_eq!(dirs(), ["Gig"]);
+    a.undo().unwrap();
+    assert_eq!(
+        dirs(),
+        [] as [String; 0],
+        "the directory went with the move"
+    );
+    assert!(read(&folder, "a.wav").is_some());
+    a.redo().unwrap();
+    assert_eq!(dirs(), ["Gig"]);
+    assert!(read(&folder, "Gig/a.wav").is_some());
+}
+
+fn removing_an_empty_directory_is_undone_and_one_with_files_is_refused<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    put(&folder, "Full/a.wav", b"a");
+    folder
+        .perform(Io::MakeDir {
+            root: Root::Folder,
+            path: path("Empty"),
+        })
+        .unwrap();
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    let refused = a.commit("Remove", |i| i.remove_dir(&path("Full")));
+    assert!(
+        matches!(
+            refused,
+            Err(Error::Refused(Refusal::Invalid(Invalid::NotEmpty(_))))
+        ),
+        "{refused:?}"
+    );
+    a.commit("Remove", |i| i.remove_dir(&path("Empty")))
+        .unwrap();
+    let there = |dir: &str| folder.directories(Root::Folder).contains(&path(dir));
+    assert!(!there("Empty"));
+    a.undo().unwrap();
+    assert!(there("Empty"), "made again");
+}
+
+fn an_intent_that_stops_partway_says_what_landed<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    fail(&probe, |io| io.mutates() && io.path().as_str() == "b.wav");
+    let stopped = a.commit("Copy in", |i| {
+        i.save_file(&path("a.wav"), b"a".to_vec(), Expect::Absent)
+            .save_file(&path("b.wav"), b"b".to_vec(), Expect::Absent)
+    });
+    heal(&probe);
+    let Err(Error::Partial(partial)) = stopped else {
+        panic!("{stopped:?}");
+    };
+    assert_eq!(partial.report.landed, [path("a.wav")]);
 }
 
 fn a_view_says_what_changed_since_the_view_before<F: Facade>() {

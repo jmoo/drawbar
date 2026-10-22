@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error as ThisError;
 
-use crate::effects::{EffectPlan, EffectStep, FileEnd, Moves, TreeEnd, UnboundEnd};
+use crate::effects::{DirEnd, EffectPlan, EffectStep, FileEnd, Moves, TreeEnd, UnboundEnd};
 use crate::error::Result;
 use crate::flow::{self, fold, ok, Flow};
 use crate::ids::{EntryHash, Nonce, WriterId};
@@ -34,6 +34,7 @@ pub struct PendingRecord {
     pub files: Vec<FileEnd>,
     pub unbound: Vec<UnboundEnd>,
     pub trees: Vec<TreeEnd>,
+    pub dirs: Vec<DirEnd>,
     /// How the steps move files, whoever carries them out.
     pub moves: Moves,
 }
@@ -49,6 +50,8 @@ struct Wire {
     unbound: Vec<UnboundEnd>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     trees: Vec<TreeEnd>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    dirs: Vec<DirEnd>,
     #[serde(default, skip_serializing_if = "Moves::renames")]
     moves: Moves,
 }
@@ -69,6 +72,7 @@ impl PendingRecord {
             files: plan.files.clone(),
             unbound: plan.unbound.clone(),
             trees: plan.trees.clone(),
+            dirs: plan.dirs.clone(),
             moves: plan.moves,
         }
     }
@@ -94,6 +98,7 @@ impl PendingRecord {
             files: wire.files,
             unbound: wire.unbound,
             trees: wire.trees,
+            dirs: wire.dirs,
             moves: wire.moves,
         })
     }
@@ -107,6 +112,7 @@ impl PendingRecord {
             files: self.files.clone(),
             unbound: self.unbound.clone(),
             trees: self.trees.clone(),
+            dirs: self.dirs.clone(),
             moves: self.moves,
         };
         serde_json::to_vec(&wire).expect("a record serializes")
@@ -120,7 +126,8 @@ impl PendingRecord {
         let unbound = self.unbound.iter();
         let unbound = unbound.flat_map(|end| end.from.iter().chain(end.path.iter()));
         let trees = self.trees.iter().flat_map(|end| [&end.from, &end.to]);
-        let ends = ends.chain(unbound).chain(trees);
+        let dirs = self.dirs.iter().map(|end| &end.path);
+        let ends = ends.chain(unbound).chain(trees).chain(dirs);
         steps
             .chain(ends)
             .all(|path| layout.check_library_path(path).is_ok())
@@ -272,6 +279,7 @@ mod tests {
             }],
             unbound: Vec::new(),
             trees: Vec::new(),
+            dirs: Vec::new(),
             moves: Moves::Rename,
         }
     }

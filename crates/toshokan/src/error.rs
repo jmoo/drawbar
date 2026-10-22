@@ -138,6 +138,8 @@ pub enum Invalid {
     ReservedPath(RelPath),
     #[error("two effects of one intent touch {0}")]
     Overlapping(RelPath),
+    #[error("{0} holds files")]
+    NotEmpty(RelPath),
     #[error("the intent changes nothing")]
     Empty,
     #[error("the intent is too long to log as one entry")]

@@ -828,7 +828,7 @@ impl Folded {
             Op::Unknown(raw) => {
                 self.unknown.insert((hash, raw.clone()));
             }
-            Op::Path { .. } | Op::Tree { .. } => {}
+            Op::Path { .. } | Op::Tree { .. } | Op::Dir { .. } => {}
         }
     }
 

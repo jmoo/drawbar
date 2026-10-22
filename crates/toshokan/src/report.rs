@@ -263,6 +263,10 @@ pub struct PartialReport {
     pub stopped: RelPath,
     pub error: IoError,
     pub record: Option<Nonce>,
+    /// The library paths the finished changes put a file at, and the directories
+    /// they made or moved a tree to: what of the intent landed. Filled where a
+    /// commit reports it; empty in a settlement's assessment.
+    pub landed: Vec<RelPath>,
 }
 
 /// What a refresh found.

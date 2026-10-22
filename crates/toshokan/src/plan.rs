@@ -94,6 +94,11 @@ pub enum FileChange {
     /// Moves everything under `from` to the same place under `to`. Refused when
     /// something is at `to`.
     MoveTree { from: RelPath, to: RelPath },
+    /// Makes the directory `path`, where nothing is.
+    MakeDir { path: RelPath },
+    /// Removes the directory `path`. Refused where a file the library knows is in
+    /// it; anything else in it keeps it.
+    RemoveDir { path: RelPath },
     /// Moves everything under `from` back to the same place under `to`, as undoing
     /// a tree move does. Refused unless each of `held` holds what it expects, and
     /// when something is at `to`. A move file by file also removes the
