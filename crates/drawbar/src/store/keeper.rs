@@ -16,7 +16,7 @@ use toshokan::io::IoError;
 use toshokan::report::{Mode, Refreshed};
 use toshokan::{EntityId, Env, Error, Expect, RelPath, View};
 
-use super::keys::{self, Came, ORIGIN, TAGS};
+use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES};
 use super::native::locate;
 use super::{
     Cmd, Event, Failure, Fingerprint, Found, Intent, Key, LibPath, Opened, Part, Source, Stat,
@@ -165,11 +165,40 @@ impl Keeper {
                 }
                 Ok(built)
             })?,
-            Intent::RenameTag { entities, from, to } => facts(library, label, |mut built, _| {
+            Intent::MakeTag { name } => facts(library, label, |built, view| {
+                Ok(match view.with(TAG_NAMES).into_iter().min() {
+                    Some(list) => built.add(list, TAG_NAMES, name),
+                    None => {
+                        built
+                            .create(|list| {
+                                list.add(TAG_NAMES, name);
+                            })
+                            .0
+                    }
+                })
+            })?,
+            Intent::RenameTag { entities, from, to } => {
+                facts(library, label, |mut built, view| {
+                    for entity in entities {
+                        built = built
+                            .remove(entity, TAGS, &from)
+                            .add(entity, TAGS, to.clone());
+                    }
+                    for list in view.find(TAG_NAMES, &from) {
+                        built =
+                            built
+                                .remove(list, TAG_NAMES, &from)
+                                .add(list, TAG_NAMES, to.clone());
+                    }
+                    Ok(built)
+                })?
+            }
+            Intent::RemoveTag { entities, name } => facts(library, label, |mut built, view| {
                 for entity in entities {
-                    built = built
-                        .remove(entity, TAGS, &from)
-                        .add(entity, TAGS, to.clone());
+                    built = built.remove(entity, TAGS, &name);
+                }
+                for list in view.find(TAG_NAMES, &name) {
+                    built = built.remove(list, TAG_NAMES, &name);
                 }
                 Ok(built)
             })?,

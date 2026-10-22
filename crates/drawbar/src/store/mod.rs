@@ -497,11 +497,18 @@ pub enum Intent {
         entities: Vec<EntityId>,
         name: String,
     },
-    /// Rename a tag on each of these entities, which wear it.
+    /// Add a tag to the library's list of tags.
+    MakeTag { name: String },
+    /// Rename a tag on each of these entities, which wear it, and in the list of tags.
     RenameTag {
         entities: Vec<EntityId>,
         from: String,
         to: String,
+    },
+    /// Take a tag off each of these entities, which wear it, and out of the list of tags.
+    RemoveTag {
+        entities: Vec<EntityId>,
+        name: String,
     },
     /// End an entity whose file is gone.
     Forget { entity: EntityId },
@@ -557,7 +564,9 @@ impl Intent {
         match self {
             Intent::Tag { .. } => "Tag",
             Intent::Untag { .. } => "Untag",
+            Intent::MakeTag { .. } => "New tag",
             Intent::RenameTag { .. } => "Rename tag",
+            Intent::RemoveTag { .. } => "Remove tag",
             Intent::Forget { .. } => "Forget",
             Intent::Save { .. } | Intent::Rewrite { .. } => "Save",
             Intent::Import { .. } => "Copy in",

@@ -1506,6 +1506,7 @@ mod tests {
         assert_eq!(
             bench.browser.tags.take_asked(),
             [
+                Asked::Make(name.clone()),
                 Asked::Tag {
                     assets: assets.clone(),
                     name: name.clone()

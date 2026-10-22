@@ -16,7 +16,7 @@ use super::cache::{self, Cache};
 use super::diff;
 use super::exec::too_much;
 use super::ids::Ids;
-use super::keys::{Came, ORIGIN, TAGS};
+use super::keys::{Came, ORIGIN, TAGS, TAG_NAMES};
 use super::{
     names, Backend, Cmd, CopyOf, Event, Failure, FileCmd, Fingerprint, Found, Holds, Intent, Key,
     LibPath, Opened, Rescue, Source, Stat, Viewed, MOST_BYTES,
@@ -1337,7 +1337,9 @@ impl Store {
         if self.asked.is_empty() && self.committing == 0 {
             browser.tags.settle();
         }
-        let names = view.values(TAGS).values.into_iter().map(|(name, _)| name);
+        let worn_names = view.values(TAGS).values.into_iter();
+        let listed = view.values(TAG_NAMES).values.into_iter();
+        let names = worn_names.chain(listed).map(|(name, _)| name);
         let mut worn = BTreeMap::new();
         for entity in view.with(TAGS) {
             let Some(id) = self.ids.id(&Key::Entity(entity)) else {
@@ -1452,9 +1454,14 @@ impl Store {
                     name: name.clone(),
                 })
             }
+            Asked::Make(name) => {
+                let listed = !view.find(TAG_NAMES, name).is_empty();
+                (!listed).then(|| Intent::MakeTag { name: name.clone() })
+            }
             Asked::Rename { from, to } => {
                 let entities = wearing(from);
-                (!entities.is_empty()).then(|| Intent::RenameTag {
+                let listed = !view.find(TAG_NAMES, from).is_empty();
+                (listed || !entities.is_empty()).then(|| Intent::RenameTag {
                     entities,
                     from: from.clone(),
                     to: to.clone(),
@@ -1462,7 +1469,8 @@ impl Store {
             }
             Asked::Remove(name) => {
                 let entities = wearing(name);
-                (!entities.is_empty()).then(|| Intent::Untag {
+                let listed = !view.find(TAG_NAMES, name).is_empty();
+                (listed || !entities.is_empty()).then(|| Intent::RemoveTag {
                     entities,
                     name: name.clone(),
                 })

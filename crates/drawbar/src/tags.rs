@@ -1,11 +1,11 @@
 //! Tags that label the list on this computer.
 //!
 //! The library keeps them as names on the entity of each asset that wears them, so a tag
-//! follows its asset's file through a rename. What this list shows is what the library's
+//! follows its asset's file through a rename, and every tag made as a name in its list
+//! of tags, so one that nothing wears stays. What this list shows is what the library's
 //! view says: a change the user makes is asked for, and shows once the library has
-//! committed it, but a rename or a removal shows at once, over the views that arrive
-//! until the library has answered it. A tag made here that nothing wears yet lives only
-//! here. An asset can have any number of tags.
+//! committed it, but a new tag, a rename or a removal shows at once, over the views that
+//! arrive until the library has answered it. An asset can have any number of tags.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -17,6 +17,8 @@ pub type Tag = Named;
 /// A change to the tags the user asked for, by tag name.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Asked {
+    /// A new tag, worn by nothing yet.
+    Make(String),
     Tag {
         assets: Vec<u64>,
         name: String,
@@ -40,7 +42,7 @@ pub struct Tags {
     list: List,
     /// The tags on each asset, by workspace id. An asset with no entry is untagged.
     of: BTreeMap<u64, BTreeSet<u64>>,
-    /// The tags made here that no asset wears in the library yet.
+    /// The tags made here that the library does not name yet.
     unworn: BTreeSet<u64>,
     asked: Vec<Asked>,
     /// The renames and removals asked for that the library may not have made yet, in
@@ -73,6 +75,8 @@ impl Tags {
         let id = self.list.make(wanted)?;
         self.revision += 1;
         self.unworn.insert(id);
+        let name = self.list.name_of(id)?.to_string();
+        self.asked.push(Asked::Make(name));
         Some(id)
     }
 
@@ -249,10 +253,13 @@ mod tests {
         tags.tag(&[7, 8], sunday);
         assert_eq!(
             tags.take_asked(),
-            [Asked::Tag {
-                assets: vec![7, 8],
-                name: "Sunday".into()
-            }]
+            [
+                Asked::Make("Sunday".into()),
+                Asked::Tag {
+                    assets: vec![7, 8],
+                    name: "Sunday".into()
+                }
+            ]
         );
         assert!(
             tags.worn(7).is_empty(),
@@ -295,6 +302,7 @@ mod tests {
         let sunday = tags.make("Sunday").unwrap();
         let worn = || BTreeMap::from([(7, names(&["Sunday"]))]);
         tags.project(names(&["Sunday"]), worn());
+        tags.take_asked();
         tags.rename(sunday, "Monday".into());
         assert_eq!(
             tags.take_asked(),
@@ -325,6 +333,7 @@ mod tests {
             names(&["Sunday"]),
             BTreeMap::from([(7, names(&["Sunday"]))]),
         );
+        tags.take_asked();
         tags.remove(sunday);
         assert_eq!(tags.take_asked(), [Asked::Remove("Sunday".into())]);
         tags.project(

@@ -1564,7 +1564,10 @@ mod tests {
         let assets = ids[..2].to_vec();
         assert_eq!(
             bench.browser.tags.take_asked(),
-            [crate::tags::Asked::Tag { assets, name }]
+            [
+                crate::tags::Asked::Make(name.clone()),
+                crate::tags::Asked::Tag { assets, name }
+            ]
         );
     }
 
@@ -1672,6 +1675,7 @@ mod tests {
             &mut bench.log,
         );
         let tag = bench.browser.tags.make("Sunday").unwrap();
+        bench.browser.tags.take_asked();
         assert!(bench.workspace.is_view(id));
 
         bench.act(vec![Act::Tag { ids: vec![id], tag }]);

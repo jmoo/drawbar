@@ -17,6 +17,10 @@ use crate::workspace::Origin;
 /// The tags on an asset, by name.
 pub const TAGS: Set<String> = Set::new("tags");
 
+/// Every tag made, by name, worn or not: the library's list of tags. Writers that make
+/// a list at once each keep one, and the tags are all their names together.
+pub const TAG_NAMES: Set<String> = Set::new("tag names");
+
 /// Where an asset came from, where its file cannot say: made new in drawbar, copied off
 /// a slot, or the occupant a write to a slot could not put back. A file opened from
 /// anywhere else says nothing, and has no entity for it.
@@ -72,7 +76,7 @@ pub const DIR: &str = ".drawbar";
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn schema() -> Schema {
-    Schema::of(&[TAGS.key(), ORIGIN.key()]).expect("drawbar's keys are distinct")
+    Schema::of(&[TAGS.key(), TAG_NAMES.key(), ORIGIN.key()]).expect("drawbar's keys are distinct")
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -3920,3 +3920,55 @@ fn a_file_made_saved_renamed_and_deleted_is_undone_a_step_at_a_time() {
         assert_eq!(session.said(outside), 0, "{outside}");
     }
 }
+
+impl Session {
+    /// The names of the library's tags, sorted.
+    fn tag_names(&self) -> Vec<String> {
+        let tags = self.bench.browser.tags.all().iter();
+        let mut names: Vec<String> = tags.map(|tag| tag.name.clone()).collect();
+        names.sort();
+        names
+    }
+
+    /// Make a tag that nothing wears, as New tag… does with nothing picked, and wait
+    /// until the library has committed it.
+    fn make_tag(&mut self, name: &str) {
+        self.bench.browser.tags.make(name).expect("a new tag");
+        self.decided();
+    }
+
+    /// Remove the tag `name` as the browser does, and wait until it is committed.
+    fn remove_tag(&mut self, name: &str) {
+        let tags = &self.bench.browser.tags;
+        let id = tags
+            .all()
+            .iter()
+            .find(|tag| tag.name == name)
+            .expect(name)
+            .id;
+        self.bench.act(vec![crate::browser::Act::RemoveTag(id)]);
+        self.decided();
+    }
+}
+
+/// A tag that nothing wears is kept by the library as a tag that wears: made, renamed
+/// and removed, it is there or gone once drawbar opens the library again, and another
+/// drawbar sees it at a refresh.
+#[test]
+fn a_tag_nothing_wears_is_kept_until_it_is_removed() {
+    let root = Temp::new();
+    let mut first = Session::listed(&root);
+    first.make_tag("Spare");
+    first.make_tag("Wedding");
+    first.rename_tag("Wedding", "Gig");
+    let mut second = Session::listed(&root);
+    assert_eq!(second.tag_names(), ["Gig", "Spare"], "read from the folder");
+    first.remove_tag("Spare");
+    first.close();
+
+    second.refresh();
+    assert_eq!(second.tag_names(), ["Gig"], "another drawbar's removal");
+    second.close();
+    let third = Session::listed(&root);
+    assert_eq!(third.tag_names(), ["Gig"]);
+}
