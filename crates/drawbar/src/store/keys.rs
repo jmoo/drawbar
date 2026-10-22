@@ -170,9 +170,22 @@ mod desktop {
     }
 
     /// Whether the volume holding `folder` takes a name in another case for the same
-    /// entry, by the first name with a case to swap: the folder's own, then those in
-    /// it. `None` where no name has one.
+    /// entry, by the first name with a case to swap. `None` where no name has one.
     fn folds_case(folder: &std::path::Path) -> Option<bool> {
+        let (dir, twin) = probed(folder)?;
+        let reached = std::fs::symlink_metadata(dir.join(&twin)).is_ok();
+        let listed = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| entry.file_name().to_str() == Some(twin.as_str()));
+        Some(reached && !listed)
+    }
+
+    /// The directory and the name, case swapped, the volume of `folder` is probed by:
+    /// of a name in it, else of the folder's own, which is on another volume where the
+    /// folder is where one is mounted.
+    pub(super) fn probed(folder: &std::path::Path) -> Option<(std::path::PathBuf, String)> {
         let own = folder
             .parent()
             .zip(folder.file_name().and_then(|name| name.to_str()))
@@ -181,21 +194,10 @@ mod desktop {
         let inside = inside.filter_map(|entry| {
             Some((folder.to_path_buf(), entry.file_name().into_string().ok()?))
         });
-        let (dir, twin) = own
-            .into_iter()
-            .chain(inside)
-            .take(64)
-            .find_map(|(dir, name)| {
-                let twin = swapped(&name);
-                (twin != name).then_some((dir, twin))
-            })?;
-        let reached = std::fs::symlink_metadata(dir.join(&twin)).is_ok();
-        let listed = std::fs::read_dir(&dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .any(|entry| entry.file_name().to_str() == Some(twin.as_str()));
-        Some(reached && !listed)
+        inside.take(64).chain(own).find_map(|(dir, name)| {
+            let twin = swapped(&name);
+            (twin != name).then_some((dir, twin))
+        })
     }
 
     /// `name` with each letter's case swapped.
@@ -360,6 +362,16 @@ mod tests {
         std::fs::write(dir.at("probe"), b"").unwrap();
         let folds = dir.at("PROBE").exists();
         assert_eq!(Volume::probe(&dir.0).folds_case, folds);
+    }
+
+    #[test]
+    fn a_volume_is_probed_by_a_name_in_the_folder_before_its_own() {
+        let dir = crate::testing::Temp::new();
+        std::fs::write(dir.at("probe"), b"").unwrap();
+        assert_eq!(
+            desktop::probed(&dir.0),
+            Some((dir.0.clone(), "PROBE".to_string()))
+        );
     }
 
     #[test]
