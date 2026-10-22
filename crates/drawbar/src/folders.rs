@@ -294,6 +294,20 @@ impl Folders {
         };
     }
 
+    /// A hash of every folder's path and every file drawbar does not hold: what besides
+    /// the assets two names can collide in.
+    pub fn names_hash(&self) -> u64 {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::hash::DefaultHasher::new();
+        for folder in &self.list {
+            folder.path.hash(&mut hasher);
+        }
+        for path in self.strangers() {
+            path.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
     /// Every file drawbar does not hold, read or not.
     pub fn strangers(&self) -> impl Iterator<Item = &LibPath> {
         self.others

@@ -4390,6 +4390,76 @@ impl Session {
     }
 }
 
+/// Each answer is taken in by what it changed, and what drawbar lists after it is what
+/// the whole view lists, and what a fresh open of the library shows.
+#[test]
+fn each_answer_lists_what_the_whole_view_lists() {
+    let root = Temp::new();
+    fs::write(root.at("outside.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    fs::write(
+        root.at("gone.ne5p"),
+        with_gain(&Fresh::Program.bytes().unwrap(), "12"),
+    )
+    .unwrap();
+    fs::write(root.at("notes.pdf"), b"notes").unwrap();
+    let mut session = Session::open(&root);
+    let step = |session: &mut Session, what: &str| {
+        assert!(session.store.lists_whole(), "after {what}");
+    };
+    let id = session.create();
+    session.sync();
+    step(&mut session, "a save");
+    let outside = session.named("outside.ne5p");
+    session.tag(&[id, outside], "Sunday");
+    step(&mut session, "a tag");
+    session.place_at(id, "moved.ne5p");
+    session.sync();
+    step(&mut session, "a move");
+    session.undo();
+    step(&mut session, "an undo");
+    session.redo();
+    step(&mut session, "a redo");
+    let other = Temp::new();
+    let mut theirs = Session::elsewhere(&root, &other);
+    let moved = theirs.named("moved.ne5p");
+    theirs.tag(&[moved], "Theirs");
+    theirs.place_at(moved, "theirs.ne5p");
+    theirs.sync();
+    theirs.close();
+    session.refresh();
+    step(&mut session, "a refresh after another drawbar's changes");
+    fs::write(root.at("more.pdf"), b"more").unwrap();
+    fs::remove_file(root.at("gone.ne5p")).unwrap();
+    session.settle();
+    step(&mut session, "a rescan");
+    session.remove_tag("Sunday");
+    step(&mut session, "a tag removed");
+    let names = |session: &Session| {
+        let mut names: Vec<(String, Vec<String>)> = session
+            .bench
+            .workspace
+            .listed()
+            .map(|entity| {
+                (
+                    session.path(entity.id).unwrap_or_default(),
+                    session.worn(entity.id),
+                )
+            })
+            .collect();
+        names.sort();
+        names
+    };
+    let shown = names(&session);
+    let others = session.bench.browser.folders.others.clone();
+    session.close();
+    let fresh = Session::open(&root);
+    assert_eq!(names(&fresh), shown, "the assets and their tags");
+    assert_eq!(
+        fresh.bench.browser.folders.others, others,
+        "the files drawbar does not open"
+    );
+}
+
 /// A tagged file saved in drawbar and then moved outside it keeps its tags at its new
 /// name: the library knows it by what drawbar wrote.
 #[test]

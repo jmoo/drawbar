@@ -93,15 +93,16 @@ struct SlotView {
 }
 
 /// What a view lists that drawbar shows.
+#[derive(Default, PartialEq, Debug)]
 struct Listed {
     /// Each file drawbar opens, by the key the library knows it by, with its path and
     /// what the last scan found there.
     files: BTreeMap<Key, (LibPath, Option<Stat>)>,
-    /// Files drawbar does not open, in path order.
-    others: Vec<LibPath>,
+    /// Files drawbar does not open, by key.
+    others: BTreeMap<Key, LibPath>,
     /// Entities wearing tags whose file is nowhere, with where it was. One that says only
     /// where its file came from keeps nothing worth showing without the file.
-    lost: Vec<(toshokan::EntityId, LibPath)>,
+    lost: BTreeMap<toshokan::EntityId, LibPath>,
     /// Where the asset of each entity that says so came from.
     came: BTreeMap<toshokan::EntityId, Came>,
 }
@@ -110,55 +111,113 @@ impl Listed {
     /// What `view` lists, leaving out every path with a name that starts with a dot and
     /// every path that is no [`LibPath`].
     fn of(view: &View) -> Listed {
-        let mut listed = Listed {
-            files: BTreeMap::new(),
-            others: Vec::new(),
-            lost: Vec::new(),
-            came: BTreeMap::new(),
-        };
-        for entity in view.with(ORIGIN) {
-            let came = view.entity(entity).map(|entity| entity.get(ORIGIN));
-            if let Some(came) = came.as_ref().and_then(toshokan::Field::shown) {
-                listed.came.insert(entity, *came);
-            }
+        let mut listed = Listed::default();
+        for entity in view.entities() {
+            listed.entity(view, entity.id());
         }
-        let shown = |path: &toshokan::RelPath| {
-            let path = LibPath::parse(path.as_str())?;
-            let hidden = path.components().any(|name| name.starts_with('.'));
-            (!hidden).then_some(path)
-        };
-        let stat = |path: &toshokan::RelPath| {
-            view.listed(path).map(|listed| Stat {
-                len: listed.len,
-                modified: listed.modified,
-            })
-        };
-        let bound = view.entities().into_iter().filter_map(|entity| {
-            let file = entity.file()?;
-            Some((Key::Entity(entity.id()), file.path, file.state))
-        });
-        let unbound = view.unbound().iter().filter_map(|path| {
-            let key = Key::File(LibPath::parse(path.as_str())?);
-            Some((key, path.clone(), FileState::InSync))
-        });
-        let tagged: BTreeSet<toshokan::EntityId> = view.with(TAGS).into_iter().collect();
-        for (key, at, state) in bound.chain(unbound) {
-            let Some(path) = shown(&at) else {
+        for path in view.unbound() {
+            listed.file(view, path);
+        }
+        listed
+    }
+
+    /// Take in what `changed` says differs in `view` from the view this listed, and
+    /// return the key of each file it changed.
+    fn update(&mut self, view: &View, changed: &toshokan::Changed) -> BTreeSet<Key> {
+        let mut keys = BTreeSet::new();
+        for &entity in &changed.entities {
+            keys.insert(Key::Entity(entity));
+            self.forget(&Key::Entity(entity));
+            self.entity(view, entity);
+        }
+        for path in &changed.files {
+            if let Some(entity) = view.at(path).map(|entity| entity.id()) {
+                if keys.insert(Key::Entity(entity)) {
+                    self.forget(&Key::Entity(entity));
+                    self.entity(view, entity);
+                }
+            }
+            let Some(at) = LibPath::parse(path.as_str()) else {
                 continue;
             };
-            match (state, &key) {
-                (FileState::Missing, Key::Entity(entity)) if tagged.contains(entity) => {
-                    listed.lost.push((*entity, path));
-                }
-                (FileState::Missing, _) => {}
-                _ if !super::opens(path.leaf()) => listed.others.push(path),
-                _ => {
-                    listed.files.insert(key, (path, stat(&at)));
-                }
+            let key = Key::File(at);
+            self.forget(&key);
+            keys.insert(key);
+            if view.unbound().binary_search(path).is_ok() {
+                self.file(view, path);
             }
         }
-        listed.others.sort();
-        listed
+        keys
+    }
+
+    fn forget(&mut self, key: &Key) {
+        self.files.remove(key);
+        self.others.remove(key);
+        if let Some(entity) = key.entity() {
+            self.lost.remove(&entity);
+            self.came.remove(&entity);
+        }
+    }
+
+    /// Take in what `view` says of `entity`.
+    fn entity(&mut self, view: &View, entity: toshokan::EntityId) {
+        let Some(shown) = view.entity(entity) else {
+            return;
+        };
+        if let Some(came) = toshokan::Field::shown(&shown.get(ORIGIN)) {
+            self.came.insert(entity, *came);
+        }
+        let Some(file) = shown.file() else {
+            return;
+        };
+        let worn = shown.members(TAGS);
+        let tagged = !worn.values.is_empty() || !worn.unreadable.is_empty();
+        let key = Key::Entity(entity);
+        match file.state {
+            FileState::Missing if tagged => {
+                if let Some(path) = Listed::shown(&file.path) {
+                    self.lost.insert(entity, path);
+                }
+            }
+            FileState::Missing => {}
+            _ => self.list(view, key, &file.path),
+        }
+    }
+
+    /// Take in the file at `path`, which no entity is bound to.
+    fn file(&mut self, view: &View, path: &toshokan::RelPath) {
+        if let Some(at) = LibPath::parse(path.as_str()) {
+            self.list(view, Key::File(at), path);
+        }
+    }
+
+    fn list(&mut self, view: &View, key: Key, at: &toshokan::RelPath) {
+        let Some(path) = Listed::shown(at) else {
+            return;
+        };
+        if !super::opens(path.leaf()) {
+            self.others.insert(key, path);
+            return;
+        }
+        let stat = view.listed(at).map(|listed| Stat {
+            len: listed.len,
+            modified: listed.modified,
+        });
+        self.files.insert(key, (path, stat));
+    }
+
+    /// `path` as drawbar shows it: none with a name that starts with a dot.
+    fn shown(path: &toshokan::RelPath) -> Option<LibPath> {
+        let path = LibPath::parse(path.as_str())?;
+        let hidden = path.components().any(|name| name.starts_with('.'));
+        (!hidden).then_some(path)
+    }
+
+    /// The files drawbar does not open, in path order.
+    fn others(&self) -> Vec<LibPath> {
+        let mut others: Vec<LibPath> = self.others.values().cloned().collect();
+        others.sort();
+        others
     }
 }
 
@@ -207,6 +266,14 @@ pub struct Store {
     instrument: Option<String>,
     /// Each view of a slot seen, with what its unsaved edit is kept by.
     views: BTreeMap<u64, SlotView>,
+    /// What names were last compared in for duplicates: the workspace's layout, and the
+    /// [`crate::folders::Folders::names_hash`].
+    compared: Option<(u64, u64)>,
+    /// What the view projected last lists.
+    listed: Listed,
+    /// The assets a projection passed over while a save or a rename of their files was
+    /// in flight, which the next one looks at again.
+    deferred: BTreeSet<u64>,
     /// Assets to remove now what was copied or saved of them over another has landed
     /// ([`Store::take_left`]).
     left: Vec<u64>,
@@ -282,6 +349,9 @@ impl Store {
             superseded: BTreeMap::new(),
             instrument: None,
             views: BTreeMap::new(),
+            compared: None,
+            listed: Listed::default(),
+            deferred: BTreeSet::new(),
             focused: true,
             scanning: false,
             committing: 0,
@@ -473,6 +543,14 @@ impl Store {
             });
             self.drafted.insert(entity.id, (key, stamp, base));
         }
+    }
+
+    /// Whether what the answers so far listed, each taken in by what it changed, is what
+    /// the view projected last lists whole.
+    #[cfg(test)]
+    pub(crate) fn lists_whole(&self) -> bool {
+        let whole = self.view.as_ref().map(Listed::of).unwrap_or_default();
+        self.listed == whole
     }
 
     /// Say which instrument is attached, which the views of its slots opened from now
@@ -1575,9 +1653,22 @@ impl Store {
                 self.follow_undone(&from, &to, workspace);
             }
         }
-        let listed = Listed::of(&view);
-        browser.folders.others = listed.others.clone();
-        let touched = self.project(&listed, first, workspace, browser, queue, log);
+        // A scan of every file may find what no change says, and is projected whole.
+        let reach = match (&self.view, &dirs) {
+            (Some(before), None) => {
+                let changed = view.changed_since(before);
+                Some(self.listed.update(&view, &changed))
+            }
+            _ => {
+                self.listed = Listed::of(&view);
+                None
+            }
+        };
+        if reach.as_ref().is_none_or(|keys| !keys.is_empty()) {
+            browser.folders.others = self.listed.others();
+        }
+        let listed = std::mem::take(&mut self.listed);
+        let touched = self.project(&listed, reach.as_ref(), workspace, browser, queue, log);
         if let Some(dirs) = dirs {
             browser.folders.sync(&dirs);
         }
@@ -1596,12 +1687,16 @@ impl Store {
             browser.folders.unwalked = unlisted;
         }
         self.lose(&listed, workspace, browser);
+        self.listed = listed;
         self.project_tags(&view, browser);
         if !first {
             self.attribute(&changes, workspace, log);
         }
-        flag_duplicates(workspace, browser, log);
-        self.view = Some(view);
+        let compared = (workspace.layout(), browser.folders.names_hash());
+        if self.compared.replace(compared) != Some(compared) {
+            flag_duplicates(workspace, browser, log);
+        }
+        drop_aside(self.view.replace(view));
         self.quiet = false;
         touched
     }
@@ -1626,21 +1721,32 @@ impl Store {
     fn project(
         &mut self,
         listed: &Listed,
-        first: bool,
+        reach: Option<&BTreeSet<Key>>,
         workspace: &mut Workspace,
         browser: &mut Browser,
         queue: &Queue,
         log: &mut Log,
     ) -> BTreeSet<u64> {
-        self.rekey(listed);
+        self.rekey(listed, reach);
         let mut touched = BTreeSet::new();
         let (mut moved, mut deleted, mut missing) = (0, 0, 0);
-        let known: Vec<(u64, Key)> = self.ids.iter().map(|(id, key)| (id, key.clone())).collect();
-        let lost: BTreeSet<&toshokan::EntityId> =
-            listed.lost.iter().map(|(entity, _)| entity).collect();
+        let deferred = std::mem::take(&mut self.deferred);
+        let known: Vec<(u64, Key)> = match reach {
+            None => self.ids.iter().map(|(id, key)| (id, key.clone())).collect(),
+            Some(keys) => {
+                let ids = keys.iter().filter_map(|key| self.ids.id(key));
+                let ids: BTreeSet<u64> = ids.chain(deferred).collect();
+                let keyed = ids
+                    .into_iter()
+                    .filter_map(|id| Some((id, self.ids.key(id)?.clone())));
+                keyed.collect()
+            }
+        };
         for (id, key) in known {
             // A lost row keeps its id while the library keeps its entity.
-            let shown = key.entity().is_some_and(|entity| lost.contains(&entity));
+            let shown = key
+                .entity()
+                .is_some_and(|entity| listed.lost.contains_key(&entity));
             if workspace.get(id).is_none() && !self.records.contains_key(&id) && !shown {
                 self.ids.remove(id);
                 continue;
@@ -1650,6 +1756,7 @@ impl Store {
             };
             let unsettled_at = |path: &LibPath| unsettled(&self.moving, path);
             if record.saving || record.path.as_ref().is_some_and(unsettled_at) {
+                self.deferred.insert(id);
                 continue;
             }
             let Some((path, stat)) = listed.files.get(&key) else {
@@ -1665,6 +1772,7 @@ impl Store {
                 continue;
             };
             if unsettled_at(path) {
+                self.deferred.insert(id);
                 continue;
             }
             let Some(record) = self.records.get_mut(&id) else {
@@ -1699,9 +1807,10 @@ impl Store {
                 self.recheck(id, path.clone(), stat, workspace);
             }
         }
-        let appeared = self.arrive(listed, workspace, browser, log);
+        let appeared = self.arrive(listed, reach, workspace, browser, log);
         // A file gone missing keeps the status line, which asks for it to be saved.
         let said = changed_outside(appeared, deleted, moved).filter(|_| missing == 0);
+        let first = self.view.is_none();
         if let Some(said) = said.filter(|_| !first && !self.quiet) {
             log.say(said);
         }
@@ -1711,17 +1820,22 @@ impl Store {
     /// Give each asset the key the library knows its file by now, where that changed: a
     /// file an intent made an entity of, an entity whose file was let go of, or a file
     /// drawbar wrote that the view lists for the first time.
-    fn rekey(&mut self, listed: &Listed) {
+    fn rekey(&mut self, listed: &Listed, reach: Option<&BTreeSet<Key>>) {
+        let reached = |key: &Key| reach.is_none_or(|keys| keys.contains(key));
         let by_path: BTreeMap<&LibPath, &Key> = listed
             .files
             .iter()
+            .filter(|(key, _)| reached(key))
             .map(|(key, (path, _))| (path, key))
             .collect();
-        let unlisted = self
-            .ids
-            .iter()
-            .filter(|(_, key)| !listed.files.contains_key(*key))
-            .map(|(id, _)| id);
+        let unlisted: Vec<u64> = match reach {
+            None => self.ids.iter().map(|(id, _)| id).collect(),
+            Some(keys) => keys.iter().filter_map(|key| self.ids.id(key)).collect(),
+        };
+        let unlisted = unlisted.into_iter().filter(|id| {
+            let key = self.ids.key(*id);
+            key.is_some_and(|key| !listed.files.contains_key(key))
+        });
         let unkeyed = self
             .records
             .keys()
@@ -1747,16 +1861,26 @@ impl Store {
     fn arrive(
         &mut self,
         listed: &Listed,
+        reach: Option<&BTreeSet<Key>>,
         workspace: &mut Workspace,
         browser: &Browser,
         log: &mut Log,
     ) -> usize {
-        let mut arrived: Vec<(LibPath, Key, Stat)> = listed
-            .files
-            .iter()
+        let files: Vec<(&Key, &(LibPath, Option<Stat>))> = match reach {
+            None => listed.files.iter().collect(),
+            Some(keys) => keys
+                .iter()
+                .filter_map(|key| listed.files.get_key_value(key))
+                .collect(),
+        };
+        let mut arrived: Vec<(LibPath, Key, Stat)> = files
+            .into_iter()
             .filter(|(key, _)| self.ids.id(key).is_none())
             .filter_map(|(key, (path, stat))| Some((path.clone(), key.clone(), (*stat)?)))
             .collect();
+        if arrived.is_empty() {
+            return 0;
+        }
         arrived.sort_by(|a, b| a.0.cmp(&b.0));
         let mut next = workspace.next_id();
         let mut back = Vec::new();
@@ -3086,6 +3210,18 @@ fn held(workspace: &Workspace) -> u64 {
     workspace
         .held_whole()
         .saturating_add(workspace.asked_whole())
+}
+
+/// Drop `view` where the drop holds up no frame: the last hold of a large library's
+/// view frees every path it lists.
+#[cfg(not(target_arch = "wasm32"))]
+fn drop_aside(view: Option<View>) {
+    std::thread::spawn(move || drop(view));
+}
+
+#[cfg(target_arch = "wasm32")]
+fn drop_aside(view: Option<View>) {
+    drop(view);
 }
 
 /// Whether `path` is in, is, or holds either side of one of these renames.
