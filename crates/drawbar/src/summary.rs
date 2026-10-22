@@ -5,6 +5,7 @@
 //! [`Summary`]. [`crate::store`] keeps summaries between sessions; see its cache.
 
 use nord_format::fields::Library;
+use nord_format::formats::nsmpproj::build::AudioPath;
 use nord_format::Entity;
 use nord_usb::ObjectClass;
 use serde::{Deserialize, Serialize};
@@ -137,24 +138,10 @@ fn slashed(path: &str) -> String {
     path.replace('\\', "/")
 }
 
-/// The file a project in `dir` means by `named`: a path relative to its folder, `..`
-/// and `.` resolved. `None` for an absolute path, or one that leaves the library.
+/// The file a project in `dir` means by `named`: a path relative to its folder, read as
+/// [`AudioPath`] reads it. `None` for an absolute path, or one that leaves the library.
 pub fn resolve(dir: &LibPath, named: &str) -> Option<LibPath> {
-    let named = slashed(named);
-    if named.starts_with('/') || named.split('/').next()?.contains(':') {
-        return None;
-    }
-    let mut parts: Vec<&str> = dir.components().collect();
-    for part in named.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                parts.pop()?;
-            }
-            part => parts.push(part),
-        }
-    }
-    LibPath::parse(&parts.join("/")).filter(|path| !path.is_root())
+    LibPath::parse(&AudioPath::parse(named).within(dir.components())?.join("/"))
 }
 
 #[cfg(test)]

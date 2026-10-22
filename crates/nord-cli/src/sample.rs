@@ -15,14 +15,13 @@
 //! `project new` writes the Sample Editor's `.nsmpproj` save file from a set of
 //! WAVs, one zone per file.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use clap::Args;
 use nord_format::formats::nsmp::{self, codec, encode};
-use nord_format::formats::nsmpproj::{
-    self, NewZone, Project, Stroke, Zone, LOWEST_NOTE, PROJECT_RATE,
-};
+use nord_format::formats::nsmpproj::{self, build, AudioFile, NewZone, Project, PROJECT_RATE};
 use nord_format::note;
 use nord_format::Entity;
 use nord_usb::ObjectClass;
@@ -159,7 +158,7 @@ impl CodingArgs {
 #[derive(Args)]
 pub struct BuildArgs {
     /// A Nord Sample Editor project (`.nsmpproj`). Relative audio paths in it
-    /// resolve from the project's directory.
+    /// resolve from the project's directory, with `/` or `\` between folders.
     #[arg(value_name = "PROJECT")]
     pub project: PathBuf,
 
@@ -417,22 +416,11 @@ fn decode_target(
     Ok(())
 }
 
-/// One WAV as this encoder needs it: [`crate::wav::pcm16`] at [`codec::SOURCE_RATE`].
-///
-/// Unlike a piano build, this does not resample: the field lattice is defined against
-/// that rate.
+/// One WAV as this encoder needs it; see [`build::source_pcm`].
 fn pcm_source(path: &Path) -> Result<nord_format::wav::Pcm16, String> {
-    let source = crate::wav::pcm16(path)?;
-    if source.rate != codec::SOURCE_RATE {
-        return Err(format!(
-            "{}: {} Hz, but the encoder needs {} Hz because the instrument's resampler \
-             is not decoded; resample the WAV first",
-            path.display(),
-            source.rate,
-            codec::SOURCE_RATE,
-        ));
-    }
-    Ok(source)
+    let named = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let bytes = std::fs::read(path).map_err(|e| named(&e))?;
+    build::source_pcm(&bytes).map_err(|e| named(&e))
 }
 
 /// What one encoded stroke came out as, for the report.
@@ -514,36 +502,24 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     write_file(ui, &path, &out)
 }
 
-/// One zone of a project, resolved: the audio region it plays and where on the
-/// keyboard it plays it.
-struct ProjectZone {
-    global_id: u32,
-    root_key: u8,
-    top_note: u8,
-    /// Interleaved, so `samples.len()` is `channels` times the frame count.
-    samples: Vec<i16>,
-    channels: u16,
-    /// The file frame `samples` starts at: the project's `m_start`.
-    start: usize,
-    source: PathBuf,
-    loops: Option<encode::Loop>,
-    /// Where the stream resynchronizes, in frames from the start of `samples`.
-    secondary_start: f64,
-    /// The project's `m_startSecondary` when the editor would not keep it, so a build
-    /// says where it encoded from instead.
-    repaired_secondary_start: Option<f64>,
-    /// The zone's playing gain as a linear ratio.
-    gain: f64,
-    /// The stroke's `m_loopDecay`, which only a wide header carries.
-    loop_decay: f32,
-    /// Loop settings in the project that the instrument has no field for, so a build
-    /// can name what it dropped.
-    dropped: Vec<String>,
+/// A project's WAVs, read from disk relative to the project's directory.
+struct Directory<'a>(&'a Path);
+
+impl build::Source for Directory<'_> {
+    fn wav(&self, file: &AudioFile) -> Result<Cow<'_, [u8]>, build::Unavailable> {
+        Ok(Cow::Owned(std::fs::read(self.path(file))?))
+    }
+
+    fn name(&self, file: &AudioFile) -> String {
+        self.path(file).display().to_string()
+    }
 }
 
-/// The zone gain at which both of the instrument's gain fields overflow their 24 bits.
-/// The file still matches the editor's render, but no longer states the project's gain.
-const WRAPPING_ZONE_GAIN: f64 = 16.0;
+impl Directory<'_> {
+    fn path(&self, file: &AudioFile) -> PathBuf {
+        build::AudioPath::parse(&file.path).on_disk(self.0)
+    }
+}
 
 /// `nord sample build`: a Sample Editor project into the instrument it describes.
 pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
@@ -562,62 +538,30 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         }
     };
 
-    let active_eq = project.active_eq().map_err(|e| e.to_string())?;
-    if !active_eq.is_empty() {
-        return Err(format!(
-            "the project enables {}, whose effect the editor bakes into the audio; \
-             disable it before building because this encoder cannot reproduce that processing",
-            active_eq.join(", ")
-        ));
-    }
-    let preset = project_preset(&project, layout)?;
     let dir = args.project.parent().unwrap_or_else(|| Path::new("."));
-    let resolved = project_zones(&project, dir, layout)?;
-    let name = match args.name {
-        Some(name) => name,
-        None => project.name().map_err(|e| e.to_string())?,
-    };
-
-    let zones: Vec<encode::NewZone> = resolved
-        .iter()
-        .map(|z| encode::NewZone {
-            source: &z.samples,
-            channels: z.channels,
-            root_key: z.root_key,
-            top_note: z.top_note,
-            global_id: z.global_id,
-            loops: z.loops,
-            secondary_start: z.secondary_start,
-            shift: args.coding.shift,
-            gain: z.gain,
-            loop_decay: z.loop_decay,
-        })
-        .collect();
-    let map_gain = project.map_gain().map_err(|e| e.to_string())?;
-    let instrument = encode::multi_zone(
-        encode::Instrument {
-            name: &name,
-            map_gain,
-            predictor: args.coding.predictor(),
-            layout,
-            preset,
-        },
-        &zones,
-    )
-    .map_err(|e| e.to_string())?;
+    let plan = build::plan(&project, layout, &Directory(dir)).map_err(|e| e.to_string())?;
+    let name = args.name.as_deref().unwrap_or(&plan.name);
+    let instrument = plan
+        .encode(name, args.coding.predictor(), args.coding.shift)
+        .map_err(|e| e.to_string())?;
     let out = instrument.to_bytes().map_err(|e| e.to_string())?;
 
-    ui.out(format!("{} — {} zone(s)", ui.bold(&name), zones.len()));
-    let ceiling = 10f64.powf(encode::MAX_MAP_GAIN_DB / 20.0);
-    if !(0.0..=ceiling).contains(&map_gain) {
-        ui.note(ui.dim(format!(
-            "the map's gain is {map_gain}, which the instrument clamps at +{:.3} dB, \
-             as the editor does",
-            encode::MAX_MAP_GAIN_DB
-        )));
-    }
+    ui.out(format!("{} — {} zone(s)", ui.bold(name), plan.zones.len()));
+    let warnings = plan.warnings();
+    let warn = |zone: Option<usize>| {
+        for warning in warnings.iter().filter(|w| w.zone() == zone) {
+            match warning {
+                build::Warning::MapGainClamped { .. }
+                | build::Warning::SecondaryStartRepaired { .. } => ui.note(ui.dim(warning)),
+                build::Warning::GainWraps { .. } | build::Warning::Dropped { .. } => {
+                    ui.warn(warning)
+                }
+            }
+        }
+    };
+    warn(None);
     let placed = instrument.zones().map_err(|e| e.to_string())?;
-    for (index, zone) in resolved.iter().enumerate() {
+    for (index, zone) in plan.zones.iter().enumerate() {
         let stream = placed
             .get(index)
             .ok_or_else(|| format!("zone{} did not reach the file", index + 1))?;
@@ -634,317 +578,15 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         };
         ui.out(ui.dim(format!(
             "         stroke {}{gain} from {}",
-            zone.global_id,
-            zone.source.display()
+            zone.global_id, zone.source
         )));
-        if zone.gain >= WRAPPING_ZONE_GAIN {
-            ui.warn(format!(
-                "zone{} sets gain {}, which overflows both of the instrument's gain \
-                 fields; the file will state a far quieter level, as the editor's \
-                 render of this project does",
-                index + 1,
-                zone.gain
-            ));
-        }
-        if !zone.dropped.is_empty() {
-            ui.warn(format!(
-                "zone{} sets {}, which the instrument has nowhere to hold",
-                index + 1,
-                zone.dropped.join(", ")
-            ));
-        }
-        if let Some(stated) = zone.repaired_secondary_start {
-            ui.note(ui.dim(format!(
-                "zone{} states m_startSecondary = {stated}, which the editor repairs on \
-                 load; encoded from frame {} as the editor would",
-                index + 1,
-                zone.secondary_start + zone.start as f64,
-            )));
-        }
+        warn(Some(index + 1));
     }
 
     let path = args
         .out
         .unwrap_or_else(|| args.project.with_extension(layout.extension()));
     write_file(ui, &path, &out)
-}
-
-/// The part of a project's preset each generation can represent.
-fn project_preset(project: &Project, layout: codec::Layout) -> Result<encode::Preset, String> {
-    let mut preset = encode::Preset {
-        dynamics_enabled: project.dynamics_enabled().map_err(|e| e.to_string())?,
-        ..encode::Preset::default()
-    };
-    if layout == codec::Layout::V2 {
-        let defaults = project.velocity_defaults().map_err(|e| e.to_string())?;
-        preset.velocity_to_amplitude =
-            nsmp::velocity_level(defaults.amplitude).ok_or_else(|| {
-                format!(
-                    "m_velAmpl = {} has no decoded v2 preset level",
-                    defaults.amplitude
-                )
-            })?;
-        preset.velocity_to_timbre = nsmp::velocity_level(defaults.timbre).ok_or_else(|| {
-            format!(
-                "m_velTimbre = {} has no decoded v2 preset level",
-                defaults.timbre
-            )
-        })?;
-    }
-    Ok(preset)
-}
-
-/// Resolve a project's zones, highest first, into audio and keyboard placement.
-///
-/// Anything the editor can express that this writer cannot lay out is refused here by
-/// name, because dropping it would silently change what the project describes.
-fn project_zones(
-    project: &Project,
-    dir: &Path,
-    layout: codec::Layout,
-) -> Result<Vec<ProjectZone>, String> {
-    let say = |e: nord_format::error::ParseError| e.to_string();
-    let files = project.audio_files().map_err(say)?;
-    let strokes = project.strokes().map_err(say)?;
-    let zones = project.zones().map_err(say)?;
-    let instrument_decay = project.loop_decay_enabled().map_err(say)?;
-    validate_key_ranges(&zones)?;
-
-    zones
-        .iter()
-        .enumerate()
-        .map(|(index, zone)| {
-            let at = format!("zone{}", index + 1);
-            if !zone.enabled {
-                return Err(format!(
-                    "{at} is disabled in the project. Enable or remove it before building."
-                ));
-            }
-            let [layer] = zone.strokes.as_slice() else {
-                return Err(format!(
-                    "{at} plays {} strokes, which is a velocity split or a round robin; \
-                     this writer supports one stroke per zone",
-                    zone.strokes.len()
-                ));
-            };
-            if !layer.enabled {
-                return Err(format!("{at}'s only stroke is switched off"));
-            }
-            if layer.detune != 0 || layer.velocity != (0, 127) {
-                return Err(format!(
-                    "{at} sets detune {} and velocity {}..={} on its stroke; where the \
-                     instrument applies those is not decoded, so nothing here reproduces \
-                     them",
-                    layer.detune, layer.velocity.0, layer.velocity.1
-                ));
-            }
-            let stroke = strokes
-                .iter()
-                .find(|s| s.global_id == layer.global_id)
-                .ok_or_else(|| {
-                    format!(
-                        "{at} names stroke {}, which the project does not hold",
-                        layer.global_id
-                    )
-                })?;
-            let file = files
-                .iter()
-                .find(|f| f.id == stroke.file_id)
-                .ok_or_else(|| {
-                    format!(
-                        "{at} plays audio file {}, which the project does not hold",
-                        stroke.file_id
-                    )
-                })?;
-
-            let path = dir.join(&file.path);
-            let source = pcm_source(&path)?;
-            let frames = source.frames();
-            let channels = usize::from(source.channels);
-            let start = frame(&at, "start", stroke.start, frames)?;
-            let stop = frame(&at, "stop", stroke.stop, frames)?;
-            if start >= stop {
-                return Err(format!(
-                    "{at} plays frames {start}..{stop} of {}, which is nothing",
-                    path.display()
-                ));
-            }
-            let (loops, mut dropped) = zone_loop(&at, stroke, start, stop, layout)?;
-            if loops.is_some() && instrument_decay {
-                dropped.push("the instrument's own m_loopDecayEnabled".into());
-            }
-            let encoded_secondary = stroke.encoded_secondary_start();
-            Ok(ProjectZone {
-                global_id: layer.global_id,
-                root_key: zone.root_key,
-                top_note: zone.top_note,
-                channels: source.channels,
-                samples: source.samples[start * channels..stop * channels].to_vec(),
-                source: path,
-                loops,
-                start,
-                secondary_start: encoded_secondary - start as f64,
-                repaired_secondary_start: (encoded_secondary != stroke.start_secondary)
-                    .then_some(stroke.start_secondary),
-                gain: layer.gain,
-                loop_decay: stroke.loop_decay as f32,
-                dropped,
-            })
-        })
-        .collect()
-}
-
-/// One stroke's loop as the encoder states it, and the loop settings that reach no
-/// instrument.
-///
-/// The project's loop points count frames of the audio file, so they move with the
-/// trim. Whichever loop is switched on becomes the container's single loop: a short
-/// loop has the same start with the short length, and nothing in the file records which
-/// of the two it was. The long loop states its crossfade in frames, and the short loop
-/// as a percentage of its length. Only the switched-on loop's fade reaches the audio.
-///
-/// Inferred from specimens; not confirmed on hardware.
-fn zone_loop(
-    at: &str,
-    stroke: &Stroke,
-    start: usize,
-    stop: usize,
-    layout: codec::Layout,
-) -> Result<(Option<encode::Loop>, Vec<String>), String> {
-    if !stroke.loop_enabled {
-        return Ok((None, Vec::new()));
-    }
-    let short = stroke.short_loop_enabled;
-    let length = if short {
-        stroke.short_loop_length
-    } else {
-        stroke.loop_length
-    };
-    let named = if short {
-        "m_loopLengthShort"
-    } else {
-        "m_loopLengthLong"
-    };
-    let stated = stroke.encoded_loop_start();
-    let loop_start = frame(at, "loop start", stated, stop)?;
-    if !length.is_finite() || length <= 0.0 {
-        return Err(format!("{at}'s {named} is {length}, which is not a loop"));
-    }
-    let end = frame(at, "loop end", stated + length, stop)?;
-    if loop_start < start {
-        return Err(format!(
-            "{at} loops from frame {loop_start} but its audio is trimmed to start at \
-             {start}; the loop would begin before the sample does"
-        ));
-    }
-
-    // Mode 1 rewrites the long loop's tail in a way not yet decoded. It affects only
-    // that fade: with the short loop switched on, the editor writes the same bytes
-    // whatever the mode.
-    // Inferred from specimens; not confirmed on hardware.
-    if !short && stroke.loop_crossfade_mode != 0 {
-        return Err(format!(
-            "{at} sets m_loopXFModeLong = {}; only the linear fade (mode 0) is decoded, \
-             and the fade is baked into the audio, so this one cannot be written",
-            stroke.loop_crossfade_mode
-        ));
-    }
-    let crossfade = if short {
-        exact_frame(
-            at,
-            "short loop crossfade",
-            f64::from(stroke.short_loop_crossfade) / 100.0 * length,
-            stop,
-        )?
-    } else {
-        exact_frame(at, "loop crossfade", stroke.loop_crossfade, stop)?
-    };
-
-    // These reach no instrument: the editor writes the same bytes whatever they hold.
-    let mut dropped = Vec::new();
-    if stroke.loop_detune != 0 {
-        dropped.push(format!("m_loopDetune = {}", stroke.loop_detune));
-    }
-    if stroke.loop_decay_enabled {
-        dropped.push(match layout {
-            codec::Layout::V2 => {
-                format!("m_loopDecayEnabled and m_loopDecay = {}", stroke.loop_decay)
-            }
-            codec::Layout::V3 | codec::Layout::V4 => {
-                "m_loopDecayEnabled (the amount is written, the switch is not)".into()
-            }
-        });
-    }
-    if short && !stroke.short_loop_uses_pitch {
-        dropped.push("m_shortLoopUsesPitch = 0".into());
-    }
-    if short && stroke.loop_crossfade != 0.0 {
-        dropped.push(format!(
-            "m_loopXFadeLengthLong = {} (the short loop is the one encoded)",
-            stroke.loop_crossfade
-        ));
-    }
-    if short && stroke.loop_crossfade_mode != 0 {
-        dropped.push(format!("m_loopXFModeLong = {}", stroke.loop_crossfade_mode));
-    }
-    Ok((
-        Some(encode::Loop::new(loop_start - start, end - start).crossfade(crossfade)),
-        dropped,
-    ))
-}
-
-fn validate_key_ranges(zones: &[Zone]) -> Result<(), String> {
-    for (index, zone) in zones.iter().enumerate() {
-        let at = format!("zone{}", index + 1);
-        if !(zone.bottom_note..=zone.top_note).contains(&zone.root_key) {
-            return Err(format!(
-                "{at}'s root note {} is outside its range {}..={}",
-                zone.root_key, zone.bottom_note, zone.top_note
-            ));
-        }
-        let encoded_bottom = match zones.get(index + 1) {
-            Some(below) => {
-                let below_at = index + 2;
-                below.top_note.checked_add(1).ok_or_else(|| {
-                    format!(
-                        "zone{below_at} reaches note {}, leaving no range for {at}",
-                        below.top_note
-                    )
-                })?
-            }
-            None => LOWEST_NOTE,
-        };
-        if zone.bottom_note != encoded_bottom {
-            return Err(format!(
-                "{at} starts at note {}, but its encoded range would start at \
-                 {encoded_bottom}; the encoded keyboard map tiles its zones, so that \
-                 gap or overlap cannot be reproduced",
-                zone.bottom_note
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// A project's frame position as an index into the file it points at.
-///
-/// Positions are `%f` decimals counted at 44,100 Hz, whatever the file's own rate.
-/// A zone encodes `start..stop`, not the whole `begin..end` extent.
-/// Inferred from specimens; not confirmed on hardware.
-fn frame(zone: &str, label: &str, value: f64, frames: usize) -> Result<usize, String> {
-    Ok(exact_frame(zone, label, value, frames)?.round() as usize)
-}
-
-/// [`frame`] without the rounding, for a value the encoder needs exact: a crossfade
-/// stated as a percentage can fall between two frames, and rounding it first would move
-/// a field on the field lattice.
-fn exact_frame(zone: &str, label: &str, value: f64, frames: usize) -> Result<f64, String> {
-    if !value.is_finite() || !(0.0..=frames as f64).contains(&value) {
-        return Err(format!(
-            "{zone}'s {label} is at frame {value}, outside the {frames} frames its audio holds"
-        ));
-    }
-    Ok(value)
 }
 
 /// `nord sample verify`: the container round trip, and with `--deep` the stream.
@@ -1472,32 +1114,6 @@ mod tests {
         assert!(line.contains("not a slot"), "{line}");
     }
 
-    fn map_zone(root_key: u8, bottom_note: u8, top_note: u8) -> Zone {
-        Zone {
-            zone_id: 0,
-            root_key,
-            enabled: true,
-            bottom_note,
-            top_note,
-            strokes: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn a_project_key_map_must_be_representable_by_top_notes() {
-        let valid = [map_zone(72, 61, 84), map_zone(48, LOWEST_NOTE, 60)];
-        assert!(validate_key_ranges(&valid).is_ok());
-
-        let gap = [map_zone(72, 62, 84), map_zone(48, LOWEST_NOTE, 60)];
-        assert!(validate_key_ranges(&gap).is_err());
-
-        let misplaced_root = [map_zone(60, 61, 84), map_zone(48, LOWEST_NOTE, 60)];
-        assert!(validate_key_ranges(&misplaced_root).is_err());
-
-        let raised_floor = [map_zone(60, LOWEST_NOTE + 1, 84)];
-        assert!(validate_key_ranges(&raised_floor).is_err());
-    }
-
     #[test]
     fn loop_points_read_as_frames_around_a_colon() {
         let points = loop_points("16384:32768", 1024.0).unwrap();
@@ -1508,118 +1124,6 @@ mod tests {
         );
         for bad in ["16384", "16384:", "a:b", "16384:32768:1", "-1:5"] {
             assert!(loop_points(bad, 0.0).is_err(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn a_projects_loop_maps_onto_the_one_the_container_holds() {
-        let long = stroke_with(|s| s.loop_enabled = true);
-        let (points, dropped) =
-            zone_loop("zone1", &long, 1_000, 88_200, codec::Layout::V4).unwrap();
-        assert_eq!(points, Some(encode::Loop::new(15_384, 31_768)));
-        assert!(dropped.is_empty());
-
-        let short = stroke_with(|s| {
-            s.loop_enabled = true;
-            s.short_loop_enabled = true;
-            s.short_loop_length = 1_024.0;
-            s.short_loop_crossfade = 25;
-            s.loop_crossfade = 4_096.0;
-            s.loop_crossfade_mode = 1;
-        });
-        let (points, dropped) = zone_loop("zone1", &short, 0, 88_200, codec::Layout::V4).unwrap();
-        assert_eq!(
-            points,
-            Some(encode::Loop::new(16_384, 17_408).crossfade(256.0))
-        );
-        assert!(
-            dropped.iter().any(|d| d.contains("m_loopXFadeLengthLong")),
-            "{dropped:?}"
-        );
-        assert!(
-            dropped.iter().any(|d| d.contains("m_loopXFModeLong")),
-            "{dropped:?}"
-        );
-
-        let unfaded = stroke_with(|s| {
-            s.loop_enabled = true;
-            s.short_loop_enabled = true;
-            s.short_loop_length = 1_024.0;
-            s.short_loop_crossfade = 0;
-        });
-        let (points, _) = zone_loop("zone1", &unfaded, 0, 88_200, codec::Layout::V4).unwrap();
-        assert_eq!(points, Some(encode::Loop::new(16_384, 17_408)));
-
-        let off = stroke_with(|_| {});
-        assert_eq!(
-            zone_loop("zone1", &off, 0, 88_200, codec::Layout::V4)
-                .unwrap()
-                .0,
-            None
-        );
-    }
-
-    #[test]
-    fn loop_settings_with_nowhere_to_go_are_named() {
-        let refused = |edit: fn(&mut Stroke)| {
-            let mut s = stroke_with(|s| s.loop_enabled = true);
-            edit(&mut s);
-            zone_loop("zone1", &s, 0, 88_200, codec::Layout::V4).unwrap_err()
-        };
-        assert!(refused(|s| s.loop_crossfade_mode = 1).contains("m_loopXFModeLong"));
-        assert!(refused(|s| s.loop_length = 0.0).contains("m_loopLengthLong"));
-        assert!(refused(|s| s.loop_length = 90_000.0).contains("loop end"));
-
-        // A trim that starts after the loop does leaves the loop nowhere to begin.
-        let trimmed = stroke_with(|s| s.loop_enabled = true);
-        assert!(zone_loop("zone1", &trimmed, 20_000, 88_200, codec::Layout::V4).is_err());
-
-        let mut noisy = stroke_with(|s| s.loop_enabled = true);
-        noisy.loop_detune = -50;
-        noisy.loop_decay_enabled = true;
-        let (points, dropped) = zone_loop("zone1", &noisy, 0, 88_200, codec::Layout::V4).unwrap();
-        assert!(points.is_some());
-        assert_eq!(dropped.len(), 2, "{dropped:?}");
-        assert!(dropped[0].contains("m_loopDetune"));
-        assert!(dropped[1].contains("m_loopDecay"));
-
-        let (_, narrow) = zone_loop("zone1", &noisy, 0, 88_200, codec::Layout::V2).unwrap();
-        assert!(narrow[1].contains("m_loopDecay = 20"), "{narrow:?}");
-    }
-
-    /// The canonical LP rung, whose loop the editor stores at 16384..32768.
-    fn stroke_with(edit: impl FnOnce(&mut Stroke)) -> Stroke {
-        let mut stroke = Stroke {
-            zone_id: 129,
-            global_id: 1,
-            file_id: 1,
-            begin: 0.0,
-            end: 88_200.0,
-            start: 0.0,
-            start_secondary: 11_025.0,
-            stop: 88_200.0,
-            loop_enabled: false,
-            short_loop_enabled: false,
-            loop_start: 16_384.0,
-            loop_length: 16_384.0,
-            short_loop_length: 0.0,
-            loop_crossfade: 0.0,
-            loop_crossfade_mode: 0,
-            short_loop_crossfade: 10,
-            short_loop_uses_pitch: true,
-            loop_detune: 0,
-            loop_decay_enabled: false,
-            loop_decay: 20.0,
-        };
-        edit(&mut stroke);
-        stroke
-    }
-
-    #[test]
-    fn a_frame_position_is_checked_before_rounding() {
-        assert_eq!(frame("zone1", "start", 0.4, 10).unwrap(), 0);
-        for value in [-0.4, 10.4, f64::NAN, f64::INFINITY] {
-            assert!(frame("zone1", "start", value, 10).is_err(), "{value}");
         }
     }
 
