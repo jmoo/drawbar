@@ -576,11 +576,12 @@ impl Store {
         self.instrument = instrument;
     }
 
-    /// Keep each slot view's unsaved edit where it changed since it was last kept, and
-    /// let go of the edits of views sent, reverted, closed or kept on this computer. A
-    /// view seen for the first time asks for the edit an earlier session kept of its
-    /// slot, and keeps none before the answer.
-    fn keep_slot_edits(&mut self, workspace: &Workspace) {
+    /// Ask, for each view of a slot seen for the first time, for the edit an earlier
+    /// session kept of its slot, and where `keep` says, keep each slot view's unsaved
+    /// edit where it changed since it was last kept, and let go of the edits of views
+    /// sent, reverted, closed or kept on this computer. A view keeps no edit of its
+    /// own before the answer.
+    fn keep_slot_edits(&mut self, workspace: &Workspace, keep: bool) {
         if !self.opened() {
             return;
         }
@@ -625,6 +626,9 @@ impl Store {
                 self.send(Cmd::ReadSlot(slot));
                 continue;
             };
+            if !keep {
+                continue;
+            }
             if view.saved != saved {
                 view.saved = saved;
                 view.base = blake3::hash(entity.saved.bytes());
@@ -681,8 +685,11 @@ impl Store {
                 return;
             }
         };
-        if workspace.get(id).is_none_or(LocalEntity::is_unsaved) {
+        let Some(entity) = workspace.get(id) else {
             return;
+        };
+        if entity.is_unsaved() {
+            return browser.ask_kept_slot_edit(id, &entity.name, bytes);
         }
         let changed = base != view.base;
         workspace.replace_bytes(id, bytes, log);
@@ -2621,8 +2628,8 @@ impl Store {
             self.summarize(workspace);
             self.cache.write();
             self.keep_drafts(workspace);
-            self.keep_slot_edits(workspace);
         }
+        self.keep_slot_edits(workspace, pass != Pass::Files);
         self.take_asks(workspace);
         if !self.open() {
             return true;

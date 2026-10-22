@@ -811,6 +811,35 @@ impl Browser {
         });
     }
 
+    /// Ask what to do with the edit an earlier session kept of a slot whose view was
+    /// edited before that edit was read: `kept` is its bytes.
+    pub(crate) fn ask_kept_slot_edit(&mut self, id: u64, name: &str, kept: Vec<u8>) {
+        self.raise(Ask {
+            title: format!("“{name}” has unsaved edits from before"),
+            note: Some(
+                "drawbar kept unsaved edits of this slot when it last let it go, and you \
+                 have edited it since. Keep mine keeps your edits. Take theirs puts the \
+                 earlier edits in their place. Keep both keeps the earlier edits as a new \
+                 file on this computer."
+                    .into(),
+            ),
+            verb: Verb::TakeTheirs,
+            acts: vec![Act::Restore {
+                id,
+                bytes: kept.clone(),
+            }],
+            others: vec![(
+                "Keep both",
+                vec![Act::Import {
+                    name: name.to_string(),
+                    bytes: kept,
+                }],
+            )],
+            cancel: "Keep mine",
+            strong: Answer::Cancel,
+        });
+    }
+
     /// Ask before another library opens in place of one that cannot keep the assets
     /// named in `unkept`: their unsaved edits, or what nothing may be written for.
     pub(crate) fn ask_leave(&mut self, unkept: &[String], root: crate::store::Root) {

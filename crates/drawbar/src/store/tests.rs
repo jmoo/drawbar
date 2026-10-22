@@ -4185,6 +4185,41 @@ fn a_slot_views_unsaved_edit_over_a_slot_changed_since_asks_which_to_keep() {
     assert_eq!(answers, ["Keep mine", "Keep both", "Take theirs"]);
 }
 
+/// A slot view edited before the edit an earlier session kept of its slot is read
+/// asks which to keep, and nothing kept is lost without being asked.
+#[test]
+fn a_slot_view_edited_before_its_kept_edit_is_read_asks_which_to_keep() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let at = Location::from_user(1, 1);
+    let mut first = Session::open(&root);
+    let id = first.view_slot("N1", at, program.clone());
+    let earlier = first.edit(id, "96");
+    first.close();
+
+    let mut second = Session::open(&root);
+    second.store.attached(Some("N1".to_string()));
+    let origin = Origin::Device {
+        class: ObjectClass::Program,
+        at,
+    };
+    let Bench { workspace, log, .. } = &mut second.bench;
+    let id = workspace.view("Grand".to_string(), origin, program.clone(), log);
+    let mine = second.edit(id, "12");
+    second.autosave();
+    assert!(
+        second.bytes(id) == mine,
+        "nothing is put over the edit unasked"
+    );
+    let (title, answers) = second.bench.browser.asking().expect("a question is asked");
+    assert_eq!(title, "“Grand” has unsaved edits from before");
+    assert_eq!(answers, ["Keep mine", "Keep both", "Take theirs"]);
+    let acts = second.bench.browser.answer("Take theirs");
+    second.bench.act(acts);
+    assert!(second.bytes(id) == earlier, "the earlier edit");
+    assert!(second.bench.workspace.get(id).unwrap().is_unsaved());
+}
+
 /// A slot view whose edit was sent, or let go of, leaves no edit for the next view.
 #[test]
 fn a_slot_view_sent_leaves_no_kept_edit() {

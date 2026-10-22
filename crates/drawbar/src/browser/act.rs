@@ -87,6 +87,11 @@ pub enum Act {
     /// Keep an unsaved edit as a new asset beside its file, and take the file as it is on
     /// disk.
     KeepBoth(u64),
+    /// Put bytes over an asset as an unsaved edit: an edit an earlier session kept.
+    Restore {
+        id: u64,
+        bytes: Vec<u8>,
+    },
     /// Let go of an asset whose file is gone, with the tags the library kept for it.
     Forget(u64),
     NewFolder,
@@ -279,9 +284,10 @@ impl Act {
     pub fn reads(&self) -> Vec<u64> {
         match self {
             Act::Open(item) => item.local().into_iter().collect(),
-            Act::Overwrite { id, .. } | Act::MoveAs { id, .. } | Act::File { id, .. } => {
-                vec![*id]
-            }
+            Act::Overwrite { id, .. }
+            | Act::MoveAs { id, .. }
+            | Act::File { id, .. }
+            | Act::Restore { id, .. } => vec![*id],
             Act::Keep(id)
             | Act::KeepBoth(id)
             | Act::Send { id, .. }
@@ -622,6 +628,7 @@ pub fn apply(
             Act::ReadAgain(class) => device.read_class(class),
             Act::Keep(id) => workspace.keep(id, log),
             Act::Import { name, bytes } => import(browser, workspace, log, name, bytes),
+            Act::Restore { id, bytes } => workspace.replace_bytes(id, bytes, log),
             Act::Take { from, dir, name } => take(browser, workspace, log, from, dir, name),
             Act::Unpack(read) => unpack(browser, workspace, log, read),
             Act::TakeOver { id, from } => take_over(workspace, log, id, from),
