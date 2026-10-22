@@ -65,9 +65,9 @@ impl Native {
         }
     }
 
-    /// What renames on the volume of `root` promise. A root that cannot be
-    /// probed yet, such as one not made yet, is taken to rename atomically and
-    /// replace.
+    /// What renames on the volume of `root` promise, probed at the nearest
+    /// directory that exists, the root or one above it. A root no probe can tell
+    /// about is taken to tear renames: a wrong guess then costs copies, not files.
     fn renames(&self, root: Root) -> Renames {
         let known = match root {
             Root::Folder => &self.renames[0],
@@ -76,9 +76,10 @@ impl Native {
         if let Some(known) = known.get() {
             return known;
         }
-        let probed = volume::probe(self.top(root));
+        let made = self.top(root).ancestors().find(|dir| dir.exists());
+        let probed = made.and_then(volume::probe);
         known.set(probed);
-        probed.unwrap_or(Renames::Replacing)
+        probed.unwrap_or(Renames::Torn)
     }
 
     fn full(&self, root: Root, path: &RelPath) -> Result<PathBuf, IoError> {
@@ -402,9 +403,11 @@ mod volume {
     /// File systems by the magic number `statfs` reports, from `linux/magic.h`
     /// or the driver's source. A file system not listed is taken to rename
     /// atomically and replace, and a network file system's check is not atomic
-    /// against other clients. ext2, and ext4 made without a journal, share
-    /// ext4's number and are taken to rename atomically.
-    pub const VOLUMES: [(&str, u32, Renames); 13] = [
+    /// against other clients. ⚠️ ext2, and ext4 made without a journal, share
+    /// ext4's number and are taken to rename atomically. A FUSE file system,
+    /// such as ntfs-3g, exfat-fuse or sshfs, hides what it stores to, and is
+    /// taken to tear renames.
+    pub const VOLUMES: [(&str, u32, Renames); 14] = [
         ("ext2 to ext4", 0xEF53, Renames::Exclusive),
         ("XFS", 0x5846_5342, Renames::Exclusive),
         ("Btrfs", 0x9123_683E, Renames::Exclusive),
@@ -418,6 +421,7 @@ mod volume {
         ("HFS", 0x4244, Renames::Torn),
         ("HFS+", 0x482B, Renames::Torn),
         ("UDF", 0x1501_3346, Renames::Torn),
+        ("FUSE", 0x6573_5546, Renames::Torn),
     ];
 
     pub fn renames(magic: u32) -> Renames {
@@ -454,9 +458,19 @@ mod volume {
     use super::Renames;
 
     /// File systems by the type `statfs` names, whose renames are torn whatever
-    /// the volume reports. exFAT and FAT volumes report no `RENAME_EXCL`, and no
-    /// journal.
-    pub const TORN: [&str; 3] = ["exfat", "msdos", "ntfs"];
+    /// the volume reports: exFAT, FAT, NTFS through Apple's driver, Paragon's
+    /// and Tuxera's, UDF, and FUSE file systems, which hide what they store to.
+    /// exFAT and FAT volumes report no `RENAME_EXCL`, and no journal.
+    pub const TORN: [&str; 8] = [
+        "exfat",
+        "msdos",
+        "ntfs",
+        "ufsd_NTFS",
+        "tuxera_ntfs",
+        "udf",
+        "macfuse",
+        "osxfuse",
+    ];
 
     /// What renames on a volume of type `name` promise, where its capabilities
     /// include `VOL_CAP_INT_RENAME_EXCL` or not.
@@ -547,7 +561,7 @@ mod volume {
     };
 
     /// File systems by the name Windows gives them, whose renames are torn.
-    pub const TORN: [&str; 3] = ["FAT", "FAT32", "exFAT"];
+    pub const TORN: [&str; 4] = ["FAT", "FAT32", "exFAT", "UDF"];
 
     /// What renames on a volume whose file system Windows names `name` promise.
     /// `MoveFileExW` refuses an existing destination on every volume unless asked
@@ -634,6 +648,7 @@ mod tests {
             ("exFAT", 0x2011_BAB0),
             ("ntfs3", 0x7366_746E),
             ("HFS", 0x4244),
+            ("FUSE", 0x6573_5546),
         ] {
             assert_eq!(volume::renames(magic), Renames::Torn, "{name}");
         }
@@ -675,6 +690,19 @@ mod tests {
         for name in ["NTFS", "ReFS"] {
             assert_eq!(volume::renames(name), Renames::Exclusive, "{name}");
         }
+    }
+
+    #[test]
+    fn a_root_no_probe_can_tell_about_declares_no_rename() {
+        let native = Native::new("", "");
+        assert!(!native.capabilities(Root::Folder).rename_file);
+    }
+
+    #[test]
+    fn a_root_not_made_yet_is_probed_where_it_will_be() {
+        let made = std::env::temp_dir();
+        let native = Native::new(made.join("not/made/yet"), &made);
+        assert_eq!(native.renames(Root::Folder), native.renames(Root::Local));
     }
 
     #[test]

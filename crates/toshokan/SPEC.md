@@ -821,13 +821,20 @@ each move copies and then removes its source (see File effects). Without
 `append`, a library opens read-only. Without `fsync`, a sync is answered at once,
 and a completed request is as durable as the backend makes it.
 
-The native backend tells a volume by the type of file system it reports. It
+The native backend tells a volume by the type of file system it reports, read at
+the root or, before the root exists, at the nearest directory above it. It
 declares `rename_file` and `rename_dir` except where the file system keeps no
 journal of its names, so that a crash can keep a rename's removal of the old
-name without the new one: FAT, exFAT, NTFS, HFS, HFS+ and UDF on Linux, FAT,
-exFAT and NTFS on Apple systems, and FAT and exFAT on Windows. There every move
-copies. It declares `no_replace` where renames also refuse an existing
-destination (see File effects).
+name without the new one, and where it cannot tell: FAT, exFAT, NTFS, HFS, HFS+
+and UDF on Linux; FAT, exFAT, NTFS and UDF on Apple systems; FAT, exFAT and UDF
+on Windows; every FUSE file system, which hides what it stores to; and a volume
+whose type cannot be read. There every move copies. The type is all it reads:
+ext2, and ext4 made without a journal, report ext4's type and are taken to
+rename atomically, as is any file system not named here. It declares
+`no_replace` where renames also refuse an existing destination (see File
+effects). On Windows it declares no `fsync`, so a copy cut short is told only by
+holding the start of its source's bytes, and a record cut short only by being
+empty (see Recovery).
 
 ### Browsers
 
