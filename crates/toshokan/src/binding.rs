@@ -340,9 +340,12 @@ pub(crate) fn relist<'a>(
     let mut scan = previous.clone();
     scan.files.retain(|path, _| !under(path, &touched));
     let layout = Rc::new(layout.clone());
-    fold(paths.into_iter(), scan, move |scan, path| {
-        visit(Rc::clone(&layout), path, scan)
-    })
+    let visited = fold(
+        paths.into_iter(),
+        (scan, flow::Listings::default()),
+        move |(scan, listings), path| visit(Rc::clone(&layout), path, scan, listings),
+    );
+    visited.map_ok(|(scan, _)| scan)
 }
 
 /// The files of `scan` at or under each of `paths`.
@@ -530,22 +533,32 @@ pub(crate) fn identified<'a>(
 }
 
 /// `scan` with what is at `path`: a file, every file under a directory, or
-/// nothing.
-fn visit<'a>(layout: Rc<Layout>, path: RelPath, scan: Scan) -> flow::Fallible<'a, Scan> {
+/// nothing. `listings` saves listing a directory an earlier visit of the same
+/// scan listed.
+fn visit<'a>(
+    layout: Rc<Layout>,
+    path: RelPath,
+    scan: Scan,
+    listings: flow::Listings,
+) -> flow::Fallible<'a, (Scan, flow::Listings)> {
     if !path.is_root() && !layout.holds(&path) {
-        return ok(scan);
+        return ok((scan, listings));
     }
     flow::stat(Root::Folder, &path).and_then(move |meta| {
         let Some(meta) = meta else {
-            return ok(scan);
+            return ok((scan, listings));
         };
         // A volume that ignores case finds the file by another spelling of its path too,
         // which a listing would never give.
-        flow::spelled(Root::Folder, path.clone()).and_then(move |exactly| match exactly {
-            false => ok(scan),
-            true if meta.kind == Kind::Directory => walk(layout, path, scan),
-            true => ok(found(scan, path, meta)),
-        })
+        flow::spelled_in(Root::Folder, path.clone(), listings).and_then(
+            move |(exactly, listings)| match exactly {
+                false => ok((scan, listings)),
+                true if meta.kind == Kind::Directory => {
+                    walk(layout, path, scan).map_ok(|scan| (scan, listings))
+                }
+                true => ok((found(scan, path, meta), listings)),
+            },
+        )
     })
 }
 

@@ -1331,30 +1331,32 @@ pub(crate) fn observe<'a>(
         }
     }
     started.and_then(move |started| {
-        let found = (BTreeSet::new(), BTreeSet::new());
+        let found = (BTreeSet::new(), BTreeSet::new(), flow::Listings::default());
         fold(
             paths.into_iter(),
             found,
-            |(mut present, mut directories), path| {
+            |(mut present, mut directories, listings), path| {
                 flow::stat(Root::Folder, &path).and_then(move |meta| {
                     let Some(meta) = meta else {
-                        return ok((present, directories));
+                        return ok((present, directories, listings));
                     };
                     // ⚠️ A volume that ignores case finds a path by another spelling,
                     // as the destination of a change of case finds its source.
-                    flow::spelled(Root::Folder, path.clone()).map_ok(move |exactly| {
-                        if exactly && meta.kind == Kind::Directory {
-                            directories.insert(path.clone());
-                        }
-                        if exactly {
-                            present.insert(path);
-                        }
-                        (present, directories)
-                    })
+                    flow::spelled_in(Root::Folder, path.clone(), listings).map_ok(
+                        move |(exactly, listings)| {
+                            if exactly && meta.kind == Kind::Directory {
+                                directories.insert(path.clone());
+                            }
+                            if exactly {
+                                present.insert(path);
+                            }
+                            (present, directories, listings)
+                        },
+                    )
                 })
             },
         )
-        .and_then(move |(present, directories)| {
+        .and_then(move |(present, directories, _)| {
             let both: Vec<(RelPath, RelPath)> = pairs
                 .into_iter()
                 .filter(|(from, to)| present.contains(from) && present.contains(to))

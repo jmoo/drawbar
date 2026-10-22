@@ -1,7 +1,7 @@
 //! Operations written as continuations: each request carries the code that
 //! consumes its result, so a sequence of requests reads as a sequence.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use crate::env::Identify;
@@ -189,22 +189,40 @@ pub(crate) fn stat<'a>(root: Root, path: &RelPath) -> Fallible<'a, Option<Meta>>
 /// Whether every name of `path`, which is there, is spelled as its directory lists it:
 /// a volume that ignores case finds a file by another spelling of its name too.
 pub(crate) fn spelled<'a>(root: Root, path: RelPath) -> Fallible<'a, bool> {
+    spelled_in(root, path, Listings::default()).map_ok(|(exactly, _)| exactly)
+}
+
+/// The names each directory listed so far holds.
+pub(crate) type Listings = BTreeMap<RelPath, BTreeSet<String>>;
+
+/// [`spelled`], listing only the directories `listings` does not hold, with
+/// `listings` given back holding them too.
+pub(crate) fn spelled_in<'a>(
+    root: Root,
+    path: RelPath,
+    listings: Listings,
+) -> Fallible<'a, (bool, Listings)> {
     let prefixes: Vec<RelPath> = std::iter::successors(Some(path), RelPath::parent)
         .take_while(|prefix| !prefix.is_root())
         .collect();
     fold(
         prefixes.into_iter(),
-        true,
-        move |exactly, prefix| match exactly {
-            false => ok(false),
-            true => {
-                let parent = prefix.parent().expect("a name has a directory");
-                list(root, &parent).map_ok(move |entries| {
-                    entries
-                        .iter()
-                        .any(|entry| Some(&*entry.name) == prefix.name())
-                })
+        (true, listings),
+        move |(exactly, mut listings), prefix| {
+            let parent = prefix.parent().expect("a name has a directory");
+            let name = prefix.name().expect("a prefix is not the root").to_owned();
+            if !exactly {
+                return ok((false, listings));
             }
+            if let Some(names) = listings.get(&parent) {
+                return ok((names.contains(&name), listings));
+            }
+            list(root, &parent).map_ok(move |entries| {
+                let names: BTreeSet<String> = entries.into_iter().map(|entry| entry.name).collect();
+                let exactly = names.contains(&name);
+                listings.insert(parent, names);
+                (exactly, listings)
+            })
         },
     )
 }

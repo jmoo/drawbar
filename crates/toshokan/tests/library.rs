@@ -87,6 +87,8 @@ struct Seen {
     log_read: u64,
     /// Renames from one library path to another.
     library_renames: u64,
+    /// How often each library directory was listed.
+    listed: BTreeMap<RelPath, u64>,
 }
 
 type Picks = dyn Fn(&Io) -> bool;
@@ -137,6 +139,10 @@ impl Probe {
 
     fn library_renames(&self) -> u64 {
         self.seen.borrow().library_renames
+    }
+
+    fn listed(&self) -> BTreeMap<RelPath, u64> {
+        self.seen.borrow().listed.clone()
     }
 
     /// Panics on a write under toshokan's root outside the directory of the writer
@@ -214,6 +220,9 @@ impl Probe {
         match io {
             Io::Rename { from, to, .. } if !layout().owns(from) && !layout().owns(to) => {
                 seen.library_renames += 1;
+            }
+            Io::List { dir, .. } if !layout().owns(dir) => {
+                *seen.listed.entry(dir.clone()).or_default() += 1;
             }
             _ => {}
         }
@@ -616,6 +625,7 @@ through_both!(
     a_tree_moved_with_files_no_entity_is_bound_to_is_moved_back_by_undo,
     a_tree_move_is_undone_by_one_rename_where_directories_rename,
     a_tree_move_is_not_undone_once_a_file_it_moved_changed,
+    files_rescanned_together_list_their_directory_once,
     a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept,
     losing_the_local_root_at_any_step_loses_only_drafts,
     a_crash_at_any_step_is_settled_before_the_next_write,
@@ -2699,6 +2709,29 @@ fn a_tree_move_is_not_undone_once_a_file_it_moved_changed<F: Facade>() {
             .collect::<Vec<_>>(),
         ["new/a.wav", "new/b.wav"],
         "nothing moved back"
+    );
+}
+
+fn files_rescanned_together_list_their_directory_once<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let names = ["a", "b", "c", "d"];
+    for name in names {
+        put(&folder, &format!("dir/{name}.wav"), name.as_bytes());
+    }
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    let before = probe.listed();
+    let paths = names.map(|name| path(&format!("dir/{name}.wav")));
+    a.rescan_paths(paths.to_vec()).unwrap();
+    let lists = |dir: &RelPath| {
+        probe.listed().get(dir).copied().unwrap_or(0) - before.get(dir).copied().unwrap_or(0)
+    };
+    assert_eq!(
+        (lists(&RelPath::ROOT), lists(&path("dir"))),
+        (1, 1),
+        "lists of the folder and of dir"
     );
 }
 
