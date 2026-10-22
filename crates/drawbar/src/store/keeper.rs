@@ -339,8 +339,11 @@ impl Keeper {
         let library = self.library.as_mut().ok_or("the library is not open")?;
         let committed = commit(library).map_err(|e| e.to_string())?;
         let path = |path: Option<RelPath>| path.and_then(|path| LibPath::parse(path.as_str()));
+        let trees = committed.trees.into_iter();
+        let trees = trees.map(|(from, to)| (path(Some(from)), path(Some(to))));
         let paths = committed.paths.into_iter();
         let paths = paths.map(|moved| (path(moved.from), path(moved.to)));
+        let paths = trees.chain(paths);
         let viewed = Viewed {
             undone: Some(paths.collect()),
             dirs: Some(folders(&self.folder)),

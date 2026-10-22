@@ -1713,18 +1713,17 @@ impl Store {
         touched
     }
 
-    /// Follow a file no entity is bound to that this session's undo or redo moved from
-    /// `from` to `to`: its asset keeps its id, and moves with it.
+    /// Follow a tree, or a file no entity is bound to, that this session's undo or redo
+    /// moved from `from` to `to`: each asset in it keeps its id, and moves with it.
     fn follow_undone(&mut self, from: &LibPath, to: &LibPath, workspace: &mut Workspace) {
-        let Some(id) = self.ids.id(&Key::File(from.clone())) else {
-            return;
-        };
-        self.ids.insert(id, Key::File(to.clone()));
+        self.ids.moved(from, to);
         self.cache.moved(from, to);
-        if let Some(record) = self.records.get_mut(&id) {
-            record.path = Some(to.clone());
+        for record in self.records.values_mut() {
+            if let Some(moved) = record.path.as_ref().and_then(|at| at.moved(from, to)) {
+                record.path = Some(moved);
+            }
         }
-        workspace.follow(id, to.clone());
+        workspace.relocate(from, to);
     }
 
     /// Bring the workspace level with the files the view lists. Each file keeps the id it

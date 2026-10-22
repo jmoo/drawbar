@@ -4769,6 +4769,35 @@ fn a_folder_rename_undone_leaves_no_folder_behind() {
     assert_eq!(root.names("Gig/Deep"), ["b.ne5p"]);
 }
 
+/// An unsaved edit of a file in a folder renamed, and the rename undone, follows the
+/// file: the asset keeps its id, and the edit comes back at the file's name after a
+/// quit.
+#[test]
+fn an_unsaved_edit_follows_its_file_through_a_folder_rename_and_its_undo() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::create_dir_all(root.at("Live")).unwrap();
+    fs::write(root.at("Live/a.ne5p"), &program).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.named("a.ne5p");
+    let edited = session.edit(id, "96");
+    let live = LibPath::root().join("Live");
+    let folder = session.bench.browser.folders.id_of(&live).unwrap();
+    session.rename_folder(folder, "Gig");
+    session.sync();
+    session.autosave();
+    session.undo();
+    session.autosave();
+    assert_eq!(session.named("a.ne5p"), id, "the same asset");
+    assert_eq!(session.path(id).as_deref(), Some("Live/a.ne5p"));
+    session.close();
+
+    let again = Session::open(&root);
+    let id = again.named("a.ne5p");
+    assert_eq!(again.path(id).as_deref(), Some("Live/a.ne5p"));
+    assert!(again.bytes(id) == edited, "the edit came back");
+}
+
 /// Two windows of this install keep their unsaved edits as two writers' drafts. Opened
 /// again with one window, both edits come back.
 #[test]

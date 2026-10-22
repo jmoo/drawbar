@@ -754,7 +754,8 @@ pub struct Viewed {
     /// The files the answer's scan found moved outside drawbar, from and to.
     pub moves: Vec<(LibPath, LibPath)>,
     /// What this session's undo or redo did, which the workspace follows without a
-    /// word: each file no entity is bound to that it made, moved or trashed, from and to.
+    /// word: each tree it moved, then each file no entity is bound to that it made,
+    /// moved or trashed, from and to.
     pub undone: Option<Vec<(Option<LibPath>, Option<LibPath>)>>,
     /// The folders a scan of every file could not list, where the answer scanned every
     /// file. What is in them is not known.
