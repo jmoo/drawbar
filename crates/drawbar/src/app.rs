@@ -6,7 +6,7 @@
 use eframe::egui;
 
 use crate::browser::{self, Browser};
-use crate::device::Device;
+use crate::device::{Device, DeviceCard};
 use crate::document::Document;
 use crate::keyboard::Keyboard;
 use crate::library::Library;
@@ -900,6 +900,9 @@ impl eframe::App for DrawbarApp {
             &mut self.tabs,
             &mut self.queue,
         );
+        if let Some(store) = &mut self.store {
+            store.attached(self.device.state.card().map(DeviceCard::instrument));
+        }
         // An edit to an asset with a waiting entry changes what that write would do; the
         // queue diffs it again against the occupant it already read.
         crate::queue::follow(

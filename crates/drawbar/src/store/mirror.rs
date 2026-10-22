@@ -80,6 +80,18 @@ struct Record {
 #[cfg(not(target_arch = "wasm32"))]
 const RESCUED: &str = "rescued";
 
+/// A view of a slot, as its unsaved edit is kept.
+struct SlotView {
+    slot: super::Slot,
+    /// The stamp of the bytes the view was opened over or last sent, and their hash.
+    saved: u64,
+    base: blake3::Hash,
+    /// Whether the edit an earlier session kept of the slot was read.
+    read: bool,
+    /// The stamp of the edit kept, if one is, and the hash it was kept over.
+    kept: Option<(u64, blake3::Hash)>,
+}
+
 /// What a view lists that drawbar shows.
 struct Listed {
     /// Each file drawbar opens, by the key the library knows it by, with its path and
@@ -191,6 +203,10 @@ pub struct Store {
     /// Drafts put back that another writer kept, or under a key the asset no longer
     /// goes by, each let go of once this writer keeps the edit itself.
     superseded: BTreeMap<u64, super::Kept>,
+    /// The instrument attached, as [`super::Slot::instrument`] names it.
+    instrument: Option<String>,
+    /// Each view of a slot seen, with what its unsaved edit is kept by.
+    views: BTreeMap<u64, SlotView>,
     /// Assets to remove now what was copied or saved of them over another has landed
     /// ([`Store::take_left`]).
     left: Vec<u64>,
@@ -264,6 +280,8 @@ impl Store {
             drafted: BTreeMap::new(),
             restoring: BTreeMap::new(),
             superseded: BTreeMap::new(),
+            instrument: None,
+            views: BTreeMap::new(),
             focused: true,
             scanning: false,
             committing: 0,
@@ -454,6 +472,135 @@ impl Store {
                 replaces,
             });
             self.drafted.insert(entity.id, (key, stamp, base));
+        }
+    }
+
+    /// Say which instrument is attached, which the views of its slots opened from now
+    /// keep their unsaved edits by.
+    pub fn attached(&mut self, instrument: Option<String>) {
+        self.instrument = instrument;
+    }
+
+    /// Keep each slot view's unsaved edit where it changed since it was last kept, and
+    /// let go of the edits of views sent, reverted, closed or kept on this computer. A
+    /// view seen for the first time asks for the edit an earlier session kept of its
+    /// slot, and keeps none before the answer.
+    fn keep_slot_edits(&mut self, workspace: &Workspace) {
+        if !self.opened() {
+            return;
+        }
+        let ended: Vec<u64> = self
+            .views
+            .keys()
+            .copied()
+            .filter(|id| !workspace.is_view(*id))
+            .collect();
+        for id in ended {
+            if let Some(view) = self.views.remove(&id) {
+                if view.kept.is_some() {
+                    self.send(Cmd::DiscardSlot(view.slot));
+                }
+            }
+        }
+        let views = workspace.entities().iter().filter(|entity| !entity.kept);
+        for entity in views {
+            let Some((class, at)) = entity.origin.slot() else {
+                continue;
+            };
+            let saved = entity.saved.stamp();
+            let Some(view) = self.views.get_mut(&entity.id) else {
+                let Some(instrument) = self.instrument.clone() else {
+                    continue;
+                };
+                let slot = super::Slot {
+                    instrument,
+                    class: class.to_raw(),
+                    bank: at.bank,
+                    slot: at.slot,
+                };
+                let base = blake3::hash(entity.saved.bytes());
+                let view = SlotView {
+                    slot: slot.clone(),
+                    saved,
+                    base,
+                    read: false,
+                    kept: None,
+                };
+                self.views.insert(entity.id, view);
+                self.send(Cmd::ReadSlot(slot));
+                continue;
+            };
+            if view.saved != saved {
+                view.saved = saved;
+                view.base = blake3::hash(entity.saved.bytes());
+            }
+            let held = (entity.stamp, view.base);
+            let cmd = match (view.read, entity.is_unsaved(), view.kept) {
+                (false, _, _) => None,
+                (true, true, kept) if kept != Some(held) => {
+                    view.kept = Some(held);
+                    Some(Cmd::KeepSlot {
+                        slot: view.slot.clone(),
+                        base: view.base,
+                        bytes: entity.bytes.to_vec(),
+                    })
+                }
+                (true, false, Some(_)) => {
+                    view.kept = None;
+                    Some(Cmd::DiscardSlot(view.slot.clone()))
+                }
+                (true, _, _) => None,
+            };
+            if let Some(cmd) = cmd {
+                self.send(cmd);
+            }
+        }
+    }
+
+    /// Put the edit an earlier session kept of a slot back over its view, unless the
+    /// view was edited since it opened, and ask what to do where the slot changed since
+    /// the edit was made.
+    fn restore_slot_edit(
+        &mut self,
+        slot: &super::Slot,
+        kept: Result<Option<(blake3::Hash, Vec<u8>)>, String>,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        log: &mut Log,
+    ) {
+        let Some((&id, view)) = self
+            .views
+            .iter_mut()
+            .find(|(_, view)| !view.read && view.slot == *slot)
+        else {
+            return;
+        };
+        view.read = true;
+        let (base, bytes) = match kept {
+            Ok(Some(kept)) => kept,
+            Ok(None) => return,
+            Err(why) => {
+                log.trouble(format!(
+                    "The unsaved edit drawbar kept of this slot could not be read: {why}."
+                ));
+                return;
+            }
+        };
+        if workspace.get(id).is_none_or(LocalEntity::is_unsaved) {
+            return;
+        }
+        let changed = base != view.base;
+        workspace.replace_bytes(id, bytes, log);
+        let Some(entity) = workspace.get(id) else {
+            return;
+        };
+        view.kept = Some((entity.stamp, base));
+        match changed {
+            true => slot_conflict(id, workspace, browser, log),
+            false => log.say(format!(
+                "“{}” has the unsaved edit it had when drawbar last let it go.",
+                entity.name
+            )),
         }
     }
 
@@ -1118,6 +1265,9 @@ impl Store {
                          drawbar keeps at most 1 GiB of what your changes replaced."
                     ));
                 }
+            }
+            Event::SlotKept { slot, kept } => {
+                self.restore_slot_edit(&slot, kept, workspace, browser, log);
             }
             Event::Unkept(why) => {
                 log.error(format!("keeping an unsaved edit: {why}"));
@@ -2321,6 +2471,7 @@ impl Store {
             self.summarize(workspace);
             self.cache.write();
             self.keep_drafts(workspace);
+            self.keep_slot_edits(workspace);
         }
         self.asks.extend(workspace.take_file_asks());
         if !self.open() {
@@ -3091,6 +3242,17 @@ fn conflict(id: u64, workspace: &Workspace, browser: &mut Browser, log: &mut Log
         ));
     }
     browser.ask_conflict(id, &entity.name);
+}
+
+fn slot_conflict(id: u64, workspace: &Workspace, browser: &mut Browser, log: &mut Log) {
+    let Some(entity) = workspace.get(id) else {
+        return;
+    };
+    log.warn(format!(
+        "{}: the slot changed since drawbar kept an unsaved edit of its view",
+        entity.name
+    ));
+    browser.ask_slot_conflict(id, &entity.name);
 }
 
 /// Delete a slot's former occupant.

@@ -42,6 +42,8 @@ pub mod names;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
+mod slots;
+#[cfg(not(target_arch = "wasm32"))]
 pub use native::{default_root, local_root, openable, sync_dir, Backend};
 
 #[cfg(target_arch = "wasm32")]
@@ -479,6 +481,18 @@ impl Kept {
     }
 }
 
+/// A slot of one instrument, which an unsaved edit of its view is kept by: the class's
+/// code and the bank and slot from zero, as the wire numbers them.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct Slot {
+    /// What tells the instrument from others: its serial number, or its product name
+    /// where it reports none.
+    pub instrument: String,
+    pub class: u32,
+    pub bank: u32,
+    pub slot: u32,
+}
+
 /// What the app asks a backend to do. Each runs after the one sent before it.
 #[derive(Debug)]
 pub enum Cmd {
@@ -508,6 +522,18 @@ pub enum Cmd {
     },
     /// Let go of a draft. Answered only on failure.
     Discard(Kept),
+    /// Keep the unsaved edit of a slot's view, made over the slot's bytes of hash
+    /// `base`, in this install's own state, never in the folder. Answered only on
+    /// failure, by [`Event::Unkept`].
+    KeepSlot {
+        slot: Slot,
+        base: blake3::Hash,
+        bytes: Vec<u8>,
+    },
+    /// Let go of the edit kept of a slot's view. Answered only on failure.
+    DiscardSlot(Slot),
+    /// Read the edit kept of a slot's view. Answered by [`Event::SlotKept`].
+    ReadSlot(Slot),
     /// Settle as `how` says a change another drawbar left unfinished. Answered by
     /// [`Event::Committed`].
     Settle {
@@ -774,6 +800,12 @@ pub enum Event {
     Failed(String),
     /// An unsaved edit could not be kept as a draft, or let go of: why.
     Unkept(String),
+    /// The edit [`Cmd::ReadSlot`] found kept of a slot's view, with the hash of the
+    /// slot's bytes it was made over, or why it could not be read.
+    SlotKept {
+        slot: Slot,
+        kept: Result<Option<(blake3::Hash, Vec<u8>)>, String>,
+    },
 }
 
 impl Event {
@@ -788,7 +820,7 @@ impl Event {
             Event::Committed { result: Err(_), .. } => one("intent"),
             Event::Moved { result: Err(_), .. } => one("move"),
             Event::Failed(_) => one("write"),
-            Event::Unkept(_) => one("draft"),
+            Event::Unkept(_) | Event::SlotKept { kept: Err(_), .. } => one("draft"),
             Event::Read(answers) => answers
                 .iter()
                 .filter_map(|(_, result)| result.as_ref().err())
@@ -798,6 +830,7 @@ impl Event {
             Event::Imported { result, .. } => IMPORT.failed(result),
             Event::Rewritten { result, .. } => REWRITE.failed(result),
             Event::Opened(Ok(_))
+            | Event::SlotKept { kept: Ok(_), .. }
             | Event::Trimmed(_)
             | Event::Scanned(Ok(_))
             | Event::Viewed(_)

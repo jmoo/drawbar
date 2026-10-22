@@ -780,6 +780,25 @@ impl Browser {
         });
     }
 
+    /// Ask what to do with an unsaved edit of a slot's view, kept by an earlier session,
+    /// where the slot changed since.
+    pub(crate) fn ask_slot_conflict(&mut self, id: u64, name: &str) {
+        self.raise(Ask {
+            title: format!("“{name}” changed on the instrument"),
+            note: Some(
+                "The slot changed since drawbar kept your unsaved edits of it. Keep mine \
+                 keeps your edits, to send when you choose. Take theirs discards your \
+                 edits. Keep both keeps yours as a new file on this computer."
+                    .into(),
+            ),
+            verb: Verb::TakeTheirs,
+            acts: vec![Act::Revert(id)],
+            others: vec![("Keep both", vec![Act::KeepBoth(id)])],
+            cancel: "Keep mine",
+            strong: Answer::Cancel,
+        });
+    }
+
     /// Ask before another library opens in place of one that cannot keep the assets
     /// named in `unkept`: their unsaved edits, or what nothing may be written for.
     pub(crate) fn ask_leave(&mut self, unkept: &[String], root: crate::store::Root) {

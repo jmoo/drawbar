@@ -3987,6 +3987,20 @@ impl Session {
         edited
     }
 
+    /// Open a view of program slot `at` of `instrument`, holding `bytes`, as a double
+    /// click does, and let the store see it.
+    fn view_slot(&mut self, instrument: &str, at: Location, bytes: Vec<u8>) -> u64 {
+        self.store.attached(Some(instrument.to_string()));
+        let origin = Origin::Device {
+            class: ObjectClass::Program,
+            at,
+        };
+        let Bench { workspace, log, .. } = &mut self.bench;
+        let id = workspace.view("Grand".to_string(), origin, bytes, log);
+        self.autosave();
+        id
+    }
+
     /// The autosave's pass, and every command it sent run through.
     fn autosave(&mut self) {
         let Bench {
@@ -4070,6 +4084,94 @@ fn an_unsaved_edit_over_a_file_changed_since_asks_which_to_keep() {
     let (title, answers) = second.bench.browser.asking().expect("a question is asked");
     assert_eq!(title, "“untitled.ne5p” changed on disk");
     assert_eq!(answers, ["Keep mine", "Keep both", "Take theirs"]);
+}
+
+/// An unsaved edit of a slot's view is kept by the slot, outside the library folder,
+/// and is there again when the same instrument's slot is viewed after a quit.
+#[test]
+fn a_slot_views_unsaved_edit_comes_back_when_the_slot_is_viewed_again() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let at = Location::from_user(2, 7);
+    let mut first = Session::open(&root);
+    let id = first.view_slot("N1", at, program.clone());
+    let edited = first.edit(id, "96");
+    first.close();
+    assert_eq!(
+        root.names(""),
+        Vec::<String>::new(),
+        "nothing is written in the folder"
+    );
+
+    let mut second = Session::open(&root);
+    let other = second.view_slot("N2", at, program.clone());
+    assert!(second.bytes(other) == program, "another instrument's slot");
+    let elsewhere = second.view_slot("N1", Location::from_user(2, 8), program.clone());
+    assert!(second.bytes(elsewhere) == program, "another slot");
+    let id = second.view_slot("N1", at, program.clone());
+    assert!(second.bench.workspace.get(id).unwrap().is_unsaved());
+    assert!(second.bytes(id) == edited);
+    assert_eq!(second.said("has the unsaved edit it had"), 1);
+}
+
+/// The autosave keeps a slot view's unsaved edit, so a drawbar stopped without a quit
+/// finds it again.
+#[test]
+fn a_slot_views_unsaved_edit_the_autosave_kept_survives_a_crash() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let at = Location::from_user(1, 1);
+    let mut first = Session::open(&root);
+    let id = first.view_slot("N1", at, program.clone());
+    let edited = first.edit(id, "96");
+    first.autosave();
+    let crashed = Temp::new();
+    copy_tree(&root.0, &crashed.0);
+    copy_tree(&root.local(), &crashed.local());
+
+    let mut second = Session::open(&crashed);
+    let id = second.view_slot("N1", at, program);
+    assert!(second.bytes(id) == edited);
+}
+
+/// A slot view's kept edit, over a slot that holds something else since, is shown over
+/// the view, and drawbar asks which to keep.
+#[test]
+fn a_slot_views_unsaved_edit_over_a_slot_changed_since_asks_which_to_keep() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let at = Location::from_user(1, 1);
+    let mut first = Session::open(&root);
+    let id = first.view_slot("N1", at, program.clone());
+    let edited = first.edit(id, "96");
+    first.close();
+
+    let mut second = Session::open(&root);
+    let id = second.view_slot("N1", at, with_gain(&program, "12"));
+    assert!(second.bytes(id) == edited, "the edit shows");
+    let (title, answers) = second.bench.browser.asking().expect("a question is asked");
+    assert_eq!(title, "“Grand” changed on the instrument");
+    assert_eq!(answers, ["Keep mine", "Keep both", "Take theirs"]);
+}
+
+/// A slot view whose edit was sent, or let go of, leaves no edit for the next view.
+#[test]
+fn a_slot_view_sent_leaves_no_kept_edit() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let at = Location::from_user(1, 1);
+    let mut first = Session::open(&root);
+    let id = first.view_slot("N1", at, program.clone());
+    let edited = first.edit(id, "96");
+    first.autosave();
+    first.bench.workspace.mark_saved(id);
+    first.autosave();
+    first.close();
+
+    let mut second = Session::open(&root);
+    let id = second.view_slot("N1", at, edited.clone());
+    assert!(!second.bench.workspace.get(id).unwrap().is_unsaved());
+    assert_eq!(second.said("has the unsaved edit it had"), 0);
 }
 
 /// Saving an edit lets its draft go: the next open finds the file as it was saved, and

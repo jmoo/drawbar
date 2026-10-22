@@ -117,6 +117,20 @@ impl Keeper {
                     answer(Event::Unkept(why));
                 }
             }
+            Cmd::KeepSlot { slot, base, bytes } => {
+                if let Err(e) = super::slots::keep(&self.local, &slot, base, &bytes) {
+                    answer(Event::Unkept(format!("keeping a slot's edit: {e}")));
+                }
+            }
+            Cmd::DiscardSlot(slot) => {
+                if let Err(e) = super::slots::discard(&self.local, &slot) {
+                    answer(Event::Unkept(format!("letting go of a slot's edit: {e}")));
+                }
+            }
+            Cmd::ReadSlot(slot) => {
+                let kept = super::slots::read(&self.local, &slot).map_err(|e| e.to_string());
+                answer(Event::SlotKept { slot, kept });
+            }
             Cmd::File(_) => unreachable!("the backend reads files itself"),
         }
     }

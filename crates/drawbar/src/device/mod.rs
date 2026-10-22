@@ -604,6 +604,14 @@ pub struct DeviceState {
     pub detail: Detail,
 }
 
+impl DeviceCard {
+    /// What tells this instrument from others: its serial number, or its product name
+    /// where it reports none.
+    pub fn instrument(&self) -> String {
+        self.serial.clone().unwrap_or_else(|| self.product.clone())
+    }
+}
+
 impl DeviceState {
     pub fn connected(&self) -> bool {
         matches!(self.connection, Connection::Connected(_))
