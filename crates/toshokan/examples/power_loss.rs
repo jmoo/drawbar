@@ -413,8 +413,9 @@ fn rel(text: &str) -> RelPath {
     RelPath::new(text).unwrap()
 }
 
-/// The native backend, which stops performing anything once a rename is asked
-/// to reach the path it is armed with, as a process that dies there does.
+/// The native backend, which stops performing anything once a rename or a copy
+/// is asked to make the folder path it is armed with, as a process that dies
+/// there does.
 struct Stopping {
     native: Native,
     at: Rc<RefCell<Option<RelPath>>>,
@@ -427,8 +428,20 @@ impl Backend for Stopping {
     }
 
     fn perform(&mut self, io: Io) -> IoResult {
-        let reaches = |to: &RelPath| self.at.borrow().as_ref() == Some(to);
-        if matches!(&io, Io::Rename { root: Root::Folder, to, .. } if reaches(to)) {
+        let made = match &io {
+            Io::Rename {
+                root: Root::Folder,
+                to,
+                ..
+            } => Some(to),
+            Io::Create {
+                root: Root::Folder,
+                path,
+                ..
+            } => Some(path),
+            _ => None,
+        };
+        if made.is_some() && made == self.at.borrow().as_ref() {
             self.stopped = true;
         }
         match self.stopped {
@@ -823,18 +836,26 @@ struct Crash<'w> {
 }
 
 impl Crash<'_> {
-    /// Each library path holds its old bytes, its new bytes, or nothing while a
-    /// pending record names it; no bytes left the folder; logs re-encode.
+    /// Each library path holds its old bytes, its new bytes, or, while a pending
+    /// record names it, nothing or where moves copy the start of a copy; no bytes
+    /// left the folder; logs re-encode.
     fn before_recovery(&self, raw: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
         self.kept_in(raw, "left the folder")?;
         let named = records(raw)?;
         let library = library_files(raw);
+        let native = Native::new(&self.dirs.folder, &self.dirs.local);
+        let copying = !native.capabilities(Root::Folder).rename_file;
         let [a, b] = self.candidates.map(|i| &self.models[i].files);
         let paths: BTreeSet<&String> = a.keys().chain(b.keys()).chain(library.keys()).collect();
         for path in paths {
             let holds = library.get(path);
-            let pending = || named.iter().any(|n| rel(path).starts_with(n));
-            if ![a.get(path), b.get(path)].contains(&holds) && !(holds.is_none() && pending()) {
+            let allowed = [a.get(path), b.get(path)];
+            let pending = named.iter().any(|n| rel(path).starts_with(n));
+            let started = |whole: &&Vec<u8>| {
+                holds.is_some_and(|part| part.len() < whole.len() && whole.starts_with(part))
+            };
+            let moving = holds.is_none() || copying && allowed.iter().flatten().any(started);
+            if !allowed.contains(&holds) && !(pending && moving) {
                 let shown = holds.map(|b| String::from_utf8_lossy(b).into_owned());
                 return Err(format!(
                     "{path} holds {shown:?}, neither its old nor its new bytes"

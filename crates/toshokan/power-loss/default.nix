@@ -29,11 +29,10 @@ let
     xfs = "mkfs.xfs -q -f -K";
   };
 
-  # The states a replay samples between two flushes. exFAT keeps no journal, and
-  # a rename between directories writes the new name and removes the old one in
-  # separate sectors: a crash between two flushes can keep only the removal, and
-  # the native backend renames as if a rename were atomic. Only exFAT's flushes
-  # are replayed.
+  # The states a replay samples between two flushes. exFAT keeps no journal: a
+  # crash between two flushes can leave a file at its full length holding zeros,
+  # which copying moves take for another program's file, or leave its allocation
+  # inconsistent. Only exFAT's flushes are replayed.
   samples = {
     btrfs = 16;
     exfat = 0;
