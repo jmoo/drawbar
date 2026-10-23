@@ -214,10 +214,13 @@ modification time, compared only for equality. Each member of `displaced` is
 bytes left, their identity and length. An op of another name, or missing a
 member, is kept and unknown.
 
-A run, which `take` and `runs` name, is `{"writer","from","first"?,"last","tip"?}`:
-the writer's entries numbered from `from` to `last` on `last`'s chain, the first
-by its hash; a run a snapshot holds is named by that snapshot's head as `tip`,
-and its first entry by number alone (see Reading).
+A run, which `take` and `runs` name, is
+`{"writer","from","first"?,"last","tip"?,"segment"?}`: the writer's entries
+numbered from `from` to `last` on `last`'s chain, the first by its hash; a run a
+snapshot holds is named by that snapshot's head as `tip`, and its first entry by
+number alone (see Reading). `segment` is the first line of the file the run's
+`last` was read in: a snapshot of the writer that certifies that file as far as
+`last` holds the run, though it names `last` nowhere.
 
 For example:
 
@@ -556,7 +559,7 @@ as 8 bytes little-endian, a 16-byte check of the payload, then the payload. The
 check finds a record a crash tore or a disk damaged; it does not guard against
 forgery, since only the install writes its local root. This build computes it in
 two lanes of 64-bit multiplies over the payload. The payload's first byte names
-its format, 8; then come the generation, and the view, or what it gained or the
+its format, 9; then come the generation, and the view, or what it gained or the
 grace step let go of, in this build's binary encoding: integers as LEB128,
 identifiers as their 16 bytes big-endian, text as its length and its UTF-8,
 lists as their length and their members, with each entry as its hash, its

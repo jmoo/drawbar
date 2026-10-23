@@ -1180,6 +1180,7 @@ mod tests {
             first: Some(hash(103)),
             last: them(4).own(),
             tip: None,
+            segment: None,
         };
         let entries = chain(vec![
             (

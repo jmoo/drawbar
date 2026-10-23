@@ -31,7 +31,7 @@ use crate::log::{Entry, EntryKind, Op, Own, Ref, Run};
 use crate::merge::{Beside, Folded, Live};
 use crate::quick::Quick;
 use crate::report::ItemKind;
-use crate::snapshot::Snapshot;
+use crate::snapshot::{SegmentCert, Snapshot};
 
 /// What a reader sees of one writer's directory.
 #[derive(Clone, Default)]
@@ -163,6 +163,8 @@ struct Writer {
     known: HashMap<EntryHash, Rc<Entry>, Quick>,
     /// Hashes of the lines of files seen.
     seen: BTreeSet<EntryHash>,
+    /// The first line of the file each line seen was read in.
+    segments: HashMap<EntryHash, Own, Quick>,
     folded: BTreeSet<EntryHash>,
     waiting: BTreeSet<EntryHash>,
     ambiguous: BTreeSet<EntryHash>,
@@ -255,6 +257,7 @@ fn classify(
         tips,
         known: HashMap::default(),
         seen: BTreeSet::new(),
+        segments: HashMap::default(),
         folded: BTreeSet::new(),
         waiting: BTreeSet::new(),
         ambiguous: BTreeSet::new(),
@@ -276,6 +279,7 @@ fn classify(
         for entry in lines.iter() {
             w.known.insert(entry.hash(), Rc::clone(entry));
             w.seen.insert(entry.hash());
+            w.segments.insert(entry.hash(), first.own());
         }
         let certs: Vec<_> = w
             .tips
@@ -506,11 +510,16 @@ impl Dismissals {
             .any(|run| (run.from..=run.last.n).contains(&n))
     }
 
-    /// The dismissals of `writer`'s runs on the chain of tip `tip`.
+    /// The dismissals of `writer`'s runs on the chain of tip `tip`: it names
+    /// the run's last entry or tip, or certifies the file the run's last entry
+    /// was read in at least as far.
     fn in_tip<'d>(&'d self, writer: WriterId, tip: &'d Snapshot) -> impl Iterator<Item = &'d Run> {
         self.0.iter().filter(move |run| {
             let names = tip.names(run.last) || run.tip.is_some_and(|head| tip.names(head));
-            run.writer == writer && names
+            let read_in =
+                |cert: &SegmentCert| Some(cert.first) == run.segment && cert.last.n >= run.last.n;
+            let certifies = tip.certified.segments.iter().any(read_in);
+            run.writer == writer && (names || certifies)
         })
     }
 
@@ -1038,6 +1047,7 @@ fn items(
                     first: None,
                     last: tip.head,
                     tip: Some(tip.head),
+                    segment: None,
                 },
                 span,
                 entries,
@@ -1078,6 +1088,7 @@ fn items(
                     first: Some(root.hash()),
                     last: entry.own(),
                     tip: None,
+                    segment: None,
                 },
                 span: None,
                 entries: 0,
@@ -1085,6 +1096,7 @@ fn items(
                 forced: BTreeMap::new(),
             });
             group.run.last = entry.own();
+            group.run.segment = w.segments.get(&entry.hash()).copied();
             group.entries += 1;
             group.span = widen(group.span, entry.at());
             for op in contribution::ops(&entry.kind()) {
@@ -1390,7 +1402,7 @@ pub fn genesis_writer(entry: &Entry) -> Option<WriterId> {
 mod tests {
     use super::*;
     use crate::compaction::{snapshot, Found};
-    use crate::log::{Logged, Op};
+    use crate::log::{Logged, Op, Run};
     use crate::schema::Raw;
 
     const W: WriterId = WriterId::from_u128(0xa);
@@ -1647,6 +1659,33 @@ mod tests {
     }
 
     #[test]
+    fn a_dismissal_holds_for_a_run_its_writer_compacted_past_its_last_entry() {
+        let entries = chain(W, &["a", "b", "c", "d"]);
+        let tip = folded(&entries);
+        let run = |segment| Run {
+            writer: W,
+            from: entries[1].n(),
+            first: Some(entries[1].hash()),
+            last: entries[2].own(),
+            tip: None,
+            segment,
+        };
+        assert!(
+            !tip.names(entries[2].own()),
+            "the run ends inside the segment"
+        );
+        let read_in = Dismissals(vec![run(Some(entries[0].own()))]);
+        assert!(read_in.cover_tip(W, &tip, entries[2].n()));
+        let unread = Dismissals(vec![run(None)]);
+        assert!(!unread.cover_tip(W, &tip, entries[2].n()));
+        let elsewhere = Dismissals(vec![run(Some(entries[1].own()))]);
+        assert!(
+            !elsewhere.cover_tip(W, &tip, entries[2].n()),
+            "another file"
+        );
+    }
+
+    #[test]
     fn a_copy_of_a_certified_segment_is_folded_and_a_shorter_one_waits() {
         let entries = chain(W, &["a", "b", "c"]);
         let tip = folded(&entries);
@@ -1714,6 +1753,7 @@ mod tests {
             first: Some(left.hash()),
             last: left.own(),
             tip: None,
+            segment: None,
         };
         let dismiss = entry(None, vec![Op::Dismiss { runs: vec![run] }], "dismiss");
         let theirs = vec![dismiss];

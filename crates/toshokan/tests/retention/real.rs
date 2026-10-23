@@ -173,6 +173,7 @@ impl Lines {
                 .then(|| self.entries[d.first.hash as usize].hash()),
             last: self.own(d.last),
             tip: d.tip.map(|tip| self.own(tip)),
+            segment: None,
         }
     }
 

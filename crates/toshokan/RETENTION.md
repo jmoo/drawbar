@@ -321,8 +321,11 @@ later tip that certifies it. No reader shows or merges what a dismissal names,
 ever, even if it later stops seeing the fork: a tip's references and own delete
 made by a dismissed entry do not apply either. An entry after a dismissed one is
 a new item, never placed. A dismissal never covers what the user has not seen. A
-tip matches a dismissal by the hash of its last entry, which every snapshot on
-that chain certifies (section 2).
+tip matches a dismissal by the hash of its last entry where the tip names it. A
+run's last entry usually lies inside a segment its writer later compacts, which
+certifies the segment by its ends alone, so the dismissal also names the first
+line of the file its last entry was read in, and a tip that certifies that file
+at least as far matches it.
 
 A branch that keeps writing until its instance sees the fork produces a new item
 with each sync.

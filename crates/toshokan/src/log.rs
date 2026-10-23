@@ -76,6 +76,10 @@ pub struct Run {
     pub last: Own,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tip: Option<Own>,
+    /// The first line of the file `last` was read in. A snapshot that
+    /// certifies that file at least as far as `last` holds the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment: Option<Own>,
 }
 
 /// A fork point a writer knew of when it wrote: the writer whose history forked,
@@ -603,6 +607,8 @@ struct ExactRun {
     last: Own,
     #[serde(default, deserialize_with = "not_null")]
     tip: Option<Own>,
+    #[serde(default, deserialize_with = "not_null")]
+    segment: Option<Own>,
 }
 
 impl From<ExactRun> for Run {
@@ -613,6 +619,7 @@ impl From<ExactRun> for Run {
             first,
             last,
             tip,
+            segment,
         } = run;
         Self {
             writer,
@@ -620,6 +627,7 @@ impl From<ExactRun> for Run {
             first,
             last,
             tip,
+            segment,
         }
     }
 }
@@ -1280,7 +1288,8 @@ pack_struct!(Run {
     from,
     first,
     last,
-    tip
+    tip,
+    segment
 });
 pack_struct!(Observed { target, at });
 
@@ -2020,6 +2029,10 @@ mod tests {
                 n: 4,
                 hash: hash(4),
             },
+            segment: Some(Own {
+                n: 2,
+                hash: hash(2),
+            }),
             tip: Some(Own {
                 n: 4,
                 hash: hash(4),
@@ -2393,12 +2406,14 @@ mod tests {
             format!(
                 concat!(
                     r#"{{"prev":"{}","n":1,"at":[5,0],"kind":"intent","label":"Keep","#,
-                    r#""ops":[{{"op":"dismiss","runs":[{{"writer":"{}","from":3,"last":[4,"{}"],"tip":[4,"{}"]}}]}}]}}"#
+                    r#""ops":[{{"op":"dismiss","runs":[{{"writer":"{}","from":3,"last":[4,"{}"],"tip":[4,"{}"],"#,
+                    r#""segment":[2,"{}"]}}]}}]}}"#
                 ),
                 id(1),
                 id(0xb),
                 id(4),
-                id(4)
+                id(4),
+                id(2)
             )
         );
     }
