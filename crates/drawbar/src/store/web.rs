@@ -329,6 +329,7 @@ async fn drive(
             (Cmd::Read { files, room }, Ok(folder), _) => {
                 vec![Event::Read(exec::read_all(folder, files, room).await)]
             }
+            (cmd @ Cmd::Read { .. }, Err(why), _) => refused(&cmd)(why),
             (cmd, _, Ok(worker)) => {
                 let refusal = refused(&cmd);
                 match worker.run(cmd).await {
