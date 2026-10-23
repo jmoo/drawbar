@@ -115,6 +115,18 @@ impl Session {
         }
     }
 
+    /// Fold in what the library answered, as a frame does.
+    fn poll(&mut self) {
+        let Bench {
+            workspace,
+            browser,
+            queue,
+            log,
+            ..
+        } = &mut self.bench;
+        self.store.poll(workspace, browser, queue, log);
+    }
+
     fn next(&mut self) -> bool {
         let Bench {
             workspace,
@@ -5152,15 +5164,12 @@ impl toshokan::blocking::Backend for Crashing {
     }
 }
 
-/// A save another install's drawbar left unfinished, as on a computer that syncs the
-/// folder, is not settled behind the user's back: drawbar asks, and Finish completes
-/// it.
-#[test]
-fn a_change_another_install_left_unfinished_is_asked_about() {
+/// Leave in `root` a save another install's drawbar stopped partway, and return the bytes
+/// it was saving.
+fn leave_unfinished_save(root: &Temp) -> Vec<u8> {
     use std::panic::AssertUnwindSafe;
     use toshokan::blocking::{Library, Native};
 
-    let root = Temp::new();
     let program = Fresh::Program.bytes().unwrap();
     fs::write(root.at("Grand.ne5p"), &program).unwrap();
     let elsewhere = Temp::new();
@@ -5186,8 +5195,39 @@ fn a_change_another_install_left_unfinished_is_asked_about() {
         let _ = other.intent("Save").save_file(&at, bytes, expect).commit();
     }));
     assert!(stopped.is_err(), "the other install stopped mid-save");
+    saved
+}
 
+impl Session {
+    /// Let a minute pass, and read the library again where the store asks to.
+    fn a_minute_later(&mut self) {
+        let later = eframe::egui::RawInput {
+            time: Some(60.0),
+            ..Default::default()
+        };
+        crate::testing::run(&self.bench.ctx, later, |_| {});
+        self.poll();
+        while self.store.scanning() {
+            assert!(self.next(), "the library is read again");
+        }
+        self.poll();
+    }
+}
+
+/// A save another install's drawbar left unfinished, as on a computer that syncs the
+/// folder, is not settled behind the user's back: once it has stood a while, since that
+/// drawbar may be making it still, drawbar asks, and Finish completes it.
+#[test]
+fn a_change_another_install_left_unfinished_is_asked_about() {
+    let root = Temp::new();
+    let saved = leave_unfinished_save(&root);
     let mut session = Session::listed(&root);
+    session.poll();
+    assert!(
+        session.bench.browser.asking().is_none(),
+        "nothing is asked while the change may be in progress"
+    );
+    session.a_minute_later();
     let (title, answers) = session.bench.browser.asking().expect("a question is asked");
     assert_eq!(title, "Another drawbar left “Save” unfinished");
     assert_eq!(answers, ["Later", "Roll back", "Leave as is", "Finish"]);
@@ -5199,6 +5239,25 @@ fn a_change_another_install_left_unfinished_is_asked_about() {
     }
     session.decided();
     assert!(root.read("Grand.ne5p") == saved, "the save is finished");
+}
+
+/// A change another install's drawbar finishes before it has stood a while is never
+/// asked about: it was in progress.
+#[test]
+fn a_change_another_install_finishes_soon_is_not_asked_about() {
+    let root = Temp::new();
+    leave_unfinished_save(&root);
+    let mut session = Session::listed(&root);
+    session.poll();
+    let writers = root.at(".drawbar/library/writers");
+    for writer in fs::read_dir(writers).unwrap() {
+        let pending = writer.unwrap().path().join("pending");
+        for record in fs::read_dir(pending).into_iter().flatten() {
+            fs::remove_file(record.unwrap().path()).unwrap();
+        }
+    }
+    session.a_minute_later();
+    assert!(session.bench.browser.asking().is_none());
 }
 
 fn path(text: &str) -> LibPath {

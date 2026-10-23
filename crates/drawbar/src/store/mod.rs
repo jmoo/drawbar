@@ -804,8 +804,6 @@ pub struct Opened {
     /// How many changes this install showed that the folder no longer holds, as after a
     /// restore of the folder from a backup, which opening let go of: the folder wins.
     pub let_go: usize,
-    /// Changes other installs' drawbars left unfinished, which the user settles.
-    pub unfinished: Vec<toshokan::report::Orphan>,
     /// How many pending records of other writers opening could not read.
     pub ignored: usize,
     /// What opening tried to tidy and could not: finishing a change a crash or
@@ -831,6 +829,9 @@ pub struct Viewed {
     /// The folders a scan of every file could not list, where the answer scanned every
     /// file. What is in them is not known.
     pub unlisted: Option<Vec<LibPath>>,
+    /// The changes other installs' drawbars left unfinished as they stand now, which the
+    /// user settles, where the answer read them.
+    pub unfinished: Option<Vec<toshokan::report::Orphan>>,
 }
 
 /// What a backend answers.

@@ -34,6 +34,20 @@ use crate::workspace::{
 };
 
 /// How far opening has got.
+/// How long, in seconds, a change another drawbar left unfinished must stand before
+/// the user is asked about it. ⚠️ A drawbar another install runs on this folder, as a
+/// browser tab beside the desktop app, is no `live` writer here, and may be carrying
+/// the change out still.
+const UNFINISHED_STANDS: f64 = 5.0;
+
+/// A change another drawbar left unfinished: when this session first found it, and
+/// whether the user was told of it.
+struct Unfinished {
+    orphan: toshokan::report::Orphan,
+    seen: f64,
+    told: bool,
+}
+
 enum Phase {
     Opening,
     Open,
@@ -165,6 +179,13 @@ pub struct Store {
     focused: bool,
     /// A rescan or a refresh is in flight.
     scanning: bool,
+    /// The changes other drawbars left unfinished that the last read found, by writer
+    /// and record.
+    unfinished: BTreeMap<(toshokan::WriterId, toshokan::Nonce), Unfinished>,
+    /// When the changes left unfinished were last read, in [`eframe::egui::InputState::time`].
+    looked: f64,
+    /// When to read them again, to ask about one that stood long enough.
+    recheck: Option<f64>,
     /// What another tab or the folder said changed and is not read yet: whether it takes
     /// a rescan rather than a refresh.
     #[cfg(target_arch = "wasm32")]
@@ -243,6 +264,9 @@ impl Store {
             deferred: BTreeSet::new(),
             focused: true,
             scanning: false,
+            unfinished: BTreeMap::new(),
+            looked: 0.0,
+            recheck: None,
             #[cfg(target_arch = "wasm32")]
             behind: None,
             committing: 0,
@@ -809,6 +833,7 @@ impl Store {
         while let Some(event) = self.backend.try_recv() {
             released |= self.react(event, workspace, browser, queue, log);
         }
+        self.tell_unfinished(workspace.ctx(), browser, log);
         #[cfg(target_arch = "wasm32")]
         self.hinted();
         #[cfg(target_arch = "wasm32")]
@@ -1520,7 +1545,6 @@ impl Store {
             viewed,
             drafts,
             let_go,
-            unfinished,
             ignored,
             trouble,
         } = opened;
@@ -1570,16 +1594,60 @@ impl Store {
                 browser.ask_rescue(rescue);
             }
         }
-        for orphan in unfinished {
-            match orphan.live {
+    }
+
+    /// Take in the changes other drawbars left unfinished as a read found them, read at
+    /// `now`: one that is gone was finished or settled.
+    fn found_unfinished(&mut self, now: f64, standing: Vec<toshokan::report::Orphan>) {
+        let key = |orphan: &toshokan::report::Orphan| (orphan.writer, orphan.record);
+        let keys: BTreeSet<_> = standing.iter().map(key).collect();
+        self.unfinished.retain(|known, _| keys.contains(known));
+        for orphan in standing {
+            self.unfinished.entry(key(&orphan)).or_insert(Unfinished {
+                orphan,
+                seen: now,
+                told: false,
+            });
+        }
+        self.looked = now;
+        let due = self.unfinished.values().filter(|known| !known.told);
+        self.recheck = due
+            .map(|known| known.seen + UNFINISHED_STANDS)
+            .reduce(f64::min);
+    }
+
+    /// Ask about each change other drawbars left unfinished that a read found standing
+    /// [`UNFINISHED_STANDS`] after it was first found, reading again when one is due.
+    fn tell_unfinished(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        browser: &mut Browser,
+        log: &mut Log,
+    ) {
+        let now = ctx.input(|input| input.time);
+        for known in self.unfinished.values_mut().filter(|known| !known.told) {
+            let orphan = &known.orphan;
+            if orphan.live {
                 // ⚠️ Another window may be making it now: finishing or rolling it back
                 // would race it.
-                true => log.say(format!(
+                log.say(format!(
                     "“{}” is in progress in another drawbar window.",
                     orphan.label
-                )),
-                false => browser.ask_unfinished(orphan),
+                ));
+                known.told = true;
+            } else if self.looked >= known.seen + UNFINISHED_STANDS {
+                browser.ask_unfinished(orphan.clone());
+                known.told = true;
             }
+        }
+        let Some(due) = self.recheck else {
+            return;
+        };
+        if now < due {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(due - now));
+        } else if !self.scanning {
+            self.recheck = None;
+            self.refresh();
         }
     }
 
@@ -1615,7 +1683,11 @@ impl Store {
             moves,
             undone,
             unlisted,
+            unfinished,
         } = viewed;
+        if let (Some(standing), Phase::Open) = (unfinished, &self.phase) {
+            self.found_unfinished(workspace.ctx().input(|input| input.time), standing);
+        }
         let first = self.shown.is_none();
         for (from, to) in &moves {
             self.cache.moved(from, to);

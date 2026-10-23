@@ -278,21 +278,15 @@ impl<F: Fs> Keeper<F> {
         if let_go > 0 {
             library.let_go().await.map_err(|e| e.to_string())?;
         }
-        let mut unfinished = Vec::new();
         if writable.is_ok() {
             // Also what a crash may have torn from the end of this writer's log, which
             // opening does not report.
             let settled = library.settle_interrupted().await;
             trouble.extend(settled.err().map(|e| format!("finishing a change: {e}")));
             // Another window of this install left these: they are ours to finish.
-            for orphan in opened.orphaned {
-                match orphan.ours {
-                    true => {
-                        let settled = library.settle(orphan, Settlement::Finished).await;
-                        trouble.extend(settled.err().map(|e| format!("finishing a change: {e}")));
-                    }
-                    false => unfinished.push(orphan),
-                }
+            for orphan in opened.orphaned.into_iter().filter(|orphan| orphan.ours) {
+                let settled = library.settle(orphan, Settlement::Finished).await;
+                trouble.extend(settled.err().map(|e| format!("finishing a change: {e}")));
             }
             // Nothing an earlier session displaced can be undone now.
             let emptied = library.empty_trash(Policy::default()).await;
@@ -307,7 +301,6 @@ impl<F: Fs> Keeper<F> {
             viewed,
             drafts: opened.drafts,
             let_go,
-            unfinished,
             ignored: opened.ignored.len(),
             trouble,
         })
@@ -1393,6 +1386,7 @@ fn committed_view<F: Fs>(
         moves: Vec::new(),
         undone: None,
         unlisted: None,
+        unfinished: None,
     }
 }
 
@@ -1410,6 +1404,7 @@ fn viewed<F: Fs>(
     });
     let unlisted = refreshed.unlisted.iter();
     let unlisted = unlisted.filter_map(|dir| LibPath::parse(dir.as_str()));
+    let theirs = refreshed.orphaned.into_iter().filter(|orphan| !orphan.ours);
     Viewed {
         shown: show(shown, library.view()),
         unlisted: dirs.is_some().then(|| unlisted.collect()),
@@ -1417,6 +1412,7 @@ fn viewed<F: Fs>(
         moves: moves.collect(),
         changes: refreshed.changes,
         undone: None,
+        unfinished: Some(theirs.collect()),
     }
 }
 

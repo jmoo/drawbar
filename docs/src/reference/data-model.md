@@ -619,6 +619,10 @@ and they stay.
 An effect interrupted by a crash, of this instance's writer or an idle one of
 this install, is finished at open. One another install left is asked about:
 finish it, roll it back, or leave it (`Browser::ask_unfinished`, `Cmd::Settle`).
+Every read of the library reports the ones that stand, and drawbar asks only
+about one that a read still finds five seconds after it first found it
+(`UNFINISHED_STANDS`): a drawbar in a browser tab on the same folder is no writer
+whose lock this one can see, and may be making the change still.
 A record that does not read is left, and the log says how many.
 
 ### In the browser

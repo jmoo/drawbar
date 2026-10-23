@@ -144,10 +144,11 @@ bring back any you deleted.
   has written its hidden folder. Hover the library's name for the reason.
   Changes you make in a read-only library are held in memory only, and are lost
   when you quit.
-- **A change left unfinished.** If drawbar on another computer stopped in the
-  middle of changing files in a shared library, drawbar asks when it opens the
-  library: **Finish** completes the change, **Roll back** puts the files back as
-  they were, **Leave as is** stops asking, and **Later** asks next time. What
+- **A change left unfinished.** If drawbar on another computer, or in a browser
+  on this one, stopped in the middle of changing files in a shared library,
+  drawbar asks once the change has stood for a few seconds: **Finish** completes
+  the change, **Roll back** puts the files back as they were, **Leave as is**
+  stops asking, and **Later** asks next time. What
   drawbar left unfinished on this computer, after a crash or in another window,
   is finished without asking.
 - **Restored from a backup.** When the library folder no longer holds changes
