@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::contribution::{FieldKey, Name};
 use crate::error::{Invalid, Refusal};
 use crate::ids::{EntityId, EntryHash, WriterId};
-use crate::log::{Displaced, Entry, EntryKind, FileFact, Op, Ref};
+use crate::log::{Displaced, Entry, FileFact, Logged, Op, Ref};
 use crate::merge::{Exists, Folded, Write};
 use crate::path::RelPath;
 use crate::plan::{Expect, FactChange, FileChange, Plan};
@@ -36,8 +36,9 @@ pub struct History {
     undone: Vec<EntryHash>,
     /// The item of each intent, undo and redo.
     origins: BTreeMap<EntryHash, usize>,
-    /// Each intent of this session, with what reversing it needs.
-    kept: BTreeMap<EntryHash, (Entry, Before)>,
+    /// Each intent of this session, its continuation included, with what
+    /// reversing it needs.
+    kept: BTreeMap<EntryHash, (Logged, Before)>,
 }
 
 /// What an intent replaced, as reversing it needs: the state it was committed
@@ -136,16 +137,21 @@ fn values(folded: &Folded, entity: EntityId) -> Vec<FactChange> {
 }
 
 impl History {
-    /// Adds this writer's next entry, committed over what `before` says it
-    /// replaced. An intent reversing the latest done intent is its undo; one
-    /// reversing the latest undo is a redo, which the next undo reverses. Any
-    /// other intent starts a new item and ends every redo.
-    pub fn push(&mut self, entry: &Entry, reverses: Option<EntryHash>, before: Before) {
-        let Some(label) = entry.intent() else {
-            return;
-        };
+    /// Adds this writer's next intent `entry`, which with its continuation logs
+    /// `logged`, committed over what `before` says it replaced. An intent
+    /// reversing the latest done intent is its undo; one reversing the latest
+    /// undo is a redo, which the next undo reverses. Any other intent starts a
+    /// new item and ends every redo.
+    pub fn push(
+        &mut self,
+        entry: &Entry,
+        logged: Logged,
+        reverses: Option<EntryHash>,
+        before: Before,
+    ) {
+        let label = logged.label.clone();
         let hash = entry.hash();
-        self.kept.insert(hash, (entry.clone(), before));
+        self.kept.insert(hash, (logged, before));
         let reversed = reverses.and_then(|reverses| {
             let item = *self.origins.get(&reverses)?;
             if self.done.last() == Some(&reverses) {
@@ -202,22 +208,20 @@ impl History {
         folded: &Folded,
     ) -> Result<Plan, Refusal> {
         let latest = stack.last().ok_or(Refusal::Nothing)?;
-        let (entry, before) = self.kept.get(latest).ok_or(Refusal::Nothing)?;
-        reverse(entry, before, writer, folded)
+        let (logged, before) = self.kept.get(latest).ok_or(Refusal::Nothing)?;
+        reverse(*latest, logged, before, writer, folded)
     }
 }
 
-/// The plan that compensates `entry`, one of `writer`'s intents, committed
-/// over what `before` says it replaced.
+/// The plan that compensates `intent`, one of `writer`'s intents, which with its
+/// continuation logged `logged` over what `before` says it replaced.
 pub fn reverse(
-    entry: &Entry,
+    intent: EntryHash,
+    logged: &Logged,
     before: &Before,
     writer: WriterId,
     folded: &Folded,
 ) -> Result<Plan, Refusal> {
-    let EntryKind::Intent(logged) = &entry.kind() else {
-        return Err(Refusal::Nothing);
-    };
     let reversing = Reversing {
         writer,
         folded,
@@ -234,7 +238,7 @@ pub fn reverse(
         .collect();
     let mut plan = Plan {
         label: logged.label.clone(),
-        reverses: Some(entry.hash()),
+        reverses: Some(intent),
         ..Plan::default()
     };
     let mut facts = Vec::new();

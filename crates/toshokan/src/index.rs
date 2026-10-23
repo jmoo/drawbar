@@ -672,6 +672,7 @@ mod tests {
                 ops,
                 displaced: Vec::new(),
                 forks: Vec::new(),
+                more: 0,
             });
             let chain = self.chains.entry(writer).or_default();
             let (prev, n) = chain

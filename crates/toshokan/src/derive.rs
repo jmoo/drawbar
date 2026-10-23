@@ -840,6 +840,13 @@ pub fn derive(
                         .push(own.n);
                 }
             }
+            for entity in contribution::deletes(&kind) {
+                kills
+                    .deletes
+                    .entry((*writer, *entity))
+                    .or_default()
+                    .push(own.n);
+            }
             tail.fold(*writer, entry);
         }
         keep_beside(&mut beside, *writer, &tail);
@@ -1315,6 +1322,7 @@ pub fn extend(
             }
             deleted.extend(said.deletes);
         }
+        deleted.extend(contribution::deletes(&entry.kind()));
         for entity in deleted {
             let lives = touched
                 .entry(entity)
@@ -1382,6 +1390,7 @@ mod tests {
             ops,
             displaced: Vec::new(),
             forks: Vec::new(),
+            more: 0,
         });
         Rc::new(Entry::encode(hash, n, at, kind).unwrap())
     }
@@ -1566,6 +1575,57 @@ mod tests {
         let memory = BTreeMap::from([(W, memory)]);
         let derived = derive(&seen, &memory, &BTreeSet::new());
         assert_eq!(derived.writers[&W].runs, [other]);
+    }
+
+    #[test]
+    fn a_continuation_kills_its_file_writes_of_an_entity_its_intent_deletes() {
+        use crate::log::{FileFact, More};
+        let created = entry(None, vec![set("a", vec![])], "a");
+        let delete = Op::Delete {
+            entity: E,
+            replaces: Vec::new(),
+            observed: Vec::new(),
+            take: None,
+        };
+        let deleted = entry(Some(&created), vec![delete], "d");
+        let trashed = |deletes: Vec<EntityId>| {
+            let file = FileFact {
+                path: crate::path::RelPath::new("a.npno").unwrap(),
+                identity: crate::ids::Identity::from_u128(1),
+                len: 1,
+                modified: None,
+            };
+            let more = More {
+                ops: vec![Op::File {
+                    entity: E,
+                    file: Some(file),
+                    replaces: Vec::new(),
+                    take: None,
+                }],
+                deletes,
+                ..More::default()
+            };
+            let at = Hlc {
+                wall_ms: 30,
+                counter: 0,
+            };
+            Rc::new(Entry::encode(deleted.hash(), 2, at, EntryKind::More(more)).unwrap())
+        };
+        for (deletes, files) in [(vec![E], 0), (vec![], 1)] {
+            let chain = [Rc::clone(&created), Rc::clone(&deleted), trashed(deletes)];
+            let seen = Seen {
+                segments: vec![lines(&chain, false)],
+                snapshots: vec![],
+            };
+            let merged = derived(vec![(W, seen)], false);
+            assert_eq!(merged.folded.file_writes(E).len(), files, "merged");
+            let tip = Seen {
+                segments: vec![],
+                snapshots: vec![folded(&chain)],
+            };
+            let compacted = derived(vec![(W, tip)], false);
+            assert_eq!(compacted.folded.file_writes(E).len(), files, "compacted");
+        }
     }
 
     #[test]

@@ -25,7 +25,7 @@ use crate::flow::{self, each, fold, Fallible};
 use crate::ids::{Nonce, WriterId};
 use crate::io::{Capabilities, Capability, Kind, Root, Task};
 use crate::layout::Layout;
-use crate::log::{Own, Settlement};
+use crate::log::{EntryKind, Logged, Own, Settlement};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord, Records, MAX_RECORD};
 use crate::report::{Orphan, Outcome};
@@ -37,6 +37,10 @@ pub trait Chain {
 
     /// Whether an entry after `at` is placed or folded.
     fn continues(&self, at: Own) -> bool;
+
+    /// Whether the entry after `at` is an intent whose continuation the chain
+    /// holds only part of, as an append a crash tore leaves it.
+    fn unfinished(&self, at: Own) -> bool;
 }
 
 /// A tip folds every entry its head descends from, which it certifies by
@@ -54,6 +58,30 @@ impl Chain for Placed {
         let followed = entries.into_iter().any(|entry| entry.prev() == at.hash);
         Chain::holds(self, at) && (passed || followed)
     }
+
+    fn unfinished(&self, at: Own) -> bool {
+        continued(self, at).is_some_and(|(logged, held)| held < logged.more)
+    }
+}
+
+/// The intent merged right after `at`, with how many ops and displaced items
+/// the continuation entries merged after it hold.
+pub fn continued(placed: &Placed, at: Own) -> Option<(Logged, u64)> {
+    let start = placed
+        .merged
+        .iter()
+        .position(|entry| entry.prev() == at.hash && Some(entry.n()) == at.n.checked_add(1))?;
+    let EntryKind::Intent(logged) = placed.merged[start].kind() else {
+        return None;
+    };
+    let mut held = 0;
+    for entry in &placed.merged[start + 1..] {
+        let EntryKind::More(more) = entry.kind() else {
+            break;
+        };
+        held += more.len();
+    }
+    Some((logged, held))
 }
 
 /// What opening found to recover.
@@ -134,6 +162,7 @@ pub fn classify<C: Chain>(
             match standing(layout, own, chain, settled, name, &record) {
                 Standing::Ignored => recovery.ignored.push(layout.pending(writer, name)),
                 Standing::Closed => {}
+                Standing::Spent if chain.unfinished(record.after()) => open.push((name, record)),
                 Standing::Spent => recovery.spent.push((name, record)),
                 Standing::Open => open.push((name, record)),
                 Standing::Orphan => recovery.orphaned.push(Orphan {

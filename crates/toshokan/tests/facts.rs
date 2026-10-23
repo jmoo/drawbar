@@ -163,8 +163,14 @@ impl Writer {
             EntryKind::Intent(logged) => Before::of(&logged.ops, &self.folded),
             _ => Before::default(),
         };
+        let logged = match &kind {
+            EntryKind::Intent(logged) => Some(logged.clone()),
+            _ => None,
+        };
         let entry = Entry::encode(prev, n, self.clock, kind).unwrap();
-        self.history.push(&entry, reverses, before);
+        if let Some(logged) = logged {
+            self.history.push(&entry, logged, reverses, before);
+        }
         self.own.push(entry.clone());
         self.receive(self.id, &entry);
         entry
@@ -176,6 +182,7 @@ impl Writer {
             ops,
             displaced,
             forks: Vec::new(),
+            more: 0,
         };
         self.log(now, EntryKind::Intent(logged), None)
     }
@@ -187,6 +194,7 @@ impl Writer {
             ops,
             displaced: Vec::new(),
             forks: Vec::new(),
+            more: 0,
         };
         Ok(self.log(now, EntryKind::Intent(logged), plan.reverses))
     }
@@ -1030,6 +1038,7 @@ fn every_part(mut edit: impl FnMut(&str) -> String) -> Vec<Entry> {
             ops,
             displaced,
             forks: Vec::new(),
+            more: 0,
         })
     };
     log(EntryKind::Genesis(Genesis {

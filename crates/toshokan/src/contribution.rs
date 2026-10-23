@@ -285,7 +285,26 @@ pub fn said(op: &Op) -> Said {
 pub fn ops(kind: &EntryKind) -> &[Op] {
     match kind {
         EntryKind::Intent(logged) => &logged.ops,
+        EntryKind::More(more) => &more.ops,
         EntryKind::Bind(bound) => &bound.ops,
+        _ => &[],
+    }
+}
+
+/// The entities whose fields an entry of `kind` kills as a delete does, beyond
+/// those its ops delete: a continuation's, for its intent's deletes.
+pub fn deletes(kind: &EntryKind) -> &[EntityId] {
+    match kind {
+        EntryKind::More(more) => &more.deletes,
+        _ => &[],
+    }
+}
+
+/// The bytes an entry of `kind` says its intent moved into its writer's trash.
+pub fn displaced(kind: &EntryKind) -> &[Displaced] {
+    match kind {
+        EntryKind::Intent(logged) => &logged.displaced,
+        EntryKind::More(more) => &more.displaced,
         _ => &[],
     }
 }
@@ -294,6 +313,7 @@ pub fn ops(kind: &EntryKind) -> &[Op] {
 pub fn forks(kind: &EntryKind) -> &[Forked] {
     match kind {
         EntryKind::Intent(logged) => &logged.forks,
+        EntryKind::More(more) => &more.forks,
         _ => &[],
     }
 }
@@ -324,7 +344,7 @@ impl Contribution {
             EntryKind::Unknown(raw) => {
                 self.unknown.insert((entry.hash(), raw.clone()));
             }
-            EntryKind::Intent(_) | EntryKind::Bind(_) => {
+            EntryKind::Intent(_) | EntryKind::More(_) | EntryKind::Bind(_) => {
                 let known = forks(&kind);
                 let mut deleted = Vec::new();
                 for op in ops(&kind) {
@@ -334,6 +354,7 @@ impl Contribution {
                     }
                     deleted.extend(self.fold_op(writer, own, entry.at(), known, op));
                 }
+                deleted.extend(deletes(&kind));
                 for entity in deleted {
                     for (field, held) in &self.own {
                         if field.entity() == entity && !field.is_exist() && held.at.n <= own.n {
@@ -341,25 +362,23 @@ impl Contribution {
                         }
                     }
                 }
-                if let EntryKind::Intent(logged) = &kind {
-                    for Displaced {
-                        item,
-                        from,
-                        identity,
-                        len,
-                    } in &logged.displaced
-                    {
-                        self.trash.insert(
-                            *item,
-                            Trashed {
-                                entry: entry.hash(),
-                                at: entry.at(),
-                                from: from.clone(),
-                                identity: *identity,
-                                len: *len,
-                            },
-                        );
-                    }
+                for Displaced {
+                    item,
+                    from,
+                    identity,
+                    len,
+                } in displaced(&kind)
+                {
+                    self.trash.insert(
+                        *item,
+                        Trashed {
+                            entry: entry.hash(),
+                            at: entry.at(),
+                            from: from.clone(),
+                            identity: *identity,
+                            len: *len,
+                        },
+                    );
                 }
             }
         }
@@ -1058,6 +1077,7 @@ mod tests {
                 ops: vec![op],
                 displaced: vec![],
                 forks,
+                more: 0,
             });
             entries.push(Entry::encode(prev.hash(), prev.n() + 1, at(prev.n() + 1), kind).unwrap());
         }

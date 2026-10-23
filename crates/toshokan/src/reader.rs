@@ -1399,10 +1399,6 @@ mod tests {
         }
     }
 
-    fn genesis() -> Entry {
-        genesis_of(W)
-    }
-
     fn genesis_of(writer: WriterId) -> Entry {
         let kind = EntryKind::Genesis(Genesis {
             writer,
@@ -1417,6 +1413,7 @@ mod tests {
             ops: Vec::new(),
             displaced: Vec::new(),
             forks: Vec::new(),
+            more: 0,
         });
         let n = prev.n() + 1;
         Entry::encode(prev.hash(), n, at(n + label.len() as u64), kind).unwrap()

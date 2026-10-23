@@ -157,7 +157,7 @@ An entry is an object whose first members are:
 | `prev` | The hash of the entry before it                 |
 | `n`    | Its number in its writer's chain                |
 | `at`   | Its clock reading                               |
-| `kind` | `"genesis"`, `"intent"`, `"settle"` or `"bind"` |
+| `kind` | `"genesis"`, `"intent"`, `"more"`, `"settle"` or `"bind"` |
 
 followed by the members of its kind. A genesis entry is numbered 0, and every
 other entry its predecessor's number plus one. A reader ignores members it does
@@ -187,6 +187,7 @@ attribution:
 | `ops`       | The fact changes, in order                                       |
 | `displaced` | Bytes it moved into the writer's trash; omitted if none          |
 | `forks`     | The fork points its writer knew of, `["<writer>",<n>]`; omitted if none |
+| `more`      | How many ops and `displaced` items its `more` entries hold; omitted if none |
 
 Each op is an object whose `op` member names it:
 
@@ -223,6 +224,23 @@ For example:
 ```json
 {"prev":"…02","n":3,"at":[3,0],"kind":"intent","label":"Tag","ops":[{"op":"add","entity":"…0e","key":"tags","value":"x","replaces":[]},{"op":"write","entity":"…0e","key":"origin","replaces":[["…0b",4,"…01"]]}]}
 ```
+
+A **more** entry continues the intent before it, when the intent's file ops and
+`displaced` items would not fit its line. The intent then holds its other ops
+and `more`, and each `more` entry after it holds the next of its file ops, then
+of its `displaced` items, each line within half the limit:
+
+| Member      | Value                                                                  |
+| ----------- | ---------------------------------------------------------------------- |
+| `ops`       | The intent's next file ops                                             |
+| `displaced` | The intent's next displaced items; omitted if none                     |
+| `forks`     | The fork points its writer knew of the writers its ops name; omitted if none |
+| `deletes`   | The entities the intent deletes whose files its ops write; omitted if none |
+
+A `more` entry is merged as an intent is, entry by entry; what the intent deletes
+kills its writes in the entries that name the entity in `deletes`, as it would in
+the intent's own entry. Undo and redo reverse an intent with its `more` entries.
+Recovery completes a continuation an append cut short (see Recovery).
 
 A **settle** entry records that this writer settled another writer's unfinished
 effect with the user's consent:
@@ -538,7 +556,7 @@ as 8 bytes little-endian, a 16-byte check of the payload, then the payload. The
 check finds a record a crash tore or a disk damaged; it does not guard against
 forgery, since only the install writes its local root. This build computes it in
 two lanes of 64-bit multiplies over the payload. The payload's first byte names
-its format, 7; then come the generation, and the view, or what it gained or the
+its format, 8; then come the generation, and the view, or what it gained or the
 grace step let go of, in this build's binary encoding: integers as LEB128,
 identifiers as their 16 bytes big-endian, text as its length and its UTF-8,
 lists as their length and their members, with each entry as its hash, its
@@ -643,7 +661,9 @@ A commit:
 4. Settles this writer's own unfinished effects (see Recovery).
 5. Carries out the file effects under a pending record, then appends the intent
    with a `file` op for each entity's file as the folder shows it afterwards,
-   and after it the `bind` entries that pin the moves found.
+   in `more` entries after it when they would not fit its line, and after them
+   the `bind` entries that pin the moves found. The record is spent once all of
+   them are durable.
 
 Building an intent writes nothing, but draws the id of each entity it creates,
 so one intent can create entities that name each other.
@@ -785,6 +805,12 @@ its `tmp/` that no open record places is removed, and so is every
 short before its bytes landed, before any of its steps ran: one that is empty
 or, in a folder that syncs, one of at most 16 MiB that holds a zero byte or is
 the start of a JSON value. Any other record that does not decode stays.
+
+A spent record whose intent is followed by fewer `more` items than its `more`
+says, as when a crash tore the append, is settled again before anything else:
+the steps show done, and the missing items, found again from the record and the
+folder in the same order, are appended in `more` entries. The writer does not
+compact while such a record is open.
 
 Settling twice ends as settling once.
 

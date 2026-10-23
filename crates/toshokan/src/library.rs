@@ -31,7 +31,9 @@ use crate::intent;
 use crate::io::{Capabilities, Io, Kind, Lock, Root, Task};
 use crate::layout::Layout;
 use crate::line::MAX_LINE;
-use crate::log::{Bound, Entry, EntryKind, Forked, Genesis, Logged, Op, Settle, Settlement};
+use crate::log::{
+    Bound, Displaced, Entry, EntryKind, Forked, Genesis, Logged, More, Op, Settle, Settlement,
+};
 use crate::merge::{Folded, Part};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord};
@@ -854,12 +856,21 @@ impl Library {
             return;
         };
         let mut reverses = self.reversing.take();
+        let mut intents: Vec<(&Entry, Logged)> = Vec::new();
         for entry in entries {
-            if let EntryKind::Intent(logged) = entry.kind() {
-                let before = Before::of(&logged.ops, &self.folded);
-                self.history.push(entry, reverses.take(), before);
+            match (entry.kind(), intents.last_mut()) {
+                (EntryKind::Intent(logged), _) => intents.push((entry, logged)),
+                (EntryKind::More(more), Some((_, logged))) => {
+                    logged.ops.extend(more.ops);
+                    logged.displaced.extend(more.displaced);
+                }
+                _ => {}
             }
             self.clock = self.clock.observe(entry.at());
+        }
+        for (entry, logged) in intents {
+            let before = Before::of(&logged.ops, &self.folded);
+            self.history.push(entry, logged, reverses.take(), before);
         }
         self.reader.add(id, entries, written);
         self.take_derived();
@@ -885,6 +896,16 @@ impl Library {
         let moved = self.take_derived();
         self.follow(self.reader.readings().collect());
         moved
+    }
+
+    /// `mores` as entries, each with the fork points this writer knows of the
+    /// writers its ops name.
+    fn continued(&self, mores: Vec<More>) -> Vec<EntryKind> {
+        let known = |mut more: More| {
+            more.forks = self.known_forks(&more.ops);
+            EntryKind::More(more)
+        };
+        mores.into_iter().map(known).collect()
     }
 
     /// The fork points this writer knows of the writers whose writes `ops` name.
@@ -1557,7 +1578,7 @@ fn compact_due(library: &mut Library, closing: bool) -> Flow<'_, &mut Library> {
         .and_then(|own| library.reader.derived().writers.get(&own))
         .map_or(0, |placed| placed.merged.len());
     let due = since >= COMPACT_AFTER || (closing && since > 0);
-    if !due || library.writable().is_err() {
+    if !due || !library.unsettled.is_empty() || library.writable().is_err() {
         return Flow::Done(library);
     }
     compacted(library).then(|(library, _)| Flow::Done(library))
@@ -2024,6 +2045,7 @@ fn commit<'a>(
             let logged = Logged {
                 label,
                 forks: library.known_forks(&facts),
+                more: 0,
                 ops: facts,
                 displaced: Vec::new(),
             };
@@ -2050,7 +2072,9 @@ fn committed(
 ) -> std::result::Result<Committed, Box<Partial>> {
     let kinds: Vec<EntryKind> = entries.iter().map(Entry::kind).collect();
     let ops = kinds.iter().flat_map(|kind| match kind {
-        EntryKind::Intent(Logged { ops, .. }) | EntryKind::Bind(Bound { ops }) => ops.as_slice(),
+        EntryKind::Intent(Logged { ops, .. })
+        | EntryKind::More(More { ops, .. })
+        | EntryKind::Bind(Bound { ops }) => ops.as_slice(),
         EntryKind::Genesis(_) | EntryKind::Settle(_) | EntryKind::Unknown(_) => &[],
     });
     let committed = Committed {
@@ -2151,21 +2175,41 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
         identify,
         library.capabilities,
     );
+    let own = library.writer.as_ref().map(Writer::id);
+    let placed = own.and_then(|own| library.reader.derived().writers.get(&own));
+    let logged = placed.and_then(|placed| recovery::continued(placed, record.after()));
     flow::run(settled)
         .and_then(move |applied| {
-            let mut logged = planned(&record);
-            logged.ops.extend(library.file_ops(&applied, &record.files));
-            logged.forks = library.known_forks(&logged.ops);
-            logged.displaced = applied.displaced;
-            let label = logged.label.clone();
-            append(library, vec![EntryKind::Intent(logged)]).and_then(move |(library, entries)| {
+            let mut planned = planned(&record);
+            let file_ops = library.file_ops(&applied, &record.files);
+            let label = planned.label.clone();
+            let kinds = match logged {
+                Some((_, held)) => {
+                    let rest = rest_of(file_ops, applied.displaced, held);
+                    let deleted = deleted_by(&planned.ops);
+                    library.continued(continuation(rest.0, rest.1, &deleted))
+                }
+                None => {
+                    let mores = fit(&mut planned, file_ops, applied.displaced);
+                    planned.forks = library.known_forks(&planned.ops);
+                    let mut kinds = vec![EntryKind::Intent(planned)];
+                    kinds.extend(library.continued(mores));
+                    kinds
+                }
+            };
+            let resumed = logged.is_some();
+            append(library, kinds).and_then(move |(library, entries)| {
                 library.spend(name, &record);
                 let scan = library.scan_task();
                 rebind_logged(library, scan, record.paths())
-                    .map_ok(move |library| (library, label, entries, applied.outcome))
+                    .map_ok(move |library| (library, label, entries, applied.outcome, resumed))
             })
         })
-        .and_then(|(library, label, entries, outcome)| {
+        .and_then(|(library, label, entries, outcome, resumed)| {
+            if resumed {
+                library.show();
+                return ok(library);
+            }
             match committed(label, &entries, Vec::new(), outcome, library.local()) {
                 Ok(_) => ok(library),
                 Err(partial) => {
@@ -2245,6 +2289,7 @@ fn planned(record: &PendingRecord) -> Logged {
             ops: Vec::new(),
             displaced: Vec::new(),
             forks: Vec::new(),
+            more: 0,
         },
     };
     logged.ops.retain(|op| !matches!(op, Op::File { .. }));
@@ -2354,6 +2399,94 @@ fn bound(pins: Vec<Op>) -> Vec<EntryKind> {
         kinds.push(EntryKind::Bind(Bound { ops }));
     }
     kinds
+}
+
+/// Logs `file_ops` and `displaced` in `logged` when its line holds them within
+/// [`BIND_BYTES`]; otherwise returns the continuation entries that hold them, with
+/// `logged.more` counting them, so an intent moves any number of files.
+fn fit(logged: &mut Logged, file_ops: Vec<Op>, displaced: Vec<Displaced>) -> Vec<More> {
+    let whole = json_len(&*logged)
+        + file_ops.iter().map(|op| json_len(op) + 1).sum::<usize>()
+        + displaced
+            .iter()
+            .map(|item| json_len(item) + 1)
+            .sum::<usize>();
+    if whole <= BIND_BYTES {
+        logged.ops.extend(file_ops);
+        logged.displaced = displaced;
+        return Vec::new();
+    }
+    logged.more = (file_ops.len() + displaced.len()) as u64;
+    continuation(file_ops, displaced, &deleted_by(&logged.ops))
+}
+
+/// The entities `ops` delete.
+fn deleted_by(ops: &[Op]) -> BTreeSet<EntityId> {
+    let deleted = ops.iter().filter_map(|op| match op {
+        Op::Delete { entity, .. } => Some(*entity),
+        _ => None,
+    });
+    deleted.collect()
+}
+
+/// The continuation entries that hold `file_ops`, then `displaced`, in order,
+/// each within [`BIND_BYTES`]. One that holds a file op of an entity in
+/// `deleted` names it among its deletes.
+fn continuation(
+    file_ops: Vec<Op>,
+    displaced: Vec<Displaced>,
+    deleted: &BTreeSet<EntityId>,
+) -> Vec<More> {
+    let mut mores = Vec::new();
+    let mut size = 0;
+    for op in file_ops {
+        let dies = file_of(&op).filter(|entity| deleted.contains(entity));
+        let len = json_len(&op) + 1 + dies.map_or(0, |entity| json_len(&entity) + 1);
+        let more = room(&mut mores, &mut size, len);
+        if let Some(entity) = dies.filter(|entity| !more.deletes.contains(entity)) {
+            more.deletes.push(entity);
+        }
+        more.ops.push(op);
+    }
+    for item in displaced {
+        room(&mut mores, &mut size, json_len(&item) + 1)
+            .displaced
+            .push(item);
+    }
+    mores
+}
+
+/// The entry of `mores` that has room for `len` more bytes within
+/// [`BIND_BYTES`], beside the `size` its last one holds; a new one when it has
+/// none, unless it holds nothing yet.
+fn room<'a>(mores: &'a mut Vec<More>, size: &mut usize, len: usize) -> &'a mut More {
+    let full = mores
+        .last()
+        .is_none_or(|more| *size + len > BIND_BYTES && !more.is_empty());
+    if full {
+        mores.push(More::default());
+        *size = 0;
+    }
+    *size += len;
+    mores.last_mut().expect("pushed above when there was none")
+}
+
+/// What of `file_ops`, then `displaced`, the first `held` of them leave.
+fn rest_of(file_ops: Vec<Op>, displaced: Vec<Displaced>, held: u64) -> (Vec<Op>, Vec<Displaced>) {
+    let held = usize::try_from(held).unwrap_or(usize::MAX);
+    let ops = file_ops.len();
+    let rest = file_ops.into_iter().skip(held).collect();
+    (
+        rest,
+        displaced
+            .into_iter()
+            .skip(held.saturating_sub(ops))
+            .collect(),
+    )
+}
+
+fn json_len(value: &impl serde::Serialize) -> usize {
+    serde_json::to_string(value).map_or(0, |json| json.len())
 }
 
 /// The entries that log `logged`, closed by `closing` when there is one.
@@ -2468,12 +2601,13 @@ fn log_effects<'a>(
     pins: Vec<Op>,
 ) -> Fallible<'a, (&'a mut Library, Vec<Entry>, Outcome)> {
     let (name, journaled) = (effects.record, effects.moves_files());
-    logged.ops.extend(library.file_ops(&applied, &record.files));
+    let file_ops = library.file_ops(&applied, &record.files);
+    let mores = fit(&mut logged, file_ops, applied.displaced);
     logged.forks = library.known_forks(&logged.ops);
-    logged.displaced = applied.displaced;
     let outcome = applied.outcome;
     let closing = closing.filter(|_| outcome == Outcome::Complete);
     let mut kinds = closed(logged, closing);
+    kinds.splice(1..1, library.continued(mores));
     kinds.extend(bound(pins));
     let touched = moved_paths(&effects.steps);
     appending(library, kinds).then(move |(library, appended)| {
@@ -2532,6 +2666,7 @@ fn settle_orphan(
                         ops: Vec::new(),
                         displaced: Vec::new(),
                         forks: Vec::new(),
+                        more: 0,
                     };
                     let closing = Closing { facts, settle };
                     transact(library, logged, effects, Some(closing), Vec::new())
