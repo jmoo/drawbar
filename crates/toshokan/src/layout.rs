@@ -1,7 +1,7 @@
 //! Where toshokan keeps its files.
 //!
 //! ```text
-//! <folder>/<root>/writers/<w>/
+//! <folder>/<root>/writers.2/<w>/
 //!   <segment>.txt              log segments, one JSON entry a line
 //!   snapshot-<nonce>.json      snapshots
 //!   pending/<nonce>.json       journal records of multi-step effects
@@ -19,14 +19,14 @@
 //!
 //! The app names `<root>`: one directory of the folder, or one inside a directory of
 //! the app's own, which scans skip whole. Only writer `w` writes under
-//! `writers/<w>/`. Names of segments and snapshots are advisory: every file directly
+//! `writers.2/<w>/`. Names of segments and snapshots are advisory: every file directly
 //! in a writer's directory is read by its contents.
 
 use crate::error::{Error, Result};
 use crate::ids::{EntityId, EntryHash, Nonce, SegmentName, WriterId};
 use crate::path::RelPath;
 
-pub const WRITERS: &str = "writers";
+pub const WRITERS: &str = "writers.2";
 pub const PENDING: &str = "pending";
 pub const TRASH: &str = "trash";
 pub const TMP: &str = "tmp";
@@ -218,12 +218,6 @@ impl Layout {
         child(&Self::local(genesis), "lock")
     }
 
-    /// The entries this install let go once the folder no longer held them, by
-    /// writer.
-    pub fn let_go() -> RelPath {
-        child(&RelPath::ROOT, "let-go.json")
-    }
-
     /// The identities this install's scans read that no fact gives.
     pub fn identities() -> RelPath {
         child(&RelPath::ROOT, "identities.json")
@@ -262,7 +256,7 @@ mod tests {
         let layout = Layout::new(".drawbar").unwrap();
         let w = WriterId::from_u128(0xab);
         let n = Nonce::from_u128(0xcd);
-        let dir = format!(".drawbar/writers/{w}");
+        let dir = format!(".drawbar/writers.2/{w}");
         let expected = [
             (
                 layout.segment(w, SegmentName::from_u128(0xcd)),
@@ -283,7 +277,7 @@ mod tests {
         let layout = Layout::new(".drawbar").unwrap();
         let w = WriterId::from_u128(0xab);
         let n = Nonce::from_u128(0xcd);
-        let tmp = format!(".drawbar/writers/{w}/tmp");
+        let tmp = format!(".drawbar/writers.2/{w}/tmp");
         let long = format!("a.{}", "x".repeat(MAX_NAME - 33));
         let longer = format!("a.{}", "x".repeat(MAX_NAME - 32));
         for (destination, staged) in [

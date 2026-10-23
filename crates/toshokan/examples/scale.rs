@@ -4,7 +4,7 @@
 //! ```text
 //! cargo run --release --example scale -- [--native DIR] [--entities N] [--entries N]
 //!     [--writers N] [--files N] [--corpus DIR] [--stale-mtime] [--trash N]
-//!     [--segment N] [--retired N] [--refresh N,N] [--runs N] [--label TEXT]
+//!     [--segment N] [--tags N] [--retired N] [--refresh N,N] [--runs N] [--label TEXT]
 //! ```
 //!
 //! Without `--native` the library lives on an in-memory disk. Each request is
@@ -25,12 +25,14 @@ use std::time::Instant;
 
 use toshokan::binding::{self, Scan};
 use toshokan::blocking::{run, Backend, Library, Native};
+use toshokan::compaction::{snapshot, Found};
 use toshokan::env::{ExactNames, OsRandom, PrefixIdentity, SystemClock};
 use toshokan::io::{Capabilities, Kind, Range};
-use toshokan::log::{Displaced, Entry, EntryKind, FileFact, Genesis, Logged, Op};
-use toshokan::merge::merge;
+use toshokan::library::COMPACT_AFTER;
+use toshokan::log::{Displaced, Entry, EntryKind, FileFact, Genesis, Logged, Op, Own, Ref};
 use toshokan::reader::{CachedView, Reader};
 use toshokan::simulator::Machine;
+use toshokan::snapshot::Snapshot;
 use toshokan::{
     EntityId, EntryHash, Env, Expect, Hlc, Identify, Identity, Io, IoResult, Layout, MemDisk,
     Nonce, Policy, Raw, Register, RelPath, Reply, Root, Schema, SegmentName, Set, WriterId,
@@ -281,11 +283,22 @@ impl Rng {
     }
 }
 
+/// A writer, which compacts as a writer does: every [`COMPACT_AFTER`] own
+/// entries it seals its segment, writes a snapshot, and deletes the segments and
+/// the snapshot the new one certifies.
 struct WriterGen {
     id: WriterId,
+    label: String,
     genesis: EntryHash,
-    head: EntryHash,
+    head: Own,
     segment: Vec<u8>,
+    /// The open segment's lines.
+    lines: Vec<Rc<Entry>>,
+    /// The segments written since the last snapshot, with their lines and
+    /// whether they end with a seal marker.
+    written: Vec<(RelPath, Vec<Rc<Entry>>, bool)>,
+    since: Vec<Rc<Entry>>,
+    snapshot: Option<(RelPath, Snapshot)>,
     in_segment: usize,
     bytes: u64,
     segments: usize,
@@ -294,9 +307,9 @@ struct WriterGen {
 
 struct EntityGen {
     id: EntityId,
-    name: EntryHash,
-    rating: Option<EntryHash>,
-    tags: Vec<(String, EntryHash)>,
+    name: Ref,
+    rating: Option<Ref>,
+    tags: Vec<(String, Ref)>,
 }
 
 /// A library file as the facts record it.
@@ -313,13 +326,22 @@ struct Gen {
     rng: Rng,
     at: u64,
     segment_entries: usize,
+    /// How many tag values entities draw from.
+    tags: usize,
     writers: Vec<WriterGen>,
     entities: Vec<EntityGen>,
     sink: Box<dyn Backend>,
+    /// While generating, the files the folder will hold, kept here so that what
+    /// compaction deletes is never written; `None` once they are written.
+    staged: Option<BTreeMap<RelPath, Vec<u8>>>,
 }
 
 impl Gen {
     fn put(&mut self, path: &RelPath, bytes: Vec<u8>) {
+        if let Some(staged) = &mut self.staged {
+            staged.insert(path.clone(), bytes);
+            return;
+        }
         let dir = path.parent().unwrap();
         let made = self.sink.perform(Io::MakeDir {
             root: Root::Folder,
@@ -334,23 +356,41 @@ impl Gen {
         created.unwrap();
     }
 
+    fn remove(&mut self, path: &RelPath) {
+        if let Some(staged) = &mut self.staged {
+            staged.remove(path);
+            return;
+        }
+        let removed = self.sink.perform(Io::Remove {
+            root: Root::Folder,
+            path: path.clone(),
+        });
+        removed.unwrap();
+    }
+
     fn add_writer(&mut self) -> usize {
         let id = WriterId::from_u128(self.rng.id());
+        let label = format!("writer {}", self.writers.len());
         let kind = EntryKind::Genesis(Genesis {
             writer: id,
-            label: format!("writer {}", self.writers.len()),
+            label: label.clone(),
         });
         self.at += 1;
         let at = Hlc {
             wall_ms: self.at,
             counter: 0,
         };
-        let entry = Entry::encode(EntryHash::ZERO, at, kind).unwrap();
+        let entry = Rc::new(Entry::encode(EntryHash::ZERO, 0, at, kind).unwrap());
         self.writers.push(WriterGen {
             id,
+            label,
             genesis: entry.hash(),
-            head: entry.hash(),
+            head: entry.own(),
             segment: entry.to_bytes(),
+            lines: vec![Rc::clone(&entry)],
+            written: Vec::new(),
+            since: vec![entry],
+            snapshot: None,
             in_segment: 1,
             bytes: 0,
             segments: 0,
@@ -359,27 +399,47 @@ impl Gen {
         self.writers.len() - 1
     }
 
-    fn push(&mut self, w: usize, logged: Logged) -> EntryHash {
+    fn push(&mut self, w: usize, logged: Logged) -> Ref {
         self.at += 1;
         let at = Hlc {
             wall_ms: self.at,
             counter: 0,
         };
         let writer = &mut self.writers[w];
-        let entry = Entry::encode(writer.head, at, EntryKind::Intent(logged)).unwrap();
-        writer.head = entry.hash();
+        let (prev, n) = (writer.head.hash, writer.head.n + 1);
+        let entry = Rc::new(Entry::encode(prev, n, at, EntryKind::Intent(logged)).unwrap());
+        writer.head = entry.own();
         writer.segment.extend(entry.to_bytes());
+        writer.lines.push(Rc::clone(&entry));
+        writer.since.push(Rc::clone(&entry));
         writer.in_segment += 1;
         writer.entries += 1;
-        if writer.in_segment >= self.segment_entries {
-            let marker = toshokan::line::seal_marker(writer.head);
-            writer.segment.extend(marker);
-            self.flush(w);
+        let named = entry.own().of(writer.id);
+        if writer.since.len() >= COMPACT_AFTER {
+            self.compact(w);
+        } else if writer.in_segment >= self.segment_entries {
+            self.seal(w);
         }
-        entry.hash()
+        named
     }
 
+    /// Ends the open segment with its seal marker and writes it.
+    fn seal(&mut self, w: usize) {
+        let writer = &mut self.writers[w];
+        if writer.lines.is_empty() {
+            return;
+        }
+        let marker = toshokan::line::seal_marker(writer.head.hash);
+        writer.segment.extend(marker);
+        self.write(w, true);
+    }
+
+    /// Writes the open segment as it is, as a writer still running leaves it.
     fn flush(&mut self, w: usize) {
+        self.write(w, false);
+    }
+
+    fn write(&mut self, w: usize, sealed: bool) {
         let bytes = std::mem::take(&mut self.writers[w].segment);
         if bytes.is_empty() {
             return;
@@ -390,12 +450,68 @@ impl Gen {
         writer.bytes += bytes.len() as u64;
         writer.segments += 1;
         writer.in_segment = 0;
+        let lines = std::mem::take(&mut writer.lines);
+        writer.written.push((path.clone(), lines, sealed));
         self.put(&path, bytes);
     }
 
+    /// Seals the open segment, folds the entries since the last snapshot into a
+    /// new one, and deletes the segments and the snapshot it certifies.
+    fn compact(&mut self, w: usize) {
+        self.seal(w);
+        let writer = &self.writers[w];
+        let previous = writer.snapshot.as_ref().map(|(_, snapshot)| snapshot);
+        let lines = writer
+            .written
+            .iter()
+            .map(|(_, lines, _)| Found::Lines(lines));
+        let found = lines.chain(previous.map(Found::Snapshot));
+        let label = writer.label.clone();
+        let folded = snapshot(
+            writer.id,
+            writer.genesis,
+            label,
+            previous,
+            &writer.since,
+            found,
+        );
+        let folded = folded.expect("entries to fold");
+        let path = self
+            .layout
+            .snapshot(writer.id, Nonce::from_u128(self.rng.id()));
+        if self.staged.is_none() {
+            self.put(&path, folded.encode());
+        }
+        let writer = &mut self.writers[w];
+        let written = writer.written.drain(..);
+        let gone: Vec<RelPath> = written
+            .filter(|(_, _, sealed)| *sealed)
+            .map(|(path, ..)| path)
+            .collect();
+        let replaced = writer
+            .snapshot
+            .replace((path, folded))
+            .map(|(path, _)| path);
+        writer.since.clear();
+        for path in gone.iter().chain(&replaced) {
+            self.remove(path);
+        }
+    }
+
+    /// Writes each writer's open segment as it is, and every file generating
+    /// left, its last snapshot among them.
     fn flush_all(&mut self) {
         for w in 0..self.writers.len() {
             self.flush(w);
+        }
+        let mut staged = self.staged.take().unwrap_or_default();
+        for writer in &self.writers {
+            if let Some((path, snapshot)) = &writer.snapshot {
+                staged.insert(path.clone(), snapshot.encode());
+            }
+        }
+        for (path, bytes) in staged {
+            self.put(&path, bytes);
         }
     }
 
@@ -411,12 +527,14 @@ impl Gen {
                 ops.push(Op::Create {
                     entity,
                     replaces: Vec::new(),
+                    take: None,
                 });
                 let write = |key: &str, value: Raw| Op::Write {
                     entity,
                     key: key.into(),
                     value: Some(value),
                     replaces: Vec::new(),
+                    take: None,
                 };
                 ops.push(write("name", Raw::of(&format!("Program {i}")).unwrap()));
                 ops.push(write(
@@ -429,11 +547,13 @@ impl Gen {
                 }
                 let mut tags = Vec::new();
                 for t in 0..1 + self.rng.below(5) {
-                    let tag = format!("t{}", (i * 7 + t * 13) % 50);
+                    let tag = format!("t{}", (i * 7 + t * 13) % self.tags);
                     ops.push(Op::Add {
                         entity,
                         key: "tags".into(),
                         value: Raw::of(&tag).unwrap(),
+                        replaces: Vec::new(),
+                        take: None,
                     });
                     tags.push(tag);
                 }
@@ -446,6 +566,8 @@ impl Gen {
                         entity,
                         key: "related".into(),
                         value: Raw::of(&other.to_string()).unwrap(),
+                        replaces: Vec::new(),
+                        take: None,
                     });
                 }
                 if let Some(file) = files.get(i - start) {
@@ -458,6 +580,7 @@ impl Gen {
                             modified: file.modified,
                         }),
                         replaces: Vec::new(),
+                        take: None,
                     });
                 }
                 made.push((entity, rated, tags));
@@ -468,7 +591,8 @@ impl Gen {
                     label: "Import".into(),
                     ops,
                     displaced: Vec::new(),
-                    reverses: None,
+                    forks: Vec::new(),
+                    more: 0,
                 },
             );
             for (id, rated, tags) in made {
@@ -490,13 +614,14 @@ impl Gen {
             let e = self.rng.below(self.entities.len());
             let entity = self.entities[e].id;
             let choice = self.rng.below(10);
-            let (op, update): (Op, fn(&mut EntityGen, EntryHash, &str)) = match choice {
+            let (op, update): (Op, fn(&mut EntityGen, Ref, &str)) = match choice {
                 0..5 => (
                     Op::Write {
                         entity,
                         key: "rating".into(),
                         value: Some(Raw::of(&(self.rng.below(5) as u32)).unwrap()),
                         replaces: self.entities[e].rating.into_iter().collect(),
+                        take: None,
                     },
                     |e, hash, _| e.rating = Some(hash),
                 ),
@@ -506,18 +631,26 @@ impl Gen {
                         key: "name".into(),
                         value: Some(Raw::of(&format!("Renamed {}", self.rng.next())).unwrap()),
                         replaces: vec![self.entities[e].name],
+                        take: None,
                     },
                     |e, hash, _| e.name = hash,
                 ),
                 6..9 => {
-                    let tag = format!("t{}", self.rng.below(50));
+                    let tag = format!("t{}", self.rng.below(self.tags));
+                    let tags = self.entities[e].tags.iter();
+                    let replaces = tags.filter(|(t, _)| *t == tag).map(|(_, at)| *at).collect();
                     (
                         Op::Add {
                             entity,
                             key: "tags".into(),
                             value: Raw::of(&tag).unwrap(),
+                            replaces,
+                            take: None,
                         },
-                        |e, hash, tag| e.tags.push((tag.to_owned(), hash)),
+                        |e, at, tag| {
+                            e.tags.retain(|(t, _)| t != tag);
+                            e.tags.push((tag.to_owned(), at));
+                        },
                     )
                 }
                 _ => match self.entities[e].tags.first().cloned() {
@@ -530,6 +663,7 @@ impl Gen {
                                 key: "tags".into(),
                                 value: Raw::of(&tag).unwrap(),
                                 tags,
+                                take: None,
                             },
                             |e, _, tag| e.tags.retain(|(t, _)| t != tag),
                         )
@@ -549,7 +683,8 @@ impl Gen {
                     label: "Edit".into(),
                     ops: vec![op],
                     displaced: Vec::new(),
-                    reverses: None,
+                    forks: Vec::new(),
+                    more: 0,
                 },
             );
             update(&mut self.entities[e], hash, &tag);
@@ -579,7 +714,8 @@ impl Gen {
                     label: "Save".into(),
                     ops: Vec::new(),
                     displaced,
-                    reverses: None,
+                    forks: Vec::new(),
+                    more: 0,
                 },
             );
         }
@@ -773,6 +909,7 @@ struct Args {
     stale: bool,
     trash: usize,
     segment: usize,
+    tags: usize,
     retired: usize,
     refresh: Vec<usize>,
     runs: usize,
@@ -791,6 +928,7 @@ fn args() -> Args {
         stale: false,
         trash: 0,
         segment: 500,
+        tags: 50,
         retired: 0,
         refresh: vec![1, 1000],
         runs: 3,
@@ -810,6 +948,7 @@ fn args() -> Args {
             "--stale-mtime" => args.stale = true,
             "--trash" => args.trash = value().parse().unwrap(),
             "--segment" => args.segment = value().parse().unwrap(),
+            "--tags" => args.tags = value().parse().unwrap(),
             "--retired" => args.retired = value().parse().unwrap(),
             "--refresh" => args.refresh = value().split(',').map(|n| n.parse().unwrap()).collect(),
             "--runs" => args.runs = value().parse().unwrap(),
@@ -887,9 +1026,11 @@ fn main() {
         rng: Rng(0x9e3779b97f4a7c15),
         at: SystemTimeMs::now() - 10_000_000,
         segment_entries: args.segment,
+        tags: args.tags,
         writers: Vec::new(),
         entities: Vec::new(),
         sink,
+        staged: Some(BTreeMap::new()),
     };
     for _ in 0..args.writers {
         gen.add_writer();
@@ -920,6 +1061,7 @@ fn main() {
     let own_local = {
         let mut local = world.raw("own");
         let (id, genesis, head) = own;
+        let head = head.hash;
         local
             .perform(Io::MakeDir {
                 root: Root::Local,
@@ -968,8 +1110,8 @@ fn main() {
         run(&mut backend, reader.read()).unwrap();
         reader
     });
-    let folded = bench.measure("merge: every log", || merge(reader.logs().values()));
-    drop((reader, folded));
+    let derived = bench.measure("derive: every writer", || reader.derive_afresh());
+    drop((reader, derived));
 
     let backend = world.counted(own_local, &stats);
     let (lib, _) = bench.measure("open own, no cached view", || {
@@ -1069,6 +1211,7 @@ fn main() {
                 writers: Vec::new(),
                 forks: Vec::new(),
                 gaps: Vec::new(),
+                items: Vec::new(),
             })
         });
         bench.measure("folded.files()", || view.folded().files().len());
@@ -1270,8 +1413,58 @@ fn main() {
                 gen.writers[0].entries,
                 len as f64 / gen.writers[0].entries as f64
             );
+            let read = raw.perform(Io::Read {
+                root: Root::Folder,
+                path: path.clone(),
+                range: Range { offset: 0, len },
+            });
+            if let Ok(Reply::Bytes(bytes)) = read {
+                if let Ok(snapshot) = Snapshot::decode(&bytes) {
+                    println!("  {}", split(&snapshot));
+                }
+            }
         }
     }
+}
+
+/// What a snapshot holds, by part: its own writes, with those no reader can
+/// show, its references, kills and certificates.
+fn split(snapshot: &Snapshot) -> String {
+    use toshokan::contribution::Value;
+    let state = &snapshot.state;
+    let deleted: Vec<_> = state
+        .own
+        .iter()
+        .filter(|(field, held)| field.is_exist() && held.value == Value::Exist(false))
+        .map(|(field, _)| field.entity())
+        .collect();
+    let mut removes = 0;
+    let mut clears = 0;
+    let mut of_deleted = 0;
+    for (field, held) in &state.own {
+        match held.value {
+            Value::Member(false) => removes += 1,
+            Value::Register(None) => clears += 1,
+            _ => {}
+        }
+        if !field.is_exist() && deleted.contains(&field.entity()) {
+            of_deleted += 1;
+        }
+    }
+    let certified = &snapshot.certified;
+    format!(
+        "own writes {} (removes {removes}, clears {clears}, killed {}, of deleted entities {of_deleted}); \
+         references {}; takes {}; dismissals {}; trash {}; certificates: segments {}, heads {}, hashes {}",
+        state.own.len(),
+        state.killed.len(),
+        state.refs.len(),
+        state.takes.len(),
+        state.dismissals.len(),
+        state.trash.len(),
+        certified.segments.len(),
+        certified.heads.len(),
+        certified.hashes.len(),
+    )
 }
 
 /// Reports a failure without stopping the run, so later operations still run.

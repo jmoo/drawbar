@@ -271,13 +271,8 @@ impl<F: Fs> Keeper<F> {
             Mode::ReadOnly(why) => Err(why.to_string()),
         };
         let mut trouble = Vec::new();
-        let let_go = match restored(library.fs(), &opened).await {
-            true => opened.removed.len(),
-            false => 0,
-        };
-        if let_go > 0 {
-            library.let_go().await.map_err(|e| e.to_string())?;
-        }
+        // TRIAL: toshokan lets go of what a restore took by itself (D12).
+        let let_go = 0;
         if writable.is_ok() {
             // Also what a crash may have torn from the end of this writer's log, which
             // opening does not report.
@@ -470,28 +465,6 @@ fn drafted(of: &Key) -> Result<toshokan::Drafted, String> {
         Key::Entity(entity) => toshokan::Drafted::Entity(*entity),
         Key::File(path) => toshokan::Drafted::File(relative(path).ok_or_else(|| no_path(path))?),
     })
-}
-
-/// Whether what this install showed and the folder no longer holds was taken by a
-/// restore of the folder, rather than not delivered yet by a sync: every writer whose
-/// entries went has its directory in the folder.
-async fn restored<F: Fs>(fs: &F, opened: &toshokan::Opened) -> bool {
-    let layout = keys::layout();
-    let writers = opened.removed.iter().filter_map(|change| match &change.by {
-        By::Writer { writer, .. } => Some(*writer),
-        By::This | By::Outside => None,
-    });
-    for writer in writers.collect::<BTreeSet<_>>() {
-        let present = storage::meta(fs, Root::Folder, &layout.writer(writer)).await;
-        let dir = present
-            .ok()
-            .flatten()
-            .is_some_and(|meta| meta.kind == Kind::Directory);
-        if !dir {
-            return false;
-        }
-    }
-    true
 }
 
 type Built<'l, F> = toshokan::intent::Intent<&'l mut Library<F>>;

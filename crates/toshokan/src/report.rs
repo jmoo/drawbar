@@ -8,7 +8,9 @@ use crate::drafts::Drafted;
 use crate::error::Why;
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
 use crate::io::IoError;
+use crate::log::Run;
 use crate::path::RelPath;
+use crate::plan::FactChange;
 
 /// What opening found. Opening writes nothing in the folder.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -31,10 +33,6 @@ pub struct Opened {
     /// consent.
     pub orphaned: Vec<Orphan>,
     pub drafts: Vec<DraftStatus>,
-    /// Facts this install shows whose entries no file in the folder holds now: a
-    /// restore of the folder removed them, or sync has not yet brought the files
-    /// that hold them. They stay shown until the user lets them go or adopts them.
-    pub removed: Vec<Change>,
     pub forks: Vec<Fork>,
     pub gaps: Vec<Gap>,
     /// Files in writers' directories that end before their last byte can be read,
@@ -130,13 +128,22 @@ pub enum DraftState {
     Unreadable,
 }
 
-/// Two entries of one writer with one predecessor. Both branches are merged.
+/// Where one writer's history forked: the entry numbered `at`, `prev`, after
+/// which its branches part. Neither branch is merged; each is shown as an
+/// [`Item`] of [`ItemKind::Run`] whose run's writer is `writer`, until it is
+/// dismissed. A fork stays listed after that: it is settled once no such item
+/// is left, and has nothing left to review once each such item's changes are
+/// empty.
+///
+/// When the writer is this instance's own, the instance stops writing as it
+/// once a read finds the fork: [`Start::Rekeyed`] says so at opening,
+/// [`Refreshed::retired`] at a refresh or rescan, and [`crate::Error::Rekey`]
+/// from a compaction. Its next commit writes as a new writer.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Fork {
     pub writer: WriterId,
+    pub at: u64,
     pub prev: EntryHash,
-    /// Sorted.
-    pub branches: [EntryHash; 2],
 }
 
 /// Entries of one writer held back because their predecessor is neither placed nor
@@ -146,6 +153,58 @@ pub struct Gap {
     pub writer: WriterId,
     pub missing: EntryHash,
     pub held: usize,
+}
+
+/// What a reader shows apart from the merged state.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum ItemKind {
+    /// A branch of a forked writer, or entries after a dismissed one.
+    Run,
+    /// Entries whose predecessor may still arrive. Merged once it does.
+    Gap,
+    /// After the grace step, lines of a file shorter than a snapshot certified
+    /// it: a version a sync client dropped, or a copy that diverged.
+    Unplaced,
+}
+
+/// Entries a reader shows apart from the merged state, with the net change they
+/// would make. The user keeps the current state or takes changes, with
+/// [`crate::intent::Intent::take`] naming `run`, and may dismiss a run with
+/// [`crate::intent::Intent::dismiss`]; a gap or unplaced lines cannot be
+/// dismissed. A run is shown until it is dismissed, with no changes once it
+/// would change nothing; a gap or unplaced lines only while they would change
+/// something.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Item {
+    pub kind: ItemKind,
+    pub run: Run,
+    pub by: By,
+    /// Its entries' clock readings, earliest and latest. Of the entries a
+    /// snapshot folds, a reader knows only the head's reading and those of the
+    /// writes the snapshot still holds, so a run that a snapshot holds starts at
+    /// the earliest of those.
+    pub span: (Hlc, Hlc),
+    /// How many entries it holds. Of a run that a snapshot holds, that counts
+    /// every number from its first entry no dismissal names to the snapshot's
+    /// head, whether or not a write of the entry survives.
+    pub entries: u64,
+    pub changes: Vec<ItemChange>,
+}
+
+/// One field an [`Item`] would change.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ItemChange {
+    pub entity: EntityId,
+    pub what: What,
+    /// The change that takes it; `None` where the run left the entity without a
+    /// file, which only trashing the file does. Taking a file binds the entity to
+    /// the file the run names, which the folder must hold at its path, as the
+    /// last scan found it, for no other entity: else the intent is refused with
+    /// [`crate::Invalid::Unbindable`].
+    pub change: Option<FactChange>,
+    /// Shown whatever the merged state holds: the run replaced an earlier own
+    /// write no reader holds any more, so only a take settles it.
+    pub forgotten: bool,
 }
 
 /// What a scan of the library's files found against the logged facts. A scan
@@ -228,9 +287,6 @@ pub enum Lag {
     /// continues from the last entry of the writer's chain in the folder, or
     /// starts a new writer when it is torn.
     Head,
-    /// `let-go.json` lacks the entries an adoption let go. Reopening reports them
-    /// as removed again.
-    LetGo,
     /// The scan after the commit failed. The entities whose files its effects
     /// touched are [`crate::FileState::Unscanned`] until a scan of every file.
     Scan,
@@ -275,8 +331,6 @@ pub struct PartialReport {
 pub struct Refreshed {
     /// What changed since the last view, by its writer or from outside.
     pub changes: Vec<Change>,
-    /// As [`Opened::removed`], as of this refresh.
-    pub removed: Vec<Change>,
     /// What the files scanned so far hold against the logged facts; empty until
     /// a scan of every file has succeeded.
     pub scan: ScanReport,
@@ -289,6 +343,9 @@ pub struct Refreshed {
     /// As [`Opened::orphaned`], as the pending records stand at this refresh: a
     /// writer elsewhere may have begun or finished an effect since.
     pub orphaned: Vec<Orphan>,
+    /// This instance's writer, when the read found its history forked: it writes
+    /// no more, and the next commit writes as a new writer.
+    pub retired: Option<WriterId>,
 }
 
 /// One change to what a reader sees.

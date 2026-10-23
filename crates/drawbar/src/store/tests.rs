@@ -1140,7 +1140,7 @@ fn a_library_a_newer_drawbar_wrote_opens_read_only() {
     let mut first = Session::open(&root);
     first.make_tag("Sunday");
     first.close();
-    let writers = fs::read_dir(root.at(".drawbar/library/writers")).unwrap();
+    let writers = fs::read_dir(root.at(".drawbar/library/writers.2")).unwrap();
     let writer = writers.map(|entry| entry.unwrap().path()).next().unwrap();
     let segment = fs::read_dir(&writer)
         .unwrap()
@@ -1153,7 +1153,13 @@ fn a_library_a_newer_drawbar_wrote_opens_read_only() {
     let head = head.expect("an entry");
     // A later build seals this segment as this one did, and logs in one of its own.
     let future = toshokan::Raw::new(r#"{"kind":"from a later build"}"#).unwrap();
-    let entry = Entry::encode(head.hash(), head.at(), EntryKind::Unknown(future)).unwrap();
+    let entry = Entry::encode(
+        head.hash(),
+        head.n() + 1,
+        head.at(),
+        EntryKind::Unknown(future),
+    )
+    .unwrap();
     fs::write(writer.join("later.txt"), entry.to_bytes()).unwrap();
 
     let second = Session::open(&root);
@@ -5446,7 +5452,7 @@ fn a_change_another_install_finishes_soon_is_not_asked_about() {
     leave_unfinished_save(&root);
     let mut session = Session::listed(&root);
     session.poll();
-    let writers = root.at(".drawbar/library/writers");
+    let writers = root.at(".drawbar/library/writers.2");
     for writer in fs::read_dir(writers).unwrap() {
         let pending = writer.unwrap().path().join("pending");
         for record in fs::read_dir(pending).into_iter().flatten() {
@@ -5469,7 +5475,7 @@ fn a_record_that_does_not_read_is_left_alone_and_said_so() {
     let mut first = Session::open(&root);
     first.create();
     first.close();
-    let writers = root.at(".drawbar/library/writers");
+    let writers = root.at(".drawbar/library/writers.2");
     let other = writers.join("0123456789abcdef0123456789abcdef");
     fs::create_dir_all(other.join("pending")).unwrap();
     fs::write(
@@ -5533,7 +5539,7 @@ fn changes_a_sync_has_not_brought_yet_are_not_let_go() {
     let head = fs::read_to_string(genesis.join("head.json")).unwrap();
     let id = head.split('"').nth(3).unwrap().to_string();
     let held = Temp::new();
-    let theirs_dir = root.at(&format!(".drawbar/library/writers/{id}"));
+    let theirs_dir = root.at(&format!(".drawbar/library/writers.2/{id}"));
     fs::rename(&theirs_dir, held.0.join(&id)).unwrap();
 
     let ours = Session::listed(&root);

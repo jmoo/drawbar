@@ -10,7 +10,7 @@ use crate::ids::EntityId;
 use crate::index::Index;
 use crate::merge::Folded;
 use crate::path::RelPath;
-use crate::report::{Fork, Gap, WriterInfo};
+use crate::report::{Fork, Gap, Item, WriterInfo};
 use crate::schema::{Field, Keyed, Members, Raw, Register, Set, Value, Written};
 
 /// The library as one reader sees it. Cheap to clone; never changes; can be sent
@@ -32,6 +32,7 @@ pub struct Parts {
     pub writers: Vec<WriterInfo>,
     pub forks: Vec<Fork>,
     pub gaps: Vec<Gap>,
+    pub items: Vec<Item>,
 }
 
 /// One entity of a view.
@@ -218,6 +219,12 @@ impl View {
 
     pub fn gaps(&self) -> &[Gap] {
         &self.0.gaps
+    }
+
+    /// What the view shows apart from the merged state: runs, gaps and unplaced
+    /// lines.
+    pub fn items(&self) -> &[Item] {
+        &self.0.items
     }
 
     pub fn writers(&self) -> &[WriterInfo] {

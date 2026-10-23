@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::{EntityId, EntryHash, Identity, Nonce};
 use crate::io::{IoError, Range, CHUNK};
+use crate::log::{FileFact, Run};
 use crate::path::RelPath;
 use crate::schema::Raw;
 
@@ -40,11 +41,15 @@ pub struct Plan {
     pub label: String,
     /// The entities the intent creates, their ids drawn as it was built.
     pub created: Vec<EntityId>,
-    pub facts: Vec<FactChange>,
+    /// Each with the run it takes from, when it is taken from an item: it then
+    /// settles its field against that run's writes.
+    pub facts: Vec<(FactChange, Option<Run>)>,
     /// Carried out in order, each only after every precondition was checked.
     pub files: Vec<FileChange>,
     /// The entry an undo or redo compensates.
     pub reverses: Option<EntryHash>,
+    /// Items the user dismissed: no reader merges or shows them again.
+    pub dismiss: Vec<Run>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -73,6 +78,10 @@ pub enum FactChange {
     Delete { entity: EntityId },
     /// Brings a deleted entity back.
     Revive { entity: EntityId },
+    /// Says where the entity's file is, moving nothing, as undoing a delete
+    /// does. Undo leaves it alone. Taken from an item, it is refused unless the
+    /// last scan found that file.
+    File { entity: EntityId, file: FileFact },
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

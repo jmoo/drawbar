@@ -13,12 +13,12 @@ use std::rc::Rc;
 
 use crate::cow::CowMap;
 use crate::env::{ExactNames, Identify, Names};
-use crate::error::Result;
+use crate::error::{Result, Unbindable};
 use crate::flow::{self, fold, ok};
-use crate::ids::{EntityId, EntryHash, Identity};
+use crate::ids::{EntityId, Identity};
 use crate::io::{Kind, Meta, Root, Task};
 use crate::layout::Layout;
-use crate::log::{FileFact, Op};
+use crate::log::{FileFact, Op, Ref};
 use crate::path::RelPath;
 use crate::report::{Ambiguous, Moved, ScanReport};
 use crate::view::{FileRef, FileState};
@@ -28,7 +28,7 @@ use crate::view::{FileRef, FileState};
 pub struct Fact {
     pub value: FileFact,
     /// The entry that wrote it, which a pin replaces.
-    pub entry: EntryHash,
+    pub entry: Ref,
 }
 
 /// Every entity's surviving file-register writes that say where its file is,
@@ -116,6 +116,11 @@ impl Unscanned {
 
     pub fn is_empty(&self) -> bool {
         self.paths.is_empty() && self.entities.is_empty()
+    }
+
+    /// Whether `path` is one of these paths or under one.
+    pub fn covers(&self, path: &RelPath) -> bool {
+        under(path, &self.paths.iter().map(RelPath::as_str).collect())
     }
 
     /// Whether `entity`, whose file facts are `written`, is left unknown; `paths`
@@ -259,8 +264,8 @@ impl Walk {
         }
     }
 
-    /// Lists again what may have changed at `paths`: each one's directory, and each
-    /// directory at or under it.
+    /// Lists again what may have changed at `paths`: each one's nearest listed
+    /// directory, and each directory at or under it.
     pub fn forget(&mut self, paths: &[RelPath]) {
         for path in paths {
             let stale: Vec<RelPath> = subtree(&self.listed, path).cloned().collect();
@@ -276,10 +281,14 @@ impl Walk {
             for dir in queued {
                 self.queue.remove(&dir);
             }
-            if let Some(parent) = path.parent() {
-                if self.listed.remove(&parent).is_some() {
-                    self.queue.insert(parent);
+            // A directory made since its parent was listed is not in that listing.
+            let mut dir = path.parent();
+            while let Some(at) = dir.filter(|at| !self.queue.contains(at)) {
+                if self.listed.remove(&at).is_some() {
+                    self.queue.insert(at);
+                    break;
                 }
+                dir = at.parent();
             }
         }
         if self.listed.is_empty() {
@@ -775,7 +784,31 @@ fn pin(facts: &Facts, scan: &Scan, entity: EntityId, file: &FileRef) -> Option<O
         entity,
         file: pinned,
         replaces: vec![written.entry],
+        take: None,
     })
+}
+
+/// Refuses to bind `entity` to the file `fact` names unless `scan` found it at
+/// `fact`'s path, scanned and holding what `fact` says, and `bound`, the entity
+/// bound there, is no other.
+pub fn bindable(
+    entity: EntityId,
+    fact: &FileFact,
+    scan: &Scan,
+    unscanned: &Unscanned,
+    bound: Option<EntityId>,
+) -> std::result::Result<(), Unbindable> {
+    if unscanned.covers(&fact.path) {
+        return Err(Unbindable::Unscanned);
+    }
+    let found = scan.files.get(&fact.path).ok_or(Unbindable::Absent)?;
+    if !holds(fact, found) {
+        return Err(Unbindable::Changed);
+    }
+    match bound {
+        Some(other) if other != entity => Err(Unbindable::Bound(other)),
+        _ => Ok(()),
+    }
 }
 
 /// [`bind_known`] a slice at a time. It holds no reference to the facts or the
@@ -1164,8 +1197,8 @@ fn missing(fact: &FileFact) -> FileRef {
 mod tests {
     use super::*;
     use crate::disk::MemDisk;
-    use crate::env::PrefixIdentity;
-    use crate::ids::EntryHash;
+    use crate::env::{ExactNames, PrefixIdentity};
+    use crate::ids::{EntryHash, WriterId};
     use crate::io::Io;
 
     fn path(text: &str) -> RelPath {
@@ -1188,7 +1221,11 @@ mod tests {
     fn written(fact: FileFact, entry: u128) -> Fact {
         Fact {
             value: fact,
-            entry: EntryHash::from_u128(entry),
+            entry: Ref {
+                writer: WriterId::from_u128(1),
+                n: 1,
+                hash: EntryHash::from_u128(entry),
+            },
         }
     }
 
@@ -1444,6 +1481,26 @@ mod tests {
         walk.found_after(&mut found, None, usize::MAX);
         let files: Vec<&RelPath> = found.files.keys().collect();
         assert_eq!(files, [&path("a.npno")]);
+    }
+
+    #[test]
+    fn a_walk_lists_again_the_nearest_directory_it_listed_above_a_new_one() {
+        let layout = Layout::new(".lib").unwrap();
+        let directory = Meta {
+            kind: Kind::Directory,
+            len: 0,
+            modified: None,
+        };
+        let mut walk = Walk::default();
+        walk.listed(&layout, RelPath::ROOT, vec![("d".into(), directory)]);
+        walk.listed(&layout, path("d"), Vec::new());
+        assert_eq!(walk.next(), None);
+        walk.forget(&[path("d/e/f")]);
+        assert_eq!(
+            walk.next(),
+            Some(path("d")),
+            "d/e was made after d was listed"
+        );
     }
 
     #[test]
@@ -1750,13 +1807,14 @@ mod tests {
             entity,
             file: moved,
             replaces,
+            take: None,
         }] = &pins_for(&[("b", 0)])[..]
         else {
             panic!("a move is pinned");
         };
         assert_eq!(
             (*entity, moved.path.as_str(), replaces.as_slice()),
-            (e, "b", &[EntryHash::from_u128(1)][..])
+            (e, "b", &[written(fact("a", 0), 1).entry][..])
         );
         assert!(pins_for(&[("a", 0)]).is_empty(), "a new time");
         assert!(pins_for(&[("a", 1)]).is_empty(), "changed outside");
@@ -1818,5 +1876,28 @@ mod tests {
             (Some(remembered), Vec::new()),
             "same length and time"
         );
+    }
+
+    #[test]
+    fn an_entity_is_bindable_only_to_a_scanned_file_holding_its_fact_and_no_one_elses() {
+        let (entity, other) = (EntityId::from_u128(1), EntityId::from_u128(2));
+        let scan = scanned(&[("a", 0), ("b", 1)], &one("a"));
+        let check = |at, bound, unscanned: &Unscanned| {
+            bindable(entity, &fact(at, 0), &scan, unscanned, bound)
+        };
+        let scanned_all = Unscanned::default();
+        assert_eq!(check("a", None, &scanned_all), Ok(()));
+        assert_eq!(check("a", Some(entity), &scanned_all), Ok(()));
+        assert_eq!(
+            check("a", Some(other), &scanned_all),
+            Err(Unbindable::Bound(other))
+        );
+        assert_eq!(check("b", None, &scanned_all), Err(Unbindable::Changed));
+        assert_eq!(check("c", None, &scanned_all), Err(Unbindable::Absent));
+        let unscanned = Unscanned {
+            paths: BTreeSet::from([RelPath::ROOT]),
+            entities: BTreeSet::new(),
+        };
+        assert_eq!(check("a", None, &unscanned), Err(Unbindable::Unscanned));
     }
 }

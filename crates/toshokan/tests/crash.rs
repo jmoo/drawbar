@@ -23,7 +23,7 @@ use std::rc::Rc;
 
 use common::{
     bound, close, entry, env, identify, identity, layout, path, BlockingMem, Driven, Fill, COPYING,
-    HEAD, WRITER,
+    HEAD, HEAD_AT, WRITER,
 };
 use toshokan::binding::Bindings;
 use toshokan::blocking;
@@ -31,7 +31,7 @@ use toshokan::crash::{self, Fault, Streams};
 use toshokan::disk::Tail;
 use toshokan::effects::{self, EffectPlan, Moves};
 use toshokan::io::{Capabilities, Capability, Range, CHUNK};
-use toshokan::log::{Entry, Settlement};
+use toshokan::log::{Own, Settlement};
 use toshokan::pending::{self, PendingRecord};
 use toshokan::plan::{Content, Expect, FileChange, Piece, Splice};
 use toshokan::recovery::{self, Chain};
@@ -412,16 +412,16 @@ struct Fake {
 }
 
 impl Chain for Fake {
-    fn holds(&self, hash: EntryHash) -> bool {
-        hash == HEAD
+    fn holds(&self, at: Own) -> bool {
+        at == HEAD_AT
     }
 
-    fn continues(&self, hash: EntryHash) -> bool {
-        hash == HEAD && self.closed
+    fn continues(&self, at: Own) -> bool {
+        at == HEAD_AT && self.closed
     }
 
-    fn after(&self, _: EntryHash) -> Option<Rc<Entry>> {
-        None
+    fn unfinished(&self, _: Own) -> bool {
+        false
     }
 }
 
@@ -449,7 +449,7 @@ fn recover(disk: &MemDisk) -> Result<Vec<Outcome>, Error> {
     let capabilities = d.capabilities(Root::Folder);
     let found = d.run(recovery::assess(
         &layout,
-        Some((WRITER, HEAD)),
+        Some((WRITER, HEAD_AT)),
         &logs,
         &BTreeSet::new(),
         capabilities,
@@ -984,20 +984,20 @@ fn records_that_are_unchained_unconfined_or_settled_are_not_acted_on() {
     let other = WriterId::from_u128(0x99);
     write(d, WRITER, 1, HEAD, "b");
     write(d, WRITER, 2, EntryHash::from_u128(0x12), "b");
-    write(d, WRITER, 3, HEAD, ".t/writers/x");
+    write(d, WRITER, 3, HEAD, ".t/writers.2/x");
     write(d, other, 4, HEAD, "b");
     write(d, other, 5, HEAD, "c");
 
     struct Settled;
     impl Chain for Settled {
-        fn holds(&self, hash: EntryHash) -> bool {
-            hash == HEAD
+        fn holds(&self, at: Own) -> bool {
+            at == HEAD_AT
         }
-        fn continues(&self, _: EntryHash) -> bool {
+        fn continues(&self, _: Own) -> bool {
             false
         }
-        fn after(&self, _: EntryHash) -> Option<Rc<Entry>> {
-            None
+        fn unfinished(&self, _: Own) -> bool {
+            false
         }
     }
     let logs: BTreeMap<WriterId, Settled> = [(WRITER, Settled), (other, Settled)].into();
@@ -1006,7 +1006,7 @@ fn records_that_are_unchained_unconfined_or_settled_are_not_acted_on() {
     let found = d
         .run(recovery::assess(
             &layout,
-            Some((WRITER, HEAD)),
+            Some((WRITER, HEAD_AT)),
             &logs,
             &settled,
             Capabilities::ALL,

@@ -4,7 +4,7 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use common::{files_under, fresh, held, layout, machine, Instance};
+use common::{files_under, fresh, held, layout, machine, Chains, Instance};
 use toshokan::blocking::run;
 use toshokan::compaction::compact;
 use toshokan::crash;
@@ -16,7 +16,7 @@ use toshokan::reader::{CachedView, Reader};
 use toshokan::report::{Rekey, Start};
 use toshokan::simulator::Machine;
 use toshokan::writer::{Claimed, Writer, SEGMENT_BOUND};
-use toshokan::{EntryHash, Error, Hlc, MemDisk, Refusal, Root, SegmentName, WriterId};
+use toshokan::{EntryHash, Error, Hlc, Io, MemDisk, Refusal, Root, SegmentName, WriterId};
 
 fn segments(machine: &Machine, writer: WriterId) -> usize {
     files_under(&machine.folder, &layout().writer(writer))
@@ -42,10 +42,10 @@ fn a_writer_appends_to_one_new_segment_per_process() {
     assert_eq!(segments(&machine, id), 2);
 
     let view = fresh(&machine.folder);
-    let log = &view.writers()[&id];
+    let log = &view.writers[&id];
     assert_eq!(log.heads(), [*written.last().unwrap()]);
     assert_eq!(log.chain_to(*written.last().unwrap()), Some(written));
-    assert_eq!(log.forks(), []);
+    assert!(log.forks.is_empty());
 }
 
 #[test]
@@ -117,7 +117,9 @@ fn no_writer_joins_the_pool_before_its_genesis_entry_is_durable() {
                     run(&mut disk, Writer::claim(&layout(), &reader)).unwrap();
                 match start {
                     Start::New => assert!(after < operations, "{case}"),
-                    Start::Resumed(id) => assert!(reader.logs()[&id].genesis().is_some(), "{case}"),
+                    Start::Resumed(id) => {
+                        assert!(reader.derived().writers.contains_key(&id), "{case}")
+                    }
                     Start::Rekeyed { .. } => panic!("{case}: {start:?}"),
                 }
             }
@@ -169,10 +171,10 @@ fn a_commit_crashed_anywhere_is_continued_after_its_chains_last_entry_or_by_a_ne
             |fault, disk| {
                 let shown = format!("{capabilities:?}, {fault:?}");
                 let before = fresh(&disk);
-                let [tip] = before.writers()[&id].heads()[..] else {
-                    panic!("{shown}: {:?}", before.writers()[&id].heads());
+                let [tip] = before.writers[&id].heads()[..] else {
+                    panic!("{shown}: {:?}", before.writers[&id].heads());
                 };
-                let chain = before.writers()[&id].chain_to(tip).unwrap();
+                let chain = before.writers[&id].chain_to(tip).unwrap();
                 let local = disk.files(Root::Local);
                 let recorded = ["head.json", "head.json.next"]
                     .map(|name| Layout::local(chain[0]).join(name).unwrap())
@@ -185,14 +187,14 @@ fn a_commit_crashed_anywhere_is_continued_after_its_chains_last_entry_or_by_a_ne
                     held(&before).is_subset(&held(&after)),
                     "{shown}: the folder lost entries"
                 );
-                for log in after.writers().values() {
-                    assert_eq!(log.forks(), [], "{shown}");
+                for log in after.writers.values() {
+                    assert!(log.forks.is_empty(), "{shown}");
                 }
                 match &again.start {
                     Start::Resumed(resumed) => {
                         assert_eq!(*resumed, id, "{shown}");
                         assert_eq!(
-                            after.writers()[&id].predecessor(written[0]),
+                            after.writers[&id].predecessor(written[0]),
                             Some(tip),
                             "{shown}"
                         );
@@ -206,7 +208,7 @@ fn a_commit_crashed_anywhere_is_continued_after_its_chains_last_entry_or_by_a_ne
                     start => panic!("{shown}: {start:?}"),
                 }
                 assert_ne!(again.id(), id, "{shown}");
-                assert_eq!(after.writers()[&id].heads(), [tip], "{shown}");
+                assert_eq!(after.writers[&id].heads(), [tip], "{shown}");
                 let mut named = chain.iter().map(|&entry| Some(head_record(id, entry)));
                 assert!(
                     !named.any(|record| record == recorded),
@@ -260,6 +262,40 @@ fn sync_everything(disk: &MemDisk) {
 }
 
 #[test]
+fn a_writer_whose_last_entry_follows_a_hidden_segment_does_not_resume() {
+    let mut first = Instance::open(machine(), 1);
+    first.write("a").unwrap();
+    let id = first.id();
+    let mut second = Instance::open(first.close(), 2);
+    let folder = second.machine.folder.clone();
+    let before = folder.files(Root::Folder);
+    second.write("b").unwrap();
+    let hidden = folder
+        .files(Root::Folder)
+        .into_keys()
+        .find(|path| !before.contains_key(path))
+        .expect("the second session's segment");
+    let mut third = Instance::open(second.close(), 3);
+    third.write("c").unwrap();
+    let machine = third.close();
+    machine
+        .folder
+        .perform(Io::Remove {
+            root: Root::Folder,
+            path: hidden,
+        })
+        .unwrap();
+    let fourth = Instance::open(machine, 4);
+    assert_eq!(
+        fourth.start,
+        Start::Rekeyed {
+            old: id,
+            why: Rekey::Restored
+        }
+    );
+}
+
+#[test]
 fn a_forked_history_is_never_written_again() {
     let mut original = Instance::open(machine(), 1);
     original.write("a1").unwrap();
@@ -269,7 +305,7 @@ fn a_forked_history_is_never_written_again() {
     clone.write("b2").unwrap();
     original.write("a2").unwrap();
     let view = fresh(&original.machine.folder);
-    assert_eq!(view.writers()[&id].forks().len(), 1);
+    assert_eq!(view.writers[&id].forks.len(), 1);
 
     let dir = layout().writer(id);
     let before: BTreeMap<_, _> = original.machine.folder.files(Root::Folder);
@@ -416,7 +452,7 @@ fn a_writer_whose_replaced_segment_survives_in_a_copy_appends_to_a_new_segment()
     assert_eq!(segments(&instance.machine, id), 3);
     assert_eq!(instance.machine.folder.files(Root::Folder)[&path], replaced);
     let view = fresh(&instance.machine.folder);
-    assert_eq!(view.writers()[&id].predecessor(next[0]), Some(head));
+    assert_eq!(view.writers[&id].predecessor(next[0]), Some(head));
 }
 
 /// Puts back each of `files` as it was.
@@ -468,10 +504,10 @@ fn compaction_keeps_the_members_a_newer_build_wrote_in_the_snapshot_it_folds() {
     let id = instance.id();
     let path = layout().snapshot(id, first.snapshot);
     let text = String::from_utf8(instance.machine.folder.files(Root::Folder)[&path].clone());
-    let newer = text
-        .unwrap()
-        .replacen('{', r#"{"later":{"x":[1, 2]},"#, 1)
-        .replacen(r#""state":{"#, r#""state":{"also":[ true ],"#, 1);
+    let text = text.unwrap().replacen('{', r#"{"later":{"x":[1, 2]},"#, 1);
+    let (head, state) = text.split_at(text.find(r#""state":{"#).unwrap() + r#""state":{"#.len());
+    let comma = if state.starts_with('}') { "" } else { "," };
+    let newer = format!(r#"{head}"also":[ true ]{comma}{state}"#);
     restore(
         &instance.machine.folder,
         BTreeMap::from([(path.clone(), newer.into_bytes())]),
@@ -543,7 +579,7 @@ fn a_failed_append_leaves_its_segment() {
     let last = instance.write("c").unwrap();
     assert_eq!(segments(&instance.machine, id), 2);
     let view = fresh(&instance.machine.folder);
-    assert_eq!(view.writers()[&id].heads(), last);
+    assert_eq!(view.writers[&id].heads(), last);
 }
 
 #[test]
@@ -567,7 +603,7 @@ fn compaction_leaves_the_segment_a_crash_left_open() {
 
     written.extend(second.write("c").unwrap());
     let again = second.compact().unwrap();
-    assert_eq!(again.folded, 4);
+    assert_eq!(again.folded, 1, "the entry since the first snapshot");
     let files = files_under(&second.machine.folder, &layout().writer(id));
     assert_eq!(
         files.len(),
@@ -577,22 +613,34 @@ fn compaction_leaves_the_segment_a_crash_left_open() {
     let view = fresh(&second.machine.folder);
     assert_eq!(held(&view), written.iter().copied().collect());
     assert_eq!(
-        view.writers()[&id].chain_to(*written.last().unwrap()),
+        view.writers[&id].chain_to(*written.last().unwrap()),
         Some(written)
     );
 }
 
 #[test]
-fn compacting_one_branch_of_a_fork_keeps_the_other() {
+fn a_writer_whose_history_forked_does_not_compact() {
     let mut original = Instance::open(machine(), 1);
     let mut written = original.write("a1").unwrap();
     let mut clone = Instance::open(original.machine.cloned(), 2);
     written.extend(clone.write("b2").unwrap());
     written.extend(original.write("a2").unwrap());
-    original.compact().unwrap();
+    let before = original.machine.folder.files(Root::Folder);
+    let refused = original.compact();
+    assert!(
+        matches!(
+            refused,
+            Err(Error::Rekey {
+                why: Rekey::Forked,
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(original.machine.folder.files(Root::Folder), before);
     let view = fresh(&original.machine.folder);
     assert_eq!(held(&view), written.iter().copied().collect());
-    assert_eq!(view.writers()[&original.id()].forks().len(), 1);
+    assert_eq!(view.writers[&original.id()].forks.len(), 1);
 }
 
 #[test]
@@ -689,7 +737,8 @@ fn entries_that_reached_the_folder_before_a_failure_are_followed_not_forked() {
             label: "x".into(),
             ops: Vec::new(),
             displaced: Vec::new(),
-            reverses: None,
+            forks: Vec::new(),
+            more: 0,
         })
     };
     for open in [false, true] {
@@ -713,9 +762,9 @@ fn entries_that_reached_the_folder_before_a_failure_are_followed_not_forked() {
         );
         let last = last.unwrap();
         let view = fresh(&backend.disk);
-        let log = &view.writers()[&writer.id()];
+        let log = &view.writers[&writer.id()];
         assert_eq!(log.heads(), [last[0].hash()], "open {open}");
-        assert_eq!(log.forks(), [], "open {open}");
+        assert!(log.forks.is_empty(), "open {open}");
         assert_eq!(
             log.chain_to(last[0].hash()).map(|chain| chain.len()),
             Some(3)
@@ -842,27 +891,38 @@ fn compaction_leaves_a_segment_another_process_has_open() {
     written.extend(original.write("a2").unwrap());
     let view = fresh(&original.machine.folder);
     assert_eq!(held(&view), written.iter().copied().collect());
-    assert_eq!(view.writers()[&id].forks().len(), 1);
+    assert_eq!(view.writers[&id].forks.len(), 1);
 }
 
-// Folded.cfg: without the fold check the clone deletes a segment the original
-// sealed after the fork, though no snapshot folds the original's entry.
+// Folded.cfg: a clone that compacted would delete a segment the original sealed
+// after the fork, though no snapshot folds the original's entry.
 #[test]
-fn compaction_leaves_a_sealed_segment_holding_an_entry_no_snapshot_folds() {
+fn a_clone_leaves_a_sealed_segment_holding_an_entry_no_snapshot_folds() {
     let mut original = Instance::open(machine(), 1);
     let mut written = original.write("a1").unwrap();
     let mut clone = Instance::open(original.machine.cloned(), 2);
     written.extend(original.write("a2").unwrap());
     let folder = original.close().folder;
     written.extend(clone.write("b2").unwrap());
-    let compacted = clone.compact().unwrap();
-    assert_eq!(compacted.removed.len(), 1, "only the clone's own segment");
+    let before = folder.files(Root::Folder);
+    let refused = clone.compact();
+    assert!(
+        matches!(
+            refused,
+            Err(Error::Rekey {
+                why: Rekey::Forked,
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(folder.files(Root::Folder), before);
     let view = fresh(&folder);
     assert_eq!(held(&view), written.iter().copied().collect());
 }
 
 /// The folder of a machine, where a segment gains `bytes` once the snapshot is
-/// written: between compaction's judgement of it and its deletion.
+/// in place: between compaction's judgement of it and its deletion.
 struct Meddling<'a> {
     machine: &'a mut Machine,
     segment: toshokan::RelPath,
@@ -874,7 +934,7 @@ impl toshokan::blocking::Backend for Meddling<'_> {
     }
 
     fn perform(&mut self, io: toshokan::Io) -> toshokan::IoResult {
-        let snapshot = matches!(&io, toshokan::Io::Create { path, .. }
+        let snapshot = matches!(&io, toshokan::Io::Create { path, .. } | toshokan::Io::Rename { to: path, .. }
             if path.name().is_some_and(|name| name.starts_with("snapshot-")));
         let reply = self.machine.perform(io)?;
         if snapshot {
@@ -905,7 +965,8 @@ fn a_segment_that_changes_before_compaction_deletes_it_is_left() {
         segment: sealed.clone(),
     };
     let name = toshokan::Nonce::from_u128(5);
-    let (_, compacted) = run(&mut meddling, compact(writer, &second.reader, name));
+    let compaction = compact(writer, &second.reader, &[], name, Capabilities::ALL);
+    let (_, compacted) = run(&mut meddling, compaction);
     assert_eq!(compacted.unwrap().removed.len(), 1);
     assert!(segment_paths(&second.machine, id).contains(&sealed));
 }
@@ -954,7 +1015,8 @@ fn a_writer_confirms_its_head_from_the_end_of_the_file_that_holds_it() {
         label: "d".into(),
         ops: Vec::new(),
         displaced: Vec::new(),
-        reverses: None,
+        forks: Vec::new(),
+        more: 0,
     });
     let append = claimed
         .writer
@@ -1003,7 +1065,8 @@ fn finishing_a_compactions_deletions_confirms_the_head_from_its_snapshot() {
             label: "c".into(),
             ops: Vec::new(),
             displaced: Vec::new(),
-            reverses: None,
+            forks: Vec::new(),
+            more: 0,
         });
         let append = writer.append(vec![(Hlc::ZERO, kind)], SegmentName::from_u128(77));
         let (_, appended) = run(&mut reads, append);

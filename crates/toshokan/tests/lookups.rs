@@ -14,6 +14,7 @@ use common::Later;
 use toshokan::asynch::{self, Fs, Library};
 use toshokan::env::{ExactNames, PrefixIdentity, SeededRandom, TestClock};
 use toshokan::io::Capabilities;
+use toshokan::reader::GRACE_MS;
 use toshokan::simulator::Machine;
 use toshokan::view::Conflicted;
 use toshokan::{
@@ -69,13 +70,13 @@ impl Fs for Yielding {
     }
 }
 
-fn open(folder: &MemDisk, label: &str, seed: u64) -> Library<Yielding> {
+fn open(folder: &MemDisk, clock: &TestClock, label: &str, seed: u64) -> Library<Yielding> {
     let machine = Machine {
         folder: folder.process(),
         local: MemDisk::new(),
     };
     let env = Env {
-        clock: Box::new(TestClock::at(1_000)),
+        clock: Box::new(clock.clone()),
         random: Box::new(SeededRandom::new(seed)),
         identify: Rc::new(PrefixIdentity { prefix: 1 << 16 }),
         names: Box::new(ExactNames),
@@ -416,9 +417,10 @@ fn write(library: &mut Library<Yielding>, chance: &mut SeededRandom, case: &str)
 fn run_seeded(seed: u64) {
     let mut chance = SeededRandom::new(seed);
     let folder = MemDisk::new();
+    let clock = TestClock::at(1_000);
     let mut libraries = [
-        open(&folder, "a", seed * 10),
-        open(&folder, "b", seed * 10 + 1),
+        open(&folder, &clock, "a", seed * 10),
+        open(&folder, &clock, "b", seed * 10 + 1),
     ];
     let mut backup = None;
     for step in 0..60 {
@@ -441,23 +443,22 @@ fn run_seeded(seed: u64) {
                 None => backup = Some(folder.files(Root::Folder)),
                 Some(kept) => {
                     restore(&folder, &kept);
-                    let adopts = below(&mut chance, 2) == 0;
-                    for (j, library) in libraries.iter_mut().enumerate() {
+                    for library in libraries.iter_mut() {
                         pollster::block_on(library.rescan()).unwrap();
-                        match adopts && j == k {
-                            true => drop(pollster::block_on(library.adopt(&case))),
-                            false => pollster::block_on(library.let_go()).unwrap(),
-                        }
+                    }
+                    clock.advance(GRACE_MS);
+                    for library in libraries.iter_mut() {
+                        pollster::block_on(library.rescan()).unwrap();
                     }
                     let library = &mut libraries[k];
                     let elsewhere = vec![pick(&mut chance, &paths())];
                     pollster::block_on(library.rescan_paths(elsewhere)).unwrap();
-                    let mut fresh = open(&folder, "fresh", seed * 10 + 2);
+                    let mut fresh = open(&folder, &clock, "fresh", seed * 10 + 2);
                     pollster::block_on(fresh.rescan()).unwrap();
                     assert_eq!(
                         shown(&library.view()),
                         shown(&fresh.view()),
-                        "{case}: what is shown after a restore is let go or adopted is what a fresh open and rescan show"
+                        "{case}: what is shown a day and a rescan after a restore is what a fresh open and rescan show"
                     );
                 }
             },
@@ -480,7 +481,7 @@ fn run_seeded(seed: u64) {
                     // A directory listed before the change shows it at the next rescan.
                     pollster::block_on(library.rescan()).unwrap();
                 }
-                let mut fresh = open(&folder, "fresh", seed * 10 + 2);
+                let mut fresh = open(&folder, &clock, "fresh", seed * 10 + 2);
                 pollster::block_on(fresh.rescan()).unwrap();
                 assert_eq!(
                     shown(&library.view()),

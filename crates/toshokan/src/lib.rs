@@ -25,9 +25,13 @@ pub mod blocking;
 pub mod cache;
 #[doc(hidden)]
 pub mod compaction;
+#[doc(hidden)]
+pub mod contribution;
 mod cow;
 #[doc(hidden)]
 pub mod crash;
+#[doc(hidden)]
+pub mod derive;
 pub mod disk;
 #[doc(hidden)]
 pub mod drafts;
@@ -78,7 +82,7 @@ pub mod writer;
 pub use disk::MemDisk;
 pub use drafts::Drafted;
 pub use env::{Clock, Env, ExactNames, Identify, Names, Random};
-pub use error::{Error, Invalid, Mismatch, Refusal, Result, Why};
+pub use error::{Error, Invalid, Mismatch, Refusal, Result, Unbindable, Why};
 pub use ids::{EntityId, EntryHash, Hlc, Identity, Nonce, SegmentName, WriterId};
 pub use io::{Io, IoError, IoResult, Operation, Reply, Root, Step, Task};
 pub use layout::Layout;
