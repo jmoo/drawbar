@@ -10,10 +10,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::world::{
-    change, latest, show, Body, Dir, Dismissal, Entry, Field, Hash, Item, ItemKind, Live, Shown,
-    Val, World, Write,
+    change, latest, show, Body, Dir, Dismissal, Entry, Field, File, Hash, Item, ItemKind, Live,
+    Seen, Shown, Val, World, Write,
 };
-use super::{Compaction, Design, Reading};
+use super::{Bound, Compaction, Design, Reading};
 
 /// How an oracle places a set of entries.
 #[derive(Clone, Debug, Default)]
@@ -299,6 +299,26 @@ impl Design for Oracle {
 
     fn holds(&self, r: &Reading<'_, Folds>) -> BTreeSet<Hash> {
         holds(r.world, r, |s| s.head)
+    }
+
+    fn head(&self, _: &World, s: &Folds) -> Hash {
+        s.head
+    }
+
+    fn tip_writes(&self, _: &World, _: &[File<Folds>], _: &[Seen]) -> BTreeSet<Hash> {
+        BTreeSet::new()
+    }
+
+    fn dismissals(&self, _: &World, _: &Folds) -> Vec<Dismissal> {
+        Vec::new()
+    }
+
+    fn remembered(&self, _: &World, memory: &Memory) -> BTreeSet<Hash> {
+        memory.entries.clone()
+    }
+
+    fn bounded(&self, _: &Folds, _: Bound) -> bool {
+        true
     }
 }
 

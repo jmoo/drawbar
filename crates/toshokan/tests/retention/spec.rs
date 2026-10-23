@@ -6,10 +6,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::world::{
-    change, latest, show, Body, Dir, Dismissal, Entry, Field, Hash, Item, ItemKind, Live, Ref,
-    Shown, Val, World, Write,
+    change, latest, show, Body, Dir, Dismissal, Entry, Field, File, Hash, Item, ItemKind, Live,
+    Ref, Seen, Shown, Val, World, Write,
 };
-use super::{Compaction, Design, Reading};
+use super::{Bound, Compaction, Design, Reading};
 
 /// A reference a contribution keeps: `[own n, own hash, writer, n, hash]`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -302,6 +302,45 @@ impl Design for Spec {
 
     fn holds(&self, r: &Reading<'_, Contribution>) -> BTreeSet<Hash> {
         super::oracle::holds(r.world, r, |s| s.head.hash)
+    }
+
+    fn head(&self, _: &World, s: &Contribution) -> Hash {
+        s.head.hash
+    }
+
+    fn tip_writes(&self, _: &World, files: &[File<Contribution>], seen: &[Seen]) -> BTreeSet<Hash> {
+        let snapshots: Vec<&Contribution> = seen
+            .iter()
+            .filter_map(|s| match &files[s.file].body {
+                Body::Snapshot(c) => Some(c),
+                Body::Segment(_) => None,
+            })
+            .collect();
+        snapshots
+            .iter()
+            .filter(|c| {
+                !snapshots
+                    .iter()
+                    .any(|o| o.dir == c.dir && o.head != c.head && o.certifies(c.head))
+            })
+            .flat_map(|c| c.own.values().map(|(at, _)| at.hash))
+            .collect()
+    }
+
+    fn dismissals(&self, _: &World, s: &Contribution) -> Vec<Dismissal> {
+        s.dismissals.iter().map(|(_, d)| *d).collect()
+    }
+
+    fn remembered(&self, _: &World, memory: &Memory) -> BTreeSet<Hash> {
+        memory.entries.clone()
+    }
+
+    fn bounded(&self, c: &Contribution, b: Bound) -> bool {
+        c.own.len() <= b.fields
+            && c.refs.len() <= 2 * b.fields * (b.writers - 1)
+            && c.takes.len() <= b.fields * (b.writers - 1)
+            && c.certs.segments.len() <= b.segments
+            && c.certs.hashes.len() <= c.dismissals.len() + b.drops
     }
 }
 

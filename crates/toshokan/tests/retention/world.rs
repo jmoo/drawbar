@@ -60,7 +60,7 @@ pub enum Val {
 }
 
 /// A write to one field. `None` is a clear, or a set member's remove.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Write {
     pub field: Field,
     pub value: Option<Val>,
@@ -77,7 +77,7 @@ pub struct Ref {
 /// A run, as a dismissal names it: its writer, its first entry and its last. A
 /// tip run is named by the tip's head: its first entry is then known only by
 /// number.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Dismissal {
     pub dir: Dir,
     pub first: Ref,
@@ -85,7 +85,7 @@ pub struct Dismissal {
     pub tip: Option<Ref>,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Entry {
     pub hash: Hash,
     pub dir: Dir,

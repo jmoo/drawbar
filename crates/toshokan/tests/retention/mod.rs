@@ -7,8 +7,7 @@
 //! which knows every entry and never compacts.
 //!
 //! A design is checked through [`Design`]: [`spec::Spec`] states design R's rules
-//! over what a reader can see, and [`Real`] will be toshokan once it implements
-//! them.
+//! over what a reader can see, and [`real::Real`] is toshokan.
 
 #![allow(dead_code, reason = "each test binary uses its own part")]
 
@@ -17,10 +16,11 @@ use std::collections::BTreeSet;
 pub mod check;
 pub mod history;
 pub mod oracle;
+pub mod real;
 pub mod spec;
 pub mod world;
 
-use world::{Dir, File, Hash, Seen, Shown, World};
+use world::{Dir, Dismissal, File, Hash, Seen, Shown, World};
 
 /// What a writer has when it compacts.
 pub struct Compaction<'a, S> {
@@ -44,6 +44,17 @@ pub struct Reading<'a, S> {
     pub world: &'a World,
     pub files: &'a [File<S>],
     pub seen: &'a [Seen],
+}
+
+/// What P9 bounds a snapshot by: the fields written, the writers, the segment
+/// files its directory ever held, and the compactions that followed a dropped
+/// version.
+#[derive(Clone, Copy, Debug)]
+pub struct Bound {
+    pub fields: usize,
+    pub writers: usize,
+    pub segments: usize,
+    pub drops: usize,
 }
 
 /// A design under test.
@@ -70,30 +81,25 @@ pub trait Design {
     /// The entries the files `r` sees hold, by the oracle's knowledge; used only
     /// to state properties.
     fn holds(&self, r: &Reading<'_, Self::Snapshot>) -> BTreeSet<Hash>;
-}
 
-/// toshokan, once it implements design R. Until then every check of it is
-/// ignored.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Real;
+    /// The last entry a snapshot folds.
+    fn head(&self, world: &World, s: &Self::Snapshot) -> Hash;
 
-impl Design for Real {
-    type Snapshot = ();
-    type Memory = ();
+    /// The own writes of the tips among the snapshots `seen` shows: those no
+    /// other one there certifies.
+    fn tip_writes(
+        &self,
+        world: &World,
+        files: &[File<Self::Snapshot>],
+        seen: &[Seen],
+    ) -> BTreeSet<Hash>;
 
-    fn compact(&self, _: &Compaction<'_, ()>) {
-        unimplemented!("toshokan does not implement design R yet")
-    }
+    /// The runs a snapshot's dismissals name.
+    fn dismissals(&self, world: &World, s: &Self::Snapshot) -> Vec<Dismissal>;
 
-    fn read(&self, _: &Reading<'_, ()>, _: &()) -> (Shown, ()) {
-        unimplemented!("toshokan does not implement design R yet")
-    }
+    /// The entries a reader remembers apart from its tips.
+    fn remembered(&self, world: &World, memory: &Self::Memory) -> BTreeSet<Hash>;
 
-    fn grace(&self, _: &Reading<'_, ()>, _: &()) -> (Shown, ()) {
-        unimplemented!("toshokan does not implement design R yet")
-    }
-
-    fn holds(&self, _: &Reading<'_, ()>) -> BTreeSet<Hash> {
-        unimplemented!("toshokan does not implement design R yet")
-    }
+    /// Whether a snapshot is within P9's bound.
+    fn bounded(&self, s: &Self::Snapshot, bound: Bound) -> bool;
 }

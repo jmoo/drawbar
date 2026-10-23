@@ -20,11 +20,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::history::{materialize, writer_view, Bounds, Folder, History, ViewOf};
 use super::oracle::{self, Oracle};
-use super::spec::{Contribution, Spec};
 use super::world::{
     self, Body, Dir, Existence, Field, File, Hash, ItemKind, Seen, Shown, Val, World,
 };
-use super::{Design, Reading};
+use super::{Bound, Design, Reading};
 
 /// What a sweep counted.
 #[derive(Default, Debug)]
@@ -333,24 +332,24 @@ fn permute(order: &mut Vec<usize>, k: usize, out: &mut Vec<Vec<usize>>, cap: usi
     }
 }
 
-pub struct Checker<'a> {
+pub struct Checker<'a, D: Design> {
     pub history: &'a History,
     /// Earlier states of this history, oldest first, for restores.
     pub ancestors: &'a [History],
     pub oracle: Folder<oracle::Folds>,
-    pub spec: Folder<Contribution>,
+    pub spec: Folder<D::Snapshot>,
     pub tally: &'a Tally,
     pub depth: Depth,
-    pub design: Spec,
+    pub design: D,
 }
 
-impl<'a> Checker<'a> {
+impl<'a, D: Design> Checker<'a, D> {
     pub fn new(
         history: &'a History,
         ancestors: &'a [History],
         tally: &'a Tally,
         depth: Depth,
-        design: Spec,
+        design: D,
     ) -> Self {
         Self {
             history,
@@ -379,7 +378,11 @@ impl<'a> Checker<'a> {
                 Body::Snapshot(c) => format!(
                     "snap{}@{}",
                     s.file,
-                    oracle::describe(self.history.world.entry(c.head.hash))
+                    oracle::describe(
+                        self.history
+                            .world
+                            .entry(self.design.head(&self.history.world, c))
+                    )
                 ),
             })
             .collect();
@@ -391,27 +394,6 @@ impl<'a> Checker<'a> {
 
     fn world(&self) -> &World {
         &self.history.world
-    }
-
-    /// The own writes of the tips in `seen`: snapshots no other one there
-    /// certifies.
-    fn tip_writes(files: &[File<Contribution>], seen: &[Seen]) -> BTreeSet<Hash> {
-        let snapshots: Vec<&Contribution> = seen
-            .iter()
-            .filter_map(|s| match &files[s.file].body {
-                Body::Snapshot(c) => Some(c),
-                Body::Segment(_) => None,
-            })
-            .collect();
-        snapshots
-            .iter()
-            .filter(|c| {
-                !snapshots
-                    .iter()
-                    .any(|o| o.dir == c.dir && o.head != c.head && o.certifies(c.head))
-            })
-            .flat_map(|c| c.own.values().map(|(at, _)| at.hash))
-            .collect()
     }
 
     /// The oracle's and design R's fresh reads of `seen`.
@@ -444,7 +426,9 @@ impl<'a> Checker<'a> {
             if let Err(e) = agree(
                 self.world(),
                 &held,
-                &Self::tip_writes(&self.spec.files, &seen),
+                &self
+                    .design
+                    .tip_writes(self.world(), &self.spec.files, &seen),
                 &o,
                 &s,
                 self.tally,
@@ -497,7 +481,7 @@ impl<'a> Checker<'a> {
         if let Err(e) = agree(
             self.world(),
             &Oracle.holds(&ro),
-            &Self::tip_writes(&spec_files, &seen),
+            &self.design.tip_writes(self.world(), &spec_files, &seen),
             &o,
             &s,
             self.tally,
@@ -546,12 +530,13 @@ impl<'a> Checker<'a> {
                 .iter()
                 .filter(|g| g.dir == f.dir && matches!(g.body, Body::Segment(_)))
                 .count();
-            let ok = c.own.len() <= fields
-                && c.refs.len() <= 2 * fields * (writers - 1)
-                && c.takes.len() <= fields * (writers - 1)
-                && c.certs.segments.len() <= segments
-                && c.certs.hashes.len() <= c.dismissals.len() + drops;
-            if !ok {
+            let bound = Bound {
+                fields,
+                writers,
+                segments,
+                drops,
+            };
+            if !self.design.bounded(c, bound) {
                 panic!(
                     "P9: snapshot {} is larger than its bound: {c:?}\n  history: {:?}",
                     f.id, self.history.acts
@@ -587,7 +572,7 @@ impl<'a> Checker<'a> {
                         .take(s.lines)
                         .flat_map(|&h| world.entry(h).dismisses.iter().copied()),
                 ),
-                Body::Snapshot(c) => dismissals.extend(c.dismissals.iter().map(|(_, d)| *d)),
+                Body::Snapshot(c) => dismissals.extend(self.design.dismissals(world, c)),
             }
         }
         dismissals
@@ -675,7 +660,7 @@ impl<'a> Checker<'a> {
                 if let Err(e) = agree(
                     self.world(),
                     &held,
-                    &Self::tip_writes(files, &seen),
+                    &self.design.tip_writes(self.world(), files, &seen),
                     &o,
                     &cached,
                     self.tally,
@@ -763,7 +748,7 @@ impl<'a> Checker<'a> {
             &before,
             &Default::default(),
         );
-        let mut variants: Vec<Fault> = Vec::new();
+        let mut variants: Vec<Fault<D::Snapshot>> = Vec::new();
         for (i, f) in self.spec.files.iter().enumerate() {
             let Body::Segment(lines) = &f.body else {
                 continue;
@@ -824,10 +809,10 @@ impl<'a> Checker<'a> {
             let mut held = Oracle.holds(&ro);
             // The guard keeps only what something visible descends from; the
             // oracle then holds what the reader keeps.
-            let stale: BTreeSet<Hash> = kept
-                .entries
-                .iter()
-                .copied()
+            let stale: BTreeSet<Hash> = self
+                .design
+                .remembered(world, &kept)
+                .into_iter()
                 .filter(|e| !held.contains(e))
                 .collect();
             if let Some(e) = stale
@@ -852,7 +837,7 @@ impl<'a> Checker<'a> {
             if let Err(e) = agree(
                 world,
                 &held,
-                &Self::tip_writes(&spec_files, &seen),
+                &self.design.tip_writes(self.world(), &spec_files, &seen),
                 &o,
                 &after,
                 self.tally,
@@ -869,7 +854,7 @@ impl<'a> Checker<'a> {
 }
 
 /// A faulted folder: what happened, and the files each design then holds.
-type Fault = (String, Vec<File<Contribution>>, Vec<File<oracle::Folds>>);
+type Fault<S> = (String, Vec<File<S>>, Vec<File<oracle::Folds>>);
 
 /// Every segment copied under another name, as a sync client's conflicted copy.
 fn copy<S: Clone>(files: &mut Vec<File<S>>) {
@@ -951,7 +936,7 @@ fn branch_kept(before: &Shown, after: &Shown, tally: &Tally) -> bool {
 }
 
 /// Every history within `bounds`, each checked at `depth`.
-pub fn sweep(bounds: Bounds, depth: Depth, design: Spec) -> Tally {
+pub fn sweep<D: Design + Copy + Sync>(bounds: Bounds, depth: Depth, design: D) -> Tally {
     let tally = Tally::default();
     let root = History::seeded();
     let view = |h: &History, i: usize| writer_view(h, i, &design);
@@ -993,15 +978,15 @@ pub fn sweep(bounds: Bounds, depth: Depth, design: Spec) -> Tally {
 }
 
 /// One sweep's settings.
-struct Run<'a> {
+struct Run<'a, D> {
     bounds: Bounds,
     depth: Depth,
-    design: Spec,
+    design: D,
     tally: &'a Tally,
     view: &'a ViewOf<'a>,
 }
 
-impl Run<'_> {
+impl<D: Design + Copy> Run<'_, D> {
     fn explore(&self, h: &History, shown: &Shown, ancestors: &mut Vec<History>) {
         if h.written() >= self.bounds.entries || self.tally.failed.load(Ordering::Relaxed) {
             return;

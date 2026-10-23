@@ -5,6 +5,7 @@ mod retention;
 
 use retention::check::{sweep, Depth};
 use retention::history::{Act, Bounds};
+use retention::real::Real;
 use retention::spec::Spec;
 use retention::world::Val::{A, B};
 
@@ -16,6 +17,11 @@ const DEPTH: Depth = Depth {
 
 fn run(bounds: Bounds) {
     let tally = sweep(bounds, DEPTH, Spec::default());
+    eprintln!("{}", tally.report());
+}
+
+fn run_real(bounds: Bounds) {
+    let tally = sweep(bounds, DEPTH, Real);
     eprintln!("{}", tally.report());
 }
 
@@ -156,12 +162,60 @@ fn dismissed_entries_must_never_be_merged() {
 }
 
 #[test]
-#[ignore = "toshokan does not implement design R yet"]
-fn toshokan_matches_the_oracle() {
-    use retention::{Design, Real};
-    let _ = Real.holds(&retention::Reading {
-        world: &Default::default(),
-        files: &[],
-        seen: &[],
+fn toshokan_registers_with_a_clone_match_the_oracle() {
+    run_real(REGISTERS);
+}
+
+#[test]
+fn toshokan_set_members_with_a_clone_match_the_oracle() {
+    run_real(Bounds::new(
+        2,
+        true,
+        3,
+        &[Act::Add(0, 0), Act::Remove(0, 0)],
+    ));
+}
+
+#[test]
+fn toshokan_deletes_and_revives_match_the_oracle() {
+    run_real(Bounds::new(
+        2,
+        false,
+        3,
+        &[Act::Set(0, 0, A), Act::Delete(0), Act::Revive(0)],
+    ));
+}
+
+#[test]
+fn toshokan_dismissals_match_the_oracle() {
+    run_real(Bounds::new(
+        2,
+        true,
+        3,
+        &[Act::Set(0, 0, A), Act::Set(0, 0, B), Act::Dismiss],
+    ));
+}
+
+#[test]
+fn toshokan_copies_resumed_mid_segment_match_the_oracle() {
+    run_real(Bounds {
+        shared: true,
+        drops: true,
+        ..Bounds::new(2, true, 3, &[Act::Set(0, 0, A), Act::Set(0, 0, B)])
     });
+}
+
+#[test]
+fn toshokan_with_two_entities_matches_the_oracle() {
+    run_real(Bounds::new(
+        2,
+        false,
+        3,
+        &[
+            Act::Set(0, 0, A),
+            Act::Revive(1),
+            Act::Set(1, 0, B),
+            Act::Delete(0),
+        ],
+    ));
 }
