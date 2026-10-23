@@ -55,6 +55,11 @@ nord-format = { path = "../nord-format", version = "0.8.0", features = [
 proc-macro2 = { version = "1", features = ["span-locations"] }
 syn = { version = "2", default-features = false }
 
+# The browser benchmark, run only when named.
+[[test]]
+name = "bench"
+test = false
+
 # The browser suite, run by wasm-bindgen-cli's test runner.
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
