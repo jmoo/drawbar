@@ -739,8 +739,7 @@ impl DrawbarApp {
         };
         if let Some(why) = store.stopped() {
             self.log.trouble(format!(
-                "The library stopped answering, so it was closed: {why}. Open it again \
-                 from File ▸ {}.",
+                "The library was closed, since {why}. Open it again from File ▸ {}.",
                 crate::menu::RECENT
             ));
             self.let_library_go();
