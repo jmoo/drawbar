@@ -215,6 +215,12 @@ impl Walk {
         self.unlistable.insert(dir);
     }
 
+    /// The directories listed below the root, in order.
+    pub fn dirs(&self) -> Vec<RelPath> {
+        let below = self.listed.keys().filter(|dir| !dir.is_root());
+        below.cloned().collect()
+    }
+
     /// The directories left out of the walk, in order.
     pub fn unlisted(self) -> Vec<RelPath> {
         self.unlistable.into_iter().collect()

@@ -646,6 +646,7 @@ through_both!(
     an_effect_a_live_window_left_open_is_reported_live,
     a_change_of_case_another_install_did_not_start_is_finished_by_another,
     a_refresh_reports_another_installs_unfinished_change_as_it_stands,
+    a_scan_of_every_file_reports_the_directories_it_listed,
     a_directory_made_and_filled_in_one_change_is_undone_in_one,
     directories_made_and_removed_around_tree_moves_undo_and_redo,
     removing_an_empty_directory_is_undone_and_one_with_files_is_refused,
@@ -3040,6 +3041,26 @@ fn a_change_of_case_another_install_did_not_start_is_finished_by_another<F: Faca
         .map(|(path, bytes)| format!("{path:?} {}", String::from_utf8_lossy(&bytes)))
         .collect();
     assert_eq!(files, [r#"RelPath("kick.wav") kick"#]);
+}
+
+fn a_scan_of_every_file_reports_the_directories_it_listed<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    put(&folder, "a/b/c.wav", b"c");
+    folder
+        .perform(Io::MakeDir {
+            root: Root::Folder,
+            path: path("empty"),
+        })
+        .unwrap();
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    let dirs = a.rescan().unwrap().dirs;
+    assert_eq!(dirs, Some(vec![path("a"), path("a/b"), path("empty")]));
+    assert_eq!(
+        a.refresh().unwrap().dirs,
+        None,
+        "a refresh lists no directory"
+    );
 }
 
 fn a_refresh_reports_another_installs_unfinished_change_as_it_stands<F: Facade>() {

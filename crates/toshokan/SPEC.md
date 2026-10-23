@@ -557,7 +557,8 @@ their identities:
    the commit, and those whose file facts name such a path, are bound to no file
    and shown at their logged path as unscanned. Nothing about them is pinned, and
    each refresh scans every file until a scan of every file succeeds.
-   A scan of every file lists one directory at a time and keeps what it listed.
+   A scan of every file lists one directory at a time and keeps what it listed,
+   and the refresh that finishes it reports every directory it listed.
    A directory it cannot list is left out, as is every directory it has not
    reached once it has listed 1,000,000 entries: what is under them is unknown,
    as after a failed scan, and the scan reports them. A layout that hides leaves

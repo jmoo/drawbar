@@ -278,6 +278,9 @@ pub struct Refreshed {
     /// The directories the last scan of every file could not list. What is under
     /// them is unknown, as after a failed scan, until a scan lists them.
     pub unlisted: Vec<RelPath>,
+    /// Every directory below the root that a scan of every file listed, in order,
+    /// where this refresh finished one.
+    pub dirs: Option<Vec<RelPath>>,
     /// As [`Opened::orphaned`], as the pending records stand at this refresh: a
     /// writer elsewhere may have begun or finished an effect since.
     pub orphaned: Vec<Orphan>,

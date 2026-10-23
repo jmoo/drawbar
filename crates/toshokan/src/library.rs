@@ -96,6 +96,9 @@ pub struct Library {
     listing: Option<CowMap<RelPath, Listed>>,
     /// The directories the last scan of every file could not list.
     unlisted: Vec<RelPath>,
+    /// The directories below the root a scan of every file just listed, until a
+    /// refresh reports them.
+    walked: Option<Vec<RelPath>>,
     /// The identities scans read that no fact gives, as the local root should keep
     /// them.
     remembered: Scan,
@@ -295,6 +298,7 @@ impl Library {
             scan: remembered.clone(),
             listing: None,
             unlisted: Vec::new(),
+            walked: None,
             remembered,
             unkept: false,
             unscanned: Unscanned::default(),
@@ -643,6 +647,7 @@ impl Library {
                     removed: library.removed_facts(),
                     scan: library.scan_report(),
                     unlisted: library.unlisted.clone(),
+                    dirs: library.walked.take(),
                     orphaned: library.orphaned.clone(),
                 })
             })
@@ -2123,11 +2128,9 @@ fn walked<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
     .and_then(move |(library, (scan, read))| {
         let mut library = library;
         let known = library.borrow_mut();
-        let unlisted = known
-            .walking
-            .take()
-            .map(|walk| walk.unlisted())
-            .unwrap_or_default();
+        let walk = known.walking.take();
+        known.walked = walk.as_ref().map(Walk::dirs);
+        let unlisted = walk.map(Walk::unlisted).unwrap_or_default();
         let listing = scan
             .files
             .iter()
