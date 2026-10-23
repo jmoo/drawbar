@@ -138,7 +138,7 @@ fn read<D: Design>(
 fn agree(
     world: &World,
     held: &BTreeSet<Hash>,
-    visible: &BTreeSet<Hash>,
+    tips: &BTreeSet<Hash>,
     oracle: &Shown,
     spec: &Shown,
     tally: &Tally,
@@ -176,16 +176,20 @@ fn agree(
                 .filter(|&e| world.entry(e).write.is_some_and(|w| w.value == Some(*v)))
                 .collect()
         };
-        // A value only a write no visible file holds any more carries, a
-        // forgotten basis, is beyond the design; one it places above a fork
-        // point it cannot locate exactly, or holds back from a file it cannot
-        // place, shows in its writer's item.
+        // A value the design shows only in an item of its writer: as the run's
+        // value, where the fork lies inside a segment or a fault left lines it
+        // cannot place; or as a forgotten basis, which no tip it reads holds.
         let in_run = |v: &Val| {
             let writes = oracle_writes(v);
             let writers: BTreeSet<Dir> = writes.iter().map(|&e| world.entry(e).dir).collect();
-            let forgotten = writes.iter().all(|e| !visible.contains(e));
-            let mut runs = spec.items.iter().filter(|i| writers.contains(&i.dir));
-            forgotten || runs.any(|i| i.change.get(&field) == Some(&Some(*v)))
+            let unheld = writes.iter().all(|e| !tips.contains(e));
+            spec.items
+                .iter()
+                .filter(|i| writers.contains(&i.dir))
+                .any(|i| {
+                    i.change.get(&field) == Some(&Some(*v))
+                        || (unheld && i.forgotten.contains(&field))
+                })
         };
         if let Some(v) = o.difference(&s).find(|v| !in_run(v)) {
             return Err(format!(
@@ -389,9 +393,9 @@ impl<'a> Checker<'a> {
         &self.history.world
     }
 
-    /// The writes a design-R reader of `seen` holds: the own writes of its
-    /// tips, and the lines of its segments that no tip folds.
-    fn visible(world: &World, files: &[File<Contribution>], seen: &[Seen]) -> BTreeSet<Hash> {
+    /// The own writes of the tips in `seen`: snapshots no other one there
+    /// certifies.
+    fn tip_writes(files: &[File<Contribution>], seen: &[Seen]) -> BTreeSet<Hash> {
         let snapshots: Vec<&Contribution> = seen
             .iter()
             .filter_map(|s| match &files[s.file].body {
@@ -399,23 +403,15 @@ impl<'a> Checker<'a> {
                 Body::Segment(_) => None,
             })
             .collect();
-        let tips: Vec<&&Contribution> = snapshots
+        snapshots
             .iter()
             .filter(|c| {
                 !snapshots
                     .iter()
                     .any(|o| o.dir == c.dir && o.head != c.head && o.certifies(c.head))
             })
-            .collect();
-        let folded: BTreeSet<Hash> = tips.iter().flat_map(|t| world.chain(t.head.hash)).collect();
-        let own = tips
-            .iter()
-            .flat_map(|c| c.own.values().map(|(at, _)| at.hash));
-        let lines = seen.iter().flat_map(|s| match &files[s.file].body {
-            Body::Segment(lines) => lines[..s.lines].to_vec(),
-            Body::Snapshot(_) => Vec::new(),
-        });
-        own.chain(lines.filter(|h| !folded.contains(h))).collect()
+            .flat_map(|c| c.own.values().map(|(at, _)| at.hash))
+            .collect()
     }
 
     /// The oracle's and design R's fresh reads of `seen`.
@@ -448,7 +444,7 @@ impl<'a> Checker<'a> {
             if let Err(e) = agree(
                 self.world(),
                 &held,
-                &Self::visible(self.world(), &self.spec.files, &seen),
+                &Self::tip_writes(&self.spec.files, &seen),
                 &o,
                 &s,
                 self.tally,
@@ -501,7 +497,7 @@ impl<'a> Checker<'a> {
         if let Err(e) = agree(
             self.world(),
             &Oracle.holds(&ro),
-            &Self::visible(self.world(), &spec_files, &seen),
+            &Self::tip_writes(&spec_files, &seen),
             &o,
             &s,
             self.tally,
@@ -551,7 +547,8 @@ impl<'a> Checker<'a> {
                 .filter(|g| g.dir == f.dir && matches!(g.body, Body::Segment(_)))
                 .count();
             let ok = c.own.len() <= fields
-                && c.refs.len() <= fields * (writers - 1)
+                && c.refs.len() <= 2 * fields * (writers - 1)
+                && c.takes.len() <= fields * (writers - 1)
                 && c.certs.segments.len() <= segments
                 && c.certs.hashes.len() <= c.dismissals.len() + drops;
             if !ok {
@@ -678,7 +675,7 @@ impl<'a> Checker<'a> {
                 if let Err(e) = agree(
                     self.world(),
                     &held,
-                    &Self::visible(self.world(), files, &seen),
+                    &Self::tip_writes(files, &seen),
                     &o,
                     &cached,
                     self.tally,
@@ -855,7 +852,7 @@ impl<'a> Checker<'a> {
             if let Err(e) = agree(
                 world,
                 &held,
-                &Self::visible(self.world(), &spec_files, &seen),
+                &Self::tip_writes(&spec_files, &seen),
                 &o,
                 &after,
                 self.tally,

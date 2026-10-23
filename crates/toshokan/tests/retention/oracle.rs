@@ -126,6 +126,18 @@ pub fn live(world: &World, merged: &BTreeSet<Hash>) -> Vec<Live> {
         killed.extend(entry.replaces.iter().map(|r| r.hash));
         killed.extend(entry.observed.iter().map(|r| r.hash));
     }
+    // A take settles its field for the taken run's writer below the run.
+    let settled = |e: &Hash| {
+        let entry = world.entry(*e);
+        let Some(w) = entry.write else { return false };
+        merged.iter().any(|&o| {
+            let other = world.entry(o);
+            other
+                .takes
+                .is_some_and(|d| d.dir == entry.dir && entry.n < d.first.n)
+                && other.write.is_some_and(|ow| ow.field == w.field)
+        })
+    };
     let superseded = |e: &Hash| {
         let entry = world.entry(*e);
         let Some(w) = entry.write else { return false };
@@ -143,7 +155,7 @@ pub fn live(world: &World, merged: &BTreeSet<Hash>) -> Vec<Live> {
     };
     merged
         .iter()
-        .filter(|e| !killed.contains(e) && !superseded(e))
+        .filter(|e| !killed.contains(e) && !superseded(e) && !settled(e))
         .filter_map(|&e| {
             let entry = world.entry(e);
             entry.write.map(|write| Live {
@@ -197,7 +209,11 @@ pub fn shown(world: &World, placement: &Placement) -> Shown {
             });
         }
     }
-    Shown { items, ..base }
+    Shown {
+        items,
+        forks: fork_points(world, &placement.forks),
+        ..base
+    }
 }
 
 /// `set` split into chains: each entry joins the group of its predecessor when

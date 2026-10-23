@@ -56,7 +56,9 @@ Every reference — in `replaces`, `observed` and `tags` — becomes
 `[writer, n, hash]`. `add` gains `replaces`: the tags of its value it saw, its own
 included, so a member has at most one live tag per concurrent adder.
 
-A `dismiss` op names runs the user dismissed (section 5). `reverses` is dropped.
+A `dismiss` op names runs the user dismissed, and a `take` names the run whose
+change an op takes (section 5). `reverses` is dropped. Each entry also records
+the fork points its writer knew of, by writer and number.
 
 ## 2. Snapshots
 
@@ -112,18 +114,21 @@ rules below.
 - **Sets.** Per member, the writer's latest own add or remove, live or not, and
   the number of its first.
 - **References.** Per register and per set member, and for each other writer,
-  the latest `[own n, own hash, writer, n, hash]`: the target the writer's
-  entries replaced or removed, and its own entry that did, carried forward
-  across its own later writes. A delete is a reference on every field it
-  observed: each write it observed is a target on that write's field.
-- **Own deletes.** Per own field write it holds, the first own delete above it,
-  `[n, hash]`: that delete kills the write, and every earlier own write of the
-  entity.
+  the latest `[own n, own hash, writer, n, hash]` at or below the fork point of
+  that writer its own entry knew of, and the latest above it: the target the
+  writer's entries replaced or removed, and its own entry that did, carried
+  forward across its own later writes. A delete is a reference on every field it
+  observed: each write it observed is a target on that write's field. -
+  **Takes.** Per field and other writer, the latest take of a run of that
+  writer: its own entry and the run's first number. - **Own deletes.** Per own
+  field write it holds, the first own delete above it, `[n, hash]`: that delete
+  kills the write, and every earlier own write of the entity.
 
 Plus trash items not yet emptied, settlements, dismissals, and its own unknown
 and extended entries. Nothing is dropped for being dead, and references are never
 dropped; a contribution holds at most one own write, one number and one own
-delete per field, and one reference per field and other writer.
+delete per field, and per field and other writer one take and two references,
+one on each side of a fork point it knows of.
 
 ## 3. The merge
 
@@ -144,16 +149,21 @@ writer's contribution holds it and nothing kills it:
   branch are part of the run. A reference whose target is numbered above `y`'s
   fork point kills only the write with its hash: `y`'s earlier writes it passed
   may have died only on that branch.
+- **Takes.** A take of a run of `y` kills, on its field, every write of `y`
+  numbered below the run's first entry: the user chose the run's value over
+  what the branches started from, which a reader may no longer hold.
 
 Killing below `n` is sound because `y`'s write `n` replaced every earlier write of
 `y` to that field it saw, and `y` always sees its own; and no two branches of a
 writer are ever merged (section 4), so every merged write of `y` lies on one
 chain.
 
-Because references are kept per other writer, one made before a fork can be
-overwritten by a later one made after it. Such a reference no longer applies, and
-the write it killed comes back beside the writer's value as a conflict: shown,
-never lost.
+Because references are kept per other writer, one made before a fork its writer
+had not seen can be overwritten by a later one made after it. Such a reference
+no longer applies, and the write it killed comes back beside the writer's value
+as a conflict: shown, never lost. A writer that has seen the fork keeps one
+reference on each side of it, so a take, which names both the merged write and
+the run's, keeps both.
 
 | Type | A contribution keeps | An arriving write or add is |
 | --- | --- | --- |
@@ -243,12 +253,13 @@ point, no higher than the fork point could be. Where several tips part inside a
 segment, that is just below the lowest head. When it did and no merged write of
 that writer on that field is numbered below it, the value is forgotten. The run
 then shows that field whatever the merged state shows, and, like a gap, the user
-can take it but a dismissal does not hide it; it goes when a merged write on the
-field names the run's write. This is D14's conflict for a forgotten basis. It
-arises whenever a branch compacts past a pre-fork write it replaced, so a
-branch's compaction can change the merged value of such a field. An entity left
-with no live existence write this way shows its live fields, as in a deletion
-conflict.
+can take it but a dismissal does not hide it; only a take of a run of that
+writer on that field settles it. A write that merely names the run's write, by a
+writer that had not seen the fork, does not. This is D14's conflict for a
+forgotten basis. It arises whenever a branch compacts past a pre-fork write it
+replaced, so a branch's compaction can change the merged value of such a field.
+An entity left with no live existence write this way shows its live fields, as
+in a deletion conflict.
 
 **What the reader remembers** of `y`: its tips, the entries it placed after
 them, the entries it shows as runs, its fork points and its file records. It
@@ -287,15 +298,15 @@ run added or removed; existence shows an entity the run created or deleted.
 
 **Choosing.** Keep current, or take the run's change, per field or for the whole
 run. The choice commits one intent: each change taken becomes an ordinary op
-against the current state, and a `dismiss` op names the run as
-`[writer, first hash, last hash]`, or a tip run by its head. A dismissal by a
-tip's head also covers the writes numbered up to that head in any later tip that
-certifies it. No reader shows or merges what a dismissal names, ever, even if it
-later stops seeing the fork: a tip's references and own delete made by a
-dismissed entry do not apply either. An entry after a dismissed one is a new
-item, never placed. A dismissal never covers what the user has not seen. A tip
-matches a dismissal by the hash of its last entry, which every snapshot on that
-chain certifies (section 2).
+against the current state that also names the run in `take`, and a `dismiss` op
+names the run as `[writer, first hash, last hash]`, or a tip run by its head. A
+dismissal by a tip's head also covers the writes numbered up to that head in any
+later tip that certifies it. No reader shows or merges what a dismissal names,
+ever, even if it later stops seeing the fork: a tip's references and own delete
+made by a dismissed entry do not apply either. An entry after a dismissed one is
+a new item, never placed. A dismissal never covers what the user has not seen. A
+tip matches a dismissal by the hash of its last entry, which every snapshot on
+that chain certifies (section 2).
 
 A branch that keeps writing until its instance sees the fork produces a new item
 with each sync.
@@ -523,8 +534,8 @@ and the grace step, the folder wins, beside what the guard keeps because
 something visible descends from it. An extra value fails unless the oracle's
 value shows beside it, after a fork or, after a fault, on a field the reader
 reports contradicted, or the field is a forgotten basis. A missing value fails
-unless it shows in its writer's items, or only a write no visible file holds still
-carries it.
+unless an item of its writer shows it on that field, or shows that field as a
+forgotten basis while no tip holds the write that carried it.
 
 The design is a `Design` implementation that sees only what a reader sees, with
 switches that drop the rules for branch references, the union of tips, own
@@ -567,9 +578,3 @@ Clocks: nothing in this design depends on them.
    the last pre-fork entry that still has an effect; entries above it with none
    are shown as runs, and own writes that could be pre-fork are treated as a
    forgotten basis. Certifying segments, not lines, keeps that cost to display.
-8. **Taking a run overwrites a pre-fork reference.** A take replaces the merged
-   write and names the run's write. When the run is a branch of the same writer,
-   a contribution keeps one reference per field and writer: the run's, numbered
-   higher. That reference lies beyond the fork and kills only its own target, so
-   once the taker compacts, the pre-fork value it replaced comes back beside the
-   taken one as a conflict.

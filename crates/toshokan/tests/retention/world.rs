@@ -97,6 +97,11 @@ pub struct Entry {
     /// A delete's: the field writes it observed, which it kills.
     pub observed: Vec<Ref>,
     pub dismisses: Vec<Dismissal>,
+    /// A take's: the run whose write it took. It settles its field for the
+    /// run's writer below the run.
+    pub takes: Option<Dismissal>,
+    /// The fork points its writer knew of when it wrote it, by writer.
+    pub forks: BTreeMap<Dir, u32>,
 }
 
 impl Entry {
@@ -214,6 +219,8 @@ pub struct Shown {
     pub entities: BTreeMap<u8, Existence>,
     pub items: BTreeSet<Item>,
     pub contradicted: BTreeSet<Field>,
+    /// The lowest fork point of each writer it knows of.
+    pub forks: BTreeMap<Dir, u32>,
 }
 
 impl Shown {
@@ -279,6 +286,7 @@ pub fn show(live: &[Live], items: BTreeSet<Item>) -> Shown {
         entities,
         items,
         contradicted: BTreeSet::new(),
+        forks: BTreeMap::new(),
     }
 }
 

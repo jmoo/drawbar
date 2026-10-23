@@ -110,6 +110,8 @@ impl History {
             replaces: Vec::new(),
             observed: Vec::new(),
             dismisses: Vec::new(),
+            takes: None,
+            forks: BTreeMap::new(),
         };
         Self {
             world: World {
@@ -265,6 +267,7 @@ impl History {
         };
         let conflict = |e: u8| shown.entities.get(&e).is_some_and(|x| x.deletion_conflict);
         let runs = || shown.items.iter().filter(|it| it.kind == ItemKind::Run);
+        let mut takes = None;
         let (write, replaces, observed, dismisses) = match act {
             Act::Set(e, r, v) if shown.exists(e) => (
                 Some((Field::reg(e, r), Some(v))),
@@ -315,6 +318,7 @@ impl History {
                 } else {
                     vec![]
                 };
+                takes = Some(item.run);
                 (Some((field, value)), replaces, observed, vec![])
             }
             _ => return None,
@@ -331,6 +335,8 @@ impl History {
             replaces,
             observed,
             dismisses,
+            takes,
+            forks: shown.forks.clone(),
         };
         h.world.entries.push(entry);
         h.insts[i].chain.push(hash);
