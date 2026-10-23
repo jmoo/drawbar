@@ -12,11 +12,12 @@ use toshokan::binding::Bindings;
 use toshokan::blocking::Native;
 use toshokan::blocking::{self, run, Backend};
 use toshokan::compaction::compact;
+use toshokan::derive::{Derived, Placed};
 use toshokan::effects::{self, Applied, EffectPlan};
 use toshokan::env::{ExactNames, PrefixIdentity, SeededRandom, TestClock};
 use toshokan::io::{Capabilities, Kind, Range};
 use toshokan::line::Line;
-use toshokan::log::{Entry, EntryKind, Logged};
+use toshokan::log::{Entry, EntryKind, Logged, Own};
 use toshokan::pending::PendingRecord;
 use toshokan::plan::{FileChange, Splice};
 use toshokan::reader::{CachedView, Reader};
@@ -433,10 +434,16 @@ pub fn layout() -> Layout {
 
 pub const WRITER: WriterId = WriterId::from_u128(0x77);
 pub const HEAD: EntryHash = EntryHash::from_u128(0x11);
+/// [`HEAD`] with the number every record [`entry`] makes follows.
+pub const HEAD_AT: Own = Own { n: 4, hash: HEAD };
 
-/// The entry a record carries; its contents are the library's business.
+/// The entry a record carries, numbered after [`HEAD_AT`]; its contents are the
+/// library's business.
 pub fn entry(after: EntryHash) -> Line {
-    Line::seal(format!(r#"{{"prev":"{after}","kind":"intent"}}"#)).unwrap()
+    Line::seal(format!(
+        r#"{{"prev":"{after}","n":5,"at":[0,0],"kind":"intent"}}"#
+    ))
+    .unwrap()
 }
 
 pub fn bound(files: &[(EntityId, &str)]) -> Bindings {
@@ -600,13 +607,14 @@ impl Instance {
                 }),
             )?;
             made.push(writer.genesis());
+            wrote(writer.genesis(), EntryHash::ZERO);
             self.writer = Some(writer);
         }
         let kind = EntryKind::Intent(Logged {
             label: label.into(),
             ops: Vec::new(),
             displaced: Vec::new(),
-            reverses: None,
+            forks: Vec::new(),
         });
         let at = self.tick();
         let fresh = SegmentName::from_u128(self.random.next_u128());
@@ -617,7 +625,11 @@ impl Instance {
             Ok(appended)
         });
         self.writer = Some(writer);
-        made.extend(recorded?.iter().map(Entry::hash));
+        let appended = recorded?;
+        for entry in &appended {
+            wrote(entry.hash(), entry.prev());
+        }
+        made.extend(appended.iter().map(Entry::hash));
         Ok(made)
     }
 
@@ -625,7 +637,7 @@ impl Instance {
         let name = Nonce::from_u128(self.random.next_u128());
         let writer = self.writer.take().expect("a writer");
         run(&mut self.machine, self.reader.read_writer(writer.id()))?;
-        let (writer, compacted) = run(&mut self.machine, compact(writer, &self.reader, name));
+        let (writer, compacted) = run(&mut self.machine, compact(writer, &self.reader, &[], name));
         self.writer = Some(writer);
         compacted
     }
@@ -643,24 +655,111 @@ impl Instance {
     }
 }
 
-/// What a reader without a cached view places from `folder`.
-pub fn fresh(folder: &MemDisk) -> CachedView {
+/// What a reader without a cached view derives from `folder`.
+pub fn fresh(folder: &MemDisk) -> Derived {
     let mut disk = folder.clone();
     let mut reader = Reader::new(layout(), CachedView::default());
     run(&mut disk, reader.read()).unwrap();
-    reader.cached().clone()
+    reader.derived().clone()
 }
 
-/// Every entry `view` holds, of every writer.
-pub fn held(view: &CachedView) -> BTreeSet<EntryHash> {
-    view.writers()
-        .values()
-        .flat_map(|log| {
-            let folded = log.snapshots().iter().flat_map(|s| s.folded.clone());
-            let placed = log.entries().iter().map(|entry| entry.hash());
-            folded.chain(placed).collect::<Vec<_>>()
-        })
-        .collect()
+thread_local! {
+    /// The predecessor of every entry an [`Instance`] of this thread wrote.
+    static WROTE: std::cell::RefCell<BTreeMap<EntryHash, EntryHash>> = Default::default();
+}
+
+fn wrote(hash: EntryHash, prev: EntryHash) {
+    WROTE.with_borrow_mut(|wrote| wrote.insert(hash, prev));
+}
+
+/// Every entry `derived` holds, of every writer: merged, in a run or a gap, or
+/// folded by a tip, by what the instances of this thread wrote.
+pub fn held(derived: &Derived) -> BTreeSet<EntryHash> {
+    let mut held: BTreeSet<EntryHash> = derived.writers.values().flat_map(Chains::held).collect();
+    let heads = derived.writers.values().flat_map(|placed| &placed.tips);
+    let heads: Vec<EntryHash> = heads.map(|tip| tip.head.hash).collect();
+    WROTE.with_borrow(|wrote| {
+        for head in heads {
+            let mut at = Some(head);
+            while let Some(hash) = at.filter(|hash| *hash != EntryHash::ZERO) {
+                held.insert(hash);
+                at = wrote.get(&hash).copied();
+            }
+        }
+    });
+    held
+}
+
+/// One writer's history as tests ask about it.
+pub trait Chains {
+    /// The entries it holds: merged, in a run or a gap, or named by a tip.
+    fn held(&self) -> BTreeSet<EntryHash>;
+
+    /// The entries no held entry follows.
+    fn heads(&self) -> Vec<EntryHash>;
+
+    /// The entries from the genesis entry to `hash`, when it holds each as a
+    /// line or a tip folds it, by what the instances of this thread wrote.
+    fn chain_to(&self, hash: EntryHash) -> Option<Vec<EntryHash>>;
+
+    /// The predecessor of the line `hash`.
+    fn predecessor(&self, hash: EntryHash) -> Option<EntryHash>;
+}
+
+impl Chains for Placed {
+    fn held(&self) -> BTreeSet<EntryHash> {
+        let lines = self.merged.iter().chain(&self.runs).chain(&self.gaps);
+        let named = self.tips.iter().flat_map(|tip| {
+            let certified = tip.certified.named().map(|own| own.hash);
+            certified.chain([tip.head.hash]).collect::<Vec<_>>()
+        });
+        lines.map(|entry| entry.hash()).chain(named).collect()
+    }
+
+    fn heads(&self) -> Vec<EntryHash> {
+        let lines: Vec<&Rc<Entry>> = self.merged.iter().chain(&self.runs).collect();
+        let followed: BTreeSet<EntryHash> = lines.iter().map(|entry| entry.prev()).collect();
+        let tips = self.tips.iter().map(|tip| tip.head.hash);
+        let mut heads: Vec<EntryHash> = lines
+            .iter()
+            .map(|entry| entry.hash())
+            .chain(tips)
+            .filter(|hash| !followed.contains(hash))
+            .collect();
+        heads.sort();
+        heads.dedup();
+        heads
+    }
+
+    fn chain_to(&self, hash: EntryHash) -> Option<Vec<EntryHash>> {
+        let lines = self.merged.iter().chain(&self.runs).chain(&self.gaps);
+        let mut known: BTreeMap<EntryHash, EntryHash> =
+            lines.map(|entry| (entry.hash(), entry.prev())).collect();
+        WROTE.with_borrow(|wrote| {
+            for tip in &self.tips {
+                let mut at = tip.head.hash;
+                while let Some(prev) = wrote.get(&at).filter(|_| at != EntryHash::ZERO) {
+                    known.insert(at, *prev);
+                    at = *prev;
+                }
+            }
+        });
+        let mut chain = vec![hash];
+        let mut at = *known.get(&hash)?;
+        while at != EntryHash::ZERO {
+            chain.push(at);
+            at = *known.get(&at)?;
+        }
+        chain.reverse();
+        Some(chain)
+    }
+
+    fn predecessor(&self, hash: EntryHash) -> Option<EntryHash> {
+        let mut lines = self.merged.iter().chain(&self.runs).chain(&self.gaps);
+        lines
+            .find(|entry| entry.hash() == hash)
+            .map(|entry| entry.prev())
+    }
 }
 
 /// The files under `dir` in the folder of `disk`.

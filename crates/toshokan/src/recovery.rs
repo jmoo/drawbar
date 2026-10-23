@@ -15,37 +15,43 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+use crate::derive::Placed;
 use crate::effects::{
     self, Applied, Cut, EffectPlan, EffectStep, FileEnd, Moves, Progress, Staged,
 };
 use crate::env::{Env, Identify};
 use crate::error::{Refusal, Result};
 use crate::flow::{self, each, fold, Fallible};
-use crate::ids::{EntryHash, Nonce, WriterId};
+use crate::ids::{Nonce, WriterId};
 use crate::io::{Capabilities, Capability, Kind, Root, Task};
 use crate::layout::Layout;
-use crate::log::Settlement;
+use crate::log::{Own, Settlement};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord, Records, MAX_RECORD};
-use crate::reader::WriterLog;
 use crate::report::{Orphan, Outcome};
 
 /// What recovery needs of a writer's placed history.
 pub trait Chain {
-    /// Whether the entry `hash` is placed or folded.
-    fn holds(&self, hash: EntryHash) -> bool;
+    /// Whether the entry `at` is placed or folded.
+    fn holds(&self, at: Own) -> bool;
 
-    /// Whether an entry after `hash` is placed or folded.
-    fn continues(&self, hash: EntryHash) -> bool;
+    /// Whether an entry after `at` is placed or folded.
+    fn continues(&self, at: Own) -> bool;
 }
 
-impl Chain for WriterLog {
-    fn holds(&self, hash: EntryHash) -> bool {
-        WriterLog::holds(self, hash)
+/// A tip folds every entry its head descends from, which it certifies by
+/// number: an entry numbered below a tip's head is taken as folded even where
+/// no certificate names its hash.
+impl Chain for Placed {
+    fn holds(&self, at: Own) -> bool {
+        Placed::holds(self, at.hash) || self.tips.iter().any(|tip| tip.head.n > at.n)
     }
 
-    fn continues(&self, hash: EntryHash) -> bool {
-        WriterLog::holds(self, hash) && !self.heads().contains(&hash)
+    fn continues(&self, at: Own) -> bool {
+        let passed = self.tips.iter().any(|tip| tip.head.n > at.n);
+        let entries = self.merged.iter().chain(&self.runs).chain(&self.gaps);
+        let followed = entries.into_iter().any(|entry| entry.prev() == at.hash);
+        Chain::holds(self, at) && (passed || followed)
     }
 }
 
@@ -79,7 +85,7 @@ pub struct Settling {
 /// `logs` while the reads run.
 pub fn assess<'a, C: Chain>(
     layout: &'a Layout,
-    own: Option<(WriterId, EntryHash)>,
+    own: Option<(WriterId, Own)>,
     logs: &'a BTreeMap<WriterId, C>,
     settled: &'a BTreeSet<(WriterId, Nonce)>,
     capabilities: Capabilities,
@@ -111,7 +117,7 @@ pub fn read(
 /// open records apart, for [`predict`].
 pub fn classify<C: Chain>(
     layout: &Layout,
-    own: Option<(WriterId, EntryHash)>,
+    own: Option<(WriterId, Own)>,
     logs: &BTreeMap<WriterId, C>,
     settled: &BTreeSet<(WriterId, Nonce)>,
     found: Vec<(WriterId, Records)>,
@@ -186,7 +192,7 @@ enum Standing {
 
 fn standing(
     layout: &Layout,
-    own: Option<(WriterId, EntryHash)>,
+    own: Option<(WriterId, Own)>,
     chain: &impl Chain,
     settled: &BTreeSet<(WriterId, Nonce)>,
     name: Nonce,

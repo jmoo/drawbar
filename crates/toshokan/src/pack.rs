@@ -57,11 +57,6 @@ impl<'a> In<'a> {
         std::str::from_utf8(self.take(len)?).map_err(|_| Bad("text that is not UTF-8"))
     }
 
-    /// How many bytes are left to read.
-    pub fn left(&self) -> usize {
-        self.bytes.len()
-    }
-
     /// Fails unless every byte was read.
     pub fn end(self) -> Unpacked<()> {
         match self.bytes.is_empty() {

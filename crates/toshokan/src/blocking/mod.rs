@@ -229,18 +229,6 @@ impl<B: Backend> Library<B> {
         run(&mut self.backend, self.core.rescan_paths(paths))
     }
 
-    /// Stops showing what [`Opened::removed`] reports, on every open of this
-    /// install, while the folder lacks it. Writes only in the local root.
-    pub fn let_go(&mut self) -> Result<()> {
-        run(&mut self.backend, self.core.let_go())
-    }
-
-    /// Republishes what [`Opened::removed`] reports as an intent labeled `label`,
-    /// then lets it go: the folder holds again what this install showed.
-    pub fn adopt(&mut self, label: &str) -> Result<Committed> {
-        run(&mut self.backend, self.core.adopt(label))
-    }
-
     pub fn others(&mut self) -> Result<Vec<WriterInfo>> {
         run(&mut self.backend, self.core.others())
     }

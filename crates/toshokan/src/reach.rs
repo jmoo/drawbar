@@ -724,7 +724,11 @@ mod tests {
                             len,
                             modified: Some(self.below(2) as u64),
                         },
-                        entry: EntryHash::from_u128(self.entry),
+                        entry: crate::log::Ref {
+                            writer: crate::ids::WriterId::from_u128(1),
+                            n: self.entry as u64,
+                            hash: EntryHash::from_u128(self.entry),
+                        },
                     }
                 })
                 .collect()

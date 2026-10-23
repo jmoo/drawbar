@@ -62,7 +62,11 @@ fn a_scan_asks_once_per_directory_and_reads_identities_together() {
     };
     let written = Fact {
         value: fact,
-        entry: EntryHash::from_u128(1),
+        entry: toshokan::log::Ref {
+            writer: toshokan::WriterId::from_u128(1),
+            n: 1,
+            hash: EntryHash::from_u128(1),
+        },
     };
     let facts = Facts::from([(EntityId::from_u128(1), vec![written].into())]);
     d.take();

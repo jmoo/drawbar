@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use crate::error::Why;
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
 use crate::io::IoError;
+use crate::log::Run;
 use crate::path::RelPath;
+use crate::plan::FactChange;
 
 /// What opening found. Opening writes nothing in the folder.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -27,10 +29,6 @@ pub struct Opened {
     /// consent.
     pub orphaned: Vec<Orphan>,
     pub drafts: Vec<DraftStatus>,
-    /// Facts this install shows whose entries no file in the folder holds now: a
-    /// restore of the folder removed them, or sync has not yet brought the files
-    /// that hold them. They stay shown until the user lets them go or adopts them.
-    pub removed: Vec<Change>,
     pub forks: Vec<Fork>,
     pub gaps: Vec<Gap>,
     /// Files in writers' directories that end before their last byte can be read,
@@ -104,13 +102,14 @@ pub enum DraftState {
     Unreadable,
 }
 
-/// Two entries of one writer with one predecessor. Both branches are merged.
+/// Where one writer's history forked: the entry numbered `at`, `prev`, after
+/// which its branches part. Neither branch is merged; each is shown as an
+/// [`Item`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Fork {
     pub writer: WriterId,
+    pub at: u64,
     pub prev: EntryHash,
-    /// Sorted.
-    pub branches: [EntryHash; 2],
 }
 
 /// Entries of one writer held back because their predecessor is neither placed nor
@@ -120,6 +119,46 @@ pub struct Gap {
     pub writer: WriterId,
     pub missing: EntryHash,
     pub held: usize,
+}
+
+/// What a reader shows apart from the merged state.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum ItemKind {
+    /// A branch of a forked writer, or entries after a dismissed one.
+    Run,
+    /// Entries whose predecessor may still arrive. Merged once it does.
+    Gap,
+    /// After the grace step, lines of a file shorter than a snapshot certified
+    /// it: a version a sync client dropped, or a copy that diverged.
+    Unplaced,
+}
+
+/// Entries a reader shows apart from the merged state, with the net change they
+/// would make. The user keeps the current state or takes changes, with a plan
+/// whose [`crate::Plan::take`] names `run`, and may dismiss a run with
+/// [`crate::Plan::dismiss`]; a gap or unplaced lines cannot be dismissed.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Item {
+    pub kind: ItemKind,
+    pub run: Run,
+    pub by: By,
+    /// Its entries' clock readings, earliest and latest.
+    pub span: (Hlc, Hlc),
+    pub entries: usize,
+    pub changes: Vec<ItemChange>,
+}
+
+/// One field an [`Item`] would change.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ItemChange {
+    pub entity: EntityId,
+    pub what: What,
+    /// The change that takes it; `None` for a file, which only a file effect
+    /// writes.
+    pub change: Option<FactChange>,
+    /// Shown whatever the merged state holds: the run replaced an earlier own
+    /// write no reader holds any more, so only a take settles it.
+    pub forgotten: bool,
 }
 
 /// What a scan of the library's files found against the logged facts. A scan
@@ -197,9 +236,6 @@ pub enum Lag {
     /// continues from the last entry of the writer's chain in the folder, or
     /// starts a new writer when it is torn.
     Head,
-    /// `let-go.json` lacks the entries an adoption let go. Reopening reports them
-    /// as removed again.
-    LetGo,
     /// The scan after the commit failed. The entities whose files its effects
     /// touched are [`crate::FileState::Unscanned`] until a scan of every file.
     Scan,
@@ -237,8 +273,6 @@ pub struct PartialReport {
 pub struct Refreshed {
     /// What changed since the last view, by its writer or from outside.
     pub changes: Vec<Change>,
-    /// As [`Opened::removed`], as of this refresh.
-    pub removed: Vec<Change>,
     /// What the files scanned so far hold against the logged facts; empty until
     /// a scan of every file has succeeded.
     pub scan: ScanReport,

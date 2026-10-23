@@ -4,6 +4,7 @@
 
 use crate::ids::{EntityId, EntryHash, Identity, Nonce};
 use crate::io::{IoError, Range, CHUNK};
+use crate::log::{FileFact, Run};
 use crate::path::RelPath;
 use crate::schema::Raw;
 
@@ -33,6 +34,11 @@ pub struct Plan {
     pub files: Vec<FileChange>,
     /// The entry an undo or redo compensates.
     pub reverses: Option<EntryHash>,
+    /// The item whose change the facts take: each of them settles its field
+    /// against that run's writes.
+    pub take: Option<Run>,
+    /// Items the user dismissed: no reader merges or shows them again.
+    pub dismiss: Vec<Run>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -61,6 +67,9 @@ pub enum FactChange {
     Delete { entity: EntityId },
     /// Brings a deleted entity back.
     Revive { entity: EntityId },
+    /// Says where the entity's file is, moving nothing, as undoing a delete
+    /// does. Undo leaves it alone.
+    File { entity: EntityId, file: FileFact },
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

@@ -569,11 +569,14 @@ fn rebound(was: &CowMap<EntityId, FileRef>, now: &CowMap<EntityId, FileRef>) -> 
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::rc::Rc;
+
     use super::*;
+    use crate::derive::{self, Seen, SeenSegment};
     use crate::env::{Random, SeededRandom};
     use crate::ids::{EntryHash, Hlc, Identity, WriterId};
-    use crate::line::Line;
-    use crate::log::{Entry, EntryKind, FileFact, Logged, Op};
+    use crate::log::{Entry, EntryKind, FileFact, Logged, Observed, Op, Ref, Target};
     use crate::view::FileRef;
 
     fn below(random: &mut SeededRandom, n: usize) -> usize {
@@ -581,13 +584,13 @@ mod tests {
     }
 
     /// Up to two earlier entries, for an op to replace or name.
-    fn some(random: &mut SeededRandom, hashes: &[EntryHash]) -> Vec<EntryHash> {
+    fn some(random: &mut SeededRandom, refs: &[Ref]) -> Vec<Ref> {
         (0..below(random, 3))
-            .filter_map(|_| hashes.get(below(random, hashes.len().max(1))).copied())
+            .filter_map(|_| refs.get(below(random, refs.len().max(1))).copied())
             .collect()
     }
 
-    fn op(random: &mut SeededRandom, hashes: &[EntryHash]) -> Op {
+    fn op(random: &mut SeededRandom, refs: &[Ref]) -> Op {
         let entity = EntityId::from_u128(below(random, 12) as u128);
         let value = Raw::of(&below(random, 4)).unwrap();
         let path = RelPath::new(["a", "b", "b/c", "b-c"][below(random, 4)]).unwrap();
@@ -595,25 +598,41 @@ mod tests {
         match below(random, 7) {
             0 | 1 => Op::Create {
                 entity,
-                replaces: some(random, hashes),
+                replaces: some(random, refs),
+                take: None,
             },
             2 => Op::Delete {
                 entity,
-                replaces: some(random, hashes),
-                observed: some(random, hashes),
+                replaces: some(random, refs),
+                observed: some(random, refs)
+                    .into_iter()
+                    .map(|at| Observed {
+                        target: Target::Register(key.clone()),
+                        at,
+                    })
+                    .collect(),
+                take: None,
             },
             3 => Op::Write {
                 entity,
                 key,
                 value: (below(random, 4) > 0).then_some(value),
-                replaces: some(random, hashes),
+                replaces: some(random, refs),
+                take: None,
             },
-            4 => Op::Add { entity, key, value },
+            4 => Op::Add {
+                entity,
+                key,
+                value,
+                replaces: some(random, refs),
+                take: None,
+            },
             5 => Op::Remove {
                 entity,
                 key,
                 value,
-                tags: some(random, hashes),
+                tags: some(random, refs),
+                take: None,
             },
             _ => Op::File {
                 entity,
@@ -623,8 +642,64 @@ mod tests {
                     len: 1,
                     modified: None,
                 }),
-                replaces: some(random, hashes),
+                replaces: some(random, refs),
+                take: None,
             },
+        }
+    }
+
+    /// Writers' chains of random intents, and the merged state after each entry.
+    struct Chains {
+        chains: BTreeMap<WriterId, Vec<Rc<Entry>>>,
+        refs: Vec<Ref>,
+    }
+
+    impl Chains {
+        fn new() -> Self {
+            Self {
+                chains: BTreeMap::new(),
+                refs: Vec::new(),
+            }
+        }
+
+        /// Appends a random intent of `writer`, and returns the merged state.
+        fn append(&mut self, random: &mut SeededRandom, writer: WriterId, at: u64) -> Folded {
+            let ops = (0..1 + below(random, 3))
+                .map(|_| op(random, &self.refs))
+                .collect();
+            let kind = EntryKind::Intent(Logged {
+                label: String::new(),
+                ops,
+                displaced: Vec::new(),
+                forks: Vec::new(),
+            });
+            let chain = self.chains.entry(writer).or_default();
+            let (prev, n) = chain
+                .last()
+                .map_or((EntryHash::ZERO, 0), |last| (last.hash(), last.n() + 1));
+            let at = Hlc {
+                wall_ms: at,
+                counter: 0,
+            };
+            let entry = Entry::encode(prev, n, at, kind).unwrap();
+            self.refs.push(entry.own().of(writer));
+            chain.push(Rc::new(entry));
+            let seen = self
+                .chains
+                .iter()
+                .map(|(writer, entries)| {
+                    let segment = SeenSegment {
+                        entries,
+                        sealed: false,
+                    };
+                    let seen = Seen {
+                        segments: vec![segment],
+                        snapshots: Vec::new(),
+                    };
+                    (*writer, seen)
+                })
+                .collect();
+            derive::derive(&seen, &BTreeMap::new(), false).folded
         }
     }
 
@@ -650,36 +725,14 @@ mod tests {
     fn an_index_kept_up_entry_by_entry_equals_one_built_at_once() {
         for seed in 0..200 {
             let mut random = SeededRandom::new(seed);
+            let mut chains = Chains::new();
             let mut folded = Folded::default();
             let mut bound = Bindings::default();
             let mut index = Index::default();
-            let mut hashes = Vec::new();
             for n in 0..40 {
-                let ops = (0..1 + below(&mut random, 3))
-                    .map(|_| op(&mut random, &hashes))
-                    .collect();
-                let line = Line::seal(format!(
-                    r#"{{"prev":"{}","seed":{seed},"n":{n}}}"#,
-                    EntryHash::ZERO
-                ))
-                .unwrap();
-                let at = Hlc {
-                    wall_ms: n,
-                    counter: 0,
-                };
-                let kind = EntryKind::Intent(Logged {
-                    label: String::new(),
-                    ops,
-                    displaced: Vec::new(),
-                    reverses: None,
-                });
-                let entry = Entry::new(line, at, kind, false);
-                hashes.push(entry.hash());
-                let mut next = folded.clone();
-                next.apply(
-                    WriterId::from_u128(1 + below(&mut random, 2) as u128),
-                    &entry,
-                );
+                let writer = WriterId::from_u128(1 + below(&mut random, 2) as u128);
+                let mut next = chains.append(&mut random, writer, n);
+                next.share(&folded);
                 let rebound = match below(&mut random, 2) {
                     0 => bindings(&mut random, &next),
                     _ => bound.clone(),
@@ -695,27 +748,11 @@ mod tests {
     fn an_index_whose_paths_are_built_again_equals_one_built_at_once() {
         for seed in 0..200 {
             let mut random = SeededRandom::new(seed + 1000);
+            let mut chains = Chains::new();
             let mut folded = Folded::default();
-            let mut hashes = Vec::new();
             for n in 0..30 {
-                let ops = (0..1 + below(&mut random, 3))
-                    .map(|_| op(&mut random, &hashes))
-                    .collect();
-                let line = Line::seal(format!(r#"{{"prev":"{}","n":{n}}}"#, EntryHash::ZERO));
-                let kind = EntryKind::Intent(Logged {
-                    label: String::new(),
-                    ops,
-                    displaced: Vec::new(),
-                    reverses: None,
-                });
-                let at = Hlc {
-                    wall_ms: n,
-                    counter: 0,
-                };
-                let entry = Entry::new(line.unwrap(), at, kind, false);
-                hashes.push(entry.hash());
-                let mut next = folded.clone();
-                next.apply(WriterId::from_u128(1), &entry);
+                let mut next = chains.append(&mut random, WriterId::from_u128(1), n);
+                next.share(&folded);
                 if n % 3 == 0 {
                     folded = next;
                     continue;
@@ -739,26 +776,10 @@ mod tests {
     fn an_index_built_a_slice_at_a_time_equals_one_built_at_once() {
         for seed in 0..100 {
             let mut random = SeededRandom::new(seed);
+            let mut chains = Chains::new();
             let mut folded = Folded::default();
-            let mut hashes = Vec::new();
             for n in 0..40 {
-                let ops = (0..1 + below(&mut random, 3))
-                    .map(|_| op(&mut random, &hashes))
-                    .collect();
-                let line = Line::seal(format!(r#"{{"prev":"{}","n":{n}}}"#, EntryHash::ZERO));
-                let kind = EntryKind::Intent(Logged {
-                    label: String::new(),
-                    ops,
-                    displaced: Vec::new(),
-                    reverses: None,
-                });
-                let at = Hlc {
-                    wall_ms: n,
-                    counter: 0,
-                };
-                let entry = Entry::new(line.unwrap(), at, kind, false);
-                hashes.push(entry.hash());
-                folded.apply(WriterId::from_u128(1), &entry);
+                folded = chains.append(&mut random, WriterId::from_u128(1), n);
             }
             let bound = bindings(&mut random, &folded);
             let slice = 1 + below(&mut random, 5);

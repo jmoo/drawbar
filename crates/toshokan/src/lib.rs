@@ -25,9 +25,13 @@ pub mod blocking;
 pub mod cache;
 #[doc(hidden)]
 pub mod compaction;
+#[doc(hidden)]
+pub mod contribution;
 mod cow;
 #[doc(hidden)]
 pub mod crash;
+#[doc(hidden)]
+pub mod derive;
 pub mod disk;
 #[doc(hidden)]
 pub mod drafts;

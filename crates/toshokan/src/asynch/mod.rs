@@ -333,18 +333,6 @@ impl<F: Fs> Library<F> {
         run(&self.fs, self.core.rescan_paths(paths)).await
     }
 
-    /// Stops showing what [`Opened::removed`] reports, on every open of this
-    /// install, while the folder lacks it. Writes only in the local root.
-    pub async fn let_go(&mut self) -> Result<()> {
-        run(&self.fs, self.core.let_go()).await
-    }
-
-    /// Republishes what [`Opened::removed`] reports as an intent labeled `label`,
-    /// then lets it go: the folder holds again what this install showed.
-    pub async fn adopt(&mut self, label: &str) -> Result<Committed> {
-        run(&self.fs, self.core.adopt(label)).await
-    }
-
     pub async fn others(&mut self) -> Result<Vec<WriterInfo>> {
         run(&self.fs, self.core.others()).await
     }

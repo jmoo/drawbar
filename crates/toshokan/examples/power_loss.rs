@@ -10,7 +10,8 @@
 //!
 //! `run` performs the workload's setup in `DIR` and marks `setup`, then marks
 //! `step-<i>` once step `i` returns, as a dm-log-writes mark or a synced line,
-//! and prints each mark. A step that commits an entry marks `step-<i>:<entry>`.
+//! and prints each mark. A step that commits an entry marks
+//! `step-<i>:<writer>/<n>/<hash>`.
 //! `check` opens what a crash left in `DIR` as the same install, once `N` steps
 //! returned, committing the `ENTRY`s their marks name, with the workload's
 //! hand-written model as the oracle of what each step changed.
@@ -28,11 +29,12 @@ use std::process::{Command, ExitCode};
 use std::rc::Rc;
 
 use toshokan::blocking::{self, Backend, Library, Native};
+use toshokan::derive::{Derived, Placed};
 use toshokan::env::{ExactNames, PrefixIdentity, SeededRandom, TestClock};
 use toshokan::io::Capabilities;
 use toshokan::layout::SEGMENT_EXTENSION;
 use toshokan::line;
-use toshokan::log::{Entry, Settlement};
+use toshokan::log::{Entry, Own, Settlement};
 use toshokan::pending::{self, PendingRecord};
 use toshokan::reader::{CachedView, Reader};
 use toshokan::report::{Opened, Rekey, Start};
@@ -763,7 +765,7 @@ fn run(workload: &Workload, dir: &Path, marks: &mut Marks) -> Result<(), String>
         verify(&runner, &models[i + 1], settling).map_err(|e| format!("after {step:?}: {e}"))?;
         if let Some(n) = i.checked_sub(workload.setup.len()) {
             let label = match entry {
-                Some(entry) => format!("step-{}:{entry}", n + 1),
+                Some(entry) => format!("step-{}:{}", n + 1, Acked::find(&runner.dirs, entry)?),
                 None => format!("step-{}", n + 1),
             };
             marks.mark(&label)?;
@@ -782,22 +784,108 @@ struct Checked {
     unreadable: usize,
 }
 
-fn held(view: &CachedView) -> BTreeSet<EntryHash> {
-    view.writers()
-        .values()
-        .flat_map(|log| {
-            let folded = log.snapshots().iter().flat_map(|s| s.folded.clone());
-            let placed = log.entries().iter().map(|entry| entry.hash());
-            folded.chain(placed).collect::<Vec<_>>()
-        })
-        .collect()
+/// An entry an acknowledged step committed, by its writer, number and hash:
+/// written `<writer>/<n>/<hash>`.
+#[derive(Clone, Copy, Debug)]
+struct Acked {
+    writer: WriterId,
+    at: Own,
 }
 
-fn read_logs(dirs: &Dirs) -> Result<CachedView, String> {
+impl Acked {
+    /// The entry `hash` as a reader of the folder finds it.
+    fn find(dirs: &Dirs, hash: EntryHash) -> Result<Self, String> {
+        let derived = read_logs(dirs)?;
+        let found = derived.writers.iter().find_map(|(writer, placed)| {
+            let lines = placed.merged.iter().chain(&placed.runs);
+            let line = lines.into_iter().find(|entry| entry.hash() == hash)?;
+            Some(Acked {
+                writer: *writer,
+                at: line.own(),
+            })
+        });
+        found.ok_or_else(|| format!("no writer's line is {hash}"))
+    }
+}
+
+impl std::fmt::Display for Acked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}/{}", self.writer, self.at.n, self.at.hash)
+    }
+}
+
+impl std::str::FromStr for Acked {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, String> {
+        let bad = || format!("{text} is not <writer>/<n>/<hash>");
+        let [writer, n, hash] = text.split('/').collect::<Vec<_>>()[..] else {
+            return Err(bad());
+        };
+        Ok(Acked {
+            writer: writer.parse().map_err(|_| bad())?,
+            at: Own {
+                n: n.parse().map_err(|_| bad())?,
+                hash: hash.parse().map_err(|_| bad())?,
+            },
+        })
+    }
+}
+
+/// Whether a reader of the folder holds `at` of `writer`: as a line, named by a
+/// tip, or numbered at or below a tip's head, which folds its chain.
+fn holds(derived: &Derived, writer: WriterId, at: Own) -> bool {
+    let Some(placed) = derived.writers.get(&writer) else {
+        return false;
+    };
+    let passed = placed.tips.iter().any(|tip| tip.head.n >= at.n);
+    placed.holds(at.hash) || passed
+}
+
+/// Every entry a reader holds as a line or by a tip's name, by writer.
+fn held(derived: &Derived) -> Vec<(WriterId, Own)> {
+    let mut held = Vec::new();
+    for (writer, placed) in &derived.writers {
+        let lines = placed.merged.iter().chain(&placed.runs).chain(&placed.gaps);
+        held.extend(lines.map(|entry| (*writer, entry.own())));
+        for tip in &placed.tips {
+            let named = tip.certified.named().chain([tip.head]);
+            held.extend(named.map(|at| (*writer, at)));
+        }
+    }
+    held
+}
+
+/// The entries no held line follows: a writer's last lines and tips' heads.
+fn heads(placed: &Placed) -> Vec<EntryHash> {
+    let lines: Vec<&Rc<Entry>> = placed.merged.iter().chain(&placed.runs).collect();
+    let followed: BTreeSet<EntryHash> = lines.iter().map(|entry| entry.prev()).collect();
+    let tips = placed.tips.iter().map(|tip| tip.head.hash);
+    let all = lines.iter().map(|entry| entry.hash()).chain(tips);
+    let heads: BTreeSet<EntryHash> = all.filter(|hash| !followed.contains(hash)).collect();
+    heads.into_iter().collect()
+}
+
+/// Whether the line `from` descends from `to`, through lines a reader holds.
+fn descends(placed: &Placed, from: EntryHash, to: EntryHash) -> bool {
+    let lines = placed.merged.iter().chain(&placed.runs).chain(&placed.gaps);
+    let prev: BTreeMap<EntryHash, EntryHash> =
+        lines.map(|entry| (entry.hash(), entry.prev())).collect();
+    let mut at = Some(from);
+    while let Some(hash) = at {
+        if hash == to {
+            return true;
+        }
+        at = prev.get(&hash).copied();
+    }
+    false
+}
+
+fn read_logs(dirs: &Dirs) -> Result<Derived, String> {
     let mut native = Native::new(&dirs.folder, &dirs.local);
     let mut reader = Reader::new(layout(), CachedView::default());
     blocking::run(&mut native, reader.read()).map_err(|e| format!("reading the logs: {e}"))?;
-    Ok(reader.cached().clone())
+    Ok(reader.derived().clone())
 }
 
 /// The paths each pending record in the folder names. A record cut short before
@@ -972,7 +1060,7 @@ impl Crash<'_> {
         library.close().map_err(|e| format!("closing: {e}"))?;
         let closed = tree(&self.dirs.folder)?;
         round_trip(&closed)?;
-        let own = format!("{ROOT}/writers/{writer}/");
+        let own = format!("{ROOT}/writers.2/{writer}/");
         let left: Vec<&String> = closed
             .keys()
             .filter(|p| {
@@ -1007,42 +1095,40 @@ impl Crash<'_> {
 /// folder held is lost, nothing forks, and a resumed writer continues after the
 /// last entry of its chain.
 fn continued(
-    before: &CachedView,
-    after: &CachedView,
+    before: &Derived,
+    after: &Derived,
     start: &Start,
     probe: EntryHash,
 ) -> Result<WriterId, String> {
-    if !held(before).is_subset(&held(after)) {
-        return Err("the folder lost entries".into());
-    }
-    if let Some((id, log)) = after
-        .writers()
-        .iter()
-        .find(|(_, log)| !log.forks().is_empty())
+    if let Some((writer, at)) = held(before)
+        .into_iter()
+        .find(|(writer, at)| !holds(after, *writer, *at))
     {
-        return Err(format!("{id} forked: {:?}", log.forks()));
+        return Err(format!("the folder lost {at:?} of {writer}"));
     }
-    let (&writer, log) = after
-        .writers()
+    if let Some((id, placed)) = after
+        .writers
         .iter()
-        .find(|(_, log)| log.holds(probe))
-        .ok_or("no log holds the probe")?;
-    if log.heads() != [probe] {
-        return Err(format!("{writer} has heads {:?}", log.heads()));
+        .find(|(_, placed)| !placed.forks.is_empty())
+    {
+        return Err(format!("{id} forked: {:?}", placed.forks));
+    }
+    let (&writer, placed) = after
+        .writers
+        .iter()
+        .find(|(_, placed)| placed.holds(probe))
+        .ok_or("no writer holds the probe")?;
+    if heads(placed) != [probe] {
+        return Err(format!("{writer} has heads {:?}", heads(placed)));
     }
     let Start::Resumed(id) = *start else {
         return Ok(writer);
     };
-    let tips = before
-        .writers()
-        .get(&id)
-        .map(|log| log.heads())
-        .unwrap_or_default();
+    let tips = before.writers.get(&id).map(heads).unwrap_or_default();
     let [tip] = tips[..] else {
         return Err(format!("{id} resumed with heads {tips:?}"));
     };
-    let chain = log.chain_to(probe).unwrap_or_default();
-    if writer != id || !chain.contains(&tip) {
+    if writer != id || !descends(placed, probe, tip) {
         return Err(format!("{id} did not resume after its last entry {tip}"));
     }
     Ok(writer)
@@ -1054,7 +1140,7 @@ fn check(
     workload: &Workload,
     dir: &Path,
     acked: usize,
-    entries: &[EntryHash],
+    entries: &[Acked],
 ) -> Result<Checked, String> {
     let models = models(workload);
     let last = models.len() - 1;
@@ -1075,8 +1161,10 @@ fn check(
     let raw = tree(&crash.dirs.folder)?;
     crash.before_recovery(&raw)?;
     let before = read_logs(&crash.dirs)?;
-    let held_before = held(&before);
-    if let Some(lost) = entries.iter().find(|entry| !held_before.contains(entry)) {
+    if let Some(lost) = entries
+        .iter()
+        .find(|acked| !holds(&before, acked.writer, acked.at))
+    {
         return Err(format!(
             "the folder lacks {lost}, an acknowledged step's entry"
         ));
@@ -1126,8 +1214,8 @@ fn main() -> ExitCode {
             let acked: usize = acked.parse().map_err(|e| format!("{acked}: {e}"))?;
             let entries = entries
                 .iter()
-                .map(|entry| entry.parse().map_err(|e| format!("{entry}: {e:?}")))
-                .collect::<Result<Vec<EntryHash>, String>>()?;
+                .map(|entry| entry.parse())
+                .collect::<Result<Vec<Acked>, String>>()?;
             let checked = check(&workload, Path::new(dir), acked, &entries)?;
             let start = match checked.start {
                 Start::Resumed(_) => "resumed",

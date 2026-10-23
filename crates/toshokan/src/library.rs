@@ -1,6 +1,6 @@
 //! The library as one instance holds it: the pure core both drivers run.
 //!
-//! Only [`Library::commit`] (and undo, redo, settling and adopting, which commit),
+//! Only [`Library::commit`] (and undo, redo and settling, which commit),
 //! [`Library::empty_trash`], [`Library::tidy`], [`Library::compact`] and
 //! [`Library::close`] write the folder. Opening, viewing, refreshing and scanning
 //! never do; they write only in the local root.
@@ -18,6 +18,8 @@ use crate::binding::{
     self, Binding, Bindings, Fact, Facts, Resolving, Scan, Scanned, Unscanned, Walk,
 };
 use crate::cache::{self, Encoding};
+use crate::contribution;
+use crate::derive::{self, Placed};
 use crate::drafts::{self, DraftRecord};
 use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd};
 use crate::env::Env;
@@ -29,22 +31,22 @@ use crate::intent;
 use crate::io::{Capabilities, Io, Kind, Lock, Root, Task};
 use crate::layout::Layout;
 use crate::line::MAX_LINE;
-use crate::log::{Bound, Entry, EntryKind, Genesis, Logged, Op, Settle, Settlement};
-use crate::merge::{merge, Beyond, Fold, Folded, Merging, Part};
+use crate::log::{Bound, Entry, EntryKind, Forked, Genesis, Logged, Op, Settle, Settlement};
+use crate::merge::{Folded, Part};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord};
 use crate::plan::{FactChange, FileChange, Plan};
 use crate::reach::{self, Linking, Links, Reach};
-use crate::reader::{Listing, ReadReport, Reader, Stamp, WriterLog};
+use crate::reader::{Listing, ReadReport, Reader, Stamp};
 use crate::recovery::{self, Settling};
 use crate::report::{
-    By, Change, Committed, Compacted, DraftState, DraftStatus, Emptied, HistoryItem, Lag, Local,
-    Mode, Opened, Orphan, Outcome, Partial, PartialReport, Presence, Refreshed, Settled, Start,
-    Tidied, TrashItem, What, WriterInfo,
+    By, Change, Committed, Compacted, DraftState, DraftStatus, Emptied, Fork, Gap, HistoryItem,
+    Item, ItemChange, Lag, Local, Mode, Opened, Orphan, Outcome, Partial, PartialReport, Presence,
+    Refreshed, Settled, Start, Tidied, TrashItem, What, WriterInfo,
 };
 use crate::schema::Schema;
 use crate::trash::{self, Policy};
-use crate::undo::History;
+use crate::undo::{Before, History};
 use crate::view::{FileRef, FileState, Parts, View};
 use crate::writer::{self, Claimed, Picked, Writer};
 
@@ -68,18 +70,8 @@ pub struct Library {
     orphaned: Vec<Orphan>,
     /// Pending records recovery would not act on.
     ignored: Vec<RelPath>,
-    /// What is shown: each writer's log, or what the folder holds of it once the
-    /// install let go every entry of it the folder lost.
+    /// What is shown: the merged state the reader derives.
     folded: Folded,
-    /// The snapshots `folded` joined, by writer and last folded entry.
-    joined: Joined,
-    /// Each writer's placed and folded entries no file in the folder held at the
-    /// last read.
-    lost: Let,
-    /// The entries this install let go, by writer, while the folder lacks them.
-    let_go: Let,
-    /// What is shown that the folder no longer holds, and not let go.
-    removed: Vec<Beyond>,
     /// Readings too far past this machine's clock for it to follow yet.
     ahead: BTreeSet<Hlc>,
     /// The file facts `folded` shows.
@@ -104,22 +96,13 @@ pub struct Library {
     pins: Vec<Op>,
     presence: BTreeMap<WriterId, Presence>,
     history: History,
+    /// The entry the intent being committed undoes or redoes.
+    reversing: Option<EntryHash>,
     view: View,
     /// Whether a read folded in something the view does not show yet.
     unshown: bool,
     /// The parts of this instance's state that lag what it committed, with why.
     behind: BTreeMap<Lag, String>,
-}
-
-type Let = BTreeMap<WriterId, BTreeSet<EntryHash>>;
-
-/// Snapshots a merged state joined, by writer and last folded entry.
-type Joined = BTreeSet<(WriterId, Option<EntryHash>)>;
-
-/// The snapshots of `logs`, as [`Joined`].
-fn joined<'a>(logs: impl Iterator<Item = &'a WriterLog>) -> Joined {
-    logs.flat_map(|log| log.snapshots().iter().map(|s| (log.writer(), s.head())))
-        .collect()
 }
 
 /// An intent resolved against the view, before anything is written.
@@ -151,22 +134,12 @@ impl Library {
                     .map_ok(move |cached| (picked, cached))
             })
             .and_then(|(picked, cached)| {
-                flow::read_replaced(Root::Local, Layout::let_go()).map_ok(move |bytes| {
-                    let let_go = bytes.and_then(|bytes| serde_json::from_slice(&bytes).ok());
-                    (picked, cached, let_go.unwrap_or_default())
-                })
-            })
-            .and_then(|(picked, cached, let_go)| {
                 flow::read_replaced(Root::Local, Layout::identities()).map_ok(move |bytes| {
                     let remembered = bytes.and_then(|bytes| Scan::of_identities(&bytes));
-                    (picked, cached, (let_go, remembered.unwrap_or_default()))
+                    (picked, cached, remembered.unwrap_or_default())
                 })
             })
-            .and_then(move |(picked, mut cached, kept)| {
-                let resumed = cached.state.take().map(|state| {
-                    let logs = cached.view.writers().values();
-                    (state, joined(logs))
-                });
+            .and_then(move |(picked, cached, remembered)| {
                 let reader = Reader::open(layout.clone(), cached);
                 flow::run(reader.list()).and_then(move |listing| {
                     absorbed(reader, listing).then(move |(reader, report)| {
@@ -185,17 +158,16 @@ impl Library {
                                 capabilities,
                                 reader,
                                 claimed.writer,
-                                kept,
+                                remembered,
                             );
-                            (library, report, claimed.start, resumed)
+                            (library, report, claimed.start)
                         })
                     })
                 })
             })
-            .and_then(|(mut library, report, start, resumed)| {
-                let merging =
-                    resumed.and_then(|(state, joined)| library.resume(state, joined, &report));
-                fold_opened(library, merging).then(move |library| ok((library, report, start)))
+            .and_then(|(mut library, report, start)| {
+                library.grace(true);
+                fold_opened(library).then(move |library| ok((library, report, start)))
             })
             .and_then(|(library, report, start)| {
                 saved_view(library).then(move |(library, saved)| match saved {
@@ -230,7 +202,6 @@ impl Library {
                             .collect(),
                         orphaned: library.orphaned.clone(),
                         drafts,
-                        removed: library.removed_facts(),
                         forks: report.forks,
                         gaps: report.gaps,
                         unreadable: report
@@ -253,7 +224,7 @@ impl Library {
         capabilities: Capabilities,
         reader: Reader,
         writer: Option<Writer>,
-        (let_go, remembered): (Let, Scan),
+        remembered: Scan,
     ) -> Self {
         Self {
             layout,
@@ -269,10 +240,6 @@ impl Library {
             orphaned: Vec::new(),
             ignored: Vec::new(),
             folded: Folded::default(),
-            joined: BTreeSet::new(),
-            lost: Let::new(),
-            let_go,
-            removed: Vec::new(),
             ahead: BTreeSet::new(),
             facts: Facts::new(),
             scan: remembered.clone(),
@@ -285,6 +252,7 @@ impl Library {
             pins: Vec::new(),
             presence: BTreeMap::new(),
             history: History::default(),
+            reversing: None,
             unshown: false,
             view: View::new(Parts {
                 folded: Folded::default(),
@@ -292,6 +260,7 @@ impl Library {
                 writers: Vec::new(),
                 forks: Vec::new(),
                 gaps: Vec::new(),
+                items: Vec::new(),
             }),
             behind: BTreeMap::new(),
         }
@@ -301,7 +270,7 @@ impl Library {
     fn mode_at_open(&self) -> Mode {
         match (&self.writer, self.capabilities.append) {
             (_, false) => Mode::ReadOnly(Why::FolderNotWritable),
-            (Some(writer), true) => match newer_entry(&self.folded, &self.reader, writer.id()) {
+            (Some(writer), true) => match newer_entry(&self.reader, writer.id()) {
                 Some(entry) => Mode::ReadOnly(Why::NewerOwnHistory { entry }),
                 None => Mode::Writable,
             },
@@ -313,12 +282,11 @@ impl Library {
         self.view.clone()
     }
 
-    /// What the view would show if every log were folded again from scratch, as
+    /// What the view would show if the reader derived it again from scratch, as
     /// tests compare with what it shows.
     #[doc(hidden)]
     pub fn refolded(&self) -> Folded {
-        let folder = self.shown_as_folder();
-        merge(shown_logs(&self.reader, |writer| folder.contains(&writer)))
+        self.reader.derive_afresh().folded
     }
 
     /// What this instance binds, and what binding every fact of the view afresh
@@ -362,75 +330,22 @@ impl Library {
         }
     }
 
+    /// Undoes this session's latest intent not undone.
     pub fn undo(&mut self) -> Task<'_, Result<Committed>> {
         self.commit_with(|library| {
-            let (writer, own) = library.own_entries()?;
-            let plan = library.history.plan_undo(&own, writer, &library.view);
+            let writer = library.own_id()?;
+            let plan = library.history.plan_undo(writer, &library.view);
             library.resolve(plan.map_err(Error::Refused)?)
         })
     }
 
+    /// Redoes this session's latest undo, while nothing was committed since.
     pub fn redo(&mut self) -> Task<'_, Result<Committed>> {
         self.commit_with(|library| {
-            let (writer, own) = library.own_entries()?;
-            let plan = library.history.plan_redo(&own, writer, &library.view);
+            let writer = library.own_id()?;
+            let plan = library.history.plan_redo(writer, &library.view);
             library.resolve(plan.map_err(Error::Refused)?)
         })
-    }
-
-    /// Republishes what [`Opened::removed`] reports as an intent of this writer
-    /// labeled `label`, then lets the entries the folder lost go: the folder then
-    /// holds what this install showed. Refused with [`Refusal::Nothing`] when
-    /// nothing is reported. A writer whose own entries the folder lost stops
-    /// first, so the intent is a new writer's.
-    pub fn adopt(&mut self, label: &str) -> Task<'_, Result<Committed>> {
-        if let Err(error) = self.writable() {
-            return Task::ready(Err(error));
-        }
-        let label = label.to_owned();
-        let removed = self.reader.removed();
-        let lost = self.writer.as_ref().map(Writer::id);
-        let stopped = match lost.is_some_and(|own| removed.contains_key(&own)) {
-            true => self.stop_writing(),
-            false => ok(()),
-        };
-        stopped
-            .and_then(move |()| settle_first(self))
-            .and_then(move |library| {
-                if library.removed.is_empty() {
-                    return Flow::Done(Err(Error::Refused(Refusal::Nothing)));
-                }
-                let resolved = Resolved {
-                    label,
-                    created: Vec::new(),
-                    facts: library.removed.iter().map(|b| b.op.clone()).collect(),
-                    effects: Rc::new(EffectPlan::new(library.env.nonce())),
-                    reverses: None,
-                };
-                commit(library, resolved)
-            })
-            .and_then(|(library, mut committed)| {
-                flow::run(library.forget()).then(move |kept| {
-                    library.lag(Lag::LetGo, &kept);
-                    committed.local = library.local();
-                    ok(committed)
-                })
-            })
-            .task()
-    }
-
-    /// Stops showing what [`Opened::removed`] reports: each writer whose entries
-    /// the folder lost is shown as the folder holds it, on every open of this
-    /// install, until the folder holds them again. Writes only in the local root.
-    /// When that write fails, they are not shown for now, and the next commit,
-    /// refresh or close writes it again.
-    pub fn let_go(&mut self) -> Task<'_, Result<()>> {
-        flow::run(self.forget())
-            .then(move |kept| {
-                self.lag(Lag::LetGo, &kept);
-                Flow::Done(kept)
-            })
-            .task()
     }
 
     /// Commits what `resolve` makes of the library once this writer's
@@ -451,20 +366,6 @@ impl Library {
             .task()
     }
 
-    /// Lets go every entry the folder lost: shows their writers as the folder
-    /// holds them, and keeps the entries in `let-go.json` of the local root.
-    fn forget(&mut self) -> Task<'static, Result<()>> {
-        self.let_go = self.reader.removed();
-        self.refold();
-        self.show();
-        self.keep_let_go()
-    }
-
-    fn keep_let_go(&self) -> Task<'static, Result<()>> {
-        let bytes = serde_json::to_vec(&self.let_go).expect("hashes by writer are JSON");
-        flow::replace(Root::Local, Layout::let_go(), bytes).task()
-    }
-
     /// Notes how saving `part` again went.
     fn lag(&mut self, part: Lag, saved: &Result<()>) {
         match saved {
@@ -480,23 +381,11 @@ impl Library {
         }
     }
 
-    fn own_entries(&self) -> Result<(WriterId, Vec<Entry>)> {
-        let writer = self
-            .writer
+    fn own_id(&self) -> Result<WriterId> {
+        self.writer
             .as_ref()
-            .ok_or(Error::Refused(Refusal::Nothing))?;
-        let own = self
-            .reader
-            .logs()
-            .get(&writer.id())
-            .map(|log| {
-                log.entries()
-                    .iter()
-                    .map(|entry| Entry::clone(entry))
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok((writer.id(), own))
+            .map(Writer::id)
+            .ok_or(Error::Refused(Refusal::Nothing))
     }
 
     /// Settles another writer's unfinished effect, with the user's consent, in
@@ -578,9 +467,11 @@ impl Library {
             Look::Everything => self.reader.list(),
             Look::Logs | Look::Paths(_) => self.reader.probe(),
         };
+        let full = matches!(scope, Look::Everything);
         flow::run(listed)
             .and_then(move |listing| {
-                let report = self.reader.absorb(listing);
+                let mut report = self.reader.absorb(listing);
+                report.changed |= self.grace(full);
                 let moved = self.absorb_read(&report);
                 self.unshown |= report.anything_new();
                 let forked = self
@@ -599,11 +490,20 @@ impl Library {
                 let changes = library.since_view();
                 reshown(library).map_ok(move |library| Refreshed {
                     changes,
-                    removed: library.removed_facts(),
                     scan: library.bindings.report.clone(),
                 })
             })
             .task()
+    }
+
+    /// Takes the grace step once it is due, after a read that scanned every
+    /// file when `full`; whether it took it.
+    fn grace(&mut self, full: bool) -> bool {
+        let due = self.reader.note_grace(self.env.now_ms(), full);
+        if due {
+            self.reader.take_grace();
+        }
+        due
     }
 
     /// What changed since the view.
@@ -677,45 +577,19 @@ impl Library {
     }
 
     /// Folds this writer's own entries into a snapshot and deletes the sealed
-    /// segments of its directory a snapshot folds. Undo reaches back only to the
-    /// snapshot. Refused with [`Refusal::Nothing`] when this instance writes as no
-    /// writer yet, and when a snapshot in the writer's directory already folds its
-    /// last entry.
+    /// segments of its directory the snapshot certifies. A writer also compacts
+    /// at close and every [`COMPACT_AFTER`] entries. Refused with
+    /// [`Refusal::Nothing`] when this instance writes as no writer yet, and when
+    /// a snapshot in the writer's directory already has its last entry.
     pub fn compact(&mut self) -> Task<'_, Result<Compacted>> {
         if let Err(error) = self.writable() {
             return Task::ready(Err(error));
         }
-        let Some(id) = self.writer.as_ref().map(Writer::id) else {
+        if self.writer.is_none() {
             return Task::ready(Err(Error::Refused(Refusal::Nothing)));
-        };
-        flow::run(self.reader.list_writer(id))
-            .and_then(move |listing| {
-                self.reader.absorb(listing);
-                let writer = self.writer.take().expect("checked above");
-                let name = self.env.nonce();
-                flow::run(crate::compaction::compact(writer, &self.reader, name)).then(
-                    move |(writer, compacted)| match compacted {
-                        Err(error @ Error::Rekey { .. }) => {
-                            self.writer = Some(writer);
-                            self.stop_writing()
-                                .and_then(move |()| Flow::Done(Err(error)))
-                        }
-                        Err(error) => {
-                            self.writer = Some(writer);
-                            Flow::Done(Err(error))
-                        }
-                        Ok(compacted) => {
-                            self.writer = Some(writer);
-                            flow::run(self.reader.list_writer(id)).map_ok(move |listing| {
-                                self.reader.absorb(listing);
-                                self.refold();
-                                self.show();
-                                compacted
-                            })
-                        }
-                    },
-                )
-            })
+        }
+        compacted(self)
+            .then(|(_, compacted)| Flow::Done(compacted))
             .task()
     }
 
@@ -754,10 +628,11 @@ impl Library {
         tidied(self).then(|(_, tidied)| Flow::Done(tidied)).task()
     }
 
-    /// Writes the cached view and what else lags, removes the spent pending
-    /// records of a writable library, seals the open segment and releases the
-    /// writer's lock, then lets go of what the library holds a part at a time:
-    /// nothing is left to view, and the library only drops. A record it cannot
+    /// Compacts the writer of a writable library, writes the cached view and
+    /// what else lags, removes the spent pending records of a writable library,
+    /// seals the open segment and releases the writer's lock, then lets go of
+    /// what the library holds a part at a time: nothing is left to view, and the
+    /// library only drops. A record it cannot
     /// remove stays for the next instance to find, and that failure is returned
     /// once the library is closed. A library dropped without closing leaves its
     /// segment open, as a crash does.
@@ -766,15 +641,16 @@ impl Library {
             return dismantled(self).then(|()| ok(())).task();
         };
         self.writer = Some(writer);
-        keep_local(self, false)
+        compact_due(self, true)
+            .then(|library| keep_local(library, false))
             .then(|(library, kept)| match (kept, library.writable()) {
                 (Err(error), _) => Flow::Done(Err(error)),
                 (Ok(()), Ok(())) => tidied(library).then(|(library, tidied)| ok((library, tidied))),
                 (Ok(()), Err(_)) => ok((library, Ok(Tidied::default()))),
             })
-            .and_then(|(library, tidied)| {
-                let writer = library.writer.take().expect("taken back above");
-                flow::run(writer.close()).map_ok(move |()| (library, tidied))
+            .and_then(|(library, tidied)| match library.writer.take() {
+                Some(writer) => flow::run(writer.close()).map_ok(move |()| (library, tidied)),
+                None => ok((library, tidied)),
             })
             .and_then(|(library, tidied)| {
                 dismantled(library).then(|()| Flow::Done(tidied.map(drop)))
@@ -809,13 +685,13 @@ impl Library {
     /// to the library, chained to its writer's log, not closed and not settled.
     fn is_orphan(&self, name: Nonce, theirs: &PendingRecord) -> bool {
         let own = self.writer.as_ref().map(Writer::id);
-        let Some(log) = self.reader.logs().get(&theirs.writer) else {
+        let Some(placed) = self.reader.derived().writers.get(&theirs.writer) else {
             return false;
         };
         own != Some(theirs.writer)
             && theirs.is_confined(&self.layout)
-            && recovery::Chain::holds(log, theirs.after())
-            && !recovery::Chain::continues(log, theirs.after())
+            && recovery::Chain::holds(placed, theirs.after())
+            && !recovery::Chain::continues(placed, theirs.after())
             && !self.folded.settled(theirs.writer, name)
     }
 
@@ -905,8 +781,8 @@ impl Library {
                 let replaces = self
                     .folded
                     .file_writes(*entity)
-                    .into_iter()
-                    .map(|write| write.entry)
+                    .iter()
+                    .map(crate::merge::Write::named)
                     .collect();
                 match (file, pinned.contains(entity)) {
                     (Some(file), true) => Op::Pin {
@@ -918,6 +794,7 @@ impl Library {
                         entity: *entity,
                         file: file.clone(),
                         replaces,
+                        take: None,
                     },
                 }
             })
@@ -951,124 +828,61 @@ impl Library {
         self.spent.insert(name, record.clone());
     }
 
-    /// Places entries this instance just appended to `written` and folds them in.
+    /// Places entries this instance just appended to `written` and folds them in,
+    /// keeping its intents in the history with what they replaced.
     fn absorb_own(&mut self, entries: &[Entry], written: Option<(RelPath, Stamp)>) {
         let Some(id) = self.writer.as_ref().map(Writer::id) else {
             return;
         };
-        self.reader.add(id, entries, written);
+        let mut reverses = self.reversing.take();
         for entry in entries {
-            let kind = entry.kind();
-            self.folded.fold(id, entry, &kind);
-            self.history.push(entry);
+            if let EntryKind::Intent(logged) = entry.kind() {
+                let before = Before::of(&logged.ops, &self.folded);
+                self.history.push(entry, reverses.take(), before);
+            }
             self.clock = self.clock.observe(entry.at());
-            self.refile(entities(&kind));
         }
+        self.reader.add(id, entries, written);
+        self.take_derived();
     }
 
-    /// What folds `state`, the merged state the cached view kept with the
-    /// snapshots it `joined`, into what is shown with what `read` placed since.
-    /// `None` while a writer is shown as the folder holds it: everything is folded
-    /// again then.
-    fn resume(&mut self, state: Folded, joined: Joined, read: &ReadReport) -> Option<Merging> {
-        self.lost = self.reader.removed();
-        self.retain_let_go();
-        if !self.shown_as_folder().is_empty() {
-            return None;
-        }
-        self.joined = joined;
-        Some(Merging::onto(state, self.unfolded(read)))
+    /// Takes what the reader derives as what is shown. Returns the library
+    /// paths the changed file facts name, and those where the entities they
+    /// changed were bound.
+    fn take_derived(&mut self) -> Vec<RelPath> {
+        let folded = self.reader.derived().folded.clone();
+        let changed = folded.changed(&self.folded);
+        self.folded = folded;
+        self.refile(changed.into_iter())
     }
 
-    /// Folds what a read placed, and the snapshots it kept, into what is shown.
-    /// Refolds every log while a writer is shown as the folder holds it, since
-    /// what the folder holds of it may have shrunk. Returns the library paths the
-    /// changed file facts name, and those where the entities they changed were
-    /// bound.
+    /// Takes in what a read derived. Returns the library paths the changed file
+    /// facts name, and those where the entities they changed were bound.
     fn absorb_read(&mut self, report: &ReadReport) -> Vec<RelPath> {
         if !report.anything_new() {
             self.follow(Vec::new());
             return Vec::new();
         }
-        let shown_as_folder = !self.shown_as_folder().is_empty();
-        self.lost = self.reader.removed();
-        self.retain_let_go();
-        if shown_as_folder || !self.shown_as_folder().is_empty() {
-            let was = std::mem::take(&mut self.facts);
-            self.refold();
-            self.follow(readings(&self.reader).collect::<Vec<_>>());
-            return self.moved_since(&was);
-        }
-        let own = self.writer.as_ref().map(Writer::id);
-        let (followed, joined, touched) = self.fold_read(report);
-        let moved = match joined {
-            true => {
-                let was = self.reach.refile_all(&mut self.facts, self.folded.files());
-                self.moved_since(&was)
-            }
-            false => self.refile(touched.into_iter()),
-        };
-        if own.is_some_and(|own| joined || report.placed.contains_key(&own)) {
-            self.rehistory();
-        }
-        self.follow(followed);
+        let moved = self.take_derived();
+        self.follow(self.reader.readings().collect());
         moved
     }
 
-    /// Folds into what is shown the snapshots of the logs it has not joined and
-    /// the entries `report` placed. Returns their readings, whether it joined a
-    /// snapshot, and the entities the entries changed.
-    fn fold_read(&mut self, report: &ReadReport) -> (Vec<Hlc>, bool, BTreeSet<EntityId>) {
-        let mut followed = Vec::new();
-        let mut joined = false;
-        let mut touched = BTreeSet::new();
-        for part in self.unfolded(report) {
-            match part {
-                Fold::Join(snapshot) => {
-                    self.folded.join(&snapshot.state);
-                    followed.push(snapshot.at);
-                    joined = true;
-                }
-                Fold::Apply(writer, entry) => {
-                    let kind = entry.kind();
-                    self.folded.fold(writer, &entry, &kind);
-                    followed.push(entry.at());
-                    touched.extend(entities(&kind));
-                }
-            }
-        }
-        (followed, joined, touched)
-    }
-
-    /// The snapshots of the logs not joined yet, noted as joined from now on, and
-    /// the entries `report` placed.
-    fn unfolded(&mut self, report: &ReadReport) -> Vec<Fold> {
-        let mut parts = Vec::new();
-        for log in self.reader.logs().values() {
-            for snapshot in log.snapshots() {
-                if self.joined.insert((log.writer(), snapshot.head())) {
-                    parts.push(Fold::Join(Rc::clone(snapshot)));
-                }
-            }
-        }
-        for (writer, placed) in &report.placed {
-            let log = &self.reader.logs()[writer];
-            let entries = placed.iter().filter_map(|hash| log.entry(*hash));
-            parts.extend(entries.map(|entry| Fold::Apply(*writer, Rc::clone(entry))));
-        }
-        parts
-    }
-
-    /// The paths of the file facts that differ between `was` and the facts now,
-    /// and those where the entities whose facts differ are bound.
-    fn moved_since(&self, was: &Facts) -> Vec<RelPath> {
-        let entities: BTreeSet<EntityId> = was.keys().chain(self.facts.keys()).copied().collect();
-        let changed = entities
-            .into_iter()
-            .filter(|entity| was.get(entity) != self.facts.get(entity));
-        changed
-            .flat_map(|entity| self.fact_paths(entity, was.get(&entity).map(|was| &was[..])))
-            .collect()
+    /// The fork points this writer knows of the writers whose writes `ops` name.
+    fn known_forks(&self, ops: &[Op]) -> Vec<Forked> {
+        let named: BTreeSet<WriterId> = ops
+            .iter()
+            .flat_map(|op| contribution::said(op).refs)
+            .map(|(_, target)| target.writer)
+            .collect();
+        let writers = &self.reader.derived().writers;
+        let fork = |writer: WriterId| {
+            Some(Forked {
+                writer,
+                at: writers.get(&writer)?.fork?,
+            })
+        };
+        named.into_iter().filter_map(fork).collect()
     }
 
     /// The paths `was`, an entity's file facts before, named, those its facts name
@@ -1258,83 +1072,9 @@ impl Library {
         binding::list_all(&self.layout).task()
     }
 
-    /// Folds what is shown from scratch: each writer's log, or what the folder
-    /// holds of it once every entry of it the folder lost was let go. Forgets
-    /// let-go entries the folder holds again.
-    fn refold(&mut self) {
-        let mut merging = self.unfold();
-        merging.step(usize::MAX);
-        self.folded = merging.folded();
-        self.refiled(self.folded.files());
-    }
-
-    /// The merge [`Library::refold`] folds.
-    fn unfold(&mut self) -> Merging {
-        self.lost = self.reader.removed();
-        self.retain_let_go();
-        let folder = self.shown_as_folder();
-        let logs = shown_logs(&self.reader, |writer| folder.contains(&writer));
-        self.joined = joined(logs.iter().copied());
-        Merging::new(logs)
-    }
-
     /// Takes `facts`, the file facts of what is now shown.
     fn refiled(&mut self, facts: Facts) {
         self.reach.refile_all(&mut self.facts, facts);
-        self.rehistory();
-    }
-
-    /// Forgets let-go entries the folder holds again.
-    fn retain_let_go(&mut self) {
-        for (writer, let_go) in &mut self.let_go {
-            let gone = self.lost.get(writer);
-            let_go.retain(|hash| gone.is_some_and(|gone| gone.contains(hash)));
-        }
-        self.let_go.retain(|_, let_go| !let_go.is_empty());
-    }
-
-    /// The writers shown as the folder holds them: every entry of theirs the
-    /// folder lost was let go.
-    fn shown_as_folder(&self) -> BTreeSet<WriterId> {
-        let let_go = |writer| self.let_go.get(writer);
-        self.lost
-            .iter()
-            .filter(|(writer, gone)| let_go(*writer).is_some_and(|l| gone.is_subset(l)))
-            .map(|(writer, _)| *writer)
-            .collect()
-    }
-
-    fn rehistory(&mut self) {
-        self.history = match &self.writer {
-            Some(writer) => self
-                .reader
-                .logs()
-                .get(&writer.id())
-                .map(|log| History::of(log.entries().iter().map(|entry| &**entry)))
-                .unwrap_or_default(),
-            None => History::default(),
-        };
-    }
-
-    /// What is shown that the folder no longer holds and was not let go, with the
-    /// ops that would republish it.
-    fn unkept(&self) -> Vec<Beyond> {
-        if self.lost.len() == self.shown_as_folder().len() {
-            return Vec::new();
-        }
-        let kept = merge(shown_logs(&self.reader, |writer| {
-            self.lost.contains_key(&writer)
-        }));
-        self.folded.beyond(&kept)
-    }
-
-    /// What is shown that the folder no longer holds, as changes by writer.
-    fn removed_facts(&self) -> Vec<Change> {
-        distinct(self.removed.iter().map(|beyond| Change {
-            entity: beyond.entity,
-            what: what(&beyond.part),
-            by: self.by(beyond.by),
-        }))
     }
 
     /// Who `writer` is to the user: this writer, or another by its label.
@@ -1345,11 +1085,11 @@ impl Library {
                 writer,
                 label: self
                     .reader
-                    .logs()
+                    .derived()
+                    .writers
                     .get(&writer)
-                    .and_then(WriterLog::label)
-                    .unwrap_or_default()
-                    .to_owned(),
+                    .map(label)
+                    .unwrap_or_default(),
             },
         }
     }
@@ -1370,34 +1110,73 @@ impl Library {
     /// `index` is.
     fn show_indexed(&mut self, index: Arc<Index>) {
         self.unshown = false;
-        self.removed = self.unkept();
-        let logs = self.reader.logs().values();
-        let forks = logs.clone().flat_map(|log| log.forks()).copied().collect();
-        let gaps = logs.flat_map(|log| log.gaps()).copied().collect();
+        let derived = self.reader.derived();
+        let mut forks = Vec::new();
+        let mut gaps = Vec::new();
+        for (writer, placed) in &derived.writers {
+            forks.extend(placed.forks.iter().map(|fork| Fork {
+                writer: *writer,
+                at: fork.n,
+                prev: fork.hash,
+            }));
+            if let Some(first) = placed.gaps.first() {
+                gaps.push(Gap {
+                    writer: *writer,
+                    missing: first.prev(),
+                    held: placed.gaps.len(),
+                });
+            }
+        }
+        let items = derived
+            .items
+            .iter()
+            .flat_map(|(writer, items)| items.iter().map(move |item| (*writer, item)))
+            .map(|(writer, item)| self.item(writer, item))
+            .collect();
         let parts = Parts {
             folded: self.folded.clone(),
             bindings: Arc::clone(&self.bindings),
             writers: self.writer_infos(),
             forks,
             gaps,
+            items,
         };
         self.view = View::indexed(parts, index);
+    }
+
+    /// `item` of `writer`, as the view shows it.
+    fn item(&self, writer: WriterId, item: &derive::Item) -> Item {
+        let changes = item.change.iter().map(|(field, (_, _, value))| ItemChange {
+            entity: field.entity(),
+            what: what_of(field),
+            change: fact_change(field, value),
+            forgotten: item.forgotten.contains(field),
+        });
+        Item {
+            kind: item.kind,
+            run: item.run,
+            by: self.by(writer),
+            span: item.span,
+            entries: item.entries,
+            changes: changes.collect(),
+        }
     }
 
     fn writer_infos(&self) -> Vec<WriterInfo> {
         let own = self.writer.as_ref().map(Writer::id);
         self.reader
-            .logs()
-            .values()
-            .map(|log| WriterInfo {
-                writer: log.writer(),
-                label: log.label().unwrap_or_default().to_owned(),
-                last_entry_at: log.last_at(),
-                here: match Some(log.writer()) == own {
+            .derived()
+            .writers
+            .iter()
+            .map(|(writer, placed)| WriterInfo {
+                writer: *writer,
+                label: label(placed),
+                last_entry_at: last_at(placed),
+                here: match Some(*writer) == own {
                     true => Presence::This,
                     false => self
                         .presence
-                        .get(&log.writer())
+                        .get(writer)
                         .copied()
                         .unwrap_or(Presence::Elsewhere),
                 },
@@ -1511,44 +1290,85 @@ fn what(part: &Part) -> What {
     }
 }
 
-/// Every writer's log, or what the folder holds of it for each writer `folder`
-/// names.
-fn shown_logs(reader: &Reader, folder: impl Fn(WriterId) -> bool) -> Vec<&WriterLog> {
-    let logs = reader.logs().iter();
-    let logs = logs.filter_map(|(writer, log)| match folder(*writer) {
-        true => reader.folder_log(*writer),
-        false => Some(log),
-    });
-    logs.collect()
+/// The part of an entity a write of `field` changes.
+fn what_of(field: &contribution::FieldKey) -> What {
+    use contribution::FieldKey;
+    match field {
+        FieldKey::Exist(_) => What::Created,
+        FieldKey::Register(_, key) | FieldKey::Member(_, key, _) => What::Field(key.to_string()),
+        FieldKey::File(_) => What::File,
+    }
 }
 
-/// The entities whose state folding an entry of `kind` changes.
-fn entities(kind: &EntryKind) -> impl Iterator<Item = EntityId> + '_ {
-    let ops = match kind {
-        EntryKind::Intent(logged) => logged.ops.as_slice(),
-        EntryKind::Bind(bound) => bound.ops.as_slice(),
-        EntryKind::Genesis(_) | EntryKind::Settle(_) | EntryKind::Unknown(_) => &[],
-    };
-    ops.iter().filter_map(Op::entity)
+/// The fact change that writes `value` to `field`; `None` for a file write, which
+/// only a file effect makes.
+fn fact_change(field: &contribution::FieldKey, value: &contribution::Value) -> Option<FactChange> {
+    use contribution::{FieldKey, Value};
+    Some(match (field, value) {
+        (FieldKey::Exist(entity), Value::Exist(true)) => FactChange::Revive { entity: *entity },
+        (FieldKey::Exist(entity), Value::Exist(false)) => FactChange::Delete { entity: *entity },
+        (FieldKey::Register(entity, key), Value::Register(Some(value))) => FactChange::Set {
+            entity: *entity,
+            key: key.to_string(),
+            value: value.clone(),
+        },
+        (FieldKey::Register(entity, key), Value::Register(None)) => FactChange::Clear {
+            entity: *entity,
+            key: key.to_string(),
+        },
+        (FieldKey::Member(entity, key, member), Value::Member(true)) => FactChange::Add {
+            entity: *entity,
+            key: key.to_string(),
+            value: member.clone(),
+        },
+        (FieldKey::Member(entity, key, member), Value::Member(false)) => FactChange::Remove {
+            entity: *entity,
+            key: key.to_string(),
+            value: member.clone(),
+        },
+        _ => return None,
+    })
+}
+
+/// The label a writer's genesis entry gave it, as its tips or its entries hold it.
+fn label(placed: &Placed) -> String {
+    if let Some(tip) = placed.tips.first() {
+        return tip.label.clone();
+    }
+    let first = placed.merged.first().or(placed.runs.first());
+    match first.map(|entry| entry.kind()) {
+        Some(EntryKind::Genesis(genesis)) => genesis.label,
+        _ => String::new(),
+    }
+}
+
+/// The latest clock reading of what the reader holds of a writer.
+fn last_at(placed: &Placed) -> Option<Hlc> {
+    let tips = placed.tips.iter().map(|tip| tip.at);
+    let entries = placed.merged.iter().chain(&placed.runs).chain(&placed.gaps);
+    tips.chain(entries.map(|entry| entry.at())).max()
 }
 
 /// An entry of `writer`'s own history this build does not understand.
-fn newer_entry(folded: &Folded, reader: &Reader, writer: WriterId) -> Option<EntryHash> {
-    let log = reader.logs().get(&writer)?;
-    folded
-        .unknown()
-        .map(|(entry, _)| *entry)
-        .find(|entry| log.holds(*entry))
+fn newer_entry(reader: &Reader, writer: WriterId) -> Option<EntryHash> {
+    let placed = reader.derived().writers.get(&writer)?;
+    let folded = placed.tips.iter().flat_map(|tip| &tip.state.unknown);
+    if let Some((entry, _)) = folded.into_iter().next() {
+        return Some(*entry);
+    }
+    let unknown = |entry: &&std::rc::Rc<Entry>| {
+        let kind = entry.kind();
+        let op = contribution::ops(&kind)
+            .iter()
+            .any(|op| matches!(op, Op::Unknown(_)));
+        op || matches!(kind, EntryKind::Unknown(_))
+    };
+    placed.merged.iter().find(unknown).map(|entry| entry.hash())
 }
 
 /// How far past this machine's wall clock a reading in the folder may be and still
 /// move this writer's clock.
 const MAX_DRIFT_MS: u64 = 24 * 60 * 60 * 1000;
-
-/// Every reading of the placed entries and kept snapshots.
-fn readings(reader: &Reader) -> impl Iterator<Item = Hlc> + '_ {
-    reader.logs().values().flat_map(WriterLog::readings)
-}
 
 /// `changes` without repeats, in order of their first appearance.
 fn distinct(changes: impl Iterator<Item = Change>) -> Vec<Change> {
@@ -1567,7 +1387,7 @@ fn change_of(op: &Op) -> Option<Change> {
         | Op::Add { entity, key, .. }
         | Op::Remove { entity, key, .. } => (*entity, What::Field(key.clone())),
         Op::File { entity, .. } | Op::Pin { entity, .. } => (*entity, What::File),
-        Op::Unknown(_) => return None,
+        Op::Dismiss { .. } | Op::Unknown(_) => return None,
     };
     Some(Change {
         entity,
@@ -1578,9 +1398,6 @@ fn change_of(op: &Op) -> Option<Change> {
 
 /// About how many entries one slice of placing offers.
 const PLACE_SLICE: usize = 1 << 11;
-
-/// About how many ops one slice of folding applies.
-const FOLD_SLICE: usize = 1 << 12;
 
 /// How many entities' file facts one slice takes.
 const FILE_SLICE: usize = 1 << 12;
@@ -1606,16 +1423,11 @@ fn absorbed<'a>(mut reader: Reader, listing: Listing) -> Flow<'a, (Reader, ReadR
     })
 }
 
-/// Folds what a library just opened shows a slice at a time, with `merging` when
-/// it resumes from the state its cached view kept, then follows its clock
-/// readings and decides whether it may write.
-fn fold_opened(mut library: Library, merging: Option<Merging>) -> Flow<'static, Library> {
-    let merging = merging.unwrap_or_else(|| library.unfold());
-    let folded = flow::sliced(merging, |merging| merging.step(FOLD_SLICE)).then(move |merging| {
-        library.folded = merging.folded();
-        Flow::Done(library)
-    });
-    folded
+/// Takes what a library just opened shows, its file facts a slice at a time,
+/// then follows its clock readings and decides whether it may write.
+fn fold_opened(mut library: Library) -> Flow<'static, Library> {
+    library.folded = library.reader.derived().folded.clone();
+    Flow::Done(library)
         .then(|library| {
             let filing = (library, Facts::new(), None);
             flow::sliced(filing, |(library, facts, after)| {
@@ -1624,10 +1436,79 @@ fn fold_opened(mut library: Library, merging: Option<Merging>) -> Flow<'static, 
         })
         .then(|(mut library, facts, _)| {
             library.refiled(facts);
-            library.follow(readings(&library.reader).collect::<Vec<_>>());
+            library.follow(library.reader.readings().collect());
             library.mode = library.mode_at_open();
             Flow::Done(library)
         })
+}
+
+/// How many of its own entries since its last snapshot a writer appends before
+/// it compacts.
+pub const COMPACT_AFTER: usize = 512;
+
+/// Reads this writer's directory, folds its own entries into a snapshot and
+/// deletes what the snapshot certifies, then reads the directory again. A writer
+/// whose head the folder no longer holds stops writing.
+fn compacted(library: &mut Library) -> Flow<'_, (&mut Library, Result<Compacted>)> {
+    let id = library
+        .writer
+        .as_ref()
+        .map(Writer::id)
+        .expect("a writer compacts");
+    flow::run(library.reader.list_writer(id)).then(move |listing| {
+        let listing = match listing {
+            Ok(listing) => listing,
+            Err(error) => return Flow::Done((library, Err(error))),
+        };
+        let recorded = recorded_segments(&library.reader, id);
+        library.reader.absorb(listing);
+        let writer = library.writer.take().expect("checked above");
+        let name = library.env.nonce();
+        let compaction = crate::compaction::compact(writer, &library.reader, &recorded, name);
+        flow::run(compaction).then(move |(writer, compacted)| {
+            library.writer = Some(writer);
+            match compacted {
+                Err(error @ Error::Rekey { .. }) => library
+                    .stop_writing()
+                    .then(move |stopped| Flow::Done((library, stopped.and(Err(error))))),
+                Err(error) => Flow::Done((library, Err(error))),
+                Ok(compacted) => flow::run(library.reader.list_writer(id)).then(move |listing| {
+                    let read = listing.map(|listing| {
+                        library.reader.absorb(listing);
+                        library.take_derived();
+                        library.show();
+                    });
+                    Flow::Done((library, read.map(|()| compacted)))
+                }),
+            }
+        })
+    })
+}
+
+/// The lines of each segment of `writer`'s directory the reader's last read
+/// found.
+fn recorded_segments(reader: &Reader, writer: WriterId) -> Vec<Vec<Rc<Entry>>> {
+    let files = reader.files(writer).into_iter();
+    let segments = files.filter_map(|(_, _, file)| match file {
+        crate::reader::WriterFile::Segment(segment) => Some(segment.entries.clone()),
+        _ => None,
+    });
+    segments.collect()
+}
+
+/// Compacts this writer once its own entries since its last snapshot reach
+/// [`COMPACT_AFTER`], or, when `closing`, once there are any. A compaction that
+/// fails leaves the files for the next.
+fn compact_due(library: &mut Library, closing: bool) -> Flow<'_, &mut Library> {
+    let own = library.writer.as_ref().map(Writer::id);
+    let since = own
+        .and_then(|own| library.reader.derived().writers.get(&own))
+        .map_or(0, |placed| placed.merged.len());
+    let due = since >= COMPACT_AFTER || (closing && since > 0);
+    if !due || library.writable().is_err() {
+        return Flow::Done(library);
+    }
+    compacted(library).then(|(library, _)| Flow::Done(library))
 }
 
 /// Lets go of what `library` holds a part at a time, pausing between parts.
@@ -1700,10 +1581,27 @@ fn reindexed<'a, L: BorrowMut<Library> + 'a>(
 /// Keeps what a read added to the cached view in this writer's local
 /// directory, so a crash does not take back what was shown: appended to the
 /// journal, or as a checkpoint encoded a slice at a time when one is due.
+/// Without a writer, keeps only a change of the grace step's state, in the view
+/// of each retired writer the reader loaded, which the next open joins.
 fn saved_view<'a, L: BorrowMut<Library> + 'a>(mut library: L) -> Flow<'a, (L, Result<()>)> {
     let known = library.borrow_mut();
     let Some(genesis) = known.writer.as_ref().map(Writer::genesis) else {
-        return Flow::Done((library, Ok(())));
+        if !std::mem::take(&mut known.reader.unsaved.grace) {
+            return Flow::Done((library, Ok(())));
+        }
+        let view = known.reader.cached().clone();
+        let loaded = known.reader.store.borrow().genesis;
+        let retired: BTreeSet<EntryHash> = known
+            .reader
+            .absorbed
+            .iter()
+            .copied()
+            .chain(loaded)
+            .collect();
+        let saved = fold(retired.into_iter(), (), move |(), genesis| {
+            flow::run(view.save(genesis))
+        });
+        return saved.then(|saved| Flow::Done((library, saved)));
     };
     if !cache::due(&known.reader, genesis) {
         let appended = cache::journal(&mut known.reader, genesis);
@@ -1715,28 +1613,17 @@ fn saved_view<'a, L: BorrowMut<Library> + 'a>(mut library: L) -> Flow<'a, (L, Re
     })
 }
 
-/// How many entries or entities one slice of encoding a checkpoint takes.
-const ENCODE_SLICE: usize = 1 << 12;
-
-/// How many bytes of a checkpoint one slice of encoding checks.
-const CHECK_SLICE: usize = 1 << 22;
-
-/// The checkpoint of the cached view as it is, with the merged state unless a
-/// writer is shown as the folder holds it, encoded a slice at a time.
+/// The checkpoint of the cached view as it is.
 fn encoded<'a, L: BorrowMut<Library> + 'a>(library: L) -> Flow<'a, (L, Vec<u8>)> {
     let encoding = Encoding::new(&library.borrow().reader);
-    flow::sliced((library, encoding), |(library, encoding)| {
-        let known = library.borrow();
-        let state = known.shown_as_folder().is_empty().then_some(&known.folded);
-        encoding.step(&known.reader, state, ENCODE_SLICE, CHECK_SLICE)
-    })
-    .then(|(library, encoding)| Flow::Done((library, encoding.finish())))
+    flow::sliced((library, encoding), |(_, encoding)| encoding.step())
+        .then(|(library, encoding)| Flow::Done((library, encoding.finish())))
 }
 
 /// Reads every writer's pending records and sorts out this writer's and the
 /// orphans. Writes nothing.
 fn recover(library: Library) -> Fallible<'static, Library> {
-    let writers = library.reader.logs().keys().copied().collect();
+    let writers = library.reader.writers_known().into_iter().collect();
     flow::run(recovery::read(&library.layout, writers)).and_then(move |found| {
         let mut library = library;
         let own = library
@@ -1744,8 +1631,8 @@ fn recover(library: Library) -> Fallible<'static, Library> {
             .as_ref()
             .map(|writer| (writer.id(), writer.head()));
         let settled = library.folded.settlements().clone();
-        let (assessed, open) =
-            recovery::classify(&library.layout, own, library.reader.logs(), &settled, found);
+        let chains = &library.reader.derived().writers;
+        let (assessed, open) = recovery::classify(&library.layout, own, chains, &settled, found);
         flow::run(recovery::predict(
             &library.layout,
             assessed,
@@ -2077,13 +1964,15 @@ fn commit<'a>(
             let pins = pins.filter(|op| file_of(op).is_none_or(|e| !filed.contains(&e)));
             let logged = Logged {
                 label,
+                forks: library.known_forks(&facts),
                 ops: facts,
                 displaced: Vec::new(),
-                reverses,
             };
+            library.reversing = reverses;
             transact(library, logged, effects, None, pins.collect())
         })
         .and_then(move |(library, entries, outcome)| {
+            library.reversing = None;
             match committed(shown, &entries, created, outcome, library.local()) {
                 Ok(committed) => ok((library, committed)),
                 Err(partial) => Flow::Done(Err(Error::Partial(partial))),
@@ -2160,7 +2049,7 @@ fn ensure_writer<'a>(
             writer: id,
             label: label.clone(),
         });
-        let Ok(genesis) = Entry::encode(EntryHash::ZERO, at, kind) else {
+        let Ok(genesis) = Entry::encode(EntryHash::ZERO, 0, at, kind) else {
             return Flow::Done(Err(Error::Refused(Refusal::Invalid(Invalid::TooLong))));
         };
         encoded(library).then(move |(library, bytes)| {
@@ -2207,6 +2096,7 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
         .and_then(move |applied| {
             let mut logged = planned(&record);
             logged.ops.extend(library.file_ops(&applied, &record.files));
+            logged.forks = library.known_forks(&logged.ops);
             logged.displaced = applied.displaced;
             let label = logged.label.clone();
             append(library, vec![EntryKind::Intent(logged)]).and_then(move |(library, entries)| {
@@ -2295,7 +2185,7 @@ fn planned(record: &PendingRecord) -> Logged {
             label: record.label.clone(),
             ops: Vec::new(),
             displaced: Vec::new(),
-            reverses: None,
+            forks: Vec::new(),
         },
     };
     logged.ops.retain(|op| !matches!(op, Op::File { .. }));
@@ -2341,7 +2231,8 @@ fn appending<'a>(
                 writer.stamp().then(move |written| {
                     library.absorb_own(&entries, written);
                     keep_local(library, true)
-                        .then(move |(library, _)| Flow::Done((library, Ok(entries))))
+                        .then(|(library, _)| compact_due(library, false))
+                        .then(move |library| Flow::Done((library, Ok(entries))))
                 })
             }
             Err(error @ Error::Rekey { .. }) => {
@@ -2354,8 +2245,7 @@ fn appending<'a>(
 }
 
 /// Saves the cached view, then records the head when `head` asks or when it
-/// lags, then keeps what was let go when that lags, each whatever became of the
-/// one before. Each failure leaves its part behind, to save again the next time;
+/// lags, each whatever became of the one before. Each failure leaves its part behind, to save again the next time;
 /// the first is returned. A crash meanwhile loses nothing the folder holds:
 /// reopening reads the folder into the view, which only grows, and continues from
 /// the last entry of the writer's chain there.
@@ -2369,14 +2259,7 @@ fn keep_local(library: &mut Library, head: bool) -> Flow<'_, (&mut Library, Resu
         };
         flow::run(recorded).then(move |recorded| {
             library.lag(Lag::Head, &recorded);
-            let let_go = match library.behind.contains_key(&Lag::LetGo) {
-                true => library.keep_let_go(),
-                false => Task::ready(Ok(())),
-            };
-            flow::run(let_go).then(move |kept| {
-                library.lag(Lag::LetGo, &kept);
-                Flow::Done((library, saved.and(recorded).and(kept)))
-            })
+            Flow::Done((library, saved.and(recorded)))
         })
     })
 }
@@ -2467,7 +2350,11 @@ fn carry_out<'a>(
         Ok(at) => at,
         Err(error) => return Flow::Done(Err(error)),
     };
-    let Ok(entry) = Entry::encode(head, at, EntryKind::Intent(logged.clone())) else {
+    let encoded = head
+        .n
+        .checked_add(1)
+        .and_then(|n| Entry::encode(head.hash, n, at, EntryKind::Intent(logged.clone())).ok());
+    let Some(entry) = encoded else {
         return Flow::Done(Err(Error::Refused(Refusal::Invalid(Invalid::TooLong))));
     };
     let record = Rc::new(PendingRecord::new(
@@ -2523,6 +2410,7 @@ fn log_effects<'a>(
 ) -> Fallible<'a, (&'a mut Library, Vec<Entry>, Outcome)> {
     let (name, journaled) = (effects.record, effects.moves_files());
     logged.ops.extend(library.file_ops(&applied, &record.files));
+    logged.forks = library.known_forks(&logged.ops);
     logged.displaced = applied.displaced;
     let outcome = applied.outcome;
     let closing = closing.filter(|_| outcome == Outcome::Complete);
@@ -2584,7 +2472,7 @@ fn settle_orphan(
                         label: theirs.label,
                         ops: Vec::new(),
                         displaced: Vec::new(),
-                        reverses: None,
+                        forks: Vec::new(),
                     };
                     let closing = Closing { facts, settle };
                     transact(library, logged, effects, Some(closing), Vec::new())

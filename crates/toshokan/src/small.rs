@@ -106,19 +106,6 @@ impl<K: Ord, V> SmallMap<K, V> {
         None
     }
 
-    pub(crate) fn remove<Q: Ord + ?Sized>(&mut self, key: &Q) -> Option<V>
-    where
-        K: Borrow<Q>,
-    {
-        match self {
-            Self::Few(few) => few
-                .binary_search_by(|(k, _)| k.borrow().cmp(key))
-                .ok()
-                .map(|at| few.remove(at).1),
-            Self::Many(many) => many.remove(key),
-        }
-    }
-
     pub(crate) fn iter(&self) -> Iter<'_, K, V> {
         match self {
             Self::Few(few) => Iter::Few(few.iter()),
@@ -130,21 +117,15 @@ impl<K: Ord, V> SmallMap<K, V> {
         self.iter().map(|(key, _)| key)
     }
 
+    pub(crate) fn values_mut(&mut self) -> Box<dyn Iterator<Item = &mut V> + '_> {
+        match self {
+            Self::Few(few) => Box::new(few.iter_mut().map(|(_, value)| value)),
+            Self::Many(many) => Box::new(many.values_mut()),
+        }
+    }
+
     pub(crate) fn values(&self) -> impl Iterator<Item = &V> {
         self.iter().map(|(_, value)| value)
-    }
-}
-
-impl<K: Ord, V> SmallMap<K, V> {
-    /// The map of `pairs`, which must be in strictly increasing order of key.
-    pub(crate) fn from_sorted(pairs: Vec<(K, V)>) -> Option<Self> {
-        if !pairs.windows(2).all(|pair| pair[0].0 < pair[1].0) {
-            return None;
-        }
-        Some(match pairs.len() < SPILL {
-            true => Self::Few(pairs),
-            false => Self::Many(Box::new(pairs.into_iter().collect())),
-        })
     }
 }
 
@@ -231,9 +212,8 @@ mod tests {
             let mut tree = BTreeMap::new();
             for step in 0..400 {
                 let key = (random.next_u128() % u128::from(range)) as u32;
-                match random.next_u128() % 4 {
-                    0 => assert_eq!(small.remove(&key), tree.remove(&key)),
-                    1 => assert_eq!(small.insert(key, step), tree.insert(key, step)),
+                match random.next_u128() % 3 {
+                    0 => assert_eq!(small.insert(key, step), tree.insert(key, step)),
                     _ => {
                         *small.slot(&key, || (key, 0)) += 1;
                         *tree.entry(key).or_insert(0) += 1;

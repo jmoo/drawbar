@@ -1,0 +1,1125 @@
+//! What a reader makes of the files it sees and what it remembers: each writer's
+//! tips, the entries it places after them, the entries it holds back or shows
+//! apart as runs, gaps and unplaced lines, its fork points, and the merged state.
+//!
+//! A pure function of its inputs, so that readers holding the same files and
+//! memories show the same, whatever order the files came in.
+//!
+//! - **Tips** are the snapshots of a writer no other of its snapshots certifies.
+//! - A line a tip certifies by name, or one a segment certificate matches, is
+//!   **folded**. An unsealed file shorter than a certificate **waits**; after the
+//!   grace step its lines past the first are **unplaced**. A sealed one, or one
+//!   that differs at the certified position, diverged: only its first line is
+//!   folded.
+//! - An entry whose predecessor is a tip's head or placed, numbered one past it,
+//!   is **placed**; a genesis entry is placed when the writer has no tip.
+//! - A **fork point** is an entry with two successors, a certified predecessor
+//!   of an entry no tip folds, the predecessor of a line no tip folds at or below
+//!   a tip's head, or where several tips part. Every entry of a writer numbered
+//!   above its lowest fork point is a **run**, and so is every entry after a
+//!   dismissed one. A held entry that may still follow a tip is a **gap**.
+//! - The merge kills, per field: a writer's own earlier writes, by its later own
+//!   write, and its own writes in or before its own delete of their entity;
+//!   writes a reference covers; and a taken run's writer's writes below the run.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::rc::Rc;
+
+use crate::contribution::{self, Contribution, FieldKey, Held, Said, Value};
+use crate::ids::{EntityId, EntryHash, Hlc, WriterId};
+use crate::log::{Entry, EntryKind, Own, Ref, Run};
+use crate::merge::{Beside, Folded, Live};
+use crate::quick::Quick;
+use crate::report::ItemKind;
+use crate::snapshot::Snapshot;
+
+/// What a reader sees of one writer's directory.
+#[derive(Clone, Default)]
+pub struct Seen<'a> {
+    pub segments: Vec<SeenSegment<'a>>,
+    pub snapshots: Vec<Rc<Snapshot>>,
+}
+
+/// The readable lines of one segment file, and whether the reader sees the seal
+/// marker after the last of them.
+#[derive(Clone)]
+pub struct SeenSegment<'a> {
+    pub entries: &'a [Rc<Entry>],
+    pub sealed: bool,
+}
+
+/// What a reader remembers of one writer between reads.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Memory {
+    pub tips: Vec<Rc<Snapshot>>,
+    /// The entries it placed after its tips, and those it shows apart.
+    pub entries: BTreeMap<EntryHash, Rc<Entry>>,
+    pub forks: BTreeSet<Own>,
+}
+
+impl Memory {
+    pub fn is_empty(&self) -> bool {
+        self.tips.is_empty() && self.entries.is_empty() && self.forks.is_empty()
+    }
+}
+
+/// One item: a run, a gap or unplaced lines, with the net change it would make.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Item {
+    pub kind: ItemKind,
+    /// Which run: what a dismissal or a take names.
+    pub run: Run,
+    /// Its entries' clock readings, earliest and latest.
+    pub span: (Hlc, Hlc),
+    pub entries: usize,
+    /// Per field, the run's latest write, where the merged state shows
+    /// something else, or where its basis is forgotten.
+    pub change: BTreeMap<FieldKey, (Ref, Hlc, Value)>,
+    /// Fields in `change` whatever the merged state shows: the run replaced an
+    /// own write the reader no longer holds.
+    pub forgotten: BTreeSet<FieldKey>,
+}
+
+/// How one writer's entries are placed.
+#[derive(Clone, Debug, Default)]
+pub struct Placed {
+    pub tips: Vec<Rc<Snapshot>>,
+    /// Merged, each after its predecessor.
+    pub merged: Vec<Rc<Entry>>,
+    /// Placed, but beyond a fork point or after a dismissed entry.
+    pub runs: Vec<Rc<Entry>>,
+    pub gaps: Vec<Rc<Entry>>,
+    pub unplaced: Vec<Rc<Entry>>,
+    /// Lines held back while the rest of their file arrives.
+    pub waiting: usize,
+    /// Entries named by a dismissal, and never merged.
+    pub dismissed: Vec<EntryHash>,
+    pub forks: BTreeSet<Own>,
+    /// The lowest fork point, by number.
+    pub fork: Option<u64>,
+    /// Entries whose number does not follow their predecessor's.
+    pub misnumbered: Vec<EntryHash>,
+}
+
+impl Placed {
+    /// The last entry of the writer's history the reader merges: a placed entry
+    /// with no placed successor, else a tip's head. `None` when the history
+    /// forked or holds nothing merged.
+    pub fn head(&self) -> Option<Own> {
+        if let Some(last) = self.merged.last() {
+            return Some(last.own());
+        }
+        match self.tips.as_slice() {
+            [tip] => Some(tip.head),
+            _ => None,
+        }
+    }
+
+    /// Whether the reader holds `hash` of this writer: a tip names it, or it is
+    /// merged, a run or a gap.
+    pub fn holds(&self, hash: EntryHash) -> bool {
+        let named = self
+            .tips
+            .iter()
+            .any(|tip| tip.head.hash == hash || tip.certified.named().any(|own| own.hash == hash));
+        let entries = self.merged.iter().chain(&self.runs).chain(&self.gaps);
+        named || entries.into_iter().any(|entry| entry.hash() == hash)
+    }
+}
+
+/// Everything a read derives.
+#[derive(Clone, Default)]
+pub struct Derived {
+    pub writers: BTreeMap<WriterId, Placed>,
+    /// What to remember of each writer.
+    pub memory: BTreeMap<WriterId, Memory>,
+    pub folded: Folded,
+    /// By writer.
+    pub items: BTreeMap<WriterId, Vec<Item>>,
+    /// Fields where, after the grace step, a reference the files contradict
+    /// killed only its exact target.
+    pub contradicted: BTreeSet<FieldKey>,
+}
+
+/// One writer's lines and tips, classified.
+struct Writer {
+    writer: WriterId,
+    tips: Vec<Rc<Snapshot>>,
+    /// Every entry seen or remembered, by hash.
+    known: HashMap<EntryHash, Rc<Entry>, Quick>,
+    /// Hashes of the lines of files seen.
+    seen: BTreeSet<EntryHash>,
+    folded: BTreeSet<EntryHash>,
+    waiting: BTreeSet<EntryHash>,
+    ambiguous: BTreeSet<EntryHash>,
+    named: BTreeSet<Own>,
+    candidates: BTreeSet<EntryHash>,
+    placed: BTreeSet<EntryHash>,
+    misnumbered: BTreeSet<EntryHash>,
+    forks: BTreeSet<Own>,
+    lowest: Option<u64>,
+}
+
+impl Writer {
+    fn tip_n(&self) -> Option<u64> {
+        self.tips.iter().map(|tip| tip.head.n).max()
+    }
+
+    fn is_head(&self, hash: EntryHash) -> bool {
+        self.tips.iter().any(|tip| tip.head.hash == hash)
+    }
+
+    fn certified(&self, own: Own) -> bool {
+        self.named.contains(&own) || self.folded.contains(&own.hash)
+    }
+
+    fn entry(&self, hash: EntryHash) -> &Rc<Entry> {
+        &self.known[&hash]
+    }
+
+    fn beyond(&self, n: u64) -> bool {
+        self.lowest.is_some_and(|fork| n > fork)
+    }
+}
+
+/// The tips among `snapshots`: those no other certifies, one per head.
+fn tips(snapshots: Vec<Rc<Snapshot>>) -> Vec<Rc<Snapshot>> {
+    let mut tips: Vec<Rc<Snapshot>> = Vec::new();
+    for snapshot in &snapshots {
+        let superseded = snapshots
+            .iter()
+            .any(|other| other.head != snapshot.head && other.names(snapshot.head));
+        if !superseded && !tips.iter().any(|tip| tip.head == snapshot.head) {
+            tips.push(Rc::clone(snapshot));
+        }
+    }
+    tips.sort_by_key(|tip| tip.head);
+    tips
+}
+
+/// Places one writer's entries from its tips' heads, and finds its fork points.
+fn classify(
+    writer: WriterId,
+    seen: Option<&Seen<'_>>,
+    memory: Option<&Memory>,
+    graced: bool,
+) -> Writer {
+    let empty = Seen::default();
+    let seen = seen.unwrap_or(&empty);
+    let mut snapshots: Vec<Rc<Snapshot>> =
+        memory.map(|memory| memory.tips.clone()).unwrap_or_default();
+    snapshots.extend(seen.snapshots.iter().cloned());
+    let tips = tips(snapshots);
+    let mut named = BTreeSet::new();
+    for tip in &tips {
+        named.insert(tip.head);
+        named.extend(tip.certified.named());
+    }
+    let mut w = Writer {
+        writer,
+        tips,
+        known: HashMap::default(),
+        seen: BTreeSet::new(),
+        folded: BTreeSet::new(),
+        waiting: BTreeSet::new(),
+        ambiguous: BTreeSet::new(),
+        named,
+        candidates: BTreeSet::new(),
+        placed: BTreeSet::new(),
+        misnumbered: BTreeSet::new(),
+        forks: memory
+            .map(|memory| memory.forks.clone())
+            .unwrap_or_default(),
+        lowest: None,
+    };
+    for segment in &seen.segments {
+        let lines = &segment.entries;
+        let Some(first) = lines.first() else {
+            continue;
+        };
+        for entry in lines.iter() {
+            w.known.insert(entry.hash(), Rc::clone(entry));
+            w.seen.insert(entry.hash());
+        }
+        let certs: Vec<_> = w
+            .tips
+            .iter()
+            .flat_map(|tip| tip.certified.segments.iter().copied())
+            .filter(|cert| cert.first.hash == first.hash())
+            .collect();
+        let matched = certs
+            .iter()
+            .filter_map(|cert| {
+                let pos = usize::try_from(cert.last.n.checked_sub(cert.first.n)?).ok()?;
+                (lines.len() > pos && lines[pos].hash() == cert.last.hash).then_some(pos)
+            })
+            .max();
+        let shorter = certs.iter().any(|cert| {
+            usize::try_from(cert.last.n.saturating_sub(cert.first.n))
+                .is_ok_and(|pos| lines.len() <= pos)
+        });
+        match matched {
+            Some(pos) => w
+                .folded
+                .extend(lines[..=pos].iter().map(|entry| entry.hash())),
+            // A sealed file cannot still be arriving: shorter than a
+            // certificate, it diverged from it. An unsealed one may be in
+            // flight, and waits; after the grace step it is a dropped version
+            // or a diverged copy.
+            None if !segment.sealed && shorter => match graced {
+                true => {
+                    w.folded.insert(first.hash());
+                    w.ambiguous
+                        .extend(lines[1..].iter().map(|entry| entry.hash()));
+                }
+                false => w.waiting.extend(lines.iter().map(|entry| entry.hash())),
+            },
+            None if !certs.is_empty() => {
+                w.folded.insert(first.hash());
+            }
+            None => {}
+        }
+        for entry in lines.iter() {
+            if w.certified(entry.own()) {
+                w.folded.insert(entry.hash());
+            }
+        }
+    }
+    let mut candidates: BTreeSet<EntryHash> = w
+        .seen
+        .iter()
+        .copied()
+        .filter(|hash| {
+            !w.folded.contains(hash) && !w.waiting.contains(hash) && !w.ambiguous.contains(hash)
+        })
+        .collect();
+    for (hash, entry) in memory.into_iter().flat_map(|memory| &memory.entries) {
+        if w.seen.contains(hash) || w.certified(entry.own()) {
+            continue;
+        }
+        w.known.insert(*hash, Rc::clone(entry));
+        candidates.insert(*hash);
+    }
+    let heads: BTreeMap<EntryHash, u64> = w
+        .tips
+        .iter()
+        .map(|tip| (tip.head.hash, tip.head.n))
+        .collect();
+    let mut by_prev: BTreeMap<EntryHash, Vec<EntryHash>> = BTreeMap::new();
+    for hash in &candidates {
+        by_prev
+            .entry(w.entry(*hash).prev())
+            .or_default()
+            .push(*hash);
+    }
+    let mut frontier: Vec<(EntryHash, u64)> = heads.iter().map(|(hash, n)| (*hash, *n)).collect();
+    if w.tips.is_empty() {
+        for hash in by_prev.get(&EntryHash::ZERO).into_iter().flatten() {
+            match w.entry(*hash).n() {
+                0 => {
+                    w.placed.insert(*hash);
+                    frontier.push((*hash, 0));
+                }
+                _ => {
+                    w.misnumbered.insert(*hash);
+                }
+            }
+        }
+    }
+    while let Some((prev, n)) = frontier.pop() {
+        for hash in by_prev.get(&prev).into_iter().flatten() {
+            if prev == EntryHash::ZERO || w.placed.contains(hash) {
+                continue;
+            }
+            let next = w.entry(*hash).n();
+            if Some(next) != n.checked_add(1) {
+                w.misnumbered.insert(*hash);
+                continue;
+            }
+            w.placed.insert(*hash);
+            frontier.push((*hash, next));
+        }
+    }
+    // Remembered entries a tip has since passed are folded into it.
+    let tip_n = w.tip_n();
+    candidates.retain(|hash| {
+        let passed = !w.seen.contains(hash)
+            && !w.placed.contains(hash)
+            && tip_n.is_some_and(|tip| w.entry(*hash).n() <= tip);
+        !passed
+    });
+    w.candidates = candidates;
+    let mut successors: BTreeMap<EntryHash, Vec<EntryHash>> = BTreeMap::new();
+    for hash in &w.candidates {
+        successors
+            .entry(w.entry(*hash).prev())
+            .or_default()
+            .push(*hash);
+    }
+    let mut forks = std::mem::take(&mut w.forks);
+    for (prev, next) in &successors {
+        if *prev == EntryHash::ZERO {
+            continue;
+        }
+        let Some(n) = w.entry(next[0]).n().checked_sub(1) else {
+            continue;
+        };
+        let at = Own { n, hash: *prev };
+        if next.len() > 1 || (w.certified(at) && !w.is_head(*prev)) {
+            forks.insert(at);
+        }
+    }
+    // Tip certificates are complete, so a line no tip folds, at or below a tip's
+    // head, is off that tip's chain: its writer forked at its predecessor.
+    for hash in w.candidates.difference(&w.placed) {
+        let entry = w.entry(*hash);
+        if entry.prev() == EntryHash::ZERO || entry.n() == Entry::UNNUMBERED {
+            continue;
+        }
+        if tip_n.is_some_and(|tip| entry.n() <= tip) {
+            if let Some(n) = entry.n().checked_sub(1) {
+                forks.insert(Own {
+                    n,
+                    hash: entry.prev(),
+                });
+            }
+        }
+    }
+    if w.tips.len() > 1 {
+        let mut common: Option<BTreeSet<Own>> = None;
+        for tip in &w.tips {
+            let state = &tip.state;
+            let own = state.own.values().map(|held| held.at);
+            let made = state.refs.values().map(|reference| reference.own);
+            let killed = state.killed.values().copied();
+            let dismissed = state.dismissals.iter().map(|(own, _)| *own);
+            let named: BTreeSet<Own> = tip
+                .certified
+                .named()
+                .chain([tip.head])
+                .chain(own)
+                .chain(made)
+                .chain(killed)
+                .chain(dismissed)
+                .collect();
+            common = Some(match common {
+                None => named,
+                Some(common) => common.intersection(&named).copied().collect(),
+            });
+        }
+        let parting = common
+            .unwrap_or_default()
+            .into_iter()
+            .max_by_key(|own| own.n);
+        forks.insert(parting.unwrap_or(Own {
+            n: 0,
+            hash: EntryHash::ZERO,
+        }));
+    }
+    w.lowest = forks.iter().map(|own| own.n).min();
+    w.forks = forks;
+    w
+}
+
+/// The hashes of a writer's lines and snapshot heads, by number.
+type Numbered = BTreeMap<u64, BTreeSet<EntryHash>>;
+
+/// The runs a dismissal names: from its first entry to its last, on its last
+/// entry's chain, of one writer.
+struct Dismissals(Vec<Run>);
+
+impl Dismissals {
+    /// Whether some dismissal names the merged-or-placed entry `hash` of `w`.
+    fn cover(&self, w: &Writer, hash: EntryHash) -> bool {
+        let entry = w.entry(hash);
+        self.0.iter().any(|run| {
+            run.writer == w.writer
+                && entry.n() >= run.from
+                && entry.n() <= run.last.n
+                && (walk(w, run.last.hash, hash)
+                    || (run.tip.is_none() && run.first.is_some_and(|first| walk(w, hash, first))))
+        })
+    }
+
+    /// Whether some dismissal names the own entry numbered `n` in tip `tip`.
+    fn cover_tip(&self, writer: WriterId, tip: &Snapshot, n: u64) -> bool {
+        self.0.iter().any(|run| {
+            let names = tip.names(run.last) || run.tip.is_some_and(|head| tip.names(head));
+            run.writer == writer && n >= run.from && n <= run.last.n && names
+        })
+    }
+}
+
+/// Whether `to` is `from` or comes before it on its chain, through entries `w`
+/// knows.
+fn walk(w: &Writer, from: EntryHash, to: EntryHash) -> bool {
+    let mut at = Some(from);
+    while let Some(hash) = at {
+        if hash == to {
+            return true;
+        }
+        at = w
+            .known
+            .get(&hash)
+            .map(|entry| entry.prev())
+            .filter(|prev| w.known.contains_key(prev) || *prev == to);
+    }
+    false
+}
+
+/// A write a contribution or a merged entry holds.
+#[derive(Clone)]
+struct Candidate {
+    at: Ref,
+    stamp: Hlc,
+    field: FieldKey,
+    value: Value,
+}
+
+/// What the merge kills by: references, own deletes and takes.
+#[derive(Default)]
+struct Kills {
+    /// Per field: each target, and whether it kills only its exact hash.
+    refs: HashMap<FieldKey, Vec<(Ref, bool)>, Quick>,
+    /// Per writer and entity, the numbers of its own deletes.
+    deletes: HashMap<(WriterId, EntityId), Vec<u64>, Quick>,
+    /// Per field and writer, the highest number below which a take of a run of
+    /// that writer settles the field.
+    takes: HashMap<(FieldKey, WriterId), u64, Quick>,
+    contradicted: BTreeSet<FieldKey>,
+}
+
+impl Kills {
+    fn reference(&mut self, field: FieldKey, target: Ref, exact: bool) {
+        if exact {
+            self.contradicted.insert(field.clone());
+        }
+        self.refs.entry(field).or_default().push((target, exact));
+    }
+
+    fn take(&mut self, field: FieldKey, writer: WriterId, below: u64) {
+        let kept = self.takes.entry((field, writer)).or_insert(below);
+        *kept = (*kept).max(below);
+    }
+}
+
+/// Everything the reader derives from what it sees and remembers. `graced` says
+/// whether the reader has taken the grace step: from then on an unsealed file
+/// shorter than a certificate no longer waits, and a reference the files
+/// contradict kills only its exact target.
+pub fn derive(
+    seen: &BTreeMap<WriterId, Seen<'_>>,
+    memory: &BTreeMap<WriterId, Memory>,
+    graced: bool,
+) -> Derived {
+    let writers: BTreeSet<WriterId> = seen.keys().chain(memory.keys()).copied().collect();
+    let classified: BTreeMap<WriterId, Writer> = writers
+        .iter()
+        .map(|writer| {
+            (
+                *writer,
+                classify(*writer, seen.get(writer), memory.get(writer), graced),
+            )
+        })
+        .collect();
+    // Dismissals from what is merged so far: tips' own at or below their fork
+    // point, and placed entries not beyond it.
+    let mut runs_dismissed = Vec::new();
+    for w in classified.values() {
+        for tip in &w.tips {
+            for (own, run) in &tip.state.dismissals {
+                if !w.beyond(own.n) {
+                    runs_dismissed.push(*run);
+                }
+            }
+        }
+        for hash in &w.placed {
+            let entry = w.entry(*hash);
+            if w.beyond(entry.n()) {
+                continue;
+            }
+            for op in contribution::ops(&entry.kind()) {
+                runs_dismissed.extend(contribution::said(op).dismissals);
+            }
+        }
+    }
+    let dismissals = Dismissals(runs_dismissed);
+    // The lines and snapshot heads the files show, for contradicted references.
+    let shown: HashMap<WriterId, (u64, Numbered), Quick> = seen
+        .iter()
+        .map(|(writer, files)| {
+            let mut at: BTreeMap<u64, BTreeSet<EntryHash>> = BTreeMap::new();
+            let lines = files
+                .segments
+                .iter()
+                .flat_map(|segment| segment.entries.iter())
+                .map(|entry| entry.own());
+            let heads = files.snapshots.iter().map(|snapshot| snapshot.head);
+            for own in lines.chain(heads) {
+                if own.n != Entry::UNNUMBERED {
+                    at.entry(own.n).or_default().insert(own.hash);
+                }
+            }
+            let highest = at.keys().next_back().copied().unwrap_or(0);
+            (*writer, (highest, at))
+        })
+        .collect();
+    let contradicted = |target: &Ref| {
+        let Some((highest, at)) = shown.get(&target.writer).filter(|_| graced) else {
+            return false;
+        };
+        let other = at
+            .get(&target.n)
+            .is_some_and(|hashes| !hashes.contains(&target.hash));
+        target.n > *highest || other
+    };
+    let mut derived = Derived::default();
+    let mut candidates: Vec<Candidate> = Vec::new();
+    let mut kills = Kills::default();
+    let mut placed_out: BTreeMap<WriterId, Placed> = BTreeMap::new();
+    let mut merged_entries: BTreeMap<WriterId, Vec<Rc<Entry>>> = BTreeMap::new();
+    let mut beside = Beside::default();
+    for w in classified.values() {
+        let covered: BTreeSet<EntryHash> = w
+            .candidates
+            .iter()
+            .copied()
+            .filter(|hash| dismissals.cover(w, *hash))
+            .collect();
+        let after: BTreeSet<EntryHash> = w
+            .candidates
+            .iter()
+            .copied()
+            .filter(|hash| {
+                if covered.contains(hash) {
+                    return false;
+                }
+                let mut at = w.entry(*hash).prev();
+                while let Some(entry) = w.known.get(&at).filter(|_| w.candidates.contains(&at)) {
+                    if covered.contains(&at) {
+                        return true;
+                    }
+                    at = entry.prev();
+                }
+                false
+            })
+            .collect();
+        let held: BTreeSet<EntryHash> = w.candidates.difference(&w.placed).copied().collect();
+        let mut runs: BTreeSet<EntryHash> = w
+            .candidates
+            .iter()
+            .copied()
+            .filter(|hash| {
+                !covered.contains(hash) && (w.beyond(w.entry(*hash).n()) || after.contains(hash))
+            })
+            .collect();
+        let tip_n = w.tip_n();
+        for hash in &held {
+            let n = w.entry(*hash).n();
+            if !covered.contains(hash)
+                && !runs.contains(hash)
+                && tip_n.is_some_and(|tip| n <= tip.saturating_add(1))
+            {
+                runs.insert(*hash);
+            }
+        }
+        loop {
+            let before = runs.len();
+            for hash in &held {
+                if runs.contains(&w.entry(*hash).prev()) && !covered.contains(hash) {
+                    runs.insert(*hash);
+                }
+            }
+            if runs.len() == before {
+                break;
+            }
+        }
+        let gaps: BTreeSet<EntryHash> = held
+            .iter()
+            .copied()
+            .filter(|hash| {
+                !runs.contains(hash) && !covered.contains(hash) && !w.misnumbered.contains(hash)
+            })
+            .collect();
+        let in_order = |set: &BTreeSet<EntryHash>| -> Vec<Rc<Entry>> {
+            let mut entries: Vec<Rc<Entry>> =
+                set.iter().map(|hash| Rc::clone(w.entry(*hash))).collect();
+            entries.sort_by_key(|entry| (entry.n(), entry.hash()));
+            entries
+        };
+        let merged: BTreeSet<EntryHash> = w
+            .placed
+            .iter()
+            .copied()
+            .filter(|hash| !runs.contains(hash) && !covered.contains(hash))
+            .collect();
+        let unplaced: BTreeSet<EntryHash> = w
+            .ambiguous
+            .iter()
+            .copied()
+            .filter(|hash| !w.folded.contains(hash))
+            .collect();
+        let mut remembered: BTreeMap<EntryHash, Rc<Entry>> = BTreeMap::new();
+        for hash in w.placed.iter().chain(&runs).chain(&gaps) {
+            remembered.insert(*hash, Rc::clone(w.entry(*hash)));
+        }
+        derived.memory.insert(
+            w.writer,
+            Memory {
+                tips: w.tips.clone(),
+                entries: remembered,
+                forks: w.forks.clone(),
+            },
+        );
+        merged_entries.insert(w.writer, in_order(&merged));
+        placed_out.insert(
+            w.writer,
+            Placed {
+                tips: w.tips.clone(),
+                merged: in_order(&merged),
+                runs: in_order(&runs),
+                gaps: in_order(&gaps),
+                unplaced: in_order(&unplaced),
+                waiting: w.waiting.len(),
+                dismissed: covered.iter().copied().collect(),
+                forks: w.forks.clone(),
+                fork: w.lowest,
+                misnumbered: w.misnumbered.iter().copied().collect(),
+            },
+        );
+        let ok = |n: u64| !w.beyond(n);
+        for tip in &w.tips {
+            let state = &tip.state;
+            let dismissed = |n: u64| dismissals.cover_tip(w.writer, tip, n);
+            for (field, held) in &state.own {
+                if ok(held.at.n) && !dismissed(held.at.n) {
+                    candidates.push(Candidate {
+                        at: held.at.of(w.writer),
+                        stamp: held.stamp,
+                        field: field.clone(),
+                        value: held.value.clone(),
+                    });
+                }
+            }
+            for ((field, _, _), reference) in &state.refs {
+                if ok(reference.own.n) && !dismissed(reference.own.n) {
+                    kills.reference(
+                        field.clone(),
+                        reference.target,
+                        contradicted(&reference.target),
+                    );
+                }
+            }
+            for ((field, target), taken) in &state.takes {
+                if ok(taken.own.n) && !dismissed(taken.own.n) {
+                    kills.take(field.clone(), *target, taken.below);
+                }
+            }
+            for (field, own) in &state.killed {
+                if ok(own.n) && !dismissed(own.n) {
+                    kills
+                        .deletes
+                        .entry((w.writer, field.entity()))
+                        .or_default()
+                        .push(own.n);
+                }
+            }
+            keep_beside(&mut beside, w.writer, state);
+        }
+    }
+    for (writer, entries) in &merged_entries {
+        let mut tail = Contribution::default();
+        for entry in entries {
+            let kind = entry.kind();
+            let own = entry.own();
+            let saids: Vec<Said> = contribution::ops(&kind)
+                .iter()
+                .map(contribution::said)
+                .collect();
+            let exact: BTreeSet<WriterId> = saids
+                .iter()
+                .flat_map(|said| said.refs.iter().map(|(_, target)| target))
+                .filter(|target| contradicted(target))
+                .map(|target| target.writer)
+                .collect();
+            for said in saids {
+                for write in said.writes {
+                    candidates.push(Candidate {
+                        at: own.of(*writer),
+                        stamp: entry.at(),
+                        field: write.field,
+                        value: write.value,
+                    });
+                }
+                for (field, target) in said.refs {
+                    let exact = exact.contains(&target.writer);
+                    kills.reference(field, target, exact);
+                }
+                for (field, run) in said.takes {
+                    kills.take(field, run.writer, run.from);
+                }
+                if let Some(entity) = said.deletes {
+                    kills
+                        .deletes
+                        .entry((*writer, entity))
+                        .or_default()
+                        .push(own.n);
+                }
+            }
+            tail.fold(*writer, entry);
+        }
+        keep_beside(&mut beside, *writer, &tail);
+    }
+    let lowest: HashMap<WriterId, u64, Quick> = classified
+        .values()
+        .filter_map(|w| Some((w.writer, w.lowest?)))
+        .collect();
+    let beyond = |writer: WriterId, n: u64| lowest.get(&writer).is_some_and(|fork| n > *fork);
+    // A write is live unless its writer's later own write to its field, or its
+    // own delete of its entity, a reference or a take kills it.
+    let mut latest_own: HashMap<(WriterId, FieldKey), u64, Quick> = HashMap::default();
+    for candidate in &candidates {
+        let slot = latest_own
+            .entry((candidate.at.writer, candidate.field.clone()))
+            .or_insert(candidate.at.n);
+        *slot = (*slot).max(candidate.at.n);
+    }
+    let mut seen_writes: BTreeSet<(EntryHash, FieldKey)> = BTreeSet::new();
+    let live: Vec<Live> = candidates
+        .into_iter()
+        .filter(|candidate| seen_writes.insert((candidate.at.hash, candidate.field.clone())))
+        .filter(|candidate| {
+            let Candidate { at, field, .. } = candidate;
+            let own_later = latest_own[&(at.writer, field.clone())] > at.n;
+            let own_deleted = !field.is_exist()
+                && kills
+                    .deletes
+                    .get(&(at.writer, field.entity()))
+                    .is_some_and(|deletes| deletes.iter().any(|n| *n >= at.n));
+            let referenced = kills.refs.get(field).is_some_and(|targets| {
+                targets.iter().any(|(target, exact)| {
+                    let exact = *exact || beyond(target.writer, target.n);
+                    target.writer == at.writer
+                        && (target.hash == at.hash || (!exact && at.n < target.n))
+                })
+            });
+            let settled = kills
+                .takes
+                .get(&(field.clone(), at.writer))
+                .is_some_and(|below| at.n < *below);
+            !(own_later || own_deleted || referenced || settled)
+        })
+        .map(|candidate| Live {
+            at: candidate.at,
+            stamp: candidate.stamp,
+            field: candidate.field,
+            value: candidate.value,
+        })
+        .collect();
+    derived.folded = Folded::of(live, beside);
+    derived.contradicted = kills.contradicted.clone();
+    for w in classified.values() {
+        let placed = &placed_out[&w.writer];
+        let items = items(
+            w,
+            placed,
+            &derived.folded,
+            &dismissals,
+            &kills,
+            &merged_entries,
+        );
+        if !items.is_empty() {
+            derived.items.insert(w.writer, items);
+        }
+    }
+    derived.writers = placed_out;
+    derived
+}
+
+/// The runs, gaps and unplaced lines of `w`, each with the change it makes
+/// against `folded`.
+fn items(
+    w: &Writer,
+    placed: &Placed,
+    folded: &Folded,
+    dismissals: &Dismissals,
+    kills: &Kills,
+    merged: &BTreeMap<WriterId, Vec<Rc<Entry>>>,
+) -> Vec<Item> {
+    struct Group {
+        kind: ItemKind,
+        run: Run,
+        span: Option<(Hlc, Hlc)>,
+        entries: usize,
+        writes: Vec<(FieldKey, Ref, Hlc, Value)>,
+        forced: BTreeMap<FieldKey, (Ref, Hlc, Value)>,
+    }
+    let mut groups: BTreeMap<(ItemKind, EntryHash), Group> = BTreeMap::new();
+    let beyond_f = |n: u64| w.beyond(n);
+    // Where several tips part inside a segment, the fork point may lie as high
+    // as just below the lowest head.
+    let highest_fork = w
+        .lowest
+        .map(|fork| match w.tips.iter().map(|tip| tip.head.n).min() {
+            Some(low) if w.tips.len() > 1 => fork.max(low.saturating_sub(1)),
+            _ => fork,
+        });
+    let merged_own: BTreeSet<(FieldKey, u64)> = {
+        let mut own = BTreeSet::new();
+        for tip in &w.tips {
+            for (field, held) in &tip.state.own {
+                if !beyond_f(held.at.n) && !dismissals.cover_tip(w.writer, tip, held.at.n) {
+                    own.insert((field.clone(), held.at.n));
+                }
+            }
+        }
+        for entry in merged.get(&w.writer).into_iter().flatten() {
+            for op in contribution::ops(&entry.kind()) {
+                for write in contribution::said(op).writes {
+                    own.insert((write.field, entry.n()));
+                }
+            }
+        }
+        own
+    };
+    let known_before =
+        |field: &FieldKey, n: u64| merged_own.iter().any(|(f, at)| f == field && *at < n);
+    let taken = |field: &FieldKey| kills.takes.contains_key(&(field.clone(), w.writer));
+    // A tip's own write the merge leaves out, above the fork point or dismissed,
+    // that replaced an own write the merge does not hold: a forgotten basis.
+    for tip in &w.tips {
+        let forced: BTreeMap<FieldKey, (Ref, Hlc, Value)> = tip
+            .state
+            .own
+            .iter()
+            .filter(|(field, held)| {
+                let pre_fork = highest_fork.is_none_or(|fork| held.first <= fork);
+                let replaced_own = held.first < held.at.n && (!beyond_f(held.at.n) || pre_fork);
+                (beyond_f(held.at.n) || dismissals.cover_tip(w.writer, tip, held.at.n))
+                    && replaced_own
+                    && !known_before(field, held.at.n)
+                    && !taken(field)
+            })
+            .map(|(field, held): (&FieldKey, &Held)| {
+                (
+                    field.clone(),
+                    (held.at.of(w.writer), held.stamp, held.value.clone()),
+                )
+            })
+            .collect();
+        if !beyond_f(tip.head.n) && forced.is_empty() {
+            continue;
+        }
+        let mut own: Vec<(FieldKey, Ref, Hlc, Value)> = tip
+            .state
+            .own
+            .iter()
+            .filter(|(_, held)| {
+                beyond_f(held.at.n) && !dismissals.cover_tip(w.writer, tip, held.at.n)
+            })
+            .map(|(field, held)| {
+                (
+                    field.clone(),
+                    held.at.of(w.writer),
+                    held.stamp,
+                    held.value.clone(),
+                )
+            })
+            .collect();
+        own.sort_by_key(|(_, at, _, _)| at.n);
+        let from = w.lowest.map_or(0, |fork| fork + 1);
+        groups.insert(
+            (ItemKind::Run, tip.head.hash),
+            Group {
+                kind: ItemKind::Run,
+                run: Run {
+                    writer: w.writer,
+                    from,
+                    first: None,
+                    last: tip.head,
+                    tip: Some(tip.head),
+                },
+                span: Some((tip.at, tip.at)),
+                entries: 0,
+                writes: own,
+                forced,
+            },
+        );
+    }
+    for (list, kind) in [
+        (&placed.runs, ItemKind::Run),
+        (&placed.gaps, ItemKind::Gap),
+        (&placed.unplaced, ItemKind::Unplaced),
+    ] {
+        let set: BTreeSet<EntryHash> = list.iter().map(|entry| entry.hash()).collect();
+        for entry in list.iter() {
+            let mut root = Rc::clone(entry);
+            while let Some(prev) = w
+                .known
+                .get(&root.prev())
+                .filter(|prev| set.contains(&prev.hash()))
+            {
+                root = Rc::clone(prev);
+            }
+            let key = match root.prev() {
+                prev if kind == ItemKind::Run
+                    && w.is_head(prev)
+                    && groups.contains_key(&(ItemKind::Run, prev)) =>
+                {
+                    (ItemKind::Run, prev)
+                }
+                _ => (kind, root.hash()),
+            };
+            let group = groups.entry(key).or_insert_with(|| Group {
+                kind,
+                run: Run {
+                    writer: w.writer,
+                    from: root.n(),
+                    first: Some(root.hash()),
+                    last: entry.own(),
+                    tip: None,
+                },
+                span: None,
+                entries: 0,
+                writes: Vec::new(),
+                forced: BTreeMap::new(),
+            });
+            group.run.last = entry.own();
+            group.entries += 1;
+            group.span = Some(match group.span {
+                Some((first, last)) => (first.min(entry.at()), last.max(entry.at())),
+                None => (entry.at(), entry.at()),
+            });
+            for op in contribution::ops(&entry.kind()) {
+                for write in contribution::said(op).writes {
+                    group.writes.push((
+                        write.field,
+                        entry.own().of(w.writer),
+                        entry.at(),
+                        write.value,
+                    ));
+                }
+            }
+        }
+    }
+    let mut items = Vec::new();
+    for (_, group) in groups {
+        let mut latest: BTreeMap<FieldKey, (Ref, Hlc, Value)> = BTreeMap::new();
+        for (field, at, stamp, value) in group.writes {
+            latest.insert(field, (at, stamp, value));
+        }
+        latest.retain(|field, (_, _, value)| folded.differs(field, value));
+        latest.extend(
+            group
+                .forced
+                .iter()
+                .map(|(field, write)| (field.clone(), write.clone())),
+        );
+        if latest.is_empty() {
+            continue;
+        }
+        items.push(Item {
+            kind: group.kind,
+            run: group.run,
+            span: group.span.unwrap_or_default(),
+            entries: group.entries,
+            change: latest,
+            forgotten: group.forced.into_keys().collect(),
+        });
+    }
+    items
+}
+
+/// The memories a reader keeps after the grace step: of what no file it sees
+/// holds, only what something visible descends from, a line by its chain of
+/// predecessors or a snapshot by its certificates; and no fork point, which the
+/// files show again where they still hold one.
+pub fn grace(
+    seen: &BTreeMap<WriterId, Seen<'_>>,
+    memory: &BTreeMap<WriterId, Memory>,
+) -> BTreeMap<WriterId, Memory> {
+    let mut kept = BTreeMap::new();
+    for (writer, remembered) in memory {
+        let empty = Seen::default();
+        let files = seen.get(writer).unwrap_or(&empty);
+        let lines: Vec<&Rc<Entry>> = files
+            .segments
+            .iter()
+            .flat_map(|segment| segment.entries.iter())
+            .collect();
+        let held: BTreeSet<EntryHash> = lines
+            .iter()
+            .map(|entry| entry.hash())
+            .chain(files.snapshots.iter().map(|snapshot| snapshot.head.hash))
+            .collect();
+        let known: HashMap<EntryHash, EntryHash, Quick> = remembered
+            .entries
+            .values()
+            .map(|entry| (entry.hash(), entry.prev()))
+            .collect();
+        let tip_heads: BTreeSet<EntryHash> =
+            remembered.tips.iter().map(|tip| tip.head.hash).collect();
+        let mut passed: BTreeSet<EntryHash> = BTreeSet::new();
+        for line in &lines {
+            let mut at = line.prev();
+            while (known.contains_key(&at) || tip_heads.contains(&at)) && passed.insert(at) {
+                match known.get(&at) {
+                    Some(prev) => at = *prev,
+                    None => break,
+                }
+            }
+        }
+        let descends = |own: Own| {
+            passed.contains(&own.hash)
+                || files
+                    .snapshots
+                    .iter()
+                    .any(|snapshot| snapshot.head != own && snapshot.names(own))
+        };
+        let visible = |tip: &Snapshot| {
+            files
+                .snapshots
+                .iter()
+                .any(|snapshot| snapshot.head == tip.head)
+        };
+        let memory = Memory {
+            tips: remembered
+                .tips
+                .iter()
+                .filter(|tip| visible(tip) || descends(tip.head))
+                .cloned()
+                .collect(),
+            entries: remembered
+                .entries
+                .iter()
+                .filter(|(hash, entry)| held.contains(hash) || descends(entry.own()))
+                .map(|(hash, entry)| (*hash, Rc::clone(entry)))
+                .collect(),
+            forks: BTreeSet::new(),
+        };
+        if !memory.is_empty() {
+            kept.insert(*writer, memory);
+        }
+    }
+    kept
+}
+
+/// Adds what `writer`'s `contribution` keeps beside its writes.
+fn keep_beside(beside: &mut Beside, writer: WriterId, contribution: &Contribution) {
+    for (item, trashed) in &contribution.trash {
+        beside.trash.insert((writer, *item), trashed.clone());
+    }
+    beside.settled.extend(contribution.settled.iter().copied());
+    beside.unknown.extend(contribution.unknown.iter().cloned());
+    beside
+        .extended
+        .extend(contribution.extended.iter().cloned());
+}
+
+/// The genesis entry's writer, for a reader that has nothing else of it.
+pub fn genesis_writer(entry: &Entry) -> Option<WriterId> {
+    match entry.kind() {
+        EntryKind::Genesis(genesis) => Some(genesis.writer),
+        _ => None,
+    }
+}

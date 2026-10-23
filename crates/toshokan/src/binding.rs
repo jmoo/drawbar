@@ -16,10 +16,10 @@ use crate::cow::CowMap;
 use crate::env::{Identify, Names};
 use crate::error::Result;
 use crate::flow::{self, fold, ok};
-use crate::ids::{EntityId, EntryHash, Identity};
+use crate::ids::{EntityId, Identity};
 use crate::io::{Kind, Meta, Root, Task};
 use crate::layout::{is_swap_file, Layout};
-use crate::log::{FileFact, Op};
+use crate::log::{FileFact, Op, Ref};
 use crate::path::RelPath;
 use crate::report::{Ambiguous, Copied, Moved, ScanReport};
 use crate::view::{FileRef, FileState};
@@ -29,7 +29,7 @@ use crate::view::{FileRef, FileState};
 pub struct Fact {
     pub value: FileFact,
     /// The entry that wrote it, which a pin replaces.
-    pub entry: EntryHash,
+    pub entry: Ref,
 }
 
 /// Every entity's surviving file-register writes that say where its file is,
@@ -1011,7 +1011,7 @@ mod tests {
     use super::*;
     use crate::disk::MemDisk;
     use crate::env::{ExactNames, PrefixIdentity};
-    use crate::ids::EntryHash;
+    use crate::ids::{EntryHash, WriterId};
     use crate::io::Io;
 
     fn path(text: &str) -> RelPath {
@@ -1034,7 +1034,11 @@ mod tests {
     fn written(fact: FileFact, entry: u128) -> Fact {
         Fact {
             value: fact,
-            entry: EntryHash::from_u128(entry),
+            entry: Ref {
+                writer: WriterId::from_u128(1),
+                n: 1,
+                hash: EntryHash::from_u128(entry),
+            },
         }
     }
 
@@ -1553,7 +1557,7 @@ mod tests {
         };
         assert_eq!(
             (*entity, moved.path.as_str(), replaces.as_slice()),
-            (e, "b", &[EntryHash::from_u128(1)][..])
+            (e, "b", &[written(fact("a", 0), 1).entry][..])
         );
         assert!(pins_for(&[("a", 0)]).is_empty(), "a new time");
         assert!(pins_for(&[("a", 1)]).is_empty(), "changed outside");

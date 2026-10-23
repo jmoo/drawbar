@@ -1,5 +1,5 @@
 //! Compaction: a writer folds its own entries into a snapshot, then deletes what the
-//! snapshot supersedes. Only the owner compacts, and never a writer it no longer
+//! snapshot certifies. Only the owner compacts, and never a writer it no longer
 //! writes as.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,33 +10,34 @@ use crate::flow::{self, Fallible, Flow};
 use crate::ids::{EntryHash, Nonce, WriterId};
 use crate::io::{Io, Range, Root, Task};
 use crate::line;
-use crate::merge::merge;
+use crate::log::{Entry, EntryKind, Own};
 use crate::path::RelPath;
-use crate::reader::{Reader, Stamp, WriterFile, WriterLog};
+use crate::reader::{Reader, Stamp, WriterFile};
 use crate::report::{Compacted, Rekey};
-use crate::schema::Raw;
-use crate::snapshot::Snapshot;
+use crate::snapshot::{SegmentCert, Snapshot};
 use crate::writer::Writer;
 
 /// Confirms the folder holds this writer's head, seals the open segment, and
-/// writes `snapshot-<name>.json` folding the chain up to the head, durably (file
-/// and directory synced). Only once the folder holds that snapshot does it delete
-/// each segment of the writer's directory that ends with a seal marker and every
-/// line of which a snapshot in the directory folds, and each snapshot whose
-/// folded list starts the new one's. Each is checked again just before it is
-/// deleted, and left when it changed. Returns the writer with the result.
+/// writes `snapshot-<name>.json` folding the chain up to the head into its
+/// previous snapshot, durably (file and directory synced). Only once the folder
+/// holds that snapshot does it delete each segment of the writer's directory
+/// that ends with a seal marker and every line of which the snapshot certifies,
+/// and each snapshot whose head it certifies. Each is checked again just before
+/// it is deleted, and left when it changed. Returns the writer with the result.
 ///
-/// `reader` must have read the writer's directory after its last append. Fails
+/// `reader` must have read the writer's directory after its last append.
+/// `recorded` holds the lines of segments of the directory the writer read
+/// before, which may be gone now: each is certified as a segment too. Fails
 /// with [`Error::Rekey`] when the reader or the folder does not hold the
 /// writer's head, writing nothing, or when the folder loses the snapshot before
 /// a deletion. Refused with [`Refusal::Nothing`] when a snapshot the reader
-/// found in the writer's directory already folds its head; it then writes
+/// found in the writer's directory already has its head; it then writes
 /// nothing, deletes what that snapshot lets it that a compaction cut short
 /// left, and confirms its head from that snapshot from then on.
-/// Branches of a forked history other than this writer's own are not folded.
 pub fn compact(
     writer: Writer,
     reader: &Reader,
+    recorded: &[Vec<Rc<Entry>>],
     name: Nonce,
 ) -> Task<'static, (Writer, Result<Compacted>)> {
     let id = writer.id();
@@ -44,8 +45,8 @@ pub fn compact(
         writer: id,
         why: Rekey::Restored,
     };
-    if let Some((path, stamp, folding)) = folding_head(reader, &writer) {
-        let doomed = Doomed::of(reader, id, &folding, None).sparing(&path);
+    if let Some((path, stamp, tip)) = at_head(reader, &writer) {
+        let doomed = Doomed::of(reader, id, &tip, None).sparing(&path);
         let dir = writer.layout.writer(id);
         let mut writer = writer;
         writer.held_by(path.clone(), stamp.len, stamp.tail.clone());
@@ -56,7 +57,7 @@ pub fn compact(
             })
             .task();
     }
-    let Some(snapshot) = reader.logs().get(&id).and_then(|own| fold(&writer, own)) else {
+    let Some((snapshot, folded)) = fold(&writer, reader, recorded) else {
         return Task::ready((writer, Err(lost())));
     };
     let layout = writer.layout.clone();
@@ -70,7 +71,6 @@ pub fn compact(
         bytes.len() as u64,
         bytes[bytes.len() - ending(&bytes)..].to_vec(),
     );
-    let folded = snapshot.folded.len();
     let dir = layout.writer(id);
     writer
         .head_held()
@@ -104,17 +104,15 @@ pub fn compact(
         .task()
 }
 
-/// A snapshot the reader found in the writer's directory that folds its head,
-/// with its path and stamp.
-fn folding_head(reader: &Reader, writer: &Writer) -> Option<(RelPath, Stamp, Rc<Snapshot>)> {
+/// A snapshot the reader found in the writer's directory whose head is the
+/// writer's, with its path and stamp.
+fn at_head(reader: &Reader, writer: &Writer) -> Option<(RelPath, Stamp, Rc<Snapshot>)> {
     let (id, head) = (writer.id(), writer.head());
     reader
         .files(id)
         .into_iter()
         .find_map(|(path, stamp, file)| match (file, stamp) {
-            (WriterFile::Snapshot(old), Some(stamp))
-                if old.writer == id && old.head() == Some(head) =>
-            {
+            (WriterFile::Snapshot(old), Some(stamp)) if old.writer == id && old.head == head => {
                 Some((path.clone(), stamp.clone(), Rc::clone(old)))
             }
             _ => None,
@@ -157,114 +155,232 @@ fn write_snapshot<'a>(path: RelPath, dir: RelPath, bytes: Vec<u8>) -> Fallible<'
     .map_ok(|held| held.is_some())
 }
 
-/// The snapshot of the chain from the genesis entry to the writer's head, with
-/// the state of exactly those entries.
-fn fold(writer: &Writer, own: &WriterLog) -> Option<Snapshot> {
-    let folded = own.chain_to(writer.head())?;
-    let on_chain: BTreeSet<EntryHash> = folded.iter().copied().collect();
-    let mut chain = WriterLog::new(own.writer());
-    let snapshots = own
-        .snapshots()
+/// The snapshot of the chain to the writer's head: its previous snapshot, the
+/// tip the head descends from, with the entries since folded in; and how many
+/// entries that is. `None` when the reader does not hold the chain from its
+/// genesis entry or a tip.
+fn fold(
+    writer: &Writer,
+    reader: &Reader,
+    recorded: &[Vec<Rc<Entry>>],
+) -> Option<(Snapshot, usize)> {
+    let id = writer.id();
+    let placed = reader.derived().writers.get(&id)?;
+    let known: BTreeMap<EntryHash, &Rc<Entry>> = placed
+        .merged
         .iter()
-        .filter(|snapshot| snapshot.head().is_some_and(|head| on_chain.contains(&head)))
-        .cloned()
+        .chain(&placed.runs)
+        .chain(&placed.gaps)
+        .map(|entry| (entry.hash(), entry))
         .collect();
-    let entries = own
-        .entries()
-        .iter()
-        .filter(|entry| on_chain.contains(&entry.hash()))
-        .cloned()
-        .collect();
-    chain.place(snapshots, entries);
-    let at = chain.last_at()?;
-    let mut unknown: BTreeMap<String, Raw> = BTreeMap::new();
-    for (name, raw) in chain.snapshots().iter().flat_map(|old| &old.unknown) {
-        let kept = unknown.entry(name.clone()).or_insert_with(|| raw.clone());
-        if raw > kept {
-            *kept = raw.clone();
+    let mut since: Vec<Rc<Entry>> = Vec::new();
+    let mut at = writer.head();
+    let previous = loop {
+        if let Some(tip) = placed.tips.iter().find(|tip| tip.head == at) {
+            break Some(tip);
+        }
+        let entry = known.get(&at.hash).filter(|entry| entry.own() == at)?;
+        since.push(Rc::clone(entry));
+        if at.n == 0 {
+            if at.hash != writer.genesis() || entry.prev() != EntryHash::ZERO {
+                return None;
+            }
+            break None;
+        }
+        at = Own {
+            n: at.n - 1,
+            hash: entry.prev(),
+        };
+    };
+    since.reverse();
+    let label = match since.first().map(|entry| entry.kind()) {
+        Some(EntryKind::Genesis(genesis)) => genesis.label,
+        _ => String::new(),
+    };
+    let found = reader
+        .files(id)
+        .into_iter()
+        .filter_map(|(_, _, file)| match file {
+            WriterFile::Segment(segment) => Some(Found::Lines(&segment.entries)),
+            WriterFile::Snapshot(snapshot) => Some(Found::Snapshot(snapshot)),
+            WriterFile::Unreadable => None,
+        });
+    let found = found.chain(recorded.iter().map(|lines| Found::Lines(lines)));
+    let previous = previous.map(Rc::as_ref);
+    let snapshot = snapshot(id, writer.genesis(), label, previous, &since, found)?;
+    Some((snapshot, since.len()))
+}
+
+/// A file of a writer's directory as a compaction finds it.
+pub enum Found<'a> {
+    Lines(&'a [Rc<Entry>]),
+    Snapshot(&'a Snapshot),
+}
+
+/// The snapshot of `writer` that folds `since`, its entries after `previous`'s
+/// head in chain order, into `previous`, labeled `label` when there is no
+/// previous one. It certifies each segment `found` shows by its first line and
+/// the last line on the chain, the heads of the snapshots on the chain with
+/// their certificates, and by hash every other entry of `since` and the last
+/// entry of each dismissal of its own runs on the chain. `None` when it folds
+/// nothing.
+pub fn snapshot<'a>(
+    writer: WriterId,
+    genesis: EntryHash,
+    label: String,
+    previous: Option<&Snapshot>,
+    since: &[Rc<Entry>],
+    found: impl IntoIterator<Item = Found<'a>>,
+) -> Option<Snapshot> {
+    let head = since
+        .last()
+        .map(|entry| entry.own())
+        .or(previous.map(|tip| tip.head))?;
+    let mut state = previous.map(|tip| tip.state.clone()).unwrap_or_default();
+    for entry in since {
+        state.fold(writer, entry);
+    }
+    let mut certified = previous
+        .map(|tip| tip.certified.clone())
+        .unwrap_or_default();
+    certified.heads.extend(previous.map(|tip| tip.head));
+    let added: BTreeSet<EntryHash> = since.iter().map(|entry| entry.hash()).collect();
+    let on_chain =
+        |own: Own| added.contains(&own.hash) || previous.is_some_and(|tip| tip.names(own));
+    let mut covered: BTreeSet<EntryHash> = BTreeSet::new();
+    for file in found {
+        match file {
+            Found::Lines(lines) => {
+                let on = certified_prefix(lines, previous, &added);
+                if let (Some(first), Some(last)) =
+                    (lines.first(), on.checked_sub(1).map(|at| &lines[at]))
+                {
+                    certified.segments.insert(SegmentCert {
+                        first: first.own(),
+                        last: last.own(),
+                    });
+                    covered.extend(lines[..on].iter().map(|entry| entry.hash()));
+                }
+            }
+            Found::Snapshot(old) if old.writer == writer && on_chain(old.head) => {
+                certified.heads.insert(old.head);
+                let theirs = &old.certified;
+                certified.segments.extend(theirs.segments.iter().copied());
+                certified.heads.extend(theirs.heads.iter().copied());
+                certified.hashes.extend(theirs.hashes.iter().copied());
+            }
+            Found::Snapshot(_) => {}
         }
     }
+    let uncovered = since
+        .iter()
+        .map(|entry| entry.own())
+        .filter(|own| !covered.contains(&own.hash));
+    certified.hashes.extend(uncovered);
+    // A reader matches a dismissal of this writer's own run to its chain by the
+    // hash of the run's last entry.
+    for (_, run) in &state.dismissals {
+        if run.writer == writer && (covered.contains(&run.last.hash) || on_chain(run.last)) {
+            certified.hashes.insert(run.last);
+        }
+    }
+    certified.heads.remove(&head);
+    let at = since
+        .last()
+        .map(|entry| entry.at())
+        .or(previous.map(|tip| tip.at))?;
     Some(Snapshot {
-        writer: own.writer(),
-        label: own.label().unwrap_or_default().to_owned(),
+        writer,
+        label: previous.map_or(label, |tip| tip.label.clone()),
         at,
-        folded,
-        state: merge([&chain]),
-        unknown,
+        genesis,
+        head,
+        certified,
+        state,
+        unknown: previous.map(|tip| tip.unknown.clone()).unwrap_or_default(),
     })
+}
+
+/// How many of a segment's first lines `snapshot`, or `added`, certifies: those
+/// a segment certificate of it covers, and those after them it names.
+fn certified_prefix(
+    lines: &[Rc<Entry>],
+    snapshot: Option<&Snapshot>,
+    added: &BTreeSet<EntryHash>,
+) -> usize {
+    let Some(first) = lines.first() else {
+        return 0;
+    };
+    let matched = snapshot
+        .into_iter()
+        .flat_map(|snapshot| &snapshot.certified.segments);
+    let mut on = matched
+        .filter(|cert| cert.first.hash == first.hash())
+        .filter_map(|cert| {
+            let at = usize::try_from(cert.last.n.checked_sub(cert.first.n)?).ok()?;
+            (lines.get(at)?.hash() == cert.last.hash).then_some(at + 1)
+        })
+        .max()
+        .unwrap_or(0);
+    while let Some(line) = lines.get(on) {
+        let named = snapshot.is_some_and(|snapshot| snapshot.names(line.own()));
+        if !named && !added.contains(&line.hash()) {
+            break;
+        }
+        on += 1;
+    }
+    on
 }
 
 /// The files of the writer's directory a snapshot lets it delete, as the
 /// reader last found them.
 struct Doomed {
     segments: Vec<Sealed>,
-    /// Snapshots whose folded list starts that snapshot's, with their lengths.
+    /// Snapshots whose heads that snapshot certifies, with their lengths.
     snapshots: Vec<(RelPath, u64)>,
 }
 
-/// A segment ending with a seal marker, every line of which a snapshot folds.
+/// A segment ending with a seal marker, every line of which the snapshot
+/// certifies.
 struct Sealed {
     path: RelPath,
     /// Its length with the marker.
     len: u64,
     last: EntryHash,
-    /// The other snapshot that folds it, with its length; `None` when the one
-    /// [`Doomed::of`] was given does.
-    folder: Option<(RelPath, u64)>,
 }
 
 impl Doomed {
     /// `open` is the segment this process has open, which compaction seals.
     fn of(reader: &Reader, id: WriterId, new: &Snapshot, open: Option<&RelPath>) -> Self {
-        let files = reader.files(id);
-        let mut covering: Vec<(RelPath, u64, BTreeSet<EntryHash>)> = Vec::new();
+        let mut segments = Vec::new();
         let mut snapshots = Vec::new();
-        for (path, stamp, file) in &files {
-            let (WriterFile::Snapshot(old), Some(stamp)) = (file, stamp) else {
-                continue;
-            };
-            if old.writer != id {
-                continue;
-            }
-            match new.extends(old) {
-                true => snapshots.push(((*path).clone(), stamp.len)),
-                false => covering.push((
-                    (*path).clone(),
-                    stamp.len,
-                    old.folded.iter().copied().collect(),
-                )),
+        for (path, stamp, file) in reader.files(id) {
+            match file {
+                WriterFile::Snapshot(old) => {
+                    if let Some(stamp) = stamp
+                        .filter(|_| old.writer == id && old.head != new.head && new.names(old.head))
+                    {
+                        snapshots.push((path.clone(), stamp.len));
+                    }
+                }
+                WriterFile::Segment(segment) => {
+                    let Some(last) = segment.entries.last() else {
+                        continue;
+                    };
+                    let sealed = segment.sealed || Some(path) == open;
+                    let whole = certified_prefix(&segment.entries, Some(new), &BTreeSet::new())
+                        == segment.entries.len();
+                    if sealed && whole && segment.stop.is_none() {
+                        segments.push(Sealed {
+                            path: path.clone(),
+                            len: segment.end + line::SEAL_MARKER,
+                            last: last.hash(),
+                        });
+                    }
+                }
+                WriterFile::Unreadable => {}
             }
         }
-        let folded: BTreeSet<EntryHash> = new.folded.iter().copied().collect();
-        let segments = files
-            .iter()
-            .filter_map(|(path, _, file)| {
-                let WriterFile::Segment(segment) = file else {
-                    return None;
-                };
-                let last = segment.entries.last()?.hash();
-                let sealed = segment.sealed || Some(*path) == open;
-                if !sealed || segment.stop.is_some() {
-                    return None;
-                }
-                let hashes = || segment.entries.iter().map(|entry| entry.hash());
-                let folder = match hashes().all(|hash| folded.contains(&hash)) {
-                    true => None,
-                    false => {
-                        let (path, len, _) = covering
-                            .iter()
-                            .find(|(_, _, folds)| hashes().all(|hash| folds.contains(&hash)))?;
-                        Some((path.clone(), *len))
-                    }
-                };
-                Some(Sealed {
-                    path: (*path).clone(),
-                    len: segment.end + line::SEAL_MARKER,
-                    last,
-                    folder,
-                })
-            })
-            .collect();
         Self {
             segments,
             snapshots,
@@ -279,8 +395,7 @@ impl Doomed {
 
     /// Deletes each file once the snapshot at `path` is confirmed to be in
     /// the folder still, and the file to be as the reader found it; a segment
-    /// also only while it ends with its seal marker and the snapshot that folds
-    /// it is there. Returns the deleted segments, and whether it deleted any file.
+    /// also only while it ends with its seal marker. Returns the deleted segments, and whether it deleted any file.
     fn delete<'a>(
         self,
         path: RelPath,
@@ -301,23 +416,11 @@ impl Doomed {
             segments.into_iter(),
             Vec::new(),
             move |mut removed, sealed| {
-                let Sealed {
-                    path,
-                    len,
-                    last,
-                    folder,
-                } = sealed;
+                let Sealed { path, len, last } = sealed;
                 confirm()
-                    .and_then(move |()| match folder {
-                        Some((folder, len)) => same_len(folder, len),
-                        None => flow::ok(true),
-                    })
                     .and_then({
                         let path = path.clone();
-                        move |covered| match covered {
-                            true => ends_sealed(path, len, last),
-                            false => flow::ok(false),
-                        }
+                        move |()| ends_sealed(path, len, last)
                     })
                     .and_then(move |sealed| match sealed {
                         true => {
