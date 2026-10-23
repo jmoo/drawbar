@@ -11,10 +11,37 @@ use toshokan::EntityId;
 use super::LibPath;
 
 /// How the library knows a file: by the entity bound to it, or by its path.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+///
+/// Serialized as one string, `e:<entity>` or `f:<path>`, so a map keyed by it serializes
+/// wherever a map keyed by strings does.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Key {
     Entity(EntityId),
     File(LibPath),
+}
+
+impl Serialize for Key {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let text = match self {
+            Key::Entity(entity) => format!("e:{entity}"),
+            Key::File(path) => format!("f:{path}"),
+        };
+        serializer.serialize_str(&text)
+    }
+}
+
+impl<'de> Deserialize<'de> for Key {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Key, D::Error> {
+        use serde::de::Error as _;
+
+        let text = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
+        let wrong = || D::Error::custom(format!("{text:?} names no file of a library"));
+        match text.split_once(':') {
+            Some(("e", entity)) => entity.parse().map(Key::Entity).map_err(|_| wrong()),
+            Some(("f", path)) => LibPath::parse(path).map(Key::File).ok_or_else(wrong),
+            _ => Err(wrong()),
+        }
+    }
 }
 
 impl Key {

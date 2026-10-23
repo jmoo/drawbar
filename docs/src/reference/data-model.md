@@ -630,7 +630,7 @@ streams. Nothing needs shared memory, so the page needs no cross-origin
 isolation.
 
 The page sends every command but a read to the worker, one at a time and in
-order, and waits for its answers. A command and its answers cross as RON
+order, and waits for its answers. A command and its answers cross as JSON
 (`store::wire`); the bytes a save or a draft carries, and the `File` a copy from
 outside reads, are handed over beside the text, the bytes in a transferred
 buffer. An answer carries only what it changed of what the app shows

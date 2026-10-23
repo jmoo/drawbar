@@ -1004,6 +1004,7 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "serde",
+ "serde_json",
  "syn 2.0.119",
  "toshokan",
  "unicode-normalization",

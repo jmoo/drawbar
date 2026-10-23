@@ -1,5 +1,5 @@
 //! The messages between the page and the worker that keeps a library in the browser: a
-//! command, or the answers to one, as RON text, with the files and the larger byte
+//! command, or the answers to one, as JSON text, with the files and the larger byte
 //! buffers it carries handed over beside the text rather than written into it.
 
 use std::cell::RefCell;
@@ -36,7 +36,7 @@ thread_local! {
 #[cfg(any(target_arch = "wasm32", test))]
 pub fn encode<T: serde::Serialize>(value: &T) -> Result<Message, String> {
     ATTACHING.with(|held| *held.borrow_mut() = Some(Vec::new()));
-    let text = ron::to_string(value);
+    let text = serde_json::to_string(value);
     let attached = ATTACHING.with(|held| held.borrow_mut().take().unwrap_or_default());
     Ok(Message {
         text: text.map_err(|e| e.to_string())?,
@@ -49,7 +49,7 @@ pub fn encode<T: serde::Serialize>(value: &T) -> Result<Message, String> {
 pub fn decode<T: serde::de::DeserializeOwned>(message: Message) -> Result<T, String> {
     let attached = message.attached.into_iter().map(Some).collect();
     TAKING.with(|held| *held.borrow_mut() = Some(attached));
-    let value = ron::from_str(&message.text);
+    let value = serde_json::from_str(&message.text);
     TAKING.with(|held| held.borrow_mut().take());
     value.map_err(|e| e.to_string())
 }
@@ -156,6 +156,33 @@ mod tests {
             panic!("{from:?}")
         };
         assert_eq!((&part.from, part.bytes.clone()), (&outside, 4..9));
+    }
+
+    /// What the app shows, keyed by entity and by path, comes back as it was.
+    #[test]
+    fn what_the_app_shows_comes_back_keyed_as_it_was() {
+        use super::super::shown::{Change, Shown};
+        use super::super::{Key, Stat};
+
+        let entity = toshokan::EntityId::from_u128(0xab);
+        let file = |at: &str| {
+            (
+                path(at),
+                Some(Stat {
+                    len: 3,
+                    modified: Some(7),
+                }),
+            )
+        };
+        let mut shown = Shown::default();
+        shown.files.insert(Key::Entity(entity), file("Set/a.ne5p"));
+        shown
+            .files
+            .insert(Key::File(path("b: c.ne5p")), file("b: c.ne5p"));
+        shown.worn.insert(entity, ["Live".to_string()].into());
+        let change = Change::Whole(shown);
+        let back: Change = decode(encode(&change).unwrap()).unwrap();
+        assert_eq!(back, change);
     }
 
     /// A message that names an attachment it does not carry does not decode.

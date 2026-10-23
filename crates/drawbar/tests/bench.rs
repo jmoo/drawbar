@@ -203,9 +203,9 @@ async fn measure() {
     let Some(Event::Opened(Ok(open))) = opened.2.first() else {
         panic!("{:?}", opened.2)
     };
-    let text = ron::to_string(&open.viewed.shown).unwrap();
+    let text = serde_json::to_string(&open.viewed.shown).unwrap();
     say(&format!(
-        "bench | the answer listing every file: {} bytes of RON, {} files shown",
+        "bench | the answer listing every file: {} bytes of JSON, {} files shown",
         text.len(),
         shown.files.len()
     ));
@@ -226,10 +226,10 @@ async fn measure() {
         {
             Some(Event::Committed {
                 result: Ok(viewed), ..
-            }) => ron::to_string(&viewed.shown).unwrap().len(),
+            }) => serde_json::to_string(&viewed.shown).unwrap().len(),
             other => panic!("{other:?}"),
         };
-        report(&format!("tag {} ({text} bytes of RON)", n + 1), &tagged);
+        report(&format!("tag {} ({text} bytes of JSON)", n + 1), &tagged);
     }
     let save = Cmd::Intent(Intent::Save {
         id: 1,
