@@ -513,6 +513,8 @@ field. An intent takes changes from an item with ops that name its run in
 `take`, and dismisses a run with a `dismiss` op; a gap or unplaced lines cannot
 be dismissed. A run is shown until it is dismissed, with no change once it would
 change nothing; a gap or unplaced lines only while they would change something.
+A run holding a passed entry kept for a remembered fork point is marked
+uncertain: it may be its writer's own entries a tip replaced.
 
 A writer forks when two instances write as it: a copied local root, a virtual
 machine resumed twice, a restored backup of a local root. Each fork point is

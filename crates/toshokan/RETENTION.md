@@ -431,6 +431,10 @@ removes named, its file effects. It ends at close. Drafts are unchanged.
   its file is visible again, then shown as that branch's item.
 - A run the user dismissed, after its branch compacted past it: its branch shown
   again as an item.
+- A run of entries only the reader remembers, after a fork point it remembers,
+  that a snapshot of their writer numbered past them does not name: an item
+  marked uncertain, since it may be the writer's own writes that snapshot
+  replaced, as when one instance resumed twice continued one segment.
 - Entries after a gap: an item from the start, whose changes the user can take,
   merged as soon as the gap fills.
 - A field whose earlier value a branch compacted away: shown in that branch's

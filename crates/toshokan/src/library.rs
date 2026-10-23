@@ -1208,6 +1208,7 @@ impl Library {
             span: item.span,
             entries: item.entries,
             changes: changes.collect(),
+            uncertain: item.uncertain,
         }
     }
 

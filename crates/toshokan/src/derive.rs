@@ -79,6 +79,8 @@ pub struct Item {
     /// Fields in `change` whatever the merged state shows: the run replaced an
     /// own write the reader no longer holds.
     pub forgotten: BTreeSet<FieldKey>,
+    /// As [`crate::report::Item::uncertain`].
+    pub uncertain: bool,
 }
 
 /// How one writer's entries are placed.
@@ -174,6 +176,9 @@ struct Writer {
     /// Whether it remembers a fork point that neither the files nor its other
     /// memories show.
     stale: bool,
+    /// Remembered entries no file shows that it keeps beside a tip numbered past
+    /// them only for a fork point it remembers.
+    unsure: BTreeSet<EntryHash>,
     lowest: Option<u64>,
 }
 
@@ -263,6 +268,7 @@ fn classify(
         placed: BTreeSet::new(),
         misnumbered: BTreeSet::new(),
         stale: false,
+        unsure: BTreeSet::new(),
         forks: memory
             .map(|memory| memory.forks.clone())
             .unwrap_or_default(),
@@ -410,13 +416,18 @@ fn classify(
         }
         false
     };
+    let mut unsure = BTreeSet::new();
     candidates.retain(|hash| {
         let passed = !w.seen.contains(hash)
             && !w.placed.contains(hash)
-            && tip_n.is_some_and(|tip| w.entry(*hash).n() <= tip)
-            && !after_fork(*hash);
+            && tip_n.is_some_and(|tip| w.entry(*hash).n() <= tip);
+        if passed && after_fork(*hash) {
+            unsure.insert(*hash);
+            return true;
+        }
         !passed
     });
+    w.unsure = unsure;
     w.candidates = candidates;
     let mut successors: BTreeMap<EntryHash, Vec<EntryHash>> = BTreeMap::new();
     for hash in &w.candidates {
@@ -946,6 +957,7 @@ fn items(
         entries: u64,
         writes: Vec<(FieldKey, Ref, Hlc, Value)>,
         forced: BTreeMap<FieldKey, (Ref, Hlc, Value)>,
+        uncertain: bool,
     }
     let mut groups: BTreeMap<(ItemKind, EntryHash), Group> = BTreeMap::new();
     let beyond_f = |n: u64| w.beyond(n);
@@ -1043,6 +1055,7 @@ fn items(
                 entries,
                 writes: own,
                 forced,
+                uncertain: false,
             },
         );
     }
@@ -1083,7 +1096,9 @@ fn items(
                 entries: 0,
                 writes: Vec::new(),
                 forced: BTreeMap::new(),
+                uncertain: false,
             });
+            group.uncertain |= w.unsure.contains(&entry.hash());
             group.run.last = entry.own();
             group.entries += 1;
             group.span = widen(group.span, entry.at());
@@ -1123,6 +1138,7 @@ fn items(
             entries: group.entries,
             change: latest,
             forgotten: group.forced.into_keys().collect(),
+            uncertain: group.uncertain,
         });
     }
     items
@@ -1527,6 +1543,10 @@ mod tests {
         assert_eq!(values(&derived), ["a"]);
         let items = &derived.items[&W];
         assert_eq!(items.len(), 2, "one item per branch");
+        assert!(
+            items.iter().all(|item| !item.uncertain),
+            "both branches are seen"
+        );
     }
 
     /// `entries` of `W` folded into a snapshot that certifies the segment they
@@ -1592,7 +1612,17 @@ mod tests {
         )]);
         let memory = BTreeMap::from([(W, memory)]);
         let derived = derive(&seen, &memory, &BTreeSet::new());
-        assert_eq!(derived.writers[&W].runs, [other]);
+        assert_eq!(derived.writers[&W].runs, [Rc::clone(&other)]);
+        let uncertain = |first: Option<EntryHash>| {
+            let item = derived.items[&W].iter().find(|i| i.run.first == first);
+            item.map(|item| item.uncertain)
+        };
+        assert_eq!(
+            uncertain(Some(other.hash())),
+            Some(true),
+            "it may be the writer's own replaced entry"
+        );
+        assert_eq!(uncertain(None), Some(false), "the tip is a branch");
     }
 
     #[test]

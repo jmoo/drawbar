@@ -163,6 +163,12 @@ pub struct Item {
     /// head, whether or not a write of the entry survives.
     pub entries: u64,
     pub changes: Vec<ItemChange>,
+    /// Whether the run may be its writer's own earlier entries rather than a
+    /// branch: entries only this reader remembers, no file shows, and a snapshot
+    /// of the writer numbered past them does not name, kept apart for a fork
+    /// point the reader remembers. Taking from it may bring back what the
+    /// writer itself replaced.
+    pub uncertain: bool,
 }
 
 /// One field an [`Item`] would change.
