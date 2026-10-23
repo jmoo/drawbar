@@ -89,7 +89,7 @@ impl Browser {
                     .to_string(),
             ),
             Verb::Discard,
-            vec![Act::DismissKept(run)],
+            vec![Act::DismissKept(Box::new(run))],
         ));
     }
 }
@@ -115,6 +115,9 @@ fn card(
                 .wrap(),
             );
         }
+        if kept.rows.is_empty() {
+            ui.add(egui::Label::new(egui::RichText::new("Nothing left to review.").weak()).wrap());
+        }
         for row in &kept.rows {
             ui.horizontal(|ui| {
                 let mut said = row.said.clone();
@@ -128,7 +131,7 @@ fn card(
                         (true, _) => {
                             if sheet::secondary(ui, None, "Take").clicked() {
                                 acts.push(Act::TakeKept {
-                                    run: kept.run,
+                                    run: Box::new(kept.run),
                                     changes: vec![row.key.clone()],
                                 });
                             }
@@ -144,11 +147,12 @@ fn card(
                 );
             });
         }
-        if each {
+        let takes = each && kept.rows.iter().any(|row| row.takes);
+        if takes || whole {
             ui.horizontal(|ui| {
-                if sheet::primary(ui, None, "Take all").clicked() {
+                if takes && sheet::primary(ui, None, "Take all").clicked() {
                     acts.push(Act::TakeKept {
-                        run: kept.run,
+                        run: Box::new(kept.run),
                         changes: Vec::new(),
                     });
                 }

@@ -816,6 +816,9 @@ pub struct KeptApart {
     /// When its entries were made, earliest and latest, in milliseconds since the Unix
     /// epoch.
     pub span: (u64, u64),
+    /// How many changes the other drawbar made in it, each as one step of its history.
+    pub entries: u64,
+    /// What taking them would change; none once the library holds all they say.
     pub changes: Vec<KeptChange>,
 }
 
@@ -839,8 +842,8 @@ pub enum KeptDo {
     Clear,
     Delete,
     Revive,
-    /// Says where the entity's file is.
-    File,
+    /// Binds the entity to the library file at this path.
+    File(String),
 }
 
 impl KeptDo {
@@ -856,7 +859,7 @@ impl KeptDo {
             FactChange::Clear { .. } => KeptDo::Clear,
             FactChange::Delete { .. } => KeptDo::Delete,
             FactChange::Revive { .. } => KeptDo::Revive,
-            FactChange::File { .. } => KeptDo::File,
+            FactChange::File { file, .. } => KeptDo::File(file.path.to_string()),
         }
     }
 }
@@ -869,9 +872,8 @@ pub type KeptKey = (EntityId, toshokan::report::What);
 pub struct KeptChange {
     pub entity: EntityId,
     pub what: toshokan::report::What,
-    /// What it does to the field, where a take can make it: a value gained, lost or
-    /// set. A change to where a file is cannot be taken, as only a file effect writes
-    /// that.
+    /// What taking it does; `None` where it left the entity without a file, which only
+    /// trashing the file does.
     pub takes: Option<KeptDo>,
     /// Shown whatever the library holds: it replaced a value no reader holds any more,
     /// so only taking it settles it.
@@ -890,6 +892,7 @@ impl KeptApart {
             run: item.run,
             by: item.by.clone(),
             span: (item.span.0.wall_ms, item.span.1.wall_ms),
+            entries: item.entries,
             changes: item
                 .changes
                 .iter()
@@ -946,6 +949,9 @@ pub struct Viewed {
     pub unfinished: Option<Vec<toshokan::report::Orphan>>,
     /// The changes the library keeps apart, as the view after the answer shows them.
     pub kept: Vec<KeptApart>,
+    /// Whether the answer found this install's history forked, as by a copy of its own
+    /// data used elsewhere too: it goes on writing a history of its own.
+    pub retired: bool,
 }
 
 /// A fault a test makes the library's thread or worker show.

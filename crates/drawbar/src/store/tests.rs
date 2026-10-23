@@ -5667,7 +5667,7 @@ impl Session {
         self.bench.browser.ask_dismiss_kept(run);
         let acts = self.bench.browser.answer("Discard");
         assert!(
-            matches!(&acts[..], [crate::browser::Act::DismissKept(asked)] if *asked == run),
+            matches!(&acts[..], [crate::browser::Act::DismissKept(asked)] if **asked == run),
             "{acts:?}"
         );
         self.store.dismiss_kept(run);
@@ -5792,4 +5792,114 @@ fn changes_after_history_a_sync_has_not_brought_wait_apart_until_it_does() {
     ours.settle();
     assert_eq!(ours.bench.browser.folders.kept, Vec::new(), "merged");
     assert_eq!(tagged(&ours), [wears("Grand.ne5p", &["Monday", "Sunday"])]);
+}
+
+/// A run kept apart says how many changes it holds, and once its every change is taken
+/// it offers only to be dismissed.
+#[test]
+fn a_run_kept_apart_counts_its_changes_and_offers_dismissal_once_nothing_is_left() {
+    let root = Temp::new();
+    let (mut here, _there, _, _, _copy) = forked(&root);
+    let theirs = here.kept("gains the tag “There”");
+    assert!(
+        theirs
+            .title
+            .starts_with("Another drawbar made 1 change on a branch of its own"),
+        "{}",
+        theirs.title
+    );
+    here.take_kept(theirs.run, Vec::new());
+    let left = here
+        .bench
+        .browser
+        .folders
+        .kept
+        .iter()
+        .find(|kept| kept.run == theirs.run)
+        .cloned()
+        .expect("the run stays until it is dismissed");
+    assert_eq!(left.rows, Vec::new(), "nothing left to review");
+    assert_eq!(crate::browser::kept::offers(left.kind), (true, true));
+    here.dismiss_kept(left.run);
+    assert!(!here
+        .bench
+        .browser
+        .folders
+        .kept
+        .iter()
+        .any(|kept| kept.run == left.run));
+}
+
+/// A file a branch kept apart renamed is taken as one change, and a take of it once
+/// the file is gone is refused, saying so in the user's words.
+#[test]
+fn a_file_a_branch_kept_apart_renamed_is_taken_where_the_folder_holds_it() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.sync();
+    first.close();
+    let copy = Temp::new();
+    copy_tree(&root.local(), &copy.0);
+    let mut here = Session::open(&root);
+    let mut there = Session::open_at(&root, &copy.0);
+    let (at_here, at_there) = (here.only(), there.only());
+    assert_eq!(at_here, id);
+    here.tag(&[at_here], "Here");
+    there.bench.act(vec![crate::browser::Act::RenameLocal {
+        id: at_there,
+        name: "Upright".to_string(),
+    }]);
+    there.sync();
+    there.settle();
+    here.settle();
+    let kept = here.kept("its file is the one at “Upright.ne5p”");
+    let row = kept
+        .rows
+        .iter()
+        .find(|row| row.said.contains("its file is"))
+        .unwrap();
+    assert!(row.takes, "{row:?}");
+    let key = row.key.clone();
+
+    let gone = Temp::new();
+    fs::rename(root.at("Upright.ne5p"), gone.0.join("Upright.ne5p")).unwrap();
+    here.settle();
+    here.take_kept(kept.run, vec![key.clone()]);
+    assert_eq!(
+        here.said(
+            "did not change as asked: the file at Upright.ne5p cannot be taken: no file is there"
+        ),
+        1
+    );
+
+    fs::rename(gone.0.join("Upright.ne5p"), root.at("Upright.ne5p")).unwrap();
+    here.settle();
+    here.take_kept(kept.run, vec![key]);
+    let still = here.bench.browser.folders.kept.iter();
+    assert!(
+        !still
+            .flat_map(|kept| &kept.rows)
+            .any(|row| row.said.contains("its file is")),
+        "taken"
+    );
+    let ours = here.kept("gains the tag “Here”");
+    here.take_kept(ours.run, Vec::new());
+    assert_eq!(
+        here.worn(here.named("Upright.ne5p")),
+        ["Here"],
+        "the file is the entity's again"
+    );
+}
+
+/// Each session whose history another copy of the install's data also continued says,
+/// once, that it goes on with a history of its own.
+#[test]
+fn a_session_whose_history_forked_says_it_goes_on_with_its_own() {
+    let root = Temp::new();
+    let (mut here, mut there, _, _, _copy) = forked(&root);
+    for session in [&mut here, &mut there] {
+        session.settle();
+        assert_eq!(session.said("their histories split"), 1);
+    }
 }

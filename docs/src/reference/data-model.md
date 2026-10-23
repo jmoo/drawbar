@@ -720,12 +720,17 @@ toshokan shows apart from the merged state what it cannot place in a writer's
 single history (`View::items`): a branch of a writer two installs continued, entries
 whose predecessor has not synced, and lines of a segment shorter than a snapshot
 certified it. Every view the store sends carries them as `Viewed::kept`, each a
-`KeptApart` naming its run, and drawbar lists them in **Kept apart**
-(`Folders::kept`), logging each run once. `Intent::Take` makes the named changes
-of a run, or all of them, in one entry the user can undo; taking a tag also takes
-the run's entry for it in the list of tags. `Intent::Dismiss` hides a branch from
-every reader and is not undoable. Entries waiting on a predecessor offer neither,
-and are merged once it arrives.
+`KeptApart` naming its run and how many entries it holds, and drawbar lists them
+in **Kept apart** (`Folders::kept`), logging each run once. `Intent::Take` makes the
+named changes of a run, or all of them, in one entry the user can undo; taking a
+tag also takes the run's entry for it in the list of tags, and taking a file change
+binds the entity to the file the run names, which toshokan refuses
+(`Invalid::Unbindable`) unless the last scan found it there for no other entity.
+`Intent::Dismiss` hides a branch from every reader and is not undoable; a run
+stays listed, with no changes, until it is dismissed. Entries waiting on a
+predecessor offer neither, and are merged once it arrives. A read that finds this
+writer's own history forked retires it (`Refreshed::retired`, or
+`Start::Rekeyed` at open), which `Viewed::retired` carries to the log.
 
 ### Conflicts
 

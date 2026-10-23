@@ -252,11 +252,11 @@ pub enum Act {
     /// Take each of `changes` the library keeps apart in `run`, or every one it can where
     /// none is named, as one change.
     TakeKept {
-        run: toshokan::log::Run,
+        run: Box<toshokan::log::Run>,
         changes: Vec<crate::store::KeptKey>,
     },
     /// Never show or merge the changes the library keeps apart in `run` again.
-    DismissKept(toshokan::log::Run),
+    DismissKept(Box<toshokan::log::Run>),
     /// Nothing happened, and this is why.
     Refused(String),
 }

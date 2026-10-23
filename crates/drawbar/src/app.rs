@@ -635,11 +635,11 @@ impl DrawbarApp {
                     continue;
                 }
                 (browser::Act::TakeKept { run, changes }, Some(store)) => {
-                    store.take_kept(run, changes);
+                    store.take_kept(*run, changes);
                     continue;
                 }
                 (browser::Act::DismissKept(run), Some(store)) => {
-                    store.dismiss_kept(run);
+                    store.dismiss_kept(*run);
                     continue;
                 }
                 (

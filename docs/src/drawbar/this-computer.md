@@ -143,7 +143,8 @@ each group of changes: who made them, when, and what each one does.
 This happens when:
 
 - drawbar's own data was copied to a second computer, and both copies went on
-  making changes. Each copy's changes are a branch of their own.
+  making changes. Each copy's changes are a branch of their own, and the
+  activity log says that this drawbar goes on with a history of its own.
 - A sync has brought later changes before the earlier ones they follow. These
   wait until the rest arrives and are merged then, so there is nothing to do
   with them.
@@ -154,9 +155,14 @@ Nothing kept apart changes your library until you choose to:
 
 - **Take** makes one change. **Take all** makes every change in the group. Each
   is one step that **Edit ▸ Undo** takes back.
+- Taking a change to where a sound's file is makes the sound's file the one at
+  that path. The file must be there, as drawbar last found it, and belong to no
+  other sound; otherwise the activity log says why it was not taken.
 - **Dismiss…** stops showing a branch, on this computer and every other. It
-  cannot be undone.
-- **Show file** shows the sound a change moved, which cannot be taken.
+  cannot be undone. A branch whose changes you have all taken says there is
+  nothing left to review, and offers only this.
+- **Show file** shows a sound a branch left without a file, which cannot be
+  taken.
 
 A change marked as settling a value no one holds now replaced something every
 computer has since let go of. Taking it is the only way to make it.

@@ -14,7 +14,7 @@ use toshokan::error::Refusal;
 use toshokan::io::{IoError, Kind, Range, Root};
 use toshokan::log::Settlement;
 use toshokan::plan::FactChange;
-use toshokan::report::{Item, Mode, Refreshed};
+use toshokan::report::{Item, Mode, Refreshed, Rekey, Start};
 use toshokan::{EntryHash, Env, Error, Expect, Policy, RelPath, View};
 
 use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES};
@@ -273,8 +273,8 @@ impl<F: Fs> Keeper<F> {
         };
         let mut trouble = Vec::new();
         if writable.is_ok() {
-            // Also what a crash may have torn from the end of this writer's log, which
-            // opening does not report.
+            // Now rather than before the next write, so the files a crash left are
+            // where their outcome puts them before the first scan.
             let settled = library.settle_interrupted().await;
             trouble.extend(settled.err().map(|e| format!("finishing a change: {e}")));
             // Another window of this install left these: they are ours to finish.
@@ -286,7 +286,16 @@ impl<F: Fs> Keeper<F> {
             let emptied = library.empty_trash(Policy::default()).await;
             trouble.extend(emptied.err().map(|e| format!("emptying the trash: {e}")));
         }
-        let viewed = committed_view(&library, &mut self.shown, Vec::new());
+        let viewed = Viewed {
+            retired: matches!(
+                opened.start,
+                Start::Rekeyed {
+                    why: Rekey::Forked,
+                    ..
+                }
+            ),
+            ..committed_view(&library, &mut self.shown, Vec::new())
+        };
         self.library = Some(library);
         Ok(Opened {
             writable,
@@ -448,15 +457,14 @@ impl<F: Fs> Keeper<F> {
                 Some(forgot.await?)
             }
             Intent::Take { run, changes } => {
-                let taken = facts(library, label, |built, view| {
-                    let item = view.items().iter().find(|item| item.run == run);
-                    let item = item.ok_or("those changes are no longer kept apart")?;
-                    let takes = taking(item, &changes);
-                    Ok(takes
-                        .into_iter()
-                        .fold(built, |built, change| built.take(run, change)))
+                let view = library.view();
+                let item = view.items().iter().find(|item| item.run == run);
+                let item = item.ok_or("those changes are no longer kept apart")?;
+                let takes = taking(item, &changes).into_iter();
+                let built = takes.fold(library.intent(label), |built, change| {
+                    built.take(run, change)
                 });
-                Some(taken.await?)
+                Some(built.commit().await.map_err(not_taken)?)
             }
             Intent::Dismiss { run } => {
                 let dismissed = facts(library, label, |built, _| Ok(built.dismiss(run)));
@@ -1384,6 +1392,7 @@ fn committed_view<F: Fs>(
         unlisted: None,
         unfinished: None,
         kept: kept(library),
+        retired: false,
     }
 }
 
@@ -1418,6 +1427,23 @@ fn taking(item: &Item, named: &[KeptKey]) -> Vec<FactChange> {
     takes
 }
 
+/// Why a take of changes kept apart was refused, in the user's words: a file change
+/// names its file by path, and never by the entity bound to it.
+fn not_taken(e: Error) -> String {
+    use toshokan::{Invalid, Unbindable};
+    let Error::Refused(Refusal::Invalid(Invalid::Unbindable { path, why, .. })) = &e else {
+        return e.to_string();
+    };
+    let why = match why {
+        Unbindable::Absent => "no file is there",
+        Unbindable::Changed => "the file there holds something else now",
+        Unbindable::Unscanned => "drawbar has not looked at it yet",
+        Unbindable::Bound(_) => "it is another asset's file",
+        _ => "it cannot be bound now",
+    };
+    format!("the file at {path} cannot be taken: {why}")
+}
+
 /// What the library keeps apart, as its view shows it.
 fn kept<F: Fs>(library: &Library<F>) -> Vec<super::KeptApart> {
     let view = library.view();
@@ -1446,6 +1472,7 @@ fn viewed<F: Fs>(library: &Library<F>, shown: &mut Option<View>, refreshed: Refr
         undone: None,
         unfinished: Some(theirs.collect()),
         kept: kept(library),
+        retired: refreshed.retired.is_some(),
     }
 }
 

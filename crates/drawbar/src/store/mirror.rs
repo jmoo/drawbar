@@ -1802,10 +1802,11 @@ impl Store {
             .iter()
             .filter(|kept| !self.kept_runs.contains(&kept.run))
         {
+            let made = usize::try_from(kept.entries).unwrap_or(usize::MAX);
             log.say(format!(
                 "{} {} kept apart from the library: see Kept apart.",
-                crate::strings::counted(kept.changes.len(), "change", "changes"),
-                match kept.changes.len() {
+                crate::strings::counted(made, "change", "changes"),
+                match made {
                     1 => "is",
                     _ => "are",
                 },
@@ -1871,6 +1872,7 @@ impl Store {
             unlisted,
             unfinished,
             kept,
+            retired,
         } = viewed;
         if let (Some(standing), Phase::Open) = (unfinished, &self.phase) {
             self.found_unfinished(workspace.ctx().input(|input| input.time), standing);
@@ -1912,6 +1914,13 @@ impl Store {
         }
         self.lose(&shown, workspace, browser);
         self.project_tags(&shown, browser);
+        if retired {
+            log.say(
+                "drawbar's own data for this library was copied and used elsewhere too, so \
+                 their histories split. This drawbar goes on with a history of its own; \
+                 what either side changed since is under Kept apart.",
+            );
+        }
         self.keep_apart(kept, workspace, browser, log);
         if !first {
             self.attribute(&changes, workspace, log);
@@ -3789,12 +3798,17 @@ fn kept_title(kept: &super::KeptApart) -> String {
         By::This | By::Outside => "This drawbar".to_string(),
     };
     let when = crate::when::span(kept.span.0, kept.span.1, crate::when::local_offset);
+    let made = crate::strings::counted(
+        usize::try_from(kept.entries).unwrap_or(usize::MAX),
+        "change",
+        "changes",
+    );
     let what = match kept.kind {
-        super::KeptKind::Run => "made these changes on a branch of its own",
-        super::KeptKind::Gap => "made these changes after ones that have not synced yet",
-        super::KeptKind::Unplaced => "made these changes in a version a sync dropped",
+        super::KeptKind::Run => "on a branch of its own",
+        super::KeptKind::Gap => "after ones that have not synced yet",
+        super::KeptKind::Unplaced => "in a version a sync dropped",
     };
-    format!("{who} {what} {when}")
+    format!("{who} made {made} {what} {when}")
 }
 
 /// What one change kept apart does, to the asset named `name` where the window holds it.
@@ -3818,7 +3832,8 @@ fn kept_said(name: Option<&str>, what: &What, does: &Option<super::KeptDo>) -> S
     match (what, does) {
         (What::Created, _) | (_, Some(KeptDo::Revive)) => format!("{asset} is made"),
         (What::Deleted, _) | (_, Some(KeptDo::Delete)) => format!("{asset} is removed"),
-        (What::File, _) | (_, Some(KeptDo::File)) => format!("{asset}: its file moves"),
+        (_, Some(KeptDo::File(path))) => format!("{asset}: its file is the one at “{path}”"),
+        (What::File, _) => format!("{asset} is left without a file"),
         (_, Some(KeptDo::Gain(value))) => format!("{asset} gains the {field} “{value}”"),
         (_, Some(KeptDo::Lose(value))) => format!("{asset} loses the {field} “{value}”"),
         (_, Some(KeptDo::Set(value))) => format!("{asset}: its {field} becomes “{value}”"),
