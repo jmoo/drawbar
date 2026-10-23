@@ -3125,6 +3125,17 @@ fn removing_an_empty_directory_is_undone_and_one_with_files_is_refused<F: Facade
         ),
         "{refused:?}"
     );
+    let filled = a.commit("Remove", |i| {
+        i.save_file(&path("Empty/new.wav"), b"new".to_vec(), Expect::Absent)
+            .remove_dir(&path("Empty"))
+    });
+    assert!(
+        matches!(
+            filled,
+            Err(Error::Refused(Refusal::Invalid(Invalid::NotEmpty(_))))
+        ),
+        "a file the intent puts there keeps it: {filled:?}"
+    );
     a.commit("Remove", |i| i.remove_dir(&path("Empty")))
         .unwrap();
     let there = |dir: &str| folder.directories(Root::Folder).contains(&path(dir));

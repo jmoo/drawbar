@@ -91,6 +91,17 @@ impl EffectStep {
         }
     }
 
+    /// The library path the step puts a file or a directory at, where it puts one.
+    pub fn put(&self) -> Option<&RelPath> {
+        match self {
+            Self::Place { path, .. }
+            | Self::FromTrash { path, .. }
+            | Self::MakeDir { path }
+            | Self::Rename { to: path, .. } => Some(path),
+            Self::ToTrash { .. } | Self::RemoveDir { .. } => None,
+        }
+    }
+
     /// Every library path the step names.
     pub fn library_paths(&self) -> Vec<&RelPath> {
         match self {
@@ -401,13 +412,19 @@ impl Resolver<'_> {
                 let unbound = unbound
                     .take_while(|(file, ())| file.as_str().starts_with(path.as_str()))
                     .map(|(file, ())| file);
-                let moved = |file: &RelPath| self.touched.iter().any(|at| file.starts_with(at));
+                let steps = &self.plan.steps;
+                let taken: Vec<&RelPath> = steps.iter().filter_map(EffectStep::taken).collect();
+                let moved = |file: &RelPath| taken.iter().any(|at| file.starts_with(at));
                 let staying = |file: &&RelPath| file.starts_with(&path) && !moved(file);
+                let put = steps.iter().filter_map(EffectStep::put);
+                let filled = put
+                    .into_iter()
+                    .any(|at| at.starts_with(&path) && *at != path);
                 let held = known
                     .map(|file| &file.path)
                     .chain(unbound)
                     .any(|file| staying(&file));
-                if held {
+                if held || filled {
                     return Err(invalid(Invalid::NotEmpty(path)));
                 }
                 self.step(EffectStep::RemoveDir { path: path.clone() });
