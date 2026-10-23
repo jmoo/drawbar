@@ -302,6 +302,7 @@ async fn drive(
     let worker = Worker::start(root.kept(), &local).await;
     let look = (!private).then_some(LOOK_EVERY);
     let mut hints = Hints::new(local.as_str(), look).ok();
+    let mut persisting = false;
     if let Some(hints) = &mut hints {
         let _ = hints.watch(&root.kept()).await;
     }
@@ -364,6 +365,10 @@ async fn drive(
             heard.borrow_mut().events.push_back(answer);
         }
         inbox.borrow_mut().writing -= usize::from(writes);
+        if private && writes && !persisting {
+            persisting = true;
+            persist().await;
+        }
         if private && inbox.borrow().cmds.is_empty() {
             measure(&room).await;
         }
@@ -622,6 +627,14 @@ pub(crate) fn remove_private(path: std::path::PathBuf) {
 fn storage() -> Option<StorageManager> {
     let navigator = web_sys::window()?.navigator();
     Some(field(&navigator, "storage")?.unchecked_into())
+}
+
+/// Ask the browser to keep the origin's storage when space runs low: Firefox asks the
+/// user, and other browsers decide for themselves.
+async fn persist() {
+    if let Some(asked) = storage().and_then(|storage| storage.persist().ok()) {
+        let _ = JsFuture::from(asked).await;
+    }
 }
 
 /// Read how much the origin uses, and whether its storage is kept.
