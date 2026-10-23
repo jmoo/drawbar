@@ -781,7 +781,8 @@ In the browser:
   user allowed the site on every visit. A handle restored from IndexedDB comes
   back without it, so at start drawbar opens the private library, and **File ▸
   Reconnect** *name* asks again on a click. If the user refuses, the open library
-  stays open.
+  stays open. A command that fails while the browser no longer grants the
+  permission closes the folder the same way (`Backend::denied`).
 - The page cannot reveal a picked folder in the file manager, and the origin's
   storage quota does not apply to one. **Help ▸ About drawbar** shows how much of
   the quota drawbar uses: the private library, or a picked folder's drafts and

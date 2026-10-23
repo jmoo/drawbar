@@ -43,7 +43,8 @@ Open library folder…** too ([What is supported](../getting-started/support.md)
 lists them). The browser asks whether drawbar may change the folder. It forgets
 that answer when drawbar.app closes, unless you allowed it on every visit, so the
 next visit starts with the browser's own library, and **File ▸ Reconnect**
-*folder* asks again.
+*folder* asks again. If you take the permission back while the folder is open,
+drawbar closes it the same way.
 
 Several drawbars can use one library at once: on two computers that sync the
 folder, in two windows, in two browser tabs, or in the browser and the desktop
