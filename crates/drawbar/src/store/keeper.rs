@@ -1723,6 +1723,28 @@ mod tests {
             panic!("{listed:?}")
         };
         assert!(!matches!(viewed.shown, Change::Whole(_)), "one more file");
+        let tagged = keeper.run_one(Cmd::Intent(Intent::Tag {
+            files: vec![Key::File(path("new.ne5p"))],
+            name: "Live".into(),
+            make: true,
+        }));
+        assert!(
+            matches!(tagged[..], [Event::Committed { result: Ok(_), .. }]),
+            "{tagged:?}"
+        );
+        fs::create_dir(root.at("More")).unwrap();
+        for i in 0..2300 {
+            fs::write(root.at(&format!("More/{i:04}.wav")), b"wave").unwrap();
+        }
+        let listed = keeper.run_one(Cmd::Rescan);
+        let [Event::Scanned(Ok(viewed))] = &listed[..] else {
+            panic!("{listed:?}")
+        };
+        let Change::Whole(whole) = &viewed.shown else {
+            panic!("most of it changed")
+        };
+        let shown = (whole.files.len(), whole.others().len());
+        assert_eq!(shown, (1101, 2300), "every file, those before included");
     }
 
     #[test]

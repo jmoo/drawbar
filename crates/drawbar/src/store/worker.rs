@@ -51,7 +51,7 @@ self.onmessage = async ({ data }) => {
     await bundle.default({ module_or_path: data.module });
     await bundle.drawbarWorker(data);
   } catch (error) {
-    stopped(error);
+    stopped(error?.stack || error);
   }
 };
 "#;
@@ -209,6 +209,13 @@ impl Worker {
         let _ = self.worker.post_message(&object(&[(name, true.into())]));
     }
 
+    /// Take the last answer for lost, as one the page could not read is, so the next
+    /// shows the whole view.
+    #[doc(hidden)]
+    pub fn lose(&self) {
+        self.lost.set(true);
+    }
+
     /// End the worker, which does not answer, and fail what waits on it.
     pub fn abandon(&self) {
         self.worker.terminate();
@@ -225,13 +232,15 @@ impl Worker {
         let id = self.replies.next.get();
         self.replies.next.set(id.wrapping_add(1));
         Reflect::set(&message, &"id".into(), &id.into()).map_err(js)?;
-        if self.lost.take() {
+        let lost = self.lost.take();
+        if lost {
             Reflect::set(&message, &"whole".into(), &true.into()).map_err(js)?;
         }
         let (replied, answer) = deferred();
         self.replies.waiting.borrow_mut().insert(id, answer);
         if let Err(e) = self.worker.post_message_with_transfer(&message, &transfer) {
             self.replies.waiting.borrow_mut().remove(&id);
+            self.lost.set(lost);
             return Err(js(e));
         }
         let reply = JsFuture::from(replied).await.map_err(js)?;

@@ -1759,7 +1759,10 @@ impl Store {
         };
         if now < due {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(due - now));
-        } else if !self.scanning {
+        } else if self.scanning {
+            // The scan's answer reads them again, or else the next look after it.
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        } else {
             self.recheck = None;
             self.refresh();
         }

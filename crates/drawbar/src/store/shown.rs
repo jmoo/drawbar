@@ -210,11 +210,6 @@ impl Change {
             return Change::Whole(Shown::of(view));
         };
         let changed = view.changed_since(before);
-        let reached = changed.entities.len() + changed.files.len();
-        let most = || view.entities().len() + view.unbound().count();
-        if reached > MOST_KEYS && 2 * reached > most() {
-            return Change::Whole(Shown::of(view));
-        }
         let mut keys: BTreeSet<Key> = changed.entities.iter().copied().map(Key::Entity).collect();
         for path in &changed.files {
             if let Some(entity) = view.at(path).map(|entity| entity.id()) {
@@ -223,6 +218,10 @@ impl Change {
             if let Some(at) = LibPath::parse(path.as_str()) {
                 keys.insert(Key::File(at));
             }
+        }
+        let shown = || view.entities().len() + view.unbound().count();
+        if keys.len() > MOST_KEYS && 2 * keys.len() > shown() {
+            return Change::Whole(Shown::of(view));
         }
         let now = names(view);
         let names = (now != self::names(before)).then_some(now);

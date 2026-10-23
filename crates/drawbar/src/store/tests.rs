@@ -4136,6 +4136,36 @@ fn an_unsaved_edit_comes_back_after_a_quit() {
     assert_eq!(second.said("appeared"), 0, "what was there is not news");
 }
 
+/// A whole view sent mid-session, as when most of what is shown changed at once, keeps
+/// every asset shown before with its id, its tags and its unsaved edit, and adds the rest.
+#[test]
+fn a_whole_view_mid_session_keeps_what_was_shown_and_adds_the_rest() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.tag(&[id], "Live");
+    let edited = session.edit(id, "96");
+    fs::create_dir(root.at("Many")).unwrap();
+    for i in 0..1100 {
+        fs::write(root.at(&format!("Many/{i:04}.wav")), b"wave").unwrap();
+    }
+    session.settle();
+    let shown = session.store.shown().expect("shown");
+    let shown = (shown.files.len(), shown.others().len());
+    assert_eq!(shown, (1, 1100), "every file is shown once");
+    let entity = session
+        .bench
+        .workspace
+        .get(id)
+        .expect("the asset keeps its id");
+    assert!(entity.is_unsaved());
+    assert!(session.bytes(id) == edited);
+    assert_eq!(session.worn(id), ["Live"]);
+    assert_eq!(session.bench.browser.folders.others.len(), 1100);
+    assert_eq!(session.said("deleted outside drawbar"), 0);
+}
+
 /// A library that stops answering in the middle of a command is asked about once it has
 /// shown no life for a while, and letting it go names the edits it could not keep
 /// rather than waiting for it.

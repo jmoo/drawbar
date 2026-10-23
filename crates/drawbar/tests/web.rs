@@ -7,7 +7,7 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
-use drawbar::store::shown::Shown;
+use drawbar::store::shown::{Change, Shown};
 use drawbar::store::{
     Backend, Cmd, Event, Failure, Fault, Found, Intent, Key, LibPath, Moving, Picked, Root, Slot,
     Source, Worker,
@@ -496,6 +496,28 @@ async fn a_worker_that_faults_says_so_and_a_fresh_one_opens_the_library() {
         "{opened:?}"
     );
     fresh.close().await;
+}
+
+/// After an answer the page lost, the next shows the whole view, and the one after only
+/// what changed again.
+#[wasm_bindgen_test]
+async fn the_answer_after_one_the_page_lost_shows_the_whole_view() {
+    wipe(&opfs().await).await;
+    let folder = || Folder::Private(RelPath::new("Lost").unwrap());
+    let local = RelPath::new("local/lost").unwrap();
+    let worker = Worker::start(folder(), &local).await.unwrap();
+    worker.run(Cmd::Open).await.unwrap();
+    let shown = async |worker: &Worker| match &worker.run(Cmd::Rescan).await.unwrap()[..] {
+        [Event::Scanned(Ok(viewed))] => viewed.shown.clone(),
+        answers => panic!("{answers:?}"),
+    };
+    let whole = |change: &Change| matches!(change, Change::Whole(_));
+    shown(&worker).await;
+    assert!(!whole(&shown(&worker).await), "what changed");
+    worker.lose();
+    assert!(whole(&shown(&worker).await), "the whole view");
+    assert!(!whole(&shown(&worker).await), "what changed again");
+    worker.close().await;
 }
 
 /// A worker that never finishes a command shows no sign of life for as long, and once it
