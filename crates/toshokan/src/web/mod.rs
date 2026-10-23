@@ -163,12 +163,18 @@ fn describe(error: &JsValue) -> String {
 /// The request's failure for a thrown `error`. `mismatch` is what the request
 /// means when it met the other kind of entry than it asked for.
 fn failure(error: &JsValue, mismatch: IoError) -> IoError {
-    match name_of(error).as_str() {
+    named(&name_of(error), mismatch).unwrap_or_else(|| IoError::Other(describe(error)))
+}
+
+/// The failure a `DOMException` of this name is, where it is a kind of its own.
+fn named(name: &str, mismatch: IoError) -> Option<IoError> {
+    Some(match name {
         "NotFoundError" => IoError::NotFound,
         "TypeMismatchError" => mismatch,
         "QuotaExceededError" => IoError::NoSpace,
-        _ => IoError::Other(describe(error)),
-    }
+        "NotAllowedError" => IoError::Denied,
+        _ => return None,
+    })
 }
 
 async fn wait(promise: impl Into<Promise>) -> Result<JsValue, JsValue> {
@@ -224,6 +230,16 @@ fn object(fields: &[(&str, JsValue)]) -> JsValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_browsers_errors_keep_their_kind() {
+        let named = |name| named(name, IoError::IsDirectory);
+        assert_eq!(named("NotFoundError"), Some(IoError::NotFound));
+        assert_eq!(named("TypeMismatchError"), Some(IoError::IsDirectory));
+        assert_eq!(named("QuotaExceededError"), Some(IoError::NoSpace));
+        assert_eq!(named("NotAllowedError"), Some(IoError::Denied));
+        assert_eq!(named("InvalidStateError"), None);
+    }
 
     #[test]
     fn only_chrome_declares_that_a_picked_folder_renames() {

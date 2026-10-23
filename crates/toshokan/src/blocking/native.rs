@@ -446,6 +446,7 @@ fn io_error(error: io::Error) -> IoError {
         ErrorKind::NotADirectory => IoError::NotDirectory,
         ErrorKind::DirectoryNotEmpty => IoError::NotEmpty,
         ErrorKind::StorageFull | ErrorKind::QuotaExceeded => IoError::NoSpace,
+        ErrorKind::PermissionDenied => IoError::Denied,
         _ => IoError::Other(error.to_string()),
     }
 }

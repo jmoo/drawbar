@@ -288,6 +288,10 @@ pub enum IoError {
     NotEmpty,
     #[error("no space is left")]
     NoSpace,
+    /// The user or the system does not let the backend in, as a browser whose
+    /// permission to a picked folder was taken back.
+    #[error("access to it is not allowed")]
+    Denied,
     #[error("a directory cannot move inside itself")]
     IntoItself,
     /// A splice keeps a range its source does not hold whole, or would make a

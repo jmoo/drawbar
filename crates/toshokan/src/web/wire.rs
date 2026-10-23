@@ -291,6 +291,7 @@ impl Out {
             }
             IoError::Crashed => self.tag(9),
             IoError::Other(text) => self.tag(10).text(text),
+            IoError::Denied => self.tag(11),
         }
     }
 }
@@ -422,6 +423,7 @@ impl<'a> In<'a> {
             )?),
             9 => IoError::Crashed,
             10 => IoError::Other(self.text()?),
+            11 => IoError::Denied,
             _ => return Err(Malformed("an unknown error")),
         })
     }
@@ -554,6 +556,7 @@ mod tests {
             Err(IoError::NotDirectory),
             Err(IoError::NotEmpty),
             Err(IoError::NoSpace),
+            Err(IoError::Denied),
             Err(IoError::IntoItself),
             Err(IoError::SpliceRange),
             Err(IoError::Crashed),
