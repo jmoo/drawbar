@@ -110,9 +110,9 @@ pub enum DraftState {
 /// empty.
 ///
 /// When the writer is this instance's own, the instance stops writing as it
-/// once a read finds the fork: [`Start::Rekeyed`] says so at opening, and
-/// [`Refreshed::retired`] at a refresh or rescan. Its next commit writes as a
-/// new writer.
+/// once a read finds the fork: [`Start::Rekeyed`] says so at opening,
+/// [`Refreshed::retired`] at a refresh or rescan, and [`crate::Error::Rekey`]
+/// from a compaction. Its next commit writes as a new writer.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Fork {
     pub writer: WriterId,
