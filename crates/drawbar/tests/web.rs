@@ -508,9 +508,9 @@ async fn a_worker_that_stalls_shows_no_life_and_is_let_go() {
     assert_eq!(tab.backend.waiting(), None, "nothing runs");
     tab.backend.fault(Fault::Stall);
     tab.backend.send(Cmd::Refresh);
-    sleep(300).await;
+    sleep(1_000).await;
     let waited = tab.backend.waiting().expect("the refresh runs");
-    assert!(waited.as_millis() >= 250, "{waited:?}");
+    assert!(waited.as_millis() >= 500, "{waited:?}");
     tab.backend.abandon();
     drop(tab);
     let (again, opened) = Tab::open(Root::Private).await;

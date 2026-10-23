@@ -15,7 +15,7 @@ use toshokan::blocking::{Backend as _, Native};
 use toshokan::env::{OsRandom, SystemClock};
 use toshokan::io::{Capabilities, Io, IoResult, Root};
 
-use super::counted::Counted;
+use super::counted::{Counted, Signs};
 use super::exec::{self, Fs};
 use super::keeper::{self, Keeper};
 use super::{keys, names};
@@ -105,12 +105,12 @@ pub struct Backend {
     worker: Option<JoinHandle<()>>,
     /// Commands that write sent and not yet run through.
     unrun: Arc<AtomicUsize>,
-    /// How many files the listings of the folder have found.
-    listed: Arc<AtomicUsize>,
-    /// Whether a command is running, and when it last showed life: when it started, or
-    /// when the count of files found last moved, in milliseconds since `started`.
+    /// What the library's storage has done so far.
+    signs: Arc<Signs>,
+    /// Whether a command is running, and since when.
     life: Arc<Life>,
-    /// What the listings had found when [`Backend::waiting`] last looked, and when.
+    /// How many requests the storage had answered when [`Backend::waiting`] last looked,
+    /// and when.
     seen: std::cell::Cell<(usize, std::time::Instant)>,
     #[cfg(test)]
     fault: Arc<std::sync::Mutex<Option<super::Fault>>>,
@@ -140,8 +140,8 @@ impl Backend {
         let (folder, kept) = (root.clone(), local.clone());
         let ctx = ctx.clone();
         let ran = unrun.clone();
-        let listed = Arc::new(AtomicUsize::new(0));
-        let counted = listed.clone();
+        let signs = Arc::new(Signs::default());
+        let counted = signs.clone();
         let life = Arc::new(Life::default());
         let living = life.clone();
         #[cfg(test)]
@@ -189,7 +189,7 @@ impl Backend {
             rx,
             worker: Some(worker),
             unrun,
-            listed,
+            signs,
             life,
             seen: std::cell::Cell::new((0, std::time::Instant::now())),
             #[cfg(test)]
@@ -217,13 +217,14 @@ impl Backend {
         if !self.life.running.load(Ordering::Acquire) {
             return None;
         }
-        let listed = self.listed();
-        if listed != self.seen.get().0 {
-            self.seen.set((listed, std::time::Instant::now()));
-        }
-        let since = *self.life.since.lock().expect("never poisoned");
-        let since = since.into_iter().chain([self.seen.get().1]).max()?;
-        Some(since.elapsed())
+        let running = (*self.life.since.lock().expect("never poisoned"))?;
+        let answered = self.signs.answered.load(Ordering::Relaxed);
+        self.seen.set(match self.seen.get() {
+            (_, at) if at < running => (answered, running),
+            (before, _) if before != answered => (answered, std::time::Instant::now()),
+            seen => seen,
+        });
+        Some(self.seen.get().1.elapsed())
     }
 
     /// Let the library go without waiting for its thread, which stopped or does not
@@ -264,7 +265,7 @@ impl Backend {
 
     /// How many files the listings of the folder have found so far.
     pub fn listed(&self) -> usize {
-        self.listed.load(Ordering::Relaxed)
+        self.signs.listed.load(Ordering::Relaxed)
     }
 
     /// Whether a command that writes has been sent and not run through yet.
@@ -299,17 +300,17 @@ impl Drop for Backend {
 }
 
 /// The keeper of the library in `folder`, with this install's own state for it in
-/// `local`, counting into `listed` the files its listings find.
+/// `local`, counting into `signs` what its storage does.
 pub(super) fn keeper(
     folder: &Path,
     local: &Path,
-    listed: Arc<AtomicUsize>,
+    signs: Arc<Signs>,
     clock: Box<dyn toshokan::Clock>,
 ) -> Keeper<Counted<Blocking>> {
     let names = Box::new(keys::Volume::probe(folder));
     let env = keeper::env(clock, Box::new(OsRandom::new()), names);
     let native = Blocking(RefCell::new(Native::new(folder, local)));
-    Keeper::new(Counted::new(native, listed), env)
+    Keeper::new(Counted::new(native, signs), env)
 }
 
 /// toshokan's native backend, as storage the async keeper drives.

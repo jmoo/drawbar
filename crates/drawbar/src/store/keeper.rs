@@ -1474,11 +1474,11 @@ async fn folders<F: Fs>(fs: &F) -> Vec<LibPath> {
 #[cfg(test)]
 mod tests {
     use std::fs::{self, File};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
 
     use toshokan::env::SystemClock;
 
-    use super::super::counted::Counted;
+    use super::super::counted::{Counted, Signs};
     use super::super::native::{self, Blocking};
     use super::super::Moving;
     use super::*;
@@ -1732,12 +1732,12 @@ mod tests {
         for name in ["a.ne5p", "Live/b.ne5p", "Live/c.wav", ".DS_Store"] {
             fs::write(root.at(name), name).unwrap();
         }
-        let listed = Arc::new(AtomicUsize::new(0));
+        let signs = Arc::new(Signs::default());
         let clock = Box::new(SystemClock);
-        let mut keeper = native::keeper(&root.0, &root.local(), listed.clone(), clock);
+        let mut keeper = native::keeper(&root.0, &root.local(), signs.clone(), clock);
         keeper.run_one(Cmd::Open);
         keeper.run_one(Cmd::Rescan);
-        assert_eq!(listed.load(Ordering::Relaxed), 3);
+        assert_eq!(signs.listed.load(Ordering::Relaxed), 3);
     }
 
     /// What a session stopped short left in the trash stays a month, and opening

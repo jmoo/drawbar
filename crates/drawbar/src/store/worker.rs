@@ -9,13 +9,13 @@
 //! rather than what changed since the last answer, which the page lost. The worker runs
 //! commands one at a time, in the order they arrive. `{close}` lets the library go, and
 //! is answered by `{closed}`. A fault in the worker is posted as `{failed}`, after which
-//! it answers nothing. While a scan lists the folder, `{listed}` says how many files it
-//! has found so far.
+//! it answers nothing. `{listed, answered}` says how many files its listings have found
+//! and how many requests its storage has answered, each time either moves.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use js_sys::{Array, ArrayBuffer, Function, Object, Promise, Reflect, Uint8Array};
@@ -32,7 +32,7 @@ use toshokan::io::Root;
 use toshokan::web::{CryptoRandom, DateClock, Executor, Folder};
 use toshokan::RelPath;
 
-use super::counted::Counted;
+use super::counted::{Counted, Signs};
 use super::keeper::{self, Keeper};
 use super::keys::{swapped, Volume};
 use super::wire::{self, Attachment, Message};
@@ -84,8 +84,9 @@ struct Replies {
     failed: RefCell<Option<String>>,
     started: RefCell<Option<Function>>,
     closed: RefCell<Option<Function>>,
-    /// How many files the worker's listings of the folder have found so far.
-    listed: Rc<Cell<usize>>,
+    /// How many files the worker's listings of the folder have found so far, and how
+    /// many requests its storage answered.
+    signs: Rc<Cell<(usize, usize)>>,
 }
 
 impl Replies {
@@ -122,9 +123,9 @@ impl Worker {
             Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
                 let data = event.data();
                 let id = field(&data, "id").and_then(|id| id.as_f64());
-                let listed = field(&data, "listed").and_then(|listed| listed.as_f64());
-                if let Some(listed) = listed {
-                    replies.listed.set(listed as usize);
+                let count = |name| field(&data, name).and_then(|count| count.as_f64());
+                if let (Some(listed), Some(answered)) = (count("listed"), count("answered")) {
+                    replies.signs.set((listed as usize, answered as usize));
                     return;
                 }
                 let answer = match id {
@@ -186,10 +187,10 @@ impl Worker {
         }
     }
 
-    /// How many files the worker's listings of the folder have found so far, as it
-    /// last said.
-    pub fn listed(&self) -> Rc<Cell<usize>> {
-        Rc::clone(&self.replies.listed)
+    /// How many files the worker's listings of the folder have found so far, and how
+    /// many requests its storage answered, as it last said.
+    pub fn signs(&self) -> Rc<Cell<(usize, usize)>> {
+        Rc::clone(&self.replies.signs)
     }
 
     /// Why the worker stopped answering, once it has.
@@ -270,9 +271,8 @@ impl Drop for Worker {
 #[wasm_bindgen(js_name = drawbarWorker)]
 pub async fn serve(start: JsValue) {
     let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
-    let listed = Arc::new(AtomicUsize::new(0));
-    wasm_bindgen_futures::spawn_local(tell_listed(scope.clone(), listed.clone()));
-    let keeper = match keeper(&start, listed).await {
+    let signs = Arc::new(Signs::default());
+    let keeper = match keeper(&start, signs.clone()).await {
         Ok(keeper) => keeper,
         Err(why) => {
             let _ = scope.post_message(&object(&[("failed", why.into())]));
@@ -284,6 +284,7 @@ pub async fn serve(start: JsValue) {
         scope: scope.clone(),
         waiting: RefCell::default(),
         running: Cell::new(false),
+        signs,
     });
     let hear = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
         queue.push(event.data());
@@ -294,32 +295,11 @@ pub async fn serve(start: JsValue) {
     let _ = scope.post_message(&object(&[("ready", true.into())]));
 }
 
-/// How often the worker tells the page how many files the folder's listings found.
-const TELL_LISTED_MS: i32 = 200;
-
-/// Tell the page how many files the folder's listings have found, each time the count
-/// moved, for as long as the worker runs.
-async fn tell_listed(scope: DedicatedWorkerGlobalScope, listed: Arc<AtomicUsize>) {
-    let mut told = 0;
-    loop {
-        let waited = Promise::new(&mut |resolve, _| {
-            let ms = TELL_LISTED_MS;
-            let _ = scope.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
-        });
-        let _ = JsFuture::from(waited).await;
-        let now = listed.load(Ordering::Relaxed);
-        if now != told {
-            told = now;
-            let _ = scope.post_message(&object(&[("listed", (now as f64).into())]));
-        }
-    }
-}
+/// How often the worker tells the page what its storage has done.
+const TELL_SIGNS_MS: i32 = 200;
 
 /// The keeper of the library the page's first message names.
-async fn keeper(
-    start: &JsValue,
-    listed: Arc<AtomicUsize>,
-) -> Result<Keeper<Counted<Executor>>, String> {
+async fn keeper(start: &JsValue, signs: Arc<Signs>) -> Result<Keeper<Counted<Executor>>, String> {
     let path = |name| {
         let text = field(start, name).and_then(|path| path.as_string());
         let text = text.ok_or_else(|| format!("the page sent no {name} path"))?;
@@ -352,7 +332,7 @@ async fn keeper(
         Box::new(CryptoRandom),
         Box::new(volume),
     );
-    Ok(Keeper::new(Counted::new(executor, listed), env))
+    Ok(Keeper::new(Counted::new(executor, signs), env))
 }
 
 /// How the volume holding a folder the user picked compares names, as a look at it,
@@ -400,6 +380,7 @@ struct Queue {
     scope: DedicatedWorkerGlobalScope,
     waiting: RefCell<VecDeque<JsValue>>,
     running: Cell<bool>,
+    signs: Arc<Signs>,
 }
 
 impl Queue {
@@ -407,6 +388,32 @@ impl Queue {
         self.waiting.borrow_mut().push_back(message);
         if !self.running.replace(true) {
             wasm_bindgen_futures::spawn_local(Rc::clone(self).drain());
+            wasm_bindgen_futures::spawn_local(Rc::clone(self).tell_signs());
+        }
+    }
+
+    /// Tell the page how many files the folder's listings have found and how many
+    /// requests the storage answered, each time either moved, while commands run.
+    async fn tell_signs(self: Rc<Self>) {
+        let mut told = None;
+        loop {
+            let waited = Promise::new(&mut |resolve, _| {
+                let scope = &self.scope;
+                let ms = TELL_SIGNS_MS;
+                let _ = scope.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+            });
+            let _ = JsFuture::from(waited).await;
+            let listed = self.signs.listed.load(Ordering::Relaxed);
+            let answered = self.signs.answered.load(Ordering::Relaxed);
+            if told != Some((listed, answered)) {
+                told = Some((listed, answered));
+                let said = [("listed", listed), ("answered", answered)];
+                let said = said.map(|(name, count)| (name, JsValue::from(count as f64)));
+                let _ = self.scope.post_message(&object(&said));
+            }
+            if !self.running.get() {
+                return;
+            }
         }
     }
 

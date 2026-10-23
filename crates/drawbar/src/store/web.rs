@@ -162,13 +162,15 @@ struct Heard {
     stopped: Option<String>,
     /// Whether the browser no longer lets the page into the picked folder.
     denied: bool,
-    /// How many files the worker's listings of the folder have found so far.
-    listed: Option<Rc<std::cell::Cell<usize>>>,
+    /// How many files the worker's listings of the folder have found so far, and how
+    /// many requests its storage answered.
+    signs: Option<Rc<std::cell::Cell<(usize, usize)>>>,
     /// The library's worker, once started.
     worker: Option<Rc<Worker>>,
     /// When the command the worker runs now was sent; `None` while none runs.
     running: Option<f64>,
-    /// What the listings had found when [`Backend::waiting`] last looked, and when.
+    /// How many requests the worker's storage had answered when [`Backend::waiting`]
+    /// last looked, and when.
     seen: (usize, f64),
     /// The fault a test asked the worker to show with the next command.
     fault: Option<super::Fault>,
@@ -292,15 +294,16 @@ impl Backend {
     /// no file found. `None` while none runs.
     pub fn waiting(&self) -> Option<std::time::Duration> {
         let now = js_sys::Date::now();
-        let listed = self.listed();
         let mut heard = self.heard.borrow_mut();
-        if listed != heard.seen.0 {
-            heard.seen = (listed, now);
-        }
-        let since = heard.running?.max(heard.seen.1);
-        Some(std::time::Duration::from_secs_f64(
-            (now - since).max(0.0) / 1000.0,
-        ))
+        let running = heard.running?;
+        let answered = heard.signs.as_ref().map_or(0, |signs| signs.get().1);
+        heard.seen = match heard.seen {
+            (_, at) if at < running => (answered, running),
+            (before, _) if before != answered => (answered, now),
+            seen => seen,
+        };
+        let waited = (now - heard.seen.1).max(0.0) / 1000.0;
+        Some(std::time::Duration::from_secs_f64(waited))
     }
 
     /// Let the library go without waiting for its worker, which stopped or does not
@@ -317,7 +320,7 @@ impl Backend {
     /// said.
     pub fn listed(&self) -> usize {
         let heard = self.heard.borrow();
-        heard.listed.as_ref().map_or(0, |listed| listed.get())
+        heard.signs.as_ref().map_or(0, |signs| signs.get().0)
     }
 
     /// Whether a command that writes has been sent and not answered yet.
@@ -356,7 +359,7 @@ async fn drive(
     let folder = Folder::open(root.clone()).await;
     let local = root.local();
     let worker = Worker::start(root.kept(), &local).await.map(Rc::new);
-    heard.borrow_mut().listed = worker.as_ref().ok().map(|worker| worker.listed());
+    heard.borrow_mut().signs = worker.as_ref().ok().map(|worker| worker.signs());
     heard.borrow_mut().worker = worker.as_ref().ok().cloned();
     let look = (!private).then_some(LOOK_EVERY);
     let mut hints = Hints::new(local.as_str(), look).ok();
