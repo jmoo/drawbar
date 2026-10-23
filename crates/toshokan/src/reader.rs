@@ -1326,3 +1326,618 @@ fn whole(meta: &Meta, parts: Vec<Option<Vec<u8>>>) -> Option<Fetched> {
     });
     Some(Fetched::Whole { bytes, stamp })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compaction::snapshot as fold;
+    use crate::disk::MemDisk;
+    use crate::io::Io;
+    use crate::log::{EntryKind, Genesis, Logged};
+
+    const W: WriterId = WriterId::from_u128(0xa);
+
+    fn at(n: u64) -> Hlc {
+        Hlc {
+            wall_ms: n,
+            counter: 0,
+        }
+    }
+
+    fn genesis() -> Entry {
+        let kind = EntryKind::Genesis(Genesis {
+            writer: W,
+            label: "a".into(),
+        });
+        Entry::encode(EntryHash::ZERO, 0, at(0), kind).unwrap()
+    }
+
+    fn after(prev: &Entry, label: &str) -> Entry {
+        let kind = EntryKind::Intent(Logged {
+            label: label.into(),
+            ops: Vec::new(),
+            displaced: Vec::new(),
+            forks: Vec::new(),
+        });
+        let n = prev.n() + 1;
+        Entry::encode(prev.hash(), n, at(n + label.len() as u64), kind).unwrap()
+    }
+
+    /// The genesis entry and `n` entries after it.
+    fn chain(n: usize) -> Vec<Entry> {
+        let mut entries = vec![genesis()];
+        for i in 0..n {
+            let next = after(entries.last().unwrap(), &format!("e{i}"));
+            entries.push(next);
+        }
+        entries
+    }
+
+    /// The snapshot of `writer` that folds `entries`, a chain from its genesis
+    /// entry, naming each by hash.
+    fn snapshot_of(writer: WriterId, entries: &[Entry]) -> Rc<Snapshot> {
+        let entries: Vec<Rc<Entry>> = entries.iter().cloned().map(Rc::new).collect();
+        let genesis = entries[0].hash();
+        let folded = fold(writer, genesis, "a".into(), None, &entries, []);
+        Rc::new(folded.unwrap())
+    }
+
+    fn snapshot(entries: &[Entry]) -> Rc<Snapshot> {
+        snapshot_of(W, entries)
+    }
+
+    fn linked(entries: &[Entry]) -> Vec<Rc<Entry>> {
+        let lines = entries.iter().map(|entry| Entry::linked(entry.line()));
+        lines.map(Rc::new).collect()
+    }
+
+    fn hashes(entries: &[Entry]) -> Vec<EntryHash> {
+        entries.iter().map(Entry::hash).collect()
+    }
+
+    fn bytes_of(entries: &[&Entry]) -> Vec<u8> {
+        entries.iter().flat_map(|entry| entry.to_bytes()).collect()
+    }
+
+    #[test]
+    fn a_file_is_judged_by_its_contents() {
+        let entries = chain(1);
+        let segment = bytes_of(&[&entries[0], &entries[1]]);
+        let mut torn = segment.clone();
+        torn.extend_from_slice(b"{\"prev\"");
+        let snapshot = snapshot(&entries);
+        let cases = [
+            (Vec::new(), WriterFile::Segment(Segment::default())),
+            (
+                segment.clone(),
+                WriterFile::Segment(Segment {
+                    entries: linked(&entries),
+                    end: segment.len() as u64,
+                    stop: None,
+                    sealed: false,
+                }),
+            ),
+            (snapshot.encode(), WriterFile::Snapshot(snapshot)),
+            (b"hello".to_vec(), WriterFile::Unreadable),
+            (vec![0; 40], WriterFile::Unreadable),
+        ];
+        for (bytes, expected) in cases {
+            assert_eq!(
+                WriterFile::parse(&bytes),
+                expected,
+                "{:?}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
+        let WriterFile::Segment(read) = WriterFile::parse(&torn) else {
+            panic!("a torn segment is a segment")
+        };
+        assert_eq!(read.entries, linked(&entries));
+        assert_eq!(
+            read.stop.map(|stop| stop.offset),
+            Some(segment.len() as u64)
+        );
+    }
+
+    /// What a reader that read `disk` derives and remembers.
+    fn read(disk: &MemDisk) -> Reader {
+        let layout = Layout::new(".lib").unwrap();
+        let mut reader = Reader::new(layout, CachedView::default());
+        crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
+        reader
+    }
+
+    #[test]
+    fn damaged_files_are_read_without_panicking() {
+        use crate::env::{Random, SeededRandom};
+        let entries = chain(3);
+        let disk = MemDisk::new();
+        let layout = Layout::new(".lib").unwrap();
+        let dir = layout.writer(W);
+        put(
+            &disk,
+            &dir.join("s.txt").unwrap(),
+            &bytes_of(&[&entries[2], &entries[3]]),
+        );
+        put(
+            &disk,
+            &dir.join("snap.json").unwrap(),
+            &snapshot(&entries[..2]).encode(),
+        );
+        let view = read(&disk).cached().clone();
+        let seeds = [
+            bytes_of(&entries.iter().collect::<Vec<_>>()),
+            snapshot(&entries).encode(),
+            view.encode(),
+        ];
+        let path = Layout::cached_view(entries[0].hash());
+        let mut random = SeededRandom::new(7);
+        let mut pick = |n: usize| (random.next_u128() % n as u128) as usize;
+        for _ in 0..3000 {
+            let mut bytes = seeds[pick(seeds.len())].clone();
+            for _ in 0..=pick(4) {
+                let at = pick(bytes.len().max(1));
+                match pick(4) {
+                    0 => bytes.truncate(at),
+                    1 if at < bytes.len() => bytes[at] ^= 1 << pick(8),
+                    2 => bytes.insert(at.min(bytes.len()), b"\t\n\0{}\"0"[pick(7)]),
+                    _ => bytes.extend_from_within(at.min(bytes.len())..),
+                }
+            }
+            let mut seen = Seen::default();
+            let segments;
+            match WriterFile::parse(&bytes) {
+                WriterFile::Segment(segment) => {
+                    segments = segment;
+                    seen.segments.push(SeenSegment {
+                        entries: &segments.entries,
+                        sealed: segments.sealed,
+                    });
+                }
+                WriterFile::Snapshot(snapshot) => seen.snapshots.push(snapshot),
+                WriterFile::Unreadable => {}
+            }
+            let derived = derive::derive(&BTreeMap::from([(W, seen)]), &BTreeMap::new(), false);
+            for placed in derived.writers.values() {
+                for entry in placed.merged.iter().skip(1) {
+                    assert!(placed.holds(entry.prev()), "merged after its predecessor");
+                }
+            }
+            if let Ok(view) = CachedView::decode(&path, &bytes) {
+                assert!(CachedView::decode(&path, &view.encode()).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn a_file_parsed_in_slices_is_judged_as_parsed_whole() {
+        use crate::env::{Random, SeededRandom};
+        let entries = chain(6);
+        let mut segment = bytes_of(&entries.iter().collect::<Vec<_>>());
+        let whole = segment.clone();
+        segment.extend(line::seal_marker(entries[6].hash()));
+        let seeds = [whole, segment, snapshot(&entries).encode()];
+        let mut random = SeededRandom::new(11);
+        let mut pick = |n: usize| (random.next_u128() % n as u128) as usize;
+        for _ in 0..3000 {
+            let mut bytes = seeds[pick(seeds.len())].clone();
+            for _ in 0..pick(3) {
+                let at = pick(bytes.len().max(1));
+                match pick(5) {
+                    0 => bytes.truncate(at),
+                    1 if at < bytes.len() => bytes[at] ^= 1 << pick(8),
+                    2 => bytes.insert(at.min(bytes.len()), b"\t\n\0{}\"0"[pick(7)]),
+                    3 => bytes.extend(line::seal_marker(entries[pick(7)].hash())),
+                    _ => bytes.extend_from_within(at.min(bytes.len())..),
+                }
+            }
+            let mut parsing = Parsing::new(bytes.clone());
+            let slice = 1 + pick(400);
+            let mut steps = 0;
+            while !parsing.step(slice) {
+                steps += 1;
+                assert!(steps <= bytes.len(), "parsing stalls");
+            }
+            assert_eq!(
+                parsing.finish(),
+                WriterFile::parse(&bytes),
+                "{slice}-byte slices of {:?}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
+    }
+
+    fn put(disk: &MemDisk, path: &RelPath, bytes: &[u8]) {
+        let dir = path.parent().unwrap();
+        disk.perform(Io::MakeDir {
+            root: Root::Folder,
+            path: dir,
+        })
+        .unwrap();
+        disk.perform(Io::Create {
+            root: Root::Folder,
+            path: path.clone(),
+            bytes: bytes.to_vec(),
+        })
+        .unwrap();
+    }
+
+    fn grow(disk: &MemDisk, path: &RelPath, bytes: &[u8]) {
+        let append = Io::Append {
+            root: Root::Folder,
+            path: path.clone(),
+            bytes: bytes.to_vec(),
+        };
+        disk.perform(append).unwrap();
+    }
+
+    /// A backend that counts the bytes of file contents it is asked to read.
+    struct Counting(MemDisk, u64);
+
+    impl crate::blocking::Backend for Counting {
+        fn capabilities(&self, root: Root) -> crate::io::Capabilities {
+            self.0.capabilities(root)
+        }
+
+        fn perform(&mut self, io: Io) -> crate::io::IoResult {
+            match &io {
+                Io::Read { range, .. } => self.1 += range.len,
+                Io::ReadMany { reads, .. } => {
+                    self.1 += reads.iter().map(|(_, r)| r.len).sum::<u64>()
+                }
+                _ => {}
+            }
+            self.0.perform(io)
+        }
+    }
+
+    #[test]
+    fn a_reader_reads_every_file_by_contents_and_writes_nothing() {
+        let layout = Layout::new(".lib").unwrap();
+        let disk = MemDisk::new();
+        let entries = chain(3);
+        let dir = layout.writer(W);
+        put(
+            &disk,
+            &dir.join("x (conflicted copy).jsonl").unwrap(),
+            &bytes_of(&[&entries[2], &entries[3]]),
+        );
+        put(
+            &disk,
+            &dir.join("notes.txt").unwrap(),
+            &snapshot(&entries[..2]).encode(),
+        );
+        put(&disk, &dir.join("junk").unwrap(), b"junk");
+        let mut backend = Counting(disk.clone(), 0);
+        let mut reader = Reader::new(layout.clone(), CachedView::default());
+        let report = crate::blocking::run(&mut backend, reader.read()).unwrap();
+        assert_eq!(report.placed[&W], hashes(&entries[2..]));
+        assert_eq!(report.unreadable, [(dir.join("junk").unwrap(), None)]);
+        assert_eq!(disk.mutations(), 3 * 2, "only the setup wrote");
+        let first = backend.1;
+
+        let again = crate::blocking::run(&mut backend, reader.read()).unwrap();
+        let ends = line::ENDING + 4;
+        assert_eq!(
+            backend.1 - first,
+            ends,
+            "an unchanged segment is read at its end, the junk whole, the snapshot not at all"
+        );
+        assert_eq!(again.placed, BTreeMap::new());
+        assert_eq!(again.unreadable, report.unreadable);
+    }
+
+    /// What a reader holds that a read changes, comparable.
+    fn state(reader: &Reader) -> impl PartialEq + std::fmt::Debug {
+        let files: Vec<_> = reader
+            .records()
+            .map(|(path, record)| (path.clone(), record.stamp.clone(), record.file.clone()))
+            .collect();
+        let unsaved: BTreeSet<WriterId> = reader.unsaved.memories.keys().copied().collect();
+        let files_unsaved = reader.unsaved.files.clone();
+        (reader.cached().clone(), files, unsaved, files_unsaved)
+    }
+
+    #[test]
+    fn a_read_placed_in_slices_places_what_it_places_at_once() {
+        use crate::env::{Random, SeededRandom};
+        let layout = Layout::new(".lib").unwrap();
+        let mut random = SeededRandom::new(3);
+        let mut pick = |n: usize| (random.next_u128() % n.max(1) as u128) as usize;
+        for _ in 0..60 {
+            let disk = MemDisk::new();
+            let mut files: Vec<(RelPath, Vec<u8>)> = Vec::new();
+            for w in 1..=1 + pick(3) as u128 {
+                let writer = WriterId::from_u128(w);
+                let kind = EntryKind::Genesis(Genesis {
+                    writer,
+                    label: "w".into(),
+                });
+                let mut entries = vec![Entry::encode(EntryHash::ZERO, 0, at(0), kind).unwrap()];
+                for n in 1..pick(30) {
+                    let prev = &entries[pick(entries.len()).max(n.saturating_sub(2)).min(n - 1)];
+                    entries.push(after(prev, &format!("{w}-{n}")));
+                }
+                let mut order: Vec<&Entry> = entries.iter().collect();
+                for i in (1..order.len()).rev() {
+                    order.swap(i, pick(i + 1));
+                }
+                let dir = layout.writer(writer);
+                for (i, part) in order.chunks(1 + pick(6)).enumerate() {
+                    files.push((dir.join(&format!("s{i}.txt")).unwrap(), bytes_of(part)));
+                }
+                if pick(3) == 0 {
+                    let mut chain = vec![entries[0].clone()];
+                    while let Some(next) = entries
+                        .iter()
+                        .find(|e| e.prev() == chain.last().unwrap().hash())
+                    {
+                        chain.push(next.clone());
+                    }
+                    let folded = snapshot_of(writer, &chain[..1 + pick(chain.len())]);
+                    files.push((dir.join("snap.json").unwrap(), folded.encode()));
+                }
+            }
+            let mut whole = Reader::new(layout.clone(), CachedView::default());
+            let mut sliced = whole.clone();
+            let mut grown: Vec<(RelPath, Vec<u8>)> = Vec::new();
+            for round in 0..3 {
+                for (path, bytes) in std::mem::take(&mut grown) {
+                    grow(&disk, &path, &bytes);
+                }
+                for (path, bytes) in std::mem::take(&mut files) {
+                    let ends = bytes.iter().enumerate().filter(|(_, b)| **b == b'\n');
+                    let ends: Vec<usize> = ends.map(|(at, _)| at + 1).collect();
+                    match pick(4) {
+                        0 if round < 2 => files.push((path, bytes)),
+                        1 if round < 2 && ends.len() > 1 => {
+                            let cut = ends[pick(ends.len() - 1)];
+                            put(&disk, &path, &bytes[..cut]);
+                            grown.push((path, bytes[cut..].to_vec()));
+                        }
+                        _ => put(&disk, &path, &bytes),
+                    }
+                }
+                if round == 2 && pick(2) == 0 {
+                    let gone = disk.files(Root::Folder).into_keys().next().unwrap();
+                    disk.perform(Io::Remove {
+                        root: Root::Folder,
+                        path: gone,
+                    })
+                    .unwrap();
+                }
+                let listing = crate::blocking::run(&mut disk.clone(), whole.list()).unwrap();
+                let expected = whole.absorb(listing);
+                let listing = crate::blocking::run(&mut disk.clone(), sliced.list()).unwrap();
+                let slice = 1 + pick(5);
+                let mut absorbing = sliced.absorbing(listing);
+                while !sliced.absorb_slice(&mut absorbing, slice) {}
+                let report = sliced.absorbed(absorbing);
+                assert_eq!(report, expected, "round {round}, {slice}-entry slices");
+                assert_eq!(
+                    state(&sliced),
+                    state(&whole),
+                    "round {round}, {slice}-entry slices"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_grown_segment_is_read_from_the_end_of_its_last_line() {
+        let layout = Layout::new(".lib").unwrap();
+        let disk = MemDisk::new();
+        let entries = chain(3);
+        let path = layout.writer(W).join("s.jsonl").unwrap();
+        put(&disk, &path, &bytes_of(&[&entries[0], &entries[1]]));
+        let mut backend = Counting(disk.clone(), 0);
+        let mut reader = Reader::new(layout, CachedView::default());
+        crate::blocking::run(&mut backend, reader.read()).unwrap();
+        let before = backend.1;
+        let gained = bytes_of(&[&entries[2], &entries[3]]);
+        grow(&disk, &path, &gained);
+
+        let report = crate::blocking::run(&mut backend, reader.read()).unwrap();
+        assert_eq!(report.placed[&W], hashes(&entries[2..]));
+        assert_eq!(backend.1 - before, line::ENDING + gained.len() as u64);
+        assert_eq!(report.forks, []);
+    }
+
+    #[test]
+    fn a_segment_whose_last_line_changed_as_it_grew_is_read_whole() {
+        let layout = Layout::new(".lib").unwrap();
+        let disk = MemDisk::new();
+        let entries = chain(1);
+        let (a, b) = (after(&entries[1], "a"), after(&entries[1], "bb"));
+        let path = layout.writer(W).join("s.jsonl").unwrap();
+        put(&disk, &path, &bytes_of(&[&entries[0], &entries[1], &a]));
+        let mut reader = Reader::new(layout, CachedView::default());
+        crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
+        let remove = Io::Remove {
+            root: Root::Folder,
+            path: path.clone(),
+        };
+        disk.perform(remove).unwrap();
+        let c = after(&b, "c");
+        put(&disk, &path, &bytes_of(&[&entries[0], &entries[1], &b, &c]));
+
+        let report = crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
+        let fork = Fork {
+            writer: W,
+            at: 1,
+            prev: entries[1].hash(),
+        };
+        assert_eq!(report.forks, [fork], "{report:?}");
+        let runs = &reader.derived().writers[&W].runs;
+        let runs: BTreeSet<EntryHash> = runs.iter().map(|entry| entry.hash()).collect();
+        let branches = BTreeSet::from([a.hash(), b.hash(), c.hash()]);
+        assert_eq!(runs, branches, "the remembered branch stays a run");
+    }
+
+    #[test]
+    fn a_torn_line_completed_later_is_read_from_where_the_lines_ended() {
+        let layout = Layout::new(".lib").unwrap();
+        let disk = MemDisk::new();
+        let entries = chain(2);
+        let path = layout.writer(W).join("s.jsonl").unwrap();
+        let whole = bytes_of(&[&entries[0], &entries[1], &entries[2]]);
+        let torn = entries[0].to_bytes().len() + entries[1].to_bytes().len() + 9;
+        put(&disk, &path, &whole[..torn]);
+        let mut reader = Reader::new(layout, CachedView::default());
+        let first = crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
+        assert_eq!(first.unreadable.len(), 1);
+        assert_eq!(first.placed[&W], hashes(&entries[..2]));
+        grow(&disk, &path, &whole[torn..]);
+
+        let mut backend = Counting(disk.clone(), 0);
+        let report = crate::blocking::run(&mut backend, reader.read()).unwrap();
+        assert_eq!(report.placed[&W], [entries[2].hash()]);
+        assert_eq!(report.unreadable, []);
+        let read_on = line::ENDING + entries[2].to_bytes().len() as u64;
+        assert_eq!(backend.1, read_on);
+    }
+
+    #[test]
+    fn a_sealed_segment_is_read_whole_once_anything_follows_its_marker() {
+        let layout = Layout::new(".lib").unwrap();
+        let disk = MemDisk::new();
+        let entries = chain(2);
+        let path = layout.writer(W).join("s.jsonl").unwrap();
+        let mut sealed = bytes_of(&[&entries[0], &entries[1]]);
+        let end = sealed.len() as u64;
+        sealed.extend(line::seal_marker(entries[1].hash()));
+        put(&disk, &path, &sealed);
+        let mut reader = Reader::new(layout, CachedView::default());
+        let first = crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
+        assert_eq!(first.unreadable, []);
+        let files = reader.files(W);
+        let [(_, _, WriterFile::Segment(segment))] = files.as_slice() else {
+            panic!("{}", files.len())
+        };
+        assert!(segment.sealed);
+        grow(&disk, &path, &entries[2].to_bytes());
+
+        let mut backend = Counting(disk.clone(), 0);
+        let report = crate::blocking::run(&mut backend, reader.read()).unwrap();
+        assert_eq!(report.placed, BTreeMap::new());
+        let stops: Vec<u64> = report
+            .unreadable
+            .iter()
+            .filter_map(|(_, stop)| stop.as_ref().map(|stop| stop.offset))
+            .collect();
+        assert_eq!(stops, [end]);
+        let len = sealed.len() as u64 + entries[2].to_bytes().len() as u64;
+        assert_eq!(backend.1, len, "read whole");
+    }
+
+    #[test]
+    fn a_segment_replaced_at_its_length_and_time_is_read_again() {
+        let layout = Layout::new(".lib").unwrap();
+        let mut disk = MemDisk::new();
+        let entries = chain(2);
+        let other = after(&entries[1], "x1");
+        assert_eq!(other.to_bytes().len(), entries[2].to_bytes().len());
+        let path = layout.writer(W).join("s.jsonl").unwrap();
+        put(
+            &disk,
+            &path,
+            &bytes_of(&[&entries[0], &entries[1], &entries[2]]),
+        );
+        let mut reader = Reader::new(layout, CachedView::default());
+        crate::blocking::run(&mut disk, reader.read()).unwrap();
+        let modified = |disk: &mut MemDisk| {
+            let stat = Io::Stat {
+                root: Root::Folder,
+                path: path.clone(),
+            };
+            match disk.perform(stat).unwrap() {
+                crate::io::Reply::Stat(Some(meta)) => meta.modified.unwrap(),
+                reply => panic!("{reply:?}"),
+            }
+        };
+        let before = modified(&mut disk);
+        let remove = Io::Remove {
+            root: Root::Folder,
+            path: path.clone(),
+        };
+        disk.perform(remove).unwrap();
+        put(&disk, &path, &bytes_of(&[&entries[0], &entries[1], &other]));
+        disk.set_modified(Root::Folder, &path, before).unwrap();
+        assert_eq!(modified(&mut disk), before);
+
+        let report = crate::blocking::run(&mut disk, reader.read()).unwrap();
+        assert_eq!(report.forks.len(), 1, "{report:?}");
+        let runs = &reader.derived().writers[&W].runs;
+        assert!(runs.iter().any(|entry| entry.hash() == other.hash()));
+    }
+
+    #[test]
+    fn a_cached_view_saved_in_the_local_root_loads_back() {
+        let mut disk = MemDisk::new();
+        let entries = chain(2);
+        let layout = Layout::new(".lib").unwrap();
+        let path = layout.writer(W).join("s.txt").unwrap();
+        let all: Vec<&Entry> = entries.iter().collect();
+        put(&disk, &path, &bytes_of(&all));
+        let view = read(&disk).cached().clone();
+        assert_eq!(view.writers()[&W].entries.len(), 3);
+        let genesis = entries[0].hash();
+        let empty = crate::blocking::run(&mut disk, CachedView::load(genesis)).unwrap();
+        assert_eq!(empty, CachedView::default());
+        for io in [
+            Io::MakeDir {
+                root: Root::Local,
+                path: Layout::local(genesis),
+            },
+            Io::Sync {
+                root: Root::Local,
+                path: RelPath::ROOT,
+            },
+        ] {
+            disk.perform(io).unwrap();
+        }
+        crate::blocking::run(&mut disk, view.save(genesis)).unwrap();
+        crate::blocking::run(&mut disk, view.save(genesis)).unwrap();
+        let loaded = crate::blocking::run(&mut disk, CachedView::load(genesis)).unwrap();
+        assert_eq!(loaded, view);
+        let mut restarted = disk.restart();
+        let loaded = crate::blocking::run(&mut restarted, CachedView::load(genesis)).unwrap();
+        assert_eq!(loaded, view);
+    }
+
+    #[test]
+    fn the_grace_step_is_due_a_day_and_a_full_rescan_after_something_went_unseen() {
+        let disk = MemDisk::new();
+        let entries = chain(2);
+        let layout = Layout::new(".lib").unwrap();
+        let path = layout.writer(W).join("s.txt").unwrap();
+        put(
+            &disk,
+            &path,
+            &bytes_of(&[&entries[0], &entries[1], &entries[2]]),
+        );
+        let mut reader = read(&disk);
+        disk.perform(Io::Remove {
+            root: Root::Folder,
+            path,
+        })
+        .unwrap();
+        crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
+        let merged = |reader: &Reader| reader.derived().writers[&W].merged.len();
+        assert_eq!(merged(&reader), 3, "what no file holds stays shown");
+        assert!(!reader.note_grace(1_000, false));
+        assert!(
+            !reader.note_grace(1_000 + GRACE_MS, false),
+            "no full rescan yet"
+        );
+        assert!(reader.note_grace(1_000 + GRACE_MS, true));
+        let report = reader.take_grace();
+        assert!(report.changed);
+        assert_eq!(merged(&reader), 0, "nothing visible descends from it");
+        assert!(reader.cached().grace.graced);
+        assert!(
+            !reader.note_grace(2_000 + GRACE_MS, true),
+            "nothing is unseen now"
+        );
+    }
+}

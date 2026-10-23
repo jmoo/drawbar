@@ -1123,3 +1123,313 @@ pub fn genesis_writer(entry: &Entry) -> Option<WriterId> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compaction::{snapshot, Found};
+    use crate::log::{Logged, Op};
+    use crate::schema::Raw;
+
+    const W: WriterId = WriterId::from_u128(0xa);
+    const X: WriterId = WriterId::from_u128(0xb);
+    const E: EntityId = EntityId::from_u128(0xe);
+
+    fn entry(prev: Option<&Entry>, ops: Vec<Op>, label: &str) -> Rc<Entry> {
+        let (hash, n) = prev.map_or((EntryHash::ZERO, 0), |prev| (prev.hash(), prev.n() + 1));
+        let at = Hlc {
+            wall_ms: n * 10 + label.len() as u64,
+            counter: 0,
+        };
+        let kind = EntryKind::Intent(Logged {
+            label: label.into(),
+            ops,
+            displaced: Vec::new(),
+            forks: Vec::new(),
+        });
+        Rc::new(Entry::encode(hash, n, at, kind).unwrap())
+    }
+
+    fn set(value: &str, replaces: Vec<Ref>) -> Op {
+        Op::Write {
+            entity: E,
+            key: "k".into(),
+            value: Some(Raw::of(&value).unwrap()),
+            replaces,
+            take: None,
+        }
+    }
+
+    /// A chain of writes of `values` to one register, each replacing the last.
+    fn chain(writer: WriterId, values: &[&str]) -> Vec<Rc<Entry>> {
+        let mut entries: Vec<Rc<Entry>> = Vec::new();
+        for value in values {
+            let replaces = entries
+                .last()
+                .map(|e| e.own().of(writer))
+                .into_iter()
+                .collect();
+            let next = entry(
+                entries.last().map(|e| &**e),
+                vec![set(value, replaces)],
+                value,
+            );
+            entries.push(next);
+        }
+        entries
+    }
+
+    fn lines(entries: &[Rc<Entry>], sealed: bool) -> SeenSegment<'_> {
+        SeenSegment { entries, sealed }
+    }
+
+    fn values(derived: &Derived) -> Vec<String> {
+        let writes = derived.folded.register(E, "k");
+        let mut values: Vec<String> = writes.iter().map(|w| w.value.decode().unwrap()).collect();
+        values.sort();
+        values
+    }
+
+    fn derived(seen: Vec<(WriterId, Seen<'_>)>, graced: bool) -> Derived {
+        derive(&seen.into_iter().collect(), &BTreeMap::new(), graced)
+    }
+
+    #[test]
+    fn entries_arriving_in_any_order_are_merged_in_chain_order() {
+        let entries = chain(W, &["a", "b", "c"]);
+        let late: Vec<Rc<Entry>> = entries[1..].to_vec();
+        let early = derived(
+            vec![(
+                W,
+                Seen {
+                    segments: vec![lines(&late, false)],
+                    snapshots: vec![],
+                },
+            )],
+            false,
+        );
+        let placed = &early.writers[&W];
+        assert_eq!(placed.merged, []);
+        assert_eq!(
+            placed.gaps.len(),
+            2,
+            "held back until their predecessor comes"
+        );
+        let reversed: Vec<Rc<Entry>> = entries.iter().rev().cloned().collect();
+        let all = derived(
+            vec![(
+                W,
+                Seen {
+                    segments: vec![lines(&reversed, false)],
+                    snapshots: vec![],
+                },
+            )],
+            false,
+        );
+        assert_eq!(all.writers[&W].merged, entries);
+        assert_eq!(values(&all), ["c"]);
+    }
+
+    #[test]
+    fn two_successors_of_one_entry_are_a_fork_and_neither_branch_is_merged() {
+        let entries = chain(W, &["a"]);
+        let left = entry(
+            Some(&entries[0]),
+            vec![set("left", vec![entries[0].own().of(W)])],
+            "l",
+        );
+        let right = entry(
+            Some(&entries[0]),
+            vec![set("right", vec![entries[0].own().of(W)])],
+            "r",
+        );
+        let all = vec![Rc::clone(&entries[0]), left, right];
+        let derived = derived(
+            vec![(
+                W,
+                Seen {
+                    segments: vec![lines(&all, false)],
+                    snapshots: vec![],
+                },
+            )],
+            false,
+        );
+        let placed = &derived.writers[&W];
+        assert_eq!(placed.fork, Some(0));
+        assert_eq!(placed.runs.len(), 2);
+        assert_eq!(values(&derived), ["a"]);
+        let items = &derived.items[&W];
+        assert_eq!(items.len(), 2, "one item per branch");
+    }
+
+    /// `entries` of `W` folded into a snapshot that certifies the segment they
+    /// were written to.
+    fn folded(entries: &[Rc<Entry>]) -> Rc<Snapshot> {
+        let found = [Found::Lines(entries)];
+        let snapshot = snapshot(W, entries[0].hash(), "w".into(), None, entries, found);
+        Rc::new(snapshot.unwrap())
+    }
+
+    #[test]
+    fn a_copy_of_a_certified_segment_is_folded_and_a_shorter_one_waits() {
+        let entries = chain(W, &["a", "b", "c"]);
+        let tip = folded(&entries);
+        assert!(
+            tip.certified.hashes.is_empty(),
+            "the segment certificate covers every line"
+        );
+        let shorter: Vec<Rc<Entry>> = entries[..2].to_vec();
+        let none: &[&str] = &[];
+        let cases = [
+            (&entries[..], false, 0, None, &["c"][..]),
+            (&shorter[..], false, 2, None, &["c"][..]),
+            (&shorter[..], true, 0, Some(0), none),
+        ];
+        for (copy, sealed, waiting, fork, shown) in cases {
+            let seen = Seen {
+                segments: vec![lines(copy, sealed)],
+                snapshots: vec![Rc::clone(&tip)],
+            };
+            let derived = derived(vec![(W, seen)], false);
+            let placed = &derived.writers[&W];
+            let case = format!("{} lines, sealed {sealed}", copy.len());
+            assert_eq!(placed.waiting, waiting, "{case}");
+            assert_eq!(
+                placed.fork, fork,
+                "{case}: a sealed copy that ends early diverged"
+            );
+            assert_eq!(
+                values(&derived),
+                shown,
+                "{case}: a forked tip is shown as an item"
+            );
+        }
+        let seen = Seen {
+            segments: vec![lines(&shorter, false)],
+            snapshots: vec![Rc::clone(&tip)],
+        };
+        let graced = derived(vec![(W, seen)], true);
+        let unplaced = &graced.writers[&W].unplaced;
+        assert_eq!(
+            unplaced.len(),
+            1,
+            "after the grace step, the lines past the first"
+        );
+        assert_eq!(values(&graced), ["c"]);
+    }
+
+    #[test]
+    fn a_dismissed_run_is_never_merged_nor_shown() {
+        let base = chain(W, &["a"]);
+        let left = entry(
+            Some(&base[0]),
+            vec![set("left", vec![base[0].own().of(W)])],
+            "l",
+        );
+        let right = entry(
+            Some(&base[0]),
+            vec![set("right", vec![base[0].own().of(W)])],
+            "r",
+        );
+        let own = vec![Rc::clone(&base[0]), Rc::clone(&left), Rc::clone(&right)];
+        let run = Run {
+            writer: W,
+            from: 1,
+            first: Some(left.hash()),
+            last: left.own(),
+            tip: None,
+        };
+        let dismiss = entry(None, vec![Op::Dismiss { runs: vec![run] }], "dismiss");
+        let theirs = vec![dismiss];
+        let derived = derived(
+            vec![
+                (
+                    W,
+                    Seen {
+                        segments: vec![lines(&own, false)],
+                        snapshots: vec![],
+                    },
+                ),
+                (
+                    X,
+                    Seen {
+                        segments: vec![lines(&theirs, false)],
+                        snapshots: vec![],
+                    },
+                ),
+            ],
+            false,
+        );
+        let items = &derived.items[&W];
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].run.first, Some(right.hash()));
+        assert_eq!(derived.writers[&W].dismissed, [left.hash()]);
+        assert_eq!(values(&derived), ["a"]);
+    }
+
+    #[test]
+    fn an_own_delete_ends_the_writes_of_its_own_entry() {
+        let add = Op::Add {
+            entity: E,
+            key: "s".into(),
+            value: Raw::of(&1).unwrap(),
+            replaces: Vec::new(),
+            take: None,
+        };
+        let delete = Op::Delete {
+            entity: E,
+            replaces: Vec::new(),
+            observed: Vec::new(),
+            take: None,
+        };
+        let entries = vec![entry(None, vec![add, delete], "both")];
+        let derived = derived(
+            vec![(
+                W,
+                Seen {
+                    segments: vec![lines(&entries, false)],
+                    snapshots: vec![],
+                },
+            )],
+            false,
+        );
+        assert!(derived.folded.members(E, "s").is_empty());
+        assert!(!derived.folded.present(E));
+    }
+
+    #[test]
+    fn the_grace_step_keeps_what_a_visible_line_descends_from() {
+        let entries = chain(W, &["a", "b", "c"]);
+        let remembered = derived(
+            vec![(
+                W,
+                Seen {
+                    segments: vec![lines(&entries, false)],
+                    snapshots: vec![],
+                },
+            )],
+            false,
+        )
+        .memory;
+        let last = entries[2..].to_vec();
+        let seen = BTreeMap::from([(
+            W,
+            Seen {
+                segments: vec![lines(&last, false)],
+                snapshots: vec![],
+            },
+        )]);
+        let kept = grace(&seen, &remembered);
+        let kept: BTreeSet<EntryHash> = kept[&W].entries.keys().copied().collect();
+        assert_eq!(
+            kept,
+            entries.iter().map(|e| e.hash()).collect(),
+            "c descends from a and b"
+        );
+        let none = BTreeMap::from([(W, Seen::default())]);
+        assert!(
+            grace(&none, &remembered).is_empty(),
+            "nothing visible descends from them"
+        );
+    }
+}
