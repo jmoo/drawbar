@@ -351,6 +351,30 @@ async fn a_page_watching_its_folder_looks_at_focus_and_on_a_period() {
 }
 
 #[wasm_bindgen_test]
+async fn a_worker_that_faults_fails_what_waits_and_a_fresh_one_opens_the_library() {
+    let place = Place::new(Kind::Private);
+    let local = path(&format!("{}/install", place.run));
+    let worker = Worker::start(place.folder().await, &local).await.unwrap();
+    let list = || Io::List {
+        root: Root::Folder,
+        dir: RelPath::ROOT,
+    };
+    worker.perform(list()).await.unwrap();
+    worker.trap();
+    let failed = worker.perform(list()).await;
+    assert!(
+        failed
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("failed")),
+        "{failed:?}"
+    );
+    drop(worker);
+    let clock = TestClock::at(1_000);
+    let (library, _) = place.open("install", "a", 1, &clock).await;
+    library.close().await.unwrap();
+}
+
+#[wasm_bindgen_test]
 fn the_browser_clock_and_randomness_are_live() {
     let now = DateClock.now_ms();
     let date = js_sys::Date::now() as u64;
