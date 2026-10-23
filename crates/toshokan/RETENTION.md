@@ -268,6 +268,16 @@ places the entries of the files it sees, and those it remembers, again from the
 tips' heads whenever its tips change, so its placement is a function of the
 files once they have all arrived, and readers agree.
 
+**Passed while hidden.** A remembered entry that no file the reader sees holds,
+that it cannot place after a tip's head, and whose number a tip of its writer
+has reached, is taken as folded into that tip, before the grace step. When the
+tip certifies it, this is the ordinary fold. When it does not, the entry is on
+another branch of a fork: its change drops out of view, with no item, and the
+fields it wrote show what the merge shows without it. It comes back as a run,
+and its fork is found, as soon as a file holding it is visible again; if none ever is, it stays gone, as the grace step would have left it. A
+fresh reader of the same files cannot place such an entry either, so holding it
+would keep a cached reader apart from a fresh one until the grace step.
+
 The window of recent hashes is gone. Re-deliveries are recognized by
 certificates, and a fork near the head is found by the two successors of its
 fork point; a window would only let a reader merge a recent fork, which runs
@@ -390,6 +400,9 @@ removes named, its file effects. It ends at close. Drafts are unchanged.
 - A field another writer emptied, or an entity another writer deleted, while
   this one edited it: a register conflict, or the entity shown in a deletion
   conflict with only the concurrent edit.
+- A change from another branch of a forked writer whose file sync hides once a
+  snapshot of that writer has passed its number: gone from view, with no item,
+  until its file is visible again, then shown as that branch's item.
 - Entries after a gap: an item from the start, whose changes the user can take,
   merged as soon as the gap fills.
 - A field whose earlier value a branch compacted away: shown in that branch's
@@ -406,7 +419,8 @@ removes named, its file effects. It ends at close. Drafts are unchanged.
   after an entry a restore or a dropped version took.
 - An entry no fork precedes and that follows nothing lost is merged.
 - No two branches of a writer are ever merged together.
-- A run stays shown until it is dismissed, its files go, or the grace step.
+- A run stays shown until it is dismissed, its files go, the grace step, or a
+  tip of its writer passes its number while sync hides its file.
 - A step by one branch of a forked writer changes no merged value, except on a
   field shown as a forgotten basis.
 - A replaced value or removed member never comes back without a conflict:
@@ -424,6 +438,7 @@ removes named, its file effects. It ends at close. Drafts are unchanged.
 | Let go or adopt after a restore | The folder wins after the grace period | D12 |
 | Reviving a deleted entity brings back every field | Only the concurrent edit | Ruling on D10 |
 | Undo reaches back to the last snapshot; history is shown | This session only | D11 |
+| A cached reader keeps what it placed until the grace step | An entry on another branch drops out while sync hides its file and a tip has passed its number, and returns with its file | Cached and fresh readers agree at rest |
 | A cached reader shows a field until its replacing write arrives | A fresh reader may show it empty meanwhile | D10 |
 
 ## Expected size
