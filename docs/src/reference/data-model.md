@@ -782,8 +782,9 @@ In the browser:
   stays open.
 - The page cannot reveal a picked folder in the file manager, and the origin's
   storage quota does not apply to one. **Help ▸ About drawbar** shows how much of
-  the quota the private library uses.
-- The first write to the private file system calls `navigator.storage.persist()`.
+  the quota drawbar uses: the private library, or a picked folder's drafts and
+  slot edits, which are kept in the private file system.
+- The first write to a library calls `navigator.storage.persist()`.
   Firefox asks the user; other browsers decide for themselves. Where the browser
   gives the page no storage, as some private windows do, drawbar says so and
   the library lasts until the tab closes.

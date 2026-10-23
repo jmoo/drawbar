@@ -213,12 +213,10 @@ impl Backend {
         None
     }
 
-    /// How much of the browser's storage drawbar takes, and whether it is kept. Empty
-    /// for a picked folder, which is not the browser's to keep.
+    /// How much of the browser's storage drawbar takes, and whether it is kept. For a
+    /// picked folder, which is not the browser's to keep, that is what drawbar keeps of
+    /// it here: drafts and slot edits.
     pub fn room(&self) -> String {
-        if matches!(self.root, Root::Picked(_)) {
-            return String::new();
-        }
         let room = self.room.borrow();
         let used = room
             .used
@@ -227,11 +225,14 @@ impl Backend {
             true => "kept",
             false => "may be cleared when space runs low",
         });
-        [used.as_deref(), kept]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(", ")
+        let said = [used.as_deref(), kept].into_iter().flatten();
+        let said = said.collect::<Vec<_>>().join(", ");
+        match &self.root {
+            Root::Picked(_) if !said.is_empty() => {
+                format!("drafts and slot edits in this browser: {said}")
+            }
+            _ => said,
+        }
     }
 
     pub fn send(&mut self, cmd: Cmd) {
@@ -366,12 +367,12 @@ async fn drive(
             heard.borrow_mut().events.push_back(answer);
         }
         inbox.borrow_mut().writing -= usize::from(writes);
-        if private && writes && !persisting {
+        if writes && !persisting {
             persisting = true;
             // ⚠️ Firefox waits for the user to answer, so nothing waits for it.
             spawn_local(persist());
         }
-        if private && inbox.borrow().cmds.is_empty() {
+        if inbox.borrow().cmds.is_empty() {
             measure(&room).await;
         }
         ctx.request_repaint();
