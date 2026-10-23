@@ -22,9 +22,12 @@ so back up the whole library folder. That folder says nothing about your other
 files, so it stays small however large the library is. Your unsaved edits are
 kept on this computer, in drawbar's own data, never in the library folder.
 
-In the browser, this version keeps no library: what you open or make there
-lasts until you close the tab, so export what you want to keep, or use the
-desktop app.
+In the browser, your library is kept in the browser's own storage for
+drawbar.app, which no other site or app can see. It keeps your files, tags and
+unsaved edits from one visit to the next, but clearing the site's data in the
+browser deletes them, so export what you want to keep elsewhere. **Help ▸ About
+drawbar** shows how much space it takes, and whether the browser has promised to
+keep it.
 
 ## Opening another folder
 
@@ -35,12 +38,19 @@ again when it starts, and changes nothing in a folder until you change something
 there. Unsaved edits stay with their library and come back when you open it
 again.
 
-Several drawbars can use one library at once: on two computers that sync the
-folder, or in two windows. Each keeps its own record of what it changed in the
-hidden folder, so neither overwrites the other's. When you come back to the
-window, drawbar shows what the others changed, and the activity log says so.
+In the browser, browsers that can open a folder on your computer offer **File ▸
+Open library folder…** too ([What is supported](../getting-started/support.md)
+lists them). The browser asks whether drawbar may change the folder. It forgets
+that answer when drawbar.app closes, unless you allowed it on every visit, so the
+next visit starts with the browser's own library, and **File ▸ Reconnect**
+*folder* asks again.
 
-Opening a folder in the browser comes with a later version.
+Several drawbars can use one library at once: on two computers that sync the
+folder, in two windows, in two browser tabs, or in the browser and the desktop
+app on one folder. Each keeps its own record of what it changed in the hidden
+folder, so neither overwrites the other's. A tab shows another tab's changes as
+soon as they are made; otherwise drawbar shows what the others changed when you
+come back to the window, and the activity log says so.
 
 ## Adding and making sounds
 

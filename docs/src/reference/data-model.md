@@ -25,10 +25,9 @@ a file, and a move is a rename. Any folder can be opened as a library.
   every sign-in, so the library is `%LOCALAPPDATA%\drawbar\library` instead,
   falling back to the roaming folder when `LOCALAPPDATA` is unset
   (`store::native::default_root`).
-- **Browser:** this build opens no library (see [In the browser](#in-the-browser)).
-  The window still names one: the root of the origin private file system (OPFS),
-  or in browsers with `showDirectoryPicker` a folder the user picked
-  (`store::web::Root`).
+- **Browser:** the root of the origin private file system (OPFS), or in browsers
+  with `showDirectoryPicker` a folder the user picked (`store::web::Root`). See
+  [In the browser](#in-the-browser).
 
 What a file cannot say lives in a hidden `.drawbar/` folder at the root, which
 holds toshokan's root, `.drawbar/library/`:
@@ -442,9 +441,10 @@ folder sync is: on macOS and Linux, not on Windows, and not in the browser, whic
 offers no sync at all. The file (`device::scratch`) is in `rescued/` of this
 install's own state for the library on the desktop while the library may be
 written, or a `rescued` folder of drawbar's own data (`eframe::storage_dir`)
-otherwise, never the system's temporary folder or the library, and in
-`.drawbar/tmp/` of the private storage in the browser, through a
-`library-writer.js` of the device's own.
+otherwise, never the system's temporary folder or the library. In the browser it
+is in `rescued/` of the library's local root in OPFS, or of the browser's own
+library's where none is open, written through a toshokan storage worker of the
+device's own.
 The restore runs in a session of its own once the failed write's session has
 closed (`worker::put_back`): the instrument drops a write left unfinished when its
 session closes, but keeps it as an object in another slot when a second write
@@ -620,10 +620,39 @@ A record that does not read is left, and the log says how many.
 
 ### In the browser
 
-The browser opens no library on this build: what is made in a tab lasts until
-the tab closes, and the store's commands to a library are refused with that
-reason. A later build runs toshokan in a worker on the private file system or a
-picked folder.
+The library is kept by a dedicated worker of its own (`store::worker`), started
+from drawbar's own bundle: the page hands it the URL of the bundle's wasm-bindgen
+glue and the module it already compiled, so the worker needs no script beside the
+page, whatever the bundle's hashed names are. The worker runs the same keeper as
+the desktop's thread (`store::keeper`), over toshokan's `web::Executor`, which
+writes OPFS through sync access handles and a picked folder through writable
+streams. Nothing needs shared memory, so the page needs no cross-origin
+isolation.
+
+The page sends every command but a read to the worker, one at a time and in
+order, and waits for its answers. A command and its answers cross as RON
+(`store::wire`); the bytes a save or a draft carries, and the `File` a copy from
+outside reads, are handed over beside the text, the bytes in a transferred
+buffer. An answer carries only what it changed of what the app shows
+(`store::shown::Change`), and all of it only after a scan of every file. The page
+reads files itself, from the folder's handles, and indexes a piano or sample it
+leaves resting in its file through a `File` snapshot, taken again where a move
+the worker made carried the file. An edit of a resting file is sent as the pieces
+that lay out the new file (`rewrite::Pieces`): the bytes the edit holds, and the
+ranges of the old file it keeps, which the worker reads from the library as
+toshokan stages the new one.
+
+The local root is `.drawbar/local/private/` of OPFS for the browser's own
+library, and `.drawbar/local/picked-<id>/` for a picked folder, by its id in the
+recent list. Tabs of one install write as writers of its pool, which toshokan
+holds by Web Locks. Each tab tells the library's other tabs of its commits over
+a `BroadcastChannel` named by the local root (`toshokan::web::Hints`), and a tab
+that hears of one refreshes. A picked folder, which another program may write, is
+also rescanned when its tab is shown or focused again, every minute while it is
+in view, and where Chromium's `FileSystemObserver` reports a change. Names in a
+picked folder compare as a look at it finds, ignoring case where a name's other
+case reaches the same entry, and in one normalization form on macOS; in OPFS
+they compare byte for byte.
 
 ## Identities and expectations
 
@@ -755,22 +784,22 @@ In the browser:
   Firefox asks the user; other browsers decide for themselves. Where the browser
   gives the page no storage, as some private windows do, drawbar says so and
   the library lasts until the tab closes.
-- The Web Lock that keeps a second tab to reading cannot see the desktop app's
-  file lock on the same folder. Two tabs that pick the same folder at the same
-  moment can also both open it to write. The first open of each picked folder
-  says once not to open it in the desktop app at the same time
-  (`libraries::SHARED`), and its entry in the recent list keeps `warned: true`.
+- A tab and the desktop app on one picked folder are two installs, each a writer
+  of its own, as two computers that sync the folder are.
+- A picked folder is taken to rename files only in Chrome, where that was
+  measured: Brave refuses, and other browsers are not trusted to. Elsewhere every
+  move copies the file and removes the old one (`toshokan::web::Folder::picked`).
 
 ## What lives where
 
 | What | Desktop | Browser |
 |---|---|---|
 | Library files | The library folder | The private file system's root, or the picked folder |
-| Tags, origins, each drawbar's log, staging and trash | `.drawbar/library/` in the library | A later build |
-| Drafts, the cached view, identities, rescues | `libraries/<hash>/` beside `app.ron` | A later build |
+| Tags, origins, each drawbar's log, staging and trash | `.drawbar/library/` in the library | `.drawbar/library/` in the library |
+| Drafts, slot edits, the cached view, identities, rescues | `libraries/<hash>/` beside `app.ron` | `.drawbar/local/private/` or `.drawbar/local/picked-<id>/` of OPFS |
 | Theme, panels, Show all files | eframe's store: `app.ron` in the app's data folder | eframe's store, in local storage |
 | MIDI on or off, recent libraries | eframe's store (`drawbar.midi`, `drawbar.libraries`) | |
-| Recent picked folders, as handles | | IndexedDB: database `drawbar`, store `libraries`, key `recent`: `{id, handle, warned}` |
+| Recent picked folders, as handles | | IndexedDB: database `drawbar`, store `libraries`, key `recent`: `{id, handle}` |
 | The derived cache | `library-cache.ron` beside `app.ron`, outside the default library | IndexedDB: database `drawbar`, store `files` |
 
 A preference is never kept in a library, and a library is never kept in
