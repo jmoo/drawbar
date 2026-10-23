@@ -272,11 +272,16 @@ files once they have all arrived, and readers agree.
 that it cannot place after a tip's head, and whose number a tip of its writer
 has reached, is taken as folded into that tip, before the grace step. When the
 tip certifies it, this is the ordinary fold. When it does not, the entry is on
-another branch of a fork: its change drops out of view, with no item, and the
-fields it wrote show what the merge shows without it. It comes back as a run,
-and its fork is found, as soon as a file holding it is visible again; if none
-ever is, it stays gone, as the grace step would have left it. A fresh reader of the same files cannot place such an entry either, so holding it
-would keep a cached reader apart from a fresh one until the grace step.
+another branch of a fork. If the reader remembers a fork point the entry
+descends from, through entries it knows, it keeps the entry as a run. Otherwise,
+having never seen both branches, or having forgotten the fork point at the grace
+step, it cannot tell the entry from one the tip folds: the entry's change drops
+out of view, with no item, and the fields it wrote show what the merge shows
+without it. It comes back as a run, and its fork is found, as soon as a file
+holding it is visible again; if none ever is, it stays gone, as the grace step
+would have left it. A fresh reader of the same files cannot place such an entry
+either, so holding it would keep a cached reader apart from a fresh one until
+the grace step.
 
 The window of recent hashes is gone. Re-deliveries are recognized by
 certificates, and a fork near the head is found by the two successors of its
@@ -404,8 +409,9 @@ removes named, its file effects. It ends at close. Drafts are unchanged.
   this one edited it: a register conflict, or the entity shown in a deletion
   conflict with only the concurrent edit.
 - A change from another branch of a forked writer whose file sync hides once a
-  snapshot of that writer has passed its number: gone from view, with no item,
-  until its file is visible again, then shown as that branch's item.
+  snapshot of that writer has passed its number, when the reader never found
+  the fork or forgot it at the grace step: gone from view, with no item, until
+  its file is visible again, then shown as that branch's item.
 - Entries after a gap: an item from the start, whose changes the user can take,
   merged as soon as the gap fills.
 - A field whose earlier value a branch compacted away: shown in that branch's

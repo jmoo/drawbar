@@ -351,12 +351,24 @@ fn classify(
             frontier.push((*hash, next));
         }
     }
-    // Remembered entries a tip has since passed are folded into it.
+    // Remembered entries a tip has since passed are folded into it, but for
+    // those after a fork point the reader remembers.
     let tip_n = w.tip_n();
+    let after_fork = |hash: EntryHash| {
+        let mut at = w.known.get(&hash);
+        while let Some(entry) = at {
+            if w.forks.iter().any(|fork| fork.hash == entry.prev()) {
+                return true;
+            }
+            at = w.known.get(&entry.prev());
+        }
+        false
+    };
     candidates.retain(|hash| {
         let passed = !w.seen.contains(hash)
             && !w.placed.contains(hash)
-            && tip_n.is_some_and(|tip| w.entry(*hash).n() <= tip);
+            && tip_n.is_some_and(|tip| w.entry(*hash).n() <= tip)
+            && !after_fork(*hash);
         !passed
     });
     w.candidates = candidates;
@@ -1503,6 +1515,31 @@ mod tests {
             Chain::continues(placed, entries[1].own()),
             "the tip passed it"
         );
+    }
+
+    #[test]
+    fn a_remembered_entry_after_a_remembered_fork_stays_a_run_while_its_file_is_hidden() {
+        let entries = chain(W, &["a", "b", "c", "d"]);
+        let other = entry(
+            Some(&entries[0]),
+            vec![set("other", vec![entries[0].own().of(W)])],
+            "o",
+        );
+        let memory = Memory {
+            tips: Vec::new(),
+            entries: BTreeMap::from([(other.hash(), Rc::clone(&other))]),
+            forks: BTreeSet::from([entries[0].own()]),
+        };
+        let seen = BTreeMap::from([(
+            W,
+            Seen {
+                segments: vec![],
+                snapshots: vec![folded(&entries)],
+            },
+        )]);
+        let memory = BTreeMap::from([(W, memory)]);
+        let derived = derive(&seen, &memory, &BTreeSet::new());
+        assert_eq!(derived.writers[&W].runs, [other]);
     }
 
     #[test]

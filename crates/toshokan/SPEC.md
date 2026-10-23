@@ -477,9 +477,10 @@ Per writer, from the files it reads and what it remembers, a reader derives:
   one is a run.
 - **Passed** entries: a remembered entry no file it reads holds, that it cannot
   merge, and whose number a tip's head has reached, is folded into that tip as
-  if certified. When the tip does not certify it, it was on another branch: its
-  change stays out of view, with no item, until a file holding it is read
-  again, and it is then a run.
+  if certified, unless it descends, through entries the reader knows, from a
+  fork point the reader remembers, when it is a run. When the tip does not
+  certify a folded one, it was on another branch: its change stays out of view,
+  with no item, until a file holding it is read again, and it is then a run.
 
 What the merge leaves out is shown as **items**: each run, gap, and after the
 grace step each file's lines it cannot place, with the net change it would make

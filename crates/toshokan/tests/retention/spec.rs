@@ -522,7 +522,23 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
             break;
         }
     }
-    // Remembered entries a tip has since passed are folded into it.
+    // Remembered entries a tip has since passed are folded into it, but for
+    // those after a fork point the reader remembers.
+    let fork_points: BTreeSet<Hash> = memory.forks.iter().map(|fork| fork.hash).collect();
+    let after_fork = |e: Hash| {
+        let mut at = Some(e);
+        while let Some(e) = at {
+            let Some(prev) = world.entry(e).prev else {
+                return false;
+            };
+            if fork_points.contains(&prev) {
+                return true;
+            }
+            let known = seen_lines.contains(&prev) || memory.entries.contains(&prev);
+            at = known.then_some(prev);
+        }
+        false
+    };
     let remembered_folded: BTreeSet<Hash> = candidates
         .iter()
         .copied()
@@ -532,6 +548,7 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
                 && !seen_lines.contains(&e)
                 && !placed.contains(&e)
                 && dirs.tip_n(entry.dir).is_some_and(|n| entry.n <= n)
+                && !after_fork(e)
         })
         .collect();
     candidates.retain(|e| !remembered_folded.contains(e));
