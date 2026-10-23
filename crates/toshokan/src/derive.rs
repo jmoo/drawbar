@@ -100,6 +100,9 @@ pub struct Placed {
     pub fork: Option<u64>,
     /// Entries whose number does not follow their predecessor's.
     pub misnumbered: Vec<EntryHash>,
+    /// Whether the reader remembers a fork point that neither the files nor
+    /// its other memories show, as after a restore took one branch.
+    pub stale_forks: bool,
 }
 
 impl Placed {
@@ -168,6 +171,9 @@ struct Writer {
     placed: BTreeSet<EntryHash>,
     misnumbered: BTreeSet<EntryHash>,
     forks: BTreeSet<Own>,
+    /// Whether it remembers a fork point that neither the files nor its other
+    /// memories show.
+    stale: bool,
     lowest: Option<u64>,
 }
 
@@ -256,6 +262,7 @@ fn classify(
         candidates: BTreeSet::new(),
         placed: BTreeSet::new(),
         misnumbered: BTreeSet::new(),
+        stale: false,
         forks: memory
             .map(|memory| memory.forks.clone())
             .unwrap_or_default(),
@@ -418,7 +425,8 @@ fn classify(
             .or_default()
             .push(*hash);
     }
-    let mut forks = std::mem::take(&mut w.forks);
+    let remembered = std::mem::take(&mut w.forks);
+    let mut forks = BTreeSet::new();
     for (prev, next) in &successors {
         if *prev == EntryHash::ZERO {
             continue;
@@ -465,6 +473,8 @@ fn classify(
             hash: EntryHash::ZERO,
         }));
     }
+    w.stale = !remembered.is_subset(&forks);
+    forks.extend(remembered);
     w.lowest = forks.iter().map(|own| own.n).min();
     w.forks = forks;
     w
@@ -759,6 +769,7 @@ pub fn derive(
                 forks: w.forks.clone(),
                 fork: w.lowest,
                 misnumbered: w.misnumbered.iter().copied().collect(),
+                stale_forks: w.stale,
             },
         );
         let ok = |n: u64| !w.beyond(n);
@@ -1126,10 +1137,12 @@ fn widen(span: Option<(Hlc, Hlc)>, at: Hlc) -> Option<(Hlc, Hlc)> {
 }
 
 /// The writers of which `memory` holds something no file in `seen` holds: a
-/// tip whose file is gone, or an entry neither a line nor a snapshot's head.
+/// tip whose file is gone, an entry neither a line nor a snapshot's head, or,
+/// as `derived` from them says, a fork point.
 pub fn unseen(
     seen: &BTreeMap<WriterId, Seen<'_>>,
     memory: &BTreeMap<WriterId, Memory>,
+    derived: &Derived,
 ) -> BTreeSet<WriterId> {
     let writers = memory.iter().filter(|(writer, memory)| {
         let files = seen.get(writer);
@@ -1149,7 +1162,12 @@ pub fn unseen(
             .any(|entry| !lines.contains(&entry.hash()) && !heads.contains(&entry.own()));
         tip_gone || entry_gone
     });
-    writers.map(|(writer, _)| *writer).collect()
+    let stale = derived
+        .writers
+        .iter()
+        .filter(|(_, placed)| placed.stale_forks);
+    let stale = stale.map(|(writer, _)| *writer);
+    writers.map(|(writer, _)| *writer).chain(stale).collect()
 }
 
 /// The memories a reader keeps after the grace step for `writers`, whose

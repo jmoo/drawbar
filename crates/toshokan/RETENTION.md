@@ -354,7 +354,8 @@ state; and the dismissals. It no longer keeps every hash, `let-go.json`, or anyt
 took once the grace period passes.
 
 **The grace step.** When the reader holds something of a writer that no file it
-sees holds — a tip whose file is gone, an entry in flight — it keeps showing it,
+sees holds — a tip whose file is gone, an entry in flight, a fork point only it
+remembers — it keeps showing it,
 without a report. Once that has lasted 24 hours and at least one full rescan, it
 drops each such item from which nothing it sees descends: no line whose chain of
 predecessors reaches it, and no snapshot that certifies it. A greater number on

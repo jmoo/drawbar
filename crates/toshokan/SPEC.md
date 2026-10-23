@@ -574,8 +574,9 @@ from scratch.
 ### The grace step
 
 A reader keeps showing what it remembers that no file it sees holds: a tip
-whose file is gone, or an entry in a file sync has not brought, or one a restore
-of the folder from an older copy took. It counts that time per writer. Once it
+whose file is gone, an entry in a file sync has not brought or one a restore of
+the folder from an older copy took, or a fork point neither the files nor its
+other memories show. It counts that time per writer. Once it
 has held something of a writer no file holds for 24 hours, and at least one scan
 of every file has finished since, it takes the grace step for that writer: it
 lets go of each such tip and entry of the writer from which nothing it sees

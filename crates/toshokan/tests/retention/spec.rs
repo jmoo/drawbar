@@ -279,7 +279,13 @@ impl Design for Spec {
         };
         let visible_snapshot = |t: &Contribution| snapshots.iter().any(|c| c.head == t.head);
         // The step is for the writers of which the reader holds what no file
-        // holds; it leaves the rest alone.
+        // holds, a fork point included; it leaves the rest alone.
+        let unforked = Memory {
+            forks: BTreeSet::new(),
+            ..memory.clone()
+        };
+        let (_, found) = derive(self, r, &unforked);
+        let stale = memory.forks.difference(&found.forks).map(|fork| fork.dir);
         let unseen: BTreeSet<Dir> = memory
             .tips
             .iter()
@@ -293,6 +299,7 @@ impl Design for Spec {
                     .filter(|at| !held.contains(at))
                     .map(|at| at.dir),
             )
+            .chain(stale)
             .collect();
         let kept = Memory {
             tips: memory

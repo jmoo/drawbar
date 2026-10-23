@@ -319,7 +319,8 @@ fn derived(
     }
     let (kept, graced) = match grace {
         true => {
-            let unseen = derive::unseen(&seen, memory);
+            let read = derive::derive(&seen, memory, graced);
+            let unseen = derive::unseen(&seen, memory, &read);
             let graced = graced.union(&unseen).copied().collect();
             (derive::grace(&seen, memory, &unseen), graced)
         }

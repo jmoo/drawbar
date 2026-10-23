@@ -867,7 +867,7 @@ impl Reader {
     /// The writers of which the reader holds something no file it sees holds: a
     /// tip whose file is gone, or an entry no file holds.
     pub fn unseen(&self) -> BTreeSet<WriterId> {
-        derive::unseen(&self.seen(), &self.cached.writers)
+        derive::unseen(&self.seen(), &self.cached.writers, &self.derived)
     }
 
     /// Notes, at wall time `now`, of which writers the reader holds what no file

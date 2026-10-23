@@ -1023,3 +1023,20 @@ impl<D: Design + Copy> Run<'_, D> {
         ancestors.pop();
     }
 }
+
+/// Checks the one history whose acts are `acts`, the seed's first.
+pub fn replay<D: Design + Copy + Sync>(bounds: Bounds, depth: Depth, design: D, acts: &[&str]) {
+    let tally = Tally::default();
+    let view = |h: &History, i: usize| writer_view(h, i, &design);
+    let mut h = History::seeded();
+    let mut ancestors = Vec::new();
+    while h.acts.len() < acts.len() {
+        ancestors.push(h.clone());
+        let children = h.children(&bounds, &view);
+        h = children
+            .into_iter()
+            .find(|c| c.acts.iter().zip(acts).all(|(a, b)| a == b))
+            .unwrap_or_else(|| panic!("no child after {:?}", h.acts));
+    }
+    Checker::new(&h, &ancestors, &tally, depth, design).check();
+}

@@ -3,7 +3,7 @@
 
 mod retention;
 
-use retention::check::{sweep, Depth};
+use retention::check::{replay, sweep, Depth};
 use retention::history::{Act, Bounds};
 use retention::real::Real;
 use retention::spec::Spec;
@@ -218,4 +218,31 @@ fn toshokan_with_two_entities_matches_the_oracle() {
             Act::Delete(0),
         ],
     ));
+}
+
+/// A restore that takes a dismissal and the branch it dismissed leaves a fork
+/// point only the cached view remembers; the grace step forgets it.
+#[test]
+fn a_fork_point_a_restore_took_is_forgotten_at_the_grace_step() {
+    let acts = [
+        "x creates",
+        "y Set(0, 0, B)",
+        "y is cloned",
+        "y' Delete(0), compacts",
+        "y Set(0, 0, A)",
+        "x after reading Dismiss",
+    ];
+    let bounds = Bounds::new(
+        2,
+        true,
+        4,
+        &[
+            Act::Set(0, 0, A),
+            Act::Set(0, 0, B),
+            Act::Delete(0),
+            Act::Dismiss,
+        ],
+    );
+    replay(bounds, DEPTH, Spec::default(), &acts);
+    replay(bounds, DEPTH, Real, &acts);
 }
