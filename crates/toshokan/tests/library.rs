@@ -27,9 +27,9 @@ use toshokan::simulator::Machine;
 use toshokan::snapshot::Snapshot;
 use toshokan::view::Conflicted;
 use toshokan::{
-    EntityId, EntryHash, Env, Error, Expect, Field, FileState, Hlc, Identify, Identity, Io,
-    IoResult, Lag, Layout, Local, MemDisk, Policy, Random, Refusal, Register, RelPath, Reply, Root,
-    Schema, Set, View, WriterId,
+    EntityId, EntryHash, Env, Error, Expect, Field, FileRef, FileState, Hlc, Identify, Identity,
+    Invalid, Io, IoResult, Lag, Layout, Local, MemDisk, Policy, Random, Refusal, Register, RelPath,
+    Reply, Root, Schema, Set, Unbindable, View, WriterId,
 };
 
 const ORIGIN: Register<String> = Register::new("origin");
@@ -545,6 +545,7 @@ through_both!(
     a_conflict_is_shown_and_resolved,
     a_clone_forks_into_items_taken_or_dismissed,
     one_intent_takes_from_runs_of_two_forked_writers,
+    a_file_change_is_taken_only_while_the_folder_holds_that_file,
     a_restored_folder_makes_the_writer_rekey,
     what_a_restored_writer_showed_survives_reopening_and_a_crash,
     an_instance_without_a_writer_keeps_only_the_grace_step_in_the_views_it_read,
@@ -1143,6 +1144,85 @@ fn one_intent_takes_from_runs_of_two_forked_writers<F: Facade>() {
         ],
         "each op names the run it takes from, if any"
     );
+}
+
+fn a_file_change_is_taken_only_while_the_folder_holds_that_file<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let root = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&root), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    a.close().unwrap();
+    fork::<F>(&root, "a", 10, &clock, |library, side| {
+        let committed = match side {
+            "here" => library.commit("Tag", |i| i.add(song, TAGS, tag("here"))),
+            _ => library.commit("Rename", |i| {
+                let held = Expect::Holds(identity(b"song"));
+                i.rename(song, &path("moved.npno"), held)
+            }),
+        };
+        committed.unwrap();
+    });
+
+    let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+    let view = b.view();
+    let (run, change) = view
+        .items()
+        .iter()
+        .find_map(|item| {
+            let file = item.changes.iter().find(|c| c.what == What::File)?;
+            Some((item.run, file.change.clone().unwrap()))
+        })
+        .unwrap_or_else(|| panic!("{:?}", view.items()));
+    let FactChange::File { file: named, .. } = &change else {
+        panic!("{change:?}");
+    };
+    assert_eq!(named.path, path("moved.npno"));
+    let take = |b: &mut F| b.commit("Keep", |i| i.take(run, change.clone()));
+    let refused = |taken: Result<Committed, Error>| match taken {
+        Err(Error::Refused(Refusal::Invalid(Invalid::Unbindable { entity, path, why }))) => {
+            assert_eq!((entity, path.as_str()), (song, "moved.npno"));
+            why
+        }
+        taken => panic!("{taken:?}"),
+    };
+    assert_eq!(refused(take(&mut b)), Unbindable::Unscanned);
+    folder
+        .perform(Io::Remove {
+            root: Root::Folder,
+            path: path("moved.npno"),
+        })
+        .unwrap();
+    b.rescan().unwrap();
+    assert_eq!(refused(take(&mut b)), Unbindable::Absent);
+    put(&folder, "moved.npno", b"other");
+    b.rescan().unwrap();
+    assert_eq!(refused(take(&mut b)), Unbindable::Changed);
+
+    put(&folder, "moved.npno", b"song");
+    b.rescan().unwrap();
+    let committed = take(&mut b).unwrap();
+    assert_eq!(
+        b.view().entity(song).unwrap().file(),
+        Some(FileRef {
+            path: path("moved.npno"),
+            state: FileState::InSync
+        })
+    );
+    let ops = logged_ops(&folder, &b.view(), &committed);
+    let [Op::Pin {
+        entity,
+        file,
+        take: Some(taken),
+        ..
+    }] = &ops[..]
+    else {
+        panic!("{ops:?}");
+    };
+    assert_eq!((*entity, file, *taken), (song, named, run));
+    let view = b.view();
+    let mut changes = view.items().iter().flat_map(|item| &item.changes);
+    assert!(changes.all(|c| c.what != What::File), "{:?}", view.items());
 }
 
 fn copy_folder(folder: &MemDisk) -> MemDisk {

@@ -198,7 +198,7 @@ Each op is an object whose `op` member names it:
 | `add`     | `entity`, `key`, `value`, `replaces`, `take`?    | A set gains `value`                          |
 | `remove`  | `entity`, `key`, `value`, `tags`, `take`?        | A set loses `value`                          |
 | `file`    | `entity`, `file`, `replaces`, `take`?            | A file effect left the entity's file here; none without `file` |
-| `pin`     | `entity`, `file`, `replaces`                     | A reader bound the entity's file here        |
+| `pin`     | `entity`, `file`, `replaces`, `take`?            | A reader bound the entity's file here        |
 | `dismiss` | `runs`                                           | The user dismissed these runs                |
 
 `replaces` and `tags` are arrays of references to the writes of the same field
@@ -530,7 +530,7 @@ as 8 bytes little-endian, a 16-byte check of the payload, then the payload. The
 check finds a record a crash tore or a disk damaged; it does not guard against
 forgery, since only the install writes its local root. This build computes it in
 two lanes of 64-bit multiplies over the payload. The payload's first byte names
-its format, 5; then come the generation, and the view, or what it gained or the
+its format, 6; then come the generation, and the view, or what it gained or the
 grace step let go of, in this build's binary encoding: integers as LEB128,
 identifiers as their 16 bytes big-endian, text as its length and its UTF-8,
 lists as their length and their members, with each entry as its hash, its
@@ -623,8 +623,10 @@ A commit:
    of its member, a delete observes every live field write of its entity, and
    the intent names the fork points it knows of the writers its ops name. Each
    change taken from an item names that item's run in `take`, so one intent can
-   take from several runs. A key the app did not declare, or an entity that is
-   not shown, refuses the intent.
+   take from several runs. A file taken from an item is a `pin` op of the file
+   the run names. A key the app did not declare, an entity that is not shown,
+   or a taken file the last scan did not find at its path holding what the run
+   says, or found bound to another entity, refuses the intent.
 2. Turns the file changes into the steps below and their preconditions.
 3. If the instance has no writer yet, checks the preconditions without writing
    and only then creates its writer, so a refused first intent leaves nothing.

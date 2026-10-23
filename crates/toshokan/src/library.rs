@@ -703,9 +703,25 @@ impl Library {
     }
 
     /// Checks `plan` against the view and turns its facts into ops and its file
-    /// changes into effects.
+    /// changes into effects. A file change taken from an item is refused unless
+    /// the last scan found that file.
     fn resolve(&mut self, plan: Plan) -> Result<Resolved> {
         let refused = |invalid| Error::Refused(Refusal::Invalid(invalid));
+        for (change, take) in &plan.facts {
+            let (FactChange::File { entity, file }, Some(_)) = (change, take) else {
+                continue;
+            };
+            let bound = self.view.at(&file.path).map(|bound| bound.id());
+            binding::bindable(*entity, file, &self.scan, &self.unscanned, bound).map_err(
+                |why| {
+                    refused(Invalid::Unbindable {
+                        entity: *entity,
+                        path: file.path.clone(),
+                        why,
+                    })
+                },
+            )?;
+        }
         let facts = intent::ops(&plan, &self.folded, &self.schema).map_err(refused)?;
         let revived: BTreeSet<EntityId> = plan
             .facts
@@ -789,6 +805,7 @@ impl Library {
                         entity: *entity,
                         file: file.clone(),
                         replaces,
+                        take: None,
                     },
                     (file, _) => Op::File {
                         entity: *entity,
@@ -1300,8 +1317,8 @@ fn what_of(field: &contribution::FieldKey) -> What {
     }
 }
 
-/// The fact change that writes `value` to `field`; `None` for a file write, which
-/// only a file effect makes.
+/// The fact change that writes `value` to `field`; `None` for a file write of no
+/// file, which only trashing the file makes.
 fn fact_change(field: &contribution::FieldKey, value: &contribution::Value) -> Option<FactChange> {
     use contribution::{FieldKey, Value};
     Some(match (field, value) {
@@ -1325,6 +1342,15 @@ fn fact_change(field: &contribution::FieldKey, value: &contribution::Value) -> O
             entity: *entity,
             key: key.to_string(),
             value: member.clone(),
+        },
+        (
+            FieldKey::File(entity),
+            Value::File {
+                fact: Some(file), ..
+            },
+        ) => FactChange::File {
+            entity: *entity,
+            file: file.clone(),
         },
         _ => return None,
     })

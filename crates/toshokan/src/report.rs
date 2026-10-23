@@ -154,8 +154,11 @@ pub struct Item {
 pub struct ItemChange {
     pub entity: EntityId,
     pub what: What,
-    /// The change that takes it; `None` for a file, which only a file effect
-    /// writes.
+    /// The change that takes it; `None` where the run left the entity without a
+    /// file, which only trashing the file does. Taking a file binds the entity to
+    /// the file the run names, which the folder must hold at its path, as the
+    /// last scan found it, for no other entity: else the intent is refused with
+    /// [`crate::Invalid::Unbindable`].
     pub change: Option<FactChange>,
     /// Shown whatever the merged state holds: the run replaced an earlier own
     /// write no reader holds any more, so only a take settles it.

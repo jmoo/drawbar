@@ -189,12 +189,14 @@ pub enum Op {
         replaces: Vec<Ref>,
         take: Option<Run>,
     },
-    /// A write of the entity's file register recording a binding a scan derived.
-    /// Merged as [`Op::File`]; undo leaves it alone.
+    /// A write of the entity's file register recording a binding a scan derived,
+    /// or the file of a run an intent took. Merged as [`Op::File`]; undo leaves
+    /// it alone.
     Pin {
         entity: EntityId,
         file: FileFact,
         replaces: Vec<Ref>,
+        take: Option<Run>,
     },
     /// The user dismissed these runs: no reader merges or shows them.
     Dismiss { runs: Vec<Run> },
@@ -227,8 +229,9 @@ impl Op {
             | Self::Write { take, .. }
             | Self::Add { take, .. }
             | Self::Remove { take, .. }
-            | Self::File { take, .. } => take.as_ref(),
-            Self::Pin { .. } | Self::Dismiss { .. } | Self::Unknown(_) => None,
+            | Self::File { take, .. }
+            | Self::Pin { take, .. } => take.as_ref(),
+            Self::Dismiss { .. } | Self::Unknown(_) => None,
         }
     }
 }
@@ -681,7 +684,7 @@ impl<'de> Visitor<'de> for ExactOpVisitor {
                 ("delete", "observed") => once(&mut map, &mut m.observed)?,
                 ("remove", "tags") => once(&mut map, &mut m.tags)?,
                 ("file" | "pin", "file") => once(&mut map, &mut m.file)?,
-                ("create" | "delete" | "write" | "add" | "remove" | "file", "take") => {
+                ("create" | "delete" | "write" | "add" | "remove" | "file" | "pin", "take") => {
                     once(&mut map, &mut m.take)?
                 }
                 _ => return Err(de::Error::custom("a member this build does not write")),
@@ -741,10 +744,11 @@ impl<'de> Visitor<'de> for ExactOpVisitor {
                 replaces: m.replaces.ok_or_else(missing)?,
                 take,
             },
-            "pin" if take.is_none() => Op::Pin {
+            "pin" => Op::Pin {
                 entity,
                 file: file.ok_or_else(missing)?,
                 replaces: m.replaces.ok_or_else(missing)?,
+                take,
             },
             _ => return Err(de::Error::custom("an op this build does not know")),
         };
@@ -1256,9 +1260,10 @@ impl Pack for Op {
                 entity,
                 file,
                 replaces,
+                take,
             } => {
                 out.push(6);
-                (entity, (file, replaces)).pack(out);
+                (entity, (file, (replaces, take))).pack(out);
             }
             Self::Dismiss { runs } => {
                 out.push(7);
@@ -1332,11 +1337,12 @@ impl Unpack for Op {
                 }
             }
             6 => {
-                let (entity, (file, replaces)) = Unpack::unpack(input)?;
+                let (entity, (file, (replaces, take))) = Unpack::unpack(input)?;
                 Self::Pin {
                     entity,
                     file,
                     replaces,
+                    take,
                 }
             }
             7 => Self::Dismiss {
@@ -1509,6 +1515,8 @@ enum OpOut<'a> {
         entity: EntityId,
         file: &'a FileFact,
         replaces: &'a [Ref],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        take: Option<&'a Run>,
     },
     Dismiss {
         runs: &'a [Run],
@@ -1593,10 +1601,12 @@ impl Serialize for Op {
                 entity,
                 file,
                 replaces,
+                take,
             } => OpOut::Pin {
                 entity: *entity,
                 file,
                 replaces,
+                take: take.as_ref(),
             },
             Self::Dismiss { runs } => OpOut::Dismiss { runs },
             Self::Unknown(raw) => return raw.serialize(serializer),
@@ -1691,6 +1701,8 @@ struct PinIn {
     entity: EntityId,
     file: FileFact,
     replaces: Vec<Ref>,
+    #[serde(default)]
+    take: Option<Run>,
 }
 
 #[derive(Deserialize)]
@@ -1817,11 +1829,13 @@ fn decode_op(json: &str) -> Option<Op> {
                  entity,
                  file,
                  replaces,
+                 take,
                  ..
              }| Op::Pin {
                 entity,
                 file,
                 replaces,
+                take,
             },
         ),
         "dismiss" => op_members(json, name, |m: &DismissIn| &m.op)
@@ -1965,6 +1979,18 @@ mod tests {
                     modified: None,
                 },
                 replaces: vec![r(10)],
+                take: None,
+            },
+            Op::Pin {
+                entity,
+                file: FileFact {
+                    path: RelPath::new("d.npno").unwrap(),
+                    identity: Identity::from_u128(14),
+                    len: 15,
+                    modified: Some(16),
+                },
+                replaces: vec![],
+                take: Some(run()),
             },
             Op::Dismiss { runs: vec![run()] },
         ]
@@ -2131,6 +2157,7 @@ mod tests {
                     modified: None,
                 },
                 replaces: vec![r(10)],
+                take: None,
             }],
         });
         assert_eq!(

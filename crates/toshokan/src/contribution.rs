@@ -264,6 +264,7 @@ pub fn said(op: &Op) -> Said {
             entity,
             file,
             replaces,
+            take,
         } => write(
             &mut said,
             FieldKey::File(*entity),
@@ -272,7 +273,7 @@ pub fn said(op: &Op) -> Said {
                 pin: true,
             },
             replaces,
-            None,
+            take.as_ref(),
         ),
         Op::Dismiss { runs } => said.dismissals.extend(runs.iter().copied()),
         Op::Unknown(_) => {}
@@ -1236,6 +1237,7 @@ mod tests {
                     entity: EntityId::from_u128(8),
                     file: fact,
                     replaces: vec![],
+                    take: None,
                 }],
             }),
         )

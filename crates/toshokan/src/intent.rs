@@ -462,6 +462,7 @@ pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Inv
                     .iter()
                     .map(Write::named)
                     .collect(),
+                take,
             },
         };
         ops.push(op);

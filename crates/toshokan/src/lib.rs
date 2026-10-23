@@ -81,7 +81,7 @@ pub mod writer;
 
 pub use disk::MemDisk;
 pub use env::{Clock, Env, ExactNames, Identify, Names, Random};
-pub use error::{Error, Invalid, Mismatch, Refusal, Result, Why};
+pub use error::{Error, Invalid, Mismatch, Refusal, Result, Unbindable, Why};
 pub use ids::{EntityId, EntryHash, Hlc, Identity, Nonce, SegmentName, WriterId};
 pub use io::{Io, IoError, IoResult, Operation, Reply, Root, Step, Task};
 pub use layout::Layout;

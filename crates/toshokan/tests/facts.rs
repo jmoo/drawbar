@@ -820,6 +820,7 @@ fn undo_puts_files_back_and_leaves_pins_alone() {
             entity: entity(9),
             file: fact("moved.bin", 3),
             replaces: Vec::new(),
+            take: None,
         };
         let changed = a.intent(3, vec![file, pin], trashed);
         let plan = a.history.plan_undo(a.id, &a.view()).unwrap();
@@ -1102,6 +1103,7 @@ fn every_part(mut edit: impl FnMut(&str) -> String) -> Vec<Entry> {
                 entity: e,
                 file: fact("b.bin"),
                 replaces: vec![first],
+                take: None,
             },
             Op::Delete {
                 entity: gone,

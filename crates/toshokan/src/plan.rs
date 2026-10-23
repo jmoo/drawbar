@@ -67,7 +67,8 @@ pub enum FactChange {
     /// Brings a deleted entity back.
     Revive { entity: EntityId },
     /// Says where the entity's file is, moving nothing, as undoing a delete
-    /// does. Undo leaves it alone.
+    /// does. Undo leaves it alone. Taken from an item, it is refused unless the
+    /// last scan found that file.
     File { entity: EntityId, file: FileFact },
 }
 

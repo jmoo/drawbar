@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 use crate::cow::CowMap;
 use crate::env::{Identify, Names};
-use crate::error::Result;
+use crate::error::{Result, Unbindable};
 use crate::flow::{self, fold, ok};
 use crate::ids::{EntityId, Identity};
 use crate::io::{Kind, Meta, Root, Task};
@@ -116,6 +116,11 @@ impl Unscanned {
 
     pub fn is_empty(&self) -> bool {
         self.paths.is_empty() && self.entities.is_empty()
+    }
+
+    /// Whether `path` is one of these paths or under one.
+    pub fn covers(&self, path: &RelPath) -> bool {
+        under(path, &self.paths.iter().map(RelPath::as_str).collect())
     }
 
     /// Whether `entity`, whose file facts are `written`, is left unknown; `paths`
@@ -590,7 +595,31 @@ fn pin(facts: &Facts, scan: &Scan, entity: EntityId, file: &FileRef) -> Option<O
         entity,
         file: pinned,
         replaces: vec![written.entry],
+        take: None,
     })
+}
+
+/// Refuses to bind `entity` to the file `fact` names unless `scan` found it at
+/// `fact`'s path, scanned and holding what `fact` says, and `bound`, the entity
+/// bound there, is no other.
+pub fn bindable(
+    entity: EntityId,
+    fact: &FileFact,
+    scan: &Scan,
+    unscanned: &Unscanned,
+    bound: Option<EntityId>,
+) -> std::result::Result<(), Unbindable> {
+    if unscanned.covers(&fact.path) {
+        return Err(Unbindable::Unscanned);
+    }
+    let found = scan.files.get(&fact.path).ok_or(Unbindable::Absent)?;
+    if !holds(fact, found) {
+        return Err(Unbindable::Changed);
+    }
+    match bound {
+        Some(other) if other != entity => Err(Unbindable::Bound(other)),
+        _ => Ok(()),
+    }
 }
 
 /// [`bind_known`] a slice at a time. It holds no reference to the facts or the
@@ -1551,6 +1580,7 @@ mod tests {
             entity,
             file: moved,
             replaces,
+            take: None,
         }] = &pins_for(&[("b", 0)])[..]
         else {
             panic!("a move is pinned");
@@ -1619,5 +1649,28 @@ mod tests {
             (Some(remembered), Vec::new()),
             "same length and time"
         );
+    }
+
+    #[test]
+    fn an_entity_is_bindable_only_to_a_scanned_file_holding_its_fact_and_no_one_elses() {
+        let (entity, other) = (EntityId::from_u128(1), EntityId::from_u128(2));
+        let scan = scanned(&[("a", 0), ("b", 1)], &one("a"));
+        let check = |at, bound, unscanned: &Unscanned| {
+            bindable(entity, &fact(at, 0), &scan, unscanned, bound)
+        };
+        let scanned_all = Unscanned::default();
+        assert_eq!(check("a", None, &scanned_all), Ok(()));
+        assert_eq!(check("a", Some(entity), &scanned_all), Ok(()));
+        assert_eq!(
+            check("a", Some(other), &scanned_all),
+            Err(Unbindable::Bound(other))
+        );
+        assert_eq!(check("b", None, &scanned_all), Err(Unbindable::Changed));
+        assert_eq!(check("c", None, &scanned_all), Err(Unbindable::Absent));
+        let unscanned = Unscanned {
+            paths: BTreeSet::from([RelPath::ROOT]),
+            entities: BTreeSet::new(),
+        };
+        assert_eq!(check("a", None, &unscanned), Err(Unbindable::Unscanned));
     }
 }
