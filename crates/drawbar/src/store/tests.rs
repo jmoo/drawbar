@@ -5691,13 +5691,7 @@ fn a_forked_writers_branches_show_as_changes_kept_apart() {
     let kept = here.kept("gains the tag “Here”");
     let mut said: Vec<&str> = kept.rows.iter().map(|row| row.said.as_str()).collect();
     said.sort();
-    assert_eq!(
-        said,
-        [
-            "The library's list of tags gains “Here”",
-            "“untitled.ne5p” gains the tag “Here”"
-        ]
-    );
+    assert_eq!(said, ["“untitled” gains the tag “Here”"]);
     let row = kept.rows.iter().find(|row| row.id.is_some()).unwrap();
     assert_eq!(row.id, Some(at_here));
     assert!(row.takes);
@@ -5783,7 +5777,7 @@ fn changes_after_history_a_sync_has_not_brought_wait_apart_until_it_does() {
     fs::rename(&snapshot, &away).unwrap();
 
     let mut ours = Session::listed(&root);
-    let kept = ours.kept("gains “Monday”");
+    let kept = ours.kept("gains the tag “Monday”");
     assert_eq!(kept.kind, KeptKind::Gap);
     assert_eq!(crate::browser::kept::offers(kept.kind), (false, false));
     assert_eq!(tagged(&ours), Vec::<(String, Vec<String>)>::new());
@@ -5830,8 +5824,9 @@ fn a_run_kept_apart_counts_its_changes_and_offers_dismissal_once_nothing_is_left
         .any(|kept| kept.run == left.run));
 }
 
-/// A file a branch kept apart renamed is taken as one change, and a take of it once
-/// the file is gone is refused, saying so in the user's words.
+/// A file a branch kept apart renamed is listed only while the asset's file is elsewhere,
+/// is taken as one change, and a take of it while the file is gone is refused, saying so
+/// in the user's words.
 #[test]
 fn a_file_a_branch_kept_apart_renamed_is_taken_where_the_folder_holds_it() {
     let root = Temp::new();
@@ -5853,19 +5848,24 @@ fn a_file_a_branch_kept_apart_renamed_is_taken_where_the_folder_holds_it() {
     there.sync();
     there.settle();
     here.settle();
-    let kept = here.kept("its file is the one at “Upright.ne5p”");
-    let row = kept
-        .rows
-        .iter()
-        .find(|row| row.said.contains("its file is"))
-        .unwrap();
-    assert!(row.takes, "{row:?}");
-    let key = row.key.clone();
+    let moves = |s: &Session| {
+        let kept = s.bench.browser.folders.kept.iter();
+        let mut rows = kept.flat_map(|kept| kept.rows.iter().map(move |row| (kept.run, row)));
+        rows.find(|(_, row)| row.said.contains(" is at ") || row.said.contains(" moves to "))
+            .map(|(run, row)| (run, row.key.clone(), row.said.clone()))
+    };
+    assert_eq!(
+        moves(&here),
+        None,
+        "the file is already where the branch put it"
+    );
 
     let gone = Temp::new();
     fs::rename(root.at("Upright.ne5p"), gone.0.join("Upright.ne5p")).unwrap();
     here.settle();
-    here.take_kept(kept.run, vec![key.clone()]);
+    let (run, key, said) = moves(&here).expect("the file the branch names");
+    assert_eq!(said, "“Upright” is at “Upright”");
+    here.take_kept(run, vec![key.clone()]);
     assert_eq!(
         here.said(
             "did not change as asked: the file at Upright.ne5p cannot be taken: no file is there"
@@ -5875,14 +5875,8 @@ fn a_file_a_branch_kept_apart_renamed_is_taken_where_the_folder_holds_it() {
 
     fs::rename(gone.0.join("Upright.ne5p"), root.at("Upright.ne5p")).unwrap();
     here.settle();
-    here.take_kept(kept.run, vec![key]);
-    let still = here.bench.browser.folders.kept.iter();
-    assert!(
-        !still
-            .flat_map(|kept| &kept.rows)
-            .any(|row| row.said.contains("its file is")),
-        "taken"
-    );
+    here.take_kept(run, vec![key]);
+    assert_eq!(moves(&here), None, "taken");
     let ours = here.kept("gains the tag “Here”");
     here.take_kept(ours.run, Vec::new());
     assert_eq!(

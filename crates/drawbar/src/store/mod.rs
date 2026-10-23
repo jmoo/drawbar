@@ -816,8 +816,6 @@ pub struct KeptApart {
     /// When its entries were made, earliest and latest, in milliseconds since the Unix
     /// epoch.
     pub span: (u64, u64),
-    /// How many changes the other drawbar made in it, each as one step of its history.
-    pub entries: u64,
     /// What taking them would change; none once the library holds all they say.
     pub changes: Vec<KeptChange>,
 }
@@ -892,7 +890,6 @@ impl KeptApart {
             run: item.run,
             by: item.by.clone(),
             span: (item.span.0.wall_ms, item.span.1.wall_ms),
-            entries: item.entries,
             changes: item
                 .changes
                 .iter()

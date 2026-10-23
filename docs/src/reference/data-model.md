@@ -720,8 +720,11 @@ toshokan shows apart from the merged state what it cannot place in a writer's
 single history (`View::items`): a branch of a writer two installs continued, entries
 whose predecessor has not synced, and lines of a segment shorter than a snapshot
 certified it. Every view the store sends carries them as `Viewed::kept`, each a
-`KeptApart` naming its run and how many entries it holds, and drawbar lists them
-in **Kept apart** (`Folders::kept`), logging each run once. `Intent::Take` makes the
+`KeptApart` naming its run, and drawbar lists them in **Kept apart**
+(`Folders::kept`), logging each run once. A card lists a row per change the user
+would tell apart (`kept_rows`): a tag's entry in the list of tags only where no
+asset in the run wears it, and a file change only where the asset's file is
+elsewhere; its title counts those rows. `Intent::Take` makes the
 named changes of a run, or all of them, in one entry the user can undo; taking a
 tag also takes the run's entry for it in the list of tags, and taking a file change
 binds the entity to the file the run names, which toshokan refuses

@@ -1797,45 +1797,39 @@ impl Store {
         browser: &mut Browser,
         log: &mut Log,
     ) {
-        let runs: BTreeSet<toshokan::log::Run> = kept.iter().map(|kept| kept.run).collect();
-        for kept in kept
+        let held = |entity| {
+            let id = self.ids.id(&Key::Entity(entity))?;
+            let asset = workspace.get(id)?;
+            Some(Held {
+                id,
+                name: asset.name.clone(),
+                path: asset.path.clone(),
+            })
+        };
+        let shown: Vec<crate::folders::Kept> = kept
+            .iter()
+            .map(|kept| {
+                let rows = kept_rows(&kept.changes, held);
+                crate::folders::Kept {
+                    kind: kept.kind,
+                    run: kept.run,
+                    title: kept_title(kept, rows.len()),
+                    rows,
+                }
+            })
+            .collect();
+        for kept in shown
             .iter()
             .filter(|kept| !self.kept_runs.contains(&kept.run))
         {
-            let made = usize::try_from(kept.entries).unwrap_or(usize::MAX);
-            log.say(format!(
-                "{} {} kept apart from the library: see Kept apart.",
-                crate::strings::counted(made, "change", "changes"),
-                match made {
-                    1 => "is",
-                    _ => "are",
-                },
-            ));
+            log.say(match kept.rows.len() {
+                0 => "Changes are kept apart from the library: see Kept apart.".to_string(),
+                1 => "1 change is kept apart from the library: see Kept apart.".to_string(),
+                n => format!("{n} changes are kept apart from the library: see Kept apart."),
+            });
         }
-        self.kept_runs = runs;
-        browser.folders.kept = kept
-            .iter()
-            .map(|kept| crate::folders::Kept {
-                kind: kept.kind,
-                run: kept.run,
-                title: kept_title(kept),
-                rows: kept
-                    .changes
-                    .iter()
-                    .map(|change| {
-                        let id = self.ids.id(&Key::Entity(change.entity));
-                        let name = id.and_then(|id| workspace.get(id)).map(|e| e.name.clone());
-                        crate::folders::KeptRow {
-                            key: (change.entity, change.what.clone()),
-                            id,
-                            said: kept_said(name.as_deref(), &change.what, &change.takes),
-                            takes: change.takes.is_some(),
-                            forgotten: change.forgotten,
-                        }
-                    })
-                    .collect(),
-            })
-            .collect();
+        self.kept_runs = shown.iter().map(|kept| kept.run).collect();
+        browser.folders.kept = shown;
     }
 
     /// Settle as `how` says a change another drawbar left unfinished.
@@ -3790,19 +3784,22 @@ fn rescue_url(_: &Rescue) -> Option<String> {
     None
 }
 
-/// Who made what [`super::KeptApart`] keeps apart, and when.
-fn kept_title(kept: &super::KeptApart) -> String {
+/// Who made what [`super::KeptApart`] keeps apart, and when, counting the `rows` Kept
+/// apart lists of it.
+fn kept_title(kept: &super::KeptApart, rows: usize) -> String {
     use toshokan::report::By;
     let who = match &kept.by {
-        By::Writer { label, .. } => format!("Another {label}"),
+        By::Writer { label, .. } if !label.is_empty() && label != super::keeper::LABEL => {
+            label.clone()
+        }
+        By::Writer { .. } => "Another drawbar".to_string(),
         By::This | By::Outside => "This drawbar".to_string(),
     };
     let when = crate::when::span(kept.span.0, kept.span.1, crate::when::local_offset);
-    let made = crate::strings::counted(
-        usize::try_from(kept.entries).unwrap_or(usize::MAX),
-        "change",
-        "changes",
-    );
+    let made = match rows {
+        0 => "changes".to_string(),
+        n => crate::strings::counted(n, "change", "changes"),
+    };
     let what = match kept.kind {
         super::KeptKind::Run => "on a branch of its own",
         super::KeptKind::Gap => "after ones that have not synced yet",
@@ -3811,16 +3808,90 @@ fn kept_title(kept: &super::KeptApart) -> String {
     format!("{who} made {made} {what} {when}")
 }
 
-/// What one change kept apart does, to the asset named `name` where the window holds it.
+/// What the window holds of an asset a change kept apart names.
+struct Held {
+    id: u64,
+    name: String,
+    path: Option<LibPath>,
+}
+
+/// The rows Kept apart lists of `changes`, as `held` says the window holds each asset:
+/// one for each change the user would tell apart. A tag's entry in the library's list
+/// of tags goes with the row that puts the tag on an asset, which takes it too, the
+/// list's own making goes with its first entry, and a file change that names where the
+/// asset's file is already says nothing.
+fn kept_rows(
+    changes: &[super::KeptChange],
+    held: impl Fn(toshokan::EntityId) -> Option<Held>,
+) -> Vec<crate::folders::KeptRow> {
+    use super::KeptDo;
+    let catalog = What::Field(TAG_NAMES.name().to_string());
+    let worn = What::Field(TAGS.name().to_string());
+    let gained = |tag: &str| {
+        changes.iter().any(|change| {
+            change.what == worn && matches!(&change.takes, Some(KeptDo::Gain(gain)) if gain == tag)
+        })
+    };
+    let lists: BTreeSet<toshokan::EntityId> = changes
+        .iter()
+        .filter(|change| change.what == catalog)
+        .map(|change| change.entity)
+        .collect();
+    let rows = changes.iter().filter_map(|change| {
+        let asset = held(change.entity);
+        let said = match (&change.what, &change.takes) {
+            (What::Created, _) if lists.contains(&change.entity) => return None,
+            (what, Some(KeptDo::Gain(tag))) if *what == catalog && gained(tag) => return None,
+            (what, Some(KeptDo::Gain(tag))) if *what == catalog => format!("Made the tag “{tag}”"),
+            (what, Some(KeptDo::Lose(tag))) if *what == catalog => {
+                format!("Removed the tag “{tag}”")
+            }
+            (what, _) if *what == catalog => "Changed the library's list of tags".to_string(),
+            (_, Some(KeptDo::File(at))) => {
+                let now = asset.as_ref().and_then(|asset| asset.path.as_ref());
+                if now.is_some_and(|now| now.as_str() == at) {
+                    return None;
+                }
+                let file = at.rsplit_once('/').map_or(at.as_str(), |(_, file)| file);
+                let name = shown_name(asset.as_ref().map_or(file, |asset| &asset.name));
+                match now {
+                    Some(_) => format!("“{name}” moves to “{}”", shown_path(at)),
+                    None => format!("“{name}” is at “{}”", shown_path(at)),
+                }
+            }
+            (what, does) => {
+                let name = asset.as_ref().map(|asset| shown_name(&asset.name));
+                kept_said(name.as_deref(), what, does)
+            }
+        };
+        Some(crate::folders::KeptRow {
+            key: (change.entity, change.what.clone()),
+            id: asset.map(|asset| asset.id),
+            said,
+            takes: change.takes.is_some(),
+            forgotten: change.forgotten,
+        })
+    });
+    rows.collect()
+}
+
+/// A name as the library list shows it.
+fn shown_name(name: &str) -> String {
+    crate::strings::display_name(name).to_string()
+}
+
+/// A library path as the library list names its file: its folders, then its name.
+fn shown_path(path: &str) -> String {
+    match path.rsplit_once('/') {
+        Some((dir, name)) => format!("{dir}/{}", crate::strings::display_name(name)),
+        None => shown_name(path),
+    }
+}
+
+/// What one change to an asset kept apart does, to the asset named `name` where the
+/// window holds it.
 fn kept_said(name: Option<&str>, what: &What, does: &Option<super::KeptDo>) -> String {
     use super::KeptDo;
-    if *what == What::Field(TAG_NAMES.name().to_string()) {
-        return match does {
-            Some(KeptDo::Gain(tag)) => format!("The library's list of tags gains “{tag}”"),
-            Some(KeptDo::Lose(tag)) => format!("The library's list of tags loses “{tag}”"),
-            _ => "The library's list of tags changes".to_string(),
-        };
-    }
     let asset = name.map_or("An asset the library does not show".to_string(), |name| {
         format!("“{name}”")
     });
@@ -3832,8 +3903,9 @@ fn kept_said(name: Option<&str>, what: &What, does: &Option<super::KeptDo>) -> S
     match (what, does) {
         (What::Created, _) | (_, Some(KeptDo::Revive)) => format!("{asset} is made"),
         (What::Deleted, _) | (_, Some(KeptDo::Delete)) => format!("{asset} is removed"),
-        (_, Some(KeptDo::File(path))) => format!("{asset}: its file is the one at “{path}”"),
-        (What::File, _) => format!("{asset} is left without a file"),
+        (What::File, _) | (_, Some(KeptDo::File(_))) => {
+            format!("{asset} is left without a file")
+        }
         (_, Some(KeptDo::Gain(value))) => format!("{asset} gains the {field} “{value}”"),
         (_, Some(KeptDo::Lose(value))) => format!("{asset} loses the {field} “{value}”"),
         (_, Some(KeptDo::Set(value))) => format!("{asset}: its {field} becomes “{value}”"),
@@ -3852,6 +3924,124 @@ mod tests {
 
     /// A step whose undo needs what the trash let go goes, with every step behind it,
     /// and the Edit menu names the latest change it no longer reaches.
+    fn change(
+        entity: u128,
+        what: &str,
+        takes: Option<super::super::KeptDo>,
+    ) -> super::super::KeptChange {
+        let what = match what {
+            "file" => What::File,
+            key => What::Field(key.to_string()),
+        };
+        super::super::KeptChange {
+            entity: toshokan::EntityId::from_u128(entity),
+            what,
+            takes,
+            forgotten: false,
+        }
+    }
+
+    /// Each change kept apart, as Kept apart says it: assets by the names the library
+    /// shows, a tag's catalog entry only where no asset in the run takes it, and a file
+    /// only where it is not already where the asset's file is.
+    #[test]
+    fn each_change_kept_apart_is_said_as_the_library_names_it() {
+        use super::super::KeptDo::{File, Gain, Lose};
+        let at = |path: &str| LibPath::parse(path);
+        let held = |entity: toshokan::EntityId| {
+            let (name, path) = match entity.to_u128() {
+                1 => ("Grand.ne5p", at("Grand.ne5p")),
+                2 => ("Warm pad.ne5p", at("Warm pad.ne5p")),
+                3 => ("Pad.ne5p", at("Pad.ne5p")),
+                4 => ("Bass.ne5p", None),
+                _ => return None,
+            };
+            let id = u64::try_from(entity.to_u128()).unwrap();
+            Some(Held {
+                id,
+                name: name.to_string(),
+                path,
+            })
+        };
+        let catalog = TAG_NAMES.name();
+        let cases = [
+            (
+                change(1, "tags", Some(Gain("Sunday".into()))),
+                Some("“Grand” gains the tag “Sunday”"),
+            ),
+            (change(9, catalog, Some(Gain("Sunday".into()))), None),
+            (
+                change(9, catalog, Some(Gain("Spare".into()))),
+                Some("Made the tag “Spare”"),
+            ),
+            (
+                change(9, catalog, Some(Lose("Old".into()))),
+                Some("Removed the tag “Old”"),
+            ),
+            (
+                change(2, "file", Some(File("Pads/Warm pad.ne5p".into()))),
+                Some("“Warm pad” moves to “Pads/Warm pad”"),
+            ),
+            (change(3, "file", Some(File("Pad.ne5p".into()))), None),
+            (
+                change(4, "file", Some(File("Bass.ne5p".into()))),
+                Some("“Bass” is at “Bass”"),
+            ),
+            (
+                change(5, "file", Some(File("Sets/Organ.ne5p".into()))),
+                Some("“Organ” is at “Sets/Organ”"),
+            ),
+            (
+                change(1, "file", None),
+                Some("“Grand” is left without a file"),
+            ),
+            (
+                change(6, "tags", Some(Gain("Live".into()))),
+                Some("An asset the library does not show gains the tag “Live”"),
+            ),
+        ];
+        let changes: Vec<_> = cases.iter().map(|(change, _)| change.clone()).collect();
+        let said: Vec<String> = kept_rows(&changes, held)
+            .into_iter()
+            .map(|row| row.said)
+            .collect();
+        let expected: Vec<&str> = cases.iter().filter_map(|(_, said)| *said).collect();
+        assert_eq!(said, expected);
+    }
+
+    /// A card's title names the other drawbar by its label where it has one of its own,
+    /// and counts the rows the card lists.
+    #[test]
+    fn a_card_title_names_its_writer_and_counts_its_rows() {
+        use toshokan::report::By;
+        let writer = toshokan::WriterId::from_u128(7);
+        let run = toshokan::log::Run {
+            writer,
+            from: 1,
+            first: None,
+            last: toshokan::log::Own {
+                n: 1,
+                hash: toshokan::EntryHash::from_u128(1),
+            },
+            tip: None,
+            segment: None,
+        };
+        let kept = |label: &str| super::super::KeptApart {
+            kind: super::super::KeptKind::Run,
+            run,
+            by: By::Writer {
+                writer,
+                label: label.to_string(),
+            },
+            span: (0, 0),
+            changes: Vec::new(),
+        };
+        let title = |label, rows| kept_title(&kept(label), rows);
+        assert!(title("drawbar", 2).starts_with("Another drawbar made 2 changes on a branch"));
+        assert!(title("drawbar on MacBook", 1).starts_with("drawbar on MacBook made 1 change on"));
+        assert!(title("drawbar", 0).starts_with("Another drawbar made changes on"));
+    }
+
     #[test]
     fn a_trimmed_step_and_every_one_behind_it_leave_the_history() {
         let mut history = History::default();

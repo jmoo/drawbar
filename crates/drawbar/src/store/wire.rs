@@ -216,7 +216,6 @@ mod tests {
                 label: "drawbar".to_string(),
             },
             span: (1, u64::MAX),
-            entries: 4,
             changes: vec![KeptChange {
                 entity,
                 what: what.clone(),

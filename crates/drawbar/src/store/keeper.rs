@@ -14,7 +14,7 @@ use toshokan::error::Refusal;
 use toshokan::io::{IoError, Kind, Range, Root};
 use toshokan::log::Settlement;
 use toshokan::plan::FactChange;
-use toshokan::report::{Item, Mode, Refreshed, Rekey, Start};
+use toshokan::report::{Item, Mode, Refreshed, Rekey, Start, What};
 use toshokan::{EntryHash, Env, Error, Expect, Policy, RelPath, View};
 
 use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES};
@@ -32,7 +32,7 @@ const MOST_ENTRIES: usize = 1_000_000;
 
 /// What other writers see this one called. The folder may be shared, so it says no
 /// more than which app wrote.
-const LABEL: &str = "drawbar";
+pub(super) const LABEL: &str = "drawbar";
 
 /// The most bytes a writer's trash holds in a session: the size toshokan's policy
 /// keeps.
@@ -1418,8 +1418,21 @@ fn taking(item: &Item, named: &[KeptKey]) -> Vec<FactChange> {
                     if key == TAGS.name() && tag == value)
                 })
         });
+    let listed: Vec<&FactChange> = listed.collect();
+    // A list of tags the run made is made with the first entry taken from it.
+    let made = item.changes.iter().filter(|change| {
+        change.what == What::Created
+            && picked.iter().chain(&listed).any(|taken| {
+                matches!(taken, FactChange::Add { entity, key, .. }
+                    if *entity == change.entity && key == TAG_NAMES.name())
+            })
+    });
+    let made = made.filter_map(|change| change.change.as_ref());
     let mut takes: Vec<FactChange> = Vec::new();
-    for change in picked.iter().copied().chain(listed) {
+    for change in made
+        .chain(picked.iter().copied())
+        .chain(listed.iter().copied())
+    {
         if !takes.contains(change) {
             takes.push(change.clone());
         }

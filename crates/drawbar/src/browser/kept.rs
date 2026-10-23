@@ -15,7 +15,8 @@ const WIDTH: f32 = 560.0;
 const ABOUT: &str = "These changes were made where the library's history split, as when \
                      two computers went on from one copy of drawbar's own data, or a sync \
                      left part of a history behind. drawbar shows them here rather than \
-                     mixing them in. Take the changes you want; dismiss a branch you do not.";
+                     mixing them in. Take the changes you want; dismiss a branch you don't \
+                     want.";
 
 /// What a card offers, by its kind: whether each change can be taken, and whether the
 /// whole run can be taken and dismissed.
