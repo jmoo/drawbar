@@ -184,17 +184,14 @@ impl Backend {
         let mut done = None;
         let let_go = Promise::new(&mut |resolve, _| done = Some(resolve));
         let before = LET_GO.with(|held| held.replace(Some(let_go)));
-        let (inbox, heard, room) = (
-            backend.inbox.clone(),
-            backend.heard.clone(),
-            backend.room.clone(),
-        );
+        let (inbox, heard) = (backend.inbox.clone(), backend.heard.clone());
+        spawn_local(measuring(Rc::downgrade(&backend.room), ctx.clone()));
         let ctx = ctx.clone();
         spawn_local(async move {
             if let Some(before) = before {
                 let _ = JsFuture::from(before).await;
             }
-            drive(root, inbox, heard, room, ctx).await;
+            drive(root, inbox, heard, ctx).await;
             if let Some(done) = done {
                 let _ = done.call0(&JsValue::NULL);
             }
@@ -310,7 +307,6 @@ async fn drive(
     root: Root,
     inbox: Rc<RefCell<Inbox>>,
     heard: Rc<RefCell<Heard>>,
-    room: Rc<RefCell<Room>>,
     ctx: egui::Context,
 ) {
     let private = root == Root::Private;
@@ -399,9 +395,6 @@ async fn drive(
             persisting = true;
             // ⚠️ Firefox waits for the user to answer, so nothing waits for it.
             spawn_local(persist());
-        }
-        if inbox.borrow().cmds.is_empty() {
-            measure(&room).await;
         }
         ctx.request_repaint();
     }
@@ -665,6 +658,27 @@ fn storage() -> Option<StorageManager> {
 async fn persist() {
     if let Some(asked) = storage().and_then(|storage| storage.persist().ok()) {
         let _ = JsFuture::from(asked).await;
+    }
+}
+
+/// How often to read again how much of the browser's storage drawbar takes.
+const MEASURE_EVERY_MS: i32 = 30_000;
+
+/// Read how much of the browser's storage drawbar takes now and every
+/// [`MEASURE_EVERY_MS`], for as long as the backend holding `room` lasts.
+async fn measuring(room: std::rc::Weak<RefCell<Room>>, ctx: egui::Context) {
+    while let Some(held) = room.upgrade() {
+        measure(&held).await;
+        drop(held);
+        ctx.request_repaint();
+        let waited = Promise::new(&mut |resolve, _| {
+            let global = js_sys::global();
+            let set = field(&global, "setTimeout").map(|set| set.unchecked_into::<Function>());
+            if let Some(set) = set {
+                let _ = set.call2(&global, &resolve, &MEASURE_EVERY_MS.into());
+            }
+        });
+        let _ = JsFuture::from(waited).await;
     }
 }
 
