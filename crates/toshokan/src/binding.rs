@@ -222,8 +222,8 @@ impl Walk {
         self.listed.insert(dir, entries);
     }
 
-    /// Lists again what may have changed at `paths`: each one's directory, and each
-    /// directory at or under it.
+    /// Lists again what may have changed at `paths`: each one's nearest listed
+    /// directory, and each directory at or under it.
     pub fn forget(&mut self, paths: &[RelPath]) {
         for path in paths {
             let stale: Vec<RelPath> = subtree(&self.listed, path).cloned().collect();
@@ -239,10 +239,14 @@ impl Walk {
             for dir in queued {
                 self.queue.remove(&dir);
             }
-            if let Some(parent) = path.parent() {
-                if self.listed.remove(&parent).is_some() {
-                    self.queue.insert(parent);
+            // A directory made since its parent was listed is not in that listing.
+            let mut dir = path.parent();
+            while let Some(at) = dir.filter(|at| !self.queue.contains(at)) {
+                if self.listed.remove(&at).is_some() {
+                    self.queue.insert(at);
+                    break;
                 }
+                dir = at.parent();
             }
         }
         if self.listed.is_empty() {
@@ -1236,6 +1240,26 @@ mod tests {
                 "{slice}-item slices"
             );
         }
+    }
+
+    #[test]
+    fn a_walk_lists_again_the_nearest_directory_it_listed_above_a_new_one() {
+        let layout = Layout::new(".lib").unwrap();
+        let directory = Meta {
+            kind: Kind::Directory,
+            len: 0,
+            modified: None,
+        };
+        let mut walk = Walk::default();
+        walk.listed(&layout, RelPath::ROOT, vec![("d".into(), directory)]);
+        walk.listed(&layout, path("d"), Vec::new());
+        assert_eq!(walk.next(), None);
+        walk.forget(&[path("d/e/f")]);
+        assert_eq!(
+            walk.next(),
+            Some(path("d")),
+            "d/e was made after d was listed"
+        );
     }
 
     #[test]
