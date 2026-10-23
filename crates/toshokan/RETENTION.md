@@ -92,12 +92,16 @@ are kept forever.
 
 **Matching a file to a segment certificate.** A file matches when its first line
 has the certificate's first hash and its line at the certified position has the
-certified hash; its lines up to that position are folded. A file that starts with
-the first hash but is shorter waits: its lines are held back, and are not
-evidence of a fork, since sync may still be bringing the rest. A file whose line
-at that position has another hash diverged from the certified one, as copies of a
-virtual machine resumed twice do: only its first line is folded, and the rest is
-placed or shown as a run by the rules below.
+certified hash; its lines up to that position are folded. An unsealed file that
+starts with the first hash but is shorter waits: its lines are held back, and
+are not evidence of a fork, since sync may still be bringing the rest. After the
+grace step its lines past the first are held back as items the user can take
+from: the reader cannot tell a version a sync client dropped from a copy that
+diverged before its end. A sealed file cannot still be arriving, so a sealed
+file shorter than the certificate diverged from it, as does a file whose line at
+that position has another hash, as copies of a virtual machine resumed twice do:
+only its first line is folded, and the rest is placed or shown as a run by the
+rules below.
 
 **Contribution**, per entity:
 
@@ -496,33 +500,40 @@ to explore whole; a random simulation of 93M states to depth 40 found no
 violation.
 
 **Values.** The model merges entries, not values. References, deletes that kill
-fields, contradicted references, forgotten bases and the display of tip runs
-are checked by `tests/retention`, against an oracle that holds every entry ever
+fields, contradicted references, forgotten bases and the display of runs are
+checked by `tests/retention`, against an oracle that holds every entry ever
 written, never compacts and merges by exact hash. Histories of up to three
-writers and a clone write one entity's existence, a register and a set member,
-delete and revive it, dismiss runs, and compact after any entry. Every folder
-they leave is read by fresh readers, by cached readers in every delivery order
-up to a cap (with deleted files delivered early, late or never, and conflicted
-copies), at every subset of its files, after a restore of the folder or of one
-directory to every earlier state, and after every dropped version of a segment.
+writers and a clone, which may resume mid-segment, write two entities'
+existence, two registers and two set members, delete and revive, dismiss and
+take runs, and compact after any entry, or after a sync client dropped the open
+segment's newest line. Each writer writes from what the design under test shows
+it of the folder. Every folder they leave is read by fresh readers, by cached
+readers in every delivery order up to a cap (with deleted files delivered early,
+late or never, conflicted copies, and a grace step halfway), at every subset of
+its files, after a restore of the folder or of one directory to every earlier
+state, and after every dropped version of a segment.
+
 The properties: readers at rest show what the oracle shows; a replaced value
-never shows alone again along a cached reader's deliveries, unless the user
-dismissed what replaced it; a branch's step changes no merged value outside a
-forgotten basis; no reader merges what a dismissal names; a
-contribution stays within one own write and one reference per field and writer;
-and after a fault and the grace step, the folder wins. Three divergences are
-counted rather than failed: a conflict where the oracle shows one value, a value
-a contradicted reference no longer covers, and a value the oracle merges that the
-design shows only in a run (a forgotten basis, or a fork inside a segment).
+never shows alone again along a cached reader's deliveries, unless what replaced
+it was dismissed or lies beyond a fork, or the field carries an item or a
+contradiction report; a branch's step changes no merged value outside a
+forgotten basis; no reader merges what a dismissal names; a contribution stays
+within one own write and one reference per field and writer; and after a fault
+and the grace step, the folder wins, beside what the guard keeps because
+something visible descends from it. An extra value fails unless the oracle's
+value shows beside it, after a fork or, after a fault, on a field the reader
+reports contradicted, or the field is a forgotten basis. A missing value fails
+unless it shows in its writer's items, or only a write no visible file holds still
+carries it.
 
 The design is a `Design` implementation that sees only what a reader sees, with
 switches that drop the rules for branch references, the union of tips, own
-writes and dismissals; with each switch off, a test must find a violation. The same tests run against toshokan once it implements the
-design. `cargo test --test retention_slice`, in the default suite, runs a bounded
-slice in about two minutes, or half a minute in release.
-`cargo test --release --test retention_sweep -- --ignored` runs every act with
-two writers and a clone to four entries (2.2 million histories), and three
-writers and a clone (1.4 million), in about 25 minutes.
+writes and dismissals; with each switch off, a test must find a violation. The
+same tests run against toshokan once it implements the design.
+`cargo test --test retention_slice`, in the default suite, runs a bounded slice
+in about two minutes, or half a minute in release.
+`cargo test --release --test retention_sweep -- --ignored` runs the rest, 7.7
+million histories, in about an hour.
 
 Clocks: nothing in this design depends on them.
 
@@ -556,3 +567,9 @@ Clocks: nothing in this design depends on them.
    the last pre-fork entry that still has an effect; entries above it with none
    are shown as runs, and own writes that could be pre-fork are treated as a
    forgotten basis. Certifying segments, not lines, keeps that cost to display.
+8. **Taking a run overwrites a pre-fork reference.** A take replaces the merged
+   write and names the run's write. When the run is a branch of the same writer,
+   a contribution keeps one reference per field and writer: the run's, numbered
+   higher. That reference lies beyond the fork and kills only its own target, so
+   once the taker compacts, the pre-fork value it replaced comes back beside the
+   taken one as a conflict.
