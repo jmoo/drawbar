@@ -392,10 +392,10 @@ A writer continues only if its recorded head is its tip or placed after it, and
 the snapshot's `genesis` is its genesis; otherwise it retires.
 
 An open pending record's `prev` is its writer's last entry, so it is always held.
-A record whose `prev` is held and followed is spent or closed, unless what follows
-is a run another branch numbered past, or an intent whose continuation was cut
-short. One whose `prev` is neither held nor in a run is ignored and reported, as
-now.
+A record whose `prev` is followed, or numbered below a tip's head, is spent or
+closed, unless `prev` is a run, on a branch the tip's number says nothing of, or
+what follows is an intent whose continuation was cut short. One whose `prev` is
+neither held nor in a run is ignored and reported, as now.
 
 **Continuations.** An intent whose file ops and displaced items do not fit its
 line is followed by `more` entries that hold them, appended with it. Each is an

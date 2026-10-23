@@ -787,8 +787,9 @@ as it is, logged as a `pin` op rather than a `file` op. A reader reads at most
 ### Recovery
 
 A record is open while its writer's log holds the entry named by its entry's
-`prev` and no entry after it. A record that is not open is spent, waiting only
-for its writer to remove it.
+`prev` and no entry after it; a tip numbered past `prev` counts as an entry after
+it unless `prev` is a run. A record that is not open is spent, waiting only for
+its writer to remove it.
 
 A record is ignored when it does not decode, names another writer, names a path
 that is not a library path, or its `prev` is not in its writer's log. Opening
