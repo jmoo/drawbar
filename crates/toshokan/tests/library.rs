@@ -641,6 +641,7 @@ through_both!(
     adopting_a_file_reads_no_other_file_of_its_length,
     two_windows_session_after_session_keep_a_pool_of_two,
     asking_who_else_writes_keeps_the_idle_writers_taken_up,
+    an_idle_writer_whose_records_its_log_closed_is_let_go,
     an_effect_a_live_window_left_open_is_reported_live,
     a_change_of_case_another_install_did_not_start_is_finished_by_another,
     a_directory_made_and_filled_in_one_change_is_undone_in_one,
@@ -2883,6 +2884,43 @@ fn asking_who_else_writes_keeps_the_idle_writers_taken_up<F: Facade>() {
     first.others().unwrap();
     let (_, opened) = F::open(Probe::new(&here), env("w", 4, &clock)).unwrap();
     assert_eq!(opened.drafts, [], "the first window still holds it");
+}
+
+fn an_idle_writer_whose_records_its_log_closed_is_let_go<F: Facade>() {
+    let disk = disk();
+    let one_disk = |disk: &MemDisk| Machine {
+        folder: disk.clone(),
+        local: disk.clone(),
+    };
+    let clock = TestClock::at(1_000);
+    let [mut crashed, closed] = [1, 2].map(|seed| {
+        F::open(Probe::new(&one_disk(&disk)), env("w", seed, &clock))
+            .unwrap()
+            .0
+    });
+    create(&mut crashed, "song.npno", b"song");
+    let mut closed = closed;
+    create(&mut closed, "kick.wav", b"kick");
+    closed.close().unwrap();
+    drop(crashed);
+    let disk = disk.restart();
+    assert!(
+        !pending_files(&disk).is_empty(),
+        "the crash left a spent record"
+    );
+
+    let (_third, opened) = F::open(Probe::new(&one_disk(&disk)), env("w", 3, &clock)).unwrap();
+    assert!(
+        matches!(opened.start, Start::Resumed(_)),
+        "{:?}",
+        opened.start
+    );
+    let (_fourth, opened) = F::open(Probe::new(&one_disk(&disk)), env("w", 4, &clock)).unwrap();
+    assert!(
+        matches!(opened.start, Start::Resumed(_)),
+        "the other idle writer is free to resume: {:?}",
+        opened.start
+    );
 }
 
 fn an_effect_a_live_window_left_open_is_reported_live<F: Facade>() {

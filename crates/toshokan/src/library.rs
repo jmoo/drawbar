@@ -37,7 +37,7 @@ use crate::pending::{self, PendingRecord};
 use crate::plan::{FactChange, FileChange, Plan};
 use crate::reach::{self, Linking, Links, Reach};
 use crate::reader::{Listing, ReadReport, Reader, Stamp, WriterLog};
-use crate::recovery::{self, Settling};
+use crate::recovery::{self, Chain as _, Settling};
 use crate::report::{
     By, Change, Committed, Compacted, DraftState, DraftStatus, Emptied, HistoryItem, Lag, Local,
     Mode, Opened, Orphan, Outcome, Partial, PartialReport, PathChange, Presence, Refreshed,
@@ -1939,7 +1939,8 @@ fn idle_pool(library: Library) -> Fallible<'static, Library> {
 }
 
 /// Lets go of the pooled writer `writer` once it holds nothing to take up: no
-/// draft and no pending record.
+/// draft and no open pending record. A record its own log closed, which only the
+/// writer removes, holds nothing.
 fn release_if_idle<'a, L: BorrowMut<Library> + 'a>(
     library: L,
     writer: WriterId,
@@ -1947,18 +1948,19 @@ fn release_if_idle<'a, L: BorrowMut<Library> + 'a>(
     let Some(&genesis) = library.borrow().pooled.get(&writer) else {
         return ok(library);
     };
-    let pending = library.borrow().layout.pending_dir(writer);
+    let layout = library.borrow().layout.clone();
     flow::list(Root::Local, &Layout::drafts(genesis)).and_then(move |drafts| {
         let drafted = drafts.iter().any(|entry| entry.kind == Kind::File);
-        flow::list(Root::Folder, &pending).and_then(move |records| {
-            let folded = &library.borrow().folded;
-            let open = records.iter().any(|entry| {
-                let name = entry.name.strip_suffix(".json");
-                let name = name.and_then(|name| name.parse::<Nonce>().ok());
-                let unsettled = name.is_some_and(|name| !folded.settled(writer, name));
-                entry.kind == Kind::File && unsettled
-            });
-            if drafted || open {
+        flow::run(pending::read_all(&layout, writer)).and_then(move |found| {
+            let open = {
+                let held = library.borrow();
+                let chain = held.reader.logs().get(&writer);
+                found.records.iter().any(|(name, record)| {
+                    let closed = chain.is_some_and(|chain| chain.continues(record.after()));
+                    !closed && !held.folded.settled(writer, *name)
+                })
+            };
+            if drafted || open || !found.unreadable.is_empty() {
                 return ok(library);
             }
             let mut library = library;

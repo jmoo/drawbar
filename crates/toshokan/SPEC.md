@@ -87,8 +87,8 @@ instance writes as now, as another window of the app wrote until it closed, and
 keeps it while that writer left something to take up: it offers their drafts
 beside its own, and reports their open pending records as orphans that are the
 install's own (`ours`), to settle without asking. It lets go of such a lock at
-once when the writer left nothing, and as soon as its drafts are discarded and
-its records settled, so the next instance writes as it and the pool stays as
+once when the writer left nothing, a record its own log closed counting as
+nothing, and as soon as its drafts are discarded and its records settled, so the next instance writes as it and the pool stays as
 large as the instances that run at once. An orphan whose writer's lock another
 instance on this machine holds is `live`: that instance may be carrying it out
 still. Asking which writers other instances hold tries only the locks this
