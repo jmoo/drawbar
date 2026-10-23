@@ -925,6 +925,7 @@ impl Reader {
     /// Takes in what one writer's files gave.
     fn gather(&mut self, listed: Listed, report: &mut ReadReport) {
         let Listed { writer, files } = listed;
+        report.folder_changed |= !self.folder.contains_key(&writer);
         let folder = self.folder.entry(writer).or_default();
         let present: BTreeSet<&RelPath> = files.iter().map(|file| &file.path).collect();
         let gone: Vec<RelPath> = folder

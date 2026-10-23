@@ -579,6 +579,7 @@ through_both!(
     the_trash_keeps_displaced_bytes_until_emptied,
     compaction_keeps_the_view_and_this_sessions_undo,
     emptied_trash_items_leave_the_next_snapshot,
+    a_record_no_log_explains_is_reported_on_a_warm_open,
     others_on_this_machine_are_told_apart_from_others_elsewhere,
     a_refused_intent_changes_nothing,
     what_an_instance_has_shown_survives_its_crash,
@@ -2799,6 +2800,23 @@ fn the_trash_keeps_displaced_bytes_until_emptied<F: Facade>() {
         matches!(a.undo(), Err(Error::Refused(Refusal::Emptied))),
         "undo needs what was emptied"
     );
+}
+
+fn a_record_no_log_explains_is_reported_on_a_warm_open<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    create(&mut a, "song.npno", b"song");
+    a.close().unwrap();
+    let stranger = WriterId::from_u128(0x5);
+    let record = format!(
+        ".t/writers.2/{stranger}/pending/{}.json",
+        toshokan::Nonce::from_u128(9)
+    );
+    put(&folder, &record, b"{\"not\":\"a record\"}");
+    let (_, opened) = F::open(Probe::new(&here), env("a", 2, &clock)).unwrap();
+    assert_eq!(opened.ignored, [path(&record)]);
 }
 
 fn emptied_trash_items_leave_the_next_snapshot<F: Facade>() {
