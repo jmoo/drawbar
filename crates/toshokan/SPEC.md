@@ -490,9 +490,10 @@ head, and knows only the readings of the head and of the writes the tip keeps.
 A tip's own write the merge leaves out that replaced an own write of its writer
 no merged entry holds is a forgotten basis: its run shows that field whatever
 the merged state shows, until an intent takes a run of that writer on that
-field. An intent takes changes from an item
-with ops that name its run in `take`, and dismisses a run with a `dismiss` op; a
-gap or unplaced lines cannot be dismissed.
+field. An intent takes changes from an item with ops that name its run in
+`take`, and dismisses a run with a `dismiss` op; a gap or unplaced lines cannot
+be dismissed. A run is shown until it is dismissed, with no change once it would
+change nothing; a gap or unplaced lines only while they would change something.
 
 A writer forks when two instances write as it: a copied local root, a virtual
 machine resumed twice, a restored backup of a local root. Each fork point is

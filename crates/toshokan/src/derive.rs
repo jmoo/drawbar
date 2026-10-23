@@ -63,7 +63,8 @@ impl Memory {
     }
 }
 
-/// One item: a run, a gap or unplaced lines, with the net change it would make.
+/// One item: a run, a gap or unplaced lines, with the net change it would make,
+/// which is empty for a run that would change nothing.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Item {
     pub kind: ItemKind,
@@ -856,7 +857,8 @@ pub fn derive(
 }
 
 /// The runs, gaps and unplaced lines of `w`, each with the change it makes
-/// against `folded`.
+/// against `folded`: a run with entries no dismissal names even when that
+/// change is empty, a gap or unplaced lines only when it is not.
 fn items(
     w: &Writer,
     placed: &Placed,
@@ -1038,7 +1040,8 @@ fn items(
                 .iter()
                 .map(|(field, write)| (field.clone(), write.clone())),
         );
-        if latest.is_empty() {
+        let shown_empty = group.kind == ItemKind::Run && group.entries > 0;
+        if latest.is_empty() && !shown_empty {
             continue;
         }
         items.push(Item {

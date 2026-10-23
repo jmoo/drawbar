@@ -547,6 +547,7 @@ through_both!(
     one_intent_takes_from_runs_of_two_forked_writers,
     a_file_change_is_taken_only_while_the_folder_holds_that_file,
     a_run_counts_and_spans_its_entries_whether_or_not_its_branch_compacted,
+    a_run_that_would_change_nothing_is_shown_until_dismissed,
     a_restored_folder_makes_the_writer_rekey,
     what_a_restored_writer_showed_survives_reopening_and_a_crash,
     an_instance_without_a_writer_keeps_only_the_grace_step_in_the_views_it_read,
@@ -1012,7 +1013,16 @@ fn a_clone_forks_into_items_taken_or_dismissed<F: Facade>() {
     assert_eq!(clone.refresh().unwrap().retired, None, "retired already");
     for view in [original.view(), clone.view()] {
         assert_eq!(tags(&view, song), ["here", "new"]);
-        assert_eq!(view.items(), [], "taken and dismissed");
+        let [left] = view.items() else {
+            panic!("{:?}", view.items());
+        };
+        assert_eq!(left.run, kept.run, "the taken run is shown until dismissed");
+        assert_eq!(left.changes, [], "with nothing left to review");
+    }
+    original.commit("Close", |i| i.dismiss(kept.run)).unwrap();
+    clone.refresh().unwrap();
+    for view in [original.view(), clone.view()] {
+        assert_eq!(view.items(), [], "dismissed");
     }
     clone
         .commit("Tag", |i| i.add(song, TAGS, tag("after")))
@@ -1255,6 +1265,42 @@ fn a_run_counts_and_spans_its_entries_whether_or_not_its_branch_compacted<F: Fac
             "compacted: {compacted}"
         );
     }
+}
+
+fn a_run_that_would_change_nothing_is_shown_until_dismissed<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let root = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&root), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    a.close().unwrap();
+    close_all(fork::<F>(&root, "a", 10, &clock, |library, side| {
+        let text = if side == "here" { "here" } else { "new" };
+        library
+            .commit("Tag", |i| i.add(song, TAGS, tag(text)))
+            .unwrap();
+    }));
+
+    let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+    let view = b.view();
+    assert_eq!(tags(&view, song), ["new"]);
+    let empty: Vec<&Item> = view
+        .items()
+        .iter()
+        .filter(|i| i.changes.is_empty())
+        .collect();
+    let [empty] = empty[..] else {
+        panic!("{:?}", view.items());
+    };
+    assert_eq!((empty.kind, empty.entries), (ItemKind::Run, 1));
+    let run = empty.run;
+    b.commit("Close", |i| i.dismiss(run)).unwrap();
+    let view = b.view();
+    let [left] = view.items() else {
+        panic!("{:?}", view.items());
+    };
+    assert_ne!(left.run, run);
+    assert_eq!(left.changes.len(), 1, "the other branch is still to review");
 }
 
 fn copy_folder(folder: &MemDisk) -> MemDisk {

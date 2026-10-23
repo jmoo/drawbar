@@ -104,7 +104,10 @@ pub enum DraftState {
 
 /// Where one writer's history forked: the entry numbered `at`, `prev`, after
 /// which its branches part. Neither branch is merged; each is shown as an
-/// [`Item`].
+/// [`Item`] of [`ItemKind::Run`] whose run's writer is `writer`, until it is
+/// dismissed. A fork stays listed after that: it is settled once no such item
+/// is left, and has nothing left to review once each such item's changes are
+/// empty.
 ///
 /// When the writer is this instance's own, the instance stops writing as it
 /// once a read finds the fork: [`Start::Rekeyed`] says so at opening, and
@@ -142,7 +145,9 @@ pub enum ItemKind {
 /// would make. The user keeps the current state or takes changes, with
 /// [`crate::intent::Intent::take`] naming `run`, and may dismiss a run with
 /// [`crate::intent::Intent::dismiss`]; a gap or unplaced lines cannot be
-/// dismissed.
+/// dismissed. A run is shown until it is dismissed, with no changes once it
+/// would change nothing; a gap or unplaced lines only while they would change
+/// something.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Item {
     pub kind: ItemKind,

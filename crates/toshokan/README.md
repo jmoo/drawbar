@@ -66,14 +66,15 @@ was scanned, the files that arrived, moved or changed outside the app.
 
 `opened` reports what needs the user: effects another writer left unfinished,
 drafts and forks. When an instance's history forks, each branch is shown as an
-item of the view (`items`) with the change it would make, until an intent takes
-its changes (`Intent::take`) or dismisses it (`Intent::dismiss`). The instance
-writes as a new writer once it sees the fork, which opening or a refresh
-(`retired`) reports. Facts a restore of the folder took stay shown for a day and
-a full rescan, then go. Undo reaches the intents of the session. A view never
-changes, so an app can hand it to other threads. A field read from a view is a
-value, a conflict between writers, or unreadable, so an app cannot show half a
-conflict by accident.
+item of the view (`items`) with the change it would make. One intent can take
+changes from several items (`Intent::take`); an item stays, with no changes once
+nothing is left to review, until an intent dismisses it (`Intent::dismiss`). The
+instance writes as a new writer once it sees the fork, which opening or a
+refresh (`retired`) reports. Facts a restore of the folder took stay shown for a
+day and a full rescan, then go. Undo reaches the intents of the session. A view
+never changes, so an app can hand it to other threads. A field read from a view
+is a value, a conflict between writers, or unreadable, so an app cannot show
+half a conflict by accident.
 
 A save takes bytes or a source the driver streams into staging a chunk at a
 time, such as a `Splice` of the file being rewritten, so a file of hundreds of

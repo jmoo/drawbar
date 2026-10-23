@@ -391,7 +391,8 @@ fn shown(world: &World, lines: &Lines, derived: &Derived) -> Shown {
     }
     let mut items = BTreeSet::new();
     for (by, list) in &derived.items {
-        for item in list {
+        // The model shows no item that would change nothing.
+        for item in list.iter().filter(|item| !item.change.is_empty()) {
             items.insert(Item {
                 dir: dir_of(*by),
                 kind: match item.kind {
