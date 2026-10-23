@@ -945,7 +945,9 @@ empty (see Recovery).
 ### Browsers
 
 In a browser, the library runs on the page and a dedicated worker performs its
-requests, one at a time, in the order they were sent. The folder is a directory
+requests, one at a time, in the order they were sent; or the library runs in a
+dedicated worker of the app's own, which performs its requests itself, and the
+reports it makes, which serialize, go to the page as messages. The folder is a directory
 of the origin private file system or a folder the user picked; the local root is
 always a directory of the origin private file system.
 

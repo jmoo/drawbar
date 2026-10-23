@@ -2,6 +2,8 @@
 //! builder and undo produce plans; commit checks them against the view, logs their
 //! facts and carries out their file effects.
 
+use serde::{Deserialize, Serialize};
+
 use crate::ids::{EntityId, EntryHash, Identity, Nonce};
 use crate::io::{IoError, Range, CHUNK};
 use crate::path::RelPath;
@@ -13,7 +15,7 @@ use crate::schema::Raw;
 pub struct Content(pub usize);
 
 /// What a file effect requires at a path before it runs.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Expect {
     /// Nothing is there.
     Absent,

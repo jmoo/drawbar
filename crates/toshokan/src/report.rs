@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::drafts::Drafted;
 use crate::error::Why;
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
@@ -79,7 +81,7 @@ pub struct Settled {
 }
 
 /// An unfinished effect of another writer, read from its pending record.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Orphan {
     pub writer: WriterId,
     pub record: Nonce,
@@ -95,7 +97,7 @@ pub struct Orphan {
     pub live: bool,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct DraftStatus {
     pub of: Drafted,
     pub state: DraftState,
@@ -107,7 +109,7 @@ pub struct DraftStatus {
     pub at: Option<Hlc>,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum DraftState {
     /// The entity's file still holds the base the draft was made over: the draft's
     /// bytes, to restore.
@@ -288,14 +290,14 @@ pub struct Refreshed {
 }
 
 /// One change to what a reader sees.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct Change {
     pub entity: EntityId,
     pub what: What,
     pub by: By,
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum What {
     Created,
     Deleted,
@@ -303,7 +305,7 @@ pub enum What {
     File,
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum By {
     This,
     Writer {
@@ -369,4 +371,47 @@ pub struct Compacted {
     pub folded: usize,
     /// Segments that ended with a seal marker, folded and deleted.
     pub removed: Vec<RelPath>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reports an app hands from a worker to its page come back as they were.
+    #[test]
+    fn reports_an_app_sends_elsewhere_serialize_and_come_back_whole() {
+        let writer = WriterId::from_u128(7);
+        let path = RelPath::new("Set/a.wav").unwrap();
+        let orphan = Orphan {
+            writer,
+            record: Nonce::from_u128(9),
+            label: "Move".into(),
+            paths: vec![path.clone()],
+            ours: false,
+            live: true,
+        };
+        let draft = DraftStatus {
+            of: Drafted::File(path),
+            state: DraftState::BaseChanged {
+                found: Some(Identity::from_u128(3)),
+                bytes: b"edit".to_vec(),
+            },
+            pooled: Some(writer),
+            at: Some(Hlc {
+                wall_ms: 5,
+                counter: 1,
+            }),
+        };
+        let change = Change {
+            entity: EntityId::from_u128(4),
+            what: What::Field("tags".into()),
+            by: By::Writer {
+                writer,
+                label: "drawbar".into(),
+            },
+        };
+        let json = serde_json::to_string(&(&orphan, &draft, &change)).unwrap();
+        let back: (Orphan, DraftStatus, Change) = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, (orphan, draft, change), "{json}");
+    }
 }

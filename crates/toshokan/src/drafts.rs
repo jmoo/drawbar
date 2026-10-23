@@ -14,7 +14,7 @@ use crate::path::RelPath;
 
 /// Whose unsaved edit a draft is: an entity's, or the file's at a path no entity is
 /// bound to, which an edit alone does not make an entity.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum Drafted {
     Entity(EntityId),
     File(RelPath),
