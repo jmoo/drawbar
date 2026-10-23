@@ -160,14 +160,14 @@ fn agree(
     let forks = oracle::place(world, held, &BTreeSet::new()).forks;
     let forked = !forks.is_empty();
     let fields: BTreeSet<Field> = ov.keys().chain(sv.keys()).copied().collect();
-    let mut divergent = false;
+    let mut divergent: BTreeSet<Field> = BTreeSet::new();
     for field in fields {
         let o = ov.get(&field).cloned().unwrap_or_default();
         let s = sv.get(&field).cloned().unwrap_or_default();
         if o == s {
             continue;
         }
-        divergent = true;
+        divergent.insert(field);
         let forced = spec.items.iter().any(|i| i.forgotten.contains(&field));
         let oracle_writes = |v: &Val| -> Vec<Hash> {
             let writes = oracle.writes.get(&field).into_iter().flatten().copied();
@@ -237,14 +237,21 @@ fn agree(
         }
         tally.add(&tally.unplaced, 1);
     }
-    let views = |shown: &Shown| -> Vec<_> {
-        shown
-            .item_views()
+    // Items are compared on every field whose merged values agree.
+    let undivergent = |views: Vec<(Dir, ItemKind, BTreeMap<Field, Option<Val>>)>| {
+        let mut kept: Vec<_> = views
             .into_iter()
             .filter(|v| v.1 != ItemKind::Unplaced)
-            .collect()
+            .filter_map(|(dir, kind, mut change)| {
+                change.retain(|field, _| !divergent.contains(field));
+                (!change.is_empty()).then_some((dir, kind, change))
+            })
+            .collect();
+        kept.sort();
+        kept
     };
-    if divergent || views(oracle) == views(spec) {
+    let views = |shown: &Shown| undivergent(shown.item_views());
+    if views(oracle) == views(spec) {
         return Ok(());
     }
     let mut unforced: Vec<_> = spec
@@ -256,12 +263,15 @@ fn agree(
             change.retain(|&field, &mut value| {
                 !i.forgotten.contains(&field) || world::differs(spec, field, value)
             });
-            (!change.is_empty()).then_some((i.dir, i.kind, change))
+            Some((i.dir, i.kind, change))
         })
         .collect();
-    unforced.sort();
+    unforced = undivergent(unforced);
     if unforced != views(oracle) {
-        return Err("items differ".into());
+        return Err(format!(
+            "items differ: oracle {:?}, design {unforced:?}",
+            views(oracle)
+        ));
     }
     tally.add(&tally.collapsed, 1);
     Ok(())
