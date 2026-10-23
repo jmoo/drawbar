@@ -11,10 +11,11 @@ use super::world::{
 };
 use super::{Compaction, Design, Reading};
 
-/// A reference a contribution keeps: the target, and the own entry that made it.
+/// A reference a contribution keeps: `[own n, own hash, writer, n, hash]`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Reference {
-    pub own: u32,
+    /// The own entry that made it.
+    pub own: Ref,
     pub target: Ref,
 }
 
@@ -52,10 +53,10 @@ pub struct Contribution {
     /// Per field and other writer, the latest target replaced, removed or, by a
     /// delete, observed.
     pub refs: BTreeMap<(Field, Dir), Reference>,
-    /// The number of its latest own delete.
-    pub deleted: Option<u32>,
+    /// Per own field write it holds, the first own delete above it.
+    pub killed: BTreeMap<Field, Ref>,
     pub certs: Certs,
-    pub dismissals: BTreeSet<(u32, Dismissal)>,
+    pub dismissals: BTreeSet<(Ref, Dismissal)>,
 }
 
 impl Contribution {
@@ -66,7 +67,7 @@ impl Contribution {
             own: BTreeMap::new(),
             first: BTreeMap::new(),
             refs: BTreeMap::new(),
-            deleted: None,
+            killed: BTreeMap::new(),
             certs: Certs::default(),
             dismissals: BTreeSet::new(),
         }
@@ -89,7 +90,7 @@ fn references<'a>(world: &'a World, e: &'a Entry) -> impl Iterator<Item = (Field
 }
 
 fn later(slot: &mut Option<Reference>, r: Reference) {
-    if slot.is_none_or(|s| (r.target.n, r.own) > (s.target.n, s.own)) {
+    if slot.is_none_or(|s| (r.target.n, r.own.n) > (s.target.n, s.own.n)) {
         *slot = Some(r);
     }
 }
@@ -158,19 +159,25 @@ impl Design for Spec {
         out.head = head;
         for &h in since {
             let e = world.entry(h);
-            out.dismissals.extend(e.dismisses.iter().map(|d| (e.n, *d)));
+            out.dismissals
+                .extend(e.dismisses.iter().map(|d| (e.at(), *d)));
             let Some(w) = e.write else { continue };
             out.own.insert(w.field, (e.at(), w.value));
+            out.killed.remove(&w.field);
             out.first.entry(w.field).or_insert(e.n);
             if w.value == Some(Val::Deleted) {
-                out.deleted = Some(e.n);
+                for (&field, &(at, _)) in &out.own {
+                    if field != Field::Exist && at.n < e.n {
+                        out.killed.entry(field).or_insert(e.at());
+                    }
+                }
             }
             for (field, r) in references(world, e).filter(|(_, r)| r.dir != c.dir) {
                 let mut slot = out.refs.get(&(field, r.dir)).copied();
                 later(
                     &mut slot,
                     Reference {
-                        own: e.n,
+                        own: e.at(),
                         target: r,
                     },
                 );
@@ -482,7 +489,20 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
             let mut common: Option<BTreeSet<Ref>> = None;
             for t in list {
                 let own = t.own.values().map(|(at, _)| *at);
-                let named: BTreeSet<Ref> = t.certs.named().chain([t.head]).chain(own).collect();
+                let made = t
+                    .refs
+                    .values()
+                    .map(|r| r.own)
+                    .chain(t.killed.values().copied());
+                let dismissed = t.dismissals.iter().map(|(own, _)| *own);
+                let named: BTreeSet<Ref> = t
+                    .certs
+                    .named()
+                    .chain([t.head])
+                    .chain(own)
+                    .chain(made)
+                    .chain(dismissed)
+                    .collect();
                 common = Some(match common {
                     None => named,
                     Some(c) => c.intersection(&named).copied().collect(),
@@ -511,7 +531,7 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
     for (dir, list) in &dirs.tips {
         for t in list {
             for &(own, d) in &t.dismissals {
-                if limit_of(*dir).is_none_or(|f| own <= f) {
+                if limit_of(*dir).is_none_or(|f| own.n <= f) {
                     dismissals.push(d);
                 }
             }
@@ -651,12 +671,14 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
                 )
             };
             for (&(field, _), r) in &t.refs {
-                if referenced(r.own) && !dismissed(r.own) {
+                if referenced(r.own.n) && !dismissed(r.own.n) {
                     refs.push((field, r.target, contradicted(&r.target)));
                 }
             }
-            if let Some(n) = t.deleted.filter(|&n| ok(n) && !dismissed(n)) {
-                own_deletes.push((*dir, n));
+            for k in t.killed.values() {
+                if ok(k.n) && !dismissed(k.n) {
+                    own_deletes.push((*dir, k.n));
+                }
             }
         }
     }

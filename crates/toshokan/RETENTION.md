@@ -108,15 +108,18 @@ placed or shown as a run by the rules below.
 - **Sets.** Per member, the writer's latest own add or remove, live or not, and
   the number of its first.
 - **References.** Per register and per set member, and for each other writer,
-  the latest `[own n, n, hash]`: the target the writer's entries replaced or
-  removed, and the number of its own entry that did, carried forward across its
-  own later writes. A delete is a reference on every field it observed: each
-  write it observed is a target on that write's field.
+  the latest `[own n, own hash, writer, n, hash]`: the target the writer's
+  entries replaced or removed, and its own entry that did, carried forward
+  across its own later writes. A delete is a reference on every field it
+  observed: each write it observed is a target on that write's field.
+- **Own deletes.** Per own field write it holds, the first own delete above it,
+  `[n, hash]`: that delete kills the write, and every earlier own write of the
+  entity.
 
 Plus trash items not yet emptied, settlements, dismissals, and its own unknown
 and extended entries. Nothing is dropped for being dead, and references are never
-dropped; a contribution holds at most one own write and one number per field and
-one reference per field and other writer.
+dropped; a contribution holds at most one own write, one number and one own
+delete per field, and one reference per field and other writer.
 
 ## 3. The merge
 
@@ -127,14 +130,16 @@ writer's contribution holds it and nothing kills it:
 - **Own writes.** A writer's latest own write on a field kills that writer's own
   writes numbered below it on that field. A reader that held an older own write
   and receives a newer tip therefore drops it at once.
-- **References.** A reference `[own n, y, n, hash]` kills, on its field, every
-  write of `y` numbered below `n` and the one numbered `n` with that hash. One
-  numbered `n` with another hash is on another branch, and is not killed. A
-  reference applies only when the writer holding it is not forked, or its
-  `own n` is at or below that writer's fork point: references made on a branch
-  are part of the run. A reference whose target is numbered above `y`'s fork
-  point kills only the write with its hash: `y`'s earlier writes it passed may
-  have died only on that branch.
+- **Own deletes.** An own delete a contribution holds kills that writer's own
+  field writes of the entity numbered below it.
+- **References.** A reference `[own n, own hash, y, n, hash]` kills, on its
+  field, every write of `y` numbered below `n` and the one numbered `n` with
+  that hash. One numbered `n` with another hash is on another branch, and is not
+  killed. A reference applies only when the writer holding it is not forked, or
+  its `own n` is at or below that writer's fork point: references made on a
+  branch are part of the run. A reference whose target is numbered above `y`'s
+  fork point kills only the write with its hash: `y`'s earlier writes it passed
+  may have died only on that branch.
 
 Killing below `n` is sound because `y`'s write `n` replaced every earlier write of
 `y` to that field it saw, and `y` always sees its own; and no two branches of a
@@ -211,12 +216,16 @@ the files again, so a reader without that memory finds the same ones, except for
 a fork inside a segment (open question 7).
 
 **Several tips.** When two snapshots of `y` do not certify each other, the
-writer forked and both sides compacted. The highest entry every tip certifies or
-holds as an own write is their fork point: an own write lies on its tip's chain,
-and a segment certificate names only the ends of a segment. Below it the reader
-merges the union of the tips' own writes: a tip lacks a pre-fork write only
-because its own later write replaced it, and that later write is above the fork
-point and a run. Above it, every tip's own writes and references are runs.
+writer forked and both sides compacted. Their parting is the highest entry every
+tip names by hash anywhere: in its certificates, as its head, as an own write,
+as the own entry of a reference, as an own delete, or as a dismissal. Two tips
+that name one hash both have it on their chain, so the parting never lies above
+the true fork point, and every entry that still has an effect on a tip names
+itself there. A pre-fork entry with no effect left may lie above the parting; it
+is shown as a run, which costs display only. Below the parting the reader merges
+the union of the tips' own writes: a tip lacks a pre-fork write only because its
+own later write replaced it, and that later write is above the fork point and a
+run. Above it, every tip's own writes and references are runs.
 
 Two tips with one head are copies of one chain compacted twice: their own writes
 and references are the same, since both follow from the chain; the reader takes
@@ -542,10 +551,8 @@ Clocks: nothing in this design depends on them.
    holds the survivor back as a gap; they disagree until the writer's next
    snapshot reaches both.
 7. **A fork inside a segment.** When an instance is cloned while its segment is
-   open and both sides compact, each tip names only the ends of that segment, so
-   a reader without the file places the fork point at the segment's first line.
-   It shows the pre-fork entries between that line and the true fork point as
-   runs, and treats every own write that could be pre-fork as a forgotten basis.
-   One loss remains: a pre-fork own delete that both branches revived no longer
-   kills the writer's earlier field writes, which show again. Certifying every
-   line by hash would close it at a cost per entry.
+   open and both sides compact, each tip names only the ends of that segment by
+   certificate. The parting comes from every hash the tips name, so it reaches
+   the last pre-fork entry that still has an effect; entries above it with none
+   are shown as runs, and own writes that could be pre-fork are treated as a
+   forgotten basis. Certifying segments, not lines, keeps that cost to display.
