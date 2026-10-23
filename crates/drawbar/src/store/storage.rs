@@ -126,8 +126,12 @@ fn staged(path: &RelPath) -> RelPath {
 /// processes of the install, such as other tabs, wait for them.
 const REPLACING: &str = "replacing.lock";
 
-/// How many times a lock another process holds is asked for before giving up.
-const LOCK_TRIES: usize = 10_000;
+/// How long to wait between asks for a lock another process holds.
+const LOCK_WAIT_MS: u32 = 5;
+
+/// How many times a lock another process holds is asked for before giving up: about
+/// ten seconds of waits.
+const LOCK_TRIES: usize = 2_000;
 
 /// Run `then` holding [`REPLACING`].
 async fn locked<F: Fs, T>(fs: &F, then: impl AsyncFnOnce() -> io::Result<T>) -> io::Result<T> {
@@ -139,11 +143,32 @@ async fn locked<F: Fs, T>(fs: &F, then: impl AsyncFnOnce() -> io::Result<T>) -> 
                 let _ = fs.perform(Io::Unlock { name }).await;
                 return done;
             }
-            Reply::Lock(Lock::Held) => fs.pause().await,
+            Reply::Lock(Lock::Held) => wait(LOCK_WAIT_MS).await,
             _ => return Err(wrong()),
         }
     }
     Err(io::Error::other("another tab kept it busy"))
+}
+
+/// Wait `ms` milliseconds: on the keeper's own thread on the desktop, and without
+/// holding the worker's thread in the browser.
+#[cfg(not(target_arch = "wasm32"))]
+async fn wait(ms: u32) {
+    std::thread::sleep(std::time::Duration::from_millis(ms.into()));
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn wait(ms: u32) {
+    use wasm_bindgen::JsCast as _;
+
+    let waited = js_sys::Promise::new(&mut |resolve, _| {
+        let global = js_sys::global();
+        let set = crate::js::field(&global, "setTimeout");
+        if let Some(set) = set.map(|set| set.unchecked_into::<js_sys::Function>()) {
+            let _ = set.call2(&global, &resolve, &ms.into());
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(waited).await;
 }
 
 /// Keep `bytes` at `path` in place of what it held, so a crash leaves the old bytes or
@@ -216,4 +241,60 @@ async fn read_whole<F: Fs>(fs: &F, root: Root, path: &RelPath) -> io::Result<Opt
         bytes.extend_from_slice(&read);
     }
     Ok(Some(bytes))
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use std::cell::{Cell, RefCell};
+
+    use toshokan::blocking::{Backend as _, Native};
+    use toshokan::io::{Capabilities, IoResult};
+
+    use super::*;
+    use crate::testing::Temp;
+
+    /// The native backend over a library's own state, counting the locks it asks for.
+    struct Counting(RefCell<Native>, Cell<usize>);
+
+    impl Fs for Counting {
+        fn capabilities(&self, root: Root) -> Capabilities {
+            self.0.borrow().capabilities(root)
+        }
+
+        async fn perform(&self, io: Io) -> IoResult {
+            if matches!(io, Io::Lock { .. }) {
+                self.1.set(self.1.get() + 1);
+            }
+            self.0.borrow_mut().perform(io)
+        }
+    }
+
+    /// A drawbar waiting for the lock another holds waits between asks rather than
+    /// asking as fast as it can, and goes ahead once the lock is let go.
+    #[test]
+    fn a_replace_waits_for_the_lock_another_holds_without_spinning() {
+        let root = Temp::new();
+        let local = root.local();
+        let name = RelPath::new(REPLACING).unwrap();
+        let (held, release) = std::sync::mpsc::channel();
+        let holder = {
+            let (folder, local, name) = (root.0.clone(), local.clone(), name.clone());
+            std::thread::spawn(move || {
+                let mut other = Native::new(&folder, &local);
+                other.perform(Io::Lock { name: name.clone() }).unwrap();
+                held.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                other.perform(Io::Unlock { name }).unwrap();
+            })
+        };
+        release.recv().unwrap();
+        let fs = Counting(RefCell::new(Native::new(&root.0, &local)), Cell::new(0));
+        let path = RelPath::new("slots/a").unwrap();
+        nord_usb::block_on(replace(&fs, Root::Local, &path, b"edit".to_vec())).unwrap();
+        holder.join().unwrap();
+        let asked = fs.1.get();
+        assert!(asked < 200, "{asked} asks for the lock in 200 ms");
+        let kept = nord_usb::block_on(read_replaced(&fs, Root::Local, &path)).unwrap();
+        assert_eq!(kept.as_deref(), Some(&b"edit"[..]));
+    }
 }
