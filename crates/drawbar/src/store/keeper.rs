@@ -1688,6 +1688,28 @@ mod tests {
     }
 
     #[test]
+    fn the_scan_that_first_lists_many_files_shows_the_whole_view() {
+        let root = Temp::new();
+        for i in 0..1100 {
+            fs::write(root.at(&format!("{i:04}.ne5p")), b"program").unwrap();
+        }
+        let clock = Box::new(SystemClock);
+        let mut keeper = native::keeper(&root.0, &root.local(), Arc::default(), clock);
+        keeper.run_one(Cmd::Open);
+        let listed = keeper.run_one(Cmd::Rescan);
+        let [Event::Scanned(Ok(viewed))] = &listed[..] else {
+            panic!("{listed:?}")
+        };
+        assert!(matches!(viewed.shown, Change::Whole(_)));
+        fs::write(root.at("new.ne5p"), b"program").unwrap();
+        let listed = keeper.run_one(Cmd::Rescan);
+        let [Event::Scanned(Ok(viewed))] = &listed[..] else {
+            panic!("{listed:?}")
+        };
+        assert!(!matches!(viewed.shown, Change::Whole(_)), "one more file");
+    }
+
+    #[test]
     fn the_scan_after_opening_counts_the_files_it_finds() {
         let root = Temp::new();
         fs::create_dir(root.at("Live")).unwrap();

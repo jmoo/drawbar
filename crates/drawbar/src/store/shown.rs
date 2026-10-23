@@ -41,7 +41,8 @@ pub struct Showing {
 /// What an answer's view changed of what the app shows.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Change {
-    /// Everything, as the library opens or once the app lost an answer.
+    /// Everything, as the library opens, once the app lost an answer, or where most
+    /// of what it shows changed.
     Whole(Shown),
     /// What each key the view's changes reach shows now, and the list of tags where it
     /// changed.
@@ -202,12 +203,18 @@ impl Showing {
 
 impl Change {
     /// What `view` changed since `before`, the view the app was last shown; everything
-    /// where there was none.
+    /// where there was none, or where the change reaches most of what `view` shows, as
+    /// the first listing of every file does.
     pub fn since(view: &View, before: Option<&View>) -> Change {
         let Some(before) = before else {
             return Change::Whole(Shown::of(view));
         };
         let changed = view.changed_since(before);
+        let reached = changed.entities.len() + changed.files.len();
+        let most = || view.entities().len() + view.unbound().count();
+        if reached > MOST_KEYS && 2 * reached > most() {
+            return Change::Whole(Shown::of(view));
+        }
         let mut keys: BTreeSet<Key> = changed.entities.iter().copied().map(Key::Entity).collect();
         for path in &changed.files {
             if let Some(entity) = view.at(path).map(|entity| entity.id()) {
@@ -229,6 +236,9 @@ impl Change {
         }
     }
 }
+
+/// The most keys a change names before it may be sent whole.
+const MOST_KEYS: usize = 1024;
 
 /// The library's list of tags.
 fn names(view: &View) -> BTreeSet<String> {
