@@ -29,14 +29,13 @@ pub struct Plan {
     pub label: String,
     /// The entities the intent creates, their ids drawn as it was built.
     pub created: Vec<EntityId>,
-    pub facts: Vec<FactChange>,
+    /// Each with the run it takes from, when it is taken from an item: it then
+    /// settles its field against that run's writes.
+    pub facts: Vec<(FactChange, Option<Run>)>,
     /// Carried out in order, each only after every precondition was checked.
     pub files: Vec<FileChange>,
     /// The entry an undo or redo compensates.
     pub reverses: Option<EntryHash>,
-    /// The item whose change the facts take: each of them settles its field
-    /// against that run's writes.
-    pub take: Option<Run>,
     /// Items the user dismissed: no reader merges or shows them again.
     pub dismiss: Vec<Run>,
 }

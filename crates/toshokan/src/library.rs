@@ -710,7 +710,7 @@ impl Library {
         let revived: BTreeSet<EntityId> = plan
             .facts
             .iter()
-            .filter_map(|change| match change {
+            .filter_map(|(change, _)| match change {
                 FactChange::Revive { entity } => Some(*entity),
                 _ => None,
             })

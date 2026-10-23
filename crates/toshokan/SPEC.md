@@ -622,8 +622,9 @@ A commit:
    replaces every live write of the register, an add or remove every live write
    of its member, a delete observes every live field write of its entity, and
    the intent names the fork points it knows of the writers its ops name. Each
-   change taken from an item names the item's run in `take`. A key the app did
-   not declare, or an entity that is not shown, refuses the intent.
+   change taken from an item names that item's run in `take`, so one intent can
+   take from several runs. A key the app did not declare, or an entity that is
+   not shown, refuses the intent.
 2. Turns the file changes into the steps below and their preconditions.
 3. If the instance has no writer yet, checks the preconditions without writing
    and only then creates its writer, so a refused first intent leaves nothing.

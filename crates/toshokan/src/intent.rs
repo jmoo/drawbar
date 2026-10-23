@@ -107,10 +107,13 @@ impl<L: Driver> Intent<L> {
     }
 
     pub fn clear<T: Value>(mut self, entity: EntityId, key: Register<T>) -> Self {
-        self.plan.facts.push(FactChange::Clear {
-            entity,
-            key: key.name().to_owned(),
-        });
+        self.plan.facts.push((
+            FactChange::Clear {
+                entity,
+                key: key.name().to_owned(),
+            },
+            None,
+        ));
         self
     }
 
@@ -122,11 +125,14 @@ impl<L: Driver> Intent<L> {
     /// Removes every add of `value` this writer has observed.
     pub fn remove<T: Value>(mut self, entity: EntityId, key: Set<T>, value: &T) -> Self {
         if let Some(value) = encode(&mut self.invalid, key.name(), value) {
-            self.plan.facts.push(FactChange::Remove {
-                entity,
-                key: key.name().to_owned(),
-                value,
-            });
+            self.plan.facts.push((
+                FactChange::Remove {
+                    entity,
+                    key: key.name().to_owned(),
+                    value,
+                },
+                None,
+            ));
         }
         self
     }
@@ -134,23 +140,22 @@ impl<L: Driver> Intent<L> {
     /// Deletes the entity, observing every field write this writer has seen. Its
     /// file stays where it is unless the intent also trashes it.
     pub fn delete(mut self, entity: EntityId) -> Self {
-        self.plan.facts.push(FactChange::Delete { entity });
+        self.plan.facts.push((FactChange::Delete { entity }, None));
         self
     }
 
     /// Brings a deleted entity back with the fields it had, or settles a deletion
     /// conflict in favor of keeping it.
     pub fn revive(mut self, entity: EntityId) -> Self {
-        self.plan.facts.push(FactChange::Revive { entity });
+        self.plan.facts.push((FactChange::Revive { entity }, None));
         self
     }
 
     /// Takes `change`, one of the changes [`crate::report::Item`] shows of the
     /// run `run`: it is committed as any change, and settles its field against
-    /// that run's writes. An intent takes from one run.
+    /// that run's writes. An intent may take from several runs.
     pub fn take(mut self, run: Run, change: FactChange) -> Self {
-        self.plan.take = Some(run);
-        self.plan.facts.push(change);
+        self.plan.facts.push((change, Some(run)));
         self
     }
 
@@ -275,11 +280,14 @@ fn set<T: Value>(
     value: &T,
 ) {
     if let Some(value) = encode(invalid, key.name(), value) {
-        plan.facts.push(FactChange::Set {
-            entity,
-            key: key.name().to_owned(),
-            value,
-        });
+        plan.facts.push((
+            FactChange::Set {
+                entity,
+                key: key.name().to_owned(),
+                value,
+            },
+            None,
+        ));
     }
 }
 
@@ -291,11 +299,14 @@ fn add<T: Value>(
     value: &T,
 ) {
     if let Some(value) = encode(invalid, key.name(), value) {
-        plan.facts.push(FactChange::Add {
-            entity,
-            key: key.name().to_owned(),
-            value,
-        });
+        plan.facts.push((
+            FactChange::Add {
+                entity,
+                key: key.name().to_owned(),
+                value,
+            },
+            None,
+        ));
     }
 }
 
@@ -317,8 +328,8 @@ fn encode<T: Value>(invalid: &mut Option<Invalid>, key: &str, value: &T) -> Opti
 /// `folded`: a create for each entity it creates, then each fact change in order,
 /// then a dismissal of the runs `plan` dismisses. A write replaces every live
 /// write of its register, an add or remove every live write of its member, and a
-/// delete observes every live field write of its entity. Each fact change names
-/// the run `plan` takes.
+/// delete observes every live field write of its entity. Each fact change taken
+/// from an item names its run.
 ///
 /// Refuses a key the schema does not declare with the change's kind, and a change
 /// to an entity that is neither shown, created nor revived by the plan. Of several
@@ -330,11 +341,10 @@ pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Inv
     if nothing && plan.reverses.is_none() && plan.dismiss.is_empty() {
         return Err(Invalid::Empty);
     }
-    let take = plan.take;
     let revived: BTreeSet<EntityId> = plan
         .facts
         .iter()
-        .filter_map(|change| match change {
+        .filter_map(|(change, _)| match change {
             FactChange::Revive { entity } => Some(*entity),
             _ => None,
         })
@@ -361,10 +371,11 @@ pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Inv
             take: None,
         })
         .collect();
-    for (index, change) in plan.facts.iter().enumerate() {
+    for (index, (change, take)) in plan.facts.iter().enumerate() {
         if superseded(&plan.facts[index + 1..], change) {
             continue;
         }
+        let take = *take;
         let op = match change {
             FactChange::Set { entity, key, value } => {
                 let entity = writable(*entity)?;
@@ -465,7 +476,7 @@ pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Inv
 
 /// Whether a later change in `rest` writes the same register, or the same
 /// entity's existence, as `change`.
-fn superseded(rest: &[FactChange], change: &FactChange) -> bool {
+fn superseded(rest: &[(FactChange, Option<Run>)], change: &FactChange) -> bool {
     let slot = |change: &FactChange| match change {
         FactChange::Set { entity, key, .. } | FactChange::Clear { entity, key } => {
             Some((*entity, Some(key.clone())))
@@ -476,7 +487,8 @@ fn superseded(rest: &[FactChange], change: &FactChange) -> bool {
     let Some(own) = slot(change) else {
         return false;
     };
-    rest.iter().any(|later| slot(later).as_ref() == Some(&own))
+    rest.iter()
+        .any(|(later, _)| slot(later).as_ref() == Some(&own))
 }
 
 fn register_write(

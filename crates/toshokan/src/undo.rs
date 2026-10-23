@@ -237,33 +237,34 @@ pub fn reverse(
         reverses: Some(entry.hash()),
         ..Plan::default()
     };
+    let mut facts = Vec::new();
     for op in &logged.ops {
         match op {
             Op::Create { entity, .. } => {
                 reversing.existence(*entity, Exists::Created)?;
                 reversing.only_own_writes(*entity)?;
-                plan.facts.push(FactChange::Delete { entity: *entity });
+                facts.push(FactChange::Delete { entity: *entity });
             }
             Op::Delete { entity, .. } => {
                 reversing.existence(*entity, Exists::Deleted)?;
-                plan.facts.push(FactChange::Revive { entity: *entity });
+                facts.push(FactChange::Revive { entity: *entity });
                 let revived = before.revived.get(entity).into_iter().flatten();
-                plan.facts.extend(revived.cloned());
+                facts.extend(revived.cloned());
             }
             Op::Write {
                 entity, key, value, ..
             } if !recreated.contains(entity) => {
-                plan.facts.push(reversing.write(*entity, key, value)?);
+                facts.push(reversing.write(*entity, key, value)?);
             }
             Op::Add {
                 entity, key, value, ..
             } if !recreated.contains(entity) => {
-                plan.facts.extend(reversing.add(*entity, key, value)?);
+                facts.extend(reversing.add(*entity, key, value)?);
             }
             Op::Remove {
                 entity, key, value, ..
             } if !recreated.contains(entity) => {
-                plan.facts.push(reversing.remove(*entity, key, value)?);
+                facts.push(reversing.remove(*entity, key, value)?);
             }
             Op::File { entity, file, .. } => {
                 plan.files.extend(reversing.file(*entity, file.as_ref())?);
@@ -276,6 +277,7 @@ pub fn reverse(
             | Op::Unknown(_) => {}
         }
     }
+    plan.facts = facts.into_iter().map(|change| (change, None)).collect();
     Ok(plan)
 }
 

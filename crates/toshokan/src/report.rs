@@ -134,9 +134,10 @@ pub enum ItemKind {
 }
 
 /// Entries a reader shows apart from the merged state, with the net change they
-/// would make. The user keeps the current state or takes changes, with a plan
-/// whose [`crate::Plan::take`] names `run`, and may dismiss a run with
-/// [`crate::Plan::dismiss`]; a gap or unplaced lines cannot be dismissed.
+/// would make. The user keeps the current state or takes changes, with
+/// [`crate::intent::Intent::take`] naming `run`, and may dismiss a run with
+/// [`crate::intent::Intent::dismiss`]; a gap or unplaced lines cannot be
+/// dismissed.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Item {
     pub kind: ItemKind,

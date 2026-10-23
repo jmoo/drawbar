@@ -544,6 +544,7 @@ through_both!(
     a_refresh_scans_only_the_files_other_writers_moved,
     a_conflict_is_shown_and_resolved,
     a_clone_forks_into_items_taken_or_dismissed,
+    one_intent_takes_from_runs_of_two_forked_writers,
     a_restored_folder_makes_the_writer_rekey,
     what_a_restored_writer_showed_survives_reopening_and_a_crash,
     an_instance_without_a_writer_keeps_only_the_grace_step_in_the_views_it_read,
@@ -1039,6 +1040,108 @@ fn a_clone_forks_into_items_taken_or_dismissed<F: Facade>() {
         opened.start,
         Start::Resumed(writer),
         "the forked writer is never written again"
+    );
+}
+
+/// Forks the writer whose local root `here` holds: it resumes on `here` and on a
+/// copy of that root, and each instance commits what `branch` makes of its
+/// library and the name of its side, `"here"` or `"there"`, then closes.
+fn fork<F: Facade>(
+    here: &Machine,
+    label: &str,
+    seed: u64,
+    clock: &TestClock,
+    mut branch: impl FnMut(&mut F, &str),
+) {
+    let there = here.cloned();
+    let (mut original, _) = F::open(Probe::new(here), env(label, seed, clock)).unwrap();
+    let (mut copy, _) = F::open(Probe::new(&there), env(label, seed + 1, clock)).unwrap();
+    branch(&mut original, "here");
+    branch(&mut copy, "there");
+    original.close().unwrap();
+    copy.close().unwrap();
+}
+
+/// The item that would make `change`.
+fn item_making(view: &View, change: &FactChange) -> Item {
+    let mut items = view.items().iter();
+    items
+        .find(|item| {
+            item.changes
+                .iter()
+                .any(|c| c.change.as_ref() == Some(change))
+        })
+        .cloned()
+        .unwrap_or_else(|| panic!("{change:?} in {:?}", view.items()))
+}
+
+fn added(entity: EntityId, text: &str) -> FactChange {
+    FactChange::Add {
+        entity,
+        key: "tags".into(),
+        value: toshokan::Raw::of(&text).unwrap(),
+    }
+}
+
+/// The ops of the intent `committed` logged.
+fn logged_ops(folder: &MemDisk, view: &View, committed: &Committed) -> Vec<Op> {
+    let own = view.writers().iter().find(|w| w.here == Presence::This);
+    let entries = segment_entries(folder, own.unwrap().writer);
+    let entry = entries
+        .iter()
+        .find(|entry| entry.hash() == committed.intent);
+    match entry.map(Entry::kind) {
+        Some(EntryKind::Intent(logged)) => logged.ops,
+        kind => panic!("{kind:?}"),
+    }
+}
+
+fn one_intent_takes_from_runs_of_two_forked_writers<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (a_root, b_root) = (machine(&folder), machine(&folder));
+    let (mut a, _) = F::open(Probe::new(&a_root), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    a.close().unwrap();
+    let (mut b, _) = F::open(Probe::new(&b_root), env("b", 2, &clock)).unwrap();
+    b.commit("Tag", |i| i.add(song, TAGS, tag("b"))).unwrap();
+    b.close().unwrap();
+    for (root, label, seed) in [(&a_root, "a", 10), (&b_root, "b", 20)] {
+        fork::<F>(root, label, seed, &clock, |library, side| {
+            let text = format!("{label} {side}");
+            library.commit("Tag", |i| i.add(song, TAGS, text)).unwrap();
+        });
+    }
+
+    let (mut c, _) = F::open(Probe::new(&machine(&folder)), env("c", 3, &clock)).unwrap();
+    let view = c.view();
+    assert_eq!(view.forks().len(), 2, "{:?}", view.forks());
+    let (from_a, from_b) = (added(song, "a there"), added(song, "b here"));
+    let (run_a, run_b) = (
+        item_making(&view, &from_a).run,
+        item_making(&view, &from_b).run,
+    );
+    assert_ne!(run_a.writer, run_b.writer);
+    let committed = c
+        .commit("Keep", |i| {
+            i.take(run_a, from_a.clone())
+                .take(run_b, from_b.clone())
+                .set(song, ORIGIN, "kept".into())
+        })
+        .unwrap();
+    assert_eq!(tags(&c.view(), song), ["a there", "b", "b here", "new"]);
+    let takes: Vec<_> = logged_ops(&folder, &c.view(), &committed)
+        .iter()
+        .map(|op| (op.entity(), op.take().copied()))
+        .collect();
+    assert_eq!(
+        takes,
+        [
+            (Some(song), Some(run_a)),
+            (Some(song), Some(run_b)),
+            (Some(song), None)
+        ],
+        "each op names the run it takes from, if any"
     );
 }
 
