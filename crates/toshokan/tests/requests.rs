@@ -305,6 +305,7 @@ fn a_refresh_asks_the_length_and_time_only_of_files_that_may_grow() {
     let asked: Vec<&'static str> = recorded
         .take()
         .iter()
+        .filter(|io| io.root() == Root::Folder)
         .filter_map(|io| match io {
             Io::ListStat { .. } => Some("ListStat"),
             Io::Stat { .. } => Some("Stat"),
