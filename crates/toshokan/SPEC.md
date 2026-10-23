@@ -494,15 +494,17 @@ Each install keeps what it remembers as a cached view in its local root:
 gained since, one record after another. A view holds, per writer, its tips, the
 entries merged after them and shown as runs or gaps, and its fork points, with
 the state of the grace step. A new writer writes `view.bin` from the view its
-instance holds. After each read that changed what the view remembers, after
-each append, and when the instance closes, the instance appends a record of
-what the view gained to `view.log` and syncs it. It writes `view.bin` again, and
-then removes `view.log`, when `view.log` has grown past half of `view.bin` and
-1 MiB more, when a record could not be appended or the last one is torn, when
-the view's tips changed or it let go of an entry, and when the view holds what
-neither file does. An instance without a writer keeps only a change to the grace
-step, in the view of the writer it loaded and of each retired writer whose view
-it took in.
+instance holds. After each read that changed what the view remembers, after each
+append, and when the instance closes, the instance appends a record of what the
+view gained to `view.log` and syncs it. It writes `view.bin` again, and then
+removes `view.log`, when `view.log` has grown past half of `view.bin` and 1 MiB
+more, when a record could not be appended, the last one is torn or one extends
+an earlier `view.bin`, when the view's tips changed or it let go of an entry,
+and when the view holds what neither file does. Each `view.bin` has a
+generation, one past that of the `view.bin` it replaces, and each record of
+`view.log` names the generation it extends. An instance without a writer keeps
+only a change to the grace step, in the view of the writer it loaded and of each
+retired writer whose view it took in.
 
 Every open starts from the views of the install's writers joined: the view of
 the writer it continues, then those of the other live writers, then those of
@@ -516,23 +518,24 @@ lines the view holds no entry for kept whole, or the head of the view's tip it
 holds. A file the view cannot give the lines or the snapshot of is read again.
 
 The cached view is private to the install, and only the build that wrote it
-reads it. Each file is a sequence of records: the length of the record's
-payload as 8 bytes little-endian, a 16-byte check of the payload, then the
-payload. The check finds a record a crash tore or a disk damaged; it does not
-guard against forgery, since only the install writes its local root. This build
-computes it in two lanes of 64-bit multiplies over the payload. The payload's
-first byte names its format, 3; the rest is the view, or what it gained, in this
-build's binary encoding: integers as LEB128, identifiers as their 16 bytes
+reads it. Each file is a sequence of records: the length of the record's payload
+as 8 bytes little-endian, a 16-byte check of the payload, then the payload. The
+check finds a record a crash tore or a disk damaged; it does not guard against
+forgery, since only the install writes its local root. This build computes it in
+two lanes of 64-bit multiplies over the payload. The payload's first byte names
+its format, 4; then come the generation, and the view, or what it gained, in
+this build's binary encoding: integers as LEB128, identifiers as their 16 bytes
 big-endian, text as its length and its UTF-8, lists as their length and their
 members, with each entry as its hash, its predecessor, its number, its clock
 reading and its decoded kind. An entry keeps the JSON of its line only when that
 is not the JSON this build writes for its kind, so every line is given back byte
 for byte. Neither a line nor its hash is read or checked again: the record's
-check stands for them. A record whose length, check or format byte does not
-hold ends the readable part of `view.log`. A reader replays the records in order
-onto `view.bin`, up to the first that is torn; replaying a record twice changes
-nothing. A view that cannot be read this way is discarded, and the folder read
-from scratch.
+check stands for them. A record whose length, check or format byte does not hold
+ends the readable part of `view.log`. A reader replays the records in order onto
+`view.bin`, up to the first that is torn, skipping each that extends another
+generation, as a crash between writing `view.bin` and removing `view.log` leaves
+them; replaying a record twice changes nothing. A view that cannot be read this
+way is discarded, and the folder read from scratch.
 
 ### The grace step
 

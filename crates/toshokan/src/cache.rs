@@ -7,9 +7,11 @@
 //! whole again, and the journal removed, when the journal has grown past half
 //! the checkpoint, when a record could not be appended, when a writer's tips
 //! changed or the reader let go of what it remembered, and when the view holds
-//! what another view of the install brought. Loading replays the journal onto
-//! the checkpoint; replaying a record twice changes nothing, so a crash between
-//! writing a checkpoint and removing the journal leaves a view that loads.
+//! what another view of the install brought. Each checkpoint has a generation,
+//! and each record names the generation it extends. Loading replays onto the
+//! checkpoint the records that extend it, so a crash between writing a
+//! checkpoint and removing the journal leaves the new view, not the old journal
+//! over it.
 //!
 //! Entries are kept as an install holds them, packed and verified when they were
 //! read, so loading neither parses nor hashes them again. Each record carries a
@@ -41,7 +43,7 @@ const JOURNAL_SLACK: u64 = 1 << 20;
 /// The first byte of every record this build writes; a record starting with
 /// another is not read. It changes with any change to what a record packs or
 /// how, since a record whose check holds is taken as this build packed it.
-const FORMAT: u8 = 3;
+const FORMAT: u8 = 4;
 
 /// How many bytes of a record's length start it.
 const LEN: usize = 8;
@@ -143,9 +145,12 @@ fn mixed(mut z: u64) -> u64 {
 pub struct Store {
     /// The writer whose directory holds the view, by genesis entry.
     pub(crate) genesis: Option<EntryHash>,
+    /// The generation of the checkpoint the journal extends.
+    pub(crate) generation: u64,
     checkpoint: u64,
     journal: u64,
-    /// The journal may end in a torn record, or lack one that failed.
+    /// The journal may end in a torn record, lack one that failed, or hold
+    /// records of an earlier checkpoint.
     broken: bool,
     /// The view holds what the saved one does not: write it whole.
     due: bool,
@@ -167,6 +172,7 @@ pub(crate) struct Kept {
     pub(crate) view: CachedView,
     files: BTreeMap<RelPath, StoredFile>,
     absorbed: BTreeSet<EntryHash>,
+    generation: u64,
     checkpoint: u64,
     journal: u64,
     broken: bool,
@@ -220,6 +226,7 @@ impl Loaded {
         if Some(genesis) == own {
             self.store = Store {
                 genesis: own,
+                generation: kept.generation,
                 checkpoint: kept.checkpoint,
                 journal: kept.journal,
                 broken: kept.broken,
@@ -294,6 +301,7 @@ impl Decoding {
             view: CachedView::default(),
             files: BTreeMap::new(),
             absorbed: BTreeSet::new(),
+            generation: 0,
             checkpoint: checkpoint.as_ref().map_or(0, |bytes| bytes.len() as u64),
             journal: journal.as_ref().map_or(0, |bytes| bytes.len() as u64),
             broken: false,
@@ -363,6 +371,7 @@ impl Decoding {
             Err(Bad(reason)) => return Decode::Done(Err(reason.to_owned())),
         };
         self.kept.absorbed = stored.absorbed.iter().copied().collect();
+        self.kept.generation = stored.generation;
         self.at = 0;
         match self.kept.apply(stored) {
             Ok(()) => Decode::Journal,
@@ -370,7 +379,8 @@ impl Decoding {
         }
     }
 
-    /// Replays the journal's next record, up to the first that is torn.
+    /// Replays the journal's next record, up to the first that is torn. A record
+    /// of another generation is skipped.
     fn record(&mut self) -> Decode {
         let rest = &self.journal[self.at..];
         if rest.is_empty() {
@@ -385,6 +395,10 @@ impl Decoding {
             return Decode::Done(Ok(()));
         };
         self.at = self.journal.len() - after.len();
+        if record.generation != self.kept.generation {
+            self.kept.broken = true;
+            return Decode::Journal;
+        }
         match self.kept.apply(record) {
             Ok(()) => Decode::Journal,
             Err(reason) => Decode::Done(Err(reason)),
@@ -490,6 +504,8 @@ fn frame_head(bytes: &[u8]) -> Option<(usize, [u8; CHECK])> {
 /// changed.
 #[derive(Default)]
 struct StoredView {
+    /// A checkpoint's own generation, or the generation a record extends.
+    generation: u64,
     writers: Vec<(WriterId, StoredMemory)>,
     files: Vec<(RelPath, Option<StoredFile>)>,
     absorbed: Vec<EntryHash>,
@@ -503,6 +519,7 @@ impl StoredView {
             return Err(Bad("a format this build does not read"));
         }
         let view = Self {
+            generation: Unpack::unpack(&mut input)?,
             writers: Unpack::unpack(&mut input)?,
             files: Unpack::unpack(&mut input)?,
             absorbed: Unpack::unpack(&mut input)?,
@@ -821,15 +838,17 @@ impl StoredSegment {
     }
 }
 
-/// A stored view's payload: its memories, the records of `files`, what was
-/// absorbed and the grace step's state.
+/// A stored view's payload: its generation, its memories, the records of
+/// `files`, what was absorbed and the grace step's state.
 fn write_view<'a>(
+    generation: u64,
     memories: impl ExactSizeIterator<Item = (WriterId, MemoryOut<'a>)>,
     files: Vec<(&RelPath, Option<StoredFile>)>,
     absorbed: &BTreeSet<EntryHash>,
     grace: Option<&Grace>,
 ) -> Vec<u8> {
     let mut out = vec![FORMAT];
+    generation.pack(&mut out);
     memories.len().pack(&mut out);
     for (writer, memory) in memories {
         writer.pack(&mut out);
@@ -850,16 +869,33 @@ fn whole(memory: &Memory) -> MemoryOut<'_> {
     }
 }
 
-/// `view` as a checkpoint holding nothing else.
+/// `view` as a checkpoint of the first generation holding nothing else.
 pub(crate) fn encode_view(view: &CachedView) -> Vec<u8> {
     let memories = view
         .writers
         .iter()
         .map(|(writer, memory)| (*writer, whole(memory)));
-    write_view(memories, Vec::new(), &BTreeSet::new(), Some(&view.grace))
+    write_view(0, memories, Vec::new(), &BTreeSet::new(), Some(&view.grace))
 }
 
-fn encode_checkpoint(reader: &Reader) -> Vec<u8> {
+/// A checkpoint's bytes, and its generation.
+pub(crate) struct Checkpoint {
+    generation: u64,
+    bytes: Vec<u8>,
+}
+
+/// Keeps `view` alone as the first view of the writer whose genesis entry is
+/// `genesis`.
+pub(crate) fn save_view<'a>(view: &CachedView, genesis: EntryHash) -> Fallible<'a, ()> {
+    let checkpoint = Checkpoint {
+        generation: 0,
+        bytes: encode_view(view),
+    };
+    write_checkpoint(genesis, checkpoint, Rc::default())
+}
+
+fn encode_checkpoint(reader: &Reader) -> Checkpoint {
+    let generation = reader.store.borrow().generation.wrapping_add(1);
     let view = reader.cached();
     let memories = view
         .writers
@@ -872,28 +908,35 @@ fn encode_checkpoint(reader: &Reader) -> Vec<u8> {
             Some((path, Some(StoredFile::of(record, memory)?)))
         })
         .collect();
-    write_view(memories, files, &reader.absorbed, Some(&view.grace))
+    let bytes = write_view(
+        generation,
+        memories,
+        files,
+        &reader.absorbed,
+        Some(&view.grace),
+    );
+    Checkpoint { generation, bytes }
 }
 
 /// A checkpoint of a reader's view, encoded as [`Encoding::step`] is asked to.
 pub(crate) struct Encoding {
-    out: Option<Vec<u8>>,
+    out: Checkpoint,
 }
 
 impl Encoding {
     pub(crate) fn new(reader: &Reader) -> Self {
         Self {
-            out: Some(encode_checkpoint(reader)),
+            out: encode_checkpoint(reader),
         }
     }
 
     /// True once the checkpoint is encoded.
     pub(crate) fn step(&mut self) -> bool {
-        self.out.is_some()
+        true
     }
 
-    pub(crate) fn finish(self) -> Vec<u8> {
-        self.out.unwrap_or_default()
+    pub(crate) fn finish(self) -> Checkpoint {
+        self.out
     }
 }
 
@@ -927,7 +970,14 @@ fn encode_record(reader: &Reader) -> Vec<u8> {
         })
         .collect();
     let grace = reader.unsaved.grace.then_some(&view.grace);
-    write_view(memories.into_iter(), files, &BTreeSet::new(), grace)
+    let generation = reader.store.borrow().generation;
+    write_view(
+        generation,
+        memories.into_iter(),
+        files,
+        &BTreeSet::new(),
+        grace,
+    )
 }
 
 /// Keeps what the view gained since its last save.
@@ -966,28 +1016,29 @@ pub(crate) fn journal(reader: &mut Reader, genesis: EntryHash) -> Task<'static, 
 }
 
 pub(crate) fn checkpoint(reader: &mut Reader, genesis: EntryHash) -> Task<'static, Result<()>> {
-    let bytes = encode_checkpoint(reader);
-    keep_checkpoint(reader, genesis, bytes)
+    let checkpoint = encode_checkpoint(reader);
+    keep_checkpoint(reader, genesis, checkpoint)
 }
 
-/// Writes `bytes`, which [`Encoding`] encoded of the view as it is, as the view
-/// of the writer whose genesis entry is `genesis`.
+/// Writes `checkpoint`, which [`Encoding`] encoded of the view as it is, as the
+/// view of the writer whose genesis entry is `genesis`.
 pub(crate) fn keep_checkpoint(
     reader: &mut Reader,
     genesis: EntryHash,
-    bytes: Vec<u8>,
+    checkpoint: Checkpoint,
 ) -> Task<'static, Result<()>> {
     reader.unsaved = Default::default();
     reader.store.borrow_mut().saving = true;
-    write_checkpoint(genesis, bytes, Rc::clone(&reader.store)).task()
+    write_checkpoint(genesis, checkpoint, Rc::clone(&reader.store)).task()
 }
 
-/// Replaces `view.bin` with `bytes`, then removes the journal it holds.
+/// Replaces `view.bin` with `checkpoint`, then removes the journal it holds.
 pub(crate) fn write_checkpoint<'a>(
     genesis: EntryHash,
-    bytes: Vec<u8>,
+    checkpoint: Checkpoint,
     store: Rc<RefCell<Store>>,
 ) -> Fallible<'a, ()> {
+    let Checkpoint { generation, bytes } = checkpoint;
     let len = bytes.len() as u64;
     flow::replace(Root::Local, Layout::cached_view(genesis), bytes)
         .and_then(move |()| flow::remove_if_present(Root::Local, Layout::view_journal(genesis)))
@@ -996,11 +1047,13 @@ pub(crate) fn write_checkpoint<'a>(
             *store = match written {
                 Ok(()) => Store {
                     genesis: Some(genesis),
+                    generation,
                     checkpoint: len,
                     ..Store::default()
                 },
                 Err(_) => Store {
                     genesis: Some(genesis),
+                    generation,
                     broken: true,
                     ..store.clone()
                 },

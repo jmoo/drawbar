@@ -249,10 +249,11 @@ impl CachedView {
         grew
     }
 
-    /// Keeps this view alone for the writer whose genesis entry is `genesis`,
-    /// replacing what was kept so that a crash leaves the old view or the new.
+    /// Keeps this view alone as the first view of the writer whose genesis entry
+    /// is `genesis`, replacing what was kept so that a crash leaves the old view
+    /// or the new.
     pub fn save(&self, genesis: EntryHash) -> Task<'static, Result<()>> {
-        cache::write_checkpoint(genesis, self.encode(), Rc::default()).task()
+        cache::save_view(self, genesis).task()
     }
 }
 
@@ -1940,6 +1941,50 @@ mod tests {
         let mut restarted = disk.restart();
         let loaded = crate::blocking::run(&mut restarted, CachedView::load(genesis)).unwrap();
         assert_eq!(loaded, view);
+    }
+
+    #[test]
+    fn a_journal_a_crash_left_beside_a_newer_checkpoint_is_not_replayed_onto_it() {
+        let mut disk = MemDisk::new();
+        let entries = chain(2);
+        let layout = Layout::new(".lib").unwrap();
+        let path = layout.writer(W).join("s.txt").unwrap();
+        put(
+            &disk,
+            &path,
+            &bytes_of(&[&entries[0], &entries[1], &entries[2]]),
+        );
+        let genesis = entries[0].hash();
+        disk.perform(Io::MakeDir {
+            root: Root::Local,
+            path: Layout::local(genesis),
+        })
+        .unwrap();
+        let mut reader = read(&disk);
+        crate::blocking::run(&mut disk, reader.checkpoint(genesis)).unwrap();
+        disk.perform(Io::Remove {
+            root: Root::Folder,
+            path,
+        })
+        .unwrap();
+        crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
+        reader.note_grace(1_000, false);
+        crate::blocking::run(&mut disk, reader.save(genesis)).unwrap();
+        let journal = Layout::view_journal(genesis);
+        let stale = disk.files(Root::Local)[&journal].clone();
+        assert!(reader.note_grace(1_000 + GRACE_MS, true));
+        reader.take_grace();
+        crate::blocking::run(&mut disk, reader.save(genesis)).unwrap();
+        assert!(!disk.files(Root::Local).contains_key(&journal));
+        disk.perform(Io::Create {
+            root: Root::Local,
+            path: journal,
+            bytes: stale,
+        })
+        .unwrap();
+
+        let loaded = crate::blocking::run(&mut disk, CachedView::load(genesis)).unwrap();
+        assert_eq!(&loaded, reader.cached());
     }
 
     #[test]

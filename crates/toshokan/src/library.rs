@@ -17,7 +17,7 @@ use std::sync::Arc;
 use crate::binding::{
     self, Binding, Bindings, Fact, Facts, Resolving, Scan, Scanned, Unscanned, Walk,
 };
-use crate::cache::{self, Encoding};
+use crate::cache::{self, Checkpoint, Encoding};
 use crate::contribution;
 use crate::derive::{self, Placed};
 use crate::drafts::{self, DraftRecord};
@@ -1607,14 +1607,15 @@ fn saved_view<'a, L: BorrowMut<Library> + 'a>(mut library: L) -> Flow<'a, (L, Re
         let appended = cache::journal(&mut known.reader, genesis);
         return flow::run(appended).then(|saved| Flow::Done((library, saved)));
     }
-    encoded(library).then(move |(mut library, bytes)| {
-        let written = cache::keep_checkpoint(&mut library.borrow_mut().reader, genesis, bytes);
+    encoded(library).then(move |(mut library, checkpoint)| {
+        let reader = &mut library.borrow_mut().reader;
+        let written = cache::keep_checkpoint(reader, genesis, checkpoint);
         flow::run(written).then(|saved| Flow::Done((library, saved)))
     })
 }
 
 /// The checkpoint of the cached view as it is.
-fn encoded<'a, L: BorrowMut<Library> + 'a>(library: L) -> Flow<'a, (L, Vec<u8>)> {
+fn encoded<'a, L: BorrowMut<Library> + 'a>(library: L) -> Flow<'a, (L, Checkpoint)> {
     let encoding = Encoding::new(&library.borrow().reader);
     flow::sliced((library, encoding), |(_, encoding)| encoding.step())
         .then(|(library, encoding)| Flow::Done((library, encoding.finish())))
@@ -2052,11 +2053,11 @@ fn ensure_writer<'a>(
         let Ok(genesis) = Entry::encode(EntryHash::ZERO, 0, at, kind) else {
             return Flow::Done(Err(Error::Refused(Refusal::Invalid(Invalid::TooLong))));
         };
-        encoded(library).then(move |(library, bytes)| {
+        encoded(library).then(move |(library, checkpoint)| {
             let segment = library.env.segment_name();
             let (layout, reader) = (library.layout.clone(), &mut library.reader);
             let create = Writer::create(layout, id, segment, label, at, |genesis| {
-                cache::keep_checkpoint(reader, genesis, bytes)
+                cache::keep_checkpoint(reader, genesis, checkpoint)
             });
             flow::run(create).and_then(move |writer| {
                 writer.stamp().then(move |written| {
