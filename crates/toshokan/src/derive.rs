@@ -69,9 +69,9 @@ pub struct Item {
     pub kind: ItemKind,
     /// Which run: what a dismissal or a take names.
     pub run: Run,
-    /// Its entries' clock readings, earliest and latest.
+    /// As [`crate::report::Item::span`] and [`crate::report::Item::entries`].
     pub span: (Hlc, Hlc),
-    pub entries: usize,
+    pub entries: u64,
     /// Per field, the run's latest write, where the merged state shows
     /// something else, or where its basis is forgotten.
     pub change: BTreeMap<FieldKey, (Ref, Hlc, Value)>,
@@ -443,10 +443,29 @@ impl Dismissals {
 
     /// Whether some dismissal names the own entry numbered `n` in tip `tip`.
     fn cover_tip(&self, writer: WriterId, tip: &Snapshot, n: u64) -> bool {
-        self.0.iter().any(|run| {
+        self.in_tip(writer, tip)
+            .any(|run| (run.from..=run.last.n).contains(&n))
+    }
+
+    /// The dismissals of `writer`'s runs on the chain of tip `tip`.
+    fn in_tip<'d>(&'d self, writer: WriterId, tip: &'d Snapshot) -> impl Iterator<Item = &'d Run> {
+        self.0.iter().filter(move |run| {
             let names = tip.names(run.last) || run.tip.is_some_and(|head| tip.names(head));
-            run.writer == writer && n >= run.from && n <= run.last.n && names
+            run.writer == writer && names
         })
+    }
+
+    /// The first number from `from` on that no dismissal names in tip `tip`;
+    /// `None` when they name every one.
+    fn after_in_tip(&self, writer: WriterId, tip: &Snapshot, from: u64) -> Option<u64> {
+        let mut first = from;
+        while let Some(run) = self
+            .in_tip(writer, tip)
+            .find(|run| (run.from..=run.last.n).contains(&first))
+        {
+            first = run.last.n.checked_add(1)?;
+        }
+        Some(first)
     }
 }
 
@@ -850,7 +869,7 @@ fn items(
         kind: ItemKind,
         run: Run,
         span: Option<(Hlc, Hlc)>,
-        entries: usize,
+        entries: u64,
         writes: Vec<(FieldKey, Ref, Hlc, Value)>,
         forced: BTreeMap<FieldKey, (Ref, Hlc, Value)>,
     }
@@ -928,6 +947,13 @@ fn items(
             .collect();
         own.sort_by_key(|(_, at, _, _)| at.n);
         let from = w.lowest.map_or(0, |fork| fork + 1);
+        let first = dismissals.after_in_tip(w.writer, tip, from);
+        let above = first.and_then(|first| tip.head.n.checked_sub(first));
+        let entries = above.map_or(0, |above| above.saturating_add(1));
+        let head = (entries > 0).then_some(tip.at);
+        let readings = own.iter().map(|(_, _, at, _)| *at);
+        let readings = readings.chain(forced.values().map(|(_, at, _)| *at));
+        let span = readings.chain(head).fold(None, widen);
         groups.insert(
             (ItemKind::Run, tip.head.hash),
             Group {
@@ -939,8 +965,8 @@ fn items(
                     last: tip.head,
                     tip: Some(tip.head),
                 },
-                span: Some((tip.at, tip.at)),
-                entries: 0,
+                span,
+                entries,
                 writes: own,
                 forced,
             },
@@ -986,10 +1012,7 @@ fn items(
             });
             group.run.last = entry.own();
             group.entries += 1;
-            group.span = Some(match group.span {
-                Some((first, last)) => (first.min(entry.at()), last.max(entry.at())),
-                None => (entry.at(), entry.at()),
-            });
+            group.span = widen(group.span, entry.at());
             for op in contribution::ops(&entry.kind()) {
                 for write in contribution::said(op).writes {
                     group.writes.push((
@@ -1028,6 +1051,14 @@ fn items(
         });
     }
     items
+}
+
+/// `span` widened to hold the reading `at`.
+fn widen(span: Option<(Hlc, Hlc)>, at: Hlc) -> Option<(Hlc, Hlc)> {
+    Some(match span {
+        Some((first, last)) => (first.min(at), last.max(at)),
+        None => (at, at),
+    })
 }
 
 /// The memories a reader keeps after the grace step: of what no file it sees

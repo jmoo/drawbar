@@ -143,9 +143,15 @@ pub struct Item {
     pub kind: ItemKind,
     pub run: Run,
     pub by: By,
-    /// Its entries' clock readings, earliest and latest.
+    /// Its entries' clock readings, earliest and latest. Of the entries a
+    /// snapshot folds, a reader knows only the head's reading and those of the
+    /// writes the snapshot still holds, so a run that a snapshot holds starts at
+    /// the earliest of those.
     pub span: (Hlc, Hlc),
-    pub entries: usize,
+    /// How many entries it holds. Of a run that a snapshot holds, that counts
+    /// every number from its first entry no dismissal names to the snapshot's
+    /// head, whether or not a write of the entry survives.
+    pub entries: u64,
     pub changes: Vec<ItemChange>,
 }
 

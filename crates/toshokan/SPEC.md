@@ -483,10 +483,14 @@ Per writer, from the files it reads and what it remembers, a reader derives:
 
 What the merge leaves out is shown as **items**: each run, gap, and after the
 grace step each file's lines it cannot place, with the net change it would make
-against the merged state, field by field. A tip's own write the merge leaves out
-that replaced an own write of its writer no merged entry holds is a forgotten
-basis: its run shows that field whatever the merged state shows, until an intent
-takes a run of that writer on that field. An intent takes changes from an item
+against the merged state, field by field, how many entries it holds and the
+earliest and latest of their clock readings. Of a run a tip holds, a reader
+counts every number from the run's first entry no dismissal names to the tip's
+head, and knows only the readings of the head and of the writes the tip keeps.
+A tip's own write the merge leaves out that replaced an own write of its writer
+no merged entry holds is a forgotten basis: its run shows that field whatever
+the merged state shows, until an intent takes a run of that writer on that
+field. An intent takes changes from an item
 with ops that name its run in `take`, and dismisses a run with a `dismiss` op; a
 gap or unplaced lines cannot be dismissed.
 

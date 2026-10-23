@@ -546,6 +546,7 @@ through_both!(
     a_clone_forks_into_items_taken_or_dismissed,
     one_intent_takes_from_runs_of_two_forked_writers,
     a_file_change_is_taken_only_while_the_folder_holds_that_file,
+    a_run_counts_and_spans_its_entries_whether_or_not_its_branch_compacted,
     a_restored_folder_makes_the_writer_rekey,
     what_a_restored_writer_showed_survives_reopening_and_a_crash,
     an_instance_without_a_writer_keeps_only_the_grace_step_in_the_views_it_read,
@@ -1046,21 +1047,27 @@ fn a_clone_forks_into_items_taken_or_dismissed<F: Facade>() {
 
 /// Forks the writer whose local root `here` holds: it resumes on `here` and on a
 /// copy of that root, and each instance commits what `branch` makes of its
-/// library and the name of its side, `"here"` or `"there"`, then closes.
+/// library and the name of its side, `"here"` or `"there"`. Both stay open.
 fn fork<F: Facade>(
     here: &Machine,
     label: &str,
     seed: u64,
     clock: &TestClock,
     mut branch: impl FnMut(&mut F, &str),
-) {
+) -> [F; 2] {
     let there = here.cloned();
     let (mut original, _) = F::open(Probe::new(here), env(label, seed, clock)).unwrap();
     let (mut copy, _) = F::open(Probe::new(&there), env(label, seed + 1, clock)).unwrap();
     branch(&mut original, "here");
     branch(&mut copy, "there");
-    original.close().unwrap();
-    copy.close().unwrap();
+    [original, copy]
+}
+
+/// Closes each of `libraries`, which compacts what it wrote.
+fn close_all<F: Facade>(libraries: impl IntoIterator<Item = F>) {
+    for library in libraries {
+        library.close().unwrap();
+    }
 }
 
 /// The item that would make `change`.
@@ -1108,10 +1115,10 @@ fn one_intent_takes_from_runs_of_two_forked_writers<F: Facade>() {
     b.commit("Tag", |i| i.add(song, TAGS, tag("b"))).unwrap();
     b.close().unwrap();
     for (root, label, seed) in [(&a_root, "a", 10), (&b_root, "b", 20)] {
-        fork::<F>(root, label, seed, &clock, |library, side| {
+        close_all(fork::<F>(root, label, seed, &clock, |library, side| {
             let text = format!("{label} {side}");
             library.commit("Tag", |i| i.add(song, TAGS, text)).unwrap();
-        });
+        }));
     }
 
     let (mut c, _) = F::open(Probe::new(&machine(&folder)), env("c", 3, &clock)).unwrap();
@@ -1153,7 +1160,7 @@ fn a_file_change_is_taken_only_while_the_folder_holds_that_file<F: Facade>() {
     let (mut a, _) = F::open(Probe::new(&root), env("a", 1, &clock)).unwrap();
     let song = create(&mut a, "song.npno", b"song");
     a.close().unwrap();
-    fork::<F>(&root, "a", 10, &clock, |library, side| {
+    close_all(fork::<F>(&root, "a", 10, &clock, |library, side| {
         let committed = match side {
             "here" => library.commit("Tag", |i| i.add(song, TAGS, tag("here"))),
             _ => library.commit("Rename", |i| {
@@ -1162,7 +1169,7 @@ fn a_file_change_is_taken_only_while_the_folder_holds_that_file<F: Facade>() {
             }),
         };
         committed.unwrap();
-    });
+    }));
 
     let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
     let view = b.view();
@@ -1223,6 +1230,41 @@ fn a_file_change_is_taken_only_while_the_folder_holds_that_file<F: Facade>() {
     let view = b.view();
     let mut changes = view.items().iter().flat_map(|item| &item.changes);
     assert!(changes.all(|c| c.what != What::File), "{:?}", view.items());
+}
+
+fn a_run_counts_and_spans_its_entries_whether_or_not_its_branch_compacted<F: Facade>() {
+    for compacted in [false, true] {
+        let folder = disk();
+        let clock = TestClock::at(1_000);
+        let root = machine(&folder);
+        let (mut a, _) = F::open(Probe::new(&root), env("a", 1, &clock)).unwrap();
+        let song = create(&mut a, "song.npno", b"song");
+        a.close().unwrap();
+        let branches = fork::<F>(&root, "a", 10, &clock, |library, side| {
+            let tags = if side == "here" { 3 } else { 1 };
+            for k in 0..tags {
+                clock.advance(10);
+                let text = format!("{side} {k}");
+                library.commit("Tag", |i| i.add(song, TAGS, text)).unwrap();
+            }
+            if side == "here" && compacted {
+                library.compact().unwrap();
+            }
+        });
+        let readings: Vec<Hlc> = branches[0].history().iter().map(|h| h.at).collect();
+        let (reader, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+        let item = item_making(&reader.view(), &added(song, "here 0"));
+        assert_eq!(
+            item.run.tip.is_some(),
+            compacted,
+            "a snapshot holds the run"
+        );
+        assert_eq!(
+            (item.entries, item.span),
+            (3, (readings[0], readings[2])),
+            "compacted: {compacted}"
+        );
+    }
 }
 
 fn copy_folder(folder: &MemDisk) -> MemDisk {
