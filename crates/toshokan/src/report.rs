@@ -267,6 +267,9 @@ pub struct PartialReport {
     /// they made or moved a tree to: what of the intent landed. Filled where a
     /// commit reports it; empty in a settlement's assessment.
     pub landed: Vec<RelPath>,
+    /// The library paths the finished steps took a file from, and the directories
+    /// they removed. Empty in a settlement's assessment.
+    pub taken: Vec<RelPath>,
 }
 
 /// What a refresh found.

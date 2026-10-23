@@ -748,14 +748,27 @@ fn save_part<'l>(
     (built, failed)
 }
 
-/// How one part of a batch is answered once the batch is committed: where it puts a
-/// file or a folder, by which it landed, and the event it answers with.
+/// How one part of a batch is answered once the batch is committed: the path that
+/// tells whether it landed, and the event it answers with.
 struct Owed {
     /// The part of the batch it is of, in order.
     part: usize,
-    at: Option<RelPath>,
+    at: Option<Spot>,
     failed: Option<FillFailure>,
     answer: Answering,
+}
+
+/// Where a part of a batch puts a file or a folder, or takes one from.
+enum Spot {
+    Puts(RelPath),
+    Takes(RelPath),
+}
+
+/// What of a batch that stopped partway landed: the paths its finished steps put a
+/// file or a folder at, and those they took one from.
+struct Reached {
+    put: BTreeSet<RelPath>,
+    taken: BTreeSet<RelPath>,
 }
 
 enum Answering {
@@ -904,7 +917,7 @@ fn batch(
 struct Tried {
     owed: Vec<Owed>,
     refused: Vec<Event>,
-    reached: Option<BTreeSet<RelPath>>,
+    reached: Option<Reached>,
     changes: Option<toshokan::Committed>,
     why: Option<Failure>,
 }
@@ -931,7 +944,8 @@ impl Tried {
         {
             let landed = match (&reached, &at) {
                 (None, _) => true,
-                (Some(reached), Some(at)) => reached.contains(at),
+                (Some(reached), Some(Spot::Puts(at))) => reached.put.contains(at),
+                (Some(reached), Some(Spot::Takes(at))) => reached.taken.contains(at),
                 (Some(_), None) => changes.is_some(),
             };
             let event = match landed {
@@ -995,7 +1009,12 @@ fn attempt(
     let (reached, changes, why) = match built.commit() {
         Ok(committed) => (None, Some(committed), None),
         Err(Error::Partial(partial)) => {
-            let reached: BTreeSet<RelPath> = partial.report.landed.iter().cloned().collect();
+            // ⚠️ Only a commit's report says what landed; a settlement's leaves it empty.
+            let report = &partial.report;
+            let reached = Reached {
+                put: report.landed.iter().cloned().collect(),
+                taken: report.taken.iter().cloned().collect(),
+            };
             let why = format!("the change stopped at {}", partial.report.stopped);
             (
                 Some(reached),
@@ -1003,7 +1022,13 @@ fn attempt(
                 Some(Failure::Io(why)),
             )
         }
-        Err(e) => (Some(BTreeSet::new()), None, Some(failure(e, None))),
+        Err(e) => {
+            let nothing = Reached {
+                put: BTreeSet::new(),
+                taken: BTreeSet::new(),
+            };
+            (Some(nothing), None, Some(failure(e, None)))
+        }
     };
     Tried {
         owed,
@@ -1126,7 +1151,7 @@ impl<'l> Parting<'l, '_> {
                         Some(entity) => built.rename(entity, &to, moving.expect),
                         None => built.rename_file(&from, &to, moving.expect),
                     });
-                    self.owe(Some(to), None, answering);
+                    self.owe(Some(Spot::Puts(to)), None, answering);
                 }
                 Ok(())
             }
@@ -1144,7 +1169,7 @@ impl<'l> Parting<'l, '_> {
                     }
                 };
                 self.built = Some(self.take().move_tree(&from, &to));
-                self.owe(Some(to), None, answering);
+                self.owe(Some(Spot::Puts(to)), None, answering);
                 Ok(())
             }
             Intent::Delete { files } => {
@@ -1158,7 +1183,7 @@ impl<'l> Parting<'l, '_> {
                         Some(entity) => built.trash(entity, expect).delete(entity),
                         None => built.trash_file(&at, expect),
                     });
-                    self.owe(None, None, doing);
+                    self.owe(Some(Spot::Takes(at)), None, doing);
                 }
                 Ok(())
             }
@@ -1166,14 +1191,19 @@ impl<'l> Parting<'l, '_> {
                 let at = at(&path)
                     .map_err(|why| Box::new(Event::Failed(format!("making {path}: {why}"))))?;
                 self.built = Some(self.take().make_dir(&at));
-                self.owe(Some(at), None, Answering::Quiet(format!("making {path}")));
+                self.owe(
+                    Some(Spot::Puts(at)),
+                    None,
+                    Answering::Quiet(format!("making {path}")),
+                );
                 Ok(())
             }
             Intent::RemoveDir { path } => {
                 let at = at(&path)
                     .map_err(|why| Box::new(Event::Failed(format!("removing {path}: {why}"))))?;
                 self.built = Some(self.take().remove_dir(&at));
-                self.owe(None, None, Answering::Quiet(format!("removing {path}")));
+                let doing = Answering::Quiet(format!("removing {path}"));
+                self.owe(Some(Spot::Takes(at)), None, doing);
                 Ok(())
             }
             Intent::Tag { files, name, make } => {
@@ -1224,7 +1254,7 @@ impl<'l> Parting<'l, '_> {
         let built = self.take();
         let (built, failed) = save_part(built, self.view, self.folder, &at, to, fill, tags);
         self.built = Some(built);
-        self.owe(Some(at), Some(failed), answering);
+        self.owe(Some(Spot::Puts(at)), Some(failed), answering);
         Ok(())
     }
 
@@ -1232,7 +1262,7 @@ impl<'l> Parting<'l, '_> {
         self.built.take().expect("each part puts the intent back")
     }
 
-    fn owe(&mut self, at: Option<RelPath>, failed: Option<FillFailure>, answer: Answering) {
+    fn owe(&mut self, at: Option<Spot>, failed: Option<FillFailure>, answer: Answering) {
         let part = self.part;
         self.owed.push(Owed {
             part,
@@ -1679,6 +1709,40 @@ mod tests {
 
     fn path(text: &str) -> LibPath {
         LibPath::parse(text).unwrap()
+    }
+
+    /// A batch that stops partway answers a deletion it never made as failed, so the app
+    /// lists again the file it did not delete.
+    #[cfg(unix)]
+    #[test]
+    fn a_deletion_a_batch_stopped_before_is_answered_as_failed() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = Temp::new();
+        fs::write(root.at("a.ne5p"), b"a").unwrap();
+        fs::create_dir(root.at("Locked")).unwrap();
+        fs::write(root.at("Locked/b.ne5p"), b"b").unwrap();
+        let mut keeper = keeper(&root);
+        keeper.run_one(Cmd::Rescan);
+        let (a, b) = (keeper.listed("a.ne5p"), keeper.listed("Locked/b.ne5p"));
+        let mode = |mode| fs::Permissions::from_mode(mode);
+        fs::set_permissions(root.at("Locked"), mode(0o555)).unwrap();
+        let answers = keeper.run_one(Cmd::Intent(Intent::Batch(vec![
+            Intent::Save {
+                id: 1,
+                path: path("a.ne5p"),
+                bytes: b"saved".to_vec(),
+                expect: a,
+                came: None,
+            },
+            Intent::Delete {
+                files: vec![(path("Locked/b.ne5p"), b)],
+            },
+        ])));
+        fs::set_permissions(root.at("Locked"), mode(0o755)).unwrap();
+        let failed = |event: &Event| matches!(event, Event::Failed(why) if why.starts_with("deleting Locked/b.ne5p"));
+        assert!(answers.iter().any(failed), "{answers:?}");
+        assert!(root.at("Locked/b.ne5p").exists());
     }
 
     /// A save to the path of a tagged file deleted outside drawbar writes that entity's

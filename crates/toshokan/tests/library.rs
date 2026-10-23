@@ -3137,18 +3137,23 @@ fn an_intent_that_stops_partway_says_what_landed<F: Facade>() {
     let folder = disk();
     let clock = TestClock::at(1_000);
     let probe = Probe::new(&machine(&folder));
+    put(&folder, "old.wav", b"old");
+    put(&folder, "late.wav", b"late");
     let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
     a.rescan().unwrap();
     fail(&probe, |io| io.mutates() && io.path().as_str() == "b.wav");
     let stopped = a.commit("Copy in", |i| {
-        i.save_file(&path("a.wav"), b"a".to_vec(), Expect::Absent)
+        i.trash_file(&path("old.wav"), Expect::Holds(identity(b"old")))
+            .save_file(&path("a.wav"), b"a".to_vec(), Expect::Absent)
             .save_file(&path("b.wav"), b"b".to_vec(), Expect::Absent)
+            .trash_file(&path("late.wav"), Expect::Holds(identity(b"late")))
     });
     heal(&probe);
     let Err(Error::Partial(partial)) = stopped else {
         panic!("{stopped:?}");
     };
     assert_eq!(partial.report.landed, [path("a.wav")]);
+    assert_eq!(partial.report.taken, [path("old.wav")]);
 }
 
 fn a_view_says_what_changed_since_the_view_before<F: Facade>() {

@@ -1023,6 +1023,7 @@ fn records_that_are_unchained_unconfined_or_settled_are_not_acted_on() {
             error: toshokan::io::IoError::NotFound,
             record: Some(Nonce::from_u128(1)),
             landed: Vec::new(),
+            taken: Vec::new(),
         }),
         "the source is not there"
     );

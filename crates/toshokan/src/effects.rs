@@ -81,6 +81,16 @@ impl EffectStep {
         }
     }
 
+    /// The library path the step takes a file or a directory from, where it takes
+    /// one.
+    pub fn taken(&self) -> Option<&RelPath> {
+        match self {
+            Self::ToTrash { path, .. } | Self::RemoveDir { path } => Some(path),
+            Self::Rename { from, .. } => Some(from),
+            Self::Place { .. } | Self::FromTrash { .. } | Self::MakeDir { .. } => None,
+        }
+    }
+
     /// Every library path the step names.
     pub fn library_paths(&self) -> Vec<&RelPath> {
         match self {
@@ -1187,6 +1197,11 @@ fn account<'a>(
                 error: failed.unwrap_or(IoError::NotFound),
                 record: Some(name),
                 landed: Vec::new(),
+                taken: record.steps[..progress.done]
+                    .iter()
+                    .filter_map(EffectStep::taken)
+                    .cloned()
+                    .collect(),
             }),
         };
         let sweeping = layout.clone();
@@ -1611,6 +1626,7 @@ pub(crate) fn predict(
             error,
             record: Some(name),
             landed: Vec::new(),
+            taken: Vec::new(),
         });
     }
     Outcome::Complete
