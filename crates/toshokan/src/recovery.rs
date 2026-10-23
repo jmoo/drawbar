@@ -24,7 +24,7 @@ use crate::flow::{self, each, fold, Fallible};
 use crate::ids::{EntryHash, Nonce, WriterId};
 use crate::io::{Capabilities, Capability, Kind, Root, Task};
 use crate::layout::Layout;
-use crate::log::Settlement;
+use crate::log::{Entry, EntryKind, Settlement};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord, Records, MAX_RECORD};
 use crate::reader::WriterLog;
@@ -37,6 +37,9 @@ pub trait Chain {
 
     /// Whether an entry after `hash` is placed or folded.
     fn continues(&self, hash: EntryHash) -> bool;
+
+    /// The placed entry after `hash`, where one is.
+    fn after(&self, hash: EntryHash) -> Option<Rc<Entry>>;
 }
 
 impl Chain for WriterLog {
@@ -46,6 +49,10 @@ impl Chain for WriterLog {
 
     fn continues(&self, hash: EntryHash) -> bool {
         WriterLog::holds(self, hash) && !self.heads().contains(&hash)
+    }
+
+    fn after(&self, hash: EntryHash) -> Option<Rc<Entry>> {
+        self.successor(hash).cloned()
     }
 }
 
@@ -67,6 +74,11 @@ pub struct Settling {
     pub pending: PendingRecord,
     /// How settling will end if nothing else changes the folder first.
     pub outcome: Outcome,
+    /// Where the log already closes the record, with its intent and only `bind`
+    /// entries after it up to the head, as the last append before a crash leaves
+    /// them: how many ops those entries hold. The crash may have torn the append
+    /// short of the rest, which settling appends.
+    pub logged: Option<usize>,
 }
 
 /// Reads every writer's pending records and sorts them. `own` is this writer and
@@ -115,7 +127,7 @@ pub fn classify<C: Chain>(
     logs: &BTreeMap<WriterId, C>,
     settled: &BTreeSet<(WriterId, Nonce)>,
     found: Vec<(WriterId, Records)>,
-) -> (Recovery, Vec<(Nonce, PendingRecord)>) {
+) -> (Recovery, Vec<Unsettled>) {
     let mut recovery = Recovery::default();
     let mut open = Vec::new();
     for (writer, found) in found {
@@ -127,8 +139,11 @@ pub fn classify<C: Chain>(
             match standing(layout, own, chain, settled, name, &record) {
                 Standing::Ignored => recovery.ignored.push(layout.pending(writer, name)),
                 Standing::Closed => {}
-                Standing::Spent => recovery.spent.push((name, record)),
-                Standing::Open => open.push((name, record)),
+                Standing::Spent => match logged_last(chain, record.after()) {
+                    Some(logged) => open.push((name, record, Some(logged))),
+                    None => recovery.spent.push((name, record)),
+                },
+                Standing::Open => open.push((name, record, None)),
                 Standing::Orphan => recovery.orphaned.push(Orphan {
                     ours: false,
                     live: false,
@@ -148,14 +163,14 @@ pub fn classify<C: Chain>(
 pub fn predict(
     layout: &Layout,
     recovery: Recovery,
-    open: Vec<(Nonce, PendingRecord)>,
+    open: Vec<Unsettled>,
     capabilities: Capabilities,
 ) -> Task<'static, Result<Recovery>> {
     let layout = layout.clone();
     fold(
         open.into_iter(),
         recovery,
-        move |mut recovery, (name, record)| {
+        move |mut recovery, (name, record, logged)| {
             let layout = layout.clone();
             effects::observe(&layout, name, &record).map_ok(move |seen| {
                 let progress = effects::progress(&layout, &record, &seen, capabilities.fsync);
@@ -164,12 +179,36 @@ pub fn predict(
                     record: name,
                     pending: record,
                     outcome,
+                    logged,
                 });
                 recovery
             })
         },
     )
     .task()
+}
+
+/// This writer's record to settle: one open, or one whose closing entries may be
+/// torn, with what [`Settling::logged`] says of them.
+pub type Unsettled = (Nonce, PendingRecord, Option<usize>);
+
+/// How many ops the entries after `after` hold, where they are an intent and then
+/// only `bind` entries up to the head.
+fn logged_last(chain: &impl Chain, after: EntryHash) -> Option<usize> {
+    let intent = chain.after(after)?;
+    let EntryKind::Intent(logged) = intent.kind() else {
+        return None;
+    };
+    let mut held = logged.ops.len();
+    let mut at = intent;
+    while let Some(next) = chain.after(at.hash()) {
+        let EntryKind::Bind(bound) = next.kind() else {
+            return None;
+        };
+        held += bound.ops.len();
+        at = next;
+    }
+    Some(held)
 }
 
 /// Where a record stands for a reader writing as `own`.

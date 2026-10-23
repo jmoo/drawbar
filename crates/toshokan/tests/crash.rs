@@ -31,7 +31,7 @@ use toshokan::crash::{self, Fault, Streams};
 use toshokan::disk::Tail;
 use toshokan::effects::{self, EffectPlan, Moves};
 use toshokan::io::{Capabilities, Capability, Range, CHUNK};
-use toshokan::log::Settlement;
+use toshokan::log::{Entry, Settlement};
 use toshokan::pending::{self, PendingRecord};
 use toshokan::plan::{Content, Expect, FileChange, Piece, Splice};
 use toshokan::recovery::{self, Chain};
@@ -418,6 +418,10 @@ impl Chain for Fake {
 
     fn continues(&self, hash: EntryHash) -> bool {
         hash == HEAD && self.closed
+    }
+
+    fn after(&self, _: EntryHash) -> Option<Rc<Entry>> {
+        None
     }
 }
 
@@ -991,6 +995,9 @@ fn records_that_are_unchained_unconfined_or_settled_are_not_acted_on() {
         }
         fn continues(&self, _: EntryHash) -> bool {
             false
+        }
+        fn after(&self, _: EntryHash) -> Option<Rc<Entry>> {
+            None
         }
     }
     let logs: BTreeMap<WriterId, Settled> = [(WRITER, Settled), (other, Settled)].into();

@@ -10,6 +10,7 @@ use std::rc::Rc;
 use toshokan::asynch;
 use toshokan::binding::Bindings;
 use toshokan::blocking::{self, Backend};
+use toshokan::disk::Tail;
 use toshokan::env::{ExactNames, PrefixIdentity, SeededRandom, TestClock};
 use toshokan::intent::{Driver, Intent};
 use toshokan::io::{Capabilities, Range};
@@ -649,6 +650,7 @@ through_both!(
     a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept,
     losing_the_local_root_at_any_step_loses_only_drafts,
     a_crash_at_any_step_is_settled_before_the_next_write,
+    an_append_torn_after_its_intent_binds_the_rest_at_the_next_open,
     an_empty_record_of_this_writer_is_removed_by_its_next_write,
     an_untrusted_folder_is_read_within_bounds_and_never_acted_on,
     drafts_come_back_only_while_the_file_holds_their_base,
@@ -3320,6 +3322,86 @@ fn a_crash_at_any_step_is_settled_before_the_next_write<F: Facade>() {
         }
     }
     assert!(settled > 0, "some crash interrupted an effect");
+}
+
+fn an_append_torn_after_its_intent_binds_the_rest_at_the_next_open<F: Facade>() {
+    // The disk tears only what waits for a sync.
+    if !FOLDER.get().fsync {
+        return;
+    }
+    const FILES: usize = 3_000;
+    let disk = disk();
+    let one_disk = |disk: &MemDisk| Machine {
+        folder: disk.clone(),
+        local: disk.clone(),
+    };
+    let clock = TestClock::at(1_000);
+    let name = |n: usize| format!("{n:04}.wav");
+    for n in 0..FILES {
+        put(&disk, &name(n), name(n).as_bytes());
+    }
+    let probe = Probe::new(&one_disk(&disk));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    let all: Vec<usize> = (0..FILES).collect();
+    let mut entities = Vec::new();
+    for some in all.chunks(500) {
+        let committed = a
+            .commit("Tag", |mut i| {
+                for &n in some {
+                    let expect = Expect::Holds(identity(name(n).as_bytes()));
+                    (i, _) = i.create(|e| {
+                        e.adopt(&path(&name(n)), expect).add(TAGS, tag("kept"));
+                    });
+                }
+                i
+            })
+            .unwrap();
+        entities.extend(committed.created);
+    }
+    let tearing = disk.clone();
+    fail(&probe, move |io| {
+        let (Io::Append { root, path, bytes } | Io::Create { root, path, bytes }) = io else {
+            return false;
+        };
+        let segment = *root == Root::Folder && path.as_str().ends_with(SEGMENT_EXTENSION);
+        let first = bytes.iter().position(|&byte| byte == b'\n');
+        if let Some(first) = first.filter(|first| segment && first + 1 < bytes.len()) {
+            tearing.set_tail(Tail::Torn(first as u64 + 1 + 16));
+            tearing.set_eager_names(true);
+            tearing.crash_after(1);
+        }
+        false
+    });
+    let moved = a.commit("Move", |mut i| {
+        for (n, entity) in entities.iter().enumerate() {
+            let expect = Expect::Holds(identity(name(n).as_bytes()));
+            i = i.rename(*entity, &path(&format!("Set/{}", name(n))), expect);
+        }
+        i
+    });
+    assert!(moved.is_err(), "the crash stopped the commit");
+    drop(a);
+    let disk = disk.restart();
+    let (mut again, opened) = F::open(Probe::new(&one_disk(&disk)), env("a", 2, &clock)).unwrap();
+    assert_eq!(opened.settled, [], "the record is closed");
+    again
+        .commit("Next", |i| i.create(|e| _ = e.add(TAGS, tag("next"))).0)
+        .unwrap();
+    let view = again.view();
+    let files: Vec<_> = view.entities().iter().filter_map(|e| e.file()).collect();
+    let astray: Vec<String> = files
+        .iter()
+        .filter(|file| !file.path.as_str().starts_with("Set/"))
+        .map(|file| file.path.to_string())
+        .collect();
+    assert_eq!(files.len(), FILES);
+    assert!(
+        astray.is_empty(),
+        "{} astray, as {:?}",
+        astray.len(),
+        astray.first()
+    );
 }
 
 fn an_empty_record_of_this_writer_is_removed_by_its_next_write<F: Facade>() {

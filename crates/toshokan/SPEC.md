@@ -250,9 +250,14 @@ had no room for:
 
 Its ops are merged as an intent's are. Its `pin` ops are never undone; its
 `file` ops are the intent's, and undo reads them with it. A commit keeps the
-intent's line within half the limit, spreads the `file` ops that do not fit over
-`bind` entries right after it, and its pins over as many more, so an intent can
-move any number of entities' files and any number of moves can be pinned.
+JSON of the intent's members, and of each `bind` entry's, within half the line
+limit, which leaves room for `prev`, `at` and the hash; it spreads the `file` ops
+that do not fit over `bind` entries right after the intent, and its pins over as
+many more, so an intent can move any number of entities' files and any number of
+moves can be pinned. The intent and its `bind` entries are one append. Where a
+writer's log ends with an intent and only `bind` entries after it, a crash may
+have torn that append: before its next write, the writer settles the intent's
+record again and appends the `file` ops its log lacks.
 
 Nothing derived is logged: views, bindings a reader has not pinned, and the
 merged state exist only in readers and in snapshots.

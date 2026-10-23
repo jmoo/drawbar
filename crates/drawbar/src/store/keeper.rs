@@ -261,10 +261,10 @@ impl Keeper {
         }
         let mut unfinished = Vec::new();
         if writable.is_ok() {
-            if !opened.settled.is_empty() {
-                let settled = library.settle_interrupted();
-                trouble.extend(settled.err().map(|e| format!("finishing a change: {e}")));
-            }
+            // Also what a crash may have torn from the end of this writer's log, which
+            // opening does not report.
+            let settled = library.settle_interrupted();
+            trouble.extend(settled.err().map(|e| format!("finishing a change: {e}")));
             // Another window of this install left these: they are ours to finish.
             for orphan in opened.orphaned {
                 match orphan.ours {

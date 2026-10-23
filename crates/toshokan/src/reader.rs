@@ -310,6 +310,11 @@ impl WriterLog {
         self.chain.get(&hash).map(|link| link.prev)
     }
 
+    /// The placed entry after `hash`; `None` where none is.
+    pub fn successor(&self, hash: EntryHash) -> Option<&Rc<Entry>> {
+        self.entry(*self.next.get(&hash)?)
+    }
+
     /// The placed entry `hash`; `None` when it is folded or not held.
     pub fn entry(&self, hash: EntryHash) -> Option<&Rc<Entry>> {
         self.chain.get(&hash)?.entry.as_ref()

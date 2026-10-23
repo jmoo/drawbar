@@ -237,6 +237,7 @@ impl Library {
                         settled: library
                             .unsettled
                             .iter()
+                            .filter(|settling| settling.logged.is_none())
                             .map(|settling| Settled {
                                 record: settling.record,
                                 label: settling.pending.label.clone(),
@@ -1030,6 +1031,7 @@ impl Library {
                 record: name,
                 pending: record.clone(),
                 outcome: Outcome::Complete,
+                logged: None,
             }),
             false => self.orphaned.push(Orphan {
                 ours: self.pooled.contains_key(&record.writer),
@@ -2458,18 +2460,33 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
     );
     flow::run(settled)
         .and_then(move |applied| {
+            let file_ops = library.file_ops(&applied, &record.files);
             let mut logged = planned(&record);
-            logged.ops.extend(library.file_ops(&applied, &record.files));
-            logged.displaced = applied.displaced;
-            let label = logged.label.clone();
-            append(library, vec![EntryKind::Intent(logged)]).and_then(move |(library, entries)| {
+            let kinds = match settling.logged {
+                Some(held) => {
+                    let held = held.saturating_sub(logged.ops.len());
+                    bound(file_ops.into_iter().skip(held).collect())
+                }
+                None => {
+                    logged.displaced = applied.displaced;
+                    let overflow = fit(&mut logged, file_ops);
+                    std::iter::once(EntryKind::Intent(logged))
+                        .chain(overflow)
+                        .collect()
+                }
+            };
+            let label = record.label.clone();
+            append(library, kinds).and_then(move |(library, entries)| {
                 library.spend(name, &record);
                 let scan = library.scan_task();
                 rebind_logged(library, scan, record.paths())
                     .map_ok(move |library| (library, label, entries, applied.outcome))
             })
         })
-        .and_then(|(library, label, entries, outcome)| {
+        .and_then(move |(library, label, entries, outcome)| {
+            if settling.logged.is_some() {
+                return ok(library);
+            }
             match committed(label, &entries, Vec::new(), outcome, library.local()) {
                 Ok(_) => ok(library),
                 Err(partial) => {
