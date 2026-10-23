@@ -3788,11 +3788,7 @@ fn kept_title(kept: &super::KeptApart) -> String {
         By::Writer { label, .. } => format!("Another {label}"),
         By::This | By::Outside => "This drawbar".to_string(),
     };
-    let (first, last) = (day(kept.span.0), day(kept.span.1));
-    let when = match first == last {
-        true => format!("on {first}"),
-        false => format!("between {first} and {last}"),
-    };
+    let when = crate::when::span(kept.span.0, kept.span.1, crate::when::local_offset);
     let what = match kept.kind {
         super::KeptKind::Run => "made these changes on a branch of its own",
         super::KeptKind::Gap => "made these changes after ones that have not synced yet",
@@ -3831,46 +3827,12 @@ fn kept_said(name: Option<&str>, what: &What, does: &Option<super::KeptDo>) -> S
     }
 }
 
-/// The day `ms` milliseconds after the Unix epoch falls on, as "21 Oct 2026" says it.
-fn day(ms: u64) -> String {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    // Days to a civil date, as Howard Hinnant's `civil_from_days` counts them.
-    let days = (ms / 86_400_000) as i64 + 719_468;
-    let era = days.div_euclid(146_097);
-    let of_era = days - era * 146_097;
-    let year_of_era = (of_era - of_era / 1460 + of_era / 36_524 - of_era / 146_096) / 365;
-    let of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let shifted = (5 * of_year + 2) / 153;
-    let day = of_year - (153 * shifted + 2) / 5 + 1;
-    let month = if shifted < 10 {
-        shifted + 3
-    } else {
-        shifted - 9
-    };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
-    format!("{day} {} {year}", MONTHS[(month - 1) as usize])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn entry(n: u128) -> toshokan::EntryHash {
         toshokan::EntryHash::from_u128(n)
-    }
-
-    #[test]
-    fn a_day_is_named_by_its_civil_date_in_utc() {
-        assert_eq!(day(0), "1 Jan 1970");
-        assert_eq!(day(951_868_800_000), "1 Mar 2000");
-        assert_eq!(
-            day(1_709_251_199_000),
-            "29 Feb 2024",
-            "the last second of a leap day"
-        );
-        assert_eq!(day(1_792_713_600_000), "23 Oct 2026");
     }
 
     /// A step whose undo needs what the trash let go goes, with every step behind it,

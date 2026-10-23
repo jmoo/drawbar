@@ -90,8 +90,18 @@ ureq = { version = "3.4", default-features = false, features = [
 url = "2"
 
 [target.'cfg(unix)'.dependencies]
+# The local time zone's offset, for the dates drawbar shows. eframe and toshokan
+# already build it.
+libc = "0.2"
 # The open-file limit, raised at start. Linux builds already ship it, through eframe.
 rustix = { version = "1", features = ["fs", "process"] }
+
+# The local time zone's offset, for the dates drawbar shows. toshokan already builds it.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Time",
+] }
 
 # The native menu bar, and the title bar the traffic lights sit in. macOS only:
 # elsewhere the menus and window buttons are drawn in the window.
