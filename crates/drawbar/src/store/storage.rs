@@ -4,7 +4,7 @@
 use std::io;
 
 use toshokan::asynch::Fs;
-use toshokan::io::{IoError, Kind, Meta, Range, Reply, Root};
+use toshokan::io::{IoError, Kind, Lock, Meta, Range, Reply, Root};
 use toshokan::{Identify as _, Identity, Io, RelPath};
 
 use super::keys::Contents;
@@ -121,9 +121,37 @@ fn staged(path: &RelPath) -> RelPath {
         .expect("a name with a suffix is one component")
 }
 
+/// The lock in the local root that [`replace`] and [`read_replaced`] hold, so other
+/// processes of the install, such as other tabs, wait for them.
+const REPLACING: &str = "replacing.lock";
+
+/// How many times a lock another process holds is asked for before giving up.
+const LOCK_TRIES: usize = 10_000;
+
+/// Run `then` holding [`REPLACING`].
+async fn locked<F: Fs, T>(fs: &F, then: impl AsyncFnOnce() -> io::Result<T>) -> io::Result<T> {
+    let name = RelPath::new(REPLACING).expect("the lock's name is one component");
+    for _ in 0..LOCK_TRIES {
+        match ask(fs, Io::Lock { name: name.clone() }).await? {
+            Reply::Lock(Lock::Acquired) => {
+                let done = then().await;
+                let _ = fs.perform(Io::Unlock { name }).await;
+                return done;
+            }
+            Reply::Lock(Lock::Held) => fs.pause().await,
+            _ => return Err(wrong()),
+        }
+    }
+    Err(io::Error::other("another tab kept it busy"))
+}
+
 /// Keep `bytes` at `path` in place of what it held, so a crash leaves the old bytes or
-/// the new, whole, for [`read_replaced`].
+/// the new, whole, for [`read_replaced`]. Other processes of the install wait for it.
 pub async fn replace<F: Fs>(fs: &F, root: Root, path: &RelPath, bytes: Vec<u8>) -> io::Result<()> {
+    locked(fs, async || replace_held(fs, root, path, bytes).await).await
+}
+
+async fn replace_held<F: Fs>(fs: &F, root: Root, path: &RelPath, bytes: Vec<u8>) -> io::Result<()> {
     let (next, dir) = (staged(path), path.parent().expect("a file has a parent"));
     ask(
         fs,
@@ -157,12 +185,15 @@ pub async fn read_replaced<F: Fs>(
     root: Root,
     path: &RelPath,
 ) -> io::Result<Option<Vec<u8>>> {
-    for at in [path.clone(), staged(path)] {
-        if let Some(bytes) = read_whole(fs, root, &at).await? {
-            return Ok(Some(bytes));
+    locked(fs, async || {
+        for at in [path.clone(), staged(path)] {
+            if let Some(bytes) = read_whole(fs, root, &at).await? {
+                return Ok(Some(bytes));
+            }
         }
-    }
-    Ok(None)
+        Ok(None)
+    })
+    .await
 }
 
 /// The whole file at `path`; `None` where no file is.

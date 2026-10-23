@@ -97,6 +97,96 @@ mod tests {
         now(discard(&local, &slot("A", 1))).unwrap();
     }
 
+    /// One tab's worker over the install's local root, which lets other tabs run
+    /// before each of its requests.
+    struct Tab(MemDisk);
+
+    impl Fs for Tab {
+        fn capabilities(&self, root: Root) -> toshokan::io::Capabilities {
+            Fs::capabilities(&self.0, root)
+        }
+
+        async fn perform(&self, io: Io) -> toshokan::io::IoResult {
+            let mut yielded = false;
+            std::future::poll_fn(|context| {
+                if std::mem::replace(&mut yielded, true) {
+                    return std::task::Poll::Ready(());
+                }
+                context.waker().wake_by_ref();
+                std::task::Poll::Pending
+            })
+            .await;
+            Fs::perform(&self.0, io).await
+        }
+    }
+
+    /// Run `first` and `second` a request at a time each, `second` starting once `first`
+    /// made `lead` requests, until both are done.
+    fn interleaved<A, B>(lead: usize, first: A, second: B) -> (A::Output, B::Output)
+    where
+        A: std::future::Future,
+        B: std::future::Future,
+    {
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let (mut first, mut second) = (std::pin::pin!(first), std::pin::pin!(second));
+        let (mut a, mut b) = (None, None);
+        for turn in 0.. {
+            if a.is_none() {
+                a = ready(first.as_mut().poll(&mut context));
+            }
+            if b.is_none() && turn >= lead {
+                b = ready(second.as_mut().poll(&mut context));
+            }
+            if let (Some(_), Some(_)) = (&a, &b) {
+                break;
+            }
+        }
+        (a.expect("done"), b.expect("done"))
+    }
+
+    fn ready<T>(poll: std::task::Poll<T>) -> Option<T> {
+        match poll {
+            std::task::Poll::Ready(done) => Some(done),
+            std::task::Poll::Pending => None,
+        }
+    }
+
+    #[test]
+    fn two_tabs_keeping_one_slot_at_once_leave_one_edit_whole() {
+        let base = blake3::hash(b"slot");
+        for lead in 0..24 {
+            let disk = MemDisk::new();
+            let (one, two) = (Tab(disk.process()), Tab(disk.process()));
+            now(keep(&one, &slot("A", 1), base, b"before")).unwrap();
+            let (kept_one, kept_two) = interleaved(
+                lead,
+                keep(&one, &slot("A", 1), base, b"one"),
+                keep(&two, &slot("A", 1), base, b"two"),
+            );
+            assert!(
+                kept_one.is_ok() && kept_two.is_ok(),
+                "{lead}: {kept_one:?} {kept_two:?}"
+            );
+            let kept = now(read(&one, &slot("A", 1)))
+                .unwrap()
+                .map(|(_, bytes)| bytes);
+            assert!(
+                kept.as_deref() == Some(b"one") || kept.as_deref() == Some(b"two"),
+                "{lead}: {kept:?}"
+            );
+            let (_, seen) = interleaved(
+                lead,
+                keep(&one, &slot("A", 1), base, b"three"),
+                read(&two, &slot("A", 1)),
+            );
+            let seen = seen.unwrap().map(|(_, bytes)| bytes);
+            assert!(
+                seen.is_some_and(|seen| seen != b"before"),
+                "{lead}: {kept:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_slot_file_without_its_hash_does_not_read() {
         let local = MemDisk::new();

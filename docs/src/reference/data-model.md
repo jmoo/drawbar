@@ -87,8 +87,9 @@ What only this install needs is kept in drawbar's own data, never in the
 library (`store::native::local_root`): `libraries/<hash of the library's
 path>/`, beside `app.ron`. It holds toshokan's local root, with the cached view,
 the identities its scans read and the drafts of unsaved edits; `slots/`, for the
-unsaved edits of slot views; and `rescued/`, for a slot's former occupant that a
-write to the instrument left. Losing it loses the drafts and nothing else. Two
+unsaved edits of slot views, each replaced whole under the lock `replacing.lock`
+so that two drawbars or tabs never interleave; and `rescued/`, for a slot's
+former occupant that a write to the instrument left. Losing it loses the drafts and nothing else. Two
 drawbars on one machine share it, each writing as a writer of its own; one that
 opens takes up what an idle one left, its drafts and its unfinished effects
 included.
