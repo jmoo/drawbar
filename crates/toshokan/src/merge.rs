@@ -90,6 +90,25 @@ impl<V: Clone> Held<V> {
 /// The live writes of one field, oldest first.
 type Writes<V> = Vec<Held<V>>;
 
+fn writes<V>(writes: Option<&Writes<V>>) -> &[Held<V>] {
+    writes.map_or(&[], Vec::as_slice)
+}
+
+/// The live writes in `now` that `was` does not hold, marked gained, or, where
+/// there are none, those in `was` that `now` does not hold, marked lost.
+fn changed<'a, V>(now: &'a [Held<V>], was: &'a [Held<V>]) -> Vec<(&'a Held<V>, bool)> {
+    let missing = |writes: &'a [Held<V>], held: &'a [Held<V>]| {
+        writes
+            .iter()
+            .filter(move |write| !held.iter().any(|kept| kept.at == write.at))
+    };
+    let gained: Vec<_> = missing(now, was).map(|write| (write, true)).collect();
+    match gained.is_empty() {
+        false => gained,
+        true => missing(was, now).map(|write| (write, false)).collect(),
+    }
+}
+
 #[derive(Clone, PartialEq, Debug, Default)]
 struct EntityState {
     existence: Writes<bool>,
@@ -401,52 +420,54 @@ impl Folded {
         }
     }
 
-    /// Each part of an entity that a live write `before` does not hold changed,
-    /// with the writer of that write.
+    /// Each part of an entity that changed since `before`, with the writer of
+    /// each live write `before` does not hold, or, where the part gained none,
+    /// of each live write it lost.
     pub fn since(&self, before: &Folded) -> Vec<(EntityId, Part, WriterId)> {
         let mut found = Vec::new();
+        let gone = EntityState::default();
         for pair in self.entities.diff(&before.entities) {
-            let (Some((entity, now)), old) = pair else {
-                continue;
+            let (entity, now, old) = match pair {
+                (Some((entity, now)), old) => (*entity, &**now, old.map(|(_, old)| &**old)),
+                (None, Some((entity, old))) => (*entity, &gone, Some(&**old)),
+                (None, None) => continue,
             };
-            let (entity, old) = (*entity, old.map(|(_, old)| old));
-            if old.is_some_and(|old| Arc::ptr_eq(old, now)) {
+            let old = old.unwrap_or(&gone);
+            if std::ptr::eq(old, now) {
                 continue;
             }
-            let held = |writes: &[Held<bool>], at: Ref| writes.iter().any(|held| held.at == at);
-            for write in &now.existence {
-                if old.is_none_or(|old| !held(&old.existence, write.at)) {
-                    let part = if write.value {
-                        Part::Created
-                    } else {
-                        Part::Deleted
-                    };
-                    found.push((entity, part, write.at.writer));
+            for (write, gained) in changed(&now.existence, &old.existence) {
+                let part = match write.value == gained {
+                    true => Part::Created,
+                    false => Part::Deleted,
+                };
+                found.push((entity, part, write.at.writer));
+            }
+            let keys: BTreeSet<&Name> = now.registers.keys().chain(old.registers.keys()).collect();
+            for key in keys {
+                let (now, was) = (now.registers.get(&**key), old.registers.get(&**key));
+                for (write, _) in changed(writes(now), writes(was)) {
+                    found.push((entity, Part::Field(key.to_string()), write.at.writer));
                 }
             }
-            for (key, writes) in now.registers.iter() {
-                let was = old.and_then(|old| old.registers.get(&**key));
-                for write in writes {
-                    if was.is_none_or(|was| !was.iter().any(|held| held.at == write.at)) {
+            let keys: BTreeSet<&Name> = now.sets.keys().chain(old.sets.keys()).collect();
+            for key in keys {
+                let (now, was) = (now.sets.get(&**key), old.sets.get(&**key));
+                let members: BTreeSet<&Raw> = now
+                    .iter()
+                    .flat_map(|now| now.keys())
+                    .chain(was.iter().flat_map(|was| was.keys()))
+                    .collect();
+                for member in members {
+                    let now = now.and_then(|now| now.get(member));
+                    let was = was.and_then(|was| was.get(member));
+                    for (write, _) in changed(writes(now), writes(was)) {
                         found.push((entity, Part::Field(key.to_string()), write.at.writer));
                     }
                 }
             }
-            for (key, members) in now.sets.iter() {
-                let was = old.and_then(|old| old.sets.get(&**key));
-                for (member, writes) in members.iter() {
-                    let was = was.and_then(|was| was.get(member));
-                    for write in writes {
-                        if was.is_none_or(|was| !held(was, write.at)) {
-                            found.push((entity, Part::Field(key.to_string()), write.at.writer));
-                        }
-                    }
-                }
-            }
-            for write in &now.file {
-                if old.is_none_or(|old| !old.file.iter().any(|held| held.at == write.at)) {
-                    found.push((entity, Part::File, write.at.writer));
-                }
+            for (write, _) in changed(&now.file, &old.file) {
+                found.push((entity, Part::File, write.at.writer));
             }
         }
         found

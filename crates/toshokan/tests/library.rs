@@ -3892,7 +3892,14 @@ fn facts_a_restore_removed_are_shown_until_the_grace_step<F: Facade>() {
     a.rescan().unwrap();
     assert_eq!(facts(&a.view()), shown, "nor within a day");
     clock.advance(1);
-    a.rescan().unwrap();
+    let graced = a.rescan().unwrap();
+    let tagged =
+        |change: &Change| change.entity == song && change.what == What::Field("tags".into());
+    assert!(
+        graced.changes.iter().any(tagged),
+        "what the step let go of changed: {:?}",
+        graced.changes
+    );
     let (mut elsewhere, _) = F::open(Probe::new(&machine(&folder)), env("c", 4, &clock)).unwrap();
     elsewhere.rescan().unwrap();
     assert_eq!(tags(&a.view(), song), ["new"]);
