@@ -8,6 +8,7 @@
 //! move or a deletion, each checked against what drawbar last read of the file.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 
 use toshokan::report::{By, What};
 
@@ -2396,12 +2397,15 @@ impl Store {
             let Some((from, edit)) = workspace.send_edit(id) else {
                 continue;
             };
+            let Ok(pieces) = edit.pieces(&from) else {
+                workspace.edit_not_saved(id);
+                continue;
+            };
             record.saving = true;
             self.part(Intent::Rewrite {
                 id,
                 path,
-                from,
-                edit,
+                pieces: Arc::new(pieces),
                 expect: expect.expect(),
             });
         }
@@ -3060,14 +3064,17 @@ impl Store {
         let from = match from {
             CopyOf::Outside(file) => Source::Outside(file.clone()),
             CopyOf::Part(part) => Source::Part(part.clone()),
-            CopyOf::Edited(file, edit) => Source::Edited(file.clone(), edit.clone()),
-            CopyOf::Asset(source) => {
+            CopyOf::Asset(source) | CopyOf::Edited(source, _) => {
                 let source = self.records.get(source).filter(|source| !source.saving);
                 let found =
                     source.and_then(|source| Some((source.path.clone()?, source.fingerprint?)));
-                match found {
-                    Some((at, print)) if !unsettled(waiting, &at) => Source::Library(at, print),
-                    _ => return false,
+                match (found, from) {
+                    (Some((at, _)), _) if unsettled(waiting, &at) => return false,
+                    (Some((at, print)), CopyOf::Edited(_, pieces)) => {
+                        Source::Edited(at, print, pieces.clone())
+                    }
+                    (Some((at, print)), _) => Source::Library(at, print),
+                    (None, _) => return false,
                 }
             }
         };

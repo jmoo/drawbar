@@ -1,6 +1,7 @@
 //! The desktop backend: a library is a directory, and commands run in order on a thread
 //! of their own: every change through toshokan, and reads through [`exec`].
 
+use std::cell::RefCell;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -10,10 +11,13 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use eframe::egui;
+use toshokan::blocking::{Backend as _, Native};
+use toshokan::env::{OsRandom, SystemClock};
+use toshokan::io::{Capabilities, Io, IoResult, Kind, Reply, Root};
 
 use super::exec::{self, Fs};
-use super::keeper::Keeper;
-use super::names;
+use super::keeper::{self, Keeper};
+use super::{keys, names};
 use super::{Cmd, Event, Fingerprint, LibPath, Stat};
 use crate::ondisk::OnDisk;
 
@@ -134,23 +138,25 @@ impl Backend {
         let counted = listed.clone();
         let worker = std::thread::spawn(move || {
             // toshokan's library stays on the thread that opened it.
-            let mut keeper = Keeper::new(folder, kept, counted);
-            let mut answer = |event| {
-                let _ = answers.send(event);
-                ctx.request_repaint();
-            };
-            while let Ok(cmd) = commands.recv() {
-                let wrote = writes(&cmd);
-                match cmd {
-                    Cmd::Read { files, room } => {
-                        let read = nord_usb::block_on(exec::read_all(&disk, files, room));
-                        answer(Event::Read(read));
+            let mut keeper = keeper(&folder, &kept, counted, Box::new(SystemClock));
+            nord_usb::block_on(async {
+                let mut landed = Vec::new();
+                while let Ok(cmd) = commands.recv() {
+                    let wrote = writes(&cmd);
+                    match cmd {
+                        Cmd::Read { files, room } => {
+                            landed.push(Event::Read(exec::read_all(&disk, files, room).await));
+                        }
+                        cmd => keeper.run(cmd, &mut |event| landed.push(event)).await,
                     }
-                    cmd => keeper.run(cmd, &mut answer),
+                    for event in landed.drain(..) {
+                        let _ = answers.send(exec::rest_landed(&disk, event).await);
+                        ctx.request_repaint();
+                    }
+                    ran.fetch_sub(usize::from(wrote), Ordering::Release);
                 }
-                ran.fetch_sub(usize::from(wrote), Ordering::Release);
-            }
-            keeper.close();
+                keeper.close().await;
+            });
         });
         Backend {
             root,
@@ -225,6 +231,62 @@ impl Backend {
 impl Drop for Backend {
     fn drop(&mut self) {
         self.finish();
+    }
+}
+
+/// The keeper of the library in `folder`, with this install's own state for it in
+/// `local`, counting into `listed` the files its listings find.
+pub(super) fn keeper(
+    folder: &Path,
+    local: &Path,
+    listed: Arc<AtomicUsize>,
+    clock: Box<dyn toshokan::Clock>,
+) -> Keeper<Counted> {
+    let names = Box::new(keys::Volume::probe(folder));
+    let env = keeper::env(clock, Box::new(OsRandom::new()), names);
+    let native = RefCell::new(Native::new(folder, local));
+    let counted = RefCell::default();
+    Keeper::new(
+        Counted {
+            native,
+            listed,
+            counted,
+        },
+        env,
+    )
+}
+
+/// toshokan's native backend, counting the files its listings of the folder find, so
+/// opening can say how far it has got: each directory's once.
+pub(super) struct Counted {
+    native: RefCell<Native>,
+    listed: Arc<AtomicUsize>,
+    counted: RefCell<std::collections::BTreeSet<toshokan::RelPath>>,
+}
+
+impl toshokan::asynch::Fs for Counted {
+    fn capabilities(&self, root: Root) -> Capabilities {
+        self.native.borrow().capabilities(root)
+    }
+
+    async fn perform(&self, io: Io) -> IoResult {
+        let first = match &io {
+            Io::ListStat {
+                root: Root::Folder,
+                dir,
+            } => self.counted.borrow_mut().insert(dir.clone()),
+            _ => false,
+        };
+        let reply = self.native.borrow_mut().perform(io);
+        let found = match &reply {
+            Ok(Reply::ListedStat(entries)) if first => entries
+                .iter()
+                .filter(|(name, meta)| meta.kind == Kind::File && !name.starts_with('.'))
+                .count(),
+            _ => 0,
+        };
+        self.listed.fetch_add(found, Ordering::Relaxed);
+        reply
     }
 }
 

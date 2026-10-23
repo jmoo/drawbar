@@ -2893,7 +2893,9 @@ impl Workspace {
     pub fn copies_of(&self, id: u64) -> impl Iterator<Item = u64> + '_ {
         let copies = self.arriving.iter();
         copies
-            .filter(move |(_, from)| matches!(from, CopyOf::Asset(source) if *source == id))
+            .filter(move |(_, from)| {
+                matches!(from, CopyOf::Asset(source) | CopyOf::Edited(source, _) if *source == id)
+            })
             .map(|(copy, _)| *copy)
     }
 
@@ -2911,7 +2913,8 @@ impl Workspace {
             return Some(CopyOf::Asset(id));
         };
         let (over, rewrite) = (held.over.as_ref()?, held.rewrite.as_ref().ok()?);
-        Some(CopyOf::Edited(over.clone(), rewrite.clone()))
+        let pieces = rewrite.pieces(over).ok()?;
+        Some(CopyOf::Edited(id, Arc::new(pieces)))
     }
 
     /// Let go of what an asset holds, unread again as a file of `len` bytes under a new

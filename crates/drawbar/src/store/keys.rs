@@ -1,13 +1,12 @@
 //! What drawbar keeps in a library's toshokan root: its keys, where the root is, and
-//! the identity toshokan binds files by. Only the desktop opens a library's facts on
-//! this build.
+//! the identity toshokan binds files by.
 
 use nord_format::formats;
 use nord_usb::{Location, ObjectClass};
 use serde::{Deserialize, Serialize};
 use toshokan::env::{Blake3, Digest};
 use toshokan::io::Range;
-use toshokan::{Identify, Identity, Register, RelPath, Set};
+use toshokan::{Identify, Identity, Layout, Register, RelPath, Schema, Set};
 
 use super::LibPath;
 use crate::workspace::Origin;
@@ -122,38 +121,65 @@ pub fn identity_of_bytes(path: &LibPath, bytes: &[u8]) -> Option<Identity> {
     Some(Contents.of_bytes(&path, bytes))
 }
 
-/// What only the desktop, which opens a library's facts on this build, needs.
+/// The directory at the library's root that holds what is drawbar's own. An older
+/// build's index stays there, unread.
+pub const DIR: &str = ".drawbar";
+
+pub fn schema() -> Schema {
+    Schema::of(&[TAGS.key(), TAG_NAMES.key(), ORIGIN.key()]).expect("drawbar's keys are distinct")
+}
+
+/// Where toshokan keeps the library's facts, in [`DIR`], and what its scans leave out:
+/// every name that starts with a dot, which drawbar never lists.
+pub fn layout() -> Layout {
+    Layout::within(DIR, "library")
+        .expect("the root's names are single components")
+        .hiding()
+}
+
+/// How the volume a library is on compares names: ignoring case where a look at
+/// the volume says it does, and in one normalization form on macOS, whose volumes
+/// take two spellings of an accent for one name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Volume {
+    pub folds_case: bool,
+    pub folds_form: bool,
+}
+
+/// `name` with each letter's case swapped.
+pub fn swapped(name: &str) -> String {
+    name.chars()
+        .flat_map(|c| match c.is_uppercase() {
+            true => c.to_lowercase().collect::<Vec<_>>(),
+            false => c.to_uppercase().collect::<Vec<_>>(),
+        })
+        .collect()
+}
+
+impl toshokan::Names for Volume {
+    fn key(&self, path: &str) -> String {
+        use unicode_normalization::UnicodeNormalization as _;
+        let name = |name: &str| {
+            let name = match self.folds_case {
+                true => name.to_lowercase(),
+                false => name.to_string(),
+            };
+            match self.folds_form {
+                true => name.nfc().collect(),
+                false => name,
+            }
+        };
+        let names: Vec<String> = path.split('/').map(name).collect();
+        names.join("/")
+    }
+}
+
+/// What only the desktop, which reads a volume's names itself, needs.
 #[cfg(not(target_arch = "wasm32"))]
 mod desktop {
-    use toshokan::{Identify, Identity, Layout, RelPath, Schema};
+    use toshokan::{Identify, Identity, RelPath};
 
-    use super::{Contents, ORIGIN, TAGS, TAG_NAMES};
-
-    /// The directory at the library's root that holds what is drawbar's own. An older
-    /// build's index stays there, unread.
-    pub const DIR: &str = ".drawbar";
-
-    pub fn schema() -> Schema {
-        Schema::of(&[TAGS.key(), TAG_NAMES.key(), ORIGIN.key()])
-            .expect("drawbar's keys are distinct")
-    }
-
-    /// Where toshokan keeps the library's facts, in [`DIR`], and what its scans leave out:
-    /// every name that starts with a dot, which drawbar never lists.
-    pub fn layout() -> Layout {
-        Layout::within(DIR, "library")
-            .expect("the root's names are single components")
-            .hiding()
-    }
-
-    /// How the volume a library is on compares names: ignoring case where a look at
-    /// the volume says it does, and in one normalization form on macOS, whose volumes
-    /// take two spellings of an accent for one name.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub struct Volume {
-        pub folds_case: bool,
-        pub folds_form: bool,
-    }
+    use super::{swapped, Contents, Volume};
 
     impl Volume {
         /// How the volume holding `folder` compares names, as a look at it, which
@@ -198,34 +224,6 @@ mod desktop {
             let twin = swapped(&name);
             (twin != name).then_some((dir, twin))
         })
-    }
-
-    /// `name` with each letter's case swapped.
-    fn swapped(name: &str) -> String {
-        name.chars()
-            .flat_map(|c| match c.is_uppercase() {
-                true => c.to_lowercase().collect::<Vec<_>>(),
-                false => c.to_uppercase().collect::<Vec<_>>(),
-            })
-            .collect()
-    }
-
-    impl toshokan::Names for Volume {
-        fn key(&self, path: &str) -> String {
-            use unicode_normalization::UnicodeNormalization as _;
-            let name = |name: &str| {
-                let name = match self.folds_case {
-                    true => name.to_lowercase(),
-                    false => name.to_string(),
-                };
-                match self.folds_form {
-                    true => name.nfc().collect(),
-                    false => name,
-                }
-            };
-            let names: Vec<String> = path.split('/').map(name).collect();
-            names.join("/")
-        }
     }
 
     /// The identity of the library file at `path`, which `file` opens.

@@ -33,7 +33,6 @@ mod dom;
 mod drafts;
 mod exec;
 mod ids;
-#[cfg(not(target_arch = "wasm32"))]
 mod keeper;
 mod keys;
 mod mirror;
@@ -42,8 +41,8 @@ mod shown;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
-#[cfg(not(target_arch = "wasm32"))]
 mod slots;
+mod storage;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{default_root, local_root, openable, sync_dir, Backend};
 
@@ -81,6 +80,18 @@ pub fn outside_name(from: &Outside) -> String {
     from.name()
 }
 
+/// A file outside the library, read by range.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn outside_source(from: &Outside) -> std::io::Result<impl nord_usb::FileSource> {
+    nord_usb::envelope::Positional::new(std::fs::File::open(from)?)
+}
+
+/// A file outside the library, read by range.
+#[cfg(target_arch = "wasm32")]
+pub fn outside_source(from: &Outside) -> std::io::Result<impl nord_usb::FileSource> {
+    Ok(crate::ondisk::Sliced::new(from.clone()))
+}
+
 /// How many bytes a file outside the library holds, where that can be told.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn outside_len(from: &Outside) -> Option<u64> {
@@ -106,7 +117,7 @@ use serde::{Deserialize, Serialize};
 use toshokan::EntityId;
 
 use crate::ondisk::OnDisk;
-use crate::rewrite::Rewrite;
+use crate::rewrite::Pieces;
 
 /// Where an entry sits in a library: its names from the root down, joined by `/`. The
 /// root itself is the empty path.
@@ -447,9 +458,9 @@ pub enum CopyOf {
     /// The file the asset with this id rests in, byte for byte, from wherever it is when
     /// the copy is sent.
     Asset(u64),
-    /// A piano or sample instrument resting in the library, with an edit written through
-    /// it as it is copied.
-    Edited(Arc<OnDisk>, Arc<Rewrite>),
+    /// The piano or sample instrument the asset with this id rests in, from wherever it
+    /// is when the copy is sent, as these pieces of it lay out an edit of it.
+    Edited(u64, Arc<Pieces>),
 }
 
 /// What an [`Intent::Import`] copies.
@@ -462,9 +473,9 @@ pub enum Source {
     /// A file of the library, byte for byte, which must still hold what its fingerprint
     /// says.
     Library(LibPath, Fingerprint),
-    /// A piano or sample instrument resting in the library, with an edit written through
-    /// it as it is copied.
-    Edited(Arc<OnDisk>, Arc<Rewrite>),
+    /// A piano or sample instrument of the library, which must still hold what its
+    /// fingerprint says, as these pieces of it lay out an edit of it.
+    Edited(LibPath, Fingerprint, Arc<Pieces>),
 }
 
 /// A draft as this install keeps it: of the file `of` names, by this instance's writer,
@@ -595,14 +606,13 @@ pub enum Intent {
         expect: toshokan::Expect,
         came: Option<keys::Came>,
     },
-    /// Write over the file at `path` the file `edit` makes of `from`, the piano or
-    /// sample instrument resting there, read by range. Nothing is read or written whole.
+    /// Write over the piano or sample instrument at `path` the edit `pieces` lay out of
+    /// it, reading what it keeps of the file by range. Nothing is read or written whole.
     /// Answered by [`Event::Rewritten`].
     Rewrite {
         id: u64,
         path: LibPath,
-        from: Arc<OnDisk>,
-        edit: Arc<Rewrite>,
+        pieces: Arc<Pieces>,
         expect: toshokan::Expect,
     },
     /// Copy a file to `path`, as [`Intent::Save`] writes one. Nothing is read whole: a

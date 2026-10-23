@@ -4,7 +4,7 @@
 use std::io;
 use std::sync::Arc;
 
-use super::{Failure, Fingerprint, Found, LibPath, Stat};
+use super::{Event, Failure, Fingerprint, Found, LibPath, Stat};
 use crate::ondisk::OnDisk;
 
 /// The most bytes of a library's files drawbar reads whole into memory, counting what it
@@ -92,6 +92,35 @@ async fn read_one(
         identity,
         ..Found::unread(path, stat)
     })
+}
+
+/// `event`, where it answers a change that wrote a file, with that file looked at as a
+/// read finds it: left resting, where it is a piano or sample instrument this backend
+/// reads by range.
+pub async fn rest_landed(fs: &impl Fs, event: Event) -> Event {
+    match event {
+        Event::Rewritten { id, path, result } => Event::Rewritten {
+            id,
+            path,
+            result: rested(fs, result).await,
+        },
+        Event::Imported { id, path, result } => Event::Imported {
+            id,
+            path,
+            result: rested(fs, result).await,
+        },
+        event => event,
+    }
+}
+
+async fn rested(fs: &impl Fs, found: Result<Found, Failure>) -> Result<Found, Failure> {
+    let io = |e: io::Error| Failure::Io(e.to_string());
+    let mut found = found?;
+    found.file = fs.rest(found.path.as_str(), None).await.map_err(io)?;
+    if found.file.is_some() {
+        found.identity = fs.identity(&found.path).await.map_err(io)?;
+    }
+    Ok(found)
 }
 
 /// Why a read [`Failure::Room`] refused did not run.

@@ -1,34 +1,29 @@
-//! A library on the desktop: toshokan's blocking driver, run on the backend's thread.
-//! Every change the app asks for is an intent here, and every file it writes is filled
-//! from a [`Fill`] as toshokan stages it.
+//! A library kept by toshokan's async driver, over whatever storage the backend has: the
+//! desktop's folder on its backend thread, or the browser's in a worker. Every change the
+//! app asks for is an intent here, and every file it writes is filled from a [`Fill`] as
+//! toshokan stages it.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
-use std::io::{self, Read as _, Seek as _, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::io;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use toshokan::blocking::{Backend, Library, Native, Source as Filled, Staging};
-use toshokan::env::{OsRandom, SystemClock};
+use toshokan::asynch::{Filling as Filled, Fs, Library, Source as Filler, Staging};
 use toshokan::error::Refusal;
-use toshokan::io::IoError;
-use toshokan::io::{Capabilities, Io, IoResult, Kind, Reply, Root};
+use toshokan::io::{IoError, Kind, Range, Root};
 use toshokan::log::Settlement;
 use toshokan::report::{By, Mode, Refreshed};
 use toshokan::{EntryHash, Env, Error, Expect, Policy, RelPath, View};
 
 use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES};
-use super::native::locate;
 use super::shown::Change;
+use super::storage::{self, CHUNK};
 use super::{
-    Cmd, Event, Failure, Fingerprint, Found, Intent, Kept, Key, LibPath, Moving, Opened, Part,
+    slots, Cmd, Event, Failure, Fingerprint, Found, Intent, Kept, Key, LibPath, Opened, Part,
     Source, Stat, Viewed,
 };
-use crate::ondisk::OnDisk;
-use crate::rewrite::{self, Rewrite};
+use crate::rewrite::{self, Pieces};
 
 /// The most entries a listing of the library's folders looks at: a guard against a
 /// folder no library is, such as a whole disk.
@@ -38,18 +33,29 @@ const MOST_ENTRIES: usize = 1_000_000;
 /// more than which app wrote.
 const LABEL: &str = "drawbar";
 
-/// How much of a file a copy reads at once.
-const CHUNK: usize = 4 << 20;
+/// The most bytes a writer's trash holds in a session: the size toshokan's policy
+/// keeps.
+const TRASH: u64 = 1 << 30;
 
-pub struct Keeper {
-    folder: PathBuf,
-    /// This install's own state for the library, never synced.
-    local: PathBuf,
-    library: Option<Library<Counted>>,
-    /// The time the library is opened by.
-    clock: fn() -> Box<dyn toshokan::Clock>,
-    /// How many files the listings of the folder have found.
-    listed: Arc<AtomicUsize>,
+/// What toshokan is told of the volume and the time, for a library drawbar keeps.
+pub fn env(
+    clock: Box<dyn toshokan::Clock>,
+    random: Box<dyn toshokan::Random>,
+    names: Box<dyn toshokan::Names>,
+) -> Env {
+    Env {
+        clock,
+        random,
+        identify: Rc::new(keys::Contents),
+        names,
+        label: LABEL.to_string(),
+    }
+}
+
+pub struct Keeper<F> {
+    /// The storage and what toshokan is told, until the library opens over them.
+    unopened: Option<(F, Env)>,
+    library: Option<Library<F>>,
     /// The entries this session logged, whose undo ends with it.
     session: BTreeSet<EntryHash>,
     /// The most bytes this writer's trash holds before its oldest go.
@@ -58,48 +64,48 @@ pub struct Keeper {
     shown: Option<View>,
 }
 
-/// The most bytes a writer's trash holds in a session: the size toshokan's policy
-/// keeps.
-const TRASH: u64 = 1 << 30;
-
-impl Keeper {
-    /// The library in `folder`, with this install's own state for it in `local`, counting
-    /// into `listed` the files its listings find.
-    pub fn new(folder: PathBuf, local: PathBuf, listed: Arc<AtomicUsize>) -> Keeper {
+impl<F: Fs> Keeper<F> {
+    /// The library on `fs`, opened by [`Cmd::Open`].
+    pub fn new(fs: F, env: Env) -> Keeper<F> {
         Keeper {
-            folder,
-            local,
+            unopened: Some((fs, env)),
             library: None,
-            clock: || Box::new(SystemClock),
-            listed,
             session: BTreeSet::new(),
             trash: TRASH,
             shown: None,
         }
     }
 
+    /// The storage the library is kept on, once it is open.
+    pub fn fs(&self) -> Option<&F> {
+        self.library.as_ref().map(Library::fs)
+    }
+
     /// Run a command on the library, and answer it.
-    pub fn run(&mut self, cmd: Cmd, answer: &mut impl FnMut(Event)) {
+    pub async fn run(&mut self, cmd: Cmd, answer: &mut impl FnMut(Event)) {
         match cmd {
-            Cmd::Open => answer(Event::Opened(self.open())),
-            Cmd::Rescan => answer(Event::Scanned(self.scanned(Library::rescan, true))),
-            Cmd::Refresh => answer(Event::Scanned(self.scanned(Library::refresh, false))),
+            Cmd::Open => {
+                let opened = self.open().await;
+                answer(Event::Opened(opened));
+            }
+            Cmd::Rescan => answer(Event::Scanned(self.scanned(true).await)),
+            Cmd::Refresh => answer(Event::Scanned(self.scanned(false).await)),
             Cmd::Intent(intent) => {
                 let label = intent.label().to_string();
-                let committed = self.commit(intent, answer);
-                self.made(label, committed, answer);
+                let committed = self.commit(intent, answer).await;
+                self.made(label, committed, answer).await;
             }
             Cmd::Undo => {
-                let undone = self.undone(Library::undo);
-                self.made("Undo".to_string(), undone, answer);
+                let undone = self.undone(false).await;
+                self.made("Undo".to_string(), undone, answer).await;
             }
             Cmd::Redo => {
-                let redone = self.undone(Library::redo);
-                self.made("Redo".to_string(), redone, answer);
+                let redone = self.undone(true).await;
+                self.made("Redo".to_string(), redone, answer).await;
             }
             Cmd::Settle { orphan, how } => {
-                let settled = self.settled(orphan, how);
-                self.made("Settle".to_string(), settled, answer);
+                let settled = self.settled(orphan, how).await;
+                self.made("Settle".to_string(), settled, answer).await;
             }
             Cmd::Draft {
                 of,
@@ -107,33 +113,45 @@ impl Keeper {
                 bytes,
                 replaces,
             } => {
-                let kept = self.draft(&of, |draft| draft.put(base, bytes));
-                let replaced = kept.and_then(|()| {
-                    replaces
-                        .into_iter()
-                        .try_for_each(|replaced| self.discard(replaced))
-                });
-                if let Err(why) = replaced {
+                let mut kept = self.put_draft(&of, base, bytes).await;
+                for replaced in replaces {
+                    if kept.is_err() {
+                        break;
+                    }
+                    kept = self.discard(replaced).await;
+                }
+                if let Err(why) = kept {
                     answer(Event::Unkept(why));
                 }
             }
             Cmd::Discard(kept) => {
-                if let Err(why) = self.discard(kept) {
+                if let Err(why) = self.discard(kept).await {
                     answer(Event::Unkept(why));
                 }
             }
             Cmd::KeepSlot { slot, base, bytes } => {
-                if let Err(e) = super::slots::keep(&self.local, &slot, base, &bytes) {
+                let kept = match self.fs() {
+                    Some(fs) => slots::keep(fs, &slot, base, &bytes).await,
+                    None => Err(io::Error::other("the library is not open")),
+                };
+                if let Err(e) = kept {
                     answer(Event::Unkept(format!("keeping a slot's edit: {e}")));
                 }
             }
             Cmd::DiscardSlot(slot) => {
-                if let Err(e) = super::slots::discard(&self.local, &slot) {
+                let discarded = match self.fs() {
+                    Some(fs) => slots::discard(fs, &slot).await,
+                    None => Err(io::Error::other("the library is not open")),
+                };
+                if let Err(e) = discarded {
                     answer(Event::Unkept(format!("letting go of a slot's edit: {e}")));
                 }
             }
             Cmd::ReadSlot(slot) => {
-                let kept = super::slots::read(&self.local, &slot).map_err(|e| e.to_string());
+                let kept = match self.fs() {
+                    Some(fs) => slots::read(fs, &slot).await.map_err(|e| e.to_string()),
+                    None => Err("the library is not open".to_string()),
+                };
                 answer(Event::SlotKept { slot, kept });
             }
             Cmd::Read { .. } => unreachable!("the backend reads files itself"),
@@ -142,7 +160,7 @@ impl Keeper {
 
     /// Answer a change, an undo or a redo, and keep this writer's trash within
     /// [`TRASH`] once it was made.
-    fn made(
+    async fn made(
         &mut self,
         label: String,
         committed: Result<(Option<EntryHash>, Viewed), String>,
@@ -156,7 +174,7 @@ impl Keeper {
             result: committed.map(|(_, viewed)| viewed),
         });
         if made.is_some() {
-            if let Some(trimmed) = self.trim() {
+            if let Some(trimmed) = self.trim().await {
                 answer(trimmed);
             }
         }
@@ -164,9 +182,9 @@ impl Keeper {
 
     /// Empty the oldest of this writer's trash where it holds more than [`TRASH`], and
     /// say which changes' undo needed what went.
-    fn trim(&mut self) -> Option<Event> {
+    async fn trim(&mut self) -> Option<Event> {
         let library = self.library.as_mut()?;
-        let held = library.trash().ok()?;
+        let held = library.trash().await.ok()?;
         let bytes = held
             .iter()
             .map(|item| item.len)
@@ -178,7 +196,7 @@ impl Keeper {
             max_age_ms: u64::MAX,
             max_bytes: self.trash,
         };
-        let emptied = match library.empty_trash(policy) {
+        let emptied = match library.empty_trash(policy).await {
             Ok(emptied) => emptied,
             Err(e) => return Some(Event::Unkept(format!("emptying the trash: {e}"))),
         };
@@ -189,99 +207,93 @@ impl Keeper {
     }
 
     /// Let go of a draft this instance's writer, or an idle writer of the pool, kept.
-    fn discard(&mut self, kept: Kept) -> Result<(), String> {
-        let Some(writer) = kept.pooled else {
-            return self.draft(&kept.of, |draft| draft.discard());
-        };
+    async fn discard(&mut self, kept: Kept) -> Result<(), String> {
         let library = self.library.as_mut().ok_or("the library is not open")?;
-        let of = match &kept.of {
-            Key::Entity(entity) => toshokan::Drafted::Entity(*entity),
-            Key::File(path) => {
-                toshokan::Drafted::File(relative(path).ok_or_else(|| no_path(path))?)
+        let of = drafted(&kept.of)?;
+        let discarded = match kept.pooled {
+            Some(writer) => library.discard_pooled_draft(writer, of).await,
+            None => {
+                let draft = match of {
+                    toshokan::Drafted::Entity(entity) => library.draft(entity),
+                    toshokan::Drafted::File(path) => library.draft_file(&path),
+                };
+                draft.discard().await
             }
         };
-        library
-            .discard_pooled_draft(writer, of)
-            .map_err(|e| e.to_string())
+        discarded.map_err(|e| e.to_string())
     }
 
-    /// Put or let go of the draft of the file `of` names.
-    fn draft(
+    /// Keep `bytes` as the draft of the file `of` names, made over `base`.
+    async fn put_draft(
         &mut self,
         of: &Key,
-        change: impl FnOnce(toshokan::drafts::Draft<&mut Library<Counted>>) -> toshokan::Result<()>,
+        base: toshokan::Identity,
+        bytes: Vec<u8>,
     ) -> Result<(), String> {
         let library = self.library.as_mut().ok_or("the library is not open")?;
-        let draft = match of {
-            Key::Entity(entity) => library.draft(*entity),
-            Key::File(path) => library.draft_file(&relative(path).ok_or_else(|| no_path(path))?),
+        let draft = match drafted(of)? {
+            toshokan::Drafted::Entity(entity) => library.draft(entity),
+            toshokan::Drafted::File(path) => library.draft_file(&path),
         };
-        change(draft).map_err(|e| e.to_string())
+        draft.put(base, bytes).await.map_err(|e| e.to_string())
     }
 
     /// Let the library go cleanly, once every command has run: this session's undo
     /// ends now, and the trash lets go of what only it needed.
-    pub fn close(&mut self) {
+    pub async fn close(&mut self) {
         let Some(mut library) = self.library.take() else {
             return;
         };
-        if let Ok(held) = library.trash() {
+        if let Ok(held) = library.trash().await {
             let ended = held
                 .into_iter()
                 .filter(|item| self.session.contains(&item.by));
-            let _ = library.remove_trash(ended.map(|item| item.item).collect());
+            let _ = library
+                .remove_trash(ended.map(|item| item.item).collect())
+                .await;
         }
-        let _ = library.close();
+        let _ = library.close().await;
     }
 
-    fn open(&mut self) -> Result<Opened, String> {
-        let env = Env {
-            clock: (self.clock)(),
-            random: Box::new(OsRandom::new()),
-            identify: Rc::new(keys::Contents),
-            names: Box::new(keys::Volume::probe(&self.folder)),
-            label: LABEL.to_string(),
-        };
-        let native = Counted {
-            native: Native::new(&self.folder, &self.local),
-            listed: self.listed.clone(),
-        };
-        let (mut library, opened) = Library::open(native, keys::layout(), &keys::schema(), env)
+    async fn open(&mut self) -> Result<Opened, String> {
+        let (fs, env) = self.unopened.take().ok_or("the library opened before")?;
+        let (mut library, opened) = Library::open(fs, keys::layout(), &keys::schema(), env)
+            .await
             .map_err(|e| e.to_string())?;
         let writable = match &opened.mode {
             Mode::Writable => Ok(()),
             Mode::ReadOnly(why) => Err(why.to_string()),
         };
         let mut trouble = Vec::new();
-        let let_go = match self.restored(&opened) {
+        let let_go = match restored(library.fs(), &opened).await {
             true => opened.removed.len(),
             false => 0,
         };
         if let_go > 0 {
-            library.let_go().map_err(|e| e.to_string())?;
+            library.let_go().await.map_err(|e| e.to_string())?;
         }
         let mut unfinished = Vec::new();
         if writable.is_ok() {
             // Also what a crash may have torn from the end of this writer's log, which
             // opening does not report.
-            let settled = library.settle_interrupted();
+            let settled = library.settle_interrupted().await;
             trouble.extend(settled.err().map(|e| format!("finishing a change: {e}")));
             // Another window of this install left these: they are ours to finish.
             for orphan in opened.orphaned {
                 match orphan.ours {
                     true => {
-                        let settled = library.settle(orphan, Settlement::Finished);
+                        let settled = library.settle(orphan, Settlement::Finished).await;
                         trouble.extend(settled.err().map(|e| format!("finishing a change: {e}")));
                     }
                     false => unfinished.push(orphan),
                 }
             }
             // Nothing an earlier session displaced can be undone now.
-            let emptied = library.empty_trash(Policy::default());
+            let emptied = library.empty_trash(Policy::default()).await;
             trouble.extend(emptied.err().map(|e| format!("emptying the trash: {e}")));
         }
-        let refreshed = library.rescan().map_err(|e| e.to_string())?;
-        let dirs = folders(&self.folder);
+        let refreshed = library.rescan().await.map_err(|e| e.to_string())?;
+        let dirs = folders(library.fs()).await;
         let viewed = viewed(&library, &mut self.shown, refreshed, Some(dirs));
         self.library = Some(library);
         Ok(Opened {
@@ -295,42 +307,31 @@ impl Keeper {
         })
     }
 
-    /// Whether what this install showed and the folder no longer holds was taken by a
-    /// restore of the folder, rather than not delivered yet by a sync: every writer
-    /// whose entries went has its directory in the folder.
-    fn restored(&self, opened: &toshokan::Opened) -> bool {
-        let layout = keys::layout();
-        let writers = opened.removed.iter().filter_map(|change| match &change.by {
-            By::Writer { writer, .. } => Some(*writer),
-            By::This | By::Outside => None,
-        });
-        let present = |writer| {
-            let mut at = self.folder.clone();
-            at.extend(layout.writer(writer).components());
-            at.is_dir()
-        };
-        writers.collect::<BTreeSet<_>>().into_iter().all(present)
-    }
-
-    fn scanned(
-        &mut self,
-        scan: fn(&mut Library<Counted>) -> toshokan::Result<Refreshed>,
-        whole: bool,
-    ) -> Result<Viewed, String> {
+    /// Read what other writers logged since, and scan every file where `whole`, or else
+    /// only the files their entries moved.
+    async fn scanned(&mut self, whole: bool) -> Result<Viewed, String> {
         let library = self.library.as_mut().ok_or("the library is not open")?;
-        let refreshed = scan(library).map_err(|e| e.to_string())?;
-        let dirs = whole.then(|| folders(&self.folder));
+        let refreshed = match whole {
+            true => library.rescan().await,
+            false => library.refresh().await,
+        };
+        let refreshed = refreshed.map_err(|e| e.to_string())?;
+        let dirs = match whole {
+            true => Some(folders(library.fs()).await),
+            false => None,
+        };
         Ok(viewed(library, &mut self.shown, refreshed, dirs))
     }
 
-    /// Undo or redo, and the view after it, with the files no entity is bound to that it
-    /// moved for the app to follow.
-    fn undone(
-        &mut self,
-        commit: fn(&mut Library<Counted>) -> toshokan::Result<toshokan::Committed>,
-    ) -> Result<(Option<EntryHash>, Viewed), String> {
+    /// Undo, or redo where `again`, and the view after it, with the files no entity is
+    /// bound to that it moved for the app to follow.
+    async fn undone(&mut self, again: bool) -> Result<(Option<EntryHash>, Viewed), String> {
         let library = self.library.as_mut().ok_or("the library is not open")?;
-        let committed = commit(library).map_err(|e| e.to_string())?;
+        let committed = match again {
+            true => library.redo().await,
+            false => library.undo().await,
+        };
+        let committed = committed.map_err(|e| e.to_string())?;
         let path = |path: Option<RelPath>| path.and_then(|path| LibPath::parse(path.as_str()));
         let trees = committed.trees.into_iter();
         let trees = trees.map(|(from, to)| (path(Some(from)), path(Some(to))));
@@ -339,22 +340,25 @@ impl Keeper {
         let paths = trees.chain(paths);
         let viewed = Viewed {
             undone: Some(paths.collect()),
-            dirs: Some(folders(&self.folder)),
+            dirs: Some(folders(library.fs()).await),
             ..committed_view(library, &mut self.shown, committed.changes)
         };
         Ok((Some(committed.intent), viewed))
     }
 
     /// Settle another writer's unfinished change, and the view after it.
-    fn settled(
+    async fn settled(
         &mut self,
         orphan: toshokan::report::Orphan,
         how: Settlement,
     ) -> Result<(Option<EntryHash>, Viewed), String> {
         let library = self.library.as_mut().ok_or("the library is not open")?;
-        let committed = library.settle(orphan, how).map_err(|e| e.to_string())?;
+        let committed = library
+            .settle(orphan, how)
+            .await
+            .map_err(|e| e.to_string())?;
         let viewed = Viewed {
-            dirs: Some(folders(&self.folder)),
+            dirs: Some(folders(library.fs()).await),
             ..committed_view(library, &mut self.shown, committed.changes)
         };
         Ok((Some(committed.intent), viewed))
@@ -363,7 +367,7 @@ impl Keeper {
     /// Commit an intent, and say which entry logged it, where it was made. A change to a
     /// file answers how it went first, and is answered here with the view as it stands,
     /// whether it was made or not.
-    fn commit(
+    async fn commit(
         &mut self,
         intent: Intent,
         answer: &mut impl FnMut(Event),
@@ -377,7 +381,7 @@ impl Keeper {
                 // first leaves that only to one that adopts it in the moment between.
                 let mut changes = Vec::new();
                 if files.iter().any(|key| matches!(key, Key::File(_))) {
-                    changes = library.refresh().map_err(|e| e.to_string())?.changes;
+                    changes = library.refresh().await.map_err(|e| e.to_string())?.changes;
                 }
                 let mut committed = facts(library, label, |built, view| {
                     let built = tag(built, view, &files, &name)?;
@@ -385,24 +389,31 @@ impl Keeper {
                         true => list_tag(built, view, name),
                         false => built,
                     })
-                })?;
+                })
+                .await?;
                 changes.append(&mut committed.changes);
                 Some(toshokan::Committed {
                     changes,
                     ..committed
                 })
             }
-            Intent::Untag { entities, name } => Some(facts(library, label, |mut built, _| {
-                for entity in entities {
-                    built = built.remove(entity, TAGS, &name);
-                }
-                Ok(built)
-            })?),
-            Intent::MakeTag { name } => Some(facts(library, label, |built, view| {
-                Ok(list_tag(built, view, name))
-            })?),
-            Intent::RenameTag { entities, from, to } => {
-                Some(facts(library, label, |mut built, view| {
+            Intent::Untag { entities, name } => Some(
+                facts(library, label, |mut built, _| {
+                    for entity in entities {
+                        built = built.remove(entity, TAGS, &name);
+                    }
+                    Ok(built)
+                })
+                .await?,
+            ),
+            Intent::MakeTag { name } => {
+                let made = facts(library, label, |built, view| {
+                    Ok(list_tag(built, view, name))
+                });
+                Some(made.await?)
+            }
+            Intent::RenameTag { entities, from, to } => Some(
+                facts(library, label, |mut built, view| {
                     for entity in entities {
                         built = built
                             .remove(entity, TAGS, &from)
@@ -415,10 +426,11 @@ impl Keeper {
                                 .add(list, TAG_NAMES, to.clone());
                     }
                     Ok(built)
-                })?)
-            }
-            Intent::RemoveTag { entities, name } => {
-                Some(facts(library, label, |mut built, view| {
+                })
+                .await?,
+            ),
+            Intent::RemoveTag { entities, name } => Some(
+                facts(library, label, |mut built, view| {
                     for entity in entities {
                         built = built.remove(entity, TAGS, &name);
                     }
@@ -426,197 +438,69 @@ impl Keeper {
                         built = built.remove(list, TAG_NAMES, &name);
                     }
                     Ok(built)
-                })?)
-            }
+                })
+                .await?,
+            ),
             Intent::Forget { entity } => {
-                Some(facts(library, label, |built, _| Ok(built.delete(entity)))?)
+                let forgot = facts(library, label, |built, _| Ok(built.delete(entity)));
+                Some(forgot.await?)
             }
-            Intent::Save {
-                id,
-                path,
-                bytes,
-                expect,
-                came,
-            } => {
-                let crc = nord_format::crc::crc32(&bytes);
-                let identity = keys::identity_of_bytes(&path, &bytes);
-                let to = To {
-                    path: &path,
-                    expect,
-                    came,
-                };
-                let wrote = write(library, &self.folder, label, to, Fill::Bytes(bytes));
-                let result = wrote.map(|(stat, changes)| {
-                    let print = Fingerprint {
-                        crc: Some(crc),
-                        identity,
-                        ..Fingerprint::unread(stat)
-                    };
-                    (print, changes)
-                });
-                answer_with(answer, result, |result| Event::Saved { id, path, result })
-            }
-            Intent::Rewrite {
-                id,
-                path,
-                from,
-                edit,
-                expect,
-            } => {
-                let fill = Fill::Edited(from, edit);
-                let to = To {
-                    path: &path,
-                    expect,
-                    came: None,
-                };
-                let wrote = write(library, &self.folder, label, to, fill);
-                let made = wrote.as_ref().ok().map(|(_, changes)| changes.clone());
-                let result = wrote.and_then(|_| landed(&self.folder, &path));
-                answer(Event::Rewritten { id, path, result });
-                made
-            }
-            Intent::Import {
-                id,
-                path,
-                from,
-                expect,
-                came,
-            } => {
-                let to = To {
-                    path: &path,
-                    expect,
-                    came,
-                };
-                let copied = import(library, &self.folder, label, to, from);
-                let made = copied.as_ref().ok().cloned();
-                let result = copied.and_then(|_| landed(&self.folder, &path));
-                answer(Event::Imported { id, path, result });
-                made
-            }
-            Intent::Move { moves } => {
-                let moved = facts(library, label, |mut built, view| {
-                    for moving in &moves {
-                        built = rename(built, view, moving)?;
-                    }
-                    Ok(built)
-                });
-                let (result, changes) = split(moved);
-                for Moving { from, to, .. } in moves {
-                    let result = result.clone();
-                    answer(Event::Moved { from, to, result });
-                }
-                changes
-            }
-            Intent::MoveFolder { from, to } => {
-                let moved = facts(library, label, |built, _| {
-                    let at = |path: &LibPath| relative(path).ok_or_else(|| no_path(path));
-                    Ok(built.move_tree(&at(&from)?, &at(&to)?))
-                });
-                let (result, changes) = split(moved);
-                answer(Event::Moved { from, to, result });
-                changes
-            }
-            Intent::MakeDir { path } => {
-                let made = facts(library, label, |built, _| {
-                    Ok(built.make_dir(&relative(&path).ok_or_else(|| no_path(&path))?))
-                });
-                made.map_or_else(
-                    |why| {
-                        answer(Event::Failed(format!("making {path}: {why}")));
-                        None
-                    },
-                    Some,
-                )
-            }
-            Intent::RemoveDir { path } => {
-                let removed = facts(library, label, |built, _| {
-                    Ok(built.remove_dir(&relative(&path).ok_or_else(|| no_path(&path))?))
-                });
-                removed.map_or_else(
-                    |why| {
-                        answer(Event::Failed(format!("removing {path}: {why}")));
-                        None
-                    },
-                    Some,
-                )
-            }
-            Intent::Batch(parts) => batch(library, &self.folder, label, parts, answer),
-            Intent::Delete { files } => {
-                let trashed = facts(library, label, |mut built, view| {
-                    for (path, expect) in &files {
-                        let at = relative(path).ok_or_else(|| no_path(path))?;
-                        built = match view.at(&at).map(|entity| entity.id()) {
-                            Some(entity) => built.trash(entity, *expect).delete(entity),
-                            None => built.trash_file(&at, *expect),
-                        };
-                    }
-                    Ok(built)
-                });
-                trashed.map_or_else(
-                    |why| {
-                        let paths: Vec<String> =
-                            files.iter().map(|(path, _)| path.to_string()).collect();
-                        let paths = paths.join(", ");
-                        answer(Event::Failed(format!("deleting {paths}: {why}")));
-                        None
-                    },
-                    Some,
-                )
-            }
+            Intent::Batch(parts) => batch(library, label, parts, answer).await,
+            part => batch(library, label, vec![part], answer).await,
         };
         let intent = changes.as_ref().map(|committed| committed.intent);
         let changes = changes.map(|committed| committed.changes);
-        Ok((
-            intent,
-            committed_view(library, &mut self.shown, changes.unwrap_or_default()),
-        ))
+        let viewed = committed_view(library, &mut self.shown, changes.unwrap_or_default());
+        Ok((intent, viewed))
     }
 }
 
-/// toshokan's native backend, counting the files its listings of the folder find, so
-/// opening can say how far it has got.
-struct Counted {
-    native: Native,
-    listed: Arc<AtomicUsize>,
+/// The draft `of` names, as toshokan names it.
+fn drafted(of: &Key) -> Result<toshokan::Drafted, String> {
+    Ok(match of {
+        Key::Entity(entity) => toshokan::Drafted::Entity(*entity),
+        Key::File(path) => toshokan::Drafted::File(relative(path).ok_or_else(|| no_path(path))?),
+    })
 }
 
-impl Backend for Counted {
-    fn capabilities(&self, root: Root) -> Capabilities {
-        self.native.capabilities(root)
+/// Whether what this install showed and the folder no longer holds was taken by a
+/// restore of the folder, rather than not delivered yet by a sync: every writer whose
+/// entries went has its directory in the folder.
+async fn restored<F: Fs>(fs: &F, opened: &toshokan::Opened) -> bool {
+    let layout = keys::layout();
+    let writers = opened.removed.iter().filter_map(|change| match &change.by {
+        By::Writer { writer, .. } => Some(*writer),
+        By::This | By::Outside => None,
+    });
+    for writer in writers.collect::<BTreeSet<_>>() {
+        let present = storage::meta(fs, Root::Folder, &layout.writer(writer)).await;
+        let dir = present
+            .ok()
+            .flatten()
+            .is_some_and(|meta| meta.kind == Kind::Directory);
+        if !dir {
+            return false;
+        }
     }
-
-    fn perform(&mut self, io: Io) -> IoResult {
-        let folder = io.root() == Root::Folder;
-        let reply = self.native.perform(io);
-        let found = match &reply {
-            Ok(Reply::ListedStat(entries)) if folder => entries
-                .iter()
-                .filter(|(name, meta)| meta.kind == Kind::File && !name.starts_with('.'))
-                .count(),
-            _ => 0,
-        };
-        self.listed.fetch_add(found, Ordering::Relaxed);
-        reply
-    }
+    true
 }
 
-type Built<'l> = toshokan::intent::Intent<&'l mut Library<Counted>>;
+type Built<'l, F> = toshokan::intent::Intent<&'l mut Library<F>>;
 
 /// Commit an intent labeled `label` that `build` makes against the view as it stands,
 /// and return what it changed.
-fn facts<'a>(
-    library: &'a mut Library<Counted>,
+async fn facts<'a, F: Fs + 'a>(
+    library: &'a mut Library<F>,
     label: &str,
-    build: impl FnOnce(Built<'a>, &View) -> Result<Built<'a>, String>,
+    build: impl FnOnce(Built<'a, F>, &View) -> Result<Built<'a, F>, String>,
 ) -> Result<toshokan::Committed, String> {
     let view = library.view();
     let built = build(library.intent(label), &view)?;
-    let committed = built.commit().map_err(|e| e.to_string())?;
-    Ok(committed)
+    built.commit().await.map_err(|e| e.to_string())
 }
 
 /// Add the tag `name` to the library's list of tags.
-fn list_tag<'l>(built: Built<'l>, view: &View, name: String) -> Built<'l> {
+fn list_tag<'l, F: Fs + 'l>(built: Built<'l, F>, view: &View, name: String) -> Built<'l, F> {
     match view.with(TAG_NAMES).into_iter().min() {
         Some(list) => built.add(list, TAG_NAMES, name),
         None => {
@@ -631,12 +515,12 @@ fn list_tag<'l>(built: Built<'l>, view: &View, name: String) -> Built<'l> {
 
 /// Put a tag on each file of `files`: on its entity, the one bound to its path in `view`
 /// where another writer made one since the app looked, or a new one that adopts it.
-fn tag<'l>(
-    mut built: Built<'l>,
+fn tag<'l, F: Fs + 'l>(
+    mut built: Built<'l, F>,
     view: &View,
     files: &[Key],
     name: &str,
-) -> Result<Built<'l>, String> {
+) -> Result<Built<'l, F>, String> {
     for key in files {
         let path = match key {
             Key::Entity(entity) => {
@@ -673,25 +557,6 @@ struct To<'p> {
     came: Option<Came>,
 }
 
-/// Write the file `to` names from `fill`: as the file of the entity bound there, as a new
-/// entity's file where `to` says where it came from, or as one no entity is bound to.
-/// Returns the file's stat as it is found there, and what the commit changed.
-fn write(
-    library: &mut Library<Counted>,
-    folder: &Path,
-    label: &str,
-    to: To<'_>,
-    fill: Fill,
-) -> Result<(Stat, toshokan::Committed), Failure> {
-    let at = relative(to.path).ok_or_else(|| Failure::Io(no_path(to.path)))?;
-    let view = library.view();
-    let built = library.intent(label);
-    let (built, failed) = save_part(built, &view, folder, &at, to, fill, &[]);
-    let committed = built.commit().map_err(|e| failure(e, failed.take()))?;
-    let stat = stat_at(folder, to.path)?;
-    Ok((stat, committed))
-}
-
 /// What a fill that failed found, kept to say why its write did not land.
 type FillFailure = Rc<RefCell<Option<io::Error>>>;
 
@@ -699,33 +564,34 @@ type FillFailure = Rc<RefCell<Option<io::Error>>>;
 /// entity bound there, as a new entity's file where `to` says where it came from, or
 /// as one no entity is bound to, unless `tags` are to go on it, which makes it an
 /// entity's.
-fn save_part<'l>(
-    built: Built<'l>,
+fn save_part<'l, F: Fs + 'l>(
+    built: Built<'l, F>,
     view: &View,
-    folder: &Path,
     at: &RelPath,
     to: To<'_>,
     fill: Fill,
     tags: &[String],
-) -> (Built<'l>, FillFailure) {
+) -> (Built<'l, F>, FillFailure) {
     let To { expect, came, .. } = to;
     let failed = Rc::new(RefCell::new(None));
-    let source: Box<dyn Filled<Counted>> = Box::new(Filling {
-        fill,
-        folder: folder.to_path_buf(),
-        failed: failed.clone(),
-    });
+    let source = || -> Box<dyn Filler<F> + 'l> {
+        Box::new(Filling {
+            fill,
+            failed: failed.clone(),
+        })
+    };
     let entity = view
         .at(at)
         .map(|entity| entity.id())
         .or_else(|| missing_at(view, at));
     let built = match (entity, came) {
         (Some(entity), _) => {
-            let built = built.save_from(entity, at, source, expect);
+            let built = built.save_from(entity, at, source(), expect);
             tags.iter()
                 .fold(built, |built, name| built.add(entity, TAGS, name.clone()))
         }
         (None, Some(came)) => {
+            let source = source();
             let (built, _) = built.create(|e| {
                 e.set(ORIGIN, came).save_from(at, source, expect);
                 for name in tags {
@@ -734,8 +600,9 @@ fn save_part<'l>(
             });
             built
         }
-        (None, None) if tags.is_empty() => built.save_file_from(at, source, expect),
+        (None, None) if tags.is_empty() => built.save_file_from(at, source(), expect),
         (None, None) => {
+            let source = source();
             let (built, _) = built.create(|e| {
                 e.save_from(at, source, expect);
                 for name in tags {
@@ -828,7 +695,7 @@ impl Answering {
     }
 
     /// The event that says the part landed; none for one answered only on failure.
-    fn landed(self, folder: &Path) -> Option<Event> {
+    async fn landed<F: Fs>(self, fs: &F) -> Option<Event> {
         Some(match self {
             Answering::Saved {
                 id,
@@ -836,7 +703,7 @@ impl Answering {
                 crc,
                 identity,
             } => {
-                let result = stat_at(folder, &path).map(|stat| Fingerprint {
+                let result = stat_at(fs, &path).await.map(|stat| Fingerprint {
                     crc: Some(crc),
                     identity,
                     ..Fingerprint::unread(stat)
@@ -844,11 +711,11 @@ impl Answering {
                 Event::Saved { id, path, result }
             }
             Answering::Rewritten { id, path } => {
-                let result = landed(folder, &path);
+                let result = landed(fs, &path).await;
                 Event::Rewritten { id, path, result }
             }
             Answering::Imported { id, path } => {
-                let result = landed(folder, &path);
+                let result = landed(fs, &path).await;
                 Event::Imported { id, path, result }
             }
             Answering::Moved { from, to } => Event::Moved {
@@ -865,16 +732,15 @@ impl Answering {
 /// answered alone: each by whether its file or folder landed. A part whose file could
 /// not be read before anything was written is answered so, and the rest committed
 /// without it. A tag on a file saved in the same batch goes on it as it is made.
-fn batch(
-    library: &mut Library<Counted>,
-    folder: &Path,
+async fn batch<F: Fs>(
+    library: &mut Library<F>,
     label: &str,
     mut parts: Vec<Intent>,
     answer: &mut impl FnMut(Event),
 ) -> Option<toshokan::Committed> {
     loop {
         let again = parts.iter().any(Intent::reads).then(|| parts.clone());
-        let tried = attempt(library, folder, label, parts);
+        let tried = attempt(library, label, parts).await;
         let unread: BTreeSet<usize> = tried
             .owed
             .iter()
@@ -887,7 +753,7 @@ fn batch(
             .collect();
         let retry = again.filter(|_| tried.changes.is_none() && !unread.is_empty());
         let Some(again) = retry else {
-            return tried.answer(folder, answer);
+            return tried.answer(library.fs(), answer).await;
         };
         for owed in tried
             .owed
@@ -924,7 +790,11 @@ struct Tried {
 
 impl Tried {
     /// Answer each part, and return what the commit changed.
-    fn answer(self, folder: &Path, answer: &mut impl FnMut(Event)) -> Option<toshokan::Committed> {
+    async fn answer<F: Fs>(
+        self,
+        fs: &F,
+        answer: &mut impl FnMut(Event),
+    ) -> Option<toshokan::Committed> {
         let Tried {
             owed,
             refused,
@@ -949,7 +819,7 @@ impl Tried {
                 (Some(_), None) => changes.is_some(),
             };
             let event = match landed {
-                true => answering.landed(folder),
+                true => answering.landed(fs).await,
                 false => {
                     let filled = failed.and_then(|failed| failed.take()).map(fill_failure);
                     let failure = filled.or_else(|| why.clone());
@@ -962,12 +832,7 @@ impl Tried {
     }
 }
 
-fn attempt(
-    library: &mut Library<Counted>,
-    folder: &Path,
-    label: &str,
-    parts: Vec<Intent>,
-) -> Tried {
+async fn attempt<F: Fs>(library: &mut Library<F>, label: &str, parts: Vec<Intent>) -> Tried {
     let view = library.view();
     let saved: BTreeSet<LibPath> = parts
         .iter()
@@ -989,16 +854,25 @@ fn attempt(
             }
         }
     }
+    let mut refused = Vec::new();
+    let mut unchecked = BTreeSet::new();
+    for (at, part) in parts.iter().enumerate() {
+        if let Err(event) = checked(part, library.fs()).await {
+            refused.push(*event);
+            unchecked.insert(at);
+        }
+    }
     let mut parting = Parting {
         built: Some(library.intent(label)),
         view: &view,
-        folder,
         tags: &tags,
         part: 0,
         owed: Vec::new(),
     };
-    let mut refused = Vec::new();
     for (at, part) in parts.into_iter().enumerate() {
+        if unchecked.contains(&at) {
+            continue;
+        }
         parting.part = at;
         if let Err(event) = parting.add(part) {
             refused.push(*event);
@@ -1006,7 +880,7 @@ fn attempt(
     }
     let Parting { built, owed, .. } = parting;
     let built = built.expect("each part puts the intent back");
-    let (reached, changes, why) = match built.commit() {
+    let (reached, changes, why) = match built.commit().await {
         Ok(committed) => (None, Some(committed), None),
         Err(Error::Partial(partial)) => {
             // ⚠️ Only a commit's report says what landed; a settlement's leaves it empty.
@@ -1039,6 +913,28 @@ fn attempt(
     }
 }
 
+/// Look, before anything is built, at what `part` copies from the library: a copy of a
+/// file no longer what the app knew of it is refused.
+async fn checked<F: Fs>(part: &Intent, fs: &F) -> Result<(), Box<Event>> {
+    let Intent::Import { id, path, from, .. } = part else {
+        return Ok(());
+    };
+    let (Source::Library(source, known) | Source::Edited(source, known, _)) = from else {
+        return Ok(());
+    };
+    if still(fs, source, known).await.unwrap_or(false) {
+        return Ok(());
+    }
+    let answering = Answering::Imported {
+        id: *id,
+        path: path.clone(),
+    };
+    let changed = Failure::Io("the file it copies changed on disk".into());
+    Err(Box::new(
+        answering.refused(changed).expect("a copy answers"),
+    ))
+}
+
 fn answer_some(answer: &mut impl FnMut(Event), event: Option<Event>) {
     if let Some(event) = event {
         answer(event);
@@ -1046,18 +942,17 @@ fn answer_some(answer: &mut impl FnMut(Event), event: Option<Event>) {
 }
 
 /// One intent being built from the parts of a batch.
-struct Parting<'l, 'v> {
+struct Parting<'l, 'v, F: Fs + 'l> {
     /// Taken while a part is built into it, and put back.
-    built: Option<Built<'l>>,
+    built: Option<Built<'l, F>>,
     view: &'v View,
-    folder: &'v Path,
     tags: &'v BTreeMap<LibPath, Vec<String>>,
     /// The part being built.
     part: usize,
     owed: Vec<Owed>,
 }
 
-impl<'l> Parting<'l, '_> {
+impl<'l, F: Fs + 'l> Parting<'l, '_, F> {
     /// Build `part` into the intent, or say at once why it cannot be.
     fn add(&mut self, part: Intent) -> Result<(), Box<Event>> {
         let at = |path: &LibPath| relative(path).ok_or_else(|| no_path(path));
@@ -1085,8 +980,7 @@ impl<'l> Parting<'l, '_> {
             Intent::Rewrite {
                 id,
                 path,
-                from,
-                edit,
+                pieces,
                 expect,
             } => {
                 let answering = Answering::Rewritten {
@@ -1098,7 +992,7 @@ impl<'l> Parting<'l, '_> {
                     expect,
                     came: None,
                 };
-                self.save(to, Fill::Edited(from, edit), answering)
+                self.save(to, Fill::Edited(path.clone(), pieces), answering)
             }
             Intent::Import {
                 id,
@@ -1114,17 +1008,8 @@ impl<'l> Parting<'l, '_> {
                 let fill = match from {
                     Source::Outside(from) => Fill::Outside(from),
                     Source::Part(part) => Fill::Part(part),
-                    Source::Edited(from, edit) => Fill::Edited(from, edit),
-                    Source::Library(source, known) => {
-                        let still = still(self.folder, &source, &known).unwrap_or(false);
-                        if !still {
-                            let changed = Failure::Io("the file it copies changed on disk".into());
-                            return Err(Box::new(
-                                answering.refused(changed).expect("a copy answers"),
-                            ));
-                        }
-                        Fill::Library(source)
-                    }
+                    Source::Edited(source, _, pieces) => Fill::Edited(source, pieces),
+                    Source::Library(source, known) => Fill::Library(source, known.len),
                 };
                 let to = To {
                     path: &path,
@@ -1191,11 +1076,8 @@ impl<'l> Parting<'l, '_> {
                 let at = at(&path)
                     .map_err(|why| Box::new(Event::Failed(format!("making {path}: {why}"))))?;
                 self.built = Some(self.take().make_dir(&at));
-                self.owe(
-                    Some(Spot::Puts(at)),
-                    None,
-                    Answering::Quiet(format!("making {path}")),
-                );
+                let doing = Answering::Quiet(format!("making {path}"));
+                self.owe(Some(Spot::Puts(at)), None, doing);
                 Ok(())
             }
             Intent::RemoveDir { path } => {
@@ -1229,11 +1111,8 @@ impl<'l> Parting<'l, '_> {
                     true => list_tag(built, self.view, name.clone()),
                     false => built,
                 });
-                self.owe(
-                    None,
-                    None,
-                    Answering::Quiet(format!("tagging with “{name}”")),
-                );
+                let doing = Answering::Quiet(format!("tagging with “{name}”"));
+                self.owe(None, None, doing);
                 Ok(())
             }
             other => Err(Box::new(Event::Failed(format!(
@@ -1252,13 +1131,13 @@ impl<'l> Parting<'l, '_> {
         };
         let tags = self.tags.get(to.path).map_or(&[][..], Vec::as_slice);
         let built = self.take();
-        let (built, failed) = save_part(built, self.view, self.folder, &at, to, fill, tags);
+        let (built, failed) = save_part(built, self.view, &at, to, fill, tags);
         self.built = Some(built);
         self.owe(Some(Spot::Puts(at)), Some(failed), answering);
         Ok(())
     }
 
-    fn take(&mut self) -> Built<'l> {
+    fn take(&mut self) -> Built<'l, F> {
         self.built.take().expect("each part puts the intent back")
     }
 
@@ -1273,63 +1152,19 @@ impl<'l> Parting<'l, '_> {
     }
 }
 
-/// Copy `from` to `path`, where the copy of a library file is refused once the file is
-/// no longer what the app knew of it.
-fn import(
-    library: &mut Library<Counted>,
-    folder: &Path,
-    label: &str,
-    to: To<'_>,
-    from: Source,
-) -> Result<toshokan::Committed, Failure> {
-    let changed = || Failure::Io("the file it copies changed on disk".to_string());
-    let fill = match from {
-        Source::Outside(from) => Fill::Outside(from),
-        Source::Part(part) => Fill::Part(part),
-        Source::Edited(from, edit) => Fill::Edited(from, edit),
-        Source::Library(source, known) => {
-            if !still(folder, &source, &known).map_err(|e| Failure::Io(e.to_string()))? {
-                return Err(changed());
-            }
-            Fill::Library(source)
-        }
-    };
-    match write(library, folder, label, to, fill) {
-        Ok((_, changes)) => Ok(changes),
-        Err(Failure::Moved) if to.expect == Expect::Absent => Err(Failure::Moved),
-        Err(Failure::Moved) => Err(changed()),
-        Err(failure) => Err(failure),
-    }
-}
-
-/// Rename the file at `from` to `to`, as the entity bound there or as a file no entity
-/// is bound to.
-/// `built` with the rename `moving` names: of its entity's file, or of the file no
-/// entity is bound to.
-fn rename<'l>(built: Built<'l>, view: &View, moving: &Moving) -> Result<Built<'l>, String> {
-    let Moving { from, to, expect } = moving;
-    let (at, to) = (
-        relative(from).ok_or_else(|| no_path(from))?,
-        relative(to).ok_or_else(|| no_path(to))?,
-    );
-    Ok(match view.at(&at).map(|entity| entity.id()) {
-        Some(entity) => built.rename(entity, &to, *expect),
-        None => built.rename_file(&at, &to, *expect),
-    })
-}
-
 /// Whether the library file at `path` still holds what `known` says: its stat has not
 /// moved, or its identity is the one known.
-fn still(folder: &Path, path: &LibPath, known: &Fingerprint) -> io::Result<bool> {
-    let stat = stat_at(folder, path).map_err(|_| io::Error::from(io::ErrorKind::NotFound))?;
+async fn still<F: Fs>(fs: &F, path: &LibPath, known: &Fingerprint) -> io::Result<bool> {
+    let at = relative(path).ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+    let stat = storage::stat(fs, &at).await?;
+    let stat = stat.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
     if stat == known.stat() {
         return Ok(true);
     }
-    let (Some(identity), Some(at)) = (known.identity, relative(path)) else {
+    let Some(identity) = known.identity else {
         return Ok(false);
     };
-    let mut file = File::open(locate(folder, path.as_str())?)?;
-    Ok(keys::identity_of(&at, &mut file)? == identity)
+    Ok(storage::identity(fs, &at, stat.len).await? == identity)
 }
 
 /// What failed to fill a file, or why toshokan refused the change, as the app tells it.
@@ -1351,29 +1186,6 @@ fn fill_failure(e: io::Error) -> Failure {
     }
 }
 
-/// Answer how a change to a file went, and return what it changed.
-fn answer_with<T>(
-    answer: &mut impl FnMut(Event),
-    result: Result<(T, toshokan::Committed), Failure>,
-    event: impl FnOnce(Result<T, Failure>) -> Event,
-) -> Option<toshokan::Committed> {
-    let (result, changes) = match result {
-        Ok((done, changes)) => (Ok(done), Some(changes)),
-        Err(failure) => (Err(failure), None),
-    };
-    answer(event(result));
-    changes
-}
-
-fn split(
-    result: Result<toshokan::Committed, String>,
-) -> (Result<(), String>, Option<toshokan::Committed>) {
-    match result {
-        Ok(changes) => (Ok(()), Some(changes)),
-        Err(why) => (Err(why), None),
-    }
-}
-
 /// The entity whose file is missing from `path`: one whose file a save writes back.
 fn missing_at(view: &View, path: &RelPath) -> Option<toshokan::EntityId> {
     let mut entities = view.entities().into_iter();
@@ -1385,202 +1197,135 @@ fn missing_at(view: &View, path: &RelPath) -> Option<toshokan::EntityId> {
     missing.map(|entity| entity.id())
 }
 
-/// The file just written at `path`, as a listing finds it: resting, where it is a piano
-/// or sample instrument, and otherwise unread.
-fn landed(folder: &Path, path: &LibPath) -> Result<Found, Failure> {
-    let io = |e: io::Error| Failure::Io(e.to_string());
-    let stat = stat_at(folder, path)?;
-    let at = locate(folder, path.as_str()).map_err(io)?;
-    let file = OnDisk::open(File::open(&at).map_err(io)?, None).map_err(io)?;
-    let identity = match (&file, relative(path)) {
-        (Some(_), Some(relative)) => {
-            Some(keys::identity_of(&relative, &mut File::open(&at).map_err(io)?).map_err(io)?)
-        }
-        _ => None,
-    };
-    Ok(Found {
-        file: file.map(Arc::new),
-        identity,
-        ..Found::unread(path.clone(), stat)
-    })
+/// The file just written at `path`, as a listing finds it, with nothing read: the
+/// backend, which reads files, looks at what it holds.
+async fn landed<F: Fs>(fs: &F, path: &LibPath) -> Result<Found, Failure> {
+    Ok(Found::unread(path.clone(), stat_at(fs, path).await?))
 }
 
-fn stat_at(folder: &Path, path: &LibPath) -> Result<Stat, Failure> {
+async fn stat_at<F: Fs>(fs: &F, path: &LibPath) -> Result<Stat, Failure> {
     let gone = || Failure::Io("the file was gone as soon as it was written".into());
-    let at = locate(folder, path.as_str()).map_err(|e| Failure::Io(e.to_string()))?;
-    let meta = std::fs::symlink_metadata(at).map_err(|_| gone())?;
-    if !meta.is_file() {
-        return Err(gone());
-    }
-    let modified = meta
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .and_then(|since| u64::try_from(since.as_nanos()).ok());
-    Ok(Stat {
-        len: meta.len(),
-        modified,
-    })
+    let at = relative(path).ok_or_else(|| Failure::Io(no_path(path)))?;
+    let stat = storage::stat(fs, &at).await.map_err(|_| gone())?;
+    stat.ok_or_else(gone)
 }
 
 /// What a file toshokan stages is filled from.
 enum Fill {
     Bytes(Vec<u8>),
     /// A file outside the library, never held whole.
-    Outside(PathBuf),
+    Outside(super::Outside),
     /// Some bytes of a file outside the library, which must have their CRC.
     Part(Part),
-    /// The library's own file at this path, never held whole.
-    Library(LibPath),
-    /// The file an edit makes of a piano or sample instrument resting in the library,
-    /// read by range and never held whole.
-    Edited(Arc<OnDisk>, Arc<Rewrite>),
+    /// The library's own file at this path, of this length, never held whole.
+    Library(LibPath, u64),
+    /// The file an edit makes of a piano or sample instrument resting in the library at
+    /// this path, read by range and never held whole.
+    Edited(LibPath, Arc<Pieces>),
 }
 
 /// A [`Fill`] as toshokan takes it. What failed is kept in `failed`, since toshokan
 /// carries only its text.
 struct Filling {
     fill: Fill,
-    folder: PathBuf,
-    failed: Rc<RefCell<Option<io::Error>>>,
+    failed: FillFailure,
 }
 
-impl Filled<Counted> for Filling {
-    fn fill(self: Box<Self>, staging: &mut Staging<'_, Counted>) -> Result<(), IoError> {
-        let Filling {
-            fill,
-            folder,
-            failed,
-        } = *self;
-        fill.into(&folder, staging).map_err(|e| {
-            let why = IoError::Other(e.to_string());
-            *failed.borrow_mut() = Some(e);
-            why
+impl<F: Fs> Filler<F> for Filling {
+    fn fill<'s>(self: Box<Self>, staging: Staging<'s, F>) -> Filled<'s>
+    where
+        Self: 's,
+    {
+        Box::pin(async move {
+            let Filling { fill, failed } = *self;
+            fill.into(&staging).await.map_err(|e| {
+                let why = IoError::Other(e.to_string());
+                *failed.borrow_mut() = Some(e);
+                why
+            })
         })
     }
 }
 
 impl Fill {
-    fn into(self, folder: &Path, staging: &mut Staging<'_, Counted>) -> io::Result<()> {
-        let mut put = |at: u64, bytes: Vec<u8>| {
+    async fn into<F: Fs>(self, staging: &Staging<'_, F>) -> io::Result<()> {
+        let put = async |at: u64, bytes: Vec<u8>| {
             staging
                 .write(at, bytes)
+                .await
                 .map_err(|e| io::Error::other(e.to_string()))
         };
         match self {
-            Fill::Bytes(bytes) => put(0, bytes),
-            Fill::Outside(from) => copy(&mut File::open(from)?, None, &mut put).map(drop),
-            Fill::Library(from) => {
-                let mut from = File::open(locate(folder, from.as_str())?)?;
-                copy(&mut from, None, &mut put).map(drop)
+            Fill::Bytes(bytes) => put(0, bytes).await,
+            Fill::Outside(from) => {
+                let mut source = super::outside_source(&from)?;
+                let len = nord_usb::FileSource::len(&source);
+                copy(&mut source, 0..len, put).await.map(drop)
             }
             Fill::Part(part) => {
-                let mut source = File::open(&part.from)?;
-                source.seek(SeekFrom::Start(part.bytes.start))?;
-                let len = part.bytes.end - part.bytes.start;
-                let crc = copy(&mut source.take(len), Some(len), &mut put)?;
-                match crc == Some(part.crc32) {
+                let mut source = super::outside_source(&part.from)?;
+                let crc = copy(&mut source, part.bytes.clone(), put).await?;
+                match crc == part.crc32 {
                     true => Ok(()),
                     false => Err(part.mismatch()),
                 }
             }
-            Fill::Edited(from, edit) => {
-                let mut out = Out {
-                    put: &mut put,
-                    at: 0,
-                    end: 0,
-                    start: 0,
-                    held: Vec::new(),
+            Fill::Library(from, len) => {
+                let from = relative(&from).ok_or_else(|| io::Error::other(no_path(&from)))?;
+                let mut at = 0;
+                while at < len {
+                    let chunk = CHUNK.min(len - at);
+                    let range = Range {
+                        offset: at,
+                        len: chunk,
+                    };
+                    let bytes = staging.read(&from, range).await;
+                    let bytes = bytes.map_err(storage::failed)?;
+                    if bytes.len() as u64 != chunk {
+                        return Err(io::Error::other("the file it copies changed on disk"));
+                    }
+                    put(at, bytes).await?;
+                    at += chunk;
+                }
+                Ok(())
+            }
+            Fill::Edited(from, pieces) => {
+                let from = relative(&from).ok_or_else(|| io::Error::other(no_path(&from)))?;
+                let read = async |range: std::ops::Range<u64>| {
+                    let range = Range {
+                        offset: range.start,
+                        len: range.end - range.start,
+                    };
+                    staging.read(&from, range).await.map_err(storage::failed)
                 };
-                edit.write(&from, &mut out)?;
-                io::Write::flush(&mut out)
+                rewrite::stream(&pieces, read, put).await
             }
         }
     }
 }
 
-/// The staged file as a file that seeks, for a writer that patches what it wrote: what
-/// runs on is held and handed to `put` a chunk at a time.
-struct Out<'p, P> {
-    put: &'p mut P,
-    at: u64,
-    /// How far anything was written.
-    end: u64,
-    /// Where `held` goes.
-    start: u64,
-    held: Vec<u8>,
-}
-
-impl<P: FnMut(u64, Vec<u8>) -> io::Result<()>> io::Write for Out<'_, P> {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if self.held.is_empty() {
-            self.start = self.at;
-        }
-        self.held.extend_from_slice(bytes);
-        self.at += bytes.len() as u64;
-        self.end = self.end.max(self.at);
-        if self.held.len() >= CHUNK {
-            self.flush()?;
-        }
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        if self.held.is_empty() {
-            return Ok(());
-        }
-        (self.put)(self.start, std::mem::take(&mut self.held))
-    }
-}
-
-impl<P: FnMut(u64, Vec<u8>) -> io::Result<()>> io::Seek for Out<'_, P> {
-    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
-        io::Write::flush(self)?;
-        let at = match to {
-            SeekFrom::Start(at) => Some(at),
-            SeekFrom::End(delta) => self.end.checked_add_signed(delta),
-            SeekFrom::Current(delta) => self.at.checked_add_signed(delta),
-        };
-        self.at = at.ok_or_else(|| io::Error::other("a seek before the start"))?;
-        Ok(self.at)
-    }
-}
-
-/// Copy `from` through `put` a chunk at a time. With `len`, the copy must be that long,
-/// and its CRC-32 is returned.
-fn copy(
-    from: &mut impl io::Read,
-    len: Option<u64>,
-    put: &mut impl FnMut(u64, Vec<u8>) -> io::Result<()>,
-) -> io::Result<Option<u32>> {
+/// Copy `range` of `from` through `put` a chunk at a time, from offset 0, and return
+/// its CRC-32. A source shorter than the range fails the copy.
+async fn copy(
+    from: &mut impl nord_usb::FileSource,
+    range: std::ops::Range<u64>,
+    mut put: impl AsyncFnMut(u64, Vec<u8>) -> io::Result<()>,
+) -> io::Result<u32> {
     let mut crc = nord_format::crc::Crc32Stream::new();
-    let mut at = 0;
-    loop {
-        let mut chunk = vec![0; CHUNK];
-        let mut filled = 0;
-        while filled < CHUNK {
-            match from.read(&mut chunk[filled..])? {
-                0 => break,
-                n => filled += n,
-            }
-        }
-        if filled == 0 {
-            break;
-        }
-        chunk.truncate(filled);
+    let mut at = range.start;
+    while at < range.end {
+        let len = CHUNK.min(range.end - at);
+        let mut chunk = vec![0; len as usize];
+        from.read_at(at, &mut chunk).await?;
         crc.update(&chunk);
-        put(at, chunk)?;
-        at += filled as u64;
+        put(at - range.start, chunk).await?;
+        at += len;
     }
-    match len {
-        Some(len) if len != at => Ok(None),
-        Some(_) => Ok(Some(crc.value())),
-        None => Ok(None),
-    }
+    Ok(crc.value())
 }
 
-fn committed_view(
-    library: &Library<Counted>,
+fn committed_view<F: Fs>(
+    library: &Library<F>,
     shown: &mut Option<View>,
     changes: Vec<toshokan::report::Change>,
 ) -> Viewed {
@@ -1596,8 +1341,8 @@ fn committed_view(
 
 /// What the answer to a scan shows: everything, where it scanned every file and listed
 /// every folder in `dirs`.
-fn viewed(
-    library: &Library<Counted>,
+fn viewed<F: Fs>(
+    library: &Library<F>,
     shown: &mut Option<View>,
     refreshed: Refreshed,
     dirs: Option<Vec<LibPath>>,
@@ -1634,39 +1379,31 @@ fn no_path(path: &LibPath) -> String {
     format!("{path} is no library path")
 }
 
-/// Every folder below `root` drawbar lists, in path order: none whose name starts with a
-/// dot, none reached through a link, and none past [`MOST_ENTRIES`] entries.
-fn folders(root: &Path) -> Vec<LibPath> {
+/// Every folder below the root drawbar lists, in path order: none whose name starts with
+/// a dot, none reached through a link, and none past [`MOST_ENTRIES`] entries.
+async fn folders<F: Fs>(fs: &F) -> Vec<LibPath> {
     let mut found = Vec::new();
-    let mut waiting = std::collections::VecDeque::from([LibPath::root()]);
+    let mut waiting = VecDeque::from([RelPath::ROOT]);
     let mut looked = 0;
     while let Some(dir) = waiting.pop_front() {
-        let mut at = root.to_path_buf();
-        at.extend(dir.components());
-        let Ok(entries) = std::fs::read_dir(at) else {
+        let Ok(entries) = storage::list(fs, Root::Folder, &dir).await else {
             continue;
         };
-        for entry in entries.flatten() {
+        for (name, meta) in entries {
             looked += 1;
             if looked > MOST_ENTRIES {
                 break;
             }
-            let Ok(name) = entry.file_name().into_string() else {
-                continue;
-            };
-            let real = entry.file_type().is_ok_and(|kind| kind.is_dir());
-            if !real || name.starts_with('.') {
+            if meta.kind != Kind::Directory || name.starts_with('.') {
                 continue;
             }
-            let text = match dir.is_root() {
-                true => name,
-                false => format!("{dir}/{name}"),
-            };
-            let Some(path) = LibPath::parse(&text) else {
+            let Ok(at) = dir.join(&name) else {
                 continue;
             };
-            found.push(path.clone());
-            waiting.push_back(path);
+            if let Some(path) = LibPath::parse(at.as_str()) {
+                found.push(path);
+                waiting.push_back(at);
+            }
         }
     }
     found.sort();
@@ -1675,25 +1412,51 @@ fn folders(root: &Path) -> Vec<LibPath> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::fs::{self, File};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use toshokan::env::SystemClock;
+
+    use super::super::native::{self, Counted};
+    use super::super::Moving;
     use super::*;
+    use crate::ondisk::OnDisk;
+    use crate::rewrite::Rewrite;
     use crate::testing::Temp;
 
-    /// A keeper of the library in `root`, open.
-    fn keeper(root: &Temp) -> Keeper {
-        let mut keeper = Keeper::new(root.0.clone(), root.local(), Arc::default());
+    type Keeper = super::Keeper<Counted>;
+
+    /// A keeper of the library in `root`, open, telling the time by `clock`.
+    fn keeper_at(root: &Temp, clock: Box<dyn toshokan::Clock>) -> Keeper {
+        let mut keeper = native::keeper(&root.0, &root.local(), Arc::default(), clock);
         let opened = keeper.run_one(Cmd::Open);
         assert!(matches!(opened[..], [Event::Opened(Ok(_))]), "{opened:?}");
         keeper
+    }
+
+    fn keeper(root: &Temp) -> Keeper {
+        keeper_at(root, Box::new(SystemClock))
     }
 
     impl Keeper {
         /// Run one command, and every answer it gives.
         fn run_one(&mut self, cmd: Cmd) -> Vec<Event> {
             let mut answers = Vec::new();
-            self.run(cmd, &mut |event| answers.push(event));
+            nord_usb::block_on(self.run(cmd, &mut |event| answers.push(event)));
             answers
+        }
+
+        fn trash_now(&mut self) -> Vec<toshokan::report::TrashItem> {
+            let trash = self.library.as_mut().unwrap().trash();
+            nord_usb::block_on(trash).unwrap()
+        }
+
+        /// The stat the library listed for the file at `path`.
+        fn stat(&self, path: &str) -> Stat {
+            let Expect::Listed { len, modified } = self.listed(path) else {
+                unreachable!("a listing says how long a file is")
+            };
+            Stat { len, modified }
         }
 
         /// What the library knows the file at `path` by, as the app last read it.
@@ -1816,7 +1579,7 @@ mod tests {
             });
             (made.expect("the save was made"), answers)
         };
-        let trash = |keeper: &mut Keeper| keeper.library.as_mut().unwrap().trash().unwrap();
+        let trash = Keeper::trash_now;
         let mut first = keeper(&root);
         first.trash = 8;
         let (saved, answers) = save(&mut first, b"second");
@@ -1840,7 +1603,7 @@ mod tests {
             "a session stopped short leaves it"
         );
         save(&mut second, b"fourth");
-        second.close();
+        nord_usb::block_on(second.close());
         let mut third = keeper(&root);
         assert_eq!(
             trash(&mut third).len(),
@@ -1868,7 +1631,8 @@ mod tests {
             fs::write(root.at(name), name).unwrap();
         }
         let listed = Arc::new(AtomicUsize::new(0));
-        let mut keeper = Keeper::new(root.0.clone(), root.local(), listed.clone());
+        let clock = Box::new(SystemClock);
+        let mut keeper = native::keeper(&root.0, &root.local(), listed.clone(), clock);
         keeper.run_one(Cmd::Open);
         assert_eq!(listed.load(Ordering::Relaxed), 3);
     }
@@ -1885,16 +1649,12 @@ mod tests {
             files: vec![(path("c3.ne5p"), expect)],
         }));
         drop(first);
-        let trash = |keeper: &mut Keeper| keeper.library.as_mut().unwrap().trash().unwrap();
+        let trash = Keeper::trash_now;
 
         let mut soon = keeper(&root);
         assert_eq!(trash(&mut soon).len(), 1, "kept for now");
-        soon.close();
-        let mut later = Keeper {
-            clock: || Box::new(Later),
-            ..Keeper::new(root.0.clone(), root.local(), Arc::default())
-        };
-        later.run_one(Cmd::Open);
+        nord_usb::block_on(soon.close());
+        let mut later = keeper_at(&root, Box::new(Later));
         assert_eq!(trash(&mut later), []);
     }
 
@@ -2009,10 +1769,7 @@ mod tests {
             Intent::Import {
                 id: 3,
                 path: path("Linked/copy.ne5p"),
-                from: Source::Library(
-                    path("a.ne5p"),
-                    Fingerprint::unread(stat_at(&root.0, &path("a.ne5p")).unwrap()),
-                ),
+                from: Source::Library(path("a.ne5p"), Fingerprint::unread(keeper.stat("a.ne5p"))),
                 expect: Expect::Absent,
                 came: None,
             },
@@ -2085,15 +1842,14 @@ mod tests {
         let mut library = index.library().clone();
         library.set_name("Trimmed").unwrap();
         library.retain_strokes(|stroke| stroke.root % 2 == 0);
-        let edit = Arc::new(Rewrite::Piano(library));
+        let pieces = Arc::new(Rewrite::Piano(library).pieces(&from).unwrap());
         let expect = keeper.listed("Grand.npno");
 
         let (answers, largest) = crate::testing::largest_allocation(|| {
             keeper.run_one(Cmd::Intent(Intent::Rewrite {
                 id: 1,
                 path: path("Grand.npno"),
-                from,
-                edit,
+                pieces,
                 expect,
             }))
         });
@@ -2102,16 +1858,11 @@ mod tests {
             (1 << 20..8 << 20).contains(&largest),
             "{largest} bytes held at once"
         );
-        let Event::Rewritten {
-            result: Ok(found), ..
-        } = &answers[0]
-        else {
-            panic!("{answers:?}")
-        };
-        let saved = found
-            .file
-            .as_ref()
-            .expect("the saved library rests in its file");
+        assert!(
+            matches!(answers[0], Event::Rewritten { result: Ok(_), .. }),
+            "{answers:?}"
+        );
+        let saved = resting(&root, "Grand.npno");
         let crate::ondisk::Index::Piano(index) = &saved.index else {
             panic!("a piano library")
         };
@@ -2140,7 +1891,7 @@ mod tests {
         };
         let mut library = index.library().clone();
         library.set_name("Edited").unwrap();
-        let stat = stat_at(&root.0, &path("Grand.npno")).unwrap();
+        let stat = keeper.stat("Grand.npno");
         let import = |name: &str, from: Source| Intent::Import {
             id: 1,
             path: path(name),
@@ -2152,22 +1903,24 @@ mod tests {
             "Copy.npno",
             Source::Library(path("Grand.npno"), Fingerprint::unread(stat)),
         );
+        let pieces = Rewrite::Piano(library).pieces(&from).unwrap();
         let edited = import(
             "Edited.npno",
-            Source::Edited(from, Arc::new(Rewrite::Piano(library))),
+            Source::Edited(
+                path("Grand.npno"),
+                Fingerprint::unread(stat),
+                Arc::new(pieces),
+            ),
         );
 
         for (name, intent) in [("Copy.npno", copied), ("Edited.npno", edited)] {
             let (answers, largest) =
                 crate::testing::largest_allocation(|| keeper.run_one(Cmd::Intent(intent)));
             assert!(largest < 8 << 20, "{name}: {largest} bytes held at once");
-            let Event::Imported {
-                result: Ok(found), ..
-            } = &answers[0]
-            else {
-                panic!("{name}: {answers:?}")
-            };
-            assert!(found.file.is_some(), "{name} rests in its file");
+            assert!(
+                matches!(answers[0], Event::Imported { result: Ok(_), .. }),
+                "{name}: {answers:?}"
+            );
         }
         assert!(root.read("Copy.npno") == bytes);
         let info = nord_format::cbin::inspect(&mut File::open(root.at("Edited.npno")).unwrap());
