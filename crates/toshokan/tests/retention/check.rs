@@ -266,19 +266,14 @@ fn agree(
     if views(oracle) == views(spec) {
         return Ok(());
     }
-    let mut unforced: Vec<_> = spec
-        .items
-        .iter()
-        .filter(|i| i.kind != ItemKind::Unplaced)
-        .filter_map(|i| {
-            let mut change = i.change.clone();
-            change.retain(|&field, &mut value| {
-                !i.forgotten.contains(&field) || world::differs(spec, field, value)
-            });
-            Some((i.dir, i.kind, change))
-        })
-        .collect();
-    unforced = undivergent(unforced);
+    let unforced = spec.items.iter().map(|i| {
+        let mut change = i.change.clone();
+        change.retain(|&field, &mut value| {
+            !i.forgotten.contains(&field) || world::differs(spec, field, value)
+        });
+        (i.dir, i.kind, change)
+    });
+    let unforced = undivergent(unforced.collect());
     if unforced != views(oracle) {
         return Err(format!(
             "items differ: oracle {:?}, design {unforced:?}",
