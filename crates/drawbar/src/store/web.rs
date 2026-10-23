@@ -367,7 +367,8 @@ async fn drive(
         inbox.borrow_mut().writing -= usize::from(writes);
         if private && writes && !persisting {
             persisting = true;
-            persist().await;
+            // ⚠️ Firefox waits for the user to answer, so nothing waits for it.
+            spawn_local(persist());
         }
         if private && inbox.borrow().cmds.is_empty() {
             measure(&room).await;
