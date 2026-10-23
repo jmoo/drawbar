@@ -1,8 +1,9 @@
-# Bounded retention (draft)
+# Bounded retention
 
-This draft revises how much history toshokan keeps. It will be folded into
-[SPEC.md](SPEC.md) once settled; the model in [spec/](spec/) already follows it.
-No Rust code implements it yet.
+This design bounds how much history toshokan keeps. [SPEC.md](SPEC.md)
+specifies the format and protocol it led to; this document keeps the reasoning,
+the guarantees and what the model and the value-level checks found. The model in
+[spec/](spec/) follows it, and `tests/retention` checks toshokan against it.
 
 ## Decisions
 

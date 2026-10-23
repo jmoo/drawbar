@@ -6,8 +6,9 @@ toshokan (図書館, "library") keeps tags, provenance and relations between fil
 in a hidden directory inside a folder of real files. Every running instance of
 an app writes its own log there, offline and without coordinating, and every
 reader merges the logs to the same state, whatever order a sync client delivers
-them in. Files are saved, renamed and deleted without overwriting anything in
-place, so file changes can be undone.
+them in. Each writer keeps only what it still contributes, so a library's size
+follows its facts, not its history. Files are saved, renamed and deleted without
+overwriting anything in place, so file changes can be undone.
 
 > ⚠️ Proof of concept. The format is unstable, and the crate is not published.
 
@@ -64,7 +65,11 @@ the files a watcher saw change. Each reports what changed and, once every file
 was scanned, the files that arrived, moved or changed outside the app.
 
 `opened` reports what needs the user: effects another writer left unfinished,
-drafts, forks and facts a restore of the folder removed. A view never changes,
+drafts and forks. When an instance's history forks, each branch is shown as an
+item of the view (`items`) with the change it would make, until an intent takes
+its changes (`Intent::take`) or dismisses it (`Intent::dismiss`). Facts a
+restore of the folder took stay shown for a day and a full rescan, then go.
+Undo reaches the intents of the session. A view never changes,
 so an app can hand it to other threads. A field read from a view is a value, a
 conflict between writers, or unreadable, so an app cannot show half a conflict
 by accident.

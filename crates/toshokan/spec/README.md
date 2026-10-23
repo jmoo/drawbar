@@ -11,9 +11,7 @@ nix build .#nord.toshokan-spec-deep  # larger bounds, several hours
 
 This model follows the bounded retention of [RETENTION.md](../RETENTION.md):
 snapshots that certify the files their chain was written to instead of listing
-every folded hash, and forks shown as runs instead of merged. The Rust code still
-follows [SPEC.md](../SPEC.md), so the refinement below holds for the previous
-model, not this one, until the code changes.
+every folded hash, and forks shown as runs instead of merged.
 
 To run one config by hand, `nix shell nixpkgs#tlaplus`, then
 `tlc -workers auto -config Portable.cfg Portable.tla` in this directory.
@@ -150,22 +148,25 @@ violation; every other config must pass.
 The spec applies to the code because the code keeps the model's rules and its
 reader's obligations. [SPEC.md](../SPEC.md) states each in full.
 
-- A snapshot lists every entry it folds, in chain order, and so does the cached
-  view.
+- Entries carry their number. A snapshot certifies every entry it folds: by the
+  segments its chain was written to, by the heads of the snapshots on its chain,
+  and by hash.
 - A reader reads every parseable file in a writer's directory whatever its name,
-  places entries by chain only, caches only entries whose predecessor it holds,
-  and never shrinks its cache.
+  and derives its tips, placement, fork points, runs and gaps from those files
+  and what it remembers, the same whatever order they arrived in. It remembers
+  what it placed until the grace step lets go of what nothing it sees descends
+  from.
 - A writer deletes only segments of its directory that end with a seal marker
-  and that a snapshot in its directory wholly folds. A process seals only the
-  segment it closes, and names each segment at random.
+  and every line of which its new snapshot certifies, and snapshots whose heads
+  it certifies. A process seals only the segment it closes, and names each
+  segment at random.
 - No writer id is kept in the local root before its genesis entry is durable in
   the folder, and a writer that has to stop is replaced by a new random id.
 - Another writer's pending record is settled only with the user's consent, in
   the settling writer's own log, and removed only by its owner. An owner
   removes a record only once its log holds the closing entry, and never after
   it stops writing.
-- Each fork is reported once, found from the cached pairs of every entry ever
-  seen rather than from the files present now.
+- Each fork point is reported once, and remembered until the grace step.
 - After the local root is lost, the install reads from scratch as a new writer
   and never writes the old writer's directory again.
 
@@ -176,13 +177,14 @@ them, resurrections, hidden files and conflicted copies under other names.
 
 | Property or rule | Checked by |
 | --- | --- |
-| `ChainOrder`, `NothingIgnored`, `Retained`, `DeliveredConverges`, `Monotone`, `ForksKept` | `tests/portable.rs`: every delivery order of small scenarios, and seeded interleavings of writes, compactions, crashes, clones and lost local roots with sync; at each step a reader that reads only what changed places what one reading every file places |
+| `ChainOrder`, `NothingIgnored`, `Retained`, `DeliveredConverges`, `Monotone`, `ForksKept` | `tests/portable.rs`: every delivery order of small scenarios, and seeded interleavings of writes, compactions, crashes, clones and lost local roots with sync; at each step a reader that reads only what changed places what one reading every file places. A remembered entry no file holds whose number a tip has passed counts as folded into that tip |
+| `NoMergedFork`, `DismissalsHold`, `Agree`, the grace step | `tests/retention`: the value-level checks of design R run toshokan's encoding, compaction and derivation against an oracle that never compacts |
 | `OwnDirectory` | `tests/library.rs`: every instance runs on a backend that panics on a write in another writer's directory |
 | `EffectAccounted` | `tests/crash.rs`: every effect crashed after every operation, under torn, zeroed and lost tails, where moves rename and where they copy |
 | `DeliveredSettles` | `tests/crash.rs` and `tests/library.rs`: a crash, or the loss of the local root, at every step is settled once, by the writer itself or with consent by another, where moves rename and where they copy; a spent record is reported only by a reader its closing entry has not reached |
-| `FoldHashes` | `tests/portable.rs`: a clone branches from an entry the original folds and deletes, in every delivery order |
+| `Certify`, `CertForks` | `tests/portable.rs`: a clone branches from an entry the original folds and deletes, in every delivery order |
 | `UniqueNames` | `tests/writer.rs`: one new, randomly named segment per process |
-| `SealedOnly`, `FoldedOnly` | `tests/writer.rs` and `tests/library.rs`: compaction leaves a segment another process has open, one a crash left open, and a sealed one holding an entry no snapshot folds, and deletes the sealed segments of earlier processes |
+| `SealedOnly`, `FoldedOnly` | `tests/writer.rs` and `tests/library.rs`: compaction leaves a segment another process has open, one a crash left open, and a sealed one holding an entry off its chain, and deletes the sealed segments of earlier processes |
 | `CheckFirst` | `tests/writer.rs` and `tests/library.rs`: a writer whose last entry the folder lost appends and compacts nothing, and is replaced |
 | `Convergence` | Liveness is not tested; `DeliveredConverges` is checked at the end of every complete delivery |
 
