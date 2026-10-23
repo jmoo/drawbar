@@ -3383,9 +3383,10 @@ fn the_trash_keeps_displaced_bytes_until_emptied<F: Facade>() {
     assert_eq!(a.trash().unwrap(), []);
     let present: BTreeSet<Vec<u8>> = folder.files(Root::Folder).into_values().collect();
     assert!(!present.contains(b"one".as_slice()));
+    a.compact().unwrap();
     assert!(
         matches!(a.undo(), Err(Error::Refused(Refusal::Emptied))),
-        "undo needs what was emptied"
+        "undo needs what was emptied, whatever the snapshot keeps"
     );
 }
 
