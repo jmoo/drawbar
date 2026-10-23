@@ -153,9 +153,6 @@ pub struct ScanReport {
     /// Entities whose file is nowhere.
     pub departed: Vec<EntityId>,
     pub moved: Vec<Moved>,
-    /// Files that hold an entity's contents while the entity's own path still
-    /// does, by copy and then entity.
-    pub copied: Vec<Copied>,
     /// Entities whose file is at its path with other contents.
     pub changed: Vec<EntityId>,
     /// Entities whose file is gone and which several files could be: bound to none.
@@ -167,12 +164,6 @@ pub struct Moved {
     pub entity: EntityId,
     pub from: RelPath,
     pub to: RelPath,
-}
-
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Copied {
-    pub entity: EntityId,
-    pub copy: RelPath,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

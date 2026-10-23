@@ -955,7 +955,6 @@ impl Crash<'_> {
         let arrived: Vec<String> = scan.arrived.iter().map(|p| p.as_str().to_owned()).collect();
         let unchanged = scan.departed.is_empty()
             && scan.moved.is_empty()
-            && scan.copied.is_empty()
             && scan.changed.is_empty()
             && scan.ambiguous.is_empty();
         if arrived != self.models[model].unbound() || !unchanged {

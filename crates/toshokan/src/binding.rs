@@ -1,12 +1,11 @@
 //! Binding files to entities.
 //!
 //! A binding is a pure function of the logged facts, the files a reader sees and
-//! the app's cheap identity: by path, then by identity, with the copy rule. When an
-//! entity's path is gone, a file holding its identity is a move; while the path
-//! still holds it, such a file is a copy, a new file without an entity until an
-//! intent says something about it. When several files could be the one, or one
-//! file could be several entities', nothing is bound and it is reported. Scans
-//! never write; every commit pins the moves this writer found.
+//! the app's cheap identity: by path, then by identity. When an entity's path is
+//! gone, a file holding its identity is a move; while the path still holds it, such
+//! a file is only a file no entity is bound to. When several files could be the
+//! one, or one file could be several entities', nothing is bound and it is
+//! reported. Scans never write; every commit pins the moves this writer found.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Bound;
@@ -21,7 +20,7 @@ use crate::io::{Kind, Meta, Root, Task};
 use crate::layout::Layout;
 use crate::log::{FileFact, Op};
 use crate::path::RelPath;
-use crate::report::{Ambiguous, Copied, Moved, ScanReport};
+use crate::report::{Ambiguous, Moved, ScanReport};
 use crate::view::{FileRef, FileState};
 
 /// A surviving write of an entity's file register that says where its file is.
@@ -41,9 +40,8 @@ pub type Facts = CowMap<EntityId, Box<[Fact]>>;
 pub struct Scanned {
     pub len: u64,
     pub modified: Option<u64>,
-    /// Read only where length and time could not decide: when the length is that
-    /// of a file some entity holds, and no earlier scan or fact gives the identity
-    /// for this length and time.
+    /// Read only where it decides something and no earlier scan or fact gives it
+    /// for this length and time: see [`resolve`].
     pub identity: Option<Identity>,
 }
 
@@ -377,8 +375,9 @@ fn under(path: &RelPath, paths: &BTreeSet<&str>) -> bool {
 
 /// Gives each file of `scan` without an identity the one known for its path,
 /// length and time: from `previous`, an earlier scan, else from the last of
-/// `facts` that names them. Returns the files left without one whose length is a
-/// fact's, whose identities must be read.
+/// `facts` that names them. Returns the files left without one whose identities
+/// decide something, which must be read: one at an entity's path of its length,
+/// and one of the length of an entity that may have moved ([`Away`]).
 pub(crate) fn resolve(scan: &mut Scan, facts: &Facts, previous: &Scan) -> Vec<(RelPath, u64)> {
     let mut resolving = Resolving::default();
     while !resolving.step(scan, facts, previous, usize::MAX) {}
@@ -393,8 +392,62 @@ pub(crate) struct Resolving {
     unknown: Vec<RelPath>,
     /// What the facts naming an unknown file say of it, in order of the facts.
     logged: HashMap<RelPath, Vec<(u64, Option<u64>, Identity)>>,
-    lengths: HashSet<u64>,
+    away: Away,
     pub(crate) needed: Vec<(RelPath, u64)>,
+}
+
+/// The lengths of the entities that may have moved, gathered an entity at a time:
+/// those none of whose paths holds a file that is not also another entity's path. A
+/// file of such a length may be one of them, moved.
+#[derive(Default)]
+pub(crate) struct Away {
+    lengths: HashSet<u64>,
+    /// Each path a file is at, by how many entities' facts name it.
+    named: HashMap<RelPath, usize>,
+    /// The entities a file is at some path of: those paths, and the facts' lengths.
+    placed: Vec<(Vec<RelPath>, Vec<u64>)>,
+}
+
+impl Away {
+    fn entity(&mut self, written: &[Fact], scan: &Scan) {
+        let mut held: Vec<RelPath> = written
+            .iter()
+            .map(|fact| &fact.value.path)
+            .filter(|path| scan.files.contains_key(*path))
+            .cloned()
+            .collect();
+        held.sort();
+        held.dedup();
+        let lengths = written.iter().map(|fact| fact.value.len);
+        if held.is_empty() {
+            self.lengths.extend(lengths);
+            return;
+        }
+        for path in &held {
+            *self.named.entry(path.clone()).or_default() += 1;
+        }
+        self.placed.push((held, lengths.collect()));
+    }
+
+    fn finish(&mut self) {
+        for (held, lengths) in std::mem::take(&mut self.placed) {
+            if held.iter().all(|path| self.named[path] > 1) {
+                self.lengths.extend(lengths);
+            }
+        }
+        self.named.clear();
+    }
+}
+
+/// The lengths of the entities of `facts` that may have moved in `scan`; see [`Away`].
+#[cfg(test)]
+pub(crate) fn away(facts: &Facts, scan: &Scan) -> BTreeSet<u64> {
+    let mut away = Away::default();
+    for (_, written) in facts {
+        away.entity(written, scan);
+    }
+    away.finish();
+    away.lengths.into_iter().collect()
 }
 
 #[derive(Default)]
@@ -425,7 +478,7 @@ impl Resolving {
             Resolve::EarlierAfter(after) => {
                 self.earlier(scan, previous, Bound::Excluded(&after), slice)
             }
-            Resolve::Facts(after) => self.facts(facts, after, slice),
+            Resolve::Facts(after) => self.facts(facts, scan, after, slice),
             Resolve::Logged(from) => self.logged(scan, from, slice),
             Resolve::Done => Resolve::Done,
         };
@@ -469,34 +522,45 @@ impl Resolving {
         }
     }
 
-    fn facts(&mut self, facts: &Facts, after: Option<EntityId>, slice: usize) -> Resolve {
+    fn facts(
+        &mut self,
+        facts: &Facts,
+        scan: &Scan,
+        after: Option<EntityId>,
+        slice: usize,
+    ) -> Resolve {
         let mut entities = facts.after(after);
         let mut last = None;
         for (entity, written) in entities.by_ref().take(slice) {
             last = Some(*entity);
+            self.away.entity(written, scan);
             for fact in written.iter().map(|fact| &fact.value) {
-                self.lengths.insert(fact.len);
                 if self.unknown.binary_search(&fact.path).is_ok() {
                     let said = (fact.len, fact.modified, fact.identity);
                     self.logged.entry(fact.path.clone()).or_default().push(said);
                 }
             }
         }
-        match entities.next() {
-            Some(_) => Resolve::Facts(last),
-            None => Resolve::Logged(0),
+        if entities.next().is_some() {
+            return Resolve::Facts(last);
         }
+        self.away.finish();
+        Resolve::Logged(0)
     }
 
     fn logged(&mut self, scan: &mut Scan, from: usize, slice: usize) -> Resolve {
         let to = from.saturating_add(slice).min(self.unknown.len());
         for path in &self.unknown[from..to] {
             let file = scan.files.get_mut(path).expect("listed in an earlier step");
-            let said = self.logged.get(path).into_iter().flatten().rev();
-            let same =
-                said.filter(|(len, modified, _)| (*len, *modified) == (file.len, file.modified));
-            file.identity = same.map(|(_, _, identity)| *identity).next();
-            if file.identity.is_none() && self.lengths.contains(&file.len) {
+            let said: Vec<_> = self.logged.get(path).into_iter().flatten().rev().collect();
+            let same = said
+                .iter()
+                .find(|(len, modified, _)| (*len, *modified) == (file.len, file.modified));
+            file.identity = same.map(|(_, _, identity)| *identity);
+            // A file of an entity's length at its path, at another time, is in sync
+            // only where it holds its identity.
+            let sized = said.iter().any(|(len, ..)| *len == file.len);
+            if file.identity.is_none() && (sized || self.away.lengths.contains(&file.len)) {
                 self.needed.push((path.clone(), file.len));
             }
         }
@@ -684,7 +748,6 @@ struct Progress {
     /// How many departed entities each free file holds the identity of.
     wanted: BTreeMap<RelPath, usize>,
     moves: VecDeque<(EntityId, usize, Vec<RelPath>)>,
-    in_sync: Option<BTreeMap<Identity, Vec<EntityId>>>,
     pins: Vec<Op>,
 }
 
@@ -762,8 +825,8 @@ impl Binding {
                     None => Stage::Unbound(None),
                 },
                 Stage::Unbound(from) => {
-                    let taken = take_after(&scan.files, from, budget, |path, file| {
-                        progress.unbound(scan, path, file);
+                    let taken = take_after(&scan.files, from, budget, |path, _| {
+                        progress.unbound(path);
                     });
                     match taken {
                         Some(last) => Stage::Unbound(Some(last)),
@@ -986,24 +1049,10 @@ impl Progress {
         }
     }
 
-    /// Keeps a file no entity is bound to, and reports it as a copy of each
-    /// entity bound in sync to a file with its identity.
-    fn unbound(&mut self, scan: &Scan, path: &RelPath, file: &Scanned) {
-        if self.taken.contains(path) {
-            return;
-        }
-        let bindings = &mut self.bindings;
-        bindings.unbound.insert(path.clone(), ());
-        let Some(identity) = file.identity else {
-            return;
-        };
-        let bound = &self.bound;
-        let in_sync = self.in_sync.get_or_insert_with(|| in_sync(bound, scan));
-        for &entity in in_sync.get(&identity).into_iter().flatten() {
-            bindings.report.copied.push(Copied {
-                entity,
-                copy: path.clone(),
-            });
+    /// Keeps a file no entity is bound to.
+    fn unbound(&mut self, path: &RelPath) {
+        if !self.taken.contains(path) {
+            self.bindings.unbound.insert(path.clone(), ());
         }
     }
 
@@ -1028,21 +1077,6 @@ fn keyed(scan: &Scan, names: &dyn Names) -> BTreeMap<String, Vec<RelPath>> {
             .push(path.clone());
     }
     by_key
-}
-
-/// The entities bound in sync, by the identity of their file.
-fn in_sync(bound: &BTreeMap<EntityId, FileRef>, scan: &Scan) -> BTreeMap<Identity, Vec<EntityId>> {
-    let mut by = BTreeMap::new();
-    for (&entity, file) in bound {
-        if file.state != FileState::InSync {
-            continue;
-        }
-        let Some(identity) = scan.files.get(&file.path).and_then(|found| found.identity) else {
-            continue;
-        };
-        by.entry(identity).or_insert_with(Vec::new).push(entity);
-    }
-    by
 }
 
 fn missing(fact: &FileFact) -> FileRef {
@@ -1256,16 +1290,19 @@ mod tests {
                     known.insert((path.clone(), file.len, file.modified), identity);
                 }
             }
-            let lengths: BTreeSet<u64> = facts
-                .values()
-                .flat_map(|written| written.iter())
-                .map(|f| f.value.len)
-                .collect();
+            let away = away(&facts, &fresh);
+            let at_path = |path: &RelPath, len: u64| {
+                let written = facts.values().flat_map(|written| written.iter());
+                written
+                    .into_iter()
+                    .any(|f| f.value.path == *path && f.value.len == len)
+            };
             let mut needed = Vec::new();
             for (path, file) in &mut expected.files {
                 if file.identity.is_none() {
                     file.identity = known.get(&(path.clone(), file.len, file.modified)).copied();
-                    if file.identity.is_none() && lengths.contains(&file.len) {
+                    let decides = at_path(path, file.len) || away.contains(&file.len);
+                    if file.identity.is_none() && decides {
                         needed.push((path.clone(), file.len));
                     }
                 }
@@ -1490,28 +1527,6 @@ mod tests {
                     "{shown}: {path}"
                 );
             }
-            for (entity, file) in &bindings.bound {
-                if file.state != FileState::InSync {
-                    continue;
-                }
-                let identity = scan.files[&file.path].identity;
-                for copy in bindings
-                    .unbound
-                    .iter()
-                    .map(|(p, ())| p)
-                    .filter(|p| scan.files[*p].identity == identity)
-                {
-                    let copied = Copied {
-                        entity: *entity,
-                        copy: copy.clone(),
-                    };
-                    assert!(
-                        bindings.report.copied.contains(&copied),
-                        "{shown}: {copy} is a copy"
-                    );
-                }
-            }
-
             let swap = |id: &EntityId| EntityId::from_u128(3 - id.to_u128());
             let swapped: Facts = facts.iter().map(|(id, w)| (swap(id), w.clone())).collect();
             let by_path = |b: &Bindings,

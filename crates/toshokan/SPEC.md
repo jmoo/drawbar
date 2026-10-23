@@ -528,9 +528,11 @@ a function of the merged file registers, the library files a reader sees and
 their identities:
 
 1. A scan lists every library file with its length and modification time. It
-   reads an identity only when a file's length is that of some file fact, and no
-   fact, earlier scan or `identities.json` gives the identity for that path,
-   length and time. The install keeps in `identities.json` the identities its
+   reads an identity only where it decides a binding: for a file at the path of
+   a file fact of its length, and for a file of the length of a fact of an
+   entity that may have moved, one none of whose file facts' paths holds a file
+   that no other entity's fact names too. It reads none when a fact, earlier scan or `identities.json` gives the
+   identity for that path, length and time. The install keeps in `identities.json` the identities its
    scans read while their files keep their length and time. A file rewritten
    outside toshokan to the same length and the same modification time, as a
    coarse clock or a tool that sets the time back allows, keeps the identity read
@@ -575,9 +577,8 @@ their identities:
    its identity: a move. With no such file it is missing; with several, or when
    one file could be several entities', nothing is bound and the candidates are
    reported.
-4. A file holding a bound entity's identity while that entity's own path still
-   holds it is a copy: a new file with no entity until an intent says something
-   about it.
+4. Every other file is unbound, a copy of a bound entity's file included: it
+   has no entity until an intent says something about it.
 
 Every commit pins the moves this writer holds that its facts do not say yet: each
 file in sync at another path, as a `pin` op in a `bind` entry. A new

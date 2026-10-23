@@ -1310,6 +1310,19 @@ impl Library {
         self.reach.bound(links);
     }
 
+    /// The lengths of the facts whose files are not where they say: those the
+    /// facts gained since the last resolve, and those of the entities bound to
+    /// no file or moved. A file of one of them may be such an entity's, moved.
+    fn away(&self) -> BTreeSet<u64> {
+        let report = &self.bindings.report;
+        let ambiguous = report.ambiguous.iter().map(|ambiguous| &ambiguous.entity);
+        let moved = report.moved.iter().map(|moved| &moved.entity);
+        let entities = report.departed.iter().chain(ambiguous).chain(moved);
+        let written = entities.filter_map(|entity| self.facts.get(entity));
+        let lengths = written.flat_map(|written| written.iter().map(|fact| fact.value.len));
+        lengths.chain(self.reach.gained().iter().copied()).collect()
+    }
+
     /// The identities the local root should keep of those scans read that no fact
     /// gives: those just read, and those kept before of files the last scan found
     /// unchanged. `None` when the local root keeps them already.
@@ -2185,6 +2198,7 @@ fn rescan_paths(library: &mut Library, paths: Vec<RelPath>) -> Fallible<'_, &mut
         };
         let gone = binding::under_any(&library.scan, &paths);
         let links = library.reach.links().expect("ready above");
+        let away = library.away();
         let (changes, unknown) = reach::resolve(
             &library.scan,
             &library.facts,
@@ -2193,6 +2207,7 @@ fn rescan_paths(library: &mut Library, paths: Vec<RelPath>) -> Fallible<'_, &mut
             gone,
             found,
             library.reach.gained(),
+            &away,
         );
         let reading: Vec<RelPath> = unknown.iter().map(|(path, _)| path.clone()).collect();
         let identities = flow::identities(Root::Folder, unknown, &library.env.identify);

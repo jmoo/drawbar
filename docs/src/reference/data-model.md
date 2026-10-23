@@ -262,8 +262,10 @@ and it is Listed again.
 ### The metadata walk
 
 Opening a library lists every file by its name, length and time, through
-toshokan's scan, and reads a file only for its identity, where its length is that
-of a file the library knows and nothing earlier gives it. The header counts the
+toshokan's scan, and reads a file only for its identity, where nothing earlier
+gives it and it decides which file is an asset's: a file at an asset's path with
+its length, and a file of the length of an asset that may have moved, as one
+whose path holds nothing does. A copy of an asset's file is a file like any other. The header counts the
 files found as the scan goes.
 
 1. Each folder is listed with every file's length and time in one request.

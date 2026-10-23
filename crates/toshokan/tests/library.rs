@@ -1535,13 +1535,18 @@ fn a_copy_has_no_entity_until_one_is_said<F: Facade>() {
     );
     a.close().unwrap();
 
-    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 2, &clock)).unwrap();
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 2, &clock)).unwrap();
+    let before = probe.file_reads();
+    a.rescan().unwrap();
     assert_eq!(
-        a.rescan().unwrap().scan.copied,
-        [toshokan::report::Copied {
-            entity: song,
-            copy: path("copy.npno")
-        }]
+        probe.file_reads() - before,
+        0,
+        "a file of the length of one in place is not read"
+    );
+    assert_eq!(
+        a.view().unbound().cloned().collect::<Vec<_>>(),
+        [path("copy.npno")]
     );
     let committed = a
         .commit("Tag", |i| {
@@ -2158,7 +2163,7 @@ fn identities_a_failed_write_lost_are_kept_by_the_next_scan<F: Facade>() {
     let probe = Probe::new(&here);
     let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
     create(&mut a, "song.npno", b"song");
-    put(&folder, "tune.npno", b"tune");
+    move_outside(&folder, "song.npno", "tune.npno");
     fail(&probe, local_writes(&["identities.json.next"]));
     assert!(a.rescan().is_err(), "the identities cannot be kept");
     heal(&probe);
@@ -2166,7 +2171,7 @@ fn identities_a_failed_write_lost_are_kept_by_the_next_scan<F: Facade>() {
     let kept = local_file(&here, "identities.json").expect("kept by the next scan");
     assert!(
         String::from_utf8(kept).unwrap().contains("tune.npno"),
-        "the identity read for a length a fact has"
+        "the identity read for a file that may be an entity's, moved"
     );
 }
 
@@ -2581,7 +2586,7 @@ fn a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept<F
     let here = machine(&folder);
     let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
     create(&mut a, "song.npno", b"song");
-    put(&folder, "copy.npno", b"song");
+    move_outside(&folder, "song.npno", "moved.npno");
     put(&folder, "same.npno", b"sang");
     a.rescan().unwrap();
     a.close().unwrap();
@@ -2591,7 +2596,7 @@ fn a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept<F
     );
     let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
     assert_eq!(a.view().listed(&path("same.npno")), None);
-    assert_eq!(a.view().listed(&path("song.npno")), None);
+    assert_eq!(a.view().listed(&path("moved.npno")), None);
     a.rescan().unwrap();
     assert_eq!(a.view().listed(&path("same.npno")).map(|l| l.len), Some(4));
 }
