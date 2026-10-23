@@ -22,6 +22,7 @@ use toshokan::{EntryHash, Env, Error, Expect, Policy, RelPath, View};
 
 use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES};
 use super::native::locate;
+use super::shown::Change;
 use super::{
     Cmd, Event, Failure, Fingerprint, Found, Intent, Kept, Key, LibPath, Moving, Opened, Part,
     Source, Stat, Viewed,
@@ -53,6 +54,8 @@ pub struct Keeper {
     session: BTreeSet<EntryHash>,
     /// The most bytes this writer's trash holds before its oldest go.
     trash: u64,
+    /// The view the app was last shown.
+    shown: Option<View>,
 }
 
 /// The most bytes a writer's trash holds in a session: the size toshokan's policy
@@ -71,6 +74,7 @@ impl Keeper {
             listed,
             session: BTreeSet::new(),
             trash: TRASH,
+            shown: None,
         }
     }
 
@@ -131,7 +135,7 @@ impl Keeper {
                 let kept = super::slots::read(&self.local, &slot).map_err(|e| e.to_string());
                 answer(Event::SlotKept { slot, kept });
             }
-            Cmd::File(_) => unreachable!("the backend reads files itself"),
+            Cmd::Read { .. } => unreachable!("the backend reads files itself"),
         }
     }
 
@@ -214,18 +218,6 @@ impl Keeper {
         change(draft).map_err(|e| e.to_string())
     }
 
-    /// Scan what a file command wrote at `paths`, and answer what the view shows now.
-    pub fn touched(&mut self, paths: Vec<LibPath>, answer: &mut impl FnMut(Event)) {
-        let Some(library) = &mut self.library else {
-            return;
-        };
-        let paths = paths.iter().filter_map(relative).collect();
-        match library.rescan_paths(paths) {
-            Ok(refreshed) => answer(Event::Viewed(viewed(library, refreshed, None))),
-            Err(e) => answer(Event::Failed(format!("looking at what was written: {e}"))),
-        }
-    }
-
     /// Let the library go cleanly, once every command has run: this session's undo
     /// ends now, and the trash lets go of what only it needed.
     pub fn close(&mut self) {
@@ -289,7 +281,7 @@ impl Keeper {
         }
         let refreshed = library.rescan().map_err(|e| e.to_string())?;
         let dirs = folders(&self.folder);
-        let viewed = viewed(&library, refreshed, Some(dirs));
+        let viewed = viewed(&library, &mut self.shown, refreshed, Some(dirs));
         self.library = Some(library);
         Ok(Opened {
             writable,
@@ -327,7 +319,7 @@ impl Keeper {
         let library = self.library.as_mut().ok_or("the library is not open")?;
         let refreshed = scan(library).map_err(|e| e.to_string())?;
         let dirs = whole.then(|| folders(&self.folder));
-        Ok(viewed(library, refreshed, dirs))
+        Ok(viewed(library, &mut self.shown, refreshed, dirs))
     }
 
     /// Undo or redo, and the view after it, with the files no entity is bound to that it
@@ -347,7 +339,7 @@ impl Keeper {
         let viewed = Viewed {
             undone: Some(paths.collect()),
             dirs: Some(folders(&self.folder)),
-            ..committed_view(library, committed.changes)
+            ..committed_view(library, &mut self.shown, committed.changes)
         };
         Ok((Some(committed.intent), viewed))
     }
@@ -362,7 +354,7 @@ impl Keeper {
         let committed = library.settle(orphan, how).map_err(|e| e.to_string())?;
         let viewed = Viewed {
             dirs: Some(folders(&self.folder)),
-            ..committed_view(library, committed.changes)
+            ..committed_view(library, &mut self.shown, committed.changes)
         };
         Ok((Some(committed.intent), viewed))
     }
@@ -573,7 +565,10 @@ impl Keeper {
         };
         let intent = changes.as_ref().map(|committed| committed.intent);
         let changes = changes.map(|committed| committed.changes);
-        Ok((intent, committed_view(library, changes.unwrap_or_default())))
+        Ok((
+            intent,
+            committed_view(library, &mut self.shown, changes.unwrap_or_default()),
+        ))
     }
 }
 
@@ -1553,9 +1548,13 @@ fn copy(
     }
 }
 
-fn committed_view(library: &Library<Counted>, changes: Vec<toshokan::report::Change>) -> Viewed {
+fn committed_view(
+    library: &Library<Counted>,
+    shown: &mut Option<View>,
+    changes: Vec<toshokan::report::Change>,
+) -> Viewed {
     Viewed {
-        view: library.view(),
+        shown: show(shown, library.view(), false),
         dirs: None,
         changes,
         moves: Vec::new(),
@@ -1564,7 +1563,14 @@ fn committed_view(library: &Library<Counted>, changes: Vec<toshokan::report::Cha
     }
 }
 
-fn viewed(library: &Library<Counted>, refreshed: Refreshed, dirs: Option<Vec<LibPath>>) -> Viewed {
+/// What the answer to a scan shows: everything, where it scanned every file and listed
+/// every folder in `dirs`.
+fn viewed(
+    library: &Library<Counted>,
+    shown: &mut Option<View>,
+    refreshed: Refreshed,
+    dirs: Option<Vec<LibPath>>,
+) -> Viewed {
     let moves = refreshed.scan.moved.iter().filter_map(|moved| {
         let from = LibPath::parse(moved.from.as_str())?;
         Some((from, LibPath::parse(moved.to.as_str())?))
@@ -1572,13 +1578,21 @@ fn viewed(library: &Library<Counted>, refreshed: Refreshed, dirs: Option<Vec<Lib
     let unlisted = refreshed.unlisted.iter();
     let unlisted = unlisted.filter_map(|dir| LibPath::parse(dir.as_str()));
     Viewed {
-        view: library.view(),
+        shown: show(shown, library.view(), dirs.is_some()),
         unlisted: dirs.is_some().then(|| unlisted.collect()),
         dirs,
         moves: moves.collect(),
         changes: refreshed.changes,
         undone: None,
     }
+}
+
+/// What `view` changed of what the app was last `shown`: everything where `whole`, or
+/// where the app was shown nothing yet.
+fn show(shown: &mut Option<View>, view: View, whole: bool) -> Change {
+    let change = Change::since(&view, shown.as_ref().filter(|_| !whole));
+    *shown = Some(view);
+    change
 }
 
 fn relative(path: &LibPath) -> Option<RelPath> {

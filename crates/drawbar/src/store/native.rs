@@ -1,6 +1,5 @@
 //! The desktop backend: a library is a directory, and commands run in order on a thread
-//! of their own: every change through toshokan, and reads and empty folders through
-//! [`exec`].
+//! of their own: every change through toshokan, and reads through [`exec`].
 
 use std::fs::{self, File};
 use std::io;
@@ -115,9 +114,9 @@ fn writes(cmd: &Cmd) -> bool {
         | Cmd::Discard(_)
         | Cmd::KeepSlot { .. }
         | Cmd::DiscardSlot(_)
-        | Cmd::ReadSlot(_) => false,
+        | Cmd::ReadSlot(_)
+        | Cmd::Read { .. } => false,
         Cmd::Intent(_) | Cmd::Undo | Cmd::Redo | Cmd::Settle { .. } => true,
-        Cmd::File(file) => file.writes(),
     }
 }
 
@@ -127,7 +126,7 @@ impl Backend {
         let (tx, commands) = channel::<Cmd>();
         let (answers, rx) = channel();
         let unrun = Arc::new(AtomicUsize::new(0));
-        let mut disk = Disk { root: root.clone() };
+        let disk = Disk { root: root.clone() };
         let (folder, kept) = (root.clone(), local.clone());
         let ctx = ctx.clone();
         let ran = unrun.clone();
@@ -143,12 +142,9 @@ impl Backend {
             while let Ok(cmd) = commands.recv() {
                 let wrote = writes(&cmd);
                 match cmd {
-                    Cmd::File(file) => {
-                        let touched = file.touches();
-                        exec::execute(&mut disk, file, &mut answer);
-                        if wrote {
-                            keeper.touched(touched, &mut answer);
-                        }
+                    Cmd::Read { files, room } => {
+                        let read = nord_usb::block_on(exec::read_all(&disk, files, room));
+                        answer(Event::Read(read));
                     }
                     cmd => keeper.run(cmd, &mut answer),
                 }
@@ -306,22 +302,7 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn parent(path: &Path) -> &Path {
-    path.parent().unwrap_or(path)
-}
-
 impl Fs for Disk {
-    async fn names(&self, dir: &str) -> io::Result<Vec<String>> {
-        let mut names = Vec::new();
-        for entry in fs::read_dir(self.locate(dir)?)? {
-            if let Ok(name) = entry?.file_name().into_string() {
-                names.push(name);
-            }
-        }
-        names.sort();
-        Ok(names)
-    }
-
     async fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         fs::read(self.locate(path)?)
     }
@@ -333,20 +314,6 @@ impl Fs for Disk {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
-    }
-
-    async fn make_dir(&mut self, path: &str) -> io::Result<()> {
-        let target = self.locate(path)?;
-        fs::create_dir_all(&target)?;
-        sync_dir(parent(&target))
-    }
-
-    async fn remove_file(&mut self, path: &str) -> io::Result<()> {
-        fs::remove_file(self.locate(path)?)
-    }
-
-    async fn remove_dir(&mut self, path: &str) -> io::Result<()> {
-        fs::remove_dir(self.locate(path)?)
     }
 
     async fn rest(

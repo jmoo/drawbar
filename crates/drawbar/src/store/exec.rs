@@ -1,11 +1,10 @@
-//! Running a [`FileCmd`] against a library's files, the same way whichever backend
-//! holds them: reading files, and making or removing empty folders. Every other change
-//! to the files is an [`super::Intent`], which toshokan writes.
+//! Reading a library's files for [`super::Cmd::Read`], the same way whichever backend
+//! holds them. Every change to the files is an [`super::Intent`], which toshokan writes.
 
 use std::io;
 use std::sync::Arc;
 
-use super::{Event, Failure, FileCmd, Fingerprint, Found, LibPath, Stat};
+use super::{Failure, Fingerprint, Found, LibPath, Stat};
 use crate::ondisk::OnDisk;
 
 /// The most bytes of a library's files drawbar reads whole into memory, counting what it
@@ -25,15 +24,9 @@ pub fn opens(name: &str) -> bool {
 /// The desktop's calls finish before they return; a browser's storage answers only
 /// later, so every call is a future.
 pub trait Fs {
-    /// The names in one folder.
-    async fn names(&self, dir: &str) -> io::Result<Vec<String>>;
     async fn read(&self, path: &str) -> io::Result<Vec<u8>>;
     /// The file at `path`, or `None` where no file is: nothing, a folder, or a link.
     async fn stat(&self, path: &str) -> io::Result<Option<Stat>>;
-    async fn make_dir(&mut self, path: &str) -> io::Result<()>;
-    async fn remove_file(&mut self, path: &str) -> io::Result<()>;
-    /// Only an empty folder.
-    async fn remove_dir(&mut self, path: &str) -> io::Result<()>;
     /// The file at `path` indexed and left on disk, to be read by range, where this
     /// backend reads files that way and the file is a piano or sample instrument. `None`
     /// has it read whole. `known` is its fingerprint where its [`Stat`] has not moved
@@ -52,34 +45,8 @@ pub trait Fs {
     }
 }
 
-/// Run one command on a thread that may wait for it, as [`run`] does.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn execute(fs: &mut impl Fs, cmd: FileCmd, answer: &mut impl FnMut(Event)) {
-    nord_usb::block_on(run(fs, cmd, answer))
-}
-
-/// Run one command, handing its answer to `answer`. The commands that answer only on
-/// failure say nothing when they succeed.
-pub async fn run(fs: &mut impl Fs, cmd: FileCmd, answer: &mut impl FnMut(Event)) {
-    let answered = match cmd {
-        FileCmd::Read { files, room } => Some(Event::Read(read_all(fs, files, room).await)),
-        FileCmd::MakeDir(path) => fs
-            .make_dir(path.as_str())
-            .await
-            .err()
-            .map(|e| Event::Failed(format!("making the folder {path}: {e}"))),
-        FileCmd::RemoveDir(path) => remove_dir(fs, &path)
-            .await
-            .err()
-            .map(|e| Event::Failed(format!("removing the folder {path}: {e}"))),
-    };
-    if let Some(event) = answered {
-        answer(event);
-    }
-}
-
-/// The files [`FileCmd::Read`] asks for, read in order until `room` runs out.
-async fn read_all(
+/// The files [`super::Cmd::Read`] asks for, read in order until `room` runs out.
+pub async fn read_all(
     fs: &impl Fs,
     files: Vec<(u64, LibPath, Option<Fingerprint>)>,
     mut room: u64,
@@ -136,15 +103,6 @@ pub fn too_much() -> String {
     )
 }
 
-/// Remove a folder drawbar has emptied. macOS leaves a `.DS_Store` in any folder Finder
-/// has shown, which would otherwise keep it from being removed.
-async fn remove_dir(fs: &mut impl Fs, path: &LibPath) -> io::Result<()> {
-    if fs.names(path.as_str()).await? == [".DS_Store"] {
-        fs.remove_file(&format!("{path}/.DS_Store")).await?;
-    }
-    fs.remove_dir(path.as_str()).await
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -177,28 +135,12 @@ mod tests {
         }
     }
 
-    fn refused() -> io::Error {
-        io::ErrorKind::Unsupported.into()
-    }
-
     impl Fs for Claimed {
-        async fn names(&self, _: &str) -> io::Result<Vec<String>> {
-            Ok(Vec::new())
-        }
         async fn read(&self, path: &str) -> io::Result<Vec<u8>> {
             Ok(path.as_bytes().to_vec())
         }
         async fn stat(&self, path: &str) -> io::Result<Option<Stat>> {
             Ok(self.files.get(path).map(|len| stat(*len)))
-        }
-        async fn make_dir(&mut self, _: &str) -> io::Result<()> {
-            Err(refused())
-        }
-        async fn remove_file(&mut self, _: &str) -> io::Result<()> {
-            Err(refused())
-        }
-        async fn remove_dir(&mut self, _: &str) -> io::Result<()> {
-            Err(refused())
         }
         async fn rest(
             &self,

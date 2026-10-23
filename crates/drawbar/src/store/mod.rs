@@ -38,6 +38,7 @@ mod keeper;
 mod keys;
 mod mirror;
 pub mod names;
+mod shown;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -540,7 +541,14 @@ pub enum Cmd {
         orphan: toshokan::report::Orphan,
         how: toshokan::log::Settlement,
     },
-    File(FileCmd),
+    /// Read each of these files for the asset whose id comes with it, reading at most
+    /// `room` bytes whole between them. A piano or sample instrument may be left resting
+    /// in its file instead, which takes none of `room`. The fingerprint is what drawbar
+    /// knew of the file. Answered by [`Event::Read`].
+    Read {
+        files: Vec<(u64, LibPath, Option<Fingerprint>)>,
+        room: u64,
+    },
 }
 
 /// A change the user asked for, committed as one undo step. Each names the entities and
@@ -729,40 +737,6 @@ impl Intent {
     }
 }
 
-/// What the app asks of a library's files outside toshokan: reads, and folders, which
-/// toshokan does not keep. Each that writes is followed by a scan of the paths it
-/// touched, answered by [`Event::Viewed`].
-#[derive(Debug)]
-pub enum FileCmd {
-    /// Read each of these files for the asset whose id comes with it, reading at most
-    /// `room` bytes whole between them. A piano or sample instrument may be left resting
-    /// in its file instead, which takes none of `room`. The fingerprint is what drawbar
-    /// knew of the file. Answered by [`Event::Read`].
-    Read {
-        files: Vec<(u64, LibPath, Option<Fingerprint>)>,
-        room: u64,
-    },
-    /// Answered only on failure.
-    MakeDir(LibPath),
-    /// Delete an empty folder. Answered only on failure.
-    RemoveDir(LibPath),
-}
-
-impl FileCmd {
-    /// Whether it changes the folder.
-    pub fn writes(&self) -> bool {
-        !matches!(self, FileCmd::Read { .. })
-    }
-
-    /// The library paths it changes.
-    pub fn touches(&self) -> Vec<LibPath> {
-        match self {
-            FileCmd::Read { .. } => Vec::new(),
-            FileCmd::MakeDir(path) | FileCmd::RemoveDir(path) => vec![path.clone()],
-        }
-    }
-}
-
 /// What opening found.
 #[derive(Debug)]
 pub struct Opened {
@@ -786,8 +760,10 @@ pub struct Opened {
 }
 
 /// The library as one answer left it.
+#[derive(Debug)]
 pub struct Viewed {
-    pub view: toshokan::View,
+    /// What the answer changed of what the app shows.
+    pub shown: shown::Change,
     /// Every folder below the root, in path order, where the answer listed them.
     pub dirs: Option<Vec<LibPath>>,
     /// What changed since the view before, and who changed it.
@@ -803,26 +779,12 @@ pub struct Viewed {
     pub unlisted: Option<Vec<LibPath>>,
 }
 
-impl std::fmt::Debug for Viewed {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Viewed")
-            .field("dirs", &self.dirs)
-            .field("changes", &self.changes)
-            .field("moves", &self.moves)
-            .field("undone", &self.undone)
-            .field("unlisted", &self.unlisted)
-            .finish_non_exhaustive()
-    }
-}
-
 /// What a backend answers.
 #[derive(Debug)]
 pub enum Event {
     Opened(Result<Opened, String>),
     /// What a [`Cmd::Rescan`] or a [`Cmd::Refresh`] found.
     Scanned(Result<Viewed, String>),
-    /// What the scan after a file command found.
-    Viewed(Viewed),
     /// Whether an intent, an undo or a redo was made, as a step this session's undo
     /// takes back, by the entry that logged it, and the view after it, or why not. A change to a file that failed is
     /// told by its own answer, and is answered here with the view as it stands.
@@ -834,7 +796,7 @@ pub enum Event {
     /// The trash grew past what it holds in a session, and its oldest items went: the
     /// entries whose undo needed them.
     Trimmed(Vec<toshokan::EntryHash>),
-    /// What [`FileCmd::Read`] read, each with its asset's id. A file not where it was asked
+    /// What [`Cmd::Read`] read, each with its asset's id. A file not where it was asked
     /// for answers [`Failure::Moved`].
     Read(Vec<(u64, Result<Found, Failure>)>),
     Saved {
@@ -899,7 +861,6 @@ impl Event {
             | Event::SlotKept { kept: Ok(_), .. }
             | Event::Trimmed(_)
             | Event::Scanned(Ok(_))
-            | Event::Viewed(_)
             | Event::Committed { result: Ok(_), .. }
             | Event::Moved { result: Ok(()), .. } => Default::default(),
         }

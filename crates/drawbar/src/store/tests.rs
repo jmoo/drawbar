@@ -4490,8 +4490,8 @@ impl Session {
     }
 }
 
-/// Each answer is taken in by what it changed, and what drawbar lists after it is what
-/// the whole view lists, and what a fresh open of the library shows.
+/// Each answer is taken in by what it changed, and what drawbar shows after it is what a
+/// fresh open of the library shows.
 #[test]
 fn each_answer_lists_what_the_whole_view_lists() {
     let root = Temp::new();
@@ -4504,7 +4504,9 @@ fn each_answer_lists_what_the_whole_view_lists() {
     fs::write(root.at("notes.pdf"), b"notes").unwrap();
     let mut session = Session::open(&root);
     let step = |session: &mut Session, what: &str| {
-        assert!(session.store.lists_whole(), "after {what}");
+        let fresh = Session::listed(&root);
+        assert_eq!(session.store.shown(), fresh.store.shown(), "after {what}");
+        fresh.close();
     };
     let id = session.create();
     session.sync();

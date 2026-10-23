@@ -5,12 +5,13 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
 use toshokan::EntityId;
 
 use super::LibPath;
 
 /// How the library knows a file: by the entity bound to it, or by its path.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum Key {
     Entity(EntityId),
     File(LibPath),

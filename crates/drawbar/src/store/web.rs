@@ -36,7 +36,7 @@ use web_sys::{
 
 use super::dom::failure;
 use super::exec::{self, Fs};
-use super::{Cmd, Event, Failure, FileCmd, Fingerprint, Stat};
+use super::{Cmd, Event, Failure, Fingerprint, Stat};
 use crate::js::{describe, field};
 use crate::ondisk::OnDisk;
 use crate::room::measure as size;
@@ -117,8 +117,6 @@ struct Inbox {
     wake: Option<Function>,
     /// No command follows those queued; the task ends once they have run.
     closed: bool,
-    /// A command that writes ([`exec::writes`]) taken from `cmds` is running.
-    writing: bool,
 }
 
 impl Inbox {
@@ -236,9 +234,7 @@ impl Backend {
 
     /// Whether a command that writes has been sent and not run through yet.
     pub fn busy(&self) -> bool {
-        let inbox = self.inbox.borrow();
-        let writes = |cmd: &Cmd| matches!(cmd, Cmd::File(file) if file.writes());
-        inbox.writing || inbox.cmds.iter().any(writes)
+        false
     }
 
     /// The next answer already here. The page cannot wait for one that is not.
@@ -271,34 +267,21 @@ async fn drive(
     let private = root == Root::Private;
     let mut fs = Folder::open(root).await;
     while let Some(cmd) = next(&inbox).await {
-        let mut answer = |event| {
+        let answer = |event| {
             events.borrow_mut().push_back(event);
             ctx.request_repaint();
         };
-        let cmd = match cmd {
-            Cmd::File(file) => file,
+        let (files, most) = match cmd {
+            Cmd::Read { files, room: most } => (files, most),
             cmd => {
                 answer(unopened(cmd));
                 continue;
             }
         };
-        inbox.borrow_mut().writing = cmd.writes();
-        match &mut fs {
-            Ok(fs) => {
-                // ⚠️ The folder handles outlast only the commands that read: a rescan
-                // looks again for what moved outside this tab, and a write may move it.
-                let reads = !cmd.writes();
-                if !reads {
-                    fs.dirs.borrow_mut().clear();
-                }
-                exec::run(fs, cmd, &mut answer).await;
-                if !reads {
-                    fs.dirs.borrow_mut().clear();
-                }
-            }
-            Err(why) => answer(refused(cmd, why)),
+        match &fs {
+            Ok(fs) => answer(Event::Read(exec::read_all(fs, files, most).await)),
+            Err(why) => answer(refused(files, why)),
         }
-        inbox.borrow_mut().writing = false;
         if private && inbox.borrow().cmds.is_empty() {
             measure(&room).await;
         }
@@ -343,17 +326,14 @@ fn unopened(cmd: Cmd) -> Event {
     }
 }
 
-/// The answer to a command when there is no library to run it on.
-fn refused(cmd: FileCmd, why: &str) -> Event {
-    match cmd {
-        FileCmd::Read { files, .. } => Event::Read(
-            files
-                .into_iter()
-                .map(|(id, _, _)| (id, Err(Failure::Io(why.to_string()))))
-                .collect(),
-        ),
-        FileCmd::MakeDir(_) | FileCmd::RemoveDir(_) => Event::Failed(why.to_string()),
-    }
+/// The answer to a read when there is no library to run it on.
+fn refused(files: Vec<(u64, super::LibPath, Option<Fingerprint>)>, why: &str) -> Event {
+    Event::Read(
+        files
+            .into_iter()
+            .map(|(id, _, _)| (id, Err(Failure::Io(why.to_string()))))
+            .collect(),
+    )
 }
 
 fn storage() -> Option<StorageManager> {
@@ -629,24 +609,6 @@ impl Folder {
             found => found,
         }
     }
-
-    /// Stop following the resting files at `path`, which was written over or deleted:
-    /// what they rest in is gone.
-    fn forget(&self, path: &str) {
-        self.resting
-            .borrow_mut()
-            .retain(|(file, at)| at != path && file.strong_count() > 0);
-    }
-
-    /// [`Fs::remove_dir`], leaving the folder handles as they are.
-    async fn unmake(&self, path: &str) -> io::Result<()> {
-        let (dir, leaf) = self.spot(path).await?;
-        settle::<FileSystemDirectoryHandle>(dir.get_directory_handle(&leaf)).await?;
-        JsFuture::from(dir.remove_entry(&leaf))
-            .await
-            .map_err(failed)?;
-        Ok(())
-    }
 }
 
 /// Call `move(dir, name)` on a file or folder handle. A browser that has no `move`
@@ -685,32 +647,6 @@ fn joined(dir: &str, name: &str) -> String {
     }
 }
 
-/// The entries of a folder, sorted by name.
-async fn entries(dir: &FileSystemDirectoryHandle) -> io::Result<Vec<(String, FileSystemHandle)>> {
-    let iterator = dir.entries();
-    let mut found = Vec::new();
-    loop {
-        let step = JsFuture::from(iterator.next().map_err(failed)?)
-            .await
-            .map_err(failed)?;
-        if field(&step, "done").and_then(|done| done.as_bool()) == Some(true) {
-            break;
-        }
-        let pair: Array = field(&step, "value")
-            .ok_or_else(|| io::Error::other("a folder listed an empty entry"))?
-            .unchecked_into();
-        let (Some(name), Ok(handle)) = (
-            pair.get(0).as_string(),
-            pair.get(1).dyn_into::<FileSystemHandle>(),
-        ) else {
-            continue;
-        };
-        found.push((name, handle));
-    }
-    found.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(found)
-}
-
 fn stat(file: &File) -> Stat {
     let modified = file.last_modified();
     Stat {
@@ -742,15 +678,6 @@ pub async fn permission(dir: &FileSystemDirectoryHandle, ask: bool) -> io::Resul
 }
 
 impl Fs for Folder {
-    async fn names(&self, dir: &str) -> io::Result<Vec<String>> {
-        let dir = self.dir(dir, false).await?;
-        Ok(entries(&dir)
-            .await?
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect())
-    }
-
     /// ⚠️ Each read takes a fresh snapshot of the file. A snapshot taken before a write
     /// fails to read afterwards rather than mixing old bytes with new.
     async fn read(&self, path: &str) -> io::Result<Vec<u8>> {
@@ -781,28 +708,6 @@ impl Fs for Folder {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
-    }
-
-    async fn make_dir(&mut self, path: &str) -> io::Result<()> {
-        let made = self.dir(path, true).await.map(|_| ());
-        self.dirs.get_mut().clear();
-        made
-    }
-
-    async fn remove_file(&mut self, path: &str) -> io::Result<()> {
-        self.forget(path);
-        let (dir, leaf) = self.spot(path).await?;
-        settle::<FileSystemFileHandle>(dir.get_file_handle(&leaf)).await?;
-        JsFuture::from(dir.remove_entry(&leaf))
-            .await
-            .map_err(failed)?;
-        Ok(())
-    }
-
-    async fn remove_dir(&mut self, path: &str) -> io::Result<()> {
-        let removed = self.unmake(path).await;
-        self.dirs.get_mut().clear();
-        removed
     }
 
     /// The file is indexed through a snapshot taken now, and followed through the moves

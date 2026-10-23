@@ -10,17 +10,17 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use toshokan::report::{By, What};
-use toshokan::{FileState, View};
 
 use super::cache::{self, Cache};
 use super::diff;
 use super::drafts::Draft;
 use super::exec::too_much;
 use super::ids::Ids;
-use super::keys::{Came, ORIGIN, TAGS, TAG_NAMES};
+use super::keys::{Came, TAGS};
+use super::shown::Shown;
 use super::{
-    names, Backend, Cmd, CopyOf, Event, Failure, FileCmd, Fingerprint, Found, Holds, Intent, Key,
-    LibPath, Moving, Opened, Rescue, Source, Stat, Viewed, MOST_BYTES,
+    names, Backend, Cmd, CopyOf, Event, Failure, Fingerprint, Found, Holds, Intent, Key, LibPath,
+    Moving, Opened, Rescue, Source, Stat, Viewed, MOST_BYTES,
 };
 use crate::browser::{Browser, Rescuing};
 use crate::folders::{Folders, Op, Where};
@@ -100,136 +100,7 @@ struct Batch {
     parts: Vec<Intent>,
 }
 
-/// What a view lists that drawbar shows.
-#[derive(Default, PartialEq, Debug)]
-struct Listed {
-    /// Each file drawbar opens, by the key the library knows it by, with its path and
-    /// what the last scan found there.
-    files: BTreeMap<Key, (LibPath, Option<Stat>)>,
-    /// Files drawbar does not open, by key.
-    others: BTreeMap<Key, LibPath>,
-    /// Entities wearing tags whose file is nowhere, with where it was. One that says only
-    /// where its file came from keeps nothing worth showing without the file.
-    lost: BTreeMap<toshokan::EntityId, LibPath>,
-    /// Where the asset of each entity that says so came from.
-    came: BTreeMap<toshokan::EntityId, Came>,
-}
-
-impl Listed {
-    /// What `view` lists, leaving out every path with a name that starts with a dot and
-    /// every path that is no [`LibPath`].
-    fn of(view: &View) -> Listed {
-        let mut listed = Listed::default();
-        for entity in view.entities() {
-            listed.entity(view, entity.id());
-        }
-        for path in view.unbound() {
-            listed.file(view, path);
-        }
-        listed
-    }
-
-    /// Take in what `changed` says differs in `view` from the view this listed, and
-    /// return the key of each file it changed.
-    fn update(&mut self, view: &View, changed: &toshokan::Changed) -> BTreeSet<Key> {
-        let mut keys = BTreeSet::new();
-        for &entity in &changed.entities {
-            keys.insert(Key::Entity(entity));
-            self.forget(&Key::Entity(entity));
-            self.entity(view, entity);
-        }
-        for path in &changed.files {
-            if let Some(entity) = view.at(path).map(|entity| entity.id()) {
-                if keys.insert(Key::Entity(entity)) {
-                    self.forget(&Key::Entity(entity));
-                    self.entity(view, entity);
-                }
-            }
-            let Some(at) = LibPath::parse(path.as_str()) else {
-                continue;
-            };
-            let key = Key::File(at);
-            self.forget(&key);
-            keys.insert(key);
-            if view.is_unbound(path) {
-                self.file(view, path);
-            }
-        }
-        keys
-    }
-
-    fn forget(&mut self, key: &Key) {
-        self.files.remove(key);
-        self.others.remove(key);
-        if let Some(entity) = key.entity() {
-            self.lost.remove(&entity);
-            self.came.remove(&entity);
-        }
-    }
-
-    /// Take in what `view` says of `entity`.
-    fn entity(&mut self, view: &View, entity: toshokan::EntityId) {
-        let Some(shown) = view.entity(entity) else {
-            return;
-        };
-        if let Some(came) = toshokan::Field::shown(&shown.get(ORIGIN)) {
-            self.came.insert(entity, *came);
-        }
-        let Some(file) = shown.file() else {
-            return;
-        };
-        let worn = shown.members(TAGS);
-        let tagged = !worn.values.is_empty() || !worn.unreadable.is_empty();
-        let key = Key::Entity(entity);
-        match file.state {
-            FileState::Missing if tagged => {
-                if let Some(path) = Listed::shown(&file.path) {
-                    self.lost.insert(entity, path);
-                }
-            }
-            FileState::Missing => {}
-            _ => self.list(view, key, &file.path),
-        }
-    }
-
-    /// Take in the file at `path`, which no entity is bound to.
-    fn file(&mut self, view: &View, path: &toshokan::RelPath) {
-        if let Some(at) = LibPath::parse(path.as_str()) {
-            self.list(view, Key::File(at), path);
-        }
-    }
-
-    fn list(&mut self, view: &View, key: Key, at: &toshokan::RelPath) {
-        let Some(path) = Listed::shown(at) else {
-            return;
-        };
-        if !super::opens(path.leaf()) {
-            self.others.insert(key, path);
-            return;
-        }
-        let stat = view.listed(at).map(|listed| Stat {
-            len: listed.len,
-            modified: listed.modified,
-        });
-        self.files.insert(key, (path, stat));
-    }
-
-    /// `path` as drawbar shows it: none with a name that starts with a dot.
-    fn shown(path: &toshokan::RelPath) -> Option<LibPath> {
-        let path = LibPath::parse(path.as_str())?;
-        let hidden = path.components().any(|name| name.starts_with('.'));
-        (!hidden).then_some(path)
-    }
-
-    /// The files drawbar does not open, in path order.
-    fn others(&self) -> Vec<LibPath> {
-        let mut others: Vec<LibPath> = self.others.values().cloned().collect();
-        others.sort();
-        others
-    }
-}
-
-/// How many files one background [`FileCmd::Read`] asks for at most, and how many of
+/// How many files one background [`Cmd::Read`] asks for at most, and how many of
 /// their listed bytes. A read something needs runs after it.
 const FETCHES: (usize, u64) = (32, 16 << 20);
 
@@ -239,8 +110,8 @@ pub struct Store {
     records: BTreeMap<u64, Record>,
     /// The key the library knows each asset's file by.
     ids: Ids,
-    /// The library as the last answer showed it.
-    view: Option<View>,
+    /// What the library shows, as the answers so far changed it.
+    shown: Option<Shown>,
     /// Changes to the tags the user asked for that wait for a file to name.
     asked: Vec<Asked>,
     /// Changes to files the user asked for, each carried out once the one before it has
@@ -285,8 +156,6 @@ pub struct Store {
     /// What names were last compared in for duplicates: the workspace's layout, and the
     /// [`crate::folders::Folders::names_hash`].
     compared: Option<(u64, u64)>,
-    /// What the view projected last lists.
-    listed: Listed,
     /// The assets a projection passed over while a save or a rename of their files was
     /// in flight, which the next one looks at again.
     deferred: BTreeSet<u64>,
@@ -351,7 +220,7 @@ impl Store {
             phase: Phase::Opening,
             records: BTreeMap::new(),
             ids: Ids::default(),
-            view: None,
+            shown: None,
             asked: Vec::new(),
             asks: VecDeque::new(),
             passes: 0,
@@ -369,7 +238,6 @@ impl Store {
             instrument: None,
             views: BTreeMap::new(),
             compared: None,
-            listed: Listed::default(),
             deferred: BTreeSet::new(),
             focused: true,
             scanning: false,
@@ -564,12 +432,10 @@ impl Store {
         }
     }
 
-    /// Whether what the answers so far listed, each taken in by what it changed, is what
-    /// the view projected last lists whole.
+    /// What the library shows, as the answers so far changed it.
     #[cfg(test)]
-    pub(crate) fn lists_whole(&self) -> bool {
-        let whole = self.view.as_ref().map(Listed::of).unwrap_or_default();
-        self.listed == whole
+    pub(crate) fn shown(&self) -> Option<&Shown> {
+        self.shown.as_ref()
     }
 
     /// Say which instrument is attached, which the views of its slots opened from now
@@ -1015,7 +881,7 @@ impl Store {
             return;
         }
         self.reading = true;
-        self.send(Cmd::File(FileCmd::Read { files, room }));
+        self.send(Cmd::Read { files, room });
     }
 
     /// How many more bytes the assets may hold whole: the budget, less what they hold and
@@ -1092,7 +958,7 @@ impl Store {
 
     fn send(&mut self, cmd: Cmd) {
         #[cfg(test)]
-        if let Cmd::File(FileCmd::Read { files, .. }) = &cmd {
+        if let Cmd::Read { files, .. } = &cmd {
             self.asked_files += files.len();
         }
         self.backend.send(cmd);
@@ -1323,9 +1189,6 @@ impl Store {
                 log.error(format!("reading the library again: {why}"));
                 log.trouble("The library folder could not be read, so nothing was sent.");
             }
-            Event::Viewed(viewed) => {
-                self.viewed(viewed, workspace, browser, queue, log);
-            }
             Event::Committed {
                 label,
                 made,
@@ -1343,8 +1206,9 @@ impl Store {
                     Err(why) => {
                         log.error(format!("{label}: {why}"));
                         log.trouble(format!("The library did not change as asked: {why}."));
-                        if let Some(view) = self.view.clone() {
-                            self.project_tags(&view, browser);
+                        if let Some(shown) = self.shown.take() {
+                            self.project_tags(&shown, browser);
+                            self.shown = Some(shown);
                         }
                     }
                 }
@@ -1688,14 +1552,14 @@ impl Store {
         log: &mut Log,
     ) -> BTreeSet<u64> {
         let Viewed {
-            view,
+            shown: change,
             dirs,
             changes,
             moves,
             undone,
             unlisted,
         } = viewed;
-        let first = self.view.is_none();
+        let first = self.shown.is_none();
         for (from, to) in &moves {
             self.cache.moved(from, to);
         }
@@ -1705,22 +1569,15 @@ impl Store {
                 self.follow_undone(&from, &to, workspace);
             }
         }
-        // A scan of every file may find what no change says, and is projected whole.
-        let reach = match (&self.view, &dirs) {
-            (Some(before), None) => {
-                let changed = view.changed_since(before);
-                Some(self.listed.update(&view, &changed))
-            }
-            _ => {
-                self.listed = Listed::of(&view);
-                None
-            }
-        };
+        let mut shown = self.shown.take().unwrap_or_default();
+        let reach = shown.apply(change);
         if reach.as_ref().is_none_or(|keys| !keys.is_empty()) {
-            browser.folders.others = self.listed.others();
+            browser.folders.others = shown.others();
         }
-        let listed = std::mem::take(&mut self.listed);
-        let touched = self.project(&listed, reach.as_ref(), workspace, browser, queue, log);
+        let (touched, said) = self.project(&shown, reach.as_ref(), workspace, browser, queue, log);
+        if let Some(said) = said.filter(|_| !first && !self.quiet) {
+            log.say(said);
+        }
         if let Some(dirs) = dirs {
             browser.folders.sync(&dirs);
         }
@@ -1736,9 +1593,8 @@ impl Store {
             }
             browser.folders.unwalked = unlisted;
         }
-        self.lose(&listed, workspace, browser);
-        self.listed = listed;
-        self.project_tags(&view, browser);
+        self.lose(&shown, workspace, browser);
+        self.project_tags(&shown, browser);
         if !first {
             self.attribute(&changes, workspace, log);
         }
@@ -1746,7 +1602,7 @@ impl Store {
         if self.compared.replace(compared) != Some(compared) {
             flag_duplicates(workspace, browser, log);
         }
-        drop_aside(self.view.replace(view));
+        self.shown = Some(shown);
         self.quiet = false;
         touched
     }
@@ -1766,16 +1622,17 @@ impl Store {
 
     /// Bring the workspace level with the files the view lists. Each file keeps the id it
     /// had: by its entity, or by its path, or as the file drawbar wrote there. Returns
-    /// the assets whose files moved or changed.
+    /// the assets whose files moved or changed, and what to say of the files that changed
+    /// outside drawbar.
     fn project(
         &mut self,
-        listed: &Listed,
+        listed: &Shown,
         reach: Option<&BTreeSet<Key>>,
         workspace: &mut Workspace,
         browser: &mut Browser,
         queue: &Queue,
         log: &mut Log,
-    ) -> BTreeSet<u64> {
+    ) -> (BTreeSet<u64>, Option<String>) {
         self.rekey(listed, reach);
         let mut touched = BTreeSet::new();
         let (mut moved, mut deleted, mut missing) = (0, 0, 0);
@@ -1859,17 +1716,13 @@ impl Store {
         let appeared = self.arrive(listed, reach, workspace, browser, log);
         // A file gone missing keeps the status line, which asks for it to be saved.
         let said = changed_outside(appeared, deleted, moved).filter(|_| missing == 0);
-        let first = self.view.is_none();
-        if let Some(said) = said.filter(|_| !first && !self.quiet) {
-            log.say(said);
-        }
-        touched
+        (touched, said)
     }
 
     /// Give each asset the key the library knows its file by now, where that changed: a
     /// file an intent made an entity of, an entity whose file was let go of, or a file
     /// drawbar wrote that the view lists for the first time.
-    fn rekey(&mut self, listed: &Listed, reach: Option<&BTreeSet<Key>>) {
+    fn rekey(&mut self, listed: &Shown, reach: Option<&BTreeSet<Key>>) {
         let reached = |key: &Key| reach.is_none_or(|keys| keys.contains(key));
         let by_path: BTreeMap<&LibPath, &Key> = listed
             .files
@@ -1909,7 +1762,7 @@ impl Store {
     /// Take in each file the view lists that no asset stands for. Returns how many.
     fn arrive(
         &mut self,
-        listed: &Listed,
+        listed: &Shown,
         reach: Option<&BTreeSet<Key>>,
         workspace: &mut Workspace,
         browser: &Browser,
@@ -1955,7 +1808,7 @@ impl Store {
 
     /// Show each entity whose file is nowhere, which no asset stands for, as lost, with
     /// its tags, until the user lets it go.
-    fn lose(&mut self, listed: &Listed, workspace: &mut Workspace, browser: &mut Browser) {
+    fn lose(&mut self, listed: &Shown, workspace: &mut Workspace, browser: &mut Browser) {
         let mut lost = Vec::new();
         for (entity, path) in &listed.lost {
             let key = Key::Entity(*entity);
@@ -1979,24 +1832,17 @@ impl Store {
 
     /// Bring the browser's tags level with the view, which is all there is once no change
     /// to them waits to be answered.
-    fn project_tags(&self, view: &View, browser: &mut Browser) {
+    fn project_tags(&self, shown: &Shown, browser: &mut Browser) {
         if self.asked.is_empty() && self.committing == 0 {
             browser.tags.settle();
         }
-        let worn_names = view.values(TAGS).values.into_iter();
-        let listed = view.values(TAG_NAMES).values.into_iter();
-        let names = worn_names.chain(listed).map(|(name, _)| name);
-        let mut worn = BTreeMap::new();
-        for entity in view.with(TAGS) {
-            let Some(id) = self.ids.id(&Key::Entity(entity)) else {
-                continue;
-            };
-            let Some(members) = view.entity(entity).map(|entity| entity.members(TAGS)) else {
-                continue;
-            };
-            worn.insert(id, members.values.into_iter().collect());
-        }
-        browser.tags.project(names.collect(), worn);
+        let worn_names = shown.worn.values().flatten().cloned();
+        let names = worn_names.chain(shown.names.iter().cloned());
+        let worn = shown.worn.iter().filter_map(|(entity, worn)| {
+            let id = self.ids.id(&Key::Entity(*entity))?;
+            Some((id, worn.iter().cloned().collect()))
+        });
+        browser.tags.project(names.collect(), worn.collect());
     }
 
     /// Say which tags another drawbar changed.
@@ -2043,13 +1889,10 @@ impl Store {
         // ⚠️ Each is made against the view the one before left, so they wait in turn: a
         // rename asked right after a tag renames what the tag put on.
         while self.committing == 0 {
-            let Some(view) = self.view.clone() else {
+            let (Some(shown), Some(asked)) = (&self.shown, self.asked.first()) else {
                 return;
             };
-            let Some(asked) = self.asked.first() else {
-                return;
-            };
-            match self.intend(asked, &view, workspace) {
+            match self.intend(asked, shown, workspace) {
                 None => return,
                 Some(intent) => {
                     let asked = self.asked.remove(0);
@@ -2094,19 +1937,24 @@ impl Store {
 
     /// The intent `asked` makes against `view`: `Some(None)` where it changes nothing,
     /// and `None` while an asset it names waits for its file.
-    fn intend(&self, asked: &Asked, view: &View, workspace: &Workspace) -> Option<Option<Intent>> {
+    fn intend(
+        &self,
+        asked: &Asked,
+        shown: &Shown,
+        workspace: &Workspace,
+    ) -> Option<Option<Intent>> {
         let entities = |assets: &[u64]| -> Vec<toshokan::EntityId> {
             let keys = assets.iter().filter_map(|id| self.ids.key(*id));
             keys.filter_map(Key::entity).collect()
         };
-        let wearing = |name: &String| view.find(TAGS, name);
+        let wearing = |name: &String| shown.wearing(name);
         let intent = match asked {
             Asked::Tag { assets, name, make } => {
                 let waits = |id: &u64| self.ids.key(*id).is_none() && self.writes(*id, workspace);
                 if assets.iter().any(waits) {
                     return None;
                 }
-                let listed = !view.find(TAG_NAMES, name).is_empty();
+                let listed = shown.names.contains(name);
                 let files: Vec<Key> = assets
                     .iter()
                     .filter_map(|id| self.ids.key(*id).cloned())
@@ -2138,12 +1986,12 @@ impl Store {
                 })
             }
             Asked::Make(name) => {
-                let listed = !view.find(TAG_NAMES, name).is_empty();
+                let listed = shown.names.contains(name);
                 (!listed).then(|| Intent::MakeTag { name: name.clone() })
             }
             Asked::Rename { from, to } => {
                 let entities = wearing(from);
-                let listed = !view.find(TAG_NAMES, from).is_empty();
+                let listed = shown.names.contains(from);
                 (listed || !entities.is_empty()).then(|| Intent::RenameTag {
                     entities,
                     from: from.clone(),
@@ -2152,7 +2000,7 @@ impl Store {
             }
             Asked::Remove(name) => {
                 let entities = wearing(name);
-                let listed = !view.find(TAG_NAMES, name).is_empty();
+                let listed = shown.names.contains(name);
                 (listed || !entities.is_empty()).then(|| Intent::RemoveTag {
                     entities,
                     name: name.clone(),
@@ -2192,7 +2040,7 @@ impl Store {
         self.rechecking.insert(id);
         let files = vec![(id, path, record.fingerprint)];
         let room = self.budget;
-        self.send(Cmd::File(FileCmd::Read { files, room }));
+        self.send(Cmd::Read { files, room });
     }
 
     /// The rescues in this install's own folders, by name, each read whole on this thread
@@ -2868,7 +2716,7 @@ impl Store {
         if files.is_empty() {
             return;
         }
-        self.send(Cmd::File(FileCmd::Read { files, room }));
+        self.send(Cmd::Read { files, room });
     }
 
     /// Send one change to the folders. One made or removed while the open's listing is in
@@ -3385,18 +3233,6 @@ fn held(workspace: &Workspace) -> u64 {
     workspace
         .held_whole()
         .saturating_add(workspace.asked_whole())
-}
-
-/// Drop `view` where the drop holds up no frame: the last hold of a large library's
-/// view frees every path it lists.
-#[cfg(not(target_arch = "wasm32"))]
-fn drop_aside(view: Option<View>) {
-    std::thread::spawn(move || drop(view));
-}
-
-#[cfg(target_arch = "wasm32")]
-fn drop_aside(view: Option<View>) {
-    drop(view);
 }
 
 /// Whether `path` is in, is, or holds either side of one of these renames.
