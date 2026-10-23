@@ -1632,11 +1632,21 @@ impl Store {
         let keys: BTreeSet<_> = standing.iter().map(key).collect();
         self.unfinished.retain(|known, _| keys.contains(known));
         for orphan in standing {
-            self.unfinished.entry(key(&orphan)).or_insert(Unfinished {
-                orphan,
+            let known = self.unfinished.entry(key(&orphan));
+            let known = known.or_insert_with(|| Unfinished {
+                orphan: orphan.clone(),
                 seen: now,
                 told: false,
             });
+            // A change whose paths moved since, or whose window has gone, may have
+            // been in progress: it is asked about once it stands again.
+            if orphan.progress != known.orphan.progress {
+                known.seen = now;
+            }
+            if known.orphan.live && !orphan.live {
+                (known.seen, known.told) = (now, false);
+            }
+            known.orphan = orphan;
         }
         self.looked = now;
         let due = self.unfinished.values().filter(|known| !known.told);

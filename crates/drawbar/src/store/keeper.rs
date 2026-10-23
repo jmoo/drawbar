@@ -312,7 +312,23 @@ impl<F: Fs> Keeper<F> {
             true => library.rescan().await,
             false => library.refresh().await,
         };
-        let refreshed = refreshed.map_err(|e| e.to_string())?;
+        let mut refreshed = refreshed.map_err(|e| e.to_string())?;
+        // Another window of this install left these and closed since: they are ours to
+        // finish, as at open. One that will not finish is the user's to settle.
+        let (ours, theirs) = std::mem::take(&mut refreshed.orphaned)
+            .into_iter()
+            .partition::<Vec<_>, _>(|orphan| orphan.ours);
+        refreshed.orphaned = theirs;
+        for mut orphan in ours {
+            if library
+                .settle(orphan.clone(), Settlement::Finished)
+                .await
+                .is_err()
+            {
+                orphan.ours = false;
+                refreshed.orphaned.push(orphan);
+            }
+        }
         Ok(viewed(library, &mut self.shown, refreshed))
     }
 

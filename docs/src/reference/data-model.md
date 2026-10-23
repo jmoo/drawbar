@@ -627,9 +627,12 @@ An effect interrupted by a crash, of this instance's writer or an idle one of
 this install, is finished at open. One another install left is asked about:
 finish it, roll it back, or leave it (`Browser::ask_unfinished`, `Cmd::Settle`).
 Every read of the library reports the ones that stand, and drawbar asks only
-about one that a read still finds five seconds after it first found it
-(`UNFINISHED_STANDS`): a drawbar in a browser tab on the same folder is no writer
-whose lock this one can see, and may be making the change still.
+about one that a read finds unmoved five seconds after it first found it as it
+stands (`UNFINISHED_STANDS`, `Orphan::progress`): a drawbar in a browser tab on
+the same folder is no writer whose lock this one can see, and may be making the
+change still, as a copy of a large file can for minutes. One another window of
+this install left once that window stopped is finished at the next read, as at
+open.
 A record that does not read is left, and the log says how many.
 
 ### In the browser

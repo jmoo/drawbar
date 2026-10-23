@@ -5212,14 +5212,24 @@ impl toshokan::blocking::Backend for Crashing {
 /// Leave in `root` a save another install's drawbar stopped partway, and return the bytes
 /// it was saving.
 fn leave_unfinished_save(root: &Temp) -> Vec<u8> {
+    let elsewhere = Temp::new();
+    leave_unfinished_save_in(root, &elsewhere.0).0
+}
+
+/// Leave in `root` a save a drawbar keeping its own state in `local` stopped partway,
+/// and return the bytes it was saving, with that drawbar, which holds its writer until
+/// it is dropped.
+fn leave_unfinished_save_in(
+    root: &Temp,
+    local: &std::path::Path,
+) -> (Vec<u8>, toshokan::blocking::Library<Crashing>) {
     use std::panic::AssertUnwindSafe;
     use toshokan::blocking::{Library, Native};
 
     let program = Fresh::Program.bytes().unwrap();
     fs::write(root.at("Grand.ne5p"), &program).unwrap();
-    let elsewhere = Temp::new();
     let crashing = Crashing {
-        native: Native::new(&root.0, &elsewhere.0),
+        native: Native::new(&root.0, local),
         stopped: false,
     };
     let env = toshokan::Env {
@@ -5236,18 +5246,54 @@ fn leave_unfinished_save(root: &Temp) -> Vec<u8> {
     let expect =
         toshokan::Expect::Holds(keys::identity_of_bytes(&path("Grand.ne5p"), &program).unwrap());
     let bytes = saved.clone();
-    let stopped = std::panic::catch_unwind(AssertUnwindSafe(move || {
+    let stopped = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let _ = other.intent("Save").save_file(&at, bytes, expect).commit();
     }));
-    assert!(stopped.is_err(), "the other install stopped mid-save");
-    saved
+    assert!(stopped.is_err(), "the other drawbar stopped mid-save");
+    (saved, other)
+}
+
+/// A change another window of this install left, which stopped after this one opened,
+/// is finished without asking at the next read, as one left before it opened is.
+#[test]
+fn a_change_a_window_left_after_this_one_opened_is_finished() {
+    let root = Temp::new();
+    let mut session = Session::listed(&root);
+    let (saved, window) = leave_unfinished_save_in(&root, &root.local());
+    drop(window);
+    session.settle();
+    session.poll();
+    assert!(session.bench.browser.asking().is_none(), "nothing is asked");
+    assert!(root.read("Grand.ne5p") == saved, "the save is finished");
+}
+
+/// A change a live window of this install is making is not asked about, and once that
+/// window stops, the next read finishes it.
+#[test]
+fn a_change_a_live_window_left_is_finished_once_the_window_stops() {
+    let root = Temp::new();
+    let (saved, window) = leave_unfinished_save_in(&root, &root.local());
+    let mut session = Session::listed(&root);
+    session.poll();
+    assert_eq!(session.said("is in progress in another drawbar window"), 1);
+    drop(window);
+    session.settle();
+    session.poll();
+    assert!(session.bench.browser.asking().is_none(), "nothing is asked");
+    assert!(root.read("Grand.ne5p") == saved, "the save is finished");
 }
 
 impl Session {
     /// Let a minute pass, and read the library again where the store asks to.
     fn a_minute_later(&mut self) {
+        self.at(60.0);
+    }
+
+    /// Let the clock reach `seconds`, and read the library again where the store asks
+    /// to.
+    fn at(&mut self, seconds: f64) {
         let later = eframe::egui::RawInput {
-            time: Some(60.0),
+            time: Some(seconds),
             ..Default::default()
         };
         crate::testing::run(&self.bench.ctx, later, |_| {});
@@ -5284,6 +5330,22 @@ fn a_change_another_install_left_unfinished_is_asked_about() {
     }
     session.decided();
     assert!(root.read("Grand.ne5p") == saved, "the save is finished");
+}
+
+/// A change whose paths keep moving between reads is being carried out still, however
+/// long it takes, and is asked about only once two reads a while apart find it still.
+#[test]
+fn a_change_whose_paths_move_is_asked_about_only_once_they_stand() {
+    let root = Temp::new();
+    leave_unfinished_save(&root);
+    let mut session = Session::listed(&root);
+    session.poll();
+    fs::write(root.at("Grand.ne5p"), b"more of the copy").unwrap();
+    session.a_minute_later();
+    assert!(session.bench.browser.asking().is_none(), "it moved");
+    session.at(120.0);
+    let (title, _) = session.bench.browser.asking().expect("it stood");
+    assert_eq!(title, "Another drawbar left “Save” unfinished");
 }
 
 /// A change another install's drawbar finishes before it has stood a while is never
