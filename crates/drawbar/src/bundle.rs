@@ -328,7 +328,7 @@ fn provider(need: Key, workspace: &Workspace, device: &DeviceState) -> Provider 
             .entities()
             .iter()
             .filter(|e| e.unread() || e.reading())
-            .filter(|e| e.format_tag() == "ne5p" && !matches!(e.verify, VerifyState::NotRead(_)))
+            .filter(|e| e.format_tag() == "ne5p" && !matches!(e.verify(), VerifyState::NotRead(_)))
             .map(|e| e.id)
             .collect(),
         Key::Piano(_) | Key::Sample(_) => Vec::new(),

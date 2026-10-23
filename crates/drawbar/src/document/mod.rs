@@ -311,7 +311,7 @@ impl Document {
         // A file not read yet is asked for, and the tab says so until it comes; one read
         // and not yet decoded is decoded here.
         if let Some(entity) = workspace.get(id).filter(|entity| entity.unread()) {
-            let said = match &entity.verify {
+            let said = match &entity.verify() {
                 VerifyState::NotRead(why) => format!("“{}” could not be read: {why}", entity.name),
                 _ => "Reading…".to_string(),
             };
@@ -3560,7 +3560,7 @@ mod tests {
         assert!(open.document.pends(open.id), "the rename is a plan");
         assert_eq!(
             open.entity().bytes,
-            open.entity().saved.bytes,
+            *open.entity().saved.bytes(),
             "and nothing has copied the body for it",
         );
         assert_eq!(named(&open), "Test Piano", "nor written it");
@@ -3708,7 +3708,7 @@ mod tests {
         );
         assert_eq!(
             open.entity().bytes,
-            open.entity().saved.bytes,
+            *open.entity().saved.bytes(),
             "though no body was copied for it",
         );
 

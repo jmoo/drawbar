@@ -203,10 +203,35 @@ fn read<'a>(path: RelPath, writer: WriterId) -> Flow<'a, Result<Option<PendingRe
     })
 }
 
+/// Whether `bytes`, read where a record is created in place, are one cut short
+/// before its bytes landed: nothing, the start of a record, or bytes a crash
+/// zeroed. A record is JSON, which holds no zero byte.
+pub fn cut_short(bytes: &[u8]) -> bool {
+    let started = serde_json::from_slice::<serde::de::IgnoredAny>(bytes).is_err_and(|e| e.is_eof());
+    bytes.is_empty() || bytes.contains(&0) || started
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ids::EntityId;
+
+    #[test]
+    fn a_record_cut_short_is_empty_zeroed_or_the_start_of_one() {
+        let whole = br#"{"writer":"77","steps":[]}"#;
+        let mut zeroed = whole.to_vec();
+        zeroed[10..].fill(0);
+        for cut in [&b""[..], &[0; 26], &whole[..9], &zeroed] {
+            assert!(cut_short(cut), "{:?}", String::from_utf8_lossy(cut));
+        }
+        for kept in [
+            &whole[..],
+            br#"{"from":"a newer version"}"#,
+            b"not a record",
+        ] {
+            assert!(!cut_short(kept), "{:?}", String::from_utf8_lossy(kept));
+        }
+    }
 
     fn path(text: &str) -> RelPath {
         RelPath::new(text).unwrap()
