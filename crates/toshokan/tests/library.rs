@@ -3469,6 +3469,22 @@ fn a_crash_at_any_step_is_settled_before_the_next_write<F: Facade>() {
     assert!(settled > 0, "some crash interrupted an effect");
 }
 
+#[test]
+fn settling_a_commit_whose_append_landed_whole_writes_nothing() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = Blocking::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    create(&mut a, "song.npno", b"song");
+    a.close().unwrap();
+    let probe = Probe::new(&here);
+    let (mut a, _) = Blocking::open(probe.clone(), env("a", 2, &clock)).unwrap();
+    let writes = || (probe.folder_writes(), probe.local_writes());
+    let before = writes();
+    a.0.settle_interrupted().unwrap();
+    assert_eq!(writes(), before, "the log holds the commit's every op");
+}
+
 fn an_append_torn_after_its_intent_binds_the_rest_at_the_next_open<F: Facade>() {
     // The disk tears only what waits for a sync.
     if !FOLDER.get().fsync {
