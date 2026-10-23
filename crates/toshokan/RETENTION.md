@@ -322,10 +322,10 @@ ever, even if it later stops seeing the fork: a tip's references and own delete
 made by a dismissed entry do not apply either. An entry after a dismissed one is
 a new item, never placed. A dismissal never covers what the user has not seen. A
 tip matches a dismissal by the hash of its last entry where the tip names it. A
-run's last entry usually lies inside a segment its writer later compacts, which
-certifies the segment by its ends alone, so the dismissal also names the first
-line of the file its last entry was read in, and a tip that certifies that file
-at least as far matches it.
+tip that compacted past a line-run's last entry inside one segment names it
+nowhere, and two branches of one instance resumed twice can share that segment's
+first line, so nothing tells such a tip's branch: it is shown again as an item,
+to dismiss again, rather than hidden on a guess.
 
 A branch that keeps writing until its instance sees the fork produces a new item
 with each sync.
@@ -429,6 +429,8 @@ removes named, its file effects. It ends at close. Drafts are unchanged.
   snapshot of that writer has passed its number, when the reader never found
   the fork or forgot it at the grace step: gone from view, with no item, until
   its file is visible again, then shown as that branch's item.
+- A run the user dismissed, after its branch compacted past it: its branch shown
+  again as an item.
 - Entries after a gap: an item from the start, whose changes the user can take,
   merged as soon as the gap fills.
 - A field whose earlier value a branch compacted away: shown in that branch's
