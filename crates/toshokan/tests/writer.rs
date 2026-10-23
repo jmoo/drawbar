@@ -16,7 +16,7 @@ use toshokan::reader::{CachedView, Reader};
 use toshokan::report::{Rekey, Start};
 use toshokan::simulator::Machine;
 use toshokan::writer::{Claimed, Writer, SEGMENT_BOUND};
-use toshokan::{EntryHash, Error, Hlc, MemDisk, Refusal, Root, SegmentName, WriterId};
+use toshokan::{EntryHash, Error, Hlc, Io, MemDisk, Refusal, Root, SegmentName, WriterId};
 
 fn segments(machine: &Machine, writer: WriterId) -> usize {
     files_under(&machine.folder, &layout().writer(writer))
@@ -259,6 +259,40 @@ fn sync_everything(disk: &MemDisk) {
         })
         .unwrap();
     }
+}
+
+#[test]
+fn a_writer_whose_last_entry_follows_a_hidden_segment_does_not_resume() {
+    let mut first = Instance::open(machine(), 1);
+    first.write("a").unwrap();
+    let id = first.id();
+    let mut second = Instance::open(first.close(), 2);
+    let folder = second.machine.folder.clone();
+    let before = folder.files(Root::Folder);
+    second.write("b").unwrap();
+    let hidden = folder
+        .files(Root::Folder)
+        .into_keys()
+        .find(|path| !before.contains_key(path))
+        .expect("the second session's segment");
+    let mut third = Instance::open(second.close(), 3);
+    third.write("c").unwrap();
+    let machine = third.close();
+    machine
+        .folder
+        .perform(Io::Remove {
+            root: Root::Folder,
+            path: hidden,
+        })
+        .unwrap();
+    let fourth = Instance::open(machine, 4);
+    assert_eq!(
+        fourth.start,
+        Start::Rekeyed {
+            old: id,
+            why: Rekey::Restored
+        }
+    );
 }
 
 #[test]

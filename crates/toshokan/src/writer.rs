@@ -488,9 +488,12 @@ fn tip(
     if !tips_ours || !first_ours || !placed.holds(recorded) {
         return Err(Rekey::Restored);
     }
-    match (placed.fork, placed.head()) {
-        (None, Some(head)) => Ok(head),
-        _ => Err(Rekey::Forked),
+    if placed.fork.is_some() {
+        return Err(Rekey::Forked);
+    }
+    match placed.head() {
+        Some(head) if placed.continues(recorded) => Ok(head),
+        _ => Err(Rekey::Restored),
     }
 }
 

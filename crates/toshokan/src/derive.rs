@@ -116,6 +116,16 @@ impl Placed {
         }
     }
 
+    /// Whether the writer's history continues from `hash` as far as the reader
+    /// sees: a tip names it, or it is merged.
+    pub fn continues(&self, hash: EntryHash) -> bool {
+        let named = self
+            .tips
+            .iter()
+            .any(|tip| tip.head.hash == hash || tip.certified.named().any(|own| own.hash == hash));
+        named || self.merged.iter().any(|entry| entry.hash() == hash)
+    }
+
     /// Whether the reader holds `hash` of this writer: a tip names it, or it is
     /// merged, a run or a gap.
     pub fn holds(&self, hash: EntryHash) -> bool {
