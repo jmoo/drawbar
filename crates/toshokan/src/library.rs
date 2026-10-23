@@ -643,6 +643,7 @@ impl Library {
                     })
                     .and_then(move |library| scan_for(library, scope, moved))
             })
+            .and_then(repooled)
             .and_then(reorphaned)
             .and_then(|library| {
                 let changes = library.since_view();
@@ -1061,6 +1062,7 @@ impl Library {
                 record: name,
                 label: record.label.clone(),
                 paths: record.paths(),
+                progress: 0,
             }),
         }
     }
@@ -1936,11 +1938,18 @@ fn recover(library: Library) -> Fallible<'static, Library> {
     })
 }
 
-/// Reads every writer's pending records again, for the orphans that stand now. Each
-/// keeps whether it is the install's own and live as opening found. Writes nothing.
+/// Reads every writer's pending records again, for the orphans that stand now, each
+/// the install's own and live as the pool and presence now say. Writes nothing.
 fn reorphaned(library: &mut Library) -> Fallible<'_, &mut Library> {
     let writers = library.reader.logs().keys().copied().collect();
-    flow::run(recovery::read(&library.layout, writers)).map_ok(move |found| {
+    flow::run(recovery::read(&library.layout, writers)).and_then(move |found| {
+        let records: BTreeMap<(WriterId, Nonce), PendingRecord> = found
+            .iter()
+            .flat_map(|(writer, found)| {
+                let records = found.records.iter();
+                records.map(move |(name, record)| ((*writer, *name), record.clone()))
+            })
+            .collect();
         let own = library
             .writer
             .as_ref()
@@ -1948,13 +1957,28 @@ fn reorphaned(library: &mut Library) -> Fallible<'_, &mut Library> {
         let settled = library.folded.settlements().clone();
         let (assessed, _) =
             recovery::classify(&library.layout, own, library.reader.logs(), &settled, found);
-        library.orphaned = assessed.orphaned;
-        for orphan in &mut library.orphaned {
-            orphan.ours = library.pooled.contains_key(&orphan.writer);
-            let presence = library.presence.get(&orphan.writer);
-            orphan.live = presence == Some(&Presence::SameMachine);
-        }
-        library
+        let layout = library.layout.clone();
+        fold(
+            assessed.orphaned.into_iter(),
+            Vec::new(),
+            move |mut orphaned, mut orphan| {
+                let record = &records[&(orphan.writer, orphan.record)];
+                recovery::glance(&layout, orphan.record, record).map_ok(move |progress| {
+                    orphan.progress = progress;
+                    orphaned.push(orphan);
+                    orphaned
+                })
+            },
+        )
+        .map_ok(move |orphaned| {
+            library.orphaned = orphaned;
+            for orphan in &mut library.orphaned {
+                orphan.ours = library.pooled.contains_key(&orphan.writer);
+                let presence = library.presence.get(&orphan.writer);
+                orphan.live = presence == Some(&Presence::SameMachine);
+            }
+            library
+        })
     })
 }
 
@@ -1963,8 +1987,8 @@ fn reorphaned(library: &mut Library) -> Fallible<'_, &mut Library> {
 /// and keeps it, so this instance offers their drafts and settles their effects,
 /// and no other does. Every other idle writer's lock is let go at once, so another
 /// instance may write as it.
-fn idle_pool(library: Library) -> Fallible<'static, Library> {
-    let own = library.writer.as_ref().map(Writer::genesis);
+fn idle_pool<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
+    let own = library.borrow().writer.as_ref().map(Writer::genesis);
     flow::run(Writer::pool()).and_then(move |pool| {
         let others = pool
             .into_iter()
@@ -1977,10 +2001,22 @@ fn idle_pool(library: Library) -> Fallible<'static, Library> {
                     let Some(writer) = writer else {
                         return unlock_idle(genesis).map_ok(move |()| library);
                     };
-                    library.pooled.insert(writer, genesis);
+                    library.borrow_mut().pooled.insert(writer, genesis);
                     release_if_idle(library, writer)
                 }),
             })
+        })
+    })
+}
+
+/// Takes up again what idle writers of this install's pool left, as opening does,
+/// and asks which writers other instances on this machine hold now: a window may
+/// have closed or stopped since. Writes nothing in the folder.
+fn repooled(library: &mut Library) -> Fallible<'_, &mut Library> {
+    idle_pool(library).and_then(|library| {
+        flow::run(library.presence_task()).map_ok(move |presence| {
+            library.presence = presence;
+            library
         })
     })
 }

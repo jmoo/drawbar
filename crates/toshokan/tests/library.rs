@@ -644,6 +644,7 @@ through_both!(
     an_idle_writer_whose_records_its_log_closed_is_let_go,
     drafts_of_two_windows_are_ordered_by_their_clocks_after_the_time_went_back,
     an_effect_a_live_window_left_open_is_reported_live,
+    an_effect_a_window_left_is_the_installs_once_the_window_closes,
     a_change_of_case_another_install_did_not_start_is_finished_by_another,
     a_refresh_reports_another_installs_unfinished_change_as_it_stands,
     a_scan_of_every_file_reports_the_directories_it_listed,
@@ -3000,6 +3001,51 @@ fn an_effect_a_live_window_left_open_is_reported_live<F: Facade>() {
     );
 }
 
+fn an_effect_a_window_left_is_the_installs_once_the_window_closes<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    put(&folder, "a.wav", b"a");
+    let probe = Probe::new(&here);
+    let (mut first, _) = F::open(probe.clone(), env("w", 1, &clock)).unwrap();
+    first.rescan().unwrap();
+    first
+        .commit("Tag", |i| i.create(|e| _ = e.add(TAGS, tag("x"))).0)
+        .unwrap();
+    let (mut second, _) = F::open(Probe::new(&here), env("w", 2, &clock)).unwrap();
+    let logging = |io: &Io| io.root() == Root::Folder && io.path().as_str().ends_with(".txt");
+    fail(&probe, move |io| io.mutates() && logging(io));
+    let stopped = first.commit("Rename", |i| {
+        i.rename_file(
+            &path("a.wav"),
+            &path("b.wav"),
+            Expect::Holds(identity(b"a")),
+        )
+    });
+    heal(&probe);
+    assert!(stopped.is_err(), "the entry was not logged: {stopped:?}");
+    let orphans = |second: &mut F| {
+        let refreshed = second.refresh().unwrap();
+        let orphans = refreshed.orphaned.into_iter();
+        orphans.map(|o| (o.ours, o.live)).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        orphans(&mut second),
+        [(false, true)],
+        "the first window is live"
+    );
+
+    first.close().unwrap();
+    assert_eq!(
+        orphans(&mut second),
+        [(true, false)],
+        "the install's own to finish"
+    );
+    let orphan = second.refresh().unwrap().orphaned.remove(0);
+    second.settle(orphan, Settlement::Finished).unwrap();
+    assert_eq!(orphans(&mut second), [], "finished");
+}
+
 fn a_change_of_case_another_install_did_not_start_is_finished_by_another<F: Facade>() {
     let folder = disk();
     let clock = TestClock::at(1_000);
@@ -3095,6 +3141,10 @@ fn a_refresh_reports_another_installs_unfinished_change_as_it_stands<F: Facade>(
         panic!("one orphan once it began: {:?}", refreshed.orphaned);
     };
     assert_eq!((orphan.label.as_str(), orphan.ours), ("Rename", false));
+    let progress = |ours: &mut F| ours.refresh().unwrap().orphaned[0].progress;
+    assert_eq!(progress(&mut ours), orphan.progress, "nothing moved");
+    put(&folder, "b.wav", b"bb");
+    assert_ne!(progress(&mut ours), orphan.progress, "its path moved");
     ours.settle(orphan.clone(), Settlement::Finished).unwrap();
     assert_eq!(
         ours.refresh().unwrap().orphaned,

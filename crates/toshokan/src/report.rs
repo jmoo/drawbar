@@ -93,8 +93,13 @@ pub struct Orphan {
     /// install's to settle, with no one else to ask.
     pub ours: bool,
     /// Another instance on this machine held the writer's lock when this one
-    /// opened: it may be carrying the effect out still.
+    /// opened, or at the refresh that reported it: it may be carrying the effect out
+    /// still.
     pub live: bool,
+    /// What the folder showed of the effect's paths, hashed: it moves while a writer
+    /// carries the effect out, so two reads that show it unchanged a while apart
+    /// say no writer is. 0 until a refresh looks.
+    pub progress: u64,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -386,6 +391,7 @@ mod tests {
             paths: vec![path.clone()],
             ours: false,
             live: true,
+            progress: 3,
         };
         let draft = DraftStatus {
             of: Drafted::File(path),

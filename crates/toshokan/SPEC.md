@@ -82,8 +82,9 @@ Each install keeps, per library, a local root of its own that is never synced:
 `<genesis>` is the hash of the writer's genesis entry. The directory is created
 only after that entry is durable in the folder, so the directories of the local
 root are the install's pool of writers. An instance writes as the first writer
-of the pool whose lock it takes. It also takes the lock of every other writer no
-instance writes as now, as another window of the app wrote until it closed, and
+of the pool whose lock it takes. It also takes, as it opens and at each refresh,
+the lock of every other writer no instance writes as now, as another window of
+the app wrote until it closed, and
 keeps it while that writer left something to take up: it offers their drafts
 beside its own, and reports their open pending records as orphans that are the
 install's own (`ours`), to settle without asking. It lets go of such a lock at
@@ -776,7 +777,9 @@ that is not a library path, or its `prev` is not in its writer's log. Opening
 reports the records it ignores, and the open records of other writers as
 orphans. Each refresh reads every writer's pending records again and reports the
 orphans as they stand then, since a writer elsewhere may have begun or finished
-an effect meanwhile.
+an effect meanwhile, each with whether it is the install's own and live as the
+pool and its locks say then, and with a hash of what the folder shows of its
+paths and markers, which moves while a writer carries the effect out.
 
 Opening finds this writer's open records whose `prev` is its head, and says how
 settling each will end. The writer settles them before it checks its next

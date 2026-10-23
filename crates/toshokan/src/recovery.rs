@@ -147,6 +147,7 @@ pub fn classify<C: Chain>(
                 Standing::Orphan => recovery.orphaned.push(Orphan {
                     ours: false,
                     live: false,
+                    progress: 0,
                     writer,
                     record: name,
                     label: record.label.clone(),
@@ -397,6 +398,51 @@ pub fn remove_empty(
             )
     })
     .task()
+}
+
+/// What the folder shows of the paths another writer's record `name`, `record`,
+/// names, and of its markers, hashed. A writer carrying the effect out moves it.
+/// Reads no file.
+pub(crate) fn glance<'a>(
+    layout: &Layout,
+    name: Nonce,
+    record: &PendingRecord,
+) -> Fallible<'a, u64> {
+    use std::hash::{Hash, Hasher};
+
+    let writer = record.writer;
+    let mut paths = BTreeSet::new();
+    for step in &record.steps {
+        if let EffectStep::Place { staged, .. } = step {
+            paths.insert(layout.trash(writer, *staged));
+        }
+        if let Some((from, to)) = step.ends(layout, writer) {
+            paths.insert(from);
+            paths.insert(to);
+        }
+    }
+    let marked = match record.moves {
+        Moves::Rename => flow::ok(Vec::new()),
+        Moves::Copy => flow::list(Root::Folder, &layout.pending_dir(writer)).map_ok(move |found| {
+            let marked = found
+                .into_iter()
+                .filter(|entry| pending::marker(&entry.name).is_some_and(|(of, _)| of == name));
+            marked.map(|entry| entry.name).collect()
+        }),
+    };
+    marked.and_then(move |marked| {
+        fold(paths.into_iter(), Vec::new(), |mut seen, path| {
+            flow::stat(Root::Folder, &path).map_ok(move |meta| {
+                seen.push((path, meta.map(|meta| (meta.len, meta.modified))));
+                seen
+            })
+        })
+        .map_ok(move |seen| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (marked, seen).hash(&mut hasher);
+            hasher.finish()
+        })
+    })
 }
 
 /// How far another writer's record got, as [`orphan_plan`] needs it.
