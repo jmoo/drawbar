@@ -9,11 +9,14 @@
 //! rather than what changed since the last answer, which the page lost. The worker runs
 //! commands one at a time, in the
 //! order they arrive. `{close}` lets the library go, and is answered by `{closed}`. A
-//! fault in the worker is posted as `{failed}`, after which it answers nothing.
+//! fault in the worker is posted as `{failed}`, after which it answers nothing. While
+//! a scan lists the folder, `{listed}` says how many files it has found so far.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use js_sys::{Array, ArrayBuffer, Function, Object, Promise, Reflect, Uint8Array};
 use wasm_bindgen::closure::Closure;
@@ -29,6 +32,7 @@ use toshokan::io::Root;
 use toshokan::web::{CryptoRandom, DateClock, Executor, Folder};
 use toshokan::RelPath;
 
+use super::counted::Counted;
 use super::keeper::{self, Keeper};
 use super::keys::{swapped, Volume};
 use super::wire::{self, Attachment, Message};
@@ -80,6 +84,8 @@ struct Replies {
     failed: RefCell<Option<String>>,
     started: RefCell<Option<Function>>,
     closed: RefCell<Option<Function>>,
+    /// How many files the worker's listings of the folder have found so far.
+    listed: Rc<Cell<usize>>,
 }
 
 impl Replies {
@@ -116,6 +122,11 @@ impl Worker {
             Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
                 let data = event.data();
                 let id = field(&data, "id").and_then(|id| id.as_f64());
+                let listed = field(&data, "listed").and_then(|listed| listed.as_f64());
+                if let Some(listed) = listed {
+                    replies.listed.set(listed as usize);
+                    return;
+                }
                 let answer = match id {
                     Some(id) => replies.waiting.borrow_mut().remove(&(id as u32)),
                     None if field(&data, "closed").is_some() => replies.closed.take(),
@@ -173,6 +184,12 @@ impl Worker {
             Some(why) => Err(describe(&why)),
             None => Ok(worker),
         }
+    }
+
+    /// How many files the worker's listings of the folder have found so far, as it
+    /// last said.
+    pub fn listed(&self) -> Rc<Cell<usize>> {
+        Rc::clone(&self.replies.listed)
     }
 
     /// Why the worker stopped answering, once it has.
@@ -241,7 +258,9 @@ impl Drop for Worker {
 #[wasm_bindgen(js_name = drawbarWorker)]
 pub async fn serve(start: JsValue) {
     let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
-    let keeper = match keeper(&start).await {
+    let listed = Arc::new(AtomicUsize::new(0));
+    wasm_bindgen_futures::spawn_local(tell_listed(scope.clone(), listed.clone()));
+    let keeper = match keeper(&start, listed).await {
         Ok(keeper) => keeper,
         Err(why) => {
             let _ = scope.post_message(&object(&[("failed", why.into())]));
@@ -263,8 +282,32 @@ pub async fn serve(start: JsValue) {
     let _ = scope.post_message(&object(&[("ready", true.into())]));
 }
 
+/// How often the worker tells the page how many files the folder's listings found.
+const TELL_LISTED_MS: i32 = 200;
+
+/// Tell the page how many files the folder's listings have found, each time the count
+/// moved, for as long as the worker runs.
+async fn tell_listed(scope: DedicatedWorkerGlobalScope, listed: Arc<AtomicUsize>) {
+    let mut told = 0;
+    loop {
+        let waited = Promise::new(&mut |resolve, _| {
+            let ms = TELL_LISTED_MS;
+            let _ = scope.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+        });
+        let _ = JsFuture::from(waited).await;
+        let now = listed.load(Ordering::Relaxed);
+        if now != told {
+            told = now;
+            let _ = scope.post_message(&object(&[("listed", (now as f64).into())]));
+        }
+    }
+}
+
 /// The keeper of the library the page's first message names.
-async fn keeper(start: &JsValue) -> Result<Keeper<Executor>, String> {
+async fn keeper(
+    start: &JsValue,
+    listed: Arc<AtomicUsize>,
+) -> Result<Keeper<Counted<Executor>>, String> {
     let path = |name| {
         let text = field(start, name).and_then(|path| path.as_string());
         let text = text.ok_or_else(|| format!("the page sent no {name} path"))?;
@@ -297,7 +340,7 @@ async fn keeper(start: &JsValue) -> Result<Keeper<Executor>, String> {
         Box::new(CryptoRandom),
         Box::new(volume),
     );
-    Ok(Keeper::new(executor, env))
+    Ok(Keeper::new(Counted::new(executor, listed), env))
 }
 
 /// How the volume holding a folder the user picked compares names, as a look at it,
@@ -341,7 +384,7 @@ fn platform() -> String {
 /// Messages waiting for the keeper, run one at a time in arrival order.
 struct Queue {
     /// Taken while a command runs.
-    keeper: RefCell<Option<Keeper<Executor>>>,
+    keeper: RefCell<Option<Keeper<Counted<Executor>>>>,
     scope: DedicatedWorkerGlobalScope,
     waiting: RefCell<VecDeque<JsValue>>,
     running: Cell<bool>,
@@ -382,7 +425,7 @@ impl Queue {
         self.running.set(false);
     }
 
-    async fn answer(&self, keeper: &mut Keeper<Executor>, message: &JsValue) {
+    async fn answer(&self, keeper: &mut Keeper<Counted<Executor>>, message: &JsValue) {
         let id = field(message, "id").unwrap_or(JsValue::NULL);
         if field(message, "whole").is_some() {
             keeper.forget_shown();

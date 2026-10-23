@@ -101,6 +101,7 @@ impl Tab {
             shown: Shown::default(),
         };
         let mut answers = tab.ask(Cmd::Open).await;
+        tab.ask(Cmd::Rescan).await;
         (tab, answers.remove(0))
     }
 
@@ -342,6 +343,18 @@ async fn the_whole_workflow_in(root: Root) {
         .collect();
     assert_eq!(shown, ["Set/b.ne5p"], "{shown:?}");
     assert_eq!(again.shown.wearing("Live").len(), 1);
+    let mut listed = 0;
+    for _ in 0..100 {
+        listed = again.backend.listed();
+        if listed > 0 {
+            break;
+        }
+        sleep(10).await;
+    }
+    assert_eq!(
+        listed, 1,
+        "the worker says how many files its scan found: Set/b.ne5p"
+    );
     again.close().await;
 }
 

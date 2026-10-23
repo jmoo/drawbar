@@ -27,6 +27,7 @@
 //! onto the workspace and the browser's tags.
 
 mod cache;
+mod counted;
 mod diff;
 #[cfg(any(target_arch = "wasm32", test))]
 mod dom;
@@ -525,10 +526,10 @@ pub struct Slot {
 /// What the app asks a backend to do. Each runs after the one sent before it.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Cmd {
-    /// Open the library as a writer of its own, and scan every file. Answered by
-    /// [`Event::Opened`].
+    /// Open the library as a writer of its own, from the view it kept. Answered by
+    /// [`Event::Opened`], which lists no file: a [`Cmd::Rescan`] lists them.
     Open,
-    /// Read what other writers logged since, and scan every file again for what changed
+    /// Read what other writers logged since, and scan every file for what changed
     /// outside. Answered by [`Event::Scanned`].
     Rescan,
     /// Read what other writers logged since, scanning only the files their entries
@@ -797,6 +798,8 @@ pub struct Opened {
     /// `Err` with the reason when nothing may be written here. The library still opens,
     /// and every edit stays in memory.
     pub writable: Result<(), String>,
+    /// What the library kept of its view, which lists no file until a
+    /// [`Cmd::Rescan`] has scanned every one.
     pub viewed: Viewed,
     /// The unsaved edits an earlier session kept, each with whether its file still holds
     /// what the edit was made over.

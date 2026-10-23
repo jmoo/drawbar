@@ -179,6 +179,12 @@ pub struct Store {
     focused: bool,
     /// A rescan or a refresh is in flight.
     scanning: bool,
+    /// The scan of every file that follows opening is in flight: the view lists no file
+    /// yet.
+    first_scan: bool,
+    /// The unsaved edits an earlier session kept, taken up once the first scan lists the
+    /// files they were made over.
+    drafts_found: Vec<toshokan::report::DraftStatus>,
     /// The changes other drawbars left unfinished that the last read found, by writer
     /// and record.
     unfinished: BTreeMap<(toshokan::WriterId, toshokan::Nonce), Unfinished>,
@@ -264,6 +270,8 @@ impl Store {
             deferred: BTreeSet::new(),
             focused: true,
             scanning: false,
+            first_scan: false,
+            drafts_found: Vec::new(),
             unfinished: BTreeMap::new(),
             looked: 0.0,
             recheck: None,
@@ -803,17 +811,17 @@ impl Store {
             label: self.backend.label(),
             reveal: self.backend.reveal(),
             note: match &self.phase {
-                Phase::Opening => Some(match self.backend.listed() {
+                _ if self.listing() => Some(match self.backend.listed() {
                     0 => "opening…".to_string(),
                     1 => "opening… 1 file found".to_string(),
                     n => format!("opening… {n} files found"),
                 }),
-                Phase::Open => None,
+                Phase::Opening | Phase::Open => None,
                 Phase::ReadOnly(why) => Some(format!("read-only: {why}")),
                 Phase::Failed(why) => Some(format!("not opened: {why}")),
             },
             read_only: matches!(self.phase, Phase::ReadOnly(_)),
-            opening: matches!(self.phase, Phase::Opening),
+            opening: self.listing(),
         }
     }
 
@@ -1203,9 +1211,9 @@ impl Store {
         self.scanning
     }
 
-    /// Whether the library is still opening.
+    /// Whether the library is still opening, or listing its files after.
     pub fn listing(&self) -> bool {
-        matches!(self.phase, Phase::Opening)
+        matches!(self.phase, Phase::Opening) || self.first_scan
     }
 
     /// The key the library knows an asset's file by.
@@ -1261,9 +1269,15 @@ impl Store {
             Event::Scanned(Ok(viewed)) => {
                 let moved = self.viewed(viewed, workspace, browser, queue, log);
                 self.moved.extend(moved);
+                if self.first_scan {
+                    self.listed_whole(workspace, browser, log);
+                }
                 return self.scanned(queue, workspace, log);
             }
             Event::Scanned(Err(why)) => {
+                if self.first_scan {
+                    self.listed_whole(workspace, browser, log);
+                }
                 self.scanning = false;
                 self.send_waits = false;
                 self.moved.clear();
@@ -1569,7 +1583,7 @@ impl Store {
             }
         };
         self.viewed(viewed, workspace, browser, queue, log);
-        self.take_drafts(drafts, workspace, log);
+        self.drafts_found = drafts;
         if let_go > 0 {
             log.say(format!(
                 "The library folder no longer holds {} this computer showed, as after a \
@@ -1580,6 +1594,18 @@ impl Store {
                 }
             ));
         }
+        if self.opened() {
+            self.first_scan = true;
+            self.rescan();
+        }
+    }
+
+    /// Take in that the scan of every file that follows opening answered, whether it
+    /// listed them or failed.
+    fn listed_whole(&mut self, workspace: &mut Workspace, browser: &mut Browser, log: &mut Log) {
+        self.first_scan = false;
+        let drafts = std::mem::take(&mut self.drafts_found);
+        self.take_drafts(drafts, workspace, log);
         // The count This computer's badge shows, said even at 0 to replace the last library's.
         log.say(match browser.folders.count(None, workspace) {
             0 => "No files on this computer.".to_string(),

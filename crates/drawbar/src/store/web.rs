@@ -162,6 +162,8 @@ struct Heard {
     stopped: Option<String>,
     /// Whether the browser no longer lets the page into the picked folder.
     denied: bool,
+    /// How many files the worker's listings of the folder have found so far.
+    listed: Option<Rc<std::cell::Cell<usize>>>,
 }
 
 pub struct Backend {
@@ -271,10 +273,11 @@ impl Backend {
         self.heard.borrow().denied
     }
 
-    /// How many files the listings of the folder have found so far: none, as the worker
-    /// does not say.
+    /// How many files the listings of the folder have found so far, as the worker last
+    /// said.
     pub fn listed(&self) -> usize {
-        0
+        let heard = self.heard.borrow();
+        heard.listed.as_ref().map_or(0, |listed| listed.get())
     }
 
     /// Whether a command that writes has been sent and not answered yet.
@@ -313,6 +316,7 @@ async fn drive(
     let folder = Folder::open(root.clone()).await;
     let local = root.local();
     let worker = Worker::start(root.kept(), &local).await;
+    heard.borrow_mut().listed = worker.as_ref().ok().map(Worker::listed);
     let look = (!private).then_some(LOOK_EVERY);
     let mut hints = Hints::new(local.as_str(), look).ok();
     let mut persisting = false;

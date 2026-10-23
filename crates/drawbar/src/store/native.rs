@@ -13,8 +13,9 @@ use std::thread::JoinHandle;
 use eframe::egui;
 use toshokan::blocking::{Backend as _, Native};
 use toshokan::env::{OsRandom, SystemClock};
-use toshokan::io::{Capabilities, Io, IoResult, Kind, Reply, Root};
+use toshokan::io::{Capabilities, Io, IoResult, Root};
 
+use super::counted::Counted;
 use super::exec::{self, Fs};
 use super::keeper::{self, Keeper};
 use super::{keys, names};
@@ -225,52 +226,23 @@ pub(super) fn keeper(
     local: &Path,
     listed: Arc<AtomicUsize>,
     clock: Box<dyn toshokan::Clock>,
-) -> Keeper<Counted> {
+) -> Keeper<Counted<Blocking>> {
     let names = Box::new(keys::Volume::probe(folder));
     let env = keeper::env(clock, Box::new(OsRandom::new()), names);
-    let native = RefCell::new(Native::new(folder, local));
-    let counted = RefCell::default();
-    Keeper::new(
-        Counted {
-            native,
-            listed,
-            counted,
-        },
-        env,
-    )
+    let native = Blocking(RefCell::new(Native::new(folder, local)));
+    Keeper::new(Counted::new(native, listed), env)
 }
 
-/// toshokan's native backend, counting the files its listings of the folder find, so
-/// opening can say how far it has got: each directory's once.
-pub(super) struct Counted {
-    native: RefCell<Native>,
-    listed: Arc<AtomicUsize>,
-    counted: RefCell<std::collections::BTreeSet<toshokan::RelPath>>,
-}
+/// toshokan's native backend, as storage the async keeper drives.
+pub(super) struct Blocking(RefCell<Native>);
 
-impl toshokan::asynch::Fs for Counted {
+impl toshokan::asynch::Fs for Blocking {
     fn capabilities(&self, root: Root) -> Capabilities {
-        self.native.borrow().capabilities(root)
+        self.0.borrow().capabilities(root)
     }
 
     async fn perform(&self, io: Io) -> IoResult {
-        let first = match &io {
-            Io::ListStat {
-                root: Root::Folder,
-                dir,
-            } => self.counted.borrow_mut().insert(dir.clone()),
-            _ => false,
-        };
-        let reply = self.native.borrow_mut().perform(io);
-        let found = match &reply {
-            Ok(Reply::ListedStat(entries)) if first => entries
-                .iter()
-                .filter(|(name, meta)| meta.kind == Kind::File && !name.starts_with('.'))
-                .count(),
-            _ => 0,
-        };
-        self.listed.fetch_add(found, Ordering::Relaxed);
-        reply
+        self.0.borrow_mut().perform(io)
     }
 }
 

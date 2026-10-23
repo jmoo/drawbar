@@ -292,8 +292,7 @@ impl<F: Fs> Keeper<F> {
             let emptied = library.empty_trash(Policy::default()).await;
             trouble.extend(emptied.err().map(|e| format!("emptying the trash: {e}")));
         }
-        let refreshed = library.rescan().await.map_err(|e| e.to_string())?;
-        let viewed = viewed(&library, &mut self.shown, refreshed);
+        let viewed = committed_view(&library, &mut self.shown, Vec::new());
         self.library = Some(library);
         Ok(Opened {
             writable,
@@ -1463,20 +1462,23 @@ mod tests {
 
     use toshokan::env::SystemClock;
 
-    use super::super::native::{self, Counted};
+    use super::super::counted::Counted;
+    use super::super::native::{self, Blocking};
     use super::super::Moving;
     use super::*;
     use crate::ondisk::OnDisk;
     use crate::rewrite::Rewrite;
     use crate::testing::Temp;
 
-    type Keeper = super::Keeper<Counted>;
+    type Keeper = super::Keeper<Counted<Blocking>>;
 
     /// A keeper of the library in `root`, open, telling the time by `clock`.
     fn keeper_at(root: &Temp, clock: Box<dyn toshokan::Clock>) -> Keeper {
         let mut keeper = native::keeper(&root.0, &root.local(), Arc::default(), clock);
         let opened = keeper.run_one(Cmd::Open);
         assert!(matches!(opened[..], [Event::Opened(Ok(_))]), "{opened:?}");
+        let listed = keeper.run_one(Cmd::Rescan);
+        assert!(matches!(listed[..], [Event::Scanned(Ok(_))]), "{listed:?}");
         keeper
     }
 
@@ -1686,7 +1688,7 @@ mod tests {
     }
 
     #[test]
-    fn opening_counts_the_files_it_finds() {
+    fn the_scan_after_opening_counts_the_files_it_finds() {
         let root = Temp::new();
         fs::create_dir(root.at("Live")).unwrap();
         for name in ["a.ne5p", "Live/b.ne5p", "Live/c.wav", ".DS_Store"] {
@@ -1696,6 +1698,7 @@ mod tests {
         let clock = Box::new(SystemClock);
         let mut keeper = native::keeper(&root.0, &root.local(), listed.clone(), clock);
         keeper.run_one(Cmd::Open);
+        keeper.run_one(Cmd::Rescan);
         assert_eq!(listed.load(Ordering::Relaxed), 3);
     }
 
@@ -1803,7 +1806,7 @@ mod tests {
     /// Storage that runs `meddle` once, right after the first read of `at` in the folder
     /// once armed, as another program changing that file mid-copy would.
     struct Meddled {
-        inner: Counted,
+        inner: Counted<Blocking>,
         at: RelPath,
         meddle: RefCell<Option<Box<dyn FnOnce()>>>,
     }
@@ -1850,6 +1853,7 @@ mod tests {
             answers
         };
         run(&mut keeper, Cmd::Open);
+        run(&mut keeper, Cmd::Rescan);
         let listed = keeper.library.as_ref().unwrap().view();
         let listed = listed.listed(&RelPath::new("Long.nsmp").unwrap()).unwrap();
         let stat = Stat {

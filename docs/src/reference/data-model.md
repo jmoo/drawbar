@@ -262,12 +262,16 @@ and it is Listed again.
 
 ### The metadata walk
 
-Opening a library lists every file by its name, length and time, through
+Opening a library shows at once the view this install kept of it: its assets and
+their tags, and no other file (`Cmd::Open`). A scan of every file follows at
+once (`Cmd::Rescan`): it lists every file by its name, length and time, through
 toshokan's scan, and reads a file only for its identity, where nothing earlier
 gives it and it decides which file is an asset's: a file at an asset's path with
 its length, and a file of the length of an asset that may have moved, as one
-whose path holds nothing does. A copy of an asset's file is a file like any other. The header counts the
-files found as the scan goes.
+whose path holds nothing does. A copy of an asset's file is a file like any
+other. The header counts the files found as the scan goes; in the browser the
+library's worker says the count (`store::counted`). The scan also says which
+folders it listed, so they are not listed again to show them.
 
 1. Each folder is listed with every file's length and time in one request.
 2. Anything under a name that starts with a dot is left out, and a dot folder is
