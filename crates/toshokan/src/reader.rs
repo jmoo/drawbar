@@ -402,7 +402,13 @@ pub(crate) struct Absorbing {
 
 impl Reader {
     pub fn new(layout: Layout, cached: CachedView) -> Self {
-        let mut reader = Self {
+        let mut reader = Self::underived(layout, cached);
+        reader.derived = Rc::new(reader.derive_now());
+        reader
+    }
+
+    fn underived(layout: Layout, cached: CachedView) -> Self {
+        Self {
             layout,
             cached,
             folder: BTreeMap::new(),
@@ -410,9 +416,7 @@ impl Reader {
             unsaved: Unsaved::default(),
             absorbed: BTreeSet::new(),
             store: Rc::default(),
-        };
-        reader.derived = Rc::new(reader.derive_now());
-        reader
+        }
     }
 
     /// A reader starting from what [`cache::load`] found in the local root. The
@@ -424,7 +428,7 @@ impl Reader {
             absorbed,
             store,
         } = loaded;
-        let mut reader = Self::new(layout, view);
+        let mut reader = Self::underived(layout, view);
         reader.absorbed = absorbed;
         reader.store = Rc::new(RefCell::new(store));
         for (path, record) in files {
@@ -614,7 +618,28 @@ impl Reader {
             folder_changed: recorded,
             ..ReadReport::default()
         };
-        self.rederive(&mut report);
+        let derived = Rc::make_mut(&mut self.derived);
+        match derive::extend(derived, writer, &entries, self.cached.grace.graced) {
+            true => {
+                let memory = &derived.memory[&writer];
+                self.cached.writers.insert(writer, memory.clone());
+                let added = entries.iter().map(|entry| entry.hash()).collect();
+                let changed = Changed {
+                    added,
+                    ..Changed::default()
+                };
+                self.unsaved
+                    .memories
+                    .entry(writer)
+                    .or_default()
+                    .then(changed);
+                report.changed = true;
+                let placed = entries.iter().map(|entry| entry.hash()).collect();
+                report.placed.insert(writer, placed);
+                report.gaps = self.gaps();
+            }
+            false => self.rederive(&mut report),
+        }
         report
     }
 
@@ -668,12 +693,16 @@ impl Reader {
     }
 
     /// Ends [`Reader::absorb`] once [`Reader::absorb_slice`] returned true: derives
-    /// what the files and the cached view show.
+    /// what the files and the cached view show, when a file came, went or
+    /// changed.
     pub(crate) fn absorbed(&mut self, mut absorbing: Absorbing) -> ReadReport {
         for writer in self.folder.keys().copied().collect::<Vec<_>>() {
             self.report_unreadable(writer, &mut absorbing.report);
         }
-        self.rederive(&mut absorbing.report);
+        match absorbing.report.folder_changed {
+            true => self.rederive(&mut absorbing.report),
+            false => absorbing.report.gaps = self.gaps(),
+        }
         self.drop_unsaved_without_store();
         absorbing.report
     }
@@ -786,15 +815,22 @@ impl Reader {
                     prev: fork.hash,
                 });
             }
-            if let Some(first) = placed.gaps.first() {
-                report.gaps.push(Gap {
-                    writer: *writer,
-                    missing: first.prev(),
-                    held: placed.gaps.len(),
-                });
-            }
         }
         self.derived = Rc::new(derived);
+        report.gaps = self.gaps();
+    }
+
+    /// Every gap the reader holds back entries at.
+    fn gaps(&self) -> Vec<Gap> {
+        let writers = self.derived.writers.iter();
+        let gaps = writers.filter_map(|(writer, placed)| {
+            Some(Gap {
+                writer: *writer,
+                missing: placed.gaps.first()?.prev(),
+                held: placed.gaps.len(),
+            })
+        });
+        gaps.collect()
     }
 
     /// Whether the reader holds something no file it sees holds: a tip whose

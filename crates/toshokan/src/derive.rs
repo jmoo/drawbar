@@ -27,7 +27,7 @@ use std::rc::Rc;
 
 use crate::contribution::{self, Contribution, FieldKey, Held, Said, Value};
 use crate::ids::{EntityId, EntryHash, Hlc, WriterId};
-use crate::log::{Entry, EntryKind, Own, Ref, Run};
+use crate::log::{Entry, EntryKind, Op, Own, Ref, Run};
 use crate::merge::{Beside, Folded, Live};
 use crate::quick::Quick;
 use crate::report::ItemKind;
@@ -1104,6 +1104,117 @@ pub fn grace(
     kept
 }
 
+/// Merges `entries`, `writer`'s next entries after the last one `derived`
+/// merges of it, into `derived` as deriving afresh would. Returns false, having
+/// changed nothing, where they may change more than the fields they write: the
+/// writer has a fork point, a run, a gap or lines it holds back, an item is
+/// shown, an entry dismisses a run or does not follow, or the reader took the
+/// grace step.
+pub fn extend(
+    derived: &mut Derived,
+    writer: WriterId,
+    entries: &[Rc<Entry>],
+    graced: bool,
+) -> bool {
+    let Some(placed) = derived.writers.get(&writer) else {
+        return false;
+    };
+    let settled = placed.fork.is_none()
+        && placed.runs.is_empty()
+        && placed.gaps.is_empty()
+        && placed.unplaced.is_empty()
+        && placed.waiting == 0;
+    if graced || !settled || !derived.items.is_empty() {
+        return false;
+    }
+    let mut head = placed.head();
+    for entry in entries {
+        let follows = match head {
+            Some(head) => entry.prev() == head.hash && head.n.checked_add(1) == Some(entry.n()),
+            None => entry.prev() == EntryHash::ZERO && entry.n() == 0 && placed.tips.is_empty(),
+        };
+        let kind = entry.kind();
+        let dismisses = contribution::ops(&kind)
+            .iter()
+            .any(|op| matches!(op, Op::Dismiss { .. }));
+        if !follows || dismisses {
+            return false;
+        }
+        head = Some(entry.own());
+    }
+    let forks: HashMap<WriterId, u64, Quick> = derived
+        .writers
+        .iter()
+        .filter_map(|(writer, placed)| Some((*writer, placed.fork?)))
+        .collect();
+    let folded = &mut derived.folded;
+    let mut touched: BTreeMap<EntityId, Vec<Live>> = BTreeMap::new();
+    let mut tail = Contribution::default();
+    for entry in entries {
+        let own = entry.own();
+        let mut deleted = Vec::new();
+        for op in contribution::ops(&entry.kind()) {
+            let said = contribution::said(op);
+            for (field, target) in &said.refs {
+                let exact = forks
+                    .get(&target.writer)
+                    .is_some_and(|fork| target.n > *fork);
+                let lives = touched
+                    .entry(field.entity())
+                    .or_insert_with(|| folded.lives(field.entity()));
+                lives.retain(|live| {
+                    let covered = live.at.hash == target.hash || (!exact && live.at.n < target.n);
+                    !(live.field == *field && live.at.writer == target.writer && covered)
+                });
+            }
+            for (field, run) in &said.takes {
+                let lives = touched
+                    .entry(field.entity())
+                    .or_insert_with(|| folded.lives(field.entity()));
+                lives.retain(|live| {
+                    !(live.field == *field && live.at.writer == run.writer && live.at.n < run.from)
+                });
+            }
+            for write in said.writes {
+                let entity = write.field.entity();
+                let lives = touched
+                    .entry(entity)
+                    .or_insert_with(|| folded.lives(entity));
+                lives.retain(|live| !(live.field == write.field && live.at.writer == writer));
+                lives.push(Live {
+                    at: own.of(writer),
+                    stamp: entry.at(),
+                    field: write.field,
+                    value: write.value,
+                });
+            }
+            deleted.extend(said.deletes);
+        }
+        for entity in deleted {
+            let lives = touched
+                .entry(entity)
+                .or_insert_with(|| folded.lives(entity));
+            lives.retain(|live| {
+                live.field.is_exist() || live.at.writer != writer || live.at.n > own.n
+            });
+        }
+        tail.fold(writer, entry);
+    }
+    for (entity, lives) in touched {
+        folded.set_lives(entity, lives);
+    }
+    let mut beside = Beside::default();
+    keep_beside(&mut beside, writer, &tail);
+    folded.keep(beside);
+    let placed = derived.writers.get_mut(&writer).expect("checked above");
+    placed.merged.extend(entries.iter().cloned());
+    let memory = derived.memory.entry(writer).or_default();
+    memory
+        .entries
+        .extend(entries.iter().map(|entry| (entry.hash(), Rc::clone(entry))));
+    true
+}
+
 /// Adds what `writer`'s `contribution` keeps beside its writes.
 fn keep_beside(beside: &mut Beside, writer: WriterId, contribution: &Contribution) {
     for (item, trashed) in &contribution.trash {
@@ -1395,6 +1506,78 @@ mod tests {
         );
         assert!(derived.folded.members(E, "s").is_empty());
         assert!(!derived.folded.present(E));
+    }
+
+    #[test]
+    fn own_entries_merged_one_by_one_merge_as_deriving_afresh_does() {
+        use crate::env::{Random, SeededRandom};
+        let mut random = SeededRandom::new(5);
+        let mut pick = |n: usize| (random.next_u128() % n as u128) as usize;
+        let theirs = chain(X, &["x", "y"]);
+        let mut extended = 0;
+        for _ in 0..300 {
+            let mut own: Vec<Rc<Entry>> = Vec::new();
+            let seen = |own: &[Rc<Entry>]| {
+                derived(
+                    vec![
+                        (
+                            W,
+                            Seen {
+                                segments: vec![lines(own, false)],
+                                snapshots: vec![],
+                            },
+                        ),
+                        (
+                            X,
+                            Seen {
+                                segments: vec![lines(&theirs, false)],
+                                snapshots: vec![],
+                            },
+                        ),
+                    ],
+                    false,
+                )
+            };
+            let mut incremental = seen(&own);
+            for step in 0..6 {
+                let mut targets: Vec<Ref> = theirs.iter().map(|e| e.own().of(X)).collect();
+                targets.extend(own.iter().map(|e| e.own().of(W)));
+                let replaces: Vec<Ref> =
+                    (0..pick(3)).map(|_| targets[pick(targets.len())]).collect();
+                let entity = EntityId::from_u128(0xe + pick(2) as u128);
+                let op = match pick(4) {
+                    0 => Op::Delete {
+                        entity,
+                        replaces,
+                        observed: Vec::new(),
+                        take: None,
+                    },
+                    1 => Op::Create {
+                        entity,
+                        replaces,
+                        take: None,
+                    },
+                    _ => Op::Write {
+                        entity,
+                        key: "k".into(),
+                        value: Some(Raw::of(&step).unwrap()),
+                        replaces,
+                        take: None,
+                    },
+                };
+                let next = entry(own.last().map(|e| &**e), vec![op], &format!("s{step}"));
+                own.push(Rc::clone(&next));
+                let afresh = seen(&own);
+                if extend(&mut incremental, W, &[next], false) {
+                    extended += 1;
+                    assert_eq!(incremental.folded, afresh.folded, "step {step}");
+                    assert_eq!(incremental.writers[&W].merged, afresh.writers[&W].merged);
+                } else {
+                    incremental = afresh;
+                }
+            }
+        }
+        assert!(extended > 1000, "{extended} merged one by one");
     }
 
     #[test]

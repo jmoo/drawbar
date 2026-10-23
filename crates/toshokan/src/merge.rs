@@ -261,6 +261,43 @@ impl EntityState {
         }
     }
 
+    /// Its live writes.
+    fn lives(&self, entity: EntityId) -> Vec<Live> {
+        fn live<V: Clone>(field: FieldKey, held: &Held<V>, value: impl Fn(V) -> Value) -> Live {
+            Live {
+                at: held.at,
+                stamp: held.stamp,
+                field,
+                value: value(held.value.clone()),
+            }
+        }
+        let mut lives = Vec::new();
+        for held in &self.existence {
+            lives.push(live(FieldKey::Exist(entity), held, Value::Exist));
+        }
+        for (key, writes) in self.registers.iter() {
+            let field = || FieldKey::Register(entity, key.clone());
+            lives.extend(
+                writes
+                    .iter()
+                    .map(|held| live(field(), held, Value::Register)),
+            );
+        }
+        for (key, members) in self.sets.iter() {
+            for (member, writes) in members.iter() {
+                let field = || FieldKey::Member(entity, key.clone(), member.clone());
+                lives.extend(writes.iter().map(|held| live(field(), held, Value::Member)));
+            }
+        }
+        let file = |fact| Value::File { fact, pin: false };
+        lives.extend(
+            self.file
+                .iter()
+                .map(|held| live(FieldKey::File(entity), held, file)),
+        );
+        lives
+    }
+
     fn sort(&mut self) {
         oldest_first(&mut self.existence);
         for writes in self.registers.values_mut() {
@@ -296,6 +333,34 @@ impl Folded {
             unknown: beside.unknown,
             extended: beside.extended,
         }
+    }
+
+    /// The live writes of `entity`.
+    pub(crate) fn lives(&self, entity: EntityId) -> Vec<Live> {
+        let state = self.entities.get(&entity);
+        state.map(|state| state.lives(entity)).unwrap_or_default()
+    }
+
+    /// Makes `live` the live writes of `entity`.
+    pub(crate) fn set_lives(&mut self, entity: EntityId, live: Vec<Live>) {
+        if live.is_empty() {
+            self.entities.remove(&entity);
+            return;
+        }
+        let mut state = EntityState::default();
+        for write in live {
+            state.insert(write);
+        }
+        state.sort();
+        self.entities.insert(entity, Arc::new(state));
+    }
+
+    /// Adds what a writer keeps beside its writes.
+    pub(crate) fn keep(&mut self, beside: Beside) {
+        self.trash.extend(beside.trash);
+        self.settled.extend(beside.settled);
+        self.unknown.extend(beside.unknown);
+        self.extended.extend(beside.extended);
     }
 
     /// Whether writing `value` to `field` would change what the state shows.

@@ -329,10 +329,17 @@ struct Gen {
     writers: Vec<WriterGen>,
     entities: Vec<EntityGen>,
     sink: Box<dyn Backend>,
+    /// While generating, the files the folder will hold, kept here so that what
+    /// compaction deletes is never written; `None` once they are written.
+    staged: Option<BTreeMap<RelPath, Vec<u8>>>,
 }
 
 impl Gen {
     fn put(&mut self, path: &RelPath, bytes: Vec<u8>) {
+        if let Some(staged) = &mut self.staged {
+            staged.insert(path.clone(), bytes);
+            return;
+        }
         let dir = path.parent().unwrap();
         let made = self.sink.perform(Io::MakeDir {
             root: Root::Folder,
@@ -348,6 +355,10 @@ impl Gen {
     }
 
     fn remove(&mut self, path: &RelPath) {
+        if let Some(staged) = &mut self.staged {
+            staged.remove(path);
+            return;
+        }
         let removed = self.sink.perform(Io::Remove {
             root: Root::Folder,
             path: path.clone(),
@@ -466,7 +477,9 @@ impl Gen {
         let path = self
             .layout
             .snapshot(writer.id, Nonce::from_u128(self.rng.id()));
-        self.put(&path, folded.encode());
+        if self.staged.is_none() {
+            self.put(&path, folded.encode());
+        }
         let writer = &mut self.writers[w];
         let written = writer.written.drain(..);
         let gone: Vec<RelPath> = written
@@ -483,9 +496,20 @@ impl Gen {
         }
     }
 
+    /// Writes each writer's open segment as it is, and every file generating
+    /// left, its last snapshot among them.
     fn flush_all(&mut self) {
         for w in 0..self.writers.len() {
             self.flush(w);
+        }
+        let mut staged = self.staged.take().unwrap_or_default();
+        for writer in &self.writers {
+            if let Some((path, snapshot)) = &writer.snapshot {
+                staged.insert(path.clone(), snapshot.encode());
+            }
+        }
+        for (path, bytes) in staged {
+            self.put(&path, bytes);
         }
     }
 
@@ -995,6 +1019,7 @@ fn main() {
         writers: Vec::new(),
         entities: Vec::new(),
         sink,
+        staged: Some(BTreeMap::new()),
     };
     for _ in 0..args.writers {
         gen.add_writer();
