@@ -151,6 +151,10 @@ bring back any you deleted.
   stops asking, and **Later** asks next time. What
   drawbar left unfinished on this computer, after a crash or in another window,
   is finished without asking.
+- **Not answering.** If the library shows no sign of life for a minute, drawbar
+  asks whether to close and reopen it. Edits made since drawbar last kept them
+  are lost, and drawbar names them. If the library stops altogether, drawbar
+  closes it and says so; **File ▸ Open recent library** opens it again.
 - **Restored from a backup.** When the library folder no longer holds changes
   drawbar showed before, as after a restore from a backup, drawbar shows the
   folder as it is and says so.

@@ -197,10 +197,22 @@ impl Worker {
         self.replies.failed.borrow().clone()
     }
 
-    /// Make the worker fault, as a bug in it would.
+    /// Make the worker fault, or never finish the command it takes next, as a bug in it
+    /// would.
     #[doc(hidden)]
-    pub fn trap(&self) {
-        let _ = self.worker.post_message(&object(&[("trap", true.into())]));
+    pub fn fault(&self, fault: super::Fault) {
+        let name = match fault {
+            super::Fault::Trap => "trap",
+            super::Fault::Stall => "stall",
+        };
+        let _ = self.worker.post_message(&object(&[(name, true.into())]));
+    }
+
+    /// End the worker, which does not answer, and fail what waits on it.
+    pub fn abandon(&self) {
+        self.worker.terminate();
+        self.replies
+            .fail("the library's worker was let go".to_string());
     }
 
     /// Run `cmd` in the worker, and every answer it gave.
@@ -406,6 +418,10 @@ impl Queue {
             };
             if field(&message, "trap").is_some() {
                 std::process::abort();
+            }
+            if field(&message, "stall").is_some() {
+                let never = Promise::new(&mut |_, _| {});
+                let _ = JsFuture::from(never).await;
             }
             let keeper = self.keeper.take();
             let Some(mut keeper) = keeper else {

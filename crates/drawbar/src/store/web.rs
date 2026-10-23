@@ -164,6 +164,14 @@ struct Heard {
     denied: bool,
     /// How many files the worker's listings of the folder have found so far.
     listed: Option<Rc<std::cell::Cell<usize>>>,
+    /// The library's worker, once started.
+    worker: Option<Rc<Worker>>,
+    /// When the command the worker runs now was sent; `None` while none runs.
+    running: Option<f64>,
+    /// What the listings had found when [`Backend::waiting`] last looked, and when.
+    seen: (usize, f64),
+    /// The fault a test asked the worker to show with the next command.
+    fault: Option<super::Fault>,
 }
 
 pub struct Backend {
@@ -273,6 +281,38 @@ impl Backend {
         self.heard.borrow().denied
     }
 
+    /// Make the worker fault, or never finish, with the next command it takes, as a bug
+    /// in it would.
+    #[doc(hidden)]
+    pub fn fault(&self, fault: super::Fault) {
+        self.heard.borrow_mut().fault = Some(fault);
+    }
+
+    /// How long the command running now has gone without a sign of life: no answer, and
+    /// no file found. `None` while none runs.
+    pub fn waiting(&self) -> Option<std::time::Duration> {
+        let now = js_sys::Date::now();
+        let listed = self.listed();
+        let mut heard = self.heard.borrow_mut();
+        if listed != heard.seen.0 {
+            heard.seen = (listed, now);
+        }
+        let since = heard.running?.max(heard.seen.1);
+        Some(std::time::Duration::from_secs_f64(
+            (now - since).max(0.0) / 1000.0,
+        ))
+    }
+
+    /// Let the library go without waiting for its worker, which stopped or does not
+    /// answer: the worker ends, and what waited on it fails.
+    pub fn abandon(&mut self) {
+        let worker = self.heard.borrow_mut().worker.take();
+        if let Some(worker) = worker {
+            worker.abandon();
+        }
+        self.finish();
+    }
+
     /// How many files the listings of the folder have found so far, as the worker last
     /// said.
     pub fn listed(&self) -> usize {
@@ -315,8 +355,9 @@ async fn drive(
     let private = root == Root::Private;
     let folder = Folder::open(root.clone()).await;
     let local = root.local();
-    let worker = Worker::start(root.kept(), &local).await;
-    heard.borrow_mut().listed = worker.as_ref().ok().map(Worker::listed);
+    let worker = Worker::start(root.kept(), &local).await.map(Rc::new);
+    heard.borrow_mut().listed = worker.as_ref().ok().map(|worker| worker.listed());
+    heard.borrow_mut().worker = worker.as_ref().ok().cloned();
     let look = (!private).then_some(LOOK_EVERY);
     let mut hints = Hints::new(local.as_str(), look).ok();
     let mut persisting = false;
@@ -349,7 +390,13 @@ async fn drive(
             (cmd @ Cmd::Read { .. }, Err(why), _) => refused(&cmd)(why),
             (cmd, _, Ok(worker)) => {
                 let refusal = refused(&cmd);
-                match worker.run(cmd).await {
+                if let Some(fault) = heard.borrow_mut().fault.take() {
+                    worker.fault(fault);
+                }
+                heard.borrow_mut().running = Some(js_sys::Date::now());
+                let ran = worker.run(cmd).await;
+                heard.borrow_mut().running = None;
+                match ran {
                     Ok(answers) => answers,
                     Err(why) => refusal(&why),
                 }
@@ -362,7 +409,7 @@ async fn drive(
                 heard.borrow_mut().denied = true;
             }
         }
-        if let Some(why) = worker.as_ref().ok().and_then(Worker::stopped) {
+        if let Some(why) = worker.as_ref().ok().and_then(|worker| worker.stopped()) {
             heard.borrow_mut().stopped.get_or_insert(why);
             inbox.borrow_mut().writing -= usize::from(writes);
             ctx.request_repaint();

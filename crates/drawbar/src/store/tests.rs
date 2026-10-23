@@ -4136,6 +4136,66 @@ fn an_unsaved_edit_comes_back_after_a_quit() {
     assert_eq!(second.said("appeared"), 0, "what was there is not news");
 }
 
+/// A library that stops answering in the middle of a command is asked about once it has
+/// shown no life for a while, and letting it go names the edits it could not keep
+/// rather than waiting for it.
+#[test]
+fn a_library_that_stops_answering_is_asked_about_and_let_go() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.edit(id, "96");
+    session.store.patience(std::time::Duration::from_millis(50));
+    session.store.fault(Fault::Stall);
+    session.store.rescan();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    session.poll();
+    let (title, answers) = session.bench.browser.asking().expect("asked");
+    assert_eq!(title, "The library is not answering");
+    assert_eq!(answers, ["Keep waiting", "Close and reopen"]);
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        log,
+        ..
+    } = &mut session.bench;
+    session.store.close(workspace, browser, queue, log);
+    let said = session.said("could not be written, since the library stopped answering");
+    assert_eq!(said, 1, "the edit is named");
+}
+
+/// A library whose thread stops says so, and letting it go names the edits it could
+/// not keep.
+#[test]
+fn a_library_whose_thread_stops_says_so_and_is_let_go() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.edit(id, "96");
+    session.store.fault(Fault::Trap);
+    session.store.rescan();
+    for _ in 0..1000 {
+        if session.store.stopped().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(session.store.stopped().is_some(), "the thread stopped");
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        log,
+        ..
+    } = &mut session.bench;
+    session.store.close(workspace, browser, queue, log);
+    let said = session.said("could not be written, since the library stopped answering");
+    assert_eq!(said, 1, "the edit is named");
+}
+
 /// An unsaved edit waits out a first scan that failed, and comes back with the first
 /// that lists every file.
 #[cfg(unix)]

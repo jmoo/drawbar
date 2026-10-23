@@ -126,6 +126,7 @@ enum Verb {
     TakeTheirs,
     Discard,
     Finish,
+    Reopen,
 }
 
 impl Verb {
@@ -140,6 +141,7 @@ impl Verb {
             Verb::TakeTheirs => "Take theirs",
             Verb::Discard => "Discard",
             Verb::Finish => "Finish",
+            Verb::Reopen => "Close and reopen",
         }
     }
 
@@ -150,9 +152,12 @@ impl Verb {
             Verb::Save | Verb::Keep | Verb::KeepBoth | Verb::Finish => {
                 sheet::primary(ui, Some(glyph), label)
             }
-            Verb::Replace | Verb::Delete | Verb::Overwrite | Verb::TakeTheirs | Verb::Discard => {
-                sheet::destructive(ui, glyph, label)
-            }
+            Verb::Replace
+            | Verb::Delete
+            | Verb::Overwrite
+            | Verb::TakeTheirs
+            | Verb::Discard
+            | Verb::Reopen => sheet::destructive(ui, glyph, label),
         }
     }
 
@@ -166,6 +171,7 @@ impl Verb {
             Verb::KeepBoth => Glyph::Copy,
             Verb::TakeTheirs => Glyph::RotateCcw,
             Verb::Finish => Glyph::Check,
+            Verb::Reopen => Glyph::RefreshCw,
         }
     }
 }
@@ -854,6 +860,23 @@ impl Browser {
             Verb::Discard,
             vec![Act::OpenLibraryDiscarding(root)],
         ));
+    }
+
+    /// Ask whether to close and reopen a library that has stopped answering, which loses
+    /// the edits it has not kept.
+    pub(crate) fn ask_stalled(&mut self) {
+        let mut ask = Ask::new(
+            "The library is not answering".to_string(),
+            Some(
+                "It has shown no sign of life for a minute. Close and reopen it to go on; \
+                 edits made since they were last kept are lost."
+                    .to_string(),
+            ),
+            Verb::Reopen,
+            vec![Act::ReopenLibrary],
+        );
+        ask.cancel = "Keep waiting";
+        self.raise(ask);
     }
 
     /// Offer what to do with a slot's former occupant an interrupted write to the

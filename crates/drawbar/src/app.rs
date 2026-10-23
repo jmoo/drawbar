@@ -617,6 +617,7 @@ impl DrawbarApp {
                 browser::Act::OpenLibrary(root) => self.libraries.allow(ctx, root),
                 #[cfg(target_arch = "wasm32")]
                 browser::Act::OpenLibraryDiscarding(root) => self.waiting = Some((root, true)),
+                browser::Act::ReopenLibrary => self.reopen_library(ctx),
                 act => rest.push(act),
             }
         }
@@ -729,23 +730,49 @@ impl DrawbarApp {
         self.tabs.prune(&self.workspace);
     }
 
-    /// Let go of a library the page can no longer reach: one whose worker stopped, so
-    /// that opening it again starts a fresh one, or a picked folder the browser no
-    /// longer lets it into, which the private library stands in for until reconnected.
-    #[cfg(target_arch = "wasm32")]
+    /// Let go of the library open now, which does not answer, and open it again.
+    fn reopen_library(&mut self, ctx: &egui::Context) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let root = store.root().to_path_buf();
+        #[cfg(target_arch = "wasm32")]
+        let root = store.root().clone();
+        self.switch_library(ctx, root);
+    }
+
+    /// Let go of a library drawbar can no longer reach: one whose thread or worker
+    /// stopped, so that opening it again starts a fresh one, or in the browser a picked
+    /// folder the browser no longer lets it into, which the private library stands in
+    /// for until reconnected.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))]
     fn let_lost_library_go(&mut self, ctx: &egui::Context) {
         let Some(store) = &self.store else {
             return;
         };
-        if let Some(why) = store.stopped() {
-            self.log.trouble(format!(
-                "The library was closed, since {why}. Open it again from File ▸ {}.",
-                crate::menu::RECENT
-            ));
-            self.let_library_go();
-            self.opened();
-            return;
+        match store.stopped() {
+            Some(why) => {
+                self.log.trouble(format!(
+                    "The library was closed, since {why}. Open it again from File ▸ {}.",
+                    crate::menu::RECENT
+                ));
+                self.let_library_go();
+                self.opened();
+            }
+            #[cfg(target_arch = "wasm32")]
+            None => self.let_denied_library_go(ctx),
+            #[cfg(not(target_arch = "wasm32"))]
+            None => {}
         }
+    }
+
+    /// Let go of a picked folder the browser no longer lets the page into.
+    #[cfg(target_arch = "wasm32")]
+    fn let_denied_library_go(&mut self, ctx: &egui::Context) {
+        let Some(store) = &self.store else {
+            return;
+        };
         if !store.denied() {
             return;
         }
@@ -928,7 +955,6 @@ impl eframe::App for DrawbarApp {
             }
             None => false,
         };
-        #[cfg(target_arch = "wasm32")]
         self.let_lost_library_go(ctx);
         if self.leaving {
             if let Some(storage) = frame.storage_mut() {

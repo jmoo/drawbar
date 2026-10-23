@@ -240,6 +240,8 @@ pub enum Act {
     /// [`Act::OpenLibrary`], confirmed though the library open now loses what it cannot
     /// keep.
     OpenLibraryDiscarding(crate::store::Root),
+    /// Let go of the library open now, which does not answer, and open it again.
+    ReopenLibrary,
     /// Do this with a slot's former occupant an interrupted write left. The app runs
     /// it, not [`apply`], since it reaches the library's files.
     Rescue(crate::store::Rescue, Rescuing),
@@ -353,6 +355,7 @@ impl Act {
             | Act::PickLibrary
             | Act::OpenLibrary(_)
             | Act::OpenLibraryDiscarding(_)
+            | Act::ReopenLibrary
             | Act::Rescue(..)
             | Act::Settle(..)
             | Act::Refused(_) => Vec::new(),
@@ -794,6 +797,7 @@ pub fn apply(
             Act::PickLibrary
             | Act::OpenLibrary(_)
             | Act::OpenLibraryDiscarding(_)
+            | Act::ReopenLibrary
             | Act::Rescue(..)
             | Act::Settle(..) => {}
         }

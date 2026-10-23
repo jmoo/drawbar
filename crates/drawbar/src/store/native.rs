@@ -107,6 +107,27 @@ pub struct Backend {
     unrun: Arc<AtomicUsize>,
     /// How many files the listings of the folder have found.
     listed: Arc<AtomicUsize>,
+    /// Whether a command is running, and when it last showed life: when it started, or
+    /// when the count of files found last moved, in milliseconds since `started`.
+    life: Arc<Life>,
+    /// What the listings had found when [`Backend::waiting`] last looked, and when.
+    seen: std::cell::Cell<(usize, std::time::Instant)>,
+    #[cfg(test)]
+    fault: Arc<std::sync::Mutex<Option<super::Fault>>>,
+}
+
+/// Whether the library's thread is running a command, and since when.
+#[derive(Default)]
+struct Life {
+    running: std::sync::atomic::AtomicBool,
+    since: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl Life {
+    fn run(&self, running: bool) {
+        *self.since.lock().expect("never poisoned") = Some(std::time::Instant::now());
+        self.running.store(running, Ordering::Release);
+    }
 }
 
 impl Backend {
@@ -121,12 +142,29 @@ impl Backend {
         let ran = unrun.clone();
         let listed = Arc::new(AtomicUsize::new(0));
         let counted = listed.clone();
+        let life = Arc::new(Life::default());
+        let living = life.clone();
+        #[cfg(test)]
+        let fault = Arc::new(std::sync::Mutex::new(None));
+        #[cfg(test)]
+        let faults = fault.clone();
         let worker = std::thread::spawn(move || {
             // toshokan's library stays on the thread that opened it.
             let mut keeper = keeper(&folder, &kept, counted, Box::new(SystemClock));
             nord_usb::block_on(async {
                 let mut landed = Vec::new();
                 while let Ok(cmd) = commands.recv() {
+                    living.run(true);
+                    #[cfg(test)]
+                    match faults.lock().expect("never poisoned").take() {
+                        Some(super::Fault::Trap) => {
+                            panic!("the library's thread was made to fault")
+                        }
+                        Some(super::Fault::Stall) => loop {
+                            std::thread::park();
+                        },
+                        None => {}
+                    }
                     let wrote = cmd.writes();
                     match cmd {
                         Cmd::Read { files, room } => {
@@ -139,6 +177,7 @@ impl Backend {
                         ctx.request_repaint();
                     }
                     ran.fetch_sub(usize::from(wrote), Ordering::Release);
+                    living.run(false);
                 }
                 keeper.close().await;
             });
@@ -151,7 +190,47 @@ impl Backend {
             worker: Some(worker),
             unrun,
             listed,
+            life,
+            seen: std::cell::Cell::new((0, std::time::Instant::now())),
+            #[cfg(test)]
+            fault,
         }
+    }
+
+    /// Make the next command the library's thread takes fault or never finish, as a
+    /// bug in it would.
+    #[cfg(test)]
+    pub fn fault(&self, fault: super::Fault) {
+        *self.fault.lock().expect("never poisoned") = Some(fault);
+    }
+
+    /// Why the library's thread stopped, once it has without being let go: it answers
+    /// nothing more.
+    pub fn stopped(&self) -> Option<String> {
+        let ended = self.worker.as_ref().is_some_and(JoinHandle::is_finished);
+        (ended && self.tx.is_some()).then(|| "the library's thread stopped".to_string())
+    }
+
+    /// How long the command running now has gone without a sign of life: no answer, and
+    /// no file found. `None` while none runs.
+    pub fn waiting(&self) -> Option<std::time::Duration> {
+        if !self.life.running.load(Ordering::Acquire) {
+            return None;
+        }
+        let listed = self.listed();
+        if listed != self.seen.get().0 {
+            self.seen.set((listed, std::time::Instant::now()));
+        }
+        let since = *self.life.since.lock().expect("never poisoned");
+        let since = since.into_iter().chain([self.seen.get().1]).max()?;
+        Some(since.elapsed())
+    }
+
+    /// Let the library go without waiting for its thread, which stopped or does not
+    /// answer.
+    pub fn abandon(&mut self) {
+        self.tx = None;
+        self.worker = None;
     }
 
     pub fn root(&self) -> &Path {

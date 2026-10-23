@@ -837,6 +837,16 @@ pub struct Viewed {
     pub unfinished: Option<Vec<toshokan::report::Orphan>>,
 }
 
+/// A fault a test makes the library's thread or worker show.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub enum Fault {
+    /// It stops, as a bug that panics or traps makes it.
+    Trap,
+    /// It never finishes the command it takes next.
+    Stall,
+}
+
 /// What a backend answers.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Event {

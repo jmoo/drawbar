@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use drawbar::store::shown::Shown;
 use drawbar::store::{
-    Backend, Cmd, Event, Failure, Found, Intent, Key, LibPath, Moving, Picked, Root, Slot, Source,
-    Worker,
+    Backend, Cmd, Event, Failure, Fault, Found, Intent, Key, LibPath, Moving, Picked, Root, Slot,
+    Source, Worker,
 };
 use eframe::egui;
 use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
@@ -477,7 +477,7 @@ async fn a_worker_that_faults_says_so_and_a_fresh_one_opens_the_library() {
     let local = RelPath::new("local/faulty").unwrap();
     let worker = Worker::start(folder(), &local).await.unwrap();
     worker.run(Cmd::Open).await.unwrap();
-    worker.trap();
+    worker.fault(Fault::Trap);
     let refused = worker.run(Cmd::Rescan).await;
     assert!(
         refused.as_ref().is_err_and(|why| why.contains("stopped")),
@@ -496,6 +496,26 @@ async fn a_worker_that_faults_says_so_and_a_fresh_one_opens_the_library() {
         "{opened:?}"
     );
     fresh.close().await;
+}
+
+/// A worker that never finishes a command shows no sign of life for as long, and once it
+/// is let go the library opens again.
+#[wasm_bindgen_test]
+async fn a_worker_that_stalls_shows_no_life_and_is_let_go() {
+    wipe(&opfs().await).await;
+    let (mut tab, opened) = Tab::open(Root::Private).await;
+    assert!(matches!(opened, Event::Opened(Ok(_))), "{opened:?}");
+    assert_eq!(tab.backend.waiting(), None, "nothing runs");
+    tab.backend.fault(Fault::Stall);
+    tab.backend.send(Cmd::Refresh);
+    sleep(300).await;
+    let waited = tab.backend.waiting().expect("the refresh runs");
+    assert!(waited.as_millis() >= 250, "{waited:?}");
+    tab.backend.abandon();
+    drop(tab);
+    let (again, opened) = Tab::open(Root::Private).await;
+    assert!(matches!(opened, Event::Opened(Ok(_))), "{opened:?}");
+    again.close().await;
 }
 
 /// Two installs keep one library, each through its worker: a refresh shows one what the

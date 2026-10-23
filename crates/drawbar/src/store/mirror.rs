@@ -34,6 +34,10 @@ use crate::workspace::{
 };
 
 /// How far opening has got.
+/// How long a command may go without a sign of life, as an answer or a file found,
+/// before the user is asked whether to close and reopen the library.
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// How long, in seconds, a change another drawbar left unfinished must stand before
 /// the user is asked about it. ⚠️ A drawbar another install runs on this folder, as a
 /// browser tab beside the desktop app, is no `live` writer here, and may be carrying
@@ -182,6 +186,10 @@ pub struct Store {
     /// The scan of every file that follows opening is in flight: the view lists no file
     /// yet.
     first_scan: bool,
+    /// How long a command may go without a sign of life before the user is asked.
+    patience: std::time::Duration,
+    /// Whether the user was asked about the command that shows no life now.
+    asked_stalled: bool,
     /// The unsaved edits an earlier session kept, taken up once a scan lists the files
     /// they were made over.
     drafts_found: Vec<toshokan::report::DraftStatus>,
@@ -274,6 +282,8 @@ impl Store {
             focused: true,
             scanning: false,
             first_scan: false,
+            patience: PATIENCE,
+            asked_stalled: false,
             drafts_found: Vec::new(),
             listed: false,
             unfinished: BTreeMap::new(),
@@ -846,6 +856,12 @@ impl Store {
             released |= self.react(event, workspace, browser, queue, log);
         }
         self.tell_unfinished(workspace.ctx(), browser, log);
+        self.watch(browser);
+        if self.backend.waiting().is_some() {
+            workspace
+                .ctx()
+                .request_repaint_after(std::time::Duration::from_secs(1));
+        }
         #[cfg(target_arch = "wasm32")]
         self.hinted();
         #[cfg(target_arch = "wasm32")]
@@ -861,11 +877,56 @@ impl Store {
         released
     }
 
-    /// Why the library's worker stopped answering, once it has. The store then hears
-    /// nothing more.
-    #[cfg(target_arch = "wasm32")]
+    /// Why the library's thread or worker stopped answering, once it has. The store then
+    /// hears nothing more.
     pub fn stopped(&self) -> Option<String> {
         self.backend.stopped()
+    }
+
+    /// Whether the command the library runs now has gone [`Store::patience`] without a
+    /// sign of life, as one that never settles does.
+    fn stalled(&self) -> bool {
+        self.backend
+            .waiting()
+            .is_some_and(|waited| waited >= self.patience)
+    }
+
+    /// Wait `patience` for a command to show life before asking whether to reopen.
+    #[cfg(test)]
+    pub fn patience(&mut self, patience: std::time::Duration) {
+        self.patience = patience;
+    }
+
+    /// Make the library's thread fault, or never finish, with the next command it takes.
+    #[cfg(test)]
+    pub fn fault(&self, fault: super::Fault) {
+        self.backend.fault(fault);
+    }
+
+    /// Ask, once, whether to close and reopen a library that has stopped answering.
+    fn watch(&mut self, browser: &mut Browser) {
+        match self.stalled() {
+            true if !self.asked_stalled => {
+                self.asked_stalled = true;
+                browser.ask_stalled();
+            }
+            true => {}
+            false => self.asked_stalled = false,
+        }
+    }
+
+    /// The unsaved edits not kept as drafts since they were last made, by the names of
+    /// their assets, which a library that stopped answering cannot keep.
+    fn undrafted(&self, workspace: &Workspace) -> Vec<String> {
+        let unsaved = workspace.listed().filter(|entity| entity.is_unsaved());
+        let undrafted = unsaved.filter(|entity| {
+            let stamp = match workspace.kept_edit(entity.id) {
+                Some((_, stamp)) => stamp,
+                None => entity.stamp,
+            };
+            self.drafted.get(&entity.id).map(|kept| kept.1) != Some(stamp)
+        });
+        undrafted.map(|entity| entity.name.clone()).collect()
     }
 
     /// Whether the browser no longer lets the page into the library's picked folder.
@@ -1464,6 +1525,20 @@ impl Store {
         log: &mut Log,
     ) {
         const ROUNDS: usize = 8;
+        if self.stopped().is_some() || self.stalled() {
+            let lost = self.undrafted(workspace);
+            if !lost.is_empty() {
+                const SHOWN: usize = 5;
+                log.trouble(format!(
+                    "Edits made since they were last kept could not be written, since the \
+                     library stopped answering: {}.",
+                    crate::strings::quoted_some(&lost, SHOWN)
+                ));
+            }
+            self.cache.finish(log);
+            self.backend.abandon();
+            return;
+        }
         // The editor of a new tag's name never closes at a quit, so the tag goes under
         // the name it has, and what waited for it is asked for now.
         browser.tags.named();
