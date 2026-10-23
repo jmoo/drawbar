@@ -695,26 +695,28 @@ impl Rig {
             bench,
         };
         rig.until("the library opens", ATTACH_LIMIT, |rig| {
-            rig.store.takes_files()
+            rig.store.takes_files() && !rig.store.listing()
         });
         rig
     }
 
     /// Answer the question showing as a click on `label` would, and run the rescue acts
-    /// it gives as the app does.
+    /// it gives as the app does, writing what they changed as its next frame does.
     fn choose(&mut self, label: &str) {
-        for act in self.bench.browser.answer(label) {
+        let Bench {
+            workspace,
+            browser,
+            log,
+            ..
+        } = &mut self.bench;
+        for act in browser.answer(label) {
             let Act::Rescue(rescue, what) = act else {
                 panic!("{act:?} is not a rescue's act")
             };
-            let Bench {
-                workspace,
-                browser,
-                log,
-                ..
-            } = &mut self.bench;
             self.store.rescue(rescue, what, workspace, browser, log);
         }
+        self.store
+            .sync(workspace, browser, crate::store::Pass::Files);
     }
 
     /// The title of the question showing, once one shows.
