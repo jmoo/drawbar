@@ -1464,7 +1464,9 @@ fn compacted(library: &mut Library) -> Flow<'_, (&mut Library, Result<Compacted>
         library.reader.absorb(listing);
         let writer = library.writer.take().expect("checked above");
         let name = library.env.nonce();
-        let compaction = crate::compaction::compact(writer, &library.reader, &recorded, name);
+        let capabilities = library.capabilities;
+        let compaction =
+            crate::compaction::compact(writer, &library.reader, &recorded, name, capabilities);
         flow::run(compaction).then(move |(writer, compacted)| {
             library.writer = Some(writer);
             match compacted {

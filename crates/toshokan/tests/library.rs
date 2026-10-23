@@ -10,6 +10,7 @@ use std::rc::Rc;
 use toshokan::asynch;
 use toshokan::binding::Bindings;
 use toshokan::blocking::{self, Backend};
+use toshokan::crash;
 use toshokan::env::{ExactNames, PrefixIdentity, SeededRandom, TestClock};
 use toshokan::intent::{Driver, Intent};
 use toshokan::io::{Capabilities, Range};
@@ -601,6 +602,7 @@ through_both!(
     a_commit_writes_to_the_local_root_only_what_it_adds,
     reopening_reads_only_the_ends_of_files_read_before,
     a_writers_directory_stays_bounded_across_sessions,
+    a_crash_in_compaction_tears_a_snapshot_only_where_the_folder_cannot_rename,
 );
 
 /// One machine of a shared folder.
@@ -4005,4 +4007,70 @@ fn a_writers_directory_stays_bounded_across_sessions<F: Facade>() {
     for n in 0..8 {
         assert!(shown.contains(&format!("t{n}")), "t{n} in {shown:?}");
     }
+}
+
+fn a_crash_in_compaction_tears_a_snapshot_only_where_the_folder_cannot_rename<F: Facade>() {
+    let clock = TestClock::at(1_000);
+    let one_disk = |disk: &MemDisk| Machine {
+        folder: disk.clone(),
+        local: disk.clone(),
+    };
+    // A folder that syncs, so that a crash can tear what it has not synced.
+    let folder = Capabilities {
+        fsync: true,
+        ..FOLDER.get()
+    };
+    let setup = || {
+        let disk = MemDisk::with_capabilities(folder, Capabilities::ALL);
+        let (mut a, _) = F::open(Probe::new(&one_disk(&disk)), env("a", 1, &clock)).unwrap();
+        create(&mut a, "song.npno", b"song");
+        drop(a);
+        disk.restart()
+    };
+    let renames = folder.rename_file;
+    let staged = |disk: &MemDisk| -> Vec<RelPath> {
+        let files = disk.files(Root::Folder).into_keys();
+        let staged =
+            files.filter(|path| path.parent().is_some_and(|dir| dir.name() == Some("tmp")));
+        staged.collect()
+    };
+    let (mut torn, mut left, mut tidied) = (0, 0, 0);
+    crash::sweep(
+        setup,
+        |disk| {
+            if let Ok((mut a, _)) = F::open(Probe::new(&one_disk(disk)), env("a", 2, &clock)) {
+                let _ = a.compact();
+            }
+        },
+        |fault, disk| {
+            let shown = format!("{fault:?}");
+            let (mut a, opened) = F::open(Probe::new(&one_disk(&disk)), env("a", 3, &clock))
+                .unwrap_or_else(|e| panic!("{shown}: {e}"));
+            let snapshots = opened.unreadable.iter().filter(|path| {
+                path.name()
+                    .is_some_and(|name| name.starts_with("snapshot-"))
+            });
+            let snapshots = snapshots.count();
+            if renames {
+                assert_eq!(snapshots, 0, "{shown}: {:?}", opened.unreadable);
+            }
+            torn += snapshots;
+            if !matches!(opened.start, Start::Resumed(_)) {
+                return;
+            }
+            left += staged(&disk).len();
+            let next = a.commit("Next", |i| {
+                let (i, _) = i.create(|e| {
+                    e.add(TAGS, tag("next"));
+                });
+                i
+            });
+            next.unwrap_or_else(|e| panic!("{shown}: {e}"));
+            assert_eq!(staged(&disk), [] as [RelPath; 0], "{shown}");
+            tidied += 1;
+        },
+    );
+    assert!(tidied > 0, "some crash leaves the writer to resume");
+    assert_eq!(torn > 0, !renames, "torn snapshots: {torn}");
+    assert_eq!(left > 0, renames, "staged snapshots left: {left}");
 }

@@ -864,7 +864,7 @@ fn compaction_leaves_a_sealed_segment_holding_an_entry_no_snapshot_folds() {
 }
 
 /// The folder of a machine, where a segment gains `bytes` once the snapshot is
-/// written: between compaction's judgement of it and its deletion.
+/// in place: between compaction's judgement of it and its deletion.
 struct Meddling<'a> {
     machine: &'a mut Machine,
     segment: toshokan::RelPath,
@@ -876,7 +876,7 @@ impl toshokan::blocking::Backend for Meddling<'_> {
     }
 
     fn perform(&mut self, io: toshokan::Io) -> toshokan::IoResult {
-        let snapshot = matches!(&io, toshokan::Io::Create { path, .. }
+        let snapshot = matches!(&io, toshokan::Io::Create { path, .. } | toshokan::Io::Rename { to: path, .. }
             if path.name().is_some_and(|name| name.starts_with("snapshot-")));
         let reply = self.machine.perform(io)?;
         if snapshot {
@@ -907,7 +907,8 @@ fn a_segment_that_changes_before_compaction_deletes_it_is_left() {
         segment: sealed.clone(),
     };
     let name = toshokan::Nonce::from_u128(5);
-    let (_, compacted) = run(&mut meddling, compact(writer, &second.reader, &[], name));
+    let compaction = compact(writer, &second.reader, &[], name, Capabilities::ALL);
+    let (_, compacted) = run(&mut meddling, compaction);
     assert_eq!(compacted.unwrap().removed.len(), 1);
     assert!(segment_paths(&second.machine, id).contains(&sealed));
 }

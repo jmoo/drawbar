@@ -637,7 +637,9 @@ impl Instance {
         let name = Nonce::from_u128(self.random.next_u128());
         let writer = self.writer.take().expect("a writer");
         run(&mut self.machine, self.reader.read_writer(writer.id()))?;
-        let (writer, compacted) = run(&mut self.machine, compact(writer, &self.reader, &[], name));
+        let folder = self.machine.folder.capabilities(Root::Folder);
+        let compaction = compact(writer, &self.reader, &[], name, folder);
+        let (writer, compacted) = run(&mut self.machine, compaction);
         self.writer = Some(writer);
         compacted
     }

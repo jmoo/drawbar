@@ -8,7 +8,7 @@ use std::rc::Rc;
 use crate::error::{Error, Refusal, Result};
 use crate::flow::{self, Fallible, Flow};
 use crate::ids::{EntryHash, Nonce, WriterId};
-use crate::io::{Io, Range, Root, Task};
+use crate::io::{Capabilities, Io, Range, Root, Task};
 use crate::line;
 use crate::log::{Entry, EntryKind, Own};
 use crate::path::RelPath;
@@ -19,11 +19,13 @@ use crate::writer::Writer;
 
 /// Confirms the folder holds this writer's head, seals the open segment, and
 /// writes `snapshot-<name>.json` folding the chain up to the head into its
-/// previous snapshot, durably (file and directory synced). Only once the folder
-/// holds that snapshot does it delete each segment of the writer's directory
-/// that ends with a seal marker and every line of which the snapshot certifies,
-/// and each snapshot whose head it certifies. Each is checked again just before
-/// it is deleted, and left when it changed. Returns the writer with the result.
+/// previous snapshot, durably: staged in the writer's `tmp/` and renamed into
+/// place where `capabilities`, the folder's, rename files, else in place, where
+/// a crash can tear it. Only once the folder holds that snapshot does it delete
+/// each segment of the writer's directory that ends with a seal marker and
+/// every line of which the snapshot certifies, and each snapshot whose head it
+/// certifies. Each is checked again just before it is deleted, and left when it
+/// changed. Returns the writer with the result.
 ///
 /// `reader` must have read the writer's directory after its last append.
 /// `recorded` holds the lines of segments of the directory the writer read
@@ -39,6 +41,7 @@ pub fn compact(
     reader: &Reader,
     recorded: &[Vec<Rc<Entry>>],
     name: Nonce,
+    capabilities: Capabilities,
 ) -> Task<'static, (Writer, Result<Compacted>)> {
     let id = writer.id();
     let lost = move || Error::Rekey {
@@ -62,6 +65,9 @@ pub fn compact(
     };
     let layout = writer.layout.clone();
     let path = layout.snapshot(id, name);
+    let staged = capabilities
+        .rename_file
+        .then(|| (layout.tmp_dir(id), layout.staged(id, name, &path)));
     let open = writer
         .open_segment()
         .map(|open| layout.segment(id, open.name));
@@ -93,7 +99,7 @@ pub fn compact(
                 bytes[bytes.len() - ending(&bytes)..].to_vec(),
             );
             let written = match sealed {
-                Ok(_) => write_snapshot(path.clone(), dir.clone(), bytes),
+                Ok(_) => write_snapshot(path.clone(), dir.clone(), staged, bytes),
                 Err(error) => Flow::Done(Err(error)),
             };
             written.then(move |written| {
@@ -152,19 +158,41 @@ fn ending(bytes: &[u8]) -> usize {
     bytes.len().min(line::ENDING as usize)
 }
 
-/// Writes the snapshot durably; whether the folder then holds it.
-fn write_snapshot<'a>(path: RelPath, dir: RelPath, bytes: Vec<u8>) -> Fallible<'a, bool> {
+/// Writes the snapshot durably at `path` in the writer's directory `dir`, and
+/// says whether the folder then holds it. With `staged`, the writer's `tmp/` and
+/// a path in it, the bytes are written there and renamed into place; without,
+/// they are written in place, where a crash can tear them.
+fn write_snapshot<'a>(
+    path: RelPath,
+    dir: RelPath,
+    staged: Option<(RelPath, RelPath)>,
+    bytes: Vec<u8>,
+) -> Fallible<'a, bool> {
+    let written = match staged {
+        Some((tmp, staged)) => flow::ensure_dir(Root::Folder, &tmp)
+            .and_then({
+                let staged = staged.clone();
+                move |()| synced(staged, bytes)
+            })
+            .and_then({
+                let path = path.clone();
+                move |()| flow::rename(Root::Folder, &staged, &path)
+            }),
+        None => synced(path.clone(), bytes).and_then(move |()| flow::sync(Root::Folder, &dir)),
+    };
+    written
+        .and_then(move |()| flow::stat(Root::Folder, &path))
+        .map_ok(|held| held.is_some())
+}
+
+/// Creates `path` holding `bytes`, and syncs it.
+fn synced<'a>(path: RelPath, bytes: Vec<u8>) -> Fallible<'a, ()> {
     flow::act(Io::Create {
         root: Root::Folder,
         path: path.clone(),
         bytes,
     })
-    .and_then({
-        let path = path.clone();
-        move |()| flow::sync(Root::Folder, &path).and_then(move |()| flow::sync(Root::Folder, &dir))
-    })
-    .and_then(move |()| flow::stat(Root::Folder, &path))
-    .map_ok(|held| held.is_some())
+    .and_then(move |()| flow::sync(Root::Folder, &path))
 }
 
 /// The snapshot of the chain to the writer's head: its previous snapshot, the
