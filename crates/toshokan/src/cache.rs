@@ -43,7 +43,7 @@ const JOURNAL_SLACK: u64 = 1 << 20;
 /// The first byte of every record this build writes; a record starting with
 /// another is not read. It changes with any change to what a record packs or
 /// how, since a record whose check holds is taken as this build packed it.
-const FORMAT: u8 = 4;
+const FORMAT: u8 = 5;
 
 /// How many bytes of a record's length start it.
 const LEN: usize = 8;
@@ -164,6 +164,9 @@ pub struct Loaded {
     /// What this writer's reader last knew of each file, by path.
     pub files: BTreeMap<RelPath, StoredFile>,
     pub absorbed: BTreeSet<EntryHash>,
+    /// The retired writers whose views were read, with the generation of each
+    /// one's checkpoint.
+    pub retired: BTreeMap<EntryHash, u64>,
     pub store: Store,
 }
 
@@ -198,6 +201,7 @@ pub fn load(pool: Vec<EntryHash>, own: Option<EntryHash>) -> Task<'static, Resul
             view: CachedView::default(),
             files: BTreeMap::new(),
             absorbed: BTreeSet::new(),
+            retired: BTreeMap::new(),
             store: Store {
                 genesis: own,
                 due: own.is_some(),
@@ -244,6 +248,7 @@ impl Loaded {
         self.absorbed.extend(kept.absorbed);
         if retired {
             self.absorbed.insert(genesis);
+            self.retired.insert(genesis, kept.generation);
         }
         let grew = self.view.join(&kept.view);
         self.store.due |= grew || self.absorbed.len() != absorbed;
@@ -418,7 +423,7 @@ impl Decoding {
 impl Kept {
     /// Applies what `stored` holds to the view.
     fn apply(&mut self, stored: StoredView) -> Parsed<()> {
-        apply(&mut self.view, stored.writers, stored.grace)?;
+        apply(&mut self.view, stored.writers, &stored.let_go, stored.grace)?;
         for (path, file) in stored.files {
             match file {
                 Some(file) => self.files.insert(path, file),
@@ -436,13 +441,15 @@ pub(crate) fn restore(view: &mut CachedView, bytes: &[u8]) -> Parsed<()> {
         return Err("bytes follow the view".into());
     }
     let stored = StoredView::read(payload).map_err(|Bad(reason)| reason.to_owned())?;
-    apply(view, stored.writers, stored.grace)
+    apply(view, stored.writers, &stored.let_go, stored.grace)
 }
 
-/// Applies what each writer's memory gained or lost, and the grace step's state.
+/// Applies what each writer's memory gained or lost, what the grace step let go
+/// of, and the grace step's state.
 fn apply(
     view: &mut CachedView,
     writers: Vec<(WriterId, StoredMemory)>,
+    let_go: &[(WriterId, LetGo)],
     grace: Option<Grace>,
 ) -> Parsed<()> {
     for (writer, stored) in writers {
@@ -466,6 +473,14 @@ fn apply(
         }
         if memory.is_empty() {
             view.writers.remove(&writer);
+        }
+    }
+    for (writer, let_go) in let_go {
+        if let Some(memory) = view.writers.get_mut(writer) {
+            let_go.apply(memory);
+            if memory.is_empty() {
+                view.writers.remove(writer);
+            }
         }
     }
     if let Some(grace) = grace {
@@ -510,6 +525,7 @@ struct StoredView {
     files: Vec<(RelPath, Option<StoredFile>)>,
     absorbed: Vec<EntryHash>,
     grace: Option<Grace>,
+    let_go: Vec<(WriterId, LetGo)>,
 }
 
 impl StoredView {
@@ -524,6 +540,7 @@ impl StoredView {
             files: Unpack::unpack(&mut input)?,
             absorbed: Unpack::unpack(&mut input)?,
             grace: Unpack::unpack(&mut input)?,
+            let_go: Unpack::unpack(&mut input)?,
         };
         input.end()?;
         Ok(view)
@@ -639,6 +656,67 @@ impl Changed {
                 self.dropped.insert(hash);
             }
         }
+    }
+}
+
+/// What the grace step let go of in one writer's memory: tips by head, fork
+/// points and entries.
+#[derive(Clone, Default)]
+pub(crate) struct LetGo {
+    tips: BTreeSet<Own>,
+    forks: BTreeSet<Own>,
+    entries: BTreeSet<EntryHash>,
+}
+
+impl LetGo {
+    /// What `before` held that `after` does not.
+    pub(crate) fn between(before: Option<&Memory>, after: Option<&Memory>) -> Self {
+        let empty = Memory::default();
+        let (before, after) = (before.unwrap_or(&empty), after.unwrap_or(&empty));
+        let heads =
+            |memory: &Memory| -> BTreeSet<Own> { memory.tips.iter().map(|tip| tip.head).collect() };
+        let keys =
+            |memory: &Memory| -> BTreeSet<EntryHash> { memory.entries.keys().copied().collect() };
+        Self {
+            tips: &heads(before) - &heads(after),
+            forks: &before.forks - &after.forks,
+            entries: &keys(before) - &keys(after),
+        }
+    }
+
+    pub(crate) fn then(&mut self, next: LetGo) {
+        self.tips.extend(next.tips);
+        self.forks.extend(next.forks);
+        self.entries.extend(next.entries);
+    }
+
+    fn apply(&self, memory: &mut Memory) {
+        memory.tips.retain(|tip| !self.tips.contains(&tip.head));
+        memory.forks.retain(|fork| !self.forks.contains(fork));
+        memory
+            .entries
+            .retain(|hash, _| !self.entries.contains(hash));
+    }
+}
+
+impl Pack for LetGo {
+    fn pack(&self, out: &mut Vec<u8>) {
+        self.tips.iter().collect::<Vec<_>>().pack(out);
+        self.forks.iter().collect::<Vec<_>>().pack(out);
+        self.entries.iter().collect::<Vec<_>>().pack(out);
+    }
+}
+
+impl Unpack for LetGo {
+    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
+        let tips: Vec<Own> = Unpack::unpack(input)?;
+        let forks: Vec<Own> = Unpack::unpack(input)?;
+        let entries: Vec<EntryHash> = Unpack::unpack(input)?;
+        Ok(Self {
+            tips: tips.into_iter().collect(),
+            forks: forks.into_iter().collect(),
+            entries: entries.into_iter().collect(),
+        })
     }
 }
 
@@ -839,13 +917,14 @@ impl StoredSegment {
 }
 
 /// A stored view's payload: its generation, its memories, the records of
-/// `files`, what was absorbed and the grace step's state.
+/// `files`, what was absorbed, the grace step's state and what it let go of.
 fn write_view<'a>(
     generation: u64,
     memories: impl ExactSizeIterator<Item = (WriterId, MemoryOut<'a>)>,
     files: Vec<(&RelPath, Option<StoredFile>)>,
     absorbed: &BTreeSet<EntryHash>,
     grace: Option<&Grace>,
+    let_go: &BTreeMap<WriterId, LetGo>,
 ) -> Vec<u8> {
     let mut out = vec![FORMAT];
     generation.pack(&mut out);
@@ -857,6 +936,7 @@ fn write_view<'a>(
     files.pack(&mut out);
     absorbed.iter().collect::<Vec<_>>().pack(&mut out);
     grace.pack(&mut out);
+    let_go.pack(&mut out);
     frame(&out)
 }
 
@@ -875,7 +955,15 @@ pub(crate) fn encode_view(view: &CachedView) -> Vec<u8> {
         .writers
         .iter()
         .map(|(writer, memory)| (*writer, whole(memory)));
-    write_view(0, memories, Vec::new(), &BTreeSet::new(), Some(&view.grace))
+    let (absorbed, let_go) = (BTreeSet::new(), BTreeMap::new());
+    write_view(
+        0,
+        memories,
+        Vec::new(),
+        &absorbed,
+        Some(&view.grace),
+        &let_go,
+    )
 }
 
 /// A checkpoint's bytes, and its generation.
@@ -914,6 +1002,7 @@ fn encode_checkpoint(reader: &Reader) -> Checkpoint {
         files,
         &reader.absorbed,
         Some(&view.grace),
+        &BTreeMap::new(),
     );
     Checkpoint { generation, bytes }
 }
@@ -977,6 +1066,7 @@ fn encode_record(reader: &Reader) -> Vec<u8> {
         files,
         &BTreeSet::new(),
         grace,
+        &BTreeMap::new(),
     )
 }
 
@@ -1060,6 +1150,26 @@ pub(crate) fn write_checkpoint<'a>(
             };
             Flow::Done(written)
         })
+}
+
+/// Appends the grace step's state and what it let go of, alone, to the journal
+/// of the writer whose genesis entry is `genesis`, onto its checkpoint of
+/// `generation`.
+pub(crate) fn keep_grace(
+    genesis: EntryHash,
+    generation: u64,
+    grace: Grace,
+    let_go: &BTreeMap<WriterId, LetGo>,
+) -> Task<'static, Result<()>> {
+    let record = write_view(
+        generation,
+        std::iter::empty(),
+        Vec::new(),
+        &BTreeSet::new(),
+        Some(&grace),
+        let_go,
+    );
+    append_record(genesis, record, Rc::default()).task()
 }
 
 /// Appends one record to the journal, creating it when there is none, and syncs

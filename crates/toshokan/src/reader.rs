@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use crate::cache::{self, Changed, Store};
+use crate::cache::{self, Changed, LetGo, Store};
 use crate::derive::{self, Derived, Memory, Seen, SeenSegment};
 use crate::error::{Error, Result};
 use crate::flow::{self, Flow};
@@ -212,6 +212,10 @@ impl CachedView {
         &self.writers
     }
 
+    pub fn grace(&self) -> Grace {
+        self.grace
+    }
+
     /// The cached view kept for the writer whose genesis entry is `genesis`; empty
     /// when none was saved.
     pub fn load(genesis: EntryHash) -> Task<'static, Result<Self>> {
@@ -296,6 +300,9 @@ pub struct Reader {
     pub(crate) unsaved: Unsaved,
     /// The retired writers of this install whose cached views this one holds.
     pub(crate) absorbed: BTreeSet<EntryHash>,
+    /// The retired writers whose views this reader read, with the generation of
+    /// each one's checkpoint.
+    pub(crate) retired: BTreeMap<EntryHash, u64>,
     pub(crate) store: Rc<RefCell<Store>>,
 }
 
@@ -320,6 +327,8 @@ pub(crate) struct Unsaved {
     /// Files whose records came, went or changed.
     pub(crate) files: BTreeSet<RelPath>,
     pub(crate) grace: bool,
+    /// What the grace step let go of in each writer's memory.
+    pub(crate) let_go: BTreeMap<WriterId, LetGo>,
 }
 
 impl Unsaved {
@@ -416,6 +425,7 @@ impl Reader {
             derived: Rc::default(),
             unsaved: Unsaved::default(),
             absorbed: BTreeSet::new(),
+            retired: BTreeMap::new(),
             store: Rc::default(),
         }
     }
@@ -427,10 +437,12 @@ impl Reader {
             view,
             files,
             absorbed,
+            retired,
             store,
         } = loaded;
         let mut reader = Self::underived(layout, view);
         reader.absorbed = absorbed;
+        reader.retired = retired;
         reader.store = Rc::new(RefCell::new(store));
         for (path, record) in files {
             let Some(writer) = reader.writer_of(&path) else {
@@ -709,10 +721,15 @@ impl Reader {
     }
 
     /// A view not yet saved anywhere is written whole by its first save, so what
-    /// it gains is not kept apart.
+    /// it gains is not kept apart, except a change to the grace step, which an
+    /// instance without a writer keeps in the views it read.
     fn drop_unsaved_without_store(&mut self) {
         if self.store.borrow().genesis.is_none() {
-            self.unsaved = Unsaved::default();
+            self.unsaved = Unsaved {
+                grace: self.unsaved.grace,
+                let_go: std::mem::take(&mut self.unsaved.let_go),
+                ..Unsaved::default()
+            };
         }
     }
 
@@ -902,8 +919,11 @@ impl Reader {
             .copied()
             .collect::<BTreeSet<_>>()
         {
-            let changed = Changed::between(self.cached.writers.get(&writer), kept.get(&writer));
+            let (before, after) = (self.cached.writers.get(&writer), kept.get(&writer));
+            let changed = Changed::between(before, after);
             if !changed.is_empty() {
+                let let_go = LetGo::between(before, after);
+                self.unsaved.let_go.entry(writer).or_default().then(let_go);
                 self.unsaved
                     .memories
                     .entry(writer)

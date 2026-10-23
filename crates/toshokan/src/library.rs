@@ -1581,27 +1581,33 @@ fn reindexed<'a, L: BorrowMut<Library> + 'a>(
 /// Keeps what a read added to the cached view in this writer's local
 /// directory, so a crash does not take back what was shown: appended to the
 /// journal, or as a checkpoint encoded a slice at a time when one is due.
-/// Without a writer, keeps only a change of the grace step's state, in the view
-/// of each retired writer the reader loaded, which the next open joins.
+/// Without a writer, keeps only a change to the grace step, its state and what
+/// it let go of, appended to the journal of the view it loaded and of each
+/// retired writer's view it read, which the next open joins; a change it could
+/// not keep is kept by the next save.
 fn saved_view<'a, L: BorrowMut<Library> + 'a>(mut library: L) -> Flow<'a, (L, Result<()>)> {
     let known = library.borrow_mut();
     let Some(genesis) = known.writer.as_ref().map(Writer::genesis) else {
-        if !std::mem::take(&mut known.reader.unsaved.grace) {
+        if !known.reader.unsaved.grace {
             return Flow::Done((library, Ok(())));
         }
-        let view = known.reader.cached().clone();
-        let loaded = known.reader.store.borrow().genesis;
-        let retired: BTreeSet<EntryHash> = known
-            .reader
-            .absorbed
-            .iter()
-            .copied()
-            .chain(loaded)
-            .collect();
-        let saved = fold(retired.into_iter(), (), move |(), genesis| {
-            flow::run(view.save(genesis))
+        let grace = known.reader.cached().grace();
+        let let_go = known.reader.unsaved.let_go.clone();
+        let mut views = known.reader.retired.clone();
+        let store = known.reader.store.borrow();
+        views.extend(store.genesis.map(|loaded| (loaded, store.generation)));
+        drop(store);
+        let saved = fold(views.into_iter(), (), move |(), (genesis, generation)| {
+            flow::run(cache::keep_grace(genesis, generation, grace, &let_go))
         });
-        return saved.then(|saved| Flow::Done((library, saved)));
+        return saved.then(|saved| {
+            if saved.is_ok() {
+                let unsaved = &mut library.borrow_mut().reader.unsaved;
+                unsaved.grace = false;
+                unsaved.let_go.clear();
+            }
+            Flow::Done((library, saved))
+        });
     };
     if !cache::due(&known.reader, genesis) {
         let appended = cache::journal(&mut known.reader, genesis);

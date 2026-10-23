@@ -17,7 +17,7 @@ use toshokan::layout::SEGMENT_EXTENSION;
 use toshokan::line::MAX_LINE;
 use toshokan::log::{Entry, EntryKind, FileFact, Genesis, Logged, Op, Settlement};
 use toshokan::plan::FactChange;
-use toshokan::reader::GRACE_MS;
+use toshokan::reader::{CachedView, GRACE_MS};
 use toshokan::report::{
     By, Change, Committed, Compacted, DraftState, Emptied, HistoryItem, Item, ItemKind, Opened,
     Presence, Refreshed, Rekey, Start, Tidied, TrashItem, What, WriterInfo,
@@ -545,6 +545,8 @@ through_both!(
     a_clone_forks_into_items_taken_or_dismissed,
     a_restored_folder_makes_the_writer_rekey,
     what_a_restored_writer_showed_survives_reopening_and_a_crash,
+    an_instance_without_a_writer_keeps_only_the_grace_step_in_the_views_it_read,
+    a_grace_step_an_instance_without_a_writer_could_not_keep_is_kept_by_its_next_save,
     a_compacted_writer_is_shown_and_reported_and_survives_its_files,
     an_interrupted_adoption_is_settled_as_an_adoption,
     the_first_write_after_a_crash_follows_the_settled_intent,
@@ -1170,6 +1172,76 @@ fn what_a_restored_writer_showed_survives_reopening_and_a_crash<F: Facade>() {
             );
             assert_eq!(shown_tags, ["kept", "lost", "new"], "{shown}");
         }
+    }
+}
+
+/// Each `view.bin` of `here`'s local root, by the genesis entry of its writer.
+fn checkpoints(here: &Machine) -> BTreeMap<EntryHash, Vec<u8>> {
+    let files = here.local.files(Root::Local).into_iter();
+    let views = files.filter(|(path, _)| path.name() == Some("view.bin"));
+    let by_writer = views.map(|(path, bytes)| (path.parent().unwrap().as_str().parse(), bytes));
+    by_writer
+        .map(|(genesis, bytes)| (genesis.unwrap(), bytes))
+        .collect()
+}
+
+/// The cached view `here` keeps for the writer whose genesis entry is `genesis`.
+fn cached(here: &Machine, genesis: EntryHash) -> CachedView {
+    blocking::run(&mut here.local.clone(), CachedView::load(genesis)).unwrap()
+}
+
+fn an_instance_without_a_writer_keeps_only_the_grace_step_in_the_views_it_read<F: Facade>() {
+    let clock = TestClock::at(1_000);
+    let (restored, mut a, _) = restored_without_a_writer::<F>(&clock);
+    let before = checkpoints(&restored);
+    assert!(!before.is_empty());
+    let remembered: Vec<(EntryHash, CachedView)> = before
+        .keys()
+        .map(|genesis| (*genesis, cached(&restored, *genesis)))
+        .collect();
+    clock.advance(GRACE_MS);
+    a.rescan().unwrap();
+
+    assert!(checkpoints(&restored) == before, "no view is written whole");
+    for (genesis, view) in remembered {
+        let kept = cached(&restored, genesis);
+        assert!(kept.grace().graced, "{genesis}: {:?}", kept.grace());
+        assert_ne!(kept.writers(), view.writers(), "{genesis} lets go");
+        for (writer, memory) in kept.writers() {
+            let held = &view.writers()[writer];
+            let mut entries = memory.entries.keys();
+            assert!(
+                entries.all(|hash| held.entries.contains_key(hash)),
+                "{genesis} gained entries of {writer}"
+            );
+            assert!(
+                memory.tips.iter().all(|tip| held.tips.contains(tip)),
+                "{genesis} gained tips of {writer}"
+            );
+        }
+    }
+}
+
+fn a_grace_step_an_instance_without_a_writer_could_not_keep_is_kept_by_its_next_save<F: Facade>() {
+    let clock = TestClock::at(1_000);
+    let (restored, a, _) = restored_without_a_writer::<F>(&clock);
+    drop(a);
+    let probe = Probe::new(&restored);
+    let (mut a, _) = F::open(probe.clone(), env("a", 5, &clock)).unwrap();
+    clock.advance(GRACE_MS);
+    fail(
+        &probe,
+        local_writes(&["view.log", "view.bin", "view.bin.next"]),
+    );
+    assert!(a.rescan().is_err());
+    heal(&probe);
+    a.refresh().unwrap();
+
+    let views = checkpoints(&restored);
+    assert!(!views.is_empty());
+    for genesis in views.into_keys() {
+        let grace = cached(&restored, genesis).grace();
+        assert!(grace.graced, "{genesis}: {grace:?}");
     }
 }
 
