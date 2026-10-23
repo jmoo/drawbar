@@ -34,26 +34,3 @@ pub enum Picking {
 pub fn picking() -> Picking {
     Picking::On
 }
-
-/// What a browser says the first time it opens a picked folder: its lock keeps other
-/// tabs of drawbar.app to reading, and the desktop app never sees it.
-pub const SHARED: &str = "Don't open this folder in the drawbar desktop app at the same time.";
-
-/// [`SHARED`] where `warned` says it has not been said about this folder, which it then
-/// says it has.
-pub fn warn_once(warned: &mut bool) -> Option<&'static str> {
-    (!std::mem::replace(warned, true)).then_some(SHARED)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_folder_is_warned_about_the_desktop_app_once() {
-        let mut warned = false;
-        assert_eq!(warn_once(&mut warned), Some(SHARED));
-        assert_eq!(warn_once(&mut warned), None);
-        assert!(warned, "kept with the folder");
-    }
-}

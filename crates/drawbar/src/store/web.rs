@@ -65,9 +65,6 @@ pub struct Picked {
     /// the id the recent list already gives it.
     pub id: u32,
     pub handle: FileSystemDirectoryHandle,
-    /// It has been said once that the desktop app must not open it at the same time
-    /// ([`crate::libraries::SHARED`]).
-    pub warned: bool,
 }
 
 impl PartialEq for Root {

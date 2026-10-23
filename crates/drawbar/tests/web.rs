@@ -363,11 +363,7 @@ async fn the_whole_workflow_runs_in_a_picked_folder() {
     let root = opfs().await;
     wipe(&root).await;
     let handle = private_dir(&RelPath::new("Picked").unwrap()).await.unwrap();
-    let picked = Root::Picked(Picked {
-        id: 7,
-        handle,
-        warned: true,
-    });
+    let picked = Root::Picked(Picked { id: 7, handle });
     the_whole_workflow_in(picked).await;
 }
 

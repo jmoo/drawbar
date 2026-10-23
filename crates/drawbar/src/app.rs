@@ -739,8 +739,8 @@ impl DrawbarApp {
     #[cfg(target_arch = "wasm32")]
     fn opened(&mut self) {
         let open = self.store.as_ref().map(|store| store.root().clone());
-        if let Some(notice) = open.as_ref().and_then(|open| self.libraries.opened(open)) {
-            self.log.say(notice);
+        if let Some(open) = &open {
+            self.libraries.opened(open);
         }
         self.browser.folders.libraries = self.libraries.offered(open.as_ref());
     }
