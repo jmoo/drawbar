@@ -23,6 +23,7 @@ use toshokan::report::{
     Presence, Refreshed, Rekey, Start, Tidied, TrashItem, What, WriterInfo,
 };
 use toshokan::simulator::Machine;
+use toshokan::snapshot::Snapshot;
 use toshokan::view::Conflicted;
 use toshokan::{
     EntityId, EntryHash, Env, Error, Expect, Field, FileState, Hlc, Identify, Identity, Io,
@@ -577,6 +578,7 @@ through_both!(
     drafts_come_back_only_while_the_file_holds_their_base,
     the_trash_keeps_displaced_bytes_until_emptied,
     compaction_keeps_the_view_and_this_sessions_undo,
+    emptied_trash_items_leave_the_next_snapshot,
     others_on_this_machine_are_told_apart_from_others_elsewhere,
     a_refused_intent_changes_nothing,
     what_an_instance_has_shown_survives_its_crash,
@@ -2797,6 +2799,45 @@ fn the_trash_keeps_displaced_bytes_until_emptied<F: Facade>() {
         matches!(a.undo(), Err(Error::Refused(Refusal::Emptied))),
         "undo needs what was emptied"
     );
+}
+
+fn emptied_trash_items_leave_the_next_snapshot<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"one");
+    for (n, bytes) in [b"two".as_slice(), b"three"].into_iter().enumerate() {
+        clock.advance(31 * 24 * 60 * 60 * 1000 * n as u64);
+        a.commit("Save", |i| {
+            let held = read(&folder, "song.npno").unwrap();
+            i.save(
+                song,
+                &path("song.npno"),
+                bytes.to_vec(),
+                Expect::Holds(identity(&held)),
+            )
+        })
+        .unwrap();
+    }
+    let trashed = |folder: &MemDisk| -> usize {
+        let snapshots = folder.files(Root::Folder).into_iter();
+        let snapshots = snapshots.filter(|(path, _)| path.as_str().contains("/snapshot-"));
+        let states = snapshots.map(|(_, bytes)| Snapshot::decode(&bytes).unwrap().state);
+        states.map(|state| state.trash.len()).sum()
+    };
+    a.compact().unwrap();
+    assert_eq!(trashed(&folder), 2);
+    clock.advance(10);
+    let emptied = a.empty_trash(Policy::default()).unwrap();
+    assert_eq!(emptied.removed.len(), 1, "the item displaced a month ago");
+    a.commit("Tag", |i| i.add(song, TAGS, tag("x"))).unwrap();
+    a.compact().unwrap();
+    assert_eq!(
+        trashed(&folder),
+        1,
+        "the emptied item is gone from the snapshot"
+    );
+    assert_eq!(a.trash().unwrap().len(), 1);
 }
 
 fn compaction_keeps_the_view_and_this_sessions_undo<F: Facade>() {

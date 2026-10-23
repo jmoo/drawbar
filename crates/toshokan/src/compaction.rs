@@ -57,7 +57,7 @@ pub fn compact(
             })
             .task();
     }
-    let Some((snapshot, folded)) = fold(&writer, reader, recorded) else {
+    let Some((mut snapshot, folded)) = fold(&writer, reader, recorded) else {
         return Task::ready((writer, Err(lost())));
     };
     let layout = writer.layout.clone();
@@ -66,22 +66,34 @@ pub fn compact(
         .open_segment()
         .map(|open| layout.segment(id, open.name));
     let doomed = Doomed::of(reader, id, &snapshot, open.as_ref());
-    let bytes = snapshot.encode();
-    let (len, tail) = (
-        bytes.len() as u64,
-        bytes[bytes.len() - ending(&bytes)..].to_vec(),
-    );
     let dir = layout.writer(id);
-    writer
-        .head_held()
-        .then(move |held| match held {
-            Ok(true) => writer.seal(),
-            Ok(false) => Flow::Done((writer, Err(lost()))),
-            Err(error) => Flow::Done((writer, Err(error))),
+    flow::list(Root::Folder, &layout.trash_dir(id))
+        .then(move |listed| {
+            let listed = match listed {
+                Ok(listed) => listed,
+                Err(error) => return Flow::Done((writer, Err(error))),
+            };
+            let held: BTreeSet<String> = listed.into_iter().map(|entry| entry.name).collect();
+            snapshot
+                .state
+                .trash
+                .retain(|item, _| held.contains(&item.to_string()));
+            writer.head_held().then(move |held| match held {
+                Ok(true) => writer
+                    .seal()
+                    .then(move |(writer, sealed)| Flow::Done((writer, sealed.map(|()| snapshot)))),
+                Ok(false) => Flow::Done((writer, Err(lost()))),
+                Err(error) => Flow::Done((writer, Err(error))),
+            })
         })
-        .then(move |(mut writer, sealed)| {
+        .then(move |(mut writer, sealed): (Writer, Result<Snapshot>)| {
+            let bytes = sealed.as_ref().map(Snapshot::encode).unwrap_or_default();
+            let (len, tail) = (
+                bytes.len() as u64,
+                bytes[bytes.len() - ending(&bytes)..].to_vec(),
+            );
             let written = match sealed {
-                Ok(()) => write_snapshot(path.clone(), dir.clone(), bytes),
+                Ok(_) => write_snapshot(path.clone(), dir.clone(), bytes),
                 Err(error) => Flow::Done(Err(error)),
             };
             written.then(move |written| {
