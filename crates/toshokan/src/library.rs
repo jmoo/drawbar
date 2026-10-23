@@ -635,6 +635,7 @@ impl Library {
                     })
                     .and_then(move |library| scan_for(library, scope, moved))
             })
+            .and_then(reorphaned)
             .and_then(|library| {
                 let changes = library.since_view();
                 reshown(library).map_ok(move |library| Refreshed {
@@ -642,6 +643,7 @@ impl Library {
                     removed: library.removed_facts(),
                     scan: library.scan_report(),
                     unlisted: library.unlisted.clone(),
+                    orphaned: library.orphaned.clone(),
                 })
             })
             .task()
@@ -1927,6 +1929,28 @@ fn recover(library: Library) -> Fallible<'static, Library> {
             library.ignored = assessed.ignored;
             library
         })
+    })
+}
+
+/// Reads every writer's pending records again, for the orphans that stand now. Each
+/// keeps whether it is the install's own and live as opening found. Writes nothing.
+fn reorphaned(library: &mut Library) -> Fallible<'_, &mut Library> {
+    let writers = library.reader.logs().keys().copied().collect();
+    flow::run(recovery::read(&library.layout, writers)).map_ok(move |found| {
+        let own = library
+            .writer
+            .as_ref()
+            .map(|writer| (writer.id(), writer.head()));
+        let settled = library.folded.settlements().clone();
+        let (assessed, _) =
+            recovery::classify(&library.layout, own, library.reader.logs(), &settled, found);
+        library.orphaned = assessed.orphaned;
+        for orphan in &mut library.orphaned {
+            orphan.ours = library.pooled.contains_key(&orphan.writer);
+            let presence = library.presence.get(&orphan.writer);
+            orphan.live = presence == Some(&Presence::SameMachine);
+        }
+        library
     })
 }
 

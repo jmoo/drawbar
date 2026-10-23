@@ -770,7 +770,10 @@ for its writer to remove it.
 
 A record is ignored when it does not decode, names another writer, names a path
 that is not a library path, or its `prev` is not in its writer's log. Opening
-reports the records it ignores.
+reports the records it ignores, and the open records of other writers as
+orphans. Each refresh reads every writer's pending records again and reports the
+orphans as they stand then, since a writer elsewhere may have begun or finished
+an effect meanwhile.
 
 Opening finds this writer's open records whose `prev` is its head, and says how
 settling each will end. The writer settles them before it checks its next

@@ -645,6 +645,7 @@ through_both!(
     drafts_of_two_windows_are_ordered_by_their_clocks_after_the_time_went_back,
     an_effect_a_live_window_left_open_is_reported_live,
     a_change_of_case_another_install_did_not_start_is_finished_by_another,
+    a_refresh_reports_another_installs_unfinished_change_as_it_stands,
     a_directory_made_and_filled_in_one_change_is_undone_in_one,
     directories_made_and_removed_around_tree_moves_undo_and_redo,
     removing_an_empty_directory_is_undone_and_one_with_files_is_refused,
@@ -3039,6 +3040,46 @@ fn a_change_of_case_another_install_did_not_start_is_finished_by_another<F: Faca
         .map(|(path, bytes)| format!("{path:?} {}", String::from_utf8_lossy(&bytes)))
         .collect();
     assert_eq!(files, [r#"RelPath("kick.wav") kick"#]);
+}
+
+fn a_refresh_reports_another_installs_unfinished_change_as_it_stands<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    put(&folder, "a.wav", b"a");
+    let (mut ours, opened) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+    assert_eq!(opened.orphaned, []);
+    let probe = Probe::new(&machine(&folder));
+    let (mut theirs, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    theirs.rescan().unwrap();
+    theirs
+        .commit("Tag", |i| i.create(|e| _ = e.add(TAGS, tag("x"))).0)
+        .unwrap();
+    assert_eq!(ours.refresh().unwrap().orphaned, []);
+    // The effect is made, and its entry not logged: the record stays open.
+    let logging = |io: &Io| io.root() == Root::Folder && io.path().as_str().ends_with(".txt");
+    fail(&probe, move |io| io.mutates() && logging(io));
+    let stopped = theirs.commit("Rename", |i| {
+        i.rename_file(
+            &path("a.wav"),
+            &path("b.wav"),
+            Expect::Holds(identity(b"a")),
+        )
+    });
+    heal(&probe);
+    assert!(stopped.is_err(), "{stopped:?}");
+    drop(theirs);
+
+    let refreshed = ours.refresh().unwrap();
+    let [orphan] = refreshed.orphaned.as_slice() else {
+        panic!("one orphan once it began: {:?}", refreshed.orphaned);
+    };
+    assert_eq!((orphan.label.as_str(), orphan.ours), ("Rename", false));
+    ours.settle(orphan.clone(), Settlement::Finished).unwrap();
+    assert_eq!(
+        ours.refresh().unwrap().orphaned,
+        [],
+        "none once it is settled"
+    );
 }
 
 fn a_directory_made_and_filled_in_one_change_is_undone_in_one<F: Facade>() {
