@@ -958,6 +958,9 @@ fn items(
         writes: Vec<(FieldKey, Ref, Hlc, Value)>,
         forced: BTreeMap<FieldKey, (Ref, Hlc, Value)>,
         uncertain: bool,
+        /// Whether it holds an entry other than a continuation, which alone has
+        /// no label to show.
+        labeled: bool,
     }
     let mut groups: BTreeMap<(ItemKind, EntryHash), Group> = BTreeMap::new();
     let beyond_f = |n: u64| w.beyond(n);
@@ -1056,6 +1059,7 @@ fn items(
                 writes: own,
                 forced,
                 uncertain: false,
+                labeled: true,
             },
         );
     }
@@ -1097,8 +1101,10 @@ fn items(
                 writes: Vec::new(),
                 forced: BTreeMap::new(),
                 uncertain: false,
+                labeled: false,
             });
             group.uncertain |= w.unsure.contains(&entry.hash());
+            group.labeled |= !matches!(entry.kind(), EntryKind::More(_));
             group.run.last = entry.own();
             group.entries += 1;
             group.span = widen(group.span, entry.at());
@@ -1128,7 +1134,8 @@ fn items(
                 .map(|(field, write)| (field.clone(), write.clone())),
         );
         let shown_empty = group.kind == ItemKind::Run && group.entries > 0;
-        if latest.is_empty() && !shown_empty {
+        let waiting = group.kind == ItemKind::Gap && !group.labeled;
+        if (latest.is_empty() && !shown_empty) || waiting {
             continue;
         }
         items.push(Item {
@@ -1693,6 +1700,83 @@ mod tests {
         assert!(
             run(&entries[3]).cover_tip(W, &tip, entries[2].n()),
             "the tip names it"
+        );
+    }
+
+    /// An intent of `W` after `prev` writing `k` to `value`, and its continuation
+    /// writing `j` to it.
+    fn continued_after(prev: &Entry, value: &str) -> [Rc<Entry>; 2] {
+        use crate::log::More;
+        let at = |n: u64| Hlc {
+            wall_ms: n * 10,
+            counter: 0,
+        };
+        let write = |key: &str| Op::Write {
+            entity: E,
+            key: key.into(),
+            value: Some(Raw::of(&value).unwrap()),
+            replaces: Vec::new(),
+            take: None,
+        };
+        let n = prev.n() + 1;
+        let intent = EntryKind::Intent(Logged {
+            label: "move".into(),
+            ops: vec![write("k")],
+            displaced: Vec::new(),
+            forks: Vec::new(),
+            more: 1,
+        });
+        let intent = Rc::new(Entry::encode(prev.hash(), n, at(n), intent).unwrap());
+        let more = EntryKind::More(More {
+            ops: vec![write("j")],
+            ..More::default()
+        });
+        let more = Rc::new(Entry::encode(intent.hash(), n + 1, at(n + 1), more).unwrap());
+        [intent, more]
+    }
+
+    fn from_lines(lines_seen: &[Rc<Entry>]) -> Derived {
+        let seen = Seen {
+            segments: vec![lines(lines_seen, false)],
+            snapshots: vec![],
+        };
+        derived(vec![(W, seen)], false)
+    }
+
+    #[test]
+    fn an_intent_merges_alone_and_its_continuation_after_it_as_if_both_came_at_once() {
+        let first = chain(W, &["a"]);
+        let [intent, more] = continued_after(&first[0], "b");
+        let whole = from_lines(&[Rc::clone(&first[0]), Rc::clone(&intent), Rc::clone(&more)]);
+        let alone = from_lines(&[Rc::clone(&first[0]), Rc::clone(&intent)]);
+        assert_eq!(
+            values(&alone),
+            ["b"],
+            "the intent merges without its continuation"
+        );
+        assert!(alone.items.is_empty());
+        let late = from_lines(&[Rc::clone(&first[0]), Rc::clone(&more), Rc::clone(&intent)]);
+        assert_eq!(late.folded, whole.folded);
+        let early = from_lines(&[Rc::clone(&first[0]), Rc::clone(&more)]);
+        assert_eq!(early.writers[&W].gaps, [Rc::clone(&more)], "held back");
+        assert!(
+            early.items.is_empty(),
+            "a continuation alone has no label to show"
+        );
+    }
+
+    #[test]
+    fn a_tip_folding_an_intent_and_its_continuation_merges_as_their_lines_do() {
+        let first = chain(W, &["a"]);
+        let [intent, more] = continued_after(&first[0], "b");
+        let chain_of = [Rc::clone(&first[0]), intent, more];
+        let tip = Seen {
+            segments: vec![],
+            snapshots: vec![folded(&chain_of)],
+        };
+        assert_eq!(
+            derived(vec![(W, tip)], false).folded,
+            from_lines(&chain_of).folded
         );
     }
 
