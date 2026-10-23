@@ -37,7 +37,7 @@ mod keeper;
 mod keys;
 mod mirror;
 pub mod names;
-mod shown;
+pub mod shown;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -55,6 +55,8 @@ mod worker;
 pub use web::{default_root, permission, Backend, Picked, Root};
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web::{remove_private, settle};
+#[cfg(target_arch = "wasm32")]
+pub use worker::Worker;
 
 /// The folder of this install's own state for a library that holds the slots' former
 /// occupants a write to the instrument leaves while the library is open.
@@ -116,6 +118,7 @@ pub use cache::keep_libraries;
 pub use cache::Cache;
 pub use exec::{opens, MOST_BYTES};
 pub use ids::Key;
+pub use keys::identity_of_bytes;
 pub use mirror::{Pass, Store};
 
 use std::sync::Arc;

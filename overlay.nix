@@ -456,11 +456,17 @@ let
       }
     );
 
-  # toshokan's browser suites, run headless by wasm-bindgen's test runner in
-  # Chromium and Firefox. Linux only: a macOS build user has no window server, and
-  # Firefox there fails to start a session.
-  # ⚠️ The runner ships with wasm-bindgen-cli and must match toshokan's wasm-bindgen pin.
-  toshokan-web =
+  # A crate's browser suites, run headless by wasm-bindgen's test runner in Chromium
+  # and Firefox. Linux only: a macOS build user has no window server, and Firefox there
+  # fails to start a session.
+  # ⚠️ The runner ships with wasm-bindgen-cli and must match the crates' wasm-bindgen pin.
+  browserSuites =
+    {
+      pname,
+      cargoExtraArgs,
+      tests,
+      version,
+    }:
     let
       browsers = {
         Chromium = "CHROMEDRIVER=${final.lib.getExe final.chromedriver}";
@@ -481,12 +487,12 @@ let
       );
       args = commonArgs // {
         CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
-        cargoExtraArgs = "--locked -p toshokan --features web";
+        cargoExtraArgs = "--locked ${cargoExtraArgs}";
         # ⚠️ nixpkgs' rustc links wasm with the system `lld` and bundles none.
         nativeBuildInputs = [ final.lld ];
-        pname = "toshokan-web";
-        inherit (manifests.toshokan) version;
+        inherit pname version;
       };
+      suites = concatStringsSep " " (map (test: "--test ${test}") tests);
     in
     crane.mkCargoDerivation (
       args
@@ -499,18 +505,37 @@ let
           mkdir -p "$HOME"
           ${concatStringsSep "\n" (
             mapAttrsToList (name: driver: ''
-              echo "toshokan's browser suites in ${name}"
-              env ${driver} cargo test $cargoExtraArgs --test backends --test effects --test web
+              echo "${pname} in ${name}"
+              env ${driver} cargo test $cargoExtraArgs ${suites}
             '') browsers
           )}
         '';
         cargoArtifacts = crane.buildDepsOnly args;
         doInstallCargoArtifacts = false;
         installPhaseCommand = ''touch "$out"'';
-        meta.description = "toshokan's suites in headless browsers";
+        meta.description = "${pname}: browser suites in headless browsers";
         nativeBuildInputs = args.nativeBuildInputs ++ [ final.wasm-bindgen-cli ];
       }
     );
+
+  toshokan-web = browserSuites {
+    pname = "toshokan-web";
+    cargoExtraArgs = "-p toshokan --features web";
+    tests = [
+      "backends"
+      "effects"
+      "web"
+    ];
+    inherit (manifests.toshokan) version;
+  };
+
+  # drawbar's library in the browser, kept by its worker.
+  drawbar-web-tests = browserSuites {
+    pname = "drawbar-web-tests";
+    cargoExtraArgs = "-p drawbar";
+    tests = [ "web" ];
+    inherit (manifests.drawbar) version;
+  };
 
   # The power-loss harness's workloads and checker, and the VM tests that crash
   # and replay real file systems under them. x86_64 Linux only: they need KVM.
@@ -726,7 +751,7 @@ in
     crates
     // crossed
     # Not in `all`: it starts browsers, and only on Linux.
-    // optionalAttrs final.stdenv.hostPlatform.isLinux { inherit toshokan-web; }
+    // optionalAttrs final.stdenv.hostPlatform.isLinux { inherit drawbar-web-tests toshokan-web; }
     # Not in `all`: each boots VMs, and replaying takes long.
     // optionalAttrs (final.stdenv.hostPlatform.system == "x86_64-linux") {
       toshokan-power-loss =
