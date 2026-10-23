@@ -32,7 +32,7 @@ use toshokan::blocking::{self, Backend, Library, Native};
 use toshokan::derive::{Derived, Placed};
 use toshokan::env::{ExactNames, PrefixIdentity, SeededRandom, TestClock};
 use toshokan::io::Capabilities;
-use toshokan::layout::SEGMENT_EXTENSION;
+use toshokan::layout::{SEGMENT_EXTENSION, WRITERS};
 use toshokan::line;
 use toshokan::log::{Entry, Own, Settlement};
 use toshokan::pending::{self, PendingRecord};
@@ -894,7 +894,7 @@ fn records(tree: &BTreeMap<String, Vec<u8>>) -> Result<Vec<RelPath>, String> {
     let mut named = Vec::new();
     for (path, bytes) in tree {
         let parts: Vec<&str> = path.split('/').collect();
-        let [ROOT, "writers", _, "pending", name] = parts[..] else {
+        let [ROOT, WRITERS, _, "pending", name] = parts[..] else {
             continue;
         };
         if !name.ends_with(".json") || pending::cut_short(bytes) {
@@ -910,7 +910,7 @@ fn records(tree: &BTreeMap<String, Vec<u8>>) -> Result<Vec<RelPath>, String> {
 fn round_trip(tree: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
     for (path, bytes) in tree {
         let parts: Vec<&str> = path.split('/').collect();
-        let [ROOT, "writers", _, name] = parts[..] else {
+        let [ROOT, WRITERS, _, name] = parts[..] else {
             continue;
         };
         if !name.ends_with(SEGMENT_EXTENSION) {
