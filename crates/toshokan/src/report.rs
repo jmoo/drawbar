@@ -268,7 +268,7 @@ pub struct PartialReport {
     /// commit reports it; empty in a settlement's assessment.
     pub landed: Vec<RelPath>,
     /// The library paths the finished steps took a file from, and the directories
-    /// they removed. Empty in a settlement's assessment.
+    /// they removed.
     pub taken: Vec<RelPath>,
 }
 

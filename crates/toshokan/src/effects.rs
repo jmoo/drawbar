@@ -1643,7 +1643,11 @@ pub(crate) fn predict(
             error,
             record: Some(name),
             landed: Vec::new(),
-            taken: Vec::new(),
+            taken: record.steps[..i]
+                .iter()
+                .filter_map(EffectStep::taken)
+                .cloned()
+                .collect(),
         });
     }
     Outcome::Complete
