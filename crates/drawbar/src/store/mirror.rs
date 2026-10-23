@@ -182,9 +182,11 @@ pub struct Store {
     /// The scan of every file that follows opening is in flight: the view lists no file
     /// yet.
     first_scan: bool,
-    /// The unsaved edits an earlier session kept, taken up once the first scan lists the
-    /// files they were made over.
+    /// The unsaved edits an earlier session kept, taken up once a scan lists the files
+    /// they were made over.
     drafts_found: Vec<toshokan::report::DraftStatus>,
+    /// Whether a scan of every file has listed the files since the library opened.
+    listed: bool,
     /// The changes other drawbars left unfinished that the last read found, by writer
     /// and record.
     unfinished: BTreeMap<(toshokan::WriterId, toshokan::Nonce), Unfinished>,
@@ -273,6 +275,7 @@ impl Store {
             scanning: false,
             first_scan: false,
             drafts_found: Vec::new(),
+            listed: false,
             unfinished: BTreeMap::new(),
             looked: 0.0,
             recheck: None,
@@ -1268,17 +1271,17 @@ impl Store {
                 self.phase = Phase::Failed(why);
             }
             Event::Scanned(Ok(viewed)) => {
+                let whole = viewed.dirs.is_some();
                 let moved = self.viewed(viewed, workspace, browser, queue, log);
                 self.moved.extend(moved);
-                if self.first_scan {
+                self.first_scan = false;
+                if whole && !self.listed {
                     self.listed_whole(workspace, browser, log);
                 }
                 return self.scanned(queue, workspace, log);
             }
             Event::Scanned(Err(why)) => {
-                if self.first_scan {
-                    self.listed_whole(workspace, browser, log);
-                }
+                self.first_scan = false;
                 self.scanning = false;
                 self.send_waits = false;
                 self.moved.clear();
@@ -1601,10 +1604,9 @@ impl Store {
         }
     }
 
-    /// Take in that the scan of every file that follows opening answered, whether it
-    /// listed them or failed.
+    /// Take in that a scan of every file listed them for the first time since opening.
     fn listed_whole(&mut self, workspace: &mut Workspace, browser: &mut Browser, log: &mut Log) {
-        self.first_scan = false;
+        self.listed = true;
         let drafts = std::mem::take(&mut self.drafts_found);
         self.take_drafts(drafts, workspace, log);
         // The count This computer's badge shows, said even at 0 to replace the last library's.
@@ -1715,7 +1717,8 @@ impl Store {
         if let (Some(standing), Phase::Open) = (unfinished, &self.phase) {
             self.found_unfinished(workspace.ctx().input(|input| input.time), standing);
         }
-        let first = self.shown.is_none();
+        // Until a scan has listed every file, what a view adds is what was there.
+        let first = !self.listed;
         for (from, to) in &moves {
             self.cache.moved(from, to);
         }

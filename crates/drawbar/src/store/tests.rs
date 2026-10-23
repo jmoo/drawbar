@@ -4133,6 +4133,50 @@ fn an_unsaved_edit_comes_back_after_a_quit() {
     assert!(entity.is_unsaved());
     assert!(second.bytes(id) == edited);
     assert_eq!(second.said("has the unsaved edit it had"), 1);
+    assert_eq!(second.said("appeared"), 0, "what was there is not news");
+}
+
+/// An unsaved edit waits out a first scan that failed, and comes back with the first
+/// that lists every file.
+#[cfg(unix)]
+#[test]
+fn an_unsaved_edit_waits_out_a_first_scan_that_failed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.sync();
+    let edited = first.edit(id, "96");
+    first.close();
+    // A file whose time moved has its identity read and kept, which a local root that
+    // cannot be written fails.
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+    let file = fs::File::options()
+        .write(true)
+        .open(root.at("untitled.ne5p"))
+        .unwrap();
+    file.set_modified(later).unwrap();
+    let mode = |mode| fs::set_permissions(root.local(), fs::Permissions::from_mode(mode));
+    mode(0o555).unwrap();
+
+    let mut second = Session::listed(&root);
+    mode(0o755).unwrap();
+    assert_eq!(
+        second.said("reading the library again"),
+        1,
+        "the first scan failed"
+    );
+    assert_eq!(
+        second.said("on this computer."),
+        0,
+        "no count of files unlisted"
+    );
+    second.settle();
+    second.read_all();
+    let id = second.only();
+    assert!(second.bench.workspace.get(id).unwrap().is_unsaved());
+    assert!(second.bytes(id) == edited);
 }
 
 /// The autosave keeps an unsaved edit as a draft, so a drawbar stopped without a quit
@@ -4202,6 +4246,7 @@ fn a_slot_views_unsaved_edit_comes_back_when_the_slot_is_viewed_again() {
     assert!(second.bench.workspace.get(id).unwrap().is_unsaved());
     assert!(second.bytes(id) == edited);
     assert_eq!(second.said("has the unsaved edit it had"), 1);
+    assert_eq!(second.said("appeared"), 0, "what was there is not news");
 }
 
 /// The autosave keeps a slot view's unsaved edit, so a drawbar stopped without a quit
