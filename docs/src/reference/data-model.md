@@ -493,7 +493,7 @@ reads files and makes folders through `exec::Fs` (`store/native.rs`).
 
 | Command | Answered by |
 |---|---|
-| `Open` | `Opened`: whether the library may be written, the view after a scan of every file, the drafts an earlier session kept, and how many changes a restored folder no longer holds. |
+| `Open` | `Opened`: whether the library may be written, the view after a scan of every file, and the drafts an earlier session kept. |
 | `Rescan` | `Scanned`: what other drawbars wrote, and every file scanned again. |
 | `Refresh` | `Scanned`: what other drawbars wrote, scanning only the files their entries moved. |
 | `Intent` | A change to a file answers `Saved`, `Rewritten`, `Imported`, `Moved` or, for a delete that failed, `Failed`; then every intent answers `Committed`, with the view after it and whether it was made. |
@@ -618,10 +618,9 @@ wrote. Several drawbars may write one library at once, so another drawbar's open
 makes none read-only. Changes in a read-only library are held in memory only.
 
 Facts this install showed that no file in the folder holds now, as after a
-restore of the folder from a backup, are let go at open: the folder wins, and the
-log says so once. They are let go only where every writer whose entries went still
-has its directory in the folder; otherwise the folder may not have synced yet,
-and they stay.
+restore of the folder from a backup, stay shown: the folder may not have synced
+yet. toshokan lets them go once they have stood for `GRACE_MS`, a day, and a scan
+of every file has finished since (`Library::rescan`).
 
 An effect interrupted by a crash, of this instance's writer or an idle one of
 this install, is finished at open. One another install left is asked about:

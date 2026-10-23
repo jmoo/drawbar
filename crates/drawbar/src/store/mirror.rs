@@ -903,6 +903,12 @@ impl Store {
         self.backend.fault(fault);
     }
 
+    /// Move the library's clock `ms` ahead.
+    #[cfg(test)]
+    pub fn pass(&self, ms: u64) {
+        self.backend.pass(ms);
+    }
+
     /// Ask, once, whether to close and reopen a library that has stopped answering.
     fn watch(&mut self, browser: &mut Browser) {
         match self.stalled() {
@@ -1637,7 +1643,6 @@ impl Store {
             writable,
             viewed,
             drafts,
-            let_go,
             ignored,
             trouble,
         } = opened;
@@ -1663,16 +1668,6 @@ impl Store {
         };
         self.viewed(viewed, workspace, browser, queue, log);
         self.drafts_found = drafts;
-        if let_go > 0 {
-            log.say(format!(
-                "The library folder no longer holds {} this computer showed, as after a \
-                 restore from a backup; drawbar shows the folder as it is.",
-                match let_go {
-                    1 => "1 change".to_string(),
-                    n => format!("{n} changes"),
-                }
-            ));
-        }
         if self.opened() {
             self.first_scan = true;
             self.rescan();

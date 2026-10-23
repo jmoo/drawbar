@@ -4777,10 +4777,11 @@ fn a_tagged_file_saved_then_moved_outside_keeps_its_tags() {
     assert_eq!(tagged(&session), [wears("kept.ne5p", &["Sunday"])]);
 }
 
-/// A library folder restored from a backup wins: what this computer showed of changes
-/// the backup does not hold is let go at the next open, which says so once.
+/// What a folder restored from a backup no longer holds stays shown for a day and a scan
+/// of every file, as while a sync has not brought it yet, and then the folder is shown
+/// as it is.
 #[test]
-fn a_folder_restored_from_a_backup_is_shown_as_it_is() {
+fn a_folder_restored_from_a_backup_is_shown_as_it_is_a_day_later() {
     let root = Temp::new();
     let mut first = Session::open(&root);
     first.create();
@@ -4794,12 +4795,17 @@ fn a_folder_restored_from_a_backup_is_shown_as_it_is() {
     fs::remove_dir_all(&root.0).unwrap();
     copy_tree(&backup.0, &root.0);
 
-    let third = Session::listed(&root);
+    let mut third = Session::listed(&root);
+    let shown = tagged(&third);
+    assert!(
+        matches!(&shown[..], [(_, worn)] if worn == &["Sunday"]),
+        "still shown: {shown:?}"
+    );
+    third.settle();
+    assert_eq!(tagged(&third), shown, "still shown before a day passes");
+    third.store.pass(toshokan::reader::GRACE_MS);
+    third.settle();
     assert_eq!(tagged(&third), Vec::<(String, Vec<String>)>::new());
-    assert_eq!(third.said("no longer holds"), 1);
-    third.close();
-    let fourth = Session::listed(&root);
-    assert_eq!(fourth.said("no longer holds"), 0, "said once");
 }
 
 /// A file another drawbar tagged since this one last looked is tagged again on the
@@ -5513,41 +5519,6 @@ impl Session {
         session.opened();
         session
     }
-}
-
-/// What another install wrote and this computer showed is kept while the folder lacks
-/// that drawbar's history entirely, as while a sync has not brought it yet: only a
-/// folder that holds the history without those changes was restored.
-#[test]
-fn changes_a_sync_has_not_brought_yet_are_not_let_go() {
-    let root = Temp::new();
-    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-    let other = Temp::new();
-    let mut theirs = Session::elsewhere(&root, &other);
-    let grand = theirs.named("Grand.ne5p");
-    theirs.tag(&[grand], "Sunday");
-    theirs.close();
-    let mut ours = Session::listed(&root);
-    ours.refresh();
-    assert_eq!(tagged(&ours), [wears("Grand.ne5p", &["Sunday"])]);
-    ours.make_tag("Spare");
-    ours.close();
-    // Their writer's id is in their install's own state.
-    let genesis = fs::read_dir(&other.0)
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    let head = fs::read_to_string(genesis.join("head.json")).unwrap();
-    let id = head.split('"').nth(3).unwrap().to_string();
-    let held = Temp::new();
-    let theirs_dir = root.at(&format!(".drawbar/library/writers.2/{id}"));
-    fs::rename(&theirs_dir, held.0.join(&id)).unwrap();
-
-    let ours = Session::listed(&root);
-    assert_eq!(ours.said("no longer holds"), 0, "nothing is let go");
-    assert_eq!(tagged(&ours), [wears("Grand.ne5p", &["Sunday"])]);
 }
 
 /// An unsaved edit kept of a file by its path comes back though another drawbar made

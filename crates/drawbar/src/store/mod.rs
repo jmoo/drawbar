@@ -804,9 +804,6 @@ pub struct Opened {
     /// The unsaved edits an earlier session kept, each with whether its file still holds
     /// what the edit was made over.
     pub drafts: Vec<toshokan::report::DraftStatus>,
-    /// How many changes this install showed that the folder no longer holds, as after a
-    /// restore of the folder from a backup, which opening let go of: the folder wins.
-    pub let_go: usize,
     /// How many pending records of other writers opening could not read.
     pub ignored: usize,
     /// What opening tried to tidy and could not: finishing a change a crash or

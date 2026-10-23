@@ -156,8 +156,9 @@ bring back any you deleted.
   are lost, and drawbar names them. If the library stops altogether, drawbar
   closes it and says so; **File ▸ Open recent library** opens it again.
 - **Restored from a backup.** When the library folder no longer holds changes
-  drawbar showed before, as after a restore from a backup, drawbar shows the
-  folder as it is and says so.
+  drawbar showed before, as after a restore from a backup, drawbar keeps showing
+  them for a day, in case a sync has not brought them yet. After that, and once
+  drawbar has looked at every file again, it shows the folder as it is.
 - **Missing.** The file was deleted outside drawbar, but it had tags or unsaved
   edits, or came from your keyboard. Save it to bring the file back, or delete it.
   After a restart, a missing file with tags shows as lost, with its tags, until

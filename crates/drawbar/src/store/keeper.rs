@@ -13,7 +13,7 @@ use toshokan::asynch::{Filling as Filled, Fs, Library, Source as Filler, Staging
 use toshokan::error::Refusal;
 use toshokan::io::{IoError, Kind, Range, Root};
 use toshokan::log::Settlement;
-use toshokan::report::{By, Mode, Refreshed};
+use toshokan::report::{Mode, Refreshed};
 use toshokan::{EntryHash, Env, Error, Expect, Policy, RelPath, View};
 
 use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES};
@@ -271,8 +271,6 @@ impl<F: Fs> Keeper<F> {
             Mode::ReadOnly(why) => Err(why.to_string()),
         };
         let mut trouble = Vec::new();
-        // TRIAL: toshokan lets go of what a restore took by itself (D12).
-        let let_go = 0;
         if writable.is_ok() {
             // Also what a crash may have torn from the end of this writer's log, which
             // opening does not report.
@@ -293,7 +291,6 @@ impl<F: Fs> Keeper<F> {
             writable,
             viewed,
             drafts: opened.drafts,
-            let_go,
             ignored: opened.ignored.len(),
             trouble,
         })
