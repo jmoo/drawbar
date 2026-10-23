@@ -1410,8 +1410,58 @@ fn main() {
                 gen.writers[0].entries,
                 len as f64 / gen.writers[0].entries as f64
             );
+            let read = raw.perform(Io::Read {
+                root: Root::Folder,
+                path: path.clone(),
+                range: Range { offset: 0, len },
+            });
+            if let Ok(Reply::Bytes(bytes)) = read {
+                if let Ok(snapshot) = Snapshot::decode(&bytes) {
+                    println!("  {}", split(&snapshot));
+                }
+            }
         }
     }
+}
+
+/// What a snapshot holds, by part: its own writes, with those no reader can
+/// show, its references, kills and certificates.
+fn split(snapshot: &Snapshot) -> String {
+    use toshokan::contribution::Value;
+    let state = &snapshot.state;
+    let deleted: Vec<_> = state
+        .own
+        .iter()
+        .filter(|(field, held)| field.is_exist() && held.value == Value::Exist(false))
+        .map(|(field, _)| field.entity())
+        .collect();
+    let mut removes = 0;
+    let mut clears = 0;
+    let mut of_deleted = 0;
+    for (field, held) in &state.own {
+        match held.value {
+            Value::Member(false) => removes += 1,
+            Value::Register(None) => clears += 1,
+            _ => {}
+        }
+        if !field.is_exist() && deleted.contains(&field.entity()) {
+            of_deleted += 1;
+        }
+    }
+    let certified = &snapshot.certified;
+    format!(
+        "own writes {} (removes {removes}, clears {clears}, killed {}, of deleted entities {of_deleted}); \
+         references {}; takes {}; dismissals {}; trash {}; certificates: segments {}, heads {}, hashes {}",
+        state.own.len(),
+        state.killed.len(),
+        state.refs.len(),
+        state.takes.len(),
+        state.dismissals.len(),
+        state.trash.len(),
+        certified.segments.len(),
+        certified.heads.len(),
+        certified.hashes.len(),
+    )
 }
 
 /// Reports a failure without stopping the run, so later operations still run.
