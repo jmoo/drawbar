@@ -17,7 +17,7 @@ use super::diff;
 use super::drafts::Draft;
 use super::exec::too_much;
 use super::ids::Ids;
-use super::keys::{Came, TAGS};
+use super::keys::{Came, TAGS, TAG_NAMES};
 use super::shown::Shown;
 use super::{
     names, Backend, Cmd, CopyOf, Event, Failure, Fingerprint, Found, Holds, Intent, Key, LibPath,
@@ -190,6 +190,8 @@ pub struct Store {
     patience: std::time::Duration,
     /// Whether the user was asked about the command that shows no life now.
     asked_stalled: bool,
+    /// The runs of changes kept apart the log has told of.
+    kept_runs: BTreeSet<toshokan::log::Run>,
     /// The unsaved edits an earlier session kept, taken up once a scan lists the files
     /// they were made over.
     drafts_found: Vec<toshokan::report::DraftStatus>,
@@ -284,6 +286,7 @@ impl Store {
             first_scan: false,
             patience: PATIENCE,
             asked_stalled: false,
+            kept_runs: BTreeSet::new(),
             drafts_found: Vec::new(),
             listed: false,
             unfinished: BTreeMap::new(),
@@ -1763,6 +1766,77 @@ impl Store {
         }
     }
 
+    /// Take each of `changes` the library keeps apart in `run`, or every one where
+    /// none is named, as one change undo takes back.
+    pub fn take_kept(&mut self, run: toshokan::log::Run, changes: Vec<super::KeptKey>) {
+        if !self.open() {
+            return;
+        }
+        let intent = Intent::Take { run, changes };
+        self.committing += 1;
+        self.answering.push_back(Step::Change(intent.describe()));
+        self.send(Cmd::Intent(intent));
+    }
+
+    /// Never show or merge the changes the library keeps apart in `run` again.
+    pub fn dismiss_kept(&mut self, run: toshokan::log::Run) {
+        if !self.open() {
+            return;
+        }
+        let intent = Intent::Dismiss { run };
+        self.committing += 1;
+        self.answering.push_back(Step::Change(intent.describe()));
+        self.send(Cmd::Intent(intent));
+    }
+
+    /// Show what the library keeps apart, and say once that each new run of it is.
+    fn keep_apart(
+        &mut self,
+        kept: Vec<super::KeptApart>,
+        workspace: &Workspace,
+        browser: &mut Browser,
+        log: &mut Log,
+    ) {
+        let runs: BTreeSet<toshokan::log::Run> = kept.iter().map(|kept| kept.run).collect();
+        for kept in kept
+            .iter()
+            .filter(|kept| !self.kept_runs.contains(&kept.run))
+        {
+            log.say(format!(
+                "{} {} kept apart from the library: see Kept apart.",
+                crate::strings::counted(kept.changes.len(), "change", "changes"),
+                match kept.changes.len() {
+                    1 => "is",
+                    _ => "are",
+                },
+            ));
+        }
+        self.kept_runs = runs;
+        browser.folders.kept = kept
+            .iter()
+            .map(|kept| crate::folders::Kept {
+                kind: kept.kind,
+                run: kept.run,
+                title: kept_title(kept),
+                rows: kept
+                    .changes
+                    .iter()
+                    .map(|change| {
+                        let id = self.ids.id(&Key::Entity(change.entity));
+                        let name = id.and_then(|id| workspace.get(id)).map(|e| e.name.clone());
+                        crate::folders::KeptRow {
+                            key: (change.entity, change.what.clone()),
+                            id,
+                            said: kept_said(name.as_deref(), &change.what, &change.takes),
+                            takes: change.takes.is_some(),
+                            forgotten: change.forgotten,
+                        }
+                    })
+                    .collect(),
+            })
+            .collect();
+    }
+
     /// Settle as `how` says a change another drawbar left unfinished.
     pub fn settle_unfinished(
         &mut self,
@@ -1796,6 +1870,7 @@ impl Store {
             undone,
             unlisted,
             unfinished,
+            kept,
         } = viewed;
         if let (Some(standing), Phase::Open) = (unfinished, &self.phase) {
             self.found_unfinished(workspace.ctx().input(|input| input.time), standing);
@@ -1837,6 +1912,7 @@ impl Store {
         }
         self.lose(&shown, workspace, browser);
         self.project_tags(&shown, browser);
+        self.keep_apart(kept, workspace, browser, log);
         if !first {
             self.attribute(&changes, workspace, log);
         }
@@ -3705,12 +3781,96 @@ fn rescue_url(_: &Rescue) -> Option<String> {
     None
 }
 
+/// Who made what [`super::KeptApart`] keeps apart, and when.
+fn kept_title(kept: &super::KeptApart) -> String {
+    use toshokan::report::By;
+    let who = match &kept.by {
+        By::Writer { label, .. } => format!("Another {label}"),
+        By::This | By::Outside => "This drawbar".to_string(),
+    };
+    let (first, last) = (day(kept.span.0), day(kept.span.1));
+    let when = match first == last {
+        true => format!("on {first}"),
+        false => format!("between {first} and {last}"),
+    };
+    let what = match kept.kind {
+        super::KeptKind::Run => "made these changes on a branch of its own",
+        super::KeptKind::Gap => "made these changes after ones that have not synced yet",
+        super::KeptKind::Unplaced => "made these changes in a version a sync dropped",
+    };
+    format!("{who} {what} {when}")
+}
+
+/// What one change kept apart does, to the asset named `name` where the window holds it.
+fn kept_said(name: Option<&str>, what: &What, does: &Option<super::KeptDo>) -> String {
+    use super::KeptDo;
+    if *what == What::Field(TAG_NAMES.name().to_string()) {
+        return match does {
+            Some(KeptDo::Gain(tag)) => format!("The library's list of tags gains “{tag}”"),
+            Some(KeptDo::Lose(tag)) => format!("The library's list of tags loses “{tag}”"),
+            _ => "The library's list of tags changes".to_string(),
+        };
+    }
+    let asset = name.map_or("An asset the library does not show".to_string(), |name| {
+        format!("“{name}”")
+    });
+    let field = match what {
+        What::Field(key) if key == TAGS.name() => "tag",
+        What::Field(key) => key.as_str(),
+        What::Created | What::Deleted | What::File => "",
+    };
+    match (what, does) {
+        (What::Created, _) | (_, Some(KeptDo::Revive)) => format!("{asset} is made"),
+        (What::Deleted, _) | (_, Some(KeptDo::Delete)) => format!("{asset} is removed"),
+        (What::File, _) | (_, Some(KeptDo::File)) => format!("{asset}: its file moves"),
+        (_, Some(KeptDo::Gain(value))) => format!("{asset} gains the {field} “{value}”"),
+        (_, Some(KeptDo::Lose(value))) => format!("{asset} loses the {field} “{value}”"),
+        (_, Some(KeptDo::Set(value))) => format!("{asset}: its {field} becomes “{value}”"),
+        (_, Some(KeptDo::Clear)) => format!("{asset}: its {field} is cleared"),
+        (What::Field(_), None) => format!("{asset}: its {field} changes"),
+    }
+}
+
+/// The day `ms` milliseconds after the Unix epoch falls on, as "21 Oct 2026" says it.
+fn day(ms: u64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    // Days to a civil date, as Howard Hinnant's `civil_from_days` counts them.
+    let days = (ms / 86_400_000) as i64 + 719_468;
+    let era = days.div_euclid(146_097);
+    let of_era = days - era * 146_097;
+    let year_of_era = (of_era - of_era / 1460 + of_era / 36_524 - of_era / 146_096) / 365;
+    let of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted = (5 * of_year + 2) / 153;
+    let day = of_year - (153 * shifted + 2) / 5 + 1;
+    let month = if shifted < 10 {
+        shifted + 3
+    } else {
+        shifted - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!("{day} {} {year}", MONTHS[(month - 1) as usize])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn entry(n: u128) -> toshokan::EntryHash {
         toshokan::EntryHash::from_u128(n)
+    }
+
+    #[test]
+    fn a_day_is_named_by_its_civil_date_in_utc() {
+        assert_eq!(day(0), "1 Jan 1970");
+        assert_eq!(day(951_868_800_000), "1 Mar 2000");
+        assert_eq!(
+            day(1_709_251_199_000),
+            "29 Feb 2024",
+            "the last second of a leap day"
+        );
+        assert_eq!(day(1_792_713_600_000), "23 Oct 2026");
     }
 
     /// A step whose undo needs what the trash let go goes, with every step behind it,

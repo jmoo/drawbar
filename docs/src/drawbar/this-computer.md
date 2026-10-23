@@ -132,6 +132,38 @@ changed while you had unsaved edits to it, drawbar asks what to do:
 A sound that changed on disk is not sent to the instrument until you have looked
 at it.
 
+## Kept apart
+
+drawbar keeps a history of the changes made to a library, such as tags added and
+files renamed, so that every computer sharing the folder agrees on them.
+Sometimes part of that history cannot be merged with the rest. **Kept apart**
+then appears in the sidebar, and the activity log says so once. Click it to see
+each group of changes: who made them, when, and what each one does.
+
+This happens when:
+
+- drawbar's own data was copied to a second computer, and both copies went on
+  making changes. Each copy's changes are a branch of their own.
+- A sync has brought later changes before the earlier ones they follow. These
+  wait until the rest arrives and are merged then, so there is nothing to do
+  with them.
+- A sync replaced part of the history with an older version, leaving changes
+  only that version holds.
+
+Nothing kept apart changes your library until you choose to:
+
+- **Take** makes one change. **Take all** makes every change in the group. Each
+  is one step that **Edit ▸ Undo** takes back.
+- **Dismiss…** stops showing a branch, on this computer and every other. It
+  cannot be undone.
+- **Show file** shows the sound a change moved, which cannot be taken.
+
+A change marked as settling a value no one holds now replaced something every
+computer has since let go of. Taking it is the only way to make it.
+
+When you select a sound with changes kept apart, the inspector says so and
+links to them.
+
 ## Demo sounds
 
 **Start with a demo** on the welcome sheet (**Help ▸ Welcome**) downloads a tine

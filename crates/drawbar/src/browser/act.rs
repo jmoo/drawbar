@@ -247,6 +247,16 @@ pub enum Act {
     Rescue(crate::store::Rescue, Rescuing),
     /// Settle a change another drawbar left unfinished.
     Settle(toshokan::report::Orphan, toshokan::log::Settlement),
+    /// Show the changes the library keeps apart.
+    ShowKept,
+    /// Take each of `changes` the library keeps apart in `run`, or every one it can where
+    /// none is named, as one change.
+    TakeKept {
+        run: toshokan::log::Run,
+        changes: Vec<crate::store::KeptKey>,
+    },
+    /// Never show or merge the changes the library keeps apart in `run` again.
+    DismissKept(toshokan::log::Run),
     /// Nothing happened, and this is why.
     Refused(String),
 }
@@ -358,6 +368,9 @@ impl Act {
             | Act::ReopenLibrary
             | Act::Rescue(..)
             | Act::Settle(..)
+            | Act::ShowKept
+            | Act::TakeKept { .. }
+            | Act::DismissKept(_)
             | Act::Refused(_) => Vec::new(),
         }
     }
@@ -799,7 +812,10 @@ pub fn apply(
             | Act::OpenLibraryDiscarding(_)
             | Act::ReopenLibrary
             | Act::Rescue(..)
-            | Act::Settle(..) => {}
+            | Act::Settle(..)
+            | Act::TakeKept { .. }
+            | Act::DismissKept(_) => {}
+            Act::ShowKept => browser.show_kept = true,
         }
     }
 }

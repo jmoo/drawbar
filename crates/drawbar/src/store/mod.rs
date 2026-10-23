@@ -633,6 +633,15 @@ pub enum Intent {
     },
     /// End an entity whose file is gone.
     Forget { entity: EntityId },
+    /// Take changes another branch of a writer's history made, which are kept apart
+    /// from the library ([`KeptApart`]): each of `changes`, or every one it can take
+    /// where none is named.
+    Take {
+        run: toshokan::log::Run,
+        changes: Vec<KeptKey>,
+    },
+    /// Never show or merge the changes of `run` again, nor those after it.
+    Dismiss { run: toshokan::log::Run },
     /// Write a file whole: a new one where `expect` is [`toshokan::Expect::Absent`],
     /// with an entity saying where it came from where `came` says. Answered by
     /// [`Event::Saved`].
@@ -733,7 +742,9 @@ impl Intent {
             | Intent::MakeDir { path }
             | Intent::RemoveDir { path }
             | Intent::MoveFolder { from: path, .. } => named(path),
-            Intent::Forget { .. } => self.label().to_string(),
+            Intent::Forget { .. } | Intent::Take { .. } | Intent::Dismiss { .. } => {
+                self.label().to_string()
+            }
         }
     }
 
@@ -747,6 +758,8 @@ impl Intent {
             Intent::RenameTag { .. } => "Rename tag",
             Intent::RemoveTag { .. } => "Remove tag",
             Intent::Forget { .. } => "Forget",
+            Intent::Take { .. } => "Take kept-apart changes",
+            Intent::Dismiss { .. } => "Dismiss kept-apart changes",
             Intent::Save {
                 expect: toshokan::Expect::Absent,
                 ..
@@ -792,6 +805,105 @@ impl Intent {
     }
 }
 
+/// Changes a reader shows apart from the library rather than merging them: a branch of
+/// a writer's history two computers or a copied install continued, entries waiting for
+/// the one before them, or a version a sync client dropped.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct KeptApart {
+    pub kind: KeptKind,
+    pub run: toshokan::log::Run,
+    pub by: toshokan::report::By,
+    /// When its entries were made, earliest and latest, in milliseconds since the Unix
+    /// epoch.
+    pub span: (u64, u64),
+    pub changes: Vec<KeptChange>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum KeptKind {
+    /// A branch of a writer's history: its changes may be taken, or it dismissed.
+    Run,
+    /// Entries waiting for an earlier one to sync, merged once it does.
+    Gap,
+    /// A version of a writer's history a sync client dropped: its changes may be
+    /// taken.
+    Unplaced,
+}
+
+/// What a change kept apart does to its field.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub enum KeptDo {
+    Gain(String),
+    Lose(String),
+    Set(String),
+    Clear,
+    Delete,
+    Revive,
+    /// Says where the entity's file is.
+    File,
+}
+
+impl KeptDo {
+    fn of(change: &toshokan::plan::FactChange) -> KeptDo {
+        use toshokan::plan::FactChange;
+        let text = |raw: &toshokan::Raw| {
+            serde_json::from_str::<String>(raw.as_str()).unwrap_or_else(|_| raw.as_str().into())
+        };
+        match change {
+            FactChange::Add { value, .. } => KeptDo::Gain(text(value)),
+            FactChange::Remove { value, .. } => KeptDo::Lose(text(value)),
+            FactChange::Set { value, .. } => KeptDo::Set(text(value)),
+            FactChange::Clear { .. } => KeptDo::Clear,
+            FactChange::Delete { .. } => KeptDo::Delete,
+            FactChange::Revive { .. } => KeptDo::Revive,
+            FactChange::File { .. } => KeptDo::File,
+        }
+    }
+}
+
+/// Which change of a [`KeptApart`] an [`Intent::Take`] takes.
+pub type KeptKey = (EntityId, toshokan::report::What);
+
+/// One change a [`KeptApart`] would make.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct KeptChange {
+    pub entity: EntityId,
+    pub what: toshokan::report::What,
+    /// What it does to the field, where a take can make it: a value gained, lost or
+    /// set. A change to where a file is cannot be taken, as only a file effect writes
+    /// that.
+    pub takes: Option<KeptDo>,
+    /// Shown whatever the library holds: it replaced a value no reader holds any more,
+    /// so only taking it settles it.
+    pub forgotten: bool,
+}
+
+impl KeptApart {
+    pub fn of(item: &toshokan::report::Item) -> KeptApart {
+        use toshokan::report::ItemKind;
+        KeptApart {
+            kind: match item.kind {
+                ItemKind::Run => KeptKind::Run,
+                ItemKind::Gap => KeptKind::Gap,
+                ItemKind::Unplaced => KeptKind::Unplaced,
+            },
+            run: item.run,
+            by: item.by.clone(),
+            span: (item.span.0.wall_ms, item.span.1.wall_ms),
+            changes: item
+                .changes
+                .iter()
+                .map(|change| KeptChange {
+                    entity: change.entity,
+                    what: change.what.clone(),
+                    takes: change.change.as_ref().map(KeptDo::of),
+                    forgotten: change.forgotten,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// What opening found.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Opened {
@@ -832,6 +944,8 @@ pub struct Viewed {
     /// The changes other installs' drawbars left unfinished as they stand now, which the
     /// user settles, where the answer read them.
     pub unfinished: Option<Vec<toshokan::report::Orphan>>,
+    /// The changes the library keeps apart, as the view after the answer shows them.
+    pub kept: Vec<KeptApart>,
 }
 
 /// A fault a test makes the library's thread or worker show.

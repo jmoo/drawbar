@@ -31,6 +31,19 @@ impl Session {
         Session::within(root, MOST_BYTES)
     }
 
+    /// [`Session::open`], with this install's own state for the library at `local`.
+    fn open_at(root: &Temp, local: &std::path::Path) -> Session {
+        let bench = Bench::new();
+        let backend = Backend::start(&bench.ctx, root.0.clone(), local.to_path_buf());
+        let mut session = Session {
+            store: Store::start(backend),
+            bench,
+        };
+        session.opened();
+        session.read_all();
+        session
+    }
+
     /// [`Session::listed`], holding at most `budget` bytes whole.
     fn within(root: &Temp, budget: u64) -> Session {
         let bench = Bench::new();
@@ -5609,4 +5622,174 @@ fn a_save_behind_a_refused_rename_writes_the_file_where_it_is() {
         root.read("a.ne5p") == edited,
         "the save landed where the file is"
     );
+}
+
+/// The library in `root` with an asset tagged “New”, open in two sessions that write as
+/// one writer, as a copied install does: the first tags it “Here”, the second “There”,
+/// and each has read what the other did. Each branch of the writer's history shows as
+/// changes kept apart. Returns the sessions, the asset's id in each, and the copy.
+fn forked(root: &Temp) -> (Session, Session, u64, u64, Temp) {
+    let mut first = Session::open(root);
+    let id = first.create();
+    first.sync();
+    first.tag(&[id], "New");
+    first.close();
+    let copy = Temp::new();
+    copy_tree(&root.local(), &copy.0);
+    let mut here = Session::open(root);
+    let mut there = Session::open_at(root, &copy.0);
+    let (at_here, at_there) = (here.only(), there.only());
+    here.tag(&[at_here], "Here");
+    there.tag(&[at_there], "There");
+    here.settle();
+    there.settle();
+    (here, there, at_here, at_there, copy)
+}
+
+impl Session {
+    /// The run kept apart that holds a change described as `said` says.
+    fn kept(&self, said: &str) -> crate::folders::Kept {
+        let kept = self.bench.browser.folders.kept.iter();
+        let mut found = kept.filter(|kept| kept.rows.iter().any(|row| row.said.contains(said)));
+        found
+            .next()
+            .cloned()
+            .unwrap_or_else(|| panic!("{said:?} in {:?}", self.bench.browser.folders.kept))
+    }
+
+    fn take_kept(&mut self, run: toshokan::log::Run, changes: Vec<KeptKey>) {
+        self.store.take_kept(run, changes);
+        self.decided();
+    }
+
+    /// Dismiss `run` as Kept apart does: asked first, then dismissed.
+    fn dismiss_kept(&mut self, run: toshokan::log::Run) {
+        self.bench.browser.ask_dismiss_kept(run);
+        let acts = self.bench.browser.answer("Discard");
+        assert!(
+            matches!(&acts[..], [crate::browser::Act::DismissKept(asked)] if *asked == run),
+            "{acts:?}"
+        );
+        self.store.dismiss_kept(run);
+        self.decided();
+    }
+}
+
+/// Two sessions writing as one writer fork its history: each branch shows as changes
+/// kept apart, merged into neither, and the log says so once.
+#[test]
+fn a_forked_writers_branches_show_as_changes_kept_apart() {
+    let root = Temp::new();
+    let (here, there, at_here, at_there, _copy) = forked(&root);
+    for (session, id) in [(&here, at_here), (&there, at_there)] {
+        let kept = &session.bench.browser.folders.kept;
+        assert_eq!(kept.len(), 2, "one per branch: {kept:?}");
+        assert!(kept.iter().all(|kept| kept.kind == KeptKind::Run));
+        assert_eq!(session.worn(id), ["New"], "neither branch is merged");
+        assert_eq!(session.said("kept apart from the library"), 2);
+    }
+    let kept = here.kept("gains the tag “Here”");
+    let mut said: Vec<&str> = kept.rows.iter().map(|row| row.said.as_str()).collect();
+    said.sort();
+    assert_eq!(
+        said,
+        [
+            "The library's list of tags gains “Here”",
+            "“untitled.ne5p” gains the tag “Here”"
+        ]
+    );
+    let row = kept.rows.iter().find(|row| row.id.is_some()).unwrap();
+    assert_eq!(row.id, Some(at_here));
+    assert!(row.takes);
+    assert!(kept.title.starts_with("Another drawbar"), "{}", kept.title);
+}
+
+/// Taking one change kept apart makes it, as one change undo takes back.
+#[test]
+fn a_change_kept_apart_is_taken_and_undone() {
+    let root = Temp::new();
+    let (mut here, _there, at_here, _, _copy) = forked(&root);
+    let kept = here.kept("gains the tag “Here”");
+    let row = kept
+        .rows
+        .iter()
+        .find(|row| row.id == Some(at_here))
+        .unwrap();
+    here.take_kept(kept.run, vec![row.key.clone()]);
+    assert_eq!(here.worn(at_here), ["Here", "New"]);
+    here.undo();
+    assert_eq!(here.worn(at_here), ["New"], "undone");
+}
+
+/// Taking all of a run's changes makes each, and dismissing a run leaves it shown to no
+/// reader again.
+#[test]
+fn changes_kept_apart_are_taken_whole_or_dismissed_for_every_reader() {
+    let root = Temp::new();
+    let (mut here, mut there, at_here, at_there, _copy) = forked(&root);
+    let theirs = here.kept("gains the tag “There”");
+    here.take_kept(theirs.run, Vec::new());
+    assert_eq!(here.worn(at_here), ["New", "There"]);
+    let ours = here.kept("gains the tag “Here”");
+    here.dismiss_kept(ours.run);
+    assert!(
+        !here
+            .bench
+            .browser
+            .folders
+            .kept
+            .iter()
+            .any(|kept| kept.run == ours.run),
+        "dismissed"
+    );
+    there.settle();
+    assert!(
+        !there
+            .bench
+            .browser
+            .folders
+            .kept
+            .iter()
+            .any(|kept| kept.run == ours.run),
+        "dismissed for the other reader too"
+    );
+    assert_eq!(there.worn(at_there), ["New", "There"]);
+}
+
+/// What another drawbar logged after a part of its history the folder does not hold yet
+/// waits apart, with nothing to take, and is merged once that part arrives.
+#[test]
+fn changes_after_history_a_sync_has_not_brought_wait_apart_until_it_does() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let other = Temp::new();
+    let mut theirs = Session::elsewhere(&root, &other);
+    let grand = theirs.named("Grand.ne5p");
+    theirs.tag(&[grand], "Sunday");
+    theirs.close();
+    let mut theirs = Session::elsewhere(&root, &other);
+    let grand = theirs.named("Grand.ne5p");
+    theirs.tag(&[grand], "Monday");
+    theirs.settle();
+    let writers = fs::read_dir(root.at(".drawbar/library/writers.2")).unwrap();
+    let writer = writers.map(|entry| entry.unwrap().path()).next().unwrap();
+    let snapshot = fs::read_dir(&writer)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|file| file.extension().is_some_and(|ext| ext == "json"))
+        .expect("the snapshot the first session left");
+    let held = Temp::new();
+    let away = held.0.join("snapshot.json");
+    fs::rename(&snapshot, &away).unwrap();
+
+    let mut ours = Session::listed(&root);
+    let kept = ours.kept("gains “Monday”");
+    assert_eq!(kept.kind, KeptKind::Gap);
+    assert_eq!(crate::browser::kept::offers(kept.kind), (false, false));
+    assert_eq!(tagged(&ours), Vec::<(String, Vec<String>)>::new());
+
+    fs::rename(&away, &snapshot).unwrap();
+    ours.settle();
+    assert_eq!(ours.bench.browser.folders.kept, Vec::new(), "merged");
+    assert_eq!(tagged(&ours), [wears("Grand.ne5p", &["Monday", "Sunday"])]);
 }

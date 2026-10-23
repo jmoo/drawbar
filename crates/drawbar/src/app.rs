@@ -629,12 +629,27 @@ impl DrawbarApp {
     fn rescue(&mut self, ctx: &egui::Context, acts: Vec<browser::Act>) -> Vec<browser::Act> {
         let mut rest = Vec::new();
         for act in acts {
-            if let browser::Act::Settle(orphan, how) = act {
-                if let Some(store) = self.store.as_mut() {
+            let act = match (act, self.store.as_mut()) {
+                (browser::Act::Settle(orphan, how), Some(store)) => {
                     store.settle_unfinished(orphan, how);
+                    continue;
                 }
-                continue;
-            }
+                (browser::Act::TakeKept { run, changes }, Some(store)) => {
+                    store.take_kept(run, changes);
+                    continue;
+                }
+                (browser::Act::DismissKept(run), Some(store)) => {
+                    store.dismiss_kept(run);
+                    continue;
+                }
+                (
+                    browser::Act::Settle(..)
+                    | browser::Act::TakeKept { .. }
+                    | browser::Act::DismissKept(_),
+                    None,
+                ) => continue,
+                (act, _) => act,
+            };
             let browser::Act::Rescue(rescue, what) = act else {
                 rest.push(act);
                 continue;

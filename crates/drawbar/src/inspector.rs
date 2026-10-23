@@ -356,6 +356,7 @@ fn selection(
         return;
     }
     tags(ui, &shown.locals, &shown.wearing, acts);
+    kept_apart(ui, &shown.locals, browser, acts);
     if let Some((slot, deps)) = answered(browser, device) {
         dependencies(ui, slot, deps);
     }
@@ -700,6 +701,26 @@ fn needed(ui: &mut egui::Ui, class: ObjectClass, named: Option<&str>, id: u32) {
                     Kind::from_class(class).chip()
                 ));
             }
+        }
+    });
+}
+
+/// A note that a change to something picked is kept apart, opening Kept apart.
+fn kept_apart(ui: &mut egui::Ui, picked: &[u64], browser: &Browser, acts: &mut Vec<Act>) {
+    let kept = &browser.folders.kept;
+    if !picked
+        .iter()
+        .any(|&id| kept.iter().any(|run| run.touches(id)))
+    {
+        return;
+    }
+    card(ui, Head::fixed(Glyph::FolderGit2, "Kept apart"), |ui| {
+        ui.add(
+            egui::Label::new("A change to what is selected is kept apart from the library.").wrap(),
+        );
+        ui.add_space(GAP);
+        if tonal_button(ui, None, "Show kept apart").clicked() {
+            acts.push(Act::ShowKept);
         }
     });
 }

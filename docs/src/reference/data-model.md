@@ -714,6 +714,19 @@ an unsaved edit, a slot it came off or a place in the queue stays, marked
 missing. After a restart an entity whose file is gone and that wears tags shows
 as a lost row, with its tags, until the user forgets it.
 
+### Kept apart
+
+toshokan shows apart from the merged state what it cannot place in a writer's
+single history (`View::items`): a branch of a writer two installs continued, entries
+whose predecessor has not synced, and lines of a segment shorter than a snapshot
+certified it. Every view the store sends carries them as `Viewed::kept`, each a
+`KeptApart` naming its run, and drawbar lists them in **Kept apart**
+(`Folders::kept`), logging each run once. `Intent::Take` makes the named changes
+of a run, or all of them, in one entry the user can undo; taking a tag also takes
+the run's entry for it in the list of tags. `Intent::Dismiss` hides a branch from
+every reader and is not undoable. Entries waiting on a predecessor offer neither,
+and are merged once it arrives.
+
 ### Conflicts
 
 A file changed on disk under an unsaved edit is rebased: the file's contents

@@ -185,6 +185,57 @@ mod tests {
         assert_eq!(back, change);
     }
 
+    /// Changes kept apart cross to the page, and a take of them to the worker, naming
+    /// the run as it was.
+    #[test]
+    fn changes_kept_apart_and_a_take_of_them_come_back_as_they_were() {
+        use super::super::{KeptApart, KeptChange, KeptDo, KeptKind};
+        use toshokan::log::{Own, Run};
+        use toshokan::report::{By, What};
+
+        let writer = toshokan::WriterId::from_u128(0xfeed_0000_0000_0000_0000_0000_0000_beef);
+        let own = |n, hash| Own {
+            n,
+            hash: toshokan::EntryHash::from_u128(hash),
+        };
+        let run = Run {
+            writer,
+            from: 3,
+            first: Some(toshokan::EntryHash::from_u128(u128::MAX)),
+            last: own(9, u128::MAX - 1),
+            tip: Some(own(12, 0x12)),
+        };
+        let entity = toshokan::EntityId::from_u128(0xab);
+        let what = What::Field("tags".to_string());
+        let kept = KeptApart {
+            kind: KeptKind::Run,
+            run,
+            by: By::Writer {
+                writer,
+                label: "drawbar".to_string(),
+            },
+            span: (1, u64::MAX),
+            changes: vec![KeptChange {
+                entity,
+                what: what.clone(),
+                takes: Some(KeptDo::Gain("Live".to_string())),
+                forgotten: true,
+            }],
+        };
+        let back: KeptApart = decode(encode(&kept).unwrap()).unwrap();
+        assert_eq!(back, kept);
+        let take = Cmd::Intent(Intent::Take {
+            run,
+            changes: vec![(entity, what)],
+        });
+        let back: Cmd = decode(encode(&take).unwrap()).unwrap();
+        assert!(
+            matches!(&back, Cmd::Intent(Intent::Take { run: taken, changes })
+                if *taken == run && changes.len() == 1),
+            "{back:?}"
+        );
+    }
+
     /// A message that names an attachment it does not carry does not decode.
     #[test]
     fn a_message_naming_a_missing_attachment_does_not_decode() {

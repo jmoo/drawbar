@@ -30,6 +30,7 @@ use crate::workspace::Workspace;
 mod act;
 mod drag;
 mod instrument;
+pub(crate) mod kept;
 mod row;
 mod selection;
 mod tree;
@@ -237,6 +238,8 @@ pub struct Browser {
     ask: Option<Ask>,
     /// Questions waiting for the one showing to be answered.
     later: VecDeque<Ask>,
+    /// Whether Kept apart shows, over the window.
+    pub(crate) show_kept: bool,
     pub(crate) folders: Folders,
     pub(crate) tags: Tags,
     /// Which of the three sections are showing.
@@ -261,6 +264,7 @@ impl Default for Browser {
             rename: None,
             ask: None,
             later: VecDeque::new(),
+            show_kept: false,
             folders: Folders::default(),
             tags: Tags::default(),
             sections: Sections::default(),
@@ -624,7 +628,7 @@ impl Browser {
             self.ask = self.later.pop_front();
         }
         let Some(ask) = &self.ask else {
-            return;
+            return self.kept_sheet(ctx, acts);
         };
         let mut decision = None;
         egui::Modal::new(egui::Id::new("browser_ask"))

@@ -13,15 +13,16 @@ use toshokan::asynch::{Filling as Filled, Fs, Library, Source as Filler, Staging
 use toshokan::error::Refusal;
 use toshokan::io::{IoError, Kind, Range, Root};
 use toshokan::log::Settlement;
-use toshokan::report::{Mode, Refreshed};
+use toshokan::plan::FactChange;
+use toshokan::report::{Item, Mode, Refreshed};
 use toshokan::{EntryHash, Env, Error, Expect, Policy, RelPath, View};
 
 use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES};
 use super::shown::Change;
 use super::storage::{self, CHUNK};
 use super::{
-    slots, Cmd, Event, Failure, Fingerprint, Found, Intent, Kept, Key, LibPath, Opened, Part,
-    Source, Stat, Viewed,
+    slots, Cmd, Event, Failure, Fingerprint, Found, Intent, Kept, KeptKey, Key, LibPath, Opened,
+    Part, Source, Stat, Viewed,
 };
 use crate::rewrite::{self, Pieces};
 
@@ -445,6 +446,21 @@ impl<F: Fs> Keeper<F> {
             Intent::Forget { entity } => {
                 let forgot = facts(library, label, |built, _| Ok(built.delete(entity)));
                 Some(forgot.await?)
+            }
+            Intent::Take { run, changes } => {
+                let taken = facts(library, label, |built, view| {
+                    let item = view.items().iter().find(|item| item.run == run);
+                    let item = item.ok_or("those changes are no longer kept apart")?;
+                    let takes = taking(item, &changes);
+                    Ok(takes
+                        .into_iter()
+                        .fold(built, |built, change| built.take(run, change)))
+                });
+                Some(taken.await?)
+            }
+            Intent::Dismiss { run } => {
+                let dismissed = facts(library, label, |built, _| Ok(built.dismiss(run)));
+                Some(dismissed.await?)
             }
             Intent::Batch(parts) => batch(library, label, parts, answer).await,
             part => batch(library, label, vec![part], answer).await,
@@ -1367,7 +1383,45 @@ fn committed_view<F: Fs>(
         undone: None,
         unlisted: None,
         unfinished: None,
+        kept: kept(library),
     }
+}
+
+/// The changes of `item` that `named` names, or all it can take where it names none,
+/// each once. A tag taken brings its entry in the library's list of tags where the run
+/// added it there too.
+fn taking(item: &Item, named: &[KeptKey]) -> Vec<FactChange> {
+    let can = item.changes.iter();
+    let picked: Vec<&FactChange> = can
+        .clone()
+        .filter(|change| named.is_empty() || named.contains(&(change.entity, change.what.clone())))
+        .filter_map(|change| change.change.as_ref())
+        .collect();
+    let listed = can
+        .filter_map(|change| change.change.as_ref())
+        .filter(|change| {
+            let FactChange::Add { key, value, .. } = change else {
+                return false;
+            };
+            key == TAG_NAMES.name()
+                && picked.iter().any(|taken| {
+                    matches!(taken, FactChange::Add { key, value: tag, .. }
+                    if key == TAGS.name() && tag == value)
+                })
+        });
+    let mut takes: Vec<FactChange> = Vec::new();
+    for change in picked.iter().copied().chain(listed) {
+        if !takes.contains(change) {
+            takes.push(change.clone());
+        }
+    }
+    takes
+}
+
+/// What the library keeps apart, as its view shows it.
+fn kept<F: Fs>(library: &Library<F>) -> Vec<super::KeptApart> {
+    let view = library.view();
+    view.items().iter().map(super::KeptApart::of).collect()
 }
 
 /// What the answer to a scan shows, with every folder where it scanned every file.
@@ -1391,6 +1445,7 @@ fn viewed<F: Fs>(library: &Library<F>, shown: &mut Option<View>, refreshed: Refr
         changes: refreshed.changes,
         undone: None,
         unfinished: Some(theirs.collect()),
+        kept: kept(library),
     }
 }
 

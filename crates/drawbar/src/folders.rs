@@ -179,6 +179,38 @@ pub struct Folders {
     pub libraries: Vec<Library>,
     /// The library open last, which the browser must be let into again before it opens.
     pub reconnect: Option<Library>,
+    /// The changes the library keeps apart rather than merging them.
+    pub kept: Vec<Kept>,
+}
+
+/// Changes the library keeps apart, as Kept apart shows them: who made them and when,
+/// and each change, with the asset it changes.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Kept {
+    pub kind: crate::store::KeptKind,
+    pub run: toshokan::log::Run,
+    pub title: String,
+    pub rows: Vec<KeptRow>,
+}
+
+/// One change of a [`Kept`].
+#[derive(Clone, PartialEq, Debug)]
+pub struct KeptRow {
+    pub key: crate::store::KeptKey,
+    /// The asset it changes, where the window holds it.
+    pub id: Option<u64>,
+    pub said: String,
+    /// Whether taking it makes it: a change to where a file is cannot be taken.
+    pub takes: bool,
+    /// It settles a value no reader holds any more.
+    pub forgotten: bool,
+}
+
+impl Kept {
+    /// Whether the change to the asset `id` is kept apart here.
+    pub fn touches(&self, id: u64) -> bool {
+        self.rows.iter().any(|row| row.id == Some(id))
+    }
 }
 
 impl Folders {
