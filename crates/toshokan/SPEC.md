@@ -237,7 +237,9 @@ of its `displaced` items, each line within half the limit:
 | `forks`     | The fork points its writer knew of the writers its ops name; omitted if none |
 | `deletes`   | The entities the intent deletes whose files its ops write; omitted if none |
 
-A `more` entry is merged as an intent is, entry by entry; what the intent deletes
+A commit appends its entries in one order: the intent, its `more` entries, the
+`settle` entry when it closes another writer's record, then its `bind` entries. A
+`more` entry is merged as an intent is, entry by entry; what the intent deletes
 kills its writes in the entries that name the entity in `deletes`, as it would in
 the intent's own entry. Undo and redo reverse an intent with its `more` entries.
 Recovery completes a continuation an append cut short (see Recovery).
@@ -514,7 +516,8 @@ field. An intent takes changes from an item with ops that name its run in
 be dismissed. A run is shown until it is dismissed, with no change once it would
 change nothing; a gap or unplaced lines only while they would change something.
 A run holding a passed entry kept for a remembered fork point is marked
-uncertain: it may be its writer's own entries a tip replaced.
+uncertain: it may be its writer's own entries a tip replaced. A gap holding only
+`more` entries is not shown: their intent, which names them, has not arrived.
 
 A writer forks when two instances write as it: a copied local root, a virtual
 machine resumed twice, a restored backup of a local root. Each fork point is

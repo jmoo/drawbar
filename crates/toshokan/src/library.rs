@@ -2489,13 +2489,23 @@ fn json_len(value: &impl serde::Serialize) -> usize {
 }
 
 /// The entries that log `logged`, closed by `closing` when there is one.
-fn closed(mut logged: Logged, closing: Option<Closing>) -> Vec<EntryKind> {
+fn closed(logged: Logged, closing: Option<Closing>) -> Vec<EntryKind> {
+    let (logged, settle) = close(logged, closing);
+    let settle = settle.map(EntryKind::Settle);
+    std::iter::once(EntryKind::Intent(logged))
+        .chain(settle)
+        .collect()
+}
+
+/// `logged` with the facts `closing` plans first, and the settlement that
+/// closes it.
+fn close(mut logged: Logged, closing: Option<Closing>) -> (Logged, Option<Settle>) {
     let Some(Closing { mut facts, settle }) = closing else {
-        return vec![EntryKind::Intent(logged)];
+        return (logged, None);
     };
     facts.append(&mut logged.ops);
     logged.ops = facts;
-    vec![EntryKind::Intent(logged), EntryKind::Settle(settle)]
+    (logged, Some(settle))
 }
 
 /// Logs `logged`, carrying out `effects` under a pending record when there are
@@ -2592,7 +2602,7 @@ fn carry_out<'a>(
 /// fails.
 fn log_effects<'a>(
     library: &'a mut Library,
-    mut logged: Logged,
+    logged: Logged,
     effects: &EffectPlan,
     record: Rc<PendingRecord>,
     applied: Applied,
@@ -2601,12 +2611,14 @@ fn log_effects<'a>(
 ) -> Fallible<'a, (&'a mut Library, Vec<Entry>, Outcome)> {
     let (name, journaled) = (effects.record, effects.moves_files());
     let file_ops = library.file_ops(&applied, &record.files);
-    let mores = fit(&mut logged, file_ops, applied.displaced);
-    logged.forks = library.known_forks(&logged.ops);
     let outcome = applied.outcome;
     let closing = closing.filter(|_| outcome == Outcome::Complete);
-    let mut kinds = closed(logged, closing);
-    kinds.splice(1..1, library.continued(mores));
+    let (mut logged, settle) = close(logged, closing);
+    let mores = fit(&mut logged, file_ops, applied.displaced);
+    logged.forks = library.known_forks(&logged.ops);
+    let mut kinds = vec![EntryKind::Intent(logged)];
+    kinds.extend(library.continued(mores));
+    kinds.extend(settle.map(EntryKind::Settle));
     kinds.extend(bound(pins));
     let touched = moved_paths(&effects.steps);
     appending(library, kinds).then(move |(library, appended)| {
