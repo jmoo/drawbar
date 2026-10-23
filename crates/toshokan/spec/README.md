@@ -5,7 +5,7 @@ synced folder and how every reader merges them. TLC checks it against a sync
 layer that delivers each file to each reader independently and in any order.
 
 ```sh
-nix build .#nord.toshokan-spec       # small bounds, about seven minutes; `nix flake check` runs it
+nix build .#nord.toshokan-spec       # small bounds, about nine minutes; `nix flake check` runs it
 nix build .#nord.toshokan-spec-deep  # larger bounds, several hours
 ```
 
@@ -44,10 +44,14 @@ other entry as a run. A fork point is an entry with two successors, one a tip
 certifies before an entry no tip folds, or the highest entry every tip of a
 writer certifies; every entry of that writer numbered above it is a run, so no
 two branches are ever merged. Where a writer has several tips, the reader merges
-only what they all fold, which stands for the live writes they all name. A dismissal, an entry
-naming runs, takes them out of view. The reader remembers its tips, the entries
-it placed after them and its fork points, and after a grace period drops what no
-file it sees holds, unless it sees something newer of that writer.
+only what they all fold: the shared past of their branches. The model treats a
+snapshot as the whole chain it folds, so it checks placement, not values: what a
+snapshot's lossy contribution keeps and how references kill is checked by the
+value-level tests in `tests/retention`. A dismissal, an entry naming runs, takes
+them out of view for good: a reader never merges what a dismissal names, and
+shows an entry after one as a run. The reader remembers its tips, the entries it
+placed after them and its fork points, and after a grace period drops what no
+file it sees holds, unless something it sees descends from it.
 
 A copied local root (a restored backup, a cloned disk) makes two instances write
 one directory: a fork. A writer's local root exists only once its first entry is
@@ -67,7 +71,8 @@ that drops it shows the failure it prevents:
 | A snapshot carries forward the certificates of the snapshots on its chain. | `Carry` | [`Uncarried.cfg`](Uncarried.cfg): a segment deleted two compactions ago arrives late, and a reader shows its folded lines as a run. |
 | A reader tells a gap from a run by the entry's number. | `Numbered` | [`Unnumbered.cfg`](Unnumbered.cfg): an entry whose predecessor has not arrived is shown as a run, then merged once it arrives. |
 | A tip that certifies an entry's predecessor, but not the entry, marks a fork. | `CertForks` | [`Anchors.cfg`](Anchors.cfg): once the original has moved two entries past a fork and compacted, only a reader's memory still shows the fork, and a reader without it merges the original's branch. |
-| The grace step drops only what nothing newer of that writer contradicts. | `Guard` | [`Unguarded.cfg`](Unguarded.cfg): a reader that has received a compaction's deletions before its snapshot stops merging a writer whose newer entries it already sees. |
+| A reader never merges what a dismissal names, and shows an entry after one as a run. | `Quarantine` | [`Unquarantined.cfg`](Unquarantined.cfg): a reader that never saw a fork merges the branch a dismissal it holds names. |
+| The grace step drops only what nothing it sees descends from. | `Guard` | [`Unguarded.cfg`](Unguarded.cfg): a reader that has received a compaction's deletions before its snapshot stops merging a writer whose newer entries it already sees. |
 | No two histories give a segment the same name: a segment's name is random. | `UniqueNames` | [`Names.cfg`](Names.cfg): the original and the clone each start a segment under the next counter name. Sync keeps both, one as a conflicted copy, and the original's deletion of its own segment by name removes the clone's. |
 | A writer deletes only segments that end with a seal marker, which the process that closed the segment wrote. The segment open when a process crashed, or when its local root was copied, has none and is never deleted. | `SealedOnly` | [`Sealed.cfg`](Sealed.cfg): the clone compacts and deletes the segment the original still has open, and the original's next entry goes with it. |
 | A writer deletes only segments every entry of which a snapshot in its directory certifies. | `FoldedOnly` | [`Folded.cfg`](Folded.cfg): the original seals a segment after the fork, and the clone compacts and deletes it, though no snapshot folds the original's entry. |
@@ -89,19 +94,19 @@ delivers files roughly in order.
 | `NothingIgnored` | Every entry a reader sees is merged, held back and reported, shown as a run, or dismissed. A reader names no file, so this holds by construction. |
 | `ShownApart` | A reader never both merges and shows an entry. |
 | `NoReapply` | A reader never places an entry from a file while a tip folds it. |
-| `NoSpuriousConflict` | An entry is shown as a run only when its chain forked at or before it, a restore or a dropped version took it, or the reader still holds what one took. |
+| `NoSpuriousConflict` | An entry is shown as a run only when its chain forked at or before it, a restore or a dropped version took it, or the reader still holds what one took of that writer. |
 | `UnforkedMerged` | Once every file has reached a reader, it merges every kept entry no fork precedes and that follows nothing lost. |
 | `Agree` | Once every file has reached a reader, it merges and shows the same kept entries as a reader without a cached view, unless it still holds what the grace step would drop. |
 | `ForksFromFiles` | Once every file has reached a reader, the files show every fork point it remembers, unless a restore or a dropped version took one of the point's successors. |
 | `NoMergedFork` | A reader never merges two branches of one writer. |
 | `NoOrphan` | A writer never appends after an entry the folder no longer holds. |
-| `DismissalsHold` | Once every file has reached a reader, it shows nothing a kept, merged dismissal names. |
+| `DismissalsHold` | A reader never merges what a dismissal it merged names; once every file has reached it, it neither shows nor merges what a kept, merged dismissal names. |
 | `OwnDirectory` | A writer creates, appends to and deletes files only in its own directory. |
 | `Retained` | The folder keeps every entry written, in a segment or folded in a snapshot, unless a restore or a dropped version took it. |
 | `EffectAccounted` | Every effect begun has a pending record or a closing entry in the folder, unless a restore took both. |
 | `DeliveredConverges` | Once every file has reached a reader, it merges, shows or has dismissed every kept entry, holds back only what follows a lost entry, and reports every fork among the kept entries it sees, whatever the delivery order. A reader without a cached view does the same. |
 | `DeliveredSettles` | Once every file has reached a reader, every effect is closed, reported, or that reader's own effect in flight; this includes the effects of a writer whose local root was lost. |
-| `Monotone` | A reader stops merging an entry only when it now shows it or has dismissed it, when a restore or a dropped version took it, or when the grace step drops it with nothing newer of that writer in sight, unless its local root is lost or replaced by a copy. |
+| `Monotone` | A reader stops merging an entry only when it now shows it or has dismissed it, when a restore or a dropped version took it, or when the grace step drops it with nothing in sight descending from it, unless its local root is lost or replaced by a copy. |
 | `NoFlip` | A run stays shown until it is dismissed, no file the reader sees holds it, or the grace step. |
 | `ForksKept` | A fork point, once found, stays found, except by the grace step. |
 | `OwnFileNoRetire` | A writer takes a new id for a fork only when an entry of its directory has two successors. |
@@ -114,10 +119,12 @@ delivers files roughly in order.
 | `Recovery` | two effects, a lost local root | `toshokan-spec` |
 | `Liveness` | a clone, a lost local root, one sync fault | `toshokan-spec` |
 | `Grace` | a restored folder, and the grace step | `toshokan-spec` |
+| `GraceChaos` | the grace step with a sync fault | `toshokan-spec` |
+| `LivenessGrace` | `Convergence` with the grace step and a restored folder | `toshokan-spec` |
 | `RestoreDir` | a restored folder or directory, and the grace step | `toshokan-spec` |
 | `Resurface` | a deleted segment arriving after later compactions | `toshokan-spec` |
 | `Drop` | a sync client keeping an earlier version of a segment | `toshokan-spec` |
-| `Names`, `Sealed`, `Folded`, `Unchecked`, `FreshView`, `Uncertified`, `Uncarried`, `Unnumbered`, `Unguarded` | expected violations | `toshokan-spec` |
+| `Names`, `Sealed`, `Folded`, `Unchecked`, `FreshView`, `Uncertified`, `Uncarried`, `Unnumbered`, `Unguarded`, `Unquarantined` | expected violations | `toshokan-spec` |
 | `Anchors` | expected violation, four entries | `toshokan-spec-deep` |
 | `PortableWide` | `Portable` with four files | `toshokan-spec-deep` |
 | `PortableDeep` | `Portable` with five files | `toshokan-spec-deep` |
