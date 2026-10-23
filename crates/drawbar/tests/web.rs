@@ -367,6 +367,94 @@ async fn the_whole_workflow_runs_in_a_picked_folder() {
     the_whole_workflow_in(picked).await;
 }
 
+/// Two tabs of one install keep one library through workers over one local root, as
+/// two writers of its pool held apart by Web Locks: each writes, and a commit in one is
+/// heard in the other, which refreshes to show it.
+#[wasm_bindgen_test]
+async fn two_tabs_of_one_install_each_write_and_show_the_others_commits() {
+    wipe(&opfs().await).await;
+    let folder = || Folder::Private(RelPath::new("Shared").unwrap());
+    let local = RelPath::new("local/one").unwrap();
+    let mut shown = [Shown::default(), Shown::default()];
+    let run = async |worker: &Worker, at: usize, shown: &mut [Shown; 2], cmd: Cmd| {
+        let answers = worker.run(cmd).await.unwrap();
+        for event in &answers {
+            let viewed = match event {
+                Event::Opened(Ok(opened)) => Some(&opened.viewed),
+                Event::Scanned(Ok(viewed)) => Some(viewed),
+                Event::Committed {
+                    result: Ok(viewed), ..
+                } => Some(viewed),
+                _ => None,
+            };
+            if let Some(viewed) = viewed {
+                shown[at].apply(viewed.shown.clone());
+            }
+        }
+        answers
+    };
+    let tabs = [
+        Worker::start(folder(), &local).await.unwrap(),
+        Worker::start(folder(), &local).await.unwrap(),
+    ];
+    for (at, tab) in tabs.iter().enumerate() {
+        let opened = run(tab, at, &mut shown, Cmd::Open).await;
+        assert!(
+            matches!(&opened[..], [Event::Opened(Ok(opened)), ..] if opened.writable.is_ok()),
+            "tab {at} writes: {opened:?}"
+        );
+    }
+    let mut heard = [
+        Hints::new("Shared", None).unwrap(),
+        Hints::new("Shared", None).unwrap(),
+    ];
+
+    let saved = run(
+        &tabs[0],
+        0,
+        &mut shown,
+        Cmd::Intent(Intent::Save {
+            id: 1,
+            path: path("c3.ne5p"),
+            bytes: b"c3".to_vec(),
+            expect: Expect::Absent,
+            came: None,
+        }),
+    )
+    .await;
+    committed(&saved);
+    for (at, name) in [(0, "Gig"), (1, "Live")] {
+        let tagged = run(
+            &tabs[at],
+            at,
+            &mut shown,
+            Cmd::Intent(Intent::Tag {
+                files: vec![Key::File(path("c3.ne5p"))],
+                name: name.into(),
+                make: true,
+            }),
+        )
+        .await;
+        committed(&tagged);
+        let made = tagged.iter().find_map(|event| match event {
+            Event::Committed { made, .. } => *made,
+            _ => None,
+        });
+        heard[at].announce(made.unwrap());
+        let other = 1 - at;
+        assert_eq!(heard[other].next().await, Hint::Committed(made.unwrap()));
+        run(&tabs[other], other, &mut shown, Cmd::Refresh).await;
+        assert_eq!(
+            shown[other].wearing(name).len(),
+            1,
+            "tab {other} shows what tab {at} tagged"
+        );
+    }
+    for tab in &tabs {
+        tab.close().await;
+    }
+}
+
 /// A worker that faults answers the command waiting on it and every later one with why,
 /// and once it is let go a fresh worker opens the library again.
 #[wasm_bindgen_test]
