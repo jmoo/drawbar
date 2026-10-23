@@ -293,8 +293,7 @@ impl<F: Fs> Keeper<F> {
             trouble.extend(emptied.err().map(|e| format!("emptying the trash: {e}")));
         }
         let refreshed = library.rescan().await.map_err(|e| e.to_string())?;
-        let dirs = folders(library.fs()).await;
-        let viewed = viewed(&library, &mut self.shown, refreshed, Some(dirs));
+        let viewed = viewed(&library, &mut self.shown, refreshed);
         self.library = Some(library);
         Ok(Opened {
             writable,
@@ -315,11 +314,7 @@ impl<F: Fs> Keeper<F> {
             false => library.refresh().await,
         };
         let refreshed = refreshed.map_err(|e| e.to_string())?;
-        let dirs = match whole {
-            true => Some(folders(library.fs()).await),
-            false => None,
-        };
-        Ok(viewed(library, &mut self.shown, refreshed, dirs))
+        Ok(viewed(library, &mut self.shown, refreshed))
     }
 
     /// Undo, or redo where `again`, and the view after it, with the files no entity is
@@ -1390,14 +1385,8 @@ fn committed_view<F: Fs>(
     }
 }
 
-/// What the answer to a scan shows, with every folder in `dirs` where it scanned every
-/// file.
-fn viewed<F: Fs>(
-    library: &Library<F>,
-    shown: &mut Option<View>,
-    refreshed: Refreshed,
-    dirs: Option<Vec<LibPath>>,
-) -> Viewed {
+/// What the answer to a scan shows, with every folder where it scanned every file.
+fn viewed<F: Fs>(library: &Library<F>, shown: &mut Option<View>, refreshed: Refreshed) -> Viewed {
     let moves = refreshed.scan.moved.iter().filter_map(|moved| {
         let from = LibPath::parse(moved.from.as_str())?;
         Some((from, LibPath::parse(moved.to.as_str())?))
@@ -1405,6 +1394,10 @@ fn viewed<F: Fs>(
     let unlisted = refreshed.unlisted.iter();
     let unlisted = unlisted.filter_map(|dir| LibPath::parse(dir.as_str()));
     let theirs = refreshed.orphaned.into_iter().filter(|orphan| !orphan.ours);
+    let dirs = refreshed.dirs.map(|dirs| {
+        let shown = dirs.iter().filter_map(|dir| LibPath::parse(dir.as_str()));
+        shown.collect::<Vec<_>>()
+    });
     Viewed {
         shown: show(shown, library.view()),
         unlisted: dirs.is_some().then(|| unlisted.collect()),
