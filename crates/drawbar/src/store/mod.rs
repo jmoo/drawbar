@@ -43,15 +43,22 @@ mod shown;
 mod native;
 mod slots;
 mod storage;
+pub(crate) mod wire;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{default_root, local_root, openable, sync_dir, Backend};
 
 #[cfg(target_arch = "wasm32")]
 mod web;
 #[cfg(target_arch = "wasm32")]
-pub(crate) use web::{buffer, move_to, private_root, settle, Writer, TMP};
+mod worker;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use web::settle;
 #[cfg(target_arch = "wasm32")]
 pub use web::{default_root, permission, Backend, Picked, Root};
+
+/// The folder of this install's own state for a library that holds the slots' former
+/// occupants a write to the instrument leaves while the library is open.
+pub const RESCUED: &str = "rescued";
 
 /// Where a library is: a folder on the desktop.
 #[cfg(not(target_arch = "wasm32"))]
@@ -247,7 +254,7 @@ pub struct Stat {
 /// Its [`Stat`] is trusted: a file whose length and time are the ones taken holds what it
 /// held. Where they moved, the CRC decides, and a fingerprint without one says only that
 /// the file is not known to be the same.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Fingerprint {
     pub len: u64,
     pub modified: Option<u64>,
@@ -320,15 +327,18 @@ pub enum Holds {
 }
 
 /// One file a listing found.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Found {
     pub path: LibPath,
     pub stat: Stat,
     /// The contents, where they were read: a file asked for, a file drawbar holds whose
-    /// [`Stat`] moved, and the file under a working copy at open.
+    /// [`Stat`] moved, and the file under a working copy at open. Never sent: only the
+    /// backend that reads files holds them.
+    #[serde(skip)]
     pub bytes: Option<Vec<u8>>,
     /// The file left on disk and indexed in place of `bytes`, where the backend reads a
-    /// piano or sample instrument by range.
+    /// piano or sample instrument by range. Never sent, as `bytes`.
+    #[serde(skip)]
     pub file: Option<Arc<OnDisk>>,
     /// CRC-32 over the whole file, taken only where its contents decide something: its
     /// [`Stat`] moved from one whose CRC is known, or it may be a known file moved.
@@ -418,7 +428,7 @@ impl Rescue {
 }
 
 /// Why a save did not land.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Failure {
     /// The file is not what drawbar last read: something else wrote it, moved it, or put
     /// a file where a new one was to go.
@@ -431,8 +441,9 @@ pub enum Failure {
 
 /// Some bytes of a file outside the library, and the CRC-32 they must have: a member of
 /// a bundle. A copy whose bytes do not match fails.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Part {
+    #[serde(with = "wire::outside")]
     pub from: Outside,
     pub bytes: std::ops::Range<u64>,
     pub crc32: u32,
@@ -449,10 +460,10 @@ impl Part {
 }
 
 /// What a file copied into the library is a copy of, as the app asks for it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum CopyOf {
     /// A file outside the library.
-    Outside(Outside),
+    Outside(#[serde(with = "wire::outside")] Outside),
     /// A member of a bundle outside the library.
     Part(Part),
     /// The file the asset with this id rests in, byte for byte, from wherever it is when
@@ -464,10 +475,10 @@ pub enum CopyOf {
 }
 
 /// What an [`Intent::Import`] copies.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Source {
     /// A file outside the library.
-    Outside(Outside),
+    Outside(#[serde(with = "wire::outside")] Outside),
     /// A member of a bundle outside the library.
     Part(Part),
     /// A file of the library, byte for byte, which must still hold what its fingerprint
@@ -480,7 +491,7 @@ pub enum Source {
 
 /// A draft as this install keeps it: of the file `of` names, by this instance's writer,
 /// or by the idle writer of the install's pool that kept it.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Kept {
     pub of: Key,
     pub pooled: Option<toshokan::WriterId>,
@@ -495,7 +506,7 @@ impl Kept {
 
 /// A slot of one instrument, which an unsaved edit of its view is kept by: the class's
 /// code and the bank and slot from zero, as the wire numbers them.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct Slot {
     /// What tells the instrument from others: its serial number, or its product name
     /// where it reports none.
@@ -506,7 +517,7 @@ pub struct Slot {
 }
 
 /// What the app asks a backend to do. Each runs after the one sent before it.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum Cmd {
     /// Open the library as a writer of its own, and scan every file. Answered by
     /// [`Event::Opened`].
@@ -529,6 +540,7 @@ pub enum Cmd {
     Draft {
         of: Key,
         base: toshokan::Identity,
+        #[serde(with = "wire::bytes")]
         bytes: Vec<u8>,
         replaces: Vec<Kept>,
     },
@@ -562,11 +574,29 @@ pub enum Cmd {
     },
 }
 
+impl Cmd {
+    /// Whether it writes the folder.
+    pub fn writes(&self) -> bool {
+        match self {
+            Cmd::Open
+            | Cmd::Rescan
+            | Cmd::Refresh
+            | Cmd::Draft { .. }
+            | Cmd::Discard(_)
+            | Cmd::KeepSlot { .. }
+            | Cmd::DiscardSlot(_)
+            | Cmd::ReadSlot(_)
+            | Cmd::Read { .. } => false,
+            Cmd::Intent(_) | Cmd::Undo | Cmd::Redo | Cmd::Settle { .. } => true,
+        }
+    }
+}
+
 /// A change the user asked for, committed as one undo step. Each names the entities and
 /// files it changes as the view it was made from showed them. A change to a file names
 /// it by its path: the backend finds the entity bound to it, if any, in the view it
 /// commits against, and checks the file holds what `expect` says before it writes.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Intent {
     /// Put a tag on each of these files, making an entity for each one without, and
     /// where `make` says, add the tag to the library's list of tags as
@@ -602,6 +632,7 @@ pub enum Intent {
     Save {
         id: u64,
         path: LibPath,
+        #[serde(with = "wire::bytes")]
         bytes: Vec<u8>,
         expect: toshokan::Expect,
         came: Option<keys::Came>,
@@ -655,7 +686,7 @@ fn gesture(parts: &[Intent]) -> Option<&Intent> {
 
 /// One rename of an [`Intent::Move`]: the file at `from`, which holds what `expect`
 /// says, to `to`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Moving {
     pub from: LibPath,
     pub to: LibPath,
@@ -755,7 +786,7 @@ impl Intent {
 }
 
 /// What opening found.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Opened {
     /// `Err` with the reason when nothing may be written here. The library still opens,
     /// and every edit stays in memory.
@@ -777,7 +808,7 @@ pub struct Opened {
 }
 
 /// The library as one answer left it.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Viewed {
     /// What the answer changed of what the app shows.
     pub shown: shown::Change,
@@ -797,7 +828,7 @@ pub struct Viewed {
 }
 
 /// What a backend answers.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum Event {
     Opened(Result<Opened, String>),
     /// What a [`Cmd::Rescan`] or a [`Cmd::Refresh`] found.

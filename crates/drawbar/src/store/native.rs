@@ -108,22 +108,6 @@ pub struct Backend {
     listed: Arc<AtomicUsize>,
 }
 
-/// Whether a command writes the folder.
-fn writes(cmd: &Cmd) -> bool {
-    match cmd {
-        Cmd::Open
-        | Cmd::Rescan
-        | Cmd::Refresh
-        | Cmd::Draft { .. }
-        | Cmd::Discard(_)
-        | Cmd::KeepSlot { .. }
-        | Cmd::DiscardSlot(_)
-        | Cmd::ReadSlot(_)
-        | Cmd::Read { .. } => false,
-        Cmd::Intent(_) | Cmd::Undo | Cmd::Redo | Cmd::Settle { .. } => true,
-    }
-}
-
 impl Backend {
     /// The library at `root`, with this install's own state for it at `local`.
     pub fn start(ctx: &egui::Context, root: PathBuf, local: PathBuf) -> Backend {
@@ -142,7 +126,7 @@ impl Backend {
             nord_usb::block_on(async {
                 let mut landed = Vec::new();
                 while let Ok(cmd) = commands.recv() {
-                    let wrote = writes(&cmd);
+                    let wrote = cmd.writes();
                     match cmd {
                         Cmd::Read { files, room } => {
                             landed.push(Event::Read(exec::read_all(&disk, files, room).await));
@@ -190,7 +174,7 @@ impl Backend {
 
     pub fn send(&mut self, cmd: Cmd) {
         if let Some(tx) = &self.tx {
-            let writes = usize::from(writes(&cmd));
+            let writes = usize::from(cmd.writes());
             self.unrun.fetch_add(writes, Ordering::AcqRel);
             if tx.send(cmd).is_err() {
                 self.unrun.fetch_sub(writes, Ordering::AcqRel);

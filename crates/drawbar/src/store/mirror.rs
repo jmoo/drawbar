@@ -76,10 +76,7 @@ struct Record {
     summarized: Option<u64>,
 }
 
-/// This install's folder, beside the library's local root, for the slots' former
-/// occupants a write to the instrument leaves while the library is open.
-#[cfg(not(target_arch = "wasm32"))]
-const RESCUED: &str = "rescued";
+use super::RESCUED;
 
 /// A view of a slot, as its unsaved edit is kept.
 struct SlotView {
@@ -168,6 +165,10 @@ pub struct Store {
     focused: bool,
     /// A rescan or a refresh is in flight.
     scanning: bool,
+    /// What another tab or the folder said changed and is not read yet: whether it takes
+    /// a rescan rather than a refresh.
+    #[cfg(target_arch = "wasm32")]
+    behind: Option<bool>,
     /// An intent, an undo or a redo is in flight.
     committing: usize,
     /// A send is waiting for the rescan in flight.
@@ -243,6 +244,8 @@ impl Store {
             deferred: BTreeSet::new(),
             focused: true,
             scanning: false,
+            #[cfg(target_arch = "wasm32")]
+            behind: None,
             committing: 0,
             send_waits: false,
             name: None,
@@ -305,6 +308,15 @@ impl Store {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn tmp(&self) -> Option<std::path::PathBuf> {
         self.open().then(|| self.backend.local().join(RESCUED))
+    }
+
+    /// Where a slot's former occupant is kept while this library is open: this install's
+    /// own folder for it in the browser's storage, where the next open offers it.
+    #[cfg(target_arch = "wasm32")]
+    pub fn tmp(&self) -> Option<toshokan::RelPath> {
+        let rescued = self.backend.root().local().join(RESCUED);
+        self.open()
+            .then(|| rescued.expect("a folder's name is one component"))
     }
 
     /// Send the saves the files need, then say whether no save or rescan waits for its
@@ -799,6 +811,8 @@ impl Store {
         while let Some(event) = self.backend.try_recv() {
             released |= self.react(event, workspace, browser, queue, log);
         }
+        #[cfg(target_arch = "wasm32")]
+        self.hinted();
         browser.folders.place = Some(self.place());
         // The count of files found moves with no answer to wake the window.
         if self.listing() {
@@ -806,6 +820,26 @@ impl Store {
             workspace.ctx().request_repaint_after(soon);
         }
         released
+    }
+
+    /// Read again what another tab or the folder says changed: another tab's commit by a
+    /// refresh, and anything else by a rescan, once no scan is in flight.
+    #[cfg(target_arch = "wasm32")]
+    fn hinted(&mut self) {
+        use toshokan::web::Hint;
+
+        while let Some(hint) = self.backend.hinted() {
+            let rescan = !matches!(hint, Hint::Committed(_));
+            self.behind = Some(self.behind.unwrap_or(false) || rescan);
+        }
+        let Some(rescan) = self.behind.filter(|_| self.opened() && !self.scanning) else {
+            return;
+        };
+        self.behind = None;
+        match rescan {
+            true => self.rescan(),
+            false => self.refresh(),
+        }
     }
 
     /// Wait for the backend's next answer and fold it in, as [`Store::poll`] would.

@@ -1346,10 +1346,18 @@ impl Device {
     }
 
     /// Keep the occupant of a slot a write replaces, when it is too large to hold, in
-    /// `dir`: the open library's `.drawbar/tmp/`, or `None` where the library cannot be
-    /// written, for a `rescued` folder of drawbar's own data.
+    /// `dir`: this install's own state for the open library, or `None` where the library
+    /// cannot be written, for a `rescued` folder of drawbar's own data.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn keep_occupants_in(&self, dir: Option<std::path::PathBuf>) {
+        self.link.scratch().keep_in(dir);
+    }
+
+    /// Keep the occupant of a slot a write replaces in `dir` of the browser's storage:
+    /// the open library's own state for this install, or with `None`, the browser's
+    /// library's.
+    #[cfg(target_arch = "wasm32")]
+    pub fn keep_occupants_in(&self, dir: Option<toshokan::RelPath>) {
         self.link.scratch().keep_in(dir);
     }
 

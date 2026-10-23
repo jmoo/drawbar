@@ -413,7 +413,7 @@ struct Sending {
     largest: usize,
     /// Every range of the asset's file the send read.
     reads: Vec<Range<u64>>,
-    /// The largest occupant backup seen in the library's `.drawbar/tmp`.
+    /// The largest occupant backup seen in this install's `rescued` folder for the library.
     backup: u64,
 }
 
@@ -867,7 +867,8 @@ fn s1_a_resting_piano_lands_in_an_empty_slot_streamed() {
 }
 
 /// Sending onto a slot that holds something keeps the occupant in a file under the
-/// library's `.drawbar/tmp` until the new object has landed, then removes it.
+/// `rescued` folder of this install's own state for the library until the new object has
+/// landed, then removes it.
 #[test]
 #[ignore = "writes to an attached instrument; see the module's documentation"]
 fn s2_a_replace_keeps_the_occupant_in_a_file_until_the_write_lands() {
@@ -911,7 +912,7 @@ fn s2_a_replace_keeps_the_occupant_in_a_file_until_the_write_lands() {
     );
     assert!(
         sending.backup >= file.len - HEADER as u64,
-        "the occupant waited in .drawbar/tmp: the largest file there was {} bytes",
+        "the occupant waited in its folder: the largest file there was {} bytes",
         sending.backup
     );
     assert_eq!(
@@ -1179,7 +1180,7 @@ fn s5_a_sample_round_trips_and_replaces_streamed() {
     assert_eq!(again.outcome, Ok(()), "{}", rig.bench.log.tail(30));
     assert!(
         again.backup >= file.len - HEADER as u64,
-        "the occupant waited in .drawbar/tmp: the largest file there was {} bytes",
+        "the occupant waited in its folder: the largest file there was {} bytes",
         again.backup
     );
     assert_eq!(
