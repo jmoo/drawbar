@@ -186,8 +186,8 @@ replaces that writer's contribution and the entries placed after the old tip tha
 it folds. The writer's latest own write on each field is in it, so an older own
 write a reader held is killed by the own-write rule at once.
 
-**A contradicted reference.** If, after the grace step, a reference names a
-number above the highest the files show for its target writer (a restore of one
+**A contradicted reference.** If, after the grace step for its target writer, a
+reference names a number above the highest the files show for that writer (a restore of one
 directory, or a dropped version), or a number at which the files show only
 another entry of that writer (a restore that took one branch), every reference
 of the same entry or contribution to that writer kills only the write with its
@@ -274,8 +274,8 @@ has reached, is taken as folded into that tip, before the grace step. When the
 tip certifies it, this is the ordinary fold. When it does not, the entry is on
 another branch of a fork: its change drops out of view, with no item, and the
 fields it wrote show what the merge shows without it. It comes back as a run,
-and its fork is found, as soon as a file holding it is visible again; if none ever is, it stays gone, as the grace step would have left it. A
-fresh reader of the same files cannot place such an entry either, so holding it
+and its fork is found, as soon as a file holding it is visible again; if none
+ever is, it stays gone, as the grace step would have left it. A fresh reader of the same files cannot place such an entry either, so holding it
 would keep a cached reader apart from a fresh one until the grace step.
 
 The window of recent hashes is gone. Re-deliveries are recognized by
@@ -356,7 +356,10 @@ predecessors reaches it, and no snapshot that certifies it. A greater number on
 another branch is not enough, or a restore that took one branch of a clone would
 leave that branch shown for good. It also forgets that writer's fork points the
 files no longer show, as when a restore took one branch. It then places that
-writer's files again. Facts only a restore took disappear, with no prompt.
+writer's files again. Facts only a restore took disappear, with no prompt. The
+day counts per writer, and only the writers the reader took the step for are
+read strictly from then on (section 3, a contradicted reference); the others'
+files still wait while they arrive.
 
 The guard is what tells a restore from a slow sync. It cannot tell a snapshot
 lost by hand, or by a sync fault, while a newer segment survives: the cached

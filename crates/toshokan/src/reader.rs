@@ -159,26 +159,31 @@ impl WriterFile {
     }
 }
 
-/// When the reader takes the grace step: once it has held something no file
-/// it sees holds for [`GRACE_MS`] and at least one full rescan since.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+/// When the reader takes the grace step for a writer: once it has held
+/// something of that writer no file it sees holds for [`GRACE_MS`], with at
+/// least one full rescan since.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Grace {
-    /// Whether it took the grace step: from then on an unsealed file shorter
-    /// than a certificate no longer waits, and a reference the files contradict
-    /// kills only its exact target.
-    pub graced: bool,
-    /// When it first held something no file it sees holds, since it last held
-    /// nothing of the kind.
-    pub since: Option<u64>,
+    /// The writers it took the grace step for: an unsealed file of theirs
+    /// shorter than a certificate no longer waits, and a reference to them the
+    /// files contradict kills only its exact target.
+    pub graced: BTreeSet<WriterId>,
+    /// Each writer of which it holds what no file it sees holds.
+    pub unseen: BTreeMap<WriterId, Unseen>,
+}
+
+/// Since when a reader has held something of a writer no file it sees holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Unseen {
+    /// When it first held it, since it last held nothing of the kind.
+    pub since: u64,
     /// Whether a scan of every file finished since then.
     pub rescanned: bool,
 }
 
-pack_struct!(Grace {
-    graced,
-    since,
-    rescanned
-});
+pack_struct!(Unseen { since, rescanned });
+
+pack_struct!(Grace { graced, unseen });
 
 /// How long a reader holds what no file it sees holds before the grace step:
 /// 24 hours.
@@ -212,8 +217,8 @@ impl CachedView {
         &self.writers
     }
 
-    pub fn grace(&self) -> Grace {
-        self.grace
+    pub fn grace(&self) -> &Grace {
+        &self.grace
     }
 
     /// The cached view kept for the writer whose genesis entry is `genesis`; empty
@@ -240,14 +245,18 @@ impl CachedView {
                 grew |= mine.forks.insert(*fork);
             }
         }
-        let grace = Grace {
-            graced: self.grace.graced || other.grace.graced,
-            since: match (self.grace.since, other.grace.since) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            },
-            rescanned: self.grace.rescanned && other.grace.rescanned,
-        };
+        let mut grace = self.grace.clone();
+        grace.graced.extend(&other.grace.graced);
+        for (writer, theirs) in &other.grace.unseen {
+            let joined = match grace.unseen.get(writer) {
+                Some(mine) => Unseen {
+                    since: mine.since.min(theirs.since),
+                    rescanned: mine.rescanned && theirs.rescanned,
+                },
+                None => *theirs,
+            };
+            grace.unseen.insert(*writer, joined);
+        }
         grew |= grace != self.grace;
         self.grace = grace;
         grew
@@ -632,7 +641,7 @@ impl Reader {
             ..ReadReport::default()
         };
         let derived = Rc::make_mut(&mut self.derived);
-        match derive::extend(derived, writer, &entries, self.cached.grace.graced) {
+        match derive::extend(derived, writer, &entries, &self.cached.grace.graced) {
             true => {
                 let memory = &derived.memory[&writer];
                 self.cached.writers.insert(writer, memory.clone());
@@ -756,7 +765,11 @@ impl Reader {
     }
 
     fn derive_now(&self) -> Derived {
-        derive::derive(&self.seen(), &self.cached.writers, self.cached.grace.graced)
+        derive::derive(
+            &self.seen(),
+            &self.cached.writers,
+            &self.cached.grace.graced,
+        )
     }
 
     /// What the files and the cached view derive now, from scratch, as tests
@@ -851,65 +864,51 @@ impl Reader {
         gaps.collect()
     }
 
-    /// Whether the reader holds something no file it sees holds: a tip whose
-    /// file is gone, or an entry no file holds.
-    pub fn holds_unseen(&self) -> bool {
-        let seen = self.seen();
-        self.cached.writers.iter().any(|(writer, memory)| {
-            let files = seen.get(writer);
-            let lines: BTreeSet<EntryHash> = files
-                .into_iter()
-                .flat_map(|files| files.segments.iter())
-                .flat_map(|segment| segment.entries.iter().map(|entry| entry.hash()))
-                .collect();
-            let heads: BTreeSet<Own> = files
-                .into_iter()
-                .flat_map(|files| files.snapshots.iter().map(|snapshot| snapshot.head))
-                .collect();
-            let tip_gone = memory.tips.iter().any(|tip| !heads.contains(&tip.head));
-            let entry_gone = memory.entries.keys().any(|hash| !lines.contains(hash));
-            tip_gone || entry_gone
-        })
+    /// The writers of which the reader holds something no file it sees holds: a
+    /// tip whose file is gone, or an entry no file holds.
+    pub fn unseen(&self) -> BTreeSet<WriterId> {
+        derive::unseen(&self.seen(), &self.cached.writers)
     }
 
-    /// Notes, at wall time `now`, whether the reader holds what no file holds,
-    /// and that a scan of every file finished when `rescanned`; whether the
-    /// grace step is due.
-    pub fn note_grace(&mut self, now: u64, rescanned: bool) -> bool {
-        let unseen = self.holds_unseen();
-        let grace = self.cached.grace;
-        let next = match (unseen, grace.since) {
-            (false, _) => Grace {
-                since: None,
-                rescanned: false,
-                ..grace
-            },
-            (true, None) => Grace {
-                since: Some(now),
-                rescanned: false,
-                ..grace
-            },
-            (true, Some(since)) => Grace {
-                since: Some(since),
-                rescanned: grace.rescanned || rescanned,
-                ..grace
-            },
-        };
-        if next != grace {
-            self.cached.grace = next;
+    /// Notes, at wall time `now`, of which writers the reader holds what no file
+    /// holds, and that a scan of every file finished when `rescanned`; the
+    /// writers the grace step is due for.
+    pub fn note_grace(&mut self, now: u64, rescanned: bool) -> BTreeSet<WriterId> {
+        let held = &self.cached.grace.unseen;
+        let unseen: BTreeMap<WriterId, Unseen> = self
+            .unseen()
+            .into_iter()
+            .map(|writer| {
+                let noted = match held.get(&writer) {
+                    Some(held) => Unseen {
+                        since: held.since,
+                        rescanned: held.rescanned || rescanned,
+                    },
+                    None => Unseen {
+                        since: now,
+                        rescanned: false,
+                    },
+                };
+                (writer, noted)
+            })
+            .collect();
+        let due = unseen
+            .iter()
+            .filter(|(_, unseen)| unseen.rescanned && now.saturating_sub(unseen.since) >= GRACE_MS)
+            .map(|(writer, _)| *writer)
+            .collect();
+        if unseen != *held {
+            self.cached.grace.unseen = unseen;
             self.unsaved.grace = true;
         }
-        next.rescanned
-            && next
-                .since
-                .is_some_and(|since| now.saturating_sub(since) >= GRACE_MS)
+        due
     }
 
-    /// Takes the grace step: lets go of what no file holds and nothing visible
-    /// descends from, forgets fork points the files no longer show, and derives
-    /// again.
-    pub fn take_grace(&mut self) -> ReadReport {
-        let kept = derive::grace(&self.seen(), &self.cached.writers);
+    /// Takes the grace step for `writers`: lets go of what of theirs no file
+    /// holds and nothing visible descends from, forgets their fork points the
+    /// files no longer show, and derives again.
+    pub fn take_grace(&mut self, writers: &BTreeSet<WriterId>) -> ReadReport {
+        let kept = derive::grace(&self.seen(), &self.cached.writers, writers);
         let mut report = ReadReport::default();
         for writer in self
             .cached
@@ -933,11 +932,9 @@ impl Reader {
             }
         }
         self.cached.writers = kept;
-        self.cached.grace = Grace {
-            graced: true,
-            since: None,
-            rescanned: false,
-        };
+        let grace = &mut self.cached.grace;
+        grace.graced.extend(writers);
+        grace.unseen.retain(|writer, _| !writers.contains(writer));
         self.unsaved.grace = true;
         self.rederive(&mut report);
         report
@@ -1403,8 +1400,12 @@ mod tests {
     }
 
     fn genesis() -> Entry {
+        genesis_of(W)
+    }
+
+    fn genesis_of(writer: WriterId) -> Entry {
         let kind = EntryKind::Genesis(Genesis {
-            writer: W,
+            writer,
             label: "a".into(),
         });
         Entry::encode(EntryHash::ZERO, 0, at(0), kind).unwrap()
@@ -1423,7 +1424,11 @@ mod tests {
 
     /// The genesis entry and `n` entries after it.
     fn chain(n: usize) -> Vec<Entry> {
-        let mut entries = vec![genesis()];
+        chain_of(W, n)
+    }
+
+    fn chain_of(writer: WriterId, n: usize) -> Vec<Entry> {
+        let mut entries = vec![genesis_of(writer)];
         for i in 0..n {
             let next = after(entries.last().unwrap(), &format!("e{i}"));
             entries.push(next);
@@ -1555,7 +1560,11 @@ mod tests {
                 WriterFile::Snapshot(snapshot) => seen.snapshots.push(snapshot),
                 WriterFile::Unreadable => {}
             }
-            let derived = derive::derive(&BTreeMap::from([(W, seen)]), &BTreeMap::new(), false);
+            let derived = derive::derive(
+                &BTreeMap::from([(W, seen)]),
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+            );
             for placed in derived.writers.values() {
                 for entry in placed.merged.iter().skip(1) {
                     assert!(placed.holds(entry.prev()), "merged after its predecessor");
@@ -1992,8 +2001,9 @@ mod tests {
         crate::blocking::run(&mut disk, reader.save(genesis)).unwrap();
         let journal = Layout::view_journal(genesis);
         let stale = disk.files(Root::Local)[&journal].clone();
-        assert!(reader.note_grace(1_000 + GRACE_MS, true));
-        reader.take_grace();
+        let due = reader.note_grace(1_000 + GRACE_MS, true);
+        assert!(!due.is_empty());
+        reader.take_grace(&due);
         crate::blocking::run(&mut disk, reader.save(genesis)).unwrap();
         assert!(!disk.files(Root::Local).contains_key(&journal));
         disk.perform(Io::Create {
@@ -2027,19 +2037,61 @@ mod tests {
         crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
         let merged = |reader: &Reader| reader.derived().writers[&W].merged.len();
         assert_eq!(merged(&reader), 3, "what no file holds stays shown");
-        assert!(!reader.note_grace(1_000, false));
-        assert!(
-            !reader.note_grace(1_000 + GRACE_MS, false),
+        assert_eq!(reader.note_grace(1_000, false), BTreeSet::new());
+        assert_eq!(
+            reader.note_grace(1_000 + GRACE_MS, false),
+            BTreeSet::new(),
             "no full rescan yet"
         );
-        assert!(reader.note_grace(1_000 + GRACE_MS, true));
-        let report = reader.take_grace();
+        let due = reader.note_grace(1_000 + GRACE_MS, true);
+        assert_eq!(due, BTreeSet::from([W]));
+        let report = reader.take_grace(&due);
         assert!(report.changed);
         assert_eq!(merged(&reader), 0, "nothing visible descends from it");
-        assert!(reader.cached().grace.graced);
-        assert!(
-            !reader.note_grace(2_000 + GRACE_MS, true),
+        assert_eq!(reader.cached().grace.graced, BTreeSet::from([W]));
+        assert_eq!(
+            reader.note_grace(2_000 + GRACE_MS, true),
+            BTreeSet::new(),
             "nothing is unseen now"
         );
+    }
+
+    #[test]
+    fn the_grace_step_waits_a_day_for_each_writer_and_touches_no_other() {
+        const V: WriterId = WriterId::from_u128(0xb);
+        let disk = MemDisk::new();
+        let layout = Layout::new(".lib").unwrap();
+        let files = [(W, chain(1)), (V, chain_of(V, 1))].map(|(writer, entries)| {
+            let path = layout.writer(writer).join("s.txt").unwrap();
+            put(&disk, &path, &bytes_of(&[&entries[0], &entries[1]]));
+            path
+        });
+        let mut reader = read(&disk);
+        let gone = |reader: &mut Reader, path: &RelPath| {
+            disk.perform(Io::Remove {
+                root: Root::Folder,
+                path: path.clone(),
+            })
+            .unwrap();
+            crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
+        };
+        gone(&mut reader, &files[0]);
+        reader.note_grace(1_000, false);
+        gone(&mut reader, &files[1]);
+        reader.note_grace(1_000 + GRACE_MS - 1, true);
+        let due = reader.note_grace(1_000 + GRACE_MS, true);
+        assert_eq!(
+            due,
+            BTreeSet::from([W]),
+            "V went unseen a day less a moment ago"
+        );
+        reader.take_grace(&due);
+        let merged = |writer| {
+            let placed = reader.derived().writers.get(&writer);
+            placed.map_or(0, |placed| placed.merged.len())
+        };
+        assert_eq!((merged(W), merged(V)), (0, 2));
+        assert_eq!(reader.cached().grace.graced, BTreeSet::from([W]));
+        assert!(reader.cached().grace.unseen.contains_key(&V));
     }
 }

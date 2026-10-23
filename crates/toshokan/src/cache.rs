@@ -43,7 +43,7 @@ const JOURNAL_SLACK: u64 = 1 << 20;
 /// The first byte of every record this build writes; a record starting with
 /// another is not read. It changes with any change to what a record packs or
 /// how, since a record whose check holds is taken as this build packed it.
-const FORMAT: u8 = 6;
+const FORMAT: u8 = 7;
 
 /// How many bytes of a record's length start it.
 const LEN: usize = 8;
@@ -1158,7 +1158,7 @@ pub(crate) fn write_checkpoint<'a>(
 pub(crate) fn keep_grace(
     genesis: EntryHash,
     generation: u64,
-    grace: Grace,
+    grace: &Grace,
     let_go: &BTreeMap<WriterId, LetGo>,
 ) -> Task<'static, Result<()>> {
     let record = write_view(
@@ -1166,7 +1166,7 @@ pub(crate) fn keep_grace(
         std::iter::empty(),
         Vec::new(),
         &BTreeSet::new(),
-        Some(&grace),
+        Some(grace),
         let_go,
     );
     append_record(genesis, record, Rc::default()).task()

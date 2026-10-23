@@ -533,14 +533,14 @@ impl Kills {
     }
 }
 
-/// Everything the reader derives from what it sees and remembers. `graced` says
-/// whether the reader has taken the grace step: from then on an unsealed file
-/// shorter than a certificate no longer waits, and a reference the files
-/// contradict kills only its exact target.
+/// Everything the reader derives from what it sees and remembers. `graced`
+/// names the writers the reader took the grace step for: an unsealed file of
+/// theirs shorter than a certificate no longer waits, and a reference to them
+/// the files contradict kills only its exact target.
 pub fn derive(
     seen: &BTreeMap<WriterId, Seen<'_>>,
     memory: &BTreeMap<WriterId, Memory>,
-    graced: bool,
+    graced: &BTreeSet<WriterId>,
 ) -> Derived {
     let writers: BTreeSet<WriterId> = seen.keys().chain(memory.keys()).copied().collect();
     let classified: BTreeMap<WriterId, Writer> = writers
@@ -548,7 +548,12 @@ pub fn derive(
         .map(|writer| {
             (
                 *writer,
-                classify(*writer, seen.get(writer), memory.get(writer), graced),
+                classify(
+                    *writer,
+                    seen.get(writer),
+                    memory.get(writer),
+                    graced.contains(writer),
+                ),
             )
         })
         .collect();
@@ -595,6 +600,7 @@ pub fn derive(
         })
         .collect();
     let contradicted = |target: &Ref| {
+        let graced = graced.contains(&target.writer);
         let Some((highest, at)) = shown.get(&target.writer).filter(|_| graced) else {
             return false;
         };
@@ -1074,16 +1080,49 @@ fn widen(span: Option<(Hlc, Hlc)>, at: Hlc) -> Option<(Hlc, Hlc)> {
     })
 }
 
-/// The memories a reader keeps after the grace step: of what no file it sees
+/// The writers of which `memory` holds something no file in `seen` holds: a
+/// tip whose file is gone, or an entry neither a line nor a snapshot's head.
+pub fn unseen(
+    seen: &BTreeMap<WriterId, Seen<'_>>,
+    memory: &BTreeMap<WriterId, Memory>,
+) -> BTreeSet<WriterId> {
+    let writers = memory.iter().filter(|(writer, memory)| {
+        let files = seen.get(writer);
+        let lines: BTreeSet<EntryHash> = files
+            .into_iter()
+            .flat_map(|files| files.segments.iter())
+            .flat_map(|segment| segment.entries.iter().map(|entry| entry.hash()))
+            .collect();
+        let heads: BTreeSet<Own> = files
+            .into_iter()
+            .flat_map(|files| files.snapshots.iter().map(|snapshot| snapshot.head))
+            .collect();
+        let tip_gone = memory.tips.iter().any(|tip| !heads.contains(&tip.head));
+        let entry_gone = memory
+            .entries
+            .values()
+            .any(|entry| !lines.contains(&entry.hash()) && !heads.contains(&entry.own()));
+        tip_gone || entry_gone
+    });
+    writers.map(|(writer, _)| *writer).collect()
+}
+
+/// The memories a reader keeps after the grace step for `writers`, whose
+/// memories alone it changes: of what no file it sees
 /// holds, only what something visible descends from, a line by its chain of
 /// predecessors or a snapshot by its certificates; and no fork point, which the
 /// files show again where they still hold one.
 pub fn grace(
     seen: &BTreeMap<WriterId, Seen<'_>>,
     memory: &BTreeMap<WriterId, Memory>,
+    writers: &BTreeSet<WriterId>,
 ) -> BTreeMap<WriterId, Memory> {
     let mut kept = BTreeMap::new();
     for (writer, remembered) in memory {
+        if !writers.contains(writer) {
+            kept.insert(*writer, remembered.clone());
+            continue;
+        }
         let empty = Seen::default();
         let files = seen.get(writer).unwrap_or(&empty);
         let lines: Vec<&Rc<Entry>> = files
@@ -1152,13 +1191,13 @@ pub fn grace(
 /// merges of it, into `derived` as deriving afresh would. Returns false, having
 /// changed nothing, where they may change more than the fields they write: the
 /// writer has a fork point, a run, a gap or lines it holds back, an item is
-/// shown, an entry dismisses a run or does not follow, or the reader took the
-/// grace step.
+/// shown, an entry dismisses a run, names a writer in `graced` or does not
+/// follow.
 pub fn extend(
     derived: &mut Derived,
     writer: WriterId,
     entries: &[Rc<Entry>],
-    graced: bool,
+    graced: &BTreeSet<WriterId>,
 ) -> bool {
     let Some(placed) = derived.writers.get(&writer) else {
         return false;
@@ -1168,7 +1207,7 @@ pub fn extend(
         && placed.gaps.is_empty()
         && placed.unplaced.is_empty()
         && placed.waiting == 0;
-    if graced || !settled || !derived.items.is_empty() {
+    if !settled || !derived.items.is_empty() {
         return false;
     }
     let mut head = placed.head();
@@ -1178,10 +1217,14 @@ pub fn extend(
             None => entry.prev() == EntryHash::ZERO && entry.n() == 0 && placed.tips.is_empty(),
         };
         let kind = entry.kind();
-        let dismisses = contribution::ops(&kind)
-            .iter()
-            .any(|op| matches!(op, Op::Dismiss { .. }));
-        if !follows || dismisses {
+        let ops = contribution::ops(&kind);
+        let dismisses = ops.iter().any(|op| matches!(op, Op::Dismiss { .. }));
+        let names_graced = ops.iter().any(|op| {
+            let said = contribution::said(op);
+            let mut targets = said.refs.iter().map(|(_, target)| target.writer);
+            targets.any(|target| graced.contains(&target))
+        });
+        if !follows || dismisses || names_graced {
             return false;
         }
         head = Some(entry.own());
@@ -1346,7 +1389,11 @@ mod tests {
     }
 
     fn derived(seen: Vec<(WriterId, Seen<'_>)>, graced: bool) -> Derived {
-        derive(&seen.into_iter().collect(), &BTreeMap::new(), graced)
+        let graced = match graced {
+            true => seen.iter().map(|(writer, _)| *writer).collect(),
+            false => BTreeSet::new(),
+        };
+        derive(&seen.into_iter().collect(), &BTreeMap::new(), &graced)
     }
 
     #[test]
@@ -1612,7 +1659,7 @@ mod tests {
                 let next = entry(own.last().map(|e| &**e), vec![op], &format!("s{step}"));
                 own.push(Rc::clone(&next));
                 let afresh = seen(&own);
-                if extend(&mut incremental, W, &[next], false) {
+                if extend(&mut incremental, W, &[next], &BTreeSet::new()) {
                     extended += 1;
                     assert_eq!(incremental.folded, afresh.folded, "step {step}");
                     assert_eq!(incremental.writers[&W].merged, afresh.writers[&W].merged);
@@ -1646,7 +1693,7 @@ mod tests {
                 snapshots: vec![],
             },
         )]);
-        let kept = grace(&seen, &remembered);
+        let kept = grace(&seen, &remembered, &BTreeSet::from([W]));
         let kept: BTreeSet<EntryHash> = kept[&W].entries.keys().copied().collect();
         assert_eq!(
             kept,
@@ -1655,8 +1702,14 @@ mod tests {
         );
         let none = BTreeMap::from([(W, Seen::default())]);
         assert!(
-            grace(&none, &remembered).is_empty(),
+            grace(&none, &remembered, &BTreeSet::from([W])).is_empty(),
             "nothing visible descends from them"
+        );
+        let other = WriterId::from_u128(0x77);
+        assert_eq!(
+            grace(&none, &remembered, &BTreeSet::from([other])),
+            remembered,
+            "a step for another writer"
         );
     }
 }

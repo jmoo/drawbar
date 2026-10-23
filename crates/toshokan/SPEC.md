@@ -537,7 +537,7 @@ as 8 bytes little-endian, a 16-byte check of the payload, then the payload. The
 check finds a record a crash tore or a disk damaged; it does not guard against
 forgery, since only the install writes its local root. This build computes it in
 two lanes of 64-bit multiplies over the payload. The payload's first byte names
-its format, 6; then come the generation, and the view, or what it gained or the
+its format, 7; then come the generation, and the view, or what it gained or the
 grace step let go of, in this build's binary encoding: integers as LEB128,
 identifiers as their 16 bytes big-endian, text as its length and its UTF-8,
 lists as their length and their members, with each entry as its hash, its
@@ -556,15 +556,17 @@ from scratch.
 
 A reader keeps showing what it remembers that no file it sees holds: a tip
 whose file is gone, or an entry in a file sync has not brought, or one a restore
-of the folder from an older copy took. Once that has lasted 24 hours and at
-least one scan of every file has finished since, it takes the grace step: it
-lets go of each such tip and entry from which nothing it sees descends, a line
-by its chain of predecessors or a snapshot by its certificates, forgets the fork
-points the files no longer show, and derives again. From then on an unsealed
-file shorter than a certificate no longer waits, and a reference to a number
-above the highest the files show of its writer, or to a number where the files
-show only another entry, kills only the write with its hash. Facts only a
-restore took then disappear, without a prompt.
+of the folder from an older copy took. It counts that time per writer. Once it
+has held something of a writer no file holds for 24 hours, and at least one scan
+of every file has finished since, it takes the grace step for that writer: it
+lets go of each such tip and entry of the writer from which nothing it sees
+descends, a line by its chain of predecessors or a snapshot by its certificates,
+forgets the writer's fork points the files no longer show, and derives again.
+From then on an unsealed file of that writer shorter than a certificate no
+longer waits, and a reference to a number of that writer above the highest the
+files show of it, or to a number where the files show only another entry,
+kills only the write with its hash. Other writers are read as before. Facts
+only a restore took then disappear, without a prompt.
 
 ## Binding
 

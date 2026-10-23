@@ -30,7 +30,7 @@ pub struct Real;
 #[derive(Clone, Debug, Default)]
 pub struct Remembered {
     writers: BTreeMap<WriterId, Memory>,
-    graced: bool,
+    graced: BTreeSet<WriterId>,
 }
 
 const SET: &str = "s";
@@ -285,9 +285,9 @@ fn derived(
     r: &Reading<'_, Snapshot>,
     lines: &Lines,
     memory: &BTreeMap<WriterId, Memory>,
-    graced: bool,
+    graced: &BTreeSet<WriterId>,
     grace: bool,
-) -> (Derived, BTreeMap<WriterId, Memory>) {
+) -> (Derived, BTreeMap<WriterId, Memory>, BTreeSet<WriterId>) {
     let mut segments: Vec<(Dir, Vec<Rc<log::Entry>>, bool)> = Vec::new();
     let mut snapshots: Vec<(Dir, Rc<Snapshot>)> = Vec::new();
     for seen in r.seen {
@@ -316,18 +316,22 @@ fn derived(
             .snapshots
             .push(snapshot);
     }
-    let kept = match grace {
-        true => derive::grace(&seen, memory),
-        false => memory.clone(),
+    let (kept, graced) = match grace {
+        true => {
+            let unseen = derive::unseen(&seen, memory);
+            let graced = graced.union(&unseen).copied().collect();
+            (derive::grace(&seen, memory, &unseen), graced)
+        }
+        false => (memory.clone(), graced.clone()),
     };
-    let derived = derive::derive(&seen, &kept, graced);
+    let derived = derive::derive(&seen, &kept, &graced);
     let remembered = derived
         .memory
         .iter()
         .filter(|(_, memory)| !memory.is_empty())
         .map(|(writer, memory)| (*writer, memory.clone()))
         .collect();
-    (derived, remembered)
+    (derived, remembered, graced)
 }
 
 /// What `derived` shows, in the world's terms.
@@ -493,21 +497,15 @@ impl Design for Real {
 
     fn read(&self, r: &Reading<'_, Snapshot>, memory: &Remembered) -> (Shown, Remembered) {
         let lines = Lines::of(r.world);
-        let (derived, writers) = derived(r, &lines, &memory.writers, memory.graced, false);
-        let remembered = Remembered {
-            writers,
-            graced: memory.graced,
-        };
+        let (derived, writers, graced) = derived(r, &lines, &memory.writers, &memory.graced, false);
+        let remembered = Remembered { writers, graced };
         (shown(r.world, &lines, &derived), remembered)
     }
 
     fn grace(&self, r: &Reading<'_, Snapshot>, memory: &Remembered) -> (Shown, Remembered) {
         let lines = Lines::of(r.world);
-        let (derived, writers) = derived(r, &lines, &memory.writers, true, true);
-        let remembered = Remembered {
-            writers,
-            graced: true,
-        };
+        let (derived, writers, graced) = derived(r, &lines, &memory.writers, &memory.graced, true);
+        let remembered = Remembered { writers, graced };
         (shown(r.world, &lines, &derived), remembered)
     }
 

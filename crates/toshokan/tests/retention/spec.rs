@@ -135,9 +135,9 @@ pub struct Memory {
     /// The entries it placed after its tips, or shows.
     pub entries: BTreeSet<Hash>,
     pub forks: BTreeSet<Ref>,
-    /// Whether it has taken the grace step: from then on, a reference the
-    /// files contradict kills only its exact target.
-    pub graced: bool,
+    /// The writers it took the grace step for: a reference to them the files
+    /// contradict kills only its exact target.
+    pub graced: BTreeSet<Dir>,
 }
 
 impl Design for Spec {
@@ -278,11 +278,27 @@ impl Design for Spec {
             passed.contains(&at.hash) || snapshots.iter().any(|s| s.head != at && s.certifies(at))
         };
         let visible_snapshot = |t: &Contribution| snapshots.iter().any(|c| c.head == t.head);
+        // The step is for the writers of which the reader holds what no file
+        // holds; it leaves the rest alone.
+        let unseen: BTreeSet<Dir> = memory
+            .tips
+            .iter()
+            .filter(|t| !visible_snapshot(t))
+            .map(|t| t.head.dir)
+            .chain(
+                memory
+                    .entries
+                    .iter()
+                    .map(|&e| world.entry(e).at())
+                    .filter(|at| !held.contains(at))
+                    .map(|at| at.dir),
+            )
+            .collect();
         let kept = Memory {
             tips: memory
                 .tips
                 .iter()
-                .filter(|t| visible_snapshot(t) || newer(t.head))
+                .filter(|t| !unseen.contains(&t.head.dir) || visible_snapshot(t) || newer(t.head))
                 .cloned()
                 .collect(),
             entries: memory
@@ -291,11 +307,16 @@ impl Design for Spec {
                 .copied()
                 .filter(|&e| {
                     let at = world.entry(e).at();
-                    held.contains(&at) || newer(at)
+                    !unseen.contains(&at.dir) || held.contains(&at) || newer(at)
                 })
                 .collect(),
-            forks: BTreeSet::new(),
-            graced: true,
+            forks: memory
+                .forks
+                .iter()
+                .filter(|fork| !unseen.contains(&fork.dir))
+                .copied()
+                .collect(),
+            graced: memory.graced.union(&unseen).copied().collect(),
         };
         derive(self, r, &kept)
     }
@@ -444,7 +465,7 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
                     .iter()
                     .any(|c| lines.len() <= (c.last.n - c.first.n) as usize) =>
             {
-                if memory.graced {
+                if memory.graced.contains(&dir) {
                     dirs.folded.insert(first);
                     dirs.ambiguous.extend(&lines[1..]);
                 } else {
@@ -726,7 +747,7 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
             .iter()
             .any(|s| s.dir == r.dir && s.n == r.n && s.hash != r.hash);
         let above = highest.is_some_and(|l| r.n > l);
-        memory.graced && (above || (other && !shown_refs.contains(r)))
+        memory.graced.contains(&r.dir) && (above || (other && !shown_refs.contains(r)))
     };
     let mut refs: Vec<(Field, Ref, bool)> = Vec::new();
     // Takes: the field, the taken run's writer, and the run's first number.
@@ -984,7 +1005,7 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
         tips: dirs.tips.values().flatten().cloned().collect(),
         entries: placed.union(&runs).chain(&gaps).copied().collect(),
         forks,
-        graced: memory.graced,
+        graced: memory.graced.clone(),
     };
     (shown, memory)
 }

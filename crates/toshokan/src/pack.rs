@@ -7,7 +7,7 @@
 //! order; an enum is a byte naming the variant, then its fields.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
 use crate::path::RelPath;
@@ -377,6 +377,26 @@ impl<K: Unpack + Ord, V: Unpack> Unpack for BTreeMap<K, V> {
             return Err(Bad("keys out of order"));
         }
         Ok(pairs.into_iter().collect())
+    }
+}
+
+impl<T: Pack> Pack for BTreeSet<T> {
+    fn pack(&self, out: &mut Vec<u8>) {
+        self.len().pack(out);
+        for member in self {
+            member.pack(out);
+        }
+    }
+}
+
+/// Refuses members out of order, which no packing writes.
+impl<T: Unpack + Ord> Unpack for BTreeSet<T> {
+    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
+        let members = Vec::<T>::unpack(input)?;
+        if !members.windows(2).all(|pair| pair[0] < pair[1]) {
+            return Err(Bad("members out of order"));
+        }
+        Ok(members.into_iter().collect())
     }
 }
 

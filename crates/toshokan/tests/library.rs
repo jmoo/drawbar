@@ -1511,7 +1511,11 @@ fn an_instance_without_a_writer_keeps_only_the_grace_step_in_the_views_it_read<F
     assert!(checkpoints(&restored) == before, "no view is written whole");
     for (genesis, view) in remembered {
         let kept = cached(&restored, genesis);
-        assert!(kept.grace().graced, "{genesis}: {:?}", kept.grace());
+        assert!(
+            !kept.grace().graced.is_empty(),
+            "{genesis}: {:?}",
+            kept.grace()
+        );
         assert_ne!(kept.writers(), view.writers(), "{genesis} lets go");
         for (writer, memory) in kept.writers() {
             let held = &view.writers()[writer];
@@ -1546,8 +1550,9 @@ fn a_grace_step_an_instance_without_a_writer_could_not_keep_is_kept_by_its_next_
     let views = checkpoints(&restored);
     assert!(!views.is_empty());
     for genesis in views.into_keys() {
-        let grace = cached(&restored, genesis).grace();
-        assert!(grace.graced, "{genesis}: {grace:?}");
+        let view = cached(&restored, genesis);
+        let grace = view.grace();
+        assert!(!grace.graced.is_empty(), "{genesis}: {grace:?}");
     }
 }
 

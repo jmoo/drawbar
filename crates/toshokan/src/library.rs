@@ -499,10 +499,11 @@ impl Library {
     /// file when `full`; whether it took it.
     fn grace(&mut self, full: bool) -> bool {
         let due = self.reader.note_grace(self.env.now_ms(), full);
-        if due {
-            self.reader.take_grace();
+        if due.is_empty() {
+            return false;
         }
-        due
+        self.reader.take_grace(&due);
+        true
     }
 
     /// What changed since the view.
@@ -1642,14 +1643,14 @@ fn saved_view<'a, L: BorrowMut<Library> + 'a>(mut library: L) -> Flow<'a, (L, Re
         if !known.reader.unsaved.grace {
             return Flow::Done((library, Ok(())));
         }
-        let grace = known.reader.cached().grace();
+        let grace = known.reader.cached().grace().clone();
         let let_go = known.reader.unsaved.let_go.clone();
         let mut views = known.reader.retired.clone();
         let store = known.reader.store.borrow();
         views.extend(store.genesis.map(|loaded| (loaded, store.generation)));
         drop(store);
         let saved = fold(views.into_iter(), (), move |(), (genesis, generation)| {
-            flow::run(cache::keep_grace(genesis, generation, grace, &let_go))
+            flow::run(cache::keep_grace(genesis, generation, &grace, &let_go))
         });
         return saved.then(|saved| {
             if saved.is_ok() {
