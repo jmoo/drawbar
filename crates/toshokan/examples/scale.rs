@@ -4,7 +4,7 @@
 //! ```text
 //! cargo run --release --example scale -- [--native DIR] [--entities N] [--entries N]
 //!     [--writers N] [--files N] [--corpus DIR] [--stale-mtime] [--trash N]
-//!     [--segment N] [--retired N] [--refresh N,N] [--runs N] [--label TEXT]
+//!     [--segment N] [--tags N] [--retired N] [--refresh N,N] [--runs N] [--label TEXT]
 //! ```
 //!
 //! Without `--native` the library lives on an in-memory disk. Each request is
@@ -326,6 +326,8 @@ struct Gen {
     rng: Rng,
     at: u64,
     segment_entries: usize,
+    /// How many tag values entities draw from.
+    tags: usize,
     writers: Vec<WriterGen>,
     entities: Vec<EntityGen>,
     sink: Box<dyn Backend>,
@@ -545,7 +547,7 @@ impl Gen {
                 }
                 let mut tags = Vec::new();
                 for t in 0..1 + self.rng.below(5) {
-                    let tag = format!("t{}", (i * 7 + t * 13) % 50);
+                    let tag = format!("t{}", (i * 7 + t * 13) % self.tags);
                     ops.push(Op::Add {
                         entity,
                         key: "tags".into(),
@@ -633,7 +635,7 @@ impl Gen {
                     |e, hash, _| e.name = hash,
                 ),
                 6..9 => {
-                    let tag = format!("t{}", self.rng.below(50));
+                    let tag = format!("t{}", self.rng.below(self.tags));
                     let tags = self.entities[e].tags.iter();
                     let replaces = tags.filter(|(t, _)| *t == tag).map(|(_, at)| *at).collect();
                     (
@@ -902,6 +904,7 @@ struct Args {
     stale: bool,
     trash: usize,
     segment: usize,
+    tags: usize,
     retired: usize,
     refresh: Vec<usize>,
     runs: usize,
@@ -920,6 +923,7 @@ fn args() -> Args {
         stale: false,
         trash: 0,
         segment: 500,
+        tags: 50,
         retired: 0,
         refresh: vec![1, 1000],
         runs: 3,
@@ -939,6 +943,7 @@ fn args() -> Args {
             "--stale-mtime" => args.stale = true,
             "--trash" => args.trash = value().parse().unwrap(),
             "--segment" => args.segment = value().parse().unwrap(),
+            "--tags" => args.tags = value().parse().unwrap(),
             "--retired" => args.retired = value().parse().unwrap(),
             "--refresh" => args.refresh = value().split(',').map(|n| n.parse().unwrap()).collect(),
             "--runs" => args.runs = value().parse().unwrap(),
@@ -1016,6 +1021,7 @@ fn main() {
         rng: Rng(0x9e3779b97f4a7c15),
         at: SystemTimeMs::now() - 10_000_000,
         segment_entries: args.segment,
+        tags: args.tags,
         writers: Vec::new(),
         entities: Vec::new(),
         sink,
