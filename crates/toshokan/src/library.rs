@@ -584,7 +584,9 @@ impl Library {
     /// [`Refusal::Nothing`] when this instance writes as no writer yet, and when
     /// a snapshot in the writer's directory already has its last entry. Fails
     /// with [`Error::Rekey`] when the writer's history forked or the folder lost
-    /// its last entry, and the instance stops writing as it.
+    /// its last entry, and the instance stops writing as it. This writer's
+    /// interrupted effects are settled first, and a failure to settle them fails
+    /// the compaction.
     pub fn compact(&mut self) -> Task<'_, Result<Compacted>> {
         if let Err(error) = self.writable() {
             return Task::ready(Err(error));
@@ -592,8 +594,8 @@ impl Library {
         if self.writer.is_none() {
             return Task::ready(Err(Error::Refused(Refusal::Nothing)));
         }
-        compacted(self)
-            .then(|(_, compacted)| Flow::Done(compacted))
+        settle_first(self)
+            .and_then(|library| compacted(library).then(|(_, compacted)| Flow::Done(compacted)))
             .task()
     }
 
@@ -2177,19 +2179,26 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
     );
     let own = library.writer.as_ref().map(Writer::id);
     let placed = own.and_then(|own| library.reader.derived().writers.get(&own));
-    let logged = placed.and_then(|placed| recovery::continued(placed, record.after()));
+    let logged = placed.map_or(recovery::After::Nothing, |placed| {
+        recovery::after(placed, record.after())
+    });
     flow::run(settled)
         .and_then(move |applied| {
             let mut planned = planned(&record);
             let file_ops = library.file_ops(&applied, &record.files);
             let label = planned.label.clone();
+            let resumed = logged != recovery::After::Nothing;
             let kinds = match logged {
-                Some((_, held)) => {
-                    let rest = rest_of(file_ops, applied.displaced, held);
+                recovery::After::Intent(continued) => {
+                    let mut file_ops = file_ops;
+                    file_ops.retain(|op| file_of(op).is_none_or(|e| !continued.files.contains(&e)));
+                    let mut displaced = applied.displaced;
+                    displaced.retain(|item| !continued.displaced.contains(&item.item));
                     let deleted = deleted_by(&planned.ops);
-                    library.continued(continuation(rest.0, rest.1, &deleted))
+                    library.continued(continuation(file_ops, displaced, &deleted))
                 }
-                None => {
+                recovery::After::Folded => Vec::new(),
+                recovery::After::Nothing => {
                     let mores = fit(&mut planned, file_ops, applied.displaced);
                     planned.forks = library.known_forks(&planned.ops);
                     let mut kinds = vec![EntryKind::Intent(planned)];
@@ -2197,8 +2206,11 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
                     kinds
                 }
             };
-            let resumed = logged.is_some();
-            append(library, kinds).and_then(move |(library, entries)| {
+            let appended = match kinds.is_empty() {
+                true => ok((library, Vec::new())),
+                false => append(library, kinds),
+            };
+            appended.and_then(move |(library, entries)| {
                 library.spend(name, &record);
                 let scan = library.scan_task();
                 rebind_logged(library, scan, record.paths())
@@ -2469,20 +2481,6 @@ fn room<'a>(mores: &'a mut Vec<More>, size: &mut usize, len: usize) -> &'a mut M
     }
     *size += len;
     mores.last_mut().expect("pushed above when there was none")
-}
-
-/// What of `file_ops`, then `displaced`, the first `held` of them leave.
-fn rest_of(file_ops: Vec<Op>, displaced: Vec<Displaced>, held: u64) -> (Vec<Op>, Vec<Displaced>) {
-    let held = usize::try_from(held).unwrap_or(usize::MAX);
-    let ops = file_ops.len();
-    let rest = file_ops.into_iter().skip(held).collect();
-    (
-        rest,
-        displaced
-            .into_iter()
-            .skip(held.saturating_sub(ops))
-            .collect(),
-    )
 }
 
 fn json_len(value: &impl serde::Serialize) -> usize {

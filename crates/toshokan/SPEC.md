@@ -814,8 +814,9 @@ the start of a JSON value. Any other record that does not decode stays.
 A spent record whose intent is followed by fewer `more` items than its `more`
 says, as when a crash tore the append, is settled again before anything else:
 the steps show done, and the missing items, found again from the record and the
-folder in the same order, are appended in `more` entries. The writer does not
-compact while such a record is open.
+folder, are appended in `more` entries: each entity's file op and each trash
+item that no entry after the intent holds yet. The writer does not compact while
+such a record is open, and a compaction asked for settles it first.
 
 Settling twice ends as settling once.
 

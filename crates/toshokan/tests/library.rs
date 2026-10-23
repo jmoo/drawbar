@@ -547,6 +547,8 @@ through_both!(
     a_clone_forks_into_items_taken_or_dismissed,
     more_files_than_one_line_holds_move_and_undo_as_one_change,
     an_append_torn_after_its_intent_logs_the_rest_at_the_next_open,
+    a_compaction_finishes_a_cut_short_continuation_before_it_folds_it,
+    a_continuation_resumed_without_a_moved_file_logs_every_other_file_once,
     more_entities_deleted_than_one_line_holds_beside_their_files_come_back_with_undo,
     a_fork_compaction_finds_retires_the_writer,
     one_intent_takes_from_runs_of_two_forked_writers,
@@ -1107,6 +1109,51 @@ fn more_files_than_one_line_holds_move_and_undo_as_one_change<F: Facade>() {
     );
 }
 
+fn a_compaction_finishes_a_cut_short_continuation_before_it_folds_it<F: Facade>() {
+    let clock = TestClock::at(1_000);
+    let Some(disk) = torn_after_one_continuation::<F>(&clock) else {
+        return;
+    };
+    let (mut again, _) = F::open(Probe::new(&one_disk(&disk)), env("a", 2, &clock)).unwrap();
+    again.compact().unwrap();
+    let left = astray(&again.view());
+    assert!(
+        left.is_empty(),
+        "{} astray, as {:?}",
+        left.len(),
+        left.first()
+    );
+    again
+        .commit("Next", |i| i.create(|e| _ = e.add(TAGS, tag("next"))).0)
+        .unwrap();
+    let moves = labels_logged(&disk)
+        .iter()
+        .filter(|label| *label == "Move")
+        .count();
+    assert_eq!(moves, 1, "the move is logged once");
+}
+
+fn a_continuation_resumed_without_a_moved_file_logs_every_other_file_once<F: Facade>() {
+    let clock = TestClock::at(1_000);
+    let Some(disk) = torn_after_one_continuation::<F>(&clock) else {
+        return;
+    };
+    let gone = path(&format!("Set/{}", torn_name(5)));
+    disk.perform(Io::Remove {
+        root: Root::Folder,
+        path: gone,
+    })
+    .unwrap();
+    let (mut again, _) = F::open(Probe::new(&one_disk(&disk)), env("a", 2, &clock)).unwrap();
+    again
+        .commit("Next", |i| i.create(|e| _ = e.add(TAGS, tag("next"))).0)
+        .unwrap();
+    let counts = file_ops_logged(&disk);
+    let twice: Vec<_> = counts.iter().filter(|(_, n)| **n > 1).collect();
+    assert_eq!(twice, Vec::<(&String, &usize)>::new(), "logged twice");
+    assert_eq!(counts.len(), TORN_FILES, "each entity's move is logged");
+}
+
 fn more_entities_deleted_than_one_line_holds_beside_their_files_come_back_with_undo<F: Facade>() {
     const FILES: usize = 1_500;
     let folder = disk();
@@ -1134,21 +1181,30 @@ fn more_entities_deleted_than_one_line_holds_beside_their_files_come_back_with_u
     assert_eq!(files.len(), FILES, "each comes back with its file");
 }
 
-fn an_append_torn_after_its_intent_logs_the_rest_at_the_next_open<F: Facade>() {
-    if !FOLDER.get().fsync {
-        return;
-    }
-    const FILES: usize = 3_000;
-    let disk = disk();
-    let one_disk = |disk: &MemDisk| Machine {
+const TORN_FILES: usize = 3_000;
+
+fn torn_name(n: usize) -> String {
+    format!("{n:04}.wav")
+}
+
+fn one_disk(disk: &MemDisk) -> Machine {
+    Machine {
         folder: disk.clone(),
         local: disk.clone(),
-    };
-    let clock = TestClock::at(1_000);
-    let name = |n: usize| format!("{n:04}.wav");
+    }
+}
+
+/// A folder where a move of [`TORN_FILES`] files into `Set/` crashed with its
+/// intent and one continuation entry durable, as restarted; `None` where the
+/// disk tears nothing.
+fn torn_after_one_continuation<F: Facade>(clock: &TestClock) -> Option<MemDisk> {
+    if !FOLDER.get().fsync {
+        return None;
+    }
+    let disk = disk();
     let probe = Probe::new(&one_disk(&disk));
-    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
-    let entities = adopted(&mut a, &disk, FILES, name);
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, clock)).unwrap();
+    let entities = adopted(&mut a, &disk, TORN_FILES, torn_name);
     let tearing = disk.clone();
     fail(&probe, move |io| {
         let (Io::Append { root, path, bytes } | Io::Create { root, path, bytes }) = io else {
@@ -1170,8 +1226,8 @@ fn an_append_torn_after_its_intent_logs_the_rest_at_the_next_open<F: Facade>() {
     });
     let moved = a.commit("Move", |mut i| {
         for (n, entity) in entities.iter().enumerate() {
-            let expect = Expect::Holds(identity(name(n).as_bytes()));
-            i = i.rename(*entity, &path(&format!("Set/{}", name(n))), expect);
+            let expect = Expect::Holds(identity(torn_name(n).as_bytes()));
+            i = i.rename(*entity, &path(&format!("Set/{}", torn_name(n))), expect);
         }
         i
     });
@@ -1184,6 +1240,64 @@ fn an_append_torn_after_its_intent_logs_the_rest_at_the_next_open<F: Facade>() {
         1,
         "the intent and one continuation entry reached the folder: {torn:?}"
     );
+    Some(disk)
+}
+
+/// The files of the entities `view` shows that lie outside `Set/`.
+fn astray(view: &View) -> Vec<String> {
+    let entities = view.entities();
+    let files = entities.iter().filter_map(|e| e.file());
+    let astray = files.filter(|file| !file.path.as_str().starts_with("Set/"));
+    astray.map(|file| file.path.to_string()).collect()
+}
+
+/// The labels of the intents of every segment of the folder, in no order.
+fn labels_logged(folder: &MemDisk) -> Vec<String> {
+    let segments = folder.files(Root::Folder).into_iter();
+    let segments = segments.filter(|(path, _)| path.as_str().ends_with(SEGMENT_EXTENSION));
+    let mut labels = Vec::new();
+    for (_, bytes) in segments {
+        for line in String::from_utf8(bytes).unwrap().lines() {
+            let json = line.split('\t').next().unwrap_or_default();
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+                continue;
+            };
+            if let Some(label) = value["label"]
+                .as_str()
+                .filter(|_| value["kind"] == "intent")
+            {
+                labels.push(label.to_owned());
+            }
+        }
+    }
+    labels
+}
+
+/// How many `file` ops of the folder's segments name each entity.
+fn file_ops_logged(folder: &MemDisk) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    let segments = folder.files(Root::Folder).into_iter();
+    let segments = segments.filter(|(path, _)| path.as_str().ends_with(SEGMENT_EXTENSION));
+    for (_, bytes) in segments {
+        for line in String::from_utf8(bytes).unwrap().lines() {
+            let json = line.split('\t').next().unwrap_or_default();
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+                continue;
+            };
+            let ops = value["ops"].as_array().cloned().unwrap_or_default();
+            for op in ops.iter().filter(|op| op["op"] == "file") {
+                *counts.entry(op["entity"].to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
+}
+
+fn an_append_torn_after_its_intent_logs_the_rest_at_the_next_open<F: Facade>() {
+    let clock = TestClock::at(1_000);
+    let Some(disk) = torn_after_one_continuation::<F>(&clock) else {
+        return;
+    };
     let (mut again, opened) = F::open(Probe::new(&one_disk(&disk)), env("a", 2, &clock)).unwrap();
     let [settled] = &opened.settled[..] else {
         panic!("one record to finish: {:?}", opened.settled);
@@ -1194,23 +1308,22 @@ fn an_append_torn_after_its_intent_logs_the_rest_at_the_next_open<F: Facade>() {
         .commit("Next", |i| i.create(|e| _ = e.add(TAGS, tag("next"))).0)
         .unwrap();
     let view = again.view();
-    let files: Vec<_> = view.entities().iter().filter_map(|e| e.file()).collect();
-    let astray: Vec<String> = files
-        .iter()
-        .filter(|file| !file.path.as_str().starts_with("Set/"))
-        .map(|file| file.path.to_string())
-        .collect();
-    assert_eq!(files.len(), FILES);
+    let files = view.entities().iter().filter_map(|e| e.file()).count();
+    assert_eq!(files, TORN_FILES);
+    let left = astray(&view);
     assert!(
-        astray.is_empty(),
+        left.is_empty(),
         "{} astray, as {:?}",
-        astray.len(),
-        astray.first()
+        left.len(),
+        left.first()
     );
     let (fresh, _) = F::open(Probe::new(&machine(&disk)), env("b", 3, &clock)).unwrap();
     let view = fresh.view();
     let fresh_files = view.entities().iter().filter_map(|e| e.file()).count();
-    assert_eq!(fresh_files, FILES, "another reader holds every file op");
+    assert_eq!(
+        fresh_files, TORN_FILES,
+        "another reader holds every file op"
+    );
 }
 
 fn a_clone_forks_into_items_taken_or_dismissed<F: Facade>() {
