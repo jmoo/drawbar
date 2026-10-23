@@ -6,19 +6,24 @@
 //! forked writer changes no merged value. P7: no reader merges what a dismissal
 //! it holds names. P9: a contribution's size is bounded by fields and writers.
 //! P11: after a restore or a dropped version and the grace step, the folder
-//! wins. Three documented divergences are counted rather than failed: a value
-//! the oracle resolves and design R shows beside it as a conflict, after a fork
-//! or, after a fault, a reference that names a lost write; and a merged value
-//! design R shows only in a run, as a forgotten basis or because the fork lies
-//! inside a segment it cannot see.
+//! wins, beside what the guard keeps because something visible descends from
+//! it. Five divergences are counted rather than failed: a conflict the oracle
+//! resolves, after a fork; an extra value beside the oracle's after a fault, on
+//! a field the design reports contradicted; a merged value the design shows
+//! only in an item, as a forgotten basis, because a fork lies inside a
+//! segment, or because a fault left a file it cannot place; a faulted folder
+//! where a cached reader keeps an entry the fault took; and a faulted reading
+//! that shows such unplaced lines.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use super::history::{materialize, Bounds, Folder, History};
+use super::history::{materialize, writer_view, Bounds, Folder, History, ViewOf};
 use super::oracle::{self, Oracle};
 use super::spec::{Contribution, Spec};
-use super::world::{self, Body, Dir, Field, File, Hash, Item, ItemKind, Seen, Shown, World, Write};
+use super::world::{
+    self, Body, Dir, Existence, Field, File, Hash, ItemKind, Seen, Shown, Val, World,
+};
 use super::{Design, Reading};
 
 /// What a sweep counted.
@@ -37,6 +42,9 @@ pub struct Tally {
     /// Fields that show, after a fault, a write a reference to a lost write no
     /// longer covers.
     pub contradicted: AtomicUsize,
+    /// Faulted readings that show lines of a file shorter than a certificate,
+    /// which the reader cannot place.
+    pub unplaced: AtomicUsize,
     /// Set when a worker finds a violation, so the others stop.
     pub failed: AtomicBool,
 }
@@ -47,14 +55,16 @@ impl Tally {
     }
 
     pub fn report(&self) -> String {
+        let n = |c: &AtomicUsize| c.load(Ordering::Relaxed);
         format!(
-            "{} histories, {} reads; {} fields shown as a conflict the oracle resolves, {} fields whose merged value shows only in a run, {} faulted folders where a cached reader keeps a lost entry, {} fields after a fault where a reference to a lost write no longer covers an earlier one",
-            self.histories.load(Ordering::Relaxed),
-            self.reads.load(Ordering::Relaxed),
-            self.conflicts.load(Ordering::Relaxed),
-            self.collapsed.load(Ordering::Relaxed),
-            self.stale.load(Ordering::Relaxed),
-            self.contradicted.load(Ordering::Relaxed),
+            "{} histories, {} reads; {} fields shown as a conflict the oracle resolves, {} fields whose merged value shows only in an item, {} faulted folders where a cached reader keeps a lost entry, {} fields after a fault where a reference to a lost write no longer covers an earlier one, {} faulted readings with unplaced lines",
+            n(&self.histories),
+            n(&self.reads),
+            n(&self.conflicts),
+            n(&self.collapsed),
+            n(&self.stale),
+            n(&self.contradicted),
+            n(&self.unplaced),
         )
     }
 }
@@ -120,12 +130,15 @@ fn read<D: Design>(
     d.read(&Reading { world, files, seen }, memory)
 }
 
-/// Compares what design R shows with what the oracle shows, counting the two
-/// documented divergences.
+/// Compares what design R shows with what the oracle shows, counting the
+/// documented divergences: a value missing where the design shows it in a run;
+/// and an extra value beside the oracle's, after a fork, or after a fault on a
+/// field the design reports contradicted, or on a field it shows as a
+/// forgotten basis.
 fn agree(
     world: &World,
     held: &BTreeSet<Hash>,
-    tips: &BTreeSet<Hash>,
+    visible: &BTreeSet<Hash>,
     oracle: &Shown,
     spec: &Shown,
     tally: &Tally,
@@ -134,20 +147,19 @@ fn agree(
     if oracle == spec {
         return Ok(());
     }
-    let existence = |shown: &Shown| -> BTreeSet<super::world::Val> {
-        let writes = shown.writes.get(&Field::Exist).into_iter().flatten();
-        writes
-            .filter_map(|&h| world.entry(h).write.and_then(|w| w.value))
-            .collect()
-    };
     let with_existence = |shown: &Shown| {
         let mut values = shown.values.clone();
-        values.insert(Field::Exist, existence(shown));
+        for (field, writes) in shown.writes.iter().filter(|(f, _)| f.is_exist()) {
+            let exist = writes
+                .iter()
+                .filter_map(|&h| world.entry(h).write.and_then(|w| w.value));
+            values.insert(*field, exist.collect());
+        }
         values
     };
     let (ov, sv) = (with_existence(oracle), with_existence(spec));
     let forks = oracle::place(world, held, &BTreeSet::new()).forks;
-    let forked: BTreeSet<Dir> = forks.iter().map(|f| f.0).collect();
+    let forked = !forks.is_empty();
     let fields: BTreeSet<Field> = ov.keys().chain(sv.keys()).copied().collect();
     let mut divergent = false;
     for field in fields {
@@ -157,72 +169,95 @@ fn agree(
             continue;
         }
         divergent = true;
-        let forgetting: BTreeSet<Dir> = spec
-            .items
-            .iter()
-            .filter(|i| i.forgotten.contains(&field))
-            .map(|i| i.dir)
-            .collect();
-        let forgotten = |v: &super::world::Val| {
-            let writes = oracle.writes.get(&field).into_iter().flatten();
+        let forced = spec.items.iter().any(|i| i.forgotten.contains(&field));
+        let oracle_writes = |v: &Val| -> Vec<Hash> {
+            let writes = oracle.writes.get(&field).into_iter().flatten().copied();
             writes
-                .copied()
                 .filter(|&e| world.entry(e).write.is_some_and(|w| w.value == Some(*v)))
-                .all(|e| forgetting.contains(&world.entry(e).dir) && !tips.contains(&e))
+                .collect()
         };
-        // A pre-fork write a reader places above a fork point it cannot locate
-        // exactly shows in its writer's run.
-        let in_run = |v: &super::world::Val| {
-            let writers: BTreeSet<Dir> = oracle
-                .writes
-                .get(&field)
-                .into_iter()
-                .flatten()
-                .filter(|&&e| world.entry(e).write.is_some_and(|w| w.value == Some(*v)))
-                .map(|&e| world.entry(e).dir)
-                .collect();
-            let mut runs = spec
-                .items
-                .iter()
-                .filter(|i| i.kind == ItemKind::Run && writers.contains(&i.dir));
-            runs.any(|i| i.change.get(&field) == Some(&Some(*v)))
+        // A value only a write no visible file holds any more carries, a
+        // forgotten basis, is beyond the design; one it places above a fork
+        // point it cannot locate exactly, or holds back from a file it cannot
+        // place, shows in its writer's item.
+        let in_run = |v: &Val| {
+            let writes = oracle_writes(v);
+            let writers: BTreeSet<Dir> = writes.iter().map(|&e| world.entry(e).dir).collect();
+            let forgotten = writes.iter().all(|e| !visible.contains(e));
+            let mut runs = spec.items.iter().filter(|i| writers.contains(&i.dir));
+            forgotten || runs.any(|i| i.change.get(&field) == Some(&Some(*v)))
         };
-        let extra = !s.is_subset(&o);
-        if !o.difference(&s).all(|v| forgotten(v) || in_run(v))
-            || (extra && !faulted && forked.is_empty())
-        {
-            return Err(format!("{field:?}: oracle {o:?}, design {s:?}"));
+        if let Some(v) = o.difference(&s).find(|v| !in_run(v)) {
+            return Err(format!(
+                "{field:?}: oracle {o:?}, design {s:?}; {v:?} is shown nowhere"
+            ));
+        }
+        if !s.is_subset(&o) {
+            // The oracle's value still shows: its live writes, or, where the
+            // oracle deleted the entity, the delete in a deletion conflict.
+            let beside = if field.is_exist() || oracle.exists(field.entity) {
+                let ow = oracle.writes.get(&field).cloned().unwrap_or_default();
+                let sw = spec.writes.get(&field).cloned().unwrap_or_default();
+                !ow.is_empty() && ow.is_subset(&sw)
+            } else {
+                spec.entities
+                    .get(&field.entity)
+                    .is_some_and(|e| e.deletion_conflict)
+            };
+            let explained = forked || (faulted && spec.contradicted.contains(&field));
+            if !forced && !(beside && explained) {
+                return Err(format!(
+                    "{field:?}: oracle {o:?}, design {s:?}; an extra value with no conflict"
+                ));
+            }
+            let counter = if forced {
+                &tally.collapsed
+            } else if forked {
+                &tally.conflicts
+            } else {
+                &tally.contradicted
+            };
+            tally.add(counter, 1);
         }
         if !o.is_subset(&s) {
             tally.add(&tally.collapsed, 1);
         }
-        if extra && faulted {
-            tally.add(&tally.contradicted, 1);
-        } else if extra {
-            tally.add(&tally.conflicts, 1);
-        }
     }
-    if divergent || oracle.items == spec.items {
-        return Ok(());
-    }
-    let unforced: BTreeSet<Item> = spec
+    let unplaced = spec
         .items
         .iter()
+        .filter(|i| i.kind == ItemKind::Unplaced)
+        .count();
+    if unplaced > 0 {
+        if !faulted {
+            return Err("lines shown unplaced without a fault".into());
+        }
+        tally.add(&tally.unplaced, 1);
+    }
+    let views = |shown: &Shown| -> Vec<_> {
+        shown
+            .item_views()
+            .into_iter()
+            .filter(|v| v.1 != ItemKind::Unplaced)
+            .collect()
+    };
+    if divergent || views(oracle) == views(spec) {
+        return Ok(());
+    }
+    let mut unforced: Vec<_> = spec
+        .items
+        .iter()
+        .filter(|i| i.kind != ItemKind::Unplaced)
         .filter_map(|i| {
             let mut change = i.change.clone();
             change.retain(|&field, &mut value| {
-                !i.forgotten.contains(&field)
-                    || !world::change(&[Write { field, value }], &spec.values, spec.exists)
-                        .is_empty()
+                !i.forgotten.contains(&field) || world::differs(spec, field, value)
             });
-            (!change.is_empty()).then(|| Item {
-                change,
-                forgotten: BTreeSet::new(),
-                ..i.clone()
-            })
+            (!change.is_empty()).then_some((i.dir, i.kind, change))
         })
         .collect();
-    if unforced != oracle.items {
+    unforced.sort();
+    if unforced != views(oracle) {
         return Err("items differ".into());
     }
     tally.add(&tally.collapsed, 1);
@@ -230,15 +265,20 @@ fn agree(
 }
 
 /// The values a reader merged: everything but its items.
-fn merged(s: &Shown) -> (bool, bool, &BTreeMap<Field, BTreeSet<super::world::Val>>) {
-    (s.exists, s.deletion_conflict, &s.values)
+fn merged(s: &Shown) -> (&BTreeMap<u8, Existence>, &BTreeMap<Field, BTreeSet<Val>>) {
+    (&s.entities, &s.values)
 }
 
 /// P1 along one sequence of states, each with the entries the dismissals it
-/// holds name: a write whose value gave way to another value never shows alone
-/// again on its field without an item touching it, unless the user dismissed
-/// every write that replaced it.
-fn no_silent_return(states: &[(Shown, BTreeSet<Hash>)]) -> Result<(), String> {
+/// holds name: a write whose value gave way to a write that replaced it, by
+/// reference or as a later write of its writer, never shows alone
+/// again on its field without an item or a contradiction report touching it,
+/// unless every write that replaced it was dismissed or lies beyond a fork.
+fn no_silent_return(world: &World, states: &[(Shown, BTreeSet<Hash>)]) -> Result<(), String> {
+    let replaces = |newer: Hash, w: Hash| {
+        let (n, o) = (world.entry(newer), world.entry(w));
+        n.replaces.iter().chain(&n.observed).any(|r| r.hash == w) || (n.dir == o.dir && n.n > o.n)
+    };
     let mut replaced: BTreeMap<(Field, Hash), BTreeSet<Hash>> = BTreeMap::new();
     for pair in states.windows(2) {
         let ((before, _), (after, dismissed)) = (&pair[0], &pair[1]);
@@ -247,13 +287,14 @@ fn no_silent_return(states: &[(Shown, BTreeSet<Hash>)]) -> Result<(), String> {
             let then = before.values.get(field).cloned().unwrap_or_default();
             let values = after.values.get(field).cloned().unwrap_or_default();
             for w in writes {
-                if !now.contains(w) && !now.is_empty() && values != then {
+                if !now.contains(w) && now.iter().any(|&n| replaces(n, *w)) && values != then {
                     replaced.entry((*field, *w)).or_default().extend(&now);
                 }
             }
         }
         for (field, writes) in &after.writes {
-            let touched = after.items.iter().any(|i| i.change.contains_key(field));
+            let touched = after.items.iter().any(|i| i.change.contains_key(field))
+                || after.contradicted.contains(field);
             for w in writes {
                 let by = replaced.get(&(*field, *w));
                 if writes.len() == 1 && by.is_some_and(|by| !by.is_subset(dismissed)) && !touched {
@@ -348,9 +389,9 @@ impl<'a> Checker<'a> {
         &self.history.world
     }
 
-    /// The own writes the tips in `seen` hold: snapshots no other one there
-    /// certifies.
-    fn tip_writes(files: &[File<Contribution>], seen: &[Seen]) -> BTreeSet<Hash> {
+    /// The writes a design-R reader of `seen` holds: the own writes of its
+    /// tips, and the lines of its segments that no tip folds.
+    fn visible(world: &World, files: &[File<Contribution>], seen: &[Seen]) -> BTreeSet<Hash> {
         let snapshots: Vec<&Contribution> = seen
             .iter()
             .filter_map(|s| match &files[s.file].body {
@@ -358,15 +399,23 @@ impl<'a> Checker<'a> {
                 Body::Segment(_) => None,
             })
             .collect();
-        snapshots
+        let tips: Vec<&&Contribution> = snapshots
             .iter()
             .filter(|c| {
                 !snapshots
                     .iter()
                     .any(|o| o.dir == c.dir && o.head != c.head && o.certifies(c.head))
             })
-            .flat_map(|c| c.own.values().map(|(at, _)| at.hash))
-            .collect()
+            .collect();
+        let folded: BTreeSet<Hash> = tips.iter().flat_map(|t| world.chain(t.head.hash)).collect();
+        let own = tips
+            .iter()
+            .flat_map(|c| c.own.values().map(|(at, _)| at.hash));
+        let lines = seen.iter().flat_map(|s| match &files[s.file].body {
+            Body::Segment(lines) => lines[..s.lines].to_vec(),
+            Body::Snapshot(_) => Vec::new(),
+        });
+        own.chain(lines.filter(|h| !folded.contains(h))).collect()
     }
 
     /// The oracle's and design R's fresh reads of `seen`.
@@ -399,7 +448,7 @@ impl<'a> Checker<'a> {
             if let Err(e) = agree(
                 self.world(),
                 &held,
-                &Self::tip_writes(&self.spec.files, &seen),
+                &Self::visible(self.world(), &self.spec.files, &seen),
                 &o,
                 &s,
                 self.tally,
@@ -452,7 +501,7 @@ impl<'a> Checker<'a> {
         if let Err(e) = agree(
             self.world(),
             &Oracle.holds(&ro),
-            &Self::tip_writes(&spec_files, &seen),
+            &Self::visible(self.world(), &spec_files, &seen),
             &o,
             &s,
             self.tally,
@@ -464,7 +513,14 @@ impl<'a> Checker<'a> {
 
     /// P9.
     fn sizes(&self) {
-        let fields = 1 + 1 + 2;
+        let fields = self
+            .history
+            .world
+            .entries
+            .iter()
+            .filter_map(|e| e.write.map(|w| w.field))
+            .collect::<BTreeSet<_>>()
+            .len();
         let writers = 1 + self
             .history
             .insts
@@ -472,6 +528,20 @@ impl<'a> Checker<'a> {
             .map(|i| i.dir as usize)
             .max()
             .unwrap_or(0);
+        let drops = self
+            .history
+            .events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    super::history::Event::Compact {
+                        drop_last: true,
+                        ..
+                    }
+                )
+            })
+            .count();
         for f in &self.spec.files {
             let Body::Snapshot(c) = &f.body else { continue };
             let segments = self
@@ -483,7 +553,7 @@ impl<'a> Checker<'a> {
             let ok = c.own.len() <= fields
                 && c.refs.len() <= fields * (writers - 1)
                 && c.certs.segments.len() <= segments
-                && c.certs.hashes.len() <= c.dismissals.len();
+                && c.certs.hashes.len() <= c.dismissals.len() + drops;
             if !ok {
                 panic!(
                     "P9: snapshot {} is larger than its bound: {c:?}\n  history: {:?}",
@@ -491,6 +561,21 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+    }
+
+    /// The entries a reader of `seen` may stop merging without a replaced
+    /// value's return being silent: what its dismissals name, and what lies
+    /// beyond a fork point the files show.
+    fn excused(&self, seen: &[Seen]) -> BTreeSet<Hash> {
+        let r = Reading {
+            world: self.world(),
+            files: &self.oracle.files,
+            seen,
+        };
+        let placement = oracle::place(self.world(), &Oracle.holds(&r), &BTreeSet::new());
+        let mut excused = self.dismissed(seen);
+        excused.extend(placement.runs);
+        excused
     }
 
     /// The entries the dismissals in `seen` name.
@@ -531,47 +616,69 @@ impl<'a> Checker<'a> {
         // Deleted files: never seen; seen first and gone last; or seen first and
         // gone before anything else arrives, as when a compaction's deletions
         // overtake its snapshot.
-        for mode in 0..3 {
+        // Mode 3 delivers everything, but takes the grace step halfway.
+        for mode in 0..4 {
             let late = mode == 1;
             for order in orders(kept.len(), self.depth.orders) {
-                let mut seen: Vec<Seen> = if mode > 0 { gone.clone() } else { Vec::new() };
+                let mut seen: Vec<Seen> = if matches!(mode, 1 | 2) {
+                    gone.clone()
+                } else {
+                    Vec::new()
+                };
                 let mut memory = Default::default();
                 let mut states = Vec::new();
-                if mode > 0 {
+                if matches!(mode, 1 | 2) {
                     let (s, m) = read(&self.design, self.world(), files, &seen, &memory);
-                    states.push((s, self.dismissed(&seen)));
+                    states.push((s, self.excused(&seen)));
                     memory = m;
                 }
                 if mode == 2 {
                     seen.clear();
                     let (s, m) = read(&self.design, self.world(), files, &seen, &memory);
-                    states.push((s, self.dismissed(&seen)));
+                    states.push((s, self.excused(&seen)));
                     memory = m;
                 }
-                for &i in &order {
+                for (k, &i) in order.iter().enumerate() {
                     seen.push(kept[i]);
-                    let (s, m) = read(&self.design, self.world(), files, &seen, &memory);
-                    states.push((s, self.dismissed(&seen)));
+                    let r = Reading {
+                        world: self.world(),
+                        files,
+                        seen: &seen,
+                    };
+                    let (s, m) = if mode == 3 && k == order.len() / 2 {
+                        self.design.grace(&r, &memory)
+                    } else {
+                        self.design.read(&r, &memory)
+                    };
+                    states.push((s, self.excused(&seen)));
                     memory = m;
                 }
                 if late {
                     for g in &gone {
                         seen.retain(|s| s != g);
                         let (s, m) = read(&self.design, self.world(), files, &seen, &memory);
-                        states.push((s, self.dismissed(&seen)));
+                        states.push((s, self.excused(&seen)));
                         memory = m;
                     }
                 }
                 self.tally.add(&self.tally.reads, states.len());
-                if let Err(e) = no_silent_return(&states) {
-                    self.fail("P1: a cached reader shows a replaced value alone", &seen, e);
+                if let Err(e) = no_silent_return(self.world(), &states) {
+                    let trail: Vec<String> = states
+                        .iter()
+                        .map(|(s, _)| format!("{:?} {:?}", s.writes, s.item_views()))
+                        .collect();
+                    self.fail(
+                        "P1: a cached reader shows a replaced value alone",
+                        &seen,
+                        format!("{e} (mode {mode}, order {order:?})\n  states: {trail:#?}"),
+                    );
                 }
                 let (o, fresh, held) = self.fresh(&seen);
                 let cached = states.last().map(|(s, _)| s.clone()).unwrap_or_default();
                 if let Err(e) = agree(
                     self.world(),
                     &held,
-                    &Self::tip_writes(files, &seen),
+                    &Self::visible(self.world(), files, &seen),
                     &o,
                     &cached,
                     self.tally,
@@ -717,16 +824,38 @@ impl<'a> Checker<'a> {
                 files: &oracle_files,
                 seen: &seen,
             };
-            let (o, _) = Oracle.read(&ro, &Default::default());
-            let held = Oracle.holds(&ro);
-            if kept.entries.iter().any(|e| !held.contains(e)) {
-                self.tally.add(&self.tally.stale, 1);
-                continue;
+            let mut held = Oracle.holds(&ro);
+            // The guard keeps only what something visible descends from; the
+            // oracle then holds what the reader keeps.
+            let stale: BTreeSet<Hash> = kept
+                .entries
+                .iter()
+                .copied()
+                .filter(|e| !held.contains(e))
+                .collect();
+            if let Some(e) = stale
+                .iter()
+                .find(|&&e| !held.iter().any(|&h| world.chain(h).contains(&e)))
+            {
+                self.fail(
+                    &format!("P11: after {label}, the grace step keeps an entry nothing visible descends from"),
+                    &seen,
+                    oracle::describe(world.entry(*e)),
+                );
             }
+            if !stale.is_empty() {
+                self.tally.add(&self.tally.stale, 1);
+            }
+            let remembered = oracle::Memory {
+                entries: stale.clone(),
+                forks: BTreeSet::new(),
+            };
+            let (o, _) = Oracle.read(&ro, &remembered);
+            held.extend(&stale);
             if let Err(e) = agree(
                 world,
                 &held,
-                &Self::tip_writes(&spec_files, &seen),
+                &Self::visible(self.world(), &spec_files, &seen),
                 &o,
                 &after,
                 self.tally,
@@ -777,8 +906,9 @@ fn restore<S: Clone>(now: &[File<S>], old: &[File<S>], within: &BTreeSet<Dir>) -
 
 /// P4: a step by a branch of a forked writer changes no merged value.
 fn branch_step(parent: &History, child: &History) -> bool {
-    let Some(super::history::Event::Write { inst, .. } | super::history::Event::Compact { inst }) =
-        child.events.last().copied()
+    let Some(
+        super::history::Event::Write { inst, .. } | super::history::Event::Compact { inst, .. },
+    ) = child.events.last().copied()
     else {
         return false;
     };
@@ -806,12 +936,17 @@ fn branch_kept(before: &Shown, after: &Shown, tally: &Tally) -> bool {
         .chain(after.values.keys())
         .copied()
         .collect();
-    let existence =
-        (before.exists, before.deletion_conflict) == (after.exists, after.deletion_conflict);
-    let kept = (existence || forgotten.contains(&Field::Exist))
-        && fields
-            .iter()
-            .all(|f| forgotten.contains(f) || before.values.get(f) == after.values.get(f));
+    let entities: BTreeSet<u8> = before
+        .entities
+        .keys()
+        .chain(after.entities.keys())
+        .copied()
+        .collect();
+    let kept = entities.iter().all(|e| {
+        forgotten.contains(&Field::exist(*e)) || before.entities.get(e) == after.entities.get(e)
+    }) && fields
+        .iter()
+        .all(|f| forgotten.contains(f) || before.values.get(f) == after.values.get(f));
     if kept {
         tally.add(&tally.collapsed, 1);
     }
@@ -822,7 +957,15 @@ fn branch_kept(before: &Shown, after: &Shown, tally: &Tally) -> bool {
 pub fn sweep(bounds: Bounds, depth: Depth, design: Spec) -> Tally {
     let tally = Tally::default();
     let root = History::seeded();
-    let first = root.children(&bounds);
+    let view = |h: &History, i: usize| writer_view(h, i, &design);
+    let run = Run {
+        bounds,
+        depth,
+        design,
+        tally: &tally,
+        view: &view,
+    };
+    let first = root.children(&bounds, &view);
     let next = AtomicUsize::new(0);
     let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
     std::thread::scope(|scope| {
@@ -831,10 +974,9 @@ pub fn sweep(bounds: Bounds, depth: Depth, design: Spec) -> Tally {
                 scope.spawn(|| {
                     let work = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         while let Some(h) = first.get(next.fetch_add(1, Ordering::Relaxed)) {
-                            let ancestors = vec![root.clone()];
+                            let mut ancestors = vec![root.clone()];
                             let shown = Checker::new(h, &ancestors, &tally, depth, design).check();
-                            let mut ancestors = ancestors;
-                            explore(h, &shown, &mut ancestors, &bounds, depth, design, &tally);
+                            run.explore(h, &shown, &mut ancestors);
                         }
                     }));
                     if let Err(payload) = work {
@@ -853,36 +995,32 @@ pub fn sweep(bounds: Bounds, depth: Depth, design: Spec) -> Tally {
     tally
 }
 
-fn explore(
-    h: &History,
-    shown: &Shown,
-    ancestors: &mut Vec<History>,
-    bounds: &Bounds,
+/// One sweep's settings.
+struct Run<'a> {
+    bounds: Bounds,
     depth: Depth,
     design: Spec,
-    tally: &Tally,
-) {
-    if h.written() >= bounds.entries || tally.failed.load(Ordering::Relaxed) {
-        return;
-    }
-    ancestors.push(h.clone());
-    for child in h.children(bounds) {
-        let child_shown = Checker::new(&child, ancestors, tally, depth, design).check();
-        if branch_step(h, &child) && !branch_kept(shown, &child_shown, tally) {
-            panic!(
-                "P4: a step by a branch of a forked writer changes merged values\n  before {shown:?}\n  after {child_shown:?}\n  history: {:?}",
-                child.acts
-            );
+    tally: &'a Tally,
+    view: &'a ViewOf<'a>,
+}
+
+impl Run<'_> {
+    fn explore(&self, h: &History, shown: &Shown, ancestors: &mut Vec<History>) {
+        if h.written() >= self.bounds.entries || self.tally.failed.load(Ordering::Relaxed) {
+            return;
         }
-        explore(
-            &child,
-            &child_shown,
-            ancestors,
-            bounds,
-            depth,
-            design,
-            tally,
-        );
+        ancestors.push(h.clone());
+        for child in h.children(&self.bounds, self.view) {
+            let child_shown =
+                Checker::new(&child, ancestors, self.tally, self.depth, self.design).check();
+            if branch_step(h, &child) && !branch_kept(shown, &child_shown, self.tally) {
+                panic!(
+                    "P4: a step by a branch of a forked writer changes merged values\n  before {shown:?}\n  after {child_shown:?}\n  history: {:?}",
+                    child.acts
+                );
+            }
+            self.explore(&child, &child_shown, ancestors);
+        }
+        ancestors.pop();
     }
-    ancestors.pop();
 }

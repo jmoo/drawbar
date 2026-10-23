@@ -1,5 +1,5 @@
 //! Entries, files and what a reader shows, in the vocabulary of design R
-//! (`RETENTION.md`): one entity, its existence, one register and set members.
+//! (`RETENTION.md`): entities, their existence, registers and set members.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -8,11 +8,45 @@ pub type Hash = u32;
 /// A writer's directory. A clone writes the same directory as its original.
 pub type Dir = u8;
 
+/// An entity's field, numbered within the entity.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub enum Field {
+pub enum Kind {
     Exist,
-    Reg,
+    Reg(u8),
     Member(u8),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct Field {
+    pub entity: u8,
+    pub kind: Kind,
+}
+
+impl Field {
+    pub const fn exist(entity: u8) -> Self {
+        Self {
+            entity,
+            kind: Kind::Exist,
+        }
+    }
+
+    pub const fn reg(entity: u8, reg: u8) -> Self {
+        Self {
+            entity,
+            kind: Kind::Reg(reg),
+        }
+    }
+
+    pub const fn member(entity: u8, member: u8) -> Self {
+        Self {
+            entity,
+            kind: Kind::Member(member),
+        }
+    }
+
+    pub fn is_exist(&self) -> bool {
+        self.kind == Kind::Exist
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -40,13 +74,15 @@ pub struct Ref {
     pub hash: Hash,
 }
 
-/// A run the user dismissed: its writer, its first entry, and the last entry the
-/// dismissal covers.
+/// A run, as a dismissal names it: its writer, its first entry and its last. A
+/// tip run is named by the tip's head: its first entry is then known only by
+/// number.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Dismissal {
     pub dir: Dir,
     pub first: Ref,
     pub last: Ref,
+    pub tip: Option<Ref>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -124,39 +160,73 @@ pub struct Seen {
     pub lines: usize,
 }
 
-/// The values a field shows, and the existence of the entity.
+/// The values each field shows.
 pub type Values = BTreeMap<Field, BTreeSet<Val>>;
 
 /// An item the user is shown apart from the merged state: a run of a forked
-/// writer, or entries held back after a gap.
+/// writer, entries held back after a gap, or lines the reader cannot place.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum ItemKind {
     Run,
     Gap,
+    /// After the grace step, the lines of a file shorter than a certificate:
+    /// a version a sync client dropped, or a copy that diverged.
+    Unplaced,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Item {
     pub dir: Dir,
     pub kind: ItemKind,
+    /// Which run: dismissing the item names this.
+    pub run: Dismissal,
     /// The run's net change: its latest write to each field, where the merged
     /// state shows something else.
     pub change: BTreeMap<Field, Option<Val>>,
+    /// The run's latest write to each field in `change`, which taking it names.
+    pub writes: BTreeMap<Field, Ref>,
     /// Fields in `change` whatever the merged state shows, because the reader
     /// cannot tell whether the run replaced a value it no longer holds.
     pub forgotten: BTreeSet<Field>,
 }
 
-/// What a reader shows: the merged values, whether the entity exists and is in
-/// a deletion conflict, and the items beside it.
+impl Item {
+    /// What a reader shows of the item, without the run's identity.
+    pub fn view(&self) -> (Dir, ItemKind, BTreeMap<Field, Option<Val>>) {
+        (self.dir, self.kind, self.change.clone())
+    }
+}
+
+/// Whether an entity exists and is in a deletion conflict.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Existence {
+    pub exists: bool,
+    pub deletion_conflict: bool,
+}
+
+/// What a reader shows: the merged values, each entity's existence, the items
+/// beside them, and the fields where it reports a contradicted reference.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Shown {
     pub values: Values,
     /// The live writes behind `values`, by field.
     pub writes: BTreeMap<Field, BTreeSet<Hash>>,
-    pub exists: bool,
-    pub deletion_conflict: bool,
+    pub entities: BTreeMap<u8, Existence>,
     pub items: BTreeSet<Item>,
+    pub contradicted: BTreeSet<Field>,
+}
+
+impl Shown {
+    pub fn exists(&self, entity: u8) -> bool {
+        self.entities.get(&entity).is_some_and(|e| e.exists)
+    }
+
+    /// The items as a reader sees them, without the runs' identities.
+    pub fn item_views(&self) -> Vec<(Dir, ItemKind, BTreeMap<Field, Option<Val>>)> {
+        let mut views: Vec<_> = self.items.iter().map(Item::view).collect();
+        views.sort();
+        views
+    }
 }
 
 /// A live write: who wrote it, where, and what.
@@ -176,50 +246,73 @@ pub fn show(live: &[Live], items: BTreeSet<Item>) -> Shown {
             values.entry(l.write.field).or_default().insert(v);
         }
     }
-    let exist = values.remove(&Field::Exist).unwrap_or_default();
-    let fields_live = live
+    let mut entities = BTreeMap::new();
+    for entity in live
         .iter()
-        .any(|l| l.write.field != Field::Exist && l.write.value.is_some());
-    let created = exist.contains(&Val::Created);
-    let deleted = exist.contains(&Val::Deleted);
-    let deletion_conflict = deleted && fields_live;
-    // No live existence write is left only where a forgotten basis or a lost
-    // write took them all; the live fields still show.
-    let exists = created || deletion_conflict || (exist.is_empty() && fields_live);
-    if !exists {
-        values.clear();
-        writes.retain(|f, _| *f == Field::Exist);
+        .map(|l| l.write.field.entity)
+        .collect::<BTreeSet<u8>>()
+    {
+        let exist = values.remove(&Field::exist(entity)).unwrap_or_default();
+        let fields_live = live.iter().any(|l| {
+            l.write.field.entity == entity && !l.write.field.is_exist() && l.write.value.is_some()
+        });
+        let deletion_conflict = exist.contains(&Val::Deleted) && fields_live;
+        // No live existence write is left only where a forgotten basis or a lost
+        // write took them all; the live fields still show.
+        let exists =
+            exist.contains(&Val::Created) || deletion_conflict || (exist.is_empty() && fields_live);
+        if !exists {
+            values.retain(|f, _| f.entity != entity);
+            writes.retain(|f, _| f.entity != entity || f.is_exist());
+        }
+        entities.insert(
+            entity,
+            Existence {
+                exists,
+                deletion_conflict,
+            },
+        );
     }
     Shown {
         values,
         writes,
-        exists,
-        deletion_conflict,
+        entities,
         items,
+        contradicted: BTreeSet::new(),
     }
 }
 
 /// The net change of a run whose writes, in chain order, are `writes`, against
-/// what `values` shows.
-pub fn change(writes: &[Write], values: &Values, exists: bool) -> BTreeMap<Field, Option<Val>> {
+/// what `shown` shows.
+pub fn change(writes: &[Live], shown: &Shown) -> BTreeMap<Field, Option<Val>> {
     let mut latest: BTreeMap<Field, Option<Val>> = BTreeMap::new();
     for w in writes {
-        latest.insert(w.field, w.value);
+        latest.insert(w.write.field, w.write.value);
     }
     latest
         .into_iter()
-        .filter(|(field, value)| {
-            let now = match field {
-                Field::Exist => {
-                    let v = if exists { Val::Created } else { Val::Deleted };
-                    return *value != Some(v);
-                }
-                _ => values.get(field).cloned().unwrap_or_default(),
-            };
-            match value {
-                Some(v) => now != BTreeSet::from([*v]),
-                None => !now.is_empty(),
-            }
-        })
+        .filter(|&(field, value)| differs(shown, field, value))
         .collect()
+}
+
+/// Whether writing `value` to `field` would change what `shown` shows.
+pub fn differs(shown: &Shown, field: Field, value: Option<Val>) -> bool {
+    if field.is_exist() {
+        let v = if shown.exists(field.entity) {
+            Val::Created
+        } else {
+            Val::Deleted
+        };
+        return value != Some(v);
+    }
+    let now = shown.values.get(&field).cloned().unwrap_or_default();
+    match value {
+        Some(v) => now != BTreeSet::from([v]),
+        None => !now.is_empty(),
+    }
+}
+
+/// The latest write of each field among `writes`, in chain order.
+pub fn latest(writes: &[Live]) -> BTreeMap<Field, Ref> {
+    writes.iter().map(|w| (w.write.field, w.at)).collect()
 }

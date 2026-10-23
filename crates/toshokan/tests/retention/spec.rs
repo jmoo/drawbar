@@ -6,8 +6,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::world::{
-    change, show, Body, Dir, Dismissal, Entry, Field, Hash, Item, ItemKind, Live, Ref, Shown, Val,
-    World, Write,
+    change, latest, show, Body, Dir, Dismissal, Entry, Field, Hash, Item, ItemKind, Live, Ref,
+    Shown, Val, World, Write,
 };
 use super::{Compaction, Design, Reading};
 
@@ -129,12 +129,9 @@ pub struct Memory {
     /// The entries it placed after its tips, or shows.
     pub entries: BTreeSet<Hash>,
     pub forks: BTreeSet<Ref>,
-    /// After the grace step, the highest number the files show of each writer:
-    /// a reference above it kills only its exact target.
-    pub limit: BTreeMap<Dir, u32>,
-    /// After the grace step, what the files show: a reference to another entry
-    /// at a number they show also kills only its exact target.
-    pub shown: BTreeSet<Ref>,
+    /// Whether it has taken the grace step: from then on, a reference the
+    /// files contradict kills only its exact target.
+    pub graced: bool,
 }
 
 impl Design for Spec {
@@ -167,7 +164,7 @@ impl Design for Spec {
             out.first.entry(w.field).or_insert(e.n);
             if w.value == Some(Val::Deleted) {
                 for (&field, &(at, _)) in &out.own {
-                    if field != Field::Exist && at.n < e.n {
+                    if field.entity == w.field.entity && !field.is_exist() && at.n < e.n {
                         out.killed.entry(field).or_insert(e.at());
                     }
                 }
@@ -287,15 +284,7 @@ impl Design for Spec {
                 })
                 .collect(),
             forks: BTreeSet::new(),
-            shown: held.iter().copied().collect(),
-            limit: {
-                let mut limit: BTreeMap<Dir, u32> = BTreeMap::new();
-                for h in &held {
-                    let l = limit.entry(h.dir).or_insert(h.n);
-                    *l = (*l).max(h.n);
-                }
-                limit
-            },
+            graced: true,
         };
         derive(self, r, &kept)
     }
@@ -311,6 +300,9 @@ struct Dirs<'a> {
     tips: BTreeMap<Dir, Vec<Contribution>>,
     folded: BTreeSet<Hash>,
     waiting: BTreeSet<Hash>,
+    /// After the grace step, the lines past the first of an unsealed file
+    /// shorter than a certificate: a dropped version or a diverged copy.
+    ambiguous: BTreeSet<Hash>,
     certified: BTreeMap<Dir, BTreeSet<Ref>>,
 }
 
@@ -333,11 +325,16 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
     let world = r.world;
     // Tips: snapshots no other of their directory certifies; one per head.
     let mut snapshots: Vec<Contribution> = memory.tips.clone();
-    let mut segments: Vec<Vec<Hash>> = Vec::new();
+    // Each segment's lines, and whether the reader sees its seal marker.
+    let mut segments: Vec<(Vec<Hash>, bool)> = Vec::new();
     for seen in r.seen {
-        match &r.files[seen.file].body {
+        let file = &r.files[seen.file];
+        match &file.body {
             Body::Snapshot(s) => snapshots.push(s.clone()),
-            Body::Segment(lines) => segments.push(lines.iter().copied().take(seen.lines).collect()),
+            Body::Segment(lines) => {
+                let sealed = file.sealed && seen.lines >= lines.len();
+                segments.push((lines.iter().copied().take(seen.lines).collect(), sealed));
+            }
         }
     }
     let mut tips: BTreeMap<Dir, Vec<Contribution>> = BTreeMap::new();
@@ -355,6 +352,7 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
         tips,
         folded: BTreeSet::new(),
         waiting: BTreeSet::new(),
+        ambiguous: BTreeSet::new(),
         certified: BTreeMap::new(),
     };
     for (dir, list) in &dirs.tips {
@@ -365,7 +363,7 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
         }
     }
     // Lines a tip certifies, by hash, by head, or by matching a segment.
-    for lines in &segments {
+    for (lines, sealed) in &segments {
         let Some(&first) = lines.first() else {
             continue;
         };
@@ -387,11 +385,21 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
             .max();
         match matched {
             Some(pos) => dirs.folded.extend(&lines[..=pos]),
-            None if certs
-                .iter()
-                .any(|c| lines.len() <= (c.last.n - c.first.n) as usize) =>
+            // A sealed file cannot still be arriving: shorter than a
+            // certificate, it diverged from it. An unsealed one may be in
+            // flight, and waits; after the grace step it is a dropped version
+            // or a diverged copy, so its lines are held back as items.
+            None if !sealed
+                && certs
+                    .iter()
+                    .any(|c| lines.len() <= (c.last.n - c.first.n) as usize) =>
             {
-                dirs.waiting.extend(lines);
+                if memory.graced {
+                    dirs.folded.insert(first);
+                    dirs.ambiguous.extend(&lines[1..]);
+                } else {
+                    dirs.waiting.extend(lines);
+                }
             }
             None if !certs.is_empty() => {
                 dirs.folded.insert(first);
@@ -404,13 +412,19 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
             }
         }
     }
-    let seen_lines: BTreeSet<Hash> = segments.iter().flatten().copied().collect();
+    let seen_lines: BTreeSet<Hash> = segments
+        .iter()
+        .flat_map(|(lines, _)| lines)
+        .copied()
+        .collect();
     // Candidates: lines neither folded nor waiting, and remembered entries no
     // tip has since passed.
     let mut candidates: BTreeSet<Hash> = seen_lines
         .iter()
         .copied()
-        .filter(|h| !dirs.folded.contains(h) && !dirs.waiting.contains(h))
+        .filter(|h| {
+            !dirs.folded.contains(h) && !dirs.waiting.contains(h) && !dirs.ambiguous.contains(h)
+        })
         .collect();
     for &e in &memory.entries {
         let at = world.entry(e).at();
@@ -563,7 +577,7 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
             d.dir == entry.dir
                 && entry.n >= d.first.n
                 && entry.n <= d.last.n
-                && (walk(e, d.first.hash) || walk(d.last.hash, e))
+                && (walk(d.last.hash, e) || (d.tip.is_none() && walk(e, d.first.hash)))
         })
     };
     let covered: BTreeSet<Hash> = candidates
@@ -623,25 +637,49 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
         .copied()
         .filter(|e| !runs.contains(e) && !covered.contains(e))
         .collect();
+    let unplaced: BTreeSet<Hash> = dirs
+        .ambiguous
+        .iter()
+        .copied()
+        .filter(|h| !dirs.folded.contains(h))
+        .collect();
     // Merged writes, and what kills them.
     let tip_covered = |t: &Contribution, at: Ref| {
-        dismissals
-            .iter()
-            .any(|d| d.dir == t.dir && at.n >= d.first.n && at.n <= d.last.n && t.certifies(d.last))
+        dismissals.iter().any(|d| {
+            let names = t.certifies(d.last) || d.tip.is_some_and(|h| t.certifies(h));
+            d.dir == t.dir && at.n >= d.first.n && at.n <= d.last.n && names
+        })
     };
     let mut writes: BTreeMap<Hash, Live> = BTreeMap::new();
     // After the grace step, a reference kills only its exact hash when it or
     // another reference of its entry to the same writer names a number the
     // files no longer show, or one at which they show only another entry.
+    let shown_refs: BTreeSet<Ref> = r
+        .seen
+        .iter()
+        .flat_map(|seen| match &r.files[seen.file].body {
+            Body::Segment(lines) => lines
+                .iter()
+                .take(seen.lines)
+                .map(|&h| world.entry(h).at())
+                .collect(),
+            Body::Snapshot(s) => vec![s.head],
+        })
+        .collect();
     let contradicted = |r: &Ref| {
-        let other = memory
-            .shown
+        let highest = shown_refs
+            .iter()
+            .filter(|s| s.dir == r.dir)
+            .map(|s| s.n)
+            .max();
+        let other = shown_refs
             .iter()
             .any(|s| s.dir == r.dir && s.n == r.n && s.hash != r.hash);
-        memory.limit.get(&r.dir).is_some_and(|&l| r.n > l) || (other && !memory.shown.contains(r))
+        let above = highest.is_some_and(|l| r.n > l);
+        memory.graced && (above || (other && !shown_refs.contains(r)))
     };
     let mut refs: Vec<(Field, Ref, bool)> = Vec::new();
-    let mut own_deletes: Vec<(Dir, u32)> = Vec::new();
+    let mut own_deletes: Vec<(Dir, u8, u32)> = Vec::new();
     for (dir, list) in &dirs.tips {
         let limit = limit_of(*dir);
         let ok = |n: u32| limit.is_none_or(|f| n <= f);
@@ -675,9 +713,9 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
                     refs.push((field, r.target, contradicted(&r.target)));
                 }
             }
-            for k in t.killed.values() {
+            for (field, k) in &t.killed {
                 if ok(k.n) && !dismissed(k.n) {
-                    own_deletes.push((*dir, k.n));
+                    own_deletes.push((*dir, field.entity, k.n));
                 }
             }
         }
@@ -703,7 +741,7 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
             .collect();
         refs.extend(references(world, entry).map(|(field, r)| (field, r, exact.contains(&r.dir))));
         if write.value == Some(Val::Deleted) {
-            own_deletes.push((entry.dir, entry.n));
+            own_deletes.push((entry.dir, write.field.entity, entry.n));
         }
     }
     // A reference to a write beyond its writer's fork point was made on one
@@ -719,10 +757,10 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
                 && writes.values().any(|o| {
                     o.at.dir == w.at.dir && o.write.field == w.write.field && o.at.n > w.at.n
                 });
-            let own_deleted = w.write.field != Field::Exist
+            let own_deleted = !w.write.field.is_exist()
                 && own_deletes
                     .iter()
-                    .any(|&(d, n)| d == w.at.dir && n > w.at.n);
+                    .any(|&(d, e, n)| d == w.at.dir && e == w.write.field.entity && n > w.at.n);
             let referenced = refs
                 .iter()
                 .any(|&(f, t, exact)| f == w.write.field && kills(t, exact, w));
@@ -730,7 +768,8 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
         })
         .copied()
         .collect();
-    let base = show(&live, BTreeSet::new());
+    let mut base = show(&live, BTreeSet::new());
+    base.contradicted = refs.iter().filter(|r| r.2).map(|r| r.0).collect();
     // Items: runs of entries, joined to the tip they follow, and gaps.
     let mut items = BTreeSet::new();
     let root = |e: Hash, set: &BTreeSet<Hash>| {
@@ -740,12 +779,19 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
         }
         root
     };
-    let mut groups: BTreeMap<(ItemKind, Hash), Vec<Write>> = BTreeMap::new();
+    struct Group {
+        dir: Dir,
+        first: Ref,
+        last: Ref,
+        tip: Option<Ref>,
+        writes: Vec<Live>,
+        forced: BTreeMap<Field, (Ref, Option<Val>)>,
+    }
+    let mut groups: BTreeMap<(ItemKind, Hash), Group> = BTreeMap::new();
     // A tip's own write the merge leaves out, above the fork point or
     // dismissed, that replaced an own write the merge does not hold: a
     // forgotten basis, so a run shows the field whatever the merged state shows,
-    // and a dismissal does not hide it.
-    let mut forgotten: BTreeMap<Hash, BTreeMap<Field, Option<Val>>> = BTreeMap::new();
+    // and a dismissal does not hide it. It goes once a merged write names it.
     for (dir, list) in &dirs.tips {
         let beyond_f = |n: u32| limit_of(*dir).is_some_and(|f| n > f);
         // Where several tips part inside a segment, the fork point may lie as
@@ -759,8 +805,9 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
                 .values()
                 .any(|w| w.at.dir == *dir && w.write.field == *field && w.at.n < n)
         };
+        let taken = |at: Ref| refs.iter().any(|r| r.1.hash == at.hash);
         for t in list {
-            let forced: BTreeMap<Field, Option<Val>> = t
+            let forced: BTreeMap<Field, (Ref, Option<Val>)> = t
                 .own
                 .iter()
                 .filter(|(field, (at, _))| {
@@ -770,27 +817,46 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
                     (beyond_f(at.n) || tip_covered(t, *at))
                         && replaced_own
                         && !known_before(field, at.n)
+                        && !taken(*at)
                 })
-                .map(|(&field, &(_, value))| (field, value))
+                .map(|(&field, &own)| (field, own))
                 .collect();
             if !beyond_f(t.head.n) && forced.is_empty() {
                 continue;
             }
-            let mut own: Vec<(u32, Write)> = t
+            let mut own: Vec<Live> = t
                 .own
                 .iter()
                 .filter(|(_, (at, _))| beyond_f(at.n) && !tip_covered(t, *at))
-                .map(|(&field, &(at, value))| (at.n, Write { field, value }))
+                .map(|(&field, &(at, value))| Live {
+                    at,
+                    write: Write { field, value },
+                })
                 .collect();
-            own.sort();
-            forgotten.insert(t.head.hash, forced);
-            groups
-                .entry((ItemKind::Run, t.head.hash))
-                .or_default()
-                .extend(own.into_iter().map(|(_, w)| w));
+            own.sort_by_key(|l| l.at.n);
+            let from = limit_of(*dir).map_or(0, |f| f + 1);
+            groups.insert(
+                (ItemKind::Run, t.head.hash),
+                Group {
+                    dir: *dir,
+                    first: Ref {
+                        dir: *dir,
+                        n: from,
+                        hash: t.head.hash,
+                    },
+                    last: t.head,
+                    tip: Some(t.head),
+                    writes: own,
+                    forced,
+                },
+            );
         }
     }
-    for (set, kind) in [(&runs, ItemKind::Run), (&gaps, ItemKind::Gap)] {
+    for (set, kind) in [
+        (&runs, ItemKind::Run),
+        (&gaps, ItemKind::Gap),
+        (&unplaced, ItemKind::Unplaced),
+    ] {
         let mut ordered: Vec<Hash> = set.iter().copied().collect();
         ordered.sort_by_key(|&e| world.entry(e).n);
         for e in ordered {
@@ -798,50 +864,60 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
             let key = match world.entry(start).prev {
                 Some(p)
                     if kind == ItemKind::Run
-                        && dirs.is_head(p)
-                        && groups.contains_key(&(ItemKind::Run, p)) =>
+                        && groups.contains_key(&(ItemKind::Run, p))
+                        && dirs.is_head(p) =>
                 {
                     (ItemKind::Run, p)
                 }
                 _ => (kind, start),
             };
-            if let Some(w) = world.entry(e).write {
-                groups.entry(key).or_default().push(w);
-            } else {
-                groups.entry(key).or_default();
+            let entry = world.entry(e);
+            let group = groups.entry(key).or_insert_with(|| Group {
+                dir: entry.dir,
+                first: entry.at(),
+                last: entry.at(),
+                tip: None,
+                writes: Vec::new(),
+                forced: BTreeMap::new(),
+            });
+            group.last = entry.at();
+            if let Some(write) = entry.write {
+                group.writes.push(Live {
+                    at: entry.at(),
+                    write,
+                });
             }
         }
     }
-    for ((kind, key), writes) in groups {
-        let dir = if kind == ItemKind::Run && dirs.is_head(key) {
-            dirs.tips
-                .values()
-                .flatten()
-                .find(|t| t.head.hash == key)
-                .unwrap()
-                .dir
-        } else {
-            world.entry(key).dir
-        };
-        let mut change = change(&writes, &base.values, base.exists);
-        let forced = forgotten.remove(&key).unwrap_or_default();
-        change.extend(&forced);
-        if !change.is_empty() {
-            items.insert(Item {
-                dir,
-                kind,
-                change,
-                forgotten: forced.into_keys().collect(),
-            });
+    for ((kind, _), group) in groups {
+        let mut change = change(&group.writes, &base);
+        change.extend(group.forced.iter().map(|(&f, &(_, v))| (f, v)));
+        if change.is_empty() {
+            continue;
         }
+        let mut latest_writes = latest(&group.writes);
+        latest_writes.extend(group.forced.iter().map(|(&f, &(at, _))| (f, at)));
+        latest_writes.retain(|f, _| change.contains_key(f));
+        items.insert(Item {
+            dir: group.dir,
+            kind,
+            run: Dismissal {
+                dir: group.dir,
+                first: group.first,
+                last: group.last,
+                tip: group.tip,
+            },
+            writes: latest_writes,
+            change,
+            forgotten: group.forced.into_keys().collect(),
+        });
     }
     let shown = Shown { items, ..base };
     let memory = Memory {
         tips: dirs.tips.values().flatten().cloned().collect(),
         entries: placed.union(&runs).chain(&gaps).copied().collect(),
         forks,
-        limit: memory.limit.clone(),
-        shown: memory.shown.clone(),
+        graced: memory.graced,
     };
     (shown, memory)
 }

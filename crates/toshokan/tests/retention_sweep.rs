@@ -6,7 +6,7 @@ mod retention;
 use retention::check::{sweep, Depth};
 use retention::history::{Act, Bounds};
 use retention::spec::Spec;
-use retention::world::Val;
+use retention::world::Val::{A, B};
 
 const DEPTH: Depth = Depth {
     orders: 720,
@@ -15,14 +15,15 @@ const DEPTH: Depth = Depth {
 };
 
 const ALL: &[Act] = &[
-    Act::Set(Val::A),
-    Act::Set(Val::B),
-    Act::Clear,
-    Act::Add(0),
-    Act::Remove(0),
-    Act::Delete,
-    Act::Revive,
+    Act::Set(0, 0, A),
+    Act::Set(0, 0, B),
+    Act::Clear(0, 0),
+    Act::Add(0, 0),
+    Act::Remove(0, 0),
+    Act::Delete(0),
+    Act::Revive(0),
     Act::Dismiss,
+    Act::Take,
 ];
 
 fn run(bounds: Bounds) {
@@ -33,38 +34,76 @@ fn run(bounds: Bounds) {
 #[test]
 #[ignore = "minutes; run by name"]
 fn every_act_with_a_clone() {
-    run(Bounds {
-        writers: 2,
-        clone: true,
-        entries: 4,
-        acts: ALL,
-    });
+    run(Bounds::new(2, true, 4, ALL));
 }
 
 #[test]
 #[ignore = "minutes; run by name"]
 fn three_writers_and_a_clone() {
-    run(Bounds {
-        writers: 3,
-        clone: true,
-        entries: 4,
-        acts: &[
-            Act::Set(Val::A),
-            Act::Set(Val::B),
-            Act::Delete,
-            Act::Revive,
+    run(Bounds::new(
+        3,
+        true,
+        4,
+        &[
+            Act::Set(0, 0, A),
+            Act::Set(0, 0, B),
+            Act::Delete(0),
+            Act::Revive(0),
             Act::Dismiss,
         ],
+    ));
+}
+
+#[test]
+#[ignore = "minutes; run by name"]
+fn dismissals_and_takes_with_a_clone() {
+    run(Bounds::new(
+        2,
+        true,
+        4,
+        &[
+            Act::Set(0, 0, A),
+            Act::Set(0, 0, B),
+            Act::Dismiss,
+            Act::Take,
+        ],
+    ));
+}
+
+#[test]
+#[ignore = "minutes; run by name"]
+fn copies_resumed_mid_segment_and_dropped_versions() {
+    run(Bounds {
+        shared: true,
+        drops: true,
+        ..Bounds::new(
+            2,
+            true,
+            4,
+            &[
+                Act::Set(0, 0, A),
+                Act::Set(0, 0, B),
+                Act::Delete(0),
+                Act::Revive(0),
+            ],
+        )
     });
 }
 
 #[test]
 #[ignore = "minutes; run by name"]
-fn dismissals_with_a_clone() {
-    run(Bounds {
-        writers: 2,
-        clone: true,
-        entries: 4,
-        acts: &[Act::Set(Val::A), Act::Set(Val::B), Act::Dismiss],
-    });
+fn two_registers_two_members_and_two_entities() {
+    run(Bounds::new(
+        2,
+        true,
+        4,
+        &[
+            Act::Set(0, 0, A),
+            Act::Set(0, 1, B),
+            Act::Add(0, 1),
+            Act::Delete(0),
+            Act::Revive(1),
+            Act::Set(1, 0, A),
+        ],
+    ));
 }

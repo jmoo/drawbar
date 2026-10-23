@@ -6,7 +6,7 @@ mod retention;
 use retention::check::{sweep, Depth};
 use retention::history::{Act, Bounds};
 use retention::spec::Spec;
-use retention::world::Val;
+use retention::world::Val::{A, B};
 
 const DEPTH: Depth = Depth {
     orders: 24,
@@ -19,12 +19,12 @@ fn run(bounds: Bounds) {
     eprintln!("{}", tally.report());
 }
 
-const REGISTERS: Bounds = Bounds {
-    writers: 2,
-    clone: true,
-    entries: 3,
-    acts: &[Act::Set(Val::A), Act::Set(Val::B), Act::Clear],
-};
+const REGISTERS: Bounds = Bounds::new(
+    2,
+    true,
+    3,
+    &[Act::Set(0, 0, A), Act::Set(0, 0, B), Act::Clear(0, 0)],
+);
 
 #[test]
 fn registers_with_a_clone_match_the_oracle() {
@@ -33,40 +33,57 @@ fn registers_with_a_clone_match_the_oracle() {
 
 #[test]
 fn set_members_with_a_clone_match_the_oracle() {
-    run(Bounds {
-        writers: 2,
-        clone: true,
-        entries: 3,
-        acts: &[Act::Add(0), Act::Remove(0)],
-    });
+    run(Bounds::new(
+        2,
+        true,
+        3,
+        &[Act::Add(0, 0), Act::Remove(0, 0)],
+    ));
 }
 
 #[test]
 fn deletes_and_revives_match_the_oracle() {
-    run(Bounds {
-        writers: 2,
-        clone: false,
-        entries: 3,
-        acts: &[Act::Set(Val::A), Act::Delete, Act::Revive],
-    });
+    run(Bounds::new(
+        2,
+        false,
+        3,
+        &[Act::Set(0, 0, A), Act::Delete(0), Act::Revive(0)],
+    ));
 }
 
 #[test]
 fn dismissals_match_the_oracle() {
+    run(Bounds::new(
+        2,
+        true,
+        3,
+        &[Act::Set(0, 0, A), Act::Set(0, 0, B), Act::Dismiss],
+    ));
+}
+
+#[test]
+fn a_copy_resumed_mid_segment_matches_the_oracle() {
     run(Bounds {
-        writers: 2,
-        clone: true,
-        entries: 3,
-        acts: &[Act::Set(Val::A), Act::Set(Val::B), Act::Dismiss],
+        shared: true,
+        drops: true,
+        ..Bounds::new(2, true, 3, &[Act::Set(0, 0, A), Act::Set(0, 0, B)])
     });
 }
 
-const FOUR: Bounds = Bounds {
-    writers: 2,
-    clone: true,
-    entries: 4,
-    acts: &[Act::Set(Val::A), Act::Set(Val::B)],
-};
+#[test]
+fn two_entities_match_the_oracle() {
+    run(Bounds::new(
+        2,
+        false,
+        3,
+        &[
+            Act::Set(0, 0, A),
+            Act::Revive(1),
+            Act::Set(1, 0, B),
+            Act::Delete(0),
+        ],
+    ));
+}
 
 /// Sweeps `bounds` with one of design R's rules switched off, which must break
 /// a property; with every rule on, the same bounds pass here or in
@@ -87,7 +104,7 @@ fn must_fail(bounds: Bounds, design: Spec) {
 #[test]
 fn references_made_on_a_branch_must_not_apply() {
     must_fail(
-        FOUR,
+        Bounds::new(2, true, 4, &[Act::Set(0, 0, A), Act::Set(0, 0, B)]),
         Spec {
             branch_references: false,
             ..Spec::default()
@@ -97,12 +114,13 @@ fn references_made_on_a_branch_must_not_apply() {
 
 #[test]
 fn tips_must_merge_the_union_of_their_pre_fork_writes() {
-    let bounds = Bounds {
-        acts: &[Act::Set(Val::A), Act::Set(Val::B), Act::Add(0)],
-        ..REGISTERS
-    };
     must_fail(
-        bounds,
+        Bounds::new(
+            2,
+            true,
+            3,
+            &[Act::Set(0, 0, A), Act::Set(0, 0, B), Act::Add(0, 0)],
+        ),
         Spec {
             union: false,
             ..Spec::default()
@@ -123,14 +141,13 @@ fn a_newer_own_write_must_kill_an_older_one() {
 
 #[test]
 fn dismissed_entries_must_never_be_merged() {
-    let bounds = Bounds {
-        writers: 2,
-        clone: true,
-        entries: 4,
-        acts: &[Act::Set(Val::A), Act::Set(Val::B), Act::Dismiss],
-    };
     must_fail(
-        bounds,
+        Bounds::new(
+            2,
+            true,
+            4,
+            &[Act::Set(0, 0, A), Act::Set(0, 0, B), Act::Dismiss],
+        ),
         Spec {
             quarantine: false,
             ..Spec::default()

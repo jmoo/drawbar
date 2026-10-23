@@ -10,8 +10,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::world::{
-    change, show, Body, Dir, Entry, Field, Hash, Item, ItemKind, Live, Ref, Shown, Val, World,
-    Write,
+    change, latest, show, Body, Dir, Dismissal, Entry, Field, Hash, Item, ItemKind, Live, Shown,
+    Val, World, Write,
 };
 use super::{Compaction, Design, Reading};
 
@@ -107,7 +107,7 @@ pub fn place(
 /// last one's chain.
 pub fn covered(world: &World, d: &super::world::Dismissal) -> BTreeSet<Hash> {
     let chain = world.chain(d.last.hash);
-    if !chain.contains(&d.first.hash) {
+    if d.tip.is_none() && !chain.contains(&d.first.hash) {
         return BTreeSet::from([d.first.hash]);
     }
     chain
@@ -135,7 +135,9 @@ pub fn live(world: &World, merged: &BTreeSet<Hash>) -> Vec<Live> {
                 && other.n > entry.n
                 && other.write.is_some_and(|ow| {
                     ow.field == w.field
-                        || (w.field != Field::Exist && ow.value == Some(Val::Deleted))
+                        || (!w.field.is_exist()
+                            && ow.field == Field::exist(w.field.entity)
+                            && ow.value == Some(Val::Deleted))
                 })
         })
     };
@@ -162,16 +164,37 @@ pub fn shown(world: &World, placement: &Placement) -> Shown {
         (&placement.gaps, ItemKind::Gap),
     ] {
         for group in groups(world, set) {
-            let writes: Vec<Write> = group.iter().filter_map(|&e| world.entry(e).write).collect();
-            let change = change(&writes, &base.values, base.exists);
-            if !change.is_empty() {
-                items.insert(Item {
-                    dir: world.entry(group[0]).dir,
-                    kind,
-                    change,
-                    forgotten: BTreeSet::new(),
-                });
+            let writes: Vec<Live> = group
+                .iter()
+                .filter_map(|&e| {
+                    let entry = world.entry(e);
+                    entry.write.map(|write| Live {
+                        at: entry.at(),
+                        write,
+                    })
+                })
+                .collect();
+            let change = change(&writes, &base);
+            if change.is_empty() {
+                continue;
             }
+            let (first, last) = (world.entry(group[0]), world.entry(*group.last().unwrap()));
+            items.insert(Item {
+                dir: first.dir,
+                kind,
+                run: Dismissal {
+                    dir: first.dir,
+                    first: first.at(),
+                    last: last.at(),
+                    tip: None,
+                },
+                writes: latest(&writes)
+                    .into_iter()
+                    .filter(|(f, _)| change.contains_key(f))
+                    .collect(),
+                change,
+                forgotten: BTreeSet::new(),
+            });
         }
     }
     Shown { items, ..base }
@@ -195,49 +218,6 @@ pub fn groups(world: &World, set: &BTreeSet<Hash>) -> Vec<Vec<Hash>> {
             g
         })
         .collect()
-}
-
-/// What a writer sees and how it writes: the oracle's view of the entries it has
-/// read, and the entry each act makes there.
-pub struct View<'a> {
-    pub world: &'a World,
-    pub placement: Placement,
-    pub live: Vec<Live>,
-    pub shown: Shown,
-}
-
-impl<'a> View<'a> {
-    pub fn of(world: &'a World, seen: &BTreeSet<Hash>) -> Self {
-        let placement = place(world, seen, &BTreeSet::new());
-        let live = live(world, &placement.merged);
-        let shown = shown(world, &placement);
-        Self {
-            world,
-            placement,
-            live,
-            shown,
-        }
-    }
-
-    pub fn live_on(&self, field: Field) -> Vec<Ref> {
-        self.live
-            .iter()
-            .filter(|l| l.write.field == field)
-            .map(|l| l.at)
-            .collect()
-    }
-
-    /// The dismissal of every run this view shows.
-    pub fn dismissals(&self) -> Vec<super::world::Dismissal> {
-        groups(self.world, &self.placement.runs)
-            .into_iter()
-            .map(|g| super::world::Dismissal {
-                dir: self.world.entry(g[0]).dir,
-                first: self.world.entry(g[0]).at(),
-                last: self.world.entry(*g.last().unwrap()).at(),
-            })
-            .collect()
-    }
 }
 
 /// The oracle as a design: a snapshot is the whole chain it folds.
@@ -296,23 +276,9 @@ impl Design for Oracle {
         (shown, memory)
     }
 
-    fn grace(&self, r: &Reading<'_, Folds>, memory: &Memory) -> (Shown, Memory) {
-        let held = holds(r.world, r, |s| s.head);
-        let newer = |e: Hash| {
-            let entry = r.world.entry(e);
-            held.iter()
-                .any(|&h| r.world.entry(h).dir == entry.dir && r.world.entry(h).n > entry.n)
-        };
-        let kept = Memory {
-            entries: memory
-                .entries
-                .iter()
-                .copied()
-                .filter(|&e| held.contains(&e) || newer(e))
-                .collect(),
-            forks: BTreeSet::new(),
-        };
-        self.read(r, &kept)
+    /// The folder wins: what the files hold, read afresh.
+    fn grace(&self, r: &Reading<'_, Folds>, _: &Memory) -> (Shown, Memory) {
+        self.read(r, &Memory::default())
     }
 
     fn holds(&self, r: &Reading<'_, Folds>) -> BTreeSet<Hash> {
@@ -323,7 +289,10 @@ impl Design for Oracle {
 /// The value an entry's act writes, for display in failures.
 pub fn describe(entry: &Entry) -> String {
     let what = match entry.write {
-        Some(Write { field, value }) => format!("{field:?}={value:?}"),
+        Some(Write { field, value }) => {
+            let value = value.map_or("-".to_string(), |v| format!("{v:?}"));
+            format!("{}{:?}={value}", field.entity, field.kind)
+        }
         None => "dismiss".into(),
     };
     format!("{}#{}:{what}", ["x", "y", "z"][entry.dir as usize], entry.n)
