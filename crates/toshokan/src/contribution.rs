@@ -11,7 +11,8 @@
 //! latest take of a run; and its dismissals, trash, settlements and the entries
 //! and ops this build does not know.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use serde::de::Error as _;
@@ -27,6 +28,27 @@ use crate::schema::Raw;
 
 /// A key's name.
 pub type Name = Arc<str>;
+
+/// The most names [`name`] shares; past it, a new name is held by itself.
+const NAMES: usize = 1 << 12;
+
+/// `key` as a name, shared with every other name of the same text this thread
+/// made, so a key many fields hold is held once.
+pub fn name(key: &str) -> Name {
+    thread_local! {
+        static SHARED: RefCell<HashSet<Name>> = RefCell::default();
+    }
+    SHARED.with_borrow_mut(|shared| {
+        if let Some(name) = shared.get(key) {
+            return Arc::clone(name);
+        }
+        let name: Name = key.into();
+        if shared.len() < NAMES {
+            shared.insert(Arc::clone(&name));
+        }
+        name
+    })
+}
 
 /// One field of one entity: what one write sets.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -55,8 +77,8 @@ impl FieldKey {
     /// The field of entity `entity` a delete observed a write of.
     pub fn observed(entity: EntityId, target: &Target) -> Self {
         match target {
-            Target::Register(key) => Self::Register(entity, key.as_str().into()),
-            Target::Member(key, value) => Self::Member(entity, key.as_str().into(), value.clone()),
+            Target::Register(key) => Self::Register(entity, name(key)),
+            Target::Member(key, value) => Self::Member(entity, name(key), value.clone()),
             Target::File => Self::File(entity),
         }
     }
@@ -214,7 +236,7 @@ pub fn said(op: &Op) -> Said {
             take,
         } => write(
             &mut said,
-            FieldKey::Register(*entity, key.as_str().into()),
+            FieldKey::Register(*entity, name(key)),
             Value::Register(value.clone()),
             replaces,
             take.as_ref(),
@@ -227,7 +249,7 @@ pub fn said(op: &Op) -> Said {
             take,
         } => write(
             &mut said,
-            FieldKey::Member(*entity, key.as_str().into(), value.clone()),
+            FieldKey::Member(*entity, name(key), value.clone()),
             Value::Member(true),
             replaces,
             take.as_ref(),
@@ -240,7 +262,7 @@ pub fn said(op: &Op) -> Said {
             take,
         } => write(
             &mut said,
-            FieldKey::Member(*entity, key.as_str().into(), value.clone()),
+            FieldKey::Member(*entity, name(key), value.clone()),
             Value::Member(false),
             tags,
             take.as_ref(),
@@ -492,8 +514,8 @@ impl FieldOut {
     fn field(self, entity: EntityId) -> Option<FieldKey> {
         Some(match (self.key, self.value, self.file) {
             (None, None, false) => FieldKey::Exist(entity),
-            (Some(key), None, false) => FieldKey::Register(entity, key.into()),
-            (Some(key), Some(value), false) => FieldKey::Member(entity, key.into(), value),
+            (Some(key), None, false) => FieldKey::Register(entity, name(&key)),
+            (Some(key), Some(value), false) => FieldKey::Member(entity, name(&key), value),
             (None, None, true) => FieldKey::File(entity),
             _ => return None,
         })
@@ -906,11 +928,11 @@ impl Unpack for FieldKey {
             0 => Self::Exist(Unpack::unpack(input)?),
             1 => {
                 let (entity, key): (EntityId, String) = Unpack::unpack(input)?;
-                Self::Register(entity, key.into())
+                Self::Register(entity, name(&key))
             }
             2 => {
                 let (entity, (key, value)): (EntityId, (String, Raw)) = Unpack::unpack(input)?;
-                Self::Member(entity, key.into(), value)
+                Self::Member(entity, name(&key), value)
             }
             3 => Self::File(Unpack::unpack(input)?),
             _ => return bad_variant(),
