@@ -42,7 +42,7 @@ use crate::recovery::{self, Settling};
 use crate::report::{
     By, Change, Committed, Compacted, DraftState, DraftStatus, Emptied, Fork, Gap, HistoryItem,
     Item, ItemChange, Lag, Local, Mode, Opened, Orphan, Outcome, Partial, PartialReport, Presence,
-    Refreshed, Settled, Start, Tidied, TrashItem, What, WriterInfo,
+    Refreshed, Rekey, Settled, Start, Tidied, TrashItem, What, WriterInfo,
 };
 use crate::schema::Schema;
 use crate::trash::{self, Policy};
@@ -474,8 +474,7 @@ impl Library {
                 report.changed |= self.grace(full);
                 let moved = self.absorb_read(&report);
                 self.unshown |= report.anything_new();
-                let own = self.writer.as_ref().map(Writer::id);
-                let retired = own.filter(|own| report.forks.iter().any(|fork| fork.writer == *own));
+                let retired = self.forked();
                 keep_local(self, false)
                     .then(move |(library, kept)| match (kept, retired) {
                         (Err(error), _) => Flow::Done(Err(error)),
@@ -580,7 +579,9 @@ impl Library {
     /// segments of its directory the snapshot certifies. A writer also compacts
     /// at close and every [`COMPACT_AFTER`] entries. Refused with
     /// [`Refusal::Nothing`] when this instance writes as no writer yet, and when
-    /// a snapshot in the writer's directory already has its last entry.
+    /// a snapshot in the writer's directory already has its last entry. Fails
+    /// with [`Error::Rekey`] when the writer's history forked or the folder lost
+    /// its last entry, and the instance stops writing as it.
     pub fn compact(&mut self) -> Task<'_, Result<Compacted>> {
         if let Err(error) = self.writable() {
             return Task::ready(Err(error));
@@ -953,6 +954,13 @@ impl Library {
             moved.extend(self.fact_paths(entity, was.as_deref()));
         }
         moved
+    }
+
+    /// This instance's writer, when the reader finds its history forked.
+    fn forked(&self) -> Option<WriterId> {
+        let own = self.writer.as_ref().map(Writer::id)?;
+        let placed = self.reader.derived().writers.get(&own)?;
+        placed.fork.map(|_| own)
     }
 
     /// Stops writing as this writer: it leaves the pool, and the next commit
@@ -1496,17 +1504,32 @@ fn compacted(library: &mut Library) -> Flow<'_, (&mut Library, Result<Compacted>
         flow::run(compaction).then(move |(writer, compacted)| {
             library.writer = Some(writer);
             match compacted {
-                Err(error @ Error::Rekey { .. }) => library
-                    .stop_writing()
-                    .then(move |stopped| Flow::Done((library, stopped.and(Err(error))))),
+                Err(error @ Error::Rekey { .. }) => {
+                    library.take_derived();
+                    library.show();
+                    library
+                        .stop_writing()
+                        .then(move |stopped| Flow::Done((library, stopped.and(Err(error)))))
+                }
                 Err(error) => Flow::Done((library, Err(error))),
                 Ok(compacted) => flow::run(library.reader.list_writer(id)).then(move |listing| {
-                    let read = listing.map(|listing| {
-                        library.reader.absorb(listing);
-                        library.take_derived();
-                        library.show();
-                    });
-                    Flow::Done((library, read.map(|()| compacted)))
+                    let listing = match listing {
+                        Ok(listing) => listing,
+                        Err(error) => return Flow::Done((library, Err(error))),
+                    };
+                    library.reader.absorb(listing);
+                    library.take_derived();
+                    library.show();
+                    let Some(writer) = library.forked() else {
+                        return Flow::Done((library, Ok(compacted)));
+                    };
+                    let forked = Error::Rekey {
+                        writer,
+                        why: Rekey::Forked,
+                    };
+                    library
+                        .stop_writing()
+                        .then(move |stopped| Flow::Done((library, stopped.and(Err(forked)))))
                 }),
             }
         })

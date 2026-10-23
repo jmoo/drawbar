@@ -31,8 +31,8 @@ use crate::writer::Writer;
 /// `recorded` holds the lines of segments of the directory the writer read
 /// before, which may be gone now: each is certified as a segment too. Fails
 /// with [`Error::Rekey`] when the reader or the folder does not hold the
-/// writer's head, writing nothing, or when the folder loses the snapshot before
-/// a deletion. Refused with [`Refusal::Nothing`] when a snapshot the reader
+/// writer's head, or the reader finds the writer's history forked, writing
+/// nothing, or when the folder loses the snapshot before a deletion. Refused with [`Refusal::Nothing`] when a snapshot the reader
 /// found in the writer's directory already has its head; it then writes
 /// nothing, deletes what that snapshot lets it that a compaction cut short
 /// left, and confirms its head from that snapshot from then on.
@@ -48,6 +48,18 @@ pub fn compact(
         writer: id,
         why: Rekey::Restored,
     };
+    let forked = reader
+        .derived()
+        .writers
+        .get(&id)
+        .and_then(|placed| placed.fork);
+    if forked.is_some() {
+        let forked = Error::Rekey {
+            writer: id,
+            why: Rekey::Forked,
+        };
+        return Task::ready((writer, Err(forked)));
+    }
     if let Some((path, stamp, tip)) = at_head(reader, &writer) {
         let doomed = Doomed::of(reader, id, &tip, None).sparing(&path);
         let dir = writer.layout.writer(id);

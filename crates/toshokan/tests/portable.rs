@@ -330,7 +330,8 @@ fn every_delivery_order_after_crashes_and_compaction_converges() {
     explore(&origin, sim.versions(), 1);
 }
 
-// A clone branches from an entry the original then folds and deletes.
+// A clone branches from an entry the original, which has not seen the clone's
+// segment yet, then folds and deletes.
 #[test]
 fn every_delivery_order_of_a_compacted_fork_reports_it() {
     let mut sim = Simulator::new(0);
@@ -338,11 +339,30 @@ fn every_delivery_order_of_a_compacted_fork_reports_it() {
     original.write("a1").unwrap();
     sim.observe();
     let mut clone = Instance::open(original.machine.cloned(), 2);
+    let folder = original.machine.folder.clone();
+    let before = folder.files(Root::Folder);
     clone.write("b2").unwrap();
     sim.observe();
+    let segment = folder
+        .files(Root::Folder)
+        .into_iter()
+        .find(|(path, _)| !before.contains_key(path))
+        .expect("the clone's segment");
+    let (path, bytes) = segment;
+    let io = |io: Io| folder.perform(io).map(|_| ()).unwrap();
+    io(Io::Remove {
+        root: Root::Folder,
+        path: path.clone(),
+    });
     original.write("a2").unwrap();
     sim.observe();
     original.compact().unwrap();
+    io(Io::Create {
+        root: Root::Folder,
+        path,
+        bytes,
+    });
+    sim.observe();
     check_retained(&mut sim);
     let origin = sim.observe();
     assert_eq!(Written::of(sim.versions().iter()).forks().len(), 1);

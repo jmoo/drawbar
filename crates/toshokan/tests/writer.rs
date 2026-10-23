@@ -585,13 +585,25 @@ fn compaction_leaves_the_segment_a_crash_left_open() {
 }
 
 #[test]
-fn compacting_one_branch_of_a_fork_keeps_the_other() {
+fn a_writer_whose_history_forked_does_not_compact() {
     let mut original = Instance::open(machine(), 1);
     let mut written = original.write("a1").unwrap();
     let mut clone = Instance::open(original.machine.cloned(), 2);
     written.extend(clone.write("b2").unwrap());
     written.extend(original.write("a2").unwrap());
-    original.compact().unwrap();
+    let before = original.machine.folder.files(Root::Folder);
+    let refused = original.compact();
+    assert!(
+        matches!(
+            refused,
+            Err(Error::Rekey {
+                why: Rekey::Forked,
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(original.machine.folder.files(Root::Folder), before);
     let view = fresh(&original.machine.folder);
     assert_eq!(held(&view), written.iter().copied().collect());
     assert_eq!(view.writers[&original.id()].forks.len(), 1);
@@ -847,18 +859,29 @@ fn compaction_leaves_a_segment_another_process_has_open() {
     assert_eq!(view.writers[&id].forks.len(), 1);
 }
 
-// Folded.cfg: without the fold check the clone deletes a segment the original
-// sealed after the fork, though no snapshot folds the original's entry.
+// Folded.cfg: a clone that compacted would delete a segment the original sealed
+// after the fork, though no snapshot folds the original's entry.
 #[test]
-fn compaction_leaves_a_sealed_segment_holding_an_entry_no_snapshot_folds() {
+fn a_clone_leaves_a_sealed_segment_holding_an_entry_no_snapshot_folds() {
     let mut original = Instance::open(machine(), 1);
     let mut written = original.write("a1").unwrap();
     let mut clone = Instance::open(original.machine.cloned(), 2);
     written.extend(original.write("a2").unwrap());
     let folder = original.close().folder;
     written.extend(clone.write("b2").unwrap());
-    let compacted = clone.compact().unwrap();
-    assert_eq!(compacted.removed.len(), 1, "only the clone's own segment");
+    let before = folder.files(Root::Folder);
+    let refused = clone.compact();
+    assert!(
+        matches!(
+            refused,
+            Err(Error::Rekey {
+                why: Rekey::Forked,
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(folder.files(Root::Folder), before);
     let view = fresh(&folder);
     assert_eq!(held(&view), written.iter().copied().collect());
 }

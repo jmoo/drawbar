@@ -544,6 +544,7 @@ through_both!(
     a_refresh_scans_only_the_files_other_writers_moved,
     a_conflict_is_shown_and_resolved,
     a_clone_forks_into_items_taken_or_dismissed,
+    a_fork_compaction_finds_retires_the_writer,
     one_intent_takes_from_runs_of_two_forked_writers,
     a_file_change_is_taken_only_while_the_folder_holds_that_file,
     a_run_counts_and_spans_its_entries_whether_or_not_its_branch_compacted,
@@ -965,6 +966,48 @@ fn a_conflict_is_shown_and_resolved<F: Facade>() {
         );
         assert_eq!(view.conflicts(), []);
     }
+}
+
+fn a_fork_compaction_finds_retires_the_writer<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    a.close().unwrap();
+    let there = here.cloned();
+    let (mut original, opened) = F::open(Probe::new(&here), env("a", 2, &clock)).unwrap();
+    let Start::Resumed(writer) = opened.start else {
+        panic!("{:?}", opened.start);
+    };
+    let (mut clone, _) = F::open(Probe::new(&there), env("a", 3, &clock)).unwrap();
+    clone
+        .commit("Tag", |i| i.add(song, TAGS, tag("there")))
+        .unwrap();
+    original
+        .commit("Tag", |i| i.add(song, TAGS, tag("here")))
+        .unwrap();
+    let writers = || -> BTreeSet<String> {
+        let paths = folder.files(Root::Folder).into_keys();
+        let dirs = paths.filter_map(|path| {
+            let rest = path.as_str().strip_prefix(".t/writers.2/")?;
+            Some(rest.split('/').next()?.to_owned())
+        });
+        dirs.collect()
+    };
+    let refused = original.compact();
+    assert!(
+        matches!(refused, Err(Error::Rekey { writer: w, why: Rekey::Forked }) if w == writer),
+        "{refused:?}"
+    );
+    assert_eq!(original.view().forks().len(), 1, "the fork is shown");
+    assert_eq!(original.refresh().unwrap().retired, None, "retired already");
+    let before = writers();
+    original
+        .commit("Tag", |i| i.add(song, TAGS, tag("later")))
+        .unwrap();
+    let after = writers();
+    assert_eq!(after.len(), before.len() + 1, "{before:?} then {after:?}");
 }
 
 fn a_clone_forks_into_items_taken_or_dismissed<F: Facade>() {
