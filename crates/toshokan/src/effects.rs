@@ -303,6 +303,7 @@ pub fn resolve(
             ..EffectPlan::new(env.nonce())
         },
         touched: Vec::new(),
+        removed: Vec::new(),
         claimed: BTreeSet::new(),
         layout,
         bindings,
@@ -310,12 +311,26 @@ pub fn resolve(
     for change in changes {
         resolver.change(change, capabilities, env)?;
     }
+    let put: Vec<&RelPath> = resolver
+        .plan
+        .steps
+        .iter()
+        .filter_map(EffectStep::put)
+        .collect();
+    for path in &resolver.removed {
+        if put.iter().any(|put| put.starts_with(path) && *put != path) {
+            return Err(invalid(Invalid::NotEmpty(path.clone())));
+        }
+    }
     Ok(resolver.plan)
 }
 
 struct Resolver<'r> {
     plan: EffectPlan,
     touched: Vec<RelPath>,
+    /// Each directory a [`FileChange::RemoveDir`] removes, which no step of the intent
+    /// may put anything in, before or after.
+    removed: Vec<RelPath>,
     claimed: BTreeSet<EntityId>,
     layout: &'r Layout,
     bindings: &'r Bindings,
@@ -416,17 +431,14 @@ impl Resolver<'_> {
                 let taken: Vec<&RelPath> = steps.iter().filter_map(EffectStep::taken).collect();
                 let moved = |file: &RelPath| taken.iter().any(|at| file.starts_with(at));
                 let staying = |file: &&RelPath| file.starts_with(&path) && !moved(file);
-                let put = steps.iter().filter_map(EffectStep::put);
-                let filled = put
-                    .into_iter()
-                    .any(|at| at.starts_with(&path) && *at != path);
                 let held = known
                     .map(|file| &file.path)
                     .chain(unbound)
                     .any(|file| staying(&file));
-                if held || filled {
+                if held {
                     return Err(invalid(Invalid::NotEmpty(path)));
                 }
+                self.removed.push(path.clone());
                 self.step(EffectStep::RemoveDir { path: path.clone() });
                 self.end_dir(path, false);
             }
