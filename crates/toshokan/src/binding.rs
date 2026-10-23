@@ -41,7 +41,7 @@ pub struct Scanned {
     pub len: u64,
     pub modified: Option<u64>,
     /// Read only where it decides something and no earlier scan or fact gives it
-    /// for this length and time: see [`resolve`].
+    /// for this length and time.
     pub identity: Option<Identity>,
 }
 
