@@ -1330,7 +1330,7 @@ fn committed_view<F: Fs>(
     changes: Vec<toshokan::report::Change>,
 ) -> Viewed {
     Viewed {
-        shown: show(shown, library.view(), false),
+        shown: show(shown, library.view()),
         dirs: None,
         changes,
         moves: Vec::new(),
@@ -1339,8 +1339,8 @@ fn committed_view<F: Fs>(
     }
 }
 
-/// What the answer to a scan shows: everything, where it scanned every file and listed
-/// every folder in `dirs`.
+/// What the answer to a scan shows, with every folder in `dirs` where it scanned every
+/// file.
 fn viewed<F: Fs>(
     library: &Library<F>,
     shown: &mut Option<View>,
@@ -1354,7 +1354,7 @@ fn viewed<F: Fs>(
     let unlisted = refreshed.unlisted.iter();
     let unlisted = unlisted.filter_map(|dir| LibPath::parse(dir.as_str()));
     Viewed {
-        shown: show(shown, library.view(), dirs.is_some()),
+        shown: show(shown, library.view()),
         unlisted: dirs.is_some().then(|| unlisted.collect()),
         dirs,
         moves: moves.collect(),
@@ -1363,10 +1363,10 @@ fn viewed<F: Fs>(
     }
 }
 
-/// What `view` changed of what the app was last `shown`: everything where `whole`, or
-/// where the app was shown nothing yet.
-fn show(shown: &mut Option<View>, view: View, whole: bool) -> Change {
-    let change = Change::since(&view, shown.as_ref().filter(|_| !whole));
+/// What `view` changed of what the app was last `shown`: everything where it was shown
+/// nothing yet.
+fn show(shown: &mut Option<View>, view: View) -> Change {
+    let change = Change::since(&view, shown.as_ref());
     *shown = Some(view);
     change
 }

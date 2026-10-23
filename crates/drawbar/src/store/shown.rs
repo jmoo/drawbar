@@ -1,6 +1,6 @@
 //! What a library's view shows the app: each file drawbar lists, by the key the library
-//! knows it by, and the tags. The backend that holds the library sends it whole after a
-//! scan of every file, and otherwise only what each answer changed, so the app never
+//! knows it by, and the tags. The backend that holds the library sends it whole once, as
+//! the library opens, and after that only what each answer changed, so the app never
 //! holds a view of its own.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -41,7 +41,7 @@ pub struct Showing {
 /// What an answer's view changed of what the app shows.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Change {
-    /// Everything, after a scan of every file.
+    /// Everything, as the library opens.
     Whole(Shown),
     /// What each key the view's changes reach shows now, and the list of tags where it
     /// changed.
