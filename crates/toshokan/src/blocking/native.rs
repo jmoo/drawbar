@@ -152,8 +152,12 @@ impl Native {
 
     fn read(&self, root: Root, path: &RelPath, range: Range) -> Result<Vec<u8>, IoError> {
         let mut file = File::open(self.file(root, path)?).map_err(io_error)?;
+        let len = file.metadata().map_err(io_error)?.len();
+        let wanted = len.saturating_sub(range.offset).min(range.len);
         file.seek(SeekFrom::Start(range.offset)).map_err(io_error)?;
-        let mut bytes = Vec::new();
+        // A read the size of what the file holds, rather than twice it as a growing
+        // buffer would allocate.
+        let mut bytes = Vec::with_capacity(usize::try_from(wanted).unwrap_or(0));
         file.take(range.len)
             .read_to_end(&mut bytes)
             .map_err(io_error)?;
