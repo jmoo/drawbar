@@ -41,13 +41,16 @@ pub async fn meta<F: Fs>(fs: &F, root: Root, path: &RelPath) -> io::Result<Optio
 
 /// The file at `path` in the folder, as a listing finds it; `None` where no file is.
 pub async fn stat<F: Fs>(fs: &F, path: &RelPath) -> io::Result<Option<Stat>> {
-    let meta = meta(fs, Root::Folder, path).await?;
-    Ok(meta
-        .filter(|meta| meta.kind == Kind::File)
+    Ok(file(meta(fs, Root::Folder, path).await?))
+}
+
+/// What a stat found, where it found a file.
+pub fn file(meta: Option<Meta>) -> Option<Stat> {
+    meta.filter(|meta| meta.kind == Kind::File)
         .map(|meta| Stat {
             len: meta.len,
             modified: meta.modified,
-        }))
+        })
 }
 
 /// At most `len` bytes of the file at `path` from `offset`.
@@ -68,16 +71,20 @@ pub async fn list<F: Fs>(fs: &F, root: Root, dir: &RelPath) -> io::Result<Vec<(S
     }
 }
 
-/// The identity of the folder's file at `path`, `len` bytes long, read by the ranges the
-/// library takes it by.
-pub async fn identity<F: Fs>(fs: &F, path: &RelPath, len: u64) -> io::Result<Identity> {
+/// The identity of the folder's file at `path`, `len` bytes long, read through `read` by
+/// the ranges the library takes it by.
+pub async fn identity(
+    path: &RelPath,
+    len: u64,
+    mut read: impl AsyncFnMut(Range) -> io::Result<Vec<u8>>,
+) -> io::Result<Identity> {
     let mut digest = Contents.digest(path, len);
     for range in Contents.ranges(path, len) {
         let mut at = range.offset;
         let end = range.offset + range.len;
         while at < end {
             let len = CHUNK.min(end - at);
-            let bytes = read(fs, Root::Folder, path, Range { offset: at, len }).await?;
+            let bytes = read(Range { offset: at, len }).await?;
             if bytes.len() as u64 != len {
                 return Err(io::Error::other("the file changed while it was read"));
             }

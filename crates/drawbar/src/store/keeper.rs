@@ -1008,8 +1008,10 @@ impl<'l, F: Fs + 'l> Parting<'l, '_, F> {
                 let fill = match from {
                     Source::Outside(from) => Fill::Outside(from),
                     Source::Part(part) => Fill::Part(part),
-                    Source::Edited(source, _, pieces) => Fill::Edited(source, pieces),
-                    Source::Library(source, known) => Fill::Library(source, known.len),
+                    Source::Edited(source, known, pieces) => {
+                        Fill::Library(source, known, Some(pieces))
+                    }
+                    Source::Library(source, known) => Fill::Library(source, known, None),
                 };
                 let to = To {
                     path: &path,
@@ -1157,14 +1159,30 @@ impl<'l, F: Fs + 'l> Parting<'l, '_, F> {
 async fn still<F: Fs>(fs: &F, path: &LibPath, known: &Fingerprint) -> io::Result<bool> {
     let at = relative(path).ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
     let stat = storage::stat(fs, &at).await?;
-    let stat = stat.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+    holds(&at, known, stat, async |range| {
+        storage::read(fs, Root::Folder, &at, range).await
+    })
+    .await
+}
+
+/// Whether the library file at `at`, found as `stat`, holds what `known` says: `stat`
+/// is the one known, or the identity `read` finds is.
+async fn holds(
+    at: &RelPath,
+    known: &Fingerprint,
+    stat: Option<Stat>,
+    read: impl AsyncFnMut(Range) -> io::Result<Vec<u8>>,
+) -> io::Result<bool> {
+    let Some(stat) = stat else {
+        return Ok(false);
+    };
     if stat == known.stat() {
         return Ok(true);
     }
     let Some(identity) = known.identity else {
         return Ok(false);
     };
-    Ok(storage::identity(fs, &at, stat.len).await? == identity)
+    Ok(storage::identity(at, stat.len, read).await? == identity)
 }
 
 /// What failed to fill a file, or why toshokan refused the change, as the app tells it.
@@ -1217,10 +1235,12 @@ enum Fill {
     Outside(super::Outside),
     /// Some bytes of a file outside the library, which must have their CRC.
     Part(Part),
-    /// The library's own file at this path, of this length, never held whole.
-    Library(LibPath, u64),
+    /// The library's own file at this path, as the app knew it, read by range and never
+    /// held whole: as it is, or as an edit's pieces make it. It fails where the file
+    /// changed while it was read.
+    Library(LibPath, Fingerprint, Option<Arc<Pieces>>),
     /// The file an edit makes of a piano or sample instrument resting in the library at
-    /// this path, read by range and never held whole.
+    /// this path, which it replaces, read by range and never held whole.
     Edited(LibPath, Arc<Pieces>),
 }
 
@@ -1270,38 +1290,69 @@ impl Fill {
                     false => Err(part.mismatch()),
                 }
             }
-            Fill::Library(from, len) => {
+            Fill::Library(from, known, pieces) => {
                 let from = relative(&from).ok_or_else(|| io::Error::other(no_path(&from)))?;
-                let mut at = 0;
-                while at < len {
-                    let chunk = CHUNK.min(len - at);
-                    let range = Range {
-                        offset: at,
-                        len: chunk,
-                    };
-                    let bytes = staging.read(&from, range).await;
-                    let bytes = bytes.map_err(storage::failed)?;
-                    if bytes.len() as u64 != chunk {
-                        return Err(io::Error::other("the file it copies changed on disk"));
-                    }
-                    put(at, bytes).await?;
-                    at += chunk;
+                let read =
+                    async |range: Range| staging.read(&from, range).await.map_err(storage::failed);
+                match pieces {
+                    Some(pieces) => rewrite::stream(&pieces, by_range(read), put).await?,
+                    None => whole(known.len, read, put).await?,
                 }
-                Ok(())
+                let stat = staging.stat(&from).await.map_err(storage::failed)?;
+                match holds(&from, &known, storage::file(stat), read).await? {
+                    true => Ok(()),
+                    false => Err(rewrite::changed(
+                        "the file it copies changed on disk".into(),
+                    )),
+                }
             }
             Fill::Edited(from, pieces) => {
                 let from = relative(&from).ok_or_else(|| io::Error::other(no_path(&from)))?;
-                let read = async |range: std::ops::Range<u64>| {
-                    let range = Range {
-                        offset: range.start,
-                        len: range.end - range.start,
-                    };
-                    staging.read(&from, range).await.map_err(storage::failed)
-                };
-                rewrite::stream(&pieces, read, put).await
+                let read =
+                    async |range: Range| staging.read(&from, range).await.map_err(storage::failed);
+                rewrite::stream(&pieces, by_range(read), put).await
             }
         }
     }
+}
+
+/// `read` taking a range of offsets.
+fn by_range(
+    mut read: impl AsyncFnMut(Range) -> io::Result<Vec<u8>>,
+) -> impl AsyncFnMut(std::ops::Range<u64>) -> io::Result<Vec<u8>> {
+    async move |range: std::ops::Range<u64>| {
+        let range = Range {
+            offset: range.start,
+            len: range.end - range.start,
+        };
+        read(range).await
+    }
+}
+
+/// Copy the first `len` bytes `read` finds through `put` a chunk at a time. A source
+/// shorter than `len` fails the copy.
+async fn whole(
+    len: u64,
+    mut read: impl AsyncFnMut(Range) -> io::Result<Vec<u8>>,
+    mut put: impl AsyncFnMut(u64, Vec<u8>) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut at = 0;
+    while at < len {
+        let chunk = CHUNK.min(len - at);
+        let bytes = read(Range {
+            offset: at,
+            len: chunk,
+        })
+        .await?;
+        if bytes.len() as u64 != chunk {
+            return Err(rewrite::changed(
+                "the file it copies changed on disk".into(),
+            ));
+        }
+        put(at, bytes).await?;
+        at += chunk;
+    }
+    Ok(())
 }
 
 /// Copy `range` of `from` through `put` a chunk at a time, from offset 0, and return
@@ -1736,6 +1787,92 @@ mod tests {
         }));
         assert!(matches!(deleted[0], Event::Failed(_)), "{deleted:?}");
         assert_eq!(root.read("c3.ne5p"), b"changed!");
+    }
+
+    /// Storage that runs `meddle` once, right after the first read of `at` in the folder
+    /// once armed, as another program changing that file mid-copy would.
+    struct Meddled {
+        inner: Counted,
+        at: RelPath,
+        meddle: RefCell<Option<Box<dyn FnOnce()>>>,
+    }
+
+    impl Fs for Meddled {
+        fn capabilities(&self, root: toshokan::io::Root) -> toshokan::io::Capabilities {
+            self.inner.capabilities(root)
+        }
+
+        async fn perform(&self, io: toshokan::Io) -> toshokan::io::IoResult {
+            let reads = matches!(&io, toshokan::Io::Read { root: Root::Folder, path, .. } if *path == self.at);
+            let done = self.inner.perform(io).await;
+            let meddle = reads.then(|| self.meddle.take()).flatten();
+            if let Some(meddle) = meddle {
+                meddle();
+            }
+            done
+        }
+    }
+
+    /// A copy of a library file that another program rewrites while it is read, range by
+    /// range, is refused as moved, and nothing lands.
+    #[test]
+    fn a_copy_of_a_file_rewritten_while_it_is_read_is_refused() {
+        let root = Temp::new();
+        let len = 2 * CHUNK as usize + 1;
+        fs::write(root.at("Long.nsmp"), vec![b'a'; len]).unwrap();
+        let mut counted = native::keeper(
+            &root.0,
+            &root.local(),
+            Arc::default(),
+            Box::new(SystemClock),
+        );
+        let (inner, env) = counted.unopened.take().unwrap();
+        let fs = Meddled {
+            inner,
+            at: RelPath::new("Long.nsmp").unwrap(),
+            meddle: RefCell::new(None),
+        };
+        let mut keeper = super::Keeper::new(fs, env);
+        let run = |keeper: &mut super::Keeper<Meddled>, cmd| {
+            let mut answers = Vec::new();
+            nord_usb::block_on(keeper.run(cmd, &mut |event| answers.push(event)));
+            answers
+        };
+        run(&mut keeper, Cmd::Open);
+        let listed = keeper.library.as_ref().unwrap().view();
+        let listed = listed.listed(&RelPath::new("Long.nsmp").unwrap()).unwrap();
+        let stat = Stat {
+            len: listed.len,
+            modified: listed.modified,
+        };
+        let rewrite = root.at("Long.nsmp");
+        *keeper.fs().unwrap().meddle.borrow_mut() = Some(Box::new(move || {
+            fs::write(rewrite, vec![b'b'; len + 1]).unwrap();
+        }));
+        let answers = run(
+            &mut keeper,
+            Cmd::Intent(Intent::Import {
+                id: 1,
+                path: path("Copy.nsmp"),
+                from: Source::Library(path("Long.nsmp"), Fingerprint::unread(stat)),
+                expect: Expect::Absent,
+                came: None,
+            }),
+        );
+        assert!(
+            matches!(
+                answers[..],
+                [
+                    Event::Imported {
+                        result: Err(Failure::Moved),
+                        ..
+                    },
+                    ..
+                ]
+            ),
+            "{answers:?}"
+        );
+        assert!(!root.at("Copy.nsmp").exists(), "nothing lands");
     }
 
     /// A folder of the library that is a link to one outside it is never written through:
