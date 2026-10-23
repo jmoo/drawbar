@@ -13,7 +13,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::hash::{Hash, Hasher};
 
-use crate::binding::{self, Bindings, Fact, Facts, Scan, Scanned, Unscanned};
+use crate::binding::{self, Bindings, Fact, Facts, FileKeys, Scan, Scanned, Unscanned};
 use crate::cow::CowMap;
 use crate::env::Names;
 use crate::ids::{EntityId, Identity};
@@ -593,20 +593,29 @@ pub(crate) type Changes = BTreeMap<RelPath, Option<Scanned>>;
 /// those listed now. Identities resolve as [`binding::resolve`] resolves them
 /// when given every file: from the entry the path had, else from the last fact
 /// naming the path, else read where it decides something: at a fact's path of its
-/// length, or of a length in `away`, those of the facts whose files are not where
-/// they say. Of the files not relisted, it resolves only those of a length in
-/// `gained`, the lengths the facts gained since the last resolve.
+/// length, or of the length of an entity that may have moved, as [`binding::away`]
+/// finds it among the files after the change, `keys` being `scan`'s once asked, or one
+/// the facts gained since the last resolve. Of the files not relisted, it resolves
+/// only those of a length in `gained`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve(
     scan: &Scan,
     facts: &Facts,
     links: &Links,
     names: &dyn Names,
+    keys: &mut Option<FileKeys>,
     gone: Vec<RelPath>,
     found: Scan,
     gained: &BTreeSet<u64>,
-    away: &BTreeSet<u64>,
 ) -> (Changes, Vec<(RelPath, u64)>) {
+    let mut counted: BTreeMap<String, isize> = BTreeMap::new();
+    for path in &gone {
+        *counted.entry(names.key(path.as_str())).or_default() -= 1;
+    }
+    for path in found.files.keys() {
+        *counted.entry(names.key(path.as_str())).or_default() += 1;
+    }
+    let mut away = None;
     let mut changes = Changes::new();
     for path in gone {
         changes.insert(path, None);
@@ -644,7 +653,14 @@ pub(crate) fn resolve(
                 .find(|fact| (fact.len, fact.modified) == (file.len, file.modified));
             file.identity = same.map(|fact| fact.identity);
             let sized = said.iter().any(|fact| fact.len == file.len);
-            if file.identity.is_none() && (sized || away.contains(&file.len)) {
+            let mut away = || {
+                let away = away.get_or_insert_with(|| {
+                    let keys = keys.get_or_insert_with(|| FileKeys::of(scan, names));
+                    binding::away(facts, &keys.after(&counted), names)
+                });
+                away.contains(&file.len) || gained.contains(&file.len)
+            };
+            if file.identity.is_none() && (sized || away()) {
                 needed.push((path.clone(), file.len));
             }
         }
@@ -825,7 +841,7 @@ mod tests {
                 file.identity = None;
             }
             let earlier = previous.clone();
-            let needed = binding::resolve(&mut previous, &facts, &earlier);
+            let needed = binding::resolve(&mut previous, &facts, &earlier, names);
             for (path, len) in needed {
                 let identity = CONTENTS.iter().find(|(_, l)| *l == len).unwrap().0;
                 let file = previous.files.get_mut(&path).unwrap();
@@ -855,7 +871,7 @@ mod tests {
                 .files
                 .retain(|path, _| !relisted.iter().any(|dir| path.starts_with(dir)));
             whole.files.extend(found.files.clone());
-            let whole_needed = binding::resolve(&mut whole, &facts, &previous);
+            let whole_needed = binding::resolve(&mut whole, &facts, &previous, names);
             // A file neither relisted nor of a length a fact away from its file gives
             // is left for the next scan of every file.
             let reached = |path: &RelPath, len: u64| {
@@ -873,16 +889,15 @@ mod tests {
 
             let links = reach.links.as_ref().unwrap();
             let gone = binding::under_any(&previous, &relisted);
-            let away = binding::away(&facts, &whole);
             let (changes, some_needed) = resolve(
                 &previous,
                 &facts,
                 links,
                 names,
+                &mut None,
                 gone,
                 found,
                 &reach.gained,
-                &away,
             );
             let mut some = previous.clone();
             for (path, file) in changes {

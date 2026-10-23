@@ -530,20 +530,22 @@ their identities:
 1. A scan lists every library file with its length and modification time. It
    reads an identity only where it decides a binding: for a file at the path of
    a file fact of its length, and for a file of the length of a fact of an
-   entity that may have moved, one none of whose file facts' paths holds a file
-   that no other entity's fact names too. It reads none when a fact, earlier scan or `identities.json` gives the
-   identity for that path, length and time. The install keeps in `identities.json` the identities its
-   scans read while their files keep their length and time. A file rewritten
+   entity that may have moved. Such an entity is one none of whose file facts'
+   paths holds a file that no other entity's fact names too, paths compared
+   under the volume's rules for case and Unicode normalization. It reads none
+   when a fact, earlier scan or `identities.json` gives the identity for that
+   path, length and time. The install keeps in `identities.json` the identities
+   its scans read while their files keep their length and time. A file rewritten
    outside toshokan to the same length and the same modification time, as a
    coarse clock or a tool that sets the time back allows, keeps the identity read
    before until its length or time moves: a binding can then take it for what it
    held. A precondition is never fooled, since it reads the identity at the
-   check. After a commit, only
-   the paths its file effects moved files from and to are scanned again, and of
-   the other files only those of the length of a file fact the commit wrote
-   whose file is not at its path, holding it, have their identities read: such a
-   file may be that entity's, moved. Adopting a file reads that file alone; the
-   other files of its length are read by the next scan of every file. A refresh scans again only the paths named by the file facts
+   check. After a commit, only the paths its file effects moved files from and to
+   are scanned again, with the same identity reads, and of the other files only
+   those of the length of a file fact the commit wrote whose file is not at its
+   path, holding it: such a file may be that entity's, moved. Adopting a file
+   reads that file alone; the other files of its length are read by the next scan
+   of every file. A refresh scans again only the paths named by the file facts
    the entries it read changed, before and after, and the paths those entities
    were bound to, with the same identity reads. Such a path is found only under
    the spelling its directories list, since a volume that ignores case finds a

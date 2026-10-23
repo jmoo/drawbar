@@ -12,7 +12,7 @@ use std::ops::Bound;
 use std::rc::Rc;
 
 use crate::cow::CowMap;
-use crate::env::{Identify, Names};
+use crate::env::{ExactNames, Identify, Names};
 use crate::error::Result;
 use crate::flow::{self, fold, ok};
 use crate::ids::{EntityId, EntryHash, Identity};
@@ -142,8 +142,8 @@ pub fn bind_known(
 }
 
 /// Lists every library file outside toshokan's root, with the paths whose
-/// identities it read. Requests only [`crate::Io::ListStat`], one per directory,
-/// and [`crate::Io::ReadMany`].
+/// identities it read, comparing paths byte for byte. Requests only
+/// [`crate::Io::ListStat`], one per directory, and [`crate::Io::ReadMany`].
 pub fn scan(
     layout: &Layout,
     identify: &Rc<dyn Identify>,
@@ -154,7 +154,7 @@ pub fn scan(
     let identify = Rc::clone(identify);
     list_all(layout)
         .and_then(move |mut scan| {
-            let unknown = resolve(&mut scan, &facts, &previous);
+            let unknown = resolve(&mut scan, &facts, &previous, &ExactNames);
             identified(scan, unknown, &identify)
         })
         .task()
@@ -384,9 +384,14 @@ fn under(path: &RelPath, paths: &BTreeSet<&str>) -> bool {
 /// `facts` that names them. Returns the files left without one whose identities
 /// decide something, which must be read: one at an entity's path of its length,
 /// and one of the length of an entity that may have moved ([`Away`]).
-pub(crate) fn resolve(scan: &mut Scan, facts: &Facts, previous: &Scan) -> Vec<(RelPath, u64)> {
+pub(crate) fn resolve(
+    scan: &mut Scan,
+    facts: &Facts,
+    previous: &Scan,
+    names: &dyn Names,
+) -> Vec<(RelPath, u64)> {
     let mut resolving = Resolving::default();
-    while !resolving.step(scan, facts, previous, usize::MAX) {}
+    while !resolving.step(scan, facts, previous, names, usize::MAX) {}
     resolving.needed
 }
 
@@ -398,30 +403,29 @@ pub(crate) struct Resolving {
     unknown: Vec<RelPath>,
     /// What the facts naming an unknown file say of it, in order of the facts.
     logged: HashMap<RelPath, Vec<(u64, Option<u64>, Identity)>>,
+    /// The keys of the files, once an entity asks.
+    files: Option<FileKeys>,
     away: Away,
     pub(crate) needed: Vec<(RelPath, u64)>,
 }
 
 /// The lengths of the entities that may have moved, gathered an entity at a time:
-/// those none of whose paths holds a file that is not also another entity's path. A
-/// file of such a length may be one of them, moved.
+/// those none of whose paths holds a file that no other entity's path names too,
+/// paths compared under the volume's names. A file of such a length may be one of
+/// them, moved.
 #[derive(Default)]
 pub(crate) struct Away {
     lengths: HashSet<u64>,
-    /// Each path a file is at, by how many entities' facts name it.
-    named: HashMap<RelPath, usize>,
-    /// The entities a file is at some path of: those paths, and the facts' lengths.
-    placed: Vec<(Vec<RelPath>, Vec<u64>)>,
+    /// Each key a file is at, by how many entities' facts name it.
+    named: HashMap<String, usize>,
+    /// The entities a file is at some path of: those keys, and the facts' lengths.
+    placed: Vec<(Vec<String>, Vec<u64>)>,
 }
 
 impl Away {
-    fn entity(&mut self, written: &[Fact], scan: &Scan) {
-        let mut held: Vec<RelPath> = written
-            .iter()
-            .map(|fact| &fact.value.path)
-            .filter(|path| scan.files.contains_key(*path))
-            .cloned()
-            .collect();
+    /// Takes in the entity whose facts are `written`, with `held`, the keys of their
+    /// paths a file is at.
+    fn entity(&mut self, written: &[Fact], mut held: Vec<String>) {
         held.sort();
         held.dedup();
         let lengths = written.iter().map(|fact| fact.value.len);
@@ -429,15 +433,15 @@ impl Away {
             self.lengths.extend(lengths);
             return;
         }
-        for path in &held {
-            *self.named.entry(path.clone()).or_default() += 1;
+        for key in &held {
+            *self.named.entry(key.clone()).or_default() += 1;
         }
         self.placed.push((held, lengths.collect()));
     }
 
     fn finish(&mut self) {
         for (held, lengths) in std::mem::take(&mut self.placed) {
-            if held.iter().all(|path| self.named[path] > 1) {
+            if held.iter().all(|key| self.named[key] > 1) {
                 self.lengths.extend(lengths);
             }
         }
@@ -445,12 +449,73 @@ impl Away {
     }
 }
 
-/// The lengths of the entities of `facts` that may have moved in `scan`; see [`Away`].
-#[cfg(test)]
-pub(crate) fn away(facts: &Facts, scan: &Scan) -> BTreeSet<u64> {
+/// How many files are at each key under the volume's names.
+#[derive(Clone, Default, Debug)]
+pub(crate) struct FileKeys(HashMap<String, usize>);
+
+impl FileKeys {
+    pub(crate) fn of(scan: &Scan, names: &dyn Names) -> FileKeys {
+        let mut keys = FileKeys::default();
+        for path in scan.files.keys() {
+            keys.add(path, names);
+        }
+        keys
+    }
+
+    pub(crate) fn add(&mut self, path: &RelPath, names: &dyn Names) {
+        *self.0.entry(names.key(path.as_str())).or_default() += 1;
+    }
+
+    pub(crate) fn remove(&mut self, path: &RelPath, names: &dyn Names) {
+        let key = names.key(path.as_str());
+        if let Some(count) = self.0.get_mut(&key) {
+            *count -= 1;
+            if *count == 0 {
+                self.0.remove(&key);
+            }
+        }
+    }
+
+    /// The keys of the paths of `written` a file is at.
+    fn held(&self, written: &[Fact], names: &dyn Names) -> Vec<String> {
+        self.after(&BTreeMap::new()).held(written, names)
+    }
+
+    /// The keys once `changes` are made, each one count up or down.
+    pub(crate) fn after<'k>(&'k self, changes: &'k BTreeMap<String, isize>) -> KeysAfter<'k> {
+        KeysAfter {
+            keys: self,
+            changes,
+        }
+    }
+}
+
+/// [`FileKeys`] as a change leaves them, without changing them.
+pub(crate) struct KeysAfter<'k> {
+    keys: &'k FileKeys,
+    changes: &'k BTreeMap<String, isize>,
+}
+
+impl KeysAfter<'_> {
+    fn holds(&self, key: &str) -> bool {
+        let before = self.keys.0.get(key).copied().unwrap_or(0) as isize;
+        before + self.changes.get(key).copied().unwrap_or(0) > 0
+    }
+
+    fn held(&self, written: &[Fact], names: &dyn Names) -> Vec<String> {
+        let keys = written
+            .iter()
+            .map(|fact| names.key(fact.value.path.as_str()));
+        keys.filter(|key| self.holds(key)).collect()
+    }
+}
+
+/// The lengths of the entities of `facts` that may have moved where `files` are the
+/// files' keys; see [`Away`].
+pub(crate) fn away(facts: &Facts, files: &KeysAfter<'_>, names: &dyn Names) -> BTreeSet<u64> {
     let mut away = Away::default();
     for (_, written) in facts {
-        away.entity(written, scan);
+        away.entity(written, files.held(written, names));
     }
     away.finish();
     away.lengths.into_iter().collect()
@@ -477,6 +542,7 @@ impl Resolving {
         scan: &mut Scan,
         facts: &Facts,
         previous: &Scan,
+        names: &dyn Names,
         slice: usize,
     ) -> bool {
         self.stage = match std::mem::take(&mut self.stage) {
@@ -484,7 +550,7 @@ impl Resolving {
             Resolve::EarlierAfter(after) => {
                 self.earlier(scan, previous, Bound::Excluded(&after), slice)
             }
-            Resolve::Facts(after) => self.facts(facts, scan, after, slice),
+            Resolve::Facts(after) => self.facts(facts, scan, names, after, slice),
             Resolve::Logged(from) => self.logged(scan, from, slice),
             Resolve::Done => Resolve::Done,
         };
@@ -532,6 +598,7 @@ impl Resolving {
         &mut self,
         facts: &Facts,
         scan: &Scan,
+        names: &dyn Names,
         after: Option<EntityId>,
         slice: usize,
     ) -> Resolve {
@@ -539,7 +606,8 @@ impl Resolving {
         let mut last = None;
         for (entity, written) in entities.by_ref().take(slice) {
             last = Some(*entity);
-            self.away.entity(written, scan);
+            let files = self.files.get_or_insert_with(|| FileKeys::of(scan, names));
+            self.away.entity(written, files.held(written, names));
             for fact in written.iter().map(|fact| &fact.value) {
                 if self.unknown.binary_search(&fact.path).is_ok() {
                     let said = (fact.len, fact.modified, fact.identity);
@@ -1096,7 +1164,7 @@ fn missing(fact: &FileFact) -> FileRef {
 mod tests {
     use super::*;
     use crate::disk::MemDisk;
-    use crate::env::{ExactNames, PrefixIdentity};
+    use crate::env::PrefixIdentity;
     use crate::ids::EntryHash;
     use crate::io::Io;
 
@@ -1296,7 +1364,8 @@ mod tests {
                     known.insert((path.clone(), file.len, file.modified), identity);
                 }
             }
-            let away = away(&facts, &fresh);
+            let keys = FileKeys::of(&fresh, &ExactNames);
+            let away = away(&facts, &keys.after(&BTreeMap::new()), &ExactNames);
             let at_path = |path: &RelPath, len: u64| {
                 let written = facts.values().flat_map(|written| written.iter());
                 written
@@ -1314,7 +1383,7 @@ mod tests {
                 }
             }
             let mut sliced = fresh.clone();
-            let unknown = resolve(&mut fresh, &facts, &previous);
+            let unknown = resolve(&mut fresh, &facts, &previous, &ExactNames);
             assert_eq!(
                 (fresh, unknown),
                 (expected.clone(), needed.clone()),
@@ -1322,7 +1391,7 @@ mod tests {
             );
             let slice = 1 + pick(3);
             let mut resolving = Resolving::default();
-            while !resolving.step(&mut sliced, &facts, &previous, slice) {}
+            while !resolving.step(&mut sliced, &facts, &previous, &ExactNames, slice) {}
             assert_eq!(
                 (sliced, resolving.needed),
                 (expected, needed),
@@ -1558,6 +1627,45 @@ mod tests {
         fn key(&self, path: &str) -> String {
             path.replace("e\u{301}", "\u{e9}").to_lowercase()
         }
+    }
+
+    /// On a volume that folds case, an entity whose path holds a file only under
+    /// another entity's spelling of it may have moved: files of its length are read.
+    #[test]
+    fn an_entity_another_spelling_shares_a_path_with_may_have_moved() {
+        let file = |at: &str, len: u64, identity: u128| FileFact {
+            path: path(at),
+            identity: Identity::from_u128(identity),
+            len,
+            modified: Some(0),
+        };
+        let facts = Facts::from([
+            (
+                EntityId::from_u128(1),
+                vec![written(file("a.wav", 5, 1), 1)].into(),
+            ),
+            (
+                EntityId::from_u128(2),
+                vec![written(file("A.wav", 7, 2), 2)].into(),
+            ),
+        ]);
+        let listed = |len| Scanned {
+            len,
+            modified: Some(1),
+            identity: None,
+        };
+        let mut scan = Scan {
+            files: [("A.wav", 9), ("x.wav", 7), ("y.wav", 5)]
+                .into_iter()
+                .map(|(at, len)| (path(at), listed(len)))
+                .collect(),
+        };
+        let needed = resolve(&mut scan, &facts, &Scan::default(), &Folding);
+        assert_eq!(
+            needed,
+            [(path("x.wav"), 7), (path("y.wav"), 5)],
+            "both entities name the one file under one key"
+        );
     }
 
     fn one(at: &str) -> Facts {

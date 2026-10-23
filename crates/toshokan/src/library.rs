@@ -91,6 +91,9 @@ pub struct Library {
     facts: Facts,
     /// The last scan; before the first, the identities `remembered` keeps.
     scan: Scan,
+    /// The keys of `scan`'s files under the volume's names, once a rescan of paths
+    /// asks, kept up as they rescan.
+    keys: Option<binding::FileKeys>,
     /// Each file the last scan listed, as the views show it; `None` until a scan of
     /// every file has run.
     listing: Option<CowMap<RelPath, Listed>>,
@@ -298,6 +301,7 @@ impl Library {
             scan: remembered.clone(),
             listing: None,
             unlisted: Vec::new(),
+            keys: None,
             walked: None,
             remembered,
             unkept: false,
@@ -897,6 +901,7 @@ impl Library {
             _ => {
                 drop(std::mem::take(&mut self.facts));
                 drop(std::mem::take(&mut self.scan));
+                drop(self.keys.take());
                 drop(std::mem::take(&mut self.reach));
                 drop(std::mem::take(&mut self.bindings));
                 drop(std::mem::take(&mut self.history));
@@ -1317,19 +1322,6 @@ impl Library {
         self.reach.bound(links);
     }
 
-    /// The lengths of the facts whose files are not where they say: those the
-    /// facts gained since the last resolve, and those of the entities bound to
-    /// no file or moved. A file of one of them may be such an entity's, moved.
-    fn away(&self) -> BTreeSet<u64> {
-        let report = &self.bindings.report;
-        let ambiguous = report.ambiguous.iter().map(|ambiguous| &ambiguous.entity);
-        let moved = report.moved.iter().map(|moved| &moved.entity);
-        let entities = report.departed.iter().chain(ambiguous).chain(moved);
-        let written = entities.filter_map(|entity| self.facts.get(entity));
-        let lengths = written.flat_map(|written| written.iter().map(|fact| fact.value.len));
-        lengths.chain(self.reach.gained().iter().copied()).collect()
-    }
-
     /// The identities the local root should keep of those scans read that no fact
     /// gives: those just read, and those kept before of files the last scan found
     /// unchanged. `None` when the local root keeps them already.
@@ -1377,6 +1369,13 @@ impl Library {
         self.reach.resolved();
         let names = &*self.env.names;
         for (path, file) in changes {
+            if let Some(keys) = self.keys.as_mut() {
+                match (self.scan.files.contains_key(&path), file.is_some()) {
+                    (false, true) => keys.add(&path, names),
+                    (true, false) => keys.remove(&path, names),
+                    _ => {}
+                }
+            }
             if let Some(listing) = self.listing.as_mut() {
                 match file {
                     Some(file) => _ = listing.insert(path.clone(), Listed::of(&file)),
@@ -2117,7 +2116,13 @@ fn walked<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
         let resolving = (library, found, Resolving::default());
         flow::sliced(resolving, |(library, found, resolving)| {
             let known = library.borrow();
-            resolving.step(found, &known.facts, &known.scan, FOUND_SLICE)
+            resolving.step(
+                found,
+                &known.facts,
+                &known.scan,
+                &*known.env.names,
+                FOUND_SLICE,
+            )
         })
     })
     .then(|(library, found, resolving)| {
@@ -2157,6 +2162,7 @@ fn rebound<'a, L: BorrowMut<Library> + 'a>(mut library: L, scan: Scan) -> Flow<'
         return Flow::Done(library);
     }
     known.scan = scan;
+    known.keys = None;
     known.reach.everything();
     bind_everything(library)
 }
@@ -2224,17 +2230,17 @@ fn rescan_paths(library: &mut Library, paths: Vec<RelPath>) -> Fallible<'_, &mut
             Err(error) => return unscanned(library, paths, error),
         };
         let gone = binding::under_any(&library.scan, &paths);
+        let names = &*library.env.names;
         let links = library.reach.links().expect("ready above");
-        let away = library.away();
         let (changes, unknown) = reach::resolve(
             &library.scan,
             &library.facts,
             links,
-            &*library.env.names,
+            names,
+            &mut library.keys,
             gone,
             found,
             library.reach.gained(),
-            &away,
         );
         let reading: Vec<RelPath> = unknown.iter().map(|(path, _)| path.clone()).collect();
         let identities = flow::identities(Root::Folder, unknown, &library.env.identify);
@@ -2287,7 +2293,8 @@ fn rebind_logged<'a>(
     flow::run(listed).then(move |listed| {
         let identified = match listed {
             Ok(mut scan) => {
-                let unknown = binding::resolve(&mut scan, &library.facts, &library.scan);
+                let names = &*library.env.names;
+                let unknown = binding::resolve(&mut scan, &library.facts, &library.scan, names);
                 library.reach.resolved();
                 binding::identified(scan, unknown, &library.env.identify)
             }
