@@ -4837,7 +4837,7 @@ fn a_new_folder_is_undone() {
 }
 
 /// Removing a folder that holds files and folders moves them up and removes it in one
-/// change: one undo puts everything back where it was.
+/// change: one undo puts everything back where it was, and one redo removes it again.
 #[test]
 fn removing_a_folder_with_folders_in_it_is_one_undo_step() {
     let root = Temp::new();
@@ -4858,6 +4858,10 @@ fn removing_a_folder_with_folders_in_it_is_one_undo_step() {
     assert_eq!(root.names(""), [".drawbar", "Gig"]);
     assert_eq!(root.names("Gig"), ["Set", "a.ne5p"]);
     assert_eq!(root.names("Gig/Set"), ["b.ne5p"]);
+    session.redo();
+    session.settle();
+    assert_eq!(root.names(""), [".drawbar", "Set", "a.ne5p"], "removed again");
+    assert_eq!(root.names("Set"), ["b.ne5p"]);
 }
 
 /// A new tag made on a selection and named in its editor is one change: one undo takes

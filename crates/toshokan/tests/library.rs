@@ -643,6 +643,7 @@ through_both!(
     an_effect_a_live_window_left_open_is_reported_live,
     a_change_of_case_another_install_did_not_start_is_finished_by_another,
     a_directory_made_and_filled_in_one_change_is_undone_in_one,
+    directories_made_and_removed_around_tree_moves_undo_and_redo,
     removing_an_empty_directory_is_undone_and_one_with_files_is_refused,
     an_intent_that_stops_partway_says_what_landed,
     a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept,
@@ -2988,6 +2989,42 @@ fn a_directory_made_and_filled_in_one_change_is_undone_in_one<F: Facade>() {
     a.redo().unwrap();
     assert_eq!(dirs(), ["Gig"]);
     assert!(read(&folder, "Gig/a.wav").is_some());
+}
+
+fn directories_made_and_removed_around_tree_moves_undo_and_redo<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    put(&folder, "A/x.wav", b"x");
+    put(&folder, "Gig/B/y.wav", b"y");
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    let dirs = || {
+        let dirs = folder.directories(Root::Folder).into_iter();
+        let dirs = dirs.filter(|dir| !dir.starts_with(&path(".t")) && !dir.is_root());
+        dirs.map(|dir| dir.as_str().to_owned()).collect::<Vec<_>>()
+    };
+    a.commit("Move", |i| {
+        i.make_dir(&path("Set"))
+            .move_tree(&path("A"), &path("Set/A"))
+    })
+    .unwrap();
+    a.commit("Remove folder", |i| {
+        i.move_tree(&path("Gig/B"), &path("B"))
+            .remove_dir(&path("Gig"))
+    })
+    .unwrap();
+    let moved = ["B", "Set", "Set/A"];
+    assert_eq!(dirs(), moved);
+    a.undo().unwrap();
+    assert_eq!(dirs(), ["Gig", "Gig/B", "Set", "Set/A"], "the folder made again");
+    a.undo().unwrap();
+    let before = ["A", "Gig", "Gig/B"];
+    assert_eq!(dirs(), before, "the folder removed after the tree moved out");
+    a.redo().unwrap();
+    a.redo().unwrap();
+    assert_eq!(dirs(), moved, "redone in the order each was made");
+    assert!(read(&folder, "Set/A/x.wav").is_some());
+    assert!(read(&folder, "B/y.wav").is_some());
 }
 
 fn removing_an_empty_directory_is_undone_and_one_with_files_is_refused<F: Facade>() {

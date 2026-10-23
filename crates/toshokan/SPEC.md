@@ -853,8 +853,10 @@ reverses the latest undo while the writer has committed nothing else since.
 - A `dir` op is reversed by removing the directory it made or making the one it
   removed.
 
-An intent's file changes are undone in the reverse of the order it made them, so
-one that made a directory and moved files into it moves them out first.
+An intent's file changes are undone in the reverse of the order it made them,
+except that a directory it removed is made again before anything else, and one it
+made is removed after everything else: the log keeps tree moves, then directories,
+then files, whatever order the intent made them in.
 
 An undo or redo is refused, naming the writer and entry, where another writer
 changed the same thing since: a register no longer holds only what the intent

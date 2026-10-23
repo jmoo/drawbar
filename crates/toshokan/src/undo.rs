@@ -164,8 +164,8 @@ pub fn reverse(entries: &[Entry], writer: WriterId, folded: &Folded) -> Result<P
             _ => None,
         })
         .collect();
-    // The file changes undo in the reverse of the order the intent made them, as one
-    // made a directory before moving files into it; a tree moves back where it moved.
+    // The file changes undo in the reverse of the order the intent made them; a tree
+    // moves back where it moved.
     let mut undone: Vec<Option<FileChange>> = Vec::new();
     for op in &logged.ops {
         match op {
@@ -229,6 +229,14 @@ pub fn reverse(entries: &[Entry], writer: WriterId, folded: &Folded) -> Result<P
         .filter_map(|change| change.or_else(|| trees.next()))
         .collect();
     plan.files.extend(in_order.into_iter().rev());
+    // ⚠️ The log keeps trees, then directories, then files, whatever order the intent
+    // made them in, so a directory the intent removed is made again before anything
+    // moves back into it, and one it made is removed after everything moved out.
+    plan.files.sort_by_key(|change| match change {
+        FileChange::MakeDir { .. } => 0,
+        FileChange::RemoveDir { .. } => 2,
+        _ => 1,
+    });
     Ok(plan)
 }
 
