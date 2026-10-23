@@ -796,7 +796,9 @@ In the browser:
   gives the page no storage, as some private windows do, drawbar says so and
   the library lasts until the tab closes.
 - A tab and the desktop app on one picked folder are two installs, each a writer
-  of its own, as two computers that sync the folder are.
+  of its own, as two computers that sync the folder are. So are two tabs that each
+  pick one folder before either has saved the recent list, since each gives the
+  folder an id of its own.
 - A picked folder is taken to rename files only in Chrome, where that was
   measured: Brave refuses, and other browsers are not trusted to. Elsewhere every
   move copies the file and removes the old one (`toshokan::web::Folder::picked`).
