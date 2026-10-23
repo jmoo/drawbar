@@ -9,6 +9,7 @@ pub(super) fn failure(name: &str, message: &str) -> io::Error {
         "NotFoundError" => io::ErrorKind::NotFound,
         "QuotaExceededError" => io::ErrorKind::StorageFull,
         "NotSupportedError" => io::ErrorKind::Unsupported,
+        "NotAllowedError" => io::ErrorKind::PermissionDenied,
         _ => io::ErrorKind::Other,
     };
     match name {
@@ -27,6 +28,7 @@ mod tests {
         assert_eq!(kind("NotFoundError"), io::ErrorKind::NotFound);
         assert_eq!(kind("QuotaExceededError"), io::ErrorKind::StorageFull);
         assert_eq!(kind("NotSupportedError"), io::ErrorKind::Unsupported);
+        assert_eq!(kind("NotAllowedError"), io::ErrorKind::PermissionDenied);
         assert_eq!(kind("InvalidStateError"), io::ErrorKind::Other);
         let refused = failure("NotSupportedError", "The implementation did not support");
         assert_eq!(

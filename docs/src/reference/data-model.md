@@ -637,7 +637,9 @@ order, and waits for its answers. A command and its answers cross as JSON
 (`store::wire`); the bytes a save or a draft carries, and the `File` a copy from
 outside reads, are handed over beside the text, the bytes in a transferred
 buffer. An answer carries only what it changed of what the app shows
-(`store::shown::Change`), and all of it only as the library opens. The page
+(`store::shown::Change`), and all of it only as the library opens and after an
+answer the page could not read. A fault in the worker fails what waits on it, and
+the app closes the library, which opens again with a fresh worker. The page
 reads files itself, from the folder's handles, and indexes a piano or sample it
 leaves resting in its file through a `File` snapshot, taken again where a move
 the worker made carried the file. An edit of a resting file is sent as the pieces

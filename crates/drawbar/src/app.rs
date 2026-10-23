@@ -695,6 +695,14 @@ impl DrawbarApp {
 
     /// Let the open library go and open the one at `root`, which may be the same one.
     fn switch_library(&mut self, ctx: &egui::Context, root: crate::store::Root) {
+        self.let_library_go();
+        self.store = Some(library(ctx, root));
+        self.opened();
+        self.synced = self.workspace.revision();
+    }
+
+    /// Let the open library go, and its assets leave the window.
+    fn let_library_go(&mut self) {
         if let Some(store) = self.store.take() {
             store.hand_over(
                 &mut self.workspace,
@@ -719,9 +727,42 @@ impl DrawbarApp {
         }
         self.browser.leave_library();
         self.tabs.prune(&self.workspace);
-        self.store = Some(library(ctx, root));
-        self.opened();
-        self.synced = self.workspace.revision();
+    }
+
+    /// Let go of a library the page can no longer reach: one whose worker stopped, so
+    /// that opening it again starts a fresh one, or a picked folder the browser no
+    /// longer lets it into, which the private library stands in for until reconnected.
+    #[cfg(target_arch = "wasm32")]
+    fn let_lost_library_go(&mut self, ctx: &egui::Context) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        if let Some(why) = store.stopped() {
+            self.log.trouble(format!(
+                "The library stopped answering, so it was closed: {why}. Open it again \
+                 from File ▸ {}.",
+                crate::menu::RECENT
+            ));
+            self.let_library_go();
+            self.opened();
+            return;
+        }
+        if !store.denied() {
+            return;
+        }
+        let root = store.root().clone();
+        let name = root.name().unwrap_or_default();
+        self.log.trouble(format!(
+            "This browser no longer lets drawbar into {name}, so it was closed. Choose \
+             File ▸ Reconnect {name} to open it again. Until then the library is {}.",
+            crate::libraries::THIS_COMPUTER
+        ));
+        self.switch_library(ctx, crate::store::Root::Private);
+        self.browser.folders.reconnect = Some(crate::folders::Library {
+            root,
+            name,
+            open: false,
+        });
     }
 
     /// Put the library just opened first among the recent ones.
@@ -888,6 +929,8 @@ impl eframe::App for DrawbarApp {
             }
             None => false,
         };
+        #[cfg(target_arch = "wasm32")]
+        self.let_lost_library_go(ctx);
         if self.leaving {
             if let Some(storage) = frame.storage_mut() {
                 crate::store::leave_behind(storage);

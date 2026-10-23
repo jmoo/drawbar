@@ -367,6 +367,36 @@ async fn the_whole_workflow_runs_in_a_picked_folder() {
     the_whole_workflow_in(picked).await;
 }
 
+/// A worker that faults answers the command waiting on it and every later one with why,
+/// and once it is let go a fresh worker opens the library again.
+#[wasm_bindgen_test]
+async fn a_worker_that_faults_says_so_and_a_fresh_one_opens_the_library() {
+    wipe(&opfs().await).await;
+    let folder = || Folder::Private(RelPath::new("Faulty").unwrap());
+    let local = RelPath::new("local/faulty").unwrap();
+    let worker = Worker::start(folder(), &local).await.unwrap();
+    worker.run(Cmd::Open).await.unwrap();
+    worker.trap();
+    let refused = worker.run(Cmd::Rescan).await;
+    assert!(
+        refused.as_ref().is_err_and(|why| why.contains("stopped")),
+        "{refused:?}"
+    );
+    assert!(worker.stopped().is_some());
+    assert!(
+        worker.run(Cmd::Refresh).await.is_err(),
+        "nothing runs after"
+    );
+    drop(worker);
+    let fresh = Worker::start(folder(), &local).await.unwrap();
+    let opened = fresh.run(Cmd::Open).await.unwrap();
+    assert!(
+        matches!(opened[..], [Event::Opened(Ok(_)), ..]),
+        "{opened:?}"
+    );
+    fresh.close().await;
+}
+
 /// Two installs keep one library, each through its worker: a refresh shows one what the
 /// other committed, and a tab hears of another tab's commit.
 #[wasm_bindgen_test]

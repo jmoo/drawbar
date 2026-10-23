@@ -824,6 +824,19 @@ impl Store {
         released
     }
 
+    /// Why the library's worker stopped answering, once it has. The store then hears
+    /// nothing more.
+    #[cfg(target_arch = "wasm32")]
+    pub fn stopped(&self) -> Option<String> {
+        self.backend.stopped()
+    }
+
+    /// Whether the browser no longer lets the page into the library's picked folder.
+    #[cfg(target_arch = "wasm32")]
+    pub fn denied(&self) -> bool {
+        self.backend.denied()
+    }
+
     /// Read again what another tab or the folder says changed: another tab's commit by a
     /// refresh, and anything else by a rescan, once no scan is in flight.
     #[cfg(target_arch = "wasm32")]

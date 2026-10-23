@@ -76,6 +76,12 @@ impl<F: Fs> Keeper<F> {
         }
     }
 
+    /// Show the whole view in the next answer, as the app lost what it was last shown.
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub fn forget_shown(&mut self) {
+        self.shown = None;
+    }
+
     /// The storage the library is kept on, once it is open.
     pub fn fs(&self) -> Option<&F> {
         self.library.as_ref().map(Library::fs)
@@ -1674,6 +1680,22 @@ mod tests {
 
     /// Opening counts the files the scan finds as it goes, leaving out drawbar's own and
     /// every other name that starts with a dot.
+    #[test]
+    fn an_answer_after_one_the_app_lost_shows_the_whole_view() {
+        let root = Temp::new();
+        fs::write(root.at("a.ne5p"), b"a").unwrap();
+        let mut keeper = keeper(&root);
+        let shown = |answers: Vec<Event>| match &answers[..] {
+            [Event::Scanned(Ok(viewed))] => viewed.shown.clone(),
+            _ => panic!("{answers:?}"),
+        };
+        let since = shown(keeper.run_one(Cmd::Rescan));
+        assert!(!matches!(since, Change::Whole(_)), "{since:?}");
+        keeper.forget_shown();
+        let whole = shown(keeper.run_one(Cmd::Rescan));
+        assert!(matches!(whole, Change::Whole(_)), "{whole:?}");
+    }
+
     #[test]
     fn opening_counts_the_files_it_finds() {
         let root = Temp::new();

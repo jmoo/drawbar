@@ -158,6 +158,10 @@ struct Heard {
     /// The slots' former occupants this install keeps for the library, found once it
     /// opened.
     rescues: Vec<Rescue>,
+    /// Why the library's worker stopped answering, once it has. Nothing is heard after.
+    stopped: Option<String>,
+    /// Whether the browser no longer lets the page into the picked folder.
+    denied: bool,
 }
 
 pub struct Backend {
@@ -258,6 +262,18 @@ impl Backend {
         std::mem::take(&mut self.heard.borrow_mut().rescues)
     }
 
+    /// Why the library's worker stopped, once it has: it answers nothing more, and a
+    /// fresh backend opens the library again.
+    pub fn stopped(&self) -> Option<String> {
+        self.heard.borrow().stopped.clone()
+    }
+
+    /// Whether the browser no longer lets the page into the picked folder, as when the
+    /// user took the permission back: the library must be opened again once let in.
+    pub fn denied(&self) -> bool {
+        self.heard.borrow().denied
+    }
+
     /// How many files the listings of the folder have found so far: none, as the worker
     /// does not say.
     pub fn listed(&self) -> usize {
@@ -340,6 +356,18 @@ async fn drive(
             }
             (cmd, Err(why), _) | (cmd, _, Err(why)) => refused(&cmd)(why),
         };
+        if let Root::Picked(picked) = &root {
+            let failed = answers.iter().any(|answer| !answer.faults().is_empty());
+            if failed && !permission(&picked.handle, false).await.unwrap_or(true) {
+                heard.borrow_mut().denied = true;
+            }
+        }
+        if let Some(why) = worker.as_ref().ok().and_then(Worker::stopped) {
+            heard.borrow_mut().stopped.get_or_insert(why);
+            inbox.borrow_mut().writing -= usize::from(writes);
+            ctx.request_repaint();
+            continue;
+        }
         if let Ok(folder) = &folder {
             folder.forget();
             folder.follow(&moved(&answers)).await;
@@ -812,10 +840,14 @@ async fn snapshot(handle: &FileSystemFileHandle) -> io::Result<File> {
 }
 
 /// Whether the page may read and write the folder at `dir`, asking the user when `ask`
-/// is set and the browser has not said.
+/// is set and the browser has not said. Always, where the browser asks nothing, as
+/// Firefox and Safari ask nothing of a folder of the private file system.
 ///
 /// ⚠️ Asking needs a click the user has just made.
 pub async fn permission(dir: &FileSystemDirectoryHandle, ask: bool) -> io::Result<bool> {
+    if field(dir, "queryPermission").is_none() {
+        return Ok(true);
+    }
     let descriptor = FileSystemHandlePermissionDescriptor::new();
     descriptor.set_mode(FileSystemPermissionMode::Readwrite);
     let state = match ask {

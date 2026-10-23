@@ -18,6 +18,7 @@ pub fn failed(error: IoError) -> io::Error {
     match error {
         IoError::NotFound => io::ErrorKind::NotFound.into(),
         IoError::AlreadyExists => io::ErrorKind::AlreadyExists.into(),
+        IoError::Denied => io::Error::new(io::ErrorKind::PermissionDenied, error.to_string()),
         error => io::Error::other(error.to_string()),
     }
 }

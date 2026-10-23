@@ -41,7 +41,7 @@ pub struct Showing {
 /// What an answer's view changed of what the app shows.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Change {
-    /// Everything, as the library opens.
+    /// Everything, as the library opens or once the app lost an answer.
     Whole(Shown),
     /// What each key the view's changes reach shows now, and the list of tags where it
     /// changed.

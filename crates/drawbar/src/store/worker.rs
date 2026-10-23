@@ -5,8 +5,11 @@
 //! The worker instantiates the same bundle and calls [`serve`], which answers `{ready}`
 //! or `{failed}`. From then on each command is `{id, text, attached}`, a
 //! [`wire::Message`], and is answered by `{id, text, attached}` holding every answer it
-//! gave, in order; or by `{id, failed}`. The worker runs commands one at a time, in the
-//! order they arrive. `{close}` lets the library go, and is answered by `{closed}`.
+//! gave, in order; or by `{id, failed}`. A command with `{whole}` answers the whole view
+//! rather than what changed since the last answer, which the page lost. The worker runs
+//! commands one at a time, in the
+//! order they arrive. `{close}` lets the library go, and is answered by `{closed}`. A
+//! fault in the worker is posted as `{failed}`, after which it answers nothing.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
@@ -34,6 +37,9 @@ use crate::js::{describe, field};
 
 /// The worker's whole script: it loads the page's bundle and hands over to it.
 const BOOTSTRAP: &str = r#"
+const stopped = (why) => self.postMessage({ failed: String(why?.message ?? why) });
+self.addEventListener("error", (event) => stopped(event.message));
+self.addEventListener("unhandledrejection", (event) => stopped(event.reason));
 self.onmessage = async ({ data }) => {
   self.onmessage = null;
   try {
@@ -41,7 +47,7 @@ self.onmessage = async ({ data }) => {
     await bundle.default({ module_or_path: data.module });
     await bundle.drawbarWorker(data);
   } catch (error) {
-    self.postMessage({ failed: String(error?.stack || error) });
+    stopped(error);
   }
 };
 "#;
@@ -58,6 +64,8 @@ extern "C" {
 pub struct Worker {
     worker: web_sys::Worker,
     replies: Rc<Replies>,
+    /// Whether an answer was lost, so the next must show the whole view.
+    lost: Cell<bool>,
     _hear: Closure<dyn FnMut(MessageEvent)>,
     _fail: Closure<dyn FnMut(JsValue)>,
 }
@@ -113,8 +121,14 @@ impl Worker {
                     None if field(&data, "closed").is_some() => replies.closed.take(),
                     None => replies.started.take(),
                 };
-                if let Some(answer) = answer {
-                    let _ = answer.call1(&JsValue::NULL, &data);
+                match (answer, field(&data, "failed")) {
+                    (Some(answer), _) => {
+                        let _ = answer.call1(&JsValue::NULL, &data);
+                    }
+                    (None, Some(why)) => {
+                        replies.fail(format!("the library's worker stopped: {}", describe(&why)));
+                    }
+                    (None, None) => {}
                 }
             })
         };
@@ -147,6 +161,7 @@ impl Worker {
         let worker = Worker {
             worker,
             replies,
+            lost: Cell::new(false),
             _hear: hear,
             _fail: fail,
         };
@@ -160,6 +175,17 @@ impl Worker {
         }
     }
 
+    /// Why the worker stopped answering, once it has.
+    pub fn stopped(&self) -> Option<String> {
+        self.replies.failed.borrow().clone()
+    }
+
+    /// Make the worker fault, as a bug in it would.
+    #[doc(hidden)]
+    pub fn trap(&self) {
+        let _ = self.worker.post_message(&object(&[("trap", true.into())]));
+    }
+
     /// Run `cmd` in the worker, and every answer it gave.
     pub async fn run(&self, cmd: Cmd) -> Result<Vec<Event>, String> {
         if let Some(why) = &*self.replies.failed.borrow() {
@@ -169,6 +195,9 @@ impl Worker {
         let id = self.replies.next.get();
         self.replies.next.set(id.wrapping_add(1));
         Reflect::set(&message, &"id".into(), &id.into()).map_err(js)?;
+        if self.lost.take() {
+            Reflect::set(&message, &"whole".into(), &true.into()).map_err(js)?;
+        }
         let (replied, answer) = deferred();
         self.replies.waiting.borrow_mut().insert(id, answer);
         if let Err(e) = self.worker.post_message_with_transfer(&message, &transfer) {
@@ -179,7 +208,9 @@ impl Worker {
         if let Some(why) = field(&reply, "failed") {
             return Err(describe(&why));
         }
-        wire::decode(from_js(&reply)?)
+        let decoded = from_js(&reply).and_then(wire::decode);
+        self.lost.set(decoded.is_err());
+        decoded
     }
 
     /// Let the library go, once every command sent has run.
@@ -330,6 +361,9 @@ impl Queue {
             let Some(message) = next else {
                 break;
             };
+            if field(&message, "trap").is_some() {
+                std::process::abort();
+            }
             let keeper = self.keeper.take();
             let Some(mut keeper) = keeper else {
                 let id = field(&message, "id").unwrap_or(JsValue::NULL);
@@ -350,6 +384,9 @@ impl Queue {
 
     async fn answer(&self, keeper: &mut Keeper<Executor>, message: &JsValue) {
         let id = field(message, "id").unwrap_or(JsValue::NULL);
+        if field(message, "whole").is_some() {
+            keeper.forget_shown();
+        }
         let answered = match from_js(message).and_then(wire::decode::<Cmd>) {
             Ok(cmd) => {
                 let mut events = Vec::new();
@@ -358,12 +395,21 @@ impl Queue {
             }
             Err(why) => Err(format!("the library's worker was sent {why}")),
         };
-        let (reply, transfer) = match answered {
-            Ok(message) => to_js(message),
-            Err(why) => (object(&[("failed", why.into())]), Array::new()),
+        let posted = match answered {
+            Ok(message) => {
+                let (reply, transfer) = to_js(message);
+                let _ = Reflect::set(&reply, &"id".into(), &id);
+                self.scope
+                    .post_message_with_transfer(&reply, &transfer)
+                    .map_err(js)
+            }
+            Err(why) => Err(why),
         };
-        let _ = Reflect::set(&reply, &"id".into(), &id);
-        let _ = self.scope.post_message_with_transfer(&reply, &transfer);
+        if let Err(why) = posted {
+            keeper.forget_shown();
+            let failed = object(&[("id", id), ("failed", why.into())]);
+            let _ = self.scope.post_message(&failed);
+        }
     }
 }
 
