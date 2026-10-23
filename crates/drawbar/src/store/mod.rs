@@ -52,9 +52,9 @@ mod web;
 #[cfg(target_arch = "wasm32")]
 mod worker;
 #[cfg(target_arch = "wasm32")]
-pub(crate) use web::settle;
-#[cfg(target_arch = "wasm32")]
 pub use web::{default_root, permission, Backend, Picked, Root};
+#[cfg(target_arch = "wasm32")]
+pub(crate) use web::{remove_private, settle};
 
 /// The folder of this install's own state for a library that holds the slots' former
 /// occupants a write to the instrument leaves while the library is open.
@@ -393,15 +393,18 @@ pub struct Rescue {
     pub name: String,
     /// The slot it came off, as its name says.
     pub slot: Option<nord_usb::Location>,
-    /// Where it is, outside every library.
+    /// Where it is, outside every library: on the desktop, a path; in the browser, its
+    /// path in the browser's storage for drawbar.
     pub at: std::path::PathBuf,
+    /// The file, as the browser gives it.
+    #[cfg(target_arch = "wasm32")]
+    pub file: web_sys::File,
     /// Why it does not read as one whole Nord file, where it does not. It is then no copy
     /// of what the slot held, and is offered only to be discarded.
     pub broken: Option<String>,
 }
 
 /// Why `file` does not read as one whole Nord file, where it does not.
-#[cfg(not(target_arch = "wasm32"))]
 async fn unwhole(file: std::io::Result<impl nord_usb::FileSource>) -> Option<String> {
     let verified = match file {
         Ok(mut file) => nord_usb::envelope::verify(&mut file).await.map(drop),

@@ -210,7 +210,6 @@ pub struct Store {
     shelf: Option<std::path::PathBuf>,
     /// The rescues being copied into the library, by the asset each becomes, each
     /// deleted once its copy lands.
-    #[cfg(not(target_arch = "wasm32"))]
     shelved: BTreeMap<u64, std::path::PathBuf>,
 }
 
@@ -265,7 +264,6 @@ impl Store {
             sent: 0,
             #[cfg(not(target_arch = "wasm32"))]
             shelf: None,
-            #[cfg(not(target_arch = "wasm32"))]
             shelved: BTreeMap::new(),
             left: Vec::new(),
         }
@@ -813,6 +811,10 @@ impl Store {
         }
         #[cfg(target_arch = "wasm32")]
         self.hinted();
+        #[cfg(target_arch = "wasm32")]
+        for rescue in self.backend.rescued() {
+            browser.ask_rescue(rescue);
+        }
         browser.folders.place = Some(self.place());
         // The count of files found moves with no answer to wake the window.
         if self.listing() {
@@ -2178,8 +2180,30 @@ impl Store {
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn keep_rescue(&mut self, rescue: Rescue, _: &mut Workspace, _: &mut Browser, log: &mut Log) {
-        log.trouble(format!("“{}” stays where it is.", rescue.name));
+    fn keep_rescue(
+        &mut self,
+        rescue: Rescue,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        log: &mut Log,
+    ) {
+        if !self.open() {
+            return log.trouble(format!(
+                "“{}” stays where it is: the library cannot be written.",
+                rescue.name
+            ));
+        }
+        let free = browser
+            .folders
+            .free(&LibPath::root(), &rescue.name, workspace);
+        let to = LibPath::root().join(&free);
+        let len = super::outside_len(&rescue.file).unwrap_or_default();
+        let origin = match rescue.slot {
+            Some(at) => Origin::Rescued { at },
+            None => Origin::File(free),
+        };
+        let id = workspace.arrive(to, origin, CopyOf::Outside(rescue.file), len);
+        self.shelved.insert(id, rescue.at);
     }
 
     /// Put an asset just restored where the folder changes not yet sent will put its
@@ -2480,6 +2504,10 @@ impl Store {
                             shelved.display()
                         ));
                     }
+                }
+                #[cfg(target_arch = "wasm32")]
+                if let Some(shelved) = self.shelved.remove(&id) {
+                    super::remove_private(shelved);
                 }
                 workspace.landed_copy(id);
                 // The asset the copy was moved from goes now it has landed, and its file
@@ -3451,12 +3479,20 @@ fn slot_conflict(id: u64, workspace: &Workspace, browser: &mut Browser, log: &mu
 }
 
 /// Delete a slot's former occupant.
+#[cfg(not(target_arch = "wasm32"))]
 fn discard_rescue(rescue: Rescue, log: &mut Log) {
     let name = rescue.name;
     match std::fs::remove_file(&rescue.at) {
         Ok(()) => log.say(format!("Discarded “{name}”.")),
         Err(e) => log.trouble(format!("“{name}” could not be deleted: {e}.")),
     }
+}
+
+/// Delete a slot's former occupant.
+#[cfg(target_arch = "wasm32")]
+fn discard_rescue(rescue: Rescue, log: &mut Log) {
+    super::remove_private(rescue.at);
+    log.say(format!("Discarded “{}”.", rescue.name));
 }
 
 /// The URL that shows the folder a rescue is in.

@@ -36,7 +36,7 @@ use web_sys::{
 use super::dom::failure;
 use super::exec::{self, Fs};
 use super::worker::Worker;
-use super::{Cmd, Event, Failure, Fingerprint, Intent, LibPath, Stat};
+use super::{Cmd, Event, Failure, Fingerprint, Intent, LibPath, Rescue, Stat};
 use crate::js::{describe, field};
 use crate::ondisk::OnDisk;
 use crate::room::measure as size;
@@ -158,6 +158,9 @@ struct Heard {
     events: VecDeque<Event>,
     /// What other tabs or the folder said to read again, oldest first.
     hints: VecDeque<Hint>,
+    /// The slots' former occupants this install keeps for the library, found once it
+    /// opened.
+    rescues: Vec<Rescue>,
 }
 
 pub struct Backend {
@@ -251,6 +254,12 @@ impl Backend {
         self.heard.borrow_mut().hints.pop_front()
     }
 
+    /// The slots' former occupants this install keeps for the library, found once it
+    /// opened, each once.
+    pub fn rescued(&mut self) -> Vec<Rescue> {
+        std::mem::take(&mut self.heard.borrow_mut().rescues)
+    }
+
     /// How many files the listings of the folder have found so far: none, as the worker
     /// does not say.
     pub fn listed(&self) -> usize {
@@ -334,6 +343,12 @@ async fn drive(
         if let Ok(folder) = &folder {
             folder.forget();
             folder.follow(&moved(&answers)).await;
+        }
+        if answers
+            .iter()
+            .any(|answer| matches!(answer, Event::Opened(Ok(_))))
+        {
+            heard.borrow_mut().rescues = rescues(&local).await;
         }
         for answer in answers {
             if let (
@@ -533,6 +548,78 @@ impl Refusing {
             }
         }
     }
+}
+
+/// The slots' former occupants kept in the `rescued` folder of the local root at
+/// `local`, by name. One still partial is never a slot's only copy, and is deleted.
+async fn rescues(local: &RelPath) -> Vec<Rescue> {
+    let Ok(at) = local.join(super::RESCUED) else {
+        return Vec::new();
+    };
+    let Ok(dir) = toshokan::web::private_dir(&at).await else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for (name, handle) in entries(&dir).await.unwrap_or_default() {
+        if handle.kind() != FileSystemHandleKind::File
+            || !name.starts_with(nord_usb::envelope::RESCUED)
+        {
+            continue;
+        }
+        if !nord_usb::envelope::is_rescue(&name) {
+            let _ = JsFuture::from(dir.remove_entry(&name)).await;
+            continue;
+        }
+        let Ok(file) = snapshot(handle.unchecked_ref()).await else {
+            continue;
+        };
+        let source = Ok(crate::ondisk::Sliced::new(file.clone()));
+        found.push(Rescue {
+            slot: Rescue::slot_of(&name),
+            at: format!("{at}/{name}").into(),
+            broken: super::unwhole(source).await,
+            file,
+            name,
+        });
+    }
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found
+}
+
+/// The entries of a folder.
+async fn entries(dir: &FileSystemDirectoryHandle) -> io::Result<Vec<(String, FileSystemHandle)>> {
+    let iterator = dir.entries();
+    let mut found = Vec::new();
+    loop {
+        let step = JsFuture::from(iterator.next().map_err(failed)?)
+            .await
+            .map_err(failed)?;
+        if field(&step, "done").and_then(|done| done.as_bool()) == Some(true) {
+            return Ok(found);
+        }
+        let pair: js_sys::Array = field(&step, "value")
+            .ok_or_else(|| io::Error::other("a folder listed an empty entry"))?
+            .unchecked_into();
+        if let (Some(name), Ok(handle)) = (pair.get(0).as_string(), pair.get(1).dyn_into()) {
+            found.push((name, handle));
+        }
+    }
+}
+
+/// Delete the file at `path` of the browser's private storage, after this returns.
+pub(crate) fn remove_private(path: std::path::PathBuf) {
+    spawn_local(async move {
+        let text = path.to_string_lossy();
+        let Some((dir, name)) = text.rsplit_once('/') else {
+            return;
+        };
+        let Ok(dir) = RelPath::new(dir) else {
+            return;
+        };
+        if let Ok(dir) = toshokan::web::private_dir(&dir).await {
+            let _ = JsFuture::from(dir.remove_entry(name)).await;
+        }
+    });
 }
 
 fn storage() -> Option<StorageManager> {
