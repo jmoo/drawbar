@@ -32,8 +32,9 @@ use crate::writer::Writer;
 /// before, which may be gone now: each is certified as a segment too. Fails
 /// with [`Error::Rekey`] when the reader or the folder does not hold the
 /// writer's head, or the reader finds the writer's history forked, writing
-/// nothing, or when the folder loses the snapshot before a deletion. Refused with [`Refusal::Nothing`] when a snapshot the reader
-/// found in the writer's directory already has its head; it then writes
+/// nothing, or when the folder loses the snapshot before a deletion. Refused
+/// with [`Refusal::Nothing`] when a snapshot the reader found in the writer's
+/// directory already has its head; it then writes
 /// nothing, deletes what that snapshot lets it that a compaction cut short
 /// left, and confirms its head from that snapshot from then on.
 pub fn compact(

@@ -1183,10 +1183,10 @@ pub fn unseen(
 }
 
 /// The memories a reader keeps after the grace step for `writers`, whose
-/// memories alone it changes: of what no file it sees
-/// holds, only what something visible descends from, a line by its chain of
-/// predecessors or a snapshot by its certificates; and no fork point, which the
-/// files show again where they still hold one.
+/// memories alone it changes: of what no file it sees holds, only what
+/// something visible descends from, a line by its chain of predecessors or a
+/// snapshot by its certificates; and no fork point, which the files show again
+/// where they still hold one.
 pub fn grace(
     seen: &BTreeMap<WriterId, Seen<'_>>,
     memory: &BTreeMap<WriterId, Memory>,
