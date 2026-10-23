@@ -208,6 +208,24 @@ fn tips(snapshots: Vec<Rc<Snapshot>>) -> Vec<Rc<Snapshot>> {
     tips
 }
 
+/// Every own entry `tip` names by hash: in its certificates, as its head, as an
+/// own write, as the own entry of a reference, as an own delete, or as a
+/// dismissal. An entry with an effect left on a tip's chain is among them.
+fn mentioned(tip: &Snapshot) -> impl Iterator<Item = Own> + '_ {
+    let state = &tip.state;
+    let own = state.own.values().map(|held| held.at);
+    let made = state.refs.values().map(|reference| reference.own);
+    let killed = state.killed.values().copied();
+    let dismissed = state.dismissals.iter().map(|(own, _)| *own);
+    tip.certified
+        .named()
+        .chain([tip.head])
+        .chain(own)
+        .chain(made)
+        .chain(killed)
+        .chain(dismissed)
+}
+
 /// Places one writer's entries from its tips' heads, and finds its fork points.
 fn classify(
     writer: WriterId,
@@ -352,9 +370,30 @@ fn classify(
         }
     }
     // Remembered entries a tip has since passed are folded into it, but for
-    // those after a fork point the reader remembers.
+    // those after a fork point the reader remembers that no tip names and no
+    // tip's head descends from through entries it knows.
     let tip_n = w.tip_n();
+    let remembered = |hash: &EntryHash| {
+        let entries = memory.and_then(|memory| memory.entries.get(hash));
+        entries.or_else(|| w.known.get(hash))
+    };
+    let mut named: BTreeSet<EntryHash> = w
+        .tips
+        .iter()
+        .flat_map(|tip| mentioned(tip))
+        .map(|own| own.hash)
+        .collect();
+    for tip in &w.tips {
+        let mut at = remembered(&tip.head.hash);
+        while let Some(entry) = at {
+            named.insert(entry.hash());
+            at = remembered(&entry.prev());
+        }
+    }
     let after_fork = |hash: EntryHash| {
+        if named.contains(&hash) {
+            return false;
+        }
         let mut at = w.known.get(&hash);
         while let Some(entry) = at {
             if w.forks.iter().any(|fork| fork.hash == entry.prev()) {
@@ -411,20 +450,7 @@ fn classify(
     if w.tips.len() > 1 {
         let mut common: Option<BTreeSet<Own>> = None;
         for tip in &w.tips {
-            let state = &tip.state;
-            let own = state.own.values().map(|held| held.at);
-            let made = state.refs.values().map(|reference| reference.own);
-            let killed = state.killed.values().copied();
-            let dismissed = state.dismissals.iter().map(|(own, _)| *own);
-            let named: BTreeSet<Own> = tip
-                .certified
-                .named()
-                .chain([tip.head])
-                .chain(own)
-                .chain(made)
-                .chain(killed)
-                .chain(dismissed)
-                .collect();
+            let named: BTreeSet<Own> = mentioned(tip).collect();
             common = Some(match common {
                 None => named,
                 Some(common) => common.intersection(&named).copied().collect(),

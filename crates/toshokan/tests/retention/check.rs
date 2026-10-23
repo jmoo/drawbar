@@ -237,7 +237,19 @@ fn agree(
         }
         tally.add(&tally.unplaced, 1);
     }
-    // Items are compared on every field whose merged values agree.
+    // Items are compared on every field whose merged values agree, and on the
+    // existence of every entity shown alike.
+    let entities: BTreeSet<u8> = oracle
+        .entities
+        .keys()
+        .chain(spec.entities.keys())
+        .copied()
+        .collect();
+    for entity in entities {
+        if oracle.entities.get(&entity) != spec.entities.get(&entity) {
+            divergent.insert(Field::exist(entity));
+        }
+    }
     let undivergent = |views: Vec<(Dir, ItemKind, BTreeMap<Field, Option<Val>>)>| {
         let mut kept: Vec<_> = views
             .into_iter()

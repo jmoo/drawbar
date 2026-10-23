@@ -523,9 +523,28 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
         }
     }
     // Remembered entries a tip has since passed are folded into it, but for
-    // those after a fork point the reader remembers.
+    // those after a fork point the reader remembers that no tip names and no
+    // tip's head descends from through entries it knows.
     let fork_points: BTreeSet<Hash> = memory.forks.iter().map(|fork| fork.hash).collect();
+    let mut named: BTreeSet<Hash> = dirs
+        .tips
+        .values()
+        .flatten()
+        .flat_map(mentioned)
+        .map(|r| r.hash)
+        .collect();
+    for t in dirs.tips.values().flatten() {
+        let known = |e: &Hash| memory.entries.contains(e) || seen_lines.contains(e);
+        let mut at = Some(t.head.hash).filter(known);
+        while let Some(e) = at {
+            named.insert(e);
+            at = world.entry(e).prev.filter(known);
+        }
+    }
     let after_fork = |e: Hash| {
+        if named.contains(&e) {
+            return false;
+        }
         let mut at = Some(e);
         while let Some(e) = at {
             let Some(prev) = world.entry(e).prev else {
@@ -590,21 +609,7 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
         if list.len() > 1 {
             let mut common: Option<BTreeSet<Ref>> = None;
             for t in list {
-                let own = t.own.values().map(|(at, _)| *at);
-                let made = t
-                    .refs
-                    .values()
-                    .map(|r| r.own)
-                    .chain(t.killed.values().copied());
-                let dismissed = t.dismissals.iter().map(|(own, _)| *own);
-                let named: BTreeSet<Ref> = t
-                    .certs
-                    .named()
-                    .chain([t.head])
-                    .chain(own)
-                    .chain(made)
-                    .chain(dismissed)
-                    .collect();
+                let named: BTreeSet<Ref> = mentioned(t).collect();
                 common = Some(match common {
                     None => named,
                     Some(c) => c.intersection(&named).copied().collect(),
@@ -1025,4 +1030,22 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
         graced: memory.graced.clone(),
     };
     (shown, memory)
+}
+
+/// Every entry `t` names: in its certificates, as its head, as an own write, as
+/// the own entry of a reference or a kill, or as a dismissal.
+fn mentioned(t: &Contribution) -> impl Iterator<Item = Ref> + '_ {
+    let own = t.own.values().map(|(at, _)| *at);
+    let made = t
+        .refs
+        .values()
+        .map(|r| r.own)
+        .chain(t.killed.values().copied());
+    let dismissed = t.dismissals.iter().map(|(own, _)| *own);
+    t.certs
+        .named()
+        .chain([t.head])
+        .chain(own)
+        .chain(made)
+        .chain(dismissed)
 }
