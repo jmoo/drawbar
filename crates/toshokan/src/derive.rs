@@ -116,9 +116,9 @@ impl Placed {
         }
     }
 
-    /// Whether the writer's history continues from `hash` as far as the reader
-    /// sees: a tip names it, or it is merged.
-    pub fn continues(&self, hash: EntryHash) -> bool {
+    /// Whether the writer's history reaches `hash` as far as the reader sees: a
+    /// tip names it, or it is merged.
+    pub fn reaches(&self, hash: EntryHash) -> bool {
         let named = self
             .tips
             .iter()
@@ -1470,6 +1470,39 @@ mod tests {
         let found = [Found::Lines(entries)];
         let snapshot = snapshot(W, entries[0].hash(), "w".into(), None, entries, found);
         Rc::new(snapshot.unwrap())
+    }
+
+    #[test]
+    fn an_entry_on_another_branch_is_not_continued_by_a_tip_numbered_past_it() {
+        use crate::recovery::Chain;
+        let entries = chain(W, &["a", "b", "c", "d"]);
+        let other = entry(
+            Some(&entries[0]),
+            vec![set("other", vec![entries[0].own().of(W)])],
+            "o",
+        );
+        let lines_seen = [Rc::clone(&other)];
+        let derived = derived(
+            vec![(
+                W,
+                Seen {
+                    segments: vec![lines(&lines_seen, false)],
+                    snapshots: vec![folded(&entries)],
+                },
+            )],
+            false,
+        );
+        let placed = &derived.writers[&W];
+        assert_eq!(placed.runs, [Rc::clone(&other)]);
+        assert!(
+            !Chain::continues(placed, other.own()),
+            "nothing follows it on its branch"
+        );
+        assert!(Chain::holds(placed, other.own()));
+        assert!(
+            Chain::continues(placed, entries[1].own()),
+            "the tip passed it"
+        );
     }
 
     #[test]

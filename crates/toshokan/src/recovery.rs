@@ -41,14 +41,15 @@ pub trait Chain {
 
 /// A tip folds every entry its head descends from, which it certifies by
 /// number: an entry numbered below a tip's head is taken as folded even where
-/// no certificate names its hash.
+/// no certificate names its hash, unless it is a run, on another branch.
 impl Chain for Placed {
     fn holds(&self, at: Own) -> bool {
         Placed::holds(self, at.hash) || self.tips.iter().any(|tip| tip.head.n > at.n)
     }
 
     fn continues(&self, at: Own) -> bool {
-        let passed = self.tips.iter().any(|tip| tip.head.n > at.n);
+        let run = self.runs.iter().any(|entry| entry.hash() == at.hash);
+        let passed = !run && self.tips.iter().any(|tip| tip.head.n > at.n);
         let entries = self.merged.iter().chain(&self.runs).chain(&self.gaps);
         let followed = entries.into_iter().any(|entry| entry.prev() == at.hash);
         Chain::holds(self, at) && (passed || followed)

@@ -492,7 +492,7 @@ fn tip(
         return Err(Rekey::Forked);
     }
     match placed.head() {
-        Some(head) if placed.continues(recorded) => Ok(head),
+        Some(head) if placed.reaches(recorded) => Ok(head),
         _ => Err(Rekey::Restored),
     }
 }
