@@ -41,7 +41,7 @@ self.onmessage = async ({ data }) => {
     await bundle.default({ module_or_path: data.module });
     await bundle.toshokanWorker(data);
   } catch (error) {
-    stopped(error);
+    stopped(error?.stack || error);
   }
 };
 "#;
