@@ -11,7 +11,7 @@ use crate::env::Env;
 use crate::error::Result;
 use crate::ids::{EntityId, Identity, Nonce, WriterId};
 use crate::intent::{Driver, Intent};
-use crate::io::{Capabilities, Io, IoError, IoResult, Operation, Range, Reply, Root, Step};
+use crate::io::{Capabilities, Io, IoError, IoResult, Meta, Operation, Range, Reply, Root, Step};
 use crate::layout::Layout;
 use crate::library;
 use crate::log::Settlement;
@@ -210,6 +210,19 @@ impl<F: Fs> Staging<'_, F> {
         };
         match self.fs.perform(read).await? {
             Reply::Bytes(bytes) => Ok(bytes),
+            _ => Err(IoError::Other("the backend gave the wrong reply".into())),
+        }
+    }
+
+    /// What is at `path` in the folder now, such as the file a copy read, which may
+    /// have changed while it was read.
+    pub async fn stat(&self, path: &RelPath) -> std::result::Result<Option<Meta>, IoError> {
+        let stat = Io::Stat {
+            root: self.root,
+            path: path.clone(),
+        };
+        match self.fs.perform(stat).await? {
+            Reply::Stat(meta) => Ok(meta),
             _ => Err(IoError::Other("the backend gave the wrong reply".into())),
         }
     }
@@ -488,6 +501,40 @@ mod tests {
             Later(false).await;
             self.1.set(self.1.get() + 1);
         }
+    }
+
+    #[test]
+    fn a_source_reads_and_stats_the_folder_as_it_is_now() {
+        let disk = MemDisk::new();
+        let at = RelPath::new("a").unwrap();
+        let put = |bytes: &[u8]| {
+            let _ = disk.perform(Io::Remove {
+                root: Root::Folder,
+                path: at.clone(),
+            });
+            disk.perform(Io::Create {
+                root: Root::Folder,
+                path: at.clone(),
+                bytes: bytes.to_vec(),
+            })
+            .unwrap();
+        };
+        put(b"one");
+        let staging = Staging {
+            fs: &disk,
+            root: Root::Folder,
+            path: RelPath::new("staged").unwrap(),
+        };
+        let range = Range { offset: 0, len: 3 };
+        assert_eq!(
+            pollster::block_on(staging.read(&at, range)).unwrap(),
+            b"one"
+        );
+        put(b"three");
+        let meta = pollster::block_on(staging.stat(&at)).unwrap();
+        assert_eq!(meta.map(|meta| meta.len), Some(5));
+        let gone = RelPath::new("gone").unwrap();
+        assert_eq!(pollster::block_on(staging.stat(&gone)).unwrap(), None);
     }
 
     #[test]

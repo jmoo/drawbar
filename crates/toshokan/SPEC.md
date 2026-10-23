@@ -692,7 +692,8 @@ A writer carries out an intent's steps in this order:
 
 1. Create each new file in `tmp/` and fill it, then sync it and `tmp/`.
    The app's bytes are written a chunk at a time by the driver, never held by
-   the core; they may copy ranges of the file being rewritten. A copy out of
+   the core; they may copy ranges of a library file, and stat it to learn
+   whether it changed while they read it. A copy out of
    another writer's directory is made a chunk at a time. A file whose filling
    fails is removed.
 2. Check every precondition: a path holds nothing, a file whose identity is the

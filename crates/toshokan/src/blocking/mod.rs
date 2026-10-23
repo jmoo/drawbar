@@ -12,7 +12,7 @@ use crate::env::Env;
 use crate::error::Result;
 use crate::ids::{EntityId, Identity, Nonce, WriterId};
 use crate::intent::{Driver, Intent};
-use crate::io::{Capabilities, Io, IoError, IoResult, Operation, Range, Reply, Root, Step};
+use crate::io::{Capabilities, Io, IoError, IoResult, Meta, Operation, Range, Reply, Root, Step};
 use crate::layout::Layout;
 use crate::library;
 use crate::log::Settlement;
@@ -104,6 +104,19 @@ impl<B: Backend> Staging<'_, B> {
         };
         match self.backend.perform(read)? {
             Reply::Bytes(bytes) => Ok(bytes),
+            _ => Err(IoError::Other("the backend gave the wrong reply".into())),
+        }
+    }
+
+    /// What is at `path` in the folder now, such as the file a copy read, which may
+    /// have changed while it was read.
+    pub fn stat(&mut self, path: &RelPath) -> std::result::Result<Option<Meta>, IoError> {
+        let stat = Io::Stat {
+            root: self.root,
+            path: path.clone(),
+        };
+        match self.backend.perform(stat)? {
+            Reply::Stat(meta) => Ok(meta),
             _ => Err(IoError::Other("the backend gave the wrong reply".into())),
         }
     }
