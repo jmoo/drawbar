@@ -474,23 +474,23 @@ impl Library {
                 report.changed |= self.grace(full);
                 let moved = self.absorb_read(&report);
                 self.unshown |= report.anything_new();
-                let forked = self
-                    .writer
-                    .as_ref()
-                    .is_some_and(|own| report.forks.iter().any(|fork| fork.writer == own.id()));
+                let own = self.writer.as_ref().map(Writer::id);
+                let retired = own.filter(|own| report.forks.iter().any(|fork| fork.writer == *own));
                 keep_local(self, false)
-                    .then(move |(library, kept)| match (kept, forked) {
+                    .then(move |(library, kept)| match (kept, retired) {
                         (Err(error), _) => Flow::Done(Err(error)),
-                        (Ok(()), true) => library.stop_writing().map_ok(move |()| library),
-                        (Ok(()), false) => ok(library),
+                        (Ok(()), Some(_)) => library.stop_writing().map_ok(move |()| library),
+                        (Ok(()), None) => ok(library),
                     })
                     .and_then(move |library| scan_for(library, scope, moved))
+                    .map_ok(move |library| (library, retired))
             })
-            .and_then(|library| {
+            .and_then(|(library, retired)| {
                 let changes = library.since_view();
                 reshown(library).map_ok(move |library| Refreshed {
                     changes,
                     scan: library.bindings.report.clone(),
+                    retired,
                 })
             })
             .task()

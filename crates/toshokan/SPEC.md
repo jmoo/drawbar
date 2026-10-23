@@ -496,7 +496,8 @@ gap or unplaced lines cannot be dismissed.
 
 A writer forks when two instances write as it: a copied local root, a virtual
 machine resumed twice, a restored backup of a local root. Each fork point is
-reported once, and the writer retires once its own instance sees it.
+reported once, and the writer retires once its own instance sees it, which
+opening or the refresh that found it reports.
 
 Each install keeps what it remembers as a cached view in its local root:
 `<genesis>/view.bin`, the whole view, and `<genesis>/view.log`, what the view

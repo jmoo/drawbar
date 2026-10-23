@@ -105,6 +105,11 @@ pub enum DraftState {
 /// Where one writer's history forked: the entry numbered `at`, `prev`, after
 /// which its branches part. Neither branch is merged; each is shown as an
 /// [`Item`].
+///
+/// When the writer is this instance's own, the instance stops writing as it
+/// once a read finds the fork: [`Start::Rekeyed`] says so at opening, and
+/// [`Refreshed::retired`] at a refresh or rescan. Its next commit writes as a
+/// new writer.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Fork {
     pub writer: WriterId,
@@ -286,6 +291,9 @@ pub struct Refreshed {
     /// What the files scanned so far hold against the logged facts; empty until
     /// a scan of every file has succeeded.
     pub scan: ScanReport,
+    /// This instance's writer, when the read found its history forked: it writes
+    /// no more, and the next commit writes as a new writer.
+    pub retired: Option<WriterId>,
 }
 
 /// One change to what a reader sees.

@@ -987,21 +987,11 @@ fn a_clone_forks_into_items_taken_or_dismissed<F: Facade>() {
     clone
         .commit("Tag", |i| i.add(song, TAGS, tag("there")))
         .unwrap();
-    original.refresh().unwrap();
-    clone.refresh().unwrap();
-    let added = |text: &str| FactChange::Add {
-        entity: song,
-        key: "tags".into(),
-        value: toshokan::Raw::of(&text).unwrap(),
-    };
-    let item = |view: &View, text: &str| -> Item {
-        let mut items = view.items().iter();
-        let takes = |item: &&Item| item.changes.iter().any(|c| c.change == Some(added(text)));
-        items
-            .find(takes)
-            .cloned()
-            .unwrap_or_else(|| panic!("{:?}", view.items()))
-    };
+    for library in [&mut original, &mut clone] {
+        let refreshed = library.refresh().unwrap();
+        assert_eq!(refreshed.retired, Some(writer), "each instance retires it");
+    }
+    let item = |view: &View, text: &str| item_making(view, &added(song, text));
     for view in [original.view(), clone.view()] {
         assert_eq!(tags(&view, song), ["new"], "neither branch is merged");
         assert_eq!(view.forks().len(), 1);
@@ -1016,10 +1006,10 @@ fn a_clone_forks_into_items_taken_or_dismissed<F: Facade>() {
     let (kept, dropped) = (item(&view, "here"), item(&view, "there"));
     original
         .commit("Keep here", |i| {
-            i.take(kept.run, added("here")).dismiss(dropped.run)
+            i.take(kept.run, added(song, "here")).dismiss(dropped.run)
         })
         .unwrap();
-    clone.refresh().unwrap();
+    assert_eq!(clone.refresh().unwrap().retired, None, "retired already");
     for view in [original.view(), clone.view()] {
         assert_eq!(tags(&view, song), ["here", "new"]);
         assert_eq!(view.items(), [], "taken and dismissed");
