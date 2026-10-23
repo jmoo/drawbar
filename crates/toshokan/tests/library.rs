@@ -598,6 +598,7 @@ through_both!(
     a_run_counts_and_spans_its_entries_whether_or_not_its_branch_compacted,
     a_run_that_would_change_nothing_is_shown_until_dismissed,
     a_restored_folder_makes_the_writer_rekey,
+    two_saves_undo_and_redo_one_after_the_other,
     what_a_restored_writer_showed_survives_reopening_and_a_crash,
     an_instance_without_a_writer_keeps_only_the_grace_step_in_the_views_it_read,
     a_grace_step_an_instance_without_a_writer_could_not_keep_is_kept_by_its_next_save,
@@ -2072,6 +2073,35 @@ fn the_first_undo_after_a_crash_undoes_the_settled_intent<F: Facade>() {
             );
         },
     );
+}
+
+fn two_saves_undo_and_redo_one_after_the_other<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"one");
+    for (from, to) in [(&b"one"[..], &b"two"[..]), (b"two", b"three")] {
+        clock.advance(1_000);
+        a.commit("Save", |i| {
+            i.save(
+                song,
+                &path("song.npno"),
+                to.to_vec(),
+                Expect::Holds(identity(from)),
+            )
+        })
+        .unwrap();
+    }
+    for bytes in [&b"two"[..], b"one"] {
+        clock.advance(1_000);
+        a.undo().unwrap();
+        assert_eq!(read(&folder, "song.npno").as_deref(), Some(bytes));
+    }
+    for bytes in [&b"two"[..], b"three"] {
+        clock.advance(1_000);
+        a.redo().unwrap();
+        assert_eq!(read(&folder, "song.npno").as_deref(), Some(bytes));
+    }
 }
 
 fn undoing_a_save_restores_the_displaced_bytes<F: Facade>() {

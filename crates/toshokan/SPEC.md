@@ -986,8 +986,11 @@ then files, whatever order the intent made them in.
 An undo or redo is refused, naming the writer and entry, where another writer
 changed the same thing since: a register no longer holds only what the intent
 left, another writer added or removed the same value, a delete of the entity is
-live, or another writer wrote to an entity being uncreated. It is refused when
-the trash no longer holds the bytes it needs.
+live, or another writer wrote to an entity being uncreated. A file register holds
+what the intent left while every live write of it names the same path and
+identity, whatever modification time it gives, since putting a file back where
+moves copy gives it a new one. It is refused when the trash no longer holds the
+bytes it needs.
 
 ## Trash
 

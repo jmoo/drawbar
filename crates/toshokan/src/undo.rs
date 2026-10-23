@@ -508,11 +508,15 @@ impl Reversing<'_> {
         entity: EntityId,
         file: Option<&FileFact>,
     ) -> Result<Option<FileChange>, Refusal> {
+        // Where moves copy, putting a file back gives it a new modification time: only
+        // its path and identity say whether it is still the file this intent wrote.
+        let held = |fact: Option<&FileFact>| fact.map(|fact| (fact.path.clone(), fact.identity));
+        let wrote = held(file);
         let survivors = self.folded.file_writes(entity);
         if let Some(write) = survivors
             .iter()
             .rev()
-            .find(|write| write.value.as_ref() != file)
+            .find(|write| held(write.value.as_ref()) != wrote)
         {
             return Err(changed(write));
         }
