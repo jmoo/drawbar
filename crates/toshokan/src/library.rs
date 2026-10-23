@@ -795,7 +795,16 @@ impl Library {
             Drafted::Entity(_) => None,
             Drafted::File(path) => Some(path.clone()),
         };
-        let record = DraftRecord { base, path, bytes };
+        let at = match self.tick() {
+            Ok(at) => Some(at),
+            Err(error) => return Task::ready(Err(error)),
+        };
+        let record = DraftRecord {
+            base,
+            path,
+            at,
+            bytes,
+        };
         let nothing = EffectPlan::new(self.env.nonce());
         ensure_writer(self, &nothing)
             .and_then(move |library| {
@@ -1581,11 +1590,8 @@ impl Library {
                 found.into_iter(),
                 Vec::new(),
                 move |mut statuses, (pooled, kept)| {
-                    let drafts::Kept {
-                        of,
-                        record,
-                        modified,
-                    } = kept;
+                    let drafts::Kept { of, record } = kept;
+                    let at = record.as_ref().and_then(|record| record.at);
                     let path = match &of {
                         Drafted::Entity(entity) => files.get(entity).cloned(),
                         Drafted::File(path) => Some(path.clone()),
@@ -1594,7 +1600,7 @@ impl Library {
                         of,
                         state,
                         pooled,
-                        modified,
+                        at,
                     };
                     let Some(record) = record else {
                         statuses.push(status(DraftState::Unreadable));

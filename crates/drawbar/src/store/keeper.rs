@@ -108,9 +108,10 @@ impl Keeper {
                 replaces,
             } => {
                 let kept = self.draft(&of, |draft| draft.put(base, bytes));
-                let replaced = kept.and_then(|()| match replaces {
-                    Some(replaced) => self.discard(replaced),
-                    None => Ok(()),
+                let replaced = kept.and_then(|()| {
+                    replaces
+                        .into_iter()
+                        .try_for_each(|replaced| self.discard(replaced))
                 });
                 if let Err(why) = replaced {
                     answer(Event::Unkept(why));

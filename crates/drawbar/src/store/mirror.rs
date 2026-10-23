@@ -145,10 +145,11 @@ pub struct Store {
     drafted: BTreeMap<u64, (Key, u64, toshokan::Identity)>,
     /// The drafts an earlier session kept, each put back over its asset once its file is
     /// read: as it is kept, and whether its file changed since the draft was made.
-    restoring: BTreeMap<u64, (super::Kept, Draft, bool, Option<u64>)>,
+    restoring: BTreeMap<u64, (super::Kept, Draft, bool, Option<toshokan::Hlc>)>,
     /// Drafts put back that another writer kept, or under a key the asset no longer
-    /// goes by, each let go of once this writer keeps the edit itself.
-    superseded: BTreeMap<u64, super::Kept>,
+    /// goes by, and the older of two windows' drafts of one asset, each let go of once
+    /// this writer keeps the edit itself.
+    superseded: BTreeMap<u64, Vec<super::Kept>>,
     /// The instrument attached, as [`super::Slot::instrument`] names it.
     instrument: Option<String>,
     /// Each view of a slot seen, with what its unsaved edit is kept by.
@@ -402,7 +403,7 @@ impl Store {
             .filter(|id| !unsaved(id))
             .collect();
         for id in settled {
-            if let Some(kept) = self.superseded.remove(&id) {
+            for kept in self.superseded.remove(&id).unwrap_or_default() {
                 self.send(Cmd::Discard(kept));
             }
         }
@@ -421,7 +422,9 @@ impl Store {
             let Ok(bytes) = draft.encode() else {
                 continue;
             };
-            let replaces = self.superseded.remove(&entity.id);
+            let mut replaces = self.superseded.remove(&entity.id).unwrap_or_default();
+            // The draft this writer keeps under the key replaces its own in place.
+            replaces.retain(|kept| *kept != super::Kept::own(key.clone()));
             self.send(Cmd::Draft {
                 of: key.clone(),
                 base,
@@ -584,7 +587,8 @@ impl Store {
             .drafted
             .remove(&id)
             .map(|(key, _, _)| super::Kept::own(key));
-        for kept in own.into_iter().chain(self.superseded.remove(&id)) {
+        let superseded = self.superseded.remove(&id).unwrap_or_default();
+        for kept in own.into_iter().chain(superseded) {
             self.send(Cmd::Discard(kept));
         }
     }
@@ -611,7 +615,7 @@ impl Store {
                 of: key.clone(),
                 pooled: draft.pooled,
             };
-            let modified = draft.modified;
+            let kept_at = draft.at;
             let (bytes, changed) = match draft.state {
                 DraftState::Applies { bytes } => (bytes, false),
                 DraftState::BaseChanged { bytes, .. } => (bytes, true),
@@ -640,7 +644,7 @@ impl Store {
             };
             match Draft::decode(&bytes) {
                 Ok(draft) => {
-                    let restoring = (kept, draft, changed, modified);
+                    let restoring = (kept, draft, changed, kept_at);
                     let older = match self.restoring.remove(&id) {
                         Some(earlier) if earlier.3 > restoring.3 => {
                             self.restoring.insert(id, earlier);
@@ -652,7 +656,9 @@ impl Store {
                         }
                     };
                     if let Some(older) = older {
-                        self.send(Cmd::Discard(older));
+                        // ⚠️ Let go only once this writer keeps the newer: until then
+                        // the older may be the only copy left.
+                        self.superseded.entry(id).or_default().push(older);
                         let name = workspace.get(id).map(|entity| entity.name.clone());
                         log.say(format!(
                             "Two drawbar windows kept unsaved edits of “{}”: the newer is \
@@ -701,7 +707,7 @@ impl Store {
         // This writer keeps the edit by the key the asset goes by now, and then lets
         // go of the draft it came from, where that is another.
         if kept.pooled.is_some() || self.ids.key(id) != Some(&kept.of) {
-            self.superseded.insert(id, kept);
+            self.superseded.entry(id).or_default().push(kept);
         }
         match changed {
             true => conflict(id, workspace, browser, log),

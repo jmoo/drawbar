@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::flow::{self, fold};
-use crate::ids::{EntityId, EntryHash, Identity};
+use crate::ids::{EntityId, EntryHash, Hlc, Identity};
 use crate::io::{Kind, Root, Task};
 use crate::layout::Layout;
 use crate::path::RelPath;
@@ -39,13 +39,16 @@ impl<L> Draft<L> {
 /// `drafts/<entity>.json`, or `drafts/file-<hash of the path>.json`, in a writer's
 /// local directory. It applies only while the file still holds `base`.
 ///
-/// Written as a JSON header line, `{"base":"<identity>"}` with `"path"` for a file's,
-/// then the bytes.
+/// Written as a JSON header line, `{"base":"<identity>"}` with `"path"` for a file's
+/// and `"at"` for when it was kept, then the bytes.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct DraftRecord {
     pub base: Identity,
     /// The file's path, for a draft of a file no entity is bound to.
     pub path: Option<RelPath>,
+    /// The keeping writer's clock when it was kept, which orders the drafts of
+    /// several writers as their entries are ordered, whatever the files' times say.
+    pub at: Option<Hlc>,
     pub bytes: Vec<u8>,
 }
 
@@ -64,6 +67,7 @@ impl DraftRecord {
         Ok(Self {
             base: header.base,
             path: header.path,
+            at: header.at,
             bytes: bytes[split + 1..].to_vec(),
         })
     }
@@ -72,6 +76,7 @@ impl DraftRecord {
         let header = Header {
             base: self.base,
             path: self.path.clone(),
+            at: self.at,
         };
         let mut encoded = serde_json::to_vec(&header).expect("a header serializes");
         encoded.push(b'\n');
@@ -85,6 +90,8 @@ struct Header {
     base: Identity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     path: Option<RelPath>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    at: Option<Hlc>,
 }
 
 /// A draft as the local root keeps it.
@@ -93,8 +100,6 @@ pub struct Kept {
     pub of: Drafted,
     /// `None` when it cannot be read.
     pub record: Option<DraftRecord>,
-    /// When it was last kept, as [`crate::io::Meta::modified`] gives it.
-    pub modified: Option<u64>,
 }
 
 /// Where the draft of `of` is kept, for the writer whose genesis entry is `genesis`.
@@ -125,16 +130,7 @@ pub fn read_all(genesis: EntryHash) -> Task<'static, Result<Vec<Kept>>> {
                 let path = drafts
                     .join(&format!("{stem}.json"))
                     .expect("a listed name is one component");
-                let stated = flow::stat(Root::Local, &path);
-                let read = stated.and_then({
-                    let path = path.clone();
-                    move |meta| {
-                        let modified = meta.and_then(|meta| meta.modified);
-                        flow::read_replaced(Root::Local, path)
-                            .map_ok(move |bytes| (modified, bytes))
-                    }
-                });
-                read.map_ok(move |(modified, bytes)| {
+                flow::read_replaced(Root::Local, path.clone()).map_ok(move |bytes| {
                     let record = bytes.and_then(|bytes| DraftRecord::decode(&path, &bytes).ok());
                     let (of, record) = match (entity, record) {
                         (Some(entity), record) => (Some(Drafted::Entity(entity)), record),
@@ -148,11 +144,7 @@ pub fn read_all(genesis: EntryHash) -> Task<'static, Result<Vec<Kept>>> {
                         },
                         (None, None) => (None, None),
                     };
-                    kept.extend(of.map(|of| Kept {
-                        of,
-                        record,
-                        modified,
-                    }));
+                    kept.extend(of.map(|of| Kept { of, record }));
                     kept
                 })
             })
@@ -230,6 +222,7 @@ mod tests {
         let draft = DraftRecord {
             base: Identity::from_u128(0xab),
             path: None,
+            at: None,
             bytes: b"\n{\"base\":1}\n\0".to_vec(),
         };
         let encoded = draft.encode();

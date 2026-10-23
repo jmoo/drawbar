@@ -514,12 +514,12 @@ pub enum Cmd {
     Redo,
     /// Keep an unsaved edit of the file `of` names, made over the file of identity
     /// `base`, in this install's own state, never in the folder, and once it is kept,
-    /// let go of the draft it `replaces`. Answered only on failure, by [`Event::Unkept`].
+    /// let go of the drafts it `replaces`. Answered only on failure, by [`Event::Unkept`].
     Draft {
         of: Key,
         base: toshokan::Identity,
         bytes: Vec<u8>,
-        replaces: Option<Kept>,
+        replaces: Vec<Kept>,
     },
     /// Let go of a draft. Answered only on failure.
     Discard(Kept),

@@ -887,7 +887,9 @@ Emptying a trash is the only way bytes leave the folder.
 ## Drafts
 
 `<genesis>/drafts/<entity>.json` is the JSON line `{"base":"<identity>"}`, an LF,
-then the unsaved bytes. The draft of a file no entity is bound to is
+then the unsaved bytes. The line's `"at"` is the writer's clock when it kept the
+draft, which orders drafts of one file kept by several writers as their entries
+are ordered, whatever the files' times say. The draft of a file no entity is bound to is
 `drafts/file-<hash>.json`, named by the first 16 bytes of the BLAKE3 hash of its
 path in hexadecimal, and its line also holds `"path"`; an edit alone does not
 make a file an entity. A draft whose name is not the one its `"path"` gives is

@@ -642,6 +642,7 @@ through_both!(
     two_windows_session_after_session_keep_a_pool_of_two,
     asking_who_else_writes_keeps_the_idle_writers_taken_up,
     an_idle_writer_whose_records_its_log_closed_is_let_go,
+    drafts_of_two_windows_are_ordered_by_their_clocks_after_the_time_went_back,
     an_effect_a_live_window_left_open_is_reported_live,
     a_change_of_case_another_install_did_not_start_is_finished_by_another,
     a_directory_made_and_filled_in_one_change_is_undone_in_one,
@@ -2921,6 +2922,43 @@ fn an_idle_writer_whose_records_its_log_closed_is_let_go<F: Facade>() {
         "the other idle writer is free to resume: {:?}",
         opened.start
     );
+}
+
+fn drafts_of_two_windows_are_ordered_by_their_clocks_after_the_time_went_back<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(2_000);
+    let here = machine(&folder);
+    put(&folder, "a.wav", b"a");
+    let (mut first, _) = F::open(Probe::new(&here), env("w", 1, &clock)).unwrap();
+    first.rescan().unwrap();
+    first
+        .put_file_draft(&path("a.wav"), identity(b"a"), b"older")
+        .unwrap();
+    first
+        .commit("Tag", |i| i.create(|e| _ = e.add(TAGS, tag("x"))).0)
+        .unwrap();
+    clock.set(1_000);
+    let (mut second, _) = F::open(Probe::new(&here), env("w", 2, &clock)).unwrap();
+    second
+        .put_file_draft(&path("a.wav"), identity(b"a"), b"newer")
+        .unwrap();
+    first.close().unwrap();
+    second.close().unwrap();
+
+    let (_, opened) = F::open(Probe::new(&here), env("w", 3, &clock)).unwrap();
+    let mut kept: Vec<_> = opened
+        .drafts
+        .iter()
+        .map(|draft| {
+            let DraftState::Applies { bytes } = &draft.state else {
+                panic!("{draft:?}");
+            };
+            (draft.at, String::from_utf8_lossy(bytes).into_owned())
+        })
+        .collect();
+    kept.sort();
+    let order: Vec<&str> = kept.iter().map(|(_, bytes)| bytes.as_str()).collect();
+    assert_eq!(order, ["older", "newer"], "{kept:?}");
 }
 
 fn an_effect_a_live_window_left_open_is_reported_live<F: Facade>() {
