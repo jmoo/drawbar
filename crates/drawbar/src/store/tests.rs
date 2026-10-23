@@ -1136,10 +1136,13 @@ fn a_write_that_fails_leaves_the_file_as_it_was() {
 fn a_library_a_newer_drawbar_wrote_opens_read_only() {
     use toshokan::log::{Entry, EntryKind};
 
-    let root = Temp::new();
-    let mut first = Session::open(&root);
+    let running = Temp::new();
+    let mut first = Session::open(&running);
     first.make_tag("Sunday");
-    first.close();
+    // A copy taken while it runs, before closing folds its log into a snapshot.
+    let root = Temp::new();
+    copy_tree(&running.0, &root.0);
+    copy_tree(&running.local(), &root.local());
     let writers = fs::read_dir(root.at(".drawbar/library/writers.2")).unwrap();
     let writer = writers.map(|entry| entry.unwrap().path()).next().unwrap();
     let segment = fs::read_dir(&writer)
@@ -1151,7 +1154,7 @@ fn a_library_a_newer_drawbar_wrote_opens_read_only() {
     let lines = held.split_inclusive(|byte| *byte == b'\n');
     let head = lines.filter_map(|line| Entry::parse(line).ok()).next_back();
     let head = head.expect("an entry");
-    // A later build seals this segment as this one did, and logs in one of its own.
+    // A later build logs after this one, in a segment of its own.
     let future = toshokan::Raw::new(r#"{"kind":"from a later build"}"#).unwrap();
     let entry = Entry::encode(
         head.hash(),
