@@ -878,7 +878,8 @@ fn a_rescue_file_that_does_not_decode_is_reported_not_offered() {
 }
 
 /// Keep in library copies a rescue into the library's top level, where it is an asset
-/// like any other, and deletes it where it was.
+/// like any other, an entity that says which slot it came off, and deletes it where it
+/// was. The copy is one change, which undo takes back and redo makes again.
 #[test]
 fn a_rescue_kept_moves_into_the_library_as_an_asset() {
     let root = Temp::new();
@@ -896,6 +897,12 @@ fn a_rescue_kept_moves_into_the_library_as_an_asset() {
         .collect();
     assert!(names.contains(&"nord-rescued-1-4.npno"), "{names:?}");
 
+    second.undo();
+    assert!(!root.at("nord-rescued-1-4.npno").exists(), "undone");
+    second.redo();
+    assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue(), "redone");
+    second.close();
+
     let third = Session::open(&root);
     assert_eq!(
         third.bench.browser.asking(),
@@ -908,6 +915,10 @@ fn a_rescue_kept_moves_into_the_library_as_an_asset() {
         matches!(origin, Origin::Rescued { at } if *at == Location::from_user(1, 4)),
         "{}",
         origin.label()
+    );
+    assert!(
+        matches!(third.store.key(kept), Some(Key::Entity(_))),
+        "an entity says where it came from"
     );
 }
 

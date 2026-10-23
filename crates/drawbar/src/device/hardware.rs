@@ -680,6 +680,50 @@ impl Rig {
     fn logged(&self, text: &str) -> bool {
         self.bench.log.iter().any(|entry| entry.text.contains(text))
     }
+
+    /// The same library opened again, as the next start of the app opens it, with the
+    /// instrument let go.
+    fn reopen(mut self) -> Rig {
+        self.release();
+        let library = std::mem::replace(&mut self.library, Temp::new());
+        drop(self);
+        let bench = Bench::new();
+        let store = Store::start(crate::testing::backend(&bench.ctx, &library));
+        let mut rig = Rig {
+            library,
+            store,
+            bench,
+        };
+        rig.until("the library opens", ATTACH_LIMIT, |rig| {
+            rig.store.takes_files()
+        });
+        rig
+    }
+
+    /// Answer the question showing as a click on `label` would, and run the rescue acts
+    /// it gives as the app does.
+    fn choose(&mut self, label: &str) {
+        for act in self.bench.browser.answer(label) {
+            let Act::Rescue(rescue, what) = act else {
+                panic!("{act:?} is not a rescue's act")
+            };
+            let Bench {
+                workspace,
+                browser,
+                log,
+                ..
+            } = &mut self.bench;
+            self.store.rescue(rescue, what, workspace, browser, log);
+        }
+    }
+
+    /// The title of the question showing, once one shows.
+    fn asked(&mut self) -> String {
+        self.until("a question shows", ATTACH_LIMIT, |rig| {
+            rig.bench.browser.asking().is_some()
+        });
+        self.bench.browser.asking().expect("one shows").0
+    }
 }
 
 impl Drop for Rig {
@@ -1367,6 +1411,142 @@ fn s7_a_program_on_the_instrument_exports_as_nord_cli_bundles_it() {
         (largest as u64) < u64::from(biggest),
         "an allocation of {largest} bytes held the {biggest}-byte member whole"
     );
+}
+
+/// A replace whose write fails and whose occupant cannot be put back leaves the occupant
+/// in this install's folder for the library. Keep in library makes it a file of the
+/// library, an entity that says which slot it came off, through a reopen, and the keep is
+/// one change undo takes back and redo makes again. Discard deletes another.
+#[test]
+#[ignore = "writes to an attached instrument; see the module's documentation"]
+fn s8_an_occupant_that_cannot_be_put_back_is_kept_in_the_library() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if !attached() {
+        return;
+    }
+    let piano = run().source(
+        ObjectClass::Piano,
+        slot_from("DRAWBAR_HARDWARE_PIANO", "1:6"),
+    );
+    let other = run().source(
+        ObjectClass::Piano,
+        slot_from("DRAWBAR_HARDWARE_OTHER_PIANO", "6:3"),
+    );
+    let mut claims = Claims::default();
+    let mut rig = Rig::open(&[
+        ("drawbar-hw-piano.npno", &piano),
+        ("drawbar-hw-other.npno", &other),
+    ]);
+    rig.connect();
+    let class = ObjectClass::Piano;
+    let slot = rig.vacant(class, 0);
+    claims.take(class, slot);
+    let occupant = rig.asset("drawbar-hw-piano.npno");
+    send_into_vacant(&mut rig, occupant, class, slot);
+
+    let id = rig.asset("drawbar-hw-other.npno");
+    let file = rig.file(id);
+    let path = rig.library.at("drawbar-hw-other.npno");
+    let kept_in = rig.store.tmp().expect("the library is writable");
+    let mode = |mode| fs::Permissions::from_mode(mode);
+    let mut broken = false;
+    let sending = rig.send(
+        vec![
+            Act::Replace {
+                id,
+                class,
+                at: slot,
+            },
+            Act::SendAll,
+        ],
+        id,
+        &file,
+        |reads| {
+            if broken || sent(reads).is_none_or(|sent| sent < file.len / 4) {
+                return;
+            }
+            broken = true;
+            // The write fails at its checksum, and the occupant's file cannot be read
+            // back onto the slot.
+            let mut tail = fs::read(&path).expect("the file reads");
+            let at = tail.len() - (64 << 10);
+            tail[at..at + 4096]
+                .iter_mut()
+                .for_each(|byte| *byte ^= 0xff);
+            fs::write(&path, tail).expect("the tail is overwritten");
+            for entry in fs::read_dir(&kept_in)
+                .expect("the occupant is kept")
+                .flatten()
+            {
+                fs::set_permissions(entry.path(), mode(0o000)).expect("made unreadable");
+            }
+        },
+    );
+    report(
+        "replace whose occupant cannot be put back",
+        &sending,
+        file.len,
+    );
+    let why = sending.outcome.clone().expect_err("the send failed");
+    assert!(why.contains("kept at"), "the occupant was kept: {why}");
+    let rescues = rig.backups();
+    assert_eq!(rescues.len(), 1, "{rescues:?}");
+    let name = rescues[0].0.clone();
+    let rescue = kept_in.join(&name);
+    fs::set_permissions(&rescue, mode(0o644)).expect("readable again");
+    let stem = name.strip_suffix(".npno").expect("a piano's name");
+    let second = format!("{stem} 2.npno");
+    fs::copy(&rescue, kept_in.join(&second)).expect("a second rescue");
+
+    let mut rig = rig.reopen();
+    assert!(
+        rig.asked().contains(&name),
+        "{:?}",
+        rig.bench.browser.asking()
+    );
+    rig.choose("Keep in library");
+    let landed = |rig: &Rig| {
+        rig.bench
+            .workspace
+            .listed()
+            .any(|entity| entity.name == name && entity.path.is_some())
+            && rig.library.at(&name).exists()
+            && !rescue.exists()
+    };
+    rig.until("the rescue lands in the library", SEND_LIMIT, landed);
+    assert!(rig.asked().contains(&second));
+    rig.choose("Discard…");
+    rig.choose("Discard");
+    rig.until("the second rescue is deleted", ATTACH_LIMIT, |_| {
+        !kept_in.join(&second).exists()
+    });
+
+    rig.store.undo();
+    rig.until("the keep is undone", ATTACH_LIMIT, |rig| {
+        !rig.library.at(&name).exists()
+    });
+    rig.store.redo();
+    rig.until("the keep is redone", ATTACH_LIMIT, |rig| {
+        rig.library.at(&name).exists()
+    });
+
+    let rig = rig.reopen();
+    let kept = rig.asset(&name);
+    let origin = &rig.bench.workspace.get(kept).expect("listed").origin;
+    assert!(
+        matches!(origin, crate::workspace::Origin::Rescued { at } if *at == slot),
+        "{}",
+        origin.label()
+    );
+    assert!(
+        matches!(rig.store.key(kept), Some(crate::store::Key::Entity(_))),
+        "an entity says where it came from"
+    );
+    assert!(body_difference(&rig.library.at(&name), &piano).is_none());
+    assert_eq!(rig.backups(), [], "nothing is left to offer");
+    drop(rig);
+    assert_no_strays(class);
 }
 
 /// Every slot this run wrote is empty again, and each class holds what it held when the
