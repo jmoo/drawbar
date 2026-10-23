@@ -37,6 +37,7 @@ CONSTANTS
     MaxWriters,     \* bound on writer ids, which name directories
     MaxRestores,    \* bound on restores of the folder, or of one directory, from its backup
     MaxDrops,       \* bound on files a sync client reverts to an earlier version
+    ResumeMid,      \* a clone may resume mid-segment, appending to its own copy of it
     Certify,        \* a snapshot certifies the lines it folds of its directory's files
     Carry,          \* a snapshot carries forward the certificates of the one before
     Numbered,       \* a reader tells a gap from a run by the entry's number
@@ -440,7 +441,9 @@ Dismiss(i) ==
 
 \* A copied local root (a restored backup, a cloned disk, copied app data)
 \* opens on another machine as the same writer with the same history. A
-\* writer's local root exists only once its first entry is durable.
+\* writer's local root exists only once its first entry is durable. A copy
+\* resumed mid-segment, as a virtual machine resumed twice, keeps appending to
+\* the segment it had open; sync keeps the two versions as a conflicted copy.
 Clone(i, j) ==
     /\ role[i] = "writer"
     /\ head[i] # None
@@ -450,14 +453,19 @@ Clone(i, j) ==
     /\ role' = [role EXCEPT ![j] = "writer"]
     /\ wid' = [wid EXCEPT ![j] = wid[i]]
     /\ head' = [head EXCEPT ![j] = head[i]]
-    /\ seg' = [seg EXCEPT ![j] = None]
+    /\ \E mid \in IF ResumeMid /\ seg[i] # None /\ Len(files) < MaxFiles
+                   THEN BOOLEAN ELSE {FALSE} :
+        LET f == Len(files) + 1
+        IN /\ seg' = [seg EXCEPT ![j] = IF mid THEN f ELSE None]
+           /\ files' = IF mid THEN Append(files, [files[seg[i]] EXCEPT !.name = f])
+                      ELSE files
     /\ dying' = [dying EXCEPT ![j] = dying[i]]
     /\ lastSnap' = [lastSnap EXCEPT ![j] = lastSnap[i]]
     /\ nextName' = [nextName EXCEPT ![j] = nextName[i]]
     /\ inflight' = [inflight EXCEPT ![j] = inflight[i]]
     /\ spent' = [spent EXCEPT ![j] = spent[i]]
     /\ ReadWith(j, vis[j], acc[i], known[i], snaps[i], reported[i])
-    /\ UNCHANGED <<ents, files, nW, nEff, losses, vis, folder, chaos>>
+    /\ UNCHANGED <<ents, nW, nEff, losses, vis, folder, chaos>>
 
 \* A process that quits seals its segment with a durable marker. The next
 \* open starts a new segment.

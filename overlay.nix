@@ -795,6 +795,7 @@ in
         "Deep"
         "Restore"
         "RestoreFork"
+        "ResumeMid"
         "Sync"
         "LivenessDeep"
       ];

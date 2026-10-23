@@ -44,10 +44,10 @@ other entry as a run. A fork point is an entry with two successors, one a tip
 certifies before an entry no tip folds, or the highest entry every tip of a
 writer certifies; every entry of that writer numbered above it is a run, so no
 two branches are ever merged. Where a writer has several tips, the reader merges
-only what they all fold: the shared past of their branches. The model treats a
-snapshot as the whole chain it folds, so it checks placement, not values: what a
-snapshot's lossy contribution keeps and how references kill is checked by the
-value-level tests in `tests/retention`. A dismissal, an entry naming runs, takes
+only what they all fold. Folds are ghosts: the model treats a snapshot as the
+whole chain it folds, so it checks placement only. What a snapshot's lossy
+contribution keeps, where the code's tips part by the hashes they name, and how
+references kill are checked by the value-level tests in `tests/retention`. A dismissal, an entry naming runs, takes
 them out of view for good: a reader never merges what a dismissal names, and
 shows an entry after one as a run. The reader remembers its tips, the entries it
 placed after them and its fork points, and after a grace period drops what no
@@ -124,6 +124,7 @@ delivers files roughly in order.
 | `RestoreDir` | a restored folder or directory, and the grace step | `toshokan-spec` |
 | `Resurface` | a deleted segment arriving after later compactions | `toshokan-spec` |
 | `Drop` | a sync client keeping an earlier version of a segment | `toshokan-spec` |
+| `ResumeMid` | a clone resumed mid-segment, appending to its own copy of it | `toshokan-spec-deep` |
 | `Names`, `Sealed`, `Folded`, `Unchecked`, `FreshView`, `Uncertified`, `Uncarried`, `Unnumbered`, `Unguarded`, `Unquarantined` | expected violations | `toshokan-spec` |
 | `Anchors` | expected violation, four entries | `toshokan-spec-deep` |
 | `PortableWide` | `Portable` with four files | `toshokan-spec-deep` |
