@@ -7,10 +7,10 @@
 //! [`wire::Message`], and is answered by `{id, text, attached}` holding every answer it
 //! gave, in order; or by `{id, failed}`. A command with `{whole}` answers the whole view
 //! rather than what changed since the last answer, which the page lost. The worker runs
-//! commands one at a time, in the
-//! order they arrive. `{close}` lets the library go, and is answered by `{closed}`. A
-//! fault in the worker is posted as `{failed}`, after which it answers nothing. While
-//! a scan lists the folder, `{listed}` says how many files it has found so far.
+//! commands one at a time, in the order they arrive. `{close}` lets the library go, and
+//! is answered by `{closed}`. A fault in the worker is posted as `{failed}`, after which
+//! it answers nothing. While a scan lists the folder, `{listed}` says how many files it
+//! has found so far.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};

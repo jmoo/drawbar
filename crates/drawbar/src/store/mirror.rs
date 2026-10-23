@@ -188,7 +188,8 @@ pub struct Store {
     /// The changes other drawbars left unfinished that the last read found, by writer
     /// and record.
     unfinished: BTreeMap<(toshokan::WriterId, toshokan::Nonce), Unfinished>,
-    /// When the changes left unfinished were last read, in [`eframe::egui::InputState::time`].
+    /// When the changes left unfinished were last read, as
+    /// [`eframe::egui::InputState::time`] counts.
     looked: f64,
     /// When to read them again, to ask about one that stood long enough.
     recheck: Option<f64>,
