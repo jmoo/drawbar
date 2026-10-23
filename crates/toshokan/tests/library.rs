@@ -2894,13 +2894,12 @@ fn an_idle_writer_whose_records_its_log_closed_is_let_go<F: Facade>() {
         local: disk.clone(),
     };
     let clock = TestClock::at(1_000);
-    let [mut crashed, closed] = [1, 2].map(|seed| {
+    let [mut crashed, mut closed] = [1, 2].map(|seed| {
         F::open(Probe::new(&one_disk(&disk)), env("w", seed, &clock))
             .unwrap()
             .0
     });
     create(&mut crashed, "song.npno", b"song");
-    let mut closed = closed;
     create(&mut closed, "kick.wav", b"kick");
     closed.close().unwrap();
     drop(crashed);
@@ -3094,10 +3093,18 @@ fn directories_made_and_removed_around_tree_moves_undo_and_redo<F: Facade>() {
     let moved = ["B", "Set", "Set/A"];
     assert_eq!(dirs(), moved);
     a.undo().unwrap();
-    assert_eq!(dirs(), ["Gig", "Gig/B", "Set", "Set/A"], "the folder made again");
+    assert_eq!(
+        dirs(),
+        ["Gig", "Gig/B", "Set", "Set/A"],
+        "the folder made again"
+    );
     a.undo().unwrap();
     let before = ["A", "Gig", "Gig/B"];
-    assert_eq!(dirs(), before, "the folder removed after the tree moved out");
+    assert_eq!(
+        dirs(),
+        before,
+        "the folder removed after the tree moved out"
+    );
     a.redo().unwrap();
     a.redo().unwrap();
     assert_eq!(dirs(), moved, "redone in the order each was made");

@@ -1371,7 +1371,8 @@ impl Store {
         log: &mut Log,
     ) {
         const ROUNDS: usize = 8;
-        // A new tag still being named goes under the name it has.
+        // The editor of a new tag's name never closes at a quit, so the tag goes under
+        // the name it has, and what waited for it is asked for now.
         browser.tags.named();
         self.ask_tags(workspace, browser, log);
         for _ in 0..ROUNDS {

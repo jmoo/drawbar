@@ -4853,6 +4853,11 @@ fn removing_a_folder_with_folders_in_it_is_one_undo_step() {
         .act(vec![crate::browser::Act::RemoveFolder(folder)]);
     session.sync();
     assert_eq!(root.names(""), [".drawbar", "Set", "a.ne5p"]);
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo Remove folder “Gig”"),
+        "named by the gesture"
+    );
     session.undo();
     session.settle();
     assert_eq!(root.names(""), [".drawbar", "Gig"]);
@@ -4860,7 +4865,11 @@ fn removing_a_folder_with_folders_in_it_is_one_undo_step() {
     assert_eq!(root.names("Gig/Set"), ["b.ne5p"]);
     session.redo();
     session.settle();
-    assert_eq!(root.names(""), [".drawbar", "Set", "a.ne5p"], "removed again");
+    assert_eq!(
+        root.names(""),
+        [".drawbar", "Set", "a.ne5p"],
+        "removed again"
+    );
     assert_eq!(root.names("Set"), ["b.ne5p"]);
 }
 

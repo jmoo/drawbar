@@ -636,6 +636,13 @@ pub enum Intent {
     Batch(Vec<Intent>),
 }
 
+/// The part of a batch that names the gesture: the folder it made or removed, around
+/// which the rest moves, or else its first.
+fn gesture(parts: &[Intent]) -> Option<&Intent> {
+    let folder = |part: &&Intent| matches!(part, Intent::MakeDir { .. } | Intent::RemoveDir { .. });
+    parts.iter().find(folder).or(parts.first())
+}
+
 /// One rename of an [`Intent::Move`]: the file at `from`, which holds what `expect`
 /// says, to `to`.
 #[derive(Clone, Debug)]
@@ -660,7 +667,7 @@ impl Intent {
                 let files: usize = parts.iter().map(Intent::files).sum();
                 match parts.iter().all(|part| part.label() == label) && files > 1 {
                     true => format!("{label} {files} files"),
-                    false => parts.first().map(Intent::describe).unwrap_or_default(),
+                    false => gesture(parts).map(Intent::describe).unwrap_or_default(),
                 }
             }
             Intent::Move { moves } => files(moves.iter().map(|moving| &moving.from).collect()),
@@ -712,7 +719,7 @@ impl Intent {
             Intent::Delete { .. } => "Delete",
             Intent::MakeDir { .. } => "New folder",
             Intent::RemoveDir { .. } => "Remove folder",
-            Intent::Batch(parts) => parts.first().map_or("Change", Intent::label),
+            Intent::Batch(parts) => gesture(parts).map_or("Change", Intent::label),
         }
     }
 
