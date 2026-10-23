@@ -987,6 +987,34 @@ fn a_rescue_discarded_is_deleted_once_confirmed() {
         .contains(&"nord-rescued-1-4.npno".to_string()));
 }
 
+/// Several rescues are offered one at a time in the order of their names, in which a
+/// numbered copy sorts before its first, and a discard is confirmed before the next.
+#[test]
+fn rescues_are_offered_in_the_order_of_their_names() {
+    let root = Temp::new();
+    with_rescue(&root);
+    fs::write(rescued(&root).join("nord-rescued-1-4 2.npno"), a_rescue()).unwrap();
+
+    let mut second = Session::open(&root);
+    let (title, _) = second.bench.browser.asking().expect("asked");
+    assert_eq!(
+        title,
+        "A write to the instrument left “nord-rescued-1-4 2.npno”"
+    );
+    second.choose("Discard…");
+    let (title, _) = second.bench.browser.asking().expect("asked again");
+    assert_eq!(title, "Discard “nord-rescued-1-4 2.npno”?");
+    second.choose("Discard");
+    let (title, _) = second.bench.browser.asking().expect("asked");
+    assert_eq!(
+        title,
+        "A write to the instrument left “nord-rescued-1-4.npno”"
+    );
+    second.choose("Keep in library");
+    assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
+    assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue());
+}
+
 /// A rescue in drawbar's own data, where no library could take it, is offered with the
 /// library's own, and Keep in library copies it in and deletes it there; Discard deletes
 /// it.

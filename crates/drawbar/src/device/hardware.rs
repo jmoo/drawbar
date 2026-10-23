@@ -1500,13 +1500,24 @@ fn s8_an_occupant_that_cannot_be_put_back_is_kept_in_the_library() {
     let second = format!("{stem} 2.npno");
     fs::copy(&rescue, kept_in.join(&second)).expect("a second rescue");
 
+    // The rescues are offered in order of their names, the second copy's first, and
+    // a discard asks again: each question is answered by what it names.
     let mut rig = rig.reopen();
-    assert!(
-        rig.asked().contains(&name),
-        "{:?}",
-        rig.bench.browser.asking()
-    );
-    rig.choose("Keep in library");
+    let (mut kept, mut discarded) = (false, false);
+    while !(kept && discarded) {
+        let asked = rig.asked();
+        if asked.starts_with("Discard") && asked.contains(&second) {
+            rig.choose("Discard");
+            discarded = true;
+        } else if asked.contains(&second) {
+            rig.choose("Discard…");
+        } else if asked.contains(&name) {
+            rig.choose("Keep in library");
+            kept = true;
+        } else {
+            panic!("an unexpected question: {asked}");
+        }
+    }
     let landed = |rig: &Rig| {
         rig.bench
             .workspace
@@ -1516,9 +1527,6 @@ fn s8_an_occupant_that_cannot_be_put_back_is_kept_in_the_library() {
             && !rescue.exists()
     };
     rig.until("the rescue lands in the library", SEND_LIMIT, landed);
-    assert!(rig.asked().contains(&second));
-    rig.choose("Discard…");
-    rig.choose("Discard");
     rig.until("the second rescue is deleted", ATTACH_LIMIT, |_| {
         !kept_in.join(&second).exists()
     });
