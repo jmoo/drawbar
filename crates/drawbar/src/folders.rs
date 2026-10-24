@@ -191,8 +191,6 @@ pub struct Kept {
     pub run: toshokan::log::Run,
     pub title: String,
     pub rows: Vec<KeptRow>,
-    /// They may be their writer's own older changes, which it replaced since.
-    pub uncertain: bool,
 }
 
 /// One change of a [`Kept`].

@@ -169,9 +169,6 @@ Nothing kept apart changes your library until you choose to:
 - **Show file** shows a sound a branch left without a file, which cannot be
   taken.
 
-A card may say its changes could be that drawbar's own older changes, which it
-has replaced since. Taking one of them may bring back what it replaced.
-
 A change marked “only taking it settles this” replaced a value that no computer
 shows any more, so it stays listed until you take it.
 
@@ -210,9 +207,11 @@ bring back any you deleted.
   are lost, and drawbar names them. If the library stops altogether, drawbar
   closes it and says so; **File ▸ Open recent library** opens it again.
 - **Restored from a backup.** When the library folder no longer holds changes
-  drawbar showed before, as after a restore from a backup, drawbar keeps showing
-  them for a day, in case a sync has not brought them yet. After that, and once
-  drawbar has looked at every file again, it shows the folder as it is.
+  drawbar showed before, as after a restore from a backup, drawbar shows the
+  folder as it is the next time it looks. While a sync is still bringing the
+  folder's files, changes can disappear the same way and come back once they
+  arrive. A change you make meanwhile is kept: at worst it shows beside the one
+  the sync brings.
 - **Missing.** The file was deleted outside drawbar, but it had tags or unsaved
   edits, or came from your keyboard. Save it to bring the file back, or delete
   it. After a restart, a missing file with tags shows as lost, with its tags,

@@ -924,12 +924,6 @@ impl Store {
         self.backend.fault(fault);
     }
 
-    /// Move the library's clock `ms` ahead.
-    #[cfg(test)]
-    pub fn pass(&self, ms: u64) {
-        self.backend.pass(ms);
-    }
-
     /// Ask, once, whether to close and reopen a library that has stopped answering.
     fn watch(&mut self, browser: &mut Browser) {
         match self.stalled() {
@@ -1882,7 +1876,6 @@ impl Store {
                     run: kept.run,
                     title: kept_title(kept, rows.len()),
                     rows,
-                    uncertain: kept.uncertain,
                 }
             })
             .collect();
@@ -4151,7 +4144,6 @@ mod tests {
             },
             span: (0, 0),
             changes: Vec::new(),
-            uncertain: false,
         };
         let title = |label, rows| kept_title(&kept(label), rows);
         assert!(title("drawbar", 2).starts_with("Another drawbar made 2 changes on a branch"));

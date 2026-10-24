@@ -87,8 +87,7 @@ writer's `trash/`, where an undo finds them.
 
 What only this install needs is kept in drawbar's own data, never in the library
 (`store::native::local_root`): `libraries/<hash of the library's path>/`, beside
-`app.ron`. It holds toshokan's local root, with the cached view, the identities
-its scans read and the drafts of unsaved edits; `slots/`, for the unsaved edits
+`app.ron`. It holds toshokan's local root, with the identities its scans read and the drafts of unsaved edits; `slots/`, for the unsaved edits
 of slot views, each replaced whole under the lock `replacing.lock` so that two
 drawbars or tabs never interleave; and `rescued/`, for a slot's former occupant
 that a write to the instrument left. Losing it loses the drafts and nothing
@@ -601,17 +600,18 @@ is put back over the file as it is now, and the user is asked which to keep (see
 
 ### Opening and read-only
 
-Opening reads the logs and this install's cached view, then scans every file.
+Opening reads the logs, then scans every file.
 Opening writes nothing in the folder: a writer's directory is made at its first
 change. A library opens read-only where toshokan finds it cannot write: the
 folder cannot be written, or this writer's own log holds entries a newer build
 wrote. Several drawbars may write one library at once, so another drawbar's open
 makes none read-only. Changes in a read-only library are held in memory only.
 
-Facts this install showed that no file in the folder holds now, as after a
-restore of the folder from a backup, stay shown: the folder may not have synced
-yet. toshokan lets them go once they have stood for `GRACE_MS`, a day, and a scan
-of every file has finished since (`Library::rescan`).
+What toshokan shows derives from the files in the folder alone, and it keeps
+nothing between opens. Facts no file holds now, as after a restore of the folder from a
+backup, are gone at the next read. While a sync client is still delivering the
+folder's files, facts can disappear and come back; a change made meanwhile is at
+worst a visible conflict, never a silent overwrite.
 
 An effect interrupted by a crash, of this instance's writer or an idle one of
 this install, is finished at open. One another install left is asked about:
@@ -718,8 +718,7 @@ snapshot certified it. Every view the store sends carries them as `Viewed::kept`
 (`Folders::kept`), logging each run once. A card lists a row per change the user
 would tell apart (`kept_rows`): a tag's entry in the list of tags only where no
 asset in the run wears it, and a file change only where the asset's file is
-elsewhere; its title counts those rows. A card whose item is `uncertain` says it
-may be its writer's own older changes. `Intent::Take` makes the
+elsewhere; its title counts those rows. `Intent::Take` makes the
 named changes of a run, or all of them, in one entry the user can undo; taking a
 tag also takes the run's entry for it in the list of tags, and taking a file change
 binds the entity to the file the run names, which toshokan refuses
@@ -837,7 +836,7 @@ In the browser:
 |---|---|---|
 | Library files | The library folder | The private file system's root, or the picked folder |
 | Tags, origins, each drawbar's log, staging and trash | `.drawbar/library/` in the library | `.drawbar/library/` in the library |
-| Drafts, slot edits, the cached view, identities, rescues | `libraries/<hash>/` beside `app.ron` | `.drawbar/local/private/` or `.drawbar/local/picked-<id>/` of OPFS |
+| Drafts, slot edits, identities, rescues | `libraries/<hash>/` beside `app.ron` | `.drawbar/local/private/` or `.drawbar/local/picked-<id>/` of OPFS |
 | Theme, panels, Show all files | eframe's store: `app.ron` in the app's data folder | eframe's store, in local storage |
 | MIDI on or off, recent libraries | eframe's store (`drawbar.midi`, `drawbar.libraries`) | |
 | Recent picked folders, as handles | | IndexedDB: database `drawbar`, store `libraries`, key `recent`: `{id, handle}` |

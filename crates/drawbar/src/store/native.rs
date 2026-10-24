@@ -114,9 +114,6 @@ pub struct Backend {
     seen: std::cell::Cell<(usize, std::time::Instant)>,
     #[cfg(test)]
     fault: Arc<std::sync::Mutex<Option<super::Fault>>>,
-    /// How far the library's clock runs ahead of the system's.
-    #[cfg(test)]
-    ahead: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Whether the library's thread is running a command, and since when.
@@ -151,11 +148,6 @@ impl Backend {
         let fault = Arc::new(std::sync::Mutex::new(None));
         #[cfg(test)]
         let faults = fault.clone();
-        #[cfg(test)]
-        let ahead = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        #[cfg(test)]
-        let clock = Box::new(Ahead(ahead.clone()));
-        #[cfg(not(test))]
         let clock = Box::new(SystemClock);
         let worker = std::thread::spawn(move || {
             // toshokan's library stays on the thread that opened it.
@@ -217,15 +209,7 @@ impl Backend {
             seen: std::cell::Cell::new((0, std::time::Instant::now())),
             #[cfg(test)]
             fault,
-            #[cfg(test)]
-            ahead,
         }
-    }
-
-    /// Move the library's clock `ms` further ahead of the system's.
-    #[cfg(test)]
-    pub fn pass(&self, ms: u64) {
-        self.ahead.fetch_add(ms, Ordering::Relaxed);
     }
 
     /// Make the next command the library's thread takes fault or never finish, as a
@@ -332,17 +316,6 @@ impl Drop for Backend {
 
 /// The keeper of the library in `folder`, with this install's own state for it in
 /// `local`, counting into `signs` what its storage does.
-/// The system's clock, run ahead by a shared amount.
-#[cfg(test)]
-struct Ahead(Arc<std::sync::atomic::AtomicU64>);
-
-#[cfg(test)]
-impl toshokan::Clock for Ahead {
-    fn now_ms(&mut self) -> u64 {
-        SystemClock.now_ms() + self.0.load(Ordering::Relaxed)
-    }
-}
-
 pub(super) fn keeper(
     folder: &Path,
     local: &Path,

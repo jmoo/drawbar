@@ -4791,11 +4791,10 @@ fn a_tagged_file_saved_then_moved_outside_keeps_its_tags() {
     assert_eq!(tagged(&session), [wears("kept.ne5p", &["Sunday"])]);
 }
 
-/// What a folder restored from a backup no longer holds stays shown for a day and a scan
-/// of every file, as while a sync has not brought it yet, and then the folder is shown
-/// as it is.
+/// A folder restored from a backup is shown as it is at the next read: what the backup
+/// does not hold is gone.
 #[test]
-fn a_folder_restored_from_a_backup_is_shown_as_it_is_a_day_later() {
+fn a_folder_restored_from_a_backup_is_shown_as_it_is() {
     let root = Temp::new();
     let mut first = Session::open(&root);
     first.create();
@@ -4810,14 +4809,7 @@ fn a_folder_restored_from_a_backup_is_shown_as_it_is_a_day_later() {
     copy_tree(&backup.0, &root.0);
 
     let mut third = Session::listed(&root);
-    let shown = tagged(&third);
-    assert!(
-        matches!(&shown[..], [(_, worn)] if worn == &["Sunday"]),
-        "still shown: {shown:?}"
-    );
-    third.settle();
-    assert_eq!(tagged(&third), shown, "still shown before a day passes");
-    third.store.pass(24 * 60 * 60 * 1000);
+    assert_eq!(tagged(&third), Vec::<(String, Vec<String>)>::new());
     third.settle();
     assert_eq!(tagged(&third), Vec::<(String, Vec<String>)>::new());
 }
