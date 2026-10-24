@@ -180,7 +180,7 @@ them, resurrections, hidden files and conflicted copies under other names.
 | Property or rule | Checked by |
 | --- | --- |
 | `ChainOrder`, `NothingIgnored`, `Retained`, `DeliveredConverges`, `Monotone`, `ForksKept` | `tests/portable.rs`: every delivery order of small scenarios, and seeded interleavings of writes, compactions, crashes, clones and lost local roots with sync; at each step a reader that reads only what changed places what one reading every file places. A remembered entry no file holds whose number a tip has passed counts as folded into that tip |
-| `NoMergedFork`, `DismissalsHold`, `Agree`, the grace step | `tests/retention`: the value-level checks of design R run toshokan's encoding, compaction and derivation against an oracle that never compacts |
+| `NoMergedFork`, `DismissalsHold`, `Agree`, the grace step | `tests/retention`: the value-level checks of the retention design run toshokan's encoding, compaction and derivation against an oracle that never compacts |
 | `OwnDirectory` | `tests/library.rs`: every instance runs on a backend that panics on a write in another writer's directory |
 | `EffectAccounted` | `tests/crash.rs`: every effect crashed after every operation, under torn, zeroed and lost tails, where moves rename and where they copy |
 | `DeliveredSettles` | `tests/crash.rs` and `tests/library.rs`: a crash, or the loss of the local root, at every step is settled once, by the writer itself or with consent by another, where moves rename and where they copy; a spent record is reported only by a reader its closing entry has not reached |

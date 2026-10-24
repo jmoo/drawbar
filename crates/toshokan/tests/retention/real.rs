@@ -22,7 +22,7 @@ use super::world::{
 };
 use super::{Bound, Compaction, Design, Reading};
 
-/// toshokan, under design R.
+/// toshokan, under the retention design.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Real;
 

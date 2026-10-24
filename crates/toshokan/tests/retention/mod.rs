@@ -1,4 +1,4 @@
-//! Value-level checks of the retention design in `RETENTION.md` (design R).
+//! Value-level checks of the retention design in `RETENTION.md`.
 //!
 //! Histories of three writers and a clone write one entity's existence, one
 //! register and set members, compact at every point, and dismiss runs. Every
@@ -6,7 +6,7 @@
 //! fresh and cached readers in every order, and compared with [`oracle::Oracle`],
 //! which knows every entry and never compacts.
 //!
-//! A design is checked through [`Design`]: [`spec::Spec`] states design R's rules
+//! A design is checked through [`Design`]: [`spec::Spec`] states `RETENTION.md`'s rules
 //! over what a reader can see, and [`real::Real`] is toshokan.
 
 #![allow(dead_code, reason = "each test binary uses its own part")]

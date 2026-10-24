@@ -1,65 +1,35 @@
 # Bounded retention
 
 This design bounds how much history toshokan keeps. [SPEC.md](SPEC.md)
-specifies the format and protocol it led to; this document keeps the reasoning,
-the guarantees and what the model and the value-level checks found. The model in
-[spec/](spec/) follows it, and `tests/retention` checks toshokan against it.
+specifies the format and protocol; this document gives the reasoning and the
+guarantees. The model in [spec/](spec/) follows it, and `tests/retention`
+checks toshokan against it.
 
-## Decisions
-
-- **D10.** Keep only as much history as stops two instances stomping on each
-  other. History is not for version-control features.
-- **D11.** Undo and redo reach only this session's intents and end at close.
-- **D12.** After a folder is restored from an older copy, the folder wins: no
-  retained view of restored-away facts, no let go or adopt.
-- **D13.** Unsaved edits stay local to each install.
-- **D14.** A write whose basis was forgotten is shown as a conflict, never
-  resolved silently either way. There is no offline time horizon.
-
-Settled for this design: a delete kills the fields it observed, so a revive in
-a deletion conflict brings back only the concurrent edit; the grace period is 24
-hours and at least one full rescan; the new format lives under `writers.2/`.
-
-## The problem
-
-At a constant 2,000 entities, cost grows linearly with history. With
-`examples/scale.rs --entities 2000 --files 2000 --writers 3`:
-
-| Entries | Memory (open cold) | Folder | Cached view |
-| ------: | -----------------: | -----: | ----------: |
-|     400 |             4.5 MB | 1.8 MB |      2.0 MB |
-|      2M |             767 MB | 505 MB |      286 MB |
-
-A snapshot keeps the hash of every entry it folds, and every register keeps every
-write it ever replaced, so compaction saves about a quarter and no memory.
-
-## What history protects today, and what replaces it
-
-| History kept today | What it protects | Replaced by |
-| --- | --- | --- |
-| Every folded hash, in chain order (`Snapshot::folded`, `WriterLog::chain`) | Placing an entry after any folded one; a fork from any point; telling a re-delivered line from a new one; `FoldedOnly`; writer continuation; a pending record's standing | Sequence numbers, certificates of every file the chain was written to, and fork points (sections 1, 2, 4) |
-| Every register write and a grow-only replaced set (`merge::Register`) | A snapshot never brings back a replaced write; undo's previous value | Own live writes and, per field, one reference per other writer (sections 2, 3); undo from session memory |
-| Each removed set tag with its earliest remove (`OrSet::removed`) | An add arriving after its remove stays removed; undo of an add | The same references, per member |
-| A delete's observed list and the deleted entity's whole state | Deletion conflicts; reviving whole | A delete that kills what it observed and keeps its references |
-| Every trash item ever displaced, even after emptying (`Folded::trash`) | Listing the trash | Items leave the contribution once emptied |
-| A new live tag for every add of a present value (`intent.rs`) | Nothing | `add` replaces the tags of its value it saw |
-| Entries ever held back, forks ever reported | Finding a fork after its file is gone; reporting once | Fork points, remembered until the grace step |
-| Restored-away entries in the cached view, `let-go.json`, let go and adopt | `Monotone`; the restore choice | The grace step (section 7) |
-| Own intents since the last snapshot, `reverses` | Undo, redo, history display | This session's undo stack, in memory |
+It keeps only as much history as stops two instances from overwriting each
+other's work; history is not kept for version-control features. Undo and redo
+reach only this session's intents and end at close. After a folder is restored
+from an older copy, the folder wins: no view keeps the facts the restore took
+once a grace period passes, and nothing asks the user to let them go or adopt
+them. Unsaved edits stay local to each install. A write whose basis was
+forgotten is shown as a conflict, never resolved silently either way, and there
+is no time after which an offline writer's work stops counting. A delete kills
+the fields it observed, so reviving an entity in a deletion conflict brings back
+only the concurrent edit. The grace period is 24 hours and at least one full
+rescan.
 
 ## 1. Entries
 
-Every entry gains `n`: 0 for the genesis entry, its predecessor's plus one after.
+Every entry carries `n`: 0 for the genesis entry, its predecessor's plus one after.
 A reader does not place an entry whose `n` is not its predecessor's plus one, and
 reports it.
 
-Every reference — in `replaces`, `observed` and `tags` — becomes
-`[writer, n, hash]`. `add` gains `replaces`: the tags of its value it saw, its own
-included, so a member has at most one live tag per concurrent adder.
+Every reference — in `replaces`, `observed` and `tags` — is `[writer, n, hash]`.
+An `add` carries `replaces`: the tags of its value it saw, its own included, so a
+member has at most one live tag per concurrent adder.
 
 A `dismiss` op names runs the user dismissed, and a `take` names the run whose
-change an op takes (section 5). `reverses` is dropped. Each entry also records
-the fork points its writer knew of, by writer and number.
+change an op takes (section 5). Each entry also records the fork points its
+writer knew of, by writer and number.
 
 ## 2. Snapshots
 
@@ -68,7 +38,7 @@ recognize every entry it folds:
 
 | Member | Value |
 | --- | --- |
-| `writer`, `label`, `at` | As now |
+| `writer`, `label`, `at` | Its writer, the writer's label, and its clock reading |
 | `genesis` | The hash of the genesis entry |
 | `n`, `head` | The number and hash of the last folded entry |
 | `certified` | Certificates, below |
@@ -228,7 +198,7 @@ numbered above it, is a run: no branch is merged beside another. A reader
 remembers the fork points it found, so a fork stays a fork when one branch's
 files go before the other's; certificates make every fork point derivable from
 the files again, so a reader without that memory finds the same ones, except for
-a fork inside a segment (open question 7).
+a fork inside a segment (see What users see).
 
 **Several tips.** When two snapshots of `y` do not certify each other, the
 writer forked and both sides compacted. Their parting is the highest entry every
@@ -256,8 +226,7 @@ that writer on that field is numbered below it, the value is forgotten. The run
 then shows that field whatever the merged state shows, and, like a gap, the user
 can take it but a dismissal does not hide it; only a take of a run of that
 writer on that field settles it. A write that merely names the run's write, by a
-writer that had not seen the fork, does not. This is D14's conflict for a
-forgotten basis. It arises whenever a branch compacts past a pre-fork write it
+writer that had not seen the fork, does not. It arises whenever a branch compacts past a pre-fork write it
 replaced, so a branch's compaction can change the merged value of such a field.
 An entity left with no live existence write this way shows its live fields, as
 in a deletion conflict.
@@ -283,12 +252,10 @@ would have left it. A fresh reader of the same files cannot place such an entry
 either, so holding it would keep a cached reader apart from a fresh one until
 the grace step.
 
-The window of recent hashes is gone. Re-deliveries are recognized by
-certificates, and a fork near the head is found by the two successors of its
-fork point; a window would only let a reader merge a recent fork, which runs
-forbid.
+Re-deliveries are recognized by certificates, and a fork near the head is found
+by the two successors of its fork point.
 
-## 5. Runs (D14)
+## 5. Runs
 
 **When a run appears.** A writer's history forked: a copied local root, a
 virtual machine resumed twice, a restored backup of a local root.
@@ -349,12 +316,12 @@ It never deletes a segment without a seal marker (`SealedOnly`) or a file it
 could not place on its chain (`FoldedOnly`). Superseded files may go at once.
 `CheckFirst` stays: a writer never appends after an entry the folder lost.
 
-## 7. The cached view and restores (D12)
+## 7. The cached view and restores
 
 The view keeps, per writer, the tips' contents, the entries placed after them,
 the entries shown as runs, the fork points, the file records, and the merged
-state; and the dismissals. It no longer keeps every hash, `let-go.json`, or anything a restore
-took once the grace period passes.
+state; and the dismissals. It keeps nothing a restore took once the grace
+period passes.
 
 **The grace step.** When the reader holds something of a writer that no file it
 sees holds — a tip whose file is gone, an entry in flight, a fork point only it
@@ -383,9 +350,6 @@ reader keeps waiting. A writer that wrote nothing since compacting gives no such
 wait as a gap. Edits made meanwhile are judged against the smaller view, so at
 worst they produce visible conflicts.
 
-`Library::let_go`, `adopt`, `Reader::removed`, `Opened.removed` and
-`Refreshed.removed` go.
-
 ## 8. Writers, pending records, undo and drafts
 
 A writer continues only if its recorded head is its tip or placed after it, and
@@ -395,7 +359,7 @@ An open pending record's `prev` is its writer's last entry, so it is always held
 A record whose `prev` is followed, or numbered below a tip's head, is spent or
 closed, unless `prev` is a run, on a branch the tip's number says nothing of, or
 what follows is an intent whose continuation was cut short. One whose `prev` is
-neither held nor in a run is ignored and reported, as now.
+neither held nor in a run is ignored and reported.
 
 **Continuations.** An intent whose file ops and displaced items do not fit its
 line is followed by `more` entries that hold them, appended with it. Each is an
@@ -415,7 +379,7 @@ removes named, its file effects. It ends at close. Drafts are unchanged.
 ## What users see
 
 - The library as every writer's live writes say, with conflicts where writes are
-  concurrent, as now.
+  concurrent.
 - After a copied local root, VM resume or restored local-root backup: one item per
   branch of that writer's history after the fork, with the net change it makes,
   to keep or dismiss. Neither branch's later changes are merged until the user
@@ -439,6 +403,21 @@ removes named, its file effects. It ends at close. Drafts are unchanged.
   merged as soon as the gap fills.
 - A field whose earlier value a branch compacted away: shown in that branch's
   item until the user takes a value, even when it matches the merged one.
+- A writer that wrote nothing after compacting, behind a sync slower than a day:
+  its facts disappear until its snapshot arrives.
+- After the grace step, a reference whose target a restore took kills only that
+  target, and what earlier references of its writer covered, that a snapshot
+  holding the reference no longer names, comes back beside the current value as
+  a conflict.
+- A segment a sync client dropped the newest lines of while a later line
+  survives: a cached reader keeps what it holds of the lost lines and a fresh
+  reader holds the survivor back as a gap, until the writer's next snapshot
+  reaches both.
+- A fork inside a segment, when an instance copied while its segment was open
+  and both copies compacted: pre-fork entries with no effect left can show as
+  runs, and own writes that may be pre-fork as a forgotten basis.
+- Every copied local root that wrote produces runs to review, however briefly
+  both copies ran.
 - Undo reaches this session only.
 
 ## Guarantees
@@ -460,18 +439,17 @@ removes named, its file effects. It ends at close. Drafts are unchanged.
 - Chain order, single-writer directories, no bytes leaving the folder except by
   emptying a trash, total recovery, opening writing nothing.
 
-**Given up**, and what allows it.
+**Not kept.**
 
-| Was | Now | Allowed by |
-| --- | --- | --- |
-| A fork's branches are merged side by side and reported | Each branch after the fork point is a run for the user | D14 |
-| The cached view only grows | The grace step drops what no file holds and nothing visible descends from | D12 |
-| A pre-fork value stays merged while the branches decide | A branch that compacts past it shows the field as a forgotten basis | D14 |
-| Let go or adopt after a restore | The folder wins after the grace period | D12 |
-| Reviving a deleted entity brings back every field | Only the concurrent edit | Ruling on D10 |
-| Undo reaches back to the last snapshot; history is shown | This session only | D11 |
-| A cached reader keeps what it placed until the grace step | An entry on another branch drops out while sync hides its file and a tip has passed its number, and returns with its file | Cached and fresh readers agree at rest |
-| A cached reader shows a field until its replacing write arrives | A fresh reader may show it empty meanwhile | D10 |
+- A fork's branches are not merged side by side: each branch after the fork
+  point is a run for the user.
+- The cached view does not only grow: the grace step drops what no file holds
+  and nothing visible descends from.
+- A branch that compacts past a pre-fork value it replaced takes that value out
+  of the merge, and the field shows as a forgotten basis.
+- Reviving a deleted entity brings back only the concurrent edit.
+- A fresh reader may show a field empty until the write that replaced the
+  cached reader's value arrives.
 
 ## Expected size
 
@@ -480,7 +458,7 @@ Steady state, the harness's schema: about 8.7 live writes per entity (a create,
 
 | Part | Memory | Folder (JSON) |
 | --- | --- | --- |
-| Live writes | ~100 B each; with maps and the view's index, 2.3 KB per entity (the current figure at minimal history) | ~110 B each, ~1.1 KB per entity |
+| Live writes | ~100 B each; with maps and the view's index, 2.3 KB per entity | ~110 B each, ~1.1 KB per entity |
 | References | ~48 B each | ~90 B each |
 | A deleted entity | ~100–150 B, forever | the same |
 | A removed member never re-added | one reference per remover, forever | the same |
@@ -504,8 +482,7 @@ steady state is about 6 MB of memory and 4 MB of folder, plus:
 - per retired writer, its final contribution and the references others keep to
   it, at most what it wrote.
 
-These grow with deletions, segments and writers, not with entries: about three
-orders of magnitude slower than today's 35 B of folded hash per entry.
+These grow with deletions, segments and writers, not with entries.
 
 ## An old folder
 
@@ -545,21 +522,7 @@ showing, losing, or the guarded grace step; a run stays shown until dismissed,
 gone or the grace step; a writer retires on a fork only when an entry of its
 directory has two successors; and every reader converges under fair delivery.
 
-**Results.** The fast set (`nix build .#nord.toshokan-spec`) passes:
-`Portable` (a clone, compaction, crashes; 186k states), `Recovery` (450k),
-`Liveness` (329k), `Grace` (a restored folder and the grace step; 377k),
-`GraceChaos` (the grace step with a sync fault; 293k), `LivenessGrace`
-(convergence with the grace step and a restore; 56k), `RestoreDir` (one directory
-restored; 423k), `Resurface` (a deleted segment arriving after later
-compactions; 1.3M) and `Drop` (a sync client keeping an earlier version; 23k).
-Every must-fail config fails with its stated property. Run once in the deep set:
-`Anchors` fails as intended (7.1M states), `PortableWide` passes (3.0M),
-`Restore` passes (5.6M), `RestoreFork` passes (8.8M), `RestoreDirFork` passes (a
-clone and a restored directory; 8.8M), and `Dismiss` passes (a clone and
-dismissals, four entries; 21.2M).
-`Branches`, where both branches of a clone compact past each other, is too large
-to explore whole; a random simulation of 93M states to depth 40 found no
-violation.
+The fast and deep sets are listed in [spec/README.md](spec/README.md).
 
 **Values.** The model merges entries, not values. References, deletes that kill
 fields, contradicted references, forgotten bases and the display of runs are
@@ -588,44 +551,11 @@ reports contradicted, or the field is a forgotten basis. A missing value fails
 unless an item of its writer shows it on that field, or shows that field as a
 forgotten basis while no tip holds the write that carried it.
 
-The design is a `Design` implementation that sees only what a reader sees, with
-switches that drop the rules for branch references, the union of tips, own
-writes and dismissals; with each switch off, a test must find a violation. The
-same tests run against toshokan once it implements the design.
-`cargo test --test retention_slice`, in the default suite, runs a bounded slice
-in about two minutes, or half a minute in release.
-`cargo test --release --test retention_sweep -- --ignored` runs the rest, 7.7
-million histories, in about an hour.
+The design under test is a `Design` implementation that sees only what a reader
+sees, with switches that drop the rules for branch references, the union of
+tips, own writes and dismissals; with each switch off, a test must find a
+violation. The same checks run against toshokan. `tests/retention_slice.rs`, in
+the default suite, runs a bounded slice; `tests/retention_sweep.rs` runs the
+rest by name.
 
-Clocks: nothing in this design depends on them.
-
-## Open questions and risks
-
-1. **Certificate growth.** One per segment ever written, forever. Bounded by
-   segments, not entries, but unbounded; a writer that starts many short
-   processes pays the most.
-2. **A slow sync and a quiet writer.** A writer that wrote nothing after
-   compacting leaves nothing that descends from its snapshot; a sync slower
-   than 24 hours makes its facts disappear until the snapshot arrives.
-3. **Contradicted references** rely on the grace step to tell a lost write from a
-   late one; before it, a late write's predecessor stays hidden. After it, a
-   snapshot's reference that named the lost write no longer covers what earlier
-   references of that writer covered, which comes back as a conflict.
-4. **Forks become user work.** Every copied local root that wrote produces runs
-   to review, even when both sides were active for seconds.
-5. **A forgotten basis.** A branch that compacts past a pre-fork write it
-   replaced takes that value out of the merge, and the field is shown in the
-   branch's item until the user takes a value. Keeping each field's last few own
-   writes in a contribution would make this rarer at a fixed cost per field; the
-   exhaustive tests count how often it happens.
-6. **A dropped version under a cached reader.** When a sync client drops the
-   newest lines of a segment while a later line of the same chain survives, the
-   guard keeps what the cached reader holds of the lost lines, and a fresh reader
-   holds the survivor back as a gap; they disagree until the writer's next
-   snapshot reaches both.
-7. **A fork inside a segment.** When an instance is cloned while its segment is
-   open and both sides compact, each tip names only the ends of that segment by
-   certificate. The parting comes from every hash the tips name, so it reaches
-   the last pre-fork entry that still has an effect; entries above it with none
-   are shown as runs, and own writes that could be pre-fork are treated as a
-   forgotten basis. Certifying segments, not lines, keeps that cost to display.
+Nothing in this design depends on clocks.

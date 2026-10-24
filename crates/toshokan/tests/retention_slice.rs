@@ -1,4 +1,4 @@
-//! A bounded slice of the value-level checks of design R; `retention_sweep`
+//! A bounded slice of the value-level checks of the retention design; `retention_sweep`
 //! runs the rest. See `retention/mod.rs`.
 
 mod retention;
@@ -91,7 +91,7 @@ fn two_entities_match_the_oracle() {
     ));
 }
 
-/// Sweeps `bounds` with one of design R's rules switched off, which must break
+/// Sweeps `bounds` with one of `RETENTION.md`'s rules switched off, which must break
 /// a property; with every rule on, the same bounds pass here or in
 /// `retention_sweep`.
 fn must_fail(bounds: Bounds, design: Spec) {

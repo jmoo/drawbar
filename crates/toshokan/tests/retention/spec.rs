@@ -1,4 +1,4 @@
-//! Design R's rules, as `RETENTION.md` states them, over what a reader can see:
+//! The retention design's rules, as `RETENTION.md` states them, over what a reader can see:
 //! snapshots that hold contributions and certificates, and the lines of the
 //! segments it sees. This is the reference the implementation must match; it
 //! looks into [`World`] only for the entries of lines it sees or remembers.
@@ -101,7 +101,7 @@ fn later(slot: &mut Option<Reference>, r: Reference) {
     }
 }
 
-/// Design R, with rules that tests switch off to show what each prevents.
+/// The retention design, with rules that tests switch off to show what each prevents.
 #[derive(Clone, Copy, Debug)]
 pub struct Spec {
     /// A forked writer's references apply only when made at or below its fork
