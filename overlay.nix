@@ -22,6 +22,7 @@ let
     makeOverridable
     mapAttrs
     mapAttrs'
+    mapAttrsToList
     nameValuePair
     optional
     optionalAttrs
@@ -352,12 +353,14 @@ let
       pkg;
 
   # Cross-build applications to exercise their whole dependency stack. `nord-usb`
-  # also keeps wasip1 because its own suite executes there in a wasm VM.
+  # also keeps wasip1 because its own suite executes there in a wasm VM, and
+  # `toshokan` builds for Windows because its Windows renames compile only there.
   crateTargets = {
     # A CLI has no use on WASI.
     nord-cli = filter (t: t != "wasip1") (attrNames targets);
     nord-usb = [ "wasip1" ];
     drawbar = [ "windows" ];
+    toshokan = [ "windows" ];
   };
 
   # Native rustc supplies bare wasm32; wasm-bindgen pairs drawbar/WebUSB with the page.
@@ -418,8 +421,6 @@ let
           cp ${./crates/drawbar/favicon.svg} "$out/favicon.svg"
           # The demo sounds the welcome sheet fetches, beside the app that reads them.
           cp -r --no-preserve=mode ${./crates/nord-format/tests/fixtures/demo} "$out/demo"
-          # The worker that writes the library; the app asks for it beside the page.
-          cp ${./crates/drawbar/library-writer.js} "$out/library-writer.js"
 
           if grep -qF drawbar_bg.wasm "$out/pkg/$js"; then
             echo "an unhashed asset name survived the rewrite" >&2
@@ -454,6 +455,108 @@ let
         '';
       }
     );
+
+  # A crate's browser suites, run headless by wasm-bindgen's test runner in Chromium
+  # and Firefox. Linux only: a macOS build user has no window server, and Firefox there
+  # fails to start a session.
+  # ⚠️ The runner ships with wasm-bindgen-cli and must match the crates' wasm-bindgen pin.
+  # `built` are suites only compiled, so a suite run by hand cannot rot.
+  browserSuites =
+    {
+      built ? [ ],
+      cargoExtraArgs,
+      pname,
+      tests,
+      version,
+    }:
+    let
+      browsers = {
+        Chromium = "CHROMEDRIVER=${final.lib.getExe final.chromedriver}";
+        Firefox = "GECKODRIVER=${final.lib.getExe final.geckodriver}";
+      };
+      webdriver = final.writeText "webdriver.json" (
+        builtins.toJSON {
+          "goog:chromeOptions" = {
+            # Chromium's own sandbox cannot start inside the build sandbox.
+            args = [
+              "--disable-dev-shm-usage"
+              "--no-sandbox"
+            ];
+            binary = final.lib.getExe final.chromium;
+          };
+          "moz:firefoxOptions".binary = final.lib.getExe final.firefox;
+        }
+      );
+      args = commonArgs // {
+        CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
+        cargoExtraArgs = "--locked ${cargoExtraArgs}";
+        # ⚠️ nixpkgs' rustc links wasm with the system `lld` and bundles none.
+        nativeBuildInputs = [ final.lld ];
+        inherit pname version;
+      };
+      suites = tests: concatStringsSep " " (map (test: "--test ${test}") tests);
+    in
+    crane.mkCargoDerivation (
+      args
+      // {
+        CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER = "wasm-bindgen-test-runner";
+        WASM_BINDGEN_TEST_TIMEOUT = "300";
+        WASM_BINDGEN_TEST_WEBDRIVER_JSON = webdriver;
+        buildPhaseCargoCommand = ''
+          export HOME="$TMPDIR/home"
+          mkdir -p "$HOME"
+          ${optionalString (built != [ ]) "cargo test $cargoExtraArgs ${suites built} --no-run"}
+          ${concatStringsSep "\n" (
+            mapAttrsToList (name: driver: ''
+              echo "${pname} in ${name}"
+              env ${driver} cargo test $cargoExtraArgs ${suites tests}
+            '') browsers
+          )}
+        '';
+        cargoArtifacts = crane.buildDepsOnly args;
+        doInstallCargoArtifacts = false;
+        installPhaseCommand = ''touch "$out"'';
+        meta.description = "${pname}: browser suites in headless browsers";
+        nativeBuildInputs = args.nativeBuildInputs ++ [ final.wasm-bindgen-cli ];
+      }
+    );
+
+  toshokan-web = browserSuites {
+    built = [ "bench" ];
+    cargoExtraArgs = "-p toshokan --features web";
+    pname = "toshokan-web";
+    tests = [
+      "backends"
+      "effects"
+      "web"
+    ];
+    inherit (manifests.toshokan) version;
+  };
+
+  # drawbar's library in the browser, kept by its worker.
+  drawbar-web-tests = browserSuites {
+    built = [ "bench" ];
+    cargoExtraArgs = "-p drawbar";
+    pname = "drawbar-web-tests";
+    tests = [ "web" ];
+    inherit (manifests.drawbar) version;
+  };
+
+  # The power-loss harness's workloads and checker, and the VM tests that crash
+  # and replay real file systems under them. x86_64 Linux only: they need KVM.
+  toshokanPowerLoss = final.callPackage ./crates/toshokan/power-loss {
+    power-loss = crane.buildPackage (
+      commonArgs
+      // {
+        inherit cargoArtifacts;
+        cargoExtraArgs = "--locked -p toshokan --example power_loss";
+        doCheck = false;
+        installPhaseCommand = ''install -D target/release/examples/power_loss "$out/bin/power_loss"'';
+        pname = "toshokan-power-loss";
+        inherit (manifests.toshokan) version;
+      }
+    );
+  };
 
   # `docs/book` is mdBook's own output directory, ignored by git; keeping it out
   # of the source means a local `mdbook build` cannot change this derivation.
@@ -531,6 +634,43 @@ let
         ''}
       ''
   ) { web = drawbar-web; };
+
+  # TLC over toshokan's portable-root spec, one run per config. A config whose
+  # first line reads `\* Violates <Property>: …` must report that violation; any
+  # other must pass.
+  toshokanSpec =
+    name: configs:
+    final.runCommand name
+      {
+        nativeBuildInputs = [ final.tlaplus ];
+        src = cleanSourceWith {
+          src = ./crates/toshokan/spec;
+          filter = path: _: hasSuffix ".tla" path || hasSuffix ".cfg" path;
+        };
+      }
+      ''
+        cp "$src"/* .
+        workers=''${NIX_BUILD_CORES:-0}
+        [ "$workers" -gt 0 ] || workers=auto
+        for config in ${escapeShellArgs configs}; do
+          violated=$(sed -n 's/^\\\* Violates \([A-Za-z]*\):.*/\1/p' "$config.cfg")
+          status=0
+          tlc -workers "$workers" -cleanup -config "$config.cfg" Portable.tla > "$config.log" 2>&1 || status=$?
+          if [ -z "$violated" ]; then
+            expected="No error has been found"
+          else
+            expected="$violated is violated"
+          fi
+          if ! grep -q "$expected" "$config.log"; then
+            cat "$config.log" >&2
+            echo "$config: expected \"$expected\", TLC exited $status" >&2
+            exit 1
+          fi
+          echo "$config: $expected"
+          grep -E 'distinct states found|depth of|Finished in' "$config.log" | tail -n 3
+        done
+        touch "$out"
+      '';
 
   # Expose each host-supported `<crate>-<target>` package in one set, alongside
   # the host-independent web bundle.
@@ -615,6 +755,15 @@ in
   nord =
     crates
     // crossed
+    # Not in `all`: it starts browsers, and only on Linux.
+    // optionalAttrs final.stdenv.hostPlatform.isLinux { inherit drawbar-web-tests toshokan-web; }
+    # Not in `all`: each boots VMs, and replaying takes long.
+    // optionalAttrs (final.stdenv.hostPlatform.system == "x86_64-linux") {
+      toshokan-power-loss =
+        (final.linkFarm "toshokan-power-loss" toshokanPowerLoss.replay).overrideAttrs
+          { passthru = toshokanPowerLoss.replay; };
+      toshokan-power-loss-smoke = toshokanPowerLoss.smoke;
+    }
     // mapAttrs' (name: nameValuePair "${name}-corpus") committed
     // mapAttrs' (name: nameValuePair "${name}-corpus-full") full
     // {
@@ -663,6 +812,44 @@ in
           version = "0";
         }
       );
+
+      # The portable-root protocol, model-checked. `nix flake check` runs the
+      # small configs.
+      toshokan-spec = toshokanSpec "toshokan-spec" [
+        "Portable"
+        "Recovery"
+        "Liveness"
+        "Grace"
+        "GraceChaos"
+        "LivenessGrace"
+        "RestoreDir"
+        "Resurface"
+        "Drop"
+        "Names"
+        "Sealed"
+        "Folded"
+        "Unchecked"
+        "FreshView"
+        "Uncertified"
+        "Uncarried"
+        "Unnumbered"
+        "Unguarded"
+        "Unquarantined"
+      ];
+      toshokan-spec-deep = toshokanSpec "toshokan-spec-deep" [
+        "Anchors"
+        "PortableWide"
+        "PortableDeep"
+        "Entries"
+        "Dismiss"
+        "RestoreDirFork"
+        "Deep"
+        "Restore"
+        "RestoreFork"
+        "ResumeMid"
+        "Sync"
+        "LivenessDeep"
+      ];
 
       # The corpus assemblies themselves.
       inherit corpus;

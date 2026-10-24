@@ -1,0 +1,300 @@
+//! What the keeper asks of a library's storage itself, outside toshokan's intents:
+//! listings and reads of the folder, and this install's own files in the local root.
+
+use std::io;
+
+use toshokan::asynch::Fs;
+use toshokan::io::{IoError, Kind, Lock, Meta, Range, Reply, Root};
+use toshokan::{Identify as _, Identity, Io, RelPath};
+
+use super::keys::Contents;
+use super::Stat;
+
+/// How much of a file one read asks for.
+pub const CHUNK: u64 = 4 << 20;
+
+/// `error` as the app tells it.
+pub fn failed(error: IoError) -> io::Error {
+    match error {
+        IoError::NotFound => io::ErrorKind::NotFound.into(),
+        IoError::AlreadyExists => io::ErrorKind::AlreadyExists.into(),
+        IoError::Denied => io::Error::new(io::ErrorKind::PermissionDenied, error.to_string()),
+        error => io::Error::other(error.to_string()),
+    }
+}
+
+async fn ask<F: Fs>(fs: &F, io: Io) -> io::Result<Reply> {
+    fs.perform(io).await.map_err(failed)
+}
+
+fn wrong() -> io::Error {
+    io::Error::other("the storage gave the wrong reply")
+}
+
+/// What is at `path`, file or directory.
+pub async fn meta<F: Fs>(fs: &F, root: Root, path: &RelPath) -> io::Result<Option<Meta>> {
+    let path = path.clone();
+    match ask(fs, Io::Stat { root, path }).await? {
+        Reply::Stat(meta) => Ok(meta),
+        _ => Err(wrong()),
+    }
+}
+
+/// The file at `path` in the folder, as a listing finds it; `None` where no file is.
+pub async fn stat<F: Fs>(fs: &F, path: &RelPath) -> io::Result<Option<Stat>> {
+    Ok(file(meta(fs, Root::Folder, path).await?))
+}
+
+/// What a stat found, where it found a file.
+pub fn file(meta: Option<Meta>) -> Option<Stat> {
+    meta.filter(|meta| meta.kind == Kind::File)
+        .map(|meta| Stat {
+            len: meta.len,
+            modified: meta.modified,
+        })
+}
+
+/// At most `len` bytes of the file at `path` from `offset`.
+pub async fn read<F: Fs>(fs: &F, root: Root, path: &RelPath, range: Range) -> io::Result<Vec<u8>> {
+    let path = path.clone();
+    match ask(fs, Io::Read { root, path, range }).await? {
+        Reply::Bytes(bytes) => Ok(bytes),
+        _ => Err(wrong()),
+    }
+}
+
+/// The entries of the directory `dir`, each with what a stat finds.
+pub async fn list<F: Fs>(fs: &F, root: Root, dir: &RelPath) -> io::Result<Vec<(String, Meta)>> {
+    let dir = dir.clone();
+    match ask(fs, Io::ListStat { root, dir }).await? {
+        Reply::ListedStat(entries) => Ok(entries),
+        _ => Err(wrong()),
+    }
+}
+
+/// The identity of the folder's file at `path`, `len` bytes long, read through `read` by
+/// the ranges the library takes it by.
+pub async fn identity(
+    path: &RelPath,
+    len: u64,
+    mut read: impl AsyncFnMut(Range) -> io::Result<Vec<u8>>,
+) -> io::Result<Identity> {
+    let mut digest = Contents.digest(path, len);
+    for range in Contents.ranges(path, len) {
+        let mut at = range.offset;
+        let end = range.offset + range.len;
+        while at < end {
+            let len = CHUNK.min(end - at);
+            let bytes = read(Range { offset: at, len }).await?;
+            if bytes.len() as u64 != len {
+                return Err(io::Error::other("the file changed while it was read"));
+            }
+            digest.update(&bytes);
+            at += len;
+        }
+    }
+    Ok(digest.finish())
+}
+
+/// Remove the file at `path`; none there is success.
+pub async fn remove<F: Fs>(fs: &F, root: Root, path: &RelPath) -> io::Result<()> {
+    let path = path.clone();
+    match fs.perform(Io::Remove { root, path }).await {
+        Ok(_) | Err(IoError::NotFound) => Ok(()),
+        Err(error) => Err(failed(error)),
+    }
+}
+
+async fn sync<F: Fs>(fs: &F, root: Root, path: &RelPath) -> io::Result<()> {
+    if !fs.capabilities(root).fsync {
+        return Ok(());
+    }
+    let path = path.clone();
+    ask(fs, Io::Sync { root, path }).await.map(drop)
+}
+
+/// Where [`replace`] writes `path` before it moves it there.
+fn staged(path: &RelPath) -> RelPath {
+    let name = path.name().expect("a replaced file has a name");
+    path.parent()
+        .expect("a replaced file has a parent")
+        .join(&format!("{name}.next"))
+        .expect("a name with a suffix is one component")
+}
+
+/// The lock in the local root that [`replace`] and [`read_replaced`] hold, so other
+/// processes of the install, such as other tabs, wait for them.
+const REPLACING: &str = "replacing.lock";
+
+/// How long to wait between asks for a lock another process holds.
+const LOCK_WAIT_MS: u32 = 5;
+
+/// How many times a lock another process holds is asked for before giving up: about
+/// ten seconds of waits.
+const LOCK_TRIES: usize = 2_000;
+
+/// Run `then` holding [`REPLACING`].
+async fn locked<F: Fs, T>(fs: &F, then: impl AsyncFnOnce() -> io::Result<T>) -> io::Result<T> {
+    let name = RelPath::new(REPLACING).expect("the lock's name is one component");
+    for _ in 0..LOCK_TRIES {
+        match ask(fs, Io::Lock { name: name.clone() }).await? {
+            Reply::Lock(Lock::Acquired) => {
+                let done = then().await;
+                let _ = fs.perform(Io::Unlock { name }).await;
+                return done;
+            }
+            Reply::Lock(Lock::Held) => wait(LOCK_WAIT_MS).await,
+            _ => return Err(wrong()),
+        }
+    }
+    Err(io::Error::other("another tab kept it busy"))
+}
+
+/// Wait `ms` milliseconds: on the keeper's own thread on the desktop, and without
+/// holding the worker's thread in the browser.
+#[cfg(not(target_arch = "wasm32"))]
+async fn wait(ms: u32) {
+    std::thread::sleep(std::time::Duration::from_millis(ms.into()));
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn wait(ms: u32) {
+    use wasm_bindgen::JsCast as _;
+
+    let waited = js_sys::Promise::new(&mut |resolve, _| {
+        let global = js_sys::global();
+        let set = crate::js::field(&global, "setTimeout");
+        if let Some(set) = set.map(|set| set.unchecked_into::<js_sys::Function>()) {
+            let _ = set.call2(&global, &resolve, &ms.into());
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(waited).await;
+}
+
+/// Keep `bytes` at `path` in place of what it held, so a crash leaves the old bytes or
+/// the new, whole, for [`read_replaced`]. Other processes of the install wait for it.
+pub async fn replace<F: Fs>(fs: &F, root: Root, path: &RelPath, bytes: Vec<u8>) -> io::Result<()> {
+    locked(fs, async || replace_held(fs, root, path, bytes).await).await
+}
+
+async fn replace_held<F: Fs>(fs: &F, root: Root, path: &RelPath, bytes: Vec<u8>) -> io::Result<()> {
+    let (next, dir) = (staged(path), path.parent().expect("a file has a parent"));
+    ask(
+        fs,
+        Io::MakeDir {
+            root,
+            path: dir.clone(),
+        },
+    )
+    .await?;
+    remove(fs, root, &next).await?;
+    let create = Io::Create {
+        root,
+        path: next.clone(),
+        bytes,
+    };
+    ask(fs, create).await?;
+    sync(fs, root, &next).await?;
+    remove(fs, root, path).await?;
+    let rename = Io::Rename {
+        root,
+        from: next,
+        to: path.clone(),
+    };
+    ask(fs, rename).await?;
+    sync(fs, root, &dir).await
+}
+
+/// The bytes [`replace`] last kept at `path`; `None` where it never did.
+pub async fn read_replaced<F: Fs>(
+    fs: &F,
+    root: Root,
+    path: &RelPath,
+) -> io::Result<Option<Vec<u8>>> {
+    locked(fs, async || {
+        for at in [path.clone(), staged(path)] {
+            if let Some(bytes) = read_whole(fs, root, &at).await? {
+                return Ok(Some(bytes));
+            }
+        }
+        Ok(None)
+    })
+    .await
+}
+
+/// The whole file at `path`; `None` where no file is.
+async fn read_whole<F: Fs>(fs: &F, root: Root, path: &RelPath) -> io::Result<Option<Vec<u8>>> {
+    let Some(meta) = meta(fs, root, path).await? else {
+        return Ok(None);
+    };
+    if meta.kind != Kind::File {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    while (bytes.len() as u64) < meta.len {
+        let offset = bytes.len() as u64;
+        let len = CHUNK.min(meta.len - offset);
+        let read = read(fs, root, path, Range { offset, len }).await?;
+        if read.is_empty() {
+            break;
+        }
+        bytes.extend_from_slice(&read);
+    }
+    Ok(Some(bytes))
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use std::cell::{Cell, RefCell};
+
+    use toshokan::blocking::{Backend as _, Native};
+    use toshokan::io::{Capabilities, IoResult};
+
+    use super::*;
+    use crate::testing::Temp;
+
+    /// The native backend over a library's own state, counting the locks it asks for.
+    struct Counting(RefCell<Native>, Cell<usize>);
+
+    impl Fs for Counting {
+        fn capabilities(&self, root: Root) -> Capabilities {
+            self.0.borrow().capabilities(root)
+        }
+
+        async fn perform(&self, io: Io) -> IoResult {
+            if matches!(io, Io::Lock { .. }) {
+                self.1.set(self.1.get() + 1);
+            }
+            self.0.borrow_mut().perform(io)
+        }
+    }
+
+    /// A drawbar waiting for the lock another holds waits between asks rather than
+    /// asking as fast as it can, and goes ahead once the lock is let go.
+    #[test]
+    fn a_replace_waits_for_the_lock_another_holds_without_spinning() {
+        let root = Temp::new();
+        let local = root.local();
+        let name = RelPath::new(REPLACING).unwrap();
+        let (held, release) = std::sync::mpsc::channel();
+        let holder = {
+            let (folder, local, name) = (root.0.clone(), local.clone(), name.clone());
+            std::thread::spawn(move || {
+                let mut other = Native::new(&folder, &local);
+                other.perform(Io::Lock { name: name.clone() }).unwrap();
+                held.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                other.perform(Io::Unlock { name }).unwrap();
+            })
+        };
+        release.recv().unwrap();
+        let fs = Counting(RefCell::new(Native::new(&root.0, &local)), Cell::new(0));
+        let path = RelPath::new("slots/a").unwrap();
+        nord_usb::block_on(replace(&fs, Root::Local, &path, b"edit".to_vec())).unwrap();
+        holder.join().unwrap();
+        let asked = fs.1.get();
+        assert!(asked < 200, "{asked} asks for the lock in 200 ms");
+        let kept = nord_usb::block_on(read_replaced(&fs, Root::Local, &path)).unwrap();
+        assert_eq!(kept.as_deref(), Some(&b"edit"[..]));
+    }
+}

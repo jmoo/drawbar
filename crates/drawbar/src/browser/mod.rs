@@ -30,6 +30,7 @@ use crate::workspace::Workspace;
 mod act;
 mod drag;
 mod instrument;
+pub(crate) mod kept;
 mod row;
 mod selection;
 mod tree;
@@ -125,9 +126,8 @@ enum Verb {
     KeepBoth,
     TakeTheirs,
     Discard,
-    OpenWithout,
-    SetAside,
-    OpenWithoutIndex,
+    Finish,
+    Reopen,
 }
 
 impl Verb {
@@ -141,9 +141,8 @@ impl Verb {
             Verb::KeepBoth => "Keep both",
             Verb::TakeTheirs => "Take theirs",
             Verb::Discard => "Discard",
-            Verb::OpenWithout => "Open without them…",
-            Verb::SetAside => "Set it aside and open without it…",
-            Verb::OpenWithoutIndex => "Open without it",
+            Verb::Finish => "Finish",
+            Verb::Reopen => "Close and reopen",
         }
     }
 
@@ -151,15 +150,15 @@ impl Verb {
     fn button(self, ui: &mut egui::Ui) -> egui::Response {
         let (label, glyph) = (self.label(), self.glyph());
         match self {
-            Verb::Save | Verb::Keep | Verb::KeepBoth => sheet::primary(ui, Some(glyph), label),
+            Verb::Save | Verb::Keep | Verb::KeepBoth | Verb::Finish => {
+                sheet::primary(ui, Some(glyph), label)
+            }
             Verb::Replace
             | Verb::Delete
             | Verb::Overwrite
             | Verb::TakeTheirs
             | Verb::Discard
-            | Verb::OpenWithout
-            | Verb::SetAside
-            | Verb::OpenWithoutIndex => sheet::destructive(ui, glyph, label),
+            | Verb::Reopen => sheet::destructive(ui, glyph, label),
         }
     }
 
@@ -168,11 +167,12 @@ impl Verb {
             Verb::Save => Glyph::Save,
             Verb::Keep => Glyph::LibraryBig,
             Verb::Replace => Glyph::Replace,
-            Verb::Delete | Verb::Discard | Verb::OpenWithout => Glyph::Trash2,
+            Verb::Delete | Verb::Discard => Glyph::Trash2,
             Verb::Overwrite => Glyph::Replace,
             Verb::KeepBoth => Glyph::Copy,
             Verb::TakeTheirs => Glyph::RotateCcw,
-            Verb::SetAside | Verb::OpenWithoutIndex => Glyph::FolderOpen,
+            Verb::Finish => Glyph::Check,
+            Verb::Reopen => Glyph::RefreshCw,
         }
     }
 }
@@ -238,6 +238,8 @@ pub struct Browser {
     ask: Option<Ask>,
     /// Questions waiting for the one showing to be answered.
     later: VecDeque<Ask>,
+    /// Whether Kept apart shows, over the window.
+    pub(crate) show_kept: bool,
     pub(crate) folders: Folders,
     pub(crate) tags: Tags,
     /// Which of the three sections are showing.
@@ -262,6 +264,7 @@ impl Default for Browser {
             rename: None,
             ask: None,
             later: VecDeque::new(),
+            show_kept: false,
             folders: Folders::default(),
             tags: Tags::default(),
             sections: Sections::default(),
@@ -313,6 +316,18 @@ impl Browser {
     /// The tags on this computer's list, for the views that count them.
     pub fn tags(&self) -> &Tags {
         &self.tags
+    }
+
+    /// The changes to the tags asked for since the last call, in order. Those from the
+    /// making of a new tag on wait while its name's editor is open.
+    pub(crate) fn take_tag_asks(&mut self) -> Vec<crate::tags::Asked> {
+        let editing = self.rename.as_ref().map(|rename| rename.what);
+        if let Some(naming) = self.tags.naming() {
+            if editing != Some(Item::Tag(naming)) {
+                self.tags.named();
+            }
+        }
+        self.tags.take_asked()
     }
 
     /// A click on a row drawn outside the tree, with the same gestures on the same
@@ -613,7 +628,7 @@ impl Browser {
             self.ask = self.later.pop_front();
         }
         let Some(ask) = &self.ask else {
-            return;
+            return self.kept_sheet(ctx, acts);
         };
         let mut decision = None;
         egui::Modal::new(egui::Id::new("browser_ask"))
@@ -787,34 +802,117 @@ impl Browser {
         });
     }
 
+    /// Ask what to do with an unsaved edit of a slot's view, kept by an earlier session,
+    /// where the slot changed since.
+    pub(crate) fn ask_slot_conflict(&mut self, id: u64, name: &str) {
+        self.raise(Ask {
+            title: format!("“{name}” changed on the instrument"),
+            note: Some(
+                "The slot changed since drawbar kept your unsaved edits of it. Keep mine \
+                 keeps your edits, to send when you choose. Take theirs discards your \
+                 edits. Keep both keeps yours as a new file on this computer."
+                    .into(),
+            ),
+            verb: Verb::TakeTheirs,
+            acts: vec![Act::Revert(id)],
+            others: vec![("Keep both", vec![Act::KeepBoth(id)])],
+            cancel: "Keep mine",
+            strong: Answer::Cancel,
+        });
+    }
+
+    /// Ask what to do with the edit an earlier session kept of a slot whose view was
+    /// edited before that edit was read: `kept` is its bytes.
+    pub(crate) fn ask_kept_slot_edit(&mut self, id: u64, name: &str, kept: Vec<u8>) {
+        self.raise(Ask {
+            title: format!("“{name}” has unsaved edits from before"),
+            note: Some(
+                "drawbar kept unsaved edits of this slot when it last let it go, and you \
+                 have edited it since. Keep mine keeps your edits. Take theirs puts the \
+                 earlier edits in their place. Keep both keeps the earlier edits as a new \
+                 file on this computer."
+                    .into(),
+            ),
+            verb: Verb::TakeTheirs,
+            acts: vec![Act::Restore {
+                id,
+                bytes: kept.clone(),
+            }],
+            others: vec![(
+                "Keep both",
+                vec![Act::Import {
+                    name: name.to_string(),
+                    bytes: kept,
+                }],
+            )],
+            cancel: "Keep mine",
+            strong: Answer::Cancel,
+        });
+    }
+
     /// Ask before another library opens in place of one that cannot keep the assets
-    /// named in `unkept`, because nothing may be written to it.
+    /// named in `unkept`: their unsaved edits, or what nothing may be written for.
     pub(crate) fn ask_leave(&mut self, unkept: &[String], root: crate::store::Root) {
         const SHOWN: usize = 5;
-        let mut names: Vec<String> = unkept
-            .iter()
-            .take(SHOWN)
-            .map(|name| format!("“{name}”"))
-            .collect();
-        if unkept.len() > SHOWN {
-            names.push(format!("and {} more", unkept.len() - SHOWN));
-        }
+        let names = crate::strings::quoted_some(unkept, SHOWN);
         self.raise(Ask::new(
             "Discard what this library cannot keep?".to_string(),
             Some(format!(
-                "Nothing can be written to the library open now, so opening another \
-                 discards what is unsaved in it: {}.",
-                names.join(", ")
+                "Opening another library discards what is unsaved in the one open now: {}.",
+                names
             )),
             Verb::Discard,
             vec![Act::OpenLibraryDiscarding(root)],
         ));
     }
 
+    /// Ask whether to close and reopen a library that has stopped answering, which loses
+    /// the edits it has not kept.
+    pub(crate) fn ask_stalled(&mut self) {
+        let mut ask = Ask::new(
+            "The library is not answering".to_string(),
+            Some(
+                "It has shown no sign of life for a minute. Close and reopen it to go on; \
+                 edits made since they were last kept are lost."
+                    .to_string(),
+            ),
+            Verb::Reopen,
+            vec![Act::ReopenLibrary],
+        );
+        ask.cancel = "Keep waiting";
+        self.raise(ask);
+    }
+
     /// Offer what to do with a slot's former occupant an interrupted write to the
     /// instrument left on this computer. Show the file is offered where the system can
     /// show it. A file that does not read is said to be no copy, and offered only to be
     /// discarded.
+    /// Ask what to do with a change another drawbar, of another computer or an earlier
+    /// install, left unfinished.
+    pub(crate) fn ask_unfinished(&mut self, orphan: toshokan::report::Orphan) {
+        use toshokan::log::Settlement;
+
+        const SHOWN: usize = 3;
+        let act = |how| vec![Act::Settle(orphan.clone(), how)];
+        let paths = crate::strings::quoted_some(&orphan.paths, SHOWN);
+        self.raise(Ask {
+            title: format!("Another drawbar left “{}” unfinished", orphan.label),
+            note: Some(format!(
+                "It was changing {}. Finish completes the change, Roll back puts the files \
+                 back as they were, and Leave as is stops asking.",
+                paths
+            )),
+            verb: Verb::Finish,
+            acts: act(Settlement::Finished),
+            others: vec![
+                ("Roll back", act(Settlement::RolledBack)),
+                ("Leave as is", act(Settlement::Dismissed)),
+            ],
+            cancel: "Later",
+            strong: Answer::Verb,
+        });
+    }
+
     pub(crate) fn ask_rescue(&mut self, rescue: Rescue) {
         let act = |what| vec![Act::Rescue(rescue.clone(), what)];
         let mut others = Vec::new();
@@ -855,82 +953,6 @@ impl Browser {
             },
         };
         self.raise(ask);
-    }
-
-    /// Say why a library whose index is missing opened read-only, keeping the `copies`
-    /// working copies it holds, and offer to open it without them. Putting the index back
-    /// is offered in words where the user can reach the library's files.
-    pub(crate) fn ask_unindexed(&mut self, copies: usize, reachable: bool) {
-        let back = match reachable {
-            true => format!(
-                " Put {} back from a backup and open the library again to get them back.",
-                crate::store::INDEX
-            ),
-            false => String::new(),
-        };
-        self.raise(Ask {
-            title: "This library lost the list of its unsaved edits".into(),
-            note: Some(format!(
-                "{} drawbar kept are still here, but the file that says which sounds they \
-                 belong to is missing, so the library stays read-only and keeps them.{back}",
-                edits(copies)
-            )),
-            verb: Verb::OpenWithout,
-            acts: vec![Act::DropUnindexed {
-                copies,
-                confirmed: false,
-            }],
-            others: Vec::new(),
-            cancel: "Keep read-only",
-            strong: Answer::Cancel,
-        });
-    }
-
-    /// Say why a library whose index does not read opened read-only, and offer to set the
-    /// index aside and open the library without it.
-    pub(crate) fn ask_damaged(&mut self) {
-        self.raise(Ask {
-            title: "This library's index is damaged".into(),
-            note: Some(
-                "drawbar cannot read the file that keeps this library's tags, where its \
-                 sounds came from, and which sounds its unsaved edits belong to, so the \
-                 library stays read-only."
-                    .into(),
-            ),
-            verb: Verb::SetAside,
-            acts: vec![Act::SetAside { confirmed: false }],
-            others: Vec::new(),
-            cancel: "Keep read-only",
-            strong: Answer::Cancel,
-        });
-    }
-
-    /// Ask before a library's damaged index is set aside.
-    pub(crate) fn ask_set_aside(&mut self) {
-        self.raise(Ask::new(
-            "Open the library without its index?".into(),
-            Some(
-                "Its sounds open without their tags, without where they came from, and \
-                 without their unsaved edits. The damaged index is kept, renamed, in the \
-                 library's hidden folder, and so are the unsaved edits."
-                    .into(),
-            ),
-            Verb::OpenWithoutIndex,
-            vec![Act::SetAside { confirmed: true }],
-        ));
-    }
-
-    /// Ask before a library's `copies` working copies with no index are deleted.
-    pub(crate) fn ask_drop_unindexed(&mut self, copies: usize) {
-        self.raise(Ask::new(
-            format!("Delete {}?", edits(copies)),
-            Some("They cannot be got back, and the library opens without them.".into()),
-            Verb::Delete,
-            vec![Act::DropUnindexed {
-                copies,
-                confirmed: true,
-            }],
-        ));
     }
 
     /// Ask before a slot's former occupant is deleted.
@@ -1085,14 +1107,6 @@ impl Browser {
             Verb::Delete,
             acts,
         ));
-    }
-}
-
-/// `copies` unsaved edits, in words.
-fn edits(copies: usize) -> String {
-    match copies {
-        1 => "1 unsaved edit".to_string(),
-        n => format!("{n} unsaved edits"),
     }
 }
 
@@ -1640,7 +1654,7 @@ mod tests {
         );
     }
 
-    /// Two assets given a new tag have that tag, and the third does not.
+    /// A new tag on two assets asks the library to tag those two, and not the third.
     #[test]
     fn a_tag_put_on_a_multi_selection_is_on_exactly_those_assets() {
         let mut bench = Bench::new();
@@ -1657,8 +1671,26 @@ mod tests {
         let Some(Item::Tag(tag)) = bench.browser.rename.as_ref().map(|r| r.what) else {
             panic!("a new tag opens its editor");
         };
-        assert!(bench.browser.tags.on_all(&ids[..2], tag));
-        assert!(!bench.browser.tags.worn(ids[2]).contains(&tag));
+        assert_eq!(
+            bench.browser.take_tag_asks(),
+            [],
+            "the name is chosen first"
+        );
+        bench.act(vec![Act::RenameTag {
+            id: tag,
+            name: "Sunday".into(),
+        }]);
+        bench.browser.rename = None;
+        let assets = ids[..2].to_vec();
+        assert_eq!(
+            bench.browser.take_tag_asks(),
+            [crate::tags::Asked::Tag {
+                assets,
+                name: "Sunday".into(),
+                make: true
+            }],
+            "made, named and put on in one change"
+        );
     }
 
     /// The question's verb runs what was asked, Cancel and Escape run nothing, and each
@@ -1746,9 +1778,9 @@ mod tests {
         assert!(bench.shell.browser_open, "the browser is open");
     }
 
-    /// ⚠️ A view is the only copy of its bytes and the store skips it, so a tag on a view
-    /// would be lost with its tab. Tagging keeps it on this computer first, and the log
-    /// says so.
+    /// ⚠️ A view is the only copy of its bytes and the library tags files, so a tag on a
+    /// view would be lost with its tab. Tagging keeps it on this computer first, and the
+    /// log says so.
     #[test]
     fn tagging_a_view_keeps_it_on_this_computer_first_and_says_so() {
         use crate::workspace::Origin;
@@ -1765,11 +1797,20 @@ mod tests {
             &mut bench.log,
         );
         let tag = bench.browser.tags.make("Sunday").unwrap();
+        bench.browser.tags.take_asked();
         assert!(bench.workspace.is_view(id));
 
         bench.act(vec![Act::Tag { ids: vec![id], tag }]);
         assert!(!bench.workspace.is_view(id), "it is kept on this computer");
-        assert!(bench.browser.tags.worn(id).contains(&tag));
+        let name = "Sunday".to_string();
+        assert_eq!(
+            bench.browser.tags.take_asked(),
+            [crate::tags::Asked::Tag {
+                assets: vec![id],
+                name,
+                make: false
+            }]
+        );
         let said = bench.log.transcript();
         assert!(said.contains("Kept a copy on this computer"), "{said}");
     }

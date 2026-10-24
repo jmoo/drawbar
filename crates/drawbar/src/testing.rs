@@ -56,10 +56,28 @@ impl Temp {
     }
 }
 
+/// The backend over the library in `root`, with this install's own state for it beside
+/// the library, as drawbar's own data is.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn backend(ctx: &egui::Context, root: &Temp) -> crate::store::Backend {
+    crate::store::Backend::start(ctx, root.0.clone(), root.local())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Temp {
+    /// This install's own state for the library in this folder: beside it, never in it.
+    pub fn local(&self) -> PathBuf {
+        let mut name = self.0.clone().into_os_string();
+        name.push(".local");
+        PathBuf::from(name)
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for Temp {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+        let _ = fs::remove_dir_all(self.local());
     }
 }
 

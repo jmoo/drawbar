@@ -140,6 +140,8 @@ pub(super) enum Line {
         depth: usize,
     },
     State(State),
+    /// The changes the library keeps apart, while it keeps any.
+    Kept,
     Kind(Kind),
     Tag(u64),
     NewTag,
@@ -156,6 +158,7 @@ impl Line {
             Line::Computer
             | Line::Instrument
             | Line::State(_)
+            | Line::Kept
             | Line::Kind(_)
             | Line::Tag(_)
             | Line::NewTag => super::row::ROW,
@@ -200,6 +203,7 @@ impl Line {
                 egui::Id::new(("slot", class.to_raw(), at.bank, at.slot))
             }
             Line::State(state) => egui::Id::new(("state", state.title())),
+            Line::Kept => egui::Id::new("kept apart"),
             Line::Kind(kind) => egui::Id::new(("kind", Kind::ALL.iter().position(|k| *k == kind))),
             Line::Tag(id) => egui::Id::new(("tag", id)),
             Line::NewTag => egui::Id::new("new tag"),
@@ -768,6 +772,9 @@ impl Browser {
                     below.push(Line::State(state));
                 }
             }
+            if !self.folders.kept.is_empty() {
+                below.push(Line::Kept);
+            }
         }
         below.push(Line::End(Section::Places));
         let kinds = kinds_present(workspace, &device.state);
@@ -990,6 +997,7 @@ impl Browser {
                 };
                 state_row(ui, state, count, filter, acts);
             }
+            Line::Kept => kept_row(ui, self.folders.kept.len(), acts),
             Line::Kind(kind) => self.kind_row(ui, kind, workspace, device, filter, acts),
             Line::Tag(id) => self.tag_row(ui, id, workspace, device, filter, acts),
             Line::NewTag => new_tag_row(ui, acts),
@@ -1187,16 +1195,13 @@ impl Browser {
             .count()
     }
 
-    /// An index row whose file is gone, for an asset this app does not hold. It keeps
-    /// something the file alone would not give back, until the user lets it go.
+    /// An asset whose file is gone, which this app does not hold. It keeps something the
+    /// file alone would not give back, until the user lets it go.
     fn lost_row(&mut self, ui: &mut egui::Ui, id: u64, acts: &mut Vec<Act>) {
         let Some(lost) = self.folders.lost().iter().find(|lost| lost.id == id) else {
             return;
         };
-        let name = match &lost.row.path {
-            Some(path) => path.to_string(),
-            None => lost.row.name.clone(),
-        };
+        let name = lost.path.to_string();
         let drawn = row(
             ui,
             false,
@@ -1916,6 +1921,27 @@ fn state_row(ui: &mut egui::Ui, state: State, count: usize, filter: &Filter, act
     );
     if drawn.response.on_hover_text(state.sentence()).clicked() {
         narrow(acts, asked);
+    }
+}
+
+/// What the Kept apart row says on hover.
+const KEPT: &str = "Changes kept apart from the library: take them or dismiss them";
+
+fn kept_row(ui: &mut egui::Ui, runs: usize, acts: &mut Vec<Act>) {
+    let drawn = row(
+        ui,
+        false,
+        &Cells {
+            indent: indent(0, false),
+            glyph: Some(Glyph::FolderGit2),
+            name: "Kept apart",
+            dot: Some((crate::app::warn(ui.visuals()), KEPT)),
+            count: Some(runs.to_string()),
+            ..Cells::default()
+        },
+    );
+    if drawn.response.on_hover_text(KEPT).clicked() {
+        acts.push(Act::ShowKept);
     }
 }
 
