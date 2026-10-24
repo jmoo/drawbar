@@ -1019,7 +1019,8 @@ Each instance undoes only the intents it committed since it opened, most recent
 first, by committing a compensating intent. A redo reverses the latest undo
 while the instance has committed nothing else since. Undo history is not logged:
 it ends when the instance closes. Each intent is kept with what it replaced, as
-the merged state showed it when it committed.
+the merged state showed it when it committed. An intent that only dismisses runs
+is final: it is not kept, so an undo after it reverses the intent before it.
 
 - A register write is reversed by writing back the latest value it replaced,
   another writer's included; a clear where there was none.

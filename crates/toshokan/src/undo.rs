@@ -141,7 +141,8 @@ impl History {
     /// `logged`, committed over what `before` says it replaced. An intent
     /// reversing the latest done intent is its undo; one reversing the latest
     /// undo is a redo, which the next undo reverses. Any other intent starts a
-    /// new item and ends every redo.
+    /// new item and ends every redo. An intent that only dismisses runs is
+    /// final, and joins no item.
     pub fn push(
         &mut self,
         entry: &Entry,
@@ -149,6 +150,10 @@ impl History {
         reverses: Option<EntryHash>,
         before: Before,
     ) {
+        let dismisses = |op: &Op| matches!(op, Op::Dismiss { .. });
+        if !logged.ops.is_empty() && logged.ops.iter().all(dismisses) {
+            return;
+        }
         let label = logged.label.clone();
         let hash = entry.hash();
         self.kept.insert(hash, (logged, before));

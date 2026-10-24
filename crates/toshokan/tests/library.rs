@@ -17,7 +17,7 @@ use toshokan::intent::{Driver, Intent};
 use toshokan::io::{Capabilities, Range};
 use toshokan::layout::SEGMENT_EXTENSION;
 use toshokan::line::MAX_LINE;
-use toshokan::log::{Entry, EntryKind, FileFact, Genesis, Logged, Op, Settlement};
+use toshokan::log::{Entry, EntryKind, FileFact, Genesis, Logged, Op, Run, Settlement};
 use toshokan::plan::FactChange;
 use toshokan::reader::{CachedView, GRACE_MS};
 use toshokan::report::{
@@ -589,6 +589,7 @@ through_both!(
     a_refresh_scans_only_the_files_other_writers_moved,
     a_conflict_is_shown_and_resolved,
     a_clone_forks_into_items_taken_or_dismissed,
+    undo_after_a_dismissal_undoes_the_change_before_it,
     more_files_than_one_line_holds_move_and_undo_as_one_change,
     an_append_torn_after_its_intent_logs_the_rest_at_the_next_open,
     a_retired_writers_trash_is_still_listed,
@@ -1597,6 +1598,44 @@ fn an_append_torn_after_its_intent_logs_the_rest_at_the_next_open<F: Facade>() {
         fresh_files, TORN_FILES,
         "another reader holds every file op"
     );
+}
+
+fn undo_after_a_dismissal_undoes_the_change_before_it<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    a.close().unwrap();
+    let there = here.cloned();
+    let (mut original, _) = F::open(Probe::new(&here), env("a", 2, &clock)).unwrap();
+    let (mut clone, _) = F::open(Probe::new(&there), env("a", 3, &clock)).unwrap();
+    for (library, text) in [(&mut original, "here"), (&mut clone, "there")] {
+        library
+            .commit("Tag", |i| i.add(song, TAGS, tag(text)))
+            .unwrap();
+    }
+    original.refresh().unwrap();
+    original
+        .commit("Tag", |i| i.add(song, TAGS, tag("later")))
+        .unwrap();
+    let runs: Vec<Run> = original
+        .view()
+        .items()
+        .iter()
+        .map(|item| item.run)
+        .collect();
+    assert_eq!(runs.len(), 2, "one item per branch");
+    original
+        .commit("Dismiss", |i| runs.iter().fold(i, |i, run| i.dismiss(*run)))
+        .unwrap();
+    original.undo().unwrap();
+    assert_eq!(
+        tags(&original.view(), song),
+        ["new"],
+        "the tag before is undone"
+    );
+    assert_eq!(original.view().items(), [], "the dismissal stands");
 }
 
 fn a_clone_forks_into_items_taken_or_dismissed<F: Facade>() {
