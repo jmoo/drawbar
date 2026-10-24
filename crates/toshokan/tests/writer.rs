@@ -455,6 +455,59 @@ fn a_writer_whose_replaced_segment_survives_in_a_copy_appends_to_a_new_segment()
     assert_eq!(view.writers[&id].predecessor(next[0]), Some(head));
 }
 
+/// A writer whose open segment a sync client cut short, or took, while a copy of
+/// it holds the head: it appends to a new segment after the head.
+fn appends_after_a_copy(cut: impl Fn(&MemDisk, &toshokan::RelPath, &[u8])) {
+    let mut instance = Instance::open(machine(), 1);
+    instance.write("a1").unwrap();
+    let head = *instance.write("a2").unwrap().last().unwrap();
+    let id = instance.id();
+    let folder = instance.machine.folder.clone();
+    let (path, whole) = folder
+        .files(Root::Folder)
+        .into_iter()
+        .find(|(path, _)| path.as_str().ends_with(SEGMENT_EXTENSION))
+        .expect("the open segment");
+    let copy = layout()
+        .writer(id)
+        .join(&format!("copy{SEGMENT_EXTENSION}"))
+        .unwrap();
+    folder
+        .perform(toshokan::Io::Create {
+            root: Root::Folder,
+            path: copy,
+            bytes: whole.clone(),
+        })
+        .unwrap();
+    cut(&folder, &path, &whole);
+    let next = instance.write("a3").unwrap();
+    let view = fresh(&instance.machine.folder);
+    assert_eq!(view.writers[&id].predecessor(next[0]), Some(head));
+}
+
+#[test]
+fn a_writer_whose_open_segment_was_cut_short_appends_after_a_copy_holding_its_head() {
+    appends_after_a_copy(|folder, path, whole| {
+        let first = whole.iter().position(|&b| b == b'\n').unwrap() + 1;
+        restore(
+            folder,
+            BTreeMap::from([(path.clone(), whole[..first].to_vec())]),
+        );
+    });
+}
+
+#[test]
+fn a_writer_whose_open_segment_is_gone_appends_after_a_copy_holding_its_head() {
+    appends_after_a_copy(|folder, path, _| {
+        folder
+            .perform(toshokan::Io::Remove {
+                root: Root::Folder,
+                path: path.clone(),
+            })
+            .unwrap();
+    });
+}
+
 /// Puts back each of `files` as it was.
 fn restore(disk: &MemDisk, files: BTreeMap<toshokan::RelPath, Vec<u8>>) {
     for (path, bytes) in files {
