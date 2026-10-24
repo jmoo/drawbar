@@ -72,11 +72,11 @@ connected instrument. **Revert** goes back to the last save.
 Unsaved edits are kept when you quit: those of sounds in your library, and those
 of a sound you were viewing in a slot of the instrument. A slot's edits come
 back when you view that slot of the same instrument again with the same library
-open; if the slot changed since, drawbar asks which to keep. drawbar also keeps edits every
-few seconds, so after a crash you may lose the last few seconds. In the browser,
-closing the tab before drawbar has kept your latest edit makes the browser ask
-whether to leave. Stay a moment, and the edit is kept. A read-only library keeps
-no unsaved edits.
+open; if the slot changed since, drawbar asks which to keep. drawbar also keeps
+edits every few seconds, so after a crash you may lose the last few seconds. In
+the browser, closing the tab before drawbar has kept your latest edit makes the
+browser ask whether to leave. Stay a moment, and the edit is kept. A read-only
+library keeps no unsaved edits.
 
 ## Undo
 
@@ -88,8 +88,8 @@ cannot be undone. The menu says which change it is, such as **Undo Rename
 removed folder, and a change to tags can each be undone. One action is one
 step: dropping, moving or deleting several sounds at once, unpacking a bundle,
 writing over a sound, removing a folder with what is in it, or making a tag and
-naming it, is one undo. An edit
-you have not saved is taken back with **Revert** instead.
+naming it, is one undo. An edit you have not saved is taken back with **Revert**
+instead.
 
 Deleting a sound, or saving over one, moves the old file into drawbar's trash in
 the hidden folder, where Undo finds it. The trash holds at most 1 GiB; past
@@ -214,14 +214,14 @@ bring back any you deleted.
   them for a day, in case a sync has not brought them yet. After that, and once
   drawbar has looked at every file again, it shows the folder as it is.
 - **Missing.** The file was deleted outside drawbar, but it had tags or unsaved
-  edits, or came from your keyboard. Save it to bring the file back, or delete it.
-  After a restart, a missing file with tags shows as lost, with its tags, until
-  you let it go.
+  edits, or came from your keyboard. Save it to bring the file back, or delete
+  it. After a restart, a missing file with tags shows as lost, with its tags,
+  until you let it go.
 - **A write to the instrument left a file.** If drawbar stopped, or could not
   put the old sound back, while it replaced a sound on your keyboard, the sound
-  that was there may now be only on this computer. drawbar offers it when the library opens: **Keep in
-  library** adds it to your sounds so you can send it back, **Show the file**
-  shows where it is, and **Discard** deletes it. A file that does not read is
+  that was there may now be only on this computer. drawbar offers it when the
+  library opens: **Keep in library** adds it to your sounds so you can send it
+  back, **Show the file** shows where it is, and **Discard** deletes it. A file that does not read is
   not a copy of the sound, and drawbar offers only to discard it.
 - **Differs only by case.** Two names in one folder differ only in upper and
   lower case, such as `Pad.ne5p` and `pad.ne5p`. macOS and Windows hold only one

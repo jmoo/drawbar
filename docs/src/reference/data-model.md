@@ -707,15 +707,13 @@ as a lost row, with its tags, until the user forgets it.
 
 ### Kept apart
 
-**Kept apart** is the user's name for toshokan's items, and one card is one item:
-most often a *run*, which the user sees as a branch, the entries of a writer
-after the point where its history forked, as when two installs went on from one
-copy of drawbar's own data.
-
-toshokan shows apart from the merged state what it cannot place in a writer's
-single history (`View::items`): a branch of a writer two installs continued, entries
-whose predecessor has not synced, and lines of a segment shorter than a snapshot
-certified it. Every view the store sends carries them as `Viewed::kept`, each a
+**Kept apart** is the user's name for toshokan's items, and one card is one item
+(`View::items`): what toshokan cannot place in a writer's single history and
+shows apart from the merged state. Most often it is a *run*, which the user sees
+as a branch: the entries of a writer after the point where its history forked, as
+when two installs went on from one copy of drawbar's own data. The others are
+entries whose predecessor has not synced, and lines of a segment shorter than a
+snapshot certified it. Every view the store sends carries them as `Viewed::kept`, each a
 `KeptApart` naming its run, and drawbar lists them in **Kept apart**
 (`Folders::kept`), logging each run once. A card lists a row per change the user
 would tell apart (`kept_rows`): a tag's entry in the list of tags only where no

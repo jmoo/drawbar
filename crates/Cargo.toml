@@ -12,7 +12,7 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "BSD-3-Clause"
-# `u64::is_multiple_of` and friends.
+# `File::try_lock`, which toshokan's writer lock takes.
 rust-version = "1.89"
 repository = "https://github.com/jmoo/drawbar"
 
