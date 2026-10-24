@@ -748,7 +748,10 @@ included.
 
 A tree move logs a `tree` op, and a `file` op for each entity whose file it
 moves; the files under it no entity is bound to have no facts, and it logs no
-`path` op for them. A commit reports each tree it moved. Undo moves the tree back
+`path` op for them. A commit reports each tree it moved, and each directory
+it was to remove that the folder still holds: moving file by file, it moves
+only the files the last scan listed, and a file put there since keeps its
+directory. Undo moves the tree back
 as a tree move of its own, with a precondition on the identity of each entity's
 file the move carried, in place of renaming each file back: a single `rename`
 where directories rename, file by file elsewhere, which then removes each

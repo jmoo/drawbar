@@ -265,6 +265,10 @@ pub struct Committed {
     pub paths: Vec<PathChange>,
     /// Each tree it moved, from and to, in order.
     pub trees: Vec<(RelPath, RelPath)>,
+    /// Each directory it was to remove that the folder still holds, as one a
+    /// file it did not know of keeps, where moving a tree moves its files one
+    /// by one.
+    pub left: Vec<RelPath>,
     /// ⚠️ Whether this instance's own state caught up with the commit. While it
     /// is [`Local::Behind`], a crash followed by a restore of the folder that
     /// takes the commit's entries can take them from this install's view too.

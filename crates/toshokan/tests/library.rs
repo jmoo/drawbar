@@ -591,6 +591,7 @@ through_both!(
     a_clone_forks_into_items_taken_or_dismissed,
     more_files_than_one_line_holds_move_and_undo_as_one_change,
     an_append_torn_after_its_intent_logs_the_rest_at_the_next_open,
+    a_tree_moved_file_by_file_names_the_directories_a_file_it_did_not_know_keeps,
     an_entry_of_a_copied_instance_does_not_close_another_instances_record,
     an_unfinished_effect_of_a_writer_that_retires_stays_this_installs,
     a_commit_whose_entry_did_not_sync_keeps_its_record_through_tidying,
@@ -1501,6 +1502,30 @@ fn an_entry_of_a_copied_instance_does_not_close_another_instances_record<F: Faca
         from,
         [path("song.npno")],
         "an entry names the displaced bytes"
+    );
+}
+
+fn a_tree_moved_file_by_file_names_the_directories_a_file_it_did_not_know_keeps<F: Facade>() {
+    let folder = MemDisk::with_capabilities(
+        Capabilities {
+            rename_dir: false,
+            ..Capabilities::ALL
+        },
+        Capabilities::ALL,
+    );
+    put(&folder, "old/a.wav", b"a");
+    put(&folder, "old/sub/b.wav", b"b");
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    put(&folder, "old/late.wav", b"late");
+    let moved = a
+        .commit("Rename", |i| i.move_tree(&path("old"), &path("new")))
+        .unwrap();
+    assert_eq!(
+        moved.left,
+        [path("old")],
+        "old/sub went, old keeps late.wav"
     );
 }
 

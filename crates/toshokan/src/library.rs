@@ -2385,10 +2385,11 @@ fn commit<'a>(
             library.reversing = reverses;
             transact(library, logged, effects, None, pins.collect())
         })
-        .and_then(move |(library, entries, outcome)| {
+        .and_then(move |(library, entries, ended)| {
             library.reversing = None;
+            let Ended { outcome, left } = ended;
             match committed(shown, &entries, created, outcome, library.local()) {
-                Ok(committed) => ok((library, committed)),
+                Ok(committed) => ok((library, Committed { left, ..committed })),
                 Err(partial) => Flow::Done(Err(Error::Partial(partial))),
             }
         })
@@ -2429,6 +2430,7 @@ fn committed(
         paths: paths.collect(),
         trees: trees.collect(),
         local,
+        left: Vec::new(),
     };
     match outcome {
         Outcome::Complete => Ok(committed),
@@ -2873,6 +2875,13 @@ fn close(mut logged: Logged, closing: Option<Closing>) -> (Logged, Option<Settle
     (logged, Some(settle))
 }
 
+/// How a commit's effects ended: whether they all ran, and the directories the
+/// folder still holds that they were to remove.
+struct Ended {
+    outcome: Outcome,
+    left: Vec<RelPath>,
+}
+
 /// Logs `logged`, carrying out `effects` under a pending record when there are
 /// any, closed by `closing` only when they complete, and followed by `bind`
 /// entries pinning `pins`. Returns the entries, the intent's first, and how the
@@ -2884,7 +2893,7 @@ fn transact<'a>(
     effects: Rc<EffectPlan>,
     closing: Option<Closing>,
     pins: Vec<Op>,
-) -> Fallible<'a, (&'a mut Library, Vec<Entry>, Outcome)> {
+) -> Fallible<'a, (&'a mut Library, Vec<Entry>, Ended)> {
     if effects.is_empty() {
         let mut kinds = closed(logged, closing);
         kinds.extend(bound(pins));
@@ -2894,7 +2903,11 @@ fn transact<'a>(
             })
             .map_ok(|(library, entries)| {
                 library.show();
-                (library, entries, Outcome::Complete)
+                let ended = Ended {
+                    outcome: Outcome::Complete,
+                    left: Vec::new(),
+                };
+                (library, entries, ended)
             });
     }
     let mut logged = logged;
@@ -2975,7 +2988,7 @@ fn log_effects<'a>(
     applied: Applied,
     closing: Option<Closing>,
     pins: Vec<Op>,
-) -> Fallible<'a, (&'a mut Library, Vec<Entry>, Outcome)> {
+) -> Fallible<'a, (&'a mut Library, Vec<Entry>, Ended)> {
     let (name, journaled) = (effects.record, effects.moves_files());
     let file_ops = library.file_ops(&applied, &record.files);
     let outcome = applied.outcome;
@@ -3002,7 +3015,11 @@ fn log_effects<'a>(
         };
         rescan_paths(library, touched).map_ok(move |library| {
             library.show();
-            (library, entries, outcome)
+            let ended = Ended {
+                outcome,
+                left: applied.left,
+            };
+            (library, entries, ended)
         })
     })
 }
@@ -3047,6 +3064,7 @@ fn settle_orphan(
                     };
                     let closing = Closing { facts, settle };
                     transact(library, logged, effects, Some(closing), Vec::new())
+                        .map_ok(|(library, entries, ended)| (library, entries, ended.outcome))
                 }
             },
         )
