@@ -13,7 +13,7 @@ use toshokan::log::FileFact;
 use toshokan::plan::{Content, Expect, FileChange};
 use toshokan::reader::{CachedView, Reader};
 use toshokan::report::TrashItem;
-use toshokan::trash::{self, Policy};
+use toshokan::trash;
 use toshokan::{EntityId, EntryHash, Hlc, Io, MemDisk, Nonce, Register, RelPath, Root, Schema};
 
 /// Each request's kind and the path it names.
@@ -151,13 +151,21 @@ fn a_trash_is_listed_in_one_request_and_emptied_with_one_sync() {
     assert!(listed.iter().all(|item| item.len == 5));
     let dir = layout().trash_dir(WRITER);
     assert_eq!(shapes(&d.take()), [shape("ListStat", dir.as_str())]);
-    let none = Policy {
-        max_age_ms: 0,
-        max_bytes: 0,
-    };
-    let emptied = blocking::run(&mut d, trash::empty(&layout(), WRITER, listed, none, 1)).unwrap();
+    let emptied = blocking::run(
+        &mut d,
+        trash::empty(
+            &layout(),
+            WRITER,
+            listed,
+            Default::default(),
+            Default::default(),
+        ),
+    )
+    .unwrap();
     assert_eq!(emptied.removed.len(), 4);
-    let mut expected: Vec<_> = paths.iter().map(|at| shape("Remove", at)).collect();
+    let pending = layout().pending_dir(WRITER);
+    let mut expected = vec![shape("List", pending.as_str())];
+    expected.extend(paths.iter().map(|at| shape("Remove", at)));
     expected.push(shape("Sync", dir.as_str()));
     assert_eq!(shapes(&d.take()), expected);
 }

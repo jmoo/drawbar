@@ -49,7 +49,7 @@ use crate::report::{
     WriterInfo,
 };
 use crate::schema::Schema;
-use crate::trash::{self, Policy};
+use crate::trash;
 use crate::undo::{self, Before, History};
 use crate::view::{FileRef, FileState, Listed, Parts, View};
 use crate::writer::{self, Claimed, Picked, Writer};
@@ -642,9 +642,11 @@ impl Library {
             .task()
     }
 
-    /// Removes from this writer's trash what `policy` does not keep: the only way
-    /// bytes leave the folder.
-    pub fn empty_trash(&mut self, policy: Policy) -> Task<'_, Result<Emptied>> {
+    /// Removes from this writer's trash every item but those of `kept` and those a
+    /// pending record of its names, which settling may still move: the only way bytes
+    /// leave the folder. An undo that needs a removed item is refused with
+    /// [`Refusal::Emptied`].
+    pub fn empty_trash(&mut self, kept: BTreeSet<Nonce>) -> Task<'_, Result<Emptied>> {
         if let Err(error) = self.writable() {
             return Task::ready(Err(error));
         }
@@ -652,29 +654,10 @@ impl Library {
             return Task::ready(Ok(Emptied::default()));
         };
         let listed = trash::list(&self.layout, writer, self.folded.trash(writer));
+        let spent = self.spent.keys().copied().collect();
         flow::run(listed)
             .and_then(move |items| {
-                let now = self.env.now_ms();
-                flow::run(trash::empty(&self.layout, writer, items, policy, now))
-            })
-            .task()
-    }
-
-    /// Removes from this writer's trash the items of `items` it holds: those the app
-    /// knows no undo will need, as at the end of a session whose undo ends with it.
-    /// An undo that needs one is refused with [`Refusal::Emptied`].
-    pub fn remove_trash(&mut self, items: Vec<Nonce>) -> Task<'_, Result<Emptied>> {
-        if let Err(error) = self.writable() {
-            return Task::ready(Err(error));
-        }
-        let Some(writer) = self.writer.as_ref().map(Writer::id) else {
-            return Task::ready(Ok(Emptied::default()));
-        };
-        let listed = trash::list(&self.layout, writer, self.folded.trash(writer));
-        flow::run(listed)
-            .and_then(move |held| {
-                let removed = held.into_iter().filter(|held| items.contains(&held.item));
-                flow::run(trash::remove(&self.layout, writer, removed.collect()))
+                flow::run(trash::empty(&self.layout, writer, items, kept, spent))
             })
             .task()
     }

@@ -6,6 +6,8 @@ mod native;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::Native;
 
+use std::collections::BTreeSet;
+
 use crate::disk::MemDisk;
 use crate::drafts::{Draft, Drafted};
 use crate::env::Env;
@@ -23,7 +25,6 @@ use crate::report::{
     WriterInfo,
 };
 use crate::schema::Schema;
-use crate::trash::Policy;
 use crate::view::View;
 
 /// Storage that performs requests as they come, the batched ones included.
@@ -266,12 +267,8 @@ impl<B: Backend> Library<B> {
         run(&mut self.backend, self.core.trash())
     }
 
-    pub fn empty_trash(&mut self, policy: Policy) -> Result<Emptied> {
-        run(&mut self.backend, self.core.empty_trash(policy))
-    }
-
-    pub fn remove_trash(&mut self, items: Vec<Nonce>) -> Result<Emptied> {
-        run(&mut self.backend, self.core.remove_trash(items))
+    pub fn empty_trash(&mut self, kept: BTreeSet<Nonce>) -> Result<Emptied> {
+        run(&mut self.backend, self.core.empty_trash(kept))
     }
 
     /// Removes the pending records this writer's commits left once their entries
