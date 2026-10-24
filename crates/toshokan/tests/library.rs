@@ -6505,6 +6505,15 @@ fn a_crash_in_compaction_tears_a_snapshot_only_where_the_folder_cannot_rename<F:
             });
             next.unwrap_or_else(|e| panic!("{shown}: {e}"));
             assert_eq!(staged(&disk), [] as [RelPath; 0], "{shown}");
+            a.compact().unwrap_or_else(|e| panic!("{shown}: {e}"));
+            drop(a);
+            let (_, opened) = F::open(Probe::new(&one_disk(&disk)), env("a", 4, &clock))
+                .unwrap_or_else(|e| panic!("{shown}: {e}"));
+            assert_eq!(
+                opened.unreadable,
+                [],
+                "{shown}: the next compaction removes it"
+            );
             tidied += 1;
         },
     );

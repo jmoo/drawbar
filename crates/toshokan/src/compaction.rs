@@ -420,6 +420,8 @@ impl Doomed {
                     let Some(last) = segment.entries.last() else {
                         continue;
                     };
+                    // A sync client's copy of a sealed segment is the one file
+                    // deleted here the writer did not write itself.
                     let sealed = segment.sealed || Some(path) == open;
                     let whole = certified_prefix(&segment.entries, Some(new), &BTreeSet::new())
                         == segment.entries.len();
@@ -431,7 +433,17 @@ impl Doomed {
                         });
                     }
                 }
-                WriterFile::Unreadable => {}
+                // A snapshot of its own directory that does not read is one a
+                // crash tore as this writer wrote it in place: the new snapshot
+                // holds all it would have.
+                WriterFile::Unreadable => {
+                    let torn = path
+                        .name()
+                        .is_some_and(|name| name.starts_with("snapshot-"));
+                    if let Some(stamp) = stamp.filter(|_| torn) {
+                        snapshots.push((path.clone(), stamp.len));
+                    }
+                }
             }
         }
         Self {
