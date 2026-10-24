@@ -769,11 +769,6 @@ impl Folded {
         &self.settled
     }
 
-    /// Whether some writer settled `writer`'s unfinished effect `record`.
-    pub fn settled(&self, writer: WriterId, record: Nonce) -> bool {
-        self.settled.contains(&(writer, record))
-    }
-
     /// Entries and ops this build does not know, with the entry that holds each.
     pub fn unknown(&self) -> impl Iterator<Item = &(EntryHash, Raw)> {
         self.unknown.iter()

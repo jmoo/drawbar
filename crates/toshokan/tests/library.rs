@@ -589,6 +589,8 @@ through_both!(
     a_refresh_scans_only_the_files_other_writers_moved,
     a_conflict_is_shown_and_resolved,
     a_clone_forks_into_items_taken_or_dismissed,
+    a_rename_on_a_branch_kept_apart_is_that_branchs_not_an_orphan,
+    a_settlement_on_a_branch_kept_apart_is_not_offered_again,
     undo_after_a_dismissal_undoes_the_change_before_it,
     more_files_than_one_line_holds_move_and_undo_as_one_change,
     an_append_torn_after_its_intent_logs_the_rest_at_the_next_open,
@@ -1636,6 +1638,84 @@ fn undo_after_a_dismissal_undoes_the_change_before_it<F: Facade>() {
         "the tag before is undone"
     );
     assert_eq!(original.view().items(), [], "the dismissal stands");
+}
+
+fn a_rename_on_a_branch_kept_apart_is_that_branchs_not_an_orphan<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    a.close().unwrap();
+    let there = here.cloned();
+    let (mut original, _) = F::open(Probe::new(&here), env("a", 2, &clock)).unwrap();
+    let (mut clone, _) = F::open(Probe::new(&there), env("a", 3, &clock)).unwrap();
+    original
+        .commit("Tag", |i| i.add(song, TAGS, tag("here")))
+        .unwrap();
+    clone
+        .commit("Rename", |i| {
+            i.rename(song, &path("moved.npno"), Expect::Holds(identity(b"song")))
+        })
+        .unwrap();
+    drop(clone);
+    let refreshed = original.refresh().unwrap();
+    assert!(refreshed.retired.is_some(), "the fork retires the writer");
+    assert_eq!(refreshed.orphaned, [], "the branch's own intent closed it");
+    let view = original.view();
+    let moved = view.items().iter().any(|item| {
+        item.changes
+            .iter()
+            .any(|change| change.entity == song && change.what == What::File)
+    });
+    assert!(moved, "the rename is the branch's item: {:?}", view.items());
+}
+
+fn a_settlement_on_a_branch_kept_apart_is_not_offered_again<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    put(&folder, "a.wav", b"a");
+    let probe = Probe::new(&machine(&folder));
+    let (mut theirs, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    theirs.rescan().unwrap();
+    theirs
+        .commit("Tag", |i| i.create(|e| _ = e.add(TAGS, tag("there"))).0)
+        .unwrap();
+    let first_step = |io: &Io| matches!(io, Io::Rename { from, .. } if from.as_str() == "a.wav");
+    let logging = |io: &Io| io.root() == Root::Folder && io.path().as_str().ends_with(".txt");
+    fail(&probe, move |io| {
+        io.mutates() && (first_step(io) || logging(io))
+    });
+    let stopped = theirs.commit("Rename", |i| {
+        i.rename_file(
+            &path("a.wav"),
+            &path("b.wav"),
+            Expect::Holds(identity(b"a")),
+        )
+    });
+    heal(&probe);
+    assert!(stopped.is_err(), "{stopped:?}");
+    drop(theirs);
+
+    let here = machine(&folder);
+    let (mut b, _) = F::open(Probe::new(&here), env("b", 2, &clock)).unwrap();
+    b.commit("Tag", |i| i.create(|e| _ = e.add(TAGS, tag("b"))).0)
+        .unwrap();
+    b.close().unwrap();
+    let there = here.cloned();
+    let (mut original, _) = F::open(Probe::new(&here), env("b", 3, &clock)).unwrap();
+    let (mut clone, opened) = F::open(Probe::new(&there), env("b", 4, &clock)).unwrap();
+    let [orphan] = opened.orphaned.as_slice() else {
+        panic!("one orphan: {:?}", opened.orphaned);
+    };
+    clone.settle(orphan.clone(), Settlement::Finished).unwrap();
+    drop(clone);
+    original
+        .commit("Tag", |i| i.create(|e| _ = e.add(TAGS, tag("here"))).0)
+        .unwrap();
+    let refreshed = original.refresh().unwrap();
+    assert!(refreshed.retired.is_some(), "the fork retires the writer");
+    assert_eq!(refreshed.orphaned, [], "the branch's settle closed it");
 }
 
 fn a_clone_forks_into_items_taken_or_dismissed<F: Facade>() {

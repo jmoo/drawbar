@@ -833,7 +833,7 @@ impl Library {
         own != Some(theirs.writer)
             && theirs.is_confined(&self.layout)
             && recovery::Chain::holds(placed, theirs.after())
-            && !self.folded.settled(theirs.writer, name)
+            && !self.closed_records().contains(&(theirs.writer, name))
     }
 
     fn writable(&self) -> Result<()> {
@@ -1137,6 +1137,32 @@ impl Library {
             moved.extend(self.fact_paths(entity, was.as_deref()));
         }
         moved
+    }
+
+    /// The pending records a placed entry closes, in the merged state or on a
+    /// branch shown apart as its own item.
+    fn closed_records(&self) -> BTreeSet<(WriterId, Nonce)> {
+        let mut closed = self.folded.settlements().clone();
+        for (writer, placed) in &self.reader.derived().writers {
+            for tip in &placed.tips {
+                closed.extend(tip.state.settled.iter().copied());
+            }
+            for entry in placed.runs.iter().chain(&placed.gaps) {
+                match entry.kind() {
+                    EntryKind::Intent(Logged {
+                        record: Some(record),
+                        ..
+                    }) => {
+                        closed.insert((*writer, record));
+                    }
+                    EntryKind::Settle(settle) => {
+                        closed.insert((settle.writer, settle.record));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        closed
     }
 
     /// This instance's writer, when the reader finds its history forked.
@@ -1923,7 +1949,7 @@ fn recover(library: Library) -> Fallible<'static, Library> {
     flow::run(recovery::read(&library.layout, writers)).and_then(move |found| {
         let mut library = library;
         let own = library.writer.as_ref().map(Writer::id);
-        let settled = library.folded.settlements().clone();
+        let settled = library.closed_records();
         let chains = &library.reader.derived().writers;
         let (assessed, open) = recovery::classify(&library.layout, own, chains, &settled, found);
         flow::run(recovery::predict(
@@ -1958,7 +1984,7 @@ fn reorphaned(library: &mut Library) -> Fallible<'_, &mut Library> {
             })
             .collect();
         let own = library.writer.as_ref().map(Writer::id);
-        let settled = library.folded.settlements().clone();
+        let settled = library.closed_records();
         let (assessed, _) = recovery::classify(
             &library.layout,
             own,
@@ -2047,7 +2073,8 @@ fn release_if_idle<'a, L: BorrowMut<Library> + 'a>(
             let open = {
                 let held = library.borrow();
                 let mut names = found.records.iter().map(|(name, _)| name);
-                names.any(|name| !held.folded.settled(writer, *name))
+                let closed = held.closed_records();
+                names.any(|name| !closed.contains(&(writer, *name)))
             };
             if drafted || open || !found.unreadable.is_empty() {
                 return ok(library);
@@ -2577,7 +2604,7 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
     let own = library.writer.as_ref().map(Writer::id);
     let placed = own.and_then(|own| library.reader.derived().writers.get(&own));
     let continued = placed.and_then(|placed| recovery::continued(placed, name));
-    let closed = own.is_some_and(|own| library.folded.settled(own, name));
+    let closed = own.is_some_and(|own| library.closed_records().contains(&(own, name)));
     flow::run(settled)
         .and_then(move |applied| {
             let mut planned = planned(&record);
