@@ -208,6 +208,7 @@ attribution:
 | `displaced` | Bytes it moved into the writer's trash; omitted if none          |
 | `forks`     | The fork points its writer knew of, `["<writer>",<n>]`; omitted if none |
 | `more`      | How many ops and `displaced` items its `more` entries hold; omitted if none |
+| `record`    | The nonce of the pending record whose effects it logs, which it closes; omitted if none |
 
 Each op is an object whose `op` member names it:
 
@@ -584,7 +585,7 @@ as 8 bytes little-endian, a 16-byte check of the payload, then the payload. The
 check finds a record a crash tore or a disk damaged; it does not guard against
 forgery, since only the install writes its local root. This build computes it in
 two lanes of 64-bit multiplies over the payload. The payload's first byte names
-its format, 8; then come the generation, and the view, or what it gained or the
+its format, 9; then come the generation, and the view, or what it gained or the
 grace step let go of, in this build's binary encoding: integers as LEB128,
 identifiers as their 16 bytes big-endian, text as its length and its UTF-8,
 lists as their length and their members, with each entry as its hash, its
@@ -869,10 +870,11 @@ as it is, logged as a `pin` op rather than a `file` op. A reader reads at most
 
 ### Recovery
 
-A record is open while its writer's log holds the entry named by its entry's
-`prev` and no entry after it; a tip numbered past `prev` counts as an entry after
-it unless `prev` is a run. A record that is not open is spent, waiting only for
-its writer to remove it.
+A record is closed by an entry that names it: its writer's intent whose `record`
+is the record's nonce, or another writer's `settle` entry. A tip that folded such
+an entry still names it. A record no entry names is open, wherever its writer's
+log has gone since; one that is closed is spent, waiting only for its writer to
+remove it.
 
 A record is ignored when it does not decode, names another writer, names a path
 that is not a library path, or its `prev` is not in its writer's log. Opening

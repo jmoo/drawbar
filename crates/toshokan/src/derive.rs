@@ -1432,6 +1432,7 @@ mod tests {
             displaced: Vec::new(),
             forks: Vec::new(),
             more: 0,
+            record: None,
         });
         Rc::new(Entry::encode(hash, n, at, kind).unwrap())
     }
@@ -1565,39 +1566,6 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_on_another_branch_is_not_continued_by_a_tip_numbered_past_it() {
-        use crate::recovery::Chain;
-        let entries = chain(W, &["a", "b", "c", "d"]);
-        let other = entry(
-            Some(&entries[0]),
-            vec![set("other", vec![entries[0].own().of(W)])],
-            "o",
-        );
-        let lines_seen = [Rc::clone(&other)];
-        let derived = derived(
-            vec![(
-                W,
-                Seen {
-                    segments: vec![lines(&lines_seen, false)],
-                    snapshots: vec![folded(&entries)],
-                },
-            )],
-            false,
-        );
-        let placed = &derived.writers[&W];
-        assert_eq!(placed.runs, [Rc::clone(&other)]);
-        assert!(
-            !Chain::continues(placed, other.own()),
-            "nothing follows it on its branch"
-        );
-        assert!(Chain::holds(placed, other.own()));
-        assert!(
-            Chain::continues(placed, entries[1].own()),
-            "the tip passed it"
-        );
-    }
-
-    #[test]
     fn a_remembered_entry_after_a_remembered_fork_stays_a_run_while_its_file_is_hidden() {
         let entries = chain(W, &["a", "b", "c", "d"]);
         let other = entry(
@@ -1725,6 +1693,7 @@ mod tests {
             displaced: Vec::new(),
             forks: Vec::new(),
             more: 1,
+            record: None,
         });
         let intent = Rc::new(Entry::encode(prev.hash(), n, at(n), intent).unwrap());
         let more = EntryKind::More(More {

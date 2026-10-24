@@ -614,6 +614,7 @@ impl Instance {
             displaced: Vec::new(),
             forks: Vec::new(),
             more: 0,
+            record: None,
         });
         let at = self.tick();
         let fresh = SegmentName::from_u128(self.random.next_u128());

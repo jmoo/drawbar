@@ -35,45 +35,22 @@ pub trait Chain {
     /// Whether the entry `at` is placed or folded.
     fn holds(&self, at: Own) -> bool;
 
-    /// Whether an entry after `at` is placed or folded.
-    fn continues(&self, at: Own) -> bool;
-
-    /// Whether the entry after `at` is an intent whose continuation the chain
-    /// holds only part of, as an append a crash tore leaves it.
-    fn unfinished(&self, at: Own) -> bool;
+    /// Whether the intent naming the record `record` is followed by fewer
+    /// continuation items than it says, as an append a crash tore leaves it.
+    fn unfinished(&self, record: Nonce) -> bool;
 }
 
 /// A tip folds every entry its head descends from, which it certifies by
 /// number: an entry numbered below a tip's head is taken as folded even where
-/// no certificate names its hash, unless it is a run, on another branch.
+/// no certificate names its hash.
 impl Chain for Placed {
     fn holds(&self, at: Own) -> bool {
         Placed::holds(self, at.hash) || self.tips.iter().any(|tip| tip.head.n > at.n)
     }
 
-    fn continues(&self, at: Own) -> bool {
-        let run = self.runs.iter().any(|entry| entry.hash() == at.hash);
-        let passed = !run && self.tips.iter().any(|tip| tip.head.n > at.n);
-        let entries = self.merged.iter().chain(&self.runs).chain(&self.gaps);
-        let followed = entries.into_iter().any(|entry| entry.prev() == at.hash);
-        Chain::holds(self, at) && (passed || followed)
+    fn unfinished(&self, record: Nonce) -> bool {
+        continued(self, record).is_some_and(|c| c.held < c.logged.more)
     }
-
-    fn unfinished(&self, at: Own) -> bool {
-        matches!(after(self, at), After::Intent(c) if c.held < c.logged.more)
-    }
-}
-
-/// Where the chain stands after an entry a record names.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum After {
-    /// Nothing follows it.
-    Nothing,
-    /// The intent merged right after it, and what of its continuation the
-    /// entries merged after the intent hold.
-    Intent(Continued),
-    /// A tip folds what follows it.
-    Folded,
 }
 
 /// What an intent's continuation holds so far.
@@ -88,20 +65,14 @@ pub struct Continued {
     pub displaced: BTreeSet<Nonce>,
 }
 
-/// Where the chain `placed` stands after `at`.
-pub fn after(placed: &Placed, at: Own) -> After {
-    let Some(start) = placed
-        .merged
-        .iter()
-        .position(|entry| entry.prev() == at.hash && Some(entry.n()) == at.n.checked_add(1))
-    else {
-        return match Chain::continues(placed, at) {
-            true => After::Folded,
-            false => After::Nothing,
-        };
-    };
+/// The intent merged in `placed` that names the record `record`, with what of
+/// its continuation the entries merged after it hold.
+pub fn continued(placed: &Placed, record: Nonce) -> Option<Continued> {
+    let start = placed.merged.iter().position(
+        |entry| matches!(entry.kind(), EntryKind::Intent(logged) if logged.record == Some(record)),
+    )?;
     let EntryKind::Intent(logged) = placed.merged[start].kind() else {
-        return After::Folded;
+        return None;
     };
     let named = |ops: &[Op]| ops.iter().filter_map(op_file).collect::<Vec<_>>();
     let mut continued = Continued {
@@ -120,7 +91,7 @@ pub fn after(placed: &Placed, at: Own) -> After {
             .displaced
             .extend(more.displaced.iter().map(|item| item.item));
     }
-    After::Intent(continued)
+    Some(continued)
 }
 
 /// The entity whose file `op` writes.
@@ -161,7 +132,7 @@ pub struct Settling {
 /// `logs` while the reads run.
 pub fn assess<'a, C: Chain>(
     layout: &'a Layout,
-    own: Option<(WriterId, Own)>,
+    own: Option<WriterId>,
     logs: &'a BTreeMap<WriterId, C>,
     settled: &'a BTreeSet<(WriterId, Nonce)>,
     capabilities: Capabilities,
@@ -193,7 +164,7 @@ pub fn read(
 /// open records apart, for [`predict`].
 pub fn classify<C: Chain>(
     layout: &Layout,
-    own: Option<(WriterId, Own)>,
+    own: Option<WriterId>,
     logs: &BTreeMap<WriterId, C>,
     settled: &BTreeSet<(WriterId, Nonce)>,
     found: Vec<(WriterId, Records)>,
@@ -209,7 +180,7 @@ pub fn classify<C: Chain>(
             match standing(layout, own, chain, settled, name, &record) {
                 Standing::Ignored => recovery.ignored.push(layout.pending(writer, name)),
                 Standing::Closed => {}
-                Standing::Spent if chain.unfinished(record.after()) => open.push((name, record)),
+                Standing::Spent if chain.unfinished(name) => open.push((name, record)),
                 Standing::Spent => recovery.spent.push((name, record)),
                 Standing::Open => open.push((name, record)),
                 Standing::Orphan => recovery.orphaned.push(Orphan {
@@ -260,11 +231,12 @@ pub fn predict(
 enum Standing {
     /// Unconfined, or not chained to its writer's log.
     Ignored,
-    /// Closed, waiting for its writer to remove it.
+    /// Another writer's, closed by an entry naming it, waiting for its writer to
+    /// remove it.
     Closed,
-    /// This writer's, closed by an entry in its log.
+    /// This writer's, closed by an entry naming it.
     Spent,
-    /// This writer's, open after the head its local root recorded.
+    /// This writer's, which no entry names.
     Open,
     /// Another writer's, open.
     Orphan,
@@ -272,25 +244,21 @@ enum Standing {
 
 fn standing(
     layout: &Layout,
-    own: Option<(WriterId, Own)>,
+    own: Option<WriterId>,
     chain: &impl Chain,
     settled: &BTreeSet<(WriterId, Nonce)>,
     name: Nonce,
     record: &PendingRecord,
 ) -> Standing {
-    let after = record.after();
-    if !record.is_confined(layout) || !chain.holds(after) {
+    if !record.is_confined(layout) || !chain.holds(record.after()) {
         return Standing::Ignored;
     }
-    let closed = chain.continues(after);
-    match own {
-        Some((own, head)) if own == record.writer => match (closed, head == after) {
-            (true, _) => Standing::Spent,
-            (false, true) => Standing::Open,
-            (false, false) => Standing::Ignored,
-        },
-        _ if closed || settled.contains(&(record.writer, name)) => Standing::Closed,
-        _ => Standing::Orphan,
+    let named = settled.contains(&(record.writer, name));
+    match (own == Some(record.writer), named) {
+        (true, true) => Standing::Spent,
+        (true, false) => Standing::Open,
+        (false, true) => Standing::Closed,
+        (false, false) => Standing::Orphan,
     }
 }
 

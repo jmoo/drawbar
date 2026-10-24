@@ -739,6 +739,7 @@ fn entries_that_reached_the_folder_before_a_failure_are_followed_not_forked() {
             displaced: Vec::new(),
             forks: Vec::new(),
             more: 0,
+            record: None,
         })
     };
     for open in [false, true] {
@@ -1017,6 +1018,7 @@ fn a_writer_confirms_its_head_from_the_end_of_the_file_that_holds_it() {
         displaced: Vec::new(),
         forks: Vec::new(),
         more: 0,
+        record: None,
     });
     let append = claimed
         .writer
@@ -1067,6 +1069,7 @@ fn finishing_a_compactions_deletions_confirms_the_head_from_its_snapshot() {
             displaced: Vec::new(),
             forks: Vec::new(),
             more: 0,
+            record: None,
         });
         let append = writer.append(vec![(Hlc::ZERO, kind)], SegmentName::from_u128(77));
         let (_, appended) = run(&mut reads, append);

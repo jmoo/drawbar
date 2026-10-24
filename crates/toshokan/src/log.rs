@@ -144,6 +144,9 @@ pub struct Logged {
     /// follow it, which hold nothing else.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub more: u64,
+    /// The pending record whose effects it logs, which it closes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<Nonce>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -498,6 +501,8 @@ struct IntentLine<'a> {
     more: u64,
     #[serde(default)]
     deletes: Vec<EntityId>,
+    #[serde(default)]
+    record: Option<Nonce>,
 }
 
 impl IntentLine<'_> {
@@ -517,6 +522,7 @@ impl IntentLine<'_> {
                 forks: line.forks,
                 more: line.more,
                 deletes: line.deletes,
+                record: line.record,
             },
         )?;
         Some((line.prev, line.n, line.at, kind))
@@ -531,6 +537,7 @@ struct Continued {
     forks: Vec<Forked>,
     more: u64,
     deletes: Vec<EntityId>,
+    record: Option<Nonce>,
 }
 
 /// An intent labeled `label`, or, with no label and nothing more, its
@@ -542,6 +549,7 @@ fn continued(kind: &str, label: Option<String>, members: Continued) -> Option<En
         forks,
         more,
         deletes,
+        record,
     } = members;
     match (kind, label) {
         ("intent", Some(label)) if deletes.is_empty() => Some(EntryKind::Intent(Logged {
@@ -550,8 +558,9 @@ fn continued(kind: &str, label: Option<String>, members: Continued) -> Option<En
             displaced,
             forks,
             more,
+            record,
         })),
-        ("more", None) if more == 0 => Some(EntryKind::More(More {
+        ("more", None) if more == 0 && record.is_none() => Some(EntryKind::More(More {
             ops,
             displaced,
             forks,
@@ -585,6 +594,8 @@ struct ExactLine<'a> {
     more: u64,
     #[serde(default, deserialize_with = "nonempty")]
     deletes: Vec<EntityId>,
+    #[serde(default, deserialize_with = "not_null")]
+    record: Option<Nonce>,
 }
 
 /// A number that is not 0: a 0 this build leaves out.
@@ -702,6 +713,7 @@ impl ExactLine<'_> {
                 forks: line.forks,
                 more: line.more,
                 deletes: line.deletes,
+                record: line.record,
             },
         )?;
         Some((line.prev, line.n, line.at, kind))
@@ -1212,7 +1224,7 @@ impl Pack for EntryKind {
                 out.push(INTENT);
                 logged.label.pack(out);
                 (&logged.displaced, &logged.ops).pack(out);
-                (&logged.forks, logged.more).pack(out);
+                (&logged.forks, (logged.more, logged.record)).pack(out);
             }
             Self::More(more) => {
                 out.push(MORE);
@@ -1243,13 +1255,14 @@ impl Unpack for EntryKind {
             INTENT => {
                 let label = Unpack::unpack(input)?;
                 let (displaced, ops) = Unpack::unpack(input)?;
-                let (forks, more) = Unpack::unpack(input)?;
+                let (forks, (more, record)) = Unpack::unpack(input)?;
                 Self::Intent(Logged {
                     label,
                     ops,
                     displaced,
                     forks,
                     more,
+                    record,
                 })
             }
             MORE => {
@@ -1599,6 +1612,7 @@ impl EntryKind {
                 displaced,
                 forks,
                 more,
+                record,
             }) => {
                 map.serialize_entry("kind", "intent")?;
                 map.serialize_entry("label", label)?;
@@ -1611,6 +1625,9 @@ impl EntryKind {
                 }
                 if *more != 0 {
                     map.serialize_entry("more", more)?;
+                }
+                if let Some(record) = record {
+                    map.serialize_entry("record", record)?;
                 }
                 Ok(())
             }
@@ -2283,6 +2300,7 @@ mod tests {
                     at: 2,
                 }],
                 more: 7,
+                record: None,
             }),
             EntryKind::More(More {
                 ops: every_op(),
@@ -2352,6 +2370,7 @@ mod tests {
             displaced: vec![],
             forks: vec![],
             more: 0,
+            record: None,
         });
         let entry = Entry::encode(hash(2), 3, at(3), kind).unwrap();
         let e = "0000000000000000000000000000000e";
@@ -2405,6 +2424,7 @@ mod tests {
                 at: 6,
             }],
             more: 0,
+            record: None,
         });
         assert_eq!(
             written(hash(1), 1, save),
@@ -2426,6 +2446,7 @@ mod tests {
             displaced: Vec::new(),
             forks: Vec::new(),
             more: 2,
+            record: None,
         });
         assert_eq!(
             written(hash(1), 1, moved),
@@ -2513,6 +2534,7 @@ mod tests {
             displaced: vec![],
             forks: vec![],
             more: 0,
+            record: None,
         });
         assert_eq!(
             written(hash(1), 1, dismiss),
@@ -2752,6 +2774,7 @@ mod tests {
                     _ => Vec::new(),
                 },
                 more: 0,
+                record: None,
             });
             let written = Entry::encode(hash(1), round as u64 + 1, at(round as u64), kind).unwrap();
             let json = written.json().into_owned();
@@ -2784,6 +2807,7 @@ mod tests {
             displaced: Vec::new(),
             forks: Vec::new(),
             more: 0,
+            record: None,
         });
         let written = Entry::encode(hash(1), 2, at(3), kind).unwrap();
         let spaced = written.json().replacen(':', ": ", 1);

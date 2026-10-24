@@ -272,6 +272,7 @@ impl Lines {
             displaced: Vec::new(),
             forks: forks.collect(),
             more: 0,
+            record: None,
         });
         let at = Hlc {
             wall_ms: u64::from(e.hash) + 1,

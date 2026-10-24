@@ -591,6 +591,7 @@ through_both!(
     a_clone_forks_into_items_taken_or_dismissed,
     more_files_than_one_line_holds_move_and_undo_as_one_change,
     an_append_torn_after_its_intent_logs_the_rest_at_the_next_open,
+    an_entry_of_a_copied_instance_does_not_close_another_instances_record,
     an_unfinished_effect_of_a_writer_that_retires_stays_this_installs,
     a_commit_whose_entry_did_not_sync_keeps_its_record_through_tidying,
     a_compaction_finishes_a_cut_short_continuation_before_it_folds_it,
@@ -1455,6 +1456,52 @@ fn an_unfinished_effect_of_a_writer_that_retires_stays_this_installs<F: Facade>(
         .map(|o| (o.label.as_str(), o.ours))
         .collect();
     assert_eq!(orphans, [("Rename", true)]);
+}
+
+fn an_entry_of_a_copied_instance_does_not_close_another_instances_record<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let mut here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"one");
+    a.close().unwrap();
+    let there = here.cloned();
+    let probe = Probe::new(&here);
+    let (mut original, _) = F::open(probe.clone(), env("a", 2, &clock)).unwrap();
+    let (mut copy, _) = F::open(Probe::new(&there), env("a", 3, &clock)).unwrap();
+    let logging =
+        |io: &Io| io.root() == Root::Folder && io.path().as_str().ends_with(SEGMENT_EXTENSION);
+    fail(&probe, move |io| io.mutates() && logging(io));
+    let saved = original.commit("Save", |i| {
+        i.save(
+            song,
+            &path("song.npno"),
+            b"two".to_vec(),
+            Expect::Holds(identity(b"one")),
+        )
+    });
+    assert!(
+        saved.is_err(),
+        "the effect is made and its entry not logged"
+    );
+    drop(original);
+    here.crash();
+    copy.commit("Tag", |i| i.add(song, TAGS, tag("there")))
+        .unwrap();
+    drop(copy);
+    let (mut again, opened) = F::open(Probe::new(&here), env("a", 4, &clock)).unwrap();
+    let labels: Vec<&str> = opened.settled.iter().map(|s| s.label.as_str()).collect();
+    assert_eq!(labels, ["Save"], "no entry names the record");
+    again
+        .commit("Next", |i| i.add(song, TAGS, tag("next")))
+        .unwrap();
+    let trash = again.trash().unwrap();
+    let from: Vec<_> = trash.iter().map(|item| item.from.clone()).collect();
+    assert_eq!(
+        from,
+        [path("song.npno")],
+        "an entry names the displaced bytes"
+    );
 }
 
 fn an_append_torn_after_its_intent_logs_the_rest_at_the_next_open<F: Facade>() {
@@ -3091,6 +3138,7 @@ fn shelved(folder: &MemDisk, count: usize) -> Vec<(EntityId, RelPath)> {
             displaced: Vec::new(),
             forks: Vec::new(),
             more: 0,
+            record: None,
         })
     });
     let (mut prev, mut segment) = (EntryHash::ZERO, Vec::new());

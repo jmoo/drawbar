@@ -25,7 +25,9 @@ segments, and a process that closes its segment seals it with a marker. A
 writer folds its own chain into a snapshot, and then deletes the snapshot the
 new one supersedes and the sealed segments that a snapshot in its directory
 folds. A multi-step effect writes a pending record and logs the entry that
-closes it. The record is then spent, and its owner deletes it at any later time,
+closes it, which names the record: the model closes an effect by its own
+`logged` flag, and the code closes a record only by an entry naming its nonce,
+never by its place in the chain. The record is then spent, and its owner deletes it at any later time,
 after beginning other effects or never. Another writer that sees the record of
 an effect no entry closes reports it, and with the user's consent closes it in
 its own log; only the record's owner deletes it.

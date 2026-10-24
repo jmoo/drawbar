@@ -405,8 +405,8 @@ impl Case {
     }
 }
 
-/// A writer's history as recovery sees it: its head, and whether the entry
-/// closing its record follows.
+/// A writer's history as recovery sees it: its head, and whether an entry
+/// closing its record was logged.
 struct Fake {
     closed: bool,
 }
@@ -416,21 +416,24 @@ impl Chain for Fake {
         at == HEAD_AT
     }
 
-    fn continues(&self, at: Own) -> bool {
-        at == HEAD_AT && self.closed
-    }
-
-    fn unfinished(&self, _: Own) -> bool {
+    fn unfinished(&self, _: Nonce) -> bool {
         false
     }
 }
 
 fn logs(disk: &MemDisk, writer: WriterId) -> BTreeMap<WriterId, Fake> {
-    let dir = layout().writer(writer);
-    let closed = disk.files(Root::Folder).keys().any(|p| {
-        p.parent().as_ref() == Some(&dir) && p.name().is_some_and(|n| n.starts_with("closed-"))
-    });
+    let closed = !closing(disk, writer).is_empty();
     BTreeMap::from([(writer, Fake { closed })])
+}
+
+/// The records of `writer` an entry closes, by the markers standing for them.
+fn closing(disk: &MemDisk, writer: WriterId) -> BTreeSet<(WriterId, Nonce)> {
+    let dir = layout().writer(writer);
+    let names = disk.files(Root::Folder).into_keys().filter_map(|p| {
+        let name = p.name()?.strip_prefix("closed-")?.parse::<Nonce>().ok()?;
+        (p.parent().as_ref() == Some(&dir)).then_some((writer, name))
+    });
+    names.collect()
 }
 
 fn records(disk: &MemDisk, writer: WriterId) -> Vec<(Nonce, PendingRecord)> {
@@ -449,9 +452,9 @@ fn recover(disk: &MemDisk) -> Result<Vec<Outcome>, Error> {
     let capabilities = d.capabilities(Root::Folder);
     let found = d.run(recovery::assess(
         &layout,
-        Some((WRITER, HEAD_AT)),
+        Some(WRITER),
         &logs,
-        &BTreeSet::new(),
+        &closing(disk, WRITER),
         capabilities,
     ))?;
     assert!(found.orphaned.is_empty(), "{found:?}");
@@ -682,7 +685,7 @@ fn settle_orphans(disk: &MemDisk, how: Settlement, stop: usize, seed: u64) -> (u
             &layout,
             None,
             &logs(disk, WRITER),
-            &BTreeSet::new(),
+            &closing(disk, WRITER),
             d.capabilities(Root::Folder),
         ))
         .unwrap();
@@ -918,7 +921,7 @@ fn a_folder_that_cannot_rename_a_directory_refuses_to_settle_a_directory_rename(
                         &layout,
                         None,
                         &logs,
-                        &BTreeSet::new(),
+                        &closing(&disk, WRITER),
                         folder,
                     ))
                     .unwrap();
@@ -993,10 +996,7 @@ fn records_that_are_unchained_unconfined_or_settled_are_not_acted_on() {
         fn holds(&self, at: Own) -> bool {
             at == HEAD_AT
         }
-        fn continues(&self, _: Own) -> bool {
-            false
-        }
-        fn unfinished(&self, _: Own) -> bool {
+        fn unfinished(&self, _: Nonce) -> bool {
             false
         }
     }
@@ -1006,7 +1006,7 @@ fn records_that_are_unchained_unconfined_or_settled_are_not_acted_on() {
     let found = d
         .run(recovery::assess(
             &layout,
-            Some((WRITER, HEAD_AT)),
+            Some(WRITER),
             &logs,
             &settled,
             Capabilities::ALL,

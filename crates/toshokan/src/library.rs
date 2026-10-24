@@ -807,7 +807,6 @@ impl Library {
         own != Some(theirs.writer)
             && theirs.is_confined(&self.layout)
             && recovery::Chain::holds(placed, theirs.after())
-            && !recovery::Chain::continues(placed, theirs.after())
             && !self.folded.settled(theirs.writer, name)
     }
 
@@ -1897,10 +1896,7 @@ fn recover(library: Library) -> Fallible<'static, Library> {
     let writers = library.reader.writers_known().into_iter().collect();
     flow::run(recovery::read(&library.layout, writers)).and_then(move |found| {
         let mut library = library;
-        let own = library
-            .writer
-            .as_ref()
-            .map(|writer| (writer.id(), writer.head()));
+        let own = library.writer.as_ref().map(Writer::id);
         let settled = library.folded.settlements().clone();
         let chains = &library.reader.derived().writers;
         let (assessed, open) = recovery::classify(&library.layout, own, chains, &settled, found);
@@ -1935,10 +1931,7 @@ fn reorphaned(library: &mut Library) -> Fallible<'_, &mut Library> {
                 records.map(move |(name, record)| ((*writer, *name), record.clone()))
             })
             .collect();
-        let own = library
-            .writer
-            .as_ref()
-            .map(|writer| (writer.id(), writer.head()));
+        let own = library.writer.as_ref().map(Writer::id);
         let settled = library.folded.settlements().clone();
         let (assessed, _) = recovery::classify(
             &library.layout,
@@ -2027,12 +2020,8 @@ fn release_if_idle<'a, L: BorrowMut<Library> + 'a>(
         flow::run(pending::read_all(&layout, writer)).and_then(move |found| {
             let open = {
                 let held = library.borrow();
-                let chain = held.reader.derived().writers.get(&writer);
-                found.records.iter().any(|(name, record)| {
-                    let closed = chain
-                        .is_some_and(|chain| recovery::Chain::continues(chain, record.after()));
-                    !closed && !held.folded.settled(writer, *name)
-                })
+                let mut names = found.records.iter().map(|(name, _)| name);
+                names.any(|name| !held.folded.settled(writer, *name))
             };
             if drafted || open || !found.unreadable.is_empty() {
                 return ok(library);
@@ -2391,6 +2380,7 @@ fn commit<'a>(
                 more: 0,
                 ops: facts,
                 displaced: Vec::new(),
+                record: None,
             };
             library.reversing = reverses;
             transact(library, logged, effects, None, pins.collect())
@@ -2549,17 +2539,17 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
     );
     let own = library.writer.as_ref().map(Writer::id);
     let placed = own.and_then(|own| library.reader.derived().writers.get(&own));
-    let logged = placed.map_or(recovery::After::Nothing, |placed| {
-        recovery::after(placed, record.after())
-    });
+    let continued = placed.and_then(|placed| recovery::continued(placed, name));
+    let closed = own.is_some_and(|own| library.folded.settled(own, name));
     flow::run(settled)
         .and_then(move |applied| {
             let mut planned = planned(&record);
+            planned.record = Some(name);
             let file_ops = library.file_ops(&applied, &record.files);
             let label = planned.label.clone();
-            let resumed = logged != recovery::After::Nothing;
-            let kinds = match logged {
-                recovery::After::Intent(continued) => {
+            let resumed = closed;
+            let kinds = match continued {
+                Some(continued) => {
                     let mut file_ops = file_ops;
                     file_ops.retain(|op| file_of(op).is_none_or(|e| !continued.files.contains(&e)));
                     let mut displaced = applied.displaced;
@@ -2567,8 +2557,8 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
                     let deleted = deleted_by(&planned.ops);
                     library.continued(continuation(file_ops, displaced, &deleted))
                 }
-                recovery::After::Folded => Vec::new(),
-                recovery::After::Nothing => {
+                None if closed => Vec::new(),
+                None => {
                     let mores = fit(&mut planned, file_ops, applied.displaced);
                     planned.forks = library.known_forks(&planned.ops);
                     let mut kinds = vec![EntryKind::Intent(planned)];
@@ -2672,6 +2662,7 @@ fn planned(record: &PendingRecord) -> Logged {
             displaced: Vec::new(),
             forks: Vec::new(),
             more: 0,
+            record: None,
         },
     };
     logged.ops.retain(|op| {
@@ -2906,6 +2897,8 @@ fn transact<'a>(
                 (library, entries, Outcome::Complete)
             });
     }
+    let mut logged = logged;
+    logged.record = effects.moves_files().then_some(effects.record);
     carry_out(library, &logged, Rc::clone(&effects)).and_then(move |(library, record, applied)| {
         log_effects(library, logged, &effects, record, applied, closing, pins)
     })
@@ -3050,6 +3043,7 @@ fn settle_orphan(
                         displaced: Vec::new(),
                         forks: Vec::new(),
                         more: 0,
+                        record: None,
                     };
                     let closing = Closing { facts, settle };
                     transact(library, logged, effects, Some(closing), Vec::new())

@@ -593,6 +593,7 @@ impl Gen {
                     displaced: Vec::new(),
                     forks: Vec::new(),
                     more: 0,
+                    record: None,
                 },
             );
             for (id, rated, tags) in made {
@@ -685,6 +686,7 @@ impl Gen {
                     displaced: Vec::new(),
                     forks: Vec::new(),
                     more: 0,
+                    record: None,
                 },
             );
             update(&mut self.entities[e], hash, &tag);
@@ -716,6 +718,7 @@ impl Gen {
                     displaced,
                     forks: Vec::new(),
                     more: 0,
+                    record: None,
                 },
             );
         }
