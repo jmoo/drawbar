@@ -6018,3 +6018,29 @@ fn an_older_drawbars_files_are_named_once_and_left_alone() {
     assert_eq!(root.read(".drawbar/working/1-1"), b"edit");
     assert_eq!(root.read(".drawbar/tmp/rescued-1.ne5p"), b"slot");
 }
+
+/// A dismissal is final: undo after it takes back the change before it, and the run
+/// stays dismissed.
+#[test]
+fn undo_after_a_dismissal_takes_back_the_change_before_it() {
+    let root = Temp::new();
+    let (mut here, _there, at_here, _, _copy) = forked(&root);
+    let theirs = here.kept("gains the tag “There”");
+    here.take_kept(theirs.run, Vec::new());
+    assert_eq!(here.worn(at_here), ["New", "There"]);
+    let ours = here.kept("gains the tag “Here”");
+    let taken = here.store.undo_label();
+    here.dismiss_kept(ours.run);
+    assert_eq!(
+        here.store.undo_label(),
+        taken,
+        "the Edit menu offers the take"
+    );
+    here.undo();
+    assert_eq!(here.worn(at_here), ["New"], "the take is undone");
+    let kept = &here.bench.browser.folders.kept;
+    assert!(
+        !kept.iter().any(|kept| kept.run == ours.run),
+        "still dismissed"
+    );
+}

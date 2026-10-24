@@ -1845,7 +1845,7 @@ impl Store {
         }
         let intent = Intent::Dismiss { run };
         self.committing += 1;
-        self.answering.push_back(Step::Change(intent.describe()));
+        self.answering.push_back(Step::Final);
         self.send(Cmd::Intent(intent));
     }
 
@@ -3533,6 +3533,8 @@ fn settling(how: toshokan::log::Settlement) -> &'static str {
 enum Step {
     /// A change, as the Edit menu names it.
     Change(String),
+    /// A change no undo takes back.
+    Final,
     Undo,
     Redo,
 }
@@ -3554,6 +3556,7 @@ impl History {
                 self.done.push((change, entry));
                 self.undone.clear();
             }
+            Step::Final => {}
             Step::Undo => {
                 if let Some((change, _)) = self.done.pop() {
                     self.undone.push((change, entry));
