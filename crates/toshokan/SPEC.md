@@ -1055,13 +1055,12 @@ bytes it needs.
 
 `trash/<nonce>` holds bytes an intent of the writer displaced, or new bytes an
 intent staged and could not place. An item is listed with the entry whose
-`displaced` names it. Only its writer removes an item, and only by emptying:
-first every item displaced longer ago than the policy's age, by default 30 days,
-then the oldest items until the rest fit the policy's size, by default 1 GiB.
-An item no entry names is never emptied. A writer may also remove the items an
-app names, as those whose undo ended with the app's session. Emptying removes the
-items, then syncs the trash once; an item whose removal a crash undid is removed by the next
-emptying.
+`displaced` names it. Only its writer removes an item, and only by emptying,
+which removes every item but those the app keeps and those a pending record of
+the writer names that is not spent, since settling the record may move them.
+While a pending record of the writer does not read, emptying removes nothing. An
+item no entry names is never emptied. Emptying removes the items, then syncs the
+trash once; an item whose removal a crash undid is removed by the next emptying.
 
 Emptying a trash is the only way bytes leave the folder.
 

@@ -187,5 +187,4 @@ pub use path::RelPath;
 pub use plan::{Expect, Plan};
 pub use report::{Committed, Lag, Local, Opened, Outcome, Partial};
 pub use schema::{Field, Keyed, Members, Raw, Register, Schema, Set, Value};
-pub use trash::Policy;
 pub use view::{Changed, Counts, EntityView, FileRef, FileState, Listed, View};
