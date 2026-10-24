@@ -528,6 +528,7 @@ let
     tests = [
       "backends"
       "effects"
+      "hints"
       "web"
     ];
     inherit (manifests.toshokan) version;

@@ -452,11 +452,12 @@ install's own state for the library on the desktop while the library may be
 written, or a `rescued` folder of drawbar's own data (`eframe::storage_dir`)
 otherwise, never the system's temporary folder or the library. In the browser it
 is in `rescued/` of the library's local root in OPFS, or of the browser's own
-library's where none is open, written through a toshokan storage worker of the
-device's own. That worker starts with the session's first rescue, from the
-bundle the page loaded: where drawbar.app was deployed again since, it cannot
-load, and a send that would replace an occupant is refused, as it is wherever
-there is nowhere to keep one, until the page is reloaded.
+library's where none is open, written through a worker of drawbar's own started
+for rescues (`store::Worker::rescues`). That worker starts with the session's
+first rescue, from the bundle the page loaded: where drawbar.app was deployed
+again since, it cannot load, and a send that would replace an occupant is
+refused, as it is wherever there is nowhere to keep one, until the page is
+reloaded.
 The restore runs in a session of its own once the failed write's session has
 closed (`worker::put_back`): the instrument drops a write left unfinished when its
 session closes, but keeps it as an object in another slot when a second write
