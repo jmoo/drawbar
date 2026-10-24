@@ -1407,6 +1407,9 @@ impl Store {
             Event::Unheard { label } => {
                 self.committing = self.committing.saturating_sub(1);
                 self.answering.pop_front();
+                // Whether the library took a step is not known, so the Edit menu offers
+                // none it holds until the next one it hears of.
+                self.history = History::default();
                 log.say(format!(
                     "drawbar lost the library's answer to “{label}”, so it looks at the \
                      folder to see what changed."
@@ -1423,6 +1426,8 @@ impl Store {
             Event::Moved { from, to, result } => match result {
                 _ if !self.answered_move(&from, &to) => {}
                 Ok(()) => {}
+                // The look the change's answer asks for finds where the files are.
+                Err(Failure::Unheard) => {}
                 Err(why) => {
                     let why = format!("moving {from} to {to}: {why}");
                     log.error(why.clone());
@@ -1705,7 +1710,8 @@ impl Store {
                 })
                 .collect();
             log.say(format!(
-                "An older drawbar kept {} in this folder. This drawbar does not read them,                  and leaves them where they are.",
+                "An older drawbar kept {} in this folder. This drawbar does not read them, \
+                 and leaves them where they are.",
                 crate::strings::listed(&said)
             ));
         }
@@ -2423,6 +2429,20 @@ impl Store {
         std::mem::take(&mut self.send_waits) && self.release(&moved, queue, workspace, log)
     }
 
+    /// Read again, quietly, the file of an asset whose save went unheard: one that holds
+    /// the edit leaves the asset saved.
+    fn read_unheard(&mut self, id: u64, path: LibPath, workspace: &mut Workspace) {
+        let Some(print) = self.records.get(&id).and_then(|record| record.fingerprint) else {
+            return;
+        };
+        self.quietly.insert(id);
+        let stat = Stat {
+            len: print.len,
+            modified: print.modified,
+        };
+        self.recheck(id, path, stat, workspace);
+    }
+
     /// A file drawbar knew changed on disk: an unread one is only known to be another,
     /// and one drawbar holds is read again to see what it holds now.
     fn recheck(&mut self, id: u64, path: LibPath, stat: Stat, workspace: &mut Workspace) {
@@ -2730,8 +2750,8 @@ impl Store {
             }
             Err(Failure::Room(_)) => Some(too_much()),
             Err(Failure::Io(why)) => Some(why),
-            // ⚠️ Kept unsaved until the look the change's answer asks for finds the file
-            // holds it, which it may.
+            // ⚠️ Kept unsaved until a read of the file finds it holds the edit, which
+            // it may.
             Err(Failure::Unheard) => None,
         };
         workspace.unsave(id);
@@ -2739,7 +2759,7 @@ impl Store {
             record.saved = entity.saved.stamp();
         }
         let Some(why) = why else {
-            return;
+            return self.read_unheard(id, path, workspace);
         };
         log.error(format!("saving {path}: {why}"));
         log.trouble(format!(
@@ -2789,7 +2809,10 @@ impl Store {
             }
             Err(Failure::Room(_)) => too_much(),
             Err(Failure::Io(why)) => why,
-            Err(Failure::Unheard) => return workspace.edit_not_saved(id),
+            Err(Failure::Unheard) => {
+                workspace.edit_not_saved(id);
+                return self.read_unheard(id, path, workspace);
+            }
         };
         workspace.edit_not_saved(id);
         let name = workspace

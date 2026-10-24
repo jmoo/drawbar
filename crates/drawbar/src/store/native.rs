@@ -162,16 +162,26 @@ impl Backend {
             let mut keeper = keeper(&folder, &kept, counted, clock);
             nord_usb::block_on(async {
                 let mut landed = Vec::new();
+                #[cfg(test)]
+                let mut unread = None;
                 while let Ok(cmd) = commands.recv() {
                     living.run(true);
                     #[cfg(test)]
-                    match faults.lock().expect("never poisoned").take() {
+                    let fault = faults.lock().expect("never poisoned").take();
+                    #[cfg(test)]
+                    match fault {
                         Some(super::Fault::Trap) => {
                             panic!("the library's thread was made to fault")
                         }
                         Some(super::Fault::Stall) => loop {
                             std::thread::park();
                         },
+                        Some(super::Fault::Unread) => {
+                            unread = Some(super::refusing::refused(&cmd));
+                        }
+                        Some(super::Fault::Next(after)) => {
+                            *faults.lock().expect("never poisoned") = Some(*after);
+                        }
                         None => {}
                     }
                     let wrote = cmd.writes();
@@ -180,6 +190,10 @@ impl Backend {
                             landed.push(Event::Read(exec::read_all(&disk, files, room).await));
                         }
                         cmd => keeper.run(cmd, &mut |event| landed.push(event)).await,
+                    }
+                    #[cfg(test)]
+                    if let Some(refusing) = unread.take() {
+                        landed = refusing.answers("its answers were made to be lost", false);
                     }
                     for event in landed.drain(..) {
                         let _ = answers.send(exec::rest_landed(&disk, event).await);

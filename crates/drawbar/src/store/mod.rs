@@ -39,6 +39,8 @@ mod keys;
 mod mirror;
 pub mod names;
 mod older;
+#[cfg(any(target_arch = "wasm32", test))]
+mod refusing;
 pub mod shown;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -448,6 +450,17 @@ pub enum Failure {
     /// The answer that would say whether it was done was lost: a look at the folder
     /// finds out.
     Unheard,
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Failure::Io(why) => f.write_str(why),
+            Failure::Moved => f.write_str("the file changed on disk"),
+            Failure::Room(len) => write!(f, "{len} bytes do not fit"),
+            Failure::Unheard => f.write_str("its answer was lost"),
+        }
+    }
 }
 
 /// Some bytes of a file outside the library, and the CRC-32 they must have: a member of
@@ -966,15 +979,17 @@ pub struct Viewed {
 
 /// A fault a test makes the library's thread or worker show.
 #[doc(hidden)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum Fault {
     /// It stops, as a bug that panics or traps makes it.
     Trap,
     /// It never finishes the command it takes next.
     Stall,
-    /// The page cannot read the answer to the command the worker takes next.
-    #[cfg(target_arch = "wasm32")]
+    /// The answers to the command it takes next are lost on their way back.
     Unread,
+    /// The command it takes next runs, and the fault comes with the one after.
+    #[cfg(not(target_arch = "wasm32"))]
+    Next(Box<Fault>),
 }
 
 /// What a backend answers.
@@ -1023,7 +1038,7 @@ pub enum Event {
     Moved {
         from: LibPath,
         to: LibPath,
-        result: Result<(), String>,
+        result: Result<(), Failure>,
     },
     /// A command other than a save, a copy or a move failed: what it was doing, and
     /// why.

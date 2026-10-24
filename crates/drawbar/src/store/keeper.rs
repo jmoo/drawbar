@@ -706,12 +706,6 @@ enum Answering {
 impl Answering {
     /// The event that says the part did not land, because of `failure`.
     fn refused(self, failure: Failure) -> Option<Event> {
-        let why = || match &failure {
-            Failure::Io(why) => why.clone(),
-            Failure::Moved => "the file changed on disk".to_string(),
-            Failure::Room(len) => format!("{len} bytes do not fit"),
-            Failure::Unheard => "its answer was lost".to_string(),
-        };
         Some(match self {
             Answering::Saved { id, path, .. } => Event::Saved {
                 id,
@@ -731,9 +725,9 @@ impl Answering {
             Answering::Moved { from, to } => Event::Moved {
                 from,
                 to,
-                result: Err(why()),
+                result: Err(failure),
             },
-            Answering::Quiet(doing) => Event::Failed(format!("{doing}: {}", why())),
+            Answering::Quiet(doing) => Event::Failed(format!("{doing}: {failure}")),
         })
     }
 

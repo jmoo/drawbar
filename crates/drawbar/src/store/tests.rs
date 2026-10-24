@@ -3808,7 +3808,7 @@ fn a_failed_answer_counts_each_step_and_how_it_failed_once() {
     let moved = Event::Moved {
         from: path.clone(),
         to: path,
-        result: Err("taken".into()),
+        result: Err(Failure::Io("taken".into())),
     };
     assert_eq!(moved.faults(), ["move"].into());
     let refused = Event::Committed {
@@ -6004,12 +6004,15 @@ fn an_older_drawbars_files_are_named_once_and_left_alone() {
     fs::write(root.at(".drawbar/working/1-1"), b"edit").unwrap();
     fs::write(root.at(".drawbar/tmp/rescued-1.ne5p"), b"slot").unwrap();
     let first = Session::open(&root);
+    let told = "An older drawbar kept tags in .drawbar/library.ron, unsaved edits in \
+                .drawbar/working and rescued slot contents in .drawbar/tmp in this folder. \
+                This drawbar does not read them, and leaves them where they are.";
+    let said = first.bench.log.iter().filter(|entry| entry.text == told);
     assert_eq!(
-        first.said(
-            "An older drawbar kept tags in .drawbar/library.ron, unsaved edits in \
-             .drawbar/working and rescued slot contents in .drawbar/tmp in this folder."
-        ),
-        1
+        said.count(),
+        1,
+        "{:?}",
+        first.bench.log.iter().map(|e| &e.text).collect::<Vec<_>>()
     );
     first.close();
     let again = Session::open(&root);
@@ -6043,4 +6046,107 @@ fn undo_after_a_dismissal_takes_back_the_change_before_it() {
         !kept.iter().any(|kept| kept.run == ours.run),
         "still dismissed"
     );
+}
+
+/// A change whose answers are lost leaves the Edit menu offering nothing it holds, so
+/// it never names a step the library may not have taken; the next change is offered,
+/// and undo takes it back.
+#[test]
+fn a_change_whose_answers_are_lost_leaves_undo_to_the_next_change() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.tag(&[id], "A");
+    assert!(session.store.undo_label().is_some());
+    session.store.fault(Fault::Unread);
+    session.tag(&[id], "B");
+    session.settle();
+    assert_eq!(
+        session.store.undo_label(),
+        None,
+        "no step it may not have taken"
+    );
+    session.tag(&[id], "C");
+    assert!(session
+        .store
+        .undo_label()
+        .is_some_and(|label| label.contains("“C”")));
+    session.undo();
+    assert_eq!(session.worn(id), ["A", "B"], "the last change is undone");
+}
+
+/// A move whose answers are lost is not said to have failed: a look at the folder finds
+/// the file where the move put it.
+#[test]
+fn a_move_whose_answers_are_lost_is_found_where_it_went() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let grand = session.named("Grand.ne5p");
+    session.store.fault(Fault::Unread);
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id: grand,
+        name: "Upright".to_string(),
+    }]);
+    session.sync();
+    session.settle();
+    assert_eq!(session.said("did not change as asked"), 0);
+    assert!(!root.at("Grand.ne5p").exists() && root.at("Upright.ne5p").exists());
+    session.named("Upright.ne5p");
+}
+
+/// A save that landed and whose answers are lost ends saved once the look finds the
+/// file holds it, with no question of which to keep.
+#[test]
+fn a_landed_save_whose_answers_are_lost_ends_saved_without_asking() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let edited = session.edit(id, "96");
+    session.store.fault(Fault::Unread);
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    session.settle();
+    assert!(root.read("untitled.ne5p") == edited, "the save landed");
+    assert!(!session.bench.workspace.get(id).unwrap().is_unsaved());
+    assert_eq!(
+        session.bench.browser.asking(),
+        None,
+        "nothing to choose between"
+    );
+    assert_eq!(session.said("was not saved"), 0);
+}
+
+/// An unsaved edit kept by its file's path, once the file becomes an entity, is kept
+/// under the entity before the draft under the path goes: a library that stops right
+/// after keeps it.
+#[test]
+fn an_edit_kept_under_a_new_key_is_kept_before_the_old_draft_goes() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let grand = session.named("Grand.ne5p");
+    let edited = session.edit(grand, "96");
+    session.autosave();
+    session.tag(&[grand], "Live");
+    session.store.fault(Fault::Next(Box::new(Fault::Trap)));
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Full);
+    for _ in 0..200 {
+        if session.store.stopped().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let crashed = Temp::new();
+    copy_tree(&root.0, &crashed.0);
+    copy_tree(&root.local(), &crashed.local());
+
+    let again = Session::open(&crashed);
+    let grand = again.named("Grand.ne5p");
+    assert!(again.bytes(grand) == edited, "the edit is back");
 }
