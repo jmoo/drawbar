@@ -2,8 +2,11 @@
 //! builder and undo produce plans; commit checks them against the view, logs their
 //! facts and carries out their file effects.
 
+use serde::{Deserialize, Serialize};
+
 use crate::ids::{EntityId, EntryHash, Identity, Nonce};
 use crate::io::{IoError, Range, CHUNK};
+use crate::log::{FileFact, Run};
 use crate::path::RelPath;
 use crate::schema::Raw;
 
@@ -13,12 +16,22 @@ use crate::schema::Raw;
 pub struct Content(pub usize);
 
 /// What a file effect requires at a path before it runs.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Expect {
     /// Nothing is there.
     Absent,
     /// A file whose identity is this is there.
     Holds(Identity),
+    /// A file of this length and modification time is there, as a scan listed it:
+    /// for a file the app has not read, whose identity it does not know.
+    Listed { len: u64, modified: Option<u64> },
+}
+
+impl Expect {
+    /// Whether a file is expected there.
+    pub fn present(&self) -> bool {
+        !matches!(self, Expect::Absent)
+    }
 }
 
 /// One intent: the unit of commit, undo and attribution.
@@ -28,11 +41,15 @@ pub struct Plan {
     pub label: String,
     /// The entities the intent creates, their ids drawn as it was built.
     pub created: Vec<EntityId>,
-    pub facts: Vec<FactChange>,
+    /// Each with the run it takes from, when it is taken from an item: it then
+    /// settles its field against that run's writes.
+    pub facts: Vec<(FactChange, Option<Run>)>,
     /// Carried out in order, each only after every precondition was checked.
     pub files: Vec<FileChange>,
     /// The entry an undo or redo compensates.
     pub reverses: Option<EntryHash>,
+    /// Items the user dismissed: no reader merges or shows them again.
+    pub dismiss: Vec<Run>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -61,6 +78,10 @@ pub enum FactChange {
     Delete { entity: EntityId },
     /// Brings a deleted entity back.
     Revive { entity: EntityId },
+    /// Says where the entity's file is, moving nothing, as undoing a delete
+    /// does. Undo leaves it alone. Taken from an item, it is refused unless the
+    /// last scan found that file.
+    File { entity: EntityId, file: FileFact },
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -84,6 +105,20 @@ pub enum FileChange {
     /// Moves everything under `from` to the same place under `to`. Refused when
     /// something is at `to`.
     MoveTree { from: RelPath, to: RelPath },
+    /// Makes the directory `path`, where nothing is.
+    MakeDir { path: RelPath },
+    /// Removes the directory `path`. Refused where a file the library knows is in
+    /// it; anything else in it keeps it.
+    RemoveDir { path: RelPath },
+    /// Moves everything under `from` back to the same place under `to`, as undoing
+    /// a tree move does. Refused unless each of `held` holds what it expects, and
+    /// when something is at `to`. A move file by file also removes the
+    /// directories under `from`, and `from`, it leaves holding nothing.
+    MoveBack {
+        from: RelPath,
+        to: RelPath,
+        held: Vec<(RelPath, Expect)>,
+    },
     /// Gives the entity the file at `path` as it is, moving nothing: for a library
     /// file no entity is bound to. Undo leaves the file where it is.
     Adopt {
@@ -94,6 +129,29 @@ pub enum FileChange {
     /// Brings displaced bytes back from this writer's trash to `to`.
     Restore {
         entity: EntityId,
+        item: Nonce,
+        to: RelPath,
+        expect: Expect,
+    },
+    /// Writes `content` at `path`, where no entity's file is. Bytes it displaces go
+    /// to this writer's trash.
+    SaveFile {
+        path: RelPath,
+        content: Content,
+        expect: Expect,
+    },
+    /// Renames the file at `from`, which is no entity's. Refused when something is
+    /// at `to`.
+    RenameFile {
+        from: RelPath,
+        to: RelPath,
+        expect: Expect,
+    },
+    /// Moves the file at `path`, which is no entity's, to this writer's trash.
+    TrashFile { path: RelPath, expect: Expect },
+    /// Brings displaced bytes back from this writer's trash to `to`, as no entity's
+    /// file.
+    RestoreFile {
         item: Nonce,
         to: RelPath,
         expect: Expect,

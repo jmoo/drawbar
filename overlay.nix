@@ -421,8 +421,6 @@ let
           cp ${./crates/drawbar/favicon.svg} "$out/favicon.svg"
           # The demo sounds the welcome sheet fetches, beside the app that reads them.
           cp -r --no-preserve=mode ${./crates/nord-format/tests/fixtures/demo} "$out/demo"
-          # The worker that writes the library; the app asks for it beside the page.
-          cp ${./crates/drawbar/library-writer.js} "$out/library-writer.js"
 
           if grep -qF drawbar_bg.wasm "$out/pkg/$js"; then
             echo "an unhashed asset name survived the rewrite" >&2
@@ -458,11 +456,19 @@ let
       }
     );
 
-  # toshokan's browser suites, run headless by wasm-bindgen's test runner in
-  # Chromium and Firefox. Linux only: a macOS build user has no window server, and
-  # Firefox there fails to start a session.
-  # ⚠️ The runner ships with wasm-bindgen-cli and must match toshokan's wasm-bindgen pin.
-  toshokan-web =
+  # A crate's browser suites, run headless by wasm-bindgen's test runner in Chromium
+  # and Firefox. Linux only: a macOS build user has no window server, and Firefox there
+  # fails to start a session.
+  # ⚠️ The runner ships with wasm-bindgen-cli and must match the crates' wasm-bindgen pin.
+  # `built` are suites only compiled, so a suite run by hand cannot rot.
+  browserSuites =
+    {
+      built ? [ ],
+      cargoExtraArgs,
+      pname,
+      tests,
+      version,
+    }:
     let
       browsers = {
         Chromium = "CHROMEDRIVER=${final.lib.getExe final.chromedriver}";
@@ -483,12 +489,12 @@ let
       );
       args = commonArgs // {
         CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
-        cargoExtraArgs = "--locked -p toshokan --features web";
+        cargoExtraArgs = "--locked ${cargoExtraArgs}";
         # ⚠️ nixpkgs' rustc links wasm with the system `lld` and bundles none.
         nativeBuildInputs = [ final.lld ];
-        pname = "toshokan-web";
-        inherit (manifests.toshokan) version;
+        inherit pname version;
       };
+      suites = tests: concatStringsSep " " (map (test: "--test ${test}") tests);
     in
     crane.mkCargoDerivation (
       args
@@ -499,20 +505,42 @@ let
         buildPhaseCargoCommand = ''
           export HOME="$TMPDIR/home"
           mkdir -p "$HOME"
+          ${optionalString (built != [ ]) "cargo test $cargoExtraArgs ${suites built} --no-run"}
           ${concatStringsSep "\n" (
             mapAttrsToList (name: driver: ''
-              echo "toshokan's browser suites in ${name}"
-              env ${driver} cargo test $cargoExtraArgs --test backends --test effects --test web
+              echo "${pname} in ${name}"
+              env ${driver} cargo test $cargoExtraArgs ${suites tests}
             '') browsers
           )}
         '';
         cargoArtifacts = crane.buildDepsOnly args;
         doInstallCargoArtifacts = false;
         installPhaseCommand = ''touch "$out"'';
-        meta.description = "toshokan's suites in headless browsers";
+        meta.description = "${pname}: browser suites in headless browsers";
         nativeBuildInputs = args.nativeBuildInputs ++ [ final.wasm-bindgen-cli ];
       }
     );
+
+  toshokan-web = browserSuites {
+    built = [ "bench" ];
+    cargoExtraArgs = "-p toshokan --features web";
+    pname = "toshokan-web";
+    tests = [
+      "backends"
+      "effects"
+      "web"
+    ];
+    inherit (manifests.toshokan) version;
+  };
+
+  # drawbar's library in the browser, kept by its worker.
+  drawbar-web-tests = browserSuites {
+    built = [ "bench" ];
+    cargoExtraArgs = "-p drawbar";
+    pname = "drawbar-web-tests";
+    tests = [ "web" ];
+    inherit (manifests.drawbar) version;
+  };
 
   # The power-loss harness's workloads and checker, and the VM tests that crash
   # and replay real file systems under them. x86_64 Linux only: they need KVM.
@@ -728,7 +756,7 @@ in
     crates
     // crossed
     # Not in `all`: it starts browsers, and only on Linux.
-    // optionalAttrs final.stdenv.hostPlatform.isLinux { inherit toshokan-web; }
+    // optionalAttrs final.stdenv.hostPlatform.isLinux { inherit drawbar-web-tests toshokan-web; }
     # Not in `all`: each boots VMs, and replaying takes long.
     // optionalAttrs (final.stdenv.hostPlatform.system == "x86_64-linux") {
       toshokan-power-loss =
@@ -786,24 +814,39 @@ in
       );
 
       # The portable-root protocol, model-checked. `nix flake check` runs the
-      # small configs; the deep ones take about four and a half hours.
+      # small configs.
       toshokan-spec = toshokanSpec "toshokan-spec" [
         "Portable"
         "Recovery"
         "Liveness"
+        "Grace"
+        "GraceChaos"
+        "LivenessGrace"
+        "RestoreDir"
+        "Resurface"
+        "Drop"
         "Names"
-        "Anchors"
         "Sealed"
         "Folded"
         "Unchecked"
         "FreshView"
+        "Uncertified"
+        "Uncarried"
+        "Unnumbered"
+        "Unguarded"
+        "Unquarantined"
       ];
       toshokan-spec-deep = toshokanSpec "toshokan-spec-deep" [
+        "Anchors"
+        "PortableWide"
         "PortableDeep"
         "Entries"
+        "Dismiss"
+        "RestoreDirFork"
         "Deep"
         "Restore"
         "RestoreFork"
+        "ResumeMid"
         "Sync"
         "LivenessDeep"
       ];

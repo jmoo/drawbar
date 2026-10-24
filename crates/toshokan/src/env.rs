@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use crate::ids::{EntityId, Identity, Nonce, SegmentName, WriterId};
 use crate::io::Range;
+use crate::path::RelPath;
 
 pub trait Clock {
     /// Wall time in milliseconds since the Unix epoch. May go backward; the hybrid
@@ -19,15 +20,38 @@ pub trait Random {
     fn next_u128(&mut self) -> u128;
 }
 
-/// The app's cheap identity of a file's contents: enough of the bytes to tell
-/// files apart without reading them whole.
+/// The app's identity of a file's contents: enough of the bytes to tell files
+/// apart, read a piece at a time. It may differ by kind of file: a format whose
+/// own checksum covers the whole file can be told apart by its checksum, where
+/// any other needs every byte.
 pub trait Identify {
-    /// The ranges of a file of `len` bytes its identity is computed from.
-    fn ranges(&self, len: u64) -> Vec<Range>;
+    /// The ranges of the file at `path`, of `len` bytes, its identity is computed
+    /// from.
+    fn ranges(&self, path: &RelPath, len: u64) -> Vec<Range>;
 
-    /// The identity of a file of `len` bytes, from the bytes of `ranges(len)` in
-    /// order, each cut short only where the file ends.
-    fn identify(&self, len: u64, parts: &[Vec<u8>]) -> Identity;
+    /// A digest of the file at `path`, of `len` bytes, to be fed the bytes of
+    /// `ranges(path, len)` in order, a piece at a time, each range cut short only
+    /// where the file ends.
+    fn digest(&self, path: &RelPath, len: u64) -> Box<dyn Digest>;
+
+    /// The identity of `bytes`, the whole of a file at `path`.
+    fn of_bytes(&self, path: &RelPath, bytes: &[u8]) -> Identity {
+        let len = bytes.len() as u64;
+        let mut digest = self.digest(path, len);
+        for range in self.ranges(path, len) {
+            let start = range.offset.min(len) as usize;
+            let end = range.offset.saturating_add(range.len).min(len) as usize;
+            digest.update(&bytes[start..end]);
+        }
+        digest.finish()
+    }
+}
+
+/// An identity being computed, as [`Identify::digest`] starts one.
+pub trait Digest {
+    fn update(&mut self, bytes: &[u8]);
+
+    fn finish(self: Box<Self>) -> Identity;
 }
 
 /// How the volume compares names: case and Unicode normalization.
@@ -93,21 +117,31 @@ impl Default for PrefixIdentity {
 }
 
 impl Identify for PrefixIdentity {
-    fn ranges(&self, len: u64) -> Vec<Range> {
+    fn ranges(&self, _: &RelPath, len: u64) -> Vec<Range> {
         vec![Range {
             offset: 0,
             len: len.min(self.prefix),
         }]
     }
 
-    fn identify(&self, len: u64, parts: &[Vec<u8>]) -> Identity {
+    fn digest(&self, _: &RelPath, len: u64) -> Box<dyn Digest> {
         let mut hasher = blake3::Hasher::new();
         hasher.update(&len.to_be_bytes());
-        parts.iter().for_each(|part| {
-            hasher.update(part);
-        });
+        Box::new(Blake3(hasher))
+    }
+}
+
+/// A BLAKE3 hasher whose first 16 bytes of output are an identity.
+pub struct Blake3(pub blake3::Hasher);
+
+impl Digest for Blake3 {
+    fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
+    fn finish(self: Box<Self>) -> Identity {
         let mut first = [0; 16];
-        first.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+        first.copy_from_slice(&self.0.finalize().as_bytes()[..16]);
         Identity::from_u128(u128::from_be_bytes(first))
     }
 }
@@ -238,13 +272,22 @@ mod tests {
     #[test]
     fn a_prefix_identity_reads_at_most_its_prefix_and_counts_the_length() {
         let identity = PrefixIdentity { prefix: 4 };
-        assert_eq!(identity.ranges(10), [Range { offset: 0, len: 4 }]);
-        assert_eq!(identity.ranges(2), [Range { offset: 0, len: 2 }]);
-        let head = vec![b"abcd".to_vec()];
-        assert_ne!(identity.identify(10, &head), identity.identify(11, &head));
-        assert_ne!(
-            identity.identify(10, &head),
-            identity.identify(10, &[b"abce".to_vec()])
-        );
+        let path = RelPath::new("a").unwrap();
+        assert_eq!(identity.ranges(&path, 10), [Range { offset: 0, len: 4 }]);
+        assert_eq!(identity.ranges(&path, 2), [Range { offset: 0, len: 2 }]);
+        let of = |bytes: &[u8]| identity.of_bytes(&path, bytes);
+        assert_ne!(of(b"abcd012345"), of(b"abcd0123456"));
+        assert_ne!(of(b"abcd012345"), of(b"abce012345"));
+        assert_eq!(of(b"abcd012345"), of(b"abcd543210"), "past the prefix");
+    }
+
+    #[test]
+    fn a_digest_fed_in_pieces_is_the_one_fed_at_once() {
+        let identity = PrefixIdentity { prefix: 8 };
+        let path = RelPath::new("a").unwrap();
+        let mut digest = identity.digest(&path, 10);
+        digest.update(b"abc");
+        digest.update(b"defgh");
+        assert_eq!(digest.finish(), identity.of_bytes(&path, b"abcdefghij"));
     }
 }

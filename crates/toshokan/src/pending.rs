@@ -8,13 +8,14 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error as ThisError;
 
-use crate::effects::{EffectPlan, EffectStep, FileEnd, Moves};
+use crate::effects::{DirEnd, EffectPlan, EffectStep, FileEnd, Moves, TreeEnd, UnboundEnd};
 use crate::error::Result;
 use crate::flow::{self, fold, ok, Flow};
-use crate::ids::{EntryHash, Nonce, WriterId};
+use crate::ids::{Nonce, WriterId};
 use crate::io::{Kind, Root, Task};
 use crate::layout::{is_swap_file, Layout};
 use crate::line::Line;
+use crate::log::{Entry, Own};
 use crate::path::RelPath;
 use crate::schema::Raw;
 
@@ -32,6 +33,9 @@ pub struct PendingRecord {
     pub label: String,
     pub steps: Vec<EffectStep>,
     pub files: Vec<FileEnd>,
+    pub unbound: Vec<UnboundEnd>,
+    pub trees: Vec<TreeEnd>,
+    pub dirs: Vec<DirEnd>,
     /// How the steps move files, whoever carries them out.
     pub moves: Moves,
 }
@@ -43,6 +47,12 @@ struct Wire {
     label: String,
     steps: Vec<EffectStep>,
     files: Vec<FileEnd>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    unbound: Vec<UnboundEnd>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    trees: Vec<TreeEnd>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    dirs: Vec<DirEnd>,
     #[serde(default, skip_serializing_if = "Moves::renames")]
     moves: Moves,
 }
@@ -61,13 +71,24 @@ impl PendingRecord {
             label: label.to_owned(),
             steps: plan.steps.clone(),
             files: plan.files.clone(),
+            unbound: plan.unbound.clone(),
+            trees: plan.trees.clone(),
+            dirs: plan.dirs.clone(),
             moves: plan.moves,
         }
     }
 
-    /// The writer's head when the record was written.
-    pub fn after(&self) -> EntryHash {
-        self.entry.prev()
+    /// The writer's head when the record was written; numbered
+    /// [`Entry::UNNUMBERED`] when the planned entry has no number to follow.
+    pub fn after(&self) -> Own {
+        let n = Entry::decode(self.entry.clone()).map_or(Entry::UNNUMBERED, |entry| entry.n());
+        Own {
+            n: match n {
+                0 | Entry::UNNUMBERED => Entry::UNNUMBERED,
+                n => n - 1,
+            },
+            hash: self.entry.prev(),
+        }
     }
 
     /// Refuses bytes that are not a record, or longer than [`MAX_RECORD`].
@@ -84,6 +105,9 @@ impl PendingRecord {
             label: wire.label,
             steps: wire.steps,
             files: wire.files,
+            unbound: wire.unbound,
+            trees: wire.trees,
+            dirs: wire.dirs,
             moves: wire.moves,
         })
     }
@@ -95,6 +119,9 @@ impl PendingRecord {
             label: self.label.clone(),
             steps: self.steps.clone(),
             files: self.files.clone(),
+            unbound: self.unbound.clone(),
+            trees: self.trees.clone(),
+            dirs: self.dirs.clone(),
             moves: self.moves,
         };
         serde_json::to_vec(&wire).expect("a record serializes")
@@ -105,6 +132,11 @@ impl PendingRecord {
     pub fn is_confined(&self, layout: &Layout) -> bool {
         let steps = self.steps.iter().flat_map(EffectStep::library_paths);
         let ends = self.files.iter().filter_map(|end| end.path.as_ref());
+        let unbound = self.unbound.iter();
+        let unbound = unbound.flat_map(|end| end.from.iter().chain(end.path.iter()));
+        let trees = self.trees.iter().flat_map(|end| [&end.from, &end.to]);
+        let dirs = self.dirs.iter().map(|end| &end.path);
+        let ends = ends.chain(unbound).chain(trees).chain(dirs);
         steps
             .chain(ends)
             .all(|path| layout.check_library_path(path).is_ok())
@@ -214,7 +246,8 @@ pub fn cut_short(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::EntityId;
+    use crate::ids::{EntityId, EntryHash, Hlc};
+    use crate::log::{EntryKind, Logged};
 
     #[test]
     fn a_record_cut_short_is_empty_zeroed_or_the_start_of_one() {
@@ -238,11 +271,17 @@ mod tests {
     }
 
     fn record(steps: Vec<EffectStep>) -> PendingRecord {
-        let entry = Line::seal(format!(
-            r#"{{"prev":"{}","kind":"x"}}"#,
-            EntryHash::from_u128(9)
-        ))
-        .unwrap();
+        let intent = EntryKind::Intent(Logged {
+            label: "Save".into(),
+            ops: Vec::new(),
+            displaced: Vec::new(),
+            forks: Vec::new(),
+            more: 0,
+            record: None,
+        });
+        let entry = Entry::encode(EntryHash::from_u128(9), 5, Hlc::ZERO, intent)
+            .unwrap()
+            .line();
         PendingRecord {
             writer: WriterId::from_u128(1),
             entry,
@@ -254,6 +293,9 @@ mod tests {
                 done_after: 2,
                 pin: false,
             }],
+            unbound: Vec::new(),
+            trees: Vec::new(),
+            dirs: Vec::new(),
             moves: Moves::Rename,
         }
     }
@@ -272,7 +314,11 @@ mod tests {
         ]);
         let decoded = PendingRecord::decode(&record.encode()).unwrap();
         assert_eq!(decoded, record);
-        assert_eq!(decoded.after(), EntryHash::from_u128(9));
+        let after = Own {
+            n: 4,
+            hash: EntryHash::from_u128(9),
+        };
+        assert_eq!(decoded.after(), after);
         assert_eq!(decoded.paths(), [path("a/f")]);
     }
 
@@ -324,7 +370,7 @@ mod tests {
     fn a_record_naming_toshokan_files_or_the_folder_is_not_confined() {
         let layout = Layout::new(".t").unwrap();
         assert!(record(vec![]).is_confined(&layout));
-        for bad in [".t/writers/x", ".t", ""] {
+        for bad in [".t/writers.2/x", ".t", ""] {
             let rename = EffectStep::Rename {
                 from: path("a"),
                 to: path(bad),

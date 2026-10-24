@@ -4,12 +4,13 @@ use std::collections::BTreeSet;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
-use crate::binding::Bindings;
+use crate::binding::{Bindings, Scanned};
+use crate::cow::CowMap;
 use crate::ids::EntityId;
 use crate::index::Index;
 use crate::merge::Folded;
 use crate::path::RelPath;
-use crate::report::{Fork, Gap, WriterInfo};
+use crate::report::{Fork, Gap, Item, WriterInfo};
 use crate::schema::{Field, Keyed, Members, Raw, Register, Set, Value, Written};
 
 /// The library as one reader sees it. Cheap to clone; never changes; can be sent
@@ -26,9 +27,12 @@ pub struct View(Arc<Parts>, Arc<Index>);
 pub struct Parts {
     pub folded: Folded,
     pub bindings: Arc<Bindings>,
+    /// The library files the last scan found; `None` until a scan of every file.
+    pub listing: Option<CowMap<RelPath, Listed>>,
     pub writers: Vec<WriterInfo>,
     pub forks: Vec<Fork>,
     pub gaps: Vec<Gap>,
+    pub items: Vec<Item>,
 }
 
 /// One entity of a view.
@@ -58,6 +62,23 @@ pub enum FileState {
     /// or from there. The path is the logged one. A scan of every file binds it
     /// again.
     Unscanned,
+}
+
+/// A library file as the last scan listed it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Listed {
+    pub len: u64,
+    /// When the file last changed, as [`crate::io::Meta::modified`] gives it.
+    pub modified: Option<u64>,
+}
+
+impl Listed {
+    pub(crate) fn of(file: &Scanned) -> Self {
+        Self {
+            len: file.len,
+            modified: file.modified,
+        }
+    }
 }
 
 /// The distinct values of a key, each with how many entities hold it.
@@ -200,15 +221,80 @@ impl View {
         &self.0.gaps
     }
 
+    /// What the view shows apart from the merged state: runs, gaps and unplaced
+    /// lines.
+    pub fn items(&self) -> &[Item] {
+        &self.0.items
+    }
+
     pub fn writers(&self) -> &[WriterInfo] {
         &self.0.writers
     }
 
-    /// Library files no entity is bound to. They get an entity only when an intent
-    /// says something about them.
-    pub fn unbound(&self) -> &[RelPath] {
-        &self.0.bindings.unbound
+    /// Library files no entity is bound to, in order. They get an entity only when
+    /// an intent says something about them.
+    pub fn unbound(&self) -> impl Iterator<Item = &RelPath> {
+        self.0.bindings.unbound.iter().map(|(path, ())| path)
     }
+
+    /// Whether the library file at `path` is one no entity is bound to.
+    pub fn is_unbound(&self, path: &RelPath) -> bool {
+        self.0.bindings.unbound.contains_key(path)
+    }
+
+    /// The library file at `path` as the last scan listed it; `None` where it
+    /// listed none, and for every file until a scan of every file has run.
+    pub fn listed(&self, path: &RelPath) -> Option<Listed> {
+        self.0.listing.as_ref()?.get(path).copied()
+    }
+
+    /// What differs from `before`, a view of the same library. Costs a step per
+    /// change where this view was made from `before`, as each view an instance
+    /// gives is made from the one before it, and a step per entity and file
+    /// otherwise.
+    pub fn changed_since(&self, before: &View) -> Changed {
+        let (now, was) = (&*self.0, &*before.0);
+        let mut entities: BTreeSet<EntityId> =
+            now.folded.changed(&was.folded).into_iter().collect();
+        let mut files = BTreeSet::new();
+        if !Arc::ptr_eq(&now.bindings, &was.bindings) {
+            entities.extend(differing(now.bindings.bound.diff(&was.bindings.bound)));
+            files.extend(differing(now.bindings.unbound.diff(&was.bindings.unbound)));
+        }
+        match (&now.listing, &was.listing) {
+            (Some(listing), Some(listed)) => files.extend(differing(listing.diff(listed))),
+            (listing, listed) => {
+                let every = |listing: &Option<CowMap<RelPath, Listed>>| {
+                    let paths = listing.iter().flat_map(|listing| listing.iter());
+                    paths.map(|(path, _)| path.clone()).collect::<Vec<_>>()
+                };
+                files.extend(every(listing).into_iter().chain(every(listed)));
+            }
+        }
+        Changed { entities, files }
+    }
+}
+
+/// What differs between two views of one library, as [`View::changed_since`]
+/// finds it.
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct Changed {
+    /// The entities whose state, or whose file's binding, differs.
+    pub entities: BTreeSet<EntityId>,
+    /// The library files whose listing differs, or that one view has as a file no
+    /// entity is bound to and the other does not.
+    pub files: BTreeSet<RelPath>,
+}
+
+/// The keys whose entries differ in a [`CowMap::diff`].
+fn differing<'a, K: Clone + 'a, V: PartialEq + 'a>(
+    pairs: impl Iterator<Item = (Option<&'a (K, V)>, Option<&'a (K, V)>)> + 'a,
+) -> impl Iterator<Item = K> + 'a {
+    pairs.filter_map(|pair| match pair {
+        (Some((_, now)), Some((_, was))) if now == was => None,
+        (Some((key, _)), _) | (None, Some((key, _))) => Some(key.clone()),
+        (None, None) => None,
+    })
 }
 
 impl EntityView<'_> {

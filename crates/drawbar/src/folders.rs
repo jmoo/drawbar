@@ -8,7 +8,7 @@
 use std::cell::{Ref, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::store::{names, LibPath, Row};
+use crate::store::{names, LibPath};
 use crate::workspace::{LocalEntity, Workspace};
 
 /// One directory in the library.
@@ -36,11 +36,12 @@ pub enum Op {
     RemoveDir(LibPath),
 }
 
-/// An index row whose file is gone, for an asset drawbar does not hold: it keeps tags,
-/// or the slot it came off, that would otherwise be lost.
+/// An asset whose file is gone, which drawbar does not hold: the library keeps its tags,
+/// which would otherwise be lost.
 pub struct Lost {
     pub id: u64,
-    pub row: Row,
+    /// Where its file was.
+    pub path: LibPath,
 }
 
 /// The menu item that shows the files drawbar does not open, and hides them again.
@@ -65,8 +66,6 @@ pub struct Where {
     pub read_only: bool,
     /// It is still being read.
     pub opening: bool,
-    /// How many files its listing has found, while it is still being listed.
-    pub listing: Option<usize>,
 }
 
 /// A library a window can open, for the menus that switch between them.
@@ -83,7 +82,7 @@ pub struct Library {
 pub enum Occupant {
     Asset(u64),
     Folder(u64),
-    /// An index row whose file is gone.
+    /// An asset whose file is gone, which the library keeps tags for.
     Lost(u64),
     /// A file drawbar does not hold: one it does not open, or one it did not read.
     Other,
@@ -173,10 +172,6 @@ pub struct Folders {
     pub unread: Vec<(LibPath, String)>,
     /// Folders whose contents were not all listed.
     pub unwalked: BTreeSet<LibPath>,
-    /// Folders to list whole ahead of the rest of a listing still in flight, each with
-    /// whether it has been asked for, and those listed whole since.
-    walks: BTreeMap<LibPath, bool>,
-    walked: BTreeSet<LibPath>,
     /// Show the files drawbar does not open, too.
     pub all_files: bool,
     /// The libraries the window can switch to, the open one among them. Empty where
@@ -184,6 +179,40 @@ pub struct Folders {
     pub libraries: Vec<Library>,
     /// The library open last, which the browser must be let into again before it opens.
     pub reconnect: Option<Library>,
+    /// The changes the library keeps apart rather than merging them.
+    pub kept: Vec<Kept>,
+}
+
+/// Changes the library keeps apart, as Kept apart shows them: who made them and when,
+/// and each change, with the asset it changes.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Kept {
+    pub kind: crate::store::KeptKind,
+    pub run: toshokan::log::Run,
+    pub title: String,
+    pub rows: Vec<KeptRow>,
+    /// They may be their writer's own older changes, which it replaced since.
+    pub uncertain: bool,
+}
+
+/// One change of a [`Kept`].
+#[derive(Clone, PartialEq, Debug)]
+pub struct KeptRow {
+    pub key: crate::store::KeptKey,
+    /// The asset it changes, where the window holds it.
+    pub id: Option<u64>,
+    pub said: String,
+    /// Whether taking it makes it: a change to where a file is cannot be taken.
+    pub takes: bool,
+    /// It settles a value no reader holds any more.
+    pub forgotten: bool,
+}
+
+impl Kept {
+    /// Whether the change to the asset `id` is kept apart here.
+    pub fn touches(&self, id: u64) -> bool {
+        self.rows.iter().any(|row| row.id == Some(id))
+    }
 }
 
 impl Folders {
@@ -299,6 +328,20 @@ impl Folders {
         };
     }
 
+    /// A hash of every folder's path and every file drawbar does not hold: what besides
+    /// the assets two names can collide in.
+    pub fn names_hash(&self) -> u64 {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::hash::DefaultHasher::new();
+        for folder in &self.list {
+            folder.path.hash(&mut hasher);
+        }
+        for path in self.strangers() {
+            path.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
     /// Every file drawbar does not hold, read or not.
     pub fn strangers(&self) -> impl Iterator<Item = &LibPath> {
         self.others
@@ -313,18 +356,14 @@ impl Folders {
             || self.unwalked.iter().any(|path| path.is_in(dir))
     }
 
-    /// The index rows whose file is gone.
+    /// The assets whose file is gone, which the library keeps tags for.
     pub fn lost(&self) -> &[Lost] {
         &self.lost
     }
 
-    pub(crate) fn lose(&mut self, id: u64, row: Row) {
-        self.lost.push(Lost { id, row });
-    }
-
-    /// Drop a lost row, and whatever it kept.
-    pub(crate) fn forget(&mut self, id: u64) {
-        self.lost.retain(|lost| lost.id != id);
+    /// Show these assets, whose files are gone, as lost, in place of those shown before.
+    pub(crate) fn set_lost(&mut self, lost: Vec<Lost>) {
+        self.lost = lost;
     }
 
     fn next_id(&self) -> u64 {
@@ -340,25 +379,6 @@ impl Folders {
         self.list.sort_by(|a, b| a.path.cmp(&b.path));
         self.generation += 1;
         id
-    }
-
-    /// Take in folders a listing found so far, keeping every folder already known. The
-    /// listing's end takes them all again through [`Folders::sync`].
-    pub(crate) fn add(&mut self, dirs: &[LibPath]) {
-        let known: BTreeSet<&LibPath> = self.list.iter().map(|folder| &folder.path).collect();
-        let new: Vec<LibPath> = dirs
-            .iter()
-            .filter(|dir| !known.contains(dir))
-            .cloned()
-            .collect();
-        if new.is_empty() {
-            return;
-        }
-        let ids = self.next_id()..;
-        self.list
-            .extend(ids.zip(new).map(|(id, path)| Folder { id, path }));
-        self.list.sort_by(|a, b| a.path.cmp(&b.path));
-        self.generation += 1;
     }
 
     /// Take the folders the disk has, keeping the id of each one already known, with the
@@ -397,7 +417,7 @@ impl Folders {
             .filter(|folder| folder.path.parent() == *dir)
             .map(|folder| (folder.name(), Occupant::Folder(folder.id)));
         let lost = self.lost.iter().filter_map(|lost| {
-            let path = lost.row.path.as_ref()?;
+            let path = &lost.path;
             (path.parent() == *dir).then(|| (path.leaf(), Occupant::Lost(lost.id)))
         });
         let others = self
@@ -495,8 +515,8 @@ impl Folders {
         self.list.sort_by(|a, b| a.path.cmp(&b.path));
         self.generation += 1;
         for lost in &mut self.lost {
-            if let Some(moved) = lost.row.path.as_ref().and_then(|at| at.moved(from, to)) {
-                lost.row.path = Some(moved);
+            if let Some(moved) = lost.path.moved(from, to) {
+                lost.path = moved;
             }
         }
         let others = self.others.iter_mut();
@@ -506,16 +526,10 @@ impl Folders {
                 *path = moved;
             }
         }
-        self.walks = std::mem::take(&mut self.walks)
+        self.unwalked = std::mem::take(&mut self.unwalked)
             .into_iter()
-            .map(|(path, asked)| (path.moved(from, to).unwrap_or(path), asked))
+            .map(|path| path.moved(from, to).unwrap_or(path))
             .collect();
-        for paths in [&mut self.unwalked, &mut self.walked] {
-            *paths = std::mem::take(paths)
-                .into_iter()
-                .map(|path| path.moved(from, to).unwrap_or(path))
-                .collect();
-        }
     }
 
     /// Move back what a rename the disk refused had moved, the changes not yet sent
@@ -554,35 +568,6 @@ impl Folders {
     /// Put back changes taken and not sent, ahead of any made since.
     pub(crate) fn hold(&mut self, ops: Vec<Op>) {
         self.ops.splice(0..0, ops);
-    }
-
-    /// Whether everything in `dir` has been listed: the whole library has, or `dir` was
-    /// listed ahead of the rest.
-    pub(crate) fn listed_whole(&self, dir: &LibPath) -> bool {
-        let listing = self.place.as_ref().is_some_and(|at| at.listing.is_some());
-        !listing || self.walked.iter().any(|done| dir.is_in(done))
-    }
-
-    /// Want `dir` listed whole ahead of the rest of the listing.
-    pub(crate) fn walk(&mut self, dir: &LibPath) {
-        self.walks.entry(dir.clone()).or_insert(false);
-    }
-
-    /// The folders wanted and not yet asked for, which are asked for now.
-    pub(crate) fn take_walks(&mut self) -> Vec<LibPath> {
-        let unasked = self.walks.iter_mut().filter(|(_, asked)| !**asked);
-        unasked
-            .map(|(dir, asked)| {
-                *asked = true;
-                dir.clone()
-            })
-            .collect()
-    }
-
-    /// Record that everything in `dir` has been listed.
-    pub(crate) fn walked(&mut self, dir: LibPath) {
-        self.walks.remove(&dir);
-        self.walked.insert(dir);
     }
 
     /// Remove an empty folder. The caller moves out what was in it first.

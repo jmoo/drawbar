@@ -73,8 +73,8 @@ instrument, and no test needs hardware. A separate suite in
 attached instrument: a library over a temporary folder, the browser's acts, the
 queue, and the device worker over USB. It sends piano libraries and sample
 instruments from the files they rest in, replaces an occupied slot, changes a file
-on disk while it is being sent, and checks that memory stays bounded by the transfer
-chunk.
+on disk while it is being sent, keeps in the library an occupant it could not put
+back, and checks that memory stays bounded by the transfer chunk.
 
 The tests write to the instrument, so they are ignored and do nothing unless
 `DRAWBAR_HARDWARE=1`. Close drawbar and Nord Sound Manager first, so the interface
@@ -91,6 +91,30 @@ path. The sources are slots on the instrument: `DRAWBAR_HARDWARE_PIANO` and
 `DRAWBAR_HARDWARE_SAMPLE`, a sample instrument of more than a megabyte. Each test
 writes only to the last vacant slots of bank 1 and deletes only names it gave, and
 the last test checks that every class holds what it held when the run started.
+
+## In the browser
+
+`crates/drawbar/tests/web.rs` runs the browser's library through its worker: in
+the private file system and in a folder of it opened as a picked folder is, with
+two installs of one library and two tabs of one install, and with a worker that
+faults, stalls or loses an answer.
+`crates/toshokan/tests/web.rs` and its neighbors run toshokan's browser storage.
+wasm-bindgen's test runner runs them headless; on Linux, Nix runs both in
+Chromium and Firefox:
+
+```sh
+nix build .#drawbar-web-tests .#toshokan-web
+```
+
+Elsewhere, from `crates/` in `nix develop`, point the runner at a browser's driver:
+
+```sh
+CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
+  CHROMEDRIVER=chromedriver cargo test -p drawbar --target wasm32-unknown-unknown --test web
+```
+
+`--test bench` times the browser's library at the size `DRAWBAR_BENCH_FILES`
+names, and runs only when named.
 
 ## Everything at once
 

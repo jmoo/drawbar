@@ -23,7 +23,7 @@ use std::rc::Rc;
 
 use common::{
     bound, close, entry, env, identify, identity, layout, path, BlockingMem, Driven, Fill, COPYING,
-    HEAD, WRITER,
+    HEAD, HEAD_AT, WRITER,
 };
 use toshokan::binding::Bindings;
 use toshokan::blocking;
@@ -31,7 +31,7 @@ use toshokan::crash::{self, Fault, Streams};
 use toshokan::disk::Tail;
 use toshokan::effects::{self, EffectPlan, Moves};
 use toshokan::io::{Capabilities, Capability, Range, CHUNK};
-use toshokan::log::Settlement;
+use toshokan::log::{Own, Settlement};
 use toshokan::pending::{self, PendingRecord};
 use toshokan::plan::{Content, Expect, FileChange, Piece, Splice};
 use toshokan::recovery::{self, Chain};
@@ -348,7 +348,7 @@ impl Case {
             .files
             .iter()
             .filter(|(p, _)| !bound.contains(p.as_str()) && !layout().owns(&path(p)))
-            .map(|(p, _)| path(p))
+            .map(|(p, _)| (path(p), ()))
             .collect();
         bindings
     }
@@ -405,28 +405,35 @@ impl Case {
     }
 }
 
-/// A writer's history as recovery sees it: its head, and whether the entry
-/// closing its record follows.
+/// A writer's history as recovery sees it: its head, and whether an entry
+/// closing its record was logged.
 struct Fake {
     closed: bool,
 }
 
 impl Chain for Fake {
-    fn holds(&self, hash: EntryHash) -> bool {
-        hash == HEAD
+    fn holds(&self, at: Own) -> bool {
+        at == HEAD_AT
     }
 
-    fn continues(&self, hash: EntryHash) -> bool {
-        hash == HEAD && self.closed
+    fn unfinished(&self, _: Nonce) -> bool {
+        false
     }
 }
 
 fn logs(disk: &MemDisk, writer: WriterId) -> BTreeMap<WriterId, Fake> {
-    let dir = layout().writer(writer);
-    let closed = disk.files(Root::Folder).keys().any(|p| {
-        p.parent().as_ref() == Some(&dir) && p.name().is_some_and(|n| n.starts_with("closed-"))
-    });
+    let closed = !closing(disk, writer).is_empty();
     BTreeMap::from([(writer, Fake { closed })])
+}
+
+/// The records of `writer` an entry closes, by the markers standing for them.
+fn closing(disk: &MemDisk, writer: WriterId) -> BTreeSet<(WriterId, Nonce)> {
+    let dir = layout().writer(writer);
+    let names = disk.files(Root::Folder).into_keys().filter_map(|p| {
+        let name = p.name()?.strip_prefix("closed-")?.parse::<Nonce>().ok()?;
+        (p.parent().as_ref() == Some(&dir)).then_some((writer, name))
+    });
+    names.collect()
 }
 
 fn records(disk: &MemDisk, writer: WriterId) -> Vec<(Nonce, PendingRecord)> {
@@ -445,9 +452,9 @@ fn recover(disk: &MemDisk) -> Result<Vec<Outcome>, Error> {
     let capabilities = d.capabilities(Root::Folder);
     let found = d.run(recovery::assess(
         &layout,
-        Some((WRITER, HEAD)),
+        Some(WRITER),
         &logs,
-        &BTreeSet::new(),
+        &closing(disk, WRITER),
         capabilities,
     ))?;
     assert!(found.orphaned.is_empty(), "{found:?}");
@@ -678,7 +685,7 @@ fn settle_orphans(disk: &MemDisk, how: Settlement, stop: usize, seed: u64) -> (u
             &layout,
             None,
             &logs(disk, WRITER),
-            &BTreeSet::new(),
+            &closing(disk, WRITER),
             d.capabilities(Root::Folder),
         ))
         .unwrap();
@@ -914,7 +921,7 @@ fn a_folder_that_cannot_rename_a_directory_refuses_to_settle_a_directory_rename(
                         &layout,
                         None,
                         &logs,
-                        &BTreeSet::new(),
+                        &closing(&disk, WRITER),
                         folder,
                     ))
                     .unwrap();
@@ -980,16 +987,16 @@ fn records_that_are_unchained_unconfined_or_settled_are_not_acted_on() {
     let other = WriterId::from_u128(0x99);
     write(d, WRITER, 1, HEAD, "b");
     write(d, WRITER, 2, EntryHash::from_u128(0x12), "b");
-    write(d, WRITER, 3, HEAD, ".t/writers/x");
+    write(d, WRITER, 3, HEAD, ".t/writers.2/x");
     write(d, other, 4, HEAD, "b");
     write(d, other, 5, HEAD, "c");
 
     struct Settled;
     impl Chain for Settled {
-        fn holds(&self, hash: EntryHash) -> bool {
-            hash == HEAD
+        fn holds(&self, at: Own) -> bool {
+            at == HEAD_AT
         }
-        fn continues(&self, _: EntryHash) -> bool {
+        fn unfinished(&self, _: Nonce) -> bool {
             false
         }
     }
@@ -999,7 +1006,7 @@ fn records_that_are_unchained_unconfined_or_settled_are_not_acted_on() {
     let found = d
         .run(recovery::assess(
             &layout,
-            Some((WRITER, HEAD)),
+            Some(WRITER),
             &logs,
             &settled,
             Capabilities::ALL,
@@ -1015,6 +1022,8 @@ fn records_that_are_unchained_unconfined_or_settled_are_not_acted_on() {
             stopped: path("b"),
             error: toshokan::io::IoError::NotFound,
             record: Some(Nonce::from_u128(1)),
+            landed: Vec::new(),
+            taken: Vec::new(),
         }),
         "the source is not there"
     );

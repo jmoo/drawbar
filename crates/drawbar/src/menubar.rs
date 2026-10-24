@@ -10,7 +10,7 @@ use eframe::egui;
 use muda::accelerator::{Key, KeyAccelerator, Modifiers};
 use muda::{CheckMenuItem, IsMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 
-use crate::menu::{label, menus, shortcut, Command, Entry, Offer, RECENT};
+use crate::menu::{label, menus, shortcut, undoes, Command, Entry, Offer, RECENT};
 use crate::platform::Platform;
 
 /// One native item and what it last showed, so it is only touched when that changes.
@@ -134,6 +134,12 @@ impl MenuBar {
                 Item::Plain(item) => {
                     item.set_text(label);
                     item.set_enabled(*enabled);
+                    // ⚠️ A key equivalent is the menu's even while its item is disabled,
+                    // and a field being typed in needs its own undo keys.
+                    if undoes(line.command) {
+                        let keys = accelerator(line.command).filter(|_| *enabled);
+                        let _ = item.set_key_accelerator(keys);
+                    }
                 }
                 Item::Check(item) => {
                     item.set_text(label);
@@ -271,6 +277,7 @@ fn accelerator(command: Command) -> Option<KeyAccelerator> {
         egui::Key::R => "r",
         egui::Key::S => "s",
         egui::Key::W => "w",
+        egui::Key::Z => "z",
         egui::Key::Num2 => "2",
         egui::Key::Num3 => "3",
         egui::Key::Num0 => "0",

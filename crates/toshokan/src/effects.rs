@@ -25,7 +25,7 @@ use crate::env::{Env, Identify};
 use crate::error::{Error, Invalid, Mismatch, Refusal, Result};
 use crate::flow::{self, each, fold, ok, Fallible, Flow, Held};
 use crate::ids::{EntityId, Nonce, WriterId};
-use crate::io::{Capabilities, Io, IoError, Kind, Root, Task};
+use crate::io::{Capabilities, Io, IoError, Kind, Meta, Root, Task};
 use crate::layout::Layout;
 use crate::log::{Displaced, FileFact};
 use crate::path::RelPath;
@@ -78,6 +78,27 @@ impl EffectStep {
             | Self::FromTrash { path, .. }
             | Self::MakeDir { path }
             | Self::RemoveDir { path } => path,
+        }
+    }
+
+    /// The library path the step takes a file or a directory from, where it takes
+    /// one.
+    pub fn taken(&self) -> Option<&RelPath> {
+        match self {
+            Self::ToTrash { path, .. } | Self::RemoveDir { path } => Some(path),
+            Self::Rename { from, .. } => Some(from),
+            Self::Place { .. } | Self::FromTrash { .. } | Self::MakeDir { .. } => None,
+        }
+    }
+
+    /// The library path the step puts a file or a directory at, where it puts one.
+    pub fn put(&self) -> Option<&RelPath> {
+        match self {
+            Self::Place { path, .. }
+            | Self::FromTrash { path, .. }
+            | Self::MakeDir { path }
+            | Self::Rename { to: path, .. } => Some(path),
+            Self::ToTrash { .. } | Self::RemoveDir { .. } => None,
         }
     }
 
@@ -135,6 +156,10 @@ impl Moves {
 pub struct Precondition {
     pub path: RelPath,
     pub expect: Expect,
+    /// Only an entry of exactly this name counts: the path is a rename's
+    /// destination that the volume may take for its source's name, and finding
+    /// the source there is no clash.
+    pub spelled: bool,
 }
 
 /// What a staged file is filled from.
@@ -159,6 +184,34 @@ pub struct FileEnd {
     pub pin: bool,
 }
 
+/// Where a file no entity is bound to is once the first `done_after` steps are
+/// done, and where it was: at `path`, or nowhere.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct UnboundEnd {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<RelPath>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<RelPath>,
+    pub done_after: usize,
+}
+
+/// The directory `path` made, where `made`, or removed once the first
+/// `done_after` steps are done.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct DirEnd {
+    pub path: RelPath,
+    pub made: bool,
+    pub done_after: usize,
+}
+
+/// A tree moved from `from` to `to` once the first `done_after` steps are done.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct TreeEnd {
+    pub from: RelPath,
+    pub to: RelPath,
+    pub done_after: usize,
+}
+
 /// The file effects of one intent, resolved against the bindings.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct EffectPlan {
@@ -170,6 +223,9 @@ pub struct EffectPlan {
     pub staged: Vec<(Nonce, RelPath, Staged)>,
     pub steps: Vec<EffectStep>,
     pub files: Vec<FileEnd>,
+    pub unbound: Vec<UnboundEnd>,
+    pub trees: Vec<TreeEnd>,
+    pub dirs: Vec<DirEnd>,
     pub moves: Moves,
 }
 
@@ -182,13 +238,19 @@ impl EffectPlan {
             staged: Vec::new(),
             steps: Vec::new(),
             files: Vec::new(),
+            unbound: Vec::new(),
+            trees: Vec::new(),
+            dirs: Vec::new(),
             moves: Moves::Rename,
         }
     }
 
     /// Whether the intent has no file effects at all.
     pub fn is_empty(&self) -> bool {
-        self.steps.is_empty() && self.checks.is_empty() && self.files.is_empty()
+        self.steps.is_empty()
+            && self.checks.is_empty()
+            && self.files.is_empty()
+            && self.unbound.is_empty()
     }
 
     /// Whether the effects change the folder, and so need a pending record.
@@ -212,6 +274,16 @@ pub struct Applied {
     pub displaced: Vec<Displaced>,
     /// What each entity's file register should say, for the effects that are done.
     pub files: Vec<(EntityId, Option<FileFact>)>,
+    /// Each file no entity is bound to that the effects done moved: where it was,
+    /// and where it is and what it holds.
+    pub unbound: Vec<(Option<RelPath>, Option<FileFact>)>,
+    /// Each tree the effects done moved, from and to.
+    pub trees: Vec<(RelPath, RelPath)>,
+    /// Each directory the effects done made, or removed, as the folder shows it.
+    pub dirs: Vec<(RelPath, bool)>,
+    /// Each directory a step done was to remove that the folder still holds, as
+    /// a file the plan did not know of keeps one.
+    pub left: Vec<RelPath>,
     pub outcome: Outcome,
 }
 
@@ -234,6 +306,7 @@ pub fn resolve(
             ..EffectPlan::new(env.nonce())
         },
         touched: Vec::new(),
+        removed: Vec::new(),
         claimed: BTreeSet::new(),
         layout,
         bindings,
@@ -241,15 +314,49 @@ pub fn resolve(
     for change in changes {
         resolver.change(change, capabilities, env)?;
     }
+    let put: Vec<&RelPath> = resolver
+        .plan
+        .steps
+        .iter()
+        .filter_map(EffectStep::put)
+        .collect();
+    for path in &resolver.removed {
+        if put.iter().any(|put| put.starts_with(path) && *put != path) {
+            return Err(invalid(Invalid::NotEmpty(path.clone())));
+        }
+    }
     Ok(resolver.plan)
 }
 
 struct Resolver<'r> {
     plan: EffectPlan,
     touched: Vec<RelPath>,
+    /// Each directory a [`FileChange::RemoveDir`] removes, which no step of the intent
+    /// may put anything in, before or after.
+    removed: Vec<RelPath>,
     claimed: BTreeSet<EntityId>,
     layout: &'r Layout,
     bindings: &'r Bindings,
+}
+
+/// The directories at and under `dir` that hold `files`, and `dir`, deepest first:
+/// those a move of every one of `files` out of `dir` leaves to remove.
+fn emptied(files: &[&RelPath], dir: &RelPath) -> Vec<RelPath> {
+    let mut dirs: Vec<RelPath> = files
+        .iter()
+        .flat_map(|path| std::iter::successors(path.parent(), RelPath::parent))
+        .filter(|parent| parent.starts_with(dir))
+        .chain([dir.clone()])
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    dirs.sort_by_key(|parent| std::cmp::Reverse(parent.components().count()));
+    dirs
+}
+
+/// Whether the volume, by `env`'s names, takes the two paths for one.
+fn one_name(env: &Env, a: &RelPath, b: &RelPath) -> bool {
+    a != b && env.names.key(a.as_str()) == env.names.key(b.as_str())
 }
 
 fn invalid(invalid: Invalid) -> Refusal {
@@ -274,7 +381,7 @@ impl Resolver<'_> {
                 let path = self.library(path)?;
                 self.claim(entity, &path)?;
                 self.check(&path, *expect);
-                if let Expect::Holds(_) = expect {
+                if expect.present() {
                     self.step(EffectStep::ToTrash {
                         path: path.clone(),
                         item: env.nonce(),
@@ -301,20 +408,48 @@ impl Resolver<'_> {
                 self.claim(*entity, &from)?;
                 self.touch(&to)?;
                 self.check(&from, *expect);
-                self.check(&to, Expect::Absent);
-                self.step(EffectStep::Rename {
-                    from,
-                    to: to.clone(),
-                });
+                self.rename(&from, &to, env)?;
                 self.end(*entity, Some(to));
             }
             FileChange::MoveTree { from, to } => {
-                let (from, to) = (self.library(from)?, self.library(to)?);
-                self.touch(&from)?;
-                self.touch(&to)?;
-                self.check(&to, Expect::Absent);
-                let rename_dir = capabilities.rename_dir && self.plan.moves.renames();
-                self.move_tree(&from, &to, rename_dir)?;
+                self.move_tree_whole(from, to, capabilities, env)?
+            }
+            // A directory change touches no path, so one intent may make a directory
+            // and move files into it, or move them out and remove it.
+            FileChange::MakeDir { path } => {
+                let path = self.library(path)?;
+                self.check(&path, Expect::Absent);
+                self.step(EffectStep::MakeDir { path: path.clone() });
+                self.end_dir(path, true);
+            }
+            FileChange::RemoveDir { path } => {
+                let path = self.library(path)?;
+                let known = self.bindings.bound.values();
+                let known = known.filter(|file| file.state != FileState::Missing);
+                let unbound = self.bindings.unbound.seek(|file| file.cmp(&path));
+                let unbound = unbound
+                    .take_while(|(file, ())| file.as_str().starts_with(path.as_str()))
+                    .map(|(file, ())| file);
+                let steps = &self.plan.steps;
+                let taken: Vec<&RelPath> = steps.iter().filter_map(EffectStep::taken).collect();
+                let moved = |file: &RelPath| taken.iter().any(|at| file.starts_with(at));
+                let staying = |file: &&RelPath| file.starts_with(&path) && !moved(file);
+                let held = known
+                    .map(|file| &file.path)
+                    .chain(unbound)
+                    .any(|file| staying(&file));
+                if held {
+                    return Err(invalid(Invalid::NotEmpty(path)));
+                }
+                self.removed.push(path.clone());
+                self.step(EffectStep::RemoveDir { path: path.clone() });
+                self.end_dir(path, false);
+            }
+            FileChange::MoveBack { from, to, held } => {
+                for (path, expect) in held {
+                    self.check(path, *expect);
+                }
+                self.move_tree_whole(from, to, capabilities, env)?;
             }
             FileChange::Adopt {
                 entity,
@@ -341,7 +476,7 @@ impl Resolver<'_> {
                 let to = self.library(to)?;
                 self.claim(*entity, &to)?;
                 self.check(&to, *expect);
-                if let Expect::Holds(_) = expect {
+                if expect.present() {
                     self.step(EffectStep::ToTrash {
                         path: to.clone(),
                         item: env.nonce(),
@@ -353,7 +488,81 @@ impl Resolver<'_> {
                 });
                 self.end(*entity, Some(to));
             }
+            FileChange::SaveFile {
+                path,
+                content,
+                expect,
+            } => {
+                let path = self.unbound(path)?;
+                self.check(&path, *expect);
+                if expect.present() {
+                    self.step(EffectStep::ToTrash {
+                        path: path.clone(),
+                        item: env.nonce(),
+                    });
+                }
+                let staged = env.nonce();
+                self.plan
+                    .place(staged, Staged::Content(*content), path.clone());
+                let from = expect.present().then(|| path.clone());
+                self.end_unbound(from, Some(path));
+            }
+            FileChange::RenameFile { from, to, expect } => {
+                let from = self.unbound(from)?;
+                let to = self.library(to)?;
+                self.touch(&to)?;
+                self.check(&from, *expect);
+                self.rename(&from, &to, env)?;
+                self.end_unbound(Some(from), Some(to));
+            }
+            FileChange::TrashFile { path, expect } => {
+                let path = self.unbound(path)?;
+                self.check(&path, *expect);
+                self.step(EffectStep::ToTrash {
+                    path: path.clone(),
+                    item: env.nonce(),
+                });
+                self.end_unbound(Some(path), None);
+            }
+            FileChange::RestoreFile { item, to, expect } => {
+                let to = self.unbound(to)?;
+                self.check(&to, *expect);
+                if expect.present() {
+                    self.step(EffectStep::ToTrash {
+                        path: to.clone(),
+                        item: env.nonce(),
+                    });
+                }
+                self.step(EffectStep::FromTrash {
+                    item: *item,
+                    path: to.clone(),
+                });
+                let from = expect.present().then(|| to.clone());
+                self.end_unbound(from, Some(to));
+            }
         }
+        Ok(())
+    }
+
+    fn move_tree_whole(
+        &mut self,
+        from: &RelPath,
+        to: &RelPath,
+        capabilities: Capabilities,
+        env: &mut Env,
+    ) -> std::result::Result<(), Refusal> {
+        let (from, to) = (self.library(from)?, self.library(to)?);
+        self.touch(&from)?;
+        self.touch(&to)?;
+        let rename_dir = capabilities.rename_dir && self.plan.moves.renames();
+        match rename_dir && one_name(env, &from, &to) {
+            true => self.move_tree_aside(&from, &to, env)?,
+            false => {
+                self.check(&to, Expect::Absent);
+                self.move_tree(&from, &to, rename_dir)?;
+            }
+        }
+        self.end_tree(from, to);
         Ok(())
     }
 
@@ -370,10 +579,12 @@ impl Resolver<'_> {
             .filter(|(_, file)| file.state != FileState::Missing)
             .map(|(entity, file)| (&file.path, *entity))
             .collect();
+        let unbound = self.bindings.unbound.seek(|path| path.cmp(from));
+        let unbound = unbound.take_while(|(path, ())| path.as_str().starts_with(from.as_str()));
         let files: BTreeSet<&RelPath> = bound
             .keys()
             .copied()
-            .chain(&self.bindings.unbound)
+            .chain(unbound.map(|(path, ())| path))
             .filter(|path| path.starts_with(from))
             .collect();
         for &entity in bound
@@ -399,27 +610,109 @@ impl Resolver<'_> {
                     to: rebased(path),
                 });
             }
+            // A file no entity is bound to has no facts: the tree's own end says where
+            // it went.
             if let Some(&entity) = bound.get(path) {
                 self.end(entity, Some(rebased(path)));
             }
         }
-        if !rename_dir {
-            let mut dirs: Vec<RelPath> = files
-                .iter()
-                .flat_map(|path| std::iter::successors(path.parent(), RelPath::parent))
-                .filter(|dir| dir.starts_with(from))
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
-            dirs.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
-            if !files.contains(from) && !dirs.contains(from) {
-                dirs.push(from.clone());
-            }
-            for path in dirs {
-                self.step(EffectStep::RemoveDir { path });
+        if !rename_dir && !files.contains(from) {
+            let files: Vec<&RelPath> = files.iter().copied().collect();
+            for path in emptied(&files, from) {
+                self.step(EffectStep::RemoveDir { path: path.clone() });
+                self.end_dir(path, false);
             }
         }
         Ok(())
+    }
+
+    /// Renames the file `from` to `to`, where nothing is. Where the volume may take
+    /// the two for one name, as a change of case alone on a volume that ignores
+    /// case, the file itself may be found at `to`: only an entry of exactly that
+    /// name clashes, and the file moves through a free name beside it, so that no
+    /// step finds its source and its destination one file.
+    fn rename(
+        &mut self,
+        from: &RelPath,
+        to: &RelPath,
+        env: &mut Env,
+    ) -> std::result::Result<(), Refusal> {
+        if !one_name(env, from, to) {
+            self.check(to, Expect::Absent);
+            self.step(EffectStep::Rename {
+                from: from.clone(),
+                to: to.clone(),
+            });
+            return Ok(());
+        }
+        self.spelled(to);
+        self.through_trash(from, to, env);
+        Ok(())
+    }
+
+    /// Moves `from` to `to` by way of this writer's trash, which every reader and
+    /// recovery admits, so that no step's source and destination are one file.
+    fn through_trash(&mut self, from: &RelPath, to: &RelPath, env: &mut Env) {
+        let item = env.nonce();
+        self.step(EffectStep::ToTrash {
+            path: from.clone(),
+            item,
+        });
+        self.step(EffectStep::FromTrash {
+            item,
+            path: to.clone(),
+        });
+    }
+
+    /// [`Resolver::move_tree`] by moving the directory by way of this writer's trash,
+    /// where the volume takes `from` and `to` for one name.
+    fn move_tree_aside(
+        &mut self,
+        from: &RelPath,
+        to: &RelPath,
+        env: &mut Env,
+    ) -> std::result::Result<(), Refusal> {
+        self.spelled(to);
+        let (ends, unbound, steps) = (
+            self.plan.files.len(),
+            self.plan.unbound.len(),
+            self.plan.steps.len(),
+        );
+        self.move_tree(from, to, true)?;
+        self.plan.steps.truncate(steps);
+        self.through_trash(from, to, env);
+        let done_after = self.plan.steps.len();
+        for end in &mut self.plan.files[ends..] {
+            end.done_after = done_after;
+        }
+        for end in &mut self.plan.unbound[unbound..] {
+            end.done_after = done_after;
+        }
+        Ok(())
+    }
+
+    /// Checks nothing is at `to` under exactly its name.
+    fn spelled(&mut self, to: &RelPath) {
+        self.plan.checks.push(Precondition {
+            path: to.clone(),
+            expect: Expect::Absent,
+            spelled: true,
+        });
+    }
+
+    /// Takes `path` for one effect on a file no entity is bound to: refused where
+    /// an entity's file is.
+    fn unbound(&mut self, path: &RelPath) -> std::result::Result<RelPath, Refusal> {
+        let path = self.library(path)?;
+        let bound = self.bindings.bound.values();
+        if let Some(file) = bound
+            .into_iter()
+            .find(|file| file.path == path && file.state != FileState::Missing)
+        {
+            return Err(invalid(Invalid::Bound(file.path.clone())));
+        }
+        self.touch(&path)?;
+        Ok(path)
     }
 
     fn library(&self, path: &RelPath) -> std::result::Result<RelPath, Refusal> {
@@ -462,11 +755,39 @@ impl Resolver<'_> {
         self.plan.checks.push(Precondition {
             path: path.clone(),
             expect,
+            spelled: false,
         });
     }
 
     fn step(&mut self, step: EffectStep) {
         self.plan.steps.push(step);
+    }
+
+    fn end_dir(&mut self, path: RelPath, made: bool) {
+        let done_after = self.plan.steps.len();
+        self.plan.dirs.push(DirEnd {
+            path,
+            made,
+            done_after,
+        });
+    }
+
+    fn end_tree(&mut self, from: RelPath, to: RelPath) {
+        let done_after = self.plan.steps.len();
+        self.plan.trees.push(TreeEnd {
+            from,
+            to,
+            done_after,
+        });
+    }
+
+    fn end_unbound(&mut self, from: Option<RelPath>, path: Option<RelPath>) {
+        let done_after = self.plan.steps.len();
+        self.plan.unbound.push(UnboundEnd {
+            from,
+            path,
+            done_after,
+        });
     }
 
     fn end(&mut self, entity: EntityId, path: Option<RelPath>) {
@@ -631,34 +952,52 @@ fn refusal<'a>(
 ) -> Fallible<'a, Option<Refusal>> {
     let identify = Rc::clone(identify);
     let checks = plan.checks.clone();
-    let paths: Vec<RelPath> = checks.iter().map(|check| check.path.clone()).collect();
-    let stated = fold(paths.into_iter(), Vec::new(), |mut metas, path| {
-        flow::stat(Root::Folder, &path).map_ok(move |meta| {
-            metas.push(meta);
-            metas
-        })
-    });
+    let paths: Vec<(RelPath, bool)> = checks
+        .iter()
+        .map(|check| (check.path.clone(), check.spelled))
+        .collect();
+    let stated = fold(
+        paths.into_iter(),
+        Vec::new(),
+        |mut metas, (path, spelled)| {
+            flow::stat(Root::Folder, &path).and_then(move |meta| {
+                if !spelled || meta.is_none() {
+                    metas.push(meta);
+                    return ok(metas);
+                }
+                flow::spelled(Root::Folder, path).map_ok(move |exactly| {
+                    metas.push(meta.filter(|_| exactly));
+                    metas
+                })
+            })
+        },
+    );
     let checked = stated.and_then(move |metas| {
+        let identified = |check: &Precondition, meta: &Option<Meta>| match meta {
+            Some(meta) if meta.kind == Kind::File => !matches!(check.expect, Expect::Listed { .. }),
+            _ => false,
+        };
         let files = checks
             .iter()
             .zip(&metas)
-            .filter_map(|(check, meta)| match meta {
-                Some(meta) if meta.kind == Kind::File => Some((check.path.clone(), meta.len)),
-                _ => None,
-            });
+            .filter(|(check, meta)| identified(check, meta))
+            .filter_map(|(check, meta)| Some((check.path.clone(), meta.as_ref()?.len)));
         flow::identities(Root::Folder, files.collect(), &identify).map_ok(move |identities| {
             let mut identities = identities.into_iter();
             checks.into_iter().zip(metas).find_map(|(check, meta)| {
-                let found = match meta {
-                    None => None,
-                    Some(meta) if meta.kind == Kind::Directory => {
-                        return Some(Refusal::Directory(check.path));
-                    }
-                    Some(_) => identities.next().expect("an identity for each file"),
+                if meta.is_some_and(|meta| meta.kind == Kind::Directory) {
+                    return Some(Refusal::Directory(check.path));
+                }
+                let found = match identified(&check, &meta) {
+                    true => identities.next().expect("an identity for each file"),
+                    false => None,
                 };
-                let holds = match (check.expect, found) {
-                    (Expect::Absent, None) => true,
-                    (Expect::Holds(expected), Some(found)) => expected == found,
+                let holds = match (check.expect, meta, found) {
+                    (Expect::Absent, None, _) => true,
+                    (Expect::Holds(expected), _, Some(found)) => expected == found,
+                    (Expect::Listed { len, modified }, Some(meta), _) => {
+                        (meta.len, meta.modified) == (len, modified)
+                    }
                     _ => false,
                 };
                 (!holds).then(|| {
@@ -671,11 +1010,21 @@ fn refusal<'a>(
             })
         })
     });
+    let trashed: BTreeSet<Nonce> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            EffectStep::ToTrash { item, .. } => Some(*item),
+            _ => None,
+        })
+        .collect();
     let items: Vec<RelPath> = plan
         .steps
         .iter()
         .filter_map(|step| match step {
-            EffectStep::FromTrash { item, .. } => Some(layout.trash(writer, *item)),
+            EffectStep::FromTrash { item, .. } if !trashed.contains(item) => {
+                Some(layout.trash(writer, *item))
+            }
             _ => None,
         })
         .collect();
@@ -855,6 +1204,24 @@ fn account<'a>(
             .filter(|end| end.done_after <= progress.done)
             .cloned()
             .collect();
+        let unbound: Vec<UnboundEnd> = record
+            .unbound
+            .iter()
+            .filter(|end| end.done_after <= progress.done)
+            .cloned()
+            .collect();
+        let trees: Vec<(RelPath, RelPath)> = record
+            .trees
+            .iter()
+            .filter(|end| end.done_after <= progress.done)
+            .map(|end| (end.from.clone(), end.to.clone()))
+            .collect();
+        let dirs: Vec<DirEnd> = record
+            .dirs
+            .iter()
+            .filter(|end| end.done_after <= progress.done)
+            .cloned()
+            .collect();
         let outcome = match record.steps.get(progress.done) {
             None => Outcome::Complete,
             Some(step) => Outcome::Partial(PartialReport {
@@ -862,6 +1229,12 @@ fn account<'a>(
                 stopped: step.path().clone(),
                 error: failed.unwrap_or(IoError::NotFound),
                 record: Some(name),
+                landed: Vec::new(),
+                taken: record.steps[..progress.done]
+                    .iter()
+                    .filter_map(EffectStep::taken)
+                    .cloned()
+                    .collect(),
             }),
         };
         let sweeping = layout.clone();
@@ -915,7 +1288,28 @@ fn account<'a>(
             }
         })
         .and_then(move |displaced| {
-            let paths = ends.iter().filter_map(|end| end.path.clone());
+            // A directory a step made or removed is logged as the folder shows it.
+            fold(
+                dirs.into_iter(),
+                (Vec::new(), Vec::new()),
+                |(mut shown, mut left), end| {
+                    flow::stat(Root::Folder, &end.path).map_ok(move |meta| {
+                        let there = meta.is_some_and(|meta| meta.kind == Kind::Directory);
+                        match (there == end.made, there) {
+                            (true, _) => shown.push((end.path, end.made)),
+                            (false, true) => left.push(end.path),
+                            (false, false) => {}
+                        }
+                        (shown, left)
+                    })
+                },
+            )
+            .map_ok(move |(dirs, left)| (displaced, dirs, left))
+        })
+        .and_then(move |(displaced, dirs, left)| {
+            let paths = ends.iter().map(|end| end.path.clone());
+            let paths = paths.chain(unbound.iter().map(|end| end.path.clone()));
+            let paths = paths.flatten();
             flow::observe_all(Root::Folder, paths.collect(), &identify).map_ok(move |seen| {
                 let mut seen = seen.into_iter();
                 let files = ends.into_iter().filter_map(|end| {
@@ -931,9 +1325,27 @@ fn account<'a>(
                     };
                     Some((end.entity, Some(fact)))
                 });
+                let files = files.collect();
+                let unbound = unbound.into_iter().filter_map(|end| {
+                    let Some(path) = end.path else {
+                        return Some((end.from, None));
+                    };
+                    let seen = seen.next().expect("an observation for each path")?;
+                    let fact = FileFact {
+                        path,
+                        identity: seen.identity,
+                        len: seen.len,
+                        modified: seen.modified,
+                    };
+                    Some((end.from, Some(fact)))
+                });
                 Applied {
                     displaced,
-                    files: files.collect(),
+                    files,
+                    unbound: unbound.collect(),
+                    trees,
+                    dirs,
+                    left,
                     outcome,
                 }
             })
@@ -1061,25 +1473,38 @@ pub(crate) fn observe<'a>(
         }
     }
     started.and_then(move |started| {
-        let found = (BTreeSet::new(), BTreeSet::new(), BTreeMap::new());
+        let found = (
+            BTreeSet::new(),
+            BTreeSet::new(),
+            BTreeMap::new(),
+            flow::Listings::default(),
+        );
         fold(
             paths.into_iter(),
             found,
-            |(mut present, mut directories, mut lens), path| {
-                flow::stat(Root::Folder, &path).map_ok(move |meta| {
-                    match meta.map(|meta| (meta.kind, meta.len)) {
-                        Some((Kind::Directory, _)) => drop(directories.insert(path.clone())),
-                        Some((Kind::File, len)) => drop(lens.insert(path.clone(), len)),
-                        None => {}
-                    }
-                    if meta.is_some() {
-                        present.insert(path);
-                    }
-                    (present, directories, lens)
+            |(mut present, mut directories, mut lens, listings), path| {
+                flow::stat(Root::Folder, &path).and_then(move |meta| {
+                    let Some(meta) = meta else {
+                        return ok((present, directories, lens, listings));
+                    };
+                    // ⚠️ A volume that ignores case finds a path by another spelling,
+                    // as the destination of a change of case finds its source.
+                    flow::spelled_in(Root::Folder, path.clone(), listings).map_ok(
+                        move |(exactly, listings)| {
+                            if exactly {
+                                match meta.kind {
+                                    Kind::Directory => drop(directories.insert(path.clone())),
+                                    Kind::File => drop(lens.insert(path.clone(), meta.len)),
+                                }
+                                present.insert(path);
+                            }
+                            (present, directories, lens, listings)
+                        },
+                    )
                 })
             },
         )
-        .and_then(move |(present, directories, lens)| {
+        .and_then(move |(present, directories, lens, _)| {
             let both: Vec<(RelPath, RelPath)> = pairs
                 .into_iter()
                 .filter(|(from, to)| present.contains(from) && present.contains(to))
@@ -1240,6 +1665,12 @@ pub(crate) fn predict(
             stopped: step.path().clone(),
             error,
             record: Some(name),
+            landed: Vec::new(),
+            taken: record.steps[..i]
+                .iter()
+                .filter_map(EffectStep::taken)
+                .cloned()
+                .collect(),
         });
     }
     Outcome::Complete

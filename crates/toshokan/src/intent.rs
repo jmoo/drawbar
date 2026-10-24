@@ -18,9 +18,9 @@
 use std::collections::BTreeSet;
 
 use crate::error::Invalid;
-use crate::ids::{EntityId, EntryHash};
-use crate::log::Op;
-use crate::merge::Folded;
+use crate::ids::EntityId;
+use crate::log::{Observed, Op, Ref, Run};
+use crate::merge::{Folded, Write};
 use crate::path::RelPath;
 use crate::plan::{Content, Expect, FactChange, FileChange, Plan};
 use crate::schema::{KeyKind, Raw, Register, Schema, Set, Value};
@@ -107,10 +107,13 @@ impl<L: Driver> Intent<L> {
     }
 
     pub fn clear<T: Value>(mut self, entity: EntityId, key: Register<T>) -> Self {
-        self.plan.facts.push(FactChange::Clear {
-            entity,
-            key: key.name().to_owned(),
-        });
+        self.plan.facts.push((
+            FactChange::Clear {
+                entity,
+                key: key.name().to_owned(),
+            },
+            None,
+        ));
         self
     }
 
@@ -122,11 +125,14 @@ impl<L: Driver> Intent<L> {
     /// Removes every add of `value` this writer has observed.
     pub fn remove<T: Value>(mut self, entity: EntityId, key: Set<T>, value: &T) -> Self {
         if let Some(value) = encode(&mut self.invalid, key.name(), value) {
-            self.plan.facts.push(FactChange::Remove {
-                entity,
-                key: key.name().to_owned(),
-                value,
-            });
+            self.plan.facts.push((
+                FactChange::Remove {
+                    entity,
+                    key: key.name().to_owned(),
+                    value,
+                },
+                None,
+            ));
         }
         self
     }
@@ -134,14 +140,29 @@ impl<L: Driver> Intent<L> {
     /// Deletes the entity, observing every field write this writer has seen. Its
     /// file stays where it is unless the intent also trashes it.
     pub fn delete(mut self, entity: EntityId) -> Self {
-        self.plan.facts.push(FactChange::Delete { entity });
+        self.plan.facts.push((FactChange::Delete { entity }, None));
         self
     }
 
     /// Brings a deleted entity back with the fields it had, or settles a deletion
     /// conflict in favor of keeping it.
     pub fn revive(mut self, entity: EntityId) -> Self {
-        self.plan.facts.push(FactChange::Revive { entity });
+        self.plan.facts.push((FactChange::Revive { entity }, None));
+        self
+    }
+
+    /// Takes `change`, one of the changes [`crate::report::Item`] shows of the
+    /// run `run`: it is committed as any change, and settles its field against
+    /// that run's writes. An intent may take from several runs.
+    pub fn take(mut self, run: Run, change: FactChange) -> Self {
+        self.plan.facts.push((change, Some(run)));
+        self
+    }
+
+    /// Dismisses the run `run` of an item: no reader merges or shows it again,
+    /// nor the entries after it.
+    pub fn dismiss(mut self, run: Run) -> Self {
+        self.plan.dismiss.push(run);
         self
     }
 
@@ -185,10 +206,64 @@ impl<L: Driver> Intent<L> {
         self
     }
 
+    /// Makes the directory `path` where nothing is; undo removes it.
+    pub fn make_dir(mut self, path: &RelPath) -> Self {
+        self.plan
+            .files
+            .push(FileChange::MakeDir { path: path.clone() });
+        self
+    }
+
+    /// Removes the directory `path`, which holds no file the library knows; undo
+    /// makes it again.
+    pub fn remove_dir(mut self, path: &RelPath) -> Self {
+        self.plan
+            .files
+            .push(FileChange::RemoveDir { path: path.clone() });
+        self
+    }
+
     pub fn move_tree(mut self, from: &RelPath, to: &RelPath) -> Self {
         self.plan.files.push(FileChange::MoveTree {
             from: from.clone(),
             to: to.clone(),
+        });
+        self
+    }
+
+    /// Writes `bytes` as the file at `path`, which no entity is bound to: a file
+    /// nothing is said about stays without an entity.
+    pub fn save_file(self, path: &RelPath, bytes: Vec<u8>, expect: Expect) -> Self {
+        self.save_file_from(path, L::bytes(bytes), expect)
+    }
+
+    /// Writes the file at `path`, which no entity is bound to, from `source`; see
+    /// [`Intent::save_from`].
+    pub fn save_file_from(mut self, path: &RelPath, source: L::Source, expect: Expect) -> Self {
+        self.plan.files.push(FileChange::SaveFile {
+            path: path.clone(),
+            content: Content(self.sources.len()),
+            expect,
+        });
+        self.sources.push(source);
+        self
+    }
+
+    /// Renames the file at `from`, which no entity is bound to.
+    pub fn rename_file(mut self, from: &RelPath, to: &RelPath, expect: Expect) -> Self {
+        self.plan.files.push(FileChange::RenameFile {
+            from: from.clone(),
+            to: to.clone(),
+            expect,
+        });
+        self
+    }
+
+    /// Moves the file at `path`, which no entity is bound to, to the trash.
+    pub fn trash_file(mut self, path: &RelPath, expect: Expect) -> Self {
+        self.plan.files.push(FileChange::TrashFile {
+            path: path.clone(),
+            expect,
         });
         self
     }
@@ -259,11 +334,14 @@ fn set<T: Value>(
     value: &T,
 ) {
     if let Some(value) = encode(invalid, key.name(), value) {
-        plan.facts.push(FactChange::Set {
-            entity,
-            key: key.name().to_owned(),
-            value,
-        });
+        plan.facts.push((
+            FactChange::Set {
+                entity,
+                key: key.name().to_owned(),
+                value,
+            },
+            None,
+        ));
     }
 }
 
@@ -275,11 +353,14 @@ fn add<T: Value>(
     value: &T,
 ) {
     if let Some(value) = encode(invalid, key.name(), value) {
-        plan.facts.push(FactChange::Add {
-            entity,
-            key: key.name().to_owned(),
-            value,
-        });
+        plan.facts.push((
+            FactChange::Add {
+                entity,
+                key: key.name().to_owned(),
+                value,
+            },
+            None,
+        ));
     }
 }
 
@@ -298,24 +379,26 @@ fn encode<T: Value>(invalid: &mut Option<Invalid>, key: &str, value: &T) -> Opti
 }
 
 /// The ops that log `plan`'s facts against what this writer has observed in
-/// `folded`: a create for each entity it creates, then each fact change in order.
-/// A write replaces every surviving write of its register, a remove names every
-/// live add of its value, and a delete observes every live field write of its
-/// entity.
+/// `folded`: a create for each entity it creates, then each fact change in order,
+/// then a dismissal of the runs `plan` dismisses. A write replaces every live
+/// write of its register, an add or remove every live write of its member, and a
+/// delete observes every live field write of its entity. Each fact change taken
+/// from an item names its run.
 ///
 /// Refuses a key the schema does not declare with the change's kind, and a change
 /// to an entity that is neither shown, created nor revived by the plan. Of several
 /// changes to one register of one entity, or to one entity's existence, the last
-/// is logged. A plan that changes nothing is refused unless it reverses an entry.
+/// is logged. A plan that changes nothing is refused unless it reverses an entry
+/// or dismisses a run.
 pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Invalid> {
     let nothing = plan.created.is_empty() && plan.facts.is_empty() && plan.files.is_empty();
-    if nothing && plan.reverses.is_none() {
+    if nothing && plan.reverses.is_none() && plan.dismiss.is_empty() {
         return Err(Invalid::Empty);
     }
     let revived: BTreeSet<EntityId> = plan
         .facts
         .iter()
-        .filter_map(|change| match change {
+        .filter_map(|(change, _)| match change {
             FactChange::Revive { entity } => Some(*entity),
             _ => None,
         })
@@ -339,12 +422,14 @@ pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Inv
         .map(|&entity| Op::Create {
             entity,
             replaces: Vec::new(),
+            take: None,
         })
         .collect();
-    for (index, change) in plan.facts.iter().enumerate() {
+    for (index, (change, take)) in plan.facts.iter().enumerate() {
         if superseded(&plan.facts[index + 1..], change) {
             continue;
         }
+        let take = *take;
         let op = match change {
             FactChange::Set { entity, key, value } => {
                 let entity = writable(*entity)?;
@@ -353,26 +438,35 @@ pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Inv
                     entity,
                     declared(key, KeyKind::Register)?,
                     Some(value),
+                    take,
                 )
             }
             FactChange::Clear { entity, key } => {
                 let entity = writable(*entity)?;
-                register_write(folded, entity, declared(key, KeyKind::Register)?, None)
+                register_write(
+                    folded,
+                    entity,
+                    declared(key, KeyKind::Register)?,
+                    None,
+                    take,
+                )
             }
-            FactChange::Add { entity, key, value } => Op::Add {
-                entity: writable(*entity)?,
-                key: declared(key, KeyKind::Set)?,
-                value: value.clone(),
-            },
+            FactChange::Add { entity, key, value } => {
+                let entity = writable(*entity)?;
+                let key = declared(key, KeyKind::Set)?;
+                Op::Add {
+                    replaces: member_writes(folded, entity, &key, value),
+                    entity,
+                    key,
+                    value: value.clone(),
+                    take,
+                }
+            }
             FactChange::Remove { entity, key, value } => {
                 let entity = writable(*entity)?;
                 let key = declared(key, KeyKind::Set)?;
-                let tags: Vec<_> = folded
-                    .tags(entity, &key, value)
-                    .into_iter()
-                    .map(|tag| tag.entry)
-                    .collect();
-                if tags.is_empty() {
+                let tags = member_writes(folded, entity, &key, value);
+                if tags.is_empty() && take.is_none() {
                     continue;
                 }
                 Op::Remove {
@@ -380,6 +474,7 @@ pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Inv
                     key,
                     value: value.clone(),
                     tags,
+                    take,
                 }
             }
             FactChange::Delete { entity } => {
@@ -392,60 +487,95 @@ pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Inv
                     observed: folded
                         .live_writes(*entity)
                         .into_iter()
-                        .map(|write| write.entry)
+                        .filter_map(|(field, write)| {
+                            Some(Observed {
+                                target: field.target()?,
+                                at: write.named(),
+                            })
+                        })
                         .collect(),
+                    take,
                 }
             }
             FactChange::Revive { entity } => {
                 let replaces = existence(folded, *entity);
-                if replaces.is_empty() {
+                if replaces.is_empty() && take.is_none() {
                     return Err(Invalid::NoEntity(*entity));
                 }
                 Op::Create {
                     entity: *entity,
                     replaces,
+                    take,
                 }
             }
+            FactChange::File { entity, file } => Op::Pin {
+                entity: writable(*entity)?,
+                file: file.clone(),
+                replaces: folded
+                    .file_writes(*entity)
+                    .iter()
+                    .map(Write::named)
+                    .collect(),
+                take,
+            },
         };
         ops.push(op);
+    }
+    if !plan.dismiss.is_empty() {
+        ops.push(Op::Dismiss {
+            runs: plan.dismiss.clone(),
+        });
     }
     Ok(ops)
 }
 
 /// Whether a later change in `rest` writes the same register, or the same
 /// entity's existence, as `change`.
-fn superseded(rest: &[FactChange], change: &FactChange) -> bool {
+fn superseded(rest: &[(FactChange, Option<Run>)], change: &FactChange) -> bool {
     let slot = |change: &FactChange| match change {
         FactChange::Set { entity, key, .. } | FactChange::Clear { entity, key } => {
             Some((*entity, Some(key.clone())))
         }
         FactChange::Delete { entity } | FactChange::Revive { entity } => Some((*entity, None)),
-        FactChange::Add { .. } | FactChange::Remove { .. } => None,
+        FactChange::Add { .. } | FactChange::Remove { .. } | FactChange::File { .. } => None,
     };
     let Some(own) = slot(change) else {
         return false;
     };
-    rest.iter().any(|later| slot(later).as_ref() == Some(&own))
+    rest.iter()
+        .any(|(later, _)| slot(later).as_ref() == Some(&own))
 }
 
-fn register_write(folded: &Folded, entity: EntityId, key: String, value: Option<&Raw>) -> Op {
+fn register_write(
+    folded: &Folded,
+    entity: EntityId,
+    key: String,
+    value: Option<&Raw>,
+    take: Option<Run>,
+) -> Op {
     let replaces = folded
         .register_writes(entity, &key)
-        .into_iter()
-        .map(|write| write.entry)
+        .iter()
+        .map(Write::named)
         .collect();
     Op::Write {
         entity,
         key,
         value: value.cloned(),
         replaces,
+        take,
     }
 }
 
-fn existence(folded: &Folded, entity: EntityId) -> Vec<EntryHash> {
+/// The live adds and removes of `value` in a set.
+fn member_writes(folded: &Folded, entity: EntityId, key: &str, value: &Raw) -> Vec<Ref> {
     folded
-        .existence(entity)
-        .into_iter()
-        .map(|write| write.entry)
+        .tags(entity, key, value)
+        .iter()
+        .map(Write::named)
         .collect()
+}
+
+fn existence(folded: &Folded, entity: EntityId) -> Vec<Ref> {
+    folded.existence(entity).iter().map(Write::named).collect()
 }

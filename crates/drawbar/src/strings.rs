@@ -594,10 +594,34 @@ pub fn listed<S: Borrow<str>>(words: &[S]) -> String {
     }
 }
 
+/// The first `shown` of `names`, each quoted, listed as a sentence would, with how
+/// many more there are: `“A”, “B” and 3 more`.
+pub fn quoted_some<S: std::fmt::Display>(names: &[S], shown: usize) -> String {
+    let mut words: Vec<String> = names
+        .iter()
+        .take(shown)
+        .map(|name| format!("“{name}”"))
+        .collect();
+    if names.len() > shown {
+        words.push(format!("{} more", names.len() - shown));
+    }
+    listed(&words)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn a_long_list_names_its_first_few_and_counts_the_rest() {
+        assert_eq!(quoted_some(&["Vox"], 2), "“Vox”");
+        assert_eq!(quoted_some(&["Vox", "Pipe"], 2), "“Vox” and “Pipe”");
+        assert_eq!(
+            quoted_some(&["Vox", "Pipe", "Reed", "Flute"], 2),
+            "“Vox”, “Pipe” and 2 more"
+        );
+    }
 
     #[test]
     fn a_list_reads_as_a_sentence_would_name_it() {

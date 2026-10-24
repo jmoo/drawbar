@@ -128,6 +128,8 @@ pub enum Invalid {
     NoEntity(EntityId),
     #[error("{0} has no file")]
     NoFile(EntityId),
+    #[error("{0} is an entity's file")]
+    Bound(RelPath),
     #[error("{0} is not declared in the schema")]
     UndeclaredKey(String),
     #[error("a value for {key} cannot be written as JSON: {reason}")]
@@ -136,8 +138,35 @@ pub enum Invalid {
     ReservedPath(RelPath),
     #[error("two effects of one intent touch {0}")]
     Overlapping(RelPath),
+    #[error("{0} holds files")]
+    NotEmpty(RelPath),
     #[error("the intent changes nothing")]
     Empty,
     #[error("the intent is too long to log as one entry")]
     TooLong,
+    /// A file change taken from an item names a file the entity cannot be bound
+    /// to now.
+    #[error("{entity} cannot be bound to {path}: {why}")]
+    Unbindable {
+        entity: EntityId,
+        path: RelPath,
+        why: Unbindable,
+    },
+}
+
+/// Why an entity cannot be bound to the file a run names, as the last scan
+/// found the library's files.
+#[derive(ThisError, Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
+pub enum Unbindable {
+    #[error("no file is there")]
+    Absent,
+    #[error("the file there holds other contents")]
+    Changed,
+    /// No scan of the path has succeeded since the library opened, or since a
+    /// scan of it failed.
+    #[error("the file there is not scanned yet")]
+    Unscanned,
+    #[error("the file there is bound to {0}")]
+    Bound(EntityId),
 }

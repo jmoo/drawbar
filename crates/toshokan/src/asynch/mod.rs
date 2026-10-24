@@ -6,12 +6,12 @@ use std::pin::Pin;
 use std::task::Poll;
 
 use crate::disk::MemDisk;
-use crate::drafts::Draft;
+use crate::drafts::{Draft, Drafted};
 use crate::env::Env;
 use crate::error::Result;
-use crate::ids::{EntityId, Identity};
+use crate::ids::{EntityId, Identity, Nonce, WriterId};
 use crate::intent::{Driver, Intent};
-use crate::io::{Capabilities, Io, IoError, IoResult, Operation, Range, Reply, Root, Step};
+use crate::io::{Capabilities, Io, IoError, IoResult, Meta, Operation, Range, Reply, Root, Step};
 use crate::layout::Layout;
 use crate::library;
 use crate::log::Settlement;
@@ -213,6 +213,19 @@ impl<F: Fs> Staging<'_, F> {
             _ => Err(IoError::Other("the backend gave the wrong reply".into())),
         }
     }
+
+    /// What is at `path` in the folder now, such as the file a copy read, which may
+    /// have changed while it was read.
+    pub async fn stat(&self, path: &RelPath) -> std::result::Result<Option<Meta>, IoError> {
+        let stat = Io::Stat {
+            root: self.root,
+            path: path.clone(),
+        };
+        match self.fs.perform(stat).await? {
+            Reply::Stat(meta) => Ok(meta),
+            _ => Err(IoError::Other("the backend gave the wrong reply".into())),
+        }
+    }
 }
 
 /// Runs `operation` to completion.
@@ -300,7 +313,12 @@ impl<F: Fs> Library<F> {
     }
 
     pub fn draft(&mut self, entity: EntityId) -> Draft<&mut Self> {
-        Draft::new(self, entity)
+        Draft::new(self, Drafted::Entity(entity))
+    }
+
+    /// The draft of the file at `path`, which no entity is bound to.
+    pub fn draft_file(&mut self, path: &RelPath) -> Draft<&mut Self> {
+        Draft::new(self, Drafted::File(path.clone()))
     }
 
     pub async fn undo(&mut self) -> Result<Committed> {
@@ -333,16 +351,12 @@ impl<F: Fs> Library<F> {
         run(&self.fs, self.core.rescan_paths(paths)).await
     }
 
-    /// Stops showing what [`Opened::removed`] reports, on every open of this
-    /// install, while the folder lacks it. Writes only in the local root.
-    pub async fn let_go(&mut self) -> Result<()> {
-        run(&self.fs, self.core.let_go()).await
+    pub async fn discard_pooled_draft(&mut self, writer: WriterId, of: Drafted) -> Result<()> {
+        run(&self.fs, self.core.discard_pooled_draft(writer, of)).await
     }
 
-    /// Republishes what [`Opened::removed`] reports as an intent labeled `label`,
-    /// then lets it go: the folder holds again what this install showed.
-    pub async fn adopt(&mut self, label: &str) -> Result<Committed> {
-        run(&self.fs, self.core.adopt(label)).await
+    pub async fn settle_interrupted(&mut self) -> Result<()> {
+        run(&self.fs, self.core.settle_interrupted()).await
     }
 
     pub async fn others(&mut self) -> Result<Vec<WriterInfo>> {
@@ -355,6 +369,10 @@ impl<F: Fs> Library<F> {
 
     pub async fn empty_trash(&mut self, policy: Policy) -> Result<Emptied> {
         run(&self.fs, self.core.empty_trash(policy)).await
+    }
+
+    pub async fn remove_trash(&mut self, items: Vec<Nonce>) -> Result<Emptied> {
+        run(&self.fs, self.core.remove_trash(items)).await
     }
 
     /// Removes the pending records this writer's commits left once their entries
@@ -398,13 +416,13 @@ impl<'l, F: Fs + 'l> Intent<&'l mut Library<F>> {
 
 impl<F: Fs> Draft<&mut Library<F>> {
     pub async fn put(self, base: Identity, bytes: Vec<u8>) -> Result<()> {
-        let (library, entity) = self.into_parts();
-        run(&library.fs, library.core.put_draft(entity, base, bytes)).await
+        let (library, of) = self.into_parts();
+        run(&library.fs, library.core.put_draft(of, base, bytes)).await
     }
 
     pub async fn discard(self) -> Result<()> {
-        let (library, entity) = self.into_parts();
-        run(&library.fs, library.core.discard_draft(entity)).await
+        let (library, of) = self.into_parts();
+        run(&library.fs, library.core.discard_draft(of)).await
     }
 }
 
@@ -471,6 +489,40 @@ mod tests {
             Later(false).await;
             self.1.set(self.1.get() + 1);
         }
+    }
+
+    #[test]
+    fn a_source_reads_and_stats_the_folder_as_it_is_now() {
+        let disk = MemDisk::new();
+        let at = RelPath::new("a").unwrap();
+        let put = |bytes: &[u8]| {
+            let _ = disk.perform(Io::Remove {
+                root: Root::Folder,
+                path: at.clone(),
+            });
+            disk.perform(Io::Create {
+                root: Root::Folder,
+                path: at.clone(),
+                bytes: bytes.to_vec(),
+            })
+            .unwrap();
+        };
+        put(b"one");
+        let staging = Staging {
+            fs: &disk,
+            root: Root::Folder,
+            path: RelPath::new("staged").unwrap(),
+        };
+        let range = Range { offset: 0, len: 3 };
+        assert_eq!(
+            pollster::block_on(staging.read(&at, range)).unwrap(),
+            b"one"
+        );
+        put(b"three");
+        let meta = pollster::block_on(staging.stat(&at)).unwrap();
+        assert_eq!(meta.map(|meta| meta.len), Some(5));
+        let gone = RelPath::new("gone").unwrap();
+        assert_eq!(pollster::block_on(staging.stat(&gone)).unwrap(), None);
     }
 
     #[test]

@@ -25,6 +25,10 @@ use crate::zoom::Step;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     Open,
+    /// Take back this session's last change to the library.
+    Undo,
+    /// Make again the change undone last.
+    Redo,
     New(Fresh),
     FromWavs(Making),
     NewFolder,
@@ -111,6 +115,8 @@ impl Offer {
 pub fn label(command: Command) -> &'static str {
     match command {
         Command::Open => "Open…",
+        Command::Undo => "Undo",
+        Command::Redo => "Redo",
         Command::New(kind) => kind.label(),
         Command::FromWavs(making) => making.item().0,
         Command::NewFolder => "New folder",
@@ -273,6 +279,10 @@ pub fn menus(platform: Platform) -> Vec<Menu> {
             entries: file,
         },
         Menu {
+            title: "Edit",
+            entries: vec![Do(C::Undo), Do(C::Redo)],
+        },
+        Menu {
             title: "View",
             entries: view,
         },
@@ -357,6 +367,9 @@ pub fn shortcut(command: Command, platform: Platform, mac: bool) -> Option<egui:
     let command_and = |with, key| Shortcut::new(With::COMMAND.plus(with), key);
     Some(match command {
         Command::Open => Shortcut::new(With::COMMAND, Key::O),
+        // The browser's library opens with a later build, and binds these then.
+        Command::Undo if platform.windowed() => Shortcut::new(With::COMMAND, Key::Z),
+        Command::Redo if platform.windowed() => command_and(With::SHIFT, Key::Z),
         Command::Save => Shortcut::new(With::COMMAND, Key::S),
         Command::Export => command_and(With::SHIFT, Key::E),
         Command::CloseTab => tab_key(Key::W),
@@ -390,6 +403,11 @@ fn unwritten(command: Command, platform: Platform) -> Option<egui::KeyboardShort
         .then(|| egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Equals))
 }
 
+/// Whether a command undoes or redoes, which a field being typed in does for itself.
+pub(crate) fn undoes(command: Command) -> bool {
+    matches!(command, Command::Undo | Command::Redo)
+}
+
 /// The key that puts the cursor in the search box.
 pub fn search_key() -> egui::KeyboardShortcut {
     egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K)
@@ -411,8 +429,10 @@ pub fn key_text(command: Command, platform: Platform, mac: bool) -> Option<Strin
 /// document and lose its revert. A bound key is consumed whether or not its command is
 /// offered now, so it never falls through to a shorter one. In a browser, `index.html`
 /// also keeps each of these keys from the browser's own action.
-const KEYED: [Command; 15] = [
+const KEYED: [Command; 17] = [
     Command::ReviewQueue,
+    Command::Redo,
+    Command::Undo,
     Command::Export,
     Command::Browser,
     Command::Inspector,
@@ -466,6 +486,7 @@ impl DrawbarApp {
         let mut offer = self.offer(command)?;
         let over = matches!(command, Command::Quit | Command::Zoom(_));
         offer.enabled &= over || !covered(ctx);
+        offer.enabled &= !(undoes(command) && ctx.wants_keyboard_input());
         Some(offer)
     }
 
@@ -540,6 +561,20 @@ impl DrawbarApp {
                     ..check(sharing == Sharing::On)
                 }
             }
+            Command::Undo | Command::Redo => {
+                let store = self.store.as_ref();
+                let label = match command {
+                    Command::Undo => store.and_then(crate::store::Store::undo_label),
+                    _ => store.and_then(crate::store::Store::redo_label),
+                };
+                match label {
+                    Some(label) => relabeled(label),
+                    None => Offer {
+                        enabled: false,
+                        ..plain
+                    },
+                }
+            }
             Command::Save | Command::Export => active.map(|_| plain)?,
             Command::Revert => {
                 let unsaved = self
@@ -611,6 +646,8 @@ impl DrawbarApp {
         let active = self.tabs.active();
         match command {
             Command::Open => acts.push(Act::OpenFiles),
+            Command::Undo => self.store.iter_mut().for_each(crate::store::Store::undo),
+            Command::Redo => self.store.iter_mut().for_each(crate::store::Store::redo),
             Command::New(_) | Command::FromWavs(_) | Command::NewFolder => {
                 acts.extend(made(command))
             }
@@ -716,6 +753,10 @@ impl DrawbarApp {
     ) {
         let (platform, mac) = (self.platform, crate::platform::mac_keyboard(ctx));
         for command in KEYED {
+            // ⚠️ A field being typed in takes its own undo keys.
+            if undoes(command) && ctx.wants_keyboard_input() {
+                continue;
+            }
             let mut keys = shortcut(command, platform, mac)
                 .into_iter()
                 .chain(unwritten(command, platform));

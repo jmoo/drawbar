@@ -1,4 +1,4 @@
-//! This instance's writer: the only code that writes under `writers/<w>/` for its
+//! This instance's writer: the only code that writes under `writers.2/<w>/` for its
 //! own `w`, and it writes nowhere else in toshokan's root.
 //!
 //! A writer opens a new segment under a random name the first time it appends in a
@@ -10,27 +10,28 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::derive::Placed;
 use crate::error::{Error, Invalid, Refusal, Result};
 use crate::flow::{self, Fallible, Flow};
 use crate::ids::{EntryHash, Hlc, SegmentName, WriterId};
 use crate::io::{Io, Kind, Lock, Meta, Range, Root, Task};
 use crate::layout::Layout;
 use crate::line;
-use crate::log::{Entry, EntryKind, Genesis};
+use crate::log::{Entry, EntryKind, Genesis, Own};
 use crate::path::RelPath;
-use crate::reader::{Reader, Stamp, WriterFile, WriterLog, MAX_FILE};
+use crate::reader::{Reader, Stamp, WriterFile, MAX_FILE};
 use crate::report::{Rekey, Start};
 
 /// The length past which an append seals the open segment and opens another. A
-/// picked folder in Chromium copies a whole file to append to it, at about
-/// 1.5 ms per MiB by measurement, so this bounds an append's copy.
+/// picked folder in Chromium copies a whole file to append to it, so this bounds
+/// an append's copy.
 pub const SEGMENT_BOUND: u64 = 1 << 20;
 
 pub struct Writer {
     pub(crate) layout: Layout,
     id: WriterId,
     genesis: EntryHash,
-    head: EntryHash,
+    head: Own,
     open: Option<OpenSegment>,
     /// A file this process knew to hold its head.
     holder: Option<Holder>,
@@ -62,10 +63,12 @@ pub struct Claimed {
 enum Confirmed {
     /// The open segment is as this process left it.
     Open(OpenSegment),
-    /// The open segment no longer ends as this process left it, and the folder
-    /// holds the head: the segment is left, and a new one opened.
+    /// The open segment no longer is as this process left it, as when a sync
+    /// client kept an older version under its name, and the folder holds the
+    /// head elsewhere: the segment is left, and a new one opened.
     Changed,
-    /// No segment is open, and the folder holds the head.
+    /// No segment is open, or the open one is gone, and the folder holds the
+    /// head.
     Fresh,
 }
 
@@ -78,7 +81,7 @@ struct HeadRecord {
 
 impl Writer {
     /// Takes the first writer in this install's pool, the directories of the local
-    /// root in order, whose lock it gets. `logs` must be read from the folder just
+    /// root in order, whose lock it gets. `reader` must have read the folder just
     /// before.
     ///
     /// The writer continues only if its history did not fork and the folder still
@@ -105,6 +108,17 @@ impl Writer {
     /// lock is held until [`Picked::resume`] retires it or the writer closes.
     pub fn pick() -> Task<'static, Result<Option<Picked>>> {
         flow::run(Self::pool()).and_then(pick_first).task()
+    }
+
+    /// The id of the pool's writer `genesis`, from its head record, where that reads.
+    pub fn id_of(genesis: EntryHash) -> Task<'static, Result<Option<WriterId>>> {
+        flow::read_replaced(Root::Local, Layout::head(genesis))
+            .map_ok(|bytes| {
+                let record =
+                    bytes.and_then(|bytes| serde_json::from_slice::<HeadRecord>(&bytes).ok());
+                record.map(|record| record.writer)
+            })
+            .task()
     }
 
     /// Every writer this install has a directory for in its local root, live or
@@ -137,7 +151,7 @@ impl Writer {
         view: impl FnOnce(EntryHash) -> Task<'static, Result<()>>,
     ) -> Task<'static, Result<Writer>> {
         let kind = EntryKind::Genesis(Genesis { writer: id, label });
-        let entry = match Entry::encode(EntryHash::ZERO, at, kind) {
+        let entry = match Entry::encode(EntryHash::ZERO, 0, at, kind) {
             Ok(entry) => entry,
             Err(_) => return Task::ready(Err(Error::Refused(Refusal::Invalid(Invalid::TooLong)))),
         };
@@ -147,13 +161,11 @@ impl Writer {
         let len = bytes.len() as u64;
         let dir = layout.writer(id);
         let path = layout.segment(id, segment);
-        let synced = vec![
-            path.clone(),
-            dir.clone(),
-            layout.writers(),
-            layout.root().clone(),
-            RelPath::ROOT,
-        ];
+        let mut synced = vec![path.clone(), dir.clone(), layout.writers()];
+        synced.extend(std::iter::successors(
+            Some(layout.root().clone()),
+            RelPath::parent,
+        ));
         let writer = Writer {
             holder: Some(Holder {
                 path: path.clone(),
@@ -163,7 +175,10 @@ impl Writer {
             layout,
             id,
             genesis,
-            head: genesis,
+            head: Own {
+                n: 0,
+                hash: genesis,
+            },
             open: Some(OpenSegment { name: segment, len }),
         };
         flow::act(Io::MakeDir {
@@ -208,7 +223,7 @@ impl Writer {
         self.genesis
     }
 
-    pub fn head(&self) -> EntryHash {
+    pub fn head(&self) -> Own {
         self.head
     }
 
@@ -224,7 +239,7 @@ impl Writer {
             return Flow::Done(None);
         };
         let path = self.layout.segment(self.id, open.name);
-        let tail = line::ending(self.head);
+        let tail = line::ending(self.head.hash);
         flow::stat(Root::Folder, &path).then(move |meta| {
             let meta = meta.ok().flatten().filter(|meta| meta.len == open.len);
             let stamp = meta.and_then(|meta| meta.modified).map(|modified| Stamp {
@@ -255,11 +270,15 @@ impl Writer {
         let mut prev = self.head;
         let mut entries = Vec::with_capacity(kinds.len());
         for (at, kind) in kinds {
-            let Ok(entry) = Entry::encode(prev, at, kind) else {
+            let encoded = prev
+                .n
+                .checked_add(1)
+                .and_then(|n| Entry::encode(prev.hash, n, at, kind).ok());
+            let Some(entry) = encoded else {
                 let refused = Error::Refused(Refusal::Invalid(Invalid::TooLong));
                 return Task::ready((self, Err(refused)));
             };
-            prev = entry.hash();
+            prev = entry.own();
             entries.push(entry);
         }
         if entries.is_empty() {
@@ -297,7 +316,7 @@ impl Writer {
 
     /// Records this writer's head in the local root: `head.json`.
     pub fn record(&self) -> Task<'static, Result<()>> {
-        record_head(self.id, self.genesis, self.head).task()
+        record_head(self.id, self.genesis, self.head.hash).task()
     }
 
     /// Seals the open segment and releases the writer's lock.
@@ -322,7 +341,7 @@ impl Writer {
             return Flow::Done((self, Ok(())));
         };
         let path = self.layout.segment(self.id, open.name);
-        let head = self.head;
+        let head = self.head.hash;
         let marked = flow::stat(Root::Folder, &path)
             .and_then({
                 let path = path.clone();
@@ -360,7 +379,7 @@ impl Writer {
 
     /// Where to append, once the folder is confirmed to hold this writer's head.
     fn confirm<'a>(&self) -> Flow<'a, Result<Confirmed>> {
-        let (id, head) = (self.id, self.head);
+        let (id, head) = (self.id, self.head.hash);
         let lost = move || {
             Err(Error::Rekey {
                 writer: id,
@@ -385,8 +404,8 @@ impl Writer {
                     false => held(Confirmed::Changed),
                 })
             }
-            Some(meta) if meta.len > open.len => held(Confirmed::Changed),
-            _ => Flow::Done(lost()),
+            Some(_) => held(Confirmed::Changed),
+            None => held(Confirmed::Fresh),
         })
     }
 
@@ -452,8 +471,8 @@ impl Writer {
                 name: segment,
                 len: start + len,
             });
-            self.head = entries.last().expect("at least one entry").hash();
-            self.held_by(path, start + len, line::ending(self.head));
+            self.head = entries.last().expect("at least one entry").own();
+            self.held_by(path, start + len, line::ending(self.head.hash));
             sync_all(Root::Folder, synced).then(move |result| match result {
                 Err(error) => {
                     self.leave();
@@ -465,18 +484,27 @@ impl Writer {
     }
 }
 
-/// The entry `log` continues after, or why its writer cannot continue.
+/// The entry the writer whose history the reader places as `placed` continues
+/// after, or why it cannot continue.
 fn tip(
-    log: &WriterLog,
+    placed: &Placed,
     genesis: EntryHash,
     recorded: EntryHash,
-) -> std::result::Result<EntryHash, Rekey> {
-    if log.genesis() != Some(genesis) || !log.holds(recorded) {
+) -> std::result::Result<Own, Rekey> {
+    let tips_ours = placed.tips.iter().all(|tip| tip.genesis == genesis);
+    let first_ours = placed
+        .merged
+        .first()
+        .is_none_or(|first| first.n() != 0 || first.hash() == genesis);
+    if !tips_ours || !first_ours || !placed.holds(recorded) {
         return Err(Rekey::Restored);
     }
-    match (log.forks(), log.heads().as_slice()) {
-        ([], [tip]) => Ok(*tip),
-        _ => Err(Rekey::Forked),
+    if placed.fork.is_some() {
+        return Err(Rekey::Forked);
+    }
+    match placed.head() {
+        Some(head) if placed.reaches(recorded) => Ok(head),
+        _ => Err(Rekey::Restored),
     }
 }
 
@@ -527,8 +555,8 @@ impl Picked {
     pub fn resume(self, layout: Layout, reader: &Reader) -> Task<'static, Result<Claimed>> {
         let Picked { genesis, record } = self;
         let id = record.writer;
-        let tip = match reader.logs().get(&id) {
-            Some(log) => tip(log, genesis, record.head),
+        let tip = match reader.derived().writers.get(&id) {
+            Some(placed) => tip(placed, genesis, record.head),
             None => Err(Rekey::Restored),
         };
         let tip = match tip {
@@ -557,7 +585,7 @@ impl Picked {
 }
 
 /// A file the reader's last read found holding `head` of `writer`'s chain.
-fn holder(reader: &Reader, writer: WriterId, head: EntryHash) -> Option<Holder> {
+fn holder(reader: &Reader, writer: WriterId, head: Own) -> Option<Holder> {
     reader
         .files(writer)
         .into_iter()
@@ -565,10 +593,10 @@ fn holder(reader: &Reader, writer: WriterId, head: EntryHash) -> Option<Holder> 
             let stamp = stamp?;
             let held = match file {
                 WriterFile::Segment(segment) => {
-                    segment.entries.iter().any(|entry| entry.hash() == head)
+                    segment.entries.iter().any(|entry| entry.own() == head)
                 }
-                WriterFile::Snapshot(snapshot) => snapshot.writer == writer && snapshot.folds(head),
-                WriterFile::Unreadable => false,
+                WriterFile::Snapshot(snapshot) => snapshot.writer == writer && snapshot.names(head),
+                WriterFile::Unreadable { .. } => false,
             };
             held.then(|| Holder {
                 path: path.clone(),
@@ -660,16 +688,12 @@ fn ends_with<'a>(path: RelPath, len: u64, hash: EntryHash) -> Flow<'a, Result<bo
         .map_ok(move |bytes| bytes.is_some_and(|bytes| bytes == line::ending(hash)))
 }
 
-/// Whether a file in `writer`'s directory of the folder holds `hash` now, in a
-/// segment or folded in a snapshot: first any file whose last bytes end the line
-/// `hash` names, then any file read whole.
-pub(crate) fn holds<'a>(
-    layout: &Layout,
-    writer: WriterId,
-    hash: EntryHash,
-) -> Flow<'a, Result<bool>> {
+/// Whether a file in `writer`'s directory of the folder holds `head` now, in a
+/// segment or named by a snapshot: first any file whose last bytes end the line
+/// `head` names, then any file read whole.
+pub(crate) fn holds<'a>(layout: &Layout, writer: WriterId, head: Own) -> Flow<'a, Result<bool>> {
     let dir = layout.writer(writer);
-    let ending = line::ending(hash);
+    let ending = line::ending(head.hash);
     flow::list(Root::Folder, &dir).and_then(move |entries| {
         let paths: Vec<RelPath> = entries
             .into_iter()
@@ -701,10 +725,10 @@ pub(crate) fn holds<'a>(
                 false => flow::read_file(Root::Folder, &path, MAX_FILE).map_ok(move |bytes| {
                     bytes.is_some_and(|bytes| match WriterFile::parse(&bytes) {
                         WriterFile::Segment(segment) => {
-                            segment.entries.iter().any(|entry| entry.hash() == hash)
+                            segment.entries.iter().any(|entry| entry.own() == head)
                         }
-                        WriterFile::Snapshot(snapshot) => snapshot.folds(hash),
-                        WriterFile::Unreadable => false,
+                        WriterFile::Snapshot(snapshot) => snapshot.names(head),
+                        WriterFile::Unreadable { .. } => false,
                     })
                 }),
             })

@@ -95,11 +95,10 @@ impl Executor {
                 "a library's storage is written only from a dedicated worker".into(),
             ));
         }
-        // Inferred from specimens; not confirmed on hardware.
-        // Chromium's `flush()` takes about a quarter of a millisecond, as a write
-        // reaching the disk does; Firefox's and WebKit's take microseconds, so
-        // they declare no sync. A sync covers a file's contents only: see
-        // `Tree::sync`. `userAgentData` exists only in Chromium.
+        // Chromium's `flush()` waits for the disk, as its time shows; Firefox's
+        // and WebKit's return at once, so they declare no sync. A sync covers a
+        // file's contents only: see `Tree::sync`. `userAgentData` exists only in
+        // Chromium.
         let chromium = field(&navigator(), "userAgentData").is_some();
         let private = Capabilities {
             append: true,
@@ -202,10 +201,7 @@ impl Executor {
             Io::MakeDir { root, path } => self.tree(root).make_dir(&path).await.map(done),
             Io::Sync { root, path } => self.tree(root).sync(&path).await.map(done),
             Io::Lock { name } => self.locks.lock(&name).await.map(Reply::Lock),
-            Io::Unlock { name } => {
-                self.locks.unlock(&name);
-                Ok(Reply::Done)
-            }
+            Io::Unlock { name } => self.locks.unlock(&name).await.map(|()| Reply::Done),
             Io::Fill { .. } => Err(IoError::Other(FILLED_BY_DRIVERS.into())),
         }
     }
@@ -575,7 +571,9 @@ impl Tree {
 
     /// Flushes a file through a sync access handle. A directory's names cannot
     /// be synced: the browser keeps them in its own database, as durable as it
-    /// makes them.
+    /// makes them. A file a stream fills is landed before any sync of it reaches
+    /// here, since a sync does not keep the stream open ([`Io::keeps_open`]), and
+    /// closing the stream is what makes its bytes durable.
     async fn sync(&self, path: &RelPath) -> Result<(), IoError> {
         if path.is_root() {
             return Ok(());
@@ -755,8 +753,9 @@ struct Locks {
     manager: JsValue,
     /// Names this install's locks apart from another local root's.
     prefix: String,
-    /// Each held lock's release.
-    held: RefCell<BTreeMap<RelPath, Function>>,
+    /// Each held lock's release, and the request that settles once the browser
+    /// has let the lock go.
+    held: RefCell<BTreeMap<RelPath, (Function, Promise)>>,
 }
 
 impl Locks {
@@ -802,16 +801,25 @@ impl Locks {
         let answer = wait(first).await.map_err(other)?;
         match answer.dyn_into::<Function>() {
             Ok(release) => {
-                self.held.borrow_mut().insert(name.clone(), release);
+                self.held
+                    .borrow_mut()
+                    .insert(name.clone(), (release, requested));
                 Ok(Lock::Acquired)
             }
             Err(_) => Ok(Lock::Held),
         }
     }
 
-    fn unlock(&self, name: &RelPath) {
-        if let Some(release) = self.held.borrow_mut().remove(name) {
-            let _ = release.call0(&JsValue::NULL);
-        }
+    /// Lets the lock `name` go, and returns once the browser has, so that
+    /// another process asking next finds it free.
+    async fn unlock(&self, name: &RelPath) -> Result<(), IoError> {
+        let Some((release, requested)) = self.held.borrow_mut().remove(name) else {
+            return Ok(());
+        };
+        let _ = release.call0(&JsValue::NULL);
+        wait(requested)
+            .await
+            .map(drop)
+            .map_err(|error| IoError::Other(describe(&error)))
     }
 }

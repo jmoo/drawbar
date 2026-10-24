@@ -30,13 +30,7 @@ fn path(text: &str) -> RelPath {
 }
 
 fn identity(bytes: &[u8]) -> Identity {
-    let len = bytes.len() as u64;
-    let parts: Vec<Vec<u8>> = IDENTIFY
-        .ranges(len)
-        .iter()
-        .map(|range| bytes[range.offset as usize..][..range.len as usize].to_vec())
-        .collect();
-    IDENTIFY.identify(len, &parts)
+    IDENTIFY.of_bytes(&RelPath::ROOT, bytes)
 }
 
 fn schema() -> Schema {
@@ -357,6 +351,30 @@ async fn a_page_watching_its_folder_looks_at_focus_and_on_a_period() {
 }
 
 #[wasm_bindgen_test]
+async fn a_worker_that_faults_fails_what_waits_and_a_fresh_one_opens_the_library() {
+    let place = Place::new(Kind::Private);
+    let local = path(&format!("{}/install", place.run));
+    let worker = Worker::start(place.folder().await, &local).await.unwrap();
+    let list = || Io::List {
+        root: Root::Folder,
+        dir: RelPath::ROOT,
+    };
+    worker.perform(list()).await.unwrap();
+    worker.trap();
+    let failed = worker.perform(list()).await;
+    assert!(
+        failed
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("failed")),
+        "{failed:?}"
+    );
+    drop(worker);
+    let clock = TestClock::at(1_000);
+    let (library, _) = place.open("install", "a", 1, &clock).await;
+    library.close().await.unwrap();
+}
+
+#[wasm_bindgen_test]
 fn the_browser_clock_and_randomness_are_live() {
     let now = DateClock.now_ms();
     let date = js_sys::Date::now() as u64;
@@ -443,9 +461,15 @@ async fn a_watched_folder_hints_the_paths_another_program_wrote() {
             other => panic!("the watcher said nothing of the new file: {other:?}"),
         }
     };
-    assert!(a.view().unbound().is_empty(), "nothing scanned it yet");
+    assert!(
+        a.view().unbound().cloned().collect::<Vec<_>>().is_empty(),
+        "nothing scanned it yet"
+    );
     a.rescan_paths(paths).await.unwrap();
-    assert_eq!(a.view().unbound(), [path("shelf/copy.npno")]);
+    assert_eq!(
+        a.view().unbound().cloned().collect::<Vec<_>>(),
+        [path("shelf/copy.npno")]
+    );
 }
 
 #[wasm_bindgen_test]
@@ -457,7 +481,13 @@ async fn a_refresh_reads_no_library_file_and_a_rescan_reads_them_all() {
     create(&mut a, "song.npno", b"song").await;
     write_outside(&a, "copy.npno", b"song").await;
     a.refresh().await.unwrap();
-    assert!(a.view().unbound().is_empty(), "a refresh scans no file");
+    assert!(
+        a.view().unbound().cloned().collect::<Vec<_>>().is_empty(),
+        "a refresh scans no file"
+    );
     a.rescan().await.unwrap();
-    assert_eq!(a.view().unbound(), [path("copy.npno")]);
+    assert_eq!(
+        a.view().unbound().cloned().collect::<Vec<_>>(),
+        [path("copy.npno")]
+    );
 }

@@ -15,37 +15,90 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+use crate::derive::Placed;
 use crate::effects::{
     self, Applied, Cut, EffectPlan, EffectStep, FileEnd, Moves, Progress, Staged,
 };
 use crate::env::{Env, Identify};
 use crate::error::{Refusal, Result};
 use crate::flow::{self, each, fold, Fallible};
-use crate::ids::{EntryHash, Nonce, WriterId};
+use crate::ids::{EntityId, Nonce, WriterId};
 use crate::io::{Capabilities, Capability, Kind, Root, Task};
 use crate::layout::Layout;
-use crate::log::Settlement;
+use crate::log::{EntryKind, Logged, Op, Own, Settlement};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord, Records, MAX_RECORD};
-use crate::reader::WriterLog;
 use crate::report::{Orphan, Outcome};
 
 /// What recovery needs of a writer's placed history.
 pub trait Chain {
-    /// Whether the entry `hash` is placed or folded.
-    fn holds(&self, hash: EntryHash) -> bool;
+    /// Whether the entry `at` is placed or folded.
+    fn holds(&self, at: Own) -> bool;
 
-    /// Whether an entry after `hash` is placed or folded.
-    fn continues(&self, hash: EntryHash) -> bool;
+    /// Whether the intent naming the record `record` is followed by fewer
+    /// continuation items than it says, as an append a crash tore leaves it.
+    fn unfinished(&self, record: Nonce) -> bool;
 }
 
-impl Chain for WriterLog {
-    fn holds(&self, hash: EntryHash) -> bool {
-        WriterLog::holds(self, hash)
+/// A tip folds every entry its head descends from, which it certifies by
+/// number: an entry numbered below a tip's head is taken as folded even where
+/// no certificate names its hash.
+impl Chain for Placed {
+    fn holds(&self, at: Own) -> bool {
+        Placed::holds(self, at.hash) || self.tips.iter().any(|tip| tip.head.n > at.n)
     }
 
-    fn continues(&self, hash: EntryHash) -> bool {
-        WriterLog::holds(self, hash) && !self.heads().contains(&hash)
+    fn unfinished(&self, record: Nonce) -> bool {
+        continued(self, record).is_some_and(|c| c.held < c.logged.more)
+    }
+}
+
+/// What an intent's continuation holds so far.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Continued {
+    pub logged: Logged,
+    /// How many ops and displaced items its `more` entries hold.
+    pub held: u64,
+    /// The entities a file op of the intent or its continuation names.
+    pub files: BTreeSet<EntityId>,
+    /// The trash items the intent or its continuation names.
+    pub displaced: BTreeSet<Nonce>,
+}
+
+/// The intent merged in `placed` that names the record `record`, with what of
+/// its continuation the entries merged after it hold.
+pub fn continued(placed: &Placed, record: Nonce) -> Option<Continued> {
+    let start = placed.merged.iter().position(
+        |entry| matches!(entry.kind(), EntryKind::Intent(logged) if logged.record == Some(record)),
+    )?;
+    let EntryKind::Intent(logged) = placed.merged[start].kind() else {
+        return None;
+    };
+    let named = |ops: &[Op]| ops.iter().filter_map(op_file).collect::<Vec<_>>();
+    let mut continued = Continued {
+        files: named(&logged.ops).into_iter().collect(),
+        displaced: logged.displaced.iter().map(|item| item.item).collect(),
+        held: 0,
+        logged,
+    };
+    for entry in &placed.merged[start + 1..] {
+        let EntryKind::More(more) = entry.kind() else {
+            break;
+        };
+        continued.held += more.len();
+        continued.files.extend(named(&more.ops));
+        continued
+            .displaced
+            .extend(more.displaced.iter().map(|item| item.item));
+    }
+    Some(continued)
+}
+
+/// The entity whose file `op` writes.
+fn op_file(op: &Op) -> Option<EntityId> {
+    match op {
+        Op::File { entity, .. } | Op::Pin { entity, .. } => Some(*entity),
+        _ => None,
     }
 }
 
@@ -79,7 +132,7 @@ pub struct Settling {
 /// `logs` while the reads run.
 pub fn assess<'a, C: Chain>(
     layout: &'a Layout,
-    own: Option<(WriterId, EntryHash)>,
+    own: Option<WriterId>,
     logs: &'a BTreeMap<WriterId, C>,
     settled: &'a BTreeSet<(WriterId, Nonce)>,
     capabilities: Capabilities,
@@ -111,7 +164,7 @@ pub fn read(
 /// open records apart, for [`predict`].
 pub fn classify<C: Chain>(
     layout: &Layout,
-    own: Option<(WriterId, EntryHash)>,
+    own: Option<WriterId>,
     logs: &BTreeMap<WriterId, C>,
     settled: &BTreeSet<(WriterId, Nonce)>,
     found: Vec<(WriterId, Records)>,
@@ -127,9 +180,13 @@ pub fn classify<C: Chain>(
             match standing(layout, own, chain, settled, name, &record) {
                 Standing::Ignored => recovery.ignored.push(layout.pending(writer, name)),
                 Standing::Closed => {}
+                Standing::Spent if chain.unfinished(name) => open.push((name, record)),
                 Standing::Spent => recovery.spent.push((name, record)),
                 Standing::Open => open.push((name, record)),
                 Standing::Orphan => recovery.orphaned.push(Orphan {
+                    ours: false,
+                    live: false,
+                    progress: 0,
                     writer,
                     record: name,
                     label: record.label.clone(),
@@ -174,11 +231,12 @@ pub fn predict(
 enum Standing {
     /// Unconfined, or not chained to its writer's log.
     Ignored,
-    /// Closed, waiting for its writer to remove it.
+    /// Another writer's, closed by an entry naming it, waiting for its writer to
+    /// remove it.
     Closed,
-    /// This writer's, closed by an entry in its log.
+    /// This writer's, closed by an entry naming it.
     Spent,
-    /// This writer's, open after the head its local root recorded.
+    /// This writer's, which no entry names.
     Open,
     /// Another writer's, open.
     Orphan,
@@ -186,25 +244,21 @@ enum Standing {
 
 fn standing(
     layout: &Layout,
-    own: Option<(WriterId, EntryHash)>,
+    own: Option<WriterId>,
     chain: &impl Chain,
     settled: &BTreeSet<(WriterId, Nonce)>,
     name: Nonce,
     record: &PendingRecord,
 ) -> Standing {
-    let after = record.after();
-    if !record.is_confined(layout) || !chain.holds(after) {
+    if !record.is_confined(layout) || !chain.holds(record.after()) {
         return Standing::Ignored;
     }
-    let closed = chain.continues(after);
-    match own {
-        Some((own, head)) if own == record.writer => match (closed, head == after) {
-            (true, _) => Standing::Spent,
-            (false, true) => Standing::Open,
-            (false, false) => Standing::Ignored,
-        },
-        _ if closed || settled.contains(&(record.writer, name)) => Standing::Closed,
-        _ => Standing::Orphan,
+    let named = settled.contains(&(record.writer, name));
+    match (own == Some(record.writer), named) {
+        (true, true) => Standing::Spent,
+        (true, false) => Standing::Open,
+        (false, true) => Standing::Closed,
+        (false, false) => Standing::Orphan,
     }
 }
 
@@ -358,6 +412,51 @@ pub fn remove_empty(
     .task()
 }
 
+/// What the folder shows of the paths another writer's record `name`, `record`,
+/// names, and of its markers, hashed. A writer carrying the effect out moves it.
+/// Reads no file.
+pub(crate) fn glance<'a>(
+    layout: &Layout,
+    name: Nonce,
+    record: &PendingRecord,
+) -> Fallible<'a, u64> {
+    use std::hash::{Hash, Hasher};
+
+    let writer = record.writer;
+    let mut paths = BTreeSet::new();
+    for step in &record.steps {
+        if let EffectStep::Place { staged, .. } = step {
+            paths.insert(layout.trash(writer, *staged));
+        }
+        if let Some((from, to)) = step.ends(layout, writer) {
+            paths.insert(from);
+            paths.insert(to);
+        }
+    }
+    let marked = match record.moves {
+        Moves::Rename => flow::ok(Vec::new()),
+        Moves::Copy => flow::list(Root::Folder, &layout.pending_dir(writer)).map_ok(move |found| {
+            let marked = found
+                .into_iter()
+                .filter(|entry| pending::marker(&entry.name).is_some_and(|(of, _)| of == name));
+            marked.map(|entry| entry.name).collect()
+        }),
+    };
+    marked.and_then(move |marked| {
+        fold(paths.into_iter(), Vec::new(), |mut seen, path| {
+            flow::stat(Root::Folder, &path).map_ok(move |meta| {
+                seen.push((path, meta.map(|meta| (meta.len, meta.modified))));
+                seen
+            })
+        })
+        .map_ok(move |seen| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (marked, seen).hash(&mut hasher);
+            hasher.finish()
+        })
+    })
+}
+
 /// How far another writer's record got, as [`orphan_plan`] needs it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Reached {
@@ -435,6 +534,7 @@ pub fn orphan_plan(
             ..EffectPlan::new(env.nonce())
         },
         env,
+        relayed: BTreeMap::new(),
     }
     .plan(&reached.progress, how)
 }
@@ -447,6 +547,9 @@ struct Orphaned<'a> {
     rename_dir: bool,
     plan: EffectPlan,
     env: &'a mut Env,
+    /// The items of their trash a step finished here put in this writer's trash
+    /// instead, by theirs.
+    relayed: BTreeMap<Nonce, Nonce>,
 }
 
 impl Orphaned<'_> {
@@ -495,13 +598,22 @@ impl Orphaned<'_> {
         let writer = self.theirs.writer;
         match step {
             EffectStep::ToTrash { path, .. } if self.vacant.contains(path) => {}
-            EffectStep::ToTrash { path, .. } => self.trash(path),
+            EffectStep::ToTrash { path, item } => {
+                let ours = self.trash(path);
+                self.relayed.insert(*item, ours);
+            }
             EffectStep::Place { staged, path } => {
                 self.copy(self.layout.staged(writer, *staged, path), path)
             }
-            EffectStep::FromTrash { item, path } => {
-                self.copy(self.layout.trash(writer, *item), path)
-            }
+            // A way-point through the trash this settlement began is taken up from
+            // this writer's trash, where it put it.
+            EffectStep::FromTrash { item, path } => match self.relayed.get(item) {
+                Some(&ours) => self.plan.steps.push(EffectStep::FromTrash {
+                    item: ours,
+                    path: path.clone(),
+                }),
+                None => self.copy(self.layout.trash(writer, *item), path),
+            },
             EffectStep::Rename { from, to } => return self.rename(from, to),
             EffectStep::MakeDir { .. } | EffectStep::RemoveDir { .. } => {
                 self.plan.steps.push(step.clone());
@@ -514,7 +626,9 @@ impl Orphaned<'_> {
         let writer = self.theirs.writer;
         match step {
             EffectStep::ToTrash { path, item } => self.copy(self.layout.trash(writer, *item), path),
-            EffectStep::Place { path, .. } | EffectStep::FromTrash { path, .. } => self.trash(path),
+            EffectStep::Place { path, .. } | EffectStep::FromTrash { path, .. } => {
+                self.trash(path);
+            }
             EffectStep::Rename { from, to } => return self.rename(to, from),
             EffectStep::MakeDir { .. } => {}
             EffectStep::RemoveDir { path } => self
@@ -536,12 +650,13 @@ impl Orphaned<'_> {
         Ok(())
     }
 
-    fn trash(&mut self, path: &RelPath) {
+    fn trash(&mut self, path: &RelPath) -> Nonce {
         let item = self.env.nonce();
         self.plan.steps.push(EffectStep::ToTrash {
             path: path.clone(),
             item,
         });
+        item
     }
 
     fn copy(&mut self, source: RelPath, path: &RelPath) {

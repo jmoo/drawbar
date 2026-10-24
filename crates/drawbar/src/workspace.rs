@@ -1553,8 +1553,24 @@ pub struct Leaving {
     edit: u64,
 }
 
+/// A change to an asset's file the user made, in the order made, for the store to carry
+/// out ([`Workspace::take_file_asks`]). Following a change the library made, or one made
+/// outside drawbar, asks for nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileAsk {
+    /// Write the asset's file with what it was saved as, making the file where it has
+    /// none.
+    Save(u64),
+    /// Move the asset's file from `from` to where the asset is now.
+    Move { id: u64, from: LibPath },
+    /// Trash the file at `path`: its asset is gone.
+    Delete { id: u64, path: LibPath },
+}
+
 pub struct Workspace {
     entities: Vec<LocalEntity>,
+    /// The changes to files asked for and not yet taken.
+    file_asks: Vec<FileAsk>,
     /// Where each id sits in `entities`, as of the [`Workspace::layout`] it was built at.
     at: std::cell::RefCell<(u64, std::collections::HashMap<u64, usize>)>,
     next_id: u64,
@@ -1695,6 +1711,7 @@ impl Workspace {
         let (tx, rx) = std::sync::mpsc::channel();
         Workspace {
             entities: Vec::new(),
+            file_asks: Vec::new(),
             at: Default::default(),
             families: Default::default(),
             generations: Default::default(),
@@ -1925,6 +1942,9 @@ impl Workspace {
             return;
         }
         let name = entity.name.clone();
+        if entity.path.is_some() {
+            self.file_asks.push(FileAsk::Save(id));
+        }
         self.moved();
         log.say(format!("“{name}” is on this computer."));
     }
@@ -1988,13 +2008,35 @@ impl Workspace {
         }
     }
 
-    /// Put an asset's file at `path`, which also names it.
+    /// Put an asset's file at `path`, which also names it: its first file, or a move of
+    /// the one it has.
     pub fn place(&mut self, id: u64, path: LibPath) {
+        let Some(entity) = self.get_mut(id) else {
+            return;
+        };
+        entity.set_name(path.leaf().to_string());
+        let from = entity.path.replace(path.clone());
+        let ask = match (entity.kept, from) {
+            (false, _) => None,
+            (true, None) => Some(FileAsk::Save(id)),
+            (true, Some(from)) => (from != path).then_some(FileAsk::Move { id, from }),
+        };
+        self.file_asks.extend(ask);
+        self.moved();
+    }
+
+    /// Show an asset's file where the library found it, asking for nothing.
+    pub fn follow(&mut self, id: u64, path: LibPath) {
         if let Some(entity) = self.get_mut(id) {
             entity.set_name(path.leaf().to_string());
             entity.path = Some(path);
             self.moved();
         }
+    }
+
+    /// The changes to files asked for since the last call, in order.
+    pub fn take_file_asks(&mut self) -> Vec<FileAsk> {
+        std::mem::take(&mut self.file_asks)
     }
 
     /// Forget where an asset's file was to go, so it is placed again under a free name.
@@ -2023,7 +2065,7 @@ impl Workspace {
     /// [`Workspace::rebase`].
     pub fn adopt(&mut self, id: u64, bytes: Vec<u8>, log: &mut Log) {
         self.replace_bytes(id, bytes, log);
-        self.mark_saved(id);
+        self.settle_saved(id);
     }
 
     /// [`Workspace::adopt`] for a file left on disk: the asset rests in it.
@@ -2723,13 +2765,13 @@ impl Workspace {
     }
 
     /// The copy of `id` did not land: say whether it was of a file the instrument was read
-    /// into, which then waits for the sweep of `.drawbar/tmp/` at the next open.
+    /// into, which then stays where it was read.
     pub fn fetched_copy_failed(&mut self, id: u64) -> bool {
         self.fetched.remove(&id).is_some()
     }
 
     /// The copy of `id` landed: delete the file it was fetched into, where it was. In the
-    /// browser the file waits for the sweep of `.drawbar/tmp/` at the next open.
+    /// browser the file stays where it was read.
     pub fn landed_copy(&mut self, id: u64) {
         let Some(_file) = self.fetched.remove(&id) else {
             return;
@@ -2761,6 +2803,14 @@ impl Workspace {
         self.moving_over
             .extend(leaving.map(|leaving| (id, leaving)));
         true
+    }
+
+    /// The asset an overwrite of `id` comes from, while it is as it was when moved and
+    /// the overwrite's save or copy is still to answer.
+    pub fn overwritten_from(&self, id: u64) -> Option<u64> {
+        let saving = self.saving_over.get(&id).map(|(leaving, _)| leaving);
+        let leaving = saving.or_else(|| self.moving_over.get(&id))?;
+        self.unchanged(leaving).then_some(leaving.from)
     }
 
     /// The asset a copy that has answered over the file of `id` was moved from, which
@@ -2834,11 +2884,18 @@ impl Workspace {
         self.arriving.get(&id)
     }
 
+    /// Each arriving asset, with what its copy is a copy of, by id.
+    pub fn arrivals(&self) -> impl Iterator<Item = (u64, &CopyOf)> {
+        self.arriving.iter().map(|(id, from)| (*id, from))
+    }
+
     /// The arriving assets whose copies are of the file `id` rests in.
     pub fn copies_of(&self, id: u64) -> impl Iterator<Item = u64> + '_ {
         let copies = self.arriving.iter();
         copies
-            .filter(move |(_, from)| matches!(from, CopyOf::Asset(source) if *source == id))
+            .filter(move |(_, from)| {
+                matches!(from, CopyOf::Asset(source) | CopyOf::Edited(source, _) if *source == id)
+            })
             .map(|(copy, _)| *copy)
     }
 
@@ -2856,7 +2913,8 @@ impl Workspace {
             return Some(CopyOf::Asset(id));
         };
         let (over, rewrite) = (held.over.as_ref()?, held.rewrite.as_ref().ok()?);
-        Some(CopyOf::Edited(over.clone(), rewrite.clone()))
+        let pieces = rewrite.pieces(over).ok()?;
+        Some(CopyOf::Edited(id, Arc::new(pieces)))
     }
 
     /// Let go of what an asset holds, unread again as a file of `len` bytes under a new
@@ -3427,17 +3485,30 @@ impl Workspace {
     /// ⚠️ The bytes do not change, so the stamp stays and caches over them stay valid.
     /// The list revision moves, so the store is written again without the unsaved copy.
     pub fn mark_saved(&mut self, id: u64) {
-        let Some(entity) = self.get_mut(id) else {
+        if !self.settle_saved(id) {
             return;
+        }
+        let kept = self.get(id).filter(|entity| entity.kept);
+        if kept.is_some_and(|entity| entity.path.is_some()) {
+            self.file_asks.push(FileAsk::Save(id));
+        }
+    }
+
+    /// [`Workspace::mark_saved`] for bytes the asset's file already holds, asking for no
+    /// write. Returns whether the baseline moved.
+    fn settle_saved(&mut self, id: u64) -> bool {
+        let Some(entity) = self.get_mut(id) else {
+            return false;
         };
         // Resting in its file, it holds what it was saved as, and only an editor's pending
         // edit, which the bytes do not hold, can make it unsaved.
         if !entity.is_unsaved() || entity.rests().is_some() {
-            return;
+            return false;
         }
         let saved = entity.baseline();
         entity.resave(saved);
         self.revision += 1;
+        true
     }
 
     /// Record a write that reached a slot: the bytes it carried become the saved
@@ -3486,6 +3557,9 @@ impl Workspace {
         entity.resave(Baseline::read(sent, stamp));
         entity.link = Some((class, at));
         entity.wrote = entity.saved.crc32().map(|crc32| Wrote { class, at, crc32 });
+        if entity.kept && entity.path.is_some() {
+            self.file_asks.push(FileAsk::Save(id));
+        }
         self.revision += 1;
     }
 
@@ -3645,6 +3719,10 @@ impl Workspace {
         self.edits.remove(&id);
         let at = self.position(id)?;
         let gone = self.entities.remove(at);
+        if let (true, Some(path)) = (gone.kept, &gone.path) {
+            let path = path.clone();
+            self.file_asks.push(FileAsk::Delete { id, path });
+        }
         self.moved();
         Some(gone)
     }

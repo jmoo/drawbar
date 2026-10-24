@@ -16,7 +16,7 @@ use web_sys::{
     IdbTransactionMode,
 };
 
-use super::{warn_once, Picking, THIS_COMPUTER};
+use super::{Picking, THIS_COMPUTER};
 use crate::folders::Library;
 use crate::idb::{committed, database, done, LIBRARIES as STORE};
 use crate::js::{describe, field};
@@ -160,21 +160,9 @@ impl Libraries {
     }
 
     /// Put `root` first, and keep the list for the next session, after the folders
-    /// other tabs have kept since this one read it. Returns what to say the first time a
-    /// picked folder opens.
-    pub fn opened(&mut self, root: &Root) -> Option<&'static str> {
-        let mut root = root.clone();
-        let warned = self
-            .recent
-            .iter()
-            .any(|held| *held == root && matches!(held, Root::Picked(held) if held.warned));
-        let notice = match &mut root {
-            Root::Picked(picked) => {
-                picked.warned |= warned;
-                warn_once(&mut picked.warned)
-            }
-            Root::Private => None,
-        };
+    /// other tabs have kept since this one read it.
+    pub fn opened(&mut self, root: &Root) {
+        let root = root.clone();
         self.recent.retain(|held| *held != root);
         self.recent.insert(0, root);
         self.recent.truncate(Libraries::MOST);
@@ -198,7 +186,6 @@ impl Libraries {
             // What is left of a library forgotten here is only read again if it opens.
             let _ = crate::store::keep_libraries(kept.collect()).await;
         });
-        notice
     }
 
     /// The libraries a menu offers, most recent first, with the browser's own always
@@ -259,7 +246,6 @@ async fn identify(handle: FileSystemDirectoryHandle, known: Vec<Root>) -> Root {
             return Root::Picked(Picked {
                 id: held.id,
                 handle,
-                warned: held.warned,
             });
         }
     }
@@ -267,11 +253,10 @@ async fn identify(handle: FileSystemDirectoryHandle, known: Vec<Root>) -> Root {
     Root::Picked(Picked {
         id: id.max(1),
         handle,
-        warned: false,
     })
 }
 
-/// The list as IndexedDB holds it: `{id, handle, warned}` for a picked folder, and
+/// The list as IndexedDB holds it: `{id, handle}` for a picked folder, and
 /// `{id: 0}` for the browser's own library.
 fn entries(recent: &[Root]) -> Array {
     recent
@@ -281,8 +266,7 @@ fn entries(recent: &[Root]) -> Array {
             let _ = match root {
                 Root::Private => Reflect::set(&entry, &"id".into(), &0.into()),
                 Root::Picked(picked) => Reflect::set(&entry, &"id".into(), &picked.id.into())
-                    .and_then(|_| Reflect::set(&entry, &"handle".into(), &picked.handle))
-                    .and_then(|_| Reflect::set(&entry, &"warned".into(), &picked.warned.into())),
+                    .and_then(|_| Reflect::set(&entry, &"handle".into(), &picked.handle)),
             };
             JsValue::from(entry)
         })
@@ -315,7 +299,6 @@ async fn read() -> Result<Vec<Root>, String> {
                 Some(handle) => Some(Root::Picked(Picked {
                     id,
                     handle: handle.dyn_into().ok()?,
-                    warned: field(&entry, "warned").is_some_and(|warned| warned.is_truthy()),
                 })),
             }
         })

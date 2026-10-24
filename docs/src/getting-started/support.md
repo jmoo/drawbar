@@ -26,6 +26,15 @@ has been connected, so USB support for other models cannot be guaranteed.
 The safeguards drawbar applies when it writes, listed under
 [Safety](../drawbar/instrument.md#safety), have been confirmed on the Electro 5.
 
+## The library in the browser
+
+Every browser keeps a library in its own storage for drawbar.app. Chrome and Edge
+can also open a folder on your computer as the library, and Brave can once
+`brave://flags/#file-system-access-api` is turned on. Outside Chrome, moving a
+file in that folder copies it, which takes longer for a large one. Firefox and
+Safari cannot open a folder. drawbar's tests run the library in Chromium and Firefox;
+Safari and Edge have not been tried.
+
 ## MIDI controllers
 
 The sample and piano key maps can be played from a MIDI controller. The desktop

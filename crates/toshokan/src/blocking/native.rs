@@ -15,7 +15,8 @@ use crate::path::RelPath;
 /// two directories, and locks as OS file locks on files in the local root.
 ///
 /// Symbolic links and special files are not library files: listings leave them
-/// out, and naming one fails. What a root's renames promise is probed without
+/// out, and naming one fails, as does reading or changing a path through a
+/// directory that is a link. What a root's renames promise is probed without
 /// writing, from its volume's file system: by type on Linux and Android, by type
 /// and the volume's capabilities on Apple systems, and by name on Windows. A
 /// volume that keeps no journal of its names, such as FAT or exFAT, declares no
@@ -23,10 +24,13 @@ use crate::path::RelPath;
 /// move copies, and one whose renames refuse an existing destination declares
 /// [`Capabilities::no_replace`], as every other volume on Windows does. On
 /// Windows a directory's names cannot be flushed, so `fsync` is not declared,
-/// and names containing `\` or `:` are refused.
+/// and names containing `\` or `:` are refused. The local root's directory, and
+/// those it is in, are made where missing at its first change or lock.
 pub struct Native {
     folder: PathBuf,
     local: PathBuf,
+    /// Whether the local root's directory is known to be there.
+    local_made: bool,
     locks: BTreeMap<RelPath, File>,
     /// Each root's [`Renames`], once a probe could tell.
     renames: [Cell<Option<Renames>>; 2],
@@ -53,6 +57,7 @@ impl Native {
         Self {
             folder: folder.into(),
             local: local.into(),
+            local_made: false,
             locks: BTreeMap::new(),
             renames: Default::default(),
         }
@@ -147,8 +152,12 @@ impl Native {
 
     fn read(&self, root: Root, path: &RelPath, range: Range) -> Result<Vec<u8>, IoError> {
         let mut file = File::open(self.file(root, path)?).map_err(io_error)?;
+        let len = file.metadata().map_err(io_error)?.len();
+        let wanted = len.saturating_sub(range.offset).min(range.len);
         file.seek(SeekFrom::Start(range.offset)).map_err(io_error)?;
-        let mut bytes = Vec::new();
+        // A read the size of what the file holds, rather than twice it as a growing
+        // buffer would allocate.
+        let mut bytes = Vec::with_capacity(usize::try_from(wanted).unwrap_or(0));
         file.take(range.len)
             .read_to_end(&mut bytes)
             .map_err(io_error)?;
@@ -291,6 +300,65 @@ impl Backend for Native {
     }
 
     fn perform(&mut self, io: Io) -> IoResult {
+        let local = io.root() == Root::Local && (io.mutates() || matches!(io, Io::Lock { .. }));
+        if !local {
+            return self.request(io);
+        }
+        if !self.local_made {
+            fs::create_dir_all(&self.local).map_err(io_error)?;
+            self.local_made = true;
+        }
+        let result = self.request(io.clone());
+        if result != Err(IoError::NotFound) || self.local.is_dir() {
+            return result;
+        }
+        fs::create_dir_all(&self.local).map_err(io_error)?;
+        self.request(io)
+    }
+}
+
+impl Native {
+    /// Refuses a read or a change of a path whose directories include a link, which
+    /// would reach outside the root. A link made between this look and the request is
+    /// still followed.
+    fn unlinked(&self, io: &Io) -> Result<(), IoError> {
+        let paths: Vec<&RelPath> = match io {
+            Io::Read { path, .. }
+            | Io::Create { path, .. }
+            | Io::Append { path, .. }
+            | Io::Write { path, .. }
+            | Io::Remove { path, .. }
+            | Io::RemoveDir { path, .. }
+            | Io::Sync { path, .. } => vec![path],
+            Io::ReadMany { reads, .. } => reads.iter().map(|(path, _)| path).collect(),
+            Io::Rename { from, to, .. } => vec![from, to],
+            _ => Vec::new(),
+        };
+        let top = self.top(io.root());
+        for path in paths {
+            let mut at = top.to_path_buf();
+            let mut dirs = path.components().peekable();
+            while let Some(name) = dirs.next() {
+                if dirs.peek().is_none() {
+                    break;
+                }
+                at.push(name);
+                match fs::symlink_metadata(&at) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        return Err(IoError::Other(
+                            "a directory on the way is a symbolic link".into(),
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn request(&mut self, io: Io) -> IoResult {
+        self.unlinked(&io)?;
         match io {
             Io::List { root, dir } => self.list(root, &dir).map(Reply::Listed),
             Io::Stat { root, path } => self.stat(root, &path).map(Reply::Stat),
@@ -378,6 +446,7 @@ fn io_error(error: io::Error) -> IoError {
         ErrorKind::NotADirectory => IoError::NotDirectory,
         ErrorKind::DirectoryNotEmpty => IoError::NotEmpty,
         ErrorKind::StorageFull | ErrorKind::QuotaExceeded => IoError::NoSpace,
+        ErrorKind::PermissionDenied => IoError::Denied,
         _ => IoError::Other(error.to_string()),
     }
 }

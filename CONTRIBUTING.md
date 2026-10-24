@@ -218,8 +218,8 @@ Cargo from `crates/` inside the development shell; the parent
 - `nix flake check` checks formatting, runs Clippy, builds every crate's rustdoc
   with warnings denied, runs the tests of `scripts/bump.bash`, model-checks
   toshokan's portable-root spec at small bounds, and evaluates every flake output.
-- `nix build .#nord.toshokan-spec-deep` model-checks that spec at larger bounds,
-  which takes about 80 minutes.
+- `nix build .#nord.toshokan-spec-deep` model-checks that spec at larger bounds;
+  see `crates/toshokan/spec/README.md`.
 - `nix build .#<crate>` builds and tests one crate.
 - `nix build .#nord.all` covers every crate and cross target.
 - `nix build .#nord.all-corpus` runs all suites against the pinned private

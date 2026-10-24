@@ -206,14 +206,7 @@ fn env(label: &str) -> Env {
 }
 
 fn identity(bytes: &[u8]) -> Identity {
-    let identify = PrefixIdentity::default();
-    let len = bytes.len() as u64;
-    let parts: Vec<Vec<u8>> = identify
-        .ranges(len)
-        .iter()
-        .map(|r| bytes[r.offset as usize..][..r.len.min(len - r.offset) as usize].to_vec())
-        .collect();
-    identify.identify(len, &parts)
+    PrefixIdentity::default().of_bytes(&RelPath::ROOT, bytes)
 }
 
 fn file_path(i: usize) -> RelPath {
@@ -304,7 +297,7 @@ impl Gen {
             label: format!("writer {}", self.writers.len()),
         });
         let at = self.tick();
-        let entry = Entry::encode(EntryHash::ZERO, at, kind).unwrap();
+        let entry = Entry::encode(EntryHash::ZERO, 0, at, kind).unwrap();
         self.writers.push(WriterGen {
             id,
             head: entry.hash(),
@@ -317,7 +310,8 @@ impl Gen {
     fn push(&mut self, w: usize, logged: Logged) {
         let at = self.tick();
         let writer = &mut self.writers[w];
-        let entry = Entry::encode(writer.head, at, EntryKind::Intent(logged)).unwrap();
+        let n = writer.entries as u64;
+        let entry = Entry::encode(writer.head, n, at, EntryKind::Intent(logged)).unwrap();
         writer.head = entry.hash();
         writer.segment.extend(entry.to_bytes());
         writer.in_segment += 1;
@@ -350,12 +344,14 @@ impl Gen {
                 ops.push(Op::Create {
                     entity,
                     replaces: Vec::new(),
+                    take: None,
                 });
                 let write = |key: &str, value: Raw| Op::Write {
                     entity,
                     key: key.into(),
                     value: Some(value),
                     replaces: Vec::new(),
+                    take: None,
                 };
                 ops.push(write("name", Raw::of(&format!("Program {i}")).unwrap()));
                 ops.push(write(
@@ -371,6 +367,8 @@ impl Gen {
                         entity,
                         key: "tags".into(),
                         value: Raw::of(&tag).unwrap(),
+                        replaces: Vec::new(),
+                        take: None,
                     });
                 }
                 for _ in 0..self.rng.below(3) {
@@ -382,6 +380,8 @@ impl Gen {
                         entity,
                         key: "related".into(),
                         value: Raw::of(&other.to_string()).unwrap(),
+                        replaces: Vec::new(),
+                        take: None,
                     });
                 }
                 let file = &files[i];
@@ -394,6 +394,7 @@ impl Gen {
                         modified: file.modified,
                     }),
                     replaces: Vec::new(),
+                    take: None,
                 });
                 made.push(entity);
             }
@@ -401,7 +402,9 @@ impl Gen {
                 label: "Import".into(),
                 ops,
                 displaced: Vec::new(),
-                reverses: None,
+                forks: Vec::new(),
+                more: 0,
+                record: None,
             };
             self.push(w, logged);
             self.entities.extend(made);
@@ -419,9 +422,13 @@ impl Gen {
                     entity,
                     key: "tags".into(),
                     value: Raw::of(&tag).unwrap(),
+                    replaces: Vec::new(),
+                    take: None,
                 }],
                 displaced: Vec::new(),
-                reverses: None,
+                forks: Vec::new(),
+                more: 0,
+                record: None,
             };
             self.push(w, logged);
         }
@@ -480,7 +487,12 @@ fn generated_writers() -> Vec<String> {
 /// Removes the writers earlier runs' installs added to the library, so every
 /// run measures the library as generated.
 async fn only_generated_writers() {
-    let writers = format!("{}/folder/{}/writers", home(), layout().root());
+    let writers = format!(
+        "{}/folder/{}/{}",
+        home(),
+        layout().root(),
+        toshokan::layout::WRITERS
+    );
     let generated = generated_writers();
     let listed = js_sys::Array::from(&opfs_list(parts(&writers)).await);
     for name in listed.iter().filter_map(|name| name.as_string()) {
@@ -492,6 +504,24 @@ async fn only_generated_writers() {
     }
 }
 
+/// Removes the cached view of every writer of the measured install; how many
+/// `view.bin` files it removed.
+async fn forget_views() -> usize {
+    let own = format!("{}/own", home());
+    let listed = js_sys::Array::from(&opfs_list(parts(&own)).await);
+    let mut removed = 0;
+    for genesis in listed.iter().filter_map(|name| name.as_string()) {
+        for name in ["view.bin", "view.bin.next", "view.log"] {
+            let at = parts(&format!("{own}/{genesis}/{name}"));
+            if opfs_has(at.clone()).await.is_truthy() {
+                opfs_remove(at).await.unwrap();
+                removed += usize::from(name == "view.bin");
+            }
+        }
+    }
+    removed
+}
+
 /// Written once the library files are.
 fn files_marker() -> Vec<String> {
     parts(&format!("{}/generated/ready", home()))
@@ -499,7 +529,7 @@ fn files_marker() -> Vec<String> {
 
 /// Written once the log is, in its current shape: rolled-over segments sealed.
 fn log_marker() -> Vec<String> {
-    parts(&format!("{}/generated/sealed-log", home()))
+    parts(&format!("{}/generated/numbered-log", home()))
 }
 
 /// Writes what an earlier run of this origin did not finish writing: the library
@@ -581,7 +611,7 @@ async fn generate() {
     say(&format!("log written in {:.0} ms", now() - start));
     let marker = Io::Create {
         root: Root::Local,
-        path: path("sealed-log"),
+        path: path("numbered-log"),
         bytes: Vec::new(),
     };
     ok(&worker, marker).await;
@@ -989,7 +1019,7 @@ async fn measure() {
         ("range(rating, 3..)", &|| view.range(RATING, 3..).len()),
         ("values(tags)", &|| view.values(TAGS).values.len()),
         ("values(name)", &|| view.values(NAME).values.len()),
-        ("under(lib/d0042)", &|| view.under(&path("lib/d0042")).len()),
+        ("under(lib/d0005)", &|| view.under(&path("lib/d0005")).len()),
         ("1000 x at(path)", &|| {
             let at = |i| view.at(&view.entity(pick(i))?.file()?.path);
             (0..1000).filter_map(at).count()
@@ -1025,6 +1055,16 @@ async fn measure() {
     }
     warm.report("open, existing install");
     closes.report("close, dropping the library");
+
+    let mut uncached = Samples::default();
+    for _ in 0..5 {
+        assert!(forget_views().await > 0, "a cached view to forget");
+        let library = uncached.time(open("own")).await;
+        next_task().await;
+        library.close().await.unwrap();
+        next_task().await;
+    }
+    uncached.report("open, existing install without its cached view");
 
     let library = open("own").await;
     report_memory("with the library open");

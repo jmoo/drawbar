@@ -1,17 +1,19 @@
 //! Facts: how entries merge, what a view shows, how intents become ops, and undo.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::rc::Rc;
 
 use toshokan::binding::Bindings;
+use toshokan::contribution::Contribution;
+use toshokan::derive::{derive, Seen, SeenSegment};
 use toshokan::env::SeededRandom;
 use toshokan::intent::{ops, Driver, Intent};
 use toshokan::line::Line;
-use toshokan::log::{Displaced, Entry, EntryKind, FileFact, Logged, Op};
-use toshokan::merge::Folded;
+use toshokan::log::{Displaced, Entry, EntryKind, FileFact, Logged, Op, Ref};
+use toshokan::merge::{Folded, Write};
 use toshokan::plan::{Expect, FileChange, Plan};
-use toshokan::undo::History;
+use toshokan::snapshot::{Certified, Snapshot};
+use toshokan::undo::{Before, History};
 use toshokan::view::{Conflicted, Parts, View};
 use toshokan::{
     EntityId, EntryHash, Field, Hlc, Identity, Invalid, Nonce, Random, Raw, Refusal, Register,
@@ -64,54 +66,114 @@ fn view(folded: Folded) -> View {
     View::new(Parts {
         folded,
         bindings: Bindings::default().into(),
+        listing: None,
         writers: Vec::new(),
         forks: Vec::new(),
         gaps: Vec::new(),
+        items: Vec::new(),
     })
 }
 
-/// A snapshot's state as another reader decodes it.
-fn reread(folded: &Folded) -> Folded {
-    serde_json::from_str(&serde_json::to_string(folded).unwrap()).unwrap()
+/// One writer's chain or snapshot, as a reader sees it.
+enum Shown<'a> {
+    Lines(&'a [Rc<Entry>]),
+    Snapshot(Rc<Snapshot>),
+}
+
+/// What a reader derives from what each writer's directory shows.
+fn derived(shown: Vec<(WriterId, Shown<'_>)>) -> Folded {
+    let seen = shown
+        .into_iter()
+        .map(|(writer, shown)| {
+            let seen = match shown {
+                Shown::Lines(entries) => Seen {
+                    segments: vec![SeenSegment {
+                        entries,
+                        sealed: false,
+                    }],
+                    snapshots: Vec::new(),
+                },
+                Shown::Snapshot(snapshot) => Seen {
+                    segments: Vec::new(),
+                    snapshots: vec![snapshot],
+                },
+            };
+            (writer, seen)
+        })
+        .collect();
+    derive(&seen, &BTreeMap::new(), &BTreeSet::new()).folded
+}
+
+/// `writer`'s chain `entries` folded into a snapshot that names each of them,
+/// as another reader decodes it.
+fn compacted(writer: WriterId, entries: &[Rc<Entry>]) -> Rc<Snapshot> {
+    let mut state = Contribution::default();
+    for entry in entries {
+        state.fold(writer, entry);
+    }
+    let last = entries.last().expect("a chain");
+    let snapshot = Snapshot {
+        writer,
+        label: String::new(),
+        at: last.at(),
+        genesis: entries[0].hash(),
+        head: last.own(),
+        certified: Certified {
+            hashes: entries.iter().map(|entry| entry.own()).collect(),
+            ..Certified::default()
+        },
+        state,
+        unknown: BTreeMap::new(),
+    };
+    Rc::new(Snapshot::decode(&snapshot.encode()).unwrap())
 }
 
 /// One instance writing as `id`, with what it has seen merged in `folded`.
 #[derive(Clone)]
 struct Writer {
     id: WriterId,
-    /// Keeps the lines of a cloned history apart from the original's.
-    salt: u64,
-    head: EntryHash,
     clock: Hlc,
+    /// Every writer's chain it has seen, its own included.
+    chains: BTreeMap<WriterId, Vec<Rc<Entry>>>,
     folded: Folded,
     own: Vec<Entry>,
+    history: History,
 }
 
 impl Writer {
     fn new(id: u128) -> Self {
         Self {
             id: WriterId::from_u128(id),
-            salt: 0,
-            head: EntryHash::ZERO,
             clock: Hlc::ZERO,
+            chains: BTreeMap::new(),
             folded: Folded::default(),
             own: Vec::new(),
+            history: History::default(),
         }
     }
 
-    fn log(&mut self, now: u64, kind: EntryKind) -> Entry {
+    /// Appends `kind` to its chain, keeping an intent in its history with what
+    /// it replaced and the entry it reverses.
+    fn log(&mut self, now: u64, kind: EntryKind, reverses: Option<EntryHash>) -> Entry {
         self.clock = self.clock.tick(now).unwrap();
-        let json = format!(
-            r#"{{"prev":"{}","writer":"{}","salt":{},"n":{}}}"#,
-            self.head,
-            self.id,
-            self.salt,
-            self.own.len()
-        );
-        let entry = Entry::new(Line::seal(json).unwrap(), self.clock, kind, false);
-        self.head = entry.hash();
-        self.folded.apply(self.id, &entry);
+        let (prev, n) = self
+            .own
+            .last()
+            .map_or((EntryHash::ZERO, 0), |last| (last.hash(), last.n() + 1));
+        let before = match &kind {
+            EntryKind::Intent(logged) => Before::of(&logged.ops, &self.folded),
+            _ => Before::default(),
+        };
+        let logged = match &kind {
+            EntryKind::Intent(logged) => Some(logged.clone()),
+            _ => None,
+        };
+        let entry = Entry::encode(prev, n, self.clock, kind).unwrap();
+        if let Some(logged) = logged {
+            self.history.push(&entry, logged, reverses, before);
+        }
         self.own.push(entry.clone());
+        self.receive(self.id, &entry);
         entry
     }
 
@@ -120,9 +182,11 @@ impl Writer {
             label: "test".into(),
             ops,
             displaced,
-            reverses: None,
+            forks: Vec::new(),
+            more: 0,
+            record: None,
         };
-        self.log(now, EntryKind::Intent(logged))
+        self.log(now, EntryKind::Intent(logged), None)
     }
 
     fn commit(&mut self, plan: Plan, now: u64) -> Result<Entry, Invalid> {
@@ -131,14 +195,24 @@ impl Writer {
             label: plan.label,
             ops,
             displaced: Vec::new(),
-            reverses: plan.reverses,
+            forks: Vec::new(),
+            more: 0,
+            record: None,
         };
-        Ok(self.log(now, EntryKind::Intent(logged)))
+        Ok(self.log(now, EntryKind::Intent(logged), plan.reverses))
     }
 
     fn receive(&mut self, writer: WriterId, entry: &Entry) {
         self.clock = self.clock.observe(entry.at());
-        self.folded.apply(writer, entry);
+        let chain = self.chains.entry(writer).or_default();
+        if !chain.iter().any(|held| held.hash() == entry.hash()) {
+            chain.push(Rc::new(entry.clone()));
+        }
+        let shown = self
+            .chains
+            .iter()
+            .map(|(writer, chain)| (*writer, Shown::Lines(chain)));
+        self.folded = derived(shown.collect());
     }
 
     fn sync(&mut self, from: &Writer) {
@@ -151,13 +225,22 @@ impl Writer {
         view(self.folded.clone())
     }
 
+    /// What it shows once every chain it has seen is compacted.
+    fn compacted(&self) -> Folded {
+        let shown = self
+            .chains
+            .iter()
+            .map(|(writer, chain)| (*writer, Shown::Snapshot(compacted(*writer, chain))));
+        derived(shown.collect())
+    }
+
     fn undo(&mut self, now: u64) -> Result<Entry, Refusal> {
-        let plan = History::of(&self.own).plan_undo(&self.own, self.id, &self.view())?;
+        let plan = self.history.plan_undo(self.id, &self.view())?;
         Ok(self.commit(plan, now).unwrap())
     }
 
     fn redo(&mut self, now: u64) -> Result<Entry, Refusal> {
-        let plan = History::of(&self.own).plan_redo(&self.own, self.id, &self.view())?;
+        let plan = self.history.plan_redo(self.id, &self.view())?;
         Ok(self.commit(plan, now).unwrap())
     }
 }
@@ -278,7 +361,7 @@ fn a_json_null_value_is_not_a_clear_in_a_snapshot() {
     let e = entity(1);
     let (mut a, _) = pair(e);
     a.commit(plan(intent("").set(e, NOTE, None)), 2).unwrap();
-    let note = |writer: &Writer| view(reread(&writer.folded)).entity(e).unwrap().get(NOTE);
+    let note = |writer: &Writer| view(writer.compacted()).entity(e).unwrap().get(NOTE);
     assert_eq!(note(&a), Field::Value(None));
     a.commit(plan(intent("").clear(e, NOTE)), 3).unwrap();
     assert_eq!(note(&a), Field::Unset);
@@ -375,19 +458,22 @@ fn values_that_do_not_decode_are_unreadable_and_kept() {
             value: Some(number.clone()),
             replaces: a
                 .folded
-                .register(e, "name")
+                .register_writes(e, "name")
                 .iter()
-                .map(|w| w.entry)
+                .map(Write::named)
                 .collect(),
+            take: None,
         },
         Op::Add {
             entity: e,
             key: "tags".into(),
             value: number.clone(),
+            replaces: Vec::new(),
+            take: None,
         },
     ];
     a.intent(2, ops, Vec::new());
-    for folded in [a.folded.clone(), reread(&a.folded)] {
+    for folded in [a.folded.clone(), a.compacted()] {
         let view = view(folded);
         let shown = view.entity(e).unwrap();
         assert_eq!(shown.get(NAME), Field::Unreadable(number.clone()));
@@ -449,7 +535,7 @@ fn ops_name_what_this_writer_observed() {
         .commit(plan(intent("").set(e, NAME, "right".into())), 2)
         .unwrap();
     a.sync(&b);
-    let tag = a.folded.tags(e, "tags", &Raw::of(&"a").unwrap())[0].entry;
+    let tag = a.folded.tags(e, "tags", &Raw::of(&"a").unwrap())[0].named();
 
     let plan = plan(
         intent("")
@@ -461,9 +547,9 @@ fn ops_name_what_this_writer_observed() {
     let Some(Op::Delete { observed, .. }) = written.pop() else {
         panic!("{written:?}");
     };
-    let mut expected = vec![left.hash(), right.hash(), tag];
+    let mut expected = vec![left.own().of(a.id), right.own().of(b.id), tag];
     expected.sort();
-    let mut observed = observed;
+    let mut observed: Vec<Ref> = observed.iter().map(|observed| observed.at).collect();
     observed.sort();
     assert_eq!(observed, expected);
     let [Op::Write {
@@ -485,26 +571,25 @@ fn compaction_never_resurrects_a_replaced_write() {
     a.commit(plan(intent("").add(e, TAGS, "b".into())), 3)
         .unwrap();
 
-    let mut own_a = Folded::default();
-    for entry in &a.own {
-        own_a.apply(a.id, entry);
-    }
-    let mut own_b = Folded::default();
-    for entry in &b.own {
-        own_b.apply(b.id, entry);
-    }
-    let mut a_compacted = reread(&own_a);
-    for entry in &b.own {
-        a_compacted.apply(b.id, entry);
-    }
-    let mut b_compacted = reread(&own_b);
-    for entry in &a.own {
-        b_compacted.apply(a.id, entry);
-    }
-    let mut both = reread(&own_a);
-    both.join(&reread(&own_b));
-    for folded in [a_compacted, b_compacted, both] {
-        let reader = view(folded);
+    let mut both = a.clone();
+    both.sync(&b);
+    let (a_chain, b_chain) = (&both.chains[&a.id], &both.chains[&b.id]);
+    let cases = [
+        (
+            Shown::Snapshot(compacted(a.id, a_chain)),
+            Shown::Lines(b_chain),
+        ),
+        (
+            Shown::Lines(a_chain),
+            Shown::Snapshot(compacted(b.id, b_chain)),
+        ),
+        (
+            Shown::Snapshot(compacted(a.id, a_chain)),
+            Shown::Snapshot(compacted(b.id, b_chain)),
+        ),
+    ];
+    for (of_a, of_b) in cases {
+        let reader = view(derived(vec![(a.id, of_a), (b.id, of_b)]));
         assert_eq!(
             reader.entity(e).unwrap().get(NAME),
             Field::Value("second".into())
@@ -525,12 +610,9 @@ fn undo_sets_a_field_back_and_redo_sets_it_again() {
     let EntryKind::Intent(logged) = &undo.kind() else {
         panic!();
     };
-    assert_eq!(
-        (logged.label.as_str(), logged.reverses),
-        ("Rename", Some(rename.hash()))
-    );
-    let history = History::of(&a.own);
-    let undone: Vec<_> = history
+    assert_eq!(logged.label, "Rename");
+    let undone: Vec<_> = a
+        .history
         .items()
         .iter()
         .map(|i| (i.label.as_str(), i.undone))
@@ -539,7 +621,8 @@ fn undo_sets_a_field_back_and_redo_sets_it_again() {
 
     a.redo(4).unwrap();
     assert_eq!(name(&a, e), Field::Value("second".into()));
-    assert!(!History::of(&a.own).items()[1].undone);
+    assert!(!a.history.items()[1].undone);
+    assert_eq!(a.history.items()[1].intent, rename.hash());
     a.undo(5).unwrap();
     a.undo(6).unwrap();
     assert!(a.view().entity(e).is_none(), "undoing the create deletes");
@@ -734,23 +817,24 @@ fn undo_puts_files_back_and_leaves_pins_alone() {
                 entity: e,
                 file: before,
                 replaces: Vec::new(),
+                take: None,
             }];
-            replaces.push(a.intent(2, ops, Vec::new()).hash());
+            replaces.push(a.intent(2, ops, Vec::new()).own().of(a.id));
         }
         let file = Op::File {
             entity: e,
             file: after,
             replaces,
+            take: None,
         };
         let pin = Op::Pin {
             entity: entity(9),
             file: fact("moved.bin", 3),
             replaces: Vec::new(),
+            take: None,
         };
         let changed = a.intent(3, vec![file, pin], trashed);
-        let plan = History::of(&a.own)
-            .plan_undo(&a.own, a.id, &a.view())
-            .unwrap();
+        let plan = a.history.plan_undo(a.id, &a.view()).unwrap();
         assert_eq!(plan.files, expected, "{what}");
         assert_eq!(plan.facts, [], "{what}");
         assert_eq!(plan.reverses, Some(changed.hash()), "{what}");
@@ -805,12 +889,12 @@ fn unknown_kinds_ops_keys_and_values_are_kept_through_merges_and_snapshots() {
         }
         let unreadable = Raw::new(&value).unwrap();
 
-        let kind = a.log(2, EntryKind::Unknown(unknown_kind.clone()));
+        let kind = a.log(2, EntryKind::Unknown(unknown_kind.clone()), None);
         let replaces = a
             .folded
-            .register(e, "name")
+            .register_writes(e, "name")
             .iter()
-            .map(|w| w.entry)
+            .map(Write::named)
             .collect();
         let ops = vec![
             Op::Unknown(unknown_op.clone()),
@@ -819,29 +903,22 @@ fn unknown_kinds_ops_keys_and_values_are_kept_through_merges_and_snapshots() {
                 key: "future".into(),
                 value: Some(undeclared.clone()),
                 replaces: Vec::new(),
+                take: None,
             },
             Op::Write {
                 entity: e,
                 key: "name".into(),
                 value: Some(unreadable.clone()),
                 replaces,
+                take: None,
             },
         ];
         let op = a.intent(3, ops, Vec::new());
 
-        let member = json(&mut random, 2);
-        let text = serde_json::to_string(&a.folded).unwrap();
-        let extended = format!("{{\"future\":{member},{}", &text[1..]);
-        let mut other = Folded::default();
-        other.join(&serde_json::from_str(&extended).unwrap());
-        for (how, folded) in [
-            ("applied", a.folded.clone()),
-            ("reread", reread(&a.folded)),
-            ("joined", other.clone()),
-        ] {
+        for (how, folded) in [("merged", a.folded.clone()), ("compacted", a.compacted())] {
             let unknown: Vec<_> = folded.unknown().cloned().collect();
             let mut expected = vec![
-                (kind.hash(), unknown_kind.clone()),
+                (kind.hash(), Raw::new(&kind.json()).unwrap()),
                 (op.hash(), unknown_op.clone()),
             ];
             expected.sort();
@@ -863,12 +940,6 @@ fn unknown_kinds_ops_keys_and_values_are_kept_through_merges_and_snapshots() {
                 "seed {seed}, {how}"
             );
         }
-        let rewritten = serde_json::to_string(&other).unwrap();
-        assert!(
-            rewritten.contains(&format!("\"future\":{member}")),
-            "seed {seed}: {rewritten}"
-        );
-        assert_eq!(reread(&other), other, "seed {seed}");
     }
 }
 
@@ -935,41 +1006,6 @@ fn novel_entry(novel: &mut Novel, entry: &mut serde_json::Value) {
     novel.add_each(entry.get_mut("displaced"));
 }
 
-/// Adds a novel member to every record of a snapshot's state.
-fn novel_state(novel: &mut Novel, state: &mut serde_json::Value) {
-    novel.add(state);
-    let register = |novel: &mut Novel, register: &mut serde_json::Value| {
-        novel.add(register);
-        for write in register["writes"].as_array_mut().unwrap() {
-            novel.add(write);
-            if let Some(file) = write.get_mut("file") {
-                novel.add(file);
-            }
-        }
-    };
-    for entity in state["entities"].as_object_mut().unwrap().values_mut() {
-        novel.add(entity);
-        for name in ["existence", "file"] {
-            if let Some(record) = entity.get_mut(name) {
-                register(novel, record);
-            }
-        }
-        if let Some(registers) = entity.get_mut("registers") {
-            for record in registers.as_object_mut().unwrap().values_mut() {
-                register(novel, record);
-            }
-        }
-        if let Some(sets) = entity.get_mut("sets") {
-            for set in sets.as_object_mut().unwrap().values_mut() {
-                novel.add(set);
-                novel.add_each(set.get_mut("adds"));
-                novel.add_each(set.get_mut("removed"));
-            }
-        }
-    }
-    novel.add_each(state.get_mut("trash"));
-}
-
 /// A history touching every part of the state: a genesis entry, then intents
 /// with every op, a displaced item and a settlement, each line holding what
 /// `edit` makes of the JSON this build writes.
@@ -985,25 +1021,28 @@ fn every_part(mut edit: impl FnMut(&str) -> String) -> Vec<Entry> {
     };
     let raw = |text: &str| Raw::new(text).unwrap();
     let mut entries: Vec<Entry> = Vec::new();
-    let mut log = |kind: EntryKind| -> EntryHash {
+    let mut log = |kind: EntryKind| -> Ref {
         let prev = entries.last().map_or(EntryHash::ZERO, Entry::hash);
+        let n = entries.len() as u64;
         let at = Hlc {
-            wall_ms: entries.len() as u64 + 1,
+            wall_ms: n + 1,
             counter: 0,
         };
-        let canonical = Entry::encode(prev, at, kind).unwrap();
+        let canonical = Entry::encode(prev, n, at, kind).unwrap();
         let line = Line::seal(edit(&canonical.json())).unwrap();
         let entry = Entry::decode(line).unwrap();
-        let hash = entry.hash();
+        let named = entry.own().of(w);
         entries.push(entry);
-        hash
+        named
     };
     let intent = |ops: Vec<Op>, displaced: Vec<Displaced>| {
         EntryKind::Intent(Logged {
             label: "every part".into(),
             ops,
             displaced,
-            reverses: None,
+            forks: Vec::new(),
+            more: 0,
+            record: None,
         })
     };
     log(EntryKind::Genesis(Genesis {
@@ -1015,26 +1054,32 @@ fn every_part(mut edit: impl FnMut(&str) -> String) -> Vec<Entry> {
             Op::Create {
                 entity: e,
                 replaces: Vec::new(),
+                take: None,
             },
             Op::Create {
                 entity: gone,
                 replaces: Vec::new(),
+                take: None,
             },
             Op::Write {
                 entity: e,
                 key: "name".into(),
                 value: Some(raw("\"x\"")),
                 replaces: Vec::new(),
+                take: None,
             },
             Op::Add {
                 entity: e,
                 key: "tags".into(),
                 value: raw("\"a\""),
+                replaces: Vec::new(),
+                take: None,
             },
             Op::File {
                 entity: e,
                 file: Some(fact("a.bin")),
                 replaces: Vec::new(),
+                take: None,
             },
         ],
         vec![Displaced {
@@ -1050,28 +1095,34 @@ fn every_part(mut edit: impl FnMut(&str) -> String) -> Vec<Entry> {
                 entity: e,
                 key: "tags".into(),
                 value: raw("\"b\""),
+                replaces: Vec::new(),
+                take: None,
             },
             Op::Remove {
                 entity: e,
                 key: "tags".into(),
                 value: raw("\"a\""),
                 tags: vec![first],
+                take: None,
             },
             Op::Write {
                 entity: e,
                 key: "note".into(),
                 value: None,
                 replaces: Vec::new(),
+                take: None,
             },
             Op::Pin {
                 entity: e,
                 file: fact("b.bin"),
                 replaces: vec![first],
+                take: None,
             },
             Op::Delete {
                 entity: gone,
                 replaces: vec![first],
                 observed: Vec::new(),
+                take: None,
             },
         ],
         Vec::new(),
@@ -1084,16 +1135,18 @@ fn every_part(mut edit: impl FnMut(&str) -> String) -> Vec<Entry> {
     entries
 }
 
-fn folded(entries: &[Entry]) -> Folded {
-    let mut folded = Folded::default();
-    for entry in entries {
-        folded.apply(WriterId::from_u128(0xa), entry);
-    }
-    folded
+/// What `entries`, the chain of writer `0xa`, merge to: as lines, or compacted.
+fn folded(entries: &[Entry]) -> [Folded; 2] {
+    let w = WriterId::from_u128(0xa);
+    let chain: Vec<Rc<Entry>> = entries.iter().cloned().map(Rc::new).collect();
+    [
+        derived(vec![(w, Shown::Lines(&chain))]),
+        derived(vec![(w, Shown::Snapshot(compacted(w, &chain)))]),
+    ]
 }
 
 #[test]
-fn members_no_build_knows_survive_merges_and_snapshots_at_every_level() {
+fn members_no_build_knows_survive_merges_and_snapshots() {
     for seed in 0..100 {
         let mut random = SeededRandom::new(seed);
         let mut novel = Novel {
@@ -1106,381 +1159,24 @@ fn members_no_build_knows_survive_merges_and_snapshots_at_every_level() {
             novel.render(&entry)
         });
         assert!(entries.iter().all(|entry| entry.unknown_members()));
-        let state = folded(&entries);
         let whole: BTreeSet<(EntryHash, Raw)> = entries
             .iter()
             .map(|entry| (entry.hash(), Raw::new(&entry.json()).unwrap()))
             .collect();
-        for (how, state) in [("applied", state.clone()), ("reread", reread(&state))] {
+        for (how, state) in ["merged", "compacted"].into_iter().zip(folded(&entries)) {
             let kept: BTreeSet<_> = state.extended().cloned().collect();
             assert_eq!(kept, whole, "seed {seed}, {how}");
-            let text = serde_json::to_string(&state).unwrap();
-            novel
-                .all_in(&text)
-                .unwrap_or_else(|lost| panic!("seed {seed}, {how}: {lost}"));
         }
+        let chain: Vec<Rc<Entry>> = entries.iter().cloned().map(Rc::new).collect();
+        let snapshot = compacted(WriterId::from_u128(0xa), &chain).encode();
+        novel
+            .all_in(&String::from_utf8(snapshot).unwrap())
+            .unwrap_or_else(|lost| panic!("seed {seed}: {lost}"));
 
         let canonical = every_part(str::to_owned);
         assert!(canonical.iter().all(|entry| !entry.unknown_members()));
-        let state = folded(&canonical[..3]);
-        assert_eq!(state.extended().count(), 0, "seed {seed}");
-        let mut value = serde_json::to_value(&state).unwrap();
-        let mut novel = Novel {
-            random: &mut random,
-            members: Vec::new(),
-        };
-        novel_state(&mut novel, &mut value);
-        let written = novel.render(&value);
-        let read: Folded = serde_json::from_str(&written).unwrap();
-        let again = serde_json::to_string(&read).unwrap();
-        let parse = |text: &str| serde_json::from_str::<serde_json::Value>(text).unwrap();
-        assert_eq!(parse(&again), parse(&written), "seed {seed}: {again}");
-        novel
-            .all_in(&again)
-            .unwrap_or_else(|lost| panic!("seed {seed}: {lost}"));
-
-        let mut compacted = read.clone();
-        compacted.apply(WriterId::from_u128(0xa), &canonical[3]);
-        let mut fresh = folded(&canonical);
-        fresh.join(&read);
-        assert_eq!(compacted, fresh, "seed {seed}");
-        let compacted = serde_json::to_string(&compacted).unwrap();
-        novel
-            .all_in(&compacted)
-            .unwrap_or_else(|lost| panic!("seed {seed}: {lost}"));
-
-        let mut rival = serde_json::to_value(&state).unwrap();
-        let names = novel.members.len();
-        let mut other = Novel {
-            random: &mut random,
-            members: Vec::new(),
-        };
-        novel_state(&mut other, &mut rival);
-        assert_eq!(other.members.len(), names, "seed {seed}");
-        let rival: Folded = serde_json::from_str(&other.render(&rival)).unwrap();
-        let (mut one, mut two) = (read.clone(), rival.clone());
-        one.join(&rival);
-        two.join(&read);
-        assert_eq!(one, two, "seed {seed}");
-        assert_eq!(reread(&one), one, "seed {seed}");
-    }
-}
-
-const E: EntityId = EntityId::from_u128(0xe);
-
-#[derive(Clone, Copy, Debug)]
-enum Act {
-    Set(&'static str),
-    Clear,
-    Add(&'static str),
-    Remove(&'static str),
-    Delete,
-    Revive,
-}
-
-fn act(act: Act) -> Plan {
-    let i = intent("");
-    plan(match act {
-        Act::Set(value) => i.set(E, NAME, value.into()),
-        Act::Clear => i.clear(E, NAME),
-        Act::Add(value) => i.add(E, TAGS, value.into()),
-        Act::Remove(value) => i.remove(E, TAGS, &value.into()),
-        Act::Delete => i.delete(E),
-        Act::Revive => i.revive(E),
-    })
-}
-
-/// A history being explored. `states` holds the merge of every subset of `log`,
-/// indexed by bit mask, each checked against every order of arrival;
-/// `snapshots` holds each instance's compactions of its own entries.
-#[derive(Clone)]
-struct Node {
-    instances: Vec<Instance>,
-    log: Vec<(WriterId, Entry)>,
-    states: Vec<Arc<Folded>>,
-    snapshots: Vec<(usize, Arc<Folded>)>,
-    acts: Vec<String>,
-}
-
-#[derive(Clone)]
-struct Instance {
-    writer: Writer,
-    /// The entries it has seen, as a mask over the log.
-    known: usize,
-    /// The entries it wrote.
-    own: usize,
-}
-
-const MAX_INSTANCES: usize = 3;
-
-impl Node {
-    /// A writer has created `E`, and every instance starts having seen it.
-    fn seeded() -> Self {
-        let mut seed = Writer::new(0x5);
-        let (create, _) = creating("", &[E]).create(|_| {});
-        let entry = seed.commit(plan(create), 0).unwrap();
-        let mut node = Self {
-            instances: Vec::new(),
-            log: Vec::new(),
-            states: vec![Arc::default()],
-            snapshots: Vec::new(),
-            acts: Vec::new(),
-        };
-        node.push(seed.id, entry);
-        node
-    }
-
-    fn all(&self) -> usize {
-        (1 << self.log.len()) - 1
-    }
-
-    /// Appends an entry, merging it into every subset, and checks every order of
-    /// arrival that ends with it.
-    fn push(&mut self, writer: WriterId, entry: Entry) {
-        let bit = 1 << self.log.len();
-        self.log.push((writer, entry));
-        let (writer, entry) = self.log.last().unwrap();
-        for mask in 0..bit {
-            let mut state = Folded::clone(&self.states[mask]);
-            state.apply(*writer, entry);
-            self.states.push(Arc::new(state));
-        }
-        for mask in bit..bit << 1 {
-            for earlier in (0..self.log.len() - 1).filter(|i| mask & (1 << i) != 0) {
-                let (by, last) = &self.log[earlier];
-                let mut state = Folded::clone(&self.states[mask & !(1 << earlier)]);
-                state.apply(*by, last);
-                assert!(
-                    state == *self.states[mask],
-                    "{:?} in order ending {earlier}",
-                    self.acts
-                );
-            }
+        for state in folded(&canonical) {
+            assert_eq!(state.extended().count(), 0, "seed {seed}");
         }
     }
-
-    /// Every way the next entry can be written: by an instance, a new one or, with
-    /// `clones`, a clone of the first; having first seen everything or not; doing
-    /// each act.
-    fn children(&self, alphabet: &[Act], clones: bool, now: u64) -> Vec<Node> {
-        let mut starts: Vec<(usize, Option<Instance>)> =
-            (0..self.instances.len()).map(|i| (i, None)).collect();
-        if self.instances.len() < MAX_INSTANCES {
-            let index = self.instances.len();
-            let mut writer = Writer::new(0xa + index as u128);
-            writer.receive(self.log[0].0, &self.log[0].1);
-            let fresh = Instance {
-                writer,
-                known: 1,
-                own: 0,
-            };
-            starts.push((index, Some(fresh)));
-            if let (true, Some(first)) = (clones, self.instances.first()) {
-                let mut clone = first.clone();
-                clone.writer.salt = index as u64;
-                clone.own = 0;
-                starts.push((index, Some(clone)));
-            }
-        }
-        let mut children = Vec::new();
-        for (index, start) in starts {
-            for sync in [false, true] {
-                let mut node = self.clone();
-                node.instances.extend(start.clone());
-                let instance = &mut node.instances[index];
-                if sync {
-                    if instance.known == self.all() {
-                        continue;
-                    }
-                    for (by, entry) in &self.log {
-                        instance.writer.receive(*by, entry);
-                    }
-                    instance.known = self.all();
-                }
-                for &a in alphabet {
-                    let folded = &node.instances[index].writer.folded;
-                    if matches!(a, Act::Revive)
-                        && !folded.deletion_conflicted(E)
-                        && folded.present(E)
-                    {
-                        continue;
-                    }
-                    let mut writer = node.instances[index].writer.clone();
-                    let Ok(entry) = writer.commit(act(a), now) else {
-                        continue;
-                    };
-                    let EntryKind::Intent(logged) = &entry.kind() else {
-                        unreachable!();
-                    };
-                    if logged.ops.is_empty() {
-                        continue;
-                    }
-                    let mut child = node.clone();
-                    let bit = 1 << child.log.len();
-                    let instance = &mut child.instances[index];
-                    instance.writer = writer;
-                    instance.known |= bit;
-                    instance.own |= bit;
-                    let (id, own) = (instance.writer.id, instance.own);
-                    child.acts.push(format!(
-                        "{index}{}{a:?}",
-                        if sync { " after sync " } else { " " }
-                    ));
-                    child.push(id, entry);
-                    let snapshot = Arc::new(reread(&child.states[own]));
-                    child.snapshots.push((own, snapshot));
-                    children.push(child);
-                }
-            }
-        }
-        children
-    }
-
-    /// Checks every split of the history into two deliveries, adopting what the
-    /// whole shows beyond each part, and every compaction an instance made,
-    /// delivered with the rest.
-    fn check(&self) {
-        let full = self.all();
-        let oracle = &*self.states[full];
-        for mask in (0..=full).filter(|mask| mask & 1 != 0) {
-            let mut state = Folded::clone(&self.states[mask]);
-            state.join(&self.states[full ^ mask]);
-            assert!(
-                &state == oracle,
-                "{:?} delivered as {mask:b} and the rest",
-                self.acts
-            );
-            let adopted = adopt(oracle, &self.states[mask]);
-            assert_eq!(
-                shows(&adopted),
-                adopted_shows(oracle, &self.states[mask]),
-                "{:?} adopted onto {mask:b}",
-                self.acts
-            );
-        }
-        let mut compacted = Folded::clone(&self.states[1]);
-        for (own, snapshot) in &self.snapshots {
-            let mut state = Folded::clone(snapshot);
-            state.join(&self.states[full ^ own]);
-            assert!(&state == oracle, "{:?} with {own:b} compacted", self.acts);
-            state.join(oracle);
-            assert!(
-                &state == oracle,
-                "{:?} with {own:b} compacted and delivered",
-                self.acts
-            );
-            compacted.join(snapshot);
-        }
-        assert!(
-            &compacted == oracle,
-            "{:?} with every instance compacted",
-            self.acts
-        );
-    }
-}
-
-/// What a state shows of `E`: whether it exists, and if so its name's values and
-/// its tags.
-fn shows(state: &Folded) -> (bool, BTreeSet<Raw>, Vec<Raw>) {
-    if !state.present(E) {
-        return (false, BTreeSet::new(), Vec::new());
-    }
-    let values = state.register(E, "name").into_iter().map(|w| w.value);
-    (true, values.collect(), state.members(E, "tags"))
-}
-
-/// `kept` with one more entry, by a writer that saw everything, logging the ops
-/// that make it show what `all` shows.
-fn adopt(all: &Folded, kept: &Folded) -> Folded {
-    let ops: Vec<Op> = all.beyond(kept).into_iter().map(|b| b.op).collect();
-    let mut adopted = kept.clone();
-    if !ops.is_empty() {
-        let mut adopter = Writer::new(0xf);
-        let entry = adopter.intent(100, ops, Vec::new());
-        adopted.apply(adopter.id, &entry);
-    }
-    adopted
-}
-
-/// What adopting shows: what `all` shows, but of several name values `kept`
-/// lacks, only the latest beside those `kept` shows too.
-fn adopted_shows(all: &Folded, kept: &Folded) -> (bool, BTreeSet<Raw>, Vec<Raw>) {
-    let (present, values, members) = shows(all);
-    let held = shows(kept).1;
-    if values.difference(&held).count() <= 1 {
-        return (present, values, members);
-    }
-    let new = all.register(E, "name").into_iter();
-    let new = new.filter(|w| !held.contains(&w.value));
-    let latest = new.max_by_key(|w| (w.at, w.by)).unwrap().value;
-    let mut values: BTreeSet<Raw> = values.intersection(&held).cloned().collect();
-    values.insert(latest);
-    (present, values, members)
-}
-
-/// Every history of `entries` entries after the seed by up to three instances,
-/// the third possibly a clone of the first, over `alphabet`: each merged in every
-/// order, split into every two deliveries, and with every compaction.
-fn exhaust(alphabet: &[Act], clones: bool, entries: usize) {
-    let split = 2.min(entries);
-    let mut frontier = vec![Node::seeded()];
-    for depth in 0..split {
-        frontier = frontier
-            .iter()
-            .flat_map(|node| node.children(alphabet, clones, depth as u64 / 2 + 1))
-            .collect();
-    }
-    let next = AtomicUsize::new(0);
-    let checked = AtomicUsize::new(0);
-    let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            scope.spawn(|| {
-                while let Some(node) = frontier.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    let count = explore(node, alphabet, clones, split, entries);
-                    checked.fetch_add(count, Ordering::Relaxed);
-                }
-            });
-        }
-    });
-    assert!(
-        checked.into_inner() > 0,
-        "no history reached {entries} entries"
-    );
-}
-
-fn explore(node: &Node, alphabet: &[Act], clones: bool, depth: usize, entries: usize) -> usize {
-    if depth == entries {
-        node.check();
-        return 1;
-    }
-    node.children(alphabet, clones, depth as u64 / 2 + 1)
-        .iter()
-        .map(|child| explore(child, alphabet, clones, depth + 1, entries))
-        .sum()
-}
-
-#[test]
-fn concurrent_values_converge_over_every_history() {
-    exhaust(&[Act::Set("x"), Act::Set("y")], false, 5);
-}
-
-#[test]
-fn values_and_clears_converge_over_every_history() {
-    exhaust(&[Act::Set("x"), Act::Clear], false, 5);
-}
-
-#[test]
-fn set_members_converge_over_every_history_with_clones() {
-    exhaust(&[Act::Add("x"), Act::Remove("x")], true, 5);
-}
-
-#[test]
-fn existence_converges_over_every_history() {
-    exhaust(&[Act::Set("x"), Act::Delete, Act::Revive], false, 5);
-}
-
-#[test]
-fn deletes_and_set_members_converge_over_every_history() {
-    exhaust(&[Act::Add("x"), Act::Remove("x"), Act::Delete], false, 5);
 }

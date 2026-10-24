@@ -1,7 +1,7 @@
 //! Where toshokan keeps its files.
 //!
 //! ```text
-//! <folder>/<root>/writers/<w>/
+//! <folder>/<root>/writers.2/<w>/
 //!   <segment>.txt              log segments, one JSON entry a line
 //!   snapshot-<nonce>.json      snapshots
 //!   pending/<nonce>.json       journal records of multi-step effects
@@ -17,26 +17,24 @@
 //!   retired                    present once the writer is never written again
 //! ```
 //!
-//! The app names `<root>`. Only writer `w` writes under `writers/<w>/`. Names of
-//! segments and snapshots are advisory: every file directly in a writer's directory
-//! is read by its contents.
+//! The app names `<root>`: one directory of the folder, or one inside a directory of
+//! the app's own, which scans skip whole. Only writer `w` writes under
+//! `writers.2/<w>/`. Names of segments and snapshots are advisory: every file directly
+//! in a writer's directory is read by its contents.
 
 use crate::error::{Error, Result};
 use crate::ids::{EntityId, EntryHash, Nonce, SegmentName, WriterId};
 use crate::path::RelPath;
 
-pub const WRITERS: &str = "writers";
+pub const WRITERS: &str = "writers.2";
 pub const PENDING: &str = "pending";
 pub const TRASH: &str = "trash";
 pub const TMP: &str = "tmp";
 /// Segments end in `.txt`, a type whose writes in a picked folder Chromium's Safe
 /// Browsing check samples rather than always checks.
-// Confirmed on hardware.
-// A `.txt` close takes about 1.6 ms in Chrome; one of an unlisted type, such as
-// `.jsonl`, about 45 ms.
-// Reported by public documentation; not confirmed on hardware.
-// Chromium's `download_file_types.asciipb` samples `.txt` and `.json` with
-// probability 0.01, so about 1 close in 100 still pays the full check.
+// Chromium's `download_file_types.asciipb` samples `.txt` and `.json`, so a close
+// of a segment rarely waits for the full check that a file of an unlisted type,
+// such as `.jsonl`, waits for at every close.
 pub const SEGMENT_EXTENSION: &str = ".txt";
 /// The longest name, in bytes, that common file systems take.
 const MAX_NAME: usize = 255;
@@ -44,30 +42,69 @@ const MAX_NAME: usize = 255;
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Layout {
     root: RelPath,
+    /// The directory of the folder that holds no library file: `root`, or the app's
+    /// own directory around it.
+    apart: RelPath,
+    /// Whether a name that starts with a dot is left out of the library.
+    hiding: bool,
 }
 
 impl Layout {
     /// The layout under `<folder>/<name>`; `name` is one path component.
     pub fn new(name: &str) -> Result<Self> {
+        let root = RelPath::ROOT.join(name)?;
         Ok(Self {
-            root: RelPath::ROOT.join(name)?,
+            apart: root.clone(),
+            root,
+            hiding: false,
         })
+    }
+
+    /// The layout under `<folder>/<dir>/<name>`, inside a directory of the app's own
+    /// that holds no library file, so the app may keep other files there. `dir` and
+    /// `name` are one path component each.
+    pub fn within(dir: &str, name: &str) -> Result<Self> {
+        let apart = RelPath::ROOT.join(dir)?;
+        Ok(Self {
+            root: apart.join(name)?,
+            apart,
+            hiding: false,
+        })
+    }
+
+    /// The same layout, leaving out of the library every file and directory whose
+    /// name starts with a dot, as a file manager hides them: scans neither list nor
+    /// enter them.
+    pub fn hiding(self) -> Self {
+        Self {
+            hiding: true,
+            ..self
+        }
     }
 
     pub fn root(&self) -> &RelPath {
         &self.root
     }
 
-    /// Whether `path` in the folder is toshokan's: its root or anything under it.
+    /// Whether `path` in the folder holds no library file: toshokan's root or the
+    /// app's directory around it, or anything under it.
     pub fn owns(&self, path: &RelPath) -> bool {
-        path.starts_with(&self.root)
+        path.starts_with(&self.apart)
     }
 
-    /// Refuses a path in the folder that is not a library file: toshokan's root,
-    /// anything inside it, the folder itself, and a browser's swap file.
-    pub fn check_library_path(&self, path: &RelPath) -> Result<()> {
+    /// Whether `path` in the folder can hold library files: neither what the layout
+    /// [owns](Layout::owns), nor a browser's swap file, nor, where the layout is
+    /// [hiding](Layout::hiding), a name that starts with a dot.
+    pub fn holds(&self, path: &RelPath) -> bool {
         let swap = path.name().is_some_and(is_swap_file);
-        match path.is_root() || self.owns(path) || swap {
+        let hidden = self.hiding && path.components().any(|name| name.starts_with('.'));
+        !(self.owns(path) || swap || hidden)
+    }
+
+    /// Refuses a path in the folder that is not a library file: the folder itself,
+    /// and a path the layout does not [hold](Layout::holds).
+    pub fn check_library_path(&self, path: &RelPath) -> Result<()> {
+        match path.is_root() || !self.holds(path) {
             true => Err(Error::InvalidPath {
                 path: path.as_str().to_owned(),
                 reason: "not a library file",
@@ -163,14 +200,19 @@ impl Layout {
         child(&Self::drafts(genesis), &format!("{entity}.json"))
     }
 
-    pub fn lock(genesis: EntryHash) -> RelPath {
-        child(&Self::local(genesis), "lock")
+    /// Where the draft of the file at `path`, which no entity is bound to, is kept:
+    /// named by the first 16 bytes of the BLAKE3 hash of the path.
+    pub fn file_draft(genesis: EntryHash, path: &RelPath) -> RelPath {
+        let hash = blake3::hash(path.as_str().as_bytes());
+        let name: String = hash.as_bytes()[..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        child(&Self::drafts(genesis), &format!("file-{name}.json"))
     }
 
-    /// The entries this install let go once the folder no longer held them, by
-    /// writer.
-    pub fn let_go() -> RelPath {
-        child(&RelPath::ROOT, "let-go.json")
+    pub fn lock(genesis: EntryHash) -> RelPath {
+        child(&Self::local(genesis), "lock")
     }
 
     /// The identities this install's scans read that no fact gives.
@@ -187,11 +229,8 @@ impl Layout {
 /// Whether `name` is a swap file Chromium writes beside a picked folder's file
 /// while a writable stream on it is open: bytes that never landed, which
 /// toshokan neither reads nor scans.
-// Confirmed on hardware.
-// Chromium shows the swap file `<name>.crswap` beside a file while a writable
-// stream on it is open.
-// Inferred from specimens; not confirmed on hardware.
-// A tab stopped while the stream is open leaves the swap file behind.
+// Chromium names it `<name>.crswap`, and a tab stopped while the stream is open
+// leaves it behind.
 pub(crate) fn is_swap_file(name: &str) -> bool {
     name.ends_with(".crswap")
 }
@@ -211,7 +250,7 @@ mod tests {
         let layout = Layout::new(".drawbar").unwrap();
         let w = WriterId::from_u128(0xab);
         let n = Nonce::from_u128(0xcd);
-        let dir = format!(".drawbar/writers/{w}");
+        let dir = format!(".drawbar/writers.2/{w}");
         let expected = [
             (
                 layout.segment(w, SegmentName::from_u128(0xcd)),
@@ -232,7 +271,7 @@ mod tests {
         let layout = Layout::new(".drawbar").unwrap();
         let w = WriterId::from_u128(0xab);
         let n = Nonce::from_u128(0xcd);
-        let tmp = format!(".drawbar/writers/{w}/tmp");
+        let tmp = format!(".drawbar/writers.2/{w}/tmp");
         let long = format!("a.{}", "x".repeat(MAX_NAME - 33));
         let longer = format!("a.{}", "x".repeat(MAX_NAME - 32));
         for (destination, staged) in [
@@ -278,5 +317,34 @@ mod tests {
             assert!(layout.check_library_path(&path).is_ok(), "{text:?}");
         }
         assert!(Layout::new("a/b").is_err());
+    }
+
+    #[test]
+    fn a_root_within_the_apps_directory_keeps_all_of_it_apart() {
+        let layout = Layout::within(".drawbar", "library").unwrap();
+        assert_eq!(layout.root().as_str(), ".drawbar/library");
+        for text in [
+            ".drawbar",
+            ".drawbar/library.ron",
+            ".drawbar/library/writers",
+        ] {
+            let path = RelPath::new(text).unwrap();
+            assert!(layout.check_library_path(&path).is_err(), "{text:?}");
+        }
+        assert!(layout
+            .check_library_path(&RelPath::new(".drawbarx").unwrap())
+            .is_ok());
+        assert!(Layout::within(".drawbar", "a/b").is_err());
+    }
+
+    #[test]
+    fn a_hiding_layout_holds_no_path_with_a_name_that_starts_with_a_dot() {
+        let layout = Layout::within(".drawbar", "library").unwrap().hiding();
+        for text in [".git/config", "Live/.DS_Store", ".hidden.npno"] {
+            assert!(!layout.holds(&RelPath::new(text).unwrap()), "{text}");
+        }
+        assert!(layout.holds(&RelPath::new("Live/a.npno").unwrap()));
+        let plain = Layout::within(".drawbar", "library").unwrap();
+        assert!(plain.holds(&RelPath::new(".git/config").unwrap()));
     }
 }

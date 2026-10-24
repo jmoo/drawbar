@@ -2,10 +2,15 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
+use crate::drafts::Drafted;
 use crate::error::Why;
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
 use crate::io::IoError;
+use crate::log::Run;
 use crate::path::RelPath;
+use crate::plan::FactChange;
 
 /// What opening found. Opening writes nothing in the folder.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -20,17 +25,14 @@ pub struct Opened {
     pub start: Start,
     /// This writer's effects that a crash interrupted. Opening writes nothing in
     /// the folder, so each is finished before this writer's next write, as its
-    /// outcome predicts.
+    /// outcome predicts, or when the app settles them sooner
+    /// (`settle_interrupted`).
     pub settled: Vec<Settled>,
     /// Unfinished effects of writers this install no longer writes as. They may
     /// still be in progress elsewhere, so they are settled only with the user's
     /// consent.
     pub orphaned: Vec<Orphan>,
     pub drafts: Vec<DraftStatus>,
-    /// Facts this install shows whose entries no file in the folder holds now: a
-    /// restore of the folder removed them, or sync has not yet brought the files
-    /// that hold them. They stay shown until the user lets them go or adopts them.
-    pub removed: Vec<Change>,
     pub forks: Vec<Fork>,
     pub gaps: Vec<Gap>,
     /// Files in writers' directories that end before their last byte can be read,
@@ -77,40 +79,71 @@ pub struct Settled {
 }
 
 /// An unfinished effect of another writer, read from its pending record.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Orphan {
     pub writer: WriterId,
     pub record: Nonce,
     pub label: String,
     /// The library paths the effect touches.
     pub paths: Vec<RelPath>,
+    /// The writer is one of this install's pool that no instance writes as now, as
+    /// another window of the app wrote until it closed: its effect is this
+    /// install's to settle, with no one else to ask.
+    pub ours: bool,
+    /// Another instance on this machine held the writer's lock when this one
+    /// opened, or at the refresh that reported it: it may be carrying the effect out
+    /// still.
+    pub live: bool,
+    /// What the folder showed of the effect's paths, hashed: it moves while a writer
+    /// carries the effect out, so two reads that show it unchanged a while apart
+    /// say no writer is. 0 until a refresh looks.
+    pub progress: u64,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct DraftStatus {
-    pub entity: EntityId,
+    pub of: Drafted,
     pub state: DraftState,
+    /// The writer of this install's pool that kept the draft, where it is another
+    /// that no instance writes as now; `None` for this instance's own.
+    pub pooled: Option<WriterId>,
+    /// The keeping writer's clock when it was last kept, which orders the drafts
+    /// of several writers; `None` where the draft does not say.
+    pub at: Option<Hlc>,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum DraftState {
     /// The entity's file still holds the base the draft was made over: the draft's
     /// bytes, to restore.
     Applies { bytes: Vec<u8> },
-    /// The file changed since; `None` when it is gone. The draft is kept until it
-    /// is discarded.
-    BaseChanged { found: Option<Identity> },
+    /// The file changed since; `found` is `None` when it is gone. The draft's
+    /// bytes come with it, to show beside the file as it is now, and it is kept
+    /// until it is discarded.
+    BaseChanged {
+        found: Option<Identity>,
+        bytes: Vec<u8>,
+    },
     /// The draft cannot be read. It is kept until it is discarded.
     Unreadable,
 }
 
-/// Two entries of one writer with one predecessor. Both branches are merged.
+/// Where one writer's history forked: the entry numbered `at`, `prev`, after
+/// which its branches part. Neither branch is merged; each is shown as an
+/// [`Item`] of [`ItemKind::Run`] whose run's writer is `writer`, until it is
+/// dismissed. A fork stays listed after that: it is settled once no such item
+/// is left, and has nothing left to review once each such item's changes are
+/// empty.
+///
+/// When the writer is this instance's own, the instance stops writing as it
+/// once a read finds the fork: [`Start::Rekeyed`] says so at opening,
+/// [`Refreshed::retired`] at a refresh or rescan, and [`crate::Error::Rekey`]
+/// from a compaction. Its next commit writes as a new writer.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Fork {
     pub writer: WriterId,
+    pub at: u64,
     pub prev: EntryHash,
-    /// Sorted.
-    pub branches: [EntryHash; 2],
 }
 
 /// Entries of one writer held back because their predecessor is neither placed nor
@@ -120,6 +153,64 @@ pub struct Gap {
     pub writer: WriterId,
     pub missing: EntryHash,
     pub held: usize,
+}
+
+/// What a reader shows apart from the merged state.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum ItemKind {
+    /// A branch of a forked writer, or entries after a dismissed one.
+    Run,
+    /// Entries whose predecessor may still arrive. Merged once it does.
+    Gap,
+    /// After the grace step, lines of a file shorter than a snapshot certified
+    /// it: a version a sync client dropped, or a copy that diverged.
+    Unplaced,
+}
+
+/// Entries a reader shows apart from the merged state, with the net change they
+/// would make. The user keeps the current state or takes changes, with
+/// [`crate::intent::Intent::take`] naming `run`, and may dismiss a run with
+/// [`crate::intent::Intent::dismiss`]; a gap or unplaced lines cannot be
+/// dismissed. A run is shown until it is dismissed, with no changes once it
+/// would change nothing; a gap or unplaced lines only while they would change
+/// something.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Item {
+    pub kind: ItemKind,
+    pub run: Run,
+    pub by: By,
+    /// Its entries' clock readings, earliest and latest. Of the entries a
+    /// snapshot folds, a reader knows only the head's reading and those of the
+    /// writes the snapshot still holds, so a run that a snapshot holds starts at
+    /// the earliest of those.
+    pub span: (Hlc, Hlc),
+    /// How many entries it holds. Of a run that a snapshot holds, that counts
+    /// every number from its first entry no dismissal names to the snapshot's
+    /// head, whether or not a write of the entry survives.
+    pub entries: u64,
+    pub changes: Vec<ItemChange>,
+    /// Whether the run may be its writer's own earlier entries rather than a
+    /// branch: entries only this reader remembers, no file shows, and a snapshot
+    /// of the writer numbered past them does not name, kept apart for a fork
+    /// point the reader remembers. Taking from it may bring back what the
+    /// writer itself replaced.
+    pub uncertain: bool,
+}
+
+/// One field an [`Item`] would change.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ItemChange {
+    pub entity: EntityId,
+    pub what: What,
+    /// The change that takes it; `None` where the run left the entity without a
+    /// file, which only trashing the file does. Taking a file binds the entity to
+    /// the file the run names, which the folder must hold at its path, as the
+    /// last scan found it, for no other entity: else the intent is refused with
+    /// [`crate::Invalid::Unbindable`].
+    pub change: Option<FactChange>,
+    /// Shown whatever the merged state holds: the run replaced an earlier own
+    /// write no reader holds any more, so only a take settles it.
+    pub forgotten: bool,
 }
 
 /// What a scan of the library's files found against the logged facts. A scan
@@ -132,9 +223,6 @@ pub struct ScanReport {
     /// Entities whose file is nowhere.
     pub departed: Vec<EntityId>,
     pub moved: Vec<Moved>,
-    /// Files that hold an entity's contents while the entity's own path still
-    /// does, by copy and then entity.
-    pub copied: Vec<Copied>,
     /// Entities whose file is at its path with other contents.
     pub changed: Vec<EntityId>,
     /// Entities whose file is gone and which several files could be: bound to none.
@@ -149,15 +237,18 @@ pub struct Moved {
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Copied {
-    pub entity: EntityId,
-    pub copy: RelPath,
-}
-
-#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Ambiguous {
     pub entity: EntityId,
     pub candidates: Vec<RelPath>,
+}
+
+/// Where a file no entity is bound to was before a commit and is after it: `from`
+/// alone for a file trashed, `to` alone for a file made, both for one moved or saved
+/// over.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PathChange {
+    pub from: Option<RelPath>,
+    pub to: Option<RelPath>,
 }
 
 /// A committed intent, its file effects all made. Its entries are durable in the
@@ -169,6 +260,18 @@ pub struct Committed {
     /// The entities it created, in the order the intent created them.
     pub created: Vec<EntityId>,
     pub changes: Vec<Change>,
+    /// Each file no entity is bound to that it made, moved or trashed, in order,
+    /// but for those under a tree it moved.
+    pub paths: Vec<PathChange>,
+    /// Each tree it moved, from and to, in order.
+    pub trees: Vec<(RelPath, RelPath)>,
+    /// Each directory it was to remove that the folder still holds, as one a
+    /// file it did not know of keeps, where moving a tree moves its files one
+    /// by one.
+    pub left: Vec<RelPath>,
+    /// Whether it joined this instance's undo history, as every intent does but
+    /// one that only dismisses runs.
+    pub undoable: bool,
     /// ⚠️ Whether this instance's own state caught up with the commit. While it
     /// is [`Local::Behind`], a crash followed by a restore of the folder that
     /// takes the commit's entries can take them from this install's view too.
@@ -197,9 +300,6 @@ pub enum Lag {
     /// continues from the last entry of the writer's chain in the folder, or
     /// starts a new writer when it is torn.
     Head,
-    /// `let-go.json` lacks the entries an adoption let go. Reopening reports them
-    /// as removed again.
-    LetGo,
     /// The scan after the commit failed. The entities whose files its effects
     /// touched are [`crate::FileState::Unscanned`] until a scan of every file.
     Scan,
@@ -230,6 +330,13 @@ pub struct PartialReport {
     pub stopped: RelPath,
     pub error: IoError,
     pub record: Option<Nonce>,
+    /// The library paths the finished changes put a file at, and the directories
+    /// they made or moved a tree to: what of the intent landed. Filled where a
+    /// commit reports it; empty in a settlement's assessment.
+    pub landed: Vec<RelPath>,
+    /// The library paths the finished steps took a file from, and the directories
+    /// they removed.
+    pub taken: Vec<RelPath>,
 }
 
 /// What a refresh found.
@@ -237,22 +344,32 @@ pub struct PartialReport {
 pub struct Refreshed {
     /// What changed since the last view, by its writer or from outside.
     pub changes: Vec<Change>,
-    /// As [`Opened::removed`], as of this refresh.
-    pub removed: Vec<Change>,
     /// What the files scanned so far hold against the logged facts; empty until
     /// a scan of every file has succeeded.
     pub scan: ScanReport,
+    /// The directories the last scan of every file could not list. What is under
+    /// them is unknown, as after a failed scan, until a scan lists them.
+    pub unlisted: Vec<RelPath>,
+    /// Every directory below the root that a scan of every file listed, in order,
+    /// where this refresh finished one.
+    pub dirs: Option<Vec<RelPath>>,
+    /// As [`Opened::orphaned`], as the pending records stand at this refresh: a
+    /// writer elsewhere may have begun or finished an effect since.
+    pub orphaned: Vec<Orphan>,
+    /// This instance's writer, when the read found its history forked: it writes
+    /// no more, and the next commit writes as a new writer.
+    pub retired: Option<WriterId>,
 }
 
 /// One change to what a reader sees.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct Change {
     pub entity: EntityId,
     pub what: What,
     pub by: By,
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum What {
     Created,
     Deleted,
@@ -260,7 +377,7 @@ pub enum What {
     File,
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum By {
     This,
     Writer {
@@ -299,6 +416,11 @@ pub struct HistoryItem {
 /// Displaced bytes in this writer's trash.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TrashItem {
+    /// The writer whose trash holds the bytes. Only this instance's writer
+    /// restores or empties its own; one of another writer of this install, as
+    /// one it wrote as before it retired, stays as it is, since only a writer
+    /// writes in its own directory.
+    pub writer: WriterId,
     pub item: Nonce,
     pub len: u64,
     /// Where the bytes were.
@@ -326,4 +448,48 @@ pub struct Compacted {
     pub folded: usize,
     /// Segments that ended with a seal marker, folded and deleted.
     pub removed: Vec<RelPath>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reports an app hands from a worker to its page come back as they were.
+    #[test]
+    fn reports_an_app_sends_elsewhere_serialize_and_come_back_whole() {
+        let writer = WriterId::from_u128(7);
+        let path = RelPath::new("Set/a.wav").unwrap();
+        let orphan = Orphan {
+            writer,
+            record: Nonce::from_u128(9),
+            label: "Move".into(),
+            paths: vec![path.clone()],
+            ours: false,
+            live: true,
+            progress: 3,
+        };
+        let draft = DraftStatus {
+            of: Drafted::File(path),
+            state: DraftState::BaseChanged {
+                found: Some(Identity::from_u128(3)),
+                bytes: b"edit".to_vec(),
+            },
+            pooled: Some(writer),
+            at: Some(Hlc {
+                wall_ms: 5,
+                counter: 1,
+            }),
+        };
+        let change = Change {
+            entity: EntityId::from_u128(4),
+            what: What::Field("tags".into()),
+            by: By::Writer {
+                writer,
+                label: "drawbar".into(),
+            },
+        };
+        let json = serde_json::to_string(&(&orphan, &draft, &change)).unwrap();
+        let back: (Orphan, DraftStatus, Change) = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, (orphan, draft, change), "{json}");
+    }
 }

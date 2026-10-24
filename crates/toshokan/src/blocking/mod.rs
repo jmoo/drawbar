@@ -7,12 +7,12 @@ mod native;
 pub use native::Native;
 
 use crate::disk::MemDisk;
-use crate::drafts::Draft;
+use crate::drafts::{Draft, Drafted};
 use crate::env::Env;
 use crate::error::Result;
-use crate::ids::{EntityId, Identity};
+use crate::ids::{EntityId, Identity, Nonce, WriterId};
 use crate::intent::{Driver, Intent};
-use crate::io::{Capabilities, Io, IoError, IoResult, Operation, Range, Reply, Root, Step};
+use crate::io::{Capabilities, Io, IoError, IoResult, Meta, Operation, Range, Reply, Root, Step};
 use crate::layout::Layout;
 use crate::library;
 use crate::log::Settlement;
@@ -107,6 +107,19 @@ impl<B: Backend> Staging<'_, B> {
             _ => Err(IoError::Other("the backend gave the wrong reply".into())),
         }
     }
+
+    /// What is at `path` in the folder now, such as the file a copy read, which may
+    /// have changed while it was read.
+    pub fn stat(&mut self, path: &RelPath) -> std::result::Result<Option<Meta>, IoError> {
+        let stat = Io::Stat {
+            root: self.root,
+            path: path.clone(),
+        };
+        match self.backend.perform(stat)? {
+            Reply::Stat(meta) => Ok(meta),
+            _ => Err(IoError::Other("the backend gave the wrong reply".into())),
+        }
+    }
 }
 
 /// Runs `operation` to completion.
@@ -198,7 +211,12 @@ impl<B: Backend> Library<B> {
     }
 
     pub fn draft(&mut self, entity: EntityId) -> Draft<&mut Self> {
-        Draft::new(self, entity)
+        Draft::new(self, Drafted::Entity(entity))
+    }
+
+    /// The draft of the file at `path`, which no entity is bound to.
+    pub fn draft_file(&mut self, path: &RelPath) -> Draft<&mut Self> {
+        Draft::new(self, Drafted::File(path.clone()))
     }
 
     pub fn undo(&mut self) -> Result<Committed> {
@@ -229,16 +247,15 @@ impl<B: Backend> Library<B> {
         run(&mut self.backend, self.core.rescan_paths(paths))
     }
 
-    /// Stops showing what [`Opened::removed`] reports, on every open of this
-    /// install, while the folder lacks it. Writes only in the local root.
-    pub fn let_go(&mut self) -> Result<()> {
-        run(&mut self.backend, self.core.let_go())
+    pub fn discard_pooled_draft(&mut self, writer: WriterId, of: Drafted) -> Result<()> {
+        run(
+            &mut self.backend,
+            self.core.discard_pooled_draft(writer, of),
+        )
     }
 
-    /// Republishes what [`Opened::removed`] reports as an intent labeled `label`,
-    /// then lets it go: the folder holds again what this install showed.
-    pub fn adopt(&mut self, label: &str) -> Result<Committed> {
-        run(&mut self.backend, self.core.adopt(label))
+    pub fn settle_interrupted(&mut self) -> Result<()> {
+        run(&mut self.backend, self.core.settle_interrupted())
     }
 
     pub fn others(&mut self) -> Result<Vec<WriterInfo>> {
@@ -251,6 +268,10 @@ impl<B: Backend> Library<B> {
 
     pub fn empty_trash(&mut self, policy: Policy) -> Result<Emptied> {
         run(&mut self.backend, self.core.empty_trash(policy))
+    }
+
+    pub fn remove_trash(&mut self, items: Vec<Nonce>) -> Result<Emptied> {
+        run(&mut self.backend, self.core.remove_trash(items))
     }
 
     /// Removes the pending records this writer's commits left once their entries
@@ -293,15 +314,15 @@ impl<'l, B: Backend + 'l> Intent<&'l mut Library<B>> {
 
 impl<B: Backend> Draft<&mut Library<B>> {
     pub fn put(self, base: Identity, bytes: Vec<u8>) -> Result<()> {
-        let (library, entity) = self.into_parts();
+        let (library, of) = self.into_parts();
         run(
             &mut library.backend,
-            library.core.put_draft(entity, base, bytes),
+            library.core.put_draft(of, base, bytes),
         )
     }
 
     pub fn discard(self) -> Result<()> {
-        let (library, entity) = self.into_parts();
-        run(&mut library.backend, library.core.discard_draft(entity))
+        let (library, of) = self.into_parts();
+        run(&mut library.backend, library.core.discard_draft(of))
     }
 }

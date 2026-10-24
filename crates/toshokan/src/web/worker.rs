@@ -7,7 +7,8 @@
 //! capabilities as [`wire::capability_bits`], or `{failed}`. From then on each
 //! request is `{id, request}` and each reply `{id, reply}`, both one transferred
 //! buffer in the [`wire`] encoding. The worker performs requests one at a time,
-//! in the order they arrive.
+//! in the order they arrive. A fault in the worker is posted as `{failed}`, after
+//! which it answers nothing.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
@@ -30,6 +31,9 @@ use crate::Root;
 
 /// The worker's whole script: it loads the page's bundle and hands over to it.
 const BOOTSTRAP: &str = r#"
+const stopped = (why) => self.postMessage({ failed: String(why?.message ?? why) });
+self.addEventListener("error", (event) => stopped(event.message));
+self.addEventListener("unhandledrejection", (event) => stopped(event.reason));
 self.onmessage = async ({ data }) => {
   self.onmessage = null;
   try {
@@ -37,7 +41,7 @@ self.onmessage = async ({ data }) => {
     await bundle.default({ module_or_path: data.module });
     await bundle.toshokanWorker(data);
   } catch (error) {
-    self.postMessage({ failed: String(error?.stack || error) });
+    stopped(error?.stack || error);
   }
 };
 "#;
@@ -111,13 +115,19 @@ impl Worker {
             let replies = Rc::clone(&replies);
             Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
                 let data = event.data();
-                let answered = field(&data, "id")
-                    .and_then(|id| id.as_f64())
-                    .and_then(|id| replies.waiting.borrow_mut().remove(&(id as u32)));
-                let answer = answered.or_else(|| replies.started.take());
-                let reply = field(&data, "reply").unwrap_or(data);
-                if let Some(answer) = answer {
-                    let _ = answer.call1(&JsValue::NULL, &reply);
+                let answer = match field(&data, "id").and_then(|id| id.as_f64()) {
+                    Some(id) => replies.waiting.borrow_mut().remove(&(id as u32)),
+                    None => replies.started.take(),
+                };
+                match (answer, field(&data, "failed")) {
+                    (Some(answer), _) => {
+                        let reply = field(&data, "reply").unwrap_or(data);
+                        let _ = answer.call1(&JsValue::NULL, &reply);
+                    }
+                    (None, Some(why)) => {
+                        replies.fail(format!("the storage worker failed: {}", describe(&why)));
+                    }
+                    (None, None) => {}
                 }
             })
         };
@@ -173,6 +183,14 @@ impl Worker {
         let mut worker = worker;
         worker.capabilities = [bits("folder")?, bits("local")?];
         Ok(worker)
+    }
+}
+
+impl Worker {
+    /// Makes the worker fault, as a bug in it would.
+    #[doc(hidden)]
+    pub fn trap(&self) {
+        let _ = self.worker.post_message(&object(&[("trap", true.into())]));
     }
 }
 
@@ -317,6 +335,9 @@ impl Queue {
             let Some(message) = next else {
                 break;
             };
+            if field(&message, "trap").is_some() {
+                std::process::abort();
+            }
             self.answer(message).await;
         }
         self.running.set(false);

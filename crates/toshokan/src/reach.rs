@@ -13,7 +13,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::hash::{Hash, Hasher};
 
-use crate::binding::{self, Bindings, Fact, Facts, Scan, Scanned, Unscanned};
+use crate::binding::{self, Bindings, Fact, Facts, FileKeys, Scan, Scanned, Unscanned};
 use crate::cow::CowMap;
 use crate::env::Names;
 use crate::ids::{EntityId, Identity};
@@ -27,9 +27,10 @@ pub(crate) struct Reach {
     /// `None` until a binding of every fact to a full scan.
     links: Option<Links>,
     due: Due,
-    /// The lengths the facts gained since the files' identities were last
-    /// resolved. Every file a resolve leaves without an identity has a length no
-    /// fact gave, so only files of these lengths may need one.
+    /// The lengths of the facts whose files are not where they say since the
+    /// files' identities were last resolved: a file of one of these lengths may be
+    /// one of them, moved, and needs its identity. A fact its file holds in place
+    /// reads nothing more, so adopting a file reads only that file.
     gained: BTreeSet<u64>,
 }
 
@@ -451,17 +452,14 @@ impl Reach {
         now: Box<[Fact]>,
     ) -> Option<Box<[Fact]>> {
         self.before(facts, scan, names, Some(entity), None);
-        let lengths = |written: &[Fact]| -> BTreeSet<u64> {
-            written.iter().map(|written| written.value.len).collect()
-        };
-        let gained: Vec<u64> = match &self.links {
-            Some(links) => lengths(&now)
-                .into_iter()
-                .filter(|len| !links.has_length(*len))
-                .collect(),
-            None => Vec::new(),
-        };
-        self.gained.extend(gained);
+        let away = now.iter().map(|written| &written.value).filter(|fact| {
+            let there = scan.files.get(&fact.path);
+            !there.is_some_and(|file| binding::holds(fact, file))
+        });
+        let gained: Vec<u64> = away.map(|fact| fact.len).collect();
+        if self.links.is_some() {
+            self.gained.extend(gained);
+        }
         let was = match now.is_empty() {
             true => facts.remove(&entity),
             false => facts.insert(entity, now),
@@ -558,18 +556,14 @@ fn splice(
     for (entity, file) in found.bound.iter() {
         bindings.bound.insert(*entity, file.clone());
     }
-    let mut unbound: Vec<RelPath> = bindings
-        .unbound
-        .iter()
-        .filter(|path| !region.files.contains(*path))
-        .cloned()
-        .chain(found.unbound)
-        .collect();
-    unbound.sort();
-    bindings.unbound = unbound;
+    for path in &region.files {
+        bindings.unbound.remove(path);
+    }
+    for (path, ()) in found.unbound.iter() {
+        bindings.unbound.insert(path.clone(), ());
+    }
     let report = &mut bindings.report;
     let found = found.report;
-    report.arrived = bindings.unbound.clone();
     report.departed.retain(outside);
     report.departed.extend(found.departed);
     report.departed.sort();
@@ -584,11 +578,6 @@ fn splice(
         .retain(|ambiguous| outside(&ambiguous.entity));
     report.ambiguous.extend(found.ambiguous);
     report.ambiguous.sort_by_key(|ambiguous| ambiguous.entity);
-    report.copied.retain(|copied| outside(&copied.entity));
-    report.copied.extend(found.copied);
-    report
-        .copied
-        .sort_by(|a, b| (&a.copy, a.entity).cmp(&(&b.copy, b.entity)));
     pins.retain(|op| op.entity().is_none_or(|entity| outside(&entity)));
     pins.extend(found_pins);
     pins.sort_by_key(Op::entity);
@@ -603,18 +592,30 @@ pub(crate) type Changes = BTreeMap<RelPath, Option<Scanned>>;
 /// `gone` are the files listed before under the paths relisted, and `found`
 /// those listed now. Identities resolve as [`binding::resolve`] resolves them
 /// when given every file: from the entry the path had, else from the last fact
-/// naming the path, else read when some fact gives the length. Of the files not
-/// relisted, it resolves only those of a length in `gained`, the lengths the
-/// facts gained since the last resolve.
+/// naming the path, else read where it decides something: at a fact's path of its
+/// length, or of the length of an entity that may have moved, as [`binding::away`]
+/// finds it among the files after the change, `keys` being `scan`'s once asked, or one
+/// the facts gained since the last resolve. Of the files not relisted, it resolves
+/// only those of a length in `gained`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve(
     scan: &Scan,
     facts: &Facts,
     links: &Links,
     names: &dyn Names,
+    keys: &mut Option<FileKeys>,
     gone: Vec<RelPath>,
     found: Scan,
     gained: &BTreeSet<u64>,
 ) -> (Changes, Vec<(RelPath, u64)>) {
+    let mut counted: BTreeMap<String, isize> = BTreeMap::new();
+    for path in &gone {
+        *counted.entry(names.key(path.as_str())).or_default() -= 1;
+    }
+    for path in found.files.keys() {
+        *counted.entry(names.key(path.as_str())).or_default() += 1;
+    }
+    let mut away = None;
     let mut changes = Changes::new();
     for path in gone {
         changes.insert(path, None);
@@ -651,7 +652,15 @@ pub(crate) fn resolve(
                 .rev()
                 .find(|fact| (fact.len, fact.modified) == (file.len, file.modified));
             file.identity = same.map(|fact| fact.identity);
-            if file.identity.is_none() && links.has_length(file.len) {
+            let sized = said.iter().any(|fact| fact.len == file.len);
+            let mut away = || {
+                let away = away.get_or_insert_with(|| {
+                    let keys = keys.get_or_insert_with(|| FileKeys::of(scan, names));
+                    binding::away(facts, &keys.after(&counted), names)
+                });
+                away.contains(&file.len) || gained.contains(&file.len)
+            };
+            if file.identity.is_none() && (sized || away()) {
                 needed.push((path.clone(), file.len));
             }
         }
@@ -724,7 +733,11 @@ mod tests {
                             len,
                             modified: Some(self.below(2) as u64),
                         },
-                        entry: EntryHash::from_u128(self.entry),
+                        entry: crate::log::Ref {
+                            writer: crate::ids::WriterId::from_u128(1),
+                            n: self.entry as u64,
+                            hash: EntryHash::from_u128(self.entry),
+                        },
                     }
                 })
                 .collect()
@@ -817,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn resolving_what_was_relisted_resolves_what_resolving_every_file_does() {
+    fn resolving_what_a_change_reaches_resolves_it_as_resolving_every_file_does() {
         for seed in 0..1500 {
             let mut world = World {
                 random: SeededRandom::new(seed),
@@ -832,7 +845,7 @@ mod tests {
                 file.identity = None;
             }
             let earlier = previous.clone();
-            let needed = binding::resolve(&mut previous, &facts, &earlier);
+            let needed = binding::resolve(&mut previous, &facts, &earlier, names);
             for (path, len) in needed {
                 let identity = CONTENTS.iter().find(|(_, l)| *l == len).unwrap().0;
                 let file = previous.files.get_mut(&path).unwrap();
@@ -862,12 +875,34 @@ mod tests {
                 .files
                 .retain(|path, _| !relisted.iter().any(|dir| path.starts_with(dir)));
             whole.files.extend(found.files.clone());
-            let whole_needed = binding::resolve(&mut whole, &facts, &previous);
+            let whole_needed = binding::resolve(&mut whole, &facts, &previous, names);
+            // A file neither relisted nor of a length a fact away from its file gives
+            // is left for the next scan of every file.
+            let reached = |path: &RelPath, len: u64| {
+                relisted.iter().any(|dir| path.starts_with(dir)) || reach.gained.contains(&len)
+            };
+            for (path, file) in &mut whole.files {
+                if !reached(path, file.len) {
+                    *file = previous.files[path];
+                }
+            }
+            let whole_needed: Vec<(RelPath, u64)> = whole_needed
+                .into_iter()
+                .filter(|(path, len)| reached(path, *len))
+                .collect();
 
             let links = reach.links.as_ref().unwrap();
             let gone = binding::under_any(&previous, &relisted);
-            let (changes, some_needed) =
-                resolve(&previous, &facts, links, names, gone, found, &reach.gained);
+            let (changes, some_needed) = resolve(
+                &previous,
+                &facts,
+                links,
+                names,
+                &mut None,
+                gone,
+                found,
+                &reach.gained,
+            );
             let mut some = previous.clone();
             for (path, file) in changes {
                 match file {
@@ -875,11 +910,18 @@ mod tests {
                     None => some.files.remove(&path),
                 };
             }
-            assert_eq!(
-                (some, some_needed),
-                (whole, whole_needed),
-                "seed {seed}: relisted {relisted:?}, {facts:?}"
-            );
+            let shown = format!("seed {seed}: relisted {relisted:?}, {facts:?}");
+            assert_eq!(some, whole, "{shown}");
+            // It reads what resolving every file reads, and besides only files of a
+            // length the facts gained, which may be theirs.
+            for read in &whole_needed {
+                assert!(some_needed.contains(read), "{shown}: {read:?} unread");
+            }
+            for (path, len) in &some_needed {
+                let justified =
+                    whole_needed.contains(&(path.clone(), *len)) || reach.gained.contains(len);
+                assert!(justified, "{shown}: {path} read for nothing");
+            }
         }
     }
 }

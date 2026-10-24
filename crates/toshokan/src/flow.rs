@@ -1,7 +1,7 @@
 //! Operations written as continuations: each request carries the code that
 //! consumes its result, so a sequence of requests reads as a sequence.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use crate::env::Identify;
@@ -184,6 +184,47 @@ pub(crate) fn stat<'a>(root: Root, path: &RelPath) -> Fallible<'a, Option<Meta>>
         Reply::Stat(meta) => Some(meta),
         _ => None,
     })
+}
+
+/// Whether every name of `path`, which is there, is spelled as its directory lists it:
+/// a volume that ignores case finds a file by another spelling of its name too.
+pub(crate) fn spelled<'a>(root: Root, path: RelPath) -> Fallible<'a, bool> {
+    spelled_in(root, path, Listings::default()).map_ok(|(exactly, _)| exactly)
+}
+
+/// The names each directory listed so far holds.
+pub(crate) type Listings = BTreeMap<RelPath, BTreeSet<String>>;
+
+/// [`spelled`], listing only the directories `listings` does not hold, with
+/// `listings` given back holding them too.
+pub(crate) fn spelled_in<'a>(
+    root: Root,
+    path: RelPath,
+    listings: Listings,
+) -> Fallible<'a, (bool, Listings)> {
+    let prefixes: Vec<RelPath> = std::iter::successors(Some(path), RelPath::parent)
+        .take_while(|prefix| !prefix.is_root())
+        .collect();
+    fold(
+        prefixes.into_iter(),
+        (true, listings),
+        move |(exactly, mut listings), prefix| {
+            let parent = prefix.parent().expect("a name has a directory");
+            let name = prefix.name().expect("a prefix is not the root").to_owned();
+            if !exactly {
+                return ok((false, listings));
+            }
+            if let Some(names) = listings.get(&parent) {
+                return ok((names.contains(&name), listings));
+            }
+            list(root, &parent).map_ok(move |entries| {
+                let names: BTreeSet<String> = entries.into_iter().map(|entry| entry.name).collect();
+                let exactly = names.contains(&name);
+                listings.insert(parent, names);
+                (exactly, listings)
+            })
+        },
+    )
 }
 
 pub(crate) fn read<'a>(root: Root, path: &RelPath, range: Range) -> Fallible<'a, Vec<u8>> {
@@ -756,36 +797,120 @@ pub(crate) fn identity<'a>(
     len: u64,
     identify: &Rc<dyn Identify>,
 ) -> Fallible<'a, Identity> {
-    let identify = Rc::clone(identify);
-    read_ranges(root, path, identify.ranges(len))
-        .map_ok(move |parts| identify.identify(len, &parts))
+    let gone = path.clone();
+    identities(root, vec![(path, len)], identify).and_then(move |mut found| {
+        match found.pop().flatten() {
+            Some(identity) => ok(identity),
+            None => Flow::Done(Err(Error::Io {
+                root,
+                path: gone,
+                error: IoError::NotFound,
+            })),
+        }
+    })
 }
 
-/// The identity of each file of `files`, given its length, read together; `None`
-/// for a file no longer there.
+/// The identity of each file of `files`, given its length; `None` for a file no
+/// longer there. Files whose ranges come to at most [`CHUNK`] bytes are read
+/// together; each larger one a [`CHUNK`] at a time, so no more than that of it
+/// is held at once.
 pub(crate) fn identities<'a>(
     root: Root,
     files: Vec<(RelPath, u64)>,
     identify: &Rc<dyn Identify>,
 ) -> Fallible<'a, Vec<Option<Identity>>> {
+    let mut groups: Vec<Vec<(RelPath, u64, Vec<Range>)>> = Vec::new();
+    let mut small = true;
+    for (path, len) in files {
+        let ranges = identify.ranges(&path, len);
+        let size: u64 = ranges.iter().map(|range| range.len).sum();
+        let fits = size <= CHUNK;
+        match groups.last_mut() {
+            Some(group) if fits && small => group.push((path, len, ranges)),
+            _ => groups.push(vec![(path, len, ranges)]),
+        }
+        small = fits;
+    }
     let identify = Rc::clone(identify);
-    let ranges: Vec<Vec<Range>> = files.iter().map(|(_, len)| identify.ranges(*len)).collect();
+    fold(groups.into_iter(), Vec::new(), move |mut all, group| {
+        let read = match group.as_slice() {
+            [(_, _, ranges)] if ranges.iter().map(|range| range.len).sum::<u64>() > CHUNK => {
+                let (path, len, ranges) = group.into_iter().next().expect("one file");
+                streamed(root, path, len, ranges, Rc::clone(&identify)).map_ok(|one| vec![one])
+            }
+            _ => together(root, group, Rc::clone(&identify)),
+        };
+        read.map_ok(move |found| {
+            all.extend(found);
+            all
+        })
+    })
+}
+
+/// The identities of `files`, every range of every file read in one batch.
+fn together<'a>(
+    root: Root,
+    files: Vec<(RelPath, u64, Vec<Range>)>,
+    identify: Rc<dyn Identify>,
+) -> Fallible<'a, Vec<Option<Identity>>> {
     let reads = files
         .iter()
-        .zip(&ranges)
-        .flat_map(|((path, _), ranges)| ranges.iter().map(move |range| (path.clone(), *range)));
+        .flat_map(|(path, _, ranges)| ranges.iter().map(move |range| (path.clone(), *range)));
     read_many(root, reads.collect()).map_ok(move |parts| {
         let mut parts = parts.into_iter();
         files
             .into_iter()
-            .zip(ranges)
-            .map(|((_, len), ranges)| {
-                let read: Vec<Option<Vec<u8>>> = parts.by_ref().take(ranges.len()).collect();
-                let read: Option<Vec<Vec<u8>>> = read.into_iter().collect();
-                read.map(|parts| identify.identify(len, &parts))
+            .map(|(path, len, ranges)| {
+                let read: Option<Vec<Vec<u8>>> = parts.by_ref().take(ranges.len()).collect();
+                let mut digest = identify.digest(&path, len);
+                read?.iter().for_each(|part| digest.update(part));
+                Some(digest.finish())
             })
             .collect()
     })
+}
+
+/// The identity of one file, its ranges read a [`CHUNK`] at a time.
+fn streamed<'a>(
+    root: Root,
+    path: RelPath,
+    len: u64,
+    ranges: Vec<Range>,
+    identify: Rc<dyn Identify>,
+) -> Fallible<'a, Option<Identity>> {
+    let pieces: Vec<Range> = ranges
+        .into_iter()
+        .flat_map(|range| {
+            let pieces = range.len.div_ceil(CHUNK).max(1);
+            (0..pieces).map(move |n| Range {
+                offset: range.offset + n * CHUNK,
+                len: CHUNK.min(range.len - n * CHUNK),
+            })
+        })
+        .collect();
+    let digest = Some(identify.digest(&path, len));
+    fold(pieces.into_iter(), digest, move |digest, piece| {
+        let Some(mut digest) = digest else {
+            return ok(None);
+        };
+        let io = Io::Read {
+            root,
+            path: path.clone(),
+            range: piece,
+        };
+        attempt(io.clone()).then(move |result| match result {
+            Ok(Reply::Bytes(bytes)) => {
+                digest.update(&bytes);
+                ok(Some(digest))
+            }
+            Err(IoError::NotFound) => ok(None),
+            Ok(_) => Flow::Done(Err(
+                io.failed(IoError::Other("the backend gave the wrong reply".into()))
+            )),
+            Err(error) => Flow::Done(Err(io.failed(error))),
+        })
+    })
+    .map_ok(|digest| digest.map(|digest| digest.finish()))
 }
 
 /// What one file holds of another's bytes.
@@ -854,6 +979,65 @@ mod tests {
 
     fn run<'a, T: 'a>(disk: &MemDisk, flow: Flow<'a, T>) -> T {
         blocking::run(&mut disk.clone(), flow.task())
+    }
+
+    /// Reads every byte of a file, as an identity of the whole contents does.
+    struct Whole;
+
+    impl Identify for Whole {
+        fn ranges(&self, _: &RelPath, len: u64) -> Vec<Range> {
+            vec![Range { offset: 0, len }]
+        }
+
+        fn digest(&self, _: &RelPath, len: u64) -> Box<dyn crate::env::Digest> {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(&len.to_be_bytes());
+            Box::new(crate::env::Blake3(hasher))
+        }
+    }
+
+    #[test]
+    fn a_large_files_identity_is_read_a_chunk_at_a_time_and_small_files_together() {
+        let disk = MemDisk::new();
+        let large: Vec<u8> = (0..(2 * CHUNK + 5)).map(|n| n as u8).collect();
+        for (at, bytes) in [("a", &b"small"[..]), ("big", &large), ("b", b"tiny")] {
+            disk.perform(Io::Create {
+                root: Root::Folder,
+                path: path(at),
+                bytes: bytes.to_vec(),
+            })
+            .unwrap();
+        }
+        let identify: Rc<dyn Identify> = Rc::new(Whole);
+        let files = vec![
+            (path("a"), 5),
+            (path("big"), large.len() as u64),
+            (path("gone"), 3),
+            (path("b"), 4),
+        ];
+        let mut task = run_in_place(identities(Root::Folder, files, &identify).task());
+        let (mut result, mut asked) = (None, Vec::new());
+        let found = loop {
+            match task.resume(result.take()) {
+                Step::Io(io) => {
+                    asked.push(match &io {
+                        Io::Read { range, .. } => format!("read {}", range.len),
+                        Io::ReadMany { reads, .. } => format!("many {}", reads.len()),
+                        other => format!("{other:?}"),
+                    });
+                    result = Some(disk.perform(io));
+                }
+                Step::Pause => {}
+                Step::Done(found) => break found.unwrap(),
+            }
+        };
+        let of = |at: &str, bytes: &[u8]| Some(Whole.of_bytes(&path(at), bytes));
+        assert_eq!(
+            found,
+            [of("a", b"small"), of("big", &large), None, of("b", b"tiny")]
+        );
+        let chunk = format!("read {CHUNK}");
+        assert_eq!(asked, ["many 1", &chunk, &chunk, "read 5", "many 2"]);
     }
 
     #[test]

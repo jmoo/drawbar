@@ -546,3 +546,66 @@ fn a_native_root_declares_no_replace_only_where_its_renames_refuse_a_destination
         );
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_native_local_root_missing_at_a_write_is_made_then() {
+    use toshokan::blocking::{Backend, Native};
+
+    let (folder, data) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let local = data.path().join("libraries/one");
+    let mut native = Native::new(folder.path(), &local);
+    let listed = native.perform(Io::List {
+        root: Root::Local,
+        dir: RelPath::ROOT,
+    });
+    assert!(!local.exists(), "a read makes nothing: {listed:?}");
+    native.perform(make_dir(Root::Local, "a/b")).unwrap();
+    native
+        .perform(create(Root::Local, "c.json", b"{}"))
+        .unwrap();
+    assert!(local.join("a/b").is_dir());
+    assert_eq!(std::fs::read(local.join("c.json")).unwrap(), b"{}");
+
+    std::fs::remove_dir_all(&local).unwrap();
+    let name = path("lock");
+    let locked = native.perform(Io::Lock { name });
+    assert_eq!(
+        locked,
+        Ok(Reply::Lock(Lock::Acquired)),
+        "made again once removed"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_native_root_reaches_nothing_through_a_linked_directory() {
+    use toshokan::blocking::{Backend, Native};
+
+    let (folder, outside) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::write(outside.path().join("x"), b"outside").unwrap();
+    std::fs::write(folder.path().join("a"), b"inside").unwrap();
+    std::os::unix::fs::symlink(outside.path(), folder.path().join("linked")).unwrap();
+    let mut native = Native::new(folder.path(), folder.path().join(".local"));
+    for io in [
+        create(Root::Folder, "linked/new", b"new"),
+        read("linked/x", 0, 7),
+        rename("a", "linked/a"),
+        rename("linked/x", "x"),
+        Io::Remove {
+            root: Root::Folder,
+            path: path("linked/x"),
+        },
+    ] {
+        let done = native.perform(io.clone());
+        assert!(done.is_err(), "{io:?}: {done:?}");
+    }
+    let mut names: Vec<String> = std::fs::read_dir(outside.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["x"]);
+    assert_eq!(std::fs::read(outside.path().join("x")).unwrap(), b"outside");
+    assert_eq!(std::fs::read(folder.path().join("a")).unwrap(), b"inside");
+}
