@@ -271,8 +271,6 @@ impl<F: Fs> Keeper<F> {
         };
         let mut trouble = Vec::new();
         if writable.is_ok() {
-            // Now rather than before the next write, so the files a crash left are
-            // where their outcome puts them before the first scan.
             let settled = library.settle_interrupted().await;
             trouble.extend(settled.err().map(|e| format!("finishing a change: {e}")));
             // Another window of this install left these: they are ours to finish.
@@ -2148,7 +2146,7 @@ mod tests {
         assert_eq!(root.read("a.ne5p"), b"inside");
     }
 
-    /// A piano library the size a vendor ships, about 200 MB in 64 strokes of about 3 MB.
+    /// A piano library the size a vendor ships, in 64 strokes.
     fn large_piano() -> Vec<u8> {
         use nord_format::formats::npno::synthetic::{take, Build};
         use nord_format::formats::npno::Bank;
@@ -2200,7 +2198,7 @@ mod tests {
                 expect,
             }))
         });
-        // One stroke's audio, about 3 MB, is the most held at once.
+        // One stroke's audio is the most held at once.
         assert!(
             (1 << 20..8 << 20).contains(&largest),
             "{largest} bytes held at once"

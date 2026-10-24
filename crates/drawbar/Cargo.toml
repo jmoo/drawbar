@@ -2,7 +2,7 @@
 name = "drawbar"
 description = "Your Nord's sounds, in a window: browse, edit and send programs, samples and pianos, in the browser or on the desktop"
 edition.workspace = true
-rust-version = "1.89"
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 version = "0.10.0"
@@ -197,7 +197,6 @@ web-sys = { version = "0.3", features = [
   "UsbDeviceRequestOptions",
   "Window",
   "Worker",
-  "WorkerNavigator",
   "WorkerOptions",
   "WorkerType",
   "WritableStream",

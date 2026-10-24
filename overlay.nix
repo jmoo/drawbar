@@ -462,8 +462,8 @@ let
   # ⚠️ The runner ships with wasm-bindgen-cli and must match the crates' wasm-bindgen pin.
   browserSuites =
     {
-      pname,
       cargoExtraArgs,
+      pname,
       tests,
       version,
     }:
@@ -519,8 +519,8 @@ let
     );
 
   toshokan-web = browserSuites {
-    pname = "toshokan-web";
     cargoExtraArgs = "-p toshokan --features web";
+    pname = "toshokan-web";
     tests = [
       "backends"
       "effects"
@@ -531,8 +531,8 @@ let
 
   # drawbar's library in the browser, kept by its worker.
   drawbar-web-tests = browserSuites {
-    pname = "drawbar-web-tests";
     cargoExtraArgs = "-p drawbar";
+    pname = "drawbar-web-tests";
     tests = [ "web" ];
     inherit (manifests.drawbar) version;
   };
