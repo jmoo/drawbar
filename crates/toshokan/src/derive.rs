@@ -1827,47 +1827,90 @@ mod tests {
         );
     }
 
-    /// The steps the walks back along chains take to derive `chain`, held as
-    /// lines no snapshot folds, beside a dismissal of a run inside it.
-    fn steps_to_derive(chain: &[Rc<Entry>]) -> usize {
+    /// The steps the walks back along chains take to derive what `seen` holds
+    /// beside what `memory` remembers.
+    fn steps_to_derive(
+        seen: BTreeMap<WriterId, Seen<'_>>,
+        memory: BTreeMap<WriterId, Memory>,
+    ) -> usize {
+        STEPS.set(0);
+        derive(&seen, &memory, &BTreeSet::new());
+        STEPS.get()
+    }
+
+    /// Another writer's dismissal of `W`'s run from `first` to `last`.
+    fn dismissal(first: &Entry, last: &Entry) -> Vec<Rc<Entry>> {
         let run = Run {
             writer: W,
-            from: 1,
-            first: Some(chain[1].hash()),
-            last: chain[1].own(),
+            from: first.n(),
+            first: Some(first.hash()),
+            last: last.own(),
             tip: None,
         };
-        let dismiss = entry(None, vec![Op::Dismiss { runs: vec![run] }], "dismiss");
-        let theirs = vec![dismiss];
-        let seen = vec![
-            (
-                W,
-                Seen {
-                    segments: vec![lines(chain, false)],
-                    snapshots: vec![],
-                },
-            ),
-            (
-                X,
-                Seen {
-                    segments: vec![lines(&theirs, false)],
-                    snapshots: vec![],
-                },
-            ),
-        ];
-        STEPS.set(0);
-        derived(seen, false);
-        STEPS.get()
+        vec![entry(
+            None,
+            vec![Op::Dismiss { runs: vec![run] }],
+            "dismiss",
+        )]
     }
 
     #[test]
     fn deriving_a_long_uncompacted_chain_takes_steps_in_proportion_to_its_entries() {
         let values: Vec<String> = (0..2_000).map(|n| n.to_string()).collect();
         let values: Vec<&str> = values.iter().map(String::as_str).collect();
+        fn held(entries: &[Rc<Entry>]) -> Seen<'_> {
+            Seen {
+                segments: vec![lines(entries, false)],
+                snapshots: vec![],
+            }
+        }
         for n in [500, 2_000] {
             let chain = chain(W, &values[..n]);
-            let steps = steps_to_derive(&chain);
-            assert!(steps <= 4 * n, "{steps} steps for {n} entries");
+            let mut branch = vec![Rc::clone(&chain[0])];
+            for value in &values[1..n] {
+                let next = entry(branch.last().map(|e| &**e), vec![set(value, vec![])], "b");
+                branch.push(next);
+            }
+            let remembered = Memory {
+                tips: Vec::new(),
+                entries: branch[1..]
+                    .iter()
+                    .map(|e| (e.hash(), Rc::clone(e)))
+                    .collect(),
+                forks: BTreeSet::from([chain[0].own()]),
+            };
+            let tip = Seen {
+                segments: vec![],
+                snapshots: vec![folded(&chain)],
+            };
+            let one = dismissal(&chain[1], &chain[1]);
+            let all = dismissal(&chain[1], &chain[n - 1]);
+            let cases = [
+                (
+                    "a dismissal of one entry",
+                    BTreeMap::from([(W, held(&chain)), (X, held(&one))]),
+                    BTreeMap::new(),
+                ),
+                (
+                    "a dismissal of every entry after the first",
+                    BTreeMap::from([(W, held(&chain)), (X, held(&all))]),
+                    BTreeMap::new(),
+                ),
+                (
+                    "a remembered branch after a remembered fork",
+                    BTreeMap::from([(W, tip)]),
+                    BTreeMap::from([(W, remembered)]),
+                ),
+                (
+                    "entries held without the first",
+                    BTreeMap::from([(W, held(&chain[1..]))]),
+                    BTreeMap::new(),
+                ),
+            ];
+            for (case, seen, memory) in cases {
+                let steps = steps_to_derive(seen, memory);
+                assert!(steps <= 4 * n, "{case}: {steps} steps for {n} entries");
+            }
         }
     }
 
