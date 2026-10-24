@@ -453,8 +453,7 @@ removes named, its file effects. It ends at close. Drafts are unchanged.
 
 ## Expected size
 
-Steady state, the harness's schema: about 8.7 live writes per entity (a create,
-2.7 registers, 3 tags, 1 related, 1 file).
+Steady state, for the schema the harness writes:
 
 | Part | Memory | Folder (JSON) |
 | --- | --- | --- |
@@ -467,8 +466,7 @@ Steady state, the harness's schema: about 8.7 live writes per entity (a create,
 | Entries since the last snapshot | up to the compaction threshold, ~400 B each | ~250 B each |
 
 References exist only where one writer replaced another's write: at most
-(writers − 1) per field. The worst case for 2,000 entities and 3 writers is
-2,000 × 8.7 × 2 × 90 B ≈ 3.1 MB in the folder; in practice far less.
+(writers − 1) per field, and in practice far fewer.
 
 For 2,000 entities, 3 writers and a compaction threshold of 1,024 entries, the
 steady state is about 6 MB of memory and 4 MB of folder, plus:
@@ -489,7 +487,7 @@ These grow with deletions, segments and writers, not with entries.
 There are no migrations before 1.0. This format lives under `writers.2/`; an old
 folder opens as an empty library whose files are all unbound, and the old
 directories are left for older builds. Old cached views are discarded by their
-format byte; `let-go.json` and old `head.json` files are ignored.
+format byte; old `head.json` files are ignored.
 
 ## The model
 

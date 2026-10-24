@@ -831,7 +831,7 @@ impl StoredFile {
                 }
                 Contents::Snapshot(snapshot.head)
             }
-            WriterFile::Segment(_) | WriterFile::Unreadable => return None,
+            WriterFile::Segment(_) | WriterFile::Unreadable { .. } => return None,
         };
         Some(Self {
             len: stamp.len,

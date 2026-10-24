@@ -54,11 +54,12 @@
 //! changes from several items (`Intent::take`); an item stays, with no changes once
 //! nothing is left to review, until an intent dismisses it (`Intent::dismiss`). The
 //! instance writes as a new writer once it sees the fork, which opening, a refresh
-//! (`retired`) or a refused compaction reports. Facts a restore of the folder took stay shown for a
-//! day and a full rescan, then go. Undo reaches the intents of the session. A view
-//! never changes, so an app can hand it to other threads. A field read from a view
-//! is a value, a conflict between writers, or unreadable, so an app cannot show
-//! half a conflict by accident.
+//! (`retired`) or a refused compaction reports. Facts a restore of the folder took
+//! stay shown for a day and a full rescan, then go. Undo reaches the intents of the
+//! session but those that only dismiss, and `Committed::undoable` says which a
+//! commit is. A view never changes, so an app can hand it to other threads. A field
+//! read from a view is a value, a conflict between writers, or unreadable, so an
+//! app cannot show half a conflict by accident.
 //!
 //! A save takes bytes or a source the driver streams into staging a chunk at a
 //! time, such as a `Splice` of the file being rewritten, so a file of hundreds of
@@ -101,8 +102,9 @@
 //! change (`rescan_paths`), and focus or a period for a folder other programs write
 //! (`rescan`). The Browsers section of `SPEC.md` lists what each browser can do.
 //!
-//! The browser suites run headless with `nix build .#toshokan-web` on Linux. Elsewhere, from `crates/` in the
-//! development shell, with a WebDriver and its browser installed:
+//! The browser suites run headless with `nix build .#toshokan-web` on Linux.
+//! Elsewhere, from `crates/` in the development shell, with a WebDriver and its
+//! browser installed:
 //!
 //! ```sh
 //! CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \

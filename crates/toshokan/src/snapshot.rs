@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error as ThisError;
 
@@ -86,6 +86,9 @@ impl Certified {
 #[error("not a snapshot: {reason}")]
 pub struct NotSnapshot {
     pub reason: String,
+    /// Whether the bytes, less a zero-filled tail, end inside a JSON value, as
+    /// a file a crash cut short does.
+    pub cut: bool,
 }
 
 const KNOWN: [&str; 8] = [
@@ -118,12 +121,15 @@ impl Snapshot {
     /// object with every member it needs, longer than a reader holds, or with a
     /// certificate whose last line comes before its first.
     pub fn decode(bytes: &[u8]) -> Result<Self, NotSnapshot> {
-        let refuse = |reason: String| NotSnapshot { reason };
+        let refuse = |reason: String| NotSnapshot { reason, cut: false };
         if bytes.len() as u64 > MAX_FILE {
             return Err(refuse(format!("longer than {MAX_FILE} bytes")));
         }
         let mut members: BTreeMap<String, Raw> =
-            serde_json::from_slice(bytes).map_err(|error| refuse(error.to_string()))?;
+            serde_json::from_slice(bytes).map_err(|error| NotSnapshot {
+                reason: error.to_string(),
+                cut: ends_inside_a_value(bytes),
+            })?;
         let mut take = |name: &str| {
             members
                 .remove(name)
@@ -253,9 +259,18 @@ impl Unpack for Snapshot {
     }
 }
 
+fn ends_inside_a_value(bytes: &[u8]) -> bool {
+    let end = bytes
+        .iter()
+        .rposition(|&byte| byte != 0)
+        .map_or(0, |at| at + 1);
+    serde_json::from_slice::<IgnoredAny>(&bytes[..end]).is_err_and(|error| error.is_eof())
+}
+
 fn member<T: DeserializeOwned>(name: &str, raw: &Raw) -> Result<T, NotSnapshot> {
     raw.decode().map_err(|error| NotSnapshot {
         reason: format!("`{name}`: {error}"),
+        cut: false,
     })
 }
 

@@ -32,7 +32,7 @@ impl Written {
                     let lines = segment.entries.iter();
                     pairs.extend(lines.map(|entry| (entry.hash(), entry.prev())));
                 }
-                WriterFile::Snapshot(_) | WriterFile::Unreadable => {}
+                WriterFile::Snapshot(_) | WriterFile::Unreadable { .. } => {}
             }
         }
         written

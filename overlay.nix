@@ -814,7 +814,7 @@ in
       );
 
       # The portable-root protocol, model-checked. `nix flake check` runs the
-      # small configs, in about nine minutes; the deep ones take several hours.
+      # small configs.
       toshokan-spec = toshokanSpec "toshokan-spec" [
         "Portable"
         "Recovery"

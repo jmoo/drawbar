@@ -50,7 +50,7 @@ use crate::report::{
 };
 use crate::schema::Schema;
 use crate::trash::{self, Policy};
-use crate::undo::{Before, History};
+use crate::undo::{self, Before, History};
 use crate::view::{FileRef, FileState, Listed, Parts, View};
 use crate::writer::{self, Claimed, Picked, Writer};
 
@@ -1140,14 +1140,15 @@ impl Library {
     }
 
     /// The pending records a placed entry closes, in the merged state or on a
-    /// branch shown apart as its own item.
+    /// branch shown apart as its own item or dismissed.
     fn closed_records(&self) -> BTreeSet<(WriterId, Nonce)> {
         let mut closed = self.folded.settlements().clone();
         for (writer, placed) in &self.reader.derived().writers {
             for tip in &placed.tips {
                 closed.extend(tip.state.settled.iter().copied());
             }
-            for entry in placed.runs.iter().chain(&placed.gaps) {
+            let apart = placed.runs.iter().chain(&placed.gaps);
+            for entry in apart.chain(&placed.dismissed) {
                 match entry.kind() {
                     EntryKind::Intent(Logged {
                         record: Some(record),
@@ -2476,8 +2477,19 @@ fn committed(
         Op::Tree { from, to } => Some((from.clone(), to.clone())),
         _ => None,
     });
+    let undoable = match kinds.first() {
+        Some(EntryKind::Intent(logged)) => {
+            let more = kinds[1..].iter().filter_map(|kind| match kind {
+                EntryKind::More(more) => Some(&more.ops),
+                _ => None,
+            });
+            undo::joins(logged.ops.iter().chain(more.flatten()))
+        }
+        _ => false,
+    };
     let committed = Committed {
         intent: entries[0].hash(),
+        undoable,
         created,
         changes: distinct(ops.iter().copied().filter_map(change_of)),
         paths: paths.collect(),
