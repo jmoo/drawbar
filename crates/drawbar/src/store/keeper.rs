@@ -389,6 +389,18 @@ impl<F: Fs> Keeper<F> {
     ) -> Result<(Option<EntryHash>, Viewed), String> {
         let library = self.library.as_mut().ok_or("the library is not open")?;
         let label = intent.label();
+        // ⚠️ Where folders do not rename, one moves file by file as the last scan found
+        // it: a look at it first takes along what came into it since.
+        let mut looked = Vec::new();
+        let folders = moved_folders(&intent);
+        if !folders.is_empty() && !library.fs().capabilities(Root::Folder).rename_dir {
+            let paths = folders.iter().filter_map(relative).collect();
+            looked = library
+                .rescan_paths(paths)
+                .await
+                .map_err(|e| e.to_string())?
+                .changes;
+        }
         let changes = match intent {
             Intent::Tag { files, name, make } => {
                 // ⚠️ A file another drawbar made an entity of since the last refresh would
@@ -478,9 +490,18 @@ impl<F: Fs> Keeper<F> {
             part => batch(library, label, vec![part], answer).await,
         };
         let intent = changes.as_ref().map(|committed| committed.intent);
-        let changes = changes.map(|committed| committed.changes);
-        let viewed = committed_view(library, &mut self.shown, changes.unwrap_or_default());
+        looked.extend(changes.into_iter().flat_map(|committed| committed.changes));
+        let viewed = committed_view(library, &mut self.shown, looked);
         Ok((intent, viewed))
+    }
+}
+
+/// The folders `intent` moves, its parts' included.
+fn moved_folders(intent: &Intent) -> Vec<LibPath> {
+    match intent {
+        Intent::MoveFolder { from, .. } => vec![from.clone()],
+        Intent::Batch(parts) => parts.iter().flat_map(moved_folders).collect(),
+        _ => Vec::new(),
     }
 }
 

@@ -581,6 +581,55 @@ async fn a_worker_that_stalls_shows_no_life_and_is_let_go() {
     again.close().await;
 }
 
+/// A folder moved where folders do not rename takes along the file another install put
+/// in it since this one last looked.
+#[wasm_bindgen_test]
+async fn a_folder_moves_with_what_another_install_put_in_it_since() {
+    wipe(&opfs().await).await;
+    let folder = || Folder::Private(RelPath::new("Moving").unwrap());
+    let local = |name: &str| RelPath::new(&format!("local/{name}")).unwrap();
+    let save = |at: &str| {
+        Cmd::Intent(Intent::Save {
+            id: 1,
+            path: path(at),
+            bytes: at.as_bytes().to_vec(),
+            expect: Expect::Absent,
+            came: None,
+        })
+    };
+    let first = Worker::start(folder(), &local("first")).await.unwrap();
+    let second = Worker::start(folder(), &local("second")).await.unwrap();
+    first.run(Cmd::Open).await.unwrap();
+    second.run(Cmd::Open).await.unwrap();
+    first.run(save("Set/a.ne5p")).await.unwrap();
+    second.run(save("Set/b.ne5p")).await.unwrap();
+    let moved = first
+        .run(Cmd::Intent(Intent::MoveFolder {
+            from: path("Set"),
+            to: path("Gig"),
+        }))
+        .await
+        .unwrap();
+    assert!(
+        moved
+            .iter()
+            .any(|event| matches!(event, Event::Moved { result: Ok(()), .. })),
+        "{moved:?}"
+    );
+    let mut shown = Shown::default();
+    for event in second.run(Cmd::Rescan).await.unwrap() {
+        if let Event::Scanned(Ok(viewed)) = event {
+            shown.apply(viewed.shown);
+        }
+    }
+    let mut at: Vec<String> = shown.files.values().map(|(at, _)| at.to_string()).collect();
+    at.extend(shown.others.values().map(|at| at.to_string()));
+    at.sort();
+    assert_eq!(at, ["Gig/a.ne5p", "Gig/b.ne5p"]);
+    first.close().await;
+    second.close().await;
+}
+
 /// Two installs keep one library, each through its worker: a refresh shows one what the
 /// other committed, and a tab hears of another tab's commit.
 #[wasm_bindgen_test]
