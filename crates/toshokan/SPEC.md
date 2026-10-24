@@ -1131,12 +1131,11 @@ empty (see Recovery).
 
 ### Browsers
 
-In a browser, the library runs on the page and a dedicated worker performs its
-requests, one at a time, in the order they were sent; or the library runs in a
-dedicated worker of the app's own, which performs its requests itself, and the
-reports it makes, which serialize, go to the page as messages. The folder is a directory
-of the origin private file system or a folder the user picked; the local root is
-always a directory of the origin private file system.
+In a browser, the library runs in a dedicated worker of the app's own, on an
+executor that performs its requests there, and the reports it makes, which
+serialize, go to the page as messages. The folder is a directory of the origin
+private file system or a folder the user picked; the local root is always a
+directory of the origin private file system.
 
 | Folder                                      | `append` | `rename_file` | `rename_dir` | `no_replace` | `fsync` |
 | ------------------------------------------- | -------- | ------------- | ------------ | ------------ | ------- |
@@ -1176,8 +1175,8 @@ always a directory of the origin private file system.
   Chrome and `navigator.brave` is absent; elsewhere each move copies, and each
   copy pays the check again. A rename the browser refuses although the folder
   declares it fails with `Unsupported`.
-- **Directories.** A library tells the worker its root as it opens. The worker
-  keeps the handles of the directories it finds under that root and in the
+- **Directories.** A library tells the executor its root as it opens. The
+  executor keeps the handles of the directories it finds under that root and in the
   local root, where no writer removes or renames a directory, and finds each
   other directory from the folder's top for every request. Several reads of one
   such directory find its files by one listing of it. In Firefox, each step of
@@ -1196,17 +1195,8 @@ always a directory of the origin private file system.
 - **Times.** Chromium and Firefox report a file's last change in milliseconds,
   WebKit in whole seconds: two changes that keep a file's length within that
   time look alike.
-- **The page's thread.** An operation pauses between slices of work that makes
-  no request, such as parsing the logs it read, decoding and encoding the cached
-  view, gathering, identifying and binding the library's files, and indexing
-  what is shown. Deriving the merged state, placing and folding every writer's
-  entries, runs without a pause. Once the core has held the page's thread for 6 ms since
-  a reply or the last pause, the driver gives it back at the next pause by a
-  message the page posts to itself, so the tasks waiting for the thread run
-  first and the page can draw. Where an operation pauses depends only on its
-  work, never on time.
 - **Locks** are Web Locks named `toshokan:/<local root path>/<name>`, held by
-  the worker and released when it ends.
+  the executor and released when its worker ends.
 - **Hints.** A tab that commits announces its newest entry on the
   `BroadcastChannel` `toshokan:<library>`, and the library's other tabs refresh.
   Where the browser has a `FileSystemObserver`, which only Chromium has, a page

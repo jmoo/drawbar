@@ -1,15 +1,14 @@
-//! The bytes a request and its result cross the worker boundary as: one buffer
+//! The bytes a request and its result cross to the bridge worker as: one buffer
 //! each way, so a message carries no object graph to clone.
 //!
 //! Integers are little-endian `u64`, except tags, which are one byte. A string or
 //! byte string is its length, then its bytes. Decoding refuses anything a
 //! well-formed encoding cannot produce, trailing bytes included.
 
-use crate::io::{
+use toshokan::io::{
     Capabilities, Capability, DirEntry, Io, IoError, IoResult, Kind, Lock, Meta, Range, Reply,
 };
-use crate::path::RelPath;
-use crate::Root;
+use toshokan::{RelPath, Root};
 
 /// Bytes that are not an encoding this module produces.
 #[derive(Debug, PartialEq, Eq)]
@@ -45,7 +44,11 @@ pub fn encode_request(io: &Io) -> Result<Vec<u8>, IoError> {
         Io::Sync { root, path } => out.tag(12).root(*root).path(path),
         Io::Lock { name } => out.tag(13).path(name),
         Io::Unlock { name } => out.tag(14).path(name),
-        Io::Fill { .. } => return Err(IoError::Other(crate::disk::FILLED_BY_DRIVERS.into())),
+        Io::Fill { .. } => {
+            return Err(IoError::Other(
+                "a driver fills a file, not a backend".into(),
+            ))
+        }
     };
     Ok(out.0)
 }
@@ -433,231 +436,5 @@ impl<'a> In<'a> {
             true => Ok(()),
             false => Err(Malformed("trailing bytes")),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::plan::Content;
-
-    fn path(text: &str) -> RelPath {
-        RelPath::new(text).unwrap()
-    }
-
-    fn every_request() -> Vec<Io> {
-        let (root, p) = (Root::Local, path("a/b"));
-        let range = Range {
-            offset: u64::MAX - 1,
-            len: 7,
-        };
-        vec![
-            Io::List {
-                root: Root::Folder,
-                dir: RelPath::ROOT,
-            },
-            Io::Stat {
-                root,
-                path: p.clone(),
-            },
-            Io::ListStat {
-                root,
-                dir: p.clone(),
-            },
-            Io::Read {
-                root,
-                path: p.clone(),
-                range,
-            },
-            Io::ReadMany {
-                root,
-                reads: vec![(p.clone(), range), (path("ü"), Range { offset: 0, len: 0 })],
-            },
-            Io::ReadMany {
-                root,
-                reads: Vec::new(),
-            },
-            Io::Create {
-                root,
-                path: p.clone(),
-                bytes: b"new".to_vec(),
-            },
-            Io::Append {
-                root,
-                path: p.clone(),
-                bytes: Vec::new(),
-            },
-            Io::Write {
-                root,
-                path: p.clone(),
-                offset: 1 << 40,
-                bytes: vec![0, 255],
-            },
-            Io::Rename {
-                root,
-                from: p.clone(),
-                to: path("c"),
-            },
-            Io::Remove {
-                root,
-                path: p.clone(),
-            },
-            Io::RemoveDir {
-                root,
-                path: p.clone(),
-            },
-            Io::MakeDir {
-                root,
-                path: p.clone(),
-            },
-            Io::Sync {
-                root,
-                path: p.clone(),
-            },
-            Io::Lock { name: p.clone() },
-            Io::Unlock { name: p },
-        ]
-    }
-
-    fn every_result() -> Vec<IoResult> {
-        let meta = |kind, modified| Meta {
-            kind,
-            len: 3,
-            modified,
-        };
-        let mut results = vec![
-            Ok(Reply::Listed(vec![
-                DirEntry {
-                    name: "a".into(),
-                    kind: Kind::File,
-                },
-                DirEntry {
-                    name: "d".into(),
-                    kind: Kind::Directory,
-                },
-            ])),
-            Ok(Reply::Stat(None)),
-            Ok(Reply::Stat(Some(meta(Kind::File, Some(u64::MAX))))),
-            Ok(Reply::ListedStat(vec![
-                ("a".into(), meta(Kind::File, Some(0))),
-                ("d".into(), meta(Kind::Directory, None)),
-            ])),
-            Ok(Reply::Bytes(b"bytes".to_vec())),
-            Ok(Reply::ReadMany(vec![
-                Ok(Vec::new()),
-                Err(IoError::NotFound),
-            ])),
-            Ok(Reply::Lock(Lock::Acquired)),
-            Ok(Reply::Lock(Lock::Held)),
-            Ok(Reply::Done),
-            Err(IoError::NotFound),
-            Err(IoError::AlreadyExists),
-            Err(IoError::IsDirectory),
-            Err(IoError::NotDirectory),
-            Err(IoError::NotEmpty),
-            Err(IoError::NoSpace),
-            Err(IoError::Denied),
-            Err(IoError::IntoItself),
-            Err(IoError::SpliceRange),
-            Err(IoError::Crashed),
-            Err(IoError::Other("why".into())),
-        ];
-        results.extend(CAPABILITIES.map(|c| Err(IoError::Unsupported(c))));
-        results
-    }
-
-    #[test]
-    fn every_request_and_result_decodes_to_itself() {
-        for io in every_request() {
-            let bytes = encode_request(&io).unwrap();
-            assert_eq!(decode_request(&bytes), Ok(io));
-        }
-        for result in every_result() {
-            assert_eq!(decode_result(&encode_result(&result)), result);
-        }
-    }
-
-    #[test]
-    fn a_fill_does_not_cross() {
-        let fill = Io::Fill {
-            root: Root::Folder,
-            path: path("f"),
-            content: Content(0),
-        };
-        assert!(encode_request(&fill).is_err());
-    }
-
-    #[test]
-    fn every_cut_short_or_extended_encoding_is_refused() {
-        for io in every_request() {
-            let bytes = encode_request(&io).unwrap();
-            for end in 0..bytes.len() {
-                assert!(
-                    decode_request(&bytes[..end]).is_err(),
-                    "{io:?} cut at {end}"
-                );
-            }
-            let mut longer = bytes.clone();
-            longer.push(0);
-            assert_eq!(decode_request(&longer), Err(Malformed("trailing bytes")));
-        }
-        for result in every_result() {
-            let bytes = encode_result(&result);
-            for end in 0..bytes.len() {
-                let decoded = decode_result(&bytes[..end]);
-                assert!(
-                    matches!(&decoded, Err(IoError::Other(why)) if why.starts_with("the worker replied")),
-                    "{result:?} cut at {end}: {decoded:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn a_huge_count_is_refused_before_anything_is_allocated() {
-        let mut bytes = vec![4, 0];
-        bytes.extend_from_slice(&u64::MAX.to_le_bytes());
-        assert_eq!(
-            decode_request(&bytes),
-            Err(Malformed("a count past its end"))
-        );
-        let mut bytes = vec![5, 0];
-        bytes.extend_from_slice(&u64::MAX.to_le_bytes());
-        assert!(decode_request(&bytes).is_err());
-    }
-
-    #[test]
-    fn invalid_paths_tags_and_text_are_refused() {
-        let with_path = |text: &[u8]| {
-            let mut bytes = vec![1, 0];
-            bytes.extend_from_slice(&(text.len() as u64).to_le_bytes());
-            bytes.extend_from_slice(text);
-            bytes
-        };
-        assert_eq!(
-            decode_request(&with_path(b"a/../b")),
-            Err(Malformed("an invalid path"))
-        );
-        assert_eq!(
-            decode_request(&with_path(&[0xff])),
-            Err(Malformed("text that is not UTF-8"))
-        );
-        assert_eq!(decode_request(&[15]), Err(Malformed("an unknown request")));
-        assert_eq!(
-            decode_request(&with_path(b"a")[..1]),
-            Err(Malformed("a length past its end"))
-        );
-        let mut bad_root = with_path(b"a");
-        bad_root[1] = 2;
-        assert_eq!(decode_request(&bad_root), Err(Malformed("an unknown root")));
-    }
-
-    #[test]
-    fn capabilities_survive_their_bits() {
-        for bits in 0..32 {
-            assert_eq!(capability_bits(capabilities_from_bits(bits)), bits);
-        }
-        assert_eq!(capability_bits(Capabilities::ALL), 0b11111);
-        assert_eq!(capabilities_from_bits(0), Capabilities::NONE);
     }
 }

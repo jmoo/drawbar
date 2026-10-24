@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use drawbar::store::shown::{Change, Shown};
 use drawbar::store::{
-    Backend, Cmd, Event, Failure, Fault, Found, Intent, Key, LibPath, Moving, Picked, Root, Slot,
-    Source, Unrun, Worker,
+    Backend, Cmd, Event, Failure, Fault, Found, Intent, Key, LibPath, Moving, Picked, RescueIo,
+    Root, Slot, Source, Unrun, Worker, RESCUED,
 };
 use eframe::egui;
 use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
@@ -578,6 +578,51 @@ async fn a_change_whose_answers_are_lost_is_unheard_not_refused() {
         b"c3",
         "the save landed"
     );
+    tab.close().await;
+}
+
+/// A rescue written through a worker lands whole in the library's own state and is
+/// offered at the next open, and one a write left under its partial name is deleted.
+#[wasm_bindgen_test]
+async fn a_rescue_written_through_a_worker_is_offered_and_a_partial_one_deleted() {
+    wipe(&opfs().await).await;
+    let dir = Root::Private.local().join(RESCUED).unwrap();
+    let writer = Worker::rescues(&dir).await.unwrap();
+    let (whole, cut) = ("nord-rescued-1-1.npno", "nord-rescued-1-2.npno.partial");
+    let partial = format!("{whole}.partial");
+    let ask = async |io| writer.rescue(io).await.unwrap();
+    assert!(
+        ask(RescueIo::Free(whole.into())).await,
+        "no file has the name yet"
+    );
+    ask(RescueIo::Create(partial.clone())).await;
+    let bytes = b"the slot's sound".to_vec();
+    ask(RescueIo::Write {
+        name: partial.clone(),
+        offset: 0,
+        bytes,
+    })
+    .await;
+    ask(RescueIo::Sync(partial.clone())).await;
+    ask(RescueIo::Rename {
+        from: partial,
+        to: whole.into(),
+    })
+    .await;
+    assert!(
+        !ask(RescueIo::Free(whole.into())).await,
+        "the rescue is there"
+    );
+    ask(RescueIo::Create(cut.into())).await;
+    drop(writer);
+
+    let (mut tab, opened) = Tab::open(Root::Private).await;
+    assert!(matches!(opened, Event::Opened(Ok(_))), "{opened:?}");
+    let offered: Vec<String> = tab.backend.rescued().into_iter().map(|r| r.name).collect();
+    assert_eq!(offered, [whole]);
+    let held = toshokan::web::private_dir(&dir).await.unwrap();
+    let left = JsFuture::from(held.get_file_handle(cut)).await;
+    assert!(left.is_err(), "the partial rescue is deleted");
     tab.close().await;
 }
 

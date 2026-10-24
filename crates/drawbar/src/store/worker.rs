@@ -11,6 +11,10 @@
 //! is answered by `{closed}`. A fault in the worker is posted as `{failed}`, after which
 //! it answers nothing. `{listed, answered}` says how many files its listings have found
 //! and how many requests its storage has answered, each time either moves.
+//!
+//! Started for rescues instead, the worker keeps no library: each message is a
+//! [`RescueIo`] on the files of one directory of the origin private file system, which
+//! only a worker can write in place.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
@@ -28,7 +32,8 @@ use web_sys::{
     Url, WorkerOptions, WorkerType,
 };
 
-use toshokan::io::Root;
+use serde::{Deserialize, Serialize};
+use toshokan::io::{Io, Reply, Root};
 use toshokan::web::{CryptoRandom, DateClock, Executor, Folder};
 use toshokan::RelPath;
 
@@ -61,6 +66,29 @@ extern "C" {
     /// The URL of the glue this code was bound by, which the worker imports.
     #[wasm_bindgen(thread_local_v2, js_namespace = ["import", "meta"], js_name = url)]
     static GLUE: String;
+}
+
+/// One request of a worker started by [`Worker::rescues`], on the file of this name in
+/// its directory. [`Worker::rescue`] answers [`RescueIo::Free`] with whether no file has
+/// the name, and the others with `true` once done.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum RescueIo {
+    Free(String),
+    /// Make an empty file, never over one.
+    Create(String),
+    Write {
+        name: String,
+        offset: u64,
+        #[serde(with = "wire::bytes")]
+        bytes: Vec<u8>,
+    },
+    /// Make what was written durable, where the storage can.
+    Sync(String),
+    Rename {
+        from: String,
+        to: String,
+    },
+    Remove(String),
 }
 
 /// Why [`Worker::run`] gives no answers to a command.
@@ -116,6 +144,36 @@ impl Worker {
     /// Start the worker that keeps the library in `folder`, with this install's own state
     /// for it at `local` in the origin private file system, and wait until it is ready.
     pub async fn start(folder: Folder, local: &RelPath) -> Result<Worker, String> {
+        let (kind, dir, rename) = match folder {
+            Folder::Private(path) => ("private", JsValue::from_str(path.as_str()), true),
+            Folder::Picked { dir, rename } => ("picked", dir.into(), rename),
+        };
+        Worker::spawn(&[
+            ("kind", kind.into()),
+            ("folder", dir),
+            ("rename", rename.into()),
+            ("local", local.as_str().into()),
+        ])
+        .await
+    }
+
+    /// Start a worker that writes rescues in `dir` of the origin private file system,
+    /// and wait until it is ready.
+    pub async fn rescues(dir: &RelPath) -> Result<Worker, String> {
+        Worker::spawn(&[("kind", "rescues".into()), ("folder", dir.as_str().into())]).await
+    }
+
+    /// Do `io` in the directory of a worker started by [`Worker::rescues`].
+    pub async fn rescue(&self, io: RescueIo) -> Result<bool, String> {
+        if let Some(why) = &*self.replies.failed.borrow() {
+            return Err(why.clone());
+        }
+        let reply = self.reply(&io).await?;
+        from_js(&reply).and_then(wire::decode::<Result<bool, String>>)?
+    }
+
+    /// Start the worker, with `start` beside the bundle in its first message.
+    async fn spawn(start: &[(&str, JsValue)]) -> Result<Worker, String> {
         let parts = Array::of1(&JsValue::from_str(BOOTSTRAP));
         let kind = BlobPropertyBag::new();
         kind.set_type("text/javascript");
@@ -168,18 +226,11 @@ impl Worker {
         worker.set_onerror(Some(fail.as_ref().unchecked_ref()));
         worker.set_onmessageerror(Some(fail.as_ref().unchecked_ref()));
 
-        let (kind, dir, rename) = match folder {
-            Folder::Private(path) => ("private", JsValue::from_str(path.as_str()), true),
-            Folder::Picked { dir, rename } => ("picked", dir.into(), rename),
-        };
-        let start = object(&[
+        let bundle = [
             ("glue", GLUE.with(|url| JsValue::from_str(url))),
             ("module", wasm_bindgen::module()),
-            ("kind", kind.into()),
-            ("folder", dir),
-            ("rename", rename.into()),
-            ("local", local.as_str().into()),
-        ]);
+        ];
+        let start = object(&[&bundle[..], start].concat());
         let posted = worker.post_message(&start);
         let worker = Worker {
             worker,
@@ -241,7 +292,7 @@ impl Worker {
         if let Some(why) = &*self.replies.failed.borrow() {
             return Err(Unrun::Failed(why.clone()));
         }
-        let reply = self.reply(cmd).await.map_err(Unrun::Failed)?;
+        let reply = self.reply(&cmd).await.map_err(Unrun::Failed)?;
         let decoded = match self.unread.take() {
             true => Err("the page was made unable to read it".to_string()),
             false => from_js(&reply).and_then(wire::decode),
@@ -251,8 +302,8 @@ impl Worker {
     }
 
     /// The worker's reply to `cmd`, as it came.
-    async fn reply(&self, cmd: Cmd) -> Result<JsValue, String> {
-        let (message, transfer) = to_js(wire::encode(&cmd)?);
+    async fn reply(&self, cmd: &impl Serialize) -> Result<JsValue, String> {
+        let (message, transfer) = to_js(wire::encode(cmd)?);
         let id = self.replies.next.get();
         self.replies.next.set(id.wrapping_add(1));
         Reflect::set(&message, &"id".into(), &id.into()).map_err(js)?;
@@ -303,15 +354,24 @@ impl Drop for Worker {
 pub async fn serve(start: JsValue) {
     let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
     let signs = Arc::new(Signs::default());
-    let keeper = match keeper(&start, signs.clone()).await {
-        Ok(keeper) => keeper,
+    let served = match field(&start, "kind")
+        .and_then(|kind| kind.as_string())
+        .as_deref()
+    {
+        Some("rescues") => rescues(&start).await.map(Served::Rescues),
+        _ => keeper(&start, signs.clone())
+            .await
+            .map(|keeper| Served::Library(Box::new(keeper))),
+    };
+    let served = match served {
+        Ok(served) => served,
         Err(why) => {
             let _ = scope.post_message(&object(&[("failed", why.into())]));
             return;
         }
     };
     let queue = Rc::new(Queue {
-        keeper: RefCell::new(Some(keeper)),
+        served: RefCell::new(Some(served)),
         scope: scope.clone(),
         waiting: RefCell::default(),
         running: Cell::new(false),
@@ -366,6 +426,60 @@ async fn keeper(start: &JsValue, signs: Arc<Signs>) -> Result<Keeper<Counted<Exe
     Ok(Keeper::new(Counted::new(executor, signs), env))
 }
 
+/// The storage of the directory the page's first message names, for rescues.
+async fn rescues(start: &JsValue) -> Result<Executor, String> {
+    let dir = field(start, "folder").and_then(|dir| dir.as_string());
+    let dir = RelPath::new(&dir.ok_or("the page sent no folder")?).map_err(|e| e.to_string())?;
+    Executor::new(Folder::Private(dir.clone()), &dir)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Do `io` in the directory `fs` is on.
+async fn rescue(fs: &Executor, io: RescueIo) -> Result<bool, String> {
+    let at = |name: &str| RelPath::new(name).map_err(|e| e.to_string());
+    let root = Root::Folder;
+    let io = match io {
+        RescueIo::Free(name) => Io::Stat {
+            root,
+            path: at(&name)?,
+        },
+        RescueIo::Create(name) => Io::Create {
+            root,
+            path: at(&name)?,
+            bytes: Vec::new(),
+        },
+        RescueIo::Write {
+            name,
+            offset,
+            bytes,
+        } => Io::Write {
+            root,
+            path: at(&name)?,
+            offset,
+            bytes,
+        },
+        RescueIo::Sync(_) if !fs.capabilities(root).fsync => return Ok(true),
+        RescueIo::Sync(name) => Io::Sync {
+            root,
+            path: at(&name)?,
+        },
+        RescueIo::Rename { from, to } => Io::Rename {
+            root,
+            from: at(&from)?,
+            to: at(&to)?,
+        },
+        RescueIo::Remove(name) => Io::Remove {
+            root,
+            path: at(&name)?,
+        },
+    };
+    match fs.perform(io).await.map_err(|e| e.to_string())? {
+        Reply::Stat(found) => Ok(found.is_none()),
+        _ => Ok(true),
+    }
+}
+
 /// How the volume holding a folder the user picked compares names, as a look at it,
 /// which writes nothing, finds: a name's other case reaching the same entry. Where
 /// nothing there has a name with a case to swap: ignoring case on macOS and Windows,
@@ -404,10 +518,16 @@ fn platform() -> String {
         .to_lowercase()
 }
 
+/// What a worker serves: a library, or a directory rescues are written in.
+enum Served {
+    Library(Box<Keeper<Counted<Executor>>>),
+    Rescues(Executor),
+}
+
 /// Messages waiting for the keeper, run one at a time in arrival order.
 struct Queue {
     /// Taken while a command runs.
-    keeper: RefCell<Option<Keeper<Counted<Executor>>>>,
+    served: RefCell<Option<Served>>,
     scope: DedicatedWorkerGlobalScope,
     waiting: RefCell<VecDeque<JsValue>>,
     running: Cell<bool>,
@@ -461,22 +581,46 @@ impl Queue {
                 let never = Promise::new(&mut |_, _| {});
                 let _ = JsFuture::from(never).await;
             }
-            let keeper = self.keeper.take();
-            let Some(mut keeper) = keeper else {
+            let served = self.served.take();
+            let Some(mut served) = served else {
                 let id = field(&message, "id").unwrap_or(JsValue::NULL);
                 let closed = object(&[("id", id), ("failed", "the library is closed".into())]);
                 let _ = self.scope.post_message(&closed);
                 continue;
             };
             if field(&message, "close").is_some() {
-                keeper.close().await;
+                if let Served::Library(mut keeper) = served {
+                    keeper.close().await;
+                }
                 let _ = self.scope.post_message(&object(&[("closed", true.into())]));
                 continue;
             }
-            self.answer(&mut keeper, &message).await;
-            *self.keeper.borrow_mut() = Some(keeper);
+            match &mut served {
+                Served::Library(keeper) => self.answer(keeper, &message).await,
+                Served::Rescues(fs) => self.rescued(fs, &message).await,
+            }
+            *self.served.borrow_mut() = Some(served);
         }
         self.running.set(false);
+    }
+
+    async fn rescued(&self, fs: &Executor, message: &JsValue) {
+        let id = field(message, "id").unwrap_or(JsValue::NULL);
+        let done = match from_js(message).and_then(wire::decode::<RescueIo>) {
+            Ok(io) => rescue(fs, io).await,
+            Err(why) => Err(format!("the rescue worker was sent {why}")),
+        };
+        let posted = wire::encode(&done).and_then(|message| {
+            let (reply, transfer) = to_js(message);
+            let _ = Reflect::set(&reply, &"id".into(), &id);
+            self.scope
+                .post_message_with_transfer(&reply, &transfer)
+                .map_err(js)
+        });
+        if let Err(why) = posted {
+            let failed = object(&[("id", id), ("failed", why.into())]);
+            let _ = self.scope.post_message(&failed);
+        }
     }
 
     async fn answer(&self, keeper: &mut Keeper<Counted<Executor>>, message: &JsValue) {

@@ -10,7 +10,7 @@ use js_sys::{Array, Atomics, Function, Int32Array, Object, Promise, Reflect, Sha
 use toshokan::blocking::Backend;
 use toshokan::env::Random;
 use toshokan::io::Capabilities;
-use toshokan::web::{private_dir, wire, CryptoRandom, Executor, Folder};
+use toshokan::web::{private_dir, CryptoRandom, Executor, Folder};
 use toshokan::{Io, IoError, IoResult, RelPath, Root};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -21,7 +21,7 @@ use web_sys::{
     Url, WorkerOptions, WorkerType,
 };
 
-use super::{path, Driven, Fill};
+use super::{path, wire, Driven, Fill};
 
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
