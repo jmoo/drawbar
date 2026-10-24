@@ -23,8 +23,8 @@ use crate::reader::{Reader, Stamp, WriterFile, MAX_FILE};
 use crate::report::{Rekey, Start};
 
 /// The length past which an append seals the open segment and opens another. A
-/// picked folder in Chromium copies a whole file to append to it, at about
-/// 1.5 ms per MiB by measurement, so this bounds an append's copy.
+/// picked folder in Chromium copies a whole file to append to it, so this bounds
+/// an append's copy.
 pub const SEGMENT_BOUND: u64 = 1 << 20;
 
 pub struct Writer {

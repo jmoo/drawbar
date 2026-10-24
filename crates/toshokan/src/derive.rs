@@ -1401,14 +1401,6 @@ fn keep_beside(beside: &mut Beside, writer: WriterId, contribution: &Contributio
         .extend(contribution.extended.iter().cloned());
 }
 
-/// The genesis entry's writer, for a reader that has nothing else of it.
-pub fn genesis_writer(entry: &Entry) -> Option<WriterId> {
-    match entry.kind() {
-        EntryKind::Genesis(genesis) => Some(genesis.writer),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -196,8 +196,8 @@ fn now() -> f64 {
 
 /// Resolves once the event loop has run the tasks waiting for the thread, by a
 /// message the page posts to itself, which no timer clamps.
-// ⚠️ `scheduler.yield()` would run the core ahead of the waiting tasks: measured
-// in Chrome 151, frames then came about 100 ms apart while the core worked.
+// ⚠️ `scheduler.yield()` would run the core ahead of the waiting tasks, and
+// frames would then come far apart while the core worked.
 async fn give_back() {
     let Ok(channel) = MessageChannel::new() else {
         return;

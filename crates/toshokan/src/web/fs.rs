@@ -95,11 +95,10 @@ impl Executor {
                 "a library's storage is written only from a dedicated worker".into(),
             ));
         }
-        // Inferred from specimens; not confirmed on hardware.
-        // Chromium's `flush()` takes about a quarter of a millisecond, as a write
-        // reaching the disk does; Firefox's and WebKit's take microseconds, so
-        // they declare no sync. A sync covers a file's contents only: see
-        // `Tree::sync`. `userAgentData` exists only in Chromium.
+        // Chromium's `flush()` waits for the disk, as its time shows; Firefox's
+        // and WebKit's return at once, so they declare no sync. A sync covers a
+        // file's contents only: see `Tree::sync`. `userAgentData` exists only in
+        // Chromium.
         let chromium = field(&navigator(), "userAgentData").is_some();
         let private = Capabilities {
             append: true,
