@@ -554,15 +554,13 @@ the names the library's view holds come back if the library refuses it.
 
 ### Undo
 
-Every intent is one step of this session's undo, and only this session's: an
-undo takes back the last change this drawbar made and has not undone, with
-toshokan restoring what the trash holds, and refuses where another drawbar
-changed the same thing since. The Edit menu names each step by its intent and
-what it names (`Intent::describe`), from the steps the library made
-(`Committed::made`); a change that failed is no step. The workspace follows what
-an undo moved or changed without a word about changes outside drawbar
-(`Viewed::undone`). A folder's rename is undone as one move back, which leaves
-no folder behind.
+Every intent is one step of this session's undo, and only this session's. What
+an undo takes back, and when it is refused because another drawbar changed the
+same thing since, is in [Undo and redo](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#undo-and-redo). The Edit menu names
+each step by its intent and what it names (`Intent::describe`), from the steps
+the library made (`Committed::made`); a change that failed is no step. The
+workspace follows what an undo moved or changed without a word about changes
+outside drawbar (`Viewed::undone`).
 
 ## Writes and crash safety
 
@@ -810,10 +808,10 @@ be written holds what is opened into it in memory.
 
 In the browser:
 
-- Firefox and Safari have no `showDirectoryPicker`, so **Open library folder…**
-  is absent and the library is always the private file system. Brave ships the
-  API turned off; the item is grayed out until
-  `brave://flags/#file-system-access-api` is on.
+- Where the browser has no `showDirectoryPicker`, **Open library folder…** is
+  absent and the library is always the private file system; where the API is
+  turned off, the item is grayed out. Which browsers have it is on
+  [What is supported](../getting-started/support.md).
 - A picked folder's write permission lasts until drawbar.app closes, unless the
   user allowed the site on every visit. A handle restored from IndexedDB comes
   back without it, so at start drawbar opens the private library, and **File ▸
@@ -824,14 +822,13 @@ In the browser:
   storage quota does not apply to one. **Help ▸ About drawbar** shows how much of
   the quota drawbar uses: the private library, or a picked folder's drafts and
   slot edits, which are kept in the private file system.
-- The first write to a library calls `navigator.storage.persist()`.
-  Firefox asks the user; other browsers decide for themselves. Where the browser
-  gives the page no storage, as some private windows do, drawbar says so and
-  the library lasts until the tab closes.
-- A tab and the desktop app on one picked folder are two installs, each a writer
-  of its own, as two computers that sync the folder are. So are two tabs that each
-  pick one folder before either has saved the recent list, since each gives the
-  folder an id of its own.
+- The first write to a library calls `navigator.storage.persist()`, which the
+  browser grants, refuses or asks the user about. Where the browser gives the page
+  no storage, drawbar says so and the library lasts until the tab closes.
+- A tab and the desktop app on one picked folder are two installs, as two
+  computers that sync the folder are (see [Writers](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#writers)). So are two tabs
+  that each pick one folder before either has saved the recent list, since each
+  gives the folder an id of its own.
 - A picked folder renames files only in the browsers
   [What is supported](../getting-started/support.md) names; elsewhere every move
   copies the file and removes the old one (`toshokan::web::Folder::picked`).
