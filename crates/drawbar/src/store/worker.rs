@@ -63,6 +63,15 @@ extern "C" {
     static GLUE: String;
 }
 
+/// Why [`Worker::run`] gives no answers to a command.
+#[derive(Debug)]
+pub enum Unrun {
+    /// The worker did not run it: why.
+    Failed(String),
+    /// The worker ran it, and the page could not read its answers: why.
+    Unread(String),
+}
+
 /// The page's side of a library's worker. Dropping it ends the worker, which lets go of
 /// what it held.
 pub struct Worker {
@@ -70,6 +79,8 @@ pub struct Worker {
     replies: Rc<Replies>,
     /// Whether an answer was lost, so the next must show the whole view.
     lost: Cell<bool>,
+    /// Whether the page takes the next answer for one it cannot read.
+    unread: Cell<bool>,
     _hear: Closure<dyn FnMut(MessageEvent)>,
     _fail: Closure<dyn FnMut(JsValue)>,
 }
@@ -174,6 +185,7 @@ impl Worker {
             worker,
             replies,
             lost: Cell::new(false),
+            unread: Cell::new(false),
             _hear: hear,
             _fail: fail,
         };
@@ -205,6 +217,7 @@ impl Worker {
         let name = match fault {
             super::Fault::Trap => "trap",
             super::Fault::Stall => "stall",
+            super::Fault::Unread => return self.unread.set(true),
         };
         let _ = self.worker.post_message(&object(&[(name, true.into())]));
     }
@@ -224,10 +237,21 @@ impl Worker {
     }
 
     /// Run `cmd` in the worker, and every answer it gave.
-    pub async fn run(&self, cmd: Cmd) -> Result<Vec<Event>, String> {
+    pub async fn run(&self, cmd: Cmd) -> Result<Vec<Event>, Unrun> {
         if let Some(why) = &*self.replies.failed.borrow() {
-            return Err(why.clone());
+            return Err(Unrun::Failed(why.clone()));
         }
+        let reply = self.reply(cmd).await.map_err(Unrun::Failed)?;
+        let decoded = match self.unread.take() {
+            true => Err("the page was made unable to read it".to_string()),
+            false => from_js(&reply).and_then(wire::decode),
+        };
+        self.lost.set(decoded.is_err());
+        decoded.map_err(Unrun::Unread)
+    }
+
+    /// The worker's reply to `cmd`, as it came.
+    async fn reply(&self, cmd: Cmd) -> Result<JsValue, String> {
         let (message, transfer) = to_js(wire::encode(&cmd)?);
         let id = self.replies.next.get();
         self.replies.next.set(id.wrapping_add(1));
@@ -247,9 +271,7 @@ impl Worker {
         if let Some(why) = field(&reply, "failed") {
             return Err(describe(&why));
         }
-        let decoded = from_js(&reply).and_then(wire::decode);
-        self.lost.set(decoded.is_err());
-        decoded
+        Ok(reply)
     }
 
     /// Let the library go, once every command sent has run.

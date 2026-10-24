@@ -57,7 +57,7 @@ pub use web::{default_root, permission, Backend, Picked, Root};
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web::{remove_private, settle};
 #[cfg(target_arch = "wasm32")]
-pub use worker::Worker;
+pub use worker::{Unrun, Worker};
 
 /// The folder of this install's own state for a library that holds the slots' former
 /// occupants a write to the instrument leaves while the library is open.
@@ -444,6 +444,9 @@ pub enum Failure {
     /// the file's length.
     Room(u64),
     Io(String),
+    /// The answer that would say whether it was done was lost: a look at the folder
+    /// finds out.
+    Unheard,
 }
 
 /// Some bytes of a file outside the library, and the CRC-32 they must have: a member of
@@ -543,7 +546,7 @@ pub enum Cmd {
     Redo,
     /// Keep an unsaved edit of the file `of` names, made over the file of identity
     /// `base`, in this install's own state, never in the folder, and once it is kept,
-    /// let go of the drafts it `replaces`. Answered only on failure, by [`Event::Unkept`].
+    /// let go of the drafts it `replaces`. Answered by [`Event::Drafted`].
     Draft {
         of: Key,
         base: toshokan::Identity,
@@ -962,6 +965,9 @@ pub enum Fault {
     Trap,
     /// It never finishes the command it takes next.
     Stall,
+    /// The page cannot read the answer to the command the worker takes next.
+    #[cfg(target_arch = "wasm32")]
+    Unread,
 }
 
 /// What a backend answers.
@@ -977,6 +983,10 @@ pub enum Event {
         label: String,
         made: Option<toshokan::EntryHash>,
         result: Result<Viewed, String>,
+    },
+    /// The answers to the change `label` were lost: whether it was made is not known.
+    Unheard {
+        label: String,
     },
     /// The trash grew past what it holds in a session, and its oldest items went: the
     /// entries whose undo needed them.
@@ -1011,7 +1021,12 @@ pub enum Event {
     /// A command other than a save, a copy or a move failed: what it was doing, and
     /// why.
     Failed(String),
-    /// An unsaved edit could not be kept as a draft, or let go of: why.
+    /// Whether [`Cmd::Draft`] kept the unsaved edit of the file `of` names.
+    Drafted {
+        of: Key,
+        kept: Result<(), String>,
+    },
+    /// An unsaved edit could not be let go of, or a slot's edit kept: why.
     Unkept(String),
     /// The edit [`Cmd::ReadSlot`] found kept of a slot's view, with the hash of the
     /// slot's bytes it was made over, or why it could not be read.
@@ -1033,7 +1048,9 @@ impl Event {
             Event::Committed { result: Err(_), .. } => one("intent"),
             Event::Moved { result: Err(_), .. } => one("move"),
             Event::Failed(_) => one("write"),
-            Event::Unkept(_) | Event::SlotKept { kept: Err(_), .. } => one("draft"),
+            Event::Unkept(_)
+            | Event::Drafted { kept: Err(_), .. }
+            | Event::SlotKept { kept: Err(_), .. } => one("draft"),
             Event::Read(answers) => answers
                 .iter()
                 .filter_map(|(_, result)| result.as_ref().err())
@@ -1042,7 +1059,9 @@ impl Event {
             Event::Saved { result, .. } => SAVE.failed(result),
             Event::Imported { result, .. } => IMPORT.failed(result),
             Event::Rewritten { result, .. } => REWRITE.failed(result),
+            Event::Unheard { .. } => one("unheard"),
             Event::Opened(Ok(_))
+            | Event::Drafted { kept: Ok(()), .. }
             | Event::SlotKept { kept: Ok(_), .. }
             | Event::Trimmed(_)
             | Event::Scanned(Ok(_))
@@ -1065,6 +1084,7 @@ impl Codes {
             Failure::Moved => self.changed,
             Failure::Room(_) => self.room,
             Failure::Io(_) => self.io,
+            Failure::Unheard => "unheard",
         }
     }
 

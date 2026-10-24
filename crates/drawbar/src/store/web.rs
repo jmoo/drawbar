@@ -390,7 +390,7 @@ async fn drive(
             (Cmd::Read { files, room }, Ok(folder), _) => {
                 vec![Event::Read(exec::read_all(folder, files, room).await)]
             }
-            (cmd @ Cmd::Read { .. }, Err(why), _) => refused(&cmd)(why),
+            (cmd @ Cmd::Read { .. }, Err(why), _) => refused(&cmd).answers(why, true),
             (cmd, _, Ok(worker)) => {
                 let refusal = refused(&cmd);
                 if let Some(fault) = heard.borrow_mut().fault.take() {
@@ -401,10 +401,11 @@ async fn drive(
                 heard.borrow_mut().running = None;
                 match ran {
                     Ok(answers) => answers,
-                    Err(why) => refusal(&why),
+                    Err(super::worker::Unrun::Failed(why)) => refusal.answers(&why, true),
+                    Err(super::worker::Unrun::Unread(why)) => refusal.answers(&why, false),
                 }
             }
-            (cmd, Err(why), _) | (cmd, _, Err(why)) => refused(&cmd)(why),
+            (cmd, Err(why), _) | (cmd, _, Err(why)) => refused(&cmd).answers(why, true),
         };
         if let Root::Picked(picked) = &root {
             let failed = answers.iter().any(|answer| !answer.faults().is_empty());
@@ -522,9 +523,10 @@ async fn either<A: Future, B: Future>(a: A, b: B) -> Either<A::Output, B::Output
     .await
 }
 
-/// The answers to `cmd` where it could not run, for `why`: each change to a file says it
-/// did not land, so nothing waits on it.
-fn refused(cmd: &Cmd) -> impl FnOnce(&str) -> Vec<Event> + 'static {
+/// How to answer `cmd` where it could not run, or its answers could not be read: each
+/// change to a file says it did not land, or that whether it did is unheard, so nothing
+/// waits on it.
+fn refused(cmd: &Cmd) -> Refusing {
     let refusing = match cmd {
         Cmd::Open => Refusing::Open,
         Cmd::Rescan | Cmd::Refresh => Refusing::Scan,
@@ -538,13 +540,12 @@ fn refused(cmd: &Cmd) -> impl FnOnce(&str) -> Vec<Event> + 'static {
             .to_string(),
             Vec::new(),
         ),
-        Cmd::Draft { .. } | Cmd::Discard(_) | Cmd::KeepSlot { .. } | Cmd::DiscardSlot(_) => {
-            Refusing::Kept
-        }
+        Cmd::Draft { of, .. } => Refusing::Draft(of.clone()),
+        Cmd::Discard(_) | Cmd::KeepSlot { .. } | Cmd::DiscardSlot(_) => Refusing::Kept,
         Cmd::ReadSlot(slot) => Refusing::Slot(slot.clone()),
         Cmd::Read { files, .. } => Refusing::Read(files.iter().map(|(id, ..)| *id).collect()),
     };
-    move |why| refusing.answers(why)
+    refusing
 }
 
 /// What a command that could not run is answered with.
@@ -553,6 +554,7 @@ enum Refusing {
     Scan,
     /// The intent's label, and the answer each change to a file in it owes.
     Intent(String, Vec<Owing>),
+    Draft(super::Key),
     Kept,
     Slot(super::Slot),
     Read(Vec<u64>),
@@ -583,11 +585,20 @@ fn parts(intent: &Intent) -> Vec<Owing> {
 }
 
 impl Refusing {
-    fn answers(self, why: &str) -> Vec<Event> {
-        let failed = || Failure::Io(why.to_string());
+    /// The answers for `why`, where the worker did not run the command when `heard`,
+    /// and otherwise ran it and its answers were lost.
+    fn answers(self, why: &str, heard: bool) -> Vec<Event> {
+        let failed = || match heard {
+            true => Failure::Io(why.to_string()),
+            false => Failure::Unheard,
+        };
         match self {
             Refusing::Open => vec![Event::Opened(Err(why.to_string()))],
             Refusing::Scan => vec![Event::Scanned(Err(why.to_string()))],
+            Refusing::Draft(of) => vec![Event::Drafted {
+                of,
+                kept: Err(why.to_string()),
+            }],
             Refusing::Kept => vec![Event::Unkept(why.to_string())],
             Refusing::Slot(slot) => vec![Event::SlotKept {
                 slot,
@@ -619,10 +630,13 @@ impl Refusing {
                         result: Err(why.to_string()),
                     },
                 });
-                let committed = Event::Committed {
-                    label,
-                    made: None,
-                    result: Err(why.to_string()),
+                let committed = match heard {
+                    true => Event::Committed {
+                        label,
+                        made: None,
+                        result: Err(why.to_string()),
+                    },
+                    false => Event::Unheard { label },
                 };
                 owed.chain(std::iter::once(committed)).collect()
             }

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use drawbar::store::shown::{Change, Shown};
 use drawbar::store::{
     Backend, Cmd, Event, Failure, Fault, Found, Intent, Key, LibPath, Moving, Picked, Root, Slot,
-    Source, Worker,
+    Source, Unrun, Worker,
 };
 use eframe::egui;
 use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
@@ -305,7 +305,10 @@ async fn the_whole_workflow_in(root: Root) {
             replaces: Vec::new(),
         })
         .await;
-    assert!(kept.is_empty(), "{kept:?}");
+    assert!(
+        matches!(&kept[..], [Event::Drafted { of, kept: Ok(()) }] if *of == a),
+        "{kept:?}"
+    );
     let slot = Slot {
         instrument: "Electro 5".into(),
         class: 4,
@@ -480,7 +483,7 @@ async fn a_worker_that_faults_says_so_and_a_fresh_one_opens_the_library() {
     worker.fault(Fault::Trap);
     let refused = worker.run(Cmd::Rescan).await;
     assert!(
-        refused.as_ref().is_err_and(|why| why.contains("stopped")),
+        matches!(&refused, Err(Unrun::Failed(why)) if why.contains("stopped")),
         "{refused:?}"
     );
     assert!(worker.stopped().is_some());
@@ -518,6 +521,44 @@ async fn the_answer_after_one_the_page_lost_shows_the_whole_view() {
     assert!(whole(&shown(&worker).await), "the whole view");
     assert!(!whole(&shown(&worker).await), "what changed again");
     worker.close().await;
+}
+
+/// A change whose answers the page cannot read is answered as unheard, never as one that
+/// did not land: the save landed, and the store looks to find out.
+#[wasm_bindgen_test]
+async fn a_change_whose_answers_are_lost_is_unheard_not_refused() {
+    wipe(&opfs().await).await;
+    let (mut tab, opened) = Tab::open(Root::Private).await;
+    assert!(matches!(opened, Event::Opened(Ok(_))), "{opened:?}");
+    tab.backend.fault(Fault::Unread);
+    let answers = tab
+        .ask(Cmd::Intent(Intent::Save {
+            id: 1,
+            path: path("c3.ne5p"),
+            bytes: b"c3".to_vec(),
+            expect: Expect::Absent,
+            came: None,
+        }))
+        .await;
+    assert!(
+        matches!(
+            &answers[..],
+            [
+                Event::Saved {
+                    result: Err(Failure::Unheard),
+                    ..
+                },
+                Event::Unheard { .. }
+            ]
+        ),
+        "{answers:?}"
+    );
+    assert_eq!(
+        read(&mut tab, "c3.ne5p").await.unwrap(),
+        b"c3",
+        "the save landed"
+    );
+    tab.close().await;
 }
 
 /// A worker that never finishes a command shows no sign of life for as long, and once it

@@ -5897,3 +5897,98 @@ fn a_session_whose_history_forked_says_it_goes_on_with_its_own() {
         assert_eq!(session.said("their histories split"), 1);
     }
 }
+
+/// An unsaved edit an earlier session kept, of a file that goes before drawbar reads it,
+/// stays kept for when the file is back.
+#[test]
+fn an_edit_waiting_for_its_file_to_be_read_is_kept_when_the_file_goes() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut first = Session::open(&root);
+    let grand = first.named("Grand.ne5p");
+    let edited = first.edit(grand, "12");
+    first.autosave();
+    first.close();
+
+    let mut second = Session::listed(&root);
+    let away = Temp::new();
+    fs::rename(root.at("Grand.ne5p"), away.at("Grand.ne5p")).unwrap();
+    second.settle();
+    second.autosave();
+    assert_eq!(
+        second.said("The unsaved edit of “Grand.ne5p” is still kept"),
+        1
+    );
+    second.close();
+
+    fs::rename(away.at("Grand.ne5p"), root.at("Grand.ne5p")).unwrap();
+    let third = Session::open(&root);
+    let grand = third.named("Grand.ne5p");
+    assert!(third.bytes(grand) == edited, "the edit is back");
+}
+
+/// An unsaved edit sent to be kept behind a command the library's thread faults on is
+/// named as lost when the library is let go, since it was never kept.
+#[test]
+fn an_edit_sent_to_be_kept_behind_a_fault_is_named_as_lost() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.edit(id, "96");
+    session.store.fault(Fault::Trap);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Full);
+    for _ in 0..1000 {
+        if session.store.stopped().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(session.store.stopped().is_some(), "the thread stopped");
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        log,
+        ..
+    } = &mut session.bench;
+    session.store.close(workspace, browser, queue, log);
+    let said = session.said("could not be written, since the library stopped answering");
+    assert_eq!(said, 1, "the edit is named");
+}
+
+/// An unsaved edit's draft stays while a save of it is in flight, so a save that fails
+/// leaves the edit kept for the next session whatever happens next.
+#[cfg(unix)]
+#[test]
+fn a_draft_stays_while_its_save_is_in_flight() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let edited = session.edit(id, "96");
+    session.autosave();
+    let mode = |mode| fs::set_permissions(&root.0, fs::Permissions::from_mode(mode)).unwrap();
+    mode(0o555);
+    session.bench.workspace.mark_saved(id);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Files);
+    session.store.sync(workspace, browser, Pass::Full);
+    session.settle();
+    mode(0o755);
+    assert!(session.bench.workspace.get(id).unwrap().is_unsaved());
+    let crashed = Temp::new();
+    copy_tree(&root.0, &crashed.0);
+    copy_tree(&root.local(), &crashed.local());
+
+    let again = Session::open(&crashed);
+    let id = again.only();
+    assert!(again.bytes(id) == edited, "the edit is back");
+}

@@ -127,9 +127,7 @@ impl<F: Fs> Keeper<F> {
                     }
                     kept = self.discard(replaced).await;
                 }
-                if let Err(why) = kept {
-                    answer(Event::Unkept(why));
-                }
+                answer(Event::Drafted { of, kept });
             }
             Cmd::Discard(kept) => {
                 if let Err(why) = self.discard(kept).await {
@@ -671,6 +669,7 @@ impl Answering {
             Failure::Io(why) => why.clone(),
             Failure::Moved => "the file changed on disk".to_string(),
             Failure::Room(len) => format!("{len} bytes do not fit"),
+            Failure::Unheard => "its answer was lost".to_string(),
         };
         Some(match self {
             Answering::Saved { id, path, .. } => Event::Saved {

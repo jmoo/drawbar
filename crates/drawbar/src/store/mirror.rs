@@ -159,6 +159,9 @@ pub struct Store {
     /// The unsaved edits kept as drafts, by asset: the key each is kept under, the stamp
     /// of what it holds, and the identity of the file it was made over.
     drafted: BTreeMap<u64, (Key, u64, toshokan::Identity)>,
+    /// The drafts sent and not answered yet, in the order sent, as [`Store::drafted`]
+    /// holds each once it is kept.
+    drafting: VecDeque<(u64, Key, u64, toshokan::Identity)>,
     /// The drafts an earlier session kept, each put back over its asset once its file is
     /// read: as it is kept, and whether its file changed since the draft was made.
     restoring: BTreeMap<u64, (super::Kept, Draft, bool, Option<toshokan::Hlc>)>,
@@ -275,6 +278,7 @@ impl Store {
             rechecking: BTreeSet::new(),
             moved: BTreeSet::new(),
             drafted: BTreeMap::new(),
+            drafting: VecDeque::new(),
             restoring: BTreeMap::new(),
             superseded: BTreeMap::new(),
             instrument: None,
@@ -438,9 +442,16 @@ impl Store {
         }
         for (id, kept) in std::mem::take(&mut self.drafted) {
             let unsaved = workspace.get(id).is_some_and(LocalEntity::is_unsaved);
-            match unsaved && self.ids.key(id) == Some(&kept.0) {
-                true => _ = self.drafted.insert(id, kept),
-                false => self.send(Cmd::Discard(super::Kept::own(kept.0))),
+            let saving = self.records.get(&id).is_some_and(|record| record.saving);
+            match (unsaved || saving, self.ids.key(id) == Some(&kept.0)) {
+                (true, true) => _ = self.drafted.insert(id, kept),
+                // The draft under the key it went by goes once the one under its new
+                // key is kept.
+                (true, false) => {
+                    let superseded = self.superseded.entry(id).or_default();
+                    superseded.push(super::Kept::own(kept.0));
+                }
+                (false, _) => self.send(Cmd::Discard(super::Kept::own(kept.0))),
             }
         }
         let held = |id: &u64| workspace.get(*id).is_some();
@@ -456,11 +467,12 @@ impl Store {
                 self.send(Cmd::Discard(kept));
             }
         }
+        let saving = |id: &u64| self.records.get(id).is_some_and(|record| record.saving);
         let settled: Vec<u64> = self
             .superseded
             .keys()
             .copied()
-            .filter(|id| !unsaved(id))
+            .filter(|id| !unsaved(id) && !saving(id))
             .collect();
         for id in settled {
             for kept in self.superseded.remove(&id).unwrap_or_default() {
@@ -476,7 +488,13 @@ impl Store {
                 Some((edit, stamp)) => (Draft::Edit(edit.clone()), stamp),
                 None => (Draft::Bytes(entity.bytes.to_vec()), entity.stamp),
             };
-            if self.drafted.get(&entity.id) == Some(&(key.clone(), stamp, base)) {
+            let sent = self.drafting.iter().rev().find(|sent| sent.0 == entity.id);
+            let latest = sent.map(|(_, key, stamp, base)| (key, *stamp, *base));
+            let latest = latest.or_else(|| {
+                let kept = self.drafted.get(&entity.id)?;
+                Some((&kept.0, kept.1, kept.2))
+            });
+            if latest == Some((&key, stamp, base)) {
                 continue;
             }
             let Ok(bytes) = draft.encode() else {
@@ -491,7 +509,7 @@ impl Store {
                 bytes,
                 replaces,
             });
-            self.drafted.insert(entity.id, (key, stamp, base));
+            self.drafting.push_back((entity.id, key, stamp, base));
         }
     }
 
@@ -1235,6 +1253,10 @@ impl Store {
                     workspace.unreadable(id, why, log);
                     continue;
                 }
+                Err(Failure::Unheard) => {
+                    workspace.unreadable(id, "its answer was lost".to_string(), log);
+                    continue;
+                }
             };
             let Some(record) = self.records.get_mut(&id) else {
                 continue;
@@ -1382,6 +1404,15 @@ impl Store {
                     }
                 }
             }
+            Event::Unheard { label } => {
+                self.committing = self.committing.saturating_sub(1);
+                self.answering.pop_front();
+                log.say(format!(
+                    "drawbar lost the library's answer to “{label}”, so it looks at the \
+                     folder to see what changed."
+                ));
+                self.rescan();
+            }
             Event::Read(answers) => {
                 let rechecked = answers.iter().all(|(id, _)| self.rechecking.contains(id));
                 self.took(answers, workspace, browser, queue, log);
@@ -1421,6 +1452,21 @@ impl Store {
             }
             Event::SlotKept { slot, kept } => {
                 self.restore_slot_edit(&slot, kept, workspace, browser, log);
+            }
+            Event::Drafted { of, kept } => {
+                let sent = self.drafting.pop_front();
+                match (sent, kept) {
+                    (Some((id, key, stamp, base)), Ok(())) if key == of => {
+                        self.drafted.insert(id, (key, stamp, base));
+                    }
+                    (_, Ok(())) => {}
+                    (_, Err(why)) => {
+                        log.error(format!("keeping an unsaved edit: {why}"));
+                        log.trouble(format!(
+                            "An unsaved edit could not be kept for later: {why}."
+                        ));
+                    }
+                }
             }
             Event::Unkept(why) => {
                 log.error(format!("keeping an unsaved edit: {why}"));
@@ -2601,6 +2647,13 @@ impl Store {
         if !self.quiet {
             log.say(format!("“{name}” was deleted outside drawbar."));
         }
+        // The draft stays in this install's own state, and an open that finds the file
+        // again puts it back.
+        if self.restoring.remove(&id).is_some() {
+            log.say(format!(
+                "The unsaved edit of “{name}” is still kept, for when its file is back."
+            ));
+        }
         Vanished::Deleted
     }
 
@@ -2639,19 +2692,25 @@ impl Store {
                 self.records.remove(&id);
                 workspace.unplace(id);
                 self.rescan();
-                "a file of that name appeared in the folder first".to_string()
+                Some("a file of that name appeared in the folder first".to_string())
             }
             Err(Failure::Moved) => {
                 self.rescan();
-                "it changed on disk since drawbar read it".to_string()
+                Some("it changed on disk since drawbar read it".to_string())
             }
-            Err(Failure::Room(_)) => too_much(),
-            Err(Failure::Io(why)) => why,
+            Err(Failure::Room(_)) => Some(too_much()),
+            Err(Failure::Io(why)) => Some(why),
+            // ⚠️ Kept unsaved until the look the change's answer asks for finds the file
+            // holds it, which it may.
+            Err(Failure::Unheard) => None,
         };
         workspace.unsave(id);
         if let (Some(record), Some(entity)) = (self.records.get_mut(&id), workspace.get(id)) {
             record.saved = entity.saved.stamp();
         }
+        let Some(why) = why else {
+            return;
+        };
         log.error(format!("saving {path}: {why}"));
         log.trouble(format!(
             "“{name}” was not saved, because {why}. The edit is kept and still unsaved."
@@ -2700,6 +2759,7 @@ impl Store {
             }
             Err(Failure::Room(_)) => too_much(),
             Err(Failure::Io(why)) => why,
+            Err(Failure::Unheard) => return workspace.edit_not_saved(id),
         };
         workspace.edit_not_saved(id);
         let name = workspace
@@ -2807,6 +2867,8 @@ impl Store {
             Err(Failure::Moved) => "it changed on disk since drawbar read it".to_string(),
             Err(Failure::Room(_)) => too_much(),
             Err(Failure::Io(why)) => why,
+            // A copy that landed is found by the look as a file of the library's.
+            Err(Failure::Unheard) => "its answer was lost".to_string(),
         };
         log.error(format!("copying {name} into the library: {why}"));
         // A copy moved over this file from another that did not land leaves that one.
