@@ -221,6 +221,7 @@ mod tests {
                 takes: Some(KeptDo::Gain("Live".to_string())),
                 forgotten: true,
             }],
+            uncertain: true,
         };
         let back: KeptApart = decode(encode(&kept).unwrap()).unwrap();
         assert_eq!(back, kept);

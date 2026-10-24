@@ -724,7 +724,8 @@ certified it. Every view the store sends carries them as `Viewed::kept`, each a
 (`Folders::kept`), logging each run once. A card lists a row per change the user
 would tell apart (`kept_rows`): a tag's entry in the list of tags only where no
 asset in the run wears it, and a file change only where the asset's file is
-elsewhere; its title counts those rows. `Intent::Take` makes the
+elsewhere; its title counts those rows. A card whose item is `uncertain` says it
+may be its writer's own older changes. `Intent::Take` makes the
 named changes of a run, or all of them, in one entry the user can undo; taking a
 tag also takes the run's entry for it in the list of tags, and taking a file change
 binds the entity to the file the run names, which toshokan refuses

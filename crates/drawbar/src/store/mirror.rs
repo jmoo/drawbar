@@ -1815,6 +1815,7 @@ impl Store {
                     run: kept.run,
                     title: kept_title(kept, rows.len()),
                     rows,
+                    uncertain: kept.uncertain,
                 }
             })
             .collect();
@@ -4034,6 +4035,7 @@ mod tests {
             },
             span: (0, 0),
             changes: Vec::new(),
+            uncertain: false,
         };
         let title = |label, rows| kept_title(&kept(label), rows);
         assert!(title("drawbar", 2).starts_with("Another drawbar made 2 changes on a branch"));

@@ -160,9 +160,14 @@ Nothing kept apart changes your library until you choose to:
   other sound; otherwise the activity log says why it was not taken.
 - **Dismiss…** stops showing a branch, on this computer and every other. It
   cannot be undone. A branch whose changes you have all taken says there is
-  nothing left to review, and offers only this.
+  nothing left to review, and offers only this. A branch you dismissed can show
+  again once the drawbar that made it goes on with it; dismiss it again if you
+  still don't want it.
 - **Show file** shows a sound a branch left without a file, which cannot be
   taken.
+
+A card may say its changes could be that drawbar's own older changes, which it
+has replaced since. Taking one of them may bring back what it replaced.
 
 A change marked as settling a value no one holds now replaced something every
 computer has since let go of. Taking it is the only way to make it.

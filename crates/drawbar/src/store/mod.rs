@@ -818,6 +818,8 @@ pub struct KeptApart {
     pub span: (u64, u64),
     /// What taking them would change; none once the library holds all they say.
     pub changes: Vec<KeptChange>,
+    /// They may be their writer's own older changes, which it replaced since.
+    pub uncertain: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -900,6 +902,7 @@ impl KeptApart {
                     forgotten: change.forgotten,
                 })
                 .collect(),
+            uncertain: item.uncertain,
         }
     }
 }

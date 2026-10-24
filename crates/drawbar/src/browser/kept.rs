@@ -18,6 +18,10 @@ const ABOUT: &str = "These changes were made where the library's history split, 
                      mixing them in. Take the changes you want; dismiss a branch you don't \
                      want.";
 
+/// What a card says of changes that may be their writer's own older ones.
+const UNCERTAIN: &str = "These may be its own older changes, which it has replaced since: taking \
+                         one may bring back what it replaced.";
+
 /// What a card offers, by its kind: whether each change can be taken, and whether the
 /// whole run can be taken and dismissed.
 pub(crate) fn offers(kind: KeptKind) -> (bool, bool) {
@@ -115,6 +119,9 @@ fn card(
                 )
                 .wrap(),
             );
+        }
+        if kept.uncertain {
+            ui.add(egui::Label::new(egui::RichText::new(UNCERTAIN).weak()).wrap());
         }
         if kept.rows.is_empty() {
             ui.add(egui::Label::new(egui::RichText::new("Nothing left to review.").weak()).wrap());
