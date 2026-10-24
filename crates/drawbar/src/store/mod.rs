@@ -38,6 +38,7 @@ mod keeper;
 mod keys;
 mod mirror;
 pub mod names;
+mod older;
 pub mod shown;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -924,6 +925,8 @@ pub struct Opened {
     pub drafts: Vec<toshokan::report::DraftStatus>,
     /// How many pending records of other writers opening could not read.
     pub ignored: usize,
+    /// What an older drawbar kept in the folder, the first time this install opens it.
+    pub older: Vec<older::Older>,
     /// What opening tried to tidy and could not: finishing a change a crash or
     /// another window left, or emptying the trash.
     pub trouble: Vec<String>,

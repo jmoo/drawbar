@@ -5992,3 +5992,29 @@ fn a_draft_stays_while_its_save_is_in_flight() {
     let id = again.only();
     assert!(again.bytes(id) == edited, "the edit is back");
 }
+
+/// A folder an older drawbar kept tags, unsaved edits and rescued slot contents in says
+/// so at its first open, and where, and leaves them as they are.
+#[test]
+fn an_older_drawbars_files_are_named_once_and_left_alone() {
+    let root = Temp::new();
+    fs::create_dir_all(root.at(".drawbar/working")).unwrap();
+    fs::create_dir_all(root.at(".drawbar/tmp")).unwrap();
+    fs::write(root.at(".drawbar/library.ron"), b"(tags: [])").unwrap();
+    fs::write(root.at(".drawbar/working/1-1"), b"edit").unwrap();
+    fs::write(root.at(".drawbar/tmp/rescued-1.ne5p"), b"slot").unwrap();
+    let first = Session::open(&root);
+    assert_eq!(
+        first.said(
+            "An older drawbar kept tags in .drawbar/library.ron, unsaved edits in \
+             .drawbar/working and rescued slot contents in .drawbar/tmp in this folder."
+        ),
+        1
+    );
+    first.close();
+    let again = Session::open(&root);
+    assert_eq!(again.said("An older drawbar kept"), 0, "said once");
+    assert_eq!(root.read(".drawbar/library.ron"), b"(tags: [])");
+    assert_eq!(root.read(".drawbar/working/1-1"), b"edit");
+    assert_eq!(root.read(".drawbar/tmp/rescued-1.ne5p"), b"slot");
+}

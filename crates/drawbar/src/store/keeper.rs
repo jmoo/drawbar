@@ -284,6 +284,11 @@ impl<F: Fs> Keeper<F> {
             let emptied = library.empty_trash(Policy::default()).await;
             trouble.extend(emptied.err().map(|e| format!("emptying the trash: {e}")));
         }
+        let older = super::older::found(library.fs()).await;
+        let older = older.unwrap_or_else(|e| {
+            trouble.push(format!("looking for an older drawbar's files: {e}"));
+            Vec::new()
+        });
         let viewed = Viewed {
             retired: matches!(
                 opened.start,
@@ -300,6 +305,7 @@ impl<F: Fs> Keeper<F> {
             viewed,
             drafts: opened.drafts,
             ignored: opened.ignored.len(),
+            older,
             trouble,
         })
     }

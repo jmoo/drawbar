@@ -1693,8 +1693,22 @@ impl Store {
             viewed,
             drafts,
             ignored,
+            older,
             trouble,
         } = opened;
+        if !older.is_empty() {
+            let said: Vec<String> = older
+                .iter()
+                .map(|older| {
+                    let (what, at) = older.said();
+                    format!("{what} in {}/{at}", super::keys::DIR)
+                })
+                .collect();
+            log.say(format!(
+                "An older drawbar kept {} in this folder. This drawbar does not read them,                  and leaves them where they are.",
+                crate::strings::listed(&said)
+            ));
+        }
         for why in trouble {
             log.error(format!("opening the library: {why}"));
         }
