@@ -130,7 +130,7 @@ fn card(
             ui.horizontal(|ui| {
                 let mut said = row.said.clone();
                 if row.forgotten {
-                    said.push_str(" (it would settle a value no one holds now)");
+                    said.push_str(" (only taking it settles this)");
                 }
                 ui.add(egui::Label::new(said).wrap());
                 ui.with_layout(

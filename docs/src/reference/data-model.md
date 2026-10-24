@@ -11,11 +11,11 @@ the files left on disk and read by range, and `summary.rs` with
 `store/cache.rs` what drawbar remembers of a read between sessions. What a file
 cannot say, and every change to the files, goes through
 [toshokan](https://github.com/jmoo/drawbar/tree/master/crates/toshokan), whose
-`SPEC.md` describes its format and guarantees.
+[`SPEC.md`](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md) describes its format and guarantees.
 
 ## The library on disk
 
-A library is a folder tree. A folder in the browser is a directory, an asset is
+A library is a folder tree. A folder in the sidebar is a directory, an asset is
 a file, and a move is a rename. Any folder can be opened as a library.
 
 - **Desktop:** the default library is `library` in the folder eframe keeps the
@@ -40,19 +40,21 @@ flowchart LR
     root --> cello["Cello/"]
     cello --> c3["c3.wav"]
     sidecar --> library["library/<br/><i>toshokan's root</i>"]
-    library --> writers["writers/&lt;writer&gt;/<br/><i>each drawbar's log, staging,<br/>pending effects and trash</i>"]
+    library --> writers["writers.2/&lt;writer&gt;/<br/><i>each drawbar's log, staging,<br/>pending effects and trash</i>"]
 ```
 
 `.drawbar/library/` is made at the first change, never on open, so a folder
 opened and looked at stays as it was. The default library's folder is also made
 at its first change. A scan leaves out all of `.drawbar/`, and every other name
 that starts with a dot (`store::keys::layout`). An older build's
-`.drawbar/library.ron` and `working/` stay where they are, unread.
+`.drawbar/library.ron`, `working/` and `tmp/rescued-*` stay where they are,
+unread, and the first open of the folder by this install says where they are
+(`store::older`).
 
 ### What the library keeps
 
 Every running drawbar writes as a writer of its own: it appends to a log of its
-own under `writers/`, and reads the others' logs. Nothing is written in place, so
+own under `writers.2/`, and reads the others' logs. Nothing is written in place, so
 several drawbars may change one library at once, on one computer or on several
 that sync the folder, and each sees what the others did when it reads their logs
 again. toshokan merges every log to the same state, whatever order a sync client
@@ -147,8 +149,8 @@ A `Baseline` is what the asset was last saved as:
 | `file` | The file holding these bytes, left on disk and read by range (`ondisk::OnDisk`). |
 | `unread` | The file's length, while nothing has read it. |
 
-`LocalEntity::is_unsaved` compares stamps, never bodies. Every listed row asks
-it every frame, and a piano library is hundreds of megabytes.
+`LocalEntity::is_unsaved` compares stamps, never bodies: every listed row asks
+it every frame.
 
 A send that lands moves the baseline to what it sent (`Workspace::landed`). An
 asset sent from the file it rests in keeps that file as its baseline, and
@@ -564,21 +566,13 @@ no folder behind.
 
 ## Writes and crash safety
 
-Every write to a library file is toshokan's, as its `SPEC.md` describes: the new
-file is staged in the writer's `tmp/` and synced, every precondition is checked,
-a pending record says what will happen, then displaced bytes move to the writer's
-`trash/` and the staged file is moved into place, each move durable before the
-next. A crash at any point leaves each path holding its old bytes or its new
-ones, and the next open finishes or rolls back what the record says. On macOS and
-Linux every step survives a power cut; Windows cannot sync a folder, so there a
-move survives a crash but may not survive a power cut. A file is never read whole
+Every write to a library file is toshokan's, staged, recorded and moved into
+place as [File effects and pending records](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#file-effects-and-pending-records)
+describes, so a crash leaves each path holding its old bytes or its new ones and
+the next open finishes or rolls back the change. drawbar never reads a file whole
 to write it: bytes held whole are written from memory, and every copy and every
-edit through a resting file is streamed a chunk at a time.
-
-Nothing reaches outside the library: a path through a folder that is a link is
-refused, on drawbar's reads and on toshokan's writes alike. A rename that only
-changes case goes by way of the writer's trash, since on a disk that ignores case
-the new name reaches the file itself.
+edit through a resting file is streamed a chunk at a time. drawbar's own reads,
+like toshokan's writes, refuse a path through a folder that is a link.
 
 The trash keeps what a delete or a save displaced for undo. A commit that leaves
 this writer's trash past 1 GiB empties it of the oldest items, and the Edit menu
@@ -586,8 +580,7 @@ stops at the first change whose undo needed one. Closing the library empties it
 of what this session's changes put there, since no later undo reaches them.
 Opening a library that may be written empties it of what was displaced more than
 30 days ago, and then of the oldest past 1 GiB (`toshokan::Policy::default`).
-Only the trash of the writer an instance writes as is emptied; an idle writer of
-the pool is written as again by the next window, which empties its trash then.
+Which writer's trash an instance empties is in [Trash](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#trash).
 
 ### Drafts
 
@@ -666,8 +659,8 @@ toshokan stages the new one.
 
 The local root is `.drawbar/local/private/` of OPFS for the browser's own
 library, and `.drawbar/local/picked-<id>/` for a picked folder, by its id in the
-recent list. Tabs of one install write as writers of its pool, which toshokan
-holds by Web Locks. Each tab tells the library's other tabs of its commits over
+recent list. Tabs of one install write as writers of its pool (see
+[Browsers](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#browsers)). Each tab tells the library's other tabs of its commits over
 a `BroadcastChannel` named by the local root (`toshokan::web::Hints`), and a tab
 that hears of one refreshes. A picked folder, which another program may write, is
 also rescanned when its tab is shown or focused again, every minute while it is
@@ -715,6 +708,11 @@ missing. After a restart an entity whose file is gone and that wears tags shows
 as a lost row, with its tags, until the user forgets it.
 
 ### Kept apart
+
+**Kept apart** is the user's name for toshokan's items, and one card is one item:
+most often a *run*, which the user sees as a branch, the entries of a writer
+after the point where its history forked, as when two installs went on from one
+copy of drawbar's own data.
 
 toshokan shows apart from the merged state what it cannot place in a writer's
 single history (`View::items`): a branch of a writer two installs continued, entries
@@ -834,9 +832,9 @@ In the browser:
   of its own, as two computers that sync the folder are. So are two tabs that each
   pick one folder before either has saved the recent list, since each gives the
   folder an id of its own.
-- A picked folder is taken to rename files only in Chrome, where that was
-  measured: Brave refuses, and other browsers are not trusted to. Elsewhere every
-  move copies the file and removes the old one (`toshokan::web::Folder::picked`).
+- A picked folder renames files only in the browsers
+  [What is supported](../getting-started/support.md) names; elsewhere every move
+  copies the file and removes the old one (`toshokan::web::Folder::picked`).
 
 ## What lives where
 
@@ -855,12 +853,9 @@ preferences. A folder handle can be kept only in IndexedDB, and it comes back
 without its permission, so the browser asks again on a click
 (`libraries/web.rs`).
 
-Earlier versions kept the library in eframe's store under
-`drawbar.this_computer`, `drawbar.folders` and `drawbar.tags`. Nothing reads
-those keys now. At start, any that holds something is emptied, without a word
-to the user (`store::leave_behind`). eframe's store has no remove, and on the
-desktop it writes back whatever it holds in memory, so emptying is the way to
-clear one.
+At start, `store::leave_behind` empties eframe's keys `drawbar.this_computer`,
+`drawbar.folders` and `drawbar.tags`, which nothing reads; eframe's store has no
+remove.
 
 ## The derived cache
 

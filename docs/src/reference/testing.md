@@ -94,10 +94,10 @@ the last test checks that every class holds what it held when the run started.
 
 ## In the browser
 
-`crates/drawbar/tests/web.rs` runs the browser's library through its worker, in
-the private file system and in a folder of it opened as a picked folder is, two
-installs of one library side by side, two tabs of one install, and a worker that
-faults.
+`crates/drawbar/tests/web.rs` runs the browser's library through its worker: in
+the private file system and in a folder of it opened as a picked folder is, with
+two installs of one library and two tabs of one install, and with a worker that
+faults, stalls or loses an answer.
 `crates/toshokan/tests/web.rs` and its neighbors run toshokan's browser storage.
 wasm-bindgen's test runner runs them headless; on Linux, Nix runs both in
 Chromium and Firefox:

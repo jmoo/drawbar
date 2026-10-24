@@ -1,7 +1,8 @@
 # Your files
 
 **This computer** is your library: the sounds you open, make, or copy off an
-instrument. Each one is a real file in a folder you can see.
+instrument. Each one is a file. On the desktop, the files are in a folder you
+can see.
 
 > **drawbar is alpha.** Keep your own backups of anything that matters. This
 > version starts with an empty library and does not bring over what an earlier
@@ -27,7 +28,7 @@ drawbar.app, which no other site or app can see. It keeps your files, tags and
 unsaved edits from one visit to the next, but clearing the site's data in the
 browser deletes them, so export what you want to keep elsewhere. **Help ▸ About
 drawbar** shows how much space it takes, and whether the browser has promised to
-keep it.
+keep it; see [Help and About](help.md).
 
 ## Opening another folder
 
@@ -72,8 +73,10 @@ Unsaved edits are kept when you quit: those of sounds in your library, and those
 of a sound you were viewing in a slot of the instrument. A slot's edits come
 back when you view that slot of the same instrument again with the same library
 open; if the slot changed since, drawbar asks which to keep. drawbar also keeps edits every
-few seconds, so after a crash you may lose the last few seconds. A read-only
-library keeps no unsaved edits.
+few seconds, so after a crash you may lose the last few seconds. In the browser,
+closing the tab before drawbar has kept your latest edit makes the browser ask
+whether to leave. Stay a moment, and the edit is kept. A read-only library keeps
+no unsaved edits.
 
 ## Undo
 
@@ -149,7 +152,7 @@ This happens when:
   wait until the rest arrives and are merged then, so there is nothing to do
   with them.
 - A sync replaced part of the history with an older version, leaving changes
-  only that version holds.
+  only that version holds. These can be taken but not dismissed.
 
 Nothing kept apart changes your library until you choose to:
 
@@ -169,8 +172,8 @@ Nothing kept apart changes your library until you choose to:
 A card may say its changes could be that drawbar's own older changes, which it
 has replaced since. Taking one of them may bring back what it replaced.
 
-A change marked as settling a value no one holds now replaced something every
-computer has since let go of. Taking it is the only way to make it.
+A change marked “only taking it settles this” replaced a value that no computer
+shows any more, so it stays listed until you take it.
 
 When you select a sound with changes kept apart, the inspector says so and
 links to them.
@@ -194,6 +197,10 @@ bring back any you deleted.
   stops asking, and **Later** asks next time. What
   drawbar left unfinished on this computer, after a crash or in another window,
   is finished without asking.
+- **An older drawbar.** A drawbar from before this version keeps its own tags,
+  unsaved edits and rescued slot contents in the `.drawbar` folder. This version
+  says so once and leaves them where they are, and an older drawbar that opens
+  this library sees its files without the tags this version keeps.
 - **Not answering.** If the library shows no sign of life for a minute, drawbar
   asks whether to close and reopen it. Edits made since drawbar last kept them
   are lost, and drawbar names them. If the library stops altogether, drawbar
