@@ -32,12 +32,9 @@ pub const TRASH: &str = "trash";
 pub const TMP: &str = "tmp";
 /// Segments end in `.txt`, a type whose writes in a picked folder Chromium's Safe
 /// Browsing check samples rather than always checks.
-// Confirmed on hardware.
-// A `.txt` close takes about 1.6 ms in Chrome; one of an unlisted type, such as
-// `.jsonl`, about 45 ms.
-// Reported by public documentation; not confirmed on hardware.
-// Chromium's `download_file_types.asciipb` samples `.txt` and `.json` with
-// probability 0.01, so about 1 close in 100 still pays the full check.
+// Chromium's `download_file_types.asciipb` samples `.txt` and `.json`, so a close
+// of a segment rarely waits for the full check that a file of an unlisted type,
+// such as `.jsonl`, waits for at every close.
 pub const SEGMENT_EXTENSION: &str = ".txt";
 /// The longest name, in bytes, that common file systems take.
 const MAX_NAME: usize = 255;
@@ -232,11 +229,8 @@ impl Layout {
 /// Whether `name` is a swap file Chromium writes beside a picked folder's file
 /// while a writable stream on it is open: bytes that never landed, which
 /// toshokan neither reads nor scans.
-// Confirmed on hardware.
-// Chromium shows the swap file `<name>.crswap` beside a file while a writable
-// stream on it is open.
-// Inferred from specimens; not confirmed on hardware.
-// A tab stopped while the stream is open leaves the swap file behind.
+// Chromium names it `<name>.crswap`, and a tab stopped while the stream is open
+// leaves it behind.
 pub(crate) fn is_swap_file(name: &str) -> bool {
     name.ends_with(".crswap")
 }

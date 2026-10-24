@@ -1,5 +1,5 @@
-//! The full value-level sweep of design R, of its rules and of toshokan, which
-//! takes minutes: `cargo test --release --test retention_sweep -- --ignored`.
+//! The full value-level sweep of the retention design, of its rules and of
+//! toshokan: `cargo test --release --test retention_sweep -- --ignored`.
 
 mod retention;
 

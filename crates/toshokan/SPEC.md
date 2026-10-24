@@ -7,6 +7,52 @@ this one. The format is unstable while toshokan is a proof of concept.
 All text is UTF-8. All hexadecimal is lowercase. JSON is written without
 insignificant whitespace.
 
+## Design
+
+The core does no I/O. Every operation is a state machine that asks for reads,
+writes and syncs, consumes their results, and pauses between slices of a long
+computation. The `blocking` driver runs it on
+the machine's file system, and the `asynch` driver on any async backend, such as
+a browser's; both run it on an in-memory disk that models what survives a crash.
+A directory listing with every file's metadata is one request, and so are many
+reads, so a scan of every file costs a request per directory rather than per
+file. A commit or a refresh binds files to entities again only as far as its
+changes reach: the entities and files that share a path, a name the volume
+takes for one, or an identity with what changed.
+Time, randomness, the app's identity function and the volume's name rules are
+injected, so the crash harness and the sync simulator replay every run exactly.
+
+Each writer appends to a hash-chained log in its own directory. Entries name each
+other by hash, so writers never collide, and a reader places entries by chain
+whatever their files are called. Fields are multi-value registers and
+observed-remove sets, merged by a join. A file effect stages its bytes, writes a
+pending record, moves displaced bytes into the writer's trash, and logs what it
+did; recovery after a crash, or after losing the app's data, finishes or reports
+it. Where the folder cannot rename files, each move copies and then removes its
+source, under the same record.
+
+[spec/](spec/README.md) model-checks, in TLA+, the protocol between writers and
+readers, and maps its properties to the tests that check the code.
+
+Principles:
+
+1. **The folder belongs to the user.** Files keep their names, bytes and places
+   unless the app asks. Opening writes nothing there.
+2. **One writer per file.** Each writer writes only in its own directory.
+3. **Merge is a pure function.** The same entries give the same state, in any
+   order, on any machine.
+4. **Nothing is overwritten.** Displaced bytes go to the writer's trash, which
+   only that writer empties.
+5. **Conflicts are shown.** Concurrent edits are kept, and the app can list them.
+6. **Keep what you don't understand.** What a newer writer wrote survives, even
+   when an older one compacts it.
+7. **Nondeterminism is injected.** Time, randomness and file identity come from
+   the app, so tests replay exactly.
+8. **Small.** The standard library, serde, BLAKE3 and thiserror, plus rustix on
+   Linux and Apple systems, libc on Apple systems and windows-sys on Windows,
+   for a rename that never replaces, and wasm-bindgen, js-sys and web-sys for
+   the browser.
+
 ## Durability
 
 A backend says, for each of the folder and the local root, whether it can sync.
@@ -208,6 +254,7 @@ attribution:
 | `displaced` | Bytes it moved into the writer's trash; omitted if none          |
 | `forks`     | The fork points its writer knew of, `["<writer>",<n>]`; omitted if none |
 | `more`      | How many ops and `displaced` items its `more` entries hold; omitted if none |
+| `record`    | The nonce of the pending record whose effects it logs, which it closes; omitted if none |
 
 Each op is an object whose `op` member names it:
 
@@ -419,7 +466,8 @@ to `tmp/` under its nonce, syncs it, renames it into place and syncs both
 directories; a staged snapshot a crash leaves is removed with the other files of
 `tmp/` (see Recovery). Elsewhere it writes the snapshot in place and syncs it
 and its directory, and a crash can tear it, leaving a file reported as
-unreadable at every open. It then confirms that the folder holds the snapshot.
+unreadable until the writer's next compaction deletes it with what that
+compaction supersedes. It then confirms that the folder holds the snapshot.
 Only then does it delete every segment in its directory that ends with a seal
 marker and every line of which the new snapshot certifies, and every snapshot
 whose head the new one certifies. A segment without a seal marker, such as one
@@ -584,7 +632,7 @@ as 8 bytes little-endian, a 16-byte check of the payload, then the payload. The
 check finds a record a crash tore or a disk damaged; it does not guard against
 forgery, since only the install writes its local root. This build computes it in
 two lanes of 64-bit multiplies over the payload. The payload's first byte names
-its format, 8; then come the generation, and the view, or what it gained or the
+its format, 9; then come the generation, and the view, or what it gained or the
 grace step let go of, in this build's binary encoding: integers as LEB128,
 identifiers as their 16 bytes big-endian, text as its length and its UTF-8,
 lists as their length and their members, with each entry as its hash, its
@@ -747,7 +795,10 @@ included.
 
 A tree move logs a `tree` op, and a `file` op for each entity whose file it
 moves; the files under it no entity is bound to have no facts, and it logs no
-`path` op for them. A commit reports each tree it moved. Undo moves the tree back
+`path` op for them. A commit reports each tree it moved, and each directory
+it was to remove that the folder still holds: moving file by file, it moves
+only the files the last scan listed, and a file put there since keeps its
+directory. Undo moves the tree back
 as a tree move of its own, with a precondition on the identity of each entity's
 file the move carried, in place of renaming each file back: a single `rename`
 where directories rename, file by file elsewhere, which then removes each
@@ -869,10 +920,11 @@ as it is, logged as a `pin` op rather than a `file` op. A reader reads at most
 
 ### Recovery
 
-A record is open while its writer's log holds the entry named by its entry's
-`prev` and no entry after it; a tip numbered past `prev` counts as an entry after
-it unless `prev` is a run. A record that is not open is spent, waiting only for
-its writer to remove it.
+A record is closed by an entry that names it: its writer's intent whose `record`
+is the record's nonce, or another writer's `settle` entry. A tip that folded such
+an entry still names it. A record no entry names is open, wherever its writer's
+log has gone since; one that is closed is spent, waiting only for its writer to
+remove it.
 
 A record is ignored when it does not decode, names another writer, names a path
 that is not a library path, or its `prev` is not in its writer's log. Opening
@@ -967,7 +1019,8 @@ Each instance undoes only the intents it committed since it opened, most recent
 first, by committing a compensating intent. A redo reverses the latest undo
 while the instance has committed nothing else since. Undo history is not logged:
 it ends when the instance closes. Each intent is kept with what it replaced, as
-the merged state showed it when it committed.
+the merged state showed it when it committed. An intent that only dismisses runs
+is final: it is not kept, so an undo after it reverses the intent before it.
 
 - A register write is reversed by writing back the latest value it replaced,
   another writer's included; a clear where there was none.
@@ -1008,6 +1061,11 @@ items, then syncs the trash once; an item whose removal a crash undid is removed
 emptying.
 
 Emptying a trash is the only way bytes leave the folder.
+
+An instance lists the trash of every writer whose directory its local root
+holds: its writer's and those of the writers it retired. A retired writer's
+items stay where they are, since no instance writes as that writer again; undo
+reaches only the items of this session's writer.
 
 ## Drafts
 
@@ -1140,9 +1198,10 @@ always a directory of the origin private file system.
   WebKit in whole seconds: two changes that keep a file's length within that
   time look alike.
 - **The page's thread.** An operation pauses between slices of work that makes
-  no request, such as parsing, placing and folding the logs it read, decoding
-  and encoding the cached view, gathering, identifying and binding the library's
-  files, and indexing what is shown. Once the core has held the page's thread for 6 ms since
+  no request, such as parsing the logs it read, decoding and encoding the cached
+  view, gathering, identifying and binding the library's files, and indexing
+  what is shown. Deriving the merged state, placing and folding every writer's
+  entries, runs without a pause. Once the core has held the page's thread for 6 ms since
   a reply or the last pause, the driver gives it back at the next pause by a
   message the page posts to itself, so the tasks waiting for the thread run
   first and the page can draw. Where an operation pauses depends only on its

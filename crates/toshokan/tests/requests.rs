@@ -129,6 +129,7 @@ fn a_trash_is_listed_in_one_request_and_emptied_with_one_sync() {
     let mut d = Recorded::new(MemDisk::new());
     let items: Vec<TrashItem> = (1..=4)
         .map(|n| TrashItem {
+            writer: WRITER,
             item: Nonce::from_u128(n),
             len: 0,
             from: path("f"),

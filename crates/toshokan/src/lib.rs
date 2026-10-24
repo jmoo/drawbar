@@ -15,6 +15,101 @@
 //! through [`Env`], so tests replay exactly.
 //!
 //! **Status:** proof of concept. The on-disk format is unstable.
+//!
+//! # Using a library
+//!
+//! A view answers lookups from indexes it shares with the views before and after
+//! it, each in a search plus a step per result: the entities whose register or set
+//! holds a value (`find`), holds any value (`with`) or a value in a range
+//! (`range`), each value with how many entities hold it (`values`), the entity
+//! bound to a file (`at`), the entities whose files are under a folder (`under`),
+//! and every conflict (`conflicts`). Values compare by the JSON toshokan writes for
+//! them; `range` and `values` decode each distinct value of the key. Searching
+//! names or derived metadata is the app's. `changed_since` gives the entities and
+//! files that differ from an earlier view, at a cost that follows the changes, so an
+//! app can redraw only those.
+//!
+//! Opening scans no library file: each file is shown where its facts put it, as
+//! unscanned, until a scan of every file. `rescan` scans every library file, for
+//! what changed outside the app; a rescan the app drops, to commit or to close,
+//! goes on where it stopped at the next one. An app rescans once a library opens.
+//! `refresh` reads what other writers logged since, and scans only the files their
+//! entries moved, or every file until one rescan has finished. `rescan_paths` scans
+//! the files a watcher saw change. Each reports what changed and, once every file
+//! was scanned, the files that arrived, moved or changed outside the app.
+//!
+//! `Layout::new(".app")` keeps the library's own files in `.app/`.
+//! `Layout::within(".app", "library")` keeps them in `.app/library/` and leaves all
+//! of `.app/` out of scans, for an app with other files of its own there, and
+//! `hiding()` also leaves out every name that starts with a dot.
+//!
+//! An intent can save, rename and trash a file nothing is said about by its path,
+//! without making it an entity, and `Committed::paths` says where such files went,
+//! an undo's included. A draft of an unsaved edit is kept for an entity or for such
+//! a path.
+//!
+//! `opened` reports what needs the user: effects another writer left unfinished,
+//! drafts and forks. When an instance's history forks, each branch is shown as an
+//! item of the view (`items`) with the change it would make. One intent can take
+//! changes from several items (`Intent::take`); an item stays, with no changes once
+//! nothing is left to review, until an intent dismisses it (`Intent::dismiss`). The
+//! instance writes as a new writer once it sees the fork, which opening, a refresh
+//! (`retired`) or a refused compaction reports. Facts a restore of the folder took stay shown for a
+//! day and a full rescan, then go. Undo reaches the intents of the session. A view
+//! never changes, so an app can hand it to other threads. A field read from a view
+//! is a value, a conflict between writers, or unreadable, so an app cannot show
+//! half a conflict by accident.
+//!
+//! A save takes bytes or a source the driver streams into staging a chunk at a
+//! time, such as a `Splice` of the file being rewritten, so a file of hundreds of
+//! megabytes is never held whole. A commit whose file effects stop partway fails
+//! with `Error::Partial`, which says what it logged. Any other commit whose entries
+//! reached the folder succeeds, and `Committed::local` says what the instance keeps
+//! beside the folder that lags it until the next commit, refresh or close. A commit
+//! leaves the pending record of its file effects in the folder; an app calls `tidy`
+//! when idle to remove such records, and closing removes what is left.
+//!
+//! # In the browser
+//!
+//! With the `web` feature, a library runs on the page through the async driver,
+//! and a dedicated worker running the same wasm bundle performs its requests on the
+//! origin private file system or on a folder the user picked:
+//!
+//! ```rust,ignore
+//! use toshokan::asynch::Library;
+//! use toshokan::web::{DateClock, CryptoRandom, Folder, Worker};
+//!
+//! let local = RelPath::new("libraries/main/local")?;
+//! let folder = Folder::picked(handle); // or Folder::Private(path)
+//! let worker = Worker::start(folder, &local).await?;
+//! let (mut lib, opened) = Library::open(worker, layout, &schema, env).await?;
+//! ```
+//!
+//! Opening, rescanning and committing to a large library do most of their long
+//! work a slice at a time: reading the logs and the cached view, indexing, and
+//! gathering and binding the library's files. The page's driver gives the thread
+//! back to the browser every few milliseconds between slices. Deriving the merged
+//! state from what a read found runs in one piece, at an open and at the first
+//! commit of a session, and takes longer the larger the library and the more of
+//! its writers' entries are not yet compacted: a large library that must keep a
+//! page responsive belongs in a dedicated worker.
+//!
+//! The bundle must be built by wasm-bindgen with `--target web`. The worker loads it
+//! from a small script toshokan makes as a `blob:` URL, so a Content Security
+//! Policy must allow `blob:` workers. `web::Hints` says when to look again: a
+//! commit in another tab (`refresh`), the paths Chromium's file system observer saw
+//! change (`rescan_paths`), and focus or a period for a folder other programs write
+//! (`rescan`). The Browsers section of `SPEC.md` lists what each browser can do.
+//!
+//! The browser suites run headless with `nix build .#toshokan-web` on Linux. Elsewhere, from `crates/` in the
+//! development shell, with a WebDriver and its browser installed:
+//!
+//! ```sh
+//! CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
+//! GECKODRIVER=geckodriver \
+//!   cargo test -p toshokan --features web --target wasm32-unknown-unknown \
+//!   --test backends --test effects --test web
+//! ```
 
 // The hidden modules are reached by the integration tests, not by apps.
 pub mod asynch;

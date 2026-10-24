@@ -22,7 +22,7 @@ use super::world::{
 };
 use super::{Bound, Compaction, Design, Reading};
 
-/// toshokan, under design R.
+/// toshokan, under the retention design.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Real;
 
@@ -272,6 +272,7 @@ impl Lines {
             displaced: Vec::new(),
             forks: forks.collect(),
             more: 0,
+            record: None,
         });
         let at = Hlc {
             wall_ms: u64::from(e.hash) + 1,

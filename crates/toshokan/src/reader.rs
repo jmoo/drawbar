@@ -1414,6 +1414,7 @@ mod tests {
             displaced: Vec::new(),
             forks: Vec::new(),
             more: 0,
+            record: None,
         });
         let n = prev.n() + 1;
         Entry::encode(prev.hash(), n, at(n + label.len() as u64), kind).unwrap()

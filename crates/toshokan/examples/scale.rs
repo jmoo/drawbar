@@ -4,7 +4,8 @@
 //! ```text
 //! cargo run --release --example scale -- [--native DIR] [--entities N] [--entries N]
 //!     [--writers N] [--files N] [--corpus DIR] [--stale-mtime] [--trash N]
-//!     [--segment N] [--tags N] [--retired N] [--refresh N,N] [--runs N] [--label TEXT]
+//!     [--segment N] [--tags N] [--no-compact] [--retired N] [--refresh N,N] [--runs N]
+//!     [--label TEXT]
 //! ```
 //!
 //! Without `--native` the library lives on an in-memory disk. Each request is
@@ -328,6 +329,9 @@ struct Gen {
     segment_entries: usize,
     /// How many tag values entities draw from.
     tags: usize,
+    /// Whether writers compact as a writer does, or leave every entry in
+    /// segments, as one that never closed.
+    compacts: bool,
     writers: Vec<WriterGen>,
     entities: Vec<EntityGen>,
     sink: Box<dyn Backend>,
@@ -415,7 +419,7 @@ impl Gen {
         writer.in_segment += 1;
         writer.entries += 1;
         let named = entry.own().of(writer.id);
-        if writer.since.len() >= COMPACT_AFTER {
+        if self.compacts && writer.since.len() >= COMPACT_AFTER {
             self.compact(w);
         } else if writer.in_segment >= self.segment_entries {
             self.seal(w);
@@ -593,6 +597,7 @@ impl Gen {
                     displaced: Vec::new(),
                     forks: Vec::new(),
                     more: 0,
+                    record: None,
                 },
             );
             for (id, rated, tags) in made {
@@ -685,6 +690,7 @@ impl Gen {
                     displaced: Vec::new(),
                     forks: Vec::new(),
                     more: 0,
+                    record: None,
                 },
             );
             update(&mut self.entities[e], hash, &tag);
@@ -716,6 +722,7 @@ impl Gen {
                     displaced,
                     forks: Vec::new(),
                     more: 0,
+                    record: None,
                 },
             );
         }
@@ -910,6 +917,7 @@ struct Args {
     trash: usize,
     segment: usize,
     tags: usize,
+    compacts: bool,
     retired: usize,
     refresh: Vec<usize>,
     runs: usize,
@@ -929,6 +937,7 @@ fn args() -> Args {
         trash: 0,
         segment: 500,
         tags: 50,
+        compacts: true,
         retired: 0,
         refresh: vec![1, 1000],
         runs: 3,
@@ -949,6 +958,7 @@ fn args() -> Args {
             "--trash" => args.trash = value().parse().unwrap(),
             "--segment" => args.segment = value().parse().unwrap(),
             "--tags" => args.tags = value().parse().unwrap(),
+            "--no-compact" => args.compacts = false,
             "--retired" => args.retired = value().parse().unwrap(),
             "--refresh" => args.refresh = value().split(',').map(|n| n.parse().unwrap()).collect(),
             "--runs" => args.runs = value().parse().unwrap(),
@@ -1027,6 +1037,7 @@ fn main() {
         at: SystemTimeMs::now() - 10_000_000,
         segment_entries: args.segment,
         tags: args.tags,
+        compacts: args.compacts,
         writers: Vec::new(),
         entities: Vec::new(),
         sink,

@@ -281,6 +281,9 @@ pub struct Applied {
     pub trees: Vec<(RelPath, RelPath)>,
     /// Each directory the effects done made, or removed, as the folder shows it.
     pub dirs: Vec<(RelPath, bool)>,
+    /// Each directory a step done was to remove that the folder still holds, as
+    /// a file the plan did not know of keeps one.
+    pub left: Vec<RelPath>,
     pub outcome: Outcome,
 }
 
@@ -616,7 +619,8 @@ impl Resolver<'_> {
         if !rename_dir && !files.contains(from) {
             let files: Vec<&RelPath> = files.iter().copied().collect();
             for path in emptied(&files, from) {
-                self.step(EffectStep::RemoveDir { path });
+                self.step(EffectStep::RemoveDir { path: path.clone() });
+                self.end_dir(path, false);
             }
         }
         Ok(())
@@ -1285,18 +1289,24 @@ fn account<'a>(
         })
         .and_then(move |displaced| {
             // A directory a step made or removed is logged as the folder shows it.
-            fold(dirs.into_iter(), Vec::new(), |mut shown, end| {
-                flow::stat(Root::Folder, &end.path).map_ok(move |meta| {
-                    let there = meta.is_some_and(|meta| meta.kind == Kind::Directory);
-                    if there == end.made {
-                        shown.push((end.path, end.made));
-                    }
-                    shown
-                })
-            })
-            .map_ok(move |dirs| (displaced, dirs))
+            fold(
+                dirs.into_iter(),
+                (Vec::new(), Vec::new()),
+                |(mut shown, mut left), end| {
+                    flow::stat(Root::Folder, &end.path).map_ok(move |meta| {
+                        let there = meta.is_some_and(|meta| meta.kind == Kind::Directory);
+                        match (there == end.made, there) {
+                            (true, _) => shown.push((end.path, end.made)),
+                            (false, true) => left.push(end.path),
+                            (false, false) => {}
+                        }
+                        (shown, left)
+                    })
+                },
+            )
+            .map_ok(move |(dirs, left)| (displaced, dirs, left))
         })
-        .and_then(move |(displaced, dirs)| {
+        .and_then(move |(displaced, dirs, left)| {
             let paths = ends.iter().map(|end| end.path.clone());
             let paths = paths.chain(unbound.iter().map(|end| end.path.clone()));
             let paths = paths.flatten();
@@ -1335,6 +1345,7 @@ fn account<'a>(
                     unbound: unbound.collect(),
                     trees,
                     dirs,
+                    left,
                     outcome,
                 }
             })

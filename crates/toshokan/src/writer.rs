@@ -23,8 +23,8 @@ use crate::reader::{Reader, Stamp, WriterFile, MAX_FILE};
 use crate::report::{Rekey, Start};
 
 /// The length past which an append seals the open segment and opens another. A
-/// picked folder in Chromium copies a whole file to append to it, at about
-/// 1.5 ms per MiB by measurement, so this bounds an append's copy.
+/// picked folder in Chromium copies a whole file to append to it, so this bounds
+/// an append's copy.
 pub const SEGMENT_BOUND: u64 = 1 << 20;
 
 pub struct Writer {
@@ -63,10 +63,12 @@ pub struct Claimed {
 enum Confirmed {
     /// The open segment is as this process left it.
     Open(OpenSegment),
-    /// The open segment no longer ends as this process left it, and the folder
-    /// holds the head: the segment is left, and a new one opened.
+    /// The open segment no longer is as this process left it, as when a sync
+    /// client kept an older version under its name, and the folder holds the
+    /// head elsewhere: the segment is left, and a new one opened.
     Changed,
-    /// No segment is open, and the folder holds the head.
+    /// No segment is open, or the open one is gone, and the folder holds the
+    /// head.
     Fresh,
 }
 
@@ -402,8 +404,8 @@ impl Writer {
                     false => held(Confirmed::Changed),
                 })
             }
-            Some(meta) if meta.len > open.len => held(Confirmed::Changed),
-            _ => Flow::Done(lost()),
+            Some(_) => held(Confirmed::Changed),
+            None => held(Confirmed::Fresh),
         })
     }
 

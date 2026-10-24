@@ -608,12 +608,38 @@ impl Library {
             .task()
     }
 
-    /// The bytes this writer displaced that are still in its trash, oldest first.
+    /// The bytes still in the trash of each writer this install wrote as, oldest
+    /// first: this writer's, which undo restores and emptying removes, and those
+    /// of the writers it retired, kept as they are.
     pub fn trash(&mut self) -> Task<'_, Result<Vec<TrashItem>>> {
-        match &self.writer {
-            Some(writer) => trash::list(&self.layout, writer.id(), self.folded.trash(writer.id())),
-            None => Task::ready(Ok(Vec::new())),
-        }
+        flow::list(Root::Local, &RelPath::ROOT)
+            .and_then(move |entries| {
+                let geneses: BTreeSet<EntryHash> = entries
+                    .iter()
+                    .filter(|entry| entry.kind == Kind::Directory)
+                    .filter_map(|entry| entry.name.parse().ok())
+                    .collect();
+                let writers = self.reader.derived().writers.iter();
+                let installed = writers.filter(|(_, placed)| {
+                    genesis_of(placed).is_some_and(|genesis| geneses.contains(&genesis))
+                });
+                let lists: Vec<_> = installed
+                    .map(|(writer, _)| {
+                        trash::list(&self.layout, *writer, self.folded.trash(*writer))
+                    })
+                    .collect();
+                fold(lists.into_iter(), Vec::new(), |mut all, list| {
+                    flow::run(list).map_ok(move |items| {
+                        all.extend(items);
+                        all
+                    })
+                })
+            })
+            .map_ok(|mut items: Vec<TrashItem>| {
+                items.sort_by_key(|item| (item.at, item.item));
+                items
+            })
+            .task()
     }
 
     /// Removes from this writer's trash what `policy` does not keep: the only way
@@ -807,7 +833,6 @@ impl Library {
         own != Some(theirs.writer)
             && theirs.is_confined(&self.layout)
             && recovery::Chain::holds(placed, theirs.after())
-            && !recovery::Chain::continues(placed, theirs.after())
             && !self.folded.settled(theirs.writer, name)
     }
 
@@ -957,16 +982,25 @@ impl Library {
                 pending: record.clone(),
                 outcome: Outcome::Complete,
             }),
-            false => self.orphaned.push(Orphan {
-                ours: self.pooled.contains_key(&record.writer),
-                live: self.presence.get(&record.writer) == Some(&Presence::SameMachine),
-                writer: record.writer,
-                record: name,
-                label: record.label.clone(),
-                paths: record.paths(),
-                progress: 0,
-            }),
+            false => {
+                let ours = self.pooled.contains_key(&record.writer);
+                self.orphan(name, record, ours);
+            }
         }
+    }
+
+    /// Keeps another writer's open record `name` to settle with consent, as
+    /// this install's own when `ours`.
+    fn orphan(&mut self, name: Nonce, record: &PendingRecord, ours: bool) {
+        self.orphaned.push(Orphan {
+            ours,
+            live: self.presence.get(&record.writer) == Some(&Presence::SameMachine),
+            writer: record.writer,
+            record: name,
+            label: record.label.clone(),
+            paths: record.paths(),
+            progress: 0,
+        });
     }
 
     /// Keeps this writer's record `name`, whose entry is now logged, to remove
@@ -1123,7 +1157,7 @@ impl Library {
         self.behind.remove(&Lag::Head);
         self.spent.clear();
         for settling in std::mem::take(&mut self.unsettled) {
-            self.interrupted(settling.record, &settling.pending);
+            self.orphan(settling.record, &settling.pending, true);
         }
         flow::run(writer::retire_writer(writer.genesis()))
     }
@@ -1888,10 +1922,7 @@ fn recover(library: Library) -> Fallible<'static, Library> {
     let writers = library.reader.writers_known().into_iter().collect();
     flow::run(recovery::read(&library.layout, writers)).and_then(move |found| {
         let mut library = library;
-        let own = library
-            .writer
-            .as_ref()
-            .map(|writer| (writer.id(), writer.head()));
+        let own = library.writer.as_ref().map(Writer::id);
         let settled = library.folded.settlements().clone();
         let chains = &library.reader.derived().writers;
         let (assessed, open) = recovery::classify(&library.layout, own, chains, &settled, found);
@@ -1926,10 +1957,7 @@ fn reorphaned(library: &mut Library) -> Fallible<'_, &mut Library> {
                 records.map(move |(name, record)| ((*writer, *name), record.clone()))
             })
             .collect();
-        let own = library
-            .writer
-            .as_ref()
-            .map(|writer| (writer.id(), writer.head()));
+        let own = library.writer.as_ref().map(Writer::id);
         let settled = library.folded.settlements().clone();
         let (assessed, _) = recovery::classify(
             &library.layout,
@@ -2018,12 +2046,8 @@ fn release_if_idle<'a, L: BorrowMut<Library> + 'a>(
         flow::run(pending::read_all(&layout, writer)).and_then(move |found| {
             let open = {
                 let held = library.borrow();
-                let chain = held.reader.derived().writers.get(&writer);
-                found.records.iter().any(|(name, record)| {
-                    let closed = chain
-                        .is_some_and(|chain| recovery::Chain::continues(chain, record.after()));
-                    !closed && !held.folded.settled(writer, *name)
-                })
+                let mut names = found.records.iter().map(|(name, _)| name);
+                names.any(|name| !held.folded.settled(writer, *name))
             };
             if drafted || open || !found.unreadable.is_empty() {
                 return ok(library);
@@ -2382,14 +2406,16 @@ fn commit<'a>(
                 more: 0,
                 ops: facts,
                 displaced: Vec::new(),
+                record: None,
             };
             library.reversing = reverses;
             transact(library, logged, effects, None, pins.collect())
         })
-        .and_then(move |(library, entries, outcome)| {
+        .and_then(move |(library, entries, ended)| {
             library.reversing = None;
+            let Ended { outcome, left } = ended;
             match committed(shown, &entries, created, outcome, library.local()) {
-                Ok(committed) => ok((library, committed)),
+                Ok(committed) => ok((library, Committed { left, ..committed })),
                 Err(partial) => Flow::Done(Err(Error::Partial(partial))),
             }
         })
@@ -2430,6 +2456,7 @@ fn committed(
         paths: paths.collect(),
         trees: trees.collect(),
         local,
+        left: Vec::new(),
     };
     match outcome {
         Outcome::Complete => Ok(committed),
@@ -2465,6 +2492,15 @@ fn file_of(op: &Op) -> Option<EntityId> {
         Op::File { entity, .. } | Op::Pin { entity, .. } => Some(*entity),
         _ => None,
     }
+}
+
+/// The genesis entry of the writer whose history `placed` is.
+fn genesis_of(placed: &derive::Placed) -> Option<EntryHash> {
+    let tip = placed.tips.first().map(|tip| tip.genesis);
+    tip.or_else(|| {
+        let first = placed.merged.first().filter(|entry| entry.n() == 0);
+        first.map(|entry| entry.hash())
+    })
 }
 
 /// Creates this instance's writer when it has none. Its genesis entry is the
@@ -2540,17 +2576,17 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
     );
     let own = library.writer.as_ref().map(Writer::id);
     let placed = own.and_then(|own| library.reader.derived().writers.get(&own));
-    let logged = placed.map_or(recovery::After::Nothing, |placed| {
-        recovery::after(placed, record.after())
-    });
+    let continued = placed.and_then(|placed| recovery::continued(placed, name));
+    let closed = own.is_some_and(|own| library.folded.settled(own, name));
     flow::run(settled)
         .and_then(move |applied| {
             let mut planned = planned(&record);
+            planned.record = Some(name);
             let file_ops = library.file_ops(&applied, &record.files);
             let label = planned.label.clone();
-            let resumed = logged != recovery::After::Nothing;
-            let kinds = match logged {
-                recovery::After::Intent(continued) => {
+            let resumed = closed;
+            let kinds = match continued {
+                Some(continued) => {
                     let mut file_ops = file_ops;
                     file_ops.retain(|op| file_of(op).is_none_or(|e| !continued.files.contains(&e)));
                     let mut displaced = applied.displaced;
@@ -2558,8 +2594,8 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
                     let deleted = deleted_by(&planned.ops);
                     library.continued(continuation(file_ops, displaced, &deleted))
                 }
-                recovery::After::Folded => Vec::new(),
-                recovery::After::Nothing => {
+                None if closed => Vec::new(),
+                None => {
                     let mores = fit(&mut planned, file_ops, applied.displaced);
                     planned.forks = library.known_forks(&planned.ops);
                     let mut kinds = vec![EntryKind::Intent(planned)];
@@ -2663,6 +2699,7 @@ fn planned(record: &PendingRecord) -> Logged {
             displaced: Vec::new(),
             forks: Vec::new(),
             more: 0,
+            record: None,
         },
     };
     logged.ops.retain(|op| {
@@ -2873,6 +2910,13 @@ fn close(mut logged: Logged, closing: Option<Closing>) -> (Logged, Option<Settle
     (logged, Some(settle))
 }
 
+/// How a commit's effects ended: whether they all ran, and the directories the
+/// folder still holds that they were to remove.
+struct Ended {
+    outcome: Outcome,
+    left: Vec<RelPath>,
+}
+
 /// Logs `logged`, carrying out `effects` under a pending record when there are
 /// any, closed by `closing` only when they complete, and followed by `bind`
 /// entries pinning `pins`. Returns the entries, the intent's first, and how the
@@ -2884,7 +2928,7 @@ fn transact<'a>(
     effects: Rc<EffectPlan>,
     closing: Option<Closing>,
     pins: Vec<Op>,
-) -> Fallible<'a, (&'a mut Library, Vec<Entry>, Outcome)> {
+) -> Fallible<'a, (&'a mut Library, Vec<Entry>, Ended)> {
     if effects.is_empty() {
         let mut kinds = closed(logged, closing);
         kinds.extend(bound(pins));
@@ -2894,9 +2938,15 @@ fn transact<'a>(
             })
             .map_ok(|(library, entries)| {
                 library.show();
-                (library, entries, Outcome::Complete)
+                let ended = Ended {
+                    outcome: Outcome::Complete,
+                    left: Vec::new(),
+                };
+                (library, entries, ended)
             });
     }
+    let mut logged = logged;
+    logged.record = effects.moves_files().then_some(effects.record);
     carry_out(library, &logged, Rc::clone(&effects)).and_then(move |(library, record, applied)| {
         log_effects(library, logged, &effects, record, applied, closing, pins)
     })
@@ -2973,7 +3023,7 @@ fn log_effects<'a>(
     applied: Applied,
     closing: Option<Closing>,
     pins: Vec<Op>,
-) -> Fallible<'a, (&'a mut Library, Vec<Entry>, Outcome)> {
+) -> Fallible<'a, (&'a mut Library, Vec<Entry>, Ended)> {
     let (name, journaled) = (effects.record, effects.moves_files());
     let file_ops = library.file_ops(&applied, &record.files);
     let outcome = applied.outcome;
@@ -2987,14 +3037,12 @@ fn log_effects<'a>(
     kinds.extend(bound(pins));
     let touched = moved_paths(&effects.steps);
     appending(library, kinds).then(move |(library, appended)| {
-        let logged = library
-            .writer
-            .as_ref()
-            .is_some_and(|writer| writer.head() != record.after());
-        match (journaled, logged) {
-            (false, _) => {}
-            (true, true) => library.spend(name, &record),
-            (true, false) => library.interrupted(name, &record),
+        let retired = library.writer.as_ref().map(Writer::id) != Some(record.writer);
+        match (journaled, appended.is_ok(), retired) {
+            (false, _, _) => {}
+            (true, true, _) => library.spend(name, &record),
+            (true, false, false) => library.interrupted(name, &record),
+            (true, false, true) => library.orphan(name, &record, true),
         }
         let entries = match appended {
             Ok(entries) => entries,
@@ -3002,7 +3050,11 @@ fn log_effects<'a>(
         };
         rescan_paths(library, touched).map_ok(move |library| {
             library.show();
-            (library, entries, outcome)
+            let ended = Ended {
+                outcome,
+                left: applied.left,
+            };
+            (library, entries, ended)
         })
     })
 }
@@ -3043,9 +3095,11 @@ fn settle_orphan(
                         displaced: Vec::new(),
                         forks: Vec::new(),
                         more: 0,
+                        record: None,
                     };
                     let closing = Closing { facts, settle };
                     transact(library, logged, effects, Some(closing), Vec::new())
+                        .map_ok(|(library, entries, ended)| (library, entries, ended.outcome))
                 }
             },
         )

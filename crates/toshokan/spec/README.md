@@ -25,7 +25,9 @@ segments, and a process that closes its segment seals it with a marker. A
 writer folds its own chain into a snapshot, and then deletes the snapshot the
 new one supersedes and the sealed segments that a snapshot in its directory
 folds. A multi-step effect writes a pending record and logs the entry that
-closes it. The record is then spent, and its owner deletes it at any later time,
+closes it, which names the record: the model closes an effect by its own
+`logged` flag, and the code closes a record only by an entry naming its nonce,
+never by its place in the chain. The record is then spent, and its owner deletes it at any later time,
 after beginning other effects or never. Another writer that sees the record of
 an effect no entry closes reports it, and with the user's consent closes it in
 its own log; only the record's owner deletes it.
@@ -178,7 +180,7 @@ them, resurrections, hidden files and conflicted copies under other names.
 | Property or rule | Checked by |
 | --- | --- |
 | `ChainOrder`, `NothingIgnored`, `Retained`, `DeliveredConverges`, `Monotone`, `ForksKept` | `tests/portable.rs`: every delivery order of small scenarios, and seeded interleavings of writes, compactions, crashes, clones and lost local roots with sync; at each step a reader that reads only what changed places what one reading every file places. A remembered entry no file holds whose number a tip has passed counts as folded into that tip |
-| `NoMergedFork`, `DismissalsHold`, `Agree`, the grace step | `tests/retention`: the value-level checks of design R run toshokan's encoding, compaction and derivation against an oracle that never compacts |
+| `NoMergedFork`, `DismissalsHold`, `Agree`, the grace step | `tests/retention`: the value-level checks of the retention design run toshokan's encoding, compaction and derivation against an oracle that never compacts |
 | `OwnDirectory` | `tests/library.rs`: every instance runs on a backend that panics on a write in another writer's directory |
 | `EffectAccounted` | `tests/crash.rs`: every effect crashed after every operation, under torn, zeroed and lost tails, where moves rename and where they copy |
 | `DeliveredSettles` | `tests/crash.rs` and `tests/library.rs`: a crash, or the loss of the local root, at every step is settled once, by the writer itself or with consent by another, where moves rename and where they copy; a spent record is reported only by a reader its closing entry has not reached |
@@ -229,8 +231,7 @@ until a grace period passes, and then derives its view again from the files it
 sees, so the folder wins. The model allows that step at any time some merged
 entry is held by no file the reader sees (`Grace`), which also covers a sync
 client slower than the grace period. A reader that opens later never sees the
-lost entries. The code does not do this yet: it keeps the lost facts and asks
-the user to let them go or adopt them, which RETENTION.md drops.
+lost entries.
 
 The model does not cover these cases, and the code does not prevent what they
 cause:
@@ -251,3 +252,23 @@ cause:
 - Two entries with one hash. Hashes are 128 bits of BLAKE3, so an accidental
   collision is negligible, but a forger who writes both entries can make one
   with about 2^64 work.
+
+## Power loss
+
+The crash harness checks toshokan against the file system it models. Two NixOS
+VM tests check the native backend against ext4, XFS, Btrfs and exFAT, on x86_64
+Linux with KVM:
+
+```sh
+nix build .#toshokan-power-loss-smoke  # crashes a VM mid-workload, three times
+nix build .#toshokan-power-loss        # replays every flush, on each file system
+nix build .#toshokan-power-loss.ext4   # on one
+```
+
+The replay logs each workload's writes with dm-log-writes, then rebuilds the
+disk as it stood at every flush and at sets of the writes between two flushes,
+and checks each state after the file system's own recovery. An exFAT state that
+`fsck.exfat` finds corrupt is checked but counted apart. A write is replayed
+whole, never torn; the crash harness covers torn writes.
+[examples/power_loss.rs](../examples/power_loss.rs) holds the workloads and the
+checker. Neither test covers APFS, NTFS or a browser's storage.

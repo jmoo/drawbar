@@ -1,5 +1,5 @@
-//! Entries, files and what a reader shows, in the vocabulary of design R
-//! (`RETENTION.md`): entities, their existence, registers and set members.
+//! Entries, files and what a reader shows, in the vocabulary of `RETENTION.md`:
+//! entities, their existence, registers and set members.
 
 use std::collections::{BTreeMap, BTreeSet};
 

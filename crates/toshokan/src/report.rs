@@ -265,6 +265,10 @@ pub struct Committed {
     pub paths: Vec<PathChange>,
     /// Each tree it moved, from and to, in order.
     pub trees: Vec<(RelPath, RelPath)>,
+    /// Each directory it was to remove that the folder still holds, as one a
+    /// file it did not know of keeps, where moving a tree moves its files one
+    /// by one.
+    pub left: Vec<RelPath>,
     /// ⚠️ Whether this instance's own state caught up with the commit. While it
     /// is [`Local::Behind`], a crash followed by a restore of the folder that
     /// takes the commit's entries can take them from this install's view too.
@@ -409,6 +413,11 @@ pub struct HistoryItem {
 /// Displaced bytes in this writer's trash.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TrashItem {
+    /// The writer whose trash holds the bytes. Only this instance's writer
+    /// restores or empties its own; one of another writer of this install, as
+    /// one it wrote as before it retired, stays as it is, since only a writer
+    /// writes in its own directory.
+    pub writer: WriterId,
     pub item: Nonce,
     pub len: u64,
     /// Where the bytes were.

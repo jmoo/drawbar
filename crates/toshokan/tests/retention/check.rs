@@ -30,9 +30,9 @@ use super::{Bound, Design, Reading};
 pub struct Tally {
     pub histories: AtomicUsize,
     pub reads: AtomicUsize,
-    /// Fields where design R shows a conflict the oracle does not.
+    /// Fields where the design shows a conflict the oracle does not.
     pub conflicts: AtomicUsize,
-    /// Fields where the oracle merges a value design R shows only in a run: a
+    /// Fields where the oracle merges a value the design shows only in a run: a
     /// forgotten basis, or a fork point it cannot locate exactly.
     pub collapsed: AtomicUsize,
     /// Faulted folders after which a cached reader still holds an entry the
@@ -129,7 +129,7 @@ fn read<D: Design>(
     d.read(&Reading { world, files, seen }, memory)
 }
 
-/// Compares what design R shows with what the oracle shows, counting the
+/// Compares what the design shows with what the oracle shows, counting the
 /// documented divergences: a value missing where the design shows it in a run;
 /// and an extra value beside the oracle's, after a fork, or after a fault on a
 /// field the design reports contradicted, or on a field it shows as a
@@ -413,7 +413,7 @@ impl<'a, D: Design> Checker<'a, D> {
         &self.history.world
     }
 
-    /// The oracle's and design R's fresh reads of `seen`.
+    /// The oracle's and the design's fresh reads of `seen`.
     fn fresh(&self, seen: &[Seen]) -> (Shown, Shown, BTreeSet<Hash>) {
         self.tally.add(&self.tally.reads, 1);
         let r = Reading {

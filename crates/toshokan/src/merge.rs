@@ -752,6 +752,7 @@ impl Folded {
             .trash
             .range((writer, Nonce::from_u128(0))..=(writer, Nonce::from_u128(u128::MAX)))
             .map(|(&(_, item), trashed)| TrashItem {
+                writer,
                 item,
                 len: trashed.len,
                 from: trashed.from.clone(),

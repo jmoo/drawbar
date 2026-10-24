@@ -20,7 +20,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
 use crate::log::{
-    Displaced, Entry, EntryKind, FileFact, Forked, Observed, Op, Own, Ref, Run, Target,
+    Displaced, Entry, EntryKind, FileFact, Forked, Logged, Observed, Op, Own, Ref, Run, Target,
 };
 use crate::pack::{bad_variant, In, Pack, Unpack, Unpacked};
 use crate::path::RelPath;
@@ -162,6 +162,8 @@ pub struct Contribution {
     /// The runs the writer dismissed, each with the own entry that did.
     pub dismissals: BTreeSet<(Own, Run)>,
     pub trash: BTreeMap<Nonce, Trashed>,
+    /// The pending records the writer closed, of its own by the intent that
+    /// names one or of another writer's by a settlement.
     pub settled: BTreeSet<(WriterId, Nonce)>,
     /// Own entries of a kind this build does not know, and ops it does not know,
     /// each with its entry.
@@ -367,6 +369,13 @@ impl Contribution {
                 self.unknown.insert((entry.hash(), raw.clone()));
             }
             EntryKind::Intent(_) | EntryKind::More(_) | EntryKind::Bind(_) => {
+                if let EntryKind::Intent(Logged {
+                    record: Some(record),
+                    ..
+                }) = &kind
+                {
+                    self.settled.insert((writer, *record));
+                }
                 let known = forks(&kind);
                 let mut deleted = Vec::new();
                 for op in ops(&kind) {
@@ -1100,6 +1109,7 @@ mod tests {
                 displaced: vec![],
                 forks,
                 more: 0,
+                record: None,
             });
             entries.push(Entry::encode(prev.hash(), prev.n() + 1, at(prev.n() + 1), kind).unwrap());
         }

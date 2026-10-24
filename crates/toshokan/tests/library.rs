@@ -17,7 +17,7 @@ use toshokan::intent::{Driver, Intent};
 use toshokan::io::{Capabilities, Range};
 use toshokan::layout::SEGMENT_EXTENSION;
 use toshokan::line::MAX_LINE;
-use toshokan::log::{Entry, EntryKind, FileFact, Genesis, Logged, Op, Settlement};
+use toshokan::log::{Entry, EntryKind, FileFact, Genesis, Logged, Op, Run, Settlement};
 use toshokan::plan::FactChange;
 use toshokan::reader::{CachedView, GRACE_MS};
 use toshokan::report::{
@@ -589,8 +589,14 @@ through_both!(
     a_refresh_scans_only_the_files_other_writers_moved,
     a_conflict_is_shown_and_resolved,
     a_clone_forks_into_items_taken_or_dismissed,
+    undo_after_a_dismissal_undoes_the_change_before_it,
     more_files_than_one_line_holds_move_and_undo_as_one_change,
     an_append_torn_after_its_intent_logs_the_rest_at_the_next_open,
+    a_retired_writers_trash_is_still_listed,
+    a_tree_moved_file_by_file_names_the_directories_a_file_it_did_not_know_keeps,
+    an_entry_of_a_copied_instance_does_not_close_another_instances_record,
+    an_unfinished_effect_of_a_writer_that_retires_stays_this_installs,
+    a_commit_whose_entry_did_not_sync_keeps_its_record_through_tidying,
     a_compaction_finishes_a_cut_short_continuation_before_it_folds_it,
     a_continuation_resumed_without_a_moved_file_logs_every_other_file_once,
     more_entities_deleted_than_one_line_holds_beside_their_files_come_back_with_undo,
@@ -1376,6 +1382,191 @@ fn file_ops_logged(folder: &MemDisk) -> BTreeMap<String, usize> {
     counts
 }
 
+fn a_commit_whose_entry_did_not_sync_keeps_its_record_through_tidying<F: Facade>() {
+    if !FOLDER.get().fsync {
+        return;
+    }
+    let disk = disk();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&one_disk(&disk));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"one");
+    fail(
+        &probe,
+        |io| matches!(io, Io::Sync { root: Root::Folder, path } if path.as_str().ends_with(SEGMENT_EXTENSION)),
+    );
+    let saved = a.commit("Save", |i| {
+        i.save(
+            song,
+            &path("song.npno"),
+            b"two".to_vec(),
+            Expect::Holds(identity(b"one")),
+        )
+    });
+    assert!(saved.is_err(), "the entry did not sync");
+    heal(&probe);
+    a.tidy().unwrap();
+    drop(a);
+    let disk = disk.restart();
+    let (mut again, opened) = F::open(Probe::new(&one_disk(&disk)), env("a", 2, &clock)).unwrap();
+    let labels: Vec<&str> = opened.settled.iter().map(|s| s.label.as_str()).collect();
+    assert_eq!(labels, ["Save"], "the record outlived the lost entry");
+    again
+        .commit("Next", |i| i.create(|e| _ = e.add(TAGS, tag("next"))).0)
+        .unwrap();
+    let trash = again.trash().unwrap();
+    let from: Vec<_> = trash.iter().map(|item| item.from.clone()).collect();
+    assert_eq!(
+        from,
+        [path("song.npno")],
+        "an entry names the displaced bytes"
+    );
+}
+
+fn an_unfinished_effect_of_a_writer_that_retires_stays_this_installs<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    put(&folder, "a.wav", b"a");
+    let here = machine(&folder);
+    let probe = Probe::new(&here);
+    let (mut original, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    original.rescan().unwrap();
+    create(&mut original, "song.npno", b"song");
+    let there = here.cloned();
+    let (mut clone, _) = F::open(Probe::new(&there), env("a", 3, &clock)).unwrap();
+    original
+        .commit("Tag", |i| i.create(|e| _ = e.add(TAGS, tag("here"))).0)
+        .unwrap();
+    let logging = |io: &Io| io.root() == Root::Folder && io.path().as_str().ends_with(".txt");
+    fail(&probe, move |io| io.mutates() && logging(io));
+    let stopped = original.commit("Rename", |i| {
+        i.rename_file(
+            &path("a.wav"),
+            &path("b.wav"),
+            Expect::Holds(identity(b"a")),
+        )
+    });
+    heal(&probe);
+    assert!(stopped.is_err(), "{stopped:?}");
+    clone
+        .commit("Tag", |i| i.create(|e| _ = e.add(TAGS, tag("x"))).0)
+        .unwrap();
+    let refreshed = original.refresh().unwrap();
+    assert!(refreshed.retired.is_some(), "the fork retires the writer");
+    let orphans: Vec<(&str, bool)> = refreshed
+        .orphaned
+        .iter()
+        .map(|o| (o.label.as_str(), o.ours))
+        .collect();
+    assert_eq!(orphans, [("Rename", true)]);
+}
+
+fn an_entry_of_a_copied_instance_does_not_close_another_instances_record<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let mut here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"one");
+    a.close().unwrap();
+    let there = here.cloned();
+    let probe = Probe::new(&here);
+    let (mut original, _) = F::open(probe.clone(), env("a", 2, &clock)).unwrap();
+    let (mut copy, _) = F::open(Probe::new(&there), env("a", 3, &clock)).unwrap();
+    let logging =
+        |io: &Io| io.root() == Root::Folder && io.path().as_str().ends_with(SEGMENT_EXTENSION);
+    fail(&probe, move |io| io.mutates() && logging(io));
+    let saved = original.commit("Save", |i| {
+        i.save(
+            song,
+            &path("song.npno"),
+            b"two".to_vec(),
+            Expect::Holds(identity(b"one")),
+        )
+    });
+    assert!(
+        saved.is_err(),
+        "the effect is made and its entry not logged"
+    );
+    drop(original);
+    here.crash();
+    copy.commit("Tag", |i| i.add(song, TAGS, tag("there")))
+        .unwrap();
+    drop(copy);
+    let (mut again, opened) = F::open(Probe::new(&here), env("a", 4, &clock)).unwrap();
+    let labels: Vec<&str> = opened.settled.iter().map(|s| s.label.as_str()).collect();
+    assert_eq!(labels, ["Save"], "no entry names the record");
+    again
+        .commit("Next", |i| i.add(song, TAGS, tag("next")))
+        .unwrap();
+    let trash = again.trash().unwrap();
+    let from: Vec<_> = trash.iter().map(|item| item.from.clone()).collect();
+    assert_eq!(
+        from,
+        [path("song.npno")],
+        "an entry names the displaced bytes"
+    );
+}
+
+fn a_tree_moved_file_by_file_names_the_directories_a_file_it_did_not_know_keeps<F: Facade>() {
+    let folder = MemDisk::with_capabilities(
+        Capabilities {
+            rename_dir: false,
+            ..Capabilities::ALL
+        },
+        Capabilities::ALL,
+    );
+    put(&folder, "old/a.wav", b"a");
+    put(&folder, "old/sub/b.wav", b"b");
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    put(&folder, "old/late.wav", b"late");
+    let moved = a
+        .commit("Rename", |i| i.move_tree(&path("old"), &path("new")))
+        .unwrap();
+    assert_eq!(
+        moved.left,
+        [path("old")],
+        "old/sub went, old keeps late.wav"
+    );
+}
+
+fn a_retired_writers_trash_is_still_listed<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut original, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut original, "song.npno", b"one");
+    original
+        .commit("Save", |i| {
+            i.save(
+                song,
+                &path("song.npno"),
+                b"two".to_vec(),
+                Expect::Holds(identity(b"one")),
+            )
+        })
+        .unwrap();
+    let there = here.cloned();
+    let (mut clone, _) = F::open(Probe::new(&there), env("a", 2, &clock)).unwrap();
+    for (library, text) in [(&mut original, "here"), (&mut clone, "there")] {
+        library
+            .commit("Tag", |i| i.add(song, TAGS, tag(text)))
+            .unwrap();
+    }
+    let retired = original
+        .refresh()
+        .unwrap()
+        .retired
+        .expect("the fork retires it");
+    let trash = original.trash().unwrap();
+    let listed: Vec<_> = trash
+        .iter()
+        .map(|item| (item.writer, item.from.clone()))
+        .collect();
+    assert_eq!(listed, [(retired, path("song.npno"))]);
+}
+
 fn an_append_torn_after_its_intent_logs_the_rest_at_the_next_open<F: Facade>() {
     let clock = TestClock::at(1_000);
     let Some(disk) = torn_after_one_continuation::<F>(&clock) else {
@@ -1407,6 +1598,44 @@ fn an_append_torn_after_its_intent_logs_the_rest_at_the_next_open<F: Facade>() {
         fresh_files, TORN_FILES,
         "another reader holds every file op"
     );
+}
+
+fn undo_after_a_dismissal_undoes_the_change_before_it<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    a.close().unwrap();
+    let there = here.cloned();
+    let (mut original, _) = F::open(Probe::new(&here), env("a", 2, &clock)).unwrap();
+    let (mut clone, _) = F::open(Probe::new(&there), env("a", 3, &clock)).unwrap();
+    for (library, text) in [(&mut original, "here"), (&mut clone, "there")] {
+        library
+            .commit("Tag", |i| i.add(song, TAGS, tag(text)))
+            .unwrap();
+    }
+    original.refresh().unwrap();
+    original
+        .commit("Tag", |i| i.add(song, TAGS, tag("later")))
+        .unwrap();
+    let runs: Vec<Run> = original
+        .view()
+        .items()
+        .iter()
+        .map(|item| item.run)
+        .collect();
+    assert_eq!(runs.len(), 2, "one item per branch");
+    original
+        .commit("Dismiss", |i| runs.iter().fold(i, |i, run| i.dismiss(*run)))
+        .unwrap();
+    original.undo().unwrap();
+    assert_eq!(
+        tags(&original.view(), song),
+        ["new"],
+        "the tag before is undone"
+    );
+    assert_eq!(original.view().items(), [], "the dismissal stands");
 }
 
 fn a_clone_forks_into_items_taken_or_dismissed<F: Facade>() {
@@ -3010,6 +3239,7 @@ fn shelved(folder: &MemDisk, count: usize) -> Vec<(EntityId, RelPath)> {
             displaced: Vec::new(),
             forks: Vec::new(),
             more: 0,
+            record: None,
         })
     });
     let (mut prev, mut segment) = (EntryHash::ZERO, Vec::new());
@@ -6314,6 +6544,15 @@ fn a_crash_in_compaction_tears_a_snapshot_only_where_the_folder_cannot_rename<F:
             });
             next.unwrap_or_else(|e| panic!("{shown}: {e}"));
             assert_eq!(staged(&disk), [] as [RelPath; 0], "{shown}");
+            a.compact().unwrap_or_else(|e| panic!("{shown}: {e}"));
+            drop(a);
+            let (_, opened) = F::open(Probe::new(&one_disk(&disk)), env("a", 4, &clock))
+                .unwrap_or_else(|e| panic!("{shown}: {e}"));
+            assert_eq!(
+                opened.unreadable,
+                [],
+                "{shown}: the next compaction removes it"
+            );
             tidied += 1;
         },
     );
