@@ -201,10 +201,7 @@ impl Executor {
             Io::MakeDir { root, path } => self.tree(root).make_dir(&path).await.map(done),
             Io::Sync { root, path } => self.tree(root).sync(&path).await.map(done),
             Io::Lock { name } => self.locks.lock(&name).await.map(Reply::Lock),
-            Io::Unlock { name } => {
-                self.locks.unlock(&name);
-                Ok(Reply::Done)
-            }
+            Io::Unlock { name } => self.locks.unlock(&name).await.map(|()| Reply::Done),
             Io::Fill { .. } => Err(IoError::Other(FILLED_BY_DRIVERS.into())),
         }
     }
@@ -756,8 +753,9 @@ struct Locks {
     manager: JsValue,
     /// Names this install's locks apart from another local root's.
     prefix: String,
-    /// Each held lock's release.
-    held: RefCell<BTreeMap<RelPath, Function>>,
+    /// Each held lock's release, and the request that settles once the browser
+    /// has let the lock go.
+    held: RefCell<BTreeMap<RelPath, (Function, Promise)>>,
 }
 
 impl Locks {
@@ -803,16 +801,25 @@ impl Locks {
         let answer = wait(first).await.map_err(other)?;
         match answer.dyn_into::<Function>() {
             Ok(release) => {
-                self.held.borrow_mut().insert(name.clone(), release);
+                self.held
+                    .borrow_mut()
+                    .insert(name.clone(), (release, requested));
                 Ok(Lock::Acquired)
             }
             Err(_) => Ok(Lock::Held),
         }
     }
 
-    fn unlock(&self, name: &RelPath) {
-        if let Some(release) = self.held.borrow_mut().remove(name) {
-            let _ = release.call0(&JsValue::NULL);
-        }
+    /// Lets the lock `name` go, and returns once the browser has, so that
+    /// another process asking next finds it free.
+    async fn unlock(&self, name: &RelPath) -> Result<(), IoError> {
+        let Some((release, requested)) = self.held.borrow_mut().remove(name) else {
+            return Ok(());
+        };
+        let _ = release.call0(&JsValue::NULL);
+        wait(requested)
+            .await
+            .map(drop)
+            .map_err(|error| IoError::Other(describe(&error)))
     }
 }
