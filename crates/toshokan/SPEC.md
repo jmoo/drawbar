@@ -7,6 +7,52 @@ this one. The format is unstable while toshokan is a proof of concept.
 All text is UTF-8. All hexadecimal is lowercase. JSON is written without
 insignificant whitespace.
 
+## Design
+
+The core does no I/O. Every operation is a state machine that asks for reads,
+writes and syncs, consumes their results, and pauses between slices of a long
+computation. The `blocking` driver runs it on
+the machine's file system, and the `asynch` driver on any async backend, such as
+a browser's; both run it on an in-memory disk that models what survives a crash.
+A directory listing with every file's metadata is one request, and so are many
+reads, so a scan of every file costs a request per directory rather than per
+file. A commit or a refresh binds files to entities again only as far as its
+changes reach: the entities and files that share a path, a name the volume
+takes for one, or an identity with what changed.
+Time, randomness, the app's identity function and the volume's name rules are
+injected, so the crash harness and the sync simulator replay every run exactly.
+
+Each writer appends to a hash-chained log in its own directory. Entries name each
+other by hash, so writers never collide, and a reader places entries by chain
+whatever their files are called. Fields are multi-value registers and
+observed-remove sets, merged by a join. A file effect stages its bytes, writes a
+pending record, moves displaced bytes into the writer's trash, and logs what it
+did; recovery after a crash, or after losing the app's data, finishes or reports
+it. Where the folder cannot rename files, each move copies and then removes its
+source, under the same record.
+
+[spec/](spec/README.md) model-checks, in TLA+, the protocol between writers and
+readers, and maps its properties to the tests that check the code.
+
+Principles:
+
+1. **The folder belongs to the user.** Files keep their names, bytes and places
+   unless the app asks. Opening writes nothing there.
+2. **One writer per file.** Each writer writes only in its own directory.
+3. **Merge is a pure function.** The same entries give the same state, in any
+   order, on any machine.
+4. **Nothing is overwritten.** Displaced bytes go to the writer's trash, which
+   only that writer empties.
+5. **Conflicts are shown.** Concurrent edits are kept, and the app can list them.
+6. **Keep what you don't understand.** What a newer writer wrote survives, even
+   when an older one compacts it.
+7. **Nondeterminism is injected.** Time, randomness and file identity come from
+   the app, so tests replay exactly.
+8. **Small.** The standard library, serde, BLAKE3 and thiserror, plus rustix on
+   Linux and Apple systems, libc on Apple systems and windows-sys on Windows,
+   for a rename that never replaces, and wasm-bindgen, js-sys and web-sys for
+   the browser.
+
 ## Durability
 
 A backend says, for each of the folder and the local root, whether it can sync.

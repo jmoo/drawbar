@@ -252,3 +252,23 @@ cause:
 - Two entries with one hash. Hashes are 128 bits of BLAKE3, so an accidental
   collision is negligible, but a forger who writes both entries can make one
   with about 2^64 work.
+
+## Power loss
+
+The crash harness checks toshokan against the file system it models. Two NixOS
+VM tests check the native backend against ext4, XFS, Btrfs and exFAT, on x86_64
+Linux with KVM:
+
+```sh
+nix build .#toshokan-power-loss-smoke  # crashes a VM mid-workload, three times
+nix build .#toshokan-power-loss        # replays every flush, on each file system
+nix build .#toshokan-power-loss.ext4   # on one
+```
+
+The replay logs each workload's writes with dm-log-writes, then rebuilds the
+disk as it stood at every flush and at sets of the writes between two flushes,
+and checks each state after the file system's own recovery. An exFAT state that
+`fsck.exfat` finds corrupt is checked but counted apart. A write is replayed
+whole, never torn; the crash harness covers torn writes.
+[examples/power_loss.rs](../examples/power_loss.rs) holds the workloads and the
+checker. Neither test covers APFS, NTFS or a browser's storage.
