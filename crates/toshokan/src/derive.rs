@@ -403,25 +403,19 @@ fn classify(
             at = remembered(&entry.prev());
         }
     }
-    let after_fork = |hash: EntryHash| {
-        if named.contains(&hash) {
-            return false;
-        }
-        let mut at = w.known.get(&hash);
-        while let Some(entry) = at {
-            if w.forks.iter().any(|fork| fork.hash == entry.prev()) {
-                return true;
-            }
-            at = w.known.get(&entry.prev());
-        }
-        false
+    let fork_points: BTreeSet<EntryHash> = w.forks.iter().map(|fork| fork.hash).collect();
+    let after_fork = |entry: EntryHash| {
+        let prev = w.known.get(&entry).map(|entry| entry.prev());
+        prev.is_some_and(|prev| fork_points.contains(&prev))
     };
+    let through = |hash: EntryHash| w.known.contains_key(&hash);
+    let mut memo = HashMap::default();
     let mut unsure = BTreeSet::new();
     candidates.retain(|hash| {
         let passed = !w.seen.contains(hash)
             && !w.placed.contains(hash)
             && tip_n.is_some_and(|tip| w.entry(*hash).n() <= tip);
-        if passed && after_fork(*hash) {
+        if passed && !named.contains(hash) && reaches(&w, *hash, &mut memo, &through, &after_fork) {
             unsure.insert(*hash);
             return true;
         }
@@ -499,16 +493,34 @@ type Numbered = BTreeMap<u64, BTreeSet<EntryHash>>;
 struct Dismissals(Vec<Run>);
 
 impl Dismissals {
-    /// Whether some dismissal names the merged-or-placed entry `hash` of `w`.
-    fn cover(&self, w: &Writer, hash: EntryHash) -> bool {
-        let entry = w.entry(hash);
-        self.0.iter().any(|run| {
-            run.writer == w.writer
-                && entry.n() >= run.from
-                && entry.n() <= run.last.n
-                && (walk(w, run.last.hash, hash)
-                    || (run.tip.is_none() && run.first.is_some_and(|first| walk(w, hash, first))))
-        })
+    /// The candidates of `w` some dismissal names: numbered from the run's first
+    /// to its last, on the last's chain or, for a run of lines, after its first.
+    fn covered(&self, w: &Writer) -> BTreeSet<EntryHash> {
+        let mut covered = BTreeSet::new();
+        for run in self.0.iter().filter(|run| run.writer == w.writer) {
+            let named = |hash: &EntryHash| (run.from..=run.last.n).contains(&w.entry(*hash).n());
+            let mut at = Some(run.last.hash).filter(|hash| w.known.contains_key(hash));
+            while let Some(hash) = at {
+                step();
+                if w.candidates.contains(&hash) && named(&hash) {
+                    covered.insert(hash);
+                }
+                let entry = w.entry(hash);
+                at = Some(entry.prev())
+                    .filter(|prev| entry.n() > run.from && w.known.contains_key(prev));
+            }
+            let Some(first) = run.first.filter(|_| run.tip.is_none()) else {
+                continue;
+            };
+            let mut memo = HashMap::default();
+            let through = |hash: EntryHash| w.known.contains_key(&hash);
+            for hash in w.candidates.iter().filter(|hash| named(hash)) {
+                if reaches(w, *hash, &mut memo, &through, &|at| at == first) {
+                    covered.insert(*hash);
+                }
+            }
+        }
+        covered
     }
 
     /// Whether some dismissal names the own entry numbered `n` in tip `tip`.
@@ -539,21 +551,47 @@ impl Dismissals {
     }
 }
 
-/// Whether `to` is `from` or comes before it on its chain, through entries `w`
-/// knows.
-fn walk(w: &Writer, from: EntryHash, to: EntryHash) -> bool {
-    let mut at = Some(from);
-    while let Some(hash) = at {
-        if hash == to {
-            return true;
+/// Whether the chain back from `start`, through entries `through` holds for,
+/// reaches one `hit` holds for. `memo` keeps the answer for each entry walked,
+/// so that walks from every entry of a chain take one step per entry in all.
+fn reaches(
+    w: &Writer,
+    start: EntryHash,
+    memo: &mut HashMap<EntryHash, bool, Quick>,
+    through: &dyn Fn(EntryHash) -> bool,
+    hit: &dyn Fn(EntryHash) -> bool,
+) -> bool {
+    let mut path = Vec::new();
+    let mut at = start;
+    let reached = loop {
+        if let Some(&known) = memo.get(&at) {
+            break known;
         }
-        at = w
-            .known
-            .get(&hash)
-            .map(|entry| entry.prev())
-            .filter(|prev| w.known.contains_key(prev) || *prev == to);
+        if hit(at) {
+            break true;
+        }
+        if !through(at) {
+            break false;
+        }
+        step();
+        path.push(at);
+        at = w.entry(at).prev();
+    };
+    for hash in path {
+        memo.insert(hash, reached);
     }
-    false
+    reached
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many steps the walks back along chains took, for tests that bound it.
+    static STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn step() {
+    #[cfg(test)]
+    STEPS.set(STEPS.get() + 1);
 }
 
 /// A write a contribution or a merged entry holds.
@@ -675,28 +713,17 @@ pub fn derive(
     let mut merged_entries: BTreeMap<WriterId, Vec<Rc<Entry>>> = BTreeMap::new();
     let mut beside = Beside::default();
     for w in classified.values() {
-        let covered: BTreeSet<EntryHash> = w
-            .candidates
-            .iter()
-            .copied()
-            .filter(|hash| dismissals.cover(w, *hash))
-            .collect();
+        let covered = dismissals.covered(w);
+        let mut memo = HashMap::default();
+        let through = |hash: EntryHash| w.candidates.contains(&hash) && w.known.contains_key(&hash);
+        let hit = |hash: EntryHash| covered.contains(&hash);
         let after: BTreeSet<EntryHash> = w
             .candidates
             .iter()
             .copied()
             .filter(|hash| {
-                if covered.contains(hash) {
-                    return false;
-                }
-                let mut at = w.entry(*hash).prev();
-                while let Some(entry) = w.known.get(&at).filter(|_| w.candidates.contains(&at)) {
-                    if covered.contains(&at) {
-                        return true;
-                    }
-                    at = entry.prev();
-                }
-                false
+                !covered.contains(hash)
+                    && reaches(w, w.entry(*hash).prev(), &mut memo, &through, &hit)
             })
             .collect();
         let held: BTreeSet<EntryHash> = w.candidates.difference(&w.placed).copied().collect();
@@ -1068,16 +1095,15 @@ fn items(
         (&placed.gaps, ItemKind::Gap),
         (&placed.unplaced, ItemKind::Unplaced),
     ] {
-        let set: BTreeSet<EntryHash> = list.iter().map(|entry| entry.hash()).collect();
+        // The list is in number order, so an entry's predecessor in it has its
+        // root already.
+        let mut roots: HashMap<EntryHash, Rc<Entry>, Quick> = HashMap::default();
         for entry in list.iter() {
-            let mut root = Rc::clone(entry);
-            while let Some(prev) = w
-                .known
-                .get(&root.prev())
-                .filter(|prev| set.contains(&prev.hash()))
-            {
-                root = Rc::clone(prev);
-            }
+            let root = match roots.get(&entry.prev()) {
+                Some(root) => Rc::clone(root),
+                None => Rc::clone(entry),
+            };
+            roots.insert(entry.hash(), Rc::clone(&root));
             let key = match root.prev() {
                 prev if kind == ItemKind::Run
                     && w.is_head(prev)
@@ -1739,6 +1765,50 @@ mod tests {
             derived(vec![(W, tip)], false).folded,
             from_lines(&chain_of).folded
         );
+    }
+
+    /// The steps the walks back along chains take to derive `chain`, held as
+    /// lines no snapshot folds, beside a dismissal of a run inside it.
+    fn steps_to_derive(chain: &[Rc<Entry>]) -> usize {
+        let run = Run {
+            writer: W,
+            from: 1,
+            first: Some(chain[1].hash()),
+            last: chain[1].own(),
+            tip: None,
+        };
+        let dismiss = entry(None, vec![Op::Dismiss { runs: vec![run] }], "dismiss");
+        let theirs = vec![dismiss];
+        let seen = vec![
+            (
+                W,
+                Seen {
+                    segments: vec![lines(chain, false)],
+                    snapshots: vec![],
+                },
+            ),
+            (
+                X,
+                Seen {
+                    segments: vec![lines(&theirs, false)],
+                    snapshots: vec![],
+                },
+            ),
+        ];
+        STEPS.set(0);
+        derived(seen, false);
+        STEPS.get()
+    }
+
+    #[test]
+    fn deriving_a_long_uncompacted_chain_takes_steps_in_proportion_to_its_entries() {
+        let values: Vec<String> = (0..2_000).map(|n| n.to_string()).collect();
+        let values: Vec<&str> = values.iter().map(String::as_str).collect();
+        for n in [500, 2_000] {
+            let chain = chain(W, &values[..n]);
+            let steps = steps_to_derive(&chain);
+            assert!(steps <= 4 * n, "{steps} steps for {n} entries");
+        }
     }
 
     #[test]
