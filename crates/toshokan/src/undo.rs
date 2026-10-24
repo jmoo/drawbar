@@ -136,6 +136,13 @@ fn values(folded: &Folded, entity: EntityId) -> Vec<FactChange> {
     changes
 }
 
+/// Whether an intent whose ops, with its continuations', are `ops` joins the
+/// history: every intent does but one that only dismisses runs.
+pub fn joins<'a>(ops: impl IntoIterator<Item = &'a Op>) -> bool {
+    let mut ops = ops.into_iter().peekable();
+    ops.peek().is_none() || !ops.all(|op| matches!(op, Op::Dismiss { .. }))
+}
+
 impl History {
     /// Adds this writer's next intent `entry`, which with its continuation logs
     /// `logged`, committed over what `before` says it replaced. An intent
@@ -150,8 +157,7 @@ impl History {
         reverses: Option<EntryHash>,
         before: Before,
     ) {
-        let dismisses = |op: &Op| matches!(op, Op::Dismiss { .. });
-        if !logged.ops.is_empty() && logged.ops.iter().all(dismisses) {
+        if !joins(&logged.ops) {
             return;
         }
         let label = logged.label.clone();

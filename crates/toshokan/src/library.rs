@@ -50,7 +50,7 @@ use crate::report::{
 };
 use crate::schema::Schema;
 use crate::trash::{self, Policy};
-use crate::undo::{Before, History};
+use crate::undo::{self, Before, History};
 use crate::view::{FileRef, FileState, Listed, Parts, View};
 use crate::writer::{self, Claimed, Picked, Writer};
 
@@ -2477,8 +2477,19 @@ fn committed(
         Op::Tree { from, to } => Some((from.clone(), to.clone())),
         _ => None,
     });
+    let undoable = match kinds.first() {
+        Some(EntryKind::Intent(logged)) => {
+            let more = kinds[1..].iter().filter_map(|kind| match kind {
+                EntryKind::More(more) => Some(&more.ops),
+                _ => None,
+            });
+            undo::joins(logged.ops.iter().chain(more.flatten()))
+        }
+        _ => false,
+    };
     let committed = Committed {
         intent: entries[0].hash(),
+        undoable,
         created,
         changes: distinct(ops.iter().copied().filter_map(change_of)),
         paths: paths.collect(),

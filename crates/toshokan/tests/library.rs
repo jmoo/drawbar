@@ -1619,9 +1619,10 @@ fn undo_after_a_dismissal_undoes_the_change_before_it<F: Facade>() {
             .unwrap();
     }
     original.refresh().unwrap();
-    original
+    let later = original
         .commit("Tag", |i| i.add(song, TAGS, tag("later")))
         .unwrap();
+    assert!(later.undoable, "a tag joins the undo history");
     let runs: Vec<Run> = original
         .view()
         .items()
@@ -1629,10 +1630,12 @@ fn undo_after_a_dismissal_undoes_the_change_before_it<F: Facade>() {
         .map(|item| item.run)
         .collect();
     assert_eq!(runs.len(), 2, "one item per branch");
-    original
+    let dismissed = original
         .commit("Dismiss", |i| runs.iter().fold(i, |i, run| i.dismiss(*run)))
         .unwrap();
-    original.undo().unwrap();
+    assert!(!dismissed.undoable, "a dismissal is final");
+    let undone = original.undo().unwrap();
+    assert!(undone.undoable, "an undo is redone");
     assert_eq!(
         tags(&original.view(), song),
         ["new"],

@@ -269,6 +269,9 @@ pub struct Committed {
     /// file it did not know of keeps, where moving a tree moves its files one
     /// by one.
     pub left: Vec<RelPath>,
+    /// Whether it joined this instance's undo history, as every intent does but
+    /// one that only dismisses runs.
+    pub undoable: bool,
     /// ⚠️ Whether this instance's own state caught up with the commit. While it
     /// is [`Local::Behind`], a crash followed by a restore of the folder that
     /// takes the commit's entries can take them from this install's view too.
