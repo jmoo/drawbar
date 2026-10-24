@@ -1004,6 +1004,9 @@ pub enum Event {
     Committed {
         label: String,
         made: Option<toshokan::EntryHash>,
+        /// Whether the change joined this session's undo: every one does but a
+        /// dismissal.
+        undoable: bool,
         result: Result<Viewed, String>,
     },
     /// The answers to the change `label` were lost: whether it was made is not known.

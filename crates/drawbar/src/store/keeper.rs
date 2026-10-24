@@ -168,14 +168,15 @@ impl<F: Fs> Keeper<F> {
     async fn made(
         &mut self,
         label: String,
-        committed: Result<(Option<EntryHash>, Viewed), String>,
+        committed: Result<(Option<Made>, Viewed), String>,
         answer: &mut impl FnMut(Event),
     ) {
         let made = committed.as_ref().ok().and_then(|(made, _)| *made);
-        self.session.extend(made);
+        self.session.extend(made.map(|(entry, _)| entry));
         answer(Event::Committed {
             label,
-            made,
+            made: made.map(|(entry, _)| entry),
+            undoable: made.is_some_and(|(_, undoable)| undoable),
             result: committed.map(|(_, viewed)| viewed),
         });
         if made.is_some() {
@@ -338,7 +339,7 @@ impl<F: Fs> Keeper<F> {
 
     /// Undo, or redo where `again`, and the view after it, with the files no entity is
     /// bound to that it moved for the app to follow.
-    async fn undone(&mut self, again: bool) -> Result<(Option<EntryHash>, Viewed), String> {
+    async fn undone(&mut self, again: bool) -> Result<(Option<Made>, Viewed), String> {
         let library = self.library.as_mut().ok_or("the library is not open")?;
         let committed = match again {
             true => library.redo().await,
@@ -357,7 +358,7 @@ impl<F: Fs> Keeper<F> {
             left: shown_paths(&committed.left),
             ..committed_view(library, &mut self.shown, committed.changes)
         };
-        Ok((Some(committed.intent), viewed))
+        Ok((Some((committed.intent, committed.undoable)), viewed))
     }
 
     /// Settle another writer's unfinished change, and the view after it.
@@ -365,7 +366,7 @@ impl<F: Fs> Keeper<F> {
         &mut self,
         orphan: toshokan::report::Orphan,
         how: Settlement,
-    ) -> Result<(Option<EntryHash>, Viewed), String> {
+    ) -> Result<(Option<Made>, Viewed), String> {
         let library = self.library.as_mut().ok_or("the library is not open")?;
         let committed = library
             .settle(orphan, how)
@@ -375,7 +376,7 @@ impl<F: Fs> Keeper<F> {
             dirs: Some(folders(library.fs()).await),
             ..committed_view(library, &mut self.shown, committed.changes)
         };
-        Ok((Some(committed.intent), viewed))
+        Ok((Some((committed.intent, committed.undoable)), viewed))
     }
 
     /// Commit an intent, and say which entry logged it, where it was made. A change to a
@@ -385,7 +386,7 @@ impl<F: Fs> Keeper<F> {
         &mut self,
         intent: Intent,
         answer: &mut impl FnMut(Event),
-    ) -> Result<(Option<EntryHash>, Viewed), String> {
+    ) -> Result<(Option<Made>, Viewed), String> {
         let library = self.library.as_mut().ok_or("the library is not open")?;
         let label = intent.label();
         // ⚠️ Where folders do not rename, one moves file by file as the last scan found
@@ -488,7 +489,9 @@ impl<F: Fs> Keeper<F> {
             Intent::Batch(parts) => batch(library, label, parts, answer).await,
             part => batch(library, label, vec![part], answer).await,
         };
-        let intent = changes.as_ref().map(|committed| committed.intent);
+        let intent = changes
+            .as_ref()
+            .map(|committed| (committed.intent, committed.undoable));
         let left = changes
             .as_ref()
             .map(|committed| shown_paths(&committed.left));
@@ -500,6 +503,9 @@ impl<F: Fs> Keeper<F> {
         Ok((intent, viewed))
     }
 }
+
+/// The entry that logged a change, and whether the change joined this session's undo.
+type Made = (EntryHash, bool);
 
 /// `paths` as the app names library paths.
 fn shown_paths(paths: &[RelPath]) -> Vec<LibPath> {

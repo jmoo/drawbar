@@ -114,6 +114,7 @@ impl Refusing {
                     true => Event::Committed {
                         label,
                         made: None,
+                        undoable: false,
                         result: Err(why.to_string()),
                     },
                     false => Event::Unheard { label },
