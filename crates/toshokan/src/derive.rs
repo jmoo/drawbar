@@ -22,7 +22,7 @@
 //!   write, and its own writes in or before its own delete of their entity;
 //!   writes a reference covers; and a taken run's writer's writes below the run.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::contribution::{self, Contribution, FieldKey, Held, Said, Value};
@@ -589,6 +589,34 @@ thread_local! {
     static STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// The first entry of `members` on the chain back from `entry` through them,
+/// remembered for each entry the walk passes.
+fn root_in(
+    w: &Writer,
+    entry: &Rc<Entry>,
+    members: &HashSet<EntryHash, Quick>,
+    roots: &mut HashMap<EntryHash, Rc<Entry>, Quick>,
+) -> Rc<Entry> {
+    let mut passed = Vec::new();
+    let mut at = Rc::clone(entry);
+    let root = loop {
+        step();
+        if let Some(root) = roots.get(&at.hash()) {
+            break Rc::clone(root);
+        }
+        passed.push(at.hash());
+        let prev = w.known.get(&at.prev());
+        match prev.filter(|prev| members.contains(&prev.hash())) {
+            Some(prev) => at = Rc::clone(prev),
+            None => break at,
+        }
+    };
+    for hash in passed {
+        roots.insert(hash, Rc::clone(&root));
+    }
+    root
+}
+
 fn step() {
     #[cfg(test)]
     STEPS.set(STEPS.get() + 1);
@@ -1095,15 +1123,10 @@ fn items(
         (&placed.gaps, ItemKind::Gap),
         (&placed.unplaced, ItemKind::Unplaced),
     ] {
-        // The list is in number order, so an entry's predecessor in it has its
-        // root already.
+        let members: HashSet<EntryHash, Quick> = list.iter().map(|entry| entry.hash()).collect();
         let mut roots: HashMap<EntryHash, Rc<Entry>, Quick> = HashMap::default();
         for entry in list.iter() {
-            let root = match roots.get(&entry.prev()) {
-                Some(root) => Rc::clone(root),
-                None => Rc::clone(entry),
-            };
-            roots.insert(entry.hash(), Rc::clone(&root));
+            let root = root_in(w, entry, &members, &mut roots);
             let key = match root.prev() {
                 prev if kind == ItemKind::Run
                     && w.is_head(prev)
@@ -1501,6 +1524,43 @@ mod tests {
             false => BTreeSet::new(),
         };
         derive(&seen.into_iter().collect(), &BTreeMap::new(), &graced)
+    }
+
+    #[test]
+    fn a_chain_numbered_against_its_order_is_one_item() {
+        let numbered = |prev: &Entry, n: u64, value: &str| {
+            let at = Hlc {
+                wall_ms: 100 + n,
+                counter: 0,
+            };
+            let kind = EntryKind::Intent(Logged {
+                label: value.into(),
+                ops: vec![set(value, Vec::new())],
+                displaced: Vec::new(),
+                forks: Vec::new(),
+                more: 0,
+                record: None,
+            });
+            Rc::new(Entry::encode(prev.hash(), n, at, kind).unwrap())
+        };
+        let genesis = entry(None, vec![set("a", Vec::new())], "a");
+        let misnumbered = numbered(&genesis, 5, "b");
+        let first = numbered(&misnumbered, 2, "c");
+        let second = numbered(&first, 1, "d");
+        let entries = [genesis, misnumbered, first.clone(), second];
+        let derived = derived(
+            vec![(
+                W,
+                Seen {
+                    segments: vec![lines(&entries, false)],
+                    snapshots: vec![],
+                },
+            )],
+            false,
+        );
+        let items = &derived.items[&W];
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].run.first, Some(first.hash()), "{items:?}");
     }
 
     #[test]
