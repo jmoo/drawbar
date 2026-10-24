@@ -1,21 +1,20 @@
 //! The browser's files, in a folder of its private storage: the open library's own state
 //! for this install, or the browser's library's where none is open. They are written by
-//! toshokan's storage worker, since the handles that write in place exist only in a
-//! worker, and read back by slices of the `File` the browser gives for them.
+//! drawbar's worker, since the handles that write in place exist only in a worker, and
+//! read back by slices of the `File` the browser gives for them.
 
 use std::cell::RefCell;
 use std::io;
 use std::rc::Rc;
 
 use nord_usb::{FileSink, FileSource};
-use toshokan::asynch::Fs as _;
-use toshokan::io::{Io, IoError, Reply, Root};
-use toshokan::web::{private_dir, Folder, Worker};
+use toshokan::io::IoError;
+use toshokan::web::private_dir;
 use toshokan::RelPath;
 use web_sys::FileSystemFileHandle;
 
 use super::{all_taken, numbered, partial, NAMES};
-use crate::store::settle;
+use crate::store::{settle, RescueIo, Worker};
 
 /// Where new files go, and the worker that writes there, started with the first.
 #[derive(Clone, Default)]
@@ -50,8 +49,8 @@ impl Scratch {
                 return Ok(writer.clone());
             }
         }
-        let started = Worker::start(Folder::Private(dir.clone()), dir).await;
-        let writer = Rc::new(started.map_err(failed)?);
+        let started = Worker::rescues(dir).await;
+        let writer = Rc::new(started.map_err(io::Error::other)?);
         *self.writer.borrow_mut() = Some((dir.clone(), writer.clone()));
         Ok(writer)
     }
@@ -67,16 +66,7 @@ impl Scratch {
             if !free(&writer, &named).await? || !free(&writer, &leaf).await? {
                 continue;
             }
-            let path = at(&leaf)?;
-            ask(
-                &writer,
-                Io::Create {
-                    root: Root::Folder,
-                    path,
-                    bytes: Vec::new(),
-                },
-            )
-            .await?;
+            ask(&writer, RescueIo::Create(leaf.clone())).await?;
             return Ok(Kept {
                 writer,
                 dir,
@@ -95,29 +85,13 @@ fn failed(error: IoError) -> io::Error {
     }
 }
 
-async fn ask(writer: &Worker, io: Io) -> io::Result<Reply> {
-    writer.perform(io).await.map_err(failed)
-}
-
-fn at(leaf: &str) -> io::Result<RelPath> {
-    RelPath::new(leaf).map_err(|e| io::Error::other(e.to_string()))
+async fn ask(writer: &Worker, io: RescueIo) -> io::Result<bool> {
+    writer.rescue(io).await.map_err(io::Error::other)
 }
 
 /// Whether no file is called `leaf` in the folder.
 async fn free(writer: &Worker, leaf: &str) -> io::Result<bool> {
-    let path = at(leaf)?;
-    match ask(
-        writer,
-        Io::Stat {
-            root: Root::Folder,
-            path,
-        },
-    )
-    .await?
-    {
-        Reply::Stat(found) => Ok(found.is_none()),
-        _ => Err(io::Error::other("the storage gave the wrong reply")),
-    }
+    ask(writer, RescueIo::Free(leaf.to_string())).await
 }
 
 /// One file made by [`Scratch::create`].
@@ -142,33 +116,15 @@ impl Kept {
 
     /// Make what was written durable.
     pub async fn close(&mut self) -> io::Result<()> {
-        if !self.writer.capabilities(Root::Folder).fsync {
-            return Ok(());
-        }
-        let path = at(&self.leaf)?;
-        ask(
-            &self.writer,
-            Io::Sync {
-                root: Root::Folder,
-                path,
-            },
-        )
-        .await
-        .map(drop)
+        ask(&self.writer, RescueIo::Sync(self.leaf.clone()))
+            .await
+            .map(drop)
     }
 
     /// Give the file, closed, its own name.
     pub async fn finish(&mut self) -> io::Result<()> {
-        let (from, to) = (at(&self.leaf)?, at(&self.named)?);
-        ask(
-            &self.writer,
-            Io::Rename {
-                root: Root::Folder,
-                from,
-                to,
-            },
-        )
-        .await?;
+        let (from, to) = (self.leaf.clone(), self.named.clone());
+        ask(&self.writer, RescueIo::Rename { from, to }).await?;
         self.leaf = self.named.clone();
         Ok(())
     }
@@ -192,25 +148,16 @@ impl Kept {
 
     /// Delete the file.
     pub async fn remove(self) -> io::Result<()> {
-        let path = at(&self.leaf)?;
-        ask(
-            &self.writer,
-            Io::Remove {
-                root: Root::Folder,
-                path,
-            },
-        )
-        .await
-        .map(drop)
+        ask(&self.writer, RescueIo::Remove(self.leaf))
+            .await
+            .map(drop)
     }
 }
 
 impl FileSink for Kept {
     async fn write_at(&mut self, offset: u64, buf: &[u8]) -> io::Result<()> {
-        let path = at(&self.leaf)?;
-        let write = Io::Write {
-            root: Root::Folder,
-            path,
+        let write = RescueIo::Write {
+            name: self.leaf.clone(),
             offset,
             bytes: buf.to_vec(),
         };
