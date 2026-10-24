@@ -5,7 +5,7 @@ synced folder and how every reader merges them. TLC checks it against a sync
 layer that delivers each file to each reader independently and in any order.
 
 ```sh
-nix build .#nord.toshokan-spec       # small bounds, about nine minutes; `nix flake check` runs it
+nix build .#nord.toshokan-spec       # small bounds, about five minutes; `nix flake check` runs it
 nix build .#nord.toshokan-spec-deep  # larger bounds, several hours
 ```
 
@@ -49,9 +49,12 @@ whole chain it folds, so it checks placement only. What a snapshot's lossy
 contribution keeps, where the code's tips part by the hashes they name, and how
 references kill are checked by the value-level tests in `tests/retention`. A dismissal, an entry naming runs, takes
 them out of view for good: a reader never merges what a dismissal names, and
-shows an entry after one as a run. The reader remembers its tips, the entries it
-placed after them and its fork points, and after a grace period drops what no
-file it sees holds, unless something it sees descends from it.
+shows an entry after one as a run. A reader keeps nothing between reads: each
+read derives its tips, placement, fork points, runs and gaps from the files it
+sees, as a reader opening for the first time would. While sync is still
+delivering, what it shows can go and come back, as when a compaction's deletions
+arrive before its snapshot. There is no grace step: after a restore, the folder
+wins at once.
 
 A copied local root (a restored backup, a cloned disk) makes two instances write
 one directory: a fork. A writer's local root exists only once its first entry is
@@ -70,9 +73,8 @@ that drops it shows the failure it prevents:
 | A snapshot certifies the lines it folds of every segment its chain was written to, and a writer deletes only what a snapshot certifies. | `Certify` | [`Uncertified.cfg`](Uncertified.cfg): a writer cannot delete a segment below its snapshot's anchor, and a reader shows that segment's folded lines as a run. |
 | A snapshot carries forward the certificates of the snapshots on its chain. | `Carry` | [`Uncarried.cfg`](Uncarried.cfg): a segment deleted two compactions ago arrives late, and a reader shows its folded lines as a run. |
 | A reader tells a gap from a run by the entry's number. | `Numbered` | [`Unnumbered.cfg`](Unnumbered.cfg): an entry whose predecessor has not arrived is shown as a run, then merged once it arrives. |
-| A tip that certifies an entry's predecessor, but not the entry, marks a fork. | `CertForks` | [`Anchors.cfg`](Anchors.cfg): once the original has moved two entries past a fork and compacted, only a reader's memory still shows the fork, and a reader without it merges the original's branch. |
+| A tip that certifies an entry's predecessor, but not the entry, marks a fork. | `CertForks` | [`Anchors.cfg`](Anchors.cfg): once the original has moved two entries past a fork and compacted, a reader that still sees the original's deleted segment finds the fork, and one that does not merges the original's branch. |
 | A reader never merges what a dismissal names, and shows an entry after one as a run. | `Quarantine` | [`Unquarantined.cfg`](Unquarantined.cfg): a reader that never saw a fork merges the branch a dismissal it holds names. |
-| The grace step drops only what nothing it sees descends from. | `Guard` | [`Unguarded.cfg`](Unguarded.cfg): a reader that has received a compaction's deletions before its snapshot stops merging a writer whose newer entries it already sees. |
 | No two histories give a segment the same name: a segment's name is random. | `UniqueNames` | [`Names.cfg`](Names.cfg): the original and the clone each start a segment under the next counter name. Sync keeps both, one as a conflicted copy, and the original's deletion of its own segment by name removes the clone's. |
 | A writer deletes only segments that end with a seal marker, which the process that closed the segment wrote. The segment open when a process crashed, or when its local root was copied, has none and is never deleted. | `SealedOnly` | [`Sealed.cfg`](Sealed.cfg): the clone compacts and deletes the segment the original still has open, and the original's next entry goes with it. |
 | A writer deletes only segments every entry of which a snapshot in its directory certifies. | `FoldedOnly` | [`Folded.cfg`](Folded.cfg): the original seals a segment after the fork, and the clone compacts and deletes it, though no snapshot folds the original's entry. |
@@ -83,8 +85,8 @@ file a unique name except segments under `UniqueNames = FALSE`.
 
 Superseded files are deleted as soon as the snapshot that replaces them is
 written. Deleting them one compaction later would protect no property here; it
-only shortens the time a reader without a cached view shows a gap when sync
-delivers files roughly in order.
+would only shorten the time a reader shows a gap when sync delivers files
+roughly in order.
 
 ## What is checked
 
@@ -94,39 +96,44 @@ delivers files roughly in order.
 | `NothingIgnored` | Every entry a reader sees is merged, held back and reported, shown as a run, or dismissed. A reader names no file, so this holds by construction. |
 | `ShownApart` | A reader never both merges and shows an entry. |
 | `NoReapply` | A reader never places an entry from a file while a tip folds it. |
-| `NoSpuriousConflict` | An entry is shown as a run only when its chain forked at or before it, a restore or a dropped version took it, or the reader still holds what one took of that writer. |
+| `NoSpuriousConflict` | An entry is shown as a run only when its chain forked at or before it, or a restore or a dropped version took it. |
 | `UnforkedMerged` | Once every file has reached a reader, it merges every kept entry no fork precedes and that follows nothing lost. |
-| `Agree` | Once every file has reached a reader, it merges and shows the same kept entries as a reader without a cached view, unless it still holds what the grace step would drop. |
-| `ForksFromFiles` | Once every file has reached a reader, the files show every fork point it remembers, unless a restore or a dropped version took one of the point's successors. |
+| `Agree` | Once every file has reached a reader, it merges, shows, dismisses, holds back and finds the fork points that a reader seeing exactly the folder's files does, whatever deleted files it still sees, unless the files it read hold what a restore or a dropped version took. |
 | `NoMergedFork` | A reader never merges two branches of one writer. |
 | `NoOrphan` | A writer never appends after an entry the folder no longer holds. |
 | `DismissalsHold` | A reader never merges what a dismissal it merged names; once every file has reached it, it neither shows nor merges what a kept, merged dismissal names. |
 | `OwnDirectory` | A writer creates, appends to and deletes files only in its own directory. |
 | `Retained` | The folder keeps every entry written, in a segment or folded in a snapshot, unless a restore or a dropped version took it. |
 | `EffectAccounted` | Every effect begun has a pending record or a closing entry in the folder, unless a restore took both. |
-| `DeliveredConverges` | Once every file has reached a reader, it merges, shows or has dismissed every kept entry, holds back only what follows a lost entry, and reports every fork among the kept entries it sees, whatever the delivery order. A reader without a cached view does the same. |
+| `DeliveredConverges` | Once every file has reached a reader, it merges, shows or has dismissed every kept entry, holds back only what follows a lost entry, and reports every fork among the kept entries it sees, whatever the delivery order. |
 | `DeliveredSettles` | Once every file has reached a reader, every effect is closed, reported, or that reader's own effect in flight; this includes the effects of a writer whose local root was lost. |
-| `Monotone` | A reader stops merging an entry only when it now shows it or has dismissed it, when a restore or a dropped version took it, or when the grace step drops it with nothing in sight descending from it, unless its local root is lost or replaced by a copy. |
-| `NoFlip` | A run stays shown until it is dismissed, no file the reader sees holds it, or the grace step. |
-| `ForksKept` | A fork point, once found, stays found, except by the grace step. |
+| `Monotone` | As files arrive, a reader stops merging an entry only when it now shows it or has dismissed it. |
+| `NoFlip` | As files arrive, a run stays shown until it is dismissed. |
 | `OwnFileNoRetire` | A writer takes a new id for a fork only when an entry of its directory has two successors. |
 | `Convergence` | With fair delivery, every reader eventually converges and settles or reports every effect. |
-| `FreshMonotone` | False, as [`FreshView.cfg`](FreshView.cfg) shows: without a cached view, a deletion that arrives before the snapshot that replaces the file hides entries a reader has shown. |
+
+`Agree` compares a reader with the view of the folder alone, so it is not a
+consequence of reading from scratch: a reader that has seen every file may
+still see files that were deleted, in whole or in part, and these must change
+nothing. `Monotone` and `NoFlip` constrain only steps in which files arrive:
+no file leaves the reader's view or shrinks in it, and no restore or dropped
+version has taken a line it had read. A delivered deletion or a sync fault can
+take entries out of view, or turn a run into a gap, until the files that
+replace them arrive.
 
 | Config | Scenario | Run by |
 | --- | --- | --- |
 | `Portable` | a clone, crashes, compaction | `toshokan-spec` |
 | `Recovery` | two effects, a lost local root | `toshokan-spec` |
 | `Liveness` | a clone, a lost local root, one sync fault | `toshokan-spec` |
-| `Grace` | a restored folder, and the grace step | `toshokan-spec` |
-| `GraceChaos` | the grace step with a sync fault | `toshokan-spec` |
-| `LivenessGrace` | `Convergence` with the grace step and a restored folder | `toshokan-spec` |
-| `RestoreDir` | a restored folder or directory, and the grace step | `toshokan-spec` |
+| `LivenessRestore` | `Convergence` with a restored folder | `toshokan-spec` |
+| `RestoreDir` | a restored folder or directory | `toshokan-spec` |
+| `RestoreWide` | a restored folder or directory, four files | `toshokan-spec` |
 | `Resurface` | a deleted segment arriving after later compactions | `toshokan-spec` |
 | `Drop` | a sync client keeping an earlier version of a segment | `toshokan-spec` |
 | `ResumeMid` | a clone resumed mid-segment, appending to its own copy of it | `toshokan-spec-deep` |
-| `Names`, `Sealed`, `Folded`, `Unchecked`, `FreshView`, `Uncertified`, `Uncarried`, `Unnumbered`, `Unguarded`, `Unquarantined` | expected violations | `toshokan-spec` |
-| `Anchors` | expected violation, four entries | `toshokan-spec-deep` |
+| `Names`, `Sealed`, `Folded`, `Unchecked`, `Uncertified`, `Uncarried`, `Unnumbered`, `Unquarantined` | expected violations | `toshokan-spec` |
+| `Anchors` | expected violation, four entries | `toshokan-spec` |
 | `PortableWide` | `Portable` with four files | `toshokan-spec-deep` |
 | `PortableDeep` | `Portable` with five files | `toshokan-spec-deep` |
 | `Entries` | `Portable` with four entries | `toshokan-spec-deep` |
@@ -155,9 +162,7 @@ reader's obligations. [SPEC.md](../SPEC.md) states each in full.
   and by hash.
 - A reader reads every parseable file in a writer's directory whatever its name,
   and derives its tips, placement, fork points, runs and gaps from those files
-  and what it remembers, the same whatever order they arrived in. It remembers
-  what it placed until the grace step lets go of what nothing it sees descends
-  from.
+  alone, the same whatever order they arrived in.
 - A writer deletes only segments of its directory that end with a seal marker
   and every line of which its new snapshot certifies, and snapshots whose heads
   it certifies. A process seals only the segment it closes, and names each
@@ -168,7 +173,7 @@ reader's obligations. [SPEC.md](../SPEC.md) states each in full.
   the settling writer's own log, and removed only by its owner. An owner
   removes a record only once its log holds the closing entry, and never after
   it stops writing.
-- Each fork point is reported once, and remembered until the grace step.
+- Each fork point the files show is reported.
 - After the local root is lost, the install reads from scratch as a new writer
   and never writes the old writer's directory again.
 
@@ -179,8 +184,8 @@ them, resurrections, hidden files and conflicted copies under other names.
 
 | Property or rule | Checked by |
 | --- | --- |
-| `ChainOrder`, `NothingIgnored`, `Retained`, `DeliveredConverges`, `Monotone`, `ForksKept` | `tests/portable.rs`: every delivery order of small scenarios, and seeded interleavings of writes, compactions, crashes, clones and lost local roots with sync; at each step a reader that reads only what changed places what one reading every file places. A remembered entry no file holds whose number a tip has passed counts as folded into that tip |
-| `NoMergedFork`, `DismissalsHold`, `Agree`, the grace step | `tests/retention`: the value-level checks of the retention design run toshokan's encoding, compaction and derivation against an oracle that never compacts |
+| `ChainOrder`, `NothingIgnored`, `Retained`, `DeliveredConverges`, `Agree`, `Monotone` | `tests/portable.rs`: every delivery order of small scenarios, and seeded interleavings of writes, compactions, crashes, clones and lost local roots with sync; at each step a reader that reads only what changed places what one reading every file places, and where files only arrived it keeps every entry and fork point it held |
+| `NoMergedFork`, `DismissalsHold` | `tests/retention`: the value-level checks of the retention design run toshokan's encoding, compaction and derivation against an oracle that never compacts |
 | `OwnDirectory` | `tests/library.rs`: every instance runs on a backend that panics on a write in another writer's directory |
 | `EffectAccounted` | `tests/crash.rs`: every effect crashed after every operation, under torn, zeroed and lost tails, where moves rename and where they copy |
 | `DeliveredSettles` | `tests/crash.rs` and `tests/library.rs`: a crash, or the loss of the local root, at every step is settled once, by the writer itself or with consent by another, where moves rename and where they copy; a spent record is reported only by a reader its closing entry has not reached |
@@ -226,12 +231,10 @@ this one through its sync client, which must then reconcile the writer's newer
 segment with the older copy; that is the excluded case below of a client that
 keeps one of two conflicting versions.
 
-After a restore, a reader with a cached view keeps the entries the folder lost
-until a grace period passes, and then derives its view again from the files it
-sees, so the folder wins. The model allows that step at any time some merged
-entry is held by no file the reader sees (`Grace`), which also covers a sync
-client slower than the grace period. A reader that opens later never sees the
-lost entries.
+A reader's state is a function of the files it sees, so a restore reaches it
+with the files the restore changed, and a reader that opens later never sees the
+lost entries. Where a restore shortened a segment, the model applies the
+shortening at the reader's next read.
 
 The model does not cover these cases, and the code does not prevent what they
 cause:
@@ -240,15 +243,11 @@ cause:
   machine resumed twice. Both copies append to one segment, and a line can
   follow the other copy's. Readers then report a fork or hold entries back.
 - A sync client that keeps one of two conflicting versions of a file and drops
-  the other. Entries only in the dropped version leave the folder. A reader that
-  had placed them keeps showing them and reports them as removed.
+  the other. Entries only in the dropped version leave the folder, and readers
+  stop showing them.
 - A restore that lands between a writer's check and the write it guards. The
   writer appends after an entry the folder no longer holds, and readers hold
   what it wrote back as a gap.
-- A cached view that cannot be written after an append. The commit still
-  succeeds, and says so. Until the view is written, a crash followed by a
-  restore that takes the commit's entries takes them from this install's view,
-  which `Monotone` otherwise keeps.
 - Two entries with one hash. Hashes are 128 bits of BLAKE3, so an accidental
   collision is negligible, but a forger who writes both entries can make one
   with about 2^64 work.
