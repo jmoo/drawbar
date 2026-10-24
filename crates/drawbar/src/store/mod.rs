@@ -959,6 +959,9 @@ pub struct Viewed {
     /// Whether the answer found this install's history forked, as by a copy of its own
     /// data used elsewhere too: it goes on writing a history of its own.
     pub retired: bool,
+    /// The folders a change was to remove that are still there, as ones a file it did
+    /// not know of keeps.
+    pub left: Vec<LibPath>,
 }
 
 /// A fault a test makes the library's thread or worker show.

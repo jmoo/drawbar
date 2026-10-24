@@ -354,6 +354,7 @@ impl<F: Fs> Keeper<F> {
         let viewed = Viewed {
             undone: Some(paths.collect()),
             dirs: Some(folders(library.fs()).await),
+            left: shown_paths(&committed.left),
             ..committed_view(library, &mut self.shown, committed.changes)
         };
         Ok((Some(committed.intent), viewed))
@@ -488,10 +489,24 @@ impl<F: Fs> Keeper<F> {
             part => batch(library, label, vec![part], answer).await,
         };
         let intent = changes.as_ref().map(|committed| committed.intent);
+        let left = changes
+            .as_ref()
+            .map(|committed| shown_paths(&committed.left));
         looked.extend(changes.into_iter().flat_map(|committed| committed.changes));
-        let viewed = committed_view(library, &mut self.shown, looked);
+        let viewed = Viewed {
+            left: left.unwrap_or_default(),
+            ..committed_view(library, &mut self.shown, looked)
+        };
         Ok((intent, viewed))
     }
+}
+
+/// `paths` as the app names library paths.
+fn shown_paths(paths: &[RelPath]) -> Vec<LibPath> {
+    let shown = paths
+        .iter()
+        .filter_map(|path| LibPath::parse(path.as_str()));
+    shown.collect()
 }
 
 /// The folders `intent` moves, its parts' included.
@@ -1427,6 +1442,7 @@ fn committed_view<F: Fs>(
         unfinished: None,
         kept: kept(library),
         retired: false,
+        left: Vec::new(),
     }
 }
 
@@ -1520,6 +1536,7 @@ fn viewed<F: Fs>(library: &Library<F>, shown: &mut Option<View>, refreshed: Refr
         unfinished: Some(theirs.collect()),
         kept: kept(library),
         retired: refreshed.retired.is_some(),
+        left: Vec::new(),
     }
 }
 

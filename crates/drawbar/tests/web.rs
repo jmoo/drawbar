@@ -71,6 +71,26 @@ async fn opfs() -> FileSystemDirectoryHandle {
     private_dir(&RelPath::ROOT).await.unwrap()
 }
 
+/// Write `bytes` at `name` in the directory `dir` of the private folder `folder`, as
+/// another program would, past the library.
+async fn put(folder: &str, dir: &str, name: &str, bytes: &[u8]) {
+    let root = private_dir(&RelPath::new(folder).unwrap()).await.unwrap();
+    let made = web_sys::FileSystemGetDirectoryOptions::new();
+    made.set_create(true);
+    let dir = root.get_directory_handle_with_options(dir, &made);
+    let dir: FileSystemDirectoryHandle = JsFuture::from(dir).await.unwrap().unchecked_into();
+    let created = web_sys::FileSystemGetFileOptions::new();
+    created.set_create(true);
+    let file = dir.get_file_handle_with_options(name, &created);
+    let file: web_sys::FileSystemFileHandle = JsFuture::from(file).await.unwrap().unchecked_into();
+    let writable = JsFuture::from(file.create_writable()).await.unwrap();
+    let writable: web_sys::FileSystemWritableFileStream = writable.unchecked_into();
+    JsFuture::from(writable.write_with_u8_array(bytes).unwrap())
+        .await
+        .unwrap();
+    JsFuture::from(writable.close()).await.unwrap();
+}
+
 /// A file the browser hands the page, as a drop or a picker does.
 fn file(name: &str, bytes: &[u8]) -> web_sys::File {
     let parts = Array::of1(&Uint8Array::from(bytes));
@@ -628,6 +648,44 @@ async fn a_folder_moves_with_what_another_install_put_in_it_since() {
     assert_eq!(at, ["Gig/a.ne5p", "Gig/b.ne5p"]);
     first.close().await;
     second.close().await;
+}
+
+/// A folder moved file by file that still holds a file the library does not list, such
+/// as one whose name starts with a dot, is answered as left where it was.
+#[wasm_bindgen_test]
+async fn a_folder_a_move_cannot_empty_is_answered_as_left() {
+    wipe(&opfs().await).await;
+    let folder = || Folder::Private(RelPath::new("Leaving").unwrap());
+    let worker = Worker::start(folder(), &RelPath::new("local/leaving").unwrap())
+        .await
+        .unwrap();
+    worker.run(Cmd::Open).await.unwrap();
+    worker
+        .run(Cmd::Intent(Intent::Save {
+            id: 1,
+            path: path("Set/a.ne5p"),
+            bytes: b"a".to_vec(),
+            expect: Expect::Absent,
+            came: None,
+        }))
+        .await
+        .unwrap();
+    put("Leaving", "Set", ".hidden", b"not the library's").await;
+    let moved = worker
+        .run(Cmd::Intent(Intent::MoveFolder {
+            from: path("Set"),
+            to: path("Gig"),
+        }))
+        .await
+        .unwrap();
+    let left = moved.iter().find_map(|event| match event {
+        Event::Committed {
+            result: Ok(viewed), ..
+        } => Some(viewed.left.clone()),
+        _ => None,
+    });
+    assert_eq!(left, Some(vec![path("Set")]), "{moved:?}");
+    worker.close().await;
 }
 
 /// Two installs keep one library, each through its worker: a refresh shows one what the

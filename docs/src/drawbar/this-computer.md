@@ -201,6 +201,10 @@ bring back any you deleted.
   unsaved edits and rescued slot contents in the `.drawbar` folder. This version
   says so once and leaves them where they are, and an older drawbar that opens
   this library sees its files without the tags this version keeps.
+- **A folder that stays.** Where a folder moves one file at a time, as in the
+  browser, a folder that still holds a file drawbar does not list, such as one
+  whose name starts with a dot, stays where it was, and the activity log names
+  it.
 - **Not answering.** If the library shows no sign of life for a minute, drawbar
   asks whether to close and reopen it. Edits made since drawbar last kept them
   are lost, and drawbar names them. If the library stops altogether, drawbar

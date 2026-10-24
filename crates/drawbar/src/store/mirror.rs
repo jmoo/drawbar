@@ -1928,6 +1928,7 @@ impl Store {
             unfinished,
             kept,
             retired,
+            left,
         } = viewed;
         if let (Some(standing), Phase::Open) = (unfinished, &self.phase) {
             self.found_unfinished(workspace.ctx().input(|input| input.time), standing);
@@ -1975,6 +1976,21 @@ impl Store {
                  their histories split. This drawbar goes on with a history of its own; \
                  what either side changed since is under Kept apart.",
             );
+        }
+        if !left.is_empty() {
+            let left: Vec<String> = left.iter().map(|dir| format!("“{dir}”")).collect();
+            log.say(format!(
+                "{} {} still there, since {} files drawbar did not know of.",
+                crate::strings::listed(&left),
+                match left.len() {
+                    1 => "is",
+                    _ => "are",
+                },
+                match left.len() {
+                    1 => "it holds",
+                    _ => "they hold",
+                },
+            ));
         }
         self.keep_apart(kept, workspace, browser, log);
         if !first {
