@@ -231,8 +231,7 @@ until a grace period passes, and then derives its view again from the files it
 sees, so the folder wins. The model allows that step at any time some merged
 entry is held by no file the reader sees (`Grace`), which also covers a sync
 client slower than the grace period. A reader that opens later never sees the
-lost entries. The code does not do this yet: it keeps the lost facts and asks
-the user to let them go or adopt them, which RETENTION.md drops.
+lost entries.
 
 The model does not cover these cases, and the code does not prevent what they
 cause:
