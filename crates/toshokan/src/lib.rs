@@ -85,11 +85,14 @@
 //! let (mut lib, opened) = Library::open(worker, layout, &schema, env).await?;
 //! ```
 //!
-//! Opening, rescanning and committing to a large library do their long work a
-//! slice at a time: reading the logs and the cached view, folding, indexing, and
+//! Opening, rescanning and committing to a large library do most of their long
+//! work a slice at a time: reading the logs and the cached view, indexing, and
 //! gathering and binding the library's files. The page's driver gives the thread
-//! back to the browser every few milliseconds, so the page keeps drawing and
-//! answering input.
+//! back to the browser every few milliseconds between slices. Deriving the merged
+//! state from what a read found runs in one piece, at an open and at the first
+//! commit of a session, and takes longer the larger the library and the more of
+//! its writers' entries are not yet compacted: a large library that must keep a
+//! page responsive belongs in a dedicated worker.
 //!
 //! The bundle must be built by wasm-bindgen with `--target web`. The worker loads it
 //! from a small script toshokan makes as a `blob:` URL, so a Content Security

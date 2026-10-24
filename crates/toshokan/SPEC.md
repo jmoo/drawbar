@@ -1198,9 +1198,10 @@ always a directory of the origin private file system.
   WebKit in whole seconds: two changes that keep a file's length within that
   time look alike.
 - **The page's thread.** An operation pauses between slices of work that makes
-  no request, such as parsing, placing and folding the logs it read, decoding
-  and encoding the cached view, gathering, identifying and binding the library's
-  files, and indexing what is shown. Once the core has held the page's thread for 6 ms since
+  no request, such as parsing the logs it read, decoding and encoding the cached
+  view, gathering, identifying and binding the library's files, and indexing
+  what is shown. Deriving the merged state, placing and folding every writer's
+  entries, runs without a pause. Once the core has held the page's thread for 6 ms since
   a reply or the last pause, the driver gives it back at the next pause by a
   message the page posts to itself, so the tasks waiting for the thread run
   first and the page can draw. Where an operation pauses depends only on its
