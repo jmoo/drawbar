@@ -96,7 +96,7 @@ pub struct Placed {
     /// Lines held back while the rest of their file arrives.
     pub waiting: usize,
     /// Entries named by a dismissal, and never merged.
-    pub dismissed: Vec<EntryHash>,
+    pub dismissed: Vec<Rc<Entry>>,
     pub forks: BTreeSet<Own>,
     /// The lowest fork point, by number.
     pub fork: Option<u64>,
@@ -803,7 +803,7 @@ pub fn derive(
                 gaps: in_order(&gaps),
                 unplaced: in_order(&unplaced),
                 waiting: w.waiting.len(),
-                dismissed: covered.iter().copied().collect(),
+                dismissed: in_order(&covered),
                 forks: w.forks.clone(),
                 fork: w.lowest,
                 misnumbered: w.misnumbered.iter().copied().collect(),
@@ -1904,7 +1904,11 @@ mod tests {
         let items = &derived.items[&W];
         assert_eq!(items.len(), 1, "{items:?}");
         assert_eq!(items[0].run.first, Some(right.hash()));
-        assert_eq!(derived.writers[&W].dismissed, [left.hash()]);
+        let dismissed = derived.writers[&W]
+            .dismissed
+            .iter()
+            .map(|entry| entry.hash());
+        assert_eq!(dismissed.collect::<Vec<_>>(), [left.hash()]);
         assert_eq!(values(&derived), ["a"]);
     }
 

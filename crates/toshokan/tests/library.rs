@@ -1664,12 +1664,23 @@ fn a_rename_on_a_branch_kept_apart_is_that_branchs_not_an_orphan<F: Facade>() {
     assert!(refreshed.retired.is_some(), "the fork retires the writer");
     assert_eq!(refreshed.orphaned, [], "the branch's own intent closed it");
     let view = original.view();
-    let moved = view.items().iter().any(|item| {
+    let moved = view.items().iter().find(|item| {
         item.changes
             .iter()
             .any(|change| change.entity == song && change.what == What::File)
     });
-    assert!(moved, "the rename is the branch's item: {:?}", view.items());
+    let Some(moved) = moved else {
+        panic!("the rename is the branch's item: {:?}", view.items());
+    };
+    let run = moved.run;
+    original.commit("Dismiss", |i| i.dismiss(run)).unwrap();
+    original.close().unwrap();
+    let (_, reopened) = F::open(Probe::new(&here), env("a", 4, &clock)).unwrap();
+    assert_eq!(
+        reopened.orphaned,
+        [],
+        "the dismissed branch still closed it"
+    );
 }
 
 fn a_settlement_on_a_branch_kept_apart_is_not_offered_again<F: Facade>() {

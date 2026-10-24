@@ -924,9 +924,10 @@ as it is, logged as a `pin` op rather than a `file` op. A reader reads at most
 
 A record is closed by an entry that names it: its writer's intent whose `record`
 is the record's nonce, or another writer's `settle` entry. A tip that folded such
-an entry still names it. A record no entry names is open, wherever its writer's
-log has gone since; one that is closed is spent, waiting only for its writer to
-remove it.
+an entry still names it, and so does an entry on a branch shown apart or
+dismissed, whose effect is that branch's. A record no entry names is open,
+wherever its writer's log has gone since; one that is closed is spent, waiting
+only for its writer to remove it.
 
 A record is ignored when it does not decode, names another writer, names a path
 that is not a library path, or its `prev` is not in its writer's log. Opening
