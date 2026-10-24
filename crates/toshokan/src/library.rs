@@ -957,16 +957,25 @@ impl Library {
                 pending: record.clone(),
                 outcome: Outcome::Complete,
             }),
-            false => self.orphaned.push(Orphan {
-                ours: self.pooled.contains_key(&record.writer),
-                live: self.presence.get(&record.writer) == Some(&Presence::SameMachine),
-                writer: record.writer,
-                record: name,
-                label: record.label.clone(),
-                paths: record.paths(),
-                progress: 0,
-            }),
+            false => {
+                let ours = self.pooled.contains_key(&record.writer);
+                self.orphan(name, record, ours);
+            }
         }
+    }
+
+    /// Keeps another writer's open record `name` to settle with consent, as
+    /// this install's own when `ours`.
+    fn orphan(&mut self, name: Nonce, record: &PendingRecord, ours: bool) {
+        self.orphaned.push(Orphan {
+            ours,
+            live: self.presence.get(&record.writer) == Some(&Presence::SameMachine),
+            writer: record.writer,
+            record: name,
+            label: record.label.clone(),
+            paths: record.paths(),
+            progress: 0,
+        });
     }
 
     /// Keeps this writer's record `name`, whose entry is now logged, to remove
@@ -1123,7 +1132,7 @@ impl Library {
         self.behind.remove(&Lag::Head);
         self.spent.clear();
         for settling in std::mem::take(&mut self.unsettled) {
-            self.interrupted(settling.record, &settling.pending);
+            self.orphan(settling.record, &settling.pending, true);
         }
         flow::run(writer::retire_writer(writer.genesis()))
     }
@@ -2987,14 +2996,12 @@ fn log_effects<'a>(
     kinds.extend(bound(pins));
     let touched = moved_paths(&effects.steps);
     appending(library, kinds).then(move |(library, appended)| {
-        let logged = library
-            .writer
-            .as_ref()
-            .is_some_and(|writer| writer.head() != record.after());
-        match (journaled, logged) {
-            (false, _) => {}
-            (true, true) => library.spend(name, &record),
-            (true, false) => library.interrupted(name, &record),
+        let retired = library.writer.as_ref().map(Writer::id) != Some(record.writer);
+        match (journaled, appended.is_ok(), retired) {
+            (false, _, _) => {}
+            (true, true, _) => library.spend(name, &record),
+            (true, false, false) => library.interrupted(name, &record),
+            (true, false, true) => library.orphan(name, &record, true),
         }
         let entries = match appended {
             Ok(entries) => entries,
