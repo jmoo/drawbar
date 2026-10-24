@@ -158,6 +158,29 @@ mod tests {
         assert_eq!((&part.from, part.bytes.clone()), (&outside, 4..9));
     }
 
+    /// A slot's edit goes beside the text, and comes back whole.
+    #[test]
+    fn a_slot_edit_goes_beside_the_text() {
+        use super::super::Slot;
+        let cmd = Cmd::KeepSlot {
+            slot: Slot {
+                instrument: "N1".to_string(),
+                class: 1,
+                bank: 2,
+                slot: 3,
+            },
+            base: blake3::hash(b"base"),
+            bytes: b"slot bytes".to_vec(),
+        };
+        let message = encode(&cmd).unwrap();
+        assert_eq!(message.attached.len(), 1, "{}", message.text);
+        let back: Cmd = decode(message).unwrap();
+        let Cmd::KeepSlot { bytes, .. } = back else {
+            panic!("{back:?}")
+        };
+        assert_eq!(bytes, b"slot bytes");
+    }
+
     /// What the app shows, keyed by entity and by path, comes back as it was.
     #[test]
     fn what_the_app_shows_comes_back_keyed_as_it_was() {

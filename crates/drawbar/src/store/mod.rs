@@ -563,6 +563,7 @@ pub enum Cmd {
     KeepSlot {
         slot: Slot,
         base: blake3::Hash,
+        #[serde(with = "wire::bytes")]
         bytes: Vec<u8>,
     },
     /// Let go of the edit kept of a slot's view. Answered only on failure.

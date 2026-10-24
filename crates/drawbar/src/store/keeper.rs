@@ -670,6 +670,7 @@ enum Answering {
     Saved {
         id: u64,
         path: LibPath,
+        len: u64,
         crc: u32,
         identity: Option<toshokan::Identity>,
     },
@@ -729,10 +730,18 @@ impl Answering {
             Answering::Saved {
                 id,
                 path,
+                len,
                 crc,
                 identity,
             } => {
-                let result = stat_at(fs, &path).await.map(|stat| Fingerprint {
+                // The commit landed: a stat that fails now leaves what it wrote, with no
+                // time, which the next scan reads the identity again for.
+                let stat = stat_at(fs, &path).await;
+                let stat = stat.unwrap_or(Stat {
+                    len,
+                    modified: None,
+                });
+                let result = Ok(Fingerprint {
                     crc: Some(crc),
                     identity,
                     ..Fingerprint::unread(stat)
@@ -995,6 +1004,7 @@ impl<'l, F: Fs + 'l> Parting<'l, '_, F> {
             } => {
                 let answering = Answering::Saved {
                     id,
+                    len: bytes.len() as u64,
                     crc: nord_format::crc::crc32(&bytes),
                     identity: keys::identity_of_bytes(&path, &bytes),
                     path: path.clone(),
@@ -1952,6 +1962,40 @@ mod tests {
         }));
         assert!(matches!(deleted[0], Event::Failed(_)), "{deleted:?}");
         assert_eq!(root.read("c3.ne5p"), b"changed!");
+    }
+
+    /// A save the commit landed is answered as saved with what it wrote, though the file
+    /// cannot be looked at right after.
+    #[test]
+    fn a_landed_save_that_cannot_be_looked_at_after_is_saved_with_what_it_wrote() {
+        struct Unstated(toshokan::MemDisk);
+        impl Fs for Unstated {
+            fn capabilities(&self, root: Root) -> toshokan::io::Capabilities {
+                self.0.capabilities(root)
+            }
+
+            async fn perform(&self, io: toshokan::Io) -> toshokan::io::IoResult {
+                match io {
+                    toshokan::Io::Stat { .. } => Err(IoError::Denied),
+                    io => Fs::perform(&self.0, io).await,
+                }
+            }
+        }
+        let answering = Answering::Saved {
+            id: 1,
+            path: path("c3.ne5p"),
+            len: 3,
+            crc: 7,
+            identity: None,
+        };
+        let landed = nord_usb::block_on(answering.landed(&Unstated(toshokan::MemDisk::new())));
+        let Some(Event::Saved {
+            result: Ok(print), ..
+        }) = landed
+        else {
+            panic!("{landed:?}")
+        };
+        assert_eq!((print.len, print.modified, print.crc), (3, None, Some(7)));
     }
 
     /// Storage that runs `meddle` once, right after the first read of `at` in the folder
