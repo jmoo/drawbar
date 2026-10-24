@@ -2,7 +2,6 @@
 name = "toshokan"
 description = "Keep what a file cannot say about itself beside the file, for every writer"
 edition.workspace = true
-# `File::try_lock` for the writer lock.
 rust-version.workspace = true
 license.workspace = true
 publish = false

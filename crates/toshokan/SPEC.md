@@ -11,9 +11,9 @@ insignificant whitespace.
 
 The core does no I/O. Every operation is a state machine that asks for reads,
 writes and syncs, consumes their results, and pauses between slices of a long
-computation. The `blocking` driver runs it on
-the machine's file system, and the `asynch` driver on any async backend, such as
-a browser's; both run it on an in-memory disk that models what survives a crash.
+computation. The `blocking` driver runs it on the machine's file system, and the
+`asynch` driver on any async backend, such as a browser's; both run it on an
+in-memory disk that models what survives a crash.
 A directory listing with every file's metadata is one request, and so are many
 reads, so a scan of every file costs a request per directory rather than per
 file. A commit or a refresh binds files to entities again only as far as its
@@ -1159,33 +1159,29 @@ always a directory of the origin private file system.
 - **Picked folder.** Only Chromium-based browsers can open one. Files are read
   through `getFile()` and written through writable streams, which write a copy
   and put it in place at `close()`: that is the moment a write lands, and
-  nothing is synced beyond it. An append copies the whole file, at about 1.5 ms
-  per MiB, which the 1 MiB bound on segments keeps small. The writes that fill
-  one file share one stream, kept open while other files are read. A file
-  created with bytes is named first and filled at its stream's close, so a tab
-  stopped between leaves it empty. Before
-  putting a file in place, Chromium checks it with Safe Browsing, in full unless
-  its type is one Chromium samples, such as `.txt` and `.json`, so toshokan
-  names its own files with those. A `.txt` close was measured at about 1.6 ms in
-  Chrome; that `.json` is sampled too, and that about 1 close in 100 of a
-  sampled type still pays the full check, is from Chromium's published file-type
-  policy, not measured. A saved library file is staged under its own
-  extension, so it pays what the browser charges for its type: the full check,
-  about 45 ms in Chrome and 0.1 to 1.1 s in Brave, for a type Chromium does not
-  sample. A trash item has no extension, so where moves copy, each file moved
-  into the trash pays the full check. Brave cannot rename a file outside the
-  private file system. Renaming there was measured only in Chrome and Brave, so
-  `Folder::picked` declares `rename_file` only where `navigator.userAgentData`
-  names Google Chrome and `navigator.brave` is absent; elsewhere each move
-  copies, and each copy pays the check again. A rename the browser refuses
-  although the folder declares it fails with `Unsupported`.
+  nothing is synced beyond it. An append copies the whole file, which the 1 MiB
+  bound on segments keeps small. The writes that fill one file share one
+  stream, kept open while other files are read. A file created with bytes is
+  named first and filled at its stream's close, so a tab stopped between leaves
+  it empty. Before putting a file in place, Chromium checks it with Safe
+  Browsing, in full unless its type is one Chromium samples, such as `.txt` and
+  `.json`, so toshokan names its own files with those. Chromium's published
+  file-type policy still checks some closes of a sampled type in full. A saved
+  library file is staged under its own extension, so a type Chromium does not
+  sample pays the full check, which is slow. A trash item has no extension, so
+  where moves copy, each file moved into the trash pays the full check. Brave
+  cannot rename a file outside the private file system.
+  Renaming there was confirmed only in Chrome and Brave, so `Folder::picked`
+  declares `rename_file` only where `navigator.userAgentData` names Google
+  Chrome and `navigator.brave` is absent; elsewhere each move copies, and each
+  copy pays the check again. A rename the browser refuses although the folder
+  declares it fails with `Unsupported`.
 - **Directories.** A library tells the worker its root as it opens. The worker
   keeps the handles of the directories it finds under that root and in the
   local root, where no writer removes or renames a directory, and finds each
   other directory from the folder's top for every request. Several reads of one
-  such directory find its files by one listing of it. Firefox was measured to
-  take about 3.5 ms for each step of a path, and 6 ms for each file's handle,
-  once the origin holds 100k files.
+  such directory find its files by one listing of it. In Firefox, each step of
+  a path and each file's handle grows slow once the origin holds many files.
 - **Renames** replace a file at the destination in every browser, so none
   declares `no_replace`. **Creates** check that nothing is there and then make
   the file, which opens one already there, so a file another program makes
