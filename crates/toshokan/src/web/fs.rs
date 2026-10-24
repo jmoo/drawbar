@@ -575,7 +575,9 @@ impl Tree {
 
     /// Flushes a file through a sync access handle. A directory's names cannot
     /// be synced: the browser keeps them in its own database, as durable as it
-    /// makes them.
+    /// makes them. A file a stream fills is landed before any sync of it reaches
+    /// here, since a sync does not keep the stream open ([`Io::keeps_open`]), and
+    /// closing the stream is what makes its bytes durable.
     async fn sync(&self, path: &RelPath) -> Result<(), IoError> {
         if path.is_root() {
             return Ok(());
