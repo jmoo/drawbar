@@ -413,6 +413,11 @@ pub struct HistoryItem {
 /// Displaced bytes in this writer's trash.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TrashItem {
+    /// The writer whose trash holds the bytes. Only this instance's writer
+    /// restores or empties its own; one of another writer of this install, as
+    /// one it wrote as before it retired, stays as it is, since only a writer
+    /// writes in its own directory.
+    pub writer: WriterId,
     pub item: Nonce,
     pub len: u64,
     /// Where the bytes were.

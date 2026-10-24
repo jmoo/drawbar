@@ -608,12 +608,38 @@ impl Library {
             .task()
     }
 
-    /// The bytes this writer displaced that are still in its trash, oldest first.
+    /// The bytes still in the trash of each writer this install wrote as, oldest
+    /// first: this writer's, which undo restores and emptying removes, and those
+    /// of the writers it retired, kept as they are.
     pub fn trash(&mut self) -> Task<'_, Result<Vec<TrashItem>>> {
-        match &self.writer {
-            Some(writer) => trash::list(&self.layout, writer.id(), self.folded.trash(writer.id())),
-            None => Task::ready(Ok(Vec::new())),
-        }
+        flow::list(Root::Local, &RelPath::ROOT)
+            .and_then(move |entries| {
+                let geneses: BTreeSet<EntryHash> = entries
+                    .iter()
+                    .filter(|entry| entry.kind == Kind::Directory)
+                    .filter_map(|entry| entry.name.parse().ok())
+                    .collect();
+                let writers = self.reader.derived().writers.iter();
+                let installed = writers.filter(|(_, placed)| {
+                    genesis_of(placed).is_some_and(|genesis| geneses.contains(&genesis))
+                });
+                let lists: Vec<_> = installed
+                    .map(|(writer, _)| {
+                        trash::list(&self.layout, *writer, self.folded.trash(*writer))
+                    })
+                    .collect();
+                fold(lists.into_iter(), Vec::new(), |mut all, list| {
+                    flow::run(list).map_ok(move |items| {
+                        all.extend(items);
+                        all
+                    })
+                })
+            })
+            .map_ok(|mut items: Vec<TrashItem>| {
+                items.sort_by_key(|item| (item.at, item.item));
+                items
+            })
+            .task()
     }
 
     /// Removes from this writer's trash what `policy` does not keep: the only way
@@ -2466,6 +2492,15 @@ fn file_of(op: &Op) -> Option<EntityId> {
         Op::File { entity, .. } | Op::Pin { entity, .. } => Some(*entity),
         _ => None,
     }
+}
+
+/// The genesis entry of the writer whose history `placed` is.
+fn genesis_of(placed: &derive::Placed) -> Option<EntryHash> {
+    let tip = placed.tips.first().map(|tip| tip.genesis);
+    tip.or_else(|| {
+        let first = placed.merged.first().filter(|entry| entry.n() == 0);
+        first.map(|entry| entry.hash())
+    })
 }
 
 /// Creates this instance's writer when it has none. Its genesis entry is the

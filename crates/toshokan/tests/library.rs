@@ -591,6 +591,7 @@ through_both!(
     a_clone_forks_into_items_taken_or_dismissed,
     more_files_than_one_line_holds_move_and_undo_as_one_change,
     an_append_torn_after_its_intent_logs_the_rest_at_the_next_open,
+    a_retired_writers_trash_is_still_listed,
     a_tree_moved_file_by_file_names_the_directories_a_file_it_did_not_know_keeps,
     an_entry_of_a_copied_instance_does_not_close_another_instances_record,
     an_unfinished_effect_of_a_writer_that_retires_stays_this_installs,
@@ -1527,6 +1528,42 @@ fn a_tree_moved_file_by_file_names_the_directories_a_file_it_did_not_know_keeps<
         [path("old")],
         "old/sub went, old keeps late.wav"
     );
+}
+
+fn a_retired_writers_trash_is_still_listed<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut original, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut original, "song.npno", b"one");
+    original
+        .commit("Save", |i| {
+            i.save(
+                song,
+                &path("song.npno"),
+                b"two".to_vec(),
+                Expect::Holds(identity(b"one")),
+            )
+        })
+        .unwrap();
+    let there = here.cloned();
+    let (mut clone, _) = F::open(Probe::new(&there), env("a", 2, &clock)).unwrap();
+    for (library, text) in [(&mut original, "here"), (&mut clone, "there")] {
+        library
+            .commit("Tag", |i| i.add(song, TAGS, tag(text)))
+            .unwrap();
+    }
+    let retired = original
+        .refresh()
+        .unwrap()
+        .retired
+        .expect("the fork retires it");
+    let trash = original.trash().unwrap();
+    let listed: Vec<_> = trash
+        .iter()
+        .map(|item| (item.writer, item.from.clone()))
+        .collect();
+    assert_eq!(listed, [(retired, path("song.npno"))]);
 }
 
 fn an_append_torn_after_its_intent_logs_the_rest_at_the_next_open<F: Facade>() {

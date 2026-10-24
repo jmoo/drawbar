@@ -135,6 +135,7 @@ mod tests {
 
     fn item(n: u128, day: u64, len: u64) -> TrashItem {
         TrashItem {
+            writer: crate::ids::WriterId::from_u128(1),
             item: Nonce::from_u128(n),
             len,
             from: RelPath::new("f").unwrap(),

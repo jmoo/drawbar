@@ -1014,6 +1014,11 @@ emptying.
 
 Emptying a trash is the only way bytes leave the folder.
 
+An instance lists the trash of every writer whose directory its local root
+holds: its writer's and those of the writers it retired. A retired writer's
+items stay where they are, since no instance writes as that writer again; undo
+reaches only the items of this session's writer.
+
 ## Drafts
 
 `<genesis>/drafts/<entity>.json` is the JSON line `{"base":"<identity>"}`, an LF,
