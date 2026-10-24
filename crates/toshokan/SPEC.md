@@ -237,13 +237,10 @@ modification time, compared only for equality. Each member of `displaced` is
 bytes left, their identity and length. An op of another name, or missing a
 member, is kept and unknown.
 
-A run, which `take` and `runs` name, is
-`{"writer","from","first"?,"last","tip"?,"segment"?}`: the writer's entries
-numbered from `from` to `last` on `last`'s chain, the first by its hash; a run a
-snapshot holds is named by that snapshot's head as `tip`, and its first entry by
-number alone (see Reading). `segment` is the first line of the file the run's
-`last` was read in: a snapshot of the writer that certifies that file as far as
-`last` holds the run, though it names `last` nowhere.
+A run, which `take` and `runs` name, is `{"writer","from","first"?,"last","tip"?}`:
+the writer's entries numbered from `from` to `last` on `last`'s chain, the first
+by its hash; a run a snapshot holds is named by that snapshot's head as `tip`,
+and its first entry by number alone (see Reading).
 
 For example:
 
@@ -263,7 +260,9 @@ of its `displaced` items, each line within half the limit:
 | `forks`     | The fork points its writer knew of the writers its ops name; omitted if none |
 | `deletes`   | The entities the intent deletes whose files its ops write; omitted if none |
 
-A `more` entry is merged as an intent is, entry by entry; what the intent deletes
+A commit appends its entries in one order: the intent, its `more` entries, the
+`settle` entry when it closes another writer's record, then its `bind` entries. A
+`more` entry is merged as an intent is, entry by entry; what the intent deletes
 kills its writes in the entries that name the entity in `deletes`, as it would in
 the intent's own entry. Undo and redo reverse an intent with its `more` entries.
 Recovery completes a continuation an append cut short (see Recovery).
@@ -539,6 +538,9 @@ field. An intent takes changes from an item with ops that name its run in
 `take`, and dismisses a run with a `dismiss` op; a gap or unplaced lines cannot
 be dismissed. A run is shown until it is dismissed, with no change once it would
 change nothing; a gap or unplaced lines only while they would change something.
+A run holding a passed entry kept for a remembered fork point is marked
+uncertain: it may be its writer's own entries a tip replaced. A gap holding only
+`more` entries is not shown: their intent, which names them, has not arrived.
 
 A writer forks when two instances write as it: a copied local root, a virtual
 machine resumed twice, a restored backup of a local root. Each fork point is
@@ -582,7 +584,7 @@ as 8 bytes little-endian, a 16-byte check of the payload, then the payload. The
 check finds a record a crash tore or a disk damaged; it does not guard against
 forgery, since only the install writes its local root. This build computes it in
 two lanes of 64-bit multiplies over the payload. The payload's first byte names
-its format, 9; then come the generation, and the view, or what it gained or the
+its format, 8; then come the generation, and the view, or what it gained or the
 grace step let go of, in this build's binary encoding: integers as LEB128,
 identifiers as their 16 bytes big-endian, text as its length and its UTF-8,
 lists as their length and their members, with each entry as its hash, its
@@ -903,8 +905,9 @@ the start of a JSON value. Any other record that does not decode stays.
 A spent record whose intent is followed by fewer `more` items than its `more`
 says, as when a crash tore the append, is settled again before anything else:
 the steps show done, and the missing items, found again from the record and the
-folder in the same order, are appended in `more` entries. The writer does not
-compact while such a record is open.
+folder, are appended in `more` entries: each entity's file op and each trash
+item that no entry after the intent holds yet. The writer does not compact while
+such a record is open, and a compaction asked for settles it first.
 
 Settling twice ends as settling once.
 

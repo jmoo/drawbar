@@ -4024,7 +4024,6 @@ mod tests {
                 hash: toshokan::EntryHash::from_u128(1),
             },
             tip: None,
-            segment: None,
         };
         let kept = |label: &str| super::super::KeptApart {
             kind: super::super::KeptKind::Run,

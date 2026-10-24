@@ -43,7 +43,7 @@ const JOURNAL_SLACK: u64 = 1 << 20;
 /// The first byte of every record this build writes; a record starting with
 /// another is not read. It changes with any change to what a record packs or
 /// how, since a record whose check holds is taken as this build packed it.
-const FORMAT: u8 = 9;
+const FORMAT: u8 = 8;
 
 /// How many bytes of a record's length start it.
 const LEN: usize = 8;

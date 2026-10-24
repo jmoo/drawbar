@@ -31,7 +31,7 @@ use crate::log::{Entry, EntryKind, Op, Own, Ref, Run};
 use crate::merge::{Beside, Folded, Live};
 use crate::quick::Quick;
 use crate::report::ItemKind;
-use crate::snapshot::{SegmentCert, Snapshot};
+use crate::snapshot::Snapshot;
 
 /// What a reader sees of one writer's directory.
 #[derive(Clone, Default)]
@@ -79,6 +79,8 @@ pub struct Item {
     /// Fields in `change` whatever the merged state shows: the run replaced an
     /// own write the reader no longer holds.
     pub forgotten: BTreeSet<FieldKey>,
+    /// As [`crate::report::Item::uncertain`].
+    pub uncertain: bool,
 }
 
 /// How one writer's entries are placed.
@@ -163,8 +165,6 @@ struct Writer {
     known: HashMap<EntryHash, Rc<Entry>, Quick>,
     /// Hashes of the lines of files seen.
     seen: BTreeSet<EntryHash>,
-    /// The first line of the file each line seen was read in.
-    segments: HashMap<EntryHash, Own, Quick>,
     folded: BTreeSet<EntryHash>,
     waiting: BTreeSet<EntryHash>,
     ambiguous: BTreeSet<EntryHash>,
@@ -176,6 +176,9 @@ struct Writer {
     /// Whether it remembers a fork point that neither the files nor its other
     /// memories show.
     stale: bool,
+    /// Remembered entries no file shows that it keeps beside a tip numbered past
+    /// them only for a fork point it remembers.
+    unsure: BTreeSet<EntryHash>,
     lowest: Option<u64>,
 }
 
@@ -257,7 +260,6 @@ fn classify(
         tips,
         known: HashMap::default(),
         seen: BTreeSet::new(),
-        segments: HashMap::default(),
         folded: BTreeSet::new(),
         waiting: BTreeSet::new(),
         ambiguous: BTreeSet::new(),
@@ -266,6 +268,7 @@ fn classify(
         placed: BTreeSet::new(),
         misnumbered: BTreeSet::new(),
         stale: false,
+        unsure: BTreeSet::new(),
         forks: memory
             .map(|memory| memory.forks.clone())
             .unwrap_or_default(),
@@ -279,7 +282,6 @@ fn classify(
         for entry in lines.iter() {
             w.known.insert(entry.hash(), Rc::clone(entry));
             w.seen.insert(entry.hash());
-            w.segments.insert(entry.hash(), first.own());
         }
         let certs: Vec<_> = w
             .tips
@@ -414,13 +416,18 @@ fn classify(
         }
         false
     };
+    let mut unsure = BTreeSet::new();
     candidates.retain(|hash| {
         let passed = !w.seen.contains(hash)
             && !w.placed.contains(hash)
-            && tip_n.is_some_and(|tip| w.entry(*hash).n() <= tip)
-            && !after_fork(*hash);
+            && tip_n.is_some_and(|tip| w.entry(*hash).n() <= tip);
+        if passed && after_fork(*hash) {
+            unsure.insert(*hash);
+            return true;
+        }
         !passed
     });
+    w.unsure = unsure;
     w.candidates = candidates;
     let mut successors: BTreeMap<EntryHash, Vec<EntryHash>> = BTreeMap::new();
     for hash in &w.candidates {
@@ -510,16 +517,11 @@ impl Dismissals {
             .any(|run| (run.from..=run.last.n).contains(&n))
     }
 
-    /// The dismissals of `writer`'s runs on the chain of tip `tip`: it names
-    /// the run's last entry or tip, or certifies the file the run's last entry
-    /// was read in at least as far.
+    /// The dismissals of `writer`'s runs on the chain of tip `tip`.
     fn in_tip<'d>(&'d self, writer: WriterId, tip: &'d Snapshot) -> impl Iterator<Item = &'d Run> {
         self.0.iter().filter(move |run| {
             let names = tip.names(run.last) || run.tip.is_some_and(|head| tip.names(head));
-            let read_in =
-                |cert: &SegmentCert| Some(cert.first) == run.segment && cert.last.n >= run.last.n;
-            let certifies = tip.certified.segments.iter().any(read_in);
-            run.writer == writer && (names || certifies)
+            run.writer == writer && names
         })
     }
 
@@ -955,6 +957,10 @@ fn items(
         entries: u64,
         writes: Vec<(FieldKey, Ref, Hlc, Value)>,
         forced: BTreeMap<FieldKey, (Ref, Hlc, Value)>,
+        uncertain: bool,
+        /// Whether it holds an entry other than a continuation, which alone has
+        /// no label to show.
+        labeled: bool,
     }
     let mut groups: BTreeMap<(ItemKind, EntryHash), Group> = BTreeMap::new();
     let beyond_f = |n: u64| w.beyond(n);
@@ -1047,12 +1053,13 @@ fn items(
                     first: None,
                     last: tip.head,
                     tip: Some(tip.head),
-                    segment: None,
                 },
                 span,
                 entries,
                 writes: own,
                 forced,
+                uncertain: false,
+                labeled: true,
             },
         );
     }
@@ -1088,15 +1095,17 @@ fn items(
                     first: Some(root.hash()),
                     last: entry.own(),
                     tip: None,
-                    segment: None,
                 },
                 span: None,
                 entries: 0,
                 writes: Vec::new(),
                 forced: BTreeMap::new(),
+                uncertain: false,
+                labeled: false,
             });
+            group.uncertain |= w.unsure.contains(&entry.hash());
+            group.labeled |= !matches!(entry.kind(), EntryKind::More(_));
             group.run.last = entry.own();
-            group.run.segment = w.segments.get(&entry.hash()).copied();
             group.entries += 1;
             group.span = widen(group.span, entry.at());
             for op in contribution::ops(&entry.kind()) {
@@ -1125,7 +1134,8 @@ fn items(
                 .map(|(field, write)| (field.clone(), write.clone())),
         );
         let shown_empty = group.kind == ItemKind::Run && group.entries > 0;
-        if latest.is_empty() && !shown_empty {
+        let waiting = group.kind == ItemKind::Gap && !group.labeled;
+        if (latest.is_empty() && !shown_empty) || waiting {
             continue;
         }
         items.push(Item {
@@ -1135,6 +1145,7 @@ fn items(
             entries: group.entries,
             change: latest,
             forgotten: group.forced.into_keys().collect(),
+            uncertain: group.uncertain,
         });
     }
     items
@@ -1402,7 +1413,7 @@ pub fn genesis_writer(entry: &Entry) -> Option<WriterId> {
 mod tests {
     use super::*;
     use crate::compaction::{snapshot, Found};
-    use crate::log::{Logged, Op, Run};
+    use crate::log::{Logged, Op};
     use crate::schema::Raw;
 
     const W: WriterId = WriterId::from_u128(0xa);
@@ -1539,6 +1550,10 @@ mod tests {
         assert_eq!(values(&derived), ["a"]);
         let items = &derived.items[&W];
         assert_eq!(items.len(), 2, "one item per branch");
+        assert!(
+            items.iter().all(|item| !item.uncertain),
+            "both branches are seen"
+        );
     }
 
     /// `entries` of `W` folded into a snapshot that certifies the segment they
@@ -1604,7 +1619,17 @@ mod tests {
         )]);
         let memory = BTreeMap::from([(W, memory)]);
         let derived = derive(&seen, &memory, &BTreeSet::new());
-        assert_eq!(derived.writers[&W].runs, [other]);
+        assert_eq!(derived.writers[&W].runs, [Rc::clone(&other)]);
+        let uncertain = |first: Option<EntryHash>| {
+            let item = derived.items[&W].iter().find(|i| i.run.first == first);
+            item.map(|item| item.uncertain)
+        };
+        assert_eq!(
+            uncertain(Some(other.hash())),
+            Some(true),
+            "it may be the writer's own replaced entry"
+        );
+        assert_eq!(uncertain(None), Some(false), "the tip is a branch");
     }
 
     #[test]
@@ -1659,29 +1684,99 @@ mod tests {
     }
 
     #[test]
-    fn a_dismissal_holds_for_a_run_its_writer_compacted_past_its_last_entry() {
+    fn a_tip_compacted_past_a_dismissed_line_run_is_shown_again() {
         let entries = chain(W, &["a", "b", "c", "d"]);
         let tip = folded(&entries);
-        let run = |segment| Run {
-            writer: W,
-            from: entries[1].n(),
-            first: Some(entries[1].hash()),
-            last: entries[2].own(),
-            tip: None,
-            segment,
+        let run = |last: &Rc<Entry>| {
+            Dismissals(vec![crate::log::Run {
+                writer: W,
+                from: entries[1].n(),
+                first: Some(entries[1].hash()),
+                last: last.own(),
+                tip: None,
+            }])
         };
+        assert!(!run(&entries[2]).cover_tip(W, &tip, entries[2].n()));
         assert!(
-            !tip.names(entries[2].own()),
-            "the run ends inside the segment"
+            run(&entries[3]).cover_tip(W, &tip, entries[2].n()),
+            "the tip names it"
         );
-        let read_in = Dismissals(vec![run(Some(entries[0].own()))]);
-        assert!(read_in.cover_tip(W, &tip, entries[2].n()));
-        let unread = Dismissals(vec![run(None)]);
-        assert!(!unread.cover_tip(W, &tip, entries[2].n()));
-        let elsewhere = Dismissals(vec![run(Some(entries[1].own()))]);
+    }
+
+    /// An intent of `W` after `prev` writing `k` to `value`, and its continuation
+    /// writing `j` to it.
+    fn continued_after(prev: &Entry, value: &str) -> [Rc<Entry>; 2] {
+        use crate::log::More;
+        let at = |n: u64| Hlc {
+            wall_ms: n * 10,
+            counter: 0,
+        };
+        let write = |key: &str| Op::Write {
+            entity: E,
+            key: key.into(),
+            value: Some(Raw::of(&value).unwrap()),
+            replaces: Vec::new(),
+            take: None,
+        };
+        let n = prev.n() + 1;
+        let intent = EntryKind::Intent(Logged {
+            label: "move".into(),
+            ops: vec![write("k")],
+            displaced: Vec::new(),
+            forks: Vec::new(),
+            more: 1,
+        });
+        let intent = Rc::new(Entry::encode(prev.hash(), n, at(n), intent).unwrap());
+        let more = EntryKind::More(More {
+            ops: vec![write("j")],
+            ..More::default()
+        });
+        let more = Rc::new(Entry::encode(intent.hash(), n + 1, at(n + 1), more).unwrap());
+        [intent, more]
+    }
+
+    fn from_lines(lines_seen: &[Rc<Entry>]) -> Derived {
+        let seen = Seen {
+            segments: vec![lines(lines_seen, false)],
+            snapshots: vec![],
+        };
+        derived(vec![(W, seen)], false)
+    }
+
+    #[test]
+    fn an_intent_merges_alone_and_its_continuation_after_it_as_if_both_came_at_once() {
+        let first = chain(W, &["a"]);
+        let [intent, more] = continued_after(&first[0], "b");
+        let whole = from_lines(&[Rc::clone(&first[0]), Rc::clone(&intent), Rc::clone(&more)]);
+        let alone = from_lines(&[Rc::clone(&first[0]), Rc::clone(&intent)]);
+        assert_eq!(
+            values(&alone),
+            ["b"],
+            "the intent merges without its continuation"
+        );
+        assert!(alone.items.is_empty());
+        let late = from_lines(&[Rc::clone(&first[0]), Rc::clone(&more), Rc::clone(&intent)]);
+        assert_eq!(late.folded, whole.folded);
+        let early = from_lines(&[Rc::clone(&first[0]), Rc::clone(&more)]);
+        assert_eq!(early.writers[&W].gaps, [Rc::clone(&more)], "held back");
         assert!(
-            !elsewhere.cover_tip(W, &tip, entries[2].n()),
-            "another file"
+            early.items.is_empty(),
+            "a continuation alone has no label to show"
+        );
+    }
+
+    #[test]
+    fn a_tip_folding_an_intent_and_its_continuation_merges_as_their_lines_do() {
+        let first = chain(W, &["a"]);
+        let [intent, more] = continued_after(&first[0], "b");
+        let chain_of = [Rc::clone(&first[0]), intent, more];
+        let tip = Seen {
+            segments: vec![],
+            snapshots: vec![folded(&chain_of)],
+        };
+        assert_eq!(
+            derived(vec![(W, tip)], false).folded,
+            from_lines(&chain_of).folded
         );
     }
 
@@ -1753,7 +1848,6 @@ mod tests {
             first: Some(left.hash()),
             last: left.own(),
             tip: None,
-            segment: None,
         };
         let dismiss = entry(None, vec![Op::Dismiss { runs: vec![run] }], "dismiss");
         let theirs = vec![dismiss];

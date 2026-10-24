@@ -22,10 +22,10 @@ use crate::effects::{
 use crate::env::{Env, Identify};
 use crate::error::{Refusal, Result};
 use crate::flow::{self, each, fold, Fallible};
-use crate::ids::{Nonce, WriterId};
+use crate::ids::{EntityId, Nonce, WriterId};
 use crate::io::{Capabilities, Capability, Kind, Root, Task};
 use crate::layout::Layout;
-use crate::log::{EntryKind, Logged, Own, Settlement};
+use crate::log::{EntryKind, Logged, Op, Own, Settlement};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord, Records, MAX_RECORD};
 use crate::report::{Orphan, Outcome};
@@ -60,28 +60,75 @@ impl Chain for Placed {
     }
 
     fn unfinished(&self, at: Own) -> bool {
-        continued(self, at).is_some_and(|(logged, held)| held < logged.more)
+        matches!(after(self, at), After::Intent(c) if c.held < c.logged.more)
     }
 }
 
-/// The intent merged right after `at`, with how many ops and displaced items
-/// the continuation entries merged after it hold.
-pub fn continued(placed: &Placed, at: Own) -> Option<(Logged, u64)> {
-    let start = placed
+/// Where the chain stands after an entry a record names.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum After {
+    /// Nothing follows it.
+    Nothing,
+    /// The intent merged right after it, and what of its continuation the
+    /// entries merged after the intent hold.
+    Intent(Continued),
+    /// A tip folds what follows it.
+    Folded,
+}
+
+/// What an intent's continuation holds so far.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Continued {
+    pub logged: Logged,
+    /// How many ops and displaced items its `more` entries hold.
+    pub held: u64,
+    /// The entities a file op of the intent or its continuation names.
+    pub files: BTreeSet<EntityId>,
+    /// The trash items the intent or its continuation names.
+    pub displaced: BTreeSet<Nonce>,
+}
+
+/// Where the chain `placed` stands after `at`.
+pub fn after(placed: &Placed, at: Own) -> After {
+    let Some(start) = placed
         .merged
         .iter()
-        .position(|entry| entry.prev() == at.hash && Some(entry.n()) == at.n.checked_add(1))?;
-    let EntryKind::Intent(logged) = placed.merged[start].kind() else {
-        return None;
+        .position(|entry| entry.prev() == at.hash && Some(entry.n()) == at.n.checked_add(1))
+    else {
+        return match Chain::continues(placed, at) {
+            true => After::Folded,
+            false => After::Nothing,
+        };
     };
-    let mut held = 0;
+    let EntryKind::Intent(logged) = placed.merged[start].kind() else {
+        return After::Folded;
+    };
+    let named = |ops: &[Op]| ops.iter().filter_map(op_file).collect::<Vec<_>>();
+    let mut continued = Continued {
+        files: named(&logged.ops).into_iter().collect(),
+        displaced: logged.displaced.iter().map(|item| item.item).collect(),
+        held: 0,
+        logged,
+    };
     for entry in &placed.merged[start + 1..] {
         let EntryKind::More(more) = entry.kind() else {
             break;
         };
-        held += more.len();
+        continued.held += more.len();
+        continued.files.extend(named(&more.ops));
+        continued
+            .displaced
+            .extend(more.displaced.iter().map(|item| item.item));
     }
-    Some((logged, held))
+    After::Intent(continued)
+}
+
+/// The entity whose file `op` writes.
+fn op_file(op: &Op) -> Option<EntityId> {
+    match op {
+        Op::File { entity, .. } | Op::Pin { entity, .. } => Some(*entity),
+        _ => None,
+    }
 }
 
 /// What opening found to recover.

@@ -204,7 +204,6 @@ mod tests {
             first: Some(toshokan::EntryHash::from_u128(u128::MAX)),
             last: own(9, u128::MAX - 1),
             tip: Some(own(12, 0x12)),
-            segment: Some(own(1, 0x1)),
         };
         let entity = toshokan::EntityId::from_u128(0xab);
         let what = What::Field("tags".to_string());
