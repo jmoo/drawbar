@@ -460,8 +460,10 @@ let
   # and Firefox. Linux only: a macOS build user has no window server, and Firefox there
   # fails to start a session.
   # ⚠️ The runner ships with wasm-bindgen-cli and must match the crates' wasm-bindgen pin.
+  # `built` are suites only compiled, so a suite run by hand cannot rot.
   browserSuites =
     {
+      built ? [ ],
       cargoExtraArgs,
       pname,
       tests,
@@ -492,7 +494,7 @@ let
         nativeBuildInputs = [ final.lld ];
         inherit pname version;
       };
-      suites = concatStringsSep " " (map (test: "--test ${test}") tests);
+      suites = tests: concatStringsSep " " (map (test: "--test ${test}") tests);
     in
     crane.mkCargoDerivation (
       args
@@ -503,10 +505,11 @@ let
         buildPhaseCargoCommand = ''
           export HOME="$TMPDIR/home"
           mkdir -p "$HOME"
+          ${optionalString (built != [ ]) "cargo test $cargoExtraArgs ${suites built} --no-run"}
           ${concatStringsSep "\n" (
             mapAttrsToList (name: driver: ''
               echo "${pname} in ${name}"
-              env ${driver} cargo test $cargoExtraArgs ${suites}
+              env ${driver} cargo test $cargoExtraArgs ${suites tests}
             '') browsers
           )}
         '';
@@ -519,6 +522,7 @@ let
     );
 
   toshokan-web = browserSuites {
+    built = [ "bench" ];
     cargoExtraArgs = "-p toshokan --features web";
     pname = "toshokan-web";
     tests = [
@@ -531,6 +535,7 @@ let
 
   # drawbar's library in the browser, kept by its worker.
   drawbar-web-tests = browserSuites {
+    built = [ "bench" ];
     cargoExtraArgs = "-p drawbar";
     pname = "drawbar-web-tests";
     tests = [ "web" ];
