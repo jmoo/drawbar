@@ -695,6 +695,7 @@ through_both!(
     reopening_reads_only_the_ends_of_files_read_before,
     a_writers_directory_stays_bounded_across_sessions,
     a_crash_in_compaction_tears_a_snapshot_only_where_the_folder_cannot_rename,
+    compaction_deletes_only_a_snapshot_cut_short_where_the_folder_cannot_rename,
 );
 
 /// One machine of a shared folder.
@@ -6564,6 +6565,41 @@ fn a_folder_of_fifty_thousand_files_renames_and_undoes_as_one_change() {
     a.redo().unwrap();
     assert_eq!((count("old"), count("new")), (0, LOOSE + TAGGED), "redone");
     assert_eq!(bound_under(&a, "new"), TAGGED);
+}
+
+fn compaction_deletes_only_a_snapshot_cut_short_where_the_folder_cannot_rename<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    create(&mut a, "song.npno", b"song");
+    a.close().unwrap();
+    let writers = layout().writers();
+    let real = folder
+        .files(Root::Folder)
+        .into_keys()
+        .find(|p| p.starts_with(&writers))
+        .unwrap();
+    let own = real.as_str().split('/').nth(2).unwrap().to_owned();
+    let at = |name: &str| format!(".t/writers.2/{own}/{name}");
+    put(&folder, &at("snapshot-cut.json"), br#"{"writer":"#);
+    put(&folder, &at("snapshot-newer.json"), br#"{"writer":1}"#);
+
+    let (mut a, opened) = F::open(Probe::new(&here), env("a", 2, &clock)).unwrap();
+    assert_eq!(opened.unreadable.len(), 2, "{:?}", opened.unreadable);
+    a.commit("Tag", |i| i.create(|e| _ = e.add(TAGS, tag("x"))).0)
+        .unwrap();
+    a.compact().unwrap();
+    let in_place = !FOLDER.get().rename_file;
+    assert_eq!(
+        read(&folder, &at("snapshot-cut.json")).is_none(),
+        in_place,
+        "a snapshot cut short is deleted only where snapshots are written in place"
+    );
+    assert!(
+        read(&folder, &at("snapshot-newer.json")).is_some(),
+        "a whole snapshot this build refuses is kept"
+    );
 }
 
 fn a_crash_in_compaction_tears_a_snapshot_only_where_the_folder_cannot_rename<F: Facade>() {

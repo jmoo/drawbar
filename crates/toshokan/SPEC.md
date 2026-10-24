@@ -466,8 +466,10 @@ to `tmp/` under its nonce, syncs it, renames it into place and syncs both
 directories; a staged snapshot a crash leaves is removed with the other files of
 `tmp/` (see Recovery). Elsewhere it writes the snapshot in place and syncs it
 and its directory, and a crash can tear it, leaving a file reported as
-unreadable until the writer's next compaction deletes it with what that
-compaction supersedes. It then confirms that the folder holds the snapshot.
+unreadable. The writer's next compaction there deletes a `snapshot-` file of its
+directory that ends, but for a zero-filled tail, inside its JSON value, with
+what that compaction supersedes; a whole snapshot it cannot read, as a newer
+build writes, stays. It then confirms that the folder holds the snapshot.
 Only then does it delete every segment in its directory that ends with a seal
 marker and every line of which the new snapshot certifies, and every snapshot
 whose head the new one certifies. A segment without a seal marker, such as one

@@ -596,7 +596,7 @@ fn holder(reader: &Reader, writer: WriterId, head: Own) -> Option<Holder> {
                     segment.entries.iter().any(|entry| entry.own() == head)
                 }
                 WriterFile::Snapshot(snapshot) => snapshot.writer == writer && snapshot.names(head),
-                WriterFile::Unreadable => false,
+                WriterFile::Unreadable { .. } => false,
             };
             held.then(|| Holder {
                 path: path.clone(),
@@ -728,7 +728,7 @@ pub(crate) fn holds<'a>(layout: &Layout, writer: WriterId, head: Own) -> Flow<'a
                             segment.entries.iter().any(|entry| entry.own() == head)
                         }
                         WriterFile::Snapshot(snapshot) => snapshot.names(head),
-                        WriterFile::Unreadable => false,
+                        WriterFile::Unreadable { .. } => false,
                     })
                 }),
             })

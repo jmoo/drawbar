@@ -42,7 +42,10 @@ pub enum WriterFile {
     Segment(Segment),
     Snapshot(Rc<Snapshot>),
     /// Neither: reported, and read again next time.
-    Unreadable,
+    Unreadable {
+        /// Whether it ends inside a JSON value, as a snapshot a crash tore does.
+        cut: bool,
+    },
 }
 
 /// The readable lines of a segment file, decoded.
@@ -140,7 +143,7 @@ impl Parsing {
         }
         match Snapshot::decode(&bytes) {
             Ok(snapshot) => WriterFile::Snapshot(Rc::new(snapshot)),
-            Err(_) => WriterFile::Unreadable,
+            Err(not) => WriterFile::Unreadable { cut: not.cut },
         }
     }
 }
@@ -154,7 +157,7 @@ impl WriterFile {
         }
         match Snapshot::decode(bytes) {
             Ok(snapshot) => Self::Snapshot(Rc::new(snapshot)),
-            Err(_) => Self::Unreadable,
+            Err(not) => Self::Unreadable { cut: not.cut },
         }
     }
 }
@@ -584,7 +587,7 @@ impl Reader {
                     let (resume, fixed) = match &record.file {
                         WriterFile::Segment(segment) => (segment.resume(), segment.sealed),
                         WriterFile::Snapshot(_) => (None, true),
-                        WriterFile::Unreadable => (None, false),
+                        WriterFile::Unreadable { .. } => (None, false),
                     };
                     let known = Known {
                         stamp,
@@ -756,7 +759,7 @@ impl Reader {
                     WriterFile::Snapshot(snapshot) if snapshot.writer == *writer => {
                         files.snapshots.push(Rc::clone(snapshot));
                     }
-                    WriterFile::Snapshot(_) | WriterFile::Unreadable => {}
+                    WriterFile::Snapshot(_) | WriterFile::Unreadable { .. } => {}
                 }
             }
             seen.insert(*writer, files);
@@ -991,7 +994,7 @@ impl Reader {
                     }
                 }
                 WriterFile::Snapshot(snapshot) if snapshot.writer == writer => {}
-                WriterFile::Snapshot(_) | WriterFile::Unreadable => {
+                WriterFile::Snapshot(_) | WriterFile::Unreadable { .. } => {
                     report.unreadable.push((path.clone(), None));
                 }
             }
@@ -1467,6 +1470,10 @@ mod tests {
         let mut torn = segment.clone();
         torn.extend_from_slice(b"{\"prev\"");
         let snapshot = snapshot(&entries);
+        let whole = snapshot.encode();
+        let cut = whole[..whole.len() / 2].to_vec();
+        let mut zeroed = cut.clone();
+        zeroed.resize(whole.len(), 0);
         let cases = [
             (Vec::new(), WriterFile::Segment(Segment::default())),
             (
@@ -1479,8 +1486,14 @@ mod tests {
                 }),
             ),
             (snapshot.encode(), WriterFile::Snapshot(snapshot)),
-            (b"hello".to_vec(), WriterFile::Unreadable),
-            (vec![0; 40], WriterFile::Unreadable),
+            (b"hello".to_vec(), WriterFile::Unreadable { cut: false }),
+            (
+                br#"{"writer":1}"#.to_vec(),
+                WriterFile::Unreadable { cut: false },
+            ),
+            (cut, WriterFile::Unreadable { cut: true }),
+            (zeroed, WriterFile::Unreadable { cut: true }),
+            (vec![0; 40], WriterFile::Unreadable { cut: true }),
         ];
         for (bytes, expected) in cases {
             assert_eq!(
@@ -1556,7 +1569,7 @@ mod tests {
                     });
                 }
                 WriterFile::Snapshot(snapshot) => seen.snapshots.push(snapshot),
-                WriterFile::Unreadable => {}
+                WriterFile::Unreadable { .. } => {}
             }
             let derived = derive::derive(
                 &BTreeMap::from([(W, seen)]),

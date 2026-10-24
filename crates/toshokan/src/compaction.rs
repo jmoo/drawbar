@@ -62,7 +62,7 @@ pub fn compact(
         return Task::ready((writer, Err(forked)));
     }
     if let Some((path, stamp, tip)) = at_head(reader, &writer) {
-        let doomed = Doomed::of(reader, id, &tip, None).sparing(&path);
+        let doomed = Doomed::of(reader, id, &tip, None, capabilities).sparing(&path);
         let dir = writer.layout.writer(id);
         let mut writer = writer;
         writer.held_by(path.clone(), stamp.len, stamp.tail.clone());
@@ -84,7 +84,7 @@ pub fn compact(
     let open = writer
         .open_segment()
         .map(|open| layout.segment(id, open.name));
-    let doomed = Doomed::of(reader, id, &snapshot, open.as_ref());
+    let doomed = Doomed::of(reader, id, &snapshot, open.as_ref(), capabilities);
     let dir = layout.writer(id);
     flow::list(Root::Folder, &layout.trash_dir(id))
         .then(move |listed| {
@@ -256,7 +256,7 @@ fn fold(
         .filter_map(|(_, _, file)| match file {
             WriterFile::Segment(segment) => Some(Found::Lines(&segment.entries)),
             WriterFile::Snapshot(snapshot) => Some(Found::Snapshot(snapshot)),
-            WriterFile::Unreadable => None,
+            WriterFile::Unreadable { .. } => None,
         });
     let found = found.chain(recorded.iter().map(|lines| Found::Lines(lines)));
     let previous = previous.map(Rc::as_ref);
@@ -404,7 +404,13 @@ struct Sealed {
 
 impl Doomed {
     /// `open` is the segment this process has open, which compaction seals.
-    fn of(reader: &Reader, id: WriterId, new: &Snapshot, open: Option<&RelPath>) -> Self {
+    fn of(
+        reader: &Reader,
+        id: WriterId,
+        new: &Snapshot,
+        open: Option<&RelPath>,
+        capabilities: Capabilities,
+    ) -> Self {
         let mut segments = Vec::new();
         let mut snapshots = Vec::new();
         for (path, stamp, file) in reader.files(id) {
@@ -433,13 +439,15 @@ impl Doomed {
                         });
                     }
                 }
-                // A snapshot of its own directory that does not read is one a
-                // crash tore as this writer wrote it in place: the new snapshot
-                // holds all it would have.
-                WriterFile::Unreadable => {
-                    let torn = path
-                        .name()
-                        .is_some_and(|name| name.starts_with("snapshot-"));
+                // Where snapshots are written in place, one of its own directory
+                // that a crash cut short holds less than the new snapshot does. A
+                // whole one this build refuses is a newer build's, and stays.
+                WriterFile::Unreadable { cut } => {
+                    let torn = *cut
+                        && !capabilities.rename_file
+                        && path
+                            .name()
+                            .is_some_and(|name| name.starts_with("snapshot-"));
                     if let Some(stamp) = stamp.filter(|_| torn) {
                         snapshots.push((path.clone(), stamp.len));
                     }
