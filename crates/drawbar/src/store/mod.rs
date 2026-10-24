@@ -920,7 +920,7 @@ impl KeptApart {
                     forgotten: change.forgotten,
                 })
                 .collect(),
-            uncertain: item.uncertain,
+            uncertain: false,
         }
     }
 }

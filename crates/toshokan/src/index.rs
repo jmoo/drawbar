@@ -701,7 +701,7 @@ mod tests {
                     (*writer, seen)
                 })
                 .collect();
-            derive::derive(&seen, &BTreeMap::new(), &Default::default()).folded
+            derive::derive(&seen).folded
         }
     }
 

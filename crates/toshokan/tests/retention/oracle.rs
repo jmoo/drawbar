@@ -37,12 +37,8 @@ pub fn fork_points(world: &World, forks: &BTreeSet<(Dir, Hash)>) -> BTreeMap<Dir
     lowest
 }
 
-/// Places `visible`, a set of entries, with the fork points `remembered`.
-pub fn place(
-    world: &World,
-    visible: &BTreeSet<Hash>,
-    remembered: &BTreeSet<(Dir, Hash)>,
-) -> Placement {
+/// Places `visible`, a set of entries.
+pub fn place(world: &World, visible: &BTreeSet<Hash>) -> Placement {
     let complete = |e: Hash| world.chain(e).iter().all(|a| visible.contains(a));
     let mut successors: BTreeMap<Hash, BTreeSet<Hash>> = BTreeMap::new();
     for &e in visible {
@@ -50,7 +46,7 @@ pub fn place(
             successors.entry(prev).or_default().insert(e);
         }
     }
-    let mut forks: BTreeSet<(Dir, Hash)> = remembered.clone();
+    let mut forks: BTreeSet<(Dir, Hash)> = BTreeSet::new();
     for (&prev, next) in &successors {
         if next.len() > 1 {
             forks.insert((world.entry(prev).dir, prev));
@@ -168,14 +164,23 @@ pub fn live(world: &World, merged: &BTreeSet<Hash>) -> Vec<Live> {
 
 /// What an oracle shows of `placement`.
 pub fn shown(world: &World, placement: &Placement) -> Shown {
-    let live = live(world, &placement.merged);
+    shown_within(world, placement, None)
+}
+
+/// What an oracle shows of `placement`, with only the entries in `held` showing
+/// their own writes when given: the others still replace what they replaced.
+pub fn shown_within(world: &World, placement: &Placement, held: Option<&BTreeSet<Hash>>) -> Shown {
+    let keep = |e: &Hash| held.is_none_or(|held| held.contains(e));
+    let mut live = live(world, &placement.merged);
+    live.retain(|write| keep(&write.at.hash));
     let base = show(&live, BTreeSet::new());
     let mut items = BTreeSet::new();
     for (set, kind) in [
         (&placement.runs, ItemKind::Run),
         (&placement.gaps, ItemKind::Gap),
     ] {
-        for group in groups(world, set) {
+        let set: BTreeSet<Hash> = set.iter().copied().filter(keep).collect();
+        for group in groups(world, &set) {
             let writes: Vec<Live> = group
                 .iter()
                 .filter_map(|&e| {
@@ -246,13 +251,6 @@ pub struct Folds {
     pub head: Hash,
 }
 
-/// What an oracle reader remembers: every entry it has seen, and its fork points.
-#[derive(Clone, Debug, Default)]
-pub struct Memory {
-    pub entries: BTreeSet<Hash>,
-    pub forks: BTreeSet<(Dir, Hash)>,
-}
-
 /// The entries the files a reader sees hold, the snapshots' whole chains included.
 pub fn holds<S>(
     world: &World,
@@ -271,7 +269,6 @@ pub fn holds<S>(
 
 impl Design for Oracle {
     type Snapshot = Folds;
-    type Memory = Memory;
 
     fn compact(&self, c: &Compaction<'_, Folds>) -> Folds {
         Folds {
@@ -280,21 +277,9 @@ impl Design for Oracle {
         }
     }
 
-    fn read(&self, r: &Reading<'_, Folds>, memory: &Memory) -> (Shown, Memory) {
-        let mut visible = holds(r.world, r, |s| s.head);
-        visible.extend(&memory.entries);
-        let placement = place(r.world, &visible, &memory.forks);
-        let shown = shown(r.world, &placement);
-        let memory = Memory {
-            entries: visible,
-            forks: placement.forks,
-        };
-        (shown, memory)
-    }
-
-    /// The folder wins: what the files hold, read afresh.
-    fn grace(&self, r: &Reading<'_, Folds>, _: &Memory) -> (Shown, Memory) {
-        self.read(r, &Memory::default())
+    fn read(&self, r: &Reading<'_, Folds>) -> Shown {
+        let visible = holds(r.world, r, |s| s.head);
+        shown(r.world, &place(r.world, &visible))
     }
 
     fn holds(&self, r: &Reading<'_, Folds>) -> BTreeSet<Hash> {
@@ -311,10 +296,6 @@ impl Design for Oracle {
 
     fn dismissals(&self, _: &World, _: &Folds) -> Vec<Dismissal> {
         Vec::new()
-    }
-
-    fn remembered(&self, _: &World, memory: &Memory) -> BTreeSet<Hash> {
-        memory.entries.clone()
     }
 
     fn bounded(&self, _: &Folds, _: Bound) -> bool {

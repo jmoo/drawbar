@@ -4817,7 +4817,7 @@ fn a_folder_restored_from_a_backup_is_shown_as_it_is_a_day_later() {
     );
     third.settle();
     assert_eq!(tagged(&third), shown, "still shown before a day passes");
-    third.store.pass(toshokan::reader::GRACE_MS);
+    third.store.pass(24 * 60 * 60 * 1000);
     third.settle();
     assert_eq!(tagged(&third), Vec::<(String, Vec<String>)>::new());
 }

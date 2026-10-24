@@ -17,7 +17,6 @@ use std::sync::Arc;
 use crate::binding::{
     self, Binding, Bindings, Fact, Facts, Resolving, Scan, Scanned, Unscanned, Walk,
 };
-use crate::cache::{self, Checkpoint, Encoding};
 use crate::contribution;
 use crate::cow::CowMap;
 use crate::derive::{self, Placed};
@@ -52,7 +51,7 @@ use crate::schema::Schema;
 use crate::trash::{self, Policy};
 use crate::undo::{self, Before, History};
 use crate::view::{FileRef, FileState, Listed, Parts, View};
-use crate::writer::{self, Claimed, Picked, Writer};
+use crate::writer::{self, Claimed, Writer};
 
 pub struct Library {
     layout: Layout,
@@ -134,8 +133,8 @@ struct Resolved {
 }
 
 impl Library {
-    /// Claims a writer from the pool, starts from the cached views of every writer
-    /// of the pool joined, reads the folder, assesses recovery and checks drafts.
+    /// Claims a writer from the pool, reads the folder, assesses recovery and
+    /// checks drafts.
     /// No library file is scanned: each entity's file is
     /// [`FileState::Unscanned`] at the path its facts give until
     /// [`Library::rescan`] finishes. `capabilities` are the folder's.
@@ -147,19 +146,13 @@ impl Library {
     ) -> Task<'static, Result<(Library, Opened)>> {
         flow::run(Writer::pick())
             .and_then(|picked| {
-                let own = picked.as_ref().map(Picked::genesis);
-                flow::run(Writer::pool())
-                    .and_then(move |pool| flow::run(cache::load(pool, own)))
-                    .map_ok(move |cached| (picked, cached))
-            })
-            .and_then(|(picked, cached)| {
                 flow::read_replaced(Root::Local, Layout::identities()).map_ok(move |bytes| {
                     let remembered = bytes.and_then(|bytes| Scan::of_identities(&bytes));
-                    (picked, cached, remembered.unwrap_or_default())
+                    (picked, remembered.unwrap_or_default())
                 })
             })
-            .and_then(move |(picked, cached, remembered)| {
-                let reader = Reader::open(layout.clone(), cached);
+            .and_then(move |(picked, remembered)| {
+                let reader = Reader::new(layout.clone());
                 flow::run(reader.list()).and_then(move |listing| {
                     absorbed(reader, listing).then(move |(reader, report)| {
                         let claimed = match picked {
@@ -184,17 +177,13 @@ impl Library {
                     })
                 })
             })
-            .and_then(|(mut library, report, start)| {
-                library.grace(true);
+            .and_then(|(library, report, start)| {
                 fold_opened(library).then(move |library| ok((library, report, start)))
             })
             .and_then(|(library, report, start)| {
-                saved_view(library).then(move |(library, saved)| match saved {
-                    Ok(()) => idle_pool(library)
-                        .and_then(recover)
-                        .map_ok(move |library| (library, report, start)),
-                    Err(error) => Flow::Done(Err(error)),
-                })
+                idle_pool(library)
+                    .and_then(recover)
+                    .map_ok(move |library| (library, report, start))
             })
             .and_then(|(library, report, start)| {
                 presumed_bound(library).then(move |library| ok((library, report, start)))
@@ -517,11 +506,9 @@ impl Library {
             Look::Everything => self.reader.list(),
             Look::Logs | Look::Paths(_) => self.reader.probe(),
         };
-        let full = matches!(scope, Look::Everything);
         flow::run(listed)
             .and_then(move |listing| {
-                let mut report = self.reader.absorb(listing);
-                report.changed |= self.grace(full);
+                let report = self.reader.absorb(listing);
                 let moved = self.absorb_read(&report);
                 self.unshown |= report.anything_new();
                 let retired = self.forked();
@@ -551,17 +538,6 @@ impl Library {
                 })
             })
             .task()
-    }
-
-    /// Takes the grace step once it is due, after a read that scanned every
-    /// file when `full`; whether it took it.
-    fn grace(&mut self, full: bool) -> bool {
-        let due = self.reader.note_grace(self.env.now_ms(), full);
-        if due.is_empty() {
-            return false;
-        }
-        self.reader.take_grace(&due);
-        true
     }
 
     /// What changed since the view.
@@ -769,13 +745,12 @@ impl Library {
         tidied(self).then(|(_, tidied)| Flow::Done(tidied)).task()
     }
 
-    /// Compacts the writer of a writable library, writes the cached view and
-    /// what else lags, removes the spent pending records of a writable library,
-    /// seals the open segment and releases the writer's lock, then lets go of
-    /// what the library holds a part at a time: nothing is left to view, and the
-    /// library only drops. A record it cannot
-    /// remove stays for the next instance to find, and that failure is returned
-    /// once the library is closed. A library dropped without closing leaves its
+    /// Compacts the writer of a writable library, records its head if that lags,
+    /// removes the spent pending records of a writable library, seals the open
+    /// segment and releases the writer's lock, then lets go of what the library
+    /// holds a part at a time: nothing is left to view, and the library only
+    /// drops. A record it cannot remove stays for the next instance to find, and
+    /// that failure is returned once the library is closed. A library dropped without closing leaves its
     /// segment open, as a crash does.
     pub fn close(&mut self) -> Task<'_, Result<()>> {
         let Some(writer) = self.writer.take() else {
@@ -1010,9 +985,10 @@ impl Library {
         self.spent.insert(name, record.clone());
     }
 
-    /// Places entries this instance just appended to `written` and folds them in,
-    /// keeping its intents in the history with what they replaced.
-    fn absorb_own(&mut self, entries: &[Entry], written: Option<(RelPath, Stamp)>) {
+    /// Places entries this instance just appended to `written`, the open segment
+    /// with its stamp when known, and folds them in, keeping its intents in the
+    /// history with what they replaced.
+    fn absorb_own(&mut self, entries: &[Entry], written: Option<(RelPath, Option<Stamp>)>) {
         let Some(id) = self.writer.as_ref().map(Writer::id) else {
             return;
         };
@@ -1033,7 +1009,9 @@ impl Library {
             let before = Before::of(&logged.ops, &self.folded);
             self.history.push(entry, logged, reverses.take(), before);
         }
-        self.reader.add(id, entries, written);
+        if let Some((path, stamp)) = written {
+            self.reader.add(id, entries, &path, stamp);
+        }
         self.take_derived();
     }
 
@@ -1408,7 +1386,6 @@ impl Library {
             span: item.span,
             entries: item.entries,
             changes: changes.collect(),
-            uncertain: item.uncertain,
         }
     }
 
@@ -1892,55 +1869,6 @@ fn reindexed<'a, L: BorrowMut<Library> + 'a>(
         known.show_indexed(Arc::new(index));
         Flow::Done(library)
     })
-}
-
-/// Keeps what a read added to the cached view in this writer's local
-/// directory, so a crash does not take back what was shown: appended to the
-/// journal, or as a checkpoint encoded a slice at a time when one is due.
-/// Without a writer, keeps only a change to the grace step, its state and what
-/// it let go of, appended to the journal of the view it loaded and of each
-/// retired writer's view it read, which the next open joins; a change it could
-/// not keep is kept by the next save.
-fn saved_view<'a, L: BorrowMut<Library> + 'a>(mut library: L) -> Flow<'a, (L, Result<()>)> {
-    let known = library.borrow_mut();
-    let Some(genesis) = known.writer.as_ref().map(Writer::genesis) else {
-        if !known.reader.unsaved.grace {
-            return Flow::Done((library, Ok(())));
-        }
-        let grace = known.reader.cached().grace().clone();
-        let let_go = known.reader.unsaved.let_go.clone();
-        let mut views = known.reader.retired.clone();
-        let store = known.reader.store.borrow();
-        views.extend(store.genesis.map(|loaded| (loaded, store.generation)));
-        drop(store);
-        let saved = fold(views.into_iter(), (), move |(), (genesis, generation)| {
-            flow::run(cache::keep_grace(genesis, generation, &grace, &let_go))
-        });
-        return saved.then(|saved| {
-            if saved.is_ok() {
-                let unsaved = &mut library.borrow_mut().reader.unsaved;
-                unsaved.grace = false;
-                unsaved.let_go.clear();
-            }
-            Flow::Done((library, saved))
-        });
-    };
-    if !cache::due(&known.reader, genesis) {
-        let appended = cache::journal(&mut known.reader, genesis);
-        return flow::run(appended).then(|saved| Flow::Done((library, saved)));
-    }
-    encoded(library).then(move |(mut library, checkpoint)| {
-        let reader = &mut library.borrow_mut().reader;
-        let written = cache::keep_checkpoint(reader, genesis, checkpoint);
-        flow::run(written).then(|saved| Flow::Done((library, saved)))
-    })
-}
-
-/// The checkpoint of the cached view as it is.
-fn encoded<'a, L: BorrowMut<Library> + 'a>(library: L) -> Flow<'a, (L, Checkpoint)> {
-    let encoding = Encoding::new(&library.borrow().reader);
-    flow::sliced((library, encoding), |(_, encoding)| encoding.step())
-        .then(|(library, encoding)| Flow::Done((library, encoding.finish())))
 }
 
 /// Reads every writer's pending records and sorts out this writer's and the
@@ -2573,18 +2501,13 @@ fn ensure_writer<'a>(
         let Ok(genesis) = Entry::encode(EntryHash::ZERO, 0, at, kind) else {
             return Flow::Done(Err(Error::Refused(Refusal::Invalid(Invalid::TooLong))));
         };
-        encoded(library).then(move |(library, checkpoint)| {
-            let segment = library.env.segment_name();
-            let (layout, reader) = (library.layout.clone(), &mut library.reader);
-            let create = Writer::create(layout, id, segment, label, at, |genesis| {
-                cache::keep_checkpoint(reader, genesis, checkpoint)
-            });
-            flow::run(create).and_then(move |writer| {
-                writer.stamp().then(move |written| {
-                    library.writer = Some(writer);
-                    library.absorb_own(&[genesis], written);
-                    ok(library)
-                })
+        let segment = library.env.segment_name();
+        let create = Writer::create(library.layout.clone(), id, segment, label, at);
+        flow::run(create).and_then(move |writer| {
+            writer.stamp().then(move |written| {
+                library.writer = Some(writer);
+                library.absorb_own(&[genesis], written);
+                ok(library)
             })
         })
     })
@@ -2763,11 +2686,10 @@ fn append<'a>(
 }
 
 /// As [`append`], with the library back whatever happened. Once the entries are
-/// durable in the folder, they are shown and kept in the history, and the cached
-/// view holding them is saved and then the head recorded, so that what a commit
-/// returns survives a crash and a restore. Neither failing fails the append; see
-/// [`keep_local`]. A writer that cannot continue its history stops writing: the
-/// next commit creates another.
+/// durable in the folder, they are shown and kept in the history, and the head
+/// recorded. Recording it failing does not fail the append; see [`keep_local`].
+/// A writer that cannot continue its history stops writing: the next commit
+/// creates another.
 fn appending<'a>(
     library: &'a mut Library,
     kinds: Vec<EntryKind>,
@@ -2802,23 +2724,19 @@ fn appending<'a>(
     })
 }
 
-/// Saves the cached view, then records the head when `head` asks or when it
-/// lags, each whatever became of the one before. Each failure leaves its part behind, to save again the next time;
-/// the first is returned. A crash meanwhile loses nothing the folder holds:
-/// reopening reads the folder into the view, which only grows, and continues from
-/// the last entry of the writer's chain there.
+/// Records the head when `head` asks or when it lags. A failure leaves it behind,
+/// to record again the next time. A crash meanwhile loses nothing the folder
+/// holds: reopening reads the folder and continues from the last entry of the
+/// writer's chain there.
 fn keep_local(library: &mut Library, head: bool) -> Flow<'_, (&mut Library, Result<()>)> {
-    saved_view(library).then(move |(library, saved)| {
-        library.lag(Lag::View, &saved);
-        let due = head || library.behind.contains_key(&Lag::Head);
-        let recorded = match &library.writer {
-            Some(writer) if due => writer.record(),
-            _ => Task::ready(Ok(())),
-        };
-        flow::run(recorded).then(move |recorded| {
-            library.lag(Lag::Head, &recorded);
-            Flow::Done((library, saved.and(recorded)))
-        })
+    let due = head || library.behind.contains_key(&Lag::Head);
+    let recorded = match &library.writer {
+        Some(writer) if due => writer.record(),
+        _ => Task::ready(Ok(())),
+    };
+    flow::run(recorded).then(move |recorded| {
+        library.lag(Lag::Head, &recorded);
+        Flow::Done((library, recorded))
     })
 }
 

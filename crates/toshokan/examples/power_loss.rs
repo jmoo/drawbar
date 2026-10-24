@@ -36,7 +36,7 @@ use toshokan::layout::{SEGMENT_EXTENSION, WRITERS};
 use toshokan::line;
 use toshokan::log::{Entry, Own, Settlement};
 use toshokan::pending::{self, PendingRecord};
-use toshokan::reader::{CachedView, Reader};
+use toshokan::reader::Reader;
 use toshokan::report::{Opened, Rekey, Start};
 use toshokan::{
     EntryHash, Env, Expect, Identify, Identity, Io, IoError, IoResult, Layout, Policy, Register,
@@ -883,7 +883,7 @@ fn descends(placed: &Placed, from: EntryHash, to: EntryHash) -> bool {
 
 fn read_logs(dirs: &Dirs) -> Result<Derived, String> {
     let mut native = Native::new(&dirs.folder, &dirs.local);
-    let mut reader = Reader::new(layout(), CachedView::default());
+    let mut reader = Reader::new(layout());
     blocking::run(&mut native, reader.read()).map_err(|e| format!("reading the logs: {e}"))?;
     Ok(reader.derived().clone())
 }

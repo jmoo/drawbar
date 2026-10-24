@@ -18,7 +18,7 @@ use thiserror::Error as ThisError;
 
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
 use crate::line::{Line, LineError};
-use crate::pack::{bad_variant, pack_struct, Bad, In, Pack, Unpack, Unpacked};
+use crate::pack::{bad_variant, pack_struct, In, Pack, Unpack, Unpacked};
 use crate::path::RelPath;
 use crate::schema::Raw;
 
@@ -1157,38 +1157,6 @@ impl Entry {
     /// The line, its newline included.
     pub fn to_bytes(&self) -> Vec<u8> {
         format!("{}\t{}\n", self.json(), self.hash).into_bytes()
-    }
-
-    /// The entry as packed in an install's cached view.
-    pub(crate) fn pack_into(&self, out: &mut Vec<u8>) {
-        (self.hash, self.prev).pack(out);
-        self.n.pack(out);
-        self.at.pack(out);
-        self.body.as_ref().len().pack(out);
-        out.extend_from_slice(&self.body);
-    }
-
-    /// An entry [`Entry::pack_into`] packed, from bytes whose check says they
-    /// are what this build packed: its body is taken as it is, unpacked only when
-    /// its kind or text is asked for.
-    pub(crate) fn unpack_from(input: &mut In<'_>) -> Unpacked<Self> {
-        let (hash, prev) = <(EntryHash, EntryHash)>::unpack(input)?;
-        let n = u64::unpack(input)?;
-        let at = Hlc::unpack(input)?;
-        let len = input.len()?;
-        let body = input.take(len)?;
-        match body {
-            [flags, kind, ..]
-                if flags & !(Flags::UNKNOWN_MEMBERS | Flags::TEXT) == 0 && *kind <= UNKNOWN => {}
-            _ => return Err(Bad("an entry no packing writes")),
-        }
-        Ok(Self {
-            hash,
-            prev,
-            n,
-            at,
-            body: body.into(),
-        })
     }
 }
 
@@ -2790,10 +2758,6 @@ mod tests {
                         bytes.as_bytes(),
                         "round {round}: verbatim"
                     );
-                    let mut packed = Vec::new();
-                    entry.pack_into(&mut packed);
-                    let unpacked = Entry::unpack_from(&mut In::new(&packed));
-                    assert_eq!(unpacked.as_ref(), Ok(&entry), "round {round}: {text}");
                 }
             }
         }
@@ -2817,32 +2781,6 @@ mod tests {
         let text = |entry: &Entry| entry.body[0] & Flags::TEXT != 0;
         assert!(!text(&written) && text(&read));
         assert!(read.body.len() > written.body.len() + spaced.len());
-    }
-
-    #[test]
-    fn a_cut_or_mislabeled_packed_entry_is_refused() {
-        let entry = Entry::encode(
-            hash(1),
-            2,
-            at(3),
-            EntryKind::Bind(Bound { ops: every_op() }),
-        )
-        .unwrap();
-        let mut packed = Vec::new();
-        entry.pack_into(&mut packed);
-        for cut in 0..packed.len() {
-            assert!(
-                Entry::unpack_from(&mut In::new(&packed[..cut])).is_err(),
-                "cut at {cut}"
-            );
-        }
-        let flags = packed.len() - entry.body.len();
-        for (at, bit) in [(flags, 4), (flags + 1, 8)] {
-            let mut mislabeled = packed.clone();
-            mislabeled[at] |= bit;
-            let read = Entry::unpack_from(&mut In::new(&mislabeled));
-            assert_eq!(read, Err(Bad("an entry no packing writes")), "byte {at}");
-        }
     }
 
     #[test]

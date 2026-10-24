@@ -20,7 +20,7 @@ use toshokan::line::Line;
 use toshokan::log::{Entry, EntryKind, Logged, Own};
 use toshokan::pending::PendingRecord;
 use toshokan::plan::{FileChange, Splice};
-use toshokan::reader::{CachedView, Reader};
+use toshokan::reader::Reader;
 use toshokan::report::{Compacted, Start};
 use toshokan::simulator::Machine;
 use toshokan::writer::{Claimed, Writer};
@@ -564,7 +564,7 @@ pub struct Instance {
 
 impl Instance {
     pub fn open(mut machine: Machine, seed: u64) -> Self {
-        let mut reader = Reader::new(layout(), CachedView::default());
+        let mut reader = Reader::new(layout());
         run(&mut machine, reader.read()).unwrap();
         let Claimed { writer, start } =
             run(&mut machine, Writer::claim(&layout(), &reader)).unwrap();
@@ -600,9 +600,7 @@ impl Instance {
             let at = self.tick();
             let writer = run(
                 &mut self.machine,
-                Writer::create(layout(), id, segment, "instance".into(), at, |genesis| {
-                    CachedView::default().save(genesis)
-                }),
+                Writer::create(layout(), id, segment, "instance".into(), at),
             )?;
             made.push(writer.genesis());
             wrote(writer.genesis(), EntryHash::ZERO);
@@ -657,10 +655,10 @@ impl Instance {
     }
 }
 
-/// What a reader without a cached view derives from `folder`.
+/// What a reader derives from `folder`.
 pub fn fresh(folder: &MemDisk) -> Derived {
     let mut disk = folder.clone();
-    let mut reader = Reader::new(layout(), CachedView::default());
+    let mut reader = Reader::new(layout());
     run(&mut disk, reader.read()).unwrap();
     reader.derived().clone()
 }

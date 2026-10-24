@@ -220,10 +220,10 @@ fn toshokan_with_two_entities_matches_the_oracle() {
     ));
 }
 
-/// A restore that takes a dismissal and the branch it dismissed leaves a fork
-/// point only the cached view remembers; the grace step forgets it.
+/// A restore that takes a dismissal and the branch it dismissed takes the fork
+/// point with them.
 #[test]
-fn a_fork_point_a_restore_took_is_forgotten_at_the_grace_step() {
+fn a_restore_that_takes_a_dismissed_branch_takes_its_fork_point() {
     let acts = [
         "x creates",
         "y Set(0, 0, B)",
@@ -245,4 +245,42 @@ fn a_fork_point_a_restore_took_is_forgotten_at_the_grace_step() {
     );
     replay(bounds, DEPTH, Spec::default(), &acts);
     replay(bounds, DEPTH, Real, &acts);
+}
+
+/// A dropped version that leaves a hole below a clone's line: the line still
+/// says its chain replaced what came before it, whether a reference names the
+/// entry the hole took or the line.
+#[test]
+fn a_hole_a_dropped_version_left_below_a_clones_line_is_read_as_its_chain_says() {
+    let bounds = Bounds::new(
+        2,
+        true,
+        4,
+        &[
+            Act::Set(0, 0, A),
+            Act::Set(0, 0, B),
+            Act::Dismiss,
+            Act::Take,
+        ],
+    );
+    let reads_before_the_clone = [
+        "x creates",
+        "y Set(0, 0, B)",
+        "y Set(0, 0, A)",
+        "x after reading Set(0, 0, A)",
+        "y is cloned",
+        "y' Set(0, 0, A)",
+    ];
+    let reads_the_clone = [
+        "x creates",
+        "y Set(0, 0, B)",
+        "y Set(0, 0, A)",
+        "y is cloned",
+        "y' Set(0, 0, A)",
+        "x after reading Set(0, 0, A)",
+    ];
+    for acts in [reads_before_the_clone, reads_the_clone] {
+        replay(bounds, DEPTH, Spec::default(), &acts);
+        replay(bounds, DEPTH, Real, &acts);
+    }
 }

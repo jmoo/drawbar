@@ -504,24 +504,6 @@ async fn only_generated_writers() {
     }
 }
 
-/// Removes the cached view of every writer of the measured install; how many
-/// `view.bin` files it removed.
-async fn forget_views() -> usize {
-    let own = format!("{}/own", home());
-    let listed = js_sys::Array::from(&opfs_list(parts(&own)).await);
-    let mut removed = 0;
-    for genesis in listed.iter().filter_map(|name| name.as_string()) {
-        for name in ["view.bin", "view.bin.next", "view.log"] {
-            let at = parts(&format!("{own}/{genesis}/{name}"));
-            if opfs_has(at.clone()).await.is_truthy() {
-                opfs_remove(at).await.unwrap();
-                removed += usize::from(name == "view.bin");
-            }
-        }
-    }
-    removed
-}
-
 /// Written once the library files are.
 fn files_marker() -> Vec<String> {
     parts(&format!("{}/generated/ready", home()))
@@ -1055,16 +1037,6 @@ async fn measure() {
     }
     warm.report("open, existing install");
     closes.report("close, dropping the library");
-
-    let mut uncached = Samples::default();
-    for _ in 0..5 {
-        assert!(forget_views().await > 0, "a cached view to forget");
-        let library = uncached.time(open("own")).await;
-        next_task().await;
-        library.close().await.unwrap();
-        next_task().await;
-    }
-    uncached.report("open, existing install without its cached view");
 
     let library = open("own").await;
     report_memory("with the library open");

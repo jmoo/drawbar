@@ -2,28 +2,23 @@
 //!
 //! A reader takes every file directly in `writers.2/<w>/`, whatever its name,
 //! and reads it by its contents as segment lines or as a snapshot. From the files
-//! it sees and what it remembers of each writer, [`crate::derive`] places each
-//! entry, finds forks, and merges. What the reader remembers is kept in the
-//! cached view. Reading writes nothing in the folder.
+//! it sees, [`crate::derive`] places each entry, finds forks, and merges. Reading
+//! writes nothing in the folder.
 //!
 //! Each line is parsed and decoded once: the reader keeps what it read of each
-//! file, reads only the bytes a segment gained since, and shares each decoded
-//! entry between the cached view and what the folder holds.
+//! file while it lives, and reads only the bytes a segment gained since.
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use crate::cache::{self, Changed, LetGo, Store};
-use crate::derive::{self, Derived, Memory, Seen, SeenSegment};
-use crate::error::{Error, Result};
+use crate::derive::{self, Derived, Seen, SeenSegment};
+use crate::error::Result;
 use crate::flow::{self, Flow};
 use crate::ids::{EntryHash, Hlc, WriterId};
 use crate::io::{Kind, Meta, Range, Root, Task};
 use crate::layout::{is_swap_file, Layout};
 use crate::line::{self, Stop};
 use crate::log::{Entry, Own};
-use crate::pack::pack_struct;
 use crate::path::RelPath;
 use crate::report::{Fork, Gap};
 use crate::snapshot::Snapshot;
@@ -162,122 +157,9 @@ impl WriterFile {
     }
 }
 
-/// When the reader takes the grace step for a writer: once it has held
-/// something of that writer no file it sees holds for [`GRACE_MS`], with at
-/// least one full rescan since.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
-pub struct Grace {
-    /// The writers it took the grace step for: an unsealed file of theirs
-    /// shorter than a certificate no longer waits, and a reference to them the
-    /// files contradict kills only its exact target.
-    pub graced: BTreeSet<WriterId>,
-    /// Each writer of which it holds what no file it sees holds.
-    pub unseen: BTreeMap<WriterId, Unseen>,
-}
-
-/// Since when a reader has held something of a writer no file it sees holds.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Unseen {
-    /// When it first held it, since it last held nothing of the kind.
-    pub since: u64,
-    /// Whether a scan of every file finished since then.
-    pub rescanned: bool,
-}
-
-pack_struct!(Unseen { since, rescanned });
-
-pack_struct!(Grace { graced, unseen });
-
-/// How long a reader holds what no file it sees holds before the grace step:
-/// 24 hours.
-pub const GRACE_MS: u64 = 24 * 60 * 60 * 1000;
-
-/// What this install remembers of each writer, kept in the local root.
-#[derive(Clone, PartialEq, Debug, Default)]
-pub struct CachedView {
-    pub(crate) writers: BTreeMap<WriterId, Memory>,
-    pub(crate) grace: Grace,
-}
-
-impl CachedView {
-    /// Refuses what this build cannot read with [`crate::Error::Corrupt`] naming
-    /// `path`; the caller then reads from scratch.
-    pub fn decode(path: &RelPath, bytes: &[u8]) -> Result<Self> {
-        let mut view = Self::default();
-        cache::restore(&mut view, bytes).map_err(|reason| Error::Corrupt {
-            path: path.clone(),
-            reason,
-        })?;
-        Ok(view)
-    }
-
-    pub fn encode(&self) -> Vec<u8> {
-        cache::encode_view(self)
-    }
-
-    /// What is remembered of each writer.
-    pub fn writers(&self) -> &BTreeMap<WriterId, Memory> {
-        &self.writers
-    }
-
-    pub fn grace(&self) -> &Grace {
-        &self.grace
-    }
-
-    /// The cached view kept for the writer whose genesis entry is `genesis`; empty
-    /// when none was saved.
-    pub fn load(genesis: EntryHash) -> Task<'static, Result<Self>> {
-        cache::load_one(genesis).map_ok(|kept| kept.view).task()
-    }
-
-    /// Adds everything `other` remembers; whether this view grew.
-    pub fn join(&mut self, other: &CachedView) -> bool {
-        let mut grew = false;
-        for (writer, theirs) in &other.writers {
-            let mine = self.writers.entry(*writer).or_default();
-            for tip in &theirs.tips {
-                if !mine.tips.iter().any(|kept| kept.head == tip.head) {
-                    mine.tips.push(Rc::clone(tip));
-                    grew = true;
-                }
-            }
-            for (hash, entry) in &theirs.entries {
-                grew |= mine.entries.insert(*hash, Rc::clone(entry)).is_none();
-            }
-            for fork in &theirs.forks {
-                grew |= mine.forks.insert(*fork);
-            }
-        }
-        let mut grace = self.grace.clone();
-        grace.graced.extend(&other.grace.graced);
-        for (writer, theirs) in &other.grace.unseen {
-            let joined = match grace.unseen.get(writer) {
-                Some(mine) => Unseen {
-                    since: mine.since.min(theirs.since),
-                    rescanned: mine.rescanned && theirs.rescanned,
-                },
-                None => *theirs,
-            };
-            grace.unseen.insert(*writer, joined);
-        }
-        grew |= grace != self.grace;
-        self.grace = grace;
-        grew
-    }
-
-    /// Keeps this view alone as the first view of the writer whose genesis entry
-    /// is `genesis`, replacing what was kept so that a crash leaves the old view
-    /// or the new.
-    pub fn save(&self, genesis: EntryHash) -> Task<'static, Result<()>> {
-        cache::save_view(self, genesis).task()
-    }
-}
-
 /// What one read found.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct ReadReport {
-    /// Whether what the reader remembers changed.
-    pub changed: bool,
     /// Whether any file in a writer's directory came, went or changed.
     pub folder_changed: bool,
     /// Entries newly merged, per writer, in chain order.
@@ -292,30 +174,20 @@ pub struct ReadReport {
 }
 
 impl ReadReport {
-    /// Whether the read found anything new: the reader's memory changed, or a
-    /// file in a writer's directory came, went or changed.
+    /// Whether the read found anything new: a file in a writer's directory
+    /// came, went or changed.
     pub fn anything_new(&self) -> bool {
-        self.changed || self.folder_changed
+        self.folder_changed
     }
 }
 
-/// Clones share where they save the cached view.
 #[derive(Clone)]
 pub struct Reader {
     layout: Layout,
-    cached: CachedView,
     /// What each writer's directory in the folder held at the last read.
     folder: BTreeMap<WriterId, Folder>,
-    /// What the files and the cached view derive.
+    /// What the files derive.
     derived: Rc<Derived>,
-    /// What the cached view gained since it was last saved.
-    pub(crate) unsaved: Unsaved,
-    /// The retired writers of this install whose cached views this one holds.
-    pub(crate) absorbed: BTreeSet<EntryHash>,
-    /// The retired writers whose views this reader read, with the generation of
-    /// each one's checkpoint.
-    pub(crate) retired: BTreeMap<EntryHash, u64>,
-    pub(crate) store: Rc<RefCell<Store>>,
 }
 
 /// One writer's directory as the last read found it.
@@ -330,23 +202,6 @@ pub(crate) struct Record {
     /// `None` when the file is read again next time.
     pub(crate) stamp: Option<Stamp>,
     pub(crate) file: WriterFile,
-}
-
-/// What the cached view and the files gained since the view was last saved.
-#[derive(Clone, Default)]
-pub(crate) struct Unsaved {
-    pub(crate) memories: BTreeMap<WriterId, Changed>,
-    /// Files whose records came, went or changed.
-    pub(crate) files: BTreeSet<RelPath>,
-    pub(crate) grace: bool,
-    /// What the grace step let go of in each writer's memory.
-    pub(crate) let_go: BTreeMap<WriterId, LetGo>,
-}
-
-impl Unsaved {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.memories.is_empty() && self.files.is_empty() && !self.grace
-    }
 }
 
 /// A file is unchanged while its length, its modification time and its last
@@ -423,85 +278,31 @@ pub(crate) struct Absorbing {
 }
 
 impl Reader {
-    pub fn new(layout: Layout, cached: CachedView) -> Self {
-        let mut reader = Self::underived(layout, cached);
-        reader.derived = Rc::new(reader.derive_now());
-        reader
-    }
-
-    fn underived(layout: Layout, cached: CachedView) -> Self {
+    /// A reader that has read nothing yet.
+    pub fn new(layout: Layout) -> Self {
         Self {
             layout,
-            cached,
             folder: BTreeMap::new(),
             derived: Rc::default(),
-            unsaved: Unsaved::default(),
-            absorbed: BTreeSet::new(),
-            retired: BTreeMap::new(),
-            store: Rc::default(),
         }
     }
 
-    /// A reader starting from what [`cache::load`] found in the local root. The
-    /// files the saved records describe are read again only once they change.
-    pub fn open(layout: Layout, loaded: cache::Loaded) -> Self {
-        let cache::Loaded {
-            view,
-            files,
-            absorbed,
-            retired,
-            store,
-        } = loaded;
-        let mut reader = Self::underived(layout, view);
-        reader.absorbed = absorbed;
-        reader.retired = retired;
-        reader.store = Rc::new(RefCell::new(store));
-        for (path, record) in files {
-            let Some(writer) = reader.writer_of(&path) else {
-                continue;
-            };
-            let Some(memory) = reader.cached.writers.get(&writer) else {
-                continue;
-            };
-            let Some(record) = record.resolve(memory) else {
-                continue;
-            };
-            let folder = reader.folder.entry(writer).or_default();
-            folder.files.insert(path, record);
-        }
-        reader.derived = Rc::new(reader.derive_now());
-        reader
-    }
-
-    /// Lets go of what the reader remembers, as a library closing does.
+    /// Lets go of what the reader derived, as a library closing does.
     pub(crate) fn shed_logs(&mut self) {
-        drop(std::mem::take(&mut self.cached));
         drop(std::mem::take(&mut self.derived));
     }
 
     /// Lets go of what the reader found in each file, as a library closing does.
     pub(crate) fn shed_files(&mut self) {
         drop(std::mem::take(&mut self.folder));
-        drop(std::mem::take(&mut self.unsaved));
     }
 
-    /// The writer whose directory holds `path`.
-    pub(crate) fn writer_of(&self, path: &RelPath) -> Option<WriterId> {
-        let dir = path.parent()?;
-        let writer = dir.name()?.parse().ok()?;
-        (dir == self.layout.writer(writer)).then_some(writer)
-    }
-
-    pub fn cached(&self) -> &CachedView {
-        &self.cached
-    }
-
-    /// What the files and the cached view derive, as of the last read.
+    /// What the files derive, as of the last read.
     pub fn derived(&self) -> &Derived {
         &self.derived
     }
 
-    /// Every writer the reader knows of: one the files or its memory hold.
+    /// Every writer the files hold.
     pub fn writers_known(&self) -> BTreeSet<WriterId> {
         self.derived.writers.keys().copied().collect()
     }
@@ -521,11 +322,6 @@ impl Reader {
 
     pub(crate) fn records(&self) -> impl Iterator<Item = (&RelPath, &Record)> {
         self.folder.values().flat_map(|folder| folder.files.iter())
-    }
-
-    pub(crate) fn record(&self, path: &RelPath) -> Option<&Record> {
-        let writer = self.writer_of(path)?;
-        self.folder.get(&writer)?.files.get(path)
     }
 
     /// Reads every writer's directory and derives what it shows. Requests only
@@ -612,53 +408,26 @@ impl Reader {
             .task()
     }
 
-    /// Takes in entries this instance appended as `writer`, as a read would, and
-    /// records `written`, the segment the append ended and its stamp, as a read
-    /// would find it.
+    /// Takes in entries this instance appended as `writer` to the segment at
+    /// `path`, as a read would, with the stamp a read would find on it when it is
+    /// known.
     pub fn add(
         &mut self,
         writer: WriterId,
         entries: &[Entry],
-        written: Option<(RelPath, Stamp)>,
+        path: &RelPath,
+        stamp: Option<Stamp>,
     ) -> ReadReport {
         let entries: Vec<Rc<Entry>> = entries.iter().cloned().map(Rc::new).collect();
         let folder = self.folder.entry(writer).or_default();
-        let recorded = match written {
-            Some((path, stamp)) => {
-                let recorded = folder.appended(&path, &entries, stamp);
-                if recorded {
-                    self.unsaved.files.insert(path);
-                }
-                recorded
-            }
-            None => false,
-        };
-        if !recorded {
-            let memory = self.cached.writers.entry(writer).or_default();
-            for entry in &entries {
-                memory.entries.insert(entry.hash(), Rc::clone(entry));
-            }
-        }
+        folder.appended(path, &entries, stamp);
         let mut report = ReadReport {
-            folder_changed: recorded,
+            folder_changed: true,
             ..ReadReport::default()
         };
         let derived = Rc::make_mut(&mut self.derived);
-        match derive::extend(derived, writer, &entries, &self.cached.grace.graced) {
+        match derive::extend(derived, writer, &entries) {
             true => {
-                let memory = &derived.memory[&writer];
-                self.cached.writers.insert(writer, memory.clone());
-                let added = entries.iter().map(|entry| entry.hash()).collect();
-                let changed = Changed {
-                    added,
-                    ..Changed::default()
-                };
-                self.unsaved
-                    .memories
-                    .entry(writer)
-                    .or_default()
-                    .then(changed);
-                report.changed = true;
                 let placed = entries.iter().map(|entry| entry.hash()).collect();
                 report.placed.insert(writer, placed);
                 report.gaps = self.gaps();
@@ -692,8 +461,7 @@ impl Reader {
                 .copied()
                 .collect();
             for writer in gone {
-                let folder = self.folder.remove(&writer).expect("listed above");
-                self.unsaved.files.extend(folder.files.into_keys());
+                self.folder.remove(&writer);
                 report.folder_changed = true;
             }
         }
@@ -718,8 +486,7 @@ impl Reader {
     }
 
     /// Ends [`Reader::absorb`] once [`Reader::absorb_slice`] returned true: derives
-    /// what the files and the cached view show, when a file came, went or
-    /// changed.
+    /// what the files show, when a file came, went or changed.
     pub(crate) fn absorbed(&mut self, mut absorbing: Absorbing) -> ReadReport {
         for writer in self.folder.keys().copied().collect::<Vec<_>>() {
             self.report_unreadable(writer, &mut absorbing.report);
@@ -728,21 +495,7 @@ impl Reader {
             true => self.rederive(&mut absorbing.report),
             false => absorbing.report.gaps = self.gaps(),
         }
-        self.drop_unsaved_without_store();
         absorbing.report
-    }
-
-    /// A view not yet saved anywhere is written whole by its first save, so what
-    /// it gains is not kept apart, except a change to the grace step, which an
-    /// instance without a writer keeps in the views it read.
-    fn drop_unsaved_without_store(&mut self) {
-        if self.store.borrow().genesis.is_none() {
-            self.unsaved = Unsaved {
-                grace: self.unsaved.grace,
-                let_go: std::mem::take(&mut self.unsaved.let_go),
-                ..Unsaved::default()
-            };
-        }
     }
 
     /// What each writer's files show.
@@ -768,60 +521,21 @@ impl Reader {
     }
 
     fn derive_now(&self) -> Derived {
-        derive::derive(
-            &self.seen(),
-            &self.cached.writers,
-            &self.cached.grace.graced,
-        )
+        derive::derive(&self.seen())
     }
 
-    /// What the files and the cached view derive now, from scratch, as tests
-    /// compare with what the reader holds.
+    /// What the files derive now, from scratch, as tests compare with what the
+    /// reader holds.
     #[doc(hidden)]
     pub fn derive_afresh(&self) -> Derived {
         self.derive_now()
     }
 
-    /// Derives again from the files and the cached view, keeps what to remember,
-    /// and reports what changed.
+    /// Derives again from the files, and reports what changed.
     fn rederive(&mut self, report: &mut ReadReport) {
         let mut derived = self.derive_now();
         let before = Rc::clone(&self.derived);
         derived.folded.share(&before.folded);
-        for (writer, memory) in &derived.memory {
-            let was = self.cached.writers.get(writer);
-            let changed = Changed::between(was, Some(memory));
-            if !changed.is_empty() {
-                report.changed = true;
-                self.unsaved
-                    .memories
-                    .entry(*writer)
-                    .or_default()
-                    .then(changed);
-            }
-        }
-        let gone: Vec<WriterId> = self
-            .cached
-            .writers
-            .keys()
-            .filter(|writer| !derived.memory.contains_key(writer))
-            .copied()
-            .collect();
-        for writer in gone {
-            let changed = Changed::between(self.cached.writers.get(&writer), None);
-            report.changed = true;
-            self.unsaved
-                .memories
-                .entry(writer)
-                .or_default()
-                .then(changed);
-        }
-        self.cached.writers = derived
-            .memory
-            .iter()
-            .filter(|(_, memory)| !memory.is_empty())
-            .map(|(writer, memory)| (*writer, memory.clone()))
-            .collect();
         for (writer, placed) in &derived.writers {
             let was: BTreeSet<EntryHash> = before
                 .writers
@@ -867,82 +581,6 @@ impl Reader {
         gaps.collect()
     }
 
-    /// The writers of which the reader holds something no file it sees holds: a
-    /// tip whose file is gone, or an entry no file holds.
-    pub fn unseen(&self) -> BTreeSet<WriterId> {
-        derive::unseen(&self.seen(), &self.cached.writers, &self.derived)
-    }
-
-    /// Notes, at wall time `now`, of which writers the reader holds what no file
-    /// holds, and that a scan of every file finished when `rescanned`; the
-    /// writers the grace step is due for.
-    pub fn note_grace(&mut self, now: u64, rescanned: bool) -> BTreeSet<WriterId> {
-        let held = &self.cached.grace.unseen;
-        let unseen: BTreeMap<WriterId, Unseen> = self
-            .unseen()
-            .into_iter()
-            .map(|writer| {
-                let noted = match held.get(&writer) {
-                    Some(held) => Unseen {
-                        since: held.since,
-                        rescanned: held.rescanned || rescanned,
-                    },
-                    None => Unseen {
-                        since: now,
-                        rescanned: false,
-                    },
-                };
-                (writer, noted)
-            })
-            .collect();
-        let due = unseen
-            .iter()
-            .filter(|(_, unseen)| unseen.rescanned && now.saturating_sub(unseen.since) >= GRACE_MS)
-            .map(|(writer, _)| *writer)
-            .collect();
-        if unseen != *held {
-            self.cached.grace.unseen = unseen;
-            self.unsaved.grace = true;
-        }
-        due
-    }
-
-    /// Takes the grace step for `writers`: lets go of what of theirs no file
-    /// holds and nothing visible descends from, forgets their fork points the
-    /// files no longer show, and derives again.
-    pub fn take_grace(&mut self, writers: &BTreeSet<WriterId>) -> ReadReport {
-        let kept = derive::grace(&self.seen(), &self.cached.writers, writers);
-        let mut report = ReadReport::default();
-        for writer in self
-            .cached
-            .writers
-            .keys()
-            .chain(kept.keys())
-            .copied()
-            .collect::<BTreeSet<_>>()
-        {
-            let (before, after) = (self.cached.writers.get(&writer), kept.get(&writer));
-            let changed = Changed::between(before, after);
-            if !changed.is_empty() {
-                let let_go = LetGo::between(before, after);
-                self.unsaved.let_go.entry(writer).or_default().then(let_go);
-                self.unsaved
-                    .memories
-                    .entry(writer)
-                    .or_default()
-                    .then(changed);
-                report.changed = true;
-            }
-        }
-        self.cached.writers = kept;
-        let grace = &mut self.cached.grace;
-        grace.graced.extend(writers);
-        grace.unseen.retain(|writer, _| !writers.contains(writer));
-        self.unsaved.grace = true;
-        self.rederive(&mut report);
-        report
-    }
-
     /// Takes in what one writer's files gave.
     fn gather(&mut self, listed: Listed, report: &mut ReadReport) {
         let Listed { writer, files } = listed;
@@ -957,7 +595,6 @@ impl Reader {
             .collect();
         for path in gone {
             folder.files.remove(&path);
-            self.unsaved.files.insert(path);
             report.folder_changed = true;
         }
         for Scanned { path, found } in files {
@@ -977,7 +614,6 @@ impl Reader {
                     folder.files.insert(path.clone(), Record { stamp, file });
                 }
             }
-            self.unsaved.files.insert(path);
             report.folder_changed = true;
         }
     }
@@ -1014,57 +650,54 @@ impl Reader {
             tips.chain(entries)
         })
     }
-
-    /// Keeps what the cached view gained in this writer's local directory: by
-    /// appending it to the journal, or by writing the whole view again when the
-    /// journal has grown too long or cannot be trusted.
-    pub fn save(&mut self, genesis: EntryHash) -> Task<'static, Result<()>> {
-        cache::save(self, genesis)
-    }
-
-    /// Writes the whole view, with what the reader knows of each file, as the
-    /// writer whose genesis entry is `genesis`.
-    pub fn checkpoint(&mut self, genesis: EntryHash) -> Task<'static, Result<()>> {
-        cache::checkpoint(self, genesis)
-    }
 }
 
 impl Folder {
-    /// Records that the segment at `path` gained `entries`, ending it as `stamp`
-    /// says: when the last read left it just where they begin, or they are all it
-    /// holds. Whether it recorded them.
-    fn appended(&mut self, path: &RelPath, entries: &[Rc<Entry>], stamp: Stamp) -> bool {
+    /// Records that the segment at `path` gained `entries`. Where the last read
+    /// left it just where they begin, it ends as `stamp` says; otherwise, or
+    /// without a stamp, the file is read whole again next time.
+    fn appended(&mut self, path: &RelPath, entries: &[Rc<Entry>], stamp: Option<Stamp>) {
         let added: u64 = entries.iter().map(|e| e.to_bytes().len() as u64).sum();
-        let Some(start) = stamp.len.checked_sub(added) else {
-            return false;
-        };
-        let continues = match self.files.get(path) {
-            None => start == 0,
-            Some(Record {
-                stamp: Some(old),
-                file: WriterFile::Segment(segment),
-            }) => {
+        let start = stamp
+            .as_ref()
+            .and_then(|stamp| stamp.len.checked_sub(added));
+        let continues = match (self.files.get(path), start) {
+            (None, Some(start)) => start == 0,
+            (
+                Some(Record {
+                    stamp: Some(old),
+                    file: WriterFile::Segment(segment),
+                }),
+                Some(start),
+            ) => {
                 old.len == start
                     && segment.end == start
                     && !segment.sealed
                     && segment.entries.last().map(|last| last.hash())
                         == entries.first().map(|first| first.prev())
             }
-            Some(_) => false,
+            _ => false,
         };
-        if !continues {
-            return false;
-        }
         let record = self.files.entry(path.clone()).or_insert_with(|| Record {
             stamp: None,
             file: WriterFile::Segment(Segment::default()),
         });
-        if let WriterFile::Segment(segment) = &mut record.file {
-            segment.entries.extend(entries.iter().cloned());
-            segment.end = stamp.len;
+        let stamp = stamp.filter(|_| continues);
+        match &mut record.file {
+            WriterFile::Segment(segment) => {
+                segment.entries.extend(entries.iter().cloned());
+                if let Some(stamp) = &stamp {
+                    segment.end = stamp.len;
+                }
+            }
+            file => {
+                *file = WriterFile::Segment(Segment {
+                    entries: entries.to_vec(),
+                    ..Segment::default()
+                });
+            }
         }
-        record.stamp = Some(stamp);
-        true
+        record.stamp = stamp;
     }
 }
 
@@ -1513,14 +1146,6 @@ mod tests {
         );
     }
 
-    /// What a reader that read `disk` derives and remembers.
-    fn read(disk: &MemDisk) -> Reader {
-        let layout = Layout::new(".lib").unwrap();
-        let mut reader = Reader::new(layout, CachedView::default());
-        crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
-        reader
-    }
-
     #[test]
     fn damaged_files_are_read_without_panicking() {
         use crate::env::{Random, SeededRandom};
@@ -1538,13 +1163,10 @@ mod tests {
             &dir.join("snap.json").unwrap(),
             &snapshot(&entries[..2]).encode(),
         );
-        let view = read(&disk).cached().clone();
         let seeds = [
             bytes_of(&entries.iter().collect::<Vec<_>>()),
             snapshot(&entries).encode(),
-            view.encode(),
         ];
-        let path = Layout::cached_view(entries[0].hash());
         let mut random = SeededRandom::new(7);
         let mut pick = |n: usize| (random.next_u128() % n as u128) as usize;
         for _ in 0..3000 {
@@ -1571,18 +1193,11 @@ mod tests {
                 WriterFile::Snapshot(snapshot) => seen.snapshots.push(snapshot),
                 WriterFile::Unreadable { .. } => {}
             }
-            let derived = derive::derive(
-                &BTreeMap::from([(W, seen)]),
-                &BTreeMap::new(),
-                &BTreeSet::new(),
-            );
+            let derived = derive::derive(&BTreeMap::from([(W, seen)]));
             for placed in derived.writers.values() {
                 for entry in placed.merged.iter().skip(1) {
                     assert!(placed.holds(entry.prev()), "merged after its predecessor");
                 }
-            }
-            if let Ok(view) = CachedView::decode(&path, &bytes) {
-                assert!(CachedView::decode(&path, &view.encode()).is_ok());
             }
         }
     }
@@ -1687,7 +1302,7 @@ mod tests {
         );
         put(&disk, &dir.join("junk").unwrap(), b"junk");
         let mut backend = Counting(disk.clone(), 0);
-        let mut reader = Reader::new(layout.clone(), CachedView::default());
+        let mut reader = Reader::new(layout.clone());
         let report = crate::blocking::run(&mut backend, reader.read()).unwrap();
         assert_eq!(report.placed[&W], hashes(&entries[2..]));
         assert_eq!(report.unreadable, [(dir.join("junk").unwrap(), None)]);
@@ -1711,9 +1326,13 @@ mod tests {
             .records()
             .map(|(path, record)| (path.clone(), record.stamp.clone(), record.file.clone()))
             .collect();
-        let unsaved: BTreeSet<WriterId> = reader.unsaved.memories.keys().copied().collect();
-        let files_unsaved = reader.unsaved.files.clone();
-        (reader.cached().clone(), files, unsaved, files_unsaved)
+        let merged: BTreeMap<WriterId, Vec<EntryHash>> = reader
+            .derived()
+            .writers
+            .iter()
+            .map(|(writer, placed)| (*writer, placed.merged.iter().map(|e| e.hash()).collect()))
+            .collect();
+        (files, merged)
     }
 
     #[test]
@@ -1756,7 +1375,7 @@ mod tests {
                     files.push((dir.join("snap.json").unwrap(), folded.encode()));
                 }
             }
-            let mut whole = Reader::new(layout.clone(), CachedView::default());
+            let mut whole = Reader::new(layout.clone());
             let mut sliced = whole.clone();
             let mut grown: Vec<(RelPath, Vec<u8>)> = Vec::new();
             for round in 0..3 {
@@ -1809,7 +1428,7 @@ mod tests {
         let path = layout.writer(W).join("s.jsonl").unwrap();
         put(&disk, &path, &bytes_of(&[&entries[0], &entries[1]]));
         let mut backend = Counting(disk.clone(), 0);
-        let mut reader = Reader::new(layout, CachedView::default());
+        let mut reader = Reader::new(layout);
         crate::blocking::run(&mut backend, reader.read()).unwrap();
         let before = backend.1;
         let gained = bytes_of(&[&entries[2], &entries[3]]);
@@ -1829,7 +1448,7 @@ mod tests {
         let (a, b) = (after(&entries[1], "a"), after(&entries[1], "bb"));
         let path = layout.writer(W).join("s.jsonl").unwrap();
         put(&disk, &path, &bytes_of(&[&entries[0], &entries[1], &a]));
-        let mut reader = Reader::new(layout, CachedView::default());
+        let mut reader = Reader::new(layout);
         crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
         let remove = Io::Remove {
             root: Root::Folder,
@@ -1839,17 +1458,11 @@ mod tests {
         let c = after(&b, "c");
         put(&disk, &path, &bytes_of(&[&entries[0], &entries[1], &b, &c]));
 
-        let report = crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
-        let fork = Fork {
-            writer: W,
-            at: 1,
-            prev: entries[1].hash(),
-        };
-        assert_eq!(report.forks, [fork], "{report:?}");
-        let runs = &reader.derived().writers[&W].runs;
-        let runs: BTreeSet<EntryHash> = runs.iter().map(|entry| entry.hash()).collect();
-        let branches = BTreeSet::from([a.hash(), b.hash(), c.hash()]);
-        assert_eq!(runs, branches, "the remembered branch stays a run");
+        crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
+        let merged = &reader.derived().writers[&W].merged;
+        let merged: Vec<EntryHash> = merged.iter().map(|entry| entry.hash()).collect();
+        let expected = [entries[0].hash(), entries[1].hash(), b.hash(), c.hash()];
+        assert_eq!(merged, expected, "the file read whole");
     }
 
     #[test]
@@ -1861,7 +1474,7 @@ mod tests {
         let whole = bytes_of(&[&entries[0], &entries[1], &entries[2]]);
         let torn = entries[0].to_bytes().len() + entries[1].to_bytes().len() + 9;
         put(&disk, &path, &whole[..torn]);
-        let mut reader = Reader::new(layout, CachedView::default());
+        let mut reader = Reader::new(layout);
         let first = crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
         assert_eq!(first.unreadable.len(), 1);
         assert_eq!(first.placed[&W], hashes(&entries[..2]));
@@ -1885,7 +1498,7 @@ mod tests {
         let end = sealed.len() as u64;
         sealed.extend(line::seal_marker(entries[1].hash()));
         put(&disk, &path, &sealed);
-        let mut reader = Reader::new(layout, CachedView::default());
+        let mut reader = Reader::new(layout);
         let first = crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
         assert_eq!(first.unreadable, []);
         let files = reader.files(W);
@@ -1921,7 +1534,7 @@ mod tests {
             &path,
             &bytes_of(&[&entries[0], &entries[1], &entries[2]]),
         );
-        let mut reader = Reader::new(layout, CachedView::default());
+        let mut reader = Reader::new(layout);
         crate::blocking::run(&mut disk, reader.read()).unwrap();
         let modified = |disk: &mut MemDisk| {
             let stat = Io::Stat {
@@ -1943,166 +1556,12 @@ mod tests {
         disk.set_modified(Root::Folder, &path, before).unwrap();
         assert_eq!(modified(&mut disk), before);
 
-        let report = crate::blocking::run(&mut disk, reader.read()).unwrap();
-        assert_eq!(report.forks.len(), 1, "{report:?}");
-        let runs = &reader.derived().writers[&W].runs;
-        assert!(runs.iter().any(|entry| entry.hash() == other.hash()));
-    }
-
-    #[test]
-    fn a_cached_view_saved_in_the_local_root_loads_back() {
-        let mut disk = MemDisk::new();
-        let entries = chain(2);
-        let layout = Layout::new(".lib").unwrap();
-        let path = layout.writer(W).join("s.txt").unwrap();
-        let all: Vec<&Entry> = entries.iter().collect();
-        put(&disk, &path, &bytes_of(&all));
-        let view = read(&disk).cached().clone();
-        assert_eq!(view.writers()[&W].entries.len(), 3);
-        let genesis = entries[0].hash();
-        let empty = crate::blocking::run(&mut disk, CachedView::load(genesis)).unwrap();
-        assert_eq!(empty, CachedView::default());
-        for io in [
-            Io::MakeDir {
-                root: Root::Local,
-                path: Layout::local(genesis),
-            },
-            Io::Sync {
-                root: Root::Local,
-                path: RelPath::ROOT,
-            },
-        ] {
-            disk.perform(io).unwrap();
-        }
-        crate::blocking::run(&mut disk, view.save(genesis)).unwrap();
-        crate::blocking::run(&mut disk, view.save(genesis)).unwrap();
-        let loaded = crate::blocking::run(&mut disk, CachedView::load(genesis)).unwrap();
-        assert_eq!(loaded, view);
-        let mut restarted = disk.restart();
-        let loaded = crate::blocking::run(&mut restarted, CachedView::load(genesis)).unwrap();
-        assert_eq!(loaded, view);
-    }
-
-    #[test]
-    fn a_journal_a_crash_left_beside_a_newer_checkpoint_is_not_replayed_onto_it() {
-        let mut disk = MemDisk::new();
-        let entries = chain(2);
-        let layout = Layout::new(".lib").unwrap();
-        let path = layout.writer(W).join("s.txt").unwrap();
-        put(
-            &disk,
-            &path,
-            &bytes_of(&[&entries[0], &entries[1], &entries[2]]),
-        );
-        let genesis = entries[0].hash();
-        disk.perform(Io::MakeDir {
-            root: Root::Local,
-            path: Layout::local(genesis),
-        })
-        .unwrap();
-        let mut reader = read(&disk);
-        crate::blocking::run(&mut disk, reader.checkpoint(genesis)).unwrap();
-        disk.perform(Io::Remove {
-            root: Root::Folder,
-            path,
-        })
-        .unwrap();
-        crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
-        reader.note_grace(1_000, false);
-        crate::blocking::run(&mut disk, reader.save(genesis)).unwrap();
-        let journal = Layout::view_journal(genesis);
-        let stale = disk.files(Root::Local)[&journal].clone();
-        let due = reader.note_grace(1_000 + GRACE_MS, true);
-        assert!(!due.is_empty());
-        reader.take_grace(&due);
-        crate::blocking::run(&mut disk, reader.save(genesis)).unwrap();
-        assert!(!disk.files(Root::Local).contains_key(&journal));
-        disk.perform(Io::Create {
-            root: Root::Local,
-            path: journal,
-            bytes: stale,
-        })
-        .unwrap();
-
-        let loaded = crate::blocking::run(&mut disk, CachedView::load(genesis)).unwrap();
-        assert_eq!(&loaded, reader.cached());
-    }
-
-    #[test]
-    fn the_grace_step_is_due_a_day_and_a_full_rescan_after_something_went_unseen() {
-        let disk = MemDisk::new();
-        let entries = chain(2);
-        let layout = Layout::new(".lib").unwrap();
-        let path = layout.writer(W).join("s.txt").unwrap();
-        put(
-            &disk,
-            &path,
-            &bytes_of(&[&entries[0], &entries[1], &entries[2]]),
-        );
-        let mut reader = read(&disk);
-        disk.perform(Io::Remove {
-            root: Root::Folder,
-            path,
-        })
-        .unwrap();
-        crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
-        let merged = |reader: &Reader| reader.derived().writers[&W].merged.len();
-        assert_eq!(merged(&reader), 3, "what no file holds stays shown");
-        assert_eq!(reader.note_grace(1_000, false), BTreeSet::new());
+        crate::blocking::run(&mut disk, reader.read()).unwrap();
+        let merged = &reader.derived().writers[&W].merged;
+        let merged: Vec<EntryHash> = merged.iter().map(|entry| entry.hash()).collect();
         assert_eq!(
-            reader.note_grace(1_000 + GRACE_MS, false),
-            BTreeSet::new(),
-            "no full rescan yet"
+            merged,
+            hashes(&[entries[0].clone(), entries[1].clone(), other])
         );
-        let due = reader.note_grace(1_000 + GRACE_MS, true);
-        assert_eq!(due, BTreeSet::from([W]));
-        let report = reader.take_grace(&due);
-        assert!(report.changed);
-        assert_eq!(merged(&reader), 0, "nothing visible descends from it");
-        assert_eq!(reader.cached().grace.graced, BTreeSet::from([W]));
-        assert_eq!(
-            reader.note_grace(2_000 + GRACE_MS, true),
-            BTreeSet::new(),
-            "nothing is unseen now"
-        );
-    }
-
-    #[test]
-    fn the_grace_step_waits_a_day_for_each_writer_and_touches_no_other() {
-        const V: WriterId = WriterId::from_u128(0xb);
-        let disk = MemDisk::new();
-        let layout = Layout::new(".lib").unwrap();
-        let files = [(W, chain(1)), (V, chain_of(V, 1))].map(|(writer, entries)| {
-            let path = layout.writer(writer).join("s.txt").unwrap();
-            put(&disk, &path, &bytes_of(&[&entries[0], &entries[1]]));
-            path
-        });
-        let mut reader = read(&disk);
-        let gone = |reader: &mut Reader, path: &RelPath| {
-            disk.perform(Io::Remove {
-                root: Root::Folder,
-                path: path.clone(),
-            })
-            .unwrap();
-            crate::blocking::run(&mut disk.clone(), reader.read()).unwrap();
-        };
-        gone(&mut reader, &files[0]);
-        reader.note_grace(1_000, false);
-        gone(&mut reader, &files[1]);
-        reader.note_grace(1_000 + GRACE_MS - 1, true);
-        let due = reader.note_grace(1_000 + GRACE_MS, true);
-        assert_eq!(
-            due,
-            BTreeSet::from([W]),
-            "V went unseen a day less a moment ago"
-        );
-        reader.take_grace(&due);
-        let merged = |writer| {
-            let placed = reader.derived().writers.get(&writer);
-            placed.map_or(0, |placed| placed.merged.len())
-        };
-        assert_eq!((merged(W), merged(V)), (0, 2));
-        assert_eq!(reader.cached().grace.graced, BTreeSet::from([W]));
-        assert!(reader.cached().grace.unseen.contains_key(&V));
     }
 }

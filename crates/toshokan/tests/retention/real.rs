@@ -1,6 +1,6 @@
 //! toshokan as a [`Design`]: each entry of the world becomes a toshokan entry, a
 //! compaction folds through [`toshokan::compaction::snapshot`], and a reader
-//! derives through [`toshokan::derive`] and its grace step.
+//! derives through [`toshokan::derive`].
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use toshokan::compaction::{snapshot, Found};
 use toshokan::contribution::{FieldKey, Value};
-use toshokan::derive::{self, Derived, Memory, SeenSegment};
+use toshokan::derive::{self, Derived, SeenSegment};
 use toshokan::log::{self, EntryKind, Forked, Logged, Observed, Op, Own, Run, Target};
 use toshokan::merge::{Exists, Folded};
 use toshokan::report;
@@ -25,13 +25,6 @@ use super::{Bound, Compaction, Design, Reading};
 /// toshokan, under the retention design.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Real;
-
-/// What a toshokan reader remembers: its cached view.
-#[derive(Clone, Debug, Default)]
-pub struct Remembered {
-    writers: BTreeMap<WriterId, Memory>,
-    graced: BTreeSet<WriterId>,
-}
 
 const SET: &str = "s";
 
@@ -282,14 +275,8 @@ impl Lines {
     }
 }
 
-/// What a reader derives from what `r` sees, remembering `memory`.
-fn derived(
-    r: &Reading<'_, Snapshot>,
-    lines: &Lines,
-    memory: &BTreeMap<WriterId, Memory>,
-    graced: &BTreeSet<WriterId>,
-    grace: bool,
-) -> (Derived, BTreeMap<WriterId, Memory>, BTreeSet<WriterId>) {
+/// What a reader derives from what `r` sees.
+fn derived(r: &Reading<'_, Snapshot>, lines: &Lines) -> Derived {
     let mut segments: Vec<(Dir, Vec<Rc<log::Entry>>, bool)> = Vec::new();
     let mut snapshots: Vec<(Dir, Rc<Snapshot>)> = Vec::new();
     for seen in r.seen {
@@ -318,23 +305,7 @@ fn derived(
             .snapshots
             .push(snapshot);
     }
-    let (kept, graced) = match grace {
-        true => {
-            let read = derive::derive(&seen, memory, graced);
-            let unseen = derive::unseen(&seen, memory, &read);
-            let graced = graced.union(&unseen).copied().collect();
-            (derive::grace(&seen, memory, &unseen), graced)
-        }
-        false => (memory.clone(), graced.clone()),
-    };
-    let derived = derive::derive(&seen, &kept, &graced);
-    let remembered = derived
-        .memory
-        .iter()
-        .filter(|(_, memory)| !memory.is_empty())
-        .map(|(writer, memory)| (*writer, memory.clone()))
-        .collect();
-    (derived, remembered, graced)
+    derive::derive(&seen)
 }
 
 /// What `derived` shows, in the world's terms.
@@ -444,7 +415,6 @@ fn agree_on_existence(folded: &Folded, shown: &Shown) {
 
 impl Design for Real {
     type Snapshot = Snapshot;
-    type Memory = Remembered;
 
     fn compact(&self, c: &Compaction<'_, Snapshot>) -> Snapshot {
         let lines = Lines::of(c.world);
@@ -498,18 +468,9 @@ impl Design for Real {
         Snapshot::decode(&snapshot.encode()).expect("a snapshot reads back")
     }
 
-    fn read(&self, r: &Reading<'_, Snapshot>, memory: &Remembered) -> (Shown, Remembered) {
+    fn read(&self, r: &Reading<'_, Snapshot>) -> Shown {
         let lines = Lines::of(r.world);
-        let (derived, writers, graced) = derived(r, &lines, &memory.writers, &memory.graced, false);
-        let remembered = Remembered { writers, graced };
-        (shown(r.world, &lines, &derived), remembered)
-    }
-
-    fn grace(&self, r: &Reading<'_, Snapshot>, memory: &Remembered) -> (Shown, Remembered) {
-        let lines = Lines::of(r.world);
-        let (derived, writers, graced) = derived(r, &lines, &memory.writers, &memory.graced, true);
-        let remembered = Remembered { writers, graced };
-        (shown(r.world, &lines, &derived), remembered)
+        shown(r.world, &lines, &derived(r, &lines))
     }
 
     fn holds(&self, r: &Reading<'_, Snapshot>) -> BTreeSet<Hash> {
@@ -547,15 +508,6 @@ impl Design for Real {
             .iter()
             .map(|(_, run)| lines.dismissal(run))
             .collect()
-    }
-
-    fn remembered(&self, world: &World, memory: &Remembered) -> BTreeSet<Hash> {
-        let lines = Lines::of(world);
-        let entries = memory
-            .writers
-            .values()
-            .flat_map(|memory| memory.entries.keys());
-        entries.map(|hash| lines.back[hash]).collect()
     }
 
     fn bounded(&self, s: &Snapshot, b: Bound) -> bool {

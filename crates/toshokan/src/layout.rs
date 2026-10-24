@@ -10,8 +10,6 @@
 //!   tmp/<nonce>.<extension>    staged files, under their destination's extension
 //! <local>/<genesis>/           one writer of this install, by its genesis entry
 //!   head.json                  the head this writer last wrote
-//!   view.bin                   the cached view
-//!   view.log                   what the cached view gained since
 //!   drafts/<entity>.json       unsaved edits
 //!   lock                       held while an instance writes as this writer
 //!   retired                    present once the writer is never written again
@@ -182,16 +180,6 @@ impl Layout {
         child(&Self::local(genesis), "head.json")
     }
 
-    pub fn cached_view(genesis: EntryHash) -> RelPath {
-        child(&Self::local(genesis), "view.bin")
-    }
-
-    /// What the cached view gained since `view.bin` was written, one record after
-    /// another.
-    pub fn view_journal(genesis: EntryHash) -> RelPath {
-        child(&Self::local(genesis), "view.log")
-    }
-
     pub fn drafts(genesis: EntryHash) -> RelPath {
         child(&Self::local(genesis), "drafts")
     }
@@ -295,8 +283,6 @@ mod tests {
         let entity = EntityId::from_u128(2);
         for path in [
             Layout::head(genesis),
-            Layout::cached_view(genesis),
-            Layout::view_journal(genesis),
             Layout::draft(genesis, entity),
             Layout::lock(genesis),
             Layout::retired(genesis),

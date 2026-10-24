@@ -1,5 +1,5 @@
-//! The binary encoding of what an install keeps for itself: entries in memory
-//! and the cached view in its local root. Never written to the folder.
+//! The binary encoding an install holds entries in, in memory. Never written
+//! anywhere.
 //!
 //! An unsigned integer is a LEB128 varint; an id is its 16 bytes, big-endian; text
 //! is its length then its UTF-8 bytes; a list is its length then its members; an
@@ -7,7 +7,7 @@
 //! order; an enum is a byte naming the variant, then its fields.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::HashMap;
 
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
 use crate::path::RelPath;
@@ -56,14 +56,6 @@ impl<'a> In<'a> {
         let len = self.len()?;
         std::str::from_utf8(self.take(len)?).map_err(|_| Bad("text that is not UTF-8"))
     }
-
-    /// Fails unless every byte was read.
-    pub fn end(self) -> Unpacked<()> {
-        match self.bytes.is_empty() {
-            true => Ok(()),
-            false => Err(Bad("bytes after the end")),
-        }
-    }
 }
 
 pub trait Pack {
@@ -87,8 +79,10 @@ pub fn packed<T: Pack + ?Sized>(value: &T) -> Vec<u8> {
 pub fn unpacked<T: Unpack>(bytes: &[u8]) -> Unpacked<T> {
     let mut input = In::new(bytes);
     let value = T::unpack(&mut input)?;
-    input.end()?;
-    Ok(value)
+    match input.bytes.is_empty() {
+        true => Ok(value),
+        false => Err(Bad("bytes after the end")),
+    }
 }
 
 /// A variant's byte that names no variant.
@@ -356,47 +350,6 @@ impl<A: Pack, B: Pack> Pack for (A, B) {
 impl<A: Unpack, B: Unpack> Unpack for (A, B) {
     fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
         Ok((A::unpack(input)?, B::unpack(input)?))
-    }
-}
-
-impl<K: Pack, V: Pack> Pack for BTreeMap<K, V> {
-    fn pack(&self, out: &mut Vec<u8>) {
-        self.len().pack(out);
-        for pair in self {
-            pair.0.pack(out);
-            pair.1.pack(out);
-        }
-    }
-}
-
-/// Refuses keys out of order, which no packing writes.
-impl<K: Unpack + Ord, V: Unpack> Unpack for BTreeMap<K, V> {
-    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
-        let pairs = Vec::<(K, V)>::unpack(input)?;
-        if !pairs.windows(2).all(|pair| pair[0].0 < pair[1].0) {
-            return Err(Bad("keys out of order"));
-        }
-        Ok(pairs.into_iter().collect())
-    }
-}
-
-impl<T: Pack> Pack for BTreeSet<T> {
-    fn pack(&self, out: &mut Vec<u8>) {
-        self.len().pack(out);
-        for member in self {
-            member.pack(out);
-        }
-    }
-}
-
-/// Refuses members out of order, which no packing writes.
-impl<T: Unpack + Ord> Unpack for BTreeSet<T> {
-    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
-        let members = Vec::<T>::unpack(input)?;
-        if !members.windows(2).all(|pair| pair[0] < pair[1]) {
-            return Err(Bad("members out of order"));
-        }
-        Ok(members.into_iter().collect())
     }
 }
 

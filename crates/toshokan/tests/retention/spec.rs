@@ -110,8 +110,7 @@ pub struct Spec {
     /// Below where several tips part, the union of their own writes is merged;
     /// without it, only what every tip holds.
     pub union: bool,
-    /// A writer's latest own write kills its own earlier writes, and a newer tip
-    /// replaces the entries a reader placed before it.
+    /// A writer's latest own write kills its own earlier writes.
     pub supersede: bool,
     /// What a dismissal names is never merged.
     pub quarantine: bool,
@@ -128,21 +127,8 @@ impl Default for Spec {
     }
 }
 
-/// What a design-R reader remembers.
-#[derive(Clone, Debug, Default)]
-pub struct Memory {
-    pub tips: Vec<Contribution>,
-    /// The entries it placed after its tips, or shows.
-    pub entries: BTreeSet<Hash>,
-    pub forks: BTreeSet<Ref>,
-    /// The writers it took the grace step for: a reference to them the files
-    /// contradict kills only its exact target.
-    pub graced: BTreeSet<Dir>,
-}
-
 impl Design for Spec {
     type Snapshot = Contribution;
-    type Memory = Memory;
 
     fn compact(&self, c: &Compaction<'_, Contribution>) -> Contribution {
         let world = c.world;
@@ -233,99 +219,8 @@ impl Design for Spec {
         out
     }
 
-    fn read(&self, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown, Memory) {
-        derive(self, r, memory)
-    }
-
-    fn grace(&self, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown, Memory) {
-        let world = r.world;
-        let mut held: Vec<Ref> = Vec::new();
-        for seen in r.seen {
-            match &r.files[seen.file].body {
-                Body::Segment(lines) => {
-                    held.extend(lines.iter().take(seen.lines).map(|&h| world.entry(h).at()))
-                }
-                Body::Snapshot(s) => held.push(s.head),
-            }
-        }
-        // The guard: something visible descends from what the reader remembers,
-        // a line by its chain of predecessors or a snapshot by its certificates.
-        let snapshots: Vec<&Contribution> = r
-            .seen
-            .iter()
-            .filter_map(|s| match &r.files[s.file].body {
-                Body::Snapshot(c) => Some(c),
-                Body::Segment(_) => None,
-            })
-            .collect();
-        let known: BTreeSet<Hash> = memory
-            .entries
-            .iter()
-            .copied()
-            .chain(memory.tips.iter().map(|t| t.head.hash))
-            .collect();
-        let mut passed: BTreeSet<Hash> = BTreeSet::new();
-        for line in held
-            .iter()
-            .filter(|h| !snapshots.iter().any(|s| s.head == **h))
-        {
-            let mut at = world.entry(line.hash).prev;
-            while let Some(p) = at.filter(|p| known.contains(p) && passed.insert(*p)) {
-                at = world.entry(p).prev;
-            }
-        }
-        let newer = |at: Ref| {
-            passed.contains(&at.hash) || snapshots.iter().any(|s| s.head != at && s.certifies(at))
-        };
-        let visible_snapshot = |t: &Contribution| snapshots.iter().any(|c| c.head == t.head);
-        // The step is for the writers of which the reader holds what no file
-        // holds, a fork point included; it leaves the rest alone.
-        let unforked = Memory {
-            forks: BTreeSet::new(),
-            ..memory.clone()
-        };
-        let (_, found) = derive(self, r, &unforked);
-        let stale = memory.forks.difference(&found.forks).map(|fork| fork.dir);
-        let unseen: BTreeSet<Dir> = memory
-            .tips
-            .iter()
-            .filter(|t| !visible_snapshot(t))
-            .map(|t| t.head.dir)
-            .chain(
-                memory
-                    .entries
-                    .iter()
-                    .map(|&e| world.entry(e).at())
-                    .filter(|at| !held.contains(at))
-                    .map(|at| at.dir),
-            )
-            .chain(stale)
-            .collect();
-        let kept = Memory {
-            tips: memory
-                .tips
-                .iter()
-                .filter(|t| !unseen.contains(&t.head.dir) || visible_snapshot(t) || newer(t.head))
-                .cloned()
-                .collect(),
-            entries: memory
-                .entries
-                .iter()
-                .copied()
-                .filter(|&e| {
-                    let at = world.entry(e).at();
-                    !unseen.contains(&at.dir) || held.contains(&at) || newer(at)
-                })
-                .collect(),
-            forks: memory
-                .forks
-                .iter()
-                .filter(|fork| !unseen.contains(&fork.dir))
-                .copied()
-                .collect(),
-            graced: memory.graced.union(&unseen).copied().collect(),
-        };
-        derive(self, r, &kept)
+    fn read(&self, r: &Reading<'_, Contribution>) -> Shown {
+        derive(self, r)
     }
 
     fn holds(&self, r: &Reading<'_, Contribution>) -> BTreeSet<Hash> {
@@ -359,10 +254,6 @@ impl Design for Spec {
         s.dismissals.iter().map(|(_, d)| *d).collect()
     }
 
-    fn remembered(&self, _: &World, memory: &Memory) -> BTreeSet<Hash> {
-        memory.entries.clone()
-    }
-
     fn bounded(&self, c: &Contribution, b: Bound) -> bool {
         c.own.len() <= b.fields
             && c.refs.len() <= 2 * b.fields * (b.writers - 1)
@@ -377,9 +268,8 @@ struct Dirs<'a> {
     world: &'a World,
     tips: BTreeMap<Dir, Vec<Contribution>>,
     folded: BTreeSet<Hash>,
-    waiting: BTreeSet<Hash>,
-    /// After the grace step, the lines past the first of an unsealed file
-    /// shorter than a certificate: a dropped version or a diverged copy.
+    /// The lines past the first of an unsealed file shorter than a
+    /// certificate: a dropped version or a diverged copy.
     ambiguous: BTreeSet<Hash>,
     certified: BTreeMap<Dir, BTreeSet<Ref>>,
 }
@@ -399,10 +289,10 @@ impl Dirs<'_> {
     }
 }
 
-fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown, Memory) {
+fn derive(spec: &Spec, r: &Reading<'_, Contribution>) -> Shown {
     let world = r.world;
     // Tips: snapshots no other of their directory certifies; one per head.
-    let mut snapshots: Vec<Contribution> = memory.tips.clone();
+    let mut snapshots: Vec<Contribution> = Vec::new();
     // Each segment's lines, and whether the reader sees its seal marker.
     let mut segments: Vec<(Vec<Hash>, bool)> = Vec::new();
     for seen in r.seen {
@@ -429,7 +319,6 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
         world,
         tips,
         folded: BTreeSet::new(),
-        waiting: BTreeSet::new(),
         ambiguous: BTreeSet::new(),
         certified: BTreeMap::new(),
     };
@@ -463,21 +352,16 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
             .max();
         match matched {
             Some(pos) => dirs.folded.extend(&lines[..=pos]),
-            // A sealed file cannot still be arriving: shorter than a
-            // certificate, it diverged from it. An unsealed one may be in
-            // flight, and waits; after the grace step it is a dropped version
-            // or a diverged copy, so its lines are held back as items.
+            // A sealed file shorter than a certificate diverged from it. An
+            // unsealed one may be a dropped version or a diverged copy, so its
+            // lines past the first are held back as items.
             None if !sealed
                 && certs
                     .iter()
                     .any(|c| lines.len() <= (c.last.n - c.first.n) as usize) =>
             {
-                if memory.graced.contains(&dir) {
-                    dirs.folded.insert(first);
-                    dirs.ambiguous.extend(&lines[1..]);
-                } else {
-                    dirs.waiting.extend(lines);
-                }
+                dirs.folded.insert(first);
+                dirs.ambiguous.extend(&lines[1..]);
             }
             None if !certs.is_empty() => {
                 dirs.folded.insert(first);
@@ -495,22 +379,12 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
         .flat_map(|(lines, _)| lines)
         .copied()
         .collect();
-    // Candidates: lines neither folded nor waiting, and remembered entries no
-    // tip has since passed.
-    let mut candidates: BTreeSet<Hash> = seen_lines
+    // Candidates: lines neither folded nor held back.
+    let candidates: BTreeSet<Hash> = seen_lines
         .iter()
         .copied()
-        .filter(|h| {
-            !dirs.folded.contains(h) && !dirs.waiting.contains(h) && !dirs.ambiguous.contains(h)
-        })
+        .filter(|h| !dirs.folded.contains(h) && !dirs.ambiguous.contains(h))
         .collect();
-    for &e in &memory.entries {
-        let at = world.entry(e).at();
-        if seen_lines.contains(&e) || dirs.certified(at) {
-            continue;
-        }
-        candidates.insert(e);
-    }
     // Placement from the tips' heads.
     let mut placed = BTreeSet::new();
     loop {
@@ -529,57 +403,8 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
             break;
         }
     }
-    // Remembered entries a tip has since passed are folded into it, but for
-    // those after a fork point the reader remembers that no tip names and no
-    // tip's head descends from through entries it knows.
-    let fork_points: BTreeSet<Hash> = memory.forks.iter().map(|fork| fork.hash).collect();
-    let mut named: BTreeSet<Hash> = dirs
-        .tips
-        .values()
-        .flatten()
-        .flat_map(mentioned)
-        .map(|r| r.hash)
-        .collect();
-    for t in dirs.tips.values().flatten() {
-        let known = |e: &Hash| memory.entries.contains(e) || seen_lines.contains(e);
-        let mut at = Some(t.head.hash).filter(known);
-        while let Some(e) = at {
-            named.insert(e);
-            at = world.entry(e).prev.filter(known);
-        }
-    }
-    let after_fork = |e: Hash| {
-        if named.contains(&e) {
-            return false;
-        }
-        let mut at = Some(e);
-        while let Some(e) = at {
-            let Some(prev) = world.entry(e).prev else {
-                return false;
-            };
-            if fork_points.contains(&prev) {
-                return true;
-            }
-            let known = seen_lines.contains(&prev) || memory.entries.contains(&prev);
-            at = known.then_some(prev);
-        }
-        false
-    };
-    let remembered_folded: BTreeSet<Hash> = candidates
-        .iter()
-        .copied()
-        .filter(|&e| {
-            let entry = world.entry(e);
-            spec.supersede
-                && !seen_lines.contains(&e)
-                && !placed.contains(&e)
-                && dirs.tip_n(entry.dir).is_some_and(|n| entry.n <= n)
-                && !after_fork(e)
-        })
-        .collect();
-    candidates.retain(|e| !remembered_folded.contains(e));
     // Fork points.
-    let mut forks: BTreeSet<Ref> = memory.forks.clone();
+    let mut forks: BTreeSet<Ref> = BTreeSet::new();
     let mut by_prev: BTreeMap<Hash, BTreeSet<Hash>> = BTreeMap::new();
     for &e in &candidates {
         if let Some(p) = world.entry(e).prev {
@@ -751,9 +576,9 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
         })
     };
     let mut writes: BTreeMap<Hash, Live> = BTreeMap::new();
-    // After the grace step, a reference kills only its exact hash when it or
-    // another reference of its entry to the same writer names a number the
-    // files no longer show, or one at which they show only another entry.
+    // A reference kills only its exact hash when it or another reference of its
+    // entry to the same writer names a number the files do not show, or one at
+    // which they show only another entry.
     let shown_refs: BTreeSet<Ref> = r
         .seen
         .iter()
@@ -776,7 +601,7 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
             .iter()
             .any(|s| s.dir == r.dir && s.n == r.n && s.hash != r.hash);
         let above = highest.is_some_and(|l| r.n > l);
-        memory.graced.contains(&r.dir) && (above || (other && !shown_refs.contains(r)))
+        above || (other && !shown_refs.contains(r))
     };
     let mut refs: Vec<(Field, Ref, bool)> = Vec::new();
     // Takes: the field, the taken run's writer, and the run's first number.
@@ -1025,18 +850,11 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>, memory: &Memory) -> (Shown
             forgotten: group.forced.into_keys().collect(),
         });
     }
-    let shown = Shown {
+    Shown {
         items,
         forks: lowest.clone(),
         ..base
-    };
-    let memory = Memory {
-        tips: dirs.tips.values().flatten().cloned().collect(),
-        entries: placed.union(&runs).chain(&gaps).copied().collect(),
-        forks,
-        graced: memory.graced.clone(),
-    };
-    (shown, memory)
+    }
 }
 
 /// Every entry `t` names: in its certificates, as its head, as an own write, as

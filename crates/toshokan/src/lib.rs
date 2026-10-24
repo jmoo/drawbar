@@ -54,12 +54,13 @@
 //! changes from several items (`Intent::take`); an item stays, with no changes once
 //! nothing is left to review, until an intent dismisses it (`Intent::dismiss`). The
 //! instance writes as a new writer once it sees the fork, which opening, a refresh
-//! (`retired`) or a refused compaction reports. Facts a restore of the folder took
-//! stay shown for a day and a full rescan, then go. Undo reaches the intents of the
-//! session but those that only dismiss, and `Committed::undoable` says which a
-//! commit is. A view never changes, so an app can hand it to other threads. A field
-//! read from a view is a value, a conflict between writers, or unreadable, so an
-//! app cannot show half a conflict by accident.
+//! (`retired`) or a refused compaction reports. A reader keeps nothing between
+//! opens: what it shows is what the files in the folder say, so facts a restore of
+//! the folder took go at the next read. Undo reaches the intents of the session but
+//! those that only dismiss, and `Committed::undoable` says which a commit is. A
+//! view never changes, so an app can hand it to other threads. A field read from a
+//! view is a value, a conflict between writers, or unreadable, so an app cannot
+//! show half a conflict by accident.
 //!
 //! A save takes bytes or a source the driver streams into staging a chunk at a
 //! time, such as a `Splice` of the file being rewritten, so a file of hundreds of
@@ -87,8 +88,8 @@
 //! ```
 //!
 //! Opening, rescanning and committing to a large library do most of their long
-//! work a slice at a time: reading the logs and the cached view, indexing, and
-//! gathering and binding the library's files. The page's driver gives the thread
+//! work a slice at a time: reading the logs, indexing, and gathering and binding
+//! the library's files. The page's driver gives the thread
 //! back to the browser every few milliseconds between slices. Deriving the merged
 //! state from what a read found runs in one piece, at an open and at the first
 //! commit of a session, and takes longer the larger the library and the more of
@@ -119,7 +120,6 @@ pub mod asynch;
 pub mod binding;
 pub mod blocking;
 #[doc(hidden)]
-pub mod cache;
 #[doc(hidden)]
 pub mod compaction;
 #[doc(hidden)]

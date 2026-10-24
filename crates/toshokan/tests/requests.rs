@@ -11,7 +11,7 @@ use toshokan::binding::{self, Fact, Facts, Scan};
 use toshokan::blocking::{self, Library};
 use toshokan::log::FileFact;
 use toshokan::plan::{Content, Expect, FileChange};
-use toshokan::reader::{CachedView, Reader};
+use toshokan::reader::Reader;
 use toshokan::report::TrashItem;
 use toshokan::trash::{self, Policy};
 use toshokan::{EntityId, EntryHash, Hlc, Io, MemDisk, Nonce, Register, RelPath, Root, Schema};
@@ -99,7 +99,7 @@ fn a_writer_directory_is_read_and_reread_unchanged_in_two_requests() {
         .map(|at| (at.as_str(), &b"x\n"[..]))
         .collect();
     put(&mut d, &files);
-    let mut reader = Reader::new(layout(), CachedView::default());
+    let mut reader = Reader::new(layout());
     d.take();
     blocking::run(&mut d, reader.read()).unwrap();
     let writers = layout().writers();

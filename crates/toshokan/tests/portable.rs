@@ -10,7 +10,7 @@ use common::{fresh, layout, Instance};
 use toshokan::blocking::run;
 use toshokan::derive::Derived;
 use toshokan::env::SeededRandom;
-use toshokan::reader::{CachedView, ReadReport, Reader, WriterFile};
+use toshokan::reader::{ReadReport, Reader, WriterFile};
 use toshokan::simulator::{apply, events, Files, Simulator, SyncEvent, Versions};
 use toshokan::{EntryHash, Io, MemDisk, Random, RelPath, Root, WriterId};
 
@@ -36,18 +36,6 @@ impl Written {
             }
         }
         written
-    }
-
-    /// The number of `writer`'s entry `hash` in its chain.
-    fn number(&self, writer: WriterId, hash: EntryHash) -> u64 {
-        let pairs = &self.0[&writer];
-        let mut n = 0;
-        let mut at = pairs[&hash];
-        while at != EntryHash::ZERO {
-            n += 1;
-            at = pairs[&at];
-        }
-        n
     }
 
     /// The predecessors with two or more successors, per writer.
@@ -100,8 +88,8 @@ fn forks(derived: &Derived) -> BTreeSet<(WriterId, EntryHash)> {
 }
 
 /// ChainOrder: every merged entry follows its held predecessor back to a tip or
-/// a genesis. NothingIgnored: every line the folder shows is held, or waits for
-/// the rest of its file.
+/// a genesis. NothingIgnored: every line the folder shows is held, or held back
+/// as a line of a file shorter than a certificate.
 fn check_state(folder: &Files, written: &Written, derived: &Derived, case: &str) {
     for (writer, placed) in &derived.writers {
         let held = held(derived, written, *writer);
@@ -118,21 +106,30 @@ fn check_state(folder: &Files, written: &Written, derived: &Derived, case: &str)
     for (writer, pairs) in &shown.0 {
         let held = held(derived, written, *writer);
         let unheld = pairs.keys().filter(|hash| !held.contains(hash)).count();
-        let waiting = derived
+        let unplaced = derived
             .writers
             .get(writer)
-            .map_or(0, |placed| placed.waiting);
+            .map_or(0, |placed| placed.unplaced.len());
         assert!(
-            unheld <= waiting,
-            "{case}: {unheld} entries of {writer} neither held nor waiting"
+            unheld <= unplaced,
+            "{case}: {unheld} entries of {writer} neither held nor held back"
         );
     }
 }
 
-/// Monotone, but for an entry no file in `folder` holds whose number a tip of
-/// its writer has passed, which the reader takes as folded into that tip; and
-/// ForksKept, and each fork reported when it first appears.
+/// Whether every file `before` holds is in `after`, whole or grown: files only
+/// arrived.
+fn arrived(before: &Files, after: &Files) -> bool {
+    before
+        .iter()
+        .all(|(path, bytes)| after.get(path).is_some_and(|now| now.starts_with(bytes)))
+}
+
+/// Monotone and ForksKept where files only arrived between `was` and `folder`:
+/// the reader holds every entry it held, and every fork point it found. Each fork
+/// is reported when it first appears.
 fn check_step(
+    was: &Files,
     folder: &Files,
     written: &Written,
     before: &Derived,
@@ -140,26 +137,17 @@ fn check_step(
     report: &ReadReport,
     case: &str,
 ) {
-    let shown = Written::of(folder.iter().map(|(path, bytes)| (path, bytes.as_slice())));
-    for writer in before.writers.keys() {
-        let tip = after
-            .writers
-            .get(writer)
-            .and_then(|placed| placed.tips.iter().map(|tip| tip.head.n).max());
-        let lines = shown.0.get(writer);
-        let passed = |hash: &EntryHash| {
-            let unseen = lines.is_none_or(|lines| !lines.contains_key(hash));
-            unseen && tip.is_some_and(|tip| written.number(*writer, *hash) <= tip)
-        };
-        let lost: Vec<_> = held(before, written, *writer)
-            .difference(&held(after, written, *writer))
-            .filter(|hash| !passed(hash))
-            .copied()
-            .collect();
-        assert!(lost.is_empty(), "{case}: {writer} lost {lost:?}");
-    }
     let (old, new) = (forks(before), forks(after));
-    assert!(old.is_subset(&new), "{case}: a fork was retracted");
+    if arrived(was, folder) {
+        for writer in before.writers.keys() {
+            let lost: Vec<_> = held(before, written, *writer)
+                .difference(&held(after, written, *writer))
+                .copied()
+                .collect();
+            assert!(lost.is_empty(), "{case}: {writer} lost {lost:?}");
+        }
+        assert!(old.is_subset(&new), "{case}: a fork was retracted");
+    }
     for fork in &report.forks {
         assert!(
             !old.contains(&(fork.writer, fork.prev)),
@@ -179,10 +167,8 @@ fn check_step(
 }
 
 /// DeliveredConverges: once a reader's folder equals the origin's, it holds every
-/// entry written, holds none back, reports every fork, and a reader without a
-/// cached view holds the same.
-fn check_delivered(origin: &Files, written: &Written, derived: &Derived, case: &str) {
-    let fresh = read(origin, &CachedView::default());
+/// entry written, holds none back, and reports every fork.
+fn check_delivered(written: &Written, derived: &Derived, case: &str) {
     for (writer, pairs) in &written.0 {
         let expected: BTreeSet<EntryHash> = pairs.keys().copied().collect();
         assert_eq!(
@@ -190,14 +176,9 @@ fn check_delivered(origin: &Files, written: &Written, derived: &Derived, case: &
             expected,
             "{case}: {writer} not converged"
         );
-        assert_eq!(
-            held(fresh.derived(), written, *writer),
-            expected,
-            "{case}: a fresh reader differs"
-        );
         let placed = &derived.writers[writer];
         assert!(placed.gaps.is_empty(), "{case}");
-        assert_eq!(placed.waiting, 0, "{case}");
+        assert!(placed.unplaced.is_empty(), "{case}");
     }
     assert!(
         written.forks().is_subset(&forks(derived)),
@@ -224,34 +205,34 @@ fn disk_of(files: &Files) -> MemDisk {
     disk
 }
 
-/// A reader with `cached` that read a folder holding `files`.
-fn read(files: &Files, cached: &CachedView) -> Reader {
-    let mut reader = Reader::new(layout(), cached.clone());
-    run(&mut disk_of(files), reader.read()).unwrap();
-    reader
-}
-
 /// A reader that read the folder before reads it again: it reads only the files
-/// that changed, and places what a reader with its cached view placing every file
-/// does.
+/// that changed, and derives what a new reader of every file derives.
 fn read_again(reader: &mut Reader, files: &Files, case: &str) -> ReadReport {
-    let mut cold = Reader::new(layout(), reader.cached().clone());
+    let mut cold = Reader::new(layout());
     let report = run(&mut disk_of(files), reader.read()).unwrap();
     let cold_report = run(&mut disk_of(files), cold.read()).unwrap();
-    assert_eq!(
-        reader.cached(),
-        cold.cached(),
-        "{case}: the cached views differ"
-    );
+    let (warm, cold) = (reader.derived(), cold.derived());
     assert!(
-        reader.derived().folded == cold.derived().folded,
+        warm.folded == cold.folded,
         "{case}: the merged states differ"
     );
-    let placed = |report: &ReadReport| -> BTreeSet<EntryHash> {
-        report.placed.values().flatten().copied().collect()
+    let entries = |derived: &Derived| -> Vec<[Vec<EntryHash>; 4]> {
+        let hashes = |entries: &[std::rc::Rc<toshokan::log::Entry>]| {
+            entries.iter().map(|entry| entry.hash()).collect::<Vec<_>>()
+        };
+        let placed = derived.writers.values();
+        let placed = placed.map(|p| {
+            [
+                hashes(&p.merged),
+                hashes(&p.runs),
+                hashes(&p.gaps),
+                hashes(&p.unplaced),
+            ]
+        });
+        placed.collect()
     };
-    assert_eq!(placed(&report), placed(&cold_report), "{case}");
-    assert_eq!(report.forks, cold_report.forks, "{case}");
+    assert_eq!(entries(warm), entries(cold), "{case}: placement differs");
+    assert_eq!(forks(warm), forks(cold), "{case}: fork points differ");
     assert_eq!(report.gaps, cold_report.gaps, "{case}");
     assert_eq!(report.unreadable, cold_report.unreadable, "{case}");
     report
@@ -263,13 +244,13 @@ fn explore(origin: &Files, versions: &Versions, chaos: u32) {
     let written = Written::of(versions.iter());
     let mut delivered = 0;
     let mut seen = BTreeSet::new();
-    let start = Reader::new(layout(), CachedView::default());
+    let start = Reader::new(layout());
     let mut stack = vec![(Files::new(), start, 0)];
     while let Some((folder, reader, spent)) = stack.pop() {
         let case = format!("{} files, chaos {spent}", folder.len());
         let derived = reader.derived().clone();
         if &folder == origin {
-            check_delivered(origin, &written, &derived, &case);
+            check_delivered(&written, &derived, &case);
             delivered += 1;
         }
         for event in events(origin, versions, &folder) {
@@ -283,9 +264,9 @@ fn explore(origin: &Files, versions: &Versions, chaos: u32) {
             let mut reader = reader.clone();
             let report = read_again(&mut reader, &next, &case);
             let after = reader.derived();
-            check_step(&next, &written, &derived, after, &report, &case);
+            check_step(&folder, &next, &written, &derived, after, &report, &case);
             check_state(&next, &written, after, &case);
-            if seen.insert((next.clone(), reader.cached().encode(), spent)) {
+            if seen.insert((next.clone(), spent)) {
                 stack.push((next, reader, spent));
             }
         }
@@ -385,9 +366,7 @@ fn run_seeded(seed: u64) {
     let mut chance = SeededRandom::new(seed);
     let mut sim = Simulator::new(2);
     let mut instances = vec![Instance::open(sim.machine(), seed * 100)];
-    let mut readers: Vec<Reader> = (0..2)
-        .map(|_| Reader::new(layout(), CachedView::default()))
-        .collect();
+    let mut readers: Vec<Reader> = (0..2).map(|_| Reader::new(layout())).collect();
     let mut opened = 1;
     let mut chaos = 0;
     for step in 0..80 {
@@ -440,31 +419,54 @@ fn run_seeded(seed: u64) {
                 }
                 chaos += u32::from(costs);
                 sim.apply(r, event);
-                step_reader(&mut sim, &mut readers[r], r, event, &case);
+                step_reader(&mut sim, &mut readers[r], r, &folder, event, &case);
             }
         }
         check_retained(&mut sim);
     }
     let written = Written::of(sim.versions().iter());
     for (r, reader) in readers.iter_mut().enumerate() {
+        let was = sim.reader(r).files(Root::Folder);
         sim.settle(r);
         let mut disk = sim.reader(r).clone();
         let folder = disk.files(Root::Folder);
         let before = reader.derived().clone();
         let report = run(&mut disk, reader.read()).unwrap();
         let case = format!("seed {seed}, settled reader {r}");
-        check_step(&folder, &written, &before, reader.derived(), &report, &case);
-        let origin = sim.observe();
-        check_delivered(&origin, &written, reader.derived(), &case);
+        check_step(
+            &was,
+            &folder,
+            &written,
+            &before,
+            reader.derived(),
+            &report,
+            &case,
+        );
+        check_delivered(&written, reader.derived(), &case);
     }
 }
 
-fn step_reader(sim: &mut Simulator, reader: &mut Reader, r: usize, event: &SyncEvent, case: &str) {
+fn step_reader(
+    sim: &mut Simulator,
+    reader: &mut Reader,
+    r: usize,
+    was: &Files,
+    event: &SyncEvent,
+    case: &str,
+) {
     let folder = sim.reader(r).files(Root::Folder);
     let written = Written::of(sim.versions().iter());
     let before = reader.derived().clone();
     let case = format!("{case}, reader {r} after {event:?}");
     let report = read_again(reader, &folder, &case);
-    check_step(&folder, &written, &before, reader.derived(), &report, &case);
+    check_step(
+        was,
+        &folder,
+        &written,
+        &before,
+        reader.derived(),
+        &report,
+        &case,
+    );
     check_state(&folder, &written, reader.derived(), &case);
 }

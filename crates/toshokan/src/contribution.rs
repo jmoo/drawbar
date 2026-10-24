@@ -22,7 +22,6 @@ use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
 use crate::log::{
     Displaced, Entry, EntryKind, FileFact, Forked, Logged, Observed, Op, Own, Ref, Run, Target,
 };
-use crate::pack::{bad_variant, In, Pack, Unpack, Unpacked};
 use crate::path::RelPath;
 use crate::schema::Raw;
 
@@ -908,154 +907,6 @@ impl<'de> Deserialize<'de> for Contribution {
 
 // The packing of a contribution, as an install keeps it for itself.
 
-impl Pack for FieldKey {
-    fn pack(&self, out: &mut Vec<u8>) {
-        match self {
-            Self::Exist(entity) => {
-                out.push(0);
-                entity.pack(out);
-            }
-            Self::Register(entity, key) => {
-                out.push(1);
-                (entity, &**key).pack(out);
-            }
-            Self::Member(entity, key, value) => {
-                out.push(2);
-                (entity, (&**key, value)).pack(out);
-            }
-            Self::File(entity) => {
-                out.push(3);
-                entity.pack(out);
-            }
-        }
-    }
-}
-
-impl Unpack for FieldKey {
-    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
-        Ok(match input.byte()? {
-            0 => Self::Exist(Unpack::unpack(input)?),
-            1 => {
-                let (entity, key): (EntityId, String) = Unpack::unpack(input)?;
-                Self::Register(entity, name(&key))
-            }
-            2 => {
-                let (entity, (key, value)): (EntityId, (String, Raw)) = Unpack::unpack(input)?;
-                Self::Member(entity, name(&key), value)
-            }
-            3 => Self::File(Unpack::unpack(input)?),
-            _ => return bad_variant(),
-        })
-    }
-}
-
-impl Pack for Value {
-    fn pack(&self, out: &mut Vec<u8>) {
-        match self {
-            Self::Exist(created) => {
-                out.push(0);
-                created.pack(out);
-            }
-            Self::Register(value) => {
-                out.push(1);
-                value.pack(out);
-            }
-            Self::Member(added) => {
-                out.push(2);
-                added.pack(out);
-            }
-            Self::File { fact, pin } => {
-                out.push(3);
-                (fact, pin).pack(out);
-            }
-        }
-    }
-}
-
-impl Unpack for Value {
-    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
-        Ok(match input.byte()? {
-            0 => Self::Exist(Unpack::unpack(input)?),
-            1 => Self::Register(Unpack::unpack(input)?),
-            2 => Self::Member(Unpack::unpack(input)?),
-            3 => {
-                let (fact, pin) = Unpack::unpack(input)?;
-                Self::File { fact, pin }
-            }
-            _ => return bad_variant(),
-        })
-    }
-}
-
-crate::pack::pack_struct!(Held {
-    at,
-    stamp,
-    value,
-    first
-});
-crate::pack::pack_struct!(Reference { own, target });
-crate::pack::pack_struct!(Taken { own, below });
-crate::pack::pack_struct!(Trashed {
-    entry,
-    at,
-    from,
-    identity,
-    len
-});
-
-impl Pack for Contribution {
-    fn pack(&self, out: &mut Vec<u8>) {
-        self.own.pack(out);
-        let refs = self.refs.iter();
-        let refs: Vec<_> = refs
-            .map(|((f, w, above), r)| ((f, (w, above)), r))
-            .collect();
-        refs.pack(out);
-        self.killed.pack(out);
-        let takes: Vec<_> = self.takes.iter().map(|((f, w), t)| ((f, w), t)).collect();
-        takes.pack(out);
-        self.dismissals.iter().collect::<Vec<_>>().pack(out);
-        self.trash.pack(out);
-        self.settled.iter().collect::<Vec<_>>().pack(out);
-        self.unknown.iter().collect::<Vec<_>>().pack(out);
-        self.extended.iter().collect::<Vec<_>>().pack(out);
-        self.later.pack(out);
-    }
-}
-
-/// Packed as a sequence of pairs.
-type Pairs<K, V> = Vec<(K, V)>;
-
-impl Unpack for Contribution {
-    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
-        let own = Unpack::unpack(input)?;
-        let refs: Pairs<(FieldKey, (WriterId, bool)), Reference> = Unpack::unpack(input)?;
-        let killed = Unpack::unpack(input)?;
-        let takes: Pairs<(FieldKey, WriterId), Taken> = Unpack::unpack(input)?;
-        let dismissals: Vec<(Own, Run)> = Unpack::unpack(input)?;
-        let trash = Unpack::unpack(input)?;
-        let settled: Vec<(WriterId, Nonce)> = Unpack::unpack(input)?;
-        let unknown: Vec<(EntryHash, Raw)> = Unpack::unpack(input)?;
-        let extended: Vec<(EntryHash, Raw)> = Unpack::unpack(input)?;
-        let later = Unpack::unpack(input)?;
-        Ok(Self {
-            own,
-            refs: refs
-                .into_iter()
-                .map(|((field, (writer, above)), reference)| ((field, writer, above), reference))
-                .collect(),
-            killed,
-            takes: takes.into_iter().collect(),
-            dismissals: dismissals.into_iter().collect(),
-            trash,
-            settled: settled.into_iter().collect(),
-            unknown: unknown.into_iter().collect(),
-            extended: extended.into_iter().collect(),
-            later,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1299,11 +1150,6 @@ mod tests {
         let json = serde_json::to_string(&contribution).unwrap();
         let read: Contribution = serde_json::from_str(&json).unwrap();
         assert_eq!(read, contribution, "{json}");
-        let mut packed = Vec::new();
-        contribution.pack(&mut packed);
-        let mut input = In::new(&packed);
-        assert_eq!(Contribution::unpack(&mut input), Ok(contribution));
-        assert!(input.end().is_ok());
     }
 
     #[test]

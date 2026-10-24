@@ -19,7 +19,6 @@ use toshokan::layout::SEGMENT_EXTENSION;
 use toshokan::line::MAX_LINE;
 use toshokan::log::{Entry, EntryKind, FileFact, Genesis, Logged, Op, Run, Settlement};
 use toshokan::plan::FactChange;
-use toshokan::reader::{CachedView, GRACE_MS};
 use toshokan::report::{
     By, Change, Committed, Compacted, DraftState, Emptied, HistoryItem, Item, ItemKind, Opened,
     PathChange, Presence, Refreshed, Rekey, Start, Tidied, TrashItem, What, WriterInfo,
@@ -609,10 +608,7 @@ through_both!(
     a_run_that_would_change_nothing_is_shown_until_dismissed,
     a_restored_folder_makes_the_writer_rekey,
     two_saves_undo_and_redo_one_after_the_other,
-    what_a_restored_writer_showed_survives_reopening_and_a_crash,
-    an_instance_without_a_writer_keeps_only_the_grace_step_in_the_views_it_read,
-    a_grace_step_an_instance_without_a_writer_could_not_keep_is_kept_by_its_next_save,
-    a_compacted_writer_is_shown_and_reported_and_survives_its_files,
+    a_compacted_writer_is_shown_and_reported_and_goes_with_its_files,
     an_interrupted_adoption_is_settled_as_an_adoption,
     the_first_write_after_a_crash_follows_the_settled_intent,
     the_first_undo_after_a_crash_undoes_the_settled_intent,
@@ -624,7 +620,6 @@ through_both!(
     a_rename_is_committed_when_its_rescan_fails_and_binds_nothing_stale,
     a_settlement_is_committed_when_its_rescan_fails,
     a_failed_rescan_after_a_rename_binds_no_copy_in_its_place,
-    a_commit_whose_view_cannot_be_saved_is_kept_and_undone_once,
     a_commit_whose_head_cannot_be_recorded_is_kept_and_continued,
     a_commit_leaves_its_record_until_tidied,
     closing_removes_the_records_commits_left,
@@ -677,11 +672,8 @@ through_both!(
     a_record_no_log_explains_is_reported_on_a_warm_open,
     others_on_this_machine_are_told_apart_from_others_elsewhere,
     a_refused_intent_changes_nothing,
-    what_an_instance_has_shown_survives_its_crash,
-    what_any_writer_of_an_install_showed_survives_a_restore,
-    what_a_commit_returned_current_survives_a_crash_and_a_restore,
-    facts_a_restore_removed_are_shown_until_the_grace_step,
-    a_partial_scan_after_the_grace_step_reads_files_of_the_lengths_the_restore_left,
+    facts_a_restore_removed_go_at_once,
+    a_partial_scan_after_a_restore_reads_files_of_the_lengths_the_restore_left,
     what_is_shown_is_what_its_logs_fold_to,
     what_is_bound_is_what_binding_afresh_binds,
     one_intent_creates_entities_that_name_each_other,
@@ -692,7 +684,6 @@ through_both!(
     a_folder_whose_renames_may_replace_is_written_and_says_so,
     a_view_is_read_on_other_threads,
     a_commit_writes_to_the_local_root_only_what_it_adds,
-    reopening_reads_only_the_ends_of_files_read_before,
     a_writers_directory_stays_bounded_across_sessions,
     a_crash_in_compaction_tears_a_snapshot_only_where_the_folder_cannot_rename,
     compaction_deletes_only_a_snapshot_cut_short_where_the_folder_cannot_rename,
@@ -2116,11 +2107,7 @@ fn a_restored_folder_makes_the_writer_rekey<F: Facade>() {
             why: Rekey::Restored
         }
     );
-    assert_eq!(
-        tags(&a.view(), song),
-        ["lost", "new"],
-        "this install's cached view keeps what it saw"
-    );
+    assert_eq!(tags(&a.view(), song), ["new"], "the folder wins at once");
     a.commit("Tag", |i| i.add(song, TAGS, tag("kept"))).unwrap();
     let writers: Vec<WriterInfo> = a.others().unwrap();
     let this: Vec<_> = writers
@@ -2134,152 +2121,7 @@ fn a_restored_folder_makes_the_writer_rekey<F: Facade>() {
     assert_eq!(tags(&fresh.view(), song), ["kept", "new"]);
 }
 
-/// A machine whose folder was restored after its writer tagged `song` "lost",
-/// opened once since by an instance that crashed, and an instance on it that has
-/// no writer yet.
-fn restored_without_a_writer<F: Facade>(clock: &TestClock) -> (Machine, F, EntityId) {
-    let folder = disk();
-    let here = machine(&folder);
-    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, clock)).unwrap();
-    let song = create(&mut a, "song.npno", b"song");
-    a.close().unwrap();
-    let backup = copy_folder(&folder);
-    let (mut a, _) = F::open(Probe::new(&here), env("a", 2, clock)).unwrap();
-    a.commit("Tag", |i| i.add(song, TAGS, tag("lost"))).unwrap();
-    a.close().unwrap();
-
-    let mut restored = Machine {
-        folder: backup,
-        local: here.local.clone(),
-    };
-    let (a, opened) = F::open(Probe::new(&restored), env("a", 3, clock)).unwrap();
-    assert!(matches!(opened.start, Start::Rekeyed { .. }));
-    drop(a);
-    restored.crash();
-    let (a, opened) = F::open(Probe::new(&restored), env("a", 4, clock)).unwrap();
-    assert_eq!(
-        opened.start,
-        Start::New,
-        "the retired writer is not resumed, even after a crash"
-    );
-    assert_eq!(
-        tags(&a.view(), song),
-        ["lost", "new"],
-        "an instance without a writer starts from its retired writer's view"
-    );
-    (restored, a, song)
-}
-
-fn what_a_restored_writer_showed_survives_reopening_and_a_crash<F: Facade>() {
-    let clock = TestClock::at(1_000);
-    let total = {
-        let (restored, mut a, song) = restored_without_a_writer::<F>(&clock);
-        let before = restored.local.mutations();
-        a.commit("Tag", |i| i.add(song, TAGS, tag("kept"))).unwrap();
-        restored.local.mutations() - before
-    };
-    for crash in 0..=total {
-        let shown = format!("crash after {crash} of {total}");
-        let (mut restored, mut a, song) = restored_without_a_writer::<F>(&clock);
-        restored.local.crash_after(crash);
-        let committed = a.commit("Tag", |i| i.add(song, TAGS, tag("kept")));
-        drop(a);
-        restored.crash();
-        let (a, opened) = F::open(Probe::new(&restored), env("a", 5, &clock))
-            .unwrap_or_else(|e| panic!("{shown}: {e}"));
-        let shown_tags = tags(&a.view(), song);
-        assert!(
-            shown_tags.contains(&tag("lost")),
-            "{shown}: the new writer lost the view it took over: {shown_tags:?}"
-        );
-        if crash == total {
-            committed.unwrap();
-            assert!(
-                matches!(opened.start, Start::Resumed(_)),
-                "{shown}: {:?}",
-                opened.start
-            );
-            assert_eq!(shown_tags, ["kept", "lost", "new"], "{shown}");
-        }
-    }
-}
-
-/// Each `view.bin` of `here`'s local root, by the genesis entry of its writer.
-fn checkpoints(here: &Machine) -> BTreeMap<EntryHash, Vec<u8>> {
-    let files = here.local.files(Root::Local).into_iter();
-    let views = files.filter(|(path, _)| path.name() == Some("view.bin"));
-    let by_writer = views.map(|(path, bytes)| (path.parent().unwrap().as_str().parse(), bytes));
-    by_writer
-        .map(|(genesis, bytes)| (genesis.unwrap(), bytes))
-        .collect()
-}
-
-/// The cached view `here` keeps for the writer whose genesis entry is `genesis`.
-fn cached(here: &Machine, genesis: EntryHash) -> CachedView {
-    blocking::run(&mut here.local.clone(), CachedView::load(genesis)).unwrap()
-}
-
-fn an_instance_without_a_writer_keeps_only_the_grace_step_in_the_views_it_read<F: Facade>() {
-    let clock = TestClock::at(1_000);
-    let (restored, mut a, _) = restored_without_a_writer::<F>(&clock);
-    let before = checkpoints(&restored);
-    assert!(!before.is_empty());
-    let remembered: Vec<(EntryHash, CachedView)> = before
-        .keys()
-        .map(|genesis| (*genesis, cached(&restored, *genesis)))
-        .collect();
-    clock.advance(GRACE_MS);
-    a.rescan().unwrap();
-
-    assert!(checkpoints(&restored) == before, "no view is written whole");
-    for (genesis, view) in remembered {
-        let kept = cached(&restored, genesis);
-        assert!(
-            !kept.grace().graced.is_empty(),
-            "{genesis}: {:?}",
-            kept.grace()
-        );
-        assert_ne!(kept.writers(), view.writers(), "{genesis} lets go");
-        for (writer, memory) in kept.writers() {
-            let held = &view.writers()[writer];
-            let mut entries = memory.entries.keys();
-            assert!(
-                entries.all(|hash| held.entries.contains_key(hash)),
-                "{genesis} gained entries of {writer}"
-            );
-            assert!(
-                memory.tips.iter().all(|tip| held.tips.contains(tip)),
-                "{genesis} gained tips of {writer}"
-            );
-        }
-    }
-}
-
-fn a_grace_step_an_instance_without_a_writer_could_not_keep_is_kept_by_its_next_save<F: Facade>() {
-    let clock = TestClock::at(1_000);
-    let (restored, a, _) = restored_without_a_writer::<F>(&clock);
-    drop(a);
-    let probe = Probe::new(&restored);
-    let (mut a, _) = F::open(probe.clone(), env("a", 5, &clock)).unwrap();
-    clock.advance(GRACE_MS);
-    fail(
-        &probe,
-        local_writes(&["view.log", "view.bin", "view.bin.next"]),
-    );
-    assert!(a.rescan().is_err());
-    heal(&probe);
-    a.refresh().unwrap();
-
-    let views = checkpoints(&restored);
-    assert!(!views.is_empty());
-    for genesis in views.into_keys() {
-        let view = cached(&restored, genesis);
-        let grace = view.grace();
-        assert!(!grace.graced.is_empty(), "{genesis}: {grace:?}");
-    }
-}
-
-fn a_compacted_writer_is_shown_and_reported_and_survives_its_files<F: Facade>() {
+fn a_compacted_writer_is_shown_and_reported_and_goes_with_its_files<F: Facade>() {
     let folder = disk();
     let clock = TestClock::at(1_000);
     let mut here = machine(&folder);
@@ -2330,11 +2172,7 @@ fn a_compacted_writer_is_shown_and_reported_and_survives_its_files<F: Facade>() 
     }
     here.crash();
     let (a, _) = F::open(Probe::new(&here), env("a", 3, &clock)).unwrap();
-    assert_eq!(
-        tags(&a.view(), song),
-        ["from-b", "new"],
-        "the cached view kept what only a snapshot held"
-    );
+    assert_eq!(tags(&a.view(), song), ["new"], "the folder wins at once");
 }
 
 /// Adopts `copy.npno` and saves `new.npno` in one intent.
@@ -2967,52 +2805,6 @@ fn committed_while_failing<F: Facade>(
     heal(&probe);
     let tagged = tagged.expect("the entries are durable");
     (a, song, tagged)
-}
-
-fn a_commit_whose_view_cannot_be_saved_is_kept_and_undone_once<F: Facade>() {
-    const VIEW: &[&str] = &["view.log", "view.bin.next"];
-    let clock = TestClock::at(1_000);
-    let folder = disk();
-    let here = machine(&folder);
-    let (a, song, tagged) = committed_while_failing::<F>(&here, &clock, VIEW);
-    assert_eq!(behind(&tagged), [Lag::View]);
-    assert_eq!(tags(&a.view(), song), ["new", "x"]);
-    drop(a);
-    let crashed = Machine {
-        folder: folder.clone(),
-        local: here.local.restart(),
-    };
-    let (reopened, opened) = F::open(Probe::new(&crashed), env("a", 2, &clock)).unwrap();
-    assert!(
-        matches!(opened.start, Start::Resumed(_)),
-        "{:?}",
-        opened.start
-    );
-    assert_eq!(tags(&reopened.view(), song), ["new", "x"], "after a crash");
-
-    let folder = disk();
-    let here = machine(&folder);
-    let (mut a, song, _) = committed_while_failing::<F>(&here, &clock, VIEW);
-    let labels = |a: &F| {
-        let items = a.history().into_iter();
-        items
-            .map(|item| (item.label, item.undone))
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(
-        labels(&a),
-        [("Import".to_owned(), false), ("Tag".to_owned(), false)]
-    );
-    let undone = a.undo().unwrap();
-    assert_eq!(undone.local, Local::Current, "the view is saved again");
-    assert_eq!(tags(&a.view(), song), ["new"], "one undo undoes the tag");
-    assert_eq!(
-        labels(&a),
-        [("Import".to_owned(), false), ("Tag".to_owned(), true)]
-    );
-    a.close().unwrap();
-    let (again, _) = F::open(Probe::new(&here), env("a", 3, &clock)).unwrap();
-    assert_eq!(tags(&again.view(), song), ["new"]);
 }
 
 fn a_commit_whose_head_cannot_be_recorded_is_kept_and_continued<F: Facade>() {
@@ -5184,211 +4976,6 @@ fn a_refused_intent_changes_nothing<F: Facade>() {
     );
 }
 
-fn what_an_instance_has_shown_survives_its_crash<F: Facade>() {
-    let folder = disk();
-    let clock = TestClock::at(1_000);
-    let here = machine(&folder);
-    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
-    let song = create(&mut a, "song.npno", b"song");
-    let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
-    b.commit("Tag", |i| i.add(song, TAGS, tag("b"))).unwrap();
-    a.refresh().unwrap();
-    assert_eq!(tags(&a.view(), song), ["b", "new"]);
-    drop(a);
-    let theirs = folder
-        .files(Root::Folder)
-        .into_keys()
-        .filter(|p| p.starts_with(&layout().writers()) && p.as_str().ends_with(SEGMENT_EXTENSION))
-        .find(|p| {
-            String::from_utf8_lossy(&folder.files(Root::Folder)[p]).contains(r#""value":"b""#)
-        })
-        .unwrap();
-    folder
-        .perform(Io::Remove {
-            root: Root::Folder,
-            path: theirs,
-        })
-        .unwrap();
-    let crashed = Machine {
-        folder: folder.clone(),
-        local: here.local.restart(),
-    };
-    let (a, opened) = F::open(Probe::new(&crashed), env("a", 3, &clock)).unwrap();
-    assert!(
-        matches!(opened.start, Start::Resumed(_)),
-        "{:?}",
-        opened.start
-    );
-    assert_eq!(
-        tags(&a.view(), song),
-        ["b", "new"],
-        "the cached view kept it"
-    );
-}
-
-/// Rescans through the core, stopping the rescan once it has written `stop_at`
-/// requests to its saved view, then restores the folder to before another
-/// writer's commit and reopens. Returns the song's tags.
-fn rescan_dropped_while_saving_its_view(stop_at: Option<usize>) -> Vec<String> {
-    use toshokan::library::Library as Core;
-    use toshokan::{Operation, Step};
-    let clock = TestClock::at(1_000);
-    let folder = disk();
-    let here = machine(&folder);
-    let (mut a, _) = Blocking::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
-    let song = create(&mut a, "song.npno", b"song");
-    a.close().unwrap();
-    let backup = copy_folder(&folder);
-    let mut probe = Probe::new(&here);
-    let caps = Backend::capabilities(&probe, Root::Folder);
-    let open = Core::open(layout(), schema(), env("a", 2, &clock), caps);
-    let (mut core, opened) = blocking::run(&mut probe, open).unwrap();
-    resumed(&probe.seen, &opened);
-    let (mut b, _) = Blocking::open(Probe::new(&machine(&folder)), env("b", 3, &clock)).unwrap();
-    b.commit("Tag", |i| i.add(song, TAGS, tag("theirs")))
-        .unwrap();
-    b.compact().unwrap();
-    b.close().unwrap();
-    let mut task = core.rescan();
-    let mut result = None;
-    let mut view_writes = 0;
-    loop {
-        match task.resume(result.take()) {
-            Step::Done(done) => {
-                done.unwrap();
-                break;
-            }
-            Step::Pause => {}
-            Step::Io(io) => {
-                let saves_view = io.mutates()
-                    && io.root() == Root::Local
-                    && io.path().name().is_some_and(|n| n.starts_with("view."));
-                if saves_view && Some(view_writes) == stop_at {
-                    break;
-                }
-                view_writes += usize::from(saves_view);
-                result = Some(probe.perform(io));
-            }
-        }
-    }
-    drop(task);
-    blocking::run(&mut probe, core.close()).unwrap();
-    restore(&folder, &backup);
-    let (a, _) = Blocking::open(Probe::new(&here), env("a", 4, &clock)).unwrap();
-    tags(&a.view(), song)
-}
-
-#[test]
-fn a_rescan_dropped_while_saving_its_view_leaves_the_view_to_be_saved_whole() {
-    let kept = rescan_dropped_while_saving_its_view(None);
-    assert_eq!(
-        kept,
-        ["new", "theirs"],
-        "the open shows what the restore removed"
-    );
-    for stop_at in [0, 2] {
-        let dropped = rescan_dropped_while_saving_its_view(Some(stop_at));
-        assert_eq!(dropped, kept, "dropped after {stop_at} view writes");
-    }
-}
-
-fn what_any_writer_of_an_install_showed_survives_a_restore<F: Facade>() {
-    let folder = disk();
-    let clock = TestClock::at(1_000);
-    let here = machine(&folder);
-    let (mut first, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
-    let song = create(&mut first, "song.npno", b"song");
-    let (mut second, opened) = F::open(Probe::new(&here), env("a", 2, &clock)).unwrap();
-    assert_eq!(
-        opened.start,
-        Start::New,
-        "the first instance holds its writer"
-    );
-    second
-        .commit("Tag", |i| i.add(song, TAGS, tag("two")))
-        .unwrap();
-    second.close().unwrap();
-    first.refresh().unwrap();
-    let backup = copy_folder(&folder);
-    first
-        .commit("Tag", |i| i.add(song, TAGS, tag("lost")))
-        .unwrap();
-    first.close().unwrap();
-
-    let mut restored = Machine {
-        folder: backup,
-        local: here.local.clone(),
-    };
-    for reopen in 0..3 {
-        let (a, opened) = F::open(Probe::new(&restored), env("a", 3 + reopen, &clock)).unwrap();
-        assert_eq!(
-            tags(&a.view(), song),
-            ["lost", "new", "two"],
-            "reopen {reopen}, {:?}",
-            opened.start
-        );
-        drop(a);
-        restored.crash();
-    }
-}
-
-/// A machine whose folder was backed up after `song` was created, the backup, and
-/// an instance on the machine that resumed the writer.
-fn backed_up<F: Facade>(clock: &TestClock) -> (Machine, MemDisk, F, EntityId) {
-    let folder = disk();
-    let here = machine(&folder);
-    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, clock)).unwrap();
-    let song = create(&mut a, "song.npno", b"song");
-    a.close().unwrap();
-    let backup = copy_folder(&folder);
-    let (a, opened) = F::open(Probe::new(&here), env("a", 2, clock)).unwrap();
-    assert!(
-        matches!(opened.start, Start::Resumed(_)),
-        "{:?}",
-        opened.start
-    );
-    (here, backup, a, song)
-}
-
-fn what_a_commit_returned_current_survives_a_crash_and_a_restore<F: Facade>() {
-    let total = {
-        let clock = TestClock::at(1_000);
-        let (here, _, mut a, song) = backed_up::<F>(&clock);
-        let before = here.local.mutations();
-        a.commit("Tag", |i| i.add(song, TAGS, tag("lost"))).unwrap();
-        here.local.mutations() - before
-    };
-    for crash in 0..=total {
-        let shown = format!("crash after {crash} of {total}");
-        let clock = TestClock::at(1_000);
-        let (here, backup, mut a, song) = backed_up::<F>(&clock);
-        here.local.crash_after(crash);
-        let committed = a.commit("Tag", |i| i.add(song, TAGS, tag("lost")));
-        drop(a);
-        let restored = Machine {
-            folder: backup,
-            local: here.local.restart(),
-        };
-        let (a, _) = F::open(Probe::new(&restored), env("a", 3, &clock))
-            .unwrap_or_else(|e| panic!("{shown}: {e}"));
-        let shown_tags = tags(&a.view(), song);
-        let local = committed.map(|committed| committed.local);
-        match &local {
-            Ok(Local::Current) => assert_eq!(shown_tags, ["lost", "new"], "{shown}"),
-            _ => assert!(shown_tags.contains(&tag("new")), "{shown}: {shown_tags:?}"),
-        }
-        assert!(
-            local.is_ok(),
-            "{shown}: the entries are durable before the local root"
-        );
-        assert_eq!(
-            crash == total,
-            matches!(local, Ok(Local::Current)),
-            "{shown}"
-        );
-    }
-}
-
 /// Puts the folder back as `backup` holds it, as a restore from a backup does.
 fn restore(folder: &MemDisk, backup: &MemDisk) {
     let kept = backup.files(Root::Folder);
@@ -5441,7 +5028,7 @@ fn label_of(view: &View, label: &str) -> WriterId {
 
 /// Two instances commit, refresh, compact, close, reopen and crash at random. At
 /// every step each shows what its logs fold to from scratch, however it got
-/// there: folded entry by entry, or kept in its cached view across a reopen.
+/// there: folded entry by entry, or read again at a reopen.
 fn what_is_shown_is_what_its_logs_fold_to<F: Facade>() {
     for seed in 0..12 {
         let folder = disk();
@@ -5632,7 +5219,7 @@ fn what_is_bound_is_what_binding_afresh_binds<F: Facade>() {
     }
 }
 
-fn a_partial_scan_after_the_grace_step_reads_files_of_the_lengths_the_restore_left<F: Facade>() {
+fn a_partial_scan_after_a_restore_reads_files_of_the_lengths_the_restore_left<F: Facade>() {
     let folder = disk();
     let clock = TestClock::at(1_000);
     let here = machine(&folder);
@@ -5660,14 +5247,6 @@ fn a_partial_scan_after_the_grace_step_reads_files_of_the_lengths_the_restore_le
         .unwrap();
     a.rescan_paths(vec![path("copy.npno"), path("song.npno")])
         .unwrap();
-    assert_eq!(
-        a.view().entity(song).unwrap().file().unwrap().state,
-        FileState::Missing
-    );
-
-    a.rescan().unwrap();
-    clock.advance(GRACE_MS);
-    a.rescan_paths(vec![path("other.npno")]).unwrap();
     let (mut fresh, _) = F::open(Probe::new(&machine(&folder)), env("c", 4, &clock)).unwrap();
     fresh.rescan().unwrap();
     let file = |library: &F| library.view().entity(song).unwrap().file().unwrap();
@@ -5675,30 +5254,16 @@ fn a_partial_scan_after_the_grace_step_reads_files_of_the_lengths_the_restore_le
     assert_eq!(file(&a).path, path("copy.npno"));
 }
 
-fn facts_a_restore_removed_are_shown_until_the_grace_step<F: Facade>() {
+fn facts_a_restore_removed_go_at_once<F: Facade>() {
     let folder = disk();
     let clock = TestClock::at(1_000);
     let mut here = machine(&folder);
     let (a, backup, song) = tagged_after_a_backup::<F>(&folder, &here, &clock);
-    let shown = facts(&a.view());
     a.close().unwrap();
     restore(&folder, &backup);
 
     let (mut a, _) = F::open(Probe::new(&here), env("a", 3, &clock)).unwrap();
     a.rescan().unwrap();
-    assert_eq!(facts(&a.view()), shown, "nothing is dropped at once");
-    clock.advance(GRACE_MS - 1);
-    a.rescan().unwrap();
-    assert_eq!(facts(&a.view()), shown, "nor within a day");
-    clock.advance(1);
-    let graced = a.rescan().unwrap();
-    let tagged =
-        |change: &Change| change.entity == song && change.what == What::Field("tags".into());
-    assert!(
-        graced.changes.iter().any(tagged),
-        "what the step let go of changed: {:?}",
-        graced.changes
-    );
     let (mut elsewhere, _) = F::open(Probe::new(&machine(&folder)), env("c", 4, &clock)).unwrap();
     elsewhere.rescan().unwrap();
     assert_eq!(tags(&a.view(), song), ["new"]);
@@ -5707,11 +5272,7 @@ fn facts_a_restore_removed_are_shown_until_the_grace_step<F: Facade>() {
     here.crash();
     let (mut a, _) = F::open(Probe::new(&here), env("a", 5, &clock)).unwrap();
     a.rescan().unwrap();
-    assert_eq!(
-        facts(&a.view()),
-        facts(&elsewhere.view()),
-        "the grace step holds across opens"
-    );
+    assert_eq!(facts(&a.view()), facts(&elsewhere.view()), "after a crash");
     a.commit("Tag", |i| i.add(song, TAGS, tag("after")))
         .unwrap();
     assert_eq!(tags(&a.view(), song), ["after", "new"]);
@@ -6059,40 +5620,6 @@ fn a_commit_writes_to_the_local_root_only_what_it_adds<F: Facade>() {
     a.commit("Tag", |i| i.add(song, TAGS, tag("last"))).unwrap();
     let written = seen.borrow().local_written - before;
     assert!(written < 2048, "{written} bytes for one short entry");
-}
-
-fn reopening_reads_only_the_ends_of_files_read_before<F: Facade>() {
-    let folder = disk();
-    let clock = TestClock::at(1_000);
-    let here = machine(&folder);
-    let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
-    let song = create(&mut b, "song.npno", b"song");
-    b.commit("Tag", |i| i.add(song, TAGS, tag("b"))).unwrap();
-    b.close().unwrap();
-    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
-    for n in 0..3 {
-        a.commit("Tag", |i| i.add(song, TAGS, format!("a{n}")))
-            .unwrap();
-    }
-    let before = facts(&a.view());
-    a.close().unwrap();
-
-    let probe = Probe::new(&here);
-    let seen = Rc::clone(&probe.seen);
-    let (a, opened) = F::open(probe, env("a", 3, &clock)).unwrap();
-    assert!(matches!(opened.start, Start::Resumed(_)), "{opened:?}");
-    assert_eq!(facts(&a.view()), before);
-    let shortest = folder
-        .files(Root::Folder)
-        .into_iter()
-        .filter(|(path, _)| path.parent().and_then(|dir| dir.parent()) == Some(layout().writers()))
-        .map(|(_, bytes)| bytes.len() as u64)
-        .min()
-        .unwrap();
-    let read = seen.borrow().log_read;
-    let ends = toshokan::line::ENDING + toshokan::line::SEAL_MARKER;
-    assert!(ends < shortest, "{shortest}");
-    assert!(read <= ends, "read {read} bytes of one file");
 }
 
 fn a_writers_directory_stays_bounded_across_sessions<F: Facade>() {

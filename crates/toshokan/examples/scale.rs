@@ -31,7 +31,7 @@ use toshokan::env::{ExactNames, OsRandom, PrefixIdentity, SystemClock};
 use toshokan::io::{Capabilities, Kind, Range};
 use toshokan::library::COMPACT_AFTER;
 use toshokan::log::{Displaced, Entry, EntryKind, FileFact, Genesis, Logged, Op, Own, Ref};
-use toshokan::reader::{CachedView, Reader};
+use toshokan::reader::Reader;
 use toshokan::simulator::Machine;
 use toshokan::snapshot::Snapshot;
 use toshokan::{
@@ -1116,8 +1116,8 @@ fn main() {
     }
 
     let mut backend = world.counted("reader", &stats);
-    let reader = bench.measure("reader: read every writer (no cached view)", || {
-        let mut reader = Reader::new(layout(), CachedView::default());
+    let reader = bench.measure("reader: read every writer", || {
+        let mut reader = Reader::new(layout());
         run(&mut backend, reader.read()).unwrap();
         reader
     });
@@ -1125,10 +1125,10 @@ fn main() {
     drop((reader, derived));
 
     let backend = world.counted(own_local, &stats);
-    let (lib, _) = bench.measure("open own, no cached view", || {
+    let (lib, _) = bench.measure("open own", || {
         Library::open(backend, layout(), &schema, env()).unwrap()
     });
-    bench.measure("close (writes cached view)", || lib.close().unwrap());
+    bench.measure("close", || lib.close().unwrap());
 
     let open_warm = |bench: &mut Bench, world: &mut World, op: &str| {
         let backend = world.counted(own_local, &stats);
@@ -1355,8 +1355,6 @@ fn main() {
 
     if args.retired > 0 {
         let mut local = world.raw(own_local);
-        let views: Vec<(String, Vec<u8>)> = local_views(&mut *local);
-        let (_, bytes) = views.first().cloned().expect("a cached view");
         for _ in 0..args.retired {
             let genesis = EntryHash::from_u128(gen.rng.id());
             let dir = Layout::local(genesis);
@@ -1366,18 +1364,13 @@ fn main() {
                     path: dir,
                 })
                 .unwrap();
-            for (path, bytes) in [
-                (Layout::cached_view(genesis), bytes.clone()),
-                (Layout::retired(genesis), Vec::new()),
-            ] {
-                local
-                    .perform(Io::Create {
-                        root: Root::Local,
-                        path,
-                        bytes,
-                    })
-                    .unwrap();
-            }
+            local
+                .perform(Io::Create {
+                    root: Root::Local,
+                    path: Layout::retired(genesis),
+                    bytes: Vec::new(),
+                })
+                .unwrap();
         }
         for _ in 0..args.runs {
             let op = format!("open warm, {} retired writers in the pool", args.retired);
@@ -1399,14 +1392,6 @@ fn main() {
             size(w.bytes),
             w.entries,
             w.bytes as f64 / w.entries as f64
-        );
-    }
-    for (path, bytes) in local_views(&mut *raw) {
-        println!(
-            "- cached view {path}: {} ({:.0} B/entry, {:.0} B/entity)",
-            size(bytes.len() as u64),
-            bytes.len() as f64 / entries as f64,
-            bytes.len() as f64 / entities as f64
         );
     }
     let listing = raw.perform(Io::List {
@@ -1483,38 +1468,6 @@ fn outcome<T>(result: toshokan::Result<T>) -> Option<T> {
     result
         .map_err(|error| eprintln!("    failed: {error}"))
         .ok()
-}
-
-/// Every cached view in the local root, by path.
-fn local_views(local: &mut dyn Backend) -> Vec<(String, Vec<u8>)> {
-    let Ok(Reply::Listed(dirs)) = local.perform(Io::List {
-        root: Root::Local,
-        dir: RelPath::ROOT,
-    }) else {
-        return Vec::new();
-    };
-    let mut views = Vec::new();
-    for dir in dirs.into_iter().filter(|d| d.kind == Kind::Directory) {
-        let path = RelPath::new(&format!("{}/view.bin", dir.name)).unwrap();
-        let Ok(Reply::Stat(Some(meta))) = local.perform(Io::Stat {
-            root: Root::Local,
-            path: path.clone(),
-        }) else {
-            continue;
-        };
-        let range = Range {
-            offset: 0,
-            len: meta.len,
-        };
-        if let Ok(Reply::Bytes(bytes)) = local.perform(Io::Read {
-            root: Root::Local,
-            path: path.clone(),
-            range,
-        }) {
-            views.push((path.as_str().to_owned(), bytes));
-        }
-    }
-    views
 }
 
 struct SystemTimeMs;

@@ -174,8 +174,8 @@ pub type Values = BTreeMap<Field, BTreeSet<Val>>;
 pub enum ItemKind {
     Run,
     Gap,
-    /// After the grace step, the lines of a file shorter than a certificate:
-    /// a version a sync client dropped, or a copy that diverged.
+    /// The lines of an unsealed file shorter than a certificate: a version a
+    /// sync client dropped, or a copy that diverged.
     Unplaced,
 }
 

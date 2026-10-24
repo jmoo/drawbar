@@ -1,19 +1,18 @@
 //! The properties, and the enumeration that drives them.
 //!
-//! P3, P5, P6, P8, P10, P12: at rest, fresh and cached readers of the design
-//! show what the oracle shows. P1: along a cached reader's deliveries, a value a
-//! merged write replaced never shows alone again. P4: a step by one branch of a
-//! forked writer changes no merged value. P7: no reader merges what a dismissal
-//! it holds names. P9: a contribution's size is bounded by fields and writers.
-//! P11: after a restore or a dropped version and the grace step, the folder
-//! wins, beside what the guard keeps because something visible descends from
-//! it. Five divergences are counted rather than failed: a conflict the oracle
-//! resolves, after a fork; an extra value beside the oracle's after a fault, on
-//! a field the design reports contradicted; a merged value the design shows
-//! only in an item, as a forgotten basis, because a fork lies inside a
-//! segment, or because a fault left a file it cannot place; a faulted folder
-//! where a cached reader keeps an entry the fault took; and a faulted reading
-//! that shows such unplaced lines.
+//! P3, P5, P6, P8, P10, P12: at rest, readers of the design show what the oracle
+//! shows. P1: along a reader's deliveries, a value a merged write replaced never
+//! shows alone again. P4: a step by one branch of a forked writer changes no
+//! merged value. P7: no reader merges what a dismissal it holds names. P9: a
+//! contribution's size is bounded by fields and writers. P11: after a restore or
+//! a dropped version, the folder wins. Five divergences are counted rather than
+//! failed: a conflict the oracle resolves, after a fork; an extra value beside
+//! the oracle's after a fault, on a field the design reports contradicted; a
+//! value the oracle shows after a fault that a held line's chain replaced,
+//! through an entry the fault took; a merged value the design shows only in an
+//! item, as a forgotten basis, because a fork lies inside a segment, or because a
+//! fault left a file it cannot place; and a faulted reading that shows such
+//! unplaced lines.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -35,12 +34,12 @@ pub struct Tally {
     /// Fields where the oracle merges a value the design shows only in a run: a
     /// forgotten basis, or a fork point it cannot locate exactly.
     pub collapsed: AtomicUsize,
-    /// Faulted folders after which a cached reader still holds an entry the
-    /// fault took, because something it sees descends from that entry.
-    pub stale: AtomicUsize,
     /// Fields that show, after a fault, a write a reference to a lost write no
     /// longer covers.
     pub contradicted: AtomicUsize,
+    /// Fields after a fault where the oracle shows a value that a held line's
+    /// chain replaced, through an entry the fault took.
+    pub chained: AtomicUsize,
     /// Faulted readings that show lines of a file shorter than a certificate,
     /// which the reader cannot place.
     pub unplaced: AtomicUsize,
@@ -56,13 +55,13 @@ impl Tally {
     pub fn report(&self) -> String {
         let n = |c: &AtomicUsize| c.load(Ordering::Relaxed);
         format!(
-            "{} histories, {} reads; {} fields shown as a conflict the oracle resolves, {} fields whose merged value shows only in an item, {} faulted folders where a cached reader keeps a lost entry, {} fields after a fault where a reference to a lost write no longer covers an earlier one, {} faulted readings with unplaced lines",
+            "{} histories, {} reads; {} fields shown as a conflict the oracle resolves, {} fields whose merged value shows only in an item, {} fields after a fault where a reference to a lost write no longer covers an earlier one, {} fields after a fault whose oracle value a held line's chain replaced, {} faulted readings with unplaced lines",
             n(&self.histories),
             n(&self.reads),
             n(&self.conflicts),
             n(&self.collapsed),
-            n(&self.stale),
             n(&self.contradicted),
+            n(&self.chained),
             n(&self.unplaced),
         )
     }
@@ -119,14 +118,8 @@ fn empty<S>(f: &File<S>) -> bool {
     matches!(&f.body, Body::Segment(lines) if lines.is_empty())
 }
 
-fn read<D: Design>(
-    d: &D,
-    world: &World,
-    files: &[File<D::Snapshot>],
-    seen: &[Seen],
-    memory: &D::Memory,
-) -> (Shown, D::Memory) {
-    d.read(&Reading { world, files, seen }, memory)
+fn read<D: Design>(d: &D, world: &World, files: &[File<D::Snapshot>], seen: &[Seen]) -> Shown {
+    d.read(&Reading { world, files, seen })
 }
 
 /// Compares what the design shows with what the oracle shows, counting the
@@ -141,7 +134,7 @@ fn agree(
     oracle: &Shown,
     spec: &Shown,
     tally: &Tally,
-    faulted: bool,
+    faulted: Option<&Shown>,
 ) -> Result<(), String> {
     if oracle == spec {
         return Ok(());
@@ -157,7 +150,8 @@ fn agree(
         values
     };
     let (ov, sv) = (with_existence(oracle), with_existence(spec));
-    let forks = oracle::place(world, held, &BTreeSet::new()).forks;
+    let chained = faulted.map(with_existence);
+    let forks = oracle::place(world, held).forks;
     let forked = !forks.is_empty();
     let fields: BTreeSet<Field> = ov.keys().chain(sv.keys()).copied().collect();
     let mut divergent: BTreeSet<Field> = BTreeSet::new();
@@ -190,10 +184,20 @@ fn agree(
                         || (unheld && i.forgotten.contains(&field))
                 })
         };
-        if let Some(v) = o.difference(&s).find(|v| !in_run(v)) {
+        // After a fault, a value a held line's chain replaced, though the
+        // entry that replaced it is gone.
+        let replaced = |v: &Val| {
+            let chained = chained.as_ref().map(|c| c.get(&field));
+            chained.is_some_and(|c| c.is_none_or(|values| !values.contains(v)))
+        };
+        let missing: Vec<&Val> = o.difference(&s).filter(|v| !in_run(v)).collect();
+        if let Some(v) = missing.iter().find(|v| !replaced(v)) {
             return Err(format!(
                 "{field:?}: oracle {o:?}, design {s:?}; {v:?} is shown nowhere"
             ));
+        }
+        if !missing.is_empty() {
+            tally.add(&tally.chained, 1);
         }
         if !s.is_subset(&o) {
             // The oracle's value still shows: its live writes, or, where the
@@ -207,7 +211,7 @@ fn agree(
                     .get(&field.entity)
                     .is_some_and(|e| e.deletion_conflict)
             };
-            let explained = forked || (faulted && spec.contradicted.contains(&field));
+            let explained = forked || (faulted.is_some() && spec.contradicted.contains(&field));
             if !forced && !(beside && explained) {
                 return Err(format!(
                     "{field:?}: oracle {o:?}, design {s:?}; an extra value with no conflict"
@@ -232,7 +236,7 @@ fn agree(
         .filter(|i| i.kind == ItemKind::Unplaced)
         .count();
     if unplaced > 0 {
-        if !faulted {
+        if faulted.is_none() {
             return Err("lines shown unplaced without a fault".into());
         }
         tally.add(&tally.unplaced, 1);
@@ -422,14 +426,8 @@ impl<'a, D: Design> Checker<'a, D> {
             seen,
         };
         let held = Oracle.holds(&r);
-        let (o, _) = Oracle.read(&r, &Default::default());
-        let (s, _) = read(
-            &self.design,
-            self.world(),
-            &self.spec.files,
-            seen,
-            &Default::default(),
-        );
+        let o = Oracle.read(&r);
+        let s = read(&self.design, self.world(), &self.spec.files, seen);
         (o, s, held)
     }
 
@@ -449,7 +447,7 @@ impl<'a, D: Design> Checker<'a, D> {
                 &o,
                 &s,
                 self.tally,
-                false,
+                None,
             ) {
                 self.fail(
                     "a fresh reader at rest differs from the oracle",
@@ -460,7 +458,7 @@ impl<'a, D: Design> Checker<'a, D> {
             rest_shown.get_or_insert(s);
         }
         self.copies();
-        self.cached();
+        self.deliveries();
         if self.depth.subsets {
             self.subsets();
         }
@@ -487,14 +485,8 @@ impl<'a, D: Design> Checker<'a, D> {
             files: &oracle_files,
             seen: &seen,
         };
-        let (o, _) = Oracle.read(&ro, &Default::default());
-        let (s, _) = read(
-            &self.design,
-            self.world(),
-            &spec_files,
-            &seen,
-            &Default::default(),
-        );
+        let o = Oracle.read(&ro);
+        let s = read(&self.design, self.world(), &spec_files, &seen);
         if let Err(e) = agree(
             self.world(),
             &Oracle.holds(&ro),
@@ -502,7 +494,7 @@ impl<'a, D: Design> Checker<'a, D> {
             &o,
             &s,
             self.tally,
-            false,
+            None,
         ) {
             self.fail("a conflicted copy changes what a reader shows", &seen, e);
         }
@@ -571,7 +563,7 @@ impl<'a, D: Design> Checker<'a, D> {
             files: &self.oracle.files,
             seen,
         };
-        let placement = oracle::place(self.world(), &Oracle.holds(&r), &BTreeSet::new());
+        let placement = oracle::place(self.world(), &Oracle.holds(&r));
         let mut excused = self.dismissed(seen);
         excused.extend(placement.runs);
         excused
@@ -598,9 +590,9 @@ impl<'a, D: Design> Checker<'a, D> {
             .collect()
     }
 
-    /// P3 and P1: cached readers in many orders end where a fresh one does, and
-    /// never show a replaced value alone again.
-    fn cached(&self) {
+    /// P1: along every delivery order, a reader never shows a replaced value
+    /// alone again.
+    fn deliveries(&self) {
         let files = &self.spec.files;
         let kept: Vec<Seen> = files
             .iter()
@@ -615,8 +607,7 @@ impl<'a, D: Design> Checker<'a, D> {
         // Deleted files: never seen; seen first and gone last; or seen first and
         // gone before anything else arrives, as when a compaction's deletions
         // overtake its snapshot.
-        // Mode 3 delivers everything, but takes the grace step halfway.
-        for mode in 0..4 {
+        for mode in 0..3 {
             let late = mode == 1;
             for order in orders(kept.len(), self.depth.orders) {
                 let mut seen: Vec<Seen> = if matches!(mode, 1 | 2) {
@@ -624,40 +615,26 @@ impl<'a, D: Design> Checker<'a, D> {
                 } else {
                     Vec::new()
                 };
-                let mut memory = Default::default();
                 let mut states = Vec::new();
+                let mut look = |seen: &[Seen]| {
+                    let s = read(&self.design, self.world(), files, seen);
+                    states.push((s, self.excused(seen)));
+                };
                 if matches!(mode, 1 | 2) {
-                    let (s, m) = read(&self.design, self.world(), files, &seen, &memory);
-                    states.push((s, self.excused(&seen)));
-                    memory = m;
+                    look(&seen);
                 }
                 if mode == 2 {
                     seen.clear();
-                    let (s, m) = read(&self.design, self.world(), files, &seen, &memory);
-                    states.push((s, self.excused(&seen)));
-                    memory = m;
+                    look(&seen);
                 }
-                for (k, &i) in order.iter().enumerate() {
+                for &i in &order {
                     seen.push(kept[i]);
-                    let r = Reading {
-                        world: self.world(),
-                        files,
-                        seen: &seen,
-                    };
-                    let (s, m) = if mode == 3 && k == order.len() / 2 {
-                        self.design.grace(&r, &memory)
-                    } else {
-                        self.design.read(&r, &memory)
-                    };
-                    states.push((s, self.excused(&seen)));
-                    memory = m;
+                    look(&seen);
                 }
                 if late {
                     for g in &gone {
                         seen.retain(|s| s != g);
-                        let (s, m) = read(&self.design, self.world(), files, &seen, &memory);
-                        states.push((s, self.excused(&seen)));
-                        memory = m;
+                        look(&seen);
                     }
                 }
                 self.tally.add(&self.tally.reads, states.len());
@@ -667,41 +644,9 @@ impl<'a, D: Design> Checker<'a, D> {
                         .map(|(s, _)| format!("{:?} {:?}", s.writes, s.item_views()))
                         .collect();
                     self.fail(
-                        "P1: a cached reader shows a replaced value alone",
+                        "P1: a reader shows a replaced value alone",
                         &seen,
                         format!("{e} (mode {mode}, order {order:?})\n  states: {trail:#?}"),
-                    );
-                }
-                let (o, fresh, held) = self.fresh(&seen);
-                let cached = states.last().map(|(s, _)| s.clone()).unwrap_or_default();
-                if let Err(e) = agree(
-                    self.world(),
-                    &held,
-                    &self.design.tip_writes(self.world(), files, &seen),
-                    &o,
-                    &cached,
-                    self.tally,
-                    false,
-                ) {
-                    self.fail(
-                        "P3: a cached reader at rest differs from the oracle",
-                        &seen,
-                        format!("{e}\n  oracle {o:?}\n  cached {cached:?}\n  fresh {fresh:?}"),
-                    );
-                }
-                let (graced, _) = self.design.grace(
-                    &Reading {
-                        world: self.world(),
-                        files,
-                        seen: &seen,
-                    },
-                    &memory,
-                );
-                if graced != cached {
-                    self.fail(
-                        "the grace step changes a reader at rest",
-                        &seen,
-                        format!("before {cached:?}\n  after {graced:?}"),
                     );
                 }
             }
@@ -726,7 +671,7 @@ impl<'a, D: Design> Checker<'a, D> {
                 .map(|(_, s)| *s)
                 .collect();
             let (_, s, held) = self.fresh(&seen);
-            let placement = oracle::place(self.world(), &held, &BTreeSet::new());
+            let placement = oracle::place(self.world(), &held);
             let mut written: BTreeMap<Field, BTreeSet<super::world::Val>> = BTreeMap::new();
             for &e in held.difference(&placement.dismissed) {
                 if let Some(w) = self.world().entry(e).write {
@@ -750,21 +695,9 @@ impl<'a, D: Design> Checker<'a, D> {
     }
 
     /// P11: after a restore of the folder or of one directory, or a dropped
-    /// version, a cached reader that had read everything, once it has read the
-    /// new folder and passed the grace step, shows what a fresh oracle shows.
+    /// version, a reader of the new folder shows what the oracle shows of it.
     fn faults(&self) {
         let world = self.world();
-        let before: Vec<Seen> = rests(&self.spec.files)
-            .into_iter()
-            .next()
-            .unwrap_or_default();
-        let (_, memory) = read(
-            &self.design,
-            world,
-            &self.spec.files,
-            &before,
-            &Default::default(),
-        );
         let mut variants: Vec<Fault<D::Snapshot>> = Vec::new();
         for (i, f) in self.spec.files.iter().enumerate() {
             let Body::Segment(lines) = &f.body else {
@@ -811,46 +744,18 @@ impl<'a, D: Design> Checker<'a, D> {
                 .filter(|f| !f.deleted && !empty(f))
                 .map(whole)
                 .collect();
-            let r = Reading {
-                world,
-                files: &spec_files,
-                seen: &seen,
-            };
-            let (_, m) = self.design.read(&r, &memory);
-            let (after, kept) = self.design.grace(&r, &m);
+            let after = read(&self.design, world, &spec_files, &seen);
             let ro = Reading {
                 world,
                 files: &oracle_files,
                 seen: &seen,
             };
-            let mut held = Oracle.holds(&ro);
-            // The guard keeps only what something visible descends from; the
-            // oracle then holds what the reader keeps.
-            let stale: BTreeSet<Hash> = self
-                .design
-                .remembered(world, &kept)
-                .into_iter()
-                .filter(|e| !held.contains(e))
-                .collect();
-            if let Some(e) = stale
-                .iter()
-                .find(|&&e| !held.iter().any(|&h| world.chain(h).contains(&e)))
-            {
-                self.fail(
-                    &format!("P11: after {label}, the grace step keeps an entry nothing visible descends from"),
-                    &seen,
-                    oracle::describe(world.entry(*e)),
-                );
-            }
-            if !stale.is_empty() {
-                self.tally.add(&self.tally.stale, 1);
-            }
-            let remembered = oracle::Memory {
-                entries: stale.clone(),
-                forks: BTreeSet::new(),
-            };
-            let (o, _) = Oracle.read(&ro, &remembered);
-            held.extend(&stale);
+            let held = Oracle.holds(&ro);
+            let o = Oracle.read(&ro);
+            // A line implies the chain it continues: what an entry the fault
+            // took replaced stays replaced, though it shows nothing itself.
+            let implied: BTreeSet<Hash> = held.iter().flat_map(|&e| world.chain(e)).collect();
+            let chained = oracle::shown_within(world, &oracle::place(world, &implied), Some(&held));
             if let Err(e) = agree(
                 world,
                 &held,
@@ -858,10 +763,10 @@ impl<'a, D: Design> Checker<'a, D> {
                 &o,
                 &after,
                 self.tally,
-                true,
+                Some(&chained),
             ) {
                 self.fail(
-                    &format!("P11: after {label} and the grace step, the folder does not win"),
+                    &format!("P11: after {label}, the folder does not win"),
                     &seen,
                     format!("{e}\n  oracle {o:?}\n  design {after:?}"),
                 );

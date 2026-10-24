@@ -10,7 +10,7 @@ use thiserror::Error as ThisError;
 use crate::contribution::Contribution;
 use crate::ids::{EntryHash, Hlc, WriterId};
 use crate::log::Own;
-use crate::pack::{pack_struct, Bad, In, Pack, Unpack, Unpacked};
+use crate::pack::{Bad, Unpacked};
 use crate::reader::MAX_FILE;
 use crate::schema::Raw;
 
@@ -207,58 +207,6 @@ impl Snapshot {
     }
 }
 
-pack_struct!(SegmentCert { first, last });
-
-impl Pack for Certified {
-    fn pack(&self, out: &mut Vec<u8>) {
-        let segments: Vec<&SegmentCert> = self.segments.iter().collect();
-        let heads: Vec<&Own> = self.heads.iter().collect();
-        let hashes: Vec<&Own> = self.hashes.iter().collect();
-        (segments, (heads, hashes)).pack(out);
-    }
-}
-
-impl Unpack for Certified {
-    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
-        let (segments, (heads, hashes)): (Vec<SegmentCert>, (Vec<Own>, Vec<Own>)) =
-            Unpack::unpack(input)?;
-        Ok(Self {
-            segments: segments.into_iter().collect(),
-            heads: heads.into_iter().collect(),
-            hashes: hashes.into_iter().collect(),
-        })
-    }
-}
-
-impl Pack for Snapshot {
-    fn pack(&self, out: &mut Vec<u8>) {
-        (self.writer, &self.label).pack(out);
-        (self.at, (self.genesis, self.head)).pack(out);
-        (&self.certified, (&self.state, &self.unknown)).pack(out);
-    }
-}
-
-/// Refuses what [`Snapshot::decode`] refuses.
-impl Unpack for Snapshot {
-    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
-        let (writer, label) = Unpack::unpack(input)?;
-        let (at, (genesis, head)) = Unpack::unpack(input)?;
-        let (certified, (state, unknown)) = Unpack::unpack(input)?;
-        let snapshot = Self {
-            writer,
-            label,
-            at,
-            genesis,
-            head,
-            certified,
-            state,
-            unknown,
-        };
-        snapshot.check()?;
-        Ok(snapshot)
-    }
-}
-
 fn ends_inside_a_value(bytes: &[u8]) -> bool {
     let end = bytes
         .iter()
@@ -332,18 +280,6 @@ mod tests {
         assert_eq!(read.state.later.len(), 1);
         let again = String::from_utf8(read.encode()).unwrap();
         assert!(again.contains(r#""also":[ true ]"#), "{again}");
-        let packed = crate::pack::packed(&read);
-        assert_eq!(crate::pack::unpacked::<Snapshot>(&packed), Ok(read));
-    }
-
-    #[test]
-    fn a_snapshot_packs_and_unpacks_whole() {
-        let mut written = snapshot();
-        written
-            .unknown
-            .insert("later".into(), Raw::new(r#"{"x":[1,2]}"#).unwrap());
-        let packed = crate::pack::packed(&written);
-        assert_eq!(crate::pack::unpacked::<Snapshot>(&packed), Ok(written));
     }
 
     #[test]

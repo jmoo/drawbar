@@ -12,7 +12,7 @@ use toshokan::disk::Tail;
 use toshokan::io::Capabilities;
 use toshokan::layout::{Layout, SEGMENT_EXTENSION};
 use toshokan::line::{ending, seal_marker, Line, ENDING};
-use toshokan::reader::{CachedView, Reader};
+use toshokan::reader::Reader;
 use toshokan::report::{Rekey, Start};
 use toshokan::simulator::Machine;
 use toshokan::writer::{Claimed, Writer, SEGMENT_BOUND};
@@ -91,7 +91,6 @@ fn create(disk: &mut MemDisk) -> toshokan::Result<Writer> {
         SegmentName::from_u128(8),
         "w".into(),
         Hlc::ZERO,
-        |genesis| CachedView::default().save(genesis),
     );
     run(disk, create)
 }
@@ -111,7 +110,7 @@ fn no_writer_joins_the_pool_before_its_genesis_entry_is_durable() {
                 disk.crash_after(after);
                 assert_eq!(create(&mut disk).is_ok(), after == operations, "{case}");
                 let mut disk = disk.restart();
-                let mut reader = Reader::new(layout(), CachedView::default());
+                let mut reader = Reader::new(layout());
                 run(&mut disk, reader.read()).unwrap();
                 let Claimed { start, .. } =
                     run(&mut disk, Writer::claim(&layout(), &reader)).unwrap();
@@ -1057,7 +1056,7 @@ fn a_writer_confirms_its_head_from_the_end_of_the_file_that_holds_it() {
     }
     first.compact().unwrap();
     let mut machine = first.close();
-    let mut reader = Reader::new(layout(), CachedView::default());
+    let mut reader = Reader::new(layout());
     run(&mut machine, reader.read()).unwrap();
     let mut reads = Reads {
         machine: &mut machine,

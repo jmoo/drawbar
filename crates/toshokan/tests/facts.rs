@@ -101,7 +101,7 @@ fn derived(shown: Vec<(WriterId, Shown<'_>)>) -> Folded {
             (writer, seen)
         })
         .collect();
-    derive(&seen, &BTreeMap::new(), &BTreeSet::new()).folded
+    derive(&seen).folded
 }
 
 /// `writer`'s chain `entries` folded into a snapshot that names each of them,

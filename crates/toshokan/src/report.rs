@@ -162,8 +162,8 @@ pub enum ItemKind {
     Run,
     /// Entries whose predecessor may still arrive. Merged once it does.
     Gap,
-    /// After the grace step, lines of a file shorter than a snapshot certified
-    /// it: a version a sync client dropped, or a copy that diverged.
+    /// Lines of an unsealed file shorter than a snapshot certified it: a version
+    /// a sync client dropped, a copy that diverged, or a file still arriving.
     Unplaced,
 }
 
@@ -189,12 +189,6 @@ pub struct Item {
     /// head, whether or not a write of the entry survives.
     pub entries: u64,
     pub changes: Vec<ItemChange>,
-    /// Whether the run may be its writer's own earlier entries rather than a
-    /// branch: entries only this reader remembers, no file shows, and a snapshot
-    /// of the writer numbered past them does not name, kept apart for a fork
-    /// point the reader remembers. Taking from it may bring back what the
-    /// writer itself replaced.
-    pub uncertain: bool,
 }
 
 /// One field an [`Item`] would change.
@@ -272,9 +266,7 @@ pub struct Committed {
     /// Whether it joined this instance's undo history, as every intent does but
     /// one that only dismisses runs.
     pub undoable: bool,
-    /// ⚠️ Whether this instance's own state caught up with the commit. While it
-    /// is [`Local::Behind`], a crash followed by a restore of the folder that
-    /// takes the commit's entries can take them from this install's view too.
+    /// Whether this instance's own state caught up with the commit.
     pub local: Local,
 }
 
@@ -284,8 +276,7 @@ pub struct Committed {
 pub enum Local {
     Current,
     /// Each part that lags, with the failure that left it behind. The next commit,
-    /// refresh or close saves the view, the head and what was let go again; a
-    /// refresh scans again.
+    /// refresh or close records the head again; a refresh scans again.
     Behind(BTreeMap<Lag, String>),
 }
 
@@ -293,9 +284,6 @@ pub enum Local {
 /// durable.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Lag {
-    /// The cached view in the local root lacks the commit. Reopening reads it
-    /// from the folder.
-    View,
     /// `head.json` names an earlier entry, or a failed write tore it. Reopening
     /// continues from the last entry of the writer's chain in the folder, or
     /// starts a new writer when it is torn.

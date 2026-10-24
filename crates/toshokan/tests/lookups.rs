@@ -14,7 +14,6 @@ use common::Later;
 use toshokan::asynch::{self, Fs, Library};
 use toshokan::env::{ExactNames, PrefixIdentity, SeededRandom, TestClock};
 use toshokan::io::Capabilities;
-use toshokan::reader::GRACE_MS;
 use toshokan::simulator::Machine;
 use toshokan::view::Conflicted;
 use toshokan::{
@@ -446,10 +445,6 @@ fn run_seeded(seed: u64) {
                     for library in libraries.iter_mut() {
                         pollster::block_on(library.rescan()).unwrap();
                     }
-                    clock.advance(GRACE_MS);
-                    for library in libraries.iter_mut() {
-                        pollster::block_on(library.rescan()).unwrap();
-                    }
                     let library = &mut libraries[k];
                     let elsewhere = vec![pick(&mut chance, &paths())];
                     pollster::block_on(library.rescan_paths(elsewhere)).unwrap();
@@ -458,7 +453,7 @@ fn run_seeded(seed: u64) {
                     assert_eq!(
                         shown(&library.view()),
                         shown(&fresh.view()),
-                        "{case}: what is shown a day and a rescan after a restore is what a fresh open and rescan show"
+                        "{case}: what is shown a rescan after a restore is what a fresh open and rescan show"
                     );
                 }
             },

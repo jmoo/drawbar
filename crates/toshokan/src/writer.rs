@@ -5,8 +5,7 @@
 //! process, appends to it, and seals it with the seal marker when the process
 //! closes it cleanly or compacts, or when an append would take it past
 //! [`SEGMENT_BOUND`]. Before each append it confirms the folder still
-//! holds its head; after each, once the cached view holds the new entries, it
-//! records the head in the local root.
+//! holds its head; after each, it records the head in the local root.
 
 use serde::{Deserialize, Serialize};
 
@@ -139,16 +138,13 @@ impl Writer {
 
     /// A new writer: its first segment, `segment`, holding its genesis entry, is
     /// made durable in the folder before its directory in the local root, and so
-    /// its id, exists anywhere else. The view `view` writes for the genesis entry
-    /// is kept as its cached view before its head record, so a writer in the pool
-    /// always has the view it started from.
+    /// its id, exists anywhere else.
     pub fn create(
         layout: Layout,
         id: WriterId,
         segment: SegmentName,
         label: String,
         at: Hlc,
-        view: impl FnOnce(EntryHash) -> Task<'static, Result<()>>,
     ) -> Task<'static, Result<Writer>> {
         let kind = EntryKind::Genesis(Genesis { writer: id, label });
         let entry = match Entry::encode(EntryHash::ZERO, 0, at, kind) {
@@ -156,7 +152,6 @@ impl Writer {
             Err(_) => return Task::ready(Err(Error::Refused(Refusal::Invalid(Invalid::TooLong)))),
         };
         let genesis = entry.hash();
-        let saved = view(genesis);
         let bytes = entry.to_bytes();
         let len = bytes.len() as u64;
         let dir = layout.writer(id);
@@ -201,9 +196,7 @@ impl Writer {
         })
         .and_then(move |()| flow::lock(Layout::lock(genesis)))
         .and_then(move |lock| match lock {
-            Lock::Acquired => {
-                flow::run(saved).and_then(move |()| record_head(id, genesis, genesis))
-            }
+            Lock::Acquired => record_head(id, genesis, genesis),
             Lock::Held => Flow::Done(Err(Error::Io {
                 root: Root::Local,
                 path: Layout::lock(genesis),
@@ -231,10 +224,10 @@ impl Writer {
         self.open
     }
 
-    /// The open segment with the stamp a read would find on it now; `None`, for
-    /// the next read to stamp it, when no segment is open, the stat fails, or the
-    /// segment is no longer as long as this process left it.
-    pub(crate) fn stamp<'a>(&self) -> Flow<'a, Option<(RelPath, Stamp)>> {
+    /// The open segment, `None` when none is open, with the stamp a read would
+    /// find on it now; no stamp, for the next read to read it again, when the
+    /// stat fails or the segment is no longer as long as this process left it.
+    pub(crate) fn stamp<'a>(&self) -> Flow<'a, Option<(RelPath, Option<Stamp>)>> {
         let Some(open) = self.open else {
             return Flow::Done(None);
         };
@@ -247,13 +240,13 @@ impl Writer {
                 modified,
                 tail,
             });
-            Flow::Done(stamp.map(|stamp| (path, stamp)))
+            Flow::Done(Some((path, stamp)))
         })
     }
 
     /// Appends `kinds` as consecutive entries, durably, opening a segment named
     /// `fresh` when none is open. Returns the writer with the result. The caller
-    /// keeps the entries in the cached view, then calls [`Writer::record`].
+    /// takes the entries into its reader, then calls [`Writer::record`].
     ///
     /// Refuses, appending nothing, an entry too long for a line, and fails with
     /// [`Error::Rekey`] when the folder no longer holds this writer's head. A

@@ -1,16 +1,16 @@
-//! What a reader makes of the files it sees and what it remembers: each writer's
-//! tips, the entries it places after them, the entries it holds back or shows
-//! apart as runs, gaps and unplaced lines, its fork points, and the merged state.
+//! What a reader makes of the files it sees: each writer's tips, the entries it
+//! places after them, the entries it holds back or shows apart as runs, gaps and
+//! unplaced lines, its fork points, and the merged state.
 //!
-//! A pure function of its inputs, so that readers holding the same files and
-//! memories show the same, whatever order the files came in.
+//! A pure function of the files, so that readers seeing the same files show the
+//! same, whatever order the files came in.
 //!
 //! - **Tips** are the snapshots of a writer no other of its snapshots certifies.
 //! - A line a tip certifies by name, or one a segment certificate matches, is
-//!   **folded**. An unsealed file shorter than a certificate **waits**; after the
-//!   grace step its lines past the first are **unplaced**. A sealed one, or one
-//!   that differs at the certified position, diverged: only its first line is
-//!   folded.
+//!   **folded**. An unsealed file shorter than a certificate is a dropped version
+//!   or a diverged copy: its lines past the first are **unplaced**. A sealed
+//!   one, or one that differs at the certified position, diverged: only its
+//!   first line is folded.
 //! - An entry whose predecessor is a tip's head or placed, numbered one past it,
 //!   is **placed**; a genesis entry is placed when the writer has no tip.
 //! - A **fork point** is an entry with two successors, a certified predecessor
@@ -48,21 +48,6 @@ pub struct SeenSegment<'a> {
     pub sealed: bool,
 }
 
-/// What a reader remembers of one writer between reads.
-#[derive(Clone, PartialEq, Debug, Default)]
-pub struct Memory {
-    pub tips: Vec<Rc<Snapshot>>,
-    /// The entries it placed after its tips, and those it shows apart.
-    pub entries: BTreeMap<EntryHash, Rc<Entry>>,
-    pub forks: BTreeSet<Own>,
-}
-
-impl Memory {
-    pub fn is_empty(&self) -> bool {
-        self.tips.is_empty() && self.entries.is_empty() && self.forks.is_empty()
-    }
-}
-
 /// One item: a run, a gap or unplaced lines, with the net change it would make,
 /// which is empty for a run that would change nothing.
 #[derive(Clone, PartialEq, Debug)]
@@ -79,8 +64,6 @@ pub struct Item {
     /// Fields in `change` whatever the merged state shows: the run replaced an
     /// own write the reader no longer holds.
     pub forgotten: BTreeSet<FieldKey>,
-    /// As [`crate::report::Item::uncertain`].
-    pub uncertain: bool,
 }
 
 /// How one writer's entries are placed.
@@ -93,8 +76,6 @@ pub struct Placed {
     pub runs: Vec<Rc<Entry>>,
     pub gaps: Vec<Rc<Entry>>,
     pub unplaced: Vec<Rc<Entry>>,
-    /// Lines held back while the rest of their file arrives.
-    pub waiting: usize,
     /// Entries named by a dismissal, and never merged.
     pub dismissed: Vec<Rc<Entry>>,
     pub forks: BTreeSet<Own>,
@@ -102,9 +83,6 @@ pub struct Placed {
     pub fork: Option<u64>,
     /// Entries whose number does not follow their predecessor's.
     pub misnumbered: Vec<EntryHash>,
-    /// Whether the reader remembers a fork point that neither the files nor
-    /// its other memories show, as after a restore took one branch.
-    pub stale_forks: bool,
 }
 
 impl Placed {
@@ -147,13 +125,11 @@ impl Placed {
 #[derive(Clone, Default)]
 pub struct Derived {
     pub writers: BTreeMap<WriterId, Placed>,
-    /// What to remember of each writer.
-    pub memory: BTreeMap<WriterId, Memory>,
     pub folded: Folded,
     /// By writer.
     pub items: BTreeMap<WriterId, Vec<Item>>,
-    /// Fields where, after the grace step, a reference the files contradict
-    /// killed only its exact target.
+    /// Fields where a reference the files contradict killed only its exact
+    /// target.
     pub contradicted: BTreeSet<FieldKey>,
 }
 
@@ -161,24 +137,17 @@ pub struct Derived {
 struct Writer {
     writer: WriterId,
     tips: Vec<Rc<Snapshot>>,
-    /// Every entry seen or remembered, by hash.
+    /// Every entry seen, by hash.
     known: HashMap<EntryHash, Rc<Entry>, Quick>,
     /// Hashes of the lines of files seen.
     seen: BTreeSet<EntryHash>,
     folded: BTreeSet<EntryHash>,
-    waiting: BTreeSet<EntryHash>,
     ambiguous: BTreeSet<EntryHash>,
     named: BTreeSet<Own>,
     candidates: BTreeSet<EntryHash>,
     placed: BTreeSet<EntryHash>,
     misnumbered: BTreeSet<EntryHash>,
     forks: BTreeSet<Own>,
-    /// Whether it remembers a fork point that neither the files nor its other
-    /// memories show.
-    stale: bool,
-    /// Remembered entries no file shows that it keeps beside a tip numbered past
-    /// them only for a fork point it remembers.
-    unsure: BTreeSet<EntryHash>,
     lowest: Option<u64>,
 }
 
@@ -238,18 +207,8 @@ fn mentioned(tip: &Snapshot) -> impl Iterator<Item = Own> + '_ {
 }
 
 /// Places one writer's entries from its tips' heads, and finds its fork points.
-fn classify(
-    writer: WriterId,
-    seen: Option<&Seen<'_>>,
-    memory: Option<&Memory>,
-    graced: bool,
-) -> Writer {
-    let empty = Seen::default();
-    let seen = seen.unwrap_or(&empty);
-    let mut snapshots: Vec<Rc<Snapshot>> =
-        memory.map(|memory| memory.tips.clone()).unwrap_or_default();
-    snapshots.extend(seen.snapshots.iter().cloned());
-    let tips = tips(snapshots);
+fn classify(writer: WriterId, seen: &Seen<'_>) -> Writer {
+    let tips = tips(seen.snapshots.clone());
     let mut named = BTreeSet::new();
     for tip in &tips {
         named.insert(tip.head);
@@ -261,17 +220,12 @@ fn classify(
         known: HashMap::default(),
         seen: BTreeSet::new(),
         folded: BTreeSet::new(),
-        waiting: BTreeSet::new(),
         ambiguous: BTreeSet::new(),
         named,
         candidates: BTreeSet::new(),
         placed: BTreeSet::new(),
         misnumbered: BTreeSet::new(),
-        stale: false,
-        unsure: BTreeSet::new(),
-        forks: memory
-            .map(|memory| memory.forks.clone())
-            .unwrap_or_default(),
+        forks: BTreeSet::new(),
         lowest: None,
     };
     for segment in &seen.segments {
@@ -304,18 +258,15 @@ fn classify(
             Some(pos) => w
                 .folded
                 .extend(lines[..=pos].iter().map(|entry| entry.hash())),
-            // A sealed file cannot still be arriving: shorter than a
-            // certificate, it diverged from it. An unsealed one may be in
-            // flight, and waits; after the grace step it is a dropped version
-            // or a diverged copy.
-            None if !segment.sealed && shorter => match graced {
-                true => {
-                    w.folded.insert(first.hash());
-                    w.ambiguous
-                        .extend(lines[1..].iter().map(|entry| entry.hash()));
-                }
-                false => w.waiting.extend(lines.iter().map(|entry| entry.hash())),
-            },
+            // A sealed file shorter than a certificate diverged from it. An
+            // unsealed one may be a version a sync client dropped, one still
+            // arriving, or a copy that diverged before its end: nothing tells
+            // them apart.
+            None if !segment.sealed && shorter => {
+                w.folded.insert(first.hash());
+                w.ambiguous
+                    .extend(lines[1..].iter().map(|entry| entry.hash()));
+            }
             None if !certs.is_empty() => {
                 w.folded.insert(first.hash());
             }
@@ -327,21 +278,12 @@ fn classify(
             }
         }
     }
-    let mut candidates: BTreeSet<EntryHash> = w
+    let candidates: BTreeSet<EntryHash> = w
         .seen
         .iter()
         .copied()
-        .filter(|hash| {
-            !w.folded.contains(hash) && !w.waiting.contains(hash) && !w.ambiguous.contains(hash)
-        })
+        .filter(|hash| !w.folded.contains(hash) && !w.ambiguous.contains(hash))
         .collect();
-    for (hash, entry) in memory.into_iter().flat_map(|memory| &memory.entries) {
-        if w.seen.contains(hash) || w.certified(entry.own()) {
-            continue;
-        }
-        w.known.insert(*hash, Rc::clone(entry));
-        candidates.insert(*hash);
-    }
     let heads: BTreeMap<EntryHash, u64> = w
         .tips
         .iter()
@@ -382,46 +324,7 @@ fn classify(
             frontier.push((*hash, next));
         }
     }
-    // Remembered entries a tip has since passed are folded into it, but for
-    // those after a fork point the reader remembers that no tip names and no
-    // tip's head descends from through entries it knows.
     let tip_n = w.tip_n();
-    let remembered = |hash: &EntryHash| {
-        let entries = memory.and_then(|memory| memory.entries.get(hash));
-        entries.or_else(|| w.known.get(hash))
-    };
-    let mut named: BTreeSet<EntryHash> = w
-        .tips
-        .iter()
-        .flat_map(|tip| mentioned(tip))
-        .map(|own| own.hash)
-        .collect();
-    for tip in &w.tips {
-        let mut at = remembered(&tip.head.hash);
-        while let Some(entry) = at {
-            named.insert(entry.hash());
-            at = remembered(&entry.prev());
-        }
-    }
-    let fork_points: BTreeSet<EntryHash> = w.forks.iter().map(|fork| fork.hash).collect();
-    let after_fork = |entry: EntryHash| {
-        let prev = w.known.get(&entry).map(|entry| entry.prev());
-        prev.is_some_and(|prev| fork_points.contains(&prev))
-    };
-    let through = |hash: EntryHash| w.known.contains_key(&hash);
-    let mut memo = HashMap::default();
-    let mut unsure = BTreeSet::new();
-    candidates.retain(|hash| {
-        let passed = !w.seen.contains(hash)
-            && !w.placed.contains(hash)
-            && tip_n.is_some_and(|tip| w.entry(*hash).n() <= tip);
-        if passed && !named.contains(hash) && reaches(&w, *hash, &mut memo, &through, &after_fork) {
-            unsure.insert(*hash);
-            return true;
-        }
-        !passed
-    });
-    w.unsure = unsure;
     w.candidates = candidates;
     let mut successors: BTreeMap<EntryHash, Vec<EntryHash>> = BTreeMap::new();
     for hash in &w.candidates {
@@ -430,7 +333,6 @@ fn classify(
             .or_default()
             .push(*hash);
     }
-    let remembered = std::mem::take(&mut w.forks);
     let mut forks = BTreeSet::new();
     for (prev, next) in &successors {
         if *prev == EntryHash::ZERO {
@@ -478,8 +380,6 @@ fn classify(
             hash: EntryHash::ZERO,
         }));
     }
-    w.stale = !remembered.is_subset(&forks);
-    forks.extend(remembered);
     w.lowest = forks.iter().map(|own| own.n).min();
     w.forks = forks;
     w
@@ -658,29 +558,12 @@ impl Kills {
     }
 }
 
-/// Everything the reader derives from what it sees and remembers. `graced`
-/// names the writers the reader took the grace step for: an unsealed file of
-/// theirs shorter than a certificate no longer waits, and a reference to them
-/// the files contradict kills only its exact target.
-pub fn derive(
-    seen: &BTreeMap<WriterId, Seen<'_>>,
-    memory: &BTreeMap<WriterId, Memory>,
-    graced: &BTreeSet<WriterId>,
-) -> Derived {
-    let writers: BTreeSet<WriterId> = seen.keys().chain(memory.keys()).copied().collect();
-    let classified: BTreeMap<WriterId, Writer> = writers
+/// Everything the reader derives from the files it sees. A reference the files
+/// contradict kills only its exact target.
+pub fn derive(seen: &BTreeMap<WriterId, Seen<'_>>) -> Derived {
+    let classified: BTreeMap<WriterId, Writer> = seen
         .iter()
-        .map(|writer| {
-            (
-                *writer,
-                classify(
-                    *writer,
-                    seen.get(writer),
-                    memory.get(writer),
-                    graced.contains(writer),
-                ),
-            )
-        })
+        .map(|(writer, files)| (*writer, classify(*writer, files)))
         .collect();
     // Dismissals from what is merged so far: tips' own at or below their fork
     // point, and placed entries not beyond it.
@@ -725,8 +608,7 @@ pub fn derive(
         })
         .collect();
     let contradicted = |target: &Ref| {
-        let graced = graced.contains(&target.writer);
-        let Some((highest, at)) = shown.get(&target.writer).filter(|_| graced) else {
+        let Some((highest, at)) = shown.get(&target.writer) else {
             return false;
         };
         let other = at
@@ -809,18 +691,6 @@ pub fn derive(
             .copied()
             .filter(|hash| !w.folded.contains(hash))
             .collect();
-        let mut remembered: BTreeMap<EntryHash, Rc<Entry>> = BTreeMap::new();
-        for hash in w.placed.iter().chain(&runs).chain(&gaps) {
-            remembered.insert(*hash, Rc::clone(w.entry(*hash)));
-        }
-        derived.memory.insert(
-            w.writer,
-            Memory {
-                tips: w.tips.clone(),
-                entries: remembered,
-                forks: w.forks.clone(),
-            },
-        );
         merged_entries.insert(w.writer, in_order(&merged));
         placed_out.insert(
             w.writer,
@@ -830,12 +700,10 @@ pub fn derive(
                 runs: in_order(&runs),
                 gaps: in_order(&gaps),
                 unplaced: in_order(&unplaced),
-                waiting: w.waiting.len(),
                 dismissed: in_order(&covered),
                 forks: w.forks.clone(),
                 fork: w.lowest,
                 misnumbered: w.misnumbered.iter().copied().collect(),
-                stale_forks: w.stale,
             },
         );
         let ok = |n: u64| !w.beyond(n);
@@ -1012,7 +880,6 @@ fn items(
         entries: u64,
         writes: Vec<(FieldKey, Ref, Hlc, Value)>,
         forced: BTreeMap<FieldKey, (Ref, Hlc, Value)>,
-        uncertain: bool,
         /// Whether it holds an entry other than a continuation, which alone has
         /// no label to show.
         labeled: bool,
@@ -1113,7 +980,6 @@ fn items(
                 entries,
                 writes: own,
                 forced,
-                uncertain: false,
                 labeled: true,
             },
         );
@@ -1149,10 +1015,8 @@ fn items(
                 entries: 0,
                 writes: Vec::new(),
                 forced: BTreeMap::new(),
-                uncertain: false,
                 labeled: false,
             });
-            group.uncertain |= w.unsure.contains(&entry.hash());
             group.labeled |= !matches!(entry.kind(), EntryKind::More(_));
             group.run.last = entry.own();
             group.entries += 1;
@@ -1194,7 +1058,6 @@ fn items(
             entries: group.entries,
             change: latest,
             forgotten: group.forced.into_keys().collect(),
-            uncertain: group.uncertain,
         });
     }
     items
@@ -1208,143 +1071,40 @@ fn widen(span: Option<(Hlc, Hlc)>, at: Hlc) -> Option<(Hlc, Hlc)> {
     })
 }
 
-/// The writers of which `memory` holds something no file in `seen` holds: a
-/// tip whose file is gone, an entry neither a line nor a snapshot's head, or,
-/// as `derived` from them says, a fork point.
-pub fn unseen(
-    seen: &BTreeMap<WriterId, Seen<'_>>,
-    memory: &BTreeMap<WriterId, Memory>,
-    derived: &Derived,
-) -> BTreeSet<WriterId> {
-    let writers = memory.iter().filter(|(writer, memory)| {
-        let files = seen.get(writer);
-        let lines: BTreeSet<EntryHash> = files
-            .into_iter()
-            .flat_map(|files| files.segments.iter())
-            .flat_map(|segment| segment.entries.iter().map(|entry| entry.hash()))
-            .collect();
-        let heads: BTreeSet<Own> = files
-            .into_iter()
-            .flat_map(|files| files.snapshots.iter().map(|snapshot| snapshot.head))
-            .collect();
-        let tip_gone = memory.tips.iter().any(|tip| !heads.contains(&tip.head));
-        let entry_gone = memory
-            .entries
-            .values()
-            .any(|entry| !lines.contains(&entry.hash()) && !heads.contains(&entry.own()));
-        tip_gone || entry_gone
-    });
-    let stale = derived
-        .writers
-        .iter()
-        .filter(|(_, placed)| placed.stale_forks);
-    let stale = stale.map(|(writer, _)| *writer);
-    writers.map(|(writer, _)| *writer).chain(stale).collect()
-}
-
-/// The memories a reader keeps after the grace step for `writers`, whose
-/// memories alone it changes: of what no file it sees holds, only what
-/// something visible descends from, a line by its chain of predecessors or a
-/// snapshot by its certificates; and no fork point, which the files show again
-/// where they still hold one.
-pub fn grace(
-    seen: &BTreeMap<WriterId, Seen<'_>>,
-    memory: &BTreeMap<WriterId, Memory>,
-    writers: &BTreeSet<WriterId>,
-) -> BTreeMap<WriterId, Memory> {
-    let mut kept = BTreeMap::new();
-    for (writer, remembered) in memory {
-        if !writers.contains(writer) {
-            kept.insert(*writer, remembered.clone());
-            continue;
-        }
-        let empty = Seen::default();
-        let files = seen.get(writer).unwrap_or(&empty);
-        let lines: Vec<&Rc<Entry>> = files
-            .segments
-            .iter()
-            .flat_map(|segment| segment.entries.iter())
-            .collect();
-        let held: BTreeSet<EntryHash> = lines
-            .iter()
-            .map(|entry| entry.hash())
-            .chain(files.snapshots.iter().map(|snapshot| snapshot.head.hash))
-            .collect();
-        let known: HashMap<EntryHash, EntryHash, Quick> = remembered
-            .entries
-            .values()
-            .map(|entry| (entry.hash(), entry.prev()))
-            .collect();
-        let tip_heads: BTreeSet<EntryHash> =
-            remembered.tips.iter().map(|tip| tip.head.hash).collect();
-        let mut passed: BTreeSet<EntryHash> = BTreeSet::new();
-        for line in &lines {
-            let mut at = line.prev();
-            while (known.contains_key(&at) || tip_heads.contains(&at)) && passed.insert(at) {
-                match known.get(&at) {
-                    Some(prev) => at = *prev,
-                    None => break,
-                }
-            }
-        }
-        let descends = |own: Own| {
-            passed.contains(&own.hash)
-                || files
-                    .snapshots
-                    .iter()
-                    .any(|snapshot| snapshot.head != own && snapshot.names(own))
-        };
-        let visible = |tip: &Snapshot| {
-            files
-                .snapshots
-                .iter()
-                .any(|snapshot| snapshot.head == tip.head)
-        };
-        let memory = Memory {
-            tips: remembered
-                .tips
-                .iter()
-                .filter(|tip| visible(tip) || descends(tip.head))
-                .cloned()
-                .collect(),
-            entries: remembered
-                .entries
-                .iter()
-                .filter(|(hash, entry)| held.contains(hash) || descends(entry.own()))
-                .map(|(hash, entry)| (*hash, Rc::clone(entry)))
-                .collect(),
-            forks: BTreeSet::new(),
-        };
-        if !memory.is_empty() {
-            kept.insert(*writer, memory);
-        }
-    }
-    kept
+/// Whether `placed` holds nothing beside its merged chain and tips: no fork
+/// point, and no run, gap, unplaced, dismissed or misnumbered entry.
+fn settled(placed: &Placed) -> bool {
+    placed.fork.is_none()
+        && placed.runs.is_empty()
+        && placed.gaps.is_empty()
+        && placed.unplaced.is_empty()
+        && placed.dismissed.is_empty()
+        && placed.misnumbered.is_empty()
 }
 
 /// Merges `entries`, `writer`'s next entries after the last one `derived`
 /// merges of it, into `derived` as deriving afresh would. Returns false, having
 /// changed nothing, where they may change more than the fields they write: the
-/// writer has a fork point, a run, a gap or lines it holds back, an item is
-/// shown, an entry dismisses a run, names a writer in `graced` or does not
-/// follow.
-pub fn extend(
-    derived: &mut Derived,
-    writer: WriterId,
-    entries: &[Rc<Entry>],
-    graced: &BTreeSet<WriterId>,
-) -> bool {
+/// writer has a fork point, a run, a gap, or an unplaced, dismissed or
+/// misnumbered entry, an item is shown, or an entry dismisses a run, does not
+/// follow, or references a writer in such a state or an entry numbered past
+/// that writer's head, which the files may contradict.
+pub fn extend(derived: &mut Derived, writer: WriterId, entries: &[Rc<Entry>]) -> bool {
     let Some(placed) = derived.writers.get(&writer) else {
         return false;
     };
-    let settled = placed.fork.is_none()
-        && placed.runs.is_empty()
-        && placed.gaps.is_empty()
-        && placed.unplaced.is_empty()
-        && placed.waiting == 0;
-    if !settled || !derived.items.is_empty() {
+    if !settled(placed) || !derived.items.is_empty() {
         return false;
     }
+    let shown = |target: &Ref| {
+        let placed = derived
+            .writers
+            .get(&target.writer)
+            .filter(|placed| settled(placed));
+        placed
+            .and_then(Placed::head)
+            .is_some_and(|head| target.n <= head.n)
+    };
     let mut head = placed.head();
     for entry in entries {
         let follows = match head {
@@ -1354,12 +1114,11 @@ pub fn extend(
         let kind = entry.kind();
         let ops = contribution::ops(&kind);
         let dismisses = ops.iter().any(|op| matches!(op, Op::Dismiss { .. }));
-        let names_graced = ops.iter().any(|op| {
+        let unshown = ops.iter().any(|op| {
             let said = contribution::said(op);
-            let mut targets = said.refs.iter().map(|(_, target)| target.writer);
-            targets.any(|target| graced.contains(&target))
+            said.refs.iter().any(|(_, target)| !shown(target))
         });
-        if !follows || dismisses || names_graced {
+        if !follows || dismisses || unshown {
             return false;
         }
         head = Some(entry.own());
@@ -1431,10 +1190,6 @@ pub fn extend(
     folded.keep(beside);
     let placed = derived.writers.get_mut(&writer).expect("checked above");
     placed.merged.extend(entries.iter().cloned());
-    let memory = derived.memory.entry(writer).or_default();
-    memory
-        .entries
-        .extend(entries.iter().map(|entry| (entry.hash(), Rc::clone(entry))));
     true
 }
 
@@ -1518,12 +1273,8 @@ mod tests {
         values
     }
 
-    fn derived(seen: Vec<(WriterId, Seen<'_>)>, graced: bool) -> Derived {
-        let graced = match graced {
-            true => seen.iter().map(|(writer, _)| *writer).collect(),
-            false => BTreeSet::new(),
-        };
-        derive(&seen.into_iter().collect(), &BTreeMap::new(), &graced)
+    fn derived(seen: Vec<(WriterId, Seen<'_>)>) -> Derived {
+        derive(&seen.into_iter().collect())
     }
 
     #[test]
@@ -1548,16 +1299,13 @@ mod tests {
         let first = numbered(&misnumbered, 2, "c");
         let second = numbered(&first, 1, "d");
         let entries = [genesis, misnumbered, first.clone(), second];
-        let derived = derived(
-            vec![(
-                W,
-                Seen {
-                    segments: vec![lines(&entries, false)],
-                    snapshots: vec![],
-                },
-            )],
-            false,
-        );
+        let derived = derived(vec![(
+            W,
+            Seen {
+                segments: vec![lines(&entries, false)],
+                snapshots: vec![],
+            },
+        )]);
         let items = &derived.items[&W];
         assert_eq!(items.len(), 1, "{items:?}");
         assert_eq!(items[0].run.first, Some(first.hash()), "{items:?}");
@@ -1567,16 +1315,13 @@ mod tests {
     fn entries_arriving_in_any_order_are_merged_in_chain_order() {
         let entries = chain(W, &["a", "b", "c"]);
         let late: Vec<Rc<Entry>> = entries[1..].to_vec();
-        let early = derived(
-            vec![(
-                W,
-                Seen {
-                    segments: vec![lines(&late, false)],
-                    snapshots: vec![],
-                },
-            )],
-            false,
-        );
+        let early = derived(vec![(
+            W,
+            Seen {
+                segments: vec![lines(&late, false)],
+                snapshots: vec![],
+            },
+        )]);
         let placed = &early.writers[&W];
         assert_eq!(placed.merged, []);
         assert_eq!(
@@ -1585,16 +1330,13 @@ mod tests {
             "held back until their predecessor comes"
         );
         let reversed: Vec<Rc<Entry>> = entries.iter().rev().cloned().collect();
-        let all = derived(
-            vec![(
-                W,
-                Seen {
-                    segments: vec![lines(&reversed, false)],
-                    snapshots: vec![],
-                },
-            )],
-            false,
-        );
+        let all = derived(vec![(
+            W,
+            Seen {
+                segments: vec![lines(&reversed, false)],
+                snapshots: vec![],
+            },
+        )]);
         assert_eq!(all.writers[&W].merged, entries);
         assert_eq!(values(&all), ["c"]);
     }
@@ -1613,26 +1355,19 @@ mod tests {
             "r",
         );
         let all = vec![Rc::clone(&entries[0]), left, right];
-        let derived = derived(
-            vec![(
-                W,
-                Seen {
-                    segments: vec![lines(&all, false)],
-                    snapshots: vec![],
-                },
-            )],
-            false,
-        );
+        let derived = derived(vec![(
+            W,
+            Seen {
+                segments: vec![lines(&all, false)],
+                snapshots: vec![],
+            },
+        )]);
         let placed = &derived.writers[&W];
         assert_eq!(placed.fork, Some(0));
         assert_eq!(placed.runs.len(), 2);
         assert_eq!(values(&derived), ["a"]);
         let items = &derived.items[&W];
         assert_eq!(items.len(), 2, "one item per branch");
-        assert!(
-            items.iter().all(|item| !item.uncertain),
-            "both branches are seen"
-        );
     }
 
     /// `entries` of `W` folded into a snapshot that certifies the segment they
@@ -1641,41 +1376,6 @@ mod tests {
         let found = [Found::Lines(entries)];
         let snapshot = snapshot(W, entries[0].hash(), "w".into(), None, entries, found);
         Rc::new(snapshot.unwrap())
-    }
-
-    #[test]
-    fn a_remembered_entry_after_a_remembered_fork_stays_a_run_while_its_file_is_hidden() {
-        let entries = chain(W, &["a", "b", "c", "d"]);
-        let other = entry(
-            Some(&entries[0]),
-            vec![set("other", vec![entries[0].own().of(W)])],
-            "o",
-        );
-        let memory = Memory {
-            tips: Vec::new(),
-            entries: BTreeMap::from([(other.hash(), Rc::clone(&other))]),
-            forks: BTreeSet::from([entries[0].own()]),
-        };
-        let seen = BTreeMap::from([(
-            W,
-            Seen {
-                segments: vec![],
-                snapshots: vec![folded(&entries)],
-            },
-        )]);
-        let memory = BTreeMap::from([(W, memory)]);
-        let derived = derive(&seen, &memory, &BTreeSet::new());
-        assert_eq!(derived.writers[&W].runs, [Rc::clone(&other)]);
-        let uncertain = |first: Option<EntryHash>| {
-            let item = derived.items[&W].iter().find(|i| i.run.first == first);
-            item.map(|item| item.uncertain)
-        };
-        assert_eq!(
-            uncertain(Some(other.hash())),
-            Some(true),
-            "it may be the writer's own replaced entry"
-        );
-        assert_eq!(uncertain(None), Some(false), "the tip is a branch");
     }
 
     #[test]
@@ -1718,13 +1418,13 @@ mod tests {
                 segments: vec![lines(&chain, false)],
                 snapshots: vec![],
             };
-            let merged = derived(vec![(W, seen)], false);
+            let merged = derived(vec![(W, seen)]);
             assert_eq!(merged.folded.file_writes(E).len(), files, "merged");
             let tip = Seen {
                 segments: vec![],
                 snapshots: vec![folded(&chain)],
             };
-            let compacted = derived(vec![(W, tip)], false);
+            let compacted = derived(vec![(W, tip)]);
             assert_eq!(compacted.folded.file_writes(E).len(), files, "compacted");
         }
     }
@@ -1787,7 +1487,7 @@ mod tests {
             segments: vec![lines(lines_seen, false)],
             snapshots: vec![],
         };
-        derived(vec![(W, seen)], false)
+        derived(vec![(W, seen)])
     }
 
     #[test]
@@ -1821,20 +1521,13 @@ mod tests {
             segments: vec![],
             snapshots: vec![folded(&chain_of)],
         };
-        assert_eq!(
-            derived(vec![(W, tip)], false).folded,
-            from_lines(&chain_of).folded
-        );
+        assert_eq!(derived(vec![(W, tip)]).folded, from_lines(&chain_of).folded);
     }
 
-    /// The steps the walks back along chains take to derive what `seen` holds
-    /// beside what `memory` remembers.
-    fn steps_to_derive(
-        seen: BTreeMap<WriterId, Seen<'_>>,
-        memory: BTreeMap<WriterId, Memory>,
-    ) -> usize {
+    /// The steps the walks back along chains take to derive what `seen` holds.
+    fn steps_to_derive(seen: BTreeMap<WriterId, Seen<'_>>) -> usize {
         STEPS.set(0);
-        derive(&seen, &memory, &BTreeSet::new());
+        derive(&seen);
         STEPS.get()
     }
 
@@ -1871,51 +1564,40 @@ mod tests {
                 let next = entry(branch.last().map(|e| &**e), vec![set(value, vec![])], "b");
                 branch.push(next);
             }
-            let remembered = Memory {
-                tips: Vec::new(),
-                entries: branch[1..]
-                    .iter()
-                    .map(|e| (e.hash(), Rc::clone(e)))
-                    .collect(),
-                forks: BTreeSet::from([chain[0].own()]),
-            };
-            let tip = Seen {
-                segments: vec![],
-                snapshots: vec![folded(&chain)],
-            };
+            let tip = folded(&chain);
             let one = dismissal(&chain[1], &chain[1]);
             let all = dismissal(&chain[1], &chain[n - 1]);
+            let beside = Seen {
+                segments: vec![lines(&branch[1..], false)],
+                snapshots: vec![tip],
+            };
             let cases = [
                 (
                     "a dismissal of one entry",
                     BTreeMap::from([(W, held(&chain)), (X, held(&one))]),
-                    BTreeMap::new(),
                 ),
                 (
                     "a dismissal of every entry after the first",
                     BTreeMap::from([(W, held(&chain)), (X, held(&all))]),
-                    BTreeMap::new(),
                 ),
                 (
-                    "a remembered branch after a remembered fork",
-                    BTreeMap::from([(W, tip)]),
-                    BTreeMap::from([(W, remembered)]),
+                    "a branch beside a tip that folds the other",
+                    BTreeMap::from([(W, beside)]),
                 ),
                 (
                     "entries held without the first",
                     BTreeMap::from([(W, held(&chain[1..]))]),
-                    BTreeMap::new(),
                 ),
             ];
-            for (case, seen, memory) in cases {
-                let steps = steps_to_derive(seen, memory);
+            for (case, seen) in cases {
+                let steps = steps_to_derive(seen);
                 assert!(steps <= 4 * n, "{case}: {steps} steps for {n} entries");
             }
         }
     }
 
     #[test]
-    fn a_copy_of_a_certified_segment_is_folded_and_a_shorter_one_waits() {
+    fn a_copy_of_a_certified_segment_is_folded_and_a_shorter_one_is_unplaced() {
         let entries = chain(W, &["a", "b", "c"]);
         let tip = folded(&entries);
         assert!(
@@ -1926,18 +1608,22 @@ mod tests {
         let none: &[&str] = &[];
         let cases = [
             (&entries[..], false, 0, None, &["c"][..]),
-            (&shorter[..], false, 2, None, &["c"][..]),
+            (&shorter[..], false, 1, None, &["c"][..]),
             (&shorter[..], true, 0, Some(0), none),
         ];
-        for (copy, sealed, waiting, fork, shown) in cases {
+        for (copy, sealed, unplaced, fork, shown) in cases {
             let seen = Seen {
                 segments: vec![lines(copy, sealed)],
                 snapshots: vec![Rc::clone(&tip)],
             };
-            let derived = derived(vec![(W, seen)], false);
+            let derived = derived(vec![(W, seen)]);
             let placed = &derived.writers[&W];
             let case = format!("{} lines, sealed {sealed}", copy.len());
-            assert_eq!(placed.waiting, waiting, "{case}");
+            assert_eq!(
+                placed.unplaced.len(),
+                unplaced,
+                "{case}: an unsealed copy's lines past the first"
+            );
             assert_eq!(
                 placed.fork, fork,
                 "{case}: a sealed copy that ends early diverged"
@@ -1948,18 +1634,6 @@ mod tests {
                 "{case}: a forked tip is shown as an item"
             );
         }
-        let seen = Seen {
-            segments: vec![lines(&shorter, false)],
-            snapshots: vec![Rc::clone(&tip)],
-        };
-        let graced = derived(vec![(W, seen)], true);
-        let unplaced = &graced.writers[&W].unplaced;
-        assert_eq!(
-            unplaced.len(),
-            1,
-            "after the grace step, the lines past the first"
-        );
-        assert_eq!(values(&graced), ["c"]);
     }
 
     #[test]
@@ -1985,25 +1659,22 @@ mod tests {
         };
         let dismiss = entry(None, vec![Op::Dismiss { runs: vec![run] }], "dismiss");
         let theirs = vec![dismiss];
-        let derived = derived(
-            vec![
-                (
-                    W,
-                    Seen {
-                        segments: vec![lines(&own, false)],
-                        snapshots: vec![],
-                    },
-                ),
-                (
-                    X,
-                    Seen {
-                        segments: vec![lines(&theirs, false)],
-                        snapshots: vec![],
-                    },
-                ),
-            ],
-            false,
-        );
+        let derived = derived(vec![
+            (
+                W,
+                Seen {
+                    segments: vec![lines(&own, false)],
+                    snapshots: vec![],
+                },
+            ),
+            (
+                X,
+                Seen {
+                    segments: vec![lines(&theirs, false)],
+                    snapshots: vec![],
+                },
+            ),
+        ]);
         let items = &derived.items[&W];
         assert_eq!(items.len(), 1, "{items:?}");
         assert_eq!(items[0].run.first, Some(right.hash()));
@@ -2031,16 +1702,13 @@ mod tests {
             take: None,
         };
         let entries = vec![entry(None, vec![add, delete], "both")];
-        let derived = derived(
-            vec![(
-                W,
-                Seen {
-                    segments: vec![lines(&entries, false)],
-                    snapshots: vec![],
-                },
-            )],
-            false,
-        );
+        let derived = derived(vec![(
+            W,
+            Seen {
+                segments: vec![lines(&entries, false)],
+                snapshots: vec![],
+            },
+        )]);
         assert!(derived.folded.members(E, "s").is_empty());
         assert!(!derived.folded.present(E));
     }
@@ -2055,25 +1723,22 @@ mod tests {
         for _ in 0..300 {
             let mut own: Vec<Rc<Entry>> = Vec::new();
             let seen = |own: &[Rc<Entry>]| {
-                derived(
-                    vec![
-                        (
-                            W,
-                            Seen {
-                                segments: vec![lines(own, false)],
-                                snapshots: vec![],
-                            },
-                        ),
-                        (
-                            X,
-                            Seen {
-                                segments: vec![lines(&theirs, false)],
-                                snapshots: vec![],
-                            },
-                        ),
-                    ],
-                    false,
-                )
+                derived(vec![
+                    (
+                        W,
+                        Seen {
+                            segments: vec![lines(own, false)],
+                            snapshots: vec![],
+                        },
+                    ),
+                    (
+                        X,
+                        Seen {
+                            segments: vec![lines(&theirs, false)],
+                            snapshots: vec![],
+                        },
+                    ),
+                ])
             };
             let mut incremental = seen(&own);
             for step in 0..6 {
@@ -2105,7 +1770,7 @@ mod tests {
                 let next = entry(own.last().map(|e| &**e), vec![op], &format!("s{step}"));
                 own.push(Rc::clone(&next));
                 let afresh = seen(&own);
-                if extend(&mut incremental, W, &[next], &BTreeSet::new()) {
+                if extend(&mut incremental, W, &[next]) {
                     extended += 1;
                     assert_eq!(incremental.folded, afresh.folded, "step {step}");
                     assert_eq!(incremental.writers[&W].merged, afresh.writers[&W].merged);
@@ -2115,47 +1780,5 @@ mod tests {
             }
         }
         assert!(extended > 1000, "{extended} merged one by one");
-    }
-
-    #[test]
-    fn the_grace_step_keeps_what_a_visible_line_descends_from() {
-        let entries = chain(W, &["a", "b", "c"]);
-        let remembered = derived(
-            vec![(
-                W,
-                Seen {
-                    segments: vec![lines(&entries, false)],
-                    snapshots: vec![],
-                },
-            )],
-            false,
-        )
-        .memory;
-        let last = entries[2..].to_vec();
-        let seen = BTreeMap::from([(
-            W,
-            Seen {
-                segments: vec![lines(&last, false)],
-                snapshots: vec![],
-            },
-        )]);
-        let kept = grace(&seen, &remembered, &BTreeSet::from([W]));
-        let kept: BTreeSet<EntryHash> = kept[&W].entries.keys().copied().collect();
-        assert_eq!(
-            kept,
-            entries.iter().map(|e| e.hash()).collect(),
-            "c descends from a and b"
-        );
-        let none = BTreeMap::from([(W, Seen::default())]);
-        assert!(
-            grace(&none, &remembered, &BTreeSet::from([W])).is_empty(),
-            "nothing visible descends from them"
-        );
-        let other = WriterId::from_u128(0x77);
-        assert_eq!(
-            grace(&none, &remembered, &BTreeSet::from([other])),
-            remembered,
-            "a step for another writer"
-        );
     }
 }

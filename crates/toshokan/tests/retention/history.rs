@@ -354,7 +354,7 @@ impl History {
 
 /// What instance `i` of `history` sees when it writes under design `d`: the
 /// folder as it is, the lines of each segment that it has read, and each
-/// snapshot whose head it has read, read afresh.
+/// snapshot whose head it has read.
 pub fn writer_view<D: Design>(history: &History, i: usize, d: &D) -> Shown {
     let folder = materialize(history, d);
     let read = history.read_by(i);
@@ -373,7 +373,7 @@ pub fn writer_view<D: Design>(history: &History, i: usize, d: &D) -> Shown {
         files: &folder.files,
         seen: &seen,
     };
-    d.read(&reading, &Default::default()).0
+    d.read(&reading)
 }
 
 /// What a design makes of a history: the folder, and each snapshot's head.
