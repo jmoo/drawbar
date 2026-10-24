@@ -105,7 +105,7 @@ delivers files roughly in order.
 | `Retained` | The folder keeps every entry written, in a segment or folded in a snapshot, unless a restore or a dropped version took it. |
 | `EffectAccounted` | Every effect begun has a pending record or a closing entry in the folder, unless a restore took both. |
 | `DeliveredConverges` | Once every file has reached a reader, it merges, shows or has dismissed every kept entry, holds back only what follows a lost entry, and reports every fork among the kept entries it sees, whatever the delivery order. A reader without a cached view does the same. |
-| `DeliveredSettles` | Once every file has reached a reader, every effect is closed, reported, or that reader's own effect in flight; this includes the effects of a writer whose local root was lost. |
+| `DeliveredSettles` | Once every file has reached a reader, every effect is closed by an entry it holds, merged or on a branch it shows apart, reported, or that reader's own effect in flight; this includes the effects of a writer whose local root was lost. |
 | `Monotone` | A reader stops merging an entry only when it now shows it or has dismissed it, when a restore or a dropped version took it, or when the grace step drops it with nothing in sight descending from it, unless its local root is lost or replaced by a copy. |
 | `NoFlip` | A run stays shown until it is dismissed, no file the reader sees holds it, or the grace step. |
 | `ForksKept` | A fork point, once found, stays found, except by the grace step. |

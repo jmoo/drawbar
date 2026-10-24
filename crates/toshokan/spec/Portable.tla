@@ -258,8 +258,11 @@ Fresh(v) == Read(v, {}, {}, {}, {})
 \* Entries the files a reader sees hold, in a segment or folded in a snapshot.
 VisHolds(v) == Present(v) \cup Folds(Snaps(v))
 
-Closed(r) == {ents[x].closes : x \in acc[r]} \ {0}
-\* Pending records the reader sees whose effect no merged entry closes.
+\* Effects an entry the reader holds closes: merged, shown as a run, held back
+\* after a gap, or dismissed. One closed on a branch is that branch's, shown
+\* with it as an item, and never reported to settle again.
+Closed(r) == {ents[x].closes : x \in acc[r] \cup shown[r] \cup gaps[r] \cup dismissed[r]} \ {0}
+\* Pending records the reader sees whose effect no entry it holds closes.
 Reported(r) ==
     {files[f].eff : f \in {g \in Files : files[g].kind = "pend" /\ vis[r][g] = 1}}
         \ (Closed(r) \cup {inflight[r].eff})
