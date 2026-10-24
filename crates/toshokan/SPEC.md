@@ -118,8 +118,6 @@ Each install keeps, per library, a local root of its own that is never synced:
 | Path                             | Contents                                     |
 | -------------------------------- | -------------------------------------------- |
 | `<genesis>/head.json`            | The last entry this writer wrote             |
-| `<genesis>/view.bin`             | The cached view                              |
-| `<genesis>/view.log`             | What the cached view gained since            |
 | `<genesis>/drafts/<entity>.json` | An unsaved edit; `file-<hash>.json` a file's |
 | `<genesis>/lock`                 | Held while an instance writes as this writer |
 | `<genesis>/retired`              | Empty; the writer is never written again     |
@@ -144,7 +142,7 @@ instance does not hold itself.
 `head.json` is `{"writer":"<writer id>","head":"<entry hash>"}`, and
 `identities.json` is
 `[["<library path>",<length>,<modification time or null>,"<identity>"],…]`.
-A file in the local root that is replaced, such as `view.bin` or a draft, is
+A file in the local root that is replaced, such as `identities.json` or a draft, is
 first written beside it as `<name>.next` and synced; then `<name>` is removed
 and `<name>.next` renamed to it. A reader takes `<name>`, or `<name>.next` when
 `<name>` is missing. Every `head.json` of one writer has the same length, so a
@@ -494,8 +492,8 @@ finds its own history forked while it runs does the same.
 
 A new writer is created at an instance's first write. Its first segment holds
 its genesis entry; the segment, its directory and every directory above it are
-synced. Only then does the writer get its directory in the local root, its lock,
-its cached view and, last, `head.json`.
+synced. Only then does the writer get its directory in the local root, its lock
+and, last, `head.json`.
 
 A process appends to one segment, named at random when it first appends, and
 seals it when it closes it, compacts, or would take it past 1 MiB with an
@@ -510,20 +508,17 @@ new one. It looks first at the file it last knew to hold the entry, unchanged in
 length and last 34 bytes, then at every file whose last 34 bytes end that
 entry's line, and only then reads files whole. If no file holds it, the writer
 writes nothing and stops: a new writer takes over from the next write. After the
-append is synced it stats the segment, writes the cached view and then
-`head.json`, before the commit returns. An append that fails leaves the segment
+append is synced it stats the segment and writes `head.json`, before the commit
+returns. An append that fails leaves the segment
 without a seal marker and appends nothing more to it, so nothing follows a torn
 line.
 
 The entries are then durable, and the commit succeeds whatever fails after them
-(see Intents). A cached view or `head.json` that cannot be written lags: the
-instance writes it again at its next commit, refresh or close. A crash meanwhile
-loses nothing the folder holds. Reopening reads the folder into the cached view,
-and a `head.json` that names an earlier entry of the writer's chain still lets
-the instance continue the writer, after the chain's last entry; one that a
-failed write tore starts a new writer. Until the view is written, a crash
-followed by a restore of the folder that takes the commit's entries takes them
-from this install's view too.
+(see Intents). A `head.json` that cannot be written lags: the instance writes it
+again at its next commit, refresh or close. A crash meanwhile loses nothing the
+folder holds. A `head.json` that names an earlier entry of the writer's chain
+still lets the instance continue the writer, after the chain's last entry; one
+that a failed write tore starts a new writer.
 
 ## Reading
 
@@ -545,7 +540,7 @@ snapshot when it decodes as one; anything else is reported when the library
 opens, and read again next time. A snapshot whose `writer` is not `w` is
 reported, not used.
 
-Per writer, from the files it reads and what it remembers, a reader derives:
+Per writer, from the files it reads, a reader derives:
 
 - **Tips**: the writer's snapshots no other of its snapshots certifies, one per
   head.
@@ -553,10 +548,11 @@ Per writer, from the files it reads and what it remembers, a reader derives:
   first line and line at a segment certificate's position are the certificate's.
   This recognizes re-delivered files, late deletions, conflicted copies and the
   folded part of a segment that runs on past a tip's head.
-- **Waiting** lines: those of a file without a seal marker that starts like a
-  certified segment but is shorter, held back while the rest arrives. A sealed
-  file shorter than the certificate, or one with another line at its position,
-  diverged: only its first line is folded.
+- **Unplaced** lines: those past the first of a file without a seal marker that
+  starts like a certified segment but is shorter, held back: it may be a
+  version a sync client dropped, a copy that diverged before its end, or a file
+  still arriving. A sealed file shorter than the certificate, or one with
+  another line at its position, diverged: only its first line is folded.
 - **Merged** entries: one numbered one past its predecessor, which is a tip's
   head or merged, or a genesis entry when the writer has no tip.
 - **Fork points**: an entry with two successors; a folded entry, not a tip's
@@ -568,15 +564,9 @@ Per writer, from the files it reads and what it remembers, a reader derives:
 - **Gaps**: entries whose predecessor may still come, held back.
 - Entries a dismissal names, which no reader merges or shows; an entry after
   one is a run.
-- **Passed** entries: a remembered entry no file it reads holds, that it cannot
-  merge, and whose number a tip's head has reached, is folded into that tip as
-  if certified, unless it descends, through entries the reader knows, from a
-  fork point the reader remembers, when it is a run. When the tip does not
-  certify a folded one, it was on another branch: its change stays out of view,
-  with no item, until a file holding it is read again, and it is then a run.
 
-What the merge leaves out is shown as **items**: each run, gap, and after the
-grace step each file's lines it cannot place, with the net change it would make
+What the merge leaves out is shown as **items**: each run, gap and file's
+unplaced lines, with the net change it would make
 against the merged state, field by field, how many entries it holds and the
 earliest and latest of their clock readings. Of a run a tip holds, a reader
 counts every number from the run's first entry no dismissal names to the tip's
@@ -588,8 +578,7 @@ field. An intent takes changes from an item with ops that name its run in
 `take`, and dismisses a run with a `dismiss` op; a gap or unplaced lines cannot
 be dismissed. A run is shown until it is dismissed, with no change once it would
 change nothing; a gap or unplaced lines only while they would change something.
-A run holding a passed entry kept for a remembered fork point is marked
-uncertain: it may be its writer's own entries a tip replaced. A gap holding only
+A gap holding only
 `more` entries is not shown: their intent, which names them, has not arrived.
 
 A writer forks when two instances write as it: a copied local root, a virtual
@@ -598,73 +587,21 @@ reported once. The writer retires whenever its own instance's reader holds a
 fork of its history, which opening, a refresh, or a compaction refused with
 `Rekey::Forked` reports; an instance never compacts a history it knows forked.
 
-Each install keeps what it remembers as a cached view in its local root:
-`<genesis>/view.bin`, the whole view, and `<genesis>/view.log`, what the view
-gained since, one record after another. A view holds, per writer, its tips, the
-entries merged after them and shown as runs or gaps, and its fork points, with
-the state of the grace step. A new writer writes `view.bin` from the view its
-instance holds. After each read that changed what the view remembers, after each
-append, and when the instance closes, the instance appends a record of what the
-view gained to `view.log` and syncs it. It writes `view.bin` again, and then
-removes `view.log`, when `view.log` has grown past half of `view.bin` and 1 MiB
-more, when a record could not be appended, the last one is torn or one extends
-an earlier `view.bin`, when the view's tips changed or it let go of an entry,
-and when the view holds what neither file does. Each `view.bin` has a
-generation, one past that of the `view.bin` it replaces, and each record of
-`view.log` names the generation it extends. An instance without a writer keeps
-only a change to the grace step: it appends a record of the step's state and of
-what the step let go of to the `view.log` of the writer it loaded and of each
-retired writer whose view it read, and appends it again at its next save when an
-append fails.
+### What a reader holds
 
-Every open starts from the views of the install's writers joined: the view of
-the writer it continues, then those of the other live writers, then those of
-the retired writers that no view it has read holds already. A view also names
-the retired writers of the install whose views it holds, and says what the
-reader last found in each file of the writers' directories, so that a read reads
-again only the files that changed. A file's record is its length, modification
-time and last bytes, its stamp, and either the segment's lines, as `count`
-entries of the writer's chain from `first` to `last` ending at `end`, with the
-lines the view holds no entry for kept whole, or the head of the view's tip it
-holds. A file the view cannot give the lines or the snapshot of is read again.
+A reader derives what it shows from the files it sees and nothing else: every
+open reads every file of every writer's directory, so readers that see the same
+files show the same. While an instance runs, its reader keeps what it read of
+each file, to read again only the files that changed. What only a file the
+folder no longer holds gave is gone at the next read: while a sync client
+delivers a compaction's deletions before its snapshot, until the snapshot
+arrives, and at once after a restore of the folder from an older copy.
 
-The cached view is private to the install, and only the build that wrote it
-reads it. Each file is a sequence of records: the length of the record's payload
-as 8 bytes little-endian, a 16-byte check of the payload, then the payload. The
-check finds a record a crash tore or a disk damaged; it does not guard against
-forgery, since only the install writes its local root. This build computes it in
-two lanes of 64-bit multiplies over the payload. The payload's first byte names
-its format, 9; then come the generation, and the view, or what it gained or the
-grace step let go of, in this build's binary encoding: integers as LEB128,
-identifiers as their 16 bytes big-endian, text as its length and its UTF-8,
-lists as their length and their members, with each entry as its hash, its
-predecessor, its number, its clock reading and its decoded kind. An entry keeps
-the JSON of its line only when that is not the JSON this build writes for its
-kind, so every line is given back byte for byte. Neither a line nor its hash is
-read or checked again: the record's check stands for them. A record whose
-length, check or format byte does not hold ends the readable part of `view.log`.
-A reader replays the records in order onto `view.bin`, up to the first that is
-torn, skipping each that extends another generation, as a crash between writing
-`view.bin` and removing `view.log` leaves them; replaying a record twice changes
-nothing. A view that cannot be read this way is discarded, and the folder read
-from scratch.
-
-### The grace step
-
-A reader keeps showing what it remembers that no file it sees holds: a tip
-whose file is gone, an entry in a file sync has not brought or one a restore of
-the folder from an older copy took, or a fork point neither the files nor its
-other memories show. It counts that time per writer. Once it
-has held something of a writer no file holds for 24 hours, and at least one scan
-of every file has finished since, it takes the grace step for that writer: it
-lets go of each such tip and entry of the writer from which nothing it sees
-descends, a line by its chain of predecessors or a snapshot by its certificates,
-forgets the writer's fork points the files no longer show, and derives again.
-From then on an unsealed file of that writer shorter than a certificate no
-longer waits, and a reference to a number of that writer above the highest the
-files show of it, or to a number where the files show only another entry,
-kills only the write with its hash. Other writers are read as before. Facts
-only a restore took then disappear, without a prompt.
+A reference to a number of a writer above the highest the files show of it, or
+to a number at which the files show only another entry of that writer, kills
+only the write with its hash. What only the missing write replaced is shown
+beside the current value until the rest arrives: a conflict, never a value
+shown alone in place of a newer one.
 
 ## Binding
 
@@ -778,9 +715,9 @@ effects at step 4 stops partway, that settlement is logged and the commit fails
 before its own intent is tried.
 
 Otherwise a commit whose entries are durable succeeds, whatever fails after
-them, and says which parts of the instance's own state lag it: the cached view
-or `head.json` not written, which the next commit, refresh or close writes
-again; or the scan after it failed, which the next refresh repeats. Settling one
+them, and says which parts of the instance's own state lag it: `head.json` not
+written, which the next commit, refresh or close writes again; or the scan after
+it failed, which the next refresh repeats. Settling one
 of this writer's own effects and settling another writer's effect commit in the
 same way.
 
@@ -1197,9 +1134,8 @@ always a directory of the origin private file system.
   WebKit in whole seconds: two changes that keep a file's length within that
   time look alike.
 - **The page's thread.** An operation pauses between slices of work that makes
-  no request, such as parsing the logs it read, decoding and encoding the cached
-  view, gathering, identifying and binding the library's files, and indexing
-  what is shown. Deriving the merged state, placing and folding every writer's
+  no request, such as parsing the logs it read, gathering, identifying and
+  binding the library's files, and indexing what is shown. Deriving the merged state, placing and folding every writer's
   entries, runs without a pause. Once the core has held the page's thread for 6 ms since
   a reply or the last pause, the driver gives it back at the next pause by a
   message the page posts to itself, so the tasks waiting for the thread run

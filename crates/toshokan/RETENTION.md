@@ -7,15 +7,14 @@ checks toshokan against it.
 
 It keeps only as much history as stops two instances from overwriting each
 other's work; history is not kept for version-control features. Undo and redo
-reach only this session's intents and end at close. After a folder is restored
-from an older copy, the folder wins: no view keeps the facts the restore took
-once a grace period passes, and nothing asks the user to let them go or adopt
-them. Unsaved edits stay local to each install. A write whose basis was
-forgotten is shown as a conflict, never resolved silently either way, and there
-is no time after which an offline writer's work stops counting. A delete kills
-the fields it observed, so reviving an entity in a deletion conflict brings back
-only the concurrent edit. The grace period is 24 hours and at least one full
-rescan.
+reach only this session's intents and end at close. A reader keeps nothing
+between opens: it derives what it shows from the files it sees. After a folder is
+restored from an older copy, the folder wins at once, and nothing asks the user
+to let the facts the restore took go or adopt them. Unsaved edits stay local to
+each install. A write whose basis was forgotten is shown as a conflict, never
+resolved silently either way, and there is no time after which an offline
+writer's work stops counting. A delete kills the fields it observed, so reviving
+an entity in a deletion conflict brings back only the concurrent edit.
 
 ## 1. Entries
 
@@ -57,20 +56,18 @@ file holding one reaches a reader, under any name, the reader skips it:
   can tell which branch a dismissal meant after the segment is gone.
 
 The by-hash rule is what makes certification complete; segment certificates only
-keep it small. Its writer knows segments from its own last snapshot (whose
-contents its cached view holds even after another instance of the same writer
-deleted the file), from the files it read or wrote since, and from the files in
-its directory now. A view that lags costs hashes, not correctness. Certificates
+keep it small. Its writer knows segments from its own last snapshot, from the
+files it read or wrote since, and from the files in its directory now. A segment
+it does not know of costs hashes, not correctness. Certificates
 are kept forever.
 
 **Matching a file to a segment certificate.** A file matches when its first line
 has the certificate's first hash and its line at the certified position has the
 certified hash; its lines up to that position are folded. An unsealed file that
-starts with the first hash but is shorter waits: its lines are held back, and
-are not evidence of a fork, since sync may still be bringing the rest. After the
-grace step its lines past the first are held back as items the user can take
-from: the reader cannot tell a version a sync client dropped from a copy that
-diverged before its end. A sealed file cannot still be arriving, so a sealed
+starts with the first hash but is shorter has its lines past the first held back
+as items the user can take from: the reader cannot tell a version a sync client
+dropped, or one it is still bringing, from a copy that diverged before its end.
+They are not evidence of a fork. A sealed file cannot still be arriving, so a sealed
 file shorter than the certificate diverged from it, as does a file whose line at
 that position has another hash, as copies of a virtual machine resumed twice do:
 only its first line is folded, and the rest is placed or shown as a run by the
@@ -156,21 +153,21 @@ replaces that writer's contribution and the entries placed after the old tip tha
 it folds. The writer's latest own write on each field is in it, so an older own
 write a reader held is killed by the own-write rule at once.
 
-**A contradicted reference.** If, after the grace step for its target writer, a
-reference names a number above the highest the files show for that writer (a restore of one
-directory, or a dropped version), or a number at which the files show only
-another entry of that writer (a restore that took one branch), every reference
-of the same entry or contribution to that writer kills only the write with its
-exact hash, and the reader reports it. What only the lost write replaced then
-shows again, as it would for a reader holding every entry. Where a snapshot
-holds the reference instead of its entry, the earlier exact targets are gone,
-and a write the lost one did not replace can come back too: beside the current
-value as a conflict, never in place of it. Readers that noticed the absence at
-different times disagree on that field until both have passed the grace period.
+**A contradicted reference.** If a reference names a number above the highest
+the files show for its target writer (a restore of one directory, a dropped
+version, or an entry sync has not brought yet), or a number at which the files
+show only another entry of that writer (a restore that took one branch), every
+reference of the same entry or contribution to that writer kills only the write
+with its exact hash. What only the missing write replaced then shows again, as
+it would for a reader holding every entry. Where a snapshot holds the reference
+instead of its entry, the earlier exact targets are gone, and a write the
+missing one did not replace can come back too: beside the current value as a
+conflict, never in place of it. While sync is still bringing the missing entry,
+the conflict lasts until it arrives.
 
 ## 4. Placing entries
 
-Per writer `y`, from the files the reader sees and what it remembers:
+Per writer `y`, from the files the reader sees:
 
 - **Tips.** The snapshots of `y` no other snapshot of `y` certifies.
 - **Folded.** An entry a tip certifies by hash or head, or a line of a file that
@@ -178,8 +175,8 @@ Per writer `y`, from the files the reader sees and what it remembers:
   re-delivered files, late deletions, conflicted copies, crash leftovers,
   resurfaced files and the folded part of a segment that runs on past a tip's
   head.
-- **Waiting.** The lines of a file that starts like a certified segment but is
-  shorter. Held back until the rest arrives.
+- **Unplaced.** The lines past the first of an unsealed file that starts like a
+  certified segment but is shorter (section 2). Shown as an item.
 - **Placed.** An entry whose predecessor is a tip's head or placed, or a genesis
   entry when `y` has no tip.
 - **Gap.** Any other entry whose predecessor may still come after the tips'
@@ -194,11 +191,10 @@ folds that is numbered at or below a tip's head: certificates are complete, so
 that line is off the tip's chain, even when the predecessor sits inside a
 segment certificate and cannot be checked by hash. Every entry of `y` numbered
 above a fork point, on either branch, and every live write in a tip of `y`
-numbered above it, is a run: no branch is merged beside another. A reader
-remembers the fork points it found, so a fork stays a fork when one branch's
-files go before the other's; certificates make every fork point derivable from
-the files again, so a reader without that memory finds the same ones, except for
-a fork inside a segment (see What users see).
+numbered above it, is a run: no branch is merged beside another. Certificates
+make every fork point derivable from the files, so a reader finds it again
+whichever branch's files it sees first, except for a fork inside a segment (see
+What users see).
 
 **Several tips.** When two snapshots of `y` do not certify each other, the
 writer forked and both sides compacted. Their parting is the highest entry every
@@ -231,26 +227,9 @@ replaced, so a branch's compaction can change the merged value of such a field.
 An entity left with no live existence write this way shows its live fields, as
 in a deletion conflict.
 
-**What the reader remembers** of `y`: its tips, the entries it placed after
-them, the entries it shows as runs, its fork points and its file records. It
-places the entries of the files it sees, and those it remembers, again from the
-tips' heads whenever its tips change, so its placement is a function of the
-files once they have all arrived, and readers agree.
-
-**Passed while hidden.** A remembered entry that no file the reader sees holds,
-that it cannot place after a tip's head, and whose number a tip of its writer
-has reached, is taken as folded into that tip, before the grace step. When the
-tip certifies it, this is the ordinary fold. When it does not, the entry is on
-another branch of a fork. If the reader remembers a fork point the entry
-descends from, through entries it knows, it keeps the entry as a run. Otherwise,
-having never seen both branches, or having forgotten the fork point at the grace
-step, it cannot tell the entry from one the tip folds: the entry's change drops
-out of view, with no item, and the fields it wrote show what the merge shows
-without it. It comes back as a run, and its fork is found, as soon as a file
-holding it is visible again; if none ever is, it stays gone, as the grace step
-would have left it. A fresh reader of the same files cannot place such an entry
-either, so holding it would keep a cached reader apart from a fresh one until
-the grace step.
+**A function of the files.** A reader's placement depends on the files it sees
+and nothing else, so readers that see the same files agree, whatever order they
+arrived in.
 
 Re-deliveries are recognized by certificates, and a fork near the head is found
 by the two successors of its fork point.
@@ -316,39 +295,40 @@ It never deletes a segment without a seal marker (`SealedOnly`) or a file it
 could not place on its chain (`FoldedOnly`). Superseded files may go at once.
 `CheckFirst` stays: a writer never appends after an entry the folder lost.
 
-## 7. The cached view and restores
+## 7. Restores and sync in flight
 
-The view keeps, per writer, the tips' contents, the entries placed after them,
-the entries shown as runs, the fork points, the file records, and the merged
-state; and the dismissals. It keeps nothing a restore took once the grace
-period passes.
+A reader keeps nothing between opens, and nothing between reads that the files
+it sees do not hold. Every open reads every file of every writer's directory.
 
-**The grace step.** When the reader holds something of a writer that no file it
-sees holds — a tip whose file is gone, an entry in flight, a fork point only it
-remembers — it keeps showing it,
-without a report. Once that has lasted 24 hours and at least one full rescan, it
-drops each such item from which nothing it sees descends: no line whose chain of
-predecessors reaches it, and no snapshot that certifies it. A greater number on
-another branch is not enough, or a restore that took one branch of a clone would
-leave that branch shown for good. It also forgets that writer's fork points the
-files no longer show, as when a restore took one branch. It then places that
-writer's files again. Facts only a restore took disappear, with no prompt. The
-day counts per writer, and only the writers the reader took the step for are
-read strictly from then on (section 3, a contradicted reference); the others'
-files still wait while they arrive.
+**A restore.** After the folder, or one writer's directory, is restored from an
+older copy, a reader shows what the restored files say at its next read. Facts
+only the restore took disappear, with no prompt; a reference to an entry the
+restore took is contradicted (section 3), so what only that entry replaced comes
+back beside the current value. A writer whose last entry the folder lost retires
+(`CheckFirst`).
 
-The guard is what tells a restore from a slow sync. It cannot tell a snapshot
-lost by hand, or by a sync fault, while a newer segment survives: the cached
-reader keeps the snapshot, a fresh one holds the segment back as a gap, and they
-disagree for good. A dropped version of a segment does the same to the entries it
-lost while a later line of the same chain survives. Neither is something the
-protocol does. After a compaction, a reader
-may receive the deletions before the new snapshot; the writer's later entries,
-which descend from the missing snapshot's head, show it has moved on, and the
-reader keeps waiting. A writer that wrote nothing since compacting gives no such sign: after
-24 hours its facts disappear until the snapshot arrives, and entries after them
-wait as a gap. Edits made meanwhile are judged against the smaller view, so at
-worst they produce visible conflicts.
+**Sync in flight.** A sync client delivers files in any order, so a reader can
+see less than the folder holds:
+
+- A compaction's deletions can arrive before its snapshot. Until it does, the
+  writer's facts the deleted segments held are not shown, and the writer's later
+  entries, which follow the missing snapshot's head, wait as a gap.
+- A segment can arrive before the entries it continues: a gap.
+- A segment still arriving, shorter than a certificate, shows its lines past
+  the first as unplaced (section 2) until it is whole.
+- A reference to an entry sync has not brought is contradicted (section 3):
+  what it replaced shows beside the current value as a conflict until the entry
+  arrives.
+
+What disappears comes back when its file arrives. A change the user makes
+meanwhile is judged against what is shown, so at worst it produces a visible
+conflict: references are never dropped, so nothing it replaced comes back
+alone, and nothing another writer wrote is lost.
+
+A snapshot lost by hand, or by a sync fault, while a newer segment survives
+leaves that segment held back as a gap until the writer's next snapshot reaches
+it. A dropped version of a segment shows its surviving lines past the first as
+unplaced. Neither is something the protocol does.
 
 ## 8. Writers, pending records, undo and drafts
 
@@ -384,35 +364,31 @@ removes named, its file effects. It ends at close. Drafts are unchanged.
   branch of that writer's history after the fork, with the net change it makes,
   to keep or dismiss. Neither branch's later changes are merged until the user
   chooses; the writers involved retire and continue under new ids.
-- After a folder restore: for up to a day, and a full rescan, the facts the
-  restore took stay; then they disappear, without a prompt.
+- After a folder restore: the folder as restored, at the next read. The facts
+  the restore took disappear, without a prompt.
+- While a sync client is delivering: facts can disappear and come back, as
+  when a compaction's deletions arrive before its snapshot, and a field can show
+  a conflict until the entry a reference names arrives. A change made in that
+  window is judged against what is shown: at worst a visible conflict, never a
+  silent loss, and never a replaced value shown alone again.
 - A field another writer emptied, or an entity another writer deleted, while
   this one edited it: a register conflict, or the entity shown in a deletion
   conflict with only the concurrent edit.
-- A change from another branch of a forked writer whose file sync hides once a
-  snapshot of that writer has passed its number, when the reader never found
-  the fork or forgot it at the grace step: gone from view, with no item, until
-  its file is visible again, then shown as that branch's item.
+- A change from another branch of a forked writer whose file sync hides: gone
+  from view, with no item, until its file is visible again, then shown as that
+  branch's item.
 - A run the user dismissed, after its branch compacted past it: its branch shown
   again as an item.
-- A run of entries only the reader remembers, after a fork point it remembers,
-  that a snapshot of their writer numbered past them does not name: an item
-  marked uncertain, since it may be the writer's own writes that snapshot
-  replaced, as when one instance resumed twice continued one segment.
 - Entries after a gap: an item from the start, whose changes the user can take,
   merged as soon as the gap fills.
 - A field whose earlier value a branch compacted away: shown in that branch's
   item until the user takes a value, even when it matches the merged one.
-- A writer that wrote nothing after compacting, behind a sync slower than a day:
-  its facts disappear until its snapshot arrives.
-- After the grace step, a reference whose target a restore took kills only that
-  target, and what earlier references of its writer covered, that a snapshot
-  holding the reference no longer names, comes back beside the current value as
-  a conflict.
-- A segment a sync client dropped the newest lines of while a later line
-  survives: a cached reader keeps what it holds of the lost lines and a fresh
-  reader holds the survivor back as a gap, until the writer's next snapshot
-  reaches both.
+- A reference whose target a restore took kills only that target, and what
+  earlier references of its writer covered, that a snapshot holding the
+  reference no longer names, comes back beside the current value as a conflict.
+- A segment a sync client dropped the newest lines of: its surviving lines past
+  the first shown as unplaced, and a later line of the same chain held back as
+  a gap, until the writer's next snapshot reaches both.
 - A fork inside a segment, when an instance copied while its segment was open
   and both copies compacted: pre-fork entries with no effect left can show as
   runs, and own writes that may be pre-fork as a forgotten basis.
@@ -424,18 +400,20 @@ removes named, its file effects. It ends at close. Drafts are unchanged.
 
 **Kept.**
 
-- Readers holding the same files merge and show the same entries once delivery
-  completes and, after a restore, the grace period has passed.
+- Readers that see the same files merge and show the same entries, at once,
+  whatever order the files came in; after a restore, what the restored folder
+  says.
 - Every kept entry is merged, shown as a run, dismissed by the user, or held back
   after an entry a restore or a dropped version took.
 - An entry no fork precedes and that follows nothing lost is merged.
 - No two branches of a writer are ever merged together.
-- A run stays shown until it is dismissed, its files go, the grace step, or a
-  tip of its writer passes its number while sync hides its file.
+- A run stays shown until it is dismissed or its files go.
 - A step by one branch of a forked writer changes no merged value, except on a
   field shown as a forgotten basis.
-- A replaced value or removed member never comes back without a conflict:
-  references are never dropped, and a write a reference covers stays dead.
+- A replaced value or removed member never comes back without a conflict, also
+  while sync is in flight: references are never dropped, a write a reference
+  covers stays dead, and a reference the files contradict shows what it
+  replaced only beside the current value.
 - Chain order, single-writer directories, no bytes leaving the folder except by
   emptying a trash, total recovery, opening writing nothing.
 
@@ -443,13 +421,13 @@ removes named, its file effects. It ends at close. Drafts are unchanged.
 
 - A fork's branches are not merged side by side: each branch after the fork
   point is a run for the user.
-- The cached view does not only grow: the grace step drops what no file holds
-  and nothing visible descends from.
+- What a reader shows does not only grow while sync delivers files out of
+  order: facts can disappear and come back.
 - A branch that compacts past a pre-fork value it replaced takes that value out
   of the merge, and the field shows as a forgotten basis.
 - Reviving a deleted entity brings back only the concurrent edit.
-- A fresh reader may show a field empty until the write that replaced the
-  cached reader's value arrives.
+- A reader may show a field empty, or as a conflict, until the write that
+  replaced the value it showed arrives.
 
 ## Expected size
 
@@ -486,16 +464,16 @@ These grow with deletions, segments and writers, not with entries.
 
 There are no migrations before 1.0. This format lives under `writers.2/`; an old
 folder opens as an empty library whose files are all unbound, and the old
-directories are left for older builds. Old cached views are discarded by their
-format byte; old `head.json` files are ignored.
+directories are left for older builds. A local root's `view.bin` and `view.log`,
+which older builds kept, are ignored, as are old `head.json` files.
 
 ## The model
 
 [spec/Portable.tla](spec/Portable.tla) checks placement, forks, runs,
-certificates, dismissals, the grace step, restores of the folder and of one
-directory, and dropped versions, over an abstract merge (a reader's state is the
-set of entries it merged). See [spec/README.md](spec/README.md) for the rules,
-properties and configs.
+certificates, dismissals, restores of the folder and of one directory, and
+dropped versions, over an abstract merge (a reader's state is the set of entries
+it merged, derived from the files it sees). See [spec/README.md](spec/README.md)
+for the rules, properties and configs.
 
 Its rules are constants, so a config can drop one and show what it prevents:
 
@@ -504,21 +482,20 @@ Its rules are constants, so a config can drop one and show what it prevents:
 | Certificates (`Uncertified`) | A writer cannot delete a segment below its snapshot's anchor, and readers show that segment's folded lines as a run |
 | Carrying certificates forward (`Uncarried`) | A segment deleted two compactions ago arrives late and is shown as a run |
 | Sequence numbers (`Unnumbered`) | An entry whose predecessor has not arrived is shown as a run, then merged when it arrives |
-| Forks found through certificates (`Anchors`) | Once the original has moved two entries past a fork and compacted, only a reader's memory still shows the fork, and a reader without it merges the original's branch |
-| The grace step's guard (`Unguarded`) | A reader that received a compaction's deletions before its snapshot stops merging a writer whose newer entries it already sees |
+| Forks found through certificates (`Anchors`) | Once the original has moved two entries past a fork and compacted, a reader that still sees the original's deleted segment finds the fork, and one that does not merges the original's branch |
 | `CheckFirst` (`Unchecked`) | A writer appends after an entry a restore took |
 | Quarantine of dismissed entries (`Unquarantined`) | A reader that never saw a fork merges the branch a dismissal it holds names |
 
 Properties checked, beyond chain order, single-writer directories, retention and
 recovery: every seen entry is merged, held back, shown or dismissed; nothing is
 both merged and shown; no entry is placed on top of a tip that folds it; a run
-appears only for a fork, a loss, or what a reader still holds of one; at rest,
-every entry no fork precedes is merged, readers with and without a cached view
-merge and show the same, and remembered fork points are ones the files show; no
-two branches are merged; dismissals hold; a reader stops merging only by
-showing, losing, or the guarded grace step; a run stays shown until dismissed,
-gone or the grace step; a writer retires on a fork only when an entry of its
-directory has two successors; and every reader converges under fair delivery.
+appears only for a fork or a loss; at rest, every entry no fork precedes is
+merged, and a reader merges, shows and finds the fork points that a reader of
+the folder's files alone does, whatever deleted files it still sees; no two
+branches are merged; dismissals hold; as files arrive, a reader stops merging an
+entry only by showing or dismissing it, and a run stays shown until dismissed; a
+writer retires on a fork only when an entry of its directory has two
+successors; and every reader converges under fair delivery.
 
 The fast and deep sets are listed in [spec/README.md](spec/README.md).
 
@@ -530,20 +507,20 @@ writers and a clone, which may resume mid-segment, write two entities'
 existence, two registers and two set members, delete and revive, dismiss and
 take runs, and compact after any entry, or after a sync client dropped the open
 segment's newest line. Each writer writes from what the design under test shows
-it of the folder. Every folder they leave is read by fresh readers, by cached
-readers in every delivery order up to a cap (with deleted files delivered early,
-late or never, conflicted copies, and a grace step halfway), at every subset of
-its files, after a restore of the folder or of one directory to every earlier
-state, and after every dropped version of a segment.
+it of the folder. Every folder they leave is read at rest, along every delivery
+order up to a cap (with deleted files delivered early, late or never), with
+conflicted copies, at every subset of its files, after a restore of the folder
+or of one directory to every earlier state, and after every dropped version of a
+segment. A reader holds nothing between reads.
 
 The properties: readers at rest show what the oracle shows; a replaced value
-never shows alone again along a cached reader's deliveries, unless what replaced
-it was dismissed or lies beyond a fork, or the field carries an item or a
-contradiction report; a branch's step changes no merged value outside a
-forgotten basis; no reader merges what a dismissal names; a contribution stays
-within one own write and one reference per field and writer; and after a fault
-and the grace step, the folder wins, beside what the guard keeps because
-something visible descends from it. An extra value fails unless the oracle's
+never shows alone again along a reader's deliveries, unless what replaced it was
+dismissed or lies beyond a fork, or the field carries an item or a contradiction
+report; a branch's step changes no merged value outside a forgotten basis; no
+reader merges what a dismissal names; a contribution stays within one own write
+and one reference per field and writer; and after a fault, the folder wins, but
+for a value that a line the folder holds replaced on its own chain, through the
+entry the fault took. An extra value fails unless the oracle's
 value shows beside it, after a fork or, after a fault, on a field the reader
 reports contradicted, or the field is a forgotten basis. A missing value fails
 unless an item of its writer shows it on that field, or shows that field as a
