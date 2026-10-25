@@ -174,6 +174,9 @@ pub struct Store {
     /// [`SlotView::kept`] holds each once it is kept, or `None` where the view's edit
     /// was let go of since.
     keeping: VecDeque<(u64, Option<(u64, blake3::Hash)>)>,
+    /// Whether the log has said an unsaved edit could not be kept since a keep last
+    /// succeeded.
+    told_unkept: bool,
     /// What names were last compared in for duplicates: the workspace's layout, and the
     /// [`crate::folders::Folders::names_hash`].
     compared: Option<(u64, u64)>,
@@ -288,6 +291,7 @@ impl Store {
             instrument: None,
             views: BTreeMap::new(),
             keeping: VecDeque::new(),
+            told_unkept: false,
             compared: None,
             deferred: BTreeSet::new(),
             focused: true,
@@ -404,6 +408,18 @@ impl Store {
     pub fn losing(&self, workspace: &Workspace, browser: &Browser) -> bool {
         let unheld = self.unheld(workspace).next().is_some();
         self.writing() || unheld || self.unkept_view(workspace) || self.held(browser)
+    }
+
+    /// Say that an unsaved edit could not be kept in this install's own state, or let go
+    /// of, unless it was said since a keep last succeeded.
+    fn say_unkept(&mut self, why: &str, log: &mut Log) {
+        if std::mem::replace(&mut self.told_unkept, true) {
+            return;
+        }
+        log.error(format!("keeping an unsaved edit: {why}"));
+        log.trouble(format!(
+            "An unsaved edit could not be kept for later: {why}."
+        ));
     }
 
     /// Whether a slot view's unsaved edit is not kept as it stands, by a keep answered.
@@ -1437,26 +1453,28 @@ impl Store {
                 let sent = self.drafting.pop_front();
                 match (sent, kept) {
                     (Some((id, key, stamp, base)), Ok(())) if key == of => {
+                        self.told_unkept = false;
                         self.drafted.insert(id, (key, stamp, base));
                     }
-                    (_, Ok(())) => {}
-                    (_, Err(why)) => unkept(&why, log),
+                    (_, Ok(())) => self.told_unkept = false,
+                    (_, Err(why)) => self.say_unkept(&why, log),
                 }
             }
             Event::SlotDrafted { slot, kept } => {
                 let sent = self.keeping.pop_front();
                 match (sent, kept) {
                     (Some((id, Some(held))), Ok(())) => {
+                        self.told_unkept = false;
                         let view = self.views.get_mut(&id).filter(|view| view.slot == slot);
                         if let Some(view) = view {
                             view.kept = Some(held);
                         }
                     }
-                    (_, Ok(())) => {}
-                    (_, Err(why)) => unkept(&why, log),
+                    (_, Ok(())) => self.told_unkept = false,
+                    (_, Err(why)) => self.say_unkept(&why, log),
                 }
             }
-            Event::Unkept(why) => unkept(&why, log),
+            Event::Unkept(why) => self.say_unkept(&why, log),
             Event::Failed(why) => {
                 log.error(why.as_str());
                 log.trouble(format!(
@@ -3913,14 +3931,6 @@ fn kept_rows(
 fn let_go_of_keeps(keeping: &mut VecDeque<(u64, Option<(u64, blake3::Hash)>)>, id: u64) -> bool {
     let sent = keeping.iter_mut().filter(|sent| sent.0 == id);
     sent.fold(false, |live, sent| sent.1.take().is_some() || live)
-}
-
-/// Say that an unsaved edit could not be kept in this install's own state, or let go of.
-fn unkept(why: &str, log: &mut Log) {
-    log.error(format!("keeping an unsaved edit: {why}"));
-    log.trouble(format!(
-        "An unsaved edit could not be kept for later: {why}."
-    ));
 }
 
 /// A name as the library list shows it.

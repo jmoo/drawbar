@@ -4153,6 +4153,37 @@ fn a_slot_view_reverted_while_its_keep_is_in_flight_leaves_no_kept_edit() {
     assert_eq!(second.said("has the unsaved edit it had"), 0);
 }
 
+/// A keep that fails at every autosave is said once, and again only once a keep has
+/// succeeded since.
+#[cfg(unix)]
+#[test]
+fn a_keep_that_keeps_failing_is_said_once_per_run_of_failures() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let mut session = Session::open(&root);
+    let id = session.view_slot("N1", Location::from_user(1, 1), program);
+    session.edit(id, "96");
+    session.autosave();
+    let kept = root.local().join("unsaved");
+    let mode = |mode| fs::set_permissions(&kept, fs::Permissions::from_mode(mode));
+    let failing = "could not be kept for later";
+    mode(0o555).unwrap();
+    session.edit(id, "12");
+    for _ in 0..3 {
+        session.autosave();
+    }
+    assert_eq!(session.said(failing), 1, "the first failure only");
+    mode(0o755).unwrap();
+    session.autosave();
+    mode(0o555).unwrap();
+    session.edit(id, "24");
+    session.autosave();
+    mode(0o755).unwrap();
+    assert_eq!(session.said(failing), 2, "again after a keep succeeded");
+}
+
 /// A slot view's kept edit, over a slot that holds something else since, is shown over
 /// the view, and drawbar asks which to keep.
 #[test]
