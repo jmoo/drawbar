@@ -42,7 +42,8 @@ struct Entry {
 }
 
 /// The partition every session that reads the tables opens, before anything says which
-/// partitions exist. Every recorded exchange opens this one.
+/// partitions exist. Every recorded exchange, all from the Electro 5, opens this one, and
+/// another model is assumed to have a partition 4.
 const BOOTSTRAP: ObjectClass = ObjectClass::Unknown(4);
 
 impl Geometry {

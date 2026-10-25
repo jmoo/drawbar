@@ -1193,8 +1193,8 @@ pub fn loadable(state: &DeviceState, class: ObjectClass, at: Location) -> bool {
 /// What a write into this class disturbs beyond the slot it lands in, for the question
 /// asked before it happens.
 ///
-/// A settings write makes the instrument reload the selected program, so panel state
-/// the player has not stored is lost.
+/// A settings write makes the Electro 5 reload the selected program, so panel state the
+/// player has not stored is lost. Another model is assumed to do the same.
 ///
 /// Confirmed on hardware.
 pub fn write_warning(class: ObjectClass) -> Option<&'static str> {
@@ -1463,8 +1463,8 @@ impl Device {
         if self.asked_deps.as_ref().is_some_and(rewritten) {
             self.asked_deps = None;
         }
-        // Confirmed on hardware.
-        // Writing the loaded slot requires SELECT to reload it.
+        // Writing the Electro 5's loaded slot requires SELECT to reload it, and another
+        // model is assumed alike. Confirmed on hardware.
         let written = match &cmd {
             DeviceCmd::Put { class, at, .. } | DeviceCmd::Rename { class, at, .. } => {
                 Some((*class, vec![*at]))

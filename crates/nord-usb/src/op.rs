@@ -3,6 +3,10 @@
 //! Each primitive runs inside a [`Session`]; callers can batch by opening one
 //! session and applying primitives repeatedly. Operations send the progress labels the
 //! instrument displays but omit reads that only refresh a host UI.
+//!
+//! ⚠️ The device statuses named here ([`VACANT`], [`OUT_OF_RANGE`], [`OCCUPIED`],
+//! [`NAME_TAKEN`]) were read off the Electro 5. Every other model is assumed to answer
+//! with the same codes.
 
 use crate::envelope::{self, FileSink, FileSource, Opened};
 use crate::error::{Error, Result};

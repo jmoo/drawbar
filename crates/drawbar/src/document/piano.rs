@@ -3596,7 +3596,7 @@ const CAPABILITIES: Stands = [
     (Cap::Editable, "strokes are self-contained"),
     (Cap::Editable, "one stroke at a time, on request"),
     (Cap::Editable, "banks, layers, range"),
-    (Cap::Editable, "class 1"),
+    (Cap::Editable, "into the instrument's piano library"),
     (
         Cap::Verified,
         "directory and audio re-laid, checksum recomputed",

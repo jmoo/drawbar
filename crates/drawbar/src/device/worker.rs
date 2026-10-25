@@ -603,7 +603,7 @@ async fn put<T: Transport>(
 ///
 /// ⚠️ Called once the failed write's session has closed, never inside it. A write left
 /// unfinished is dropped when its session closes, but a second write in that session makes
-/// the instrument keep the unfinished one, as an object of its own in another slot.
+/// the Electro 5 keep the unfinished one, as an object of its own in another slot.
 ///
 /// Confirmed on hardware.
 async fn put_back<T: Transport>(

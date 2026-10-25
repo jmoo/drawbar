@@ -115,7 +115,7 @@ enum Command {
         action: DeviceAction,
     },
 
-    /// Programs on the instrument (object class 4), or `.ne5p` files.
+    /// Programs on the instrument, or `.ne5p` files.
     ///
     /// Slots are `BANK:SLOT`, as the instrument displays them. The read-only verbs and
     /// `edit` also take a file.
@@ -124,33 +124,32 @@ enum Command {
         action: ProgramAction,
     },
 
-    /// Set lists on the instrument (object class 5). Same verbs as `nord program`.
+    /// Set lists on the instrument. Same verbs as `nord program`.
     Setlist {
         #[command(subcommand)]
         action: SetlistAction,
     },
 
-    /// Live slots 1:1 to 1:3, which hold the panel as it stands (object class 6).
+    /// Live slots, which hold the panel as it stands.
     Live {
         #[command(subcommand)]
         action: LiveAction,
     },
 
-    /// The global settings singleton (object class 7): the System, MIDI and Sound
-    /// menus, plus the panel state the instrument restores at power-up.
+    /// The global settings singleton: the System, MIDI and Sound menus, plus the panel
+    /// state the instrument restores at power-up.
     Settings {
         #[command(subcommand)]
         action: SettingsAction,
     },
 
-    /// Sample instruments in the instrument's library (object class 3), or `.nsmp`
-    /// files.
+    /// Sample instruments in the instrument's library, or `.nsmp` files.
     Sample {
         #[command(subcommand)]
         action: SampleAction,
     },
 
-    /// Piano libraries on the instrument (object class 1), or `.npno` files.
+    /// Piano libraries on the instrument, or `.npno` files.
     Piano {
         #[command(subcommand)]
         action: PianoAction,
@@ -425,8 +424,8 @@ enum LiveAction {
     /// Change fields in a live slot, in a `.ne5l` file or on the instrument.
     ///
     /// A live slot holds a program body under another tag, so the fields are the same as
-    /// `nord program edit`'s. Slots are 1:1 to 1:3, and the instrument overwrites them
-    /// in place.
+    /// `nord program edit`'s. An Electro 5 has slots 1:1 to 1:3 and overwrites them in
+    /// place.
     Edit(EditArgs),
 }
 
@@ -518,22 +517,22 @@ enum SettingsSlotAction {
 enum LiveSlotAction {
     /// Read a live slot from the instrument or a `.ne5l` file. Read-only.
     ///
-    /// Prints a summary, or with `--out` writes the file. Live slots are 1:1, 1:2 and
-    /// 1:3. The live slot is the panel itself, so each `--sweep` step can capture one
-    /// change without storing a program.
+    /// Prints a summary, or with `--out` writes the file. An Electro 5 has live slots 1:1,
+    /// 1:2 and 1:3. The live slot is the panel itself, so each `--sweep` step can capture
+    /// one change without storing a program.
     Get(GetArgs),
 
     /// Report everything the instrument knows about a live slot, or a `.ne5l` file's
     /// header. Read-only.
     Info {
-        /// Slot to describe (1:1, 1:2 or 1:3), or a file.
+        /// Slot to describe, such as 1:1, or a file.
         #[arg(value_name = "FILE|BANK:SLOT")]
         at: String,
     },
 
     /// List the piano and sample library objects the live panel uses. Read-only.
     Deps {
-        /// Slot to inspect (1:1, 1:2 or 1:3), or a file.
+        /// Slot to inspect, such as 1:1, or a file.
         #[arg(value_name = "FILE|BANK:SLOT")]
         at: String,
     },

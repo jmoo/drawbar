@@ -865,16 +865,22 @@ impl Message {
 /// partition alone. Confirmed on hardware. Each model orders its partitions its own way,
 /// so a class is found by its partition's name ([`Self::partition_name`]), and
 /// [`Classes`] gives the index on the attached instrument.
+///
+/// ⚠️ How each class takes a write ([`Self::overwrites_in_place`],
+/// [`Self::renames_and_copies`], [`Self::names_its_slots`], [`Self::is_library`]) and how
+/// Live and Settings are addressed were measured on the Electro 5. Every other model is
+/// assumed to match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ObjectClass {
     Piano,
     Sample,
     Program,
     SetList,
-    /// The three Live slots. Wire-addressed `0:0..0:2`; bodies are `ne5p`-shaped.
+    /// The live buffer: the panel as it stands. The Electro 5's has three slots,
+    /// wire-addressed `0:0..0:2`, holding `ne5p`-shaped bodies.
     Live,
-    /// The global settings singleton, wire-addressed `0:0`. Reports no body checksum
-    /// (`0xffffffff`), like the library classes.
+    /// The global settings singleton. The Electro 5's is wire-addressed `0:0` and reports
+    /// no body checksum (`0xffffffff`), like the library classes.
     Settings,
     /// A partition this crate cannot name, by its index in the instrument's table. The
     /// `(Native)` partitions are among them: each lists a library's objects again, in
@@ -922,14 +928,14 @@ impl ObjectClass {
             ObjectClass::SetList => "set lists".into(),
             ObjectClass::Live => "live slots".into(),
             ObjectClass::Settings => "settings".into(),
-            ObjectClass::Unknown(v) => format!("class {v}"),
+            ObjectClass::Unknown(v) => format!("partition {v}"),
         }
     }
 
-    /// The name an instrument's partition table gives this class's partition. `None` for
-    /// a partition this crate does not name.
+    /// The name an instrument's partition table gives this class's partition, as the
+    /// Electro 5's table spells it. `None` for a partition this crate does not name.
     ///
-    /// Confirmed on hardware for the Electro 5.
+    /// Confirmed on hardware.
     pub fn partition_name(self) -> Option<&'static str> {
         match self {
             ObjectClass::Piano => Some("Piano"),

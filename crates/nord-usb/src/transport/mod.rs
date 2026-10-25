@@ -37,12 +37,13 @@ pub const PRODUCT_ID_ELECTRO5: u16 = 0x0027;
 /// CoreMIDI and ALSA keep working, and the browser refuses to claim it.
 pub const CLASS_VENDOR_SPECIFIC: u8 = 0xff;
 
-/// Vendor bulk IN endpoint (device → host). The same in every corpus capture.
+/// Vendor bulk IN endpoint (device → host). The Electro 5's, in every corpus capture;
+/// another model is assumed to use the same, and opening fails plainly where it does not.
 pub const EP_IN: u8 = 0x82;
 /// Vendor bulk OUT endpoint (host → device).
 pub const EP_OUT: u8 = 0x03;
 
-/// The read buffer Nord Sound Manager posts. The device answers in chunks of about
+/// The read buffer Nord Sound Manager posts. The Electro 5 answers in chunks of about
 /// 32 KB. The device chooses that size, not USB: the link is Full Speed with 64-byte
 /// packets.
 pub const READ_BUFFER: usize = 49152;
