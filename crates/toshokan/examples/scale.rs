@@ -225,6 +225,24 @@ impl World {
         }
     }
 
+    /// Delete the identities `local`'s scans kept, as a second install has none.
+    fn forget_identities(&mut self, local: &str) {
+        let at = Layout::identities();
+        match self {
+            Self::Mem { locals, .. } => {
+                if let Some(disk) = locals.get(local) {
+                    let _ = disk.perform(Io::Remove {
+                        root: Root::Local,
+                        path: at,
+                    });
+                }
+            }
+            Self::Native { locals, .. } => {
+                let _ = std::fs::remove_file(locals.join(local).join(at.as_str()));
+            }
+        }
+    }
+
     fn counted(&mut self, local: &str, stats: &Rc<RefCell<IoStats>>) -> Counted {
         Counted {
             inner: self.raw(local),
@@ -1152,6 +1170,24 @@ fn main() {
         scanned.changed.len(),
         scanned.departed.len()
     );
+    lib.close().unwrap();
+    for _ in 0..args.runs {
+        let (mut lib, _) = open_warm(&mut bench, &mut world, "open warm");
+        bench.measure("rescan after open, identities kept", || {
+            lib.rescan().unwrap()
+        });
+        lib.close().unwrap();
+    }
+    for _ in 0..args.runs {
+        world.forget_identities(own_local);
+        let (mut lib, _) = open_warm(&mut bench, &mut world, "open warm");
+        bench.measure("rescan after open, no identities.json", || {
+            lib.rescan().unwrap()
+        });
+        lib.close().unwrap();
+    }
+    let (mut lib, _) = open_warm(&mut bench, &mut world, "open warm");
+    lib.rescan().unwrap();
 
     let view = lib.view();
     let sample: Vec<EntityId> = (0..1000)
