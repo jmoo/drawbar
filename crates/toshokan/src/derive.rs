@@ -29,7 +29,6 @@ use crate::contribution::{self, Contribution, FieldKey, Held, Said, Value};
 use crate::ids::{EntityId, EntryHash, Hlc, WriterId};
 use crate::log::{Entry, EntryKind, Op, Own, Ref, Run};
 use crate::merge::{Beside, Folded, Live};
-use crate::quick::Quick;
 use crate::report::ItemKind;
 use crate::snapshot::Snapshot;
 
@@ -138,7 +137,7 @@ struct Writer {
     writer: WriterId,
     tips: Vec<Rc<Snapshot>>,
     /// Every entry seen, by hash.
-    known: HashMap<EntryHash, Rc<Entry>, Quick>,
+    known: HashMap<EntryHash, Rc<Entry>>,
     /// Hashes of the lines of files seen.
     seen: BTreeSet<EntryHash>,
     folded: BTreeSet<EntryHash>,
@@ -457,7 +456,7 @@ impl Dismissals {
 fn reaches(
     w: &Writer,
     start: EntryHash,
-    memo: &mut HashMap<EntryHash, bool, Quick>,
+    memo: &mut HashMap<EntryHash, bool>,
     through: &dyn Fn(EntryHash) -> bool,
     hit: &dyn Fn(EntryHash) -> bool,
 ) -> bool {
@@ -494,8 +493,8 @@ thread_local! {
 fn root_in(
     w: &Writer,
     entry: &Rc<Entry>,
-    members: &HashSet<EntryHash, Quick>,
-    roots: &mut HashMap<EntryHash, Rc<Entry>, Quick>,
+    members: &HashSet<EntryHash>,
+    roots: &mut HashMap<EntryHash, Rc<Entry>>,
 ) -> Rc<Entry> {
     let mut passed = Vec::new();
     let mut at = Rc::clone(entry);
@@ -535,12 +534,12 @@ struct Candidate {
 #[derive(Default)]
 struct Kills {
     /// Per field: each target, and whether it kills only its exact hash.
-    refs: HashMap<FieldKey, Vec<(Ref, bool)>, Quick>,
+    refs: HashMap<FieldKey, Vec<(Ref, bool)>>,
     /// Per writer and entity, the numbers of its own deletes.
-    deletes: HashMap<(WriterId, EntityId), Vec<u64>, Quick>,
+    deletes: HashMap<(WriterId, EntityId), Vec<u64>>,
     /// Per field and writer, the highest number below which a take of a run of
     /// that writer settles the field.
-    takes: HashMap<(FieldKey, WriterId), u64, Quick>,
+    takes: HashMap<(FieldKey, WriterId), u64>,
     contradicted: BTreeSet<FieldKey>,
 }
 
@@ -588,7 +587,7 @@ pub fn derive(seen: &BTreeMap<WriterId, Seen<'_>>) -> Derived {
     }
     let dismissals = Dismissals(runs_dismissed);
     // The lines and snapshot heads the files show, for contradicted references.
-    let shown: HashMap<WriterId, (u64, Numbered), Quick> = seen
+    let shown: HashMap<WriterId, (u64, Numbered)> = seen
         .iter()
         .map(|(writer, files)| {
             let mut at: BTreeMap<u64, BTreeSet<EntryHash>> = BTreeMap::new();
@@ -796,14 +795,14 @@ pub fn derive(seen: &BTreeMap<WriterId, Seen<'_>>) -> Derived {
         }
         keep_beside(&mut beside, *writer, &tail);
     }
-    let lowest: HashMap<WriterId, u64, Quick> = classified
+    let lowest: HashMap<WriterId, u64> = classified
         .values()
         .filter_map(|w| Some((w.writer, w.lowest?)))
         .collect();
     let beyond = |writer: WriterId, n: u64| lowest.get(&writer).is_some_and(|fork| n > *fork);
     // A write is live unless its writer's later own write to its field, or its
     // own delete of its entity, a reference or a take kills it.
-    let mut latest_own: HashMap<(WriterId, FieldKey), u64, Quick> = HashMap::default();
+    let mut latest_own: HashMap<(WriterId, FieldKey), u64> = HashMap::default();
     for candidate in &candidates {
         let slot = latest_own
             .entry((candidate.at.writer, candidate.field.clone()))
@@ -989,8 +988,8 @@ fn items(
         (&placed.gaps, ItemKind::Gap),
         (&placed.unplaced, ItemKind::Unplaced),
     ] {
-        let members: HashSet<EntryHash, Quick> = list.iter().map(|entry| entry.hash()).collect();
-        let mut roots: HashMap<EntryHash, Rc<Entry>, Quick> = HashMap::default();
+        let members: HashSet<EntryHash> = list.iter().map(|entry| entry.hash()).collect();
+        let mut roots: HashMap<EntryHash, Rc<Entry>> = HashMap::default();
         for entry in list.iter() {
             let root = root_in(w, entry, &members, &mut roots);
             let key = match root.prev() {
@@ -1123,7 +1122,7 @@ pub fn extend(derived: &mut Derived, writer: WriterId, entries: &[Rc<Entry>]) ->
         }
         head = Some(entry.own());
     }
-    let forks: HashMap<WriterId, u64, Quick> = derived
+    let forks: HashMap<WriterId, u64> = derived
         .writers
         .iter()
         .filter_map(|(writer, placed)| Some((*writer, placed.fork?)))

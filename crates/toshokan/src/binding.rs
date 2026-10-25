@@ -424,7 +424,7 @@ pub(crate) fn resolve(
     }
     let away = away(facts, &FileKeys::of(scan, names), names);
     let mut logged: HashMap<&RelPath, Vec<Said>> = HashMap::new();
-    for (_, written) in facts {
+    for written in facts.values() {
         for fact in written.iter().map(|fact| &fact.value) {
             if unknown.binary_search(&fact.path).is_ok() {
                 let said = (fact.len, fact.modified, fact.identity);
@@ -540,7 +540,7 @@ impl FileKeys {
 /// files' keys; see [`Away`].
 fn away(facts: &Facts, files: &FileKeys, names: &dyn Names) -> HashSet<u64> {
     let mut away = Away::default();
-    for (_, written) in facts {
+    for written in facts.values() {
         away.entity(written, files.held(written, names));
     }
     away.finish();

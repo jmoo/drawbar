@@ -19,7 +19,6 @@ use crate::log::{FileFact, Ref};
 use crate::path::RelPath;
 use crate::report::TrashItem;
 use crate::schema::{KeyKind, Raw, Written};
-use crate::small::SmallMap;
 
 /// A live write: who wrote it, where, when, and what.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -94,7 +93,7 @@ fn writes<V>(writes: Option<&Writes<V>>) -> &[Held<V>] {
     writes.map_or(&[], Vec::as_slice)
 }
 
-/// Each key `now` or `was` holds, with its entry in each.
+/// A key's entry in each of two maps, as [`side_by_side`] gives it.
 pub(crate) type Paired<'a, K, V> = (Option<(&'a K, &'a V)>, Option<(&'a K, &'a V)>);
 
 /// Each key `now` or `was` holds, with its entry in each, in order of key.
@@ -134,9 +133,9 @@ fn changed<'a, V>(now: &'a [Held<V>], was: &'a [Held<V>]) -> Vec<(&'a Held<V>, b
 #[derive(Clone, PartialEq, Debug, Default)]
 struct EntityState {
     existence: Writes<bool>,
-    registers: SmallMap<Name, Writes<Option<Raw>>>,
+    registers: BTreeMap<Name, Writes<Option<Raw>>>,
     /// Per key, per member, its live adds and removes.
-    sets: SmallMap<Name, SmallMap<Raw, Writes<bool>>>,
+    sets: BTreeMap<Name, BTreeMap<Raw, Writes<bool>>>,
     file: Writes<Option<FileFact>>,
 }
 
@@ -279,19 +278,16 @@ impl EntityState {
                 value: created,
             }),
             (FieldKey::Register(_, key), Value::Register(value)) => {
-                self.registers
-                    .slot(&key, || (key.clone(), Writes::default()))
-                    .push(Held { at, stamp, value });
+                let writes = self.registers.entry(key).or_default();
+                writes.push(Held { at, stamp, value });
             }
             (FieldKey::Member(_, key, member), Value::Member(added)) => {
-                let members = self.sets.slot(&key, || (key.clone(), SmallMap::default()));
-                members
-                    .slot(&member, || (member.clone(), Writes::default()))
-                    .push(Held {
-                        at,
-                        stamp,
-                        value: added,
-                    });
+                let members = self.sets.entry(key).or_default();
+                members.entry(member).or_default().push(Held {
+                    at,
+                    stamp,
+                    value: added,
+                });
             }
             (FieldKey::File(_), Value::File { fact, .. }) => self.file.push(Held {
                 at,

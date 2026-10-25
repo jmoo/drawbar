@@ -435,7 +435,7 @@ Steady state, for the schema the harness writes:
 
 | Part | Memory | Folder (JSON) |
 | --- | --- | --- |
-| Live writes | ~100 B each; with maps and the view's index, 2.3 KB per entity | ~110 B each, ~1.1 KB per entity |
+| Live writes | ~100 B each, besides the maps that hold them | ~110 B each, ~1.1 KB per entity |
 | References | ~48 B each | ~90 B each |
 | A deleted entity | ~100–150 B, forever | the same |
 | A removed member never re-added | one reference per remover, forever | the same |

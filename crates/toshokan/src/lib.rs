@@ -145,7 +145,6 @@ pub mod path;
 #[doc(hidden)]
 pub mod pending;
 pub mod plan;
-mod quick;
 #[doc(hidden)]
 pub mod reader;
 #[doc(hidden)]
@@ -154,7 +153,6 @@ pub mod report;
 pub mod schema;
 #[doc(hidden)]
 pub mod simulator;
-mod small;
 #[doc(hidden)]
 pub mod snapshot;
 pub mod trash;
