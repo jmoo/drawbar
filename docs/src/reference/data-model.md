@@ -589,7 +589,9 @@ Every intent is one step of this session's undo, and only this session's. What
 an undo takes back, and when it is refused because another drawbar changed the
 same thing since, is in [Undo and redo](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#undo-and-redo). The Edit menu names
 each step by its intent and what it names (`Intent::describe`), from the steps
-the library made (`Committed::made`); a change that failed is no step. The
+the library made (`Committed::made`); a change that failed is no step. A batch
+whose intent would not fit one entry is refused before it writes anything, each
+part answered with why (`store::keeper::TOO_LARGE`). The
 workspace follows what an undo moved or changed without a word about changes
 outside drawbar (`Viewed::undone`).
 

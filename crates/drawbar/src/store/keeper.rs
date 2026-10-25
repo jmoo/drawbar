@@ -1331,6 +1331,9 @@ async fn holds(
     Ok(storage::identity(at, stat.len, read).await? == identity)
 }
 
+/// Why a change is refused that is too large for the library to log as one.
+const TOO_LARGE: &str = "it is too large a change to make at once; change fewer files at a time";
+
 /// What failed to fill a file, or why toshokan refused the change, as the app tells it.
 fn failure(e: Error, filled: Option<io::Error>) -> Failure {
     if let Some(e) = filled {
@@ -1338,6 +1341,9 @@ fn failure(e: Error, filled: Option<io::Error>) -> Failure {
     }
     match e {
         Error::Refused(Refusal::Changed(_) | Refusal::Directory(_)) => Failure::Moved,
+        Error::Refused(Refusal::Invalid(toshokan::Invalid::TooLong)) => {
+            Failure::Io(TOO_LARGE.to_string())
+        }
         e => Failure::Io(e.to_string()),
     }
 }
@@ -1780,6 +1786,30 @@ mod tests {
         let failed = |event: &Event| matches!(event, Event::Failed(why) if why.starts_with("deleting Locked/b.ne5p"));
         assert!(answers.iter().any(failed), "{answers:?}");
         assert!(root.at("Locked/b.ne5p").exists());
+    }
+
+    /// A change too large for the library to log as one entry is refused whole, each
+    /// file saying why, and the folder keeps every file.
+    #[test]
+    fn a_change_too_large_to_log_as_one_is_refused_whole_and_says_why() {
+        const FILES: usize = 13_000;
+        let root = Temp::new();
+        let dir = format!("{}/{}", "a".repeat(200), "b".repeat(200));
+        fs::create_dir_all(root.at(&dir)).unwrap();
+        let name = |n: usize| format!("{dir}/{n:05}{}.ne5p", "c".repeat(190));
+        for n in 0..FILES {
+            fs::write(root.at(&name(n)), b"x").unwrap();
+        }
+        let mut keeper = keeper(&root);
+        let files = (0..FILES).map(|n| (path(&name(n)), keeper.listed(&name(n))));
+        let answers = keeper.run_one(Cmd::Intent(Intent::Delete {
+            files: files.collect(),
+        }));
+        let refused =
+            |event: &Event| matches!(event, Event::Failed(why) if why.ends_with(TOO_LARGE));
+        assert_eq!(answers.iter().filter(|event| refused(event)).count(), FILES);
+        assert!((0..FILES).all(|n| root.at(&name(n)).exists()));
+        assert_eq!(keeper.trash_now(), []);
     }
 
     /// A save to the path of a tagged file deleted outside drawbar writes that entity's
