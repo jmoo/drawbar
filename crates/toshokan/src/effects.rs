@@ -27,7 +27,7 @@ use crate::flow::{self, each, fold, ok, Fallible, Flow, Held};
 use crate::ids::{EntityId, Nonce, WriterId};
 use crate::io::{Capabilities, Io, IoError, Kind, Meta, Root, Task};
 use crate::layout::Layout;
-use crate::log::{Displaced, FileFact};
+use crate::log::{Displaced, FileFact, Ref};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord};
 use crate::plan::{Content, Expect, FileChange};
@@ -182,6 +182,10 @@ pub struct FileEnd {
     /// undo leaves alone.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pin: bool,
+    /// The writes of the entity's file register its op replaces, as the writer
+    /// that carries the effects out knew them when it wrote the record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replaces: Vec<Ref>,
 }
 
 /// Where a file no entity is bound to is once the first `done_after` steps are
@@ -463,6 +467,7 @@ impl Resolver<'_> {
                     path: Some(path),
                     done_after: 0,
                     pin: true,
+                    replaces: Vec::new(),
                 });
             }
             FileChange::Restore {
@@ -795,6 +800,7 @@ impl Resolver<'_> {
             path,
             done_after,
             pin: false,
+            replaces: Vec::new(),
         });
     }
 }

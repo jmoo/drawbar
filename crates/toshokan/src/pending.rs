@@ -291,6 +291,7 @@ mod tests {
                 path: Some(path("a/f")),
                 done_after: 2,
                 pin: false,
+                replaces: Vec::new(),
             }],
             unbound: Vec::new(),
             trees: Vec::new(),

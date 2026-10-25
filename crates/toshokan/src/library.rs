@@ -26,7 +26,8 @@ use crate::intent;
 use crate::io::{Capabilities, Io, Kind, Lock, Root, Task};
 use crate::layout::Layout;
 use crate::log::{
-    Bound, Displaced, Entry, EntryKind, FileFact, Forked, Genesis, Logged, Op, Settle, Settlement,
+    Bound, Displaced, Entry, EntryKind, FileFact, Forked, Genesis, Logged, Op, Ref, Settle,
+    Settlement,
 };
 use crate::merge::{side_by_side, Folded, Part};
 use crate::path::RelPath;
@@ -789,11 +790,13 @@ impl Library {
         pins.cloned().collect()
     }
 
-    /// `logged` with every file op and displaced item carrying out `effects` may
-    /// add, each as long as it can be, and the fork points of every writer they
-    /// name: an intent whose widest entry does not fit a line is refused before
-    /// anything is written.
-    fn widest(&self, logged: &Logged, effects: &EffectPlan) -> Logged {
+    /// `logged` after the `facts` settling a record adds, with every file op and
+    /// displaced item carrying out `effects` may add, each as long as it can be,
+    /// and a fork point for every writer its ops name, as late as one can be. Its
+    /// refs are fixed when the record is written, so no entry logging the intent,
+    /// at commit or when the record settles, is longer: an intent whose widest
+    /// entry does not fit a line is refused before anything is written.
+    fn widest(&self, logged: &Logged, facts: &[Op], effects: &EffectPlan) -> Logged {
         let fact = |path: &RelPath| FileFact {
             path: path.clone(),
             identity: Identity::from_u128(u128::MAX),
@@ -801,10 +804,10 @@ impl Library {
             modified: Some(u64::MAX),
         };
         let mut widest = logged.clone();
+        widest.ops = facts.iter().chain(&logged.ops).cloned().collect();
         for end in &effects.files {
-            let writes = self.folded.file_writes(end.entity);
-            let replaces = writes.iter().map(crate::merge::Write::named).collect();
             let (entity, file) = (end.entity, end.path.as_ref().map(fact));
+            let replaces = end.replaces.clone();
             widest.ops.push(match (file, end.pin) {
                 (Some(file), true) => Op::Pin {
                     entity,
@@ -847,56 +850,25 @@ impl Library {
                 _ => None,
             })
             .collect();
-        widest.forks = self.known_forks(&widest.ops);
+        let named = named_writers(&widest.ops).into_iter();
+        widest.forks = named
+            .map(|writer| Forked {
+                writer,
+                at: u64::MAX,
+            })
+            .collect();
         widest
     }
 
-    /// The file ops logging what the effects, whose ends are `ends`, did to each
-    /// entity's file. A file given as it is is pinned, so undo leaves it alone.
-    fn file_ops(&self, applied: &Applied, ends: &[FileEnd]) -> Vec<Op> {
-        let pinned: BTreeSet<EntityId> = ends
-            .iter()
-            .filter(|end| end.pin)
-            .map(|end| end.entity)
-            .collect();
-        let ops = applied
-            .files
-            .iter()
-            .map(|(entity, file)| {
-                let replaces = self
-                    .folded
-                    .file_writes(*entity)
-                    .iter()
-                    .map(crate::merge::Write::named)
-                    .collect();
-                match (file, pinned.contains(entity)) {
-                    (Some(file), true) => Op::Pin {
-                        entity: *entity,
-                        file: file.clone(),
-                        replaces,
-                        take: None,
-                    },
-                    (file, _) => Op::File {
-                        entity: *entity,
-                        file: file.clone(),
-                        replaces,
-                        take: None,
-                    },
-                }
-            })
-            .chain(applied.unbound.iter().map(|(from, file)| Op::Path {
-                from: from.clone(),
-                file: file.clone(),
-            }));
-        let trees = applied.trees.iter().map(|(from, to)| Op::Tree {
-            from: from.clone(),
-            to: to.clone(),
-        });
-        let dirs = applied.dirs.iter().map(|(path, made)| Op::Dir {
-            path: path.clone(),
-            made: *made,
-        });
-        trees.chain(dirs).chain(ops).collect()
+    /// `effects` with the writes of each entity's file register its op will
+    /// replace, as this writer knows them now.
+    fn with_replaces(&self, effects: Rc<EffectPlan>) -> Rc<EffectPlan> {
+        let mut effects = Rc::unwrap_or_clone(effects);
+        for end in &mut effects.files {
+            let writes = self.folded.file_writes(end.entity);
+            end.replaces = writes.iter().map(crate::merge::Write::named).collect();
+        }
+        Rc::new(effects)
     }
 
     /// Keeps an open pending record a failure left behind: this writer's is
@@ -980,11 +952,6 @@ impl Library {
 
     /// The fork points this writer knows of the writers whose writes `ops` name.
     fn known_forks(&self, ops: &[Op]) -> Vec<Forked> {
-        let named: BTreeSet<WriterId> = ops
-            .iter()
-            .flat_map(|op| contribution::said(op).refs)
-            .map(|(_, target)| target.writer)
-            .collect();
         let writers = &self.reader.derived().writers;
         let fork = |writer: WriterId| {
             Some(Forked {
@@ -992,7 +959,7 @@ impl Library {
                 at: writers.get(&writer)?.fork?,
             })
         };
-        named.into_iter().filter_map(fork).collect()
+        named_writers(ops).into_iter().filter_map(fork).collect()
     }
 
     /// The paths `was`, an entity's file facts before, named, those its facts name
@@ -2103,7 +2070,7 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
         .and_then(move |applied| {
             let mut planned = planned(&record);
             planned.record = Some(name);
-            let file_ops = library.file_ops(&applied, &record.files);
+            let file_ops = file_ops(&applied, &record.files);
             let label = planned.label.clone();
             let resumed = closed;
             let kinds = match closed {
@@ -2387,17 +2354,23 @@ fn transact<'a>(
     }
     let mut logged = logged;
     logged.record = effects.moves_files().then_some(effects.record);
-    carry_out(library, &logged, Rc::clone(&effects)).and_then(move |(library, record, applied)| {
-        log_effects(library, logged, &effects, record, applied, closing, pins)
-    })
+    let effects = library.with_replaces(effects);
+    let facts = closing.as_ref().map_or(&[][..], |closing| &closing.facts);
+    carry_out(library, &logged, facts, Rc::clone(&effects)).and_then(
+        move |(library, record, applied)| {
+            log_effects(library, logged, &effects, record, applied, closing, pins)
+        },
+    )
 }
 
-/// Stages, checks and journals `effects` for the intent `logged`, then carries
-/// them out. A refusal changes nothing; a failure once the record is written
-/// leaves it to settle, and one before leaves nothing to settle.
+/// Stages, checks and journals `effects` for the intent `logged`, which settling
+/// a record adds `facts` to, then carries them out. A refusal changes nothing; a
+/// failure once the record is written leaves it to settle, and one before leaves
+/// nothing to settle.
 fn carry_out<'a>(
     library: &'a mut Library,
     logged: &Logged,
+    facts: &[Op],
     effects: Rc<EffectPlan>,
 ) -> Fallible<'a, (&'a mut Library, Rc<PendingRecord>, Applied)> {
     let writer = library.writer.as_ref().expect("a writer commits");
@@ -2414,7 +2387,7 @@ fn carry_out<'a>(
         wall_ms: u64::MAX,
         counter: u32::MAX,
     };
-    let widest = EntryKind::Intent(library.widest(logged, &effects));
+    let widest = EntryKind::Intent(library.widest(logged, facts, &effects));
     let widest = Entry::encode(head.hash, u64::MAX, latest, widest);
     let (Some(entry), Ok(_)) = (encoded, widest) else {
         return Flow::Done(Err(Error::Refused(Refusal::Invalid(Invalid::TooLong))));
@@ -2459,6 +2432,60 @@ fn carry_out<'a>(
     })
 }
 
+/// The file ops logging what the effects, whose ends are `ends`, did to each
+/// entity's file, each replacing what its end says. A file given as it is is
+/// pinned, so undo leaves it alone.
+fn file_ops(applied: &Applied, ends: &[FileEnd]) -> Vec<Op> {
+    let pinned: BTreeSet<EntityId> = ends
+        .iter()
+        .filter(|end| end.pin)
+        .map(|end| end.entity)
+        .collect();
+    let replaces: BTreeMap<EntityId, &[Ref]> = ends
+        .iter()
+        .map(|end| (end.entity, &end.replaces[..]))
+        .collect();
+    let ops = applied
+        .files
+        .iter()
+        .map(|(entity, file)| {
+            let replaces = replaces[entity].to_vec();
+            match (file, pinned.contains(entity)) {
+                (Some(file), true) => Op::Pin {
+                    entity: *entity,
+                    file: file.clone(),
+                    replaces,
+                    take: None,
+                },
+                (file, _) => Op::File {
+                    entity: *entity,
+                    file: file.clone(),
+                    replaces,
+                    take: None,
+                },
+            }
+        })
+        .chain(applied.unbound.iter().map(|(from, file)| Op::Path {
+            from: from.clone(),
+            file: file.clone(),
+        }));
+    let trees = applied.trees.iter().map(|(from, to)| Op::Tree {
+        from: from.clone(),
+        to: to.clone(),
+    });
+    let dirs = applied.dirs.iter().map(|(path, made)| Op::Dir {
+        path: path.clone(),
+        made: *made,
+    });
+    trees.chain(dirs).chain(ops).collect()
+}
+
+/// The writers whose writes `ops` name.
+fn named_writers(ops: &[Op]) -> BTreeSet<WriterId> {
+    let refs = ops.iter().flat_map(|op| contribution::said(op).refs);
+    refs.map(|(_, target)| target.writer).collect()
+}
+
 /// Appends the intent `logged` with what `applied` says the effects did, closed
 /// by `closing` if they complete and followed by `bind` entries pinning `pins`,
 /// removes the record once the entries are durable, and scans again the paths
@@ -2474,7 +2501,7 @@ fn log_effects<'a>(
     pins: Vec<Op>,
 ) -> Fallible<'a, (&'a mut Library, Vec<Entry>, Ended)> {
     let (name, journaled) = (effects.record, effects.moves_files());
-    let file_ops = library.file_ops(&applied, &record.files);
+    let file_ops = file_ops(&applied, &record.files);
     let outcome = applied.outcome;
     let closing = closing.filter(|_| outcome == Outcome::Complete);
     let (mut logged, settle) = close(logged, closing);

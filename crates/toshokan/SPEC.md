@@ -298,8 +298,12 @@ For example:
 
 An intent is one line, file ops and `displaced` items included. Before it writes
 anything, a commit refuses an intent whose line would be longer than a line can
-be with every file op and `displaced` item its effects may add, each as long as
-it can be (`Invalid::TooLong`). A commit appends its entries in one order: the
+be with the facts a settlement adds, every file op and `displaced` item its
+effects may add, and a fork point for every writer it names, each as long as it
+can be, or whose pending record would be longer than a reader reads
+(`Invalid::TooLong`). A file op replaces the writes its writer knew of when it
+wrote the record, so no entry that logs the intent, at commit or when the record
+settles, is longer. A commit appends its entries in one order: the
 intent, the `settle` entry when it closes another writer's record, then its
 `bind` entries, each holding at most 1 MiB of ops.
 
@@ -842,8 +846,10 @@ A pending record is a JSON object:
 `"moves":"copy"`, omitted otherwise, says the steps move files by copying.
 `files` says where each entity's file is once the first `done_after` steps are
 done; a `path` of `null` is no file. `"pin":true` marks a file the intent adopts
-as it is, logged as a `pin` op rather than a `file` op. A reader reads at most
-16 MiB of a record.
+as it is, logged as a `pin` op rather than a `file` op. `replaces`, omitted when
+empty, holds the references the entity's `file` or `pin` op replaces: the writes
+of its file register the writer knew of when it wrote the record. A reader reads
+at most 16 MiB of a record.
 
 ### Recovery
 
