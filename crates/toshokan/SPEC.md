@@ -1131,10 +1131,9 @@ always a directory of the origin private file system.
   WebKit in whole seconds: two changes that keep a file's length within that
   time look alike.
 - **The page's thread.** The core holds the thread that drives it from one
-  request to the next: parsing the logs it read, deriving the merged state,
-  gathering, binding and indexing the library's files each run in one piece. A
-  page that must draw while a large library opens runs the library in a
-  dedicated worker.
+  request to the next: parsing the logs it read, deriving the merged state, and
+  gathering and binding the library's files each run in one piece. A page that
+  must draw while a large library opens runs the library in a dedicated worker.
 - **Locks** are Web Locks named `toshokan:/<local root path>/<name>`, held by
   the worker and released when it ends.
 - **Hints.** A tab that commits announces its newest entry on the

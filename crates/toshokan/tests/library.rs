@@ -6075,10 +6075,12 @@ fn a_folder_of_fifty_thousand_files_renames_and_undoes_as_one_change() {
     };
     let bound_under = |a: &Library<Native>, dir: &str| {
         let view = a.view();
-        let under = view.under(&path(dir));
-        under
+        let files = view
+            .entities()
             .into_iter()
-            .filter(|entity| entity.file().is_some())
+            .filter_map(|entity| entity.file());
+        files
+            .filter(|file| file.path.starts_with(&path(dir)))
             .count()
     };
 

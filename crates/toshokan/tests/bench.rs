@@ -976,12 +976,10 @@ async fn measure() {
         conflicts.time(async { view.conflicts() }).await;
     }
     conflicts.report("conflicts()");
-    let lookups: [(&str, &dyn Fn() -> usize); 6] = [
+    let lookups: [(&str, &dyn Fn() -> usize); 4] = [
         ("with(rating)", &|| view.with(RATING).len()),
-        ("range(rating, 3..)", &|| view.range(RATING, 3..).len()),
         ("values(tags)", &|| view.values(TAGS).values.len()),
         ("values(name)", &|| view.values(NAME).values.len()),
-        ("under(lib/d0005)", &|| view.under(&path("lib/d0005")).len()),
         ("1000 x at(path)", &|| {
             let at = |i| view.at(&view.entity(pick(i))?.file()?.path);
             (0..1000).filter_map(at).count()

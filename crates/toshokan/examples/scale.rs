@@ -1175,11 +1175,7 @@ fn main() {
         bench.measure("view: conflicts()", || view.conflicts().len());
         bench.measure("view: with(rating)", || view.with(RATING).len());
         bench.measure("view: values(tags)", || view.values(TAGS).values.len());
-        bench.measure("view: range(rating, 3..)", || view.range(RATING, 3..).len());
         bench.measure("view: values(name)", || view.values(NAME).values.len());
-        bench.measure("view: under(lib/d0042)", || {
-            view.under(&RelPath::new("lib/d0042").unwrap()).len()
-        });
         bench.measure("view: 1000 × at(path)", || {
             sample
                 .iter()
@@ -1214,7 +1210,7 @@ fn main() {
         });
         let bound = bench.measure("bind", || binding::bind(&facts, &scanned, &ExactNames));
         let bindings = std::sync::Arc::new(bound);
-        bench.measure("view: index built at once", || {
+        bench.measure("view: built at once", || {
             toshokan::View::new(toshokan::view::Parts {
                 folded: view.folded().clone(),
                 bindings: std::sync::Arc::clone(&bindings),

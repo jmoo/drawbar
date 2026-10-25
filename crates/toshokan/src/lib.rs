@@ -18,13 +18,11 @@
 //!
 //! # Using a library
 //!
-//! A view answers lookups from indexes it shares with the views before and after
-//! it, each in a search plus a step per result: the entities whose register or set
-//! holds a value (`find`), holds any value (`with`) or a value in a range
-//! (`range`), each value with how many entities hold it (`values`), the entity
-//! bound to a file (`at`), the entities whose files are under a folder (`under`),
-//! and every conflict (`conflicts`). Values compare by the JSON toshokan writes for
-//! them; `range` and `values` decode each distinct value of the key. Searching
+//! A view answers lookups from the merged state: the entities whose register or
+//! set holds a value (`find`) or any value (`with`), and each value with how many
+//! entities hold it (`values`), each by a visit of every entity shown; and the
+//! entity bound to a file (`at`), by a search. Values compare by the JSON toshokan
+//! writes for them; `values` decodes each distinct value of the key. Searching
 //! names or derived metadata is the app's. `changed_since` gives the entities and
 //! files that differ from an earlier view, at a cost that follows the changes, so an
 //! app can redraw only those.
@@ -88,8 +86,8 @@
 //! ```
 //!
 //! Each stage of an operation runs in one piece on the thread that drives it:
-//! parsing the logs, deriving the merged state, and gathering, binding and
-//! indexing the library's files. Each takes longer the larger the library, so a
+//! parsing the logs, deriving the merged state, and gathering and binding the
+//! library's files. Each takes longer the larger the library, so a
 //! library on a page that must stay responsive belongs in a dedicated worker.
 //!
 //! The bundle must be built by wasm-bindgen with `--target web`. The worker loads it
@@ -134,7 +132,6 @@ pub mod env;
 pub mod error;
 mod flow;
 pub mod ids;
-mod index;
 pub mod intent;
 pub mod io;
 pub mod layout;

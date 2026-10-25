@@ -508,13 +508,9 @@ impl Folded {
         self.entities.get(&entity)?.shown()
     }
 
-    /// [`Folded::shown`] of every entity after `after`, by id, each with the id
-    /// of every entity the iterator passed.
-    pub fn each_shown_after(
-        &self,
-        after: Option<EntityId>,
-    ) -> impl Iterator<Item = (EntityId, Option<Shown<'_>>)> {
-        let entities = self.entities.after(after);
+    /// [`Folded::shown`] of every entity, by id.
+    pub fn each_shown(&self) -> impl Iterator<Item = (EntityId, Option<Shown<'_>>)> {
+        let entities = self.entities.iter();
         entities.map(|(entity, state)| (*entity, state.shown()))
     }
 
@@ -523,19 +519,6 @@ impl Folded {
     pub fn logged_path(&self, entity: EntityId) -> Option<&RelPath> {
         let state = self.entities.get(&entity).filter(|state| state.present())?;
         state.latest_file().map(|file| &file.path)
-    }
-
-    /// Every entity shown after `after`, by id, with the path of its latest live
-    /// file write that names a file, if any.
-    pub(crate) fn shown_paths_after(
-        &self,
-        after: Option<EntityId>,
-    ) -> impl Iterator<Item = (EntityId, Option<&RelPath>)> {
-        let shown = self
-            .entities
-            .after(after)
-            .filter(|(_, state)| state.present());
-        shown.map(|(entity, state)| (*entity, state.latest_file().map(|file| &file.path)))
     }
 
     /// How many entities the state holds a live write of, shown or not.

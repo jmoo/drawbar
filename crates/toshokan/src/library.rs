@@ -24,7 +24,6 @@ use crate::env::Env;
 use crate::error::{Error, Invalid, Refusal, Result, Why};
 use crate::flow::{self, fold, ok, Fallible, Flow};
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
-use crate::index::Index;
 use crate::intent;
 use crate::io::{Capabilities, Io, Kind, Lock, Root, Task};
 use crate::layout::Layout;
@@ -187,7 +186,7 @@ impl Library {
                         orphan.live = presence.get(&orphan.writer) == Some(&Presence::SameMachine);
                     }
                     library.presence = presence;
-                    library.index();
+                    library.show();
                     ok((library, report, start))
                 })
             })
@@ -1190,13 +1189,6 @@ impl Library {
         self.bind_everything();
     }
 
-    /// Binds what is due, then builds the index of what is shown and shows it.
-    fn index(&mut self) {
-        self.bind_facts();
-        let index = Index::of(&self.folded, &self.bindings);
-        self.show_indexed(Arc::new(index));
-    }
-
     /// Shows what changed since the view, if anything did.
     fn reshow(&mut self) {
         self.bind_facts();
@@ -1255,18 +1247,6 @@ impl Library {
     /// Rebuilds the view from the library's state.
     fn show(&mut self) {
         self.bind_facts();
-        let mut index = Arc::clone(self.view.index());
-        let shown = self.view.parts();
-        Arc::make_mut(&mut index).update(
-            (&shown.folded, &shown.bindings),
-            (&self.folded, &self.bindings),
-        );
-        self.show_indexed(index);
-    }
-
-    /// Rebuilds the view from the library's state, bound already, whose index
-    /// `index` is.
-    fn show_indexed(&mut self, index: Arc<Index>) {
         self.unshown = false;
         let derived = self.reader.derived();
         let mut forks = Vec::new();
@@ -1300,7 +1280,7 @@ impl Library {
             gaps,
             items,
         };
-        self.view = View::indexed(parts, index);
+        self.view = View::new(parts);
     }
 
     /// `item` of `writer`, as the view shows it.
