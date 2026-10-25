@@ -156,6 +156,10 @@ pub fn dot(ui: &mut egui::Ui, color: egui::Color32, size: f32) -> egui::Response
     response
 }
 
+/// Where the libraries whose older drawbar's files this install has told of are kept, one
+/// per line.
+const OLDER_TOLD: &str = "drawbar.older_told";
+
 pub struct DrawbarApp {
     pub(crate) workspace: Workspace,
     pub(crate) device: Device,
@@ -207,6 +211,9 @@ pub struct DrawbarApp {
     synced_at: f64,
     /// The selection's revision when its first assets were last asked for.
     picked: Option<u64>,
+    /// The libraries whose older drawbar's files this install has told of, by
+    /// [`Store::library_key`].
+    told_older: std::collections::BTreeSet<String>,
     /// Where the pointer was last seen while files from outside hovered over the window.
     /// The desktop's windowing may not say, and a drop then lands at the top level.
     #[cfg(not(target_arch = "wasm32"))]
@@ -309,6 +316,7 @@ impl DrawbarApp {
             synced: 0,
             synced_at: 0.0,
             picked: None,
+            told_older: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             dragged_at: None,
         };
@@ -317,6 +325,8 @@ impl DrawbarApp {
             app.library.restore(storage);
             app.browser.folders.all_files =
                 storage.get_string(crate::folders::ALL_FILES_KEY).as_deref() == Some("true");
+            let told = storage.get_string(OLDER_TOLD).unwrap_or_default();
+            app.told_older = told.lines().map(str::to_string).collect();
             #[cfg(not(target_arch = "wasm32"))]
             app.midi.restore(storage, &cc.egui_ctx);
         }
@@ -657,13 +667,7 @@ impl DrawbarApp {
             let Some(store) = self.store.as_mut() else {
                 continue;
             };
-            let shown = store.rescue(
-                rescue,
-                what,
-                &mut self.workspace,
-                &mut self.browser,
-                &mut self.log,
-            );
+            let shown = store.rescue(rescue, what, &mut self.browser, &mut self.log);
             if let Some(url) = shown {
                 ctx.open_url(egui::OpenUrl::new_tab(url));
             }
@@ -898,6 +902,8 @@ impl eframe::App for DrawbarApp {
             crate::folders::ALL_FILES_KEY,
             self.browser.folders.all_files.to_string(),
         );
+        let told: Vec<&str> = self.told_older.iter().map(String::as_str).collect();
+        storage.set_string(OLDER_TOLD, told.join("\n"));
         // Unlike the theme, these are not written from the frame that changed them: a
         // divider moves on every frame of a drag, and each write rewrites the whole
         // store.
@@ -966,6 +972,10 @@ impl eframe::App for DrawbarApp {
                 );
                 let left = store.take_left().into_iter();
                 arrived.extend(left.map(browser::Act::Remove));
+                let older = store.take_older();
+                if !older.is_empty() && self.told_older.insert(store.library_key()) {
+                    self.log.say(crate::store::older_notice(&older));
+                }
                 released
             }
             None => false,
@@ -983,8 +993,26 @@ impl eframe::App for DrawbarApp {
             &mut self.tabs,
             &mut self.queue,
         );
-        if let Some(store) = &mut self.store {
-            store.attached(self.device.state.card().map(DeviceCard::instrument));
+        let kept = self.device.take_kept();
+        match &mut self.store {
+            Some(store) => {
+                store.attached(self.device.state.card().map(DeviceCard::instrument));
+                if !kept.is_empty() {
+                    store.rescue_due();
+                }
+                if self.device.state.in_flight.is_none() {
+                    store.look_for_rescues(&mut self.workspace, &mut self.browser, &mut self.log);
+                }
+            }
+            None => {
+                for at in kept {
+                    self.log.trouble(format!(
+                        "{} may be empty. What was in it is kept on this computer, and goes \
+                         into the library drawbar opens next.",
+                        crate::strings::shown(at)
+                    ));
+                }
+            }
         }
         // An edit to an asset with a waiting entry changes what that write would do; the
         // queue diffs it again against the occupant it already read.

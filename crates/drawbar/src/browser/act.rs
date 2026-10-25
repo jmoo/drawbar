@@ -264,8 +264,6 @@ pub enum Act {
 /// What to do with a slot's former occupant an interrupted write left on this computer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Rescuing {
-    /// Move it into the library's top level as an asset.
-    Keep,
     /// Show its folder in the system's file manager, and ask again.
     Show,
     /// Ask before it is deleted.

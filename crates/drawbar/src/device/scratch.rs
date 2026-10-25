@@ -6,8 +6,8 @@
 //! ([`nord_usb::envelope::rescue_name_for`]). It is written under a
 //! [partial](nord_usb::envelope::PARTIAL) name, which the next open deletes, and takes its
 //! own only once [`Kept::finish`] is called on it whole. One an interrupted write left
-//! behind may be the slot's only copy, and the next open offers each to the user
-//! ([`crate::store::Rescue`]).
+//! behind may be the slot's only copy, and goes into the library
+//! ([`crate::store::Store::look_for_rescues`]).
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;

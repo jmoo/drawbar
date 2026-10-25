@@ -1,6 +1,6 @@
 //! What a drawbar from before the library was toshokan's kept in a library's folder:
 //! tags, unsaved edits and the slot contents it rescued. Nothing reads or removes them;
-//! the user is told once where they are.
+//! the app tells the user once per library where they are ([`notice`]).
 
 use std::io;
 
@@ -32,19 +32,12 @@ impl Older {
     }
 }
 
-/// Where this install remembers it told of an older drawbar's files.
-const TOLD: &str = "notices/older-drawbar";
-
 fn at(path: &str) -> RelPath {
     RelPath::new(path).expect("a fixed path")
 }
 
-/// What an older drawbar kept in the folder, the first time this install looks; then
-/// nothing, since it remembers it told.
+/// What an older drawbar kept in the folder.
 pub async fn found<F: Fs>(fs: &F) -> io::Result<Vec<Older>> {
-    if storage::meta(fs, Root::Local, &at(TOLD)).await?.is_some() {
-        return Ok(Vec::new());
-    }
     let kind = async |path: &str| -> io::Result<Option<Kind>> {
         Ok(
             storage::meta(fs, Root::Folder, &at(&format!("{DIR}/{path}")))
@@ -65,8 +58,21 @@ pub async fn found<F: Fs>(fs: &F) -> io::Result<Vec<Older>> {
             found.push(Older::Rescues);
         }
     }
-    if !found.is_empty() {
-        storage::mark(fs, Root::Local, &at(TOLD)).await?;
-    }
     Ok(found)
+}
+
+/// What the user is told of what an older drawbar kept in the folder.
+pub fn notice(older: &[Older]) -> String {
+    let said: Vec<String> = older
+        .iter()
+        .map(|older| {
+            let (what, at) = older.said();
+            format!("{what} in {DIR}/{at}")
+        })
+        .collect();
+    format!(
+        "An older drawbar kept {} in this folder. This drawbar does not read them, and \
+         leaves them where they are.",
+        crate::strings::listed(&said)
+    )
 }
