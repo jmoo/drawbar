@@ -330,7 +330,7 @@ leaves that segment held back as a gap until the writer's next snapshot reaches
 it. A dropped version of a segment shows its surviving lines past the first as
 unplaced. Neither is something the protocol does.
 
-## 8. Writers, pending records, undo and drafts
+## 8. Writers, pending records and undo
 
 A writer continues only if its recorded head is its tip or placed after it, and
 the snapshot's `genesis` is its genesis; otherwise it retires.
@@ -354,7 +354,7 @@ rest from the record before it writes or compacts anything else.
 
 The undo stack lives in memory and holds this session's intents only. Each item
 keeps what reversing it needs: the values its writes replaced, the tags its
-removes named, its file effects. It ends at close. Drafts are unchanged.
+removes named, its file effects. It ends at close.
 
 ## What users see
 

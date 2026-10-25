@@ -20,16 +20,16 @@ use toshokan::line::MAX_LINE;
 use toshokan::log::{Entry, EntryKind, FileFact, Genesis, Logged, Op, Run, Settlement};
 use toshokan::plan::FactChange;
 use toshokan::report::{
-    By, Change, Committed, Compacted, DraftState, Emptied, HistoryItem, Item, ItemKind, Opened,
-    PathChange, Presence, Refreshed, Rekey, Start, Tidied, TrashItem, What, WriterInfo,
+    By, Change, Committed, Compacted, Emptied, HistoryItem, Item, ItemKind, Opened, PathChange,
+    Presence, Refreshed, Rekey, Start, Tidied, TrashItem, What, WriterInfo,
 };
 use toshokan::simulator::Machine;
 use toshokan::snapshot::Snapshot;
 use toshokan::view::Conflicted;
 use toshokan::{
-    Changed, Drafted, EntityId, EntryHash, Env, Error, Expect, Field, FileRef, FileState, Hlc,
-    Identify, Identity, Invalid, Io, IoResult, Lag, Layout, Local, MemDisk, Nonce, Policy, Random,
-    Refusal, Register, RelPath, Reply, Root, Schema, Set, Unbindable, View, WriterId,
+    Changed, EntityId, EntryHash, Env, Error, Expect, Field, FileRef, FileState, Hlc, Identify,
+    Identity, Invalid, Io, IoResult, Lag, Layout, Local, MemDisk, Nonce, Policy, Random, Refusal,
+    Register, RelPath, Reply, Root, Schema, Set, Unbindable, View, WriterId,
 };
 
 const ORIGIN: Register<String> = Register::new("origin");
@@ -349,9 +349,6 @@ trait Facade: Sized {
     fn remove_trash(&mut self, items: Vec<Nonce>) -> Result<Emptied, Error>;
     fn tidy(&mut self) -> Result<Tidied, Error>;
     fn compact(&mut self) -> Result<Compacted, Error>;
-    fn put_draft(&mut self, entity: EntityId, base: Identity, bytes: &[u8]) -> Result<(), Error>;
-    fn discard_draft(&mut self, of: Drafted) -> Result<(), Error>;
-    fn put_file_draft(&mut self, at: &RelPath, base: Identity, bytes: &[u8]) -> Result<(), Error>;
     fn settle(
         &mut self,
         orphan: toshokan::report::Orphan,
@@ -423,15 +420,6 @@ impl Facade for Blocking {
     }
     fn compact(&mut self) -> Result<Compacted, Error> {
         self.0.compact()
-    }
-    fn put_draft(&mut self, entity: EntityId, base: Identity, bytes: &[u8]) -> Result<(), Error> {
-        self.0.draft(entity).put(base, bytes.to_vec())
-    }
-    fn discard_draft(&mut self, of: Drafted) -> Result<(), Error> {
-        toshokan::drafts::Draft::new(&mut self.0, of).discard()
-    }
-    fn put_file_draft(&mut self, at: &RelPath, base: Identity, bytes: &[u8]) -> Result<(), Error> {
-        self.0.draft_file(at).put(base, bytes.to_vec())
     }
     fn settle(
         &mut self,
@@ -507,15 +495,6 @@ impl Facade for Async {
     }
     fn compact(&mut self) -> Result<Compacted, Error> {
         pollster::block_on(self.0.compact())
-    }
-    fn put_draft(&mut self, entity: EntityId, base: Identity, bytes: &[u8]) -> Result<(), Error> {
-        pollster::block_on(self.0.draft(entity).put(base, bytes.to_vec()))
-    }
-    fn discard_draft(&mut self, of: Drafted) -> Result<(), Error> {
-        pollster::block_on(toshokan::drafts::Draft::new(&mut self.0, of).discard())
-    }
-    fn put_file_draft(&mut self, at: &RelPath, base: Identity, bytes: &[u8]) -> Result<(), Error> {
-        pollster::block_on(self.0.draft_file(at).put(base, bytes.to_vec()))
     }
     fn settle(
         &mut self,
@@ -648,7 +627,6 @@ through_both!(
     two_windows_session_after_session_keep_a_pool_of_two,
     asking_who_else_writes_keeps_the_idle_writers_taken_up,
     an_idle_writer_whose_records_its_log_closed_is_let_go,
-    drafts_of_two_windows_are_ordered_by_their_clocks_after_the_time_went_back,
     an_effect_a_live_window_left_open_is_reported_live,
     an_effect_a_window_left_is_the_installs_once_the_window_closes,
     a_change_of_case_another_install_did_not_start_is_finished_by_another,
@@ -659,12 +637,10 @@ through_both!(
     removing_an_empty_directory_is_undone_and_one_with_files_is_refused,
     an_intent_that_stops_partway_says_what_landed,
     a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept,
-    losing_the_local_root_at_any_step_loses_only_drafts,
+    losing_the_local_root_at_any_step_loses_nothing_of_the_library,
     a_crash_at_any_step_is_settled_before_the_next_write,
     an_empty_record_of_this_writer_is_removed_by_its_next_write,
     an_untrusted_folder_is_read_within_bounds_and_never_acted_on,
-    drafts_come_back_only_while_the_file_holds_their_base,
-    a_file_draft_under_another_files_name_is_reported_unreadable,
     the_trash_keeps_displaced_bytes_until_emptied,
     the_items_an_app_names_leave_the_trash,
     compaction_keeps_the_view_and_this_sessions_undo,
@@ -3734,10 +3710,10 @@ fn asking_who_else_writes_keeps_the_idle_writers_taken_up<F: Facade>() {
     let clock = TestClock::at(1_000);
     let here = machine(&folder);
     put(&folder, "a.wav", b"a");
-    let mut windows = [1, 2].map(|seed| {
-        F::open(Probe::new(&here), env("w", seed, &clock))
-            .unwrap()
-            .0
+    let probes = [1, 2].map(|_| Probe::new(&here));
+    let mut windows = [0, 1].map(|n| {
+        let opened = F::open(probes[n].clone(), env("w", n as u64 + 1, &clock));
+        opened.unwrap().0
     });
     for (n, window) in windows.iter_mut().enumerate() {
         window
@@ -3746,19 +3722,30 @@ fn asking_who_else_writes_keeps_the_idle_writers_taken_up<F: Facade>() {
             })
             .unwrap();
     }
-    windows[1]
-        .put_file_draft(&path("a.wav"), identity(b"a"), b"edited")
-        .unwrap();
+    windows[1].rescan().unwrap();
+    // The effect is made, and its entry not logged: the record stays open.
+    let logging = |io: &Io| io.root() == Root::Folder && io.path().as_str().ends_with(".txt");
+    fail(&probes[1], move |io| io.mutates() && logging(io));
+    let stopped = windows[1].commit("Rename", |i| {
+        i.rename_file(
+            &path("a.wav"),
+            &path("b.wav"),
+            Expect::Holds(identity(b"a")),
+        )
+    });
+    heal(&probes[1]);
+    assert!(stopped.is_err(), "the entry was not logged: {stopped:?}");
     for window in windows {
         window.close().unwrap();
     }
 
     let (mut first, opened) = F::open(Probe::new(&here), env("w", 3, &clock)).unwrap();
-    let pooled = opened.drafts.iter().filter(|draft| draft.pooled.is_some());
-    assert_eq!(pooled.count(), 1, "the idle writer's draft is taken up");
+    let ours = opened.orphaned.iter().filter(|orphan| orphan.ours);
+    assert_eq!(ours.count(), 1, "the idle writer's record is taken up");
     first.others().unwrap();
     let (_, opened) = F::open(Probe::new(&here), env("w", 4, &clock)).unwrap();
-    assert_eq!(opened.drafts, [], "the first window still holds it");
+    let orphans: Vec<(bool, bool)> = opened.orphaned.iter().map(|o| (o.ours, o.live)).collect();
+    assert_eq!(orphans, [(false, true)], "the first window still holds it");
 }
 
 fn an_idle_writer_whose_records_its_log_closed_is_let_go<F: Facade>() {
@@ -3795,43 +3782,6 @@ fn an_idle_writer_whose_records_its_log_closed_is_let_go<F: Facade>() {
         "the other idle writer is free to resume: {:?}",
         opened.start
     );
-}
-
-fn drafts_of_two_windows_are_ordered_by_their_clocks_after_the_time_went_back<F: Facade>() {
-    let folder = disk();
-    let clock = TestClock::at(2_000);
-    let here = machine(&folder);
-    put(&folder, "a.wav", b"a");
-    let (mut first, _) = F::open(Probe::new(&here), env("w", 1, &clock)).unwrap();
-    first.rescan().unwrap();
-    first
-        .put_file_draft(&path("a.wav"), identity(b"a"), b"older")
-        .unwrap();
-    first
-        .commit("Tag", |i| i.create(|e| _ = e.add(TAGS, tag("x"))).0)
-        .unwrap();
-    clock.set(1_000);
-    let (mut second, _) = F::open(Probe::new(&here), env("w", 2, &clock)).unwrap();
-    second
-        .put_file_draft(&path("a.wav"), identity(b"a"), b"newer")
-        .unwrap();
-    first.close().unwrap();
-    second.close().unwrap();
-
-    let (_, opened) = F::open(Probe::new(&here), env("w", 3, &clock)).unwrap();
-    let mut kept: Vec<_> = opened
-        .drafts
-        .iter()
-        .map(|draft| {
-            let DraftState::Applies { bytes } = &draft.state else {
-                panic!("{draft:?}");
-            };
-            (draft.at, String::from_utf8_lossy(bytes).into_owned())
-        })
-        .collect();
-    kept.sort();
-    let order: Vec<&str> = kept.iter().map(|(_, bytes)| bytes.as_str()).collect();
-    assert_eq!(order, ["older", "newer"], "{kept:?}");
 }
 
 fn an_effect_a_live_window_left_open_is_reported_live<F: Facade>() {
@@ -4254,7 +4204,6 @@ fn steps<F: Facade>(library: &mut F, clock: &TestClock, done: &mut usize) -> Res
         })?
         .created[0];
     *done += 1;
-    library.put_draft(song, identity(b"one"), b"draft")?;
     library.commit("Save", |i| {
         i.save(
             song,
@@ -4289,7 +4238,7 @@ fn steps<F: Facade>(library: &mut F, clock: &TestClock, done: &mut usize) -> Res
     Ok(())
 }
 
-fn losing_the_local_root_at_any_step_loses_only_drafts<F: Facade>() {
+fn losing_the_local_root_at_any_step_loses_nothing_of_the_library<F: Facade>() {
     let total = {
         let disk = disk();
         let clock = TestClock::at(1_000);
@@ -4324,7 +4273,6 @@ fn losing_the_local_root_at_any_step_loses_only_drafts<F: Facade>() {
         let (mut heir, opened) = F::open(Probe::new(&here), env("heir", 2, &clock))
             .unwrap_or_else(|e| panic!("{shown}: {e}"));
         assert_eq!(opened.start, Start::New, "{shown}");
-        assert!(opened.drafts.is_empty(), "{shown}: drafts are lost");
         assert!(
             opened.settled.is_empty(),
             "{shown}: nothing is this writer's"
@@ -4602,112 +4550,6 @@ fn an_untrusted_folder_is_read_within_bounds_and_never_acted_on<F: Facade>() {
         assert_eq!(probe.folder_writes(), 0, "seed {seed}");
         assert!(opened.orphaned.is_empty(), "seed {seed}");
     }
-}
-
-fn a_file_draft_under_another_files_name_is_reported_unreadable<F: Facade>() {
-    let folder = disk();
-    let clock = TestClock::at(1_000);
-    let here = machine(&folder);
-    put(&folder, "loose.wav", b"loose");
-    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
-    a.put_file_draft(&path("loose.wav"), identity(b"loose"), b"edited loose")
-        .unwrap();
-    a.close().unwrap();
-    let local = here.local.files(Root::Local);
-    let kept = local
-        .keys()
-        .find(|at| at.name().is_some_and(|name| name.starts_with("file-")))
-        .expect("the draft is kept")
-        .clone();
-    let elsewhere = kept.parent().unwrap().join("file-0.json").unwrap();
-    here.local
-        .perform(Io::Rename {
-            root: Root::Local,
-            from: kept,
-            to: elsewhere,
-        })
-        .unwrap();
-
-    let (mut a, opened) = F::open(Probe::new(&here), env("a", 2, &clock)).unwrap();
-    let states: Vec<(Drafted, DraftState)> =
-        opened.drafts.into_iter().map(|d| (d.of, d.state)).collect();
-    assert_eq!(
-        states,
-        [(Drafted::File(path("loose.wav")), DraftState::Unreadable)]
-    );
-    a.discard_draft(Drafted::File(path("loose.wav"))).unwrap();
-    a.close().unwrap();
-    let (_, opened) = F::open(Probe::new(&here), env("a", 3, &clock)).unwrap();
-    assert_eq!(opened.drafts, [], "discarding it removed the misnamed file");
-}
-
-fn drafts_come_back_only_while_the_file_holds_their_base<F: Facade>() {
-    let folder = disk();
-    let clock = TestClock::at(1_000);
-    let here = machine(&folder);
-    put(&folder, "loose.wav", b"loose");
-    put(&folder, "gone.wav", b"gone");
-    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
-    a.put_file_draft(&path("loose.wav"), identity(b"loose"), b"edited loose")
-        .unwrap();
-    a.put_file_draft(&path("gone.wav"), identity(b"gone"), b"edited gone")
-        .unwrap();
-    assert!(
-        folder
-            .directories(Root::Folder)
-            .iter()
-            .any(|d| d.starts_with(&layout().writers())),
-        "a draft before the first commit starts the writer"
-    );
-    let song = create(&mut a, "song.npno", b"song");
-    let other = create(&mut a, "other.npno", b"other");
-    a.put_draft(song, identity(b"song"), b"edited").unwrap();
-    a.put_draft(other, identity(b"other"), b"edited too")
-        .unwrap();
-    a.close().unwrap();
-    put(&folder, "other.npno", b"changed outside");
-    let _ = folder.perform(Io::Remove {
-        root: Root::Folder,
-        path: path("gone.wav"),
-    });
-
-    let (mut a, opened) = F::open(Probe::new(&here), env("a", 2, &clock)).unwrap();
-    let states: BTreeMap<Drafted, DraftState> =
-        opened.drafts.into_iter().map(|d| (d.of, d.state)).collect();
-    let file = |at: &str| Drafted::File(path(at));
-    assert_eq!(
-        states[&file("loose.wav")],
-        DraftState::Applies {
-            bytes: b"edited loose".to_vec()
-        }
-    );
-    assert_eq!(
-        states[&file("gone.wav")],
-        DraftState::BaseChanged {
-            found: None,
-            bytes: b"edited gone".to_vec()
-        }
-    );
-    let (song, other) = (Drafted::Entity(song), Drafted::Entity(other));
-    assert_eq!(
-        states[&song],
-        DraftState::Applies {
-            bytes: b"edited".to_vec()
-        }
-    );
-    assert_eq!(
-        states[&other],
-        DraftState::BaseChanged {
-            found: Some(identity(b"changed outside")),
-            bytes: b"edited too".to_vec()
-        }
-    );
-    for of in [song, other, file("loose.wav"), file("gone.wav")] {
-        a.discard_draft(of).unwrap();
-    }
-    a.close().unwrap();
-    let (_, opened) = F::open(Probe::new(&here), env("a", 3, &clock)).unwrap();
-    assert_eq!(opened.drafts, []);
 }
 
 fn the_trash_keeps_displaced_bytes_until_emptied<F: Facade>() {
@@ -5924,8 +5766,7 @@ fn a_change_of_case_a_crash_stops_is_finished_at_the_next_open() {
 }
 
 /// Two windows of one install write as two writers of its pool. Opened again with one
-/// window, the install offers the drafts both kept, each from the writer that kept it,
-/// and the effect the other window left unfinished is its own to settle.
+/// window, the effect the other window left unfinished is the install's own to settle.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn one_window_takes_up_what_another_window_of_the_install_left() {
@@ -5951,14 +5792,6 @@ fn one_window_takes_up_what_another_window_of_the_install_left() {
     for library in [&mut first, &mut second] {
         library.rescan().unwrap();
     }
-    first
-        .draft_file(&path("a.wav"))
-        .put(identity(b"a"), b"first's edit".to_vec())
-        .unwrap();
-    second
-        .draft_file(&path("b.wav"))
-        .put(identity(b"b"), b"second's edit".to_vec())
-        .unwrap();
     first.close().unwrap();
     crash.set(Some(|_, to| to.as_str() == "b.wav"));
     let stopped = std::panic::catch_unwind(AssertUnwindSafe(move || {
@@ -5974,23 +5807,6 @@ fn one_window_takes_up_what_another_window_of_the_install_left() {
     assert!(stopped.is_err(), "the crash stopped the save");
 
     let (mut again, opened) = open(&never, 4);
-    let mut kept: Vec<(Drafted, bool)> = opened
-        .drafts
-        .iter()
-        .map(|draft| (draft.of.clone(), draft.pooled.is_some()))
-        .collect();
-    kept.sort_by(|a, b| a.0.cmp(&b.0));
-    let offered: Vec<&Drafted> = kept.iter().map(|(of, _)| of).collect();
-    assert_eq!(
-        offered,
-        [&Drafted::File(path("a.wav")), &Drafted::File(path("b.wav"))],
-        "both windows' drafts"
-    );
-    let pooled = kept.iter().filter(|(_, pooled)| *pooled).count();
-    assert_eq!(
-        pooled, 1,
-        "one kept by the writer this window does not write as"
-    );
     // Whichever writer this window took, the save is this install's to finish.
     match &opened.orphaned[..] {
         [] => {
@@ -6004,17 +5820,6 @@ fn one_window_takes_up_what_another_window_of_the_install_left() {
         more => panic!("one effect to settle: {more:?}"),
     }
     assert_eq!(read_native(folder.path(), "b.wav"), b"saved");
-    let pooled = opened
-        .drafts
-        .iter()
-        .find(|draft| draft.pooled.is_some())
-        .unwrap();
-    again
-        .discard_pooled_draft(pooled.pooled.unwrap(), pooled.of.clone())
-        .unwrap();
-    again.close().unwrap();
-    let (_, opened) = open(&never, 5);
-    assert_eq!(opened.drafts.len(), 1, "the discarded draft is gone");
 }
 
 #[cfg(not(target_arch = "wasm32"))]

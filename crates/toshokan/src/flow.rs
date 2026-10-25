@@ -715,37 +715,8 @@ pub(crate) struct Observed {
     pub identity: Identity,
 }
 
-/// What is at `path`: nothing, or a file and its identity. A directory is an error.
-pub(crate) fn observe<'a>(
-    root: Root,
-    path: &RelPath,
-    identify: &Rc<dyn Identify>,
-) -> Fallible<'a, Option<Observed>> {
-    let identify = Rc::clone(identify);
-    let path = path.clone();
-    stat(root, &path).and_then(move |meta| match meta {
-        None => ok(None),
-        Some(Meta {
-            kind: Kind::Directory,
-            ..
-        }) => Flow::Done(Err(Error::Io {
-            root,
-            path,
-            error: IoError::IsDirectory,
-        })),
-        Some(Meta { len, modified, .. }) => {
-            identity(root, path, len, &identify).map_ok(move |identity| {
-                Some(Observed {
-                    len,
-                    modified,
-                    identity,
-                })
-            })
-        }
-    })
-}
-
-/// What is at each of `paths`, as [`observe`] says, the identities read together.
+/// What is at each of `paths`: nothing, or a file and its identity, the identities
+/// read together. A directory is an error.
 pub(crate) fn observe_all<'a>(
     root: Root,
     paths: Vec<RelPath>,
@@ -787,26 +758,6 @@ pub(crate) fn observe_all<'a>(
                 })
                 .collect()
         })
-    })
-}
-
-/// The identity of the file of `len` bytes at `path`.
-pub(crate) fn identity<'a>(
-    root: Root,
-    path: RelPath,
-    len: u64,
-    identify: &Rc<dyn Identify>,
-) -> Fallible<'a, Identity> {
-    let gone = path.clone();
-    identities(root, vec![(path, len)], identify).and_then(move |mut found| {
-        match found.pop().flatten() {
-            Some(identity) => ok(identity),
-            None => Flow::Done(Err(Error::Io {
-                root,
-                path: gone,
-                error: IoError::NotFound,
-            })),
-        }
     })
 }
 

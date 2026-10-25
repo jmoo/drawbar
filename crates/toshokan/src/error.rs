@@ -55,11 +55,6 @@ pub enum Error {
     #[error("finishing {} stopped partway at {}: {}", .0.label, .0.report.stopped, .0.report.error)]
     Unfinished(Box<Partial>),
 
-    /// This instance has not written to the library yet, so it has no directory
-    /// in the local root to keep drafts in.
-    #[error("this instance has not committed anything yet")]
-    NoWriter,
-
     /// This writer cannot write again: appending would continue a history the
     /// folder no longer holds, or that another instance also continues. Nothing
     /// was written; the library continues as a new writer.

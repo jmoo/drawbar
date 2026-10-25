@@ -4,9 +4,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::drafts::Drafted;
 use crate::error::Why;
-use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
+use crate::ids::{EntityId, EntryHash, Hlc, Nonce, WriterId};
 use crate::io::IoError;
 use crate::log::Run;
 use crate::path::RelPath;
@@ -32,7 +31,6 @@ pub struct Opened {
     /// still be in progress elsewhere, so they are settled only with the user's
     /// consent.
     pub orphaned: Vec<Orphan>,
-    pub drafts: Vec<DraftStatus>,
     pub forks: Vec<Fork>,
     pub gaps: Vec<Gap>,
     /// Files in writers' directories that end before their last byte can be read,
@@ -98,34 +96,6 @@ pub struct Orphan {
     /// carries the effect out, so two reads that show it unchanged a while apart
     /// say no writer is. 0 until a refresh looks.
     pub progress: u64,
-}
-
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct DraftStatus {
-    pub of: Drafted,
-    pub state: DraftState,
-    /// The writer of this install's pool that kept the draft, where it is another
-    /// that no instance writes as now; `None` for this instance's own.
-    pub pooled: Option<WriterId>,
-    /// The keeping writer's clock when it was last kept, which orders the drafts
-    /// of several writers; `None` where the draft does not say.
-    pub at: Option<Hlc>,
-}
-
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum DraftState {
-    /// The entity's file still holds the base the draft was made over: the draft's
-    /// bytes, to restore.
-    Applies { bytes: Vec<u8> },
-    /// The file changed since; `found` is `None` when it is gone. The draft's
-    /// bytes come with it, to show beside the file as it is now, and it is kept
-    /// until it is discarded.
-    BaseChanged {
-        found: Option<Identity>,
-        bytes: Vec<u8>,
-    },
-    /// The draft cannot be read. It is kept until it is discarded.
-    Unreadable,
 }
 
 /// Where one writer's history forked: the entry numbered `at`, `prev`, after
@@ -451,22 +421,10 @@ mod tests {
             writer,
             record: Nonce::from_u128(9),
             label: "Move".into(),
-            paths: vec![path.clone()],
+            paths: vec![path],
             ours: false,
             live: true,
             progress: 3,
-        };
-        let draft = DraftStatus {
-            of: Drafted::File(path),
-            state: DraftState::BaseChanged {
-                found: Some(Identity::from_u128(3)),
-                bytes: b"edit".to_vec(),
-            },
-            pooled: Some(writer),
-            at: Some(Hlc {
-                wall_ms: 5,
-                counter: 1,
-            }),
         };
         let change = Change {
             entity: EntityId::from_u128(4),
@@ -476,8 +434,8 @@ mod tests {
                 label: "drawbar".into(),
             },
         };
-        let json = serde_json::to_string(&(&orphan, &draft, &change)).unwrap();
-        let back: (Orphan, DraftStatus, Change) = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, (orphan, draft, change), "{json}");
+        let json = serde_json::to_string(&(&orphan, &change)).unwrap();
+        let back: (Orphan, Change) = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, (orphan, change), "{json}");
     }
 }
