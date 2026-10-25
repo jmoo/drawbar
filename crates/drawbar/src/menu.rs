@@ -367,9 +367,8 @@ pub fn shortcut(command: Command, platform: Platform, mac: bool) -> Option<egui:
     let command_and = |with, key| Shortcut::new(With::COMMAND.plus(with), key);
     Some(match command {
         Command::Open => Shortcut::new(With::COMMAND, Key::O),
-        // The browser's library opens with a later build, and binds these then.
-        Command::Undo if platform.windowed() => Shortcut::new(With::COMMAND, Key::Z),
-        Command::Redo if platform.windowed() => command_and(With::SHIFT, Key::Z),
+        Command::Undo => Shortcut::new(With::COMMAND, Key::Z),
+        Command::Redo => command_and(With::SHIFT, Key::Z),
         Command::Save => Shortcut::new(With::COMMAND, Key::S),
         Command::Export => command_and(With::SHIFT, Key::E),
         Command::CloseTab => tab_key(Key::W),

@@ -1615,6 +1615,50 @@ mod tests {
         );
     }
 
+    /// The browser build's ⌘Z undoes the last change to the library, and ⇧⌘Z redoes it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_web_builds_undo_and_redo_keys_reach_the_library() {
+        use eframe::App as _;
+
+        let root = crate::testing::Temp::new();
+        let (ctx, mut app) = opened_over(&root);
+        app.platform = crate::platform::Platform::Web;
+        app.browser.tags.make("Live").expect("a new tag");
+        let until = |app: &mut DrawbarApp, keys: Vec<egui::Event>, done: fn(&Store) -> bool| {
+            let mut window = eframe::Frame::_new_kittest();
+            let input = crate::testing::screen(egui::vec2(1280.0, 720.0), keys);
+            crate::testing::run(&ctx, input, |ctx| app.update(ctx, &mut window));
+            for _ in 0..500 {
+                if app.store.as_ref().is_some_and(done) {
+                    return true;
+                }
+                frame(&ctx, app);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            false
+        };
+        let undoable = |store: &Store| store.undo_label().is_some();
+        let redoable = |store: &Store| store.redo_label().is_some();
+        assert!(until(&mut app, Vec::new(), undoable), "the tag is made");
+        let key = |modifiers| egui::Event::Key {
+            key: egui::Key::Z,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        let command = egui::Modifiers::COMMAND;
+        assert!(until(&mut app, vec![key(command)], redoable), "⌘Z undid it");
+        let shift = command.plus(egui::Modifiers::SHIFT);
+        assert!(
+            until(&mut app, vec![key(shift)], |store| store
+                .redo_label()
+                .is_none()),
+            "⇧⌘Z redid it"
+        );
+    }
+
     /// End to end through the app's own frames: New makes a file, and the next run finds
     /// the asset where it was left.
     #[cfg(not(target_arch = "wasm32"))]
