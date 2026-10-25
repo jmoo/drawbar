@@ -21,6 +21,7 @@ your terminal, or from your own code.
 | 🎹 | [nord-format](crates/nord-format/README.md) | Rust library: read and write Nord files, byte for byte. |
 | 🔌 | [nord-usb](crates/nord-usb/README.md) | Rust library: talk to a Nord over USB. |
 | 🧬 | [nord-bits-derive](crates/nord-bits-derive/README.md) | The macro behind nord-format's layouts. |
+| 📚 | [toshokan](crates/toshokan/README.md) | Rust library: keep tags and history beside a folder of real files, for every writer. drawbar's library. |
 
 ## Try it
 

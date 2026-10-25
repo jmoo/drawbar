@@ -9,7 +9,7 @@ reader merges the logs to the same state, whatever order a sync client delivers
 them in. Files are saved, renamed and deleted without overwriting anything in
 place, so file changes can be undone.
 
-The on-disk format may change before 1.0, and the crate is not yet published.
+The on-disk format may change before 1.0.
 
 An app declares its keys, opens a library as one writer, renders views and
 changes the library by intents:
