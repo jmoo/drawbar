@@ -46,6 +46,7 @@ enum Renames {
     Exclusive,
     /// Atomic; a rename may replace what another program made at the
     /// destination after the core's check.
+    #[cfg_attr(windows, expect(dead_code, reason = "a Windows rename never replaces"))]
     Replacing,
     /// Not atomic: the volume keeps no journal of its names, and a crash can keep
     /// a rename's removal of the old name without the new one. No rename is
