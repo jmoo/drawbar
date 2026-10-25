@@ -2399,9 +2399,6 @@ fn carry_out<'a>(
         &effects,
     ));
     let (name, journaled) = (effects.record, effects.moves_files());
-    if journaled && record.encode().len() as u64 > pending::MAX_RECORD {
-        return Flow::Done(Err(Error::Refused(Refusal::Invalid(Invalid::TooLong))));
-    }
     let layout = library.layout.clone();
     let identify = Rc::clone(&library.env.identify);
     let prepared = effects::prepare(&layout, effects, Rc::clone(&record), Rc::clone(&identify));
