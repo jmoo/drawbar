@@ -27,6 +27,9 @@ cargo install drawbar
 - On the desktop, or in a browser that can open a folder, open any folder as the
   library, such as a Sample Editor project. Nothing in it changes until you
   change something, and you can undo what you change while it is open.
+- Keep the library in Dropbox, OneDrive, iCloud Drive or on a network share, and
+  use it from every computer that syncs it; see
+  [Your files](../../docs/src/drawbar/this-computer.md#opening-another-folder).
 
 Start with [The window](../../docs/src/drawbar/overview.md) in the user guide,
 and read [What is supported](../../docs/src/getting-started/support.md) before

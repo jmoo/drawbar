@@ -47,16 +47,20 @@ next visit starts with the browser's own library, and **File ▸ Reconnect**
 *folder* asks again. If you take the permission back while the folder is open,
 drawbar closes it the same way.
 
-Several drawbars can use one library at once: on two computers that sync the
-folder, in two windows, in two browser tabs, or in the browser and the desktop
-app on one folder. Each keeps its own record of what it changed in the hidden
-folder, so neither overwrites the other's. A tab shows another tab's changes as
-soon as they are made; otherwise drawbar shows what the others changed when you
-come back to the window, and the activity log says so. In the browser, and on a
-desktop disk that cannot refuse to move a file onto one already there, drawbar
-checks that a name is free before a saved, copied or moved file takes it. A file
-another program makes at that name in the instant between is replaced, and what
-it held is lost.
+The library folder can live in Dropbox, OneDrive or iCloud Drive, or on a
+network share, and syncing just works: a copy that is out of date, changes that
+arrive out of order, and a folder partly restored from a backup all come
+together again. Each drawbar keeps its own record of what it changed in the
+hidden folder, so none overwrites another's. That is also why several drawbars
+can use one library at once: on two computers, in two windows, in two browser
+tabs, or in the browser and the desktop app on one folder. A tab shows another
+tab's changes as soon as they are made; otherwise drawbar shows what the others
+changed when you come back to the window, and the activity log says so.
+
+In the browser, and on a desktop disk that cannot refuse to move a file onto one
+already there, drawbar checks that a name is free before a saved, copied or
+moved file takes it. A file another program makes at that name in the instant
+between is replaced, and what it held is lost.
 
 ## Adding and making sounds
 
