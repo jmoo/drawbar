@@ -680,7 +680,7 @@ the user. A scan writes nothing in the folder.
 An intent is one user action: fact changes and file effects committed together.
 Opening, reading, refreshing and scanning write nothing in the folder; only
 committing an intent (an undo, a redo or a settlement included), emptying the
-trash, tidying, compaction and closing do.
+trash, compaction and closing do.
 
 A commit:
 
@@ -700,8 +700,8 @@ A commit:
 5. Carries out the file effects under a pending record, then appends the intent
    with a `file` op for each entity's file as the folder shows it afterwards,
    in `more` entries after it when they would not fit its line, and after them
-   the `bind` entries that pin the moves found. The record is spent once all of
-   them are durable.
+   the `bind` entries that pin the moves found. The record is removed once all
+   of them are durable.
 
 Building an intent writes nothing, but draws the id of each entity it creates,
 so one intent can create entities that name each other.
@@ -820,11 +820,10 @@ A writer carries out an intent's steps in this order:
    only then removes the source and syncs the source's directory. A copy that
    fails removes what it wrote. Each step runs alone.
 5. Append the intent's entry.
-6. Keep the pending record, now spent: its entry is logged, so the record is
-   not open, and no reader that has the entry reports it. No commit removes it.
-   The writer removes its spent records, each after its markers, when the app
-   tidies, as an app does when idle, and when it closes. A record whose removal
-   fails stays spent for the next tidy or close.
+6. Remove the pending record, after its markers, once the entry is durable. Its
+   entry is logged, so a record a crash or a failed removal leaves is spent: no
+   reader that has the entry reports it. The writer removes it before its next
+   write, which fails while it cannot, and when it closes.
 
 Where the folder's renames refuse an existing destination themselves, as
 `renameat2` with `RENAME_NOREPLACE`, `renamex_np` with `RENAME_EXCL` and
@@ -891,7 +890,7 @@ volume that ignores case finds the destination of a change of case by its
 source's name. When
 the last done step's source still holds the same bytes as its destination, the
 source is removed. The remaining steps are carried out, the planned entry is
-appended with what the steps did, and the record is spent. Then every file in
+appended with what the steps did, and the record is removed. Then every file in
 its `tmp/` that no open record places is removed, and so is every
 `pending/<nonce>.json` opening ignored that is a record created in place and cut
 short before its bytes landed, before any of its steps ran: one that is empty
@@ -997,9 +996,10 @@ bytes it needs.
 `trash/<nonce>` holds bytes an intent of the writer displaced, or new bytes an
 intent staged and could not place. An item is listed with the entry whose
 `displaced` names it. Only its writer removes an item, and only by emptying,
-which removes every item but those the app keeps and those a pending record of
-the writer names that is not spent, since settling the record may move them.
-While a pending record of the writer does not read, emptying removes nothing. An
+which first removes the writer's spent records, then every item but those the
+app keeps and those a pending record of the writer still in the folder names,
+since settling the record may move them. While a pending record of the writer
+does not read, emptying removes nothing. An
 item no entry names is never emptied. Emptying removes the items, then syncs the
 trash once; an item whose removal a crash undid is removed by the next emptying.
 
@@ -1016,9 +1016,9 @@ The folder keeps, for the life of a writer: one snapshot, holding at most one ow
 write per field it wrote and per other writer two references and one take, and a
 certificate per segment it ever wrote; the segments written since; one segment
 per process that crashed or was copied; trash items
-until the writer empties them; spent pending records until the writer tidies or
-closes; and the pending records of a writer that will never run again, settled
-or not. The local root keeps one directory per writer
+until the writer empties them; a spent pending record until the writer's next
+write or close; and the pending records of a writer that will never run again,
+settled or not. The local root keeps one directory per writer
 the install has used.
 
 ## Backends

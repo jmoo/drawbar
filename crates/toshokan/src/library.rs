@@ -1,7 +1,7 @@
 //! The library as one instance holds it: the pure core both drivers run.
 //!
 //! Only [`Library::commit`] (and undo, redo and settling, which commit),
-//! [`Library::empty_trash`], [`Library::tidy`], [`Library::compact`] and
+//! [`Library::empty_trash`], [`Library::compact`] and
 //! [`Library::close`] write the folder. Opening, viewing, refreshing and scanning
 //! never do; they write only in the local root.
 //!
@@ -38,7 +38,7 @@ use crate::recovery::{self, Settling};
 use crate::report::{
     By, Change, Committed, Compacted, Emptied, Fork, Gap, HistoryItem, Item, ItemChange, Lag,
     Local, Mode, Opened, Orphan, Outcome, Partial, PartialReport, PathChange, Presence, Refreshed,
-    Rekey, ScanReport, Settled, Start, Tidied, TrashItem, What, WriterInfo,
+    Rekey, ScanReport, Settled, Start, TrashItem, What, WriterInfo,
 };
 use crate::schema::Schema;
 use crate::trash;
@@ -60,9 +60,10 @@ pub struct Library {
     clock: Hlc,
     /// This writer's interrupted effects, settled before its next write is planned.
     unsettled: Vec<Settling>,
-    /// This writer's records whose entries are logged, left in the folder until
-    /// [`Library::tidy`] or [`Library::close`] removes them.
-    spent: BTreeMap<Nonce, PendingRecord>,
+    /// This writer's records whose entries are logged and that are still in the
+    /// folder: those opening found, and one whose removal at commit failed. Each
+    /// is removed before the next write.
+    spent: Vec<(Nonce, PendingRecord)>,
     orphaned: Vec<Orphan>,
     /// The other writers of this install's pool that no instance writes as now, by
     /// id, with their geneses: their locks are held, and their effects are this
@@ -231,7 +232,7 @@ impl Library {
             writer,
             clock: Hlc::ZERO,
             unsettled: Vec::new(),
-            spent: BTreeMap::new(),
+            spent: Vec::new(),
             orphaned: Vec::new(),
             pooled: BTreeMap::new(),
             ignored: Vec::new(),
@@ -611,11 +612,12 @@ impl Library {
         let Some(writer) = self.writer.as_ref().map(Writer::id) else {
             return Task::ready(Ok(Emptied::default()));
         };
-        let listed = trash::list(&self.layout, writer, self.folded.trash(writer));
-        let spent = self.spent.keys().copied().collect();
-        flow::run(listed)
-            .and_then(move |items| {
-                flow::run(trash::empty(&self.layout, writer, items, kept, spent))
+        remove_spent(self)
+            .then(move |(library, _)| {
+                let listed = trash::list(&library.layout, writer, library.folded.trash(writer));
+                flow::run(listed).and_then(move |items| {
+                    flow::run(trash::empty(&library.layout, writer, items, kept))
+                })
             })
             .task()
     }
@@ -642,26 +644,13 @@ impl Library {
             .task()
     }
 
-    /// Removes this writer's spent pending records: those of its intents whose
-    /// entries are logged, which commits leave in the folder. An app tidies when
-    /// it is idle, and [`Library::close`] removes what is left. Every record is
-    /// tried; one whose removal fails stays to try again, and the first failure is
-    /// returned once the others are tried. An app may drop the task to commit, and
-    /// what it removed stays removed.
-    pub fn tidy(&mut self) -> Task<'_, Result<Tidied>> {
-        if let Err(error) = self.writable() {
-            return Task::ready(Err(error));
-        }
-        tidied(self).then(|(_, tidied)| Flow::Done(tidied)).task()
-    }
-
     /// Compacts the writer of a writable library, records its head if that lags,
-    /// removes the spent pending records of a writable library, seals the open
-    /// segment and releases the writer's lock, then lets go of what the library
-    /// holds: nothing is left to view, and the library only drops. A record it
-    /// cannot remove stays for the next instance to find, and that failure is
-    /// returned once the library is closed. A library dropped without closing
-    /// leaves its segment open, as a crash does.
+    /// removes the records its entries closed that are still in the folder, seals
+    /// the open segment and releases the writer's lock, then lets go of what the
+    /// library holds: nothing is left to view, and the library only drops. A
+    /// record it cannot remove stays for the next instance to find, and that
+    /// failure is returned once the library is closed. A library dropped without
+    /// closing leaves its segment open, as a crash does.
     pub fn close(&mut self) -> Task<'_, Result<()>> {
         let Some(writer) = self.writer.take() else {
             self.dismantle();
@@ -672,17 +661,17 @@ impl Library {
             .then(|library| keep_local(library, false))
             .then(|(library, kept)| match (kept, library.writable()) {
                 (Err(error), _) => Flow::Done(Err(error)),
-                (Ok(()), Ok(())) => tidied(library).then(|(library, tidied)| ok((library, tidied))),
-                (Ok(()), Err(_)) => ok((library, Ok(Tidied::default()))),
+                (Ok(()), Ok(())) => remove_spent(library).then(flow::ok),
+                (Ok(()), Err(_)) => ok((library, Ok(()))),
             })
-            .and_then(|(library, tidied)| match library.writer.take() {
-                Some(writer) => flow::run(writer.close()).map_ok(move |()| (library, tidied)),
-                None => ok((library, tidied)),
+            .and_then(|(library, removed)| match library.writer.take() {
+                Some(writer) => flow::run(writer.close()).map_ok(move |()| (library, removed)),
+                None => ok((library, removed)),
             })
             .then(|closed| {
-                let closed = closed.and_then(|(library, tidied)| {
+                let closed = closed.and_then(|(library, removed)| {
                     library.dismantle();
-                    tidied.map(drop)
+                    removed
                 });
                 Flow::Done(closed)
             })
@@ -879,13 +868,6 @@ impl Library {
             paths: record.paths(),
             progress: 0,
         });
-    }
-
-    /// Keeps this writer's record `name`, whose entry is now logged, to remove
-    /// when the library tidies.
-    fn spend(&mut self, name: Nonce, record: &PendingRecord) {
-        self.unsettled.retain(|settling| settling.record != name);
-        self.spent.insert(name, record.clone());
     }
 
     /// Places entries this instance just appended to `written`, the open segment
@@ -1546,7 +1528,7 @@ fn recover(library: Library) -> Fallible<'static, Library> {
         ))
         .map_ok(move |assessed| {
             library.unsettled = assessed.own;
-            library.spent = assessed.spent.into_iter().collect();
+            library.spent = assessed.spent;
             library.orphaned = assessed.orphaned;
             for orphan in &mut library.orphaned {
                 orphan.ours = library.pooled.contains_key(&orphan.writer);
@@ -1864,13 +1846,17 @@ fn moved_paths(steps: &[EffectStep]) -> Vec<RelPath> {
     moves.flat_map(EffectStep::library_paths).cloned().collect()
 }
 
-/// Settles this writer's interrupted effects, so that what is planned next is
-/// planned against the facts and history they leave.
+/// Removes this writer's spent records, then settles its interrupted effects, so
+/// that what is planned next is planned against the facts and history they leave.
+/// A spent record that cannot be removed fails the write.
 fn settle_first(library: &mut Library) -> Fallible<'_, &mut Library> {
-    if library.unsettled.is_empty() {
-        return ok(library);
-    }
-    settle_own(library)
+    remove_spent(library).then(
+        |(library, removed)| match (removed, library.unsettled.is_empty()) {
+            (Err(error), _) => Flow::Done(Err(error)),
+            (Ok(()), true) => ok(library),
+            (Ok(()), false) => settle_own(library),
+        },
+    )
 }
 
 /// Commits `resolved` once this writer's interrupted effects are settled: creates
@@ -2052,8 +2038,8 @@ fn ensure_writer<'a>(
 }
 
 /// Settles this writer's interrupted effects, oldest first, and shows what they
-/// leave. A record stays to settle while settling it fails, and is spent once its
-/// entry is logged. One whose effects stop partway is logged as far as they got,
+/// leave. A record stays to settle while settling it fails, and is removed once
+/// its entry is durable. One whose effects stop partway is logged as far as they got,
 /// and fails the settling with [`Error::Unfinished`].
 fn settle_own(library: &mut Library) -> Fallible<'_, &mut Library> {
     let open = library.unsettled.clone();
@@ -2108,10 +2094,11 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
                 false => append(library, kinds),
             };
             appended.and_then(move |(library, entries)| {
-                library.spend(name, &record);
-                let scan = library.scan_task();
-                rebind_logged(library, scan, record.paths())
-                    .map_ok(move |library| (library, label, entries, applied.outcome, resumed))
+                remove_record(library, name, &record).then(move |library| {
+                    let scan = library.scan_task();
+                    rebind_logged(library, scan, record.paths())
+                        .map_ok(move |library| (library, label, entries, applied.outcome, resumed))
+                })
             })
         })
         .and_then(|(library, label, entries, outcome, resumed)| {
@@ -2129,35 +2116,37 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
         })
 }
 
-/// Removes this writer's spent records, each after its markers, and returns those
-/// removed, or the first failure once every record is tried. Each is forgotten as
-/// it is removed, so a task dropped partway keeps what it removed.
-fn tidied(library: &mut Library) -> Flow<'_, (&mut Library, Result<Tidied>)> {
-    let names: Vec<Nonce> = library.spent.keys().copied().collect();
-    remove_spent(library, names.into_iter(), Tidied::default(), Ok(()))
+/// Removes this writer's record `name` once its entries are durable, with the
+/// others its entries closed. One that stays is removed before the next write.
+fn remove_record<'a>(
+    library: &'a mut Library,
+    name: Nonce,
+    record: &PendingRecord,
+) -> Flow<'a, &'a mut Library> {
+    library.unsettled.retain(|settling| settling.record != name);
+    library.spent.push((name, record.clone()));
+    remove_spent(library).then(|(library, _)| Flow::Done(library))
 }
 
-fn remove_spent(
-    library: &mut Library,
-    mut names: std::vec::IntoIter<Nonce>,
-    mut tidied: Tidied,
-    failed: Result<()>,
-) -> Flow<'_, (&mut Library, Result<Tidied>)> {
-    let Some(name) = names.next() else {
-        return Flow::Done((library, failed.map(|()| tidied)));
-    };
-    let removing = effects::finish(&library.layout, name, &library.spent[&name]);
-    flow::run(removing).then(move |removed| {
-        let failed = match removed {
-            Ok(()) => {
-                library.spent.remove(&name);
-                tidied.removed.push(name);
-                failed
-            }
-            Err(error) => failed.and(Err(error)),
-        };
-        remove_spent(library, names, tidied, failed)
-    })
+/// Removes this writer's records its entries closed that are still in the
+/// folder, each after its markers. One whose removal fails stays to try again,
+/// and the first failure is returned once the others are tried.
+fn remove_spent(library: &mut Library) -> Flow<'_, (&mut Library, Result<()>)> {
+    let spent = std::mem::take(&mut library.spent);
+    flow::fold(
+        spent.into_iter(),
+        (library, Ok(())),
+        |(library, failed), (name, record)| {
+            let removing = effects::finish(&library.layout, name, &record);
+            flow::run(removing).then(move |removed| {
+                if removed.is_err() {
+                    library.spent.push((name, record));
+                }
+                flow::ok((library, failed.and(removed)))
+            })
+        },
+    )
+    .then(|folded| Flow::Done(folded.expect("removing a record fails nothing else")))
 }
 
 /// Removes what a run cut short before its steps left: staged files no record
@@ -2507,9 +2496,8 @@ fn carry_out<'a>(
 
 /// Appends the intent `logged` with what `applied` says the effects did, closed
 /// by `closing` if they complete and followed by `bind` entries pinning `pins`,
-/// keeps the record as spent once the entries are durable, and scans again the
-/// paths the effects moved files from and to. Once the entries are durable nothing
-/// fails.
+/// removes the record once the entries are durable, and scans again the paths the
+/// effects moved files from and to. Once the entries are durable nothing fails.
 fn log_effects<'a>(
     library: &'a mut Library,
     logged: Logged,
@@ -2534,22 +2522,27 @@ fn log_effects<'a>(
     appending(library, kinds).then(move |(library, appended)| {
         let retired = library.writer.as_ref().map(Writer::id) != Some(record.writer);
         match (journaled, appended.is_ok(), retired) {
-            (false, _, _) => {}
-            (true, true, _) => library.spend(name, &record),
             (true, false, false) => library.interrupted(name, &record),
             (true, false, true) => library.orphan(name, &record, true),
+            (false, _, _) | (true, true, _) => {}
         }
         let entries = match appended {
             Ok(entries) => entries,
             Err(error) => return Flow::Done(Err(error)),
         };
-        rescan_paths(library, touched).map_ok(move |library| {
-            library.show();
-            let ended = Ended {
-                outcome,
-                left: applied.left,
-            };
-            (library, entries, ended)
+        let removed = match journaled {
+            true => remove_record(library, name, &record),
+            false => Flow::Done(library),
+        };
+        removed.then(move |library| {
+            rescan_paths(library, touched).map_ok(move |library| {
+                library.show();
+                let ended = Ended {
+                    outcome,
+                    left: applied.left,
+                };
+                (library, entries, ended)
+            })
         })
     })
 }

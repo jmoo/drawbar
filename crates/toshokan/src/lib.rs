@@ -64,8 +64,7 @@
 //! with `Error::Partial`, which says what it logged. Any other commit whose entries
 //! reached the folder succeeds, and `Committed::local` says what the instance keeps
 //! beside the folder that lags it until the next commit, refresh or close. A commit
-//! leaves the pending record of its file effects in the folder; an app calls `tidy`
-//! when idle to remove such records, and closing removes what is left.
+//! removes the pending record of its file effects once its entries are durable.
 //!
 //! # In the browser
 //!

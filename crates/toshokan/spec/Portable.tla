@@ -73,7 +73,6 @@ VARIABLES
     lastSnap,   \* its last snapshot, or None
     nextName,   \* its segment name counter, when names are not unique
     inflight,   \* its effect in flight
-    spent,      \* records of its effects closed since, not yet deleted
     \* Reader state: `vis`, its copy of the folder, and what its last read
     \* derived from that copy alone.
     acc,        \* entries whose effects the reader has merged (a ghost)
@@ -85,7 +84,7 @@ VARIABLES
     vis         \* vis[r][f]: how much of file f reader r sees
 
 writer == <<ents, files, nW, nEff, clones, losses, role, wid, head, seg, dying,
-            lastSnap, nextName, inflight, spent>>
+            lastSnap, nextName, inflight>>
 reader == <<acc, reported, shown, dismissed, gaps, dup, vis>>
 folder == <<backup, restores, drops, lost, lostEffects>>
 vars == <<writer, reader, folder, chaos>>
@@ -306,7 +305,7 @@ AppendEntry(i, closes, dis) ==
 Write(i) ==
     /\ AppendEntry(i, 0, {})
     /\ UNCHANGED <<nW, nEff, clones, losses, role, wid, dying, lastSnap,
-                   inflight, spent, reader, folder, chaos>>
+                   inflight, reader, folder, chaos>>
 
 \* The owner seals its segment, folds its own chain into a snapshot, and
 \* deletes the snapshot the new one supersedes and the segments of its
@@ -354,7 +353,7 @@ Compact(i) ==
        /\ seg' = [seg EXCEPT ![i] = None]
        /\ dying' = [dying EXCEPT ![i] = @ \cup superseded \cup old]
        /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, nextName,
-                      inflight, spent, reader, folder, chaos>>
+                      inflight, reader, folder, chaos>>
 
 \* A deletion names a file. Sync applies it to whichever file holds that
 \* name, which for a segment name two histories chose may be the other's.
@@ -372,25 +371,22 @@ DeleteOne(i) ==
            /\ IF namesake = {} \/ kept THEN UNCHANGED files
               ELSE \E g \in namesake : files' = [files EXCEPT ![g].deleted = TRUE]
     /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, seg,
-                   lastSnap, nextName, inflight, spent, reader, folder, chaos>>
-
-\* A multi-step effect: write its pending record, then log the entry that
-\* closes it. The record is then spent, and its writer deletes it at any
-\* later time, after beginning other effects or never.
-Spent(i) == spent[i] \cup IF inflight[i].logged THEN {inflight[i].rec} ELSE {}
+                   lastSnap, nextName, inflight, reader, folder, chaos>>
 
 \* No effect of this writer is open.
 Idle(i) == inflight[i] = NoEffect \/ inflight[i].logged
 
+\* A multi-step effect: write its pending record, then log the entry that
+\* closes it. The record is then spent, and its writer deletes it before it
+\* begins another effect.
 Begin(i) ==
     LET f == Len(files) + 1 IN
     /\ Writable(i)
-    /\ Idle(i)
+    /\ inflight[i] = NoEffect
     /\ nEff < MaxEffects
     /\ Len(files) < MaxFiles
     /\ files' = Append(files, NewFile("pend", wid[i], f, <<>>, None, {}, {}, nEff + 1))
     /\ inflight' = [inflight EXCEPT ![i] = [eff |-> nEff + 1, rec |-> f, logged |-> FALSE]]
-    /\ spent' = [spent EXCEPT ![i] = Spent(i)]
     /\ nEff' = nEff + 1
     /\ UNCHANGED <<ents, nW, clones, losses, role, wid, head, seg, dying,
                    lastSnap, nextName, reader, folder, chaos>>
@@ -401,15 +397,13 @@ Close(i) ==
     /\ AppendEntry(i, inflight[i].eff, {})
     /\ inflight' = [inflight EXCEPT ![i].logged = TRUE]
     /\ UNCHANGED <<nW, nEff, clones, losses, role, wid, dying, lastSnap,
-                   spent, reader, folder, chaos>>
+                   reader, folder, chaos>>
 
 Unpend(i) ==
     /\ Writable(i)
-    /\ \E f \in Spent(i) :
-        /\ files' = [files EXCEPT ![f].deleted = TRUE]
-        /\ spent' = [spent EXCEPT ![i] = @ \ {f}]
-        /\ inflight' = IF f = inflight[i].rec
-                       THEN [inflight EXCEPT ![i] = NoEffect] ELSE inflight
+    /\ inflight[i].logged
+    /\ files' = [files EXCEPT ![inflight[i].rec].deleted = TRUE]
+    /\ inflight' = [inflight EXCEPT ![i] = NoEffect]
     /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, seg, dying,
                    lastSnap, nextName, reader, folder, chaos>>
 
@@ -420,7 +414,7 @@ Settle(i) ==
     \E e \in Reported(i) :
         /\ AppendEntry(i, e, {})
         /\ UNCHANGED <<nW, nEff, clones, losses, role, wid, dying,
-                       lastSnap, inflight, spent, reader, folder, chaos>>
+                       lastSnap, inflight, reader, folder, chaos>>
 
 \* The user dismisses the runs a writer's reader shows, by an entry naming
 \* them. Taking a run's writes instead is an ordinary write.
@@ -428,7 +422,7 @@ Dismiss(i) ==
     /\ shown[i] # {}
     /\ AppendEntry(i, 0, shown[i])
     /\ UNCHANGED <<nW, nEff, clones, losses, role, wid, dying, lastSnap,
-                   inflight, spent, reader, folder, chaos>>
+                   inflight, reader, folder, chaos>>
 
 \* A copied local root (a restored backup, a cloned disk, copied app data)
 \* opens on another machine as the same writer with the same history. A
@@ -454,7 +448,6 @@ Clone(i, j) ==
     /\ lastSnap' = [lastSnap EXCEPT ![j] = lastSnap[i]]
     /\ nextName' = [nextName EXCEPT ![j] = nextName[i]]
     /\ inflight' = [inflight EXCEPT ![j] = inflight[i]]
-    /\ spent' = [spent EXCEPT ![j] = spent[i]]
     /\ UNCHANGED <<ents, nW, nEff, losses, reader, folder, chaos>>
 
 \* A process that quits seals its segment with a durable marker. The next
@@ -465,7 +458,7 @@ Quit(i) ==
     /\ files' = [files EXCEPT ![seg[i]].sealed = TRUE]
     /\ seg' = [seg EXCEPT ![i] = None]
     /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, dying,
-                   lastSnap, nextName, inflight, spent, reader, folder, chaos>>
+                   lastSnap, nextName, inflight, reader, folder, chaos>>
 
 \* A crash leaves its segment without a seal marker.
 Crash(i) ==
@@ -473,7 +466,7 @@ Crash(i) ==
     /\ seg[i] # None
     /\ seg' = [seg EXCEPT ![i] = None]
     /\ UNCHANGED <<ents, files, nW, nEff, clones, losses, role, wid, head,
-                   dying, lastSnap, nextName, inflight, spent, reader, folder,
+                   dying, lastSnap, nextName, inflight, reader, folder,
                    chaos>>
 
 \* Instance i continues under a new writer id and never writes, compacts or
@@ -488,7 +481,6 @@ Renew(i) ==
     /\ lastSnap' = [lastSnap EXCEPT ![i] = None]
     /\ nextName' = [nextName EXCEPT ![i] = 0]
     /\ inflight' = [inflight EXCEPT ![i] = NoEffect]
-    /\ spent' = [spent EXCEPT ![i] = {}]
 
 \* Losing the local root loses the effect in flight; the next open is a new
 \* writer.
@@ -550,7 +542,7 @@ Restore ==
     /\ \E b \in backup : Becomes(BackedUp(b, 0..MaxWriters))
     /\ restores' = restores + 1
     /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, seg, dying,
-                   lastSnap, nextName, inflight, spent, reader, backup, drops, chaos>>
+                   lastSnap, nextName, inflight, reader, backup, drops, chaos>>
 
 \* One writer's directory alone goes back to its backup.
 RestoreDir ==
@@ -558,7 +550,7 @@ RestoreDir ==
     /\ \E b \in backup : \E d \in 1..nW : Becomes(BackedUp(b, {d}))
     /\ restores' = restores + 1
     /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, seg, dying,
-                   lastSnap, nextName, inflight, spent, reader, backup, drops, chaos>>
+                   lastSnap, nextName, inflight, reader, backup, drops, chaos>>
 
 \* A sync client keeps an earlier version of one segment: a shorter prefix,
 \* without a seal marker.
@@ -570,7 +562,7 @@ DropVersion ==
         /\ Becomes([files EXCEPT ![f].ents = SubSeq(@, 1, k), ![f].sealed = FALSE])
     /\ drops' = drops + 1
     /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, seg, dying,
-                   lastSnap, nextName, inflight, spent, reader, backup, restores, chaos>>
+                   lastSnap, nextName, inflight, reader, backup, restores, chaos>>
 
 -----------------------------------------------------------------------------
 (* Sync. Each file reaches each reader independently. A file may show any  *)
@@ -622,7 +614,6 @@ Init ==
     /\ lastSnap = [i \in Instances |-> None]
     /\ nextName = [i \in Instances |-> 0]
     /\ inflight = [i \in Instances |-> NoEffect]
-    /\ spent = [i \in Instances |-> {}]
     /\ acc = [i \in Instances |-> {}]
     /\ reported = [i \in Instances |-> {}]
     /\ shown = [i \in Instances |-> {}]
@@ -737,8 +728,7 @@ DismissalsHold ==
 \* A writer creates, appends to and deletes files only in its own directory.
 OwnDirectory ==
     \A i \in Instances : role[i] = "writer" =>
-        \A f \in dying[i] \cup spent[i]
-                \cup ({seg[i], lastSnap[i], inflight[i].rec} \ {None}) :
+        \A f \in dying[i] \cup ({seg[i], lastSnap[i], inflight[i].rec} \ {None}) :
             files[f].dir = wid[i]
 
 \* The folder keeps every entry written, in a segment or folded in a

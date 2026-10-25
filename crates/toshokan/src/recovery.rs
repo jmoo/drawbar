@@ -2,9 +2,9 @@
 //!
 //! Opening assesses and writes nothing in the folder. This writer's own records
 //! are settled before its next write: the steps resume where they stopped, and
-//! the intent's entry is appended with what they did. The record is then spent,
-//! as is one whose entry the log already holds, and is removed only when the
-//! library tidies or closes. A record of a writer this install does not write as
+//! the intent's entry is appended with what they did, and the record is removed.
+//! One whose entry the log already holds is spent, and is removed before the next
+//! write or at close. A record of a writer this install does not write as
 //! is reported as possibly still in progress elsewhere, and settled only with the
 //! user's consent, by this writer and in its own log; only its owner ever removes
 //! it. Settling twice equals settling once.

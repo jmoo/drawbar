@@ -27,9 +27,9 @@ new one supersedes and the sealed segments that a snapshot in its directory
 folds. A multi-step effect writes a pending record and logs the entry that
 closes it, which names the record: the model closes an effect by its own
 `logged` flag, and the code closes a record only by an entry naming its nonce,
-never by its place in the chain. The record is then spent, and its owner deletes it at any later time,
-after beginning other effects or never. Another writer that sees the record of
-an effect no entry closes reports it, and with the user's consent closes it in
+never by its place in the chain. The record is then spent, and its owner deletes
+it before it begins another effect, or never. Another writer that sees the record
+of an effect no entry closes reports it, and with the user's consent closes it in
 its own log; only the record's owner deletes it.
 
 Each entry carries its number in its writer's chain. A snapshot lets a reader

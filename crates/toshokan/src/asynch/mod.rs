@@ -18,8 +18,7 @@ use crate::log::Settlement;
 use crate::path::RelPath;
 use crate::plan::{Splice, Splicing};
 use crate::report::{
-    Committed, Compacted, Emptied, HistoryItem, Opened, Orphan, Refreshed, Tidied, TrashItem,
-    WriterInfo,
+    Committed, Compacted, Emptied, HistoryItem, Opened, Orphan, Refreshed, TrashItem, WriterInfo,
 };
 use crate::schema::Schema;
 use crate::view::View;
@@ -346,13 +345,6 @@ impl<F: Fs> Library<F> {
 
     pub async fn empty_trash(&mut self, kept: BTreeSet<Nonce>) -> Result<Emptied> {
         run(&self.fs, self.core.empty_trash(kept)).await
-    }
-
-    /// Removes the pending records this writer's commits left once their entries
-    /// were logged. An app calls it when idle, and may drop it to commit; closing
-    /// removes what is left.
-    pub async fn tidy(&mut self) -> Result<Tidied> {
-        run(&self.fs, self.core.tidy()).await
     }
 
     /// Compacts now, as tests and harnesses drive it; a writer compacts by itself.

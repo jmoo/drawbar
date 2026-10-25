@@ -86,7 +86,6 @@ enum Step {
     },
     Undo,
     Redo,
-    Tidy,
     Compact,
     /// Empties the whole trash.
     EmptyTrash,
@@ -195,7 +194,6 @@ fn workloads() -> Vec<Workload> {
                 },
             ],
             steps: vec![
-                Tidy,
                 Compact,
                 Tag {
                     name: "song",
@@ -263,12 +261,9 @@ impl Model {
     fn after(&self, step: Step, history: &mut (Vec<Model>, Vec<Model>)) -> Model {
         let mut next = self.clone();
         match step {
-            Step::Open
-            | Step::Close
-            | Step::Tidy
-            | Step::Compact
-            | Step::EmptyTrash
-            | Step::Settle => return next,
+            Step::Open | Step::Close | Step::Compact | Step::EmptyTrash | Step::Settle => {
+                return next
+            }
             Step::Undo => {
                 let before = history.0.pop().expect("something to undo");
                 history.1.push(next);
@@ -600,7 +595,6 @@ impl Runner {
             }
             Step::Undo => committed(self.library().undo())?,
             Step::Redo => committed(self.library().redo())?,
-            Step::Tidy => self.library().tidy().map(|_| None).map_err(shown)?,
             Step::Compact => self.library().compact().map(|_| None).map_err(shown)?,
             Step::EmptyTrash => {
                 let emptied = self.library().empty_trash(Default::default());

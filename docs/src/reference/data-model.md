@@ -609,8 +609,7 @@ After each commit drawbar keeps the items of this session's changes, newest
 first, up to 1 GiB, and empties the rest; the Edit menu stops at the first change
 whose undo needed an item it emptied. Closing the library empties every item.
 Opening a library that may be written empties it too, after settling, which may
-need what the trash holds; toshokan keeps any item a pending record not yet
-spent names.
+need what the trash holds; toshokan keeps any item a pending record names.
 Which writer's trash an instance empties is in [Trash](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#trash).
 
 ### Drafts

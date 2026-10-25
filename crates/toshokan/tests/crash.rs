@@ -444,7 +444,7 @@ fn records(disk: &MemDisk, writer: WriterId) -> Vec<(Nonce, PendingRecord)> {
 }
 
 /// Opens as `WRITER`, settles its records, as the library does before its next
-/// write, and removes them, as tidying does.
+/// write, and removes them, as its next write does.
 fn recover(disk: &MemDisk) -> Result<Vec<Outcome>, Error> {
     let layout = layout();
     let d = &mut process(disk);

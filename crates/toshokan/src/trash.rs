@@ -48,22 +48,19 @@ pub fn list(
 
 /// Removes from `writer`'s trash every item of `items` but those of `kept` and those
 /// a pending record of the writer names, which settling it may still move, then syncs
-/// the trash once. The records of `spent` have settled and keep nothing. While a
-/// record of the writer does not read, removes none.
+/// the trash once. While a record of the writer does not read, removes none.
 pub fn empty(
     layout: &Layout,
     writer: WriterId,
     items: Vec<TrashItem>,
     kept: BTreeSet<Nonce>,
-    spent: BTreeSet<Nonce>,
 ) -> Task<'static, Result<Emptied>> {
     let layout = layout.clone();
     flow::run(pending::read_all(&layout, writer))
-        .and_then(move |mut found| {
+        .and_then(move |found| {
             if !found.unreadable.is_empty() {
                 return flow::ok(Emptied::default());
             }
-            found.records.retain(|(name, _)| !spent.contains(name));
             let named = named(&found.records);
             let removed = items
                 .into_iter()
@@ -141,10 +138,8 @@ mod tests {
         (nonce(9), record)
     }
 
-    /// Emptying keeps what the app keeps and what an unsettled record of the writer
-    /// names, and removes the rest.
     #[test]
-    fn emptying_keeps_what_the_app_keeps_and_what_an_unsettled_record_names() {
+    fn emptying_keeps_what_the_app_keeps_and_what_a_pending_record_names() {
         use crate::disk::MemDisk;
         use crate::ids::{EntryHash, Hlc};
         use crate::io::Io;
@@ -184,14 +179,9 @@ mod tests {
             path: RelPath::new("f").unwrap(),
         }]);
         put(layout.pending(writer, name), unsettled.encode());
-        let (_, settled) = record(vec![EffectStep::ToTrash {
-            path: RelPath::new("f").unwrap(),
-            item: nonce(4),
-        }]);
-        put(layout.pending(writer, nonce(8)), settled.encode());
 
         let mut disk = disk;
-        let emptied = empty(&layout, writer, items, [nonce(3)].into(), [nonce(8)].into());
+        let emptied = empty(&layout, writer, items, [nonce(3)].into());
         let emptied = crate::blocking::run(&mut disk, emptied).unwrap();
         assert_eq!(emptied.removed, [nonce(1), nonce(4)]);
     }

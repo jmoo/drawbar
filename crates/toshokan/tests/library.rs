@@ -21,7 +21,7 @@ use toshokan::log::{Entry, EntryKind, FileFact, Genesis, Logged, Op, Run, Settle
 use toshokan::plan::FactChange;
 use toshokan::report::{
     By, Change, Committed, Compacted, Emptied, HistoryItem, Item, ItemKind, Opened, PathChange,
-    Presence, Refreshed, Rekey, Start, Tidied, TrashItem, What, WriterInfo,
+    Presence, Refreshed, Rekey, Start, TrashItem, What, WriterInfo,
 };
 use toshokan::simulator::Machine;
 use toshokan::snapshot::Snapshot;
@@ -346,7 +346,6 @@ trait Facade: Sized {
     fn others(&mut self) -> Result<Vec<WriterInfo>, Error>;
     fn trash(&mut self) -> Result<Vec<TrashItem>, Error>;
     fn empty_trash(&mut self, kept: BTreeSet<Nonce>) -> Result<Emptied, Error>;
-    fn tidy(&mut self) -> Result<Tidied, Error>;
     fn compact(&mut self) -> Result<Compacted, Error>;
     fn settle(
         &mut self,
@@ -410,9 +409,6 @@ impl Facade for Blocking {
     }
     fn empty_trash(&mut self, kept: BTreeSet<Nonce>) -> Result<Emptied, Error> {
         self.0.empty_trash(kept)
-    }
-    fn tidy(&mut self) -> Result<Tidied, Error> {
-        self.0.tidy()
     }
     fn compact(&mut self) -> Result<Compacted, Error> {
         self.0.compact()
@@ -482,9 +478,6 @@ impl Facade for Async {
     }
     fn empty_trash(&mut self, kept: BTreeSet<Nonce>) -> Result<Emptied, Error> {
         pollster::block_on(self.0.empty_trash(kept))
-    }
-    fn tidy(&mut self) -> Result<Tidied, Error> {
-        pollster::block_on(self.0.tidy())
     }
     fn compact(&mut self) -> Result<Compacted, Error> {
         pollster::block_on(self.0.compact())
@@ -569,7 +562,7 @@ through_both!(
     a_tree_moved_file_by_file_names_the_directories_a_file_it_did_not_know_keeps,
     an_entry_of_a_copied_instance_does_not_close_another_instances_record,
     an_unfinished_effect_of_a_writer_that_retires_stays_this_installs,
-    a_commit_whose_entry_did_not_sync_keeps_its_record_through_tidying,
+    a_commit_whose_entry_did_not_sync_keeps_its_record,
     a_compaction_finishes_a_cut_short_continuation_before_it_folds_it,
     a_continuation_resumed_without_a_moved_file_logs_every_other_file_once,
     more_entities_deleted_than_one_line_holds_beside_their_files_come_back_with_undo,
@@ -593,12 +586,12 @@ through_both!(
     a_settlement_is_committed_when_its_rescan_fails,
     a_failed_rescan_after_a_rename_binds_no_copy_in_its_place,
     a_commit_whose_head_cannot_be_recorded_is_kept_and_continued,
-    a_commit_leaves_its_record_until_tidied,
-    closing_removes_the_records_commits_left,
-    a_record_tidying_cannot_remove_is_removed_by_the_next,
-    records_a_crash_left_spent_are_not_settled_again_and_tidied,
+    a_commit_removes_its_record_once_its_entries_are_durable,
+    a_record_whose_removal_fails_is_removed_before_the_next_write,
+    closing_removes_a_record_whose_removal_failed,
+    a_record_a_crash_left_spent_is_not_settled_again_and_goes_at_the_next_write,
     a_spent_record_is_reported_only_where_its_entry_has_not_arrived,
-    a_settled_record_is_spent_and_logged_once,
+    a_settled_record_is_removed_and_logged_once,
     identities_a_failed_write_lost_are_kept_by_the_next_scan,
     a_commit_scans_only_what_it_moved_and_a_rescan_finds_the_rest,
     an_identity_read_for_a_new_time_is_read_once_per_install,
@@ -1345,7 +1338,7 @@ fn file_ops_logged(folder: &MemDisk) -> BTreeMap<String, usize> {
     counts
 }
 
-fn a_commit_whose_entry_did_not_sync_keeps_its_record_through_tidying<F: Facade>() {
+fn a_commit_whose_entry_did_not_sync_keeps_its_record<F: Facade>() {
     if !FOLDER.get().fsync {
         return;
     }
@@ -1368,7 +1361,6 @@ fn a_commit_whose_entry_did_not_sync_keeps_its_record_through_tidying<F: Facade>
     });
     assert!(saved.is_err(), "the entry did not sync");
     heal(&probe);
-    a.tidy().unwrap();
     drop(a);
     let disk = disk.restart();
     let (mut again, opened) = F::open(Probe::new(&one_disk(&disk)), env("a", 2, &clock)).unwrap();
@@ -2832,81 +2824,81 @@ fn pending_removal(io: &Io) -> bool {
     matches!(io, Io::Remove { root: Root::Folder, path } if path.components().any(|c| c == "pending"))
 }
 
-fn a_commit_leaves_its_record_until_tidied<F: Facade>() {
+fn a_commit_removes_its_record_once_its_entries_are_durable<F: Facade>() {
     let folder = disk();
     let clock = TestClock::at(1_000);
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     let song = create(&mut a, "song.npno", b"song");
+    assert_eq!(pending_files(&folder), [], "the import's record is removed");
     let renamed = a
         .commit("Rename", |i| {
             i.rename(song, &path("b.npno"), Expect::Holds(identity(b"song")))
         })
         .unwrap();
     assert_eq!(renamed.local, Local::Current);
-    let left = pending_files(&folder);
-    a.commit("Tag", |i| i.add(song, TAGS, tag("x"))).unwrap();
-    assert_eq!(pending_files(&folder), left, "the next commit leaves them");
-    let records = left.iter().filter(|path| path.as_str().ends_with(".json"));
-    assert_eq!(
-        records.count(),
-        2,
-        "the import's and the rename's: {left:?}"
-    );
-    assert_eq!(a.tidy().unwrap().removed.len(), 2);
-    assert_eq!(pending_files(&folder), []);
-    assert_eq!(a.tidy().unwrap(), Tidied::default());
+    assert_eq!(pending_files(&folder), [], "the rename's record is removed");
     let labels: Vec<String> = a.history().into_iter().map(|item| item.label).collect();
-    assert_eq!(labels, ["Import", "Rename", "Tag"]);
+    assert_eq!(labels, ["Import", "Rename"]);
 }
 
-fn closing_removes_the_records_commits_left<F: Facade>() {
+/// Opens a library on `folder` and commits an import whose record removal fails,
+/// which still succeeds; returns the library and the record left.
+fn with_a_record_left<F: Facade>(folder: &MemDisk, clock: &TestClock) -> (F, Probe, RelPath) {
+    let probe = Probe::new(&machine(folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, clock)).unwrap();
+    fail(&probe, pending_removal);
+    create(&mut a, "one.npno", b"one");
+    heal(&probe);
+    let left = pending_files(folder);
+    let records: Vec<&RelPath> = left
+        .iter()
+        .filter(|at| at.as_str().ends_with(".json"))
+        .collect();
+    assert_eq!(records.len(), 1, "{left:?}");
+    let record = records[0].clone();
+    (a, probe, record)
+}
+
+fn a_record_whose_removal_fails_is_removed_before_the_next_write<F: Facade>() {
     let folder = disk();
     let clock = TestClock::at(1_000);
-    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
-    create(&mut a, "song.npno", b"song");
-    assert_ne!(pending_files(&folder), []);
+    let (mut a, probe, record) = with_a_record_left::<F>(&folder, &clock);
+    let song = a.view().entities()[0].id();
+    fail(&probe, pending_removal);
+    let refused = a.commit("Tag", |i| i.add(song, TAGS, tag("x")));
+    heal(&probe);
+    assert!(
+        refused.is_err(),
+        "no write while the record stays: {refused:?}"
+    );
+    assert!(pending_files(&folder).contains(&record));
+    a.commit("Tag", |i| i.add(song, TAGS, tag("x"))).unwrap();
+    assert_eq!(pending_files(&folder), []);
+}
+
+fn closing_removes_a_record_whose_removal_failed<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (a, _, _) = with_a_record_left::<F>(&folder, &clock);
     a.close().unwrap();
     assert_eq!(pending_files(&folder), []);
 }
 
-fn a_record_tidying_cannot_remove_is_removed_by_the_next<F: Facade>() {
-    let folder = disk();
-    let clock = TestClock::at(1_000);
-    let probe = Probe::new(&machine(&folder));
-    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
-    create(&mut a, "one.npno", b"one");
-    create(&mut a, "two.npno", b"two");
-    let records: Vec<RelPath> = pending_files(&folder)
-        .into_iter()
-        .filter(|path| path.as_str().ends_with(".json"))
-        .collect();
-    let stuck = records[0].clone();
-    let failing = stuck.clone();
-    fail(&probe, move |io| {
-        pending_removal(io) && *io.path() == failing
-    });
-    let tidied = a.tidy();
-    heal(&probe);
-    assert!(tidied.is_err(), "{tidied:?}");
-    assert_eq!(pending_files(&folder), [stuck], "the other is removed");
-    let tidied = a.tidy().unwrap();
-    assert_eq!(tidied.removed.len(), 1);
-    assert_eq!(pending_files(&folder), []);
-}
-
-fn records_a_crash_left_spent_are_not_settled_again_and_tidied<F: Facade>() {
+fn a_record_a_crash_left_spent_is_not_settled_again_and_goes_at_the_next_write<F: Facade>() {
     let one_disk = |disk: &MemDisk| Machine {
         folder: disk.clone(),
         local: disk.clone(),
     };
     let folder = disk();
     let clock = TestClock::at(1_000);
-    let (mut a, _) = F::open(Probe::new(&one_disk(&folder)), env("a", 1, &clock)).unwrap();
+    let probe = Probe::new(&one_disk(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
     let song = create(&mut a, "one.npno", b"one");
+    fail(&probe, pending_removal);
     create(&mut a, "two.npno", b"two");
     drop(a);
     let folder = folder.restart();
-    let left = pending_files(&folder);
+    assert_ne!(pending_files(&folder), [], "the crash left the record");
     let (mut again, opened) = F::open(Probe::new(&one_disk(&folder)), env("a", 2, &clock)).unwrap();
     assert!(
         matches!(opened.start, Start::Resumed(_)),
@@ -2918,17 +2910,16 @@ fn records_a_crash_left_spent_are_not_settled_again_and_tidied<F: Facade>() {
     again
         .commit("Tag", |i| i.add(song, TAGS, tag("x")))
         .unwrap();
-    assert_eq!(pending_files(&folder), left, "the next commit leaves them");
+    assert_eq!(pending_files(&folder), [], "the next write removes it");
     let labels: Vec<String> = again.history().into_iter().map(|i| i.label).collect();
     assert_eq!(labels, ["Tag"], "the history holds this session's intents");
-    assert_eq!(again.tidy().unwrap().removed.len(), 2);
-    assert_eq!(pending_files(&folder), []);
 }
 
 fn a_spent_record_is_reported_only_where_its_entry_has_not_arrived<F: Facade>() {
     let folder = disk();
     let clock = TestClock::at(1_000);
-    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
     create(&mut a, "one.npno", b"one");
     let segments = |folder: &MemDisk| -> BTreeMap<RelPath, Vec<u8>> {
         let files = folder.files(Root::Folder).into_iter();
@@ -2937,7 +2928,9 @@ fn a_spent_record_is_reported_only_where_its_entry_has_not_arrived<F: Facade>() 
             .collect()
     };
     let before = segments(&folder);
+    fail(&probe, pending_removal);
     create(&mut a, "two.npno", b"two");
+    heal(&probe);
 
     let (_, opened) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
     assert_eq!(opened.orphaned, [], "every record's entry arrived");
@@ -2956,7 +2949,7 @@ fn a_spent_record_is_reported_only_where_its_entry_has_not_arrived<F: Facade>() 
     assert_eq!(opened.orphaned[0].paths, [path("two.npno")]);
 }
 
-fn a_settled_record_is_spent_and_logged_once<F: Facade>() {
+fn a_settled_record_is_removed_and_logged_once<F: Facade>() {
     interrupted_renames::<F>(|disk, shown| {
         let machine = Machine {
             folder: disk.clone(),
@@ -2970,7 +2963,7 @@ fn a_settled_record_is_spent_and_logged_once<F: Facade>() {
             .commit("Tag", |i| i.add(song, TAGS, tag("next")))
             .unwrap_or_else(|e| panic!("{shown}: {e}"));
         assert_eq!(tagged.local, Local::Current, "{shown}");
-        assert_ne!(pending_files(&disk), [], "{shown}: the record is spent");
+        assert_eq!(pending_files(&disk), [], "{shown}: the record is removed");
         again
             .commit("Tag", |i| i.add(song, TAGS, tag("last")))
             .unwrap_or_else(|e| panic!("{shown}: {e}"));
@@ -2985,8 +2978,6 @@ fn a_settled_record_is_spent_and_logged_once<F: Facade>() {
             ["last", "new", "next"],
             "{shown}"
         );
-        again.tidy().unwrap_or_else(|e| panic!("{shown}: {e}"));
-        assert_eq!(pending_files(&disk), [], "{shown}");
     });
 }
 
@@ -3748,11 +3739,12 @@ fn an_idle_writer_whose_records_its_log_closed_is_let_go<F: Facade>() {
         local: disk.clone(),
     };
     let clock = TestClock::at(1_000);
+    let probes = [1, 2].map(|_| Probe::new(&one_disk(&disk)));
     let [mut crashed, mut closed] = [1, 2].map(|seed| {
-        F::open(Probe::new(&one_disk(&disk)), env("w", seed, &clock))
-            .unwrap()
-            .0
+        let probe = probes[seed as usize - 1].clone();
+        F::open(probe, env("w", seed, &clock)).unwrap().0
     });
+    fail(&probes[0], pending_removal);
     create(&mut crashed, "song.npno", b"song");
     create(&mut closed, "kick.wav", b"kick");
     closed.close().unwrap();
@@ -5241,7 +5233,6 @@ fn interrupted<F: Facade>(
         let clock = TestClock::at(1_000);
         let (mut library, _) = F::open(Probe::new(&one_disk(disk)), env("a", 1, &clock)).unwrap();
         let song = create(&mut library, "song.npno", b"song");
-        library.tidy().unwrap();
         let before = disk.mutations();
         if let Some(crash) = crash {
             disk.crash_after(crash);

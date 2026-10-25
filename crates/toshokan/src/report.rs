@@ -387,12 +387,6 @@ pub struct Emptied {
     pub bytes: u64,
 }
 
-/// This writer's spent pending records tidying removed, by name.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
-pub struct Tidied {
-    pub removed: Vec<Nonce>,
-}
-
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Compacted {
     pub snapshot: Nonce,
