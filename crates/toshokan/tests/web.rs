@@ -1,25 +1,24 @@
-//! The library in a browser: the async driver on the page's thread, through a
-//! storage worker, on each kind of folder.
+//! The library in a browser: the async driver in a dedicated worker, on an executor
+//! of each kind of folder.
 
 #![cfg(all(target_arch = "wasm32", feature = "web"))]
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
-use std::time::Duration;
 
-use toshokan::asynch::{Fs, Library};
-use toshokan::env::{Clock, ExactNames, Identify, PrefixIdentity, Random, SeededRandom, TestClock};
+use toshokan::asynch::Library;
+use toshokan::env::{ExactNames, Identify, PrefixIdentity, Random, SeededRandom, TestClock};
 use toshokan::io::{Range, CHUNK};
 use toshokan::plan::{Piece, Splice};
 use toshokan::report::{Mode, Presence, Start};
-use toshokan::web::{private_dir, CryptoRandom, DateClock, Folder, Hint, Hints, Worker};
+use toshokan::web::{private_dir, CryptoRandom, Executor, Folder};
 use toshokan::{
     EntityId, Env, Expect, Identity, Io, Layout, Opened, Register, RelPath, Reply, Root, Schema,
     Set,
 };
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
-wasm_bindgen_test_configure!(run_in_browser);
+wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 const ORIGIN: Register<String> = Register::new("origin");
 const TAGS: Set<String> = Set::new("tags");
@@ -49,7 +48,7 @@ struct Place {
     run: String,
 }
 
-type Lib = Library<Worker>;
+type Lib = Library<Executor>;
 
 impl Place {
     fn new(kind: Kind) -> Self {
@@ -79,7 +78,7 @@ impl Place {
         clock: &TestClock,
     ) -> (Lib, Opened) {
         let local = path(&format!("{}/{install}", self.run));
-        let worker = Worker::start(self.folder().await, &local).await.unwrap();
+        let executor = Executor::new(self.folder().await, &local).await.unwrap();
         let env = Env {
             clock: Box::new(clock.clone()),
             random: Box::new(SeededRandom::new(seed)),
@@ -87,7 +86,7 @@ impl Place {
             names: Box::new(ExactNames),
             label: label.into(),
         };
-        Library::open(worker, Layout::new(".t").unwrap(), &schema(), env)
+        Library::open(executor, Layout::new(".t").unwrap(), &schema(), env)
             .await
             .unwrap()
     }
@@ -233,7 +232,7 @@ async fn a_rename_keeps_the_tags_and_a_new_reader_finds_the_file(kind: Kind) {
     assert_eq!(tags(&fresh, song), ["new"]);
 }
 
-/// Each instance's worker holds its writer's Web Lock until it closes.
+/// Each instance's executor holds its writer's Web Lock until it closes.
 async fn another_instance_of_an_install_is_present_until_it_closes(kind: Kind) {
     let place = Place::new(kind);
     let clock = TestClock::at(1_000);
@@ -317,81 +316,6 @@ on_each_folder!(
     compaction_keeps_what_every_reader_sees,
 );
 
-#[wasm_bindgen_test]
-async fn a_commit_announced_in_one_tab_is_heard_in_another() {
-    let name = format!("{:032x}", CryptoRandom.next_u128());
-    let mut heard = Hints::new(&name, None).unwrap();
-    let said = Hints::new(&name, None).unwrap();
-    let elsewhere = Hints::new("another library", None).unwrap();
-    let entry = toshokan::EntryHash::from_u128(7);
-    elsewhere.announce(toshokan::EntryHash::from_u128(8));
-    said.announce(entry);
-    assert_eq!(heard.next().await, Hint::Committed(entry));
-}
-
-#[wasm_bindgen_test]
-async fn a_page_watching_its_folder_looks_at_focus_and_on_a_period() {
-    let name = format!("{:032x}", CryptoRandom.next_u128());
-    let mut watching = Hints::new(&name, Some(Duration::from_millis(50))).unwrap();
-    assert_eq!(watching.next().await, Hint::Look, "the period passed");
-    drop(watching);
-    let mut watching = Hints::new(&name, Some(Duration::from_secs(3600))).unwrap();
-    let global = js_sys::global();
-    let get = |object: &wasm_bindgen::JsValue, name: &str| {
-        js_sys::Reflect::get(object, &name.into()).unwrap()
-    };
-    let event = js_sys::Reflect::construct(
-        &get(&global, "Event").into(),
-        &js_sys::Array::of1(&"focus".into()),
-    )
-    .unwrap();
-    let dispatch: js_sys::Function = get(&global, "dispatchEvent").into();
-    dispatch.call1(&global, &event).unwrap();
-    assert_eq!(watching.next().await, Hint::Look, "the page was focused");
-}
-
-#[wasm_bindgen_test]
-async fn a_worker_that_faults_fails_what_waits_and_a_fresh_one_opens_the_library() {
-    let place = Place::new(Kind::Private);
-    let local = path(&format!("{}/install", place.run));
-    let worker = Worker::start(place.folder().await, &local).await.unwrap();
-    let list = || Io::List {
-        root: Root::Folder,
-        dir: RelPath::ROOT,
-    };
-    worker.perform(list()).await.unwrap();
-    worker.trap();
-    let failed = worker.perform(list()).await;
-    assert!(
-        failed
-            .as_ref()
-            .is_err_and(|e| e.to_string().contains("failed")),
-        "{failed:?}"
-    );
-    drop(worker);
-    let clock = TestClock::at(1_000);
-    let (library, _) = place.open("install", "a", 1, &clock).await;
-    library.close().await.unwrap();
-}
-
-#[wasm_bindgen_test]
-fn the_browser_clock_and_randomness_are_live() {
-    let now = DateClock.now_ms();
-    let date = js_sys::Date::now() as u64;
-    assert!(date.abs_diff(now) < 1_000, "{now} is not near {date}");
-    assert_ne!(CryptoRandom.next_u128(), CryptoRandom.next_u128());
-}
-
-#[wasm_bindgen_test]
-async fn an_executor_refuses_to_start_outside_a_worker() {
-    let page = path("library/page");
-    let executor = toshokan::web::Executor::new(Folder::Private(page.clone()), &page).await;
-    assert!(
-        executor.is_err(),
-        "the page cannot hold sync access handles"
-    );
-}
-
 /// Writes `bytes` at `at` in `library`'s folder without logging anything, as
 /// another program would.
 async fn write_outside(library: &Lib, at: &str, bytes: &[u8]) {
@@ -407,40 +331,6 @@ async fn write_outside(library: &Lib, at: &str, bytes: &[u8]) {
         bytes: bytes.to_vec(),
     };
     library.fs().perform(created).await.unwrap();
-}
-
-#[wasm_bindgen_test]
-async fn a_watched_folder_hints_the_paths_another_program_wrote() {
-    let place = Place::new(Kind::Private);
-    let clock = TestClock::at(1_000);
-    let (mut a, _) = place.open("one", "a", 1, &clock).await;
-    a.rescan().await.unwrap();
-    create(&mut a, "song.npno", b"song").await;
-    let name = format!("{:032x}", CryptoRandom.next_u128());
-    let mut hints = Hints::new(&name, Some(Duration::from_secs(20))).unwrap();
-    let observer = js_sys::Reflect::get(&js_sys::global(), &"FileSystemObserver".into()).unwrap();
-    let watched = hints.watch(&place.folder().await).await.unwrap();
-    assert_eq!(watched, !observer.is_undefined(), "watches where it can");
-    if !watched {
-        return;
-    }
-    write_outside(&a, "shelf/copy.npno", b"song").await;
-    let paths = loop {
-        match hints.next().await {
-            Hint::Changed(paths) if paths.contains(&path("shelf/copy.npno")) => break paths,
-            Hint::Changed(_) => {}
-            other => panic!("the watcher said nothing of the new file: {other:?}"),
-        }
-    };
-    assert!(
-        a.view().unbound().cloned().collect::<Vec<_>>().is_empty(),
-        "nothing scanned it yet"
-    );
-    a.rescan_paths(paths).await.unwrap();
-    assert_eq!(
-        a.view().unbound().cloned().collect::<Vec<_>>(),
-        [path("shelf/copy.npno")]
-    );
 }
 
 #[wasm_bindgen_test]

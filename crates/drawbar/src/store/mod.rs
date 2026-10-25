@@ -59,7 +59,7 @@ pub use web::{default_root, permission, Backend, Picked, Root};
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web::{remove_private, settle};
 #[cfg(target_arch = "wasm32")]
-pub use worker::{Unrun, Worker};
+pub use worker::{RescueIo, Unrun, Worker};
 
 /// The folder of this install's own state for a library that holds the slots' former
 /// occupants a write to the instrument leaves while the library is open.

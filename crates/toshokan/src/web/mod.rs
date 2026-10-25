@@ -1,9 +1,7 @@
 //! Libraries in the browser, behind the `web` feature.
 //!
-//! The library runs on the page's thread, through the [`crate::asynch`] driver,
-//! on a [`Worker`]: each request crosses to a dedicated worker as one message, and
-//! the worker performs it on the browser's file system and replies. The worker
-//! runs this same wasm bundle, so the page ships no script of its own for it.
+//! A library runs in a dedicated worker, through the [`crate::asynch`] driver, on
+//! an [`Executor`], which performs each request on the browser's file system.
 //!
 //! A library's folder is a [`Folder`]: a directory of the origin private file
 //! system, or a folder the user picked. Its local root, which only this install
@@ -16,8 +14,6 @@
 
 mod fs;
 mod hints;
-pub mod wire;
-mod worker;
 
 use js_sys::{Function, Object, Promise, Reflect, Uint8Array};
 use wasm_bindgen::{JsCast, JsValue};
@@ -30,7 +26,6 @@ use crate::path::RelPath;
 
 pub use fs::Executor;
 pub use hints::{Hint, Hints};
-pub use worker::{serve, Worker};
 
 /// Where a library's folder is.
 #[derive(Clone, Debug)]

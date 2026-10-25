@@ -69,31 +69,24 @@
 //!
 //! # In the browser
 //!
-//! With the `web` feature, a library runs on the page through the async driver,
-//! and a dedicated worker running the same wasm bundle performs its requests on the
-//! origin private file system or on a folder the user picked:
+//! With the `web` feature, a library runs through the async driver in a dedicated
+//! worker the app starts, on an `Executor` that performs its requests on the origin
+//! private file system or on a folder the user picked:
 //!
 //! ```rust,ignore
 //! use toshokan::asynch::Library;
-//! use toshokan::web::{DateClock, CryptoRandom, Folder, Worker};
+//! use toshokan::web::{DateClock, CryptoRandom, Executor, Folder};
 //!
 //! let local = RelPath::new("libraries/main/local")?;
 //! let folder = Folder::picked(handle); // or Folder::Private(path)
-//! let worker = Worker::start(folder, &local).await?;
-//! let (mut lib, opened) = Library::open(worker, layout, &schema, env).await?;
+//! let executor = Executor::new(folder, &local).await?;
+//! let (mut lib, opened) = Library::open(executor, layout, &schema, env).await?;
 //! ```
 //!
-//! Each stage of an operation runs in one piece on the thread that drives it:
-//! parsing the logs, deriving the merged state, and gathering and binding the
-//! library's files. Each takes longer the larger the library, so a
-//! library on a page that must stay responsive belongs in a dedicated worker.
-//!
-//! The bundle must be built by wasm-bindgen with `--target web`. The worker loads it
-//! from a small script toshokan makes as a `blob:` URL, so a Content Security
-//! Policy must allow `blob:` workers. `web::Hints` says when to look again: a
-//! commit in another tab (`refresh`), the paths Chromium's file system observer saw
-//! change (`rescan_paths`), and focus or a period for a folder other programs write
-//! (`rescan`). The Browsers section of `SPEC.md` lists what each browser can do.
+//! `web::Hints` says when to look again: a commit in another tab (`refresh`), the
+//! paths Chromium's file system observer saw change (`rescan_paths`), and focus or a
+//! period for a folder other programs write (`rescan`). The Browsers section of
+//! `SPEC.md` lists what each browser can do.
 //!
 //! The browser suites run headless with `nix build .#toshokan-web` on Linux.
 //! Elsewhere, from `crates/` in the development shell, with a WebDriver and its
@@ -103,7 +96,7 @@
 //! CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
 //! GECKODRIVER=geckodriver \
 //!   cargo test -p toshokan --features web --target wasm32-unknown-unknown \
-//!   --test backends --test effects --test web
+//!   --test backends --test effects --test hints --test web
 //! ```
 
 // The hidden modules are reached by the integration tests, not by apps.

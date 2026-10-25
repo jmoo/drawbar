@@ -249,6 +249,8 @@ impl Driven for Recorded {
 
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
 pub mod web;
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+mod wire;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub struct NativeDirs {

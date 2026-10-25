@@ -34,8 +34,6 @@ js-sys = { version = "0.3", optional = true }
 wasm-bindgen = { version = "=0.2.121", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 web-sys = { version = "0.3", optional = true, features = [
-  "Blob",
-  "BlobPropertyBag",
   "BroadcastChannel",
   "DedicatedWorkerGlobalScope",
   "Document",
@@ -50,16 +48,10 @@ web-sys = { version = "0.3", optional = true, features = [
   "FileSystemReadWriteOptions",
   "FileSystemSyncAccessHandle",
   "FileSystemWritableFileStream",
-  "MessageChannel",
   "MessageEvent",
-  "MessagePort",
   "StorageManager",
-  "Url",
   "VisibilityState",
   "Window",
-  "Worker",
-  "WorkerOptions",
-  "WorkerType",
   "WritableStream",
   "WriteCommandType",
   "WriteParams",
@@ -89,6 +81,16 @@ tempfile = "3"
 name = "bench"
 test = false
 
-# The browser suites, run by wasm-bindgen-cli's test runner.
+# The browser suites, run by wasm-bindgen-cli's test runner, and the worker that
+# answers the blocking suites.
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
+web-sys = { version = "0.3", features = [
+  "Blob",
+  "BlobPropertyBag",
+  "MessageChannel",
+  "Url",
+  "Worker",
+  "WorkerOptions",
+  "WorkerType",
+] }

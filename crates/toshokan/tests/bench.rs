@@ -1,6 +1,7 @@
 //! The browser benchmark: a generated library in the origin private file system,
-//! opened, committed to, saved into, refreshed and queried by the async driver on
-//! the page, with how long each operation held the page's thread.
+//! opened, committed to, saved into, refreshed and queried by the async driver in a
+//! dedicated worker, with how long each operation held the worker's thread between
+//! requests.
 //!
 //! `generate` writes the library once and leaves it for later runs of the same
 //! origin and profile; `measure` writes it first where it is missing. Neither runs
@@ -17,8 +18,8 @@
 //! files', as a copy that sets its own times leaves them, so each scan reads the
 //! identity of every file `identities.json` does not give. Each run starts
 //! from the library as generated: the writers earlier runs' installs added are
-//! removed. Beside the browser's own long tasks, where it reports them, each
-//! operation reports the longest the core held the page's thread. The runner's
+//! removed. Each operation reports the longest the core held the worker's thread
+//! between requests, and the longest its timers waited. The runner's
 //! WebDriver mode starts each browser with a fresh profile, so it generates every
 //! time; `scripts/bench.py` keeps a profile per browser and reports tab memory.
 
@@ -31,7 +32,7 @@ use toshokan::asynch::{Fs, Library};
 use toshokan::env::{ExactNames, Identify, PrefixIdentity, Random};
 use toshokan::io::Range;
 use toshokan::log::{Entry, EntryKind, FileFact, Genesis, Logged, Op};
-use toshokan::web::{CryptoRandom, DateClock, Folder, Worker};
+use toshokan::web::{CryptoRandom, DateClock, Executor, Folder};
 use toshokan::{
     EntityId, EntryHash, Env, Expect, Hlc, Identity, Io, Layout, MemDisk, Raw, Register, RelPath,
     Reply, Root, Schema, SegmentName, Set, WriterId,
@@ -40,54 +41,30 @@ use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
-wasm_bindgen_test_configure!(run_in_browser);
+wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 #[wasm_bindgen(inline_js = r#"
 let watching = null;
 export function watch_start() {
   const start = performance.now();
-  const w = { last: start, gap: 0, frame: start, frames: 0, drawn: false, tasks: [] };
+  const w = { last: start, gap: 0 };
   w.timer = setInterval(() => {
     const now = performance.now();
     w.gap = Math.max(w.gap, now - w.last);
     w.last = now;
   }, 1);
-  const frame = (now) => {
-    w.drawn = true;
-    w.frames = Math.max(w.frames, now - w.frame);
-    w.frame = now;
-    w.request = requestAnimationFrame(frame);
-  };
-  w.request = requestAnimationFrame(frame);
-  if (PerformanceObserver.supportedEntryTypes?.includes("longtask")) {
-    w.observer = new PerformanceObserver((list) => {
-      for (const task of list.getEntries()) w.tasks.push(task.duration);
-    });
-    w.observer.observe({ type: "longtask" });
-  }
   watching = w;
 }
 export async function watch_stop() {
   const w = watching;
   watching = null;
   const end = performance.now();
-  await new Promise((done) => {
-    requestAnimationFrame(() => setTimeout(done, 0));
-    setTimeout(done, 200);
-  });
+  await new Promise((done) => setTimeout(done, 0));
   clearInterval(w.timer);
-  cancelAnimationFrame(w.request);
-  const frames = w.drawn ? Math.max(w.frames, end - w.frame) : -1;
-  const gaps = [Math.max(w.gap, end - w.last), frames];
-  if (!w.observer) return [...gaps, -1, 0, 0];
-  for (const task of w.observer.takeRecords()) w.tasks.push(task.duration);
-  w.observer.disconnect();
-  const tasks = [w.tasks.length, Math.max(0, ...w.tasks), w.tasks.reduce((a, b) => a + b, 0)];
-  return [...gaps, ...tasks];
+  return Math.max(w.gap, end - w.last);
 }
 export function browser() {
-  const longtask = PerformanceObserver.supportedEntryTypes?.includes("longtask");
-  return `${navigator.userAgent} | longtask ${longtask ? "reported" : "not reported"}`;
+  return navigator.userAgent;
 }
 async function walk(path, create) {
   let dir = await navigator.storage.getDirectory();
@@ -120,13 +97,6 @@ export async function opfs_remove(path) {
 }
 export function say(line) {
   console.log(line);
-  let shown = document.getElementById("bench");
-  if (!shown) {
-    shown = document.createElement("pre");
-    shown.id = "bench";
-    document.body.append(shown);
-  }
-  shown.append(line + "\n");
 }
 export function now() {
   return performance.now();
@@ -465,7 +435,7 @@ fn log_files(files: &[Described]) -> Vec<(RelPath, Vec<u8>)> {
     gen.sink.files(Root::Folder).into_iter().collect()
 }
 
-async fn ok(worker: &Worker, io: Io) -> Reply {
+async fn ok(worker: &Executor, io: Io) -> Reply {
     let shown = format!("{:?} {}", io.root(), io.path());
     match worker.perform(io).await {
         Ok(reply) => reply,
@@ -474,7 +444,7 @@ async fn ok(worker: &Worker, io: Io) -> Reply {
 }
 
 /// Writes `files`, making each directory once.
-async fn put(worker: &Worker, files: impl IntoIterator<Item = (RelPath, Vec<u8>)>) {
+async fn put(worker: &Executor, files: impl IntoIterator<Item = (RelPath, Vec<u8>)>) {
     let root = Root::Folder;
     let mut made = std::collections::BTreeSet::new();
     for (path, bytes) in files {
@@ -540,7 +510,7 @@ async fn generated() {
     if !files_cached {
         opfs_remove(parts(&home)).await.unwrap();
     }
-    let worker = Worker::start(
+    let worker = Executor::new(
         Folder::Private(path(&format!("{home}/folder"))),
         &path(&format!("{home}/generated")),
     )
@@ -615,18 +585,13 @@ async fn generated() {
     ok(&worker, marker).await;
 }
 
-/// One operation's samples: wall time, the longest the page went without a
-/// frame and without running a timer, and the long tasks the browser reported.
+/// One operation's samples: wall time, the longest its timers waited, and the
+/// longest the core held the thread at once between requests.
 #[derive(Default)]
 struct Samples {
     wall: Vec<f64>,
-    frames: Vec<f64>,
     timers: Vec<f64>,
-    /// The longest the core held the page's thread at once.
     held: Vec<f64>,
-    long_tasks: i64,
-    longest_task: f64,
-    in_long_tasks: f64,
 }
 
 impl Samples {
@@ -638,37 +603,16 @@ impl Samples {
         let wall = now() - start;
         let (since, longest) = HELD.with(std::cell::Cell::get);
         self.held.push(longest.max(now() - since));
-        let watched: Vec<f64> = js_sys::Array::from(&watch_stop().await)
-            .iter()
-            .map(|value| value.as_f64().unwrap())
-            .collect();
+        self.timers
+            .push(watch_stop().await.as_f64().unwrap_or_default());
         self.wall.push(wall);
-        self.timers.push(watched[0]);
-        self.frames.push(watched[1]);
-        match watched[2] < 0.0 {
-            true => self.long_tasks = -1,
-            false => self.long_tasks += watched[2] as i64,
-        }
-        self.longest_task = self.longest_task.max(watched[3]);
-        self.in_long_tasks += watched[4];
         output
     }
 
     fn report(&self, name: &str) {
-        let tasks = match self.long_tasks {
-            -1 => "long tasks not reported".to_owned(),
-            n => format!(
-                "long tasks {n} (longest {:.0}, {:.0} in all)",
-                self.longest_task, self.in_long_tasks
-            ),
-        };
         let longest = |xs: &[f64]| xs.iter().copied().fold(0.0, f64::max);
-        let frames = match self.frames.iter().any(|gap| *gap < 0.0) {
-            true => "no frames drawn".to_owned(),
-            false => format!("longest frame gap {:.0}", longest(&self.frames)),
-        };
         say(&format!(
-            "bench | {name} | {} | {frames}, timer gap {:.0}, held {:.0} | {tasks}",
+            "bench | {name} | {} | timer gap {:.0}, held {:.0}",
             stats(&self.wall),
             longest(&self.timers),
             longest(&self.held),
@@ -700,14 +644,14 @@ fn report_memory(when: &str) {
 }
 
 thread_local! {
-    /// When the core last got the page's thread back, and the longest it has
+    /// When the core last got the thread back from a request, and the longest it has
     /// held it at once since a sample started.
     static HELD: std::cell::Cell<(f64, f64)> = const { std::cell::Cell::new((0.0, 0.0)) };
 }
 
-/// The worker, timing how long the core holds the page's thread: from a reply,
-/// or from the library's start, to the next request.
-struct Watched(Worker);
+/// The executor, timing how long the core holds the thread: from a reply, or from the
+/// library's start, to the next request.
+struct Watched(Executor);
 
 impl Watched {
     fn holding(&self) {
@@ -735,7 +679,7 @@ impl Fs for Watched {
     }
 
     fn own(&self, root: &RelPath) {
-        self.0.own(root);
+        Fs::own(&self.0, root);
     }
 }
 
@@ -743,7 +687,7 @@ type Lib = Library<Watched>;
 
 async fn open(install: &str) -> Lib {
     let home = home();
-    let worker = Worker::start(
+    let worker = Executor::new(
         Folder::Private(path(&format!("{home}/folder"))),
         &path(&format!("{home}/{install}")),
     )
@@ -780,8 +724,8 @@ async fn current<F: Fs>(library: &Library<F>, at: &RelPath) -> Vec<u8> {
     bytes
 }
 
-/// The worker, with each request it performed and how long it took.
-struct Traced(Worker, RefCell<Vec<(String, f64)>>);
+/// The executor, with each request it performed and how long it took.
+struct Traced(Executor, RefCell<Vec<(String, f64)>>);
 
 impl Fs for Traced {
     fn capabilities(&self, root: Root) -> toshokan::io::Capabilities {
@@ -803,7 +747,7 @@ impl Fs for Traced {
     }
 
     fn own(&self, root: &RelPath) {
-        self.0.own(root);
+        Fs::own(&self.0, root);
     }
 }
 
@@ -825,7 +769,7 @@ fn said(name: &str, library: &Library<Traced>, total: f64) {
 #[wasm_bindgen_test]
 async fn trace() {
     let home = home();
-    let worker = Worker::start(
+    let worker = Executor::new(
         Folder::Private(path(&format!("{home}/folder"))),
         &path(&format!("{home}/own")),
     )
@@ -871,7 +815,7 @@ async fn trace() {
         said("refresh, nothing new", &a, now() - start);
     }
     a.close().await.unwrap();
-    let worker = Worker::start(
+    let worker = Executor::new(
         Folder::Private(path(&format!("{home}/folder"))),
         &path(&format!("{home}/own")),
     )

@@ -16,9 +16,7 @@
 use drawbar::store::shown::Shown;
 use drawbar::store::{Backend, Cmd, Event, Intent, Key, LibPath, Root, Slot};
 use eframe::egui;
-use toshokan::io::{Io, Root as Tree};
-use toshokan::web::{Folder, Worker};
-use toshokan::{asynch::Fs as _, Expect, RelPath};
+use toshokan::Expect;
 use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
@@ -58,6 +56,15 @@ export async function watch_stop() {
 export function browser() {
   return navigator.userAgent;
 }
+export async function put(path, text) {
+  let dir = await navigator.storage.getDirectory();
+  const parts = path.split("/");
+  const name = parts.pop();
+  for (const part of parts) dir = await dir.getDirectoryHandle(part, { create: true });
+  const writable = await (await dir.getFileHandle(name, { create: true })).createWritable();
+  await writable.write(text);
+  await writable.close();
+}
 export async function wipe() {
   const root = await navigator.storage.getDirectory();
   for await (const [name] of root.entries()) await root.removeEntry(name, { recursive: true });
@@ -76,6 +83,7 @@ extern "C" {
     fn watch_start();
     async fn watch_stop() -> JsValue;
     fn browser() -> String;
+    async fn put(path: &str, text: &str);
     async fn wipe();
     fn now() -> f64;
     async fn next_task();
@@ -92,33 +100,11 @@ fn file_path(i: usize) -> String {
     format!("Bench/{:03}/{i:06}.ne5p", i / PER_DIR)
 }
 
-fn rel(text: &str) -> RelPath {
-    RelPath::new(text).unwrap()
-}
-
-/// Write the folder's files through toshokan's storage worker, which writes in place.
+/// Write the folder's files from the page.
 async fn generate() {
     wipe().await;
-    let worker = Worker::start(Folder::Private(RelPath::ROOT), &rel(".bench-local"))
-        .await
-        .unwrap();
-    let count = files();
-    for dir in 0..count.div_ceil(PER_DIR) {
-        let dir = rel(&format!("Bench/{dir:03}"));
-        let made = Io::MakeDir {
-            root: Tree::Folder,
-            path: dir,
-        };
-        worker.perform(made).await.unwrap();
-    }
-    for i in 0..count {
-        let bytes = format!("CBIN program {i:06} of the bench").into_bytes();
-        let create = Io::Create {
-            root: Tree::Folder,
-            path: rel(&file_path(i)),
-            bytes,
-        };
-        worker.perform(create).await.unwrap();
+    for i in 0..files() {
+        put(&file_path(i), &format!("CBIN program {i:06} of the bench")).await;
     }
 }
 
