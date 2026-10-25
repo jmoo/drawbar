@@ -33,7 +33,8 @@ is the precise version of most of this page.
 | Tags, origins, each drawbar's log, staging and trash | `.drawbar/library/` in the library | `.drawbar/library/` in the library |
 | Unsaved edits, identities, rescued slot contents | `libraries/<hash>/` beside `app.ron` | `.drawbar/local/private/` or `.drawbar/local/picked-<id>/` of the private file system |
 | Theme, panels and other preferences | eframe's store: `app.ron` in drawbar's data folder | eframe's store, in local storage |
-| Recent libraries | eframe's store | IndexedDB, as folder handles |
+| MIDI on or off, recent libraries | eframe's store | |
+| Recent picked folders | | IndexedDB, as folder handles |
 
 On the desktop the default library is `library` in drawbar's data folder; the
 paths are on [Your files](../drawbar/this-computer.md#where-your-library-lives).
@@ -102,6 +103,12 @@ once the instrument is idle, or at the next open, may be the slot's only copy.
 drawbar copies it into the library under the slot's name, as one change undo
 can take back, and then deletes it. While the library cannot be written, the
 file stays where it is, and drawbar asks about it.
+
+A rescued occupant survives a power cut only where drawbar can sync its folder
+to disk: on macOS and Linux, not on Windows or in the browser. In the browser,
+the worker that writes the file loads from the bundle the page loaded, so after
+drawbar.app is deployed again, a send that would replace an occupant can be
+refused until the page is reloaded.
 
 ## How a change works
 
