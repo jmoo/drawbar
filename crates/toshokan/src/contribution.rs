@@ -308,17 +308,7 @@ pub fn said(op: &Op) -> Said {
 pub fn ops(kind: &EntryKind) -> &[Op] {
     match kind {
         EntryKind::Intent(logged) => &logged.ops,
-        EntryKind::More(more) => &more.ops,
         EntryKind::Bind(bound) => &bound.ops,
-        _ => &[],
-    }
-}
-
-/// The entities whose fields an entry of `kind` kills as a delete does, beyond
-/// those its ops delete: a continuation's, for its intent's deletes.
-pub fn deletes(kind: &EntryKind) -> &[EntityId] {
-    match kind {
-        EntryKind::More(more) => &more.deletes,
         _ => &[],
     }
 }
@@ -327,7 +317,6 @@ pub fn deletes(kind: &EntryKind) -> &[EntityId] {
 pub fn displaced(kind: &EntryKind) -> &[Displaced] {
     match kind {
         EntryKind::Intent(logged) => &logged.displaced,
-        EntryKind::More(more) => &more.displaced,
         _ => &[],
     }
 }
@@ -336,7 +325,6 @@ pub fn displaced(kind: &EntryKind) -> &[Displaced] {
 pub fn forks(kind: &EntryKind) -> &[Forked] {
     match kind {
         EntryKind::Intent(logged) => &logged.forks,
-        EntryKind::More(more) => &more.forks,
         _ => &[],
     }
 }
@@ -367,7 +355,7 @@ impl Contribution {
             EntryKind::Unknown(raw) => {
                 self.unknown.insert((entry.hash(), raw.clone()));
             }
-            EntryKind::Intent(_) | EntryKind::More(_) | EntryKind::Bind(_) => {
+            EntryKind::Intent(_) | EntryKind::Bind(_) => {
                 if let EntryKind::Intent(Logged {
                     record: Some(record),
                     ..
@@ -384,7 +372,6 @@ impl Contribution {
                     }
                     deleted.extend(self.fold_op(writer, own, entry.at(), known, op));
                 }
-                deleted.extend(deletes(&kind));
                 for entity in deleted {
                     for (field, held) in &self.own {
                         if field.entity() == entity && !field.is_exist() && held.at.n <= own.n {
@@ -959,7 +946,6 @@ mod tests {
                 ops: vec![op],
                 displaced: vec![],
                 forks,
-                more: 0,
                 record: None,
             });
             entries.push(Entry::encode(prev.hash(), prev.n() + 1, at(prev.n() + 1), kind).unwrap());

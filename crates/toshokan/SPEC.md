@@ -206,7 +206,7 @@ For example, the JSON `{"prev":"0…0"}` makes the line:
 {"prev":"00000000000000000000000000000000"}	21fbde4eb554d0b73a2edf6821643616
 ```
 
-A line longer than 1 MiB, a line whose hash does not match, a final line without
+A line longer than 16 MiB, a line whose hash does not match, a final line without
 its LF, or a line starting with a zero byte ends the readable part of the file
 for now. Every line before it counts; a later read of the same file may get
 further.
@@ -226,7 +226,7 @@ An entry is an object whose first members are:
 | `prev` | The hash of the entry before it                 |
 | `n`    | Its number in its writer's chain                |
 | `at`   | Its clock reading                               |
-| `kind` | `"genesis"`, `"intent"`, `"more"`, `"settle"` or `"bind"` |
+| `kind` | `"genesis"`, `"intent"`, `"settle"` or `"bind"` |
 
 followed by the members of its kind. A genesis entry is numbered 0, and every
 other entry its predecessor's number plus one. A reader ignores members it does
@@ -256,7 +256,6 @@ attribution:
 | `ops`       | The fact changes, in order                                       |
 | `displaced` | Bytes it moved into the writer's trash; omitted if none          |
 | `forks`     | The fork points its writer knew of, `["<writer>",<n>]`; omitted if none |
-| `more`      | How many ops and `displaced` items its `more` entries hold; omitted if none |
 | `record`    | The nonce of the pending record whose effects it logs, which it closes; omitted if none |
 
 Each op is an object whose `op` member names it:
@@ -298,24 +297,12 @@ For example:
 {"prev":"…02","n":3,"at":[3,0],"kind":"intent","label":"Tag","ops":[{"op":"add","entity":"…0e","key":"tags","value":"x","replaces":[]},{"op":"write","entity":"…0e","key":"origin","replaces":[["…0b",4,"…01"]]}]}
 ```
 
-A **more** entry continues the intent before it, when the intent's file ops and
-`displaced` items would not fit its line. The intent then holds its other ops
-and `more`, and each `more` entry after it holds the next of its file ops, then
-of its `displaced` items, each line within half the limit:
-
-| Member      | Value                                                                  |
-| ----------- | ---------------------------------------------------------------------- |
-| `ops`       | The intent's next file ops                                             |
-| `displaced` | The intent's next displaced items; omitted if none                     |
-| `forks`     | The fork points its writer knew of the writers its ops name; omitted if none |
-| `deletes`   | The entities the intent deletes whose files its ops write; omitted if none |
-
-A commit appends its entries in one order: the intent, its `more` entries, the
-`settle` entry when it closes another writer's record, then its `bind` entries. A
-`more` entry is merged as an intent is, entry by entry; what the intent deletes
-kills its writes in the entries that name the entity in `deletes`, as it would in
-the intent's own entry. Undo and redo reverse an intent with its `more` entries.
-Recovery completes a continuation an append cut short (see Recovery).
+An intent is one line, file ops and `displaced` items included. Before it writes
+anything, a commit refuses an intent whose line would be longer than a line can
+be with every file op and `displaced` item its effects may add, each as long as
+it can be (`Invalid::TooLong`). A commit appends its entries in one order: the
+intent, the `settle` entry when it closes another writer's record, then its
+`bind` entries, each holding at most 1 MiB of ops.
 
 A **settle** entry records that this writer settled another writer's unfinished
 effect with the user's consent:
@@ -699,8 +686,7 @@ A commit:
 4. Settles this writer's own unfinished effects (see Recovery).
 5. Carries out the file effects under a pending record, then appends the intent
    with a `file` op for each entity's file as the folder shows it afterwards,
-   in `more` entries after it when they would not fit its line, and after them
-   the `bind` entries that pin the moves found. The record is removed once all
+   and after it the `bind` entries that pin the moves found. The record is removed once all
    of them are durable.
 
 Building an intent writes nothing, but draws the id of each entity it creates,
@@ -896,13 +882,6 @@ its `tmp/` that no open record places is removed, and so is every
 short before its bytes landed, before any of its steps ran: one that is empty
 or, in a folder that syncs, one of at most 16 MiB that holds a zero byte or is
 the start of a JSON value. Any other record that does not decode stays.
-
-A spent record whose intent is followed by fewer `more` items than its `more`
-says, as when a crash tore the append, is settled again before anything else:
-the steps show done, and the missing items, found again from the record and the
-folder, are appended in `more` entries: each entity's file op and each trash
-item that no entry after the intent holds yet. The writer does not compact while
-such a record is open, and a compaction asked for settles it first.
 
 Settling twice ends as settling once.
 

@@ -276,7 +276,6 @@ mod tests {
             ops: Vec::new(),
             displaced: Vec::new(),
             forks: Vec::new(),
-            more: 0,
             record: None,
         });
         let entry = Entry::encode(EntryHash::from_u128(9), 5, Hlc::ZERO, intent)

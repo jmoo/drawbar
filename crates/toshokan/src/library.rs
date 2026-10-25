@@ -21,13 +21,12 @@ use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd};
 use crate::env::Env;
 use crate::error::{Error, Invalid, Refusal, Result, Why};
 use crate::flow::{self, fold, ok, Fallible, Flow};
-use crate::ids::{EntityId, EntryHash, Hlc, Nonce, WriterId};
+use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
 use crate::intent;
 use crate::io::{Capabilities, Io, Kind, Lock, Root, Task};
 use crate::layout::Layout;
-use crate::line::MAX_LINE;
 use crate::log::{
-    Bound, Displaced, Entry, EntryKind, Forked, Genesis, Logged, More, Op, Settle, Settlement,
+    Bound, Displaced, Entry, EntryKind, FileFact, Forked, Genesis, Logged, Op, Settle, Settlement,
 };
 use crate::merge::{side_by_side, Folded, Part};
 use crate::path::RelPath;
@@ -790,6 +789,66 @@ impl Library {
         pins.cloned().collect()
     }
 
+    /// `logged` with every file op and displaced item carrying out `effects` may
+    /// add, each as long as it can be: an intent whose widest entry does not fit
+    /// a line is refused before anything is written.
+    fn widest(&self, logged: &Logged, effects: &EffectPlan) -> Logged {
+        let fact = |path: &RelPath| FileFact {
+            path: path.clone(),
+            identity: Identity::from_u128(u128::MAX),
+            len: u64::MAX,
+            modified: Some(u64::MAX),
+        };
+        let mut widest = logged.clone();
+        for end in &effects.files {
+            let writes = self.folded.file_writes(end.entity);
+            let replaces = writes.iter().map(crate::merge::Write::named).collect();
+            let (entity, file) = (end.entity, end.path.as_ref().map(fact));
+            widest.ops.push(match (file, end.pin) {
+                (Some(file), true) => Op::Pin {
+                    entity,
+                    file,
+                    replaces,
+                    take: None,
+                },
+                (file, _) => Op::File {
+                    entity,
+                    file,
+                    replaces,
+                    take: None,
+                },
+            });
+        }
+        widest
+            .ops
+            .extend(effects.unbound.iter().map(|end| Op::Path {
+                from: end.from.clone(),
+                file: end.path.as_ref().map(fact),
+            }));
+        widest.ops.extend(effects.trees.iter().map(|end| Op::Tree {
+            from: end.from.clone(),
+            to: end.to.clone(),
+        }));
+        widest.ops.extend(effects.dirs.iter().map(|end| Op::Dir {
+            path: end.path.clone(),
+            made: end.made,
+        }));
+        widest.displaced = effects
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                EffectStep::ToTrash { path, item } => Some(Displaced {
+                    item: *item,
+                    from: path.clone(),
+                    identity: Identity::from_u128(u128::MAX),
+                    len: u64::MAX,
+                }),
+                _ => None,
+            })
+            .collect();
+        widest
+    }
+
     /// The file ops logging what the effects, whose ends are `ends`, did to each
     /// entity's file. A file given as it is is pinned, so undo leaves it alone.
     fn file_ops(&self, applied: &Applied, ends: &[FileEnd]) -> Vec<Op> {
@@ -880,13 +939,8 @@ impl Library {
         let mut reverses = self.reversing.take();
         let mut intents: Vec<(&Entry, Logged)> = Vec::new();
         for entry in entries {
-            match (entry.kind(), intents.last_mut()) {
-                (EntryKind::Intent(logged), _) => intents.push((entry, logged)),
-                (EntryKind::More(more), Some((_, logged))) => {
-                    logged.ops.extend(more.ops);
-                    logged.displaced.extend(more.displaced);
-                }
-                _ => {}
+            if let EntryKind::Intent(logged) = entry.kind() {
+                intents.push((entry, logged));
             }
             self.clock = self.clock.observe(entry.at());
         }
@@ -920,16 +974,6 @@ impl Library {
         let moved = self.take_derived();
         self.follow(self.reader.readings().collect());
         moved
-    }
-
-    /// `mores` as entries, each with the fork points this writer knows of the
-    /// writers its ops name.
-    fn continued(&self, mores: Vec<More>) -> Vec<EntryKind> {
-        let known = |mut more: More| {
-            more.forks = self.known_forks(&more.ops);
-            EntryKind::More(more)
-        };
-        mores.into_iter().map(known).collect()
     }
 
     /// The fork points this writer knows of the writers whose writes `ops` name.
@@ -1883,7 +1927,6 @@ fn commit<'a>(
             let logged = Logged {
                 label,
                 forks: library.known_forks(&facts),
-                more: 0,
                 ops: facts,
                 displaced: Vec::new(),
                 record: None,
@@ -1912,9 +1955,7 @@ fn committed(
 ) -> std::result::Result<Committed, Box<Partial>> {
     let kinds: Vec<EntryKind> = entries.iter().map(Entry::kind).collect();
     let ops = kinds.iter().flat_map(|kind| match kind {
-        EntryKind::Intent(Logged { ops, .. })
-        | EntryKind::More(More { ops, .. })
-        | EntryKind::Bind(Bound { ops }) => ops.as_slice(),
+        EntryKind::Intent(Logged { ops, .. }) | EntryKind::Bind(Bound { ops }) => ops.as_slice(),
         EntryKind::Genesis(_) | EntryKind::Settle(_) | EntryKind::Unknown(_) => &[],
     });
     let ops: Vec<&Op> = ops.collect();
@@ -1930,13 +1971,7 @@ fn committed(
         _ => None,
     });
     let undoable = match kinds.first() {
-        Some(EntryKind::Intent(logged)) => {
-            let more = kinds[1..].iter().filter_map(|kind| match kind {
-                EntryKind::More(more) => Some(&more.ops),
-                _ => None,
-            });
-            undo::joins(logged.ops.iter().chain(more.flatten()))
-        }
+        Some(EntryKind::Intent(logged)) => undo::joins(logged.ops.iter()),
         _ => false,
     };
     let committed = Committed {
@@ -2061,8 +2096,6 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
         library.capabilities,
     );
     let own = library.writer.as_ref().map(Writer::id);
-    let placed = own.and_then(|own| library.reader.derived().writers.get(&own));
-    let continued = placed.and_then(|placed| recovery::continued(placed, name));
     let closed = own.is_some_and(|own| library.closed_records().contains(&(own, name)));
     flow::run(settled)
         .and_then(move |applied| {
@@ -2071,22 +2104,13 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
             let file_ops = library.file_ops(&applied, &record.files);
             let label = planned.label.clone();
             let resumed = closed;
-            let kinds = match continued {
-                Some(continued) => {
-                    let mut file_ops = file_ops;
-                    file_ops.retain(|op| file_of(op).is_none_or(|e| !continued.files.contains(&e)));
-                    let mut displaced = applied.displaced;
-                    displaced.retain(|item| !continued.displaced.contains(&item.item));
-                    let deleted = deleted_by(&planned.ops);
-                    library.continued(continuation(file_ops, displaced, &deleted))
-                }
-                None if closed => Vec::new(),
-                None => {
-                    let mores = fit(&mut planned, file_ops, applied.displaced);
+            let kinds = match closed {
+                true => Vec::new(),
+                false => {
+                    planned.ops.extend(file_ops);
+                    planned.displaced = applied.displaced;
                     planned.forks = library.known_forks(&planned.ops);
-                    let mut kinds = vec![EntryKind::Intent(planned)];
-                    kinds.extend(library.continued(mores));
-                    kinds
+                    vec![EntryKind::Intent(planned)]
                 }
             };
             let appended = match kinds.is_empty() {
@@ -2187,7 +2211,6 @@ fn planned(record: &PendingRecord) -> Logged {
             ops: Vec::new(),
             displaced: Vec::new(),
             forks: Vec::new(),
-            more: 0,
             record: None,
         },
     };
@@ -2275,9 +2298,9 @@ struct Closing {
     settle: Settle,
 }
 
-/// The most of a line the ops of one `bind` entry take, so that a commit pins any
-/// number of moves.
-const BIND_BYTES: usize = MAX_LINE / 2;
+/// The most bytes the ops of one `bind` entry take, well within a line, so that a
+/// commit pins any number of moves.
+const BIND_BYTES: usize = 1 << 20;
 
 /// The `bind` entries that pin `pins`.
 fn bound(pins: Vec<Op>) -> Vec<EntryKind> {
@@ -2298,80 +2321,6 @@ fn bound(pins: Vec<Op>) -> Vec<EntryKind> {
         kinds.push(EntryKind::Bind(Bound { ops }));
     }
     kinds
-}
-
-/// Logs `file_ops` and `displaced` in `logged` when its line holds them within
-/// [`BIND_BYTES`]; otherwise returns the continuation entries that hold them, with
-/// `logged.more` counting them, so an intent moves any number of files.
-fn fit(logged: &mut Logged, file_ops: Vec<Op>, displaced: Vec<Displaced>) -> Vec<More> {
-    let whole = json_len(&*logged)
-        + file_ops.iter().map(|op| json_len(op) + 1).sum::<usize>()
-        + displaced
-            .iter()
-            .map(|item| json_len(item) + 1)
-            .sum::<usize>();
-    if whole <= BIND_BYTES {
-        logged.ops.extend(file_ops);
-        logged.displaced = displaced;
-        return Vec::new();
-    }
-    logged.more = (file_ops.len() + displaced.len()) as u64;
-    continuation(file_ops, displaced, &deleted_by(&logged.ops))
-}
-
-/// The entities `ops` delete.
-fn deleted_by(ops: &[Op]) -> BTreeSet<EntityId> {
-    let deleted = ops.iter().filter_map(|op| match op {
-        Op::Delete { entity, .. } => Some(*entity),
-        _ => None,
-    });
-    deleted.collect()
-}
-
-/// The continuation entries that hold `file_ops`, then `displaced`, in order,
-/// each within [`BIND_BYTES`]. One that holds a file op of an entity in
-/// `deleted` names it among its deletes.
-fn continuation(
-    file_ops: Vec<Op>,
-    displaced: Vec<Displaced>,
-    deleted: &BTreeSet<EntityId>,
-) -> Vec<More> {
-    let mut mores = Vec::new();
-    let mut size = 0;
-    for op in file_ops {
-        let dies = file_of(&op).filter(|entity| deleted.contains(entity));
-        let len = json_len(&op) + 1 + dies.map_or(0, |entity| json_len(&entity) + 1);
-        let more = room(&mut mores, &mut size, len);
-        if let Some(entity) = dies.filter(|entity| !more.deletes.contains(entity)) {
-            more.deletes.push(entity);
-        }
-        more.ops.push(op);
-    }
-    for item in displaced {
-        room(&mut mores, &mut size, json_len(&item) + 1)
-            .displaced
-            .push(item);
-    }
-    mores
-}
-
-/// The entry of `mores` that has room for `len` more bytes within
-/// [`BIND_BYTES`], beside the `size` its last one holds; a new one when it has
-/// none, unless it holds nothing yet.
-fn room<'a>(mores: &'a mut Vec<More>, size: &mut usize, len: usize) -> &'a mut More {
-    let full = mores
-        .last()
-        .is_none_or(|more| *size + len > BIND_BYTES && !more.is_empty());
-    if full {
-        mores.push(More::default());
-        *size = 0;
-    }
-    *size += len;
-    mores.last_mut().expect("pushed above when there was none")
-}
-
-fn json_len(value: &impl serde::Serialize) -> usize {
-    serde_json::to_string(value).map_or(0, |json| json.len())
 }
 
 /// The entries that log `logged`, closed by `closing` when there is one.
@@ -2454,7 +2403,9 @@ fn carry_out<'a>(
         .n
         .checked_add(1)
         .and_then(|n| Entry::encode(head.hash, n, at, EntryKind::Intent(logged.clone())).ok());
-    let Some(entry) = encoded else {
+    let widest = EntryKind::Intent(library.widest(logged, &effects));
+    let widest = Entry::encode(head.hash, u64::MAX, at, widest);
+    let (Some(entry), Ok(_)) = (encoded, widest) else {
         return Flow::Done(Err(Error::Refused(Refusal::Invalid(Invalid::TooLong))));
     };
     let record = Rc::new(PendingRecord::new(
@@ -2512,10 +2463,10 @@ fn log_effects<'a>(
     let outcome = applied.outcome;
     let closing = closing.filter(|_| outcome == Outcome::Complete);
     let (mut logged, settle) = close(logged, closing);
-    let mores = fit(&mut logged, file_ops, applied.displaced);
+    logged.ops.extend(file_ops);
+    logged.displaced = applied.displaced;
     logged.forks = library.known_forks(&logged.ops);
     let mut kinds = vec![EntryKind::Intent(logged)];
-    kinds.extend(library.continued(mores));
     kinds.extend(settle.map(EntryKind::Settle));
     kinds.extend(bound(pins));
     let touched = moved_paths(&effects.steps);
@@ -2582,7 +2533,6 @@ fn settle_orphan(
                         ops: Vec::new(),
                         displaced: Vec::new(),
                         forks: Vec::new(),
-                        more: 0,
                         record: None,
                     };
                     let closing = Closing { facts, settle };

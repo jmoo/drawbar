@@ -183,7 +183,6 @@ impl Writer {
             ops,
             displaced,
             forks: Vec::new(),
-            more: 0,
             record: None,
         };
         self.log(now, EntryKind::Intent(logged), None)
@@ -196,7 +195,6 @@ impl Writer {
             ops,
             displaced: Vec::new(),
             forks: Vec::new(),
-            more: 0,
             record: None,
         };
         Ok(self.log(now, EntryKind::Intent(logged), plan.reverses))
@@ -1041,7 +1039,6 @@ fn every_part(mut edit: impl FnMut(&str) -> String) -> Vec<Entry> {
             ops,
             displaced,
             forks: Vec::new(),
-            more: 0,
             record: None,
         })
     };

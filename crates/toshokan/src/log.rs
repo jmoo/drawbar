@@ -106,9 +106,6 @@ pub struct Observed {
 pub enum EntryKind {
     Genesis(Genesis),
     Intent(Logged),
-    /// Ops and displaced bytes of the intent before it that its line had no room
-    /// for.
-    More(More),
     Settle(Settle),
     Bind(Bound),
     /// A kind this build does not know, or a known kind whose members do not
@@ -140,44 +137,9 @@ pub struct Logged {
     /// The fork points of the writers its ops name that its writer knew of.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub forks: Vec<Forked>,
-    /// How many ops and displaced items continue in the [`More`] entries that
-    /// follow it, which hold nothing else.
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub more: u64,
     /// The pending record whose effects it logs, which it closes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record: Option<Nonce>,
-}
-
-fn is_zero(n: &u64) -> bool {
-    *n == 0
-}
-
-/// The continuation of an intent: what of it the intent's line had no room for.
-///
-/// ⚠️ Its ops decode only straight from JSON text, as [`Logged`]'s do.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-pub struct More {
-    pub ops: Vec<Op>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub displaced: Vec<Displaced>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub forks: Vec<Forked>,
-    /// The entities the intent deletes whose fields its ops write: their writes
-    /// die with the delete, as they would in the intent's own entry.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub deletes: Vec<EntityId>,
-}
-
-impl More {
-    /// How many ops and displaced items it holds.
-    pub fn len(&self) -> u64 {
-        (self.ops.len() + self.displaced.len()) as u64
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }
 
 /// One fact change. A write is named by its writer, number and hash: a [`Ref`].
@@ -498,30 +460,24 @@ struct IntentLine<'a> {
     #[serde(default)]
     forks: Vec<Forked>,
     #[serde(default)]
-    more: u64,
-    #[serde(default)]
-    deletes: Vec<EntityId>,
-    #[serde(default)]
     record: Option<Nonce>,
 }
 
 impl IntentLine<'_> {
-    /// The line's `prev`, `n`, `at` and intent or continuation, when it is one.
+    /// The line's `prev`, `n`, `at` and intent, when it is one.
     fn read(json: &str) -> Option<(EntryHash, u64, Hlc, EntryKind)> {
         let line: IntentLine = serde_json::from_str(json).ok()?;
         let ops = line.ops.iter().map(|raw| {
             decode_op(raw.get())
                 .unwrap_or_else(|| Op::Unknown(Raw::new(raw.get()).expect("read as JSON")))
         });
-        let kind = continued(
+        let kind = intent(
             line.kind?,
             line.label,
-            Continued {
+            Members {
                 ops: ops.collect(),
                 displaced: line.displaced,
                 forks: line.forks,
-                more: line.more,
-                deletes: line.deletes,
                 record: line.record,
             },
         )?;
@@ -529,42 +485,29 @@ impl IntentLine<'_> {
     }
 }
 
-/// The members an intent shares with its continuation, and those each has
-/// alone.
-struct Continued {
+/// The members of an intent line besides its label.
+struct Members {
     ops: Vec<Op>,
     displaced: Vec<Displaced>,
     forks: Vec<Forked>,
-    more: u64,
-    deletes: Vec<EntityId>,
     record: Option<Nonce>,
 }
 
-/// An intent labeled `label`, or, with no label and nothing more, its
-/// continuation, as `kind` names it.
-fn continued(kind: &str, label: Option<String>, members: Continued) -> Option<EntryKind> {
-    let Continued {
+/// An intent labeled `label`, when `kind` names one.
+fn intent(kind: &str, label: Option<String>, members: Members) -> Option<EntryKind> {
+    let Members {
         ops,
         displaced,
         forks,
-        more,
-        deletes,
         record,
     } = members;
     match (kind, label) {
-        ("intent", Some(label)) if deletes.is_empty() => Some(EntryKind::Intent(Logged {
+        ("intent", Some(label)) => Some(EntryKind::Intent(Logged {
             label,
             ops,
             displaced,
             forks,
-            more,
             record,
-        })),
-        ("more", None) if more == 0 && record.is_none() => Some(EntryKind::More(More {
-            ops,
-            displaced,
-            forks,
-            deletes,
         })),
         _ => None,
     }
@@ -590,20 +533,8 @@ struct ExactLine<'a> {
     displaced: Vec<ExactDisplaced>,
     #[serde(default, deserialize_with = "nonempty")]
     forks: Vec<Forked>,
-    #[serde(default, deserialize_with = "nonzero")]
-    more: u64,
-    #[serde(default, deserialize_with = "nonempty")]
-    deletes: Vec<EntityId>,
     #[serde(default, deserialize_with = "not_null")]
     record: Option<Nonce>,
-}
-
-/// A number that is not 0: a 0 this build leaves out.
-fn nonzero<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
-    match u64::deserialize(deserializer)? {
-        0 => Err(de::Error::custom("a 0 this build leaves out")),
-        n => Ok(n),
-    }
 }
 
 #[derive(Deserialize)]
@@ -692,8 +623,8 @@ fn not_null<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
 }
 
 impl ExactLine<'_> {
-    /// The line's `prev`, `n`, `at` and intent or continuation, when it is one
-    /// this build would write.
+    /// The line's `prev`, `n`, `at` and intent, when it is one this build would
+    /// write.
     fn read(json: &str) -> Option<(EntryHash, u64, Hlc, EntryKind)> {
         let line: ExactLine = serde_json::from_str(json).ok()?;
         let displaced = line.displaced.into_iter().map(|displaced| Displaced {
@@ -704,15 +635,13 @@ impl ExactLine<'_> {
         });
         let mut ops: Vec<Op> = line.ops.into_iter().map(|op| op.0).collect();
         ops.shrink_to_fit();
-        let kind = continued(
+        let kind = intent(
             line.kind,
             line.label,
-            Continued {
+            Members {
                 ops,
                 displaced: displaced.collect(),
                 forks: line.forks,
-                more: line.more,
-                deletes: line.deletes,
                 record: line.record,
             },
         )?;
@@ -993,7 +922,6 @@ impl Entry {
                 members(json).map(EntryKind::Genesis)
             }
             Some("intent") => members(json).map(EntryKind::Intent),
-            Some("more") => members(json).map(EntryKind::More),
             Some("settle") => members(json).map(EntryKind::Settle),
             Some("bind") => members(json).map(EntryKind::Bind),
             _ => None,
@@ -1044,7 +972,7 @@ impl Entry {
         })
     }
 
-    /// The entry of an intent or continuation line [`ExactLine`] read: it holds
+    /// The entry of an intent line [`ExactLine`] read: it holds
     /// no member the kind leaves out.
     fn exact(line: Line, n: u64, at: Hlc, kind: EntryKind) -> Self {
         Self::new(line, n, at, kind, false)
@@ -1179,7 +1107,6 @@ const INTENT: u8 = 1;
 const SETTLE: u8 = 2;
 const BIND: u8 = 3;
 const UNKNOWN: u8 = 4;
-const MORE: u8 = 5;
 
 impl Pack for EntryKind {
     fn pack(&self, out: &mut Vec<u8>) {
@@ -1192,12 +1119,7 @@ impl Pack for EntryKind {
                 out.push(INTENT);
                 logged.label.pack(out);
                 (&logged.displaced, &logged.ops).pack(out);
-                (&logged.forks, (logged.more, logged.record)).pack(out);
-            }
-            Self::More(more) => {
-                out.push(MORE);
-                (&more.displaced, &more.ops).pack(out);
-                (&more.forks, &more.deletes).pack(out);
+                (&logged.forks, logged.record).pack(out);
             }
             Self::Settle(settle) => {
                 out.push(SETTLE);
@@ -1223,24 +1145,13 @@ impl Unpack for EntryKind {
             INTENT => {
                 let label = Unpack::unpack(input)?;
                 let (displaced, ops) = Unpack::unpack(input)?;
-                let (forks, (more, record)) = Unpack::unpack(input)?;
+                let (forks, record) = Unpack::unpack(input)?;
                 Self::Intent(Logged {
                     label,
                     ops,
                     displaced,
                     forks,
-                    more,
                     record,
-                })
-            }
-            MORE => {
-                let (displaced, ops) = Unpack::unpack(input)?;
-                let (forks, deletes) = Unpack::unpack(input)?;
-                Self::More(More {
-                    ops,
-                    displaced,
-                    forks,
-                    deletes,
                 })
             }
             SETTLE => {
@@ -1579,7 +1490,6 @@ impl EntryKind {
                 ops,
                 displaced,
                 forks,
-                more,
                 record,
             }) => {
                 map.serialize_entry("kind", "intent")?;
@@ -1591,30 +1501,8 @@ impl EntryKind {
                 if !forks.is_empty() {
                     map.serialize_entry("forks", forks)?;
                 }
-                if *more != 0 {
-                    map.serialize_entry("more", more)?;
-                }
                 if let Some(record) = record {
                     map.serialize_entry("record", record)?;
-                }
-                Ok(())
-            }
-            Self::More(More {
-                ops,
-                displaced,
-                forks,
-                deletes,
-            }) => {
-                map.serialize_entry("kind", "more")?;
-                map.serialize_entry("ops", ops)?;
-                if !displaced.is_empty() {
-                    map.serialize_entry("displaced", displaced)?;
-                }
-                if !forks.is_empty() {
-                    map.serialize_entry("forks", forks)?;
-                }
-                if !deletes.is_empty() {
-                    map.serialize_entry("deletes", deletes)?;
                 }
                 Ok(())
             }
@@ -2267,26 +2155,7 @@ mod tests {
                     writer: WriterId::from_u128(0xb),
                     at: 2,
                 }],
-                more: 7,
                 record: None,
-            }),
-            EntryKind::More(More {
-                ops: every_op(),
-                displaced: vec![Displaced {
-                    item: Nonce::from_u128(5),
-                    from: RelPath::new("y.npno").unwrap(),
-                    identity: Identity::from_u128(6),
-                    len: 7,
-                }],
-                forks: vec![Forked {
-                    writer: WriterId::from_u128(0xb),
-                    at: 2,
-                }],
-                deletes: vec![EntityId::from_u128(8)],
-            }),
-            EntryKind::More(More {
-                ops: every_op(),
-                ..More::default()
             }),
             EntryKind::Settle(Settle {
                 writer: WriterId::from_u128(2),
@@ -2337,7 +2206,6 @@ mod tests {
             ],
             displaced: vec![],
             forks: vec![],
-            more: 0,
             record: None,
         });
         let entry = Entry::encode(hash(2), 3, at(3), kind).unwrap();
@@ -2391,7 +2259,6 @@ mod tests {
                 writer: WriterId::from_u128(2),
                 at: 6,
             }],
-            more: 0,
             record: None,
         });
         assert_eq!(
@@ -2406,53 +2273,6 @@ mod tests {
                 id(3),
                 id(4),
                 id(2)
-            )
-        );
-        let moved = EntryKind::Intent(Logged {
-            label: "Move".into(),
-            ops: Vec::new(),
-            displaced: Vec::new(),
-            forks: Vec::new(),
-            more: 2,
-            record: None,
-        });
-        assert_eq!(
-            written(hash(1), 1, moved),
-            format!(
-                r#"{{"prev":"{}","n":1,"at":[5,0],"kind":"intent","label":"Move","ops":[],"more":2}}"#,
-                id(1)
-            )
-        );
-        let more = EntryKind::More(More {
-            ops: vec![Op::File {
-                entity: EntityId::from_u128(7),
-                file: None,
-                replaces: Vec::new(),
-                take: None,
-            }],
-            displaced: vec![Displaced {
-                item: Nonce::from_u128(3),
-                from: RelPath::new("x.npno").unwrap(),
-                identity: Identity::from_u128(4),
-                len: 5,
-            }],
-            forks: Vec::new(),
-            deletes: vec![EntityId::from_u128(7)],
-        });
-        assert_eq!(
-            written(hash(1), 2, more),
-            format!(
-                concat!(
-                    r#"{{"prev":"{}","n":2,"at":[5,0],"kind":"more","#,
-                    r#""ops":[{{"op":"file","entity":"{}","replaces":[]}}],"#,
-                    r#""displaced":[{{"item":"{}","from":"x.npno","identity":"{}","len":5}}],"#,
-                    r#""deletes":["{}"]}}"#
-                ),
-                id(1),
-                id(7),
-                id(3),
-                id(4),
-                id(7)
             )
         );
         let settle = EntryKind::Settle(Settle {
@@ -2501,7 +2321,6 @@ mod tests {
             ops: vec![Op::Dismiss { runs: vec![run()] }],
             displaced: vec![],
             forks: vec![],
-            more: 0,
             record: None,
         });
         assert_eq!(
@@ -2741,7 +2560,6 @@ mod tests {
                     }],
                     _ => Vec::new(),
                 },
-                more: 0,
                 record: None,
             });
             let written = Entry::encode(hash(1), round as u64 + 1, at(round as u64), kind).unwrap();
@@ -2770,7 +2588,6 @@ mod tests {
             ops: every_op(),
             displaced: Vec::new(),
             forks: Vec::new(),
-            more: 0,
             record: None,
         });
         let written = Entry::encode(hash(1), 2, at(3), kind).unwrap();

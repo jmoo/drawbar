@@ -337,20 +337,8 @@ the snapshot's `genesis` is its genesis; otherwise it retires.
 
 An open pending record's `prev` is its writer's last entry, so it is always held.
 A record whose `prev` is followed, or numbered below a tip's head, is spent or
-closed, unless `prev` is a run, on a branch the tip's number says nothing of, or
-what follows is an intent whose continuation was cut short. One whose `prev` is
-neither held nor in a run is ignored and reported.
-
-**Continuations.** An intent whose file ops and displaced items do not fit its
-line is followed by `more` entries that hold them, appended with it. Each is an
-ordinary entry: placed, merged, folded into contributions and compacted entry by
-entry, and its references name it. A delete is the one rule that spans entries:
-the intent's delete of an entity kills its writer's writes of that entity in
-the `more` entries too, which say so by naming the entity, so the merge needs no
-state across entries. Undo keeps the intent and its continuation as one item.
-A torn append that kept the intent and part of its continuation leaves the
-record spent but short of the count the intent gives; the writer appends the
-rest from the record before it writes or compacts anything else.
+closed, unless `prev` is a run, on a branch the tip's number says nothing of.
+One whose `prev` is neither held nor in a run is ignored and reported.
 
 The undo stack lives in memory and holds this session's intents only. Each item
 keeps what reversing it needs: the values its writes replaced, the tags its

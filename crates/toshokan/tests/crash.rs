@@ -415,10 +415,6 @@ impl Chain for Fake {
     fn holds(&self, at: Own) -> bool {
         at == HEAD_AT
     }
-
-    fn unfinished(&self, _: Nonce) -> bool {
-        false
-    }
 }
 
 fn logs(disk: &MemDisk, writer: WriterId) -> BTreeMap<WriterId, Fake> {
@@ -995,9 +991,6 @@ fn records_that_are_unchained_unconfined_or_settled_are_not_acted_on() {
     impl Chain for Settled {
         fn holds(&self, at: Own) -> bool {
             at == HEAD_AT
-        }
-        fn unfinished(&self, _: Nonce) -> bool {
-            false
         }
     }
     let logs: BTreeMap<WriterId, Settled> = [(WRITER, Settled), (other, Settled)].into();

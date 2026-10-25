@@ -382,7 +382,6 @@ impl Gen {
                 ops,
                 displaced: Vec::new(),
                 forks: Vec::new(),
-                more: 0,
                 record: None,
             };
             self.push(w, logged);
@@ -406,7 +405,6 @@ impl Gen {
                 }],
                 displaced: Vec::new(),
                 forks: Vec::new(),
-                more: 0,
                 record: None,
             };
             self.push(w, logged);

@@ -36,8 +36,7 @@ pub struct History {
     undone: Vec<EntryHash>,
     /// The item of each intent, undo and redo.
     origins: BTreeMap<EntryHash, usize>,
-    /// Each intent of this session, its continuation included, with what
-    /// reversing it needs.
+    /// Each intent of this session, with what reversing it needs.
     kept: BTreeMap<EntryHash, (Logged, Before)>,
 }
 
@@ -136,20 +135,19 @@ fn values(folded: &Folded, entity: EntityId) -> Vec<FactChange> {
     changes
 }
 
-/// Whether an intent whose ops, with its continuations', are `ops` joins the
-/// history: every intent does but one that only dismisses runs.
+/// Whether an intent whose ops are `ops` joins the history: every intent does
+/// but one that only dismisses runs.
 pub fn joins<'a>(ops: impl IntoIterator<Item = &'a Op>) -> bool {
     let mut ops = ops.into_iter().peekable();
     ops.peek().is_none() || !ops.all(|op| matches!(op, Op::Dismiss { .. }))
 }
 
 impl History {
-    /// Adds this writer's next intent `entry`, which with its continuation logs
-    /// `logged`, committed over what `before` says it replaced. An intent
-    /// reversing the latest done intent is its undo; one reversing the latest
-    /// undo is a redo, which the next undo reverses. Any other intent starts a
-    /// new item and ends every redo. An intent that only dismisses runs is
-    /// final, and joins no item.
+    /// Adds this writer's next intent `entry`, which logs `logged`, committed over
+    /// what `before` says it replaced. An intent reversing the latest done intent
+    /// is its undo; one reversing the latest undo is a redo, which the next undo
+    /// reverses. Any other intent starts a new item and ends every redo. An intent
+    /// that only dismisses runs is final, and joins no item.
     pub fn push(
         &mut self,
         entry: &Entry,
@@ -224,8 +222,8 @@ impl History {
     }
 }
 
-/// The plan that compensates `intent`, one of `writer`'s intents, which with its
-/// continuation logged `logged` over what `before` says it replaced.
+/// The plan that compensates `intent`, one of `writer`'s intents, which logged
+/// `logged` over what `before` says it replaced.
 pub fn reverse(
     intent: EntryHash,
     logged: &Logged,

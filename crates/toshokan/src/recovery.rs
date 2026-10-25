@@ -22,10 +22,10 @@ use crate::effects::{
 use crate::env::{Env, Identify};
 use crate::error::{Refusal, Result};
 use crate::flow::{self, each, fold, Fallible};
-use crate::ids::{EntityId, Nonce, WriterId};
+use crate::ids::{Nonce, WriterId};
 use crate::io::{Capabilities, Capability, Kind, Root, Task};
 use crate::layout::Layout;
-use crate::log::{EntryKind, Logged, Op, Own, Settlement};
+use crate::log::{Own, Settlement};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord, Records, MAX_RECORD};
 use crate::report::{Orphan, Outcome};
@@ -34,10 +34,6 @@ use crate::report::{Orphan, Outcome};
 pub trait Chain {
     /// Whether the entry `at` is placed or folded.
     fn holds(&self, at: Own) -> bool;
-
-    /// Whether the intent naming the record `record` is followed by fewer
-    /// continuation items than it says, as an append a crash tore leaves it.
-    fn unfinished(&self, record: Nonce) -> bool;
 }
 
 /// A tip folds every entry its head descends from, which it certifies by
@@ -46,59 +42,6 @@ pub trait Chain {
 impl Chain for Placed {
     fn holds(&self, at: Own) -> bool {
         Placed::holds(self, at.hash) || self.tips.iter().any(|tip| tip.head.n > at.n)
-    }
-
-    fn unfinished(&self, record: Nonce) -> bool {
-        continued(self, record).is_some_and(|c| c.held < c.logged.more)
-    }
-}
-
-/// What an intent's continuation holds so far.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Continued {
-    pub logged: Logged,
-    /// How many ops and displaced items its `more` entries hold.
-    pub held: u64,
-    /// The entities a file op of the intent or its continuation names.
-    pub files: BTreeSet<EntityId>,
-    /// The trash items the intent or its continuation names.
-    pub displaced: BTreeSet<Nonce>,
-}
-
-/// The intent merged in `placed` that names the record `record`, with what of
-/// its continuation the entries merged after it hold.
-pub fn continued(placed: &Placed, record: Nonce) -> Option<Continued> {
-    let start = placed.merged.iter().position(
-        |entry| matches!(entry.kind(), EntryKind::Intent(logged) if logged.record == Some(record)),
-    )?;
-    let EntryKind::Intent(logged) = placed.merged[start].kind() else {
-        return None;
-    };
-    let named = |ops: &[Op]| ops.iter().filter_map(op_file).collect::<Vec<_>>();
-    let mut continued = Continued {
-        files: named(&logged.ops).into_iter().collect(),
-        displaced: logged.displaced.iter().map(|item| item.item).collect(),
-        held: 0,
-        logged,
-    };
-    for entry in &placed.merged[start + 1..] {
-        let EntryKind::More(more) = entry.kind() else {
-            break;
-        };
-        continued.held += more.len();
-        continued.files.extend(named(&more.ops));
-        continued
-            .displaced
-            .extend(more.displaced.iter().map(|item| item.item));
-    }
-    Some(continued)
-}
-
-/// The entity whose file `op` writes.
-fn op_file(op: &Op) -> Option<EntityId> {
-    match op {
-        Op::File { entity, .. } | Op::Pin { entity, .. } => Some(*entity),
-        _ => None,
     }
 }
 
@@ -180,7 +123,6 @@ pub fn classify<C: Chain>(
             match standing(layout, own, chain, settled, name, &record) {
                 Standing::Ignored => recovery.ignored.push(layout.pending(writer, name)),
                 Standing::Closed => {}
-                Standing::Spent if chain.unfinished(name) => open.push((name, record)),
                 Standing::Spent => recovery.spent.push((name, record)),
                 Standing::Open => open.push((name, record)),
                 Standing::Orphan => recovery.orphaned.push(Orphan {

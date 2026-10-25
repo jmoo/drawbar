@@ -11,7 +11,7 @@ use thiserror::Error as ThisError;
 use crate::ids::EntryHash;
 
 /// The longest line, newline included, a reader accepts.
-pub const MAX_LINE: usize = 1 << 20;
+pub const MAX_LINE: usize = 16 << 20;
 
 const HASH_DIGITS: usize = 32;
 

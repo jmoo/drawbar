@@ -264,7 +264,6 @@ impl Lines {
             ops,
             displaced: Vec::new(),
             forks: forks.collect(),
-            more: 0,
             record: None,
         });
         let at = Hlc {

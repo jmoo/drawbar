@@ -613,7 +613,6 @@ impl Instance {
             ops: Vec::new(),
             displaced: Vec::new(),
             forks: Vec::new(),
-            more: 0,
             record: None,
         });
         let at = self.tick();

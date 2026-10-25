@@ -905,7 +905,6 @@ mod tests {
             ops: Vec::new(),
             displaced: Vec::new(),
             forks: Vec::new(),
-            more: 0,
             record: None,
         });
         let n = prev.n() + 1;

@@ -614,7 +614,6 @@ impl Gen {
                     ops,
                     displaced: Vec::new(),
                     forks: Vec::new(),
-                    more: 0,
                     record: None,
                 },
             );
@@ -707,7 +706,6 @@ impl Gen {
                     ops: vec![op],
                     displaced: Vec::new(),
                     forks: Vec::new(),
-                    more: 0,
                     record: None,
                 },
             );
@@ -739,7 +737,6 @@ impl Gen {
                     ops: Vec::new(),
                     displaced,
                     forks: Vec::new(),
-                    more: 0,
                     record: None,
                 },
             );
