@@ -15,12 +15,9 @@ use crate::path::RelPath;
 
 type Then<'a, T> = Box<dyn FnOnce(IoResult) -> Flow<'a, T> + 'a>;
 
-type Next<'a, T> = Box<dyn FnOnce() -> Flow<'a, T> + 'a>;
-
-/// A request and what follows it, a pause before what follows, or the result.
+/// A request and what follows it, or the result.
 pub(crate) enum Flow<'a, T> {
     Io(Io, Then<'a, T>),
-    Pause(Next<'a, T>),
     Done(T),
 }
 
@@ -31,17 +28,10 @@ impl<'a, T: 'a> Flow<'a, T> {
         Self::Io(io, Box::new(then))
     }
 
-    /// `next` once the thread is given back: a slice of work that makes no
-    /// request ends here.
-    pub(crate) fn pause(next: impl FnOnce() -> Self + 'a) -> Self {
-        Self::Pause(Box::new(next))
-    }
-
     pub(crate) fn then<U: 'a>(self, next: impl FnOnce(T) -> Flow<'a, U> + 'a) -> Flow<'a, U> {
         match self {
             Self::Done(value) => next(value),
             Self::Io(io, then) => Flow::Io(io, Box::new(move |result| then(result).then(next))),
-            Self::Pause(resume) => Flow::Pause(Box::new(move || resume().then(next))),
         }
     }
 
@@ -80,14 +70,12 @@ fn drive<'a, T: 'a>(mut task: Task<'a, T>, result: Option<IoResult>) -> Flow<'a,
     match task.resume(result) {
         Step::Done(value) => Flow::Done(value),
         Step::Io(io) => Flow::io(io, move |result| drive(task, Some(result))),
-        Step::Pause => Flow::pause(move || drive(task, None)),
     }
 }
 
 enum Running<'a, T> {
     Ready(Flow<'a, T>),
     Waiting(Then<'a, T>),
-    Paused(Next<'a, T>),
     Finished,
 }
 
@@ -98,7 +86,6 @@ impl<T> Operation for Running<'_, T> {
         let flow = match (std::mem::replace(self, Self::Finished), result) {
             (Self::Ready(flow), None) => flow,
             (Self::Waiting(then), Some(result)) => then(result),
-            (Self::Paused(next), None) => next(),
             _ => panic!("an operation was resumed out of turn"),
         };
         match flow {
@@ -106,25 +93,8 @@ impl<T> Operation for Running<'_, T> {
                 *self = Self::Waiting(then);
                 Step::Io(io)
             }
-            Flow::Pause(next) => {
-                *self = Self::Paused(next);
-                Step::Pause
-            }
             Flow::Done(value) => Step::Done(value),
         }
-    }
-}
-
-/// Calls `slice` on `state` until it returns true, pausing after each call that
-/// returns false: a computation too long for one turn of the thread, each call
-/// doing a bounded part of it.
-pub(crate) fn sliced<'a, S: 'a>(
-    mut state: S,
-    mut slice: impl FnMut(&mut S) -> bool + 'a,
-) -> Flow<'a, S> {
-    match slice(&mut state) {
-        true => Flow::Done(state),
-        false => Flow::pause(move || sliced(state, slice)),
     }
 }
 
@@ -1027,7 +997,6 @@ mod tests {
                     });
                     result = Some(disk.perform(io));
                 }
-                Step::Pause => {}
                 Step::Done(found) => break found.unwrap(),
             }
         };
@@ -1038,34 +1007,6 @@ mod tests {
         );
         let chunk = format!("read {CHUNK}");
         assert_eq!(asked, ["many 1", &chunk, &chunk, "read 5", "many 2"]);
-    }
-
-    #[test]
-    fn a_sliced_computation_pauses_between_slices_inside_a_sequence_of_requests() {
-        let a = path("a");
-        let flow = stat(Root::Folder, &a)
-            .then(|_| {
-                sliced(0, |done| {
-                    *done += 1;
-                    *done == 3
-                })
-            })
-            .then(move |slices| stat(Root::Folder, &a).map_ok(move |_| slices));
-        let mut task = run_in_place(flow.task());
-        let mut steps = Vec::new();
-        let mut result = None;
-        let slices = loop {
-            match task.resume(result.take()) {
-                Step::Io(io) => {
-                    steps.push("io");
-                    result = Some(MemDisk::new().perform(io));
-                }
-                Step::Pause => steps.push("pause"),
-                Step::Done(slices) => break slices.unwrap(),
-            }
-        };
-        assert_eq!(steps, ["io", "pause", "pause", "io"]);
-        assert_eq!(slices, 3);
     }
 
     /// A task run through [`run`] inside another flow, as library operations
@@ -1107,7 +1048,6 @@ mod tests {
                     asked.push(io.clone());
                     result = Some(disk.perform(io));
                 }
-                Step::Pause => {}
                 Step::Done(done) => break done,
             }
         };
@@ -1140,7 +1080,6 @@ mod tests {
                     }
                     result = Some(disk.perform(io));
                 }
-                Step::Pause => {}
                 Step::Done(bytes) => break bytes.unwrap(),
             }
         };

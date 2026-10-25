@@ -689,14 +689,9 @@ thread_local! {
     static HELD: std::cell::Cell<(f64, f64)> = const { std::cell::Cell::new((0.0, 0.0)) };
 }
 
-/// The worker, timing how long the core holds the page's thread: from a reply
-/// or a pause that gave the thread back, or from the library's start, to the
-/// next request or such pause. It gives the thread back when the worker does:
-/// once the core has held it for [`TURN_MS`].
+/// The worker, timing how long the core holds the page's thread: from a reply,
+/// or from the library's start, to the next request.
 struct Watched(Worker);
-
-/// As the worker's pause decides.
-const TURN_MS: f64 = 6.0;
 
 impl Watched {
     fn holding(&self) {
@@ -721,17 +716,6 @@ impl Fs for Watched {
         let result = self.0.perform(io).await;
         self.resumed();
         result
-    }
-
-    async fn pause(&self) {
-        let gives_back = HELD.with(|held| now() - held.get().0 >= TURN_MS);
-        if gives_back {
-            self.holding();
-        }
-        self.0.pause().await;
-        if gives_back {
-            self.resumed();
-        }
     }
 
     fn own(&self, root: &RelPath) {
@@ -800,10 +784,6 @@ impl Fs for Traced {
         let result = self.0.perform(io).await;
         self.1.borrow_mut().push((what, now() - start));
         result
-    }
-
-    async fn pause(&self) {
-        self.0.pause().await;
     }
 
     fn own(&self, root: &RelPath) {

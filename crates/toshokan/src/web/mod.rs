@@ -22,9 +22,7 @@ mod worker;
 use js_sys::{Function, Object, Promise, Reflect, Uint8Array};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{
-    FileSystemDirectoryHandle, FileSystemGetDirectoryOptions, MessageChannel, StorageManager,
-};
+use web_sys::{FileSystemDirectoryHandle, FileSystemGetDirectoryOptions, StorageManager};
 
 use crate::env::{Clock, Random};
 use crate::io::IoError;
@@ -179,34 +177,6 @@ fn named(name: &str, mismatch: IoError) -> Option<IoError> {
 
 async fn wait(promise: impl Into<Promise>) -> Result<JsValue, JsValue> {
     JsFuture::from(promise.into()).await
-}
-
-/// `performance.now()`, on the page or in a worker.
-fn now() -> f64 {
-    let performance =
-        field(&js_sys::global(), "performance").expect("every browser has performance");
-    let now: Function = field(&performance, "now")
-        .expect("performance tells the time")
-        .unchecked_into();
-    now.call0(&performance)
-        .ok()
-        .and_then(|now| now.as_f64())
-        .unwrap_or_default()
-}
-
-/// Resolves once the event loop has run the tasks waiting for the thread, by a
-/// message the page posts to itself, which no timer clamps.
-// ⚠️ `scheduler.yield()` would run the core ahead of the waiting tasks, and
-// frames would then come far apart while the core worked.
-async fn give_back() {
-    let Ok(channel) = MessageChannel::new() else {
-        return;
-    };
-    let (given, resolve) = deferred();
-    channel.port1().set_onmessage(Some(&resolve));
-    if channel.port2().post_message(&JsValue::NULL).is_ok() {
-        let _ = wait(given).await;
-    }
 }
 
 /// A promise and the function that resolves it.

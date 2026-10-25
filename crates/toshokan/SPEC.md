@@ -10,10 +10,9 @@ insignificant whitespace.
 ## Design
 
 The core does no I/O. Every operation is a state machine that asks for reads,
-writes and syncs, consumes their results, and pauses between slices of a long
-computation. The `blocking` driver runs it on the machine's file system, and the
-`asynch` driver on any async backend, such as a browser's; both run it on an
-in-memory disk that models what survives a crash.
+writes and syncs, and consumes their results. The `blocking` driver runs it on
+the machine's file system, and the `asynch` driver on any async backend, such as
+a browser's; both run it on an in-memory disk that models what survives a crash.
 A directory listing with every file's metadata is one request, and so are many
 reads, so a scan of every file costs a request per directory rather than per
 file. A commit or a refresh binds files to entities again only as far as its
@@ -1133,14 +1132,11 @@ always a directory of the origin private file system.
 - **Times.** Chromium and Firefox report a file's last change in milliseconds,
   WebKit in whole seconds: two changes that keep a file's length within that
   time look alike.
-- **The page's thread.** An operation pauses between slices of work that makes
-  no request, such as parsing the logs it read, gathering, identifying and
-  binding the library's files, and indexing what is shown. Deriving the merged state, placing and folding every writer's
-  entries, runs without a pause. Once the core has held the page's thread for 6 ms since
-  a reply or the last pause, the driver gives it back at the next pause by a
-  message the page posts to itself, so the tasks waiting for the thread run
-  first and the page can draw. Where an operation pauses depends only on its
-  work, never on time.
+- **The page's thread.** The core holds the thread that drives it from one
+  request to the next: parsing the logs it read, deriving the merged state,
+  gathering, binding and indexing the library's files each run in one piece. A
+  page that must draw while a large library opens runs the library in a
+  dedicated worker.
 - **Locks** are Web Locks named `toshokan:/<local root path>/<name>`, held by
   the worker and released when it ends.
 - **Hints.** A tab that commits announces its newest entry on the

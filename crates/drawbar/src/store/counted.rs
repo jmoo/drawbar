@@ -64,10 +64,6 @@ impl<F: Fs> Fs for Counted<F> {
         reply
     }
 
-    async fn pause(&self) {
-        self.inner.pause().await;
-    }
-
     fn own(&self, root: &RelPath) {
         self.inner.own(root);
     }
