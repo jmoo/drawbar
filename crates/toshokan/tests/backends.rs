@@ -577,6 +577,44 @@ fn a_native_local_root_missing_at_a_write_is_made_then() {
     );
 }
 
+/// A writer's lock is taken on its `head.json`, which the holder writes and other
+/// processes read while it is held.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_native_lock_leaves_its_file_readable_and_writable() {
+    use toshokan::blocking::{Backend, Native};
+
+    let (folder, local) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let [mut holder, mut other] = [0, 1].map(|_| Native::new(folder.path(), local.path()));
+    let name = path("head.json");
+    let locked = holder.perform(Io::Lock { name: name.clone() });
+    assert_eq!(locked, Ok(Reply::Lock(Lock::Acquired)));
+    holder
+        .perform(Io::Write {
+            root: Root::Local,
+            path: name.clone(),
+            offset: 0,
+            bytes: b"{}".to_vec(),
+        })
+        .unwrap();
+    let range = Range { offset: 0, len: 2 };
+    let read = other.perform(Io::Read {
+        root: Root::Local,
+        path: name.clone(),
+        range,
+    });
+    assert_eq!(
+        read,
+        Ok(Reply::Bytes(b"{}".to_vec())),
+        "read by another process"
+    );
+    let taken = other.perform(Io::Lock { name: name.clone() });
+    assert_eq!(taken, Ok(Reply::Lock(Lock::Held)), "held by the first");
+    holder.perform(Io::Unlock { name: name.clone() }).unwrap();
+    let taken = other.perform(Io::Lock { name });
+    assert_eq!(taken, Ok(Reply::Lock(Lock::Acquired)), "let go");
+}
+
 #[cfg(unix)]
 #[test]
 fn a_native_root_reaches_nothing_through_a_linked_directory() {

@@ -71,11 +71,15 @@ enum Confirmed {
     Fresh,
 }
 
-/// `head.json` in the writer's directory of the local root.
+/// `head.json` in the writer's directory of the local root, the one file there: the
+/// writer's lock is taken on it.
 #[derive(Serialize, Deserialize)]
 struct HeadRecord {
     writer: WriterId,
     head: EntryHash,
+    /// The writer is never written again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    retired: bool,
 }
 
 impl Writer {
@@ -111,12 +115,8 @@ impl Writer {
 
     /// The id of the pool's writer `genesis`, from its head record, where that reads.
     pub fn id_of(genesis: EntryHash) -> Task<'static, Result<Option<WriterId>>> {
-        flow::read_replaced(Root::Local, Layout::head(genesis))
-            .map_ok(|bytes| {
-                let record =
-                    bytes.and_then(|bytes| serde_json::from_slice::<HeadRecord>(&bytes).ok());
-                record.map(|record| record.writer)
-            })
+        read_head(genesis)
+            .map_ok(|record| record.map(|record| record.writer))
             .task()
     }
 
@@ -194,16 +194,16 @@ impl Writer {
                 path: Layout::local(genesis),
             })
         })
-        .and_then(move |()| flow::lock(Layout::lock(genesis)))
+        .and_then(move |()| flow::lock(Layout::head(genesis)))
         .and_then(move |lock| match lock {
             Lock::Acquired => record_head(id, genesis, genesis),
             Lock::Held => Flow::Done(Err(Error::Io {
                 root: Root::Local,
-                path: Layout::lock(genesis),
+                path: Layout::head(genesis),
                 error: crate::io::IoError::Other("a new writer's lock is held".into()),
             })),
         })
-        .and_then(|()| sync_all(Root::Local, vec![RelPath::ROOT]))
+        .and_then(move |()| sync_all(Root::Local, vec![Layout::local(genesis), RelPath::ROOT]))
         .map_ok(move |()| writer)
         .task()
     }
@@ -317,10 +317,7 @@ impl Writer {
         let genesis = self.genesis;
         self.seal()
             .then(move |(_, sealed)| {
-                flow::act(Io::Unlock {
-                    name: Layout::lock(genesis),
-                })
-                .then(move |unlocked| Flow::Done(sealed.and(unlocked)))
+                unlock(genesis).then(move |unlocked| Flow::Done(sealed.and(unlocked)))
             })
             .task()
     }
@@ -506,24 +503,13 @@ fn pick_first<'a>(mut pool: Vec<EntryHash>) -> Flow<'a, Result<Option<Picked>>> 
         return flow::ok(None);
     }
     let genesis = pool.remove(0);
-    flow::stat(Root::Local, &Layout::retired(genesis))
-        .and_then(move |retired| match retired {
-            Some(_) => flow::ok(Lock::Held),
-            None => flow::lock(Layout::lock(genesis)),
-        })
-        .and_then(move |lock| match lock {
-            Lock::Held => pick_first(pool),
-            Lock::Acquired => {
-                flow::read_replaced(Root::Local, Layout::head(genesis)).and_then(move |bytes| {
-                    let record =
-                        bytes.and_then(|bytes| serde_json::from_slice::<HeadRecord>(&bytes).ok());
-                    match record {
-                        None => unlock(genesis).and_then(move |()| pick_first(pool)),
-                        Some(record) => flow::ok(Some(Picked { genesis, record })),
-                    }
-                })
-            }
-        })
+    flow::lock(Layout::head(genesis)).and_then(move |lock| match lock {
+        Lock::Held => pick_first(pool),
+        Lock::Acquired => read_head(genesis).and_then(move |record| match record {
+            Some(record) if !record.retired => flow::ok(Some(Picked { genesis, record })),
+            _ => unlock(genesis).and_then(move |()| pick_first(pool)),
+        }),
+    })
 }
 
 /// A writer of the pool whose lock this process holds, not yet confirmed to be
@@ -607,18 +593,19 @@ pub fn retire_writer(genesis: EntryHash) -> Task<'static, Result<()>> {
         .task()
 }
 
+/// Records in `head.json` that the writer is never written again. One whose record
+/// does not read is never continued anyway, and is left as it is.
 fn mark_retired<'a>(genesis: EntryHash) -> Flow<'a, Result<()>> {
-    let marker = Io::Create {
-        root: Root::Local,
-        path: Layout::retired(genesis),
-        bytes: Vec::new(),
-    };
-    flow::attempt(marker.clone())
-        .then(move |result| match result {
-            Ok(_) | Err(crate::io::IoError::AlreadyExists) => flow::ok(()),
-            Err(error) => Flow::Done(Err(marker.failed(error))),
-        })
-        .and_then(move |()| flow::sync(Root::Local, &Layout::local(genesis)))
+    read_head(genesis).and_then(move |record| match record {
+        Some(record) => write_head(
+            genesis,
+            &HeadRecord {
+                retired: true,
+                ..record
+            },
+        ),
+        None => flow::ok(()),
+    })
 }
 
 fn retire<'a>(genesis: EntryHash, old: WriterId, why: Rekey) -> Flow<'a, Result<Claimed>> {
@@ -632,7 +619,7 @@ fn retire<'a>(genesis: EntryHash, old: WriterId, why: Rekey) -> Flow<'a, Result<
 
 fn unlock<'a>(genesis: EntryHash) -> Flow<'a, Result<()>> {
     flow::act(Io::Unlock {
-        name: Layout::lock(genesis),
+        name: Layout::head(genesis),
     })
 }
 
@@ -642,24 +629,48 @@ pub(crate) fn head_record(bytes: &[u8]) -> Option<(WriterId, EntryHash)> {
     Some((record.writer, record.head))
 }
 
-/// Writes `head.json` over the last record when that has the new record's length,
-/// as every record of one writer has; otherwise replaces it.
+/// The record `head.json` of the writer `genesis` holds; `None` where none reads.
+fn read_head<'a>(genesis: EntryHash) -> Fallible<'a, Option<HeadRecord>> {
+    flow::read_file(Root::Local, &Layout::head(genesis), u64::MAX)
+        .map_ok(|bytes| bytes.and_then(|bytes| serde_json::from_slice(&bytes).ok()))
+}
+
+/// Records `head` as the last entry `writer` wrote.
 fn record_head<'a>(writer: WriterId, genesis: EntryHash, head: EntryHash) -> Flow<'a, Result<()>> {
-    let bytes = serde_json::to_vec(&HeadRecord { writer, head }).expect("a head record is JSON");
+    let record = HeadRecord {
+        writer,
+        head,
+        retired: false,
+    };
+    write_head(genesis, &record)
+}
+
+/// Writes `record` over `head.json` in place, or as a new file where none is.
+///
+/// ⚠️ Never replaced: the writer's lock is held on the file, and a new file at its
+/// path would be one another process could lock. Every record of one writer has the
+/// same length but the retired one, which is longer and written last, so no write
+/// leaves the end of an older record behind.
+fn write_head<'a>(genesis: EntryHash, record: &HeadRecord) -> Flow<'a, Result<()>> {
+    let bytes = serde_json::to_vec(record).expect("a head record is JSON");
     let path = Layout::head(genesis);
-    flow::stat(Root::Local, &path).and_then(move |meta| match meta {
-        Some(Meta {
-            kind: Kind::File,
-            len,
-            ..
-        }) if len == bytes.len() as u64 => flow::act(Io::Write {
-            root: Root::Local,
-            path: path.clone(),
-            offset: 0,
-            bytes,
-        })
-        .and_then(move |()| flow::sync(Root::Local, &path)),
-        _ => flow::replace(Root::Local, path, bytes),
+    flow::stat(Root::Local, &path).and_then(move |meta| {
+        let write = match meta {
+            Some(Meta {
+                kind: Kind::File, ..
+            }) => Io::Write {
+                root: Root::Local,
+                path: path.clone(),
+                offset: 0,
+                bytes,
+            },
+            _ => Io::Create {
+                root: Root::Local,
+                path: path.clone(),
+                bytes,
+            },
+        };
+        flow::act(write).and_then(move |()| flow::sync(Root::Local, &path))
     })
 }
 

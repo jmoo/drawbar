@@ -175,10 +175,7 @@ fn a_commit_crashed_anywhere_is_continued_after_its_chains_last_entry_or_by_a_ne
                 };
                 let chain = before.writers[&id].chain_to(tip).unwrap();
                 let local = disk.files(Root::Local);
-                let recorded = ["head.json", "head.json.next"]
-                    .map(|name| Layout::local(chain[0]).join(name).unwrap())
-                    .into_iter()
-                    .find_map(|path| local.get(&path).cloned());
+                let recorded = local.get(&Layout::head(chain[0])).cloned();
                 let mut again = Instance::open(one_disk(disk), 3);
                 let written = again.write("d").unwrap_or_else(|e| panic!("{shown}: {e}"));
                 let after = fresh(&again.machine.folder);
@@ -292,6 +289,52 @@ fn a_writer_whose_last_entry_follows_a_hidden_segment_does_not_resume() {
             why: Rekey::Restored
         }
     );
+}
+
+/// Each writer keeps one file in the local root, `head.json`, which also says when
+/// the writer is retired.
+#[test]
+fn a_writer_keeps_one_file_in_the_local_root_retired_or_not() {
+    let mut original = Instance::open(machine(), 1);
+    original.write("a1").unwrap();
+    let id = original.id();
+    let mut clone = Instance::open(original.machine.cloned(), 2);
+    clone.write("b2").unwrap();
+    original.write("a2").unwrap();
+    let mut reopened = Instance::open(original.close(), 3);
+    assert!(matches!(reopened.start, Start::Rekeyed { old, .. } if old == id));
+    reopened.write("after").unwrap();
+    let local = reopened.close().local.files(Root::Local);
+    let names: Vec<&str> = local.keys().filter_map(|path| path.name()).collect();
+    assert_eq!(names, ["head.json", "head.json"], "{local:?}");
+    let retired = local
+        .values()
+        .filter(|record| String::from_utf8_lossy(record).ends_with(r#","retired":true}"#));
+    assert_eq!(retired.count(), 1, "the forked writer's");
+}
+
+/// A `retired` or `lock` file an earlier version left beside `head.json` is not
+/// read: the writer it names is continued while it can be.
+#[test]
+fn a_retired_or_lock_file_an_earlier_version_left_is_not_read() {
+    let mut first = Instance::open(machine(), 1);
+    first.write("a").unwrap();
+    let id = first.id();
+    let machine = first.close();
+    let dirs: Vec<_> = machine.local.directories(Root::Local).into_iter().collect();
+    let [dir] = &dirs[..] else {
+        panic!("{dirs:?}");
+    };
+    for name in ["retired", "lock"] {
+        let io = Io::Create {
+            root: Root::Local,
+            path: dir.join(name).unwrap(),
+            bytes: Vec::new(),
+        };
+        machine.local.perform(io).unwrap();
+    }
+    let second = Instance::open(machine, 2);
+    assert_eq!(second.start, Start::Resumed(id));
 }
 
 #[test]

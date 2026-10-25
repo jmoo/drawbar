@@ -1364,24 +1364,26 @@ impl Library {
                     .filter_map(|entry| entry.name.parse::<EntryHash>().ok())
                     .filter(move |genesis| !held.contains(genesis));
                 fold(pool, BTreeMap::new(), |mut presence, genesis| {
-                    flow::read_replaced(Root::Local, Layout::head(genesis)).and_then(move |head| {
-                        let writer = head
-                            .and_then(|bytes| writer::head_record(&bytes))
-                            .map(|(writer, _)| writer);
-                        let Some(writer) = writer else {
-                            return ok(presence);
-                        };
-                        flow::lock(Layout::lock(genesis)).and_then(move |lock| match lock {
-                            Lock::Held => {
-                                presence.insert(writer, Presence::SameMachine);
-                                ok(presence)
-                            }
-                            Lock::Acquired => flow::act(Io::Unlock {
-                                name: Layout::lock(genesis),
+                    flow::read_file(Root::Local, &Layout::head(genesis), u64::MAX).and_then(
+                        move |head| {
+                            let writer = head
+                                .and_then(|bytes| writer::head_record(&bytes))
+                                .map(|(writer, _)| writer);
+                            let Some(writer) = writer else {
+                                return ok(presence);
+                            };
+                            flow::lock(Layout::head(genesis)).and_then(move |lock| match lock {
+                                Lock::Held => {
+                                    presence.insert(writer, Presence::SameMachine);
+                                    ok(presence)
+                                }
+                                Lock::Acquired => flow::act(Io::Unlock {
+                                    name: Layout::head(genesis),
+                                })
+                                .map_ok(move |()| presence),
                             })
-                            .map_ok(move |()| presence),
-                        })
-                    })
+                        },
+                    )
                 })
             })
             .task()
@@ -1822,7 +1824,7 @@ fn idle_pool<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
             .into_iter()
             .filter(move |genesis| Some(*genesis) != own);
         fold(others, library, |library, genesis| {
-            flow::lock(Layout::lock(genesis)).and_then(move |lock| match lock {
+            flow::lock(Layout::head(genesis)).and_then(move |lock| match lock {
                 Lock::Held => ok(library),
                 Lock::Acquired => flow::run(Writer::id_of(genesis)).and_then(move |writer| {
                     let mut library = library;
@@ -1877,7 +1879,7 @@ fn release_if_idle<'a, L: BorrowMut<Library> + 'a>(
 
 fn unlock_idle<'a>(genesis: EntryHash) -> Fallible<'a, ()> {
     flow::act(Io::Unlock {
-        name: Layout::lock(genesis),
+        name: Layout::head(genesis),
     })
 }
 

@@ -1,6 +1,8 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions, TryLockError};
+#[cfg(not(windows))]
+use std::fs::TryLockError;
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -274,14 +276,62 @@ impl Native {
             .truncate(false)
             .open(self.full(Root::Local, &name)?)
             .map_err(io_error)?;
-        match file.try_lock() {
-            Ok(()) => {
+        match try_lock(&file).map_err(io_error)? {
+            true => {
                 self.locks.insert(name, file);
                 Ok(Lock::Acquired)
             }
-            Err(TryLockError::WouldBlock) => Ok(Lock::Held),
-            Err(TryLockError::Error(error)) => Err(io_error(error)),
+            false => Ok(Lock::Held),
         }
+    }
+}
+
+/// Takes the lock of `file` without waiting; `false` where another process holds it.
+/// What the file holds stays readable and writable through other handles.
+#[cfg(not(windows))]
+fn try_lock(file: &File) -> io::Result<bool> {
+    match file.try_lock() {
+        Ok(()) => Ok(true),
+        Err(TryLockError::WouldBlock) => Ok(false),
+        Err(TryLockError::Error(error)) => Err(error),
+    }
+}
+
+/// Takes the lock of `file` without waiting; `false` where another process holds it.
+/// What the file holds stays readable and writable through other handles.
+// A Windows lock bars every other handle from the bytes it covers, so this one
+// covers a byte far past the end of any file.
+#[cfg(windows)]
+fn try_lock(file: &File) -> io::Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
+    use windows_sys::Win32::Storage::FileSystem::{
+        LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+    };
+    use windows_sys::Win32::System::IO::{OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
+
+    let mut at = OVERLAPPED {
+        Internal: 0,
+        InternalHigh: 0,
+        Anonymous: OVERLAPPED_0 {
+            Anonymous: OVERLAPPED_0_0 {
+                Offset: 0,
+                OffsetHigh: 0x7fff_ffff,
+            },
+        },
+        hEvent: std::ptr::null_mut(),
+    };
+    let flags = LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY;
+    // SAFETY: the handle is open for the call, and `at` outlives it: a lock asked to
+    // fail at once completes before the call returns.
+    let locked = unsafe { LockFileEx(file.as_raw_handle(), flags, 0, 1, 0, &mut at) };
+    if locked != 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) {
+        true => Ok(false),
+        false => Err(error),
     }
 }
 

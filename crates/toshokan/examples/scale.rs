@@ -1364,11 +1364,13 @@ fn main() {
                     path: dir,
                 })
                 .unwrap();
+            let writer = WriterId::from_u128(gen.rng.id());
+            let record = format!(r#"{{"writer":"{writer}","head":"{genesis}","retired":true}}"#);
             local
                 .perform(Io::Create {
                     root: Root::Local,
-                    path: Layout::retired(genesis),
-                    bytes: Vec::new(),
+                    path: Layout::head(genesis),
+                    bytes: record.into_bytes(),
                 })
                 .unwrap();
         }
