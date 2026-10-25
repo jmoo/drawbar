@@ -156,8 +156,8 @@ struct Heard {
     events: VecDeque<Event>,
     /// What other tabs or the folder said to read again, oldest first.
     hints: VecDeque<Hint>,
-    /// The slots' former occupants this install keeps for the library, found once it
-    /// opened.
+    /// The slots' former occupants this install keeps for the library, found each time
+    /// the page looks.
     rescues: Vec<Rescue>,
     /// Why the library's worker stopped answering, once it has. Nothing is heard after.
     stopped: Option<String>,
@@ -182,6 +182,7 @@ pub struct Backend {
     inbox: Rc<RefCell<Inbox>>,
     heard: Rc<RefCell<Heard>>,
     room: Rc<RefCell<Room>>,
+    ctx: egui::Context,
 }
 
 impl Backend {
@@ -193,6 +194,7 @@ impl Backend {
             inbox: Rc::default(),
             heard: Rc::default(),
             room: Rc::default(),
+            ctx: ctx.clone(),
         };
         let mut done = None;
         let let_go = Promise::new(&mut |resolve, _| done = Some(resolve));
@@ -266,10 +268,19 @@ impl Backend {
         self.heard.borrow_mut().hints.pop_front()
     }
 
-    /// The slots' former occupants this install keeps for the library, found once it
-    /// opened, each once.
+    /// The slots' former occupants [`Backend::look_for_rescues`] found, each time once.
     pub fn rescued(&mut self) -> Vec<Rescue> {
         std::mem::take(&mut self.heard.borrow_mut().rescues)
+    }
+
+    /// Look again for the slots' former occupants in this install's folder for them.
+    pub fn look_for_rescues(&self) {
+        let (heard, local, ctx) = (self.heard.clone(), self.root.local(), self.ctx.clone());
+        spawn_local(async move {
+            let found = rescues(&local).await;
+            heard.borrow_mut().rescues = found;
+            ctx.request_repaint();
+        });
     }
 
     /// Why the library's worker stopped, once it has: it answers nothing more, and a
@@ -423,12 +434,6 @@ async fn drive(
         if let Ok(folder) = &folder {
             folder.forget();
             folder.follow(&moved(&answers)).await;
-        }
-        if answers
-            .iter()
-            .any(|answer| matches!(answer, Event::Opened(Ok(_))))
-        {
-            heard.borrow_mut().rescues = rescues(&local).await;
         }
         for answer in answers {
             if let (

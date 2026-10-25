@@ -90,7 +90,7 @@ What only this install needs is kept in drawbar's own data, never in the library
 `app.ron`. It holds toshokan's local root, with the identities its scans read and the drafts of unsaved edits; `slots/`, for the unsaved edits
 of slot views, each replaced whole under the lock `replacing.lock` so that two
 drawbars or tabs never interleave; and `rescued/`, for a slot's former occupant
-that a write to the instrument left. Losing it loses the drafts and nothing
+while a write to the instrument replaces it, and one the library could not take. Losing it loses the drafts and nothing
 else. Two drawbars on one machine share it, each writing as a writer of its own;
 one that opens takes up what an idle one left, its drafts and its unfinished
 effects included.
@@ -466,20 +466,26 @@ closed (`worker::put_back`): the instrument drops a write left unfinished when i
 session closes, but keeps it as an object in another slot when a second write
 follows it in the same session. The file is deleted once the slot holds what it
 should. Where the restore fails as well, or a delete may have landed, it stays,
-`DeviceEvent::Kept` names it in the log, and the next open offers it. It is the
-only copy drawbar keeps. The file is named as its rescue,
+`DeviceEvent::Kept` names it in the log. It is the only copy drawbar keeps. The file is named as its rescue,
 `nord-rescued-<bank>-<slot>.<tag>`, numbered where that name is taken. An open
 removes the `.partial` ones, which never are a slot's only copy.
 
-Once a library that may be written opens, each file named that way in both
-`rescued` folders is offered in a question (`Browser::ask_rescue`). Each is read
-through first and checked against its stored checksum (`envelope::verify`). One
-that does not read is said to be no copy of the slot, and offered only to be
-discarded. **Keep in library** copies it into the library's top level under its
-own name, or a free one, with the slot its name gives as its origin, and deletes
-it once the copy lands. **Show the file** opens its folder and asks again.
-**Discard** asks once more, then deletes it. **Later** leaves it to be offered at
-the next open.
+Once the library is listed, and after each `DeviceEvent::Kept` once the
+instrument is idle, drawbar looks in both `rescued` folders
+(`Store::look_for_rescues`). It waits for the instrument because a write in
+progress holds its slot's occupant under the name it takes as a rescue. Each file
+named as a rescue is read through and checked against its stored checksum
+(`envelope::verify`). Where the library may be written, a whole one is copied
+into the library's top level under its own name, or a free one, with the slot its
+name gives as its origin, in one intent that undo takes back, and deleted once the
+copy lands. One already being copied is not copied again. A crash after the copy
+lands and before the delete leaves the file to be copied again at the next open, so
+the library may hold the occupant twice, never not at all. One that does not read
+is said to be no copy of the slot, and offered only to be discarded. While the
+library cannot be written, a whole one stays where it is and is asked about
+(`Browser::ask_rescue`): **Show the file** opens its folder and asks again,
+**Discard** asks once more, then deletes it, and **Later** leaves it for the next
+open of a library that can take it.
 
 The queue compares a resting file with a slot's occupant by the checksum its
 check took, so its diff says only whether the bodies differ. The instrument

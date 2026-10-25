@@ -248,12 +248,15 @@ pub struct Store {
     /// How many writing commands have been sent.
     sent: u64,
     /// Where drawbar keeps a slot's former occupant no library could take, whose files
-    /// are offered with the library's own: see [`Rescue`].
+    /// are taken in with the library's own: see [`Rescue`].
     #[cfg(not(target_arch = "wasm32"))]
     shelf: Option<std::path::PathBuf>,
     /// The rescues being copied into the library, by the asset each becomes, each
     /// deleted once its copy lands.
     shelved: BTreeMap<u64, std::path::PathBuf>,
+    /// The folders that keep the slots' former occupants are to be looked in: the
+    /// library has been listed, or a write has left one since.
+    rescues_due: bool,
 }
 
 impl Store {
@@ -318,11 +321,12 @@ impl Store {
             #[cfg(not(target_arch = "wasm32"))]
             shelf: None,
             shelved: BTreeMap::new(),
+            rescues_due: false,
             left: Vec::new(),
         }
     }
 
-    /// The same store, offering on open the rescues left in `shelf`, drawbar's own data.
+    /// The same store, taking in on open the rescues left in `shelf`, drawbar's own data.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn shelving(self, shelf: Option<std::path::PathBuf>) -> Store {
         Store { shelf, ..self }
@@ -355,14 +359,14 @@ impl Store {
     }
 
     /// Where a slot's former occupant is kept while this library is open: this install's
-    /// own folder for it, outside the library, where the next open offers it.
+    /// own folder for it, outside the library, from which it goes into the library.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn tmp(&self) -> Option<std::path::PathBuf> {
         self.open().then(|| self.backend.local().join(RESCUED))
     }
 
     /// Where a slot's former occupant is kept while this library is open: this install's
-    /// own folder for it in the browser's storage, where the next open offers it.
+    /// own folder for it in the browser's storage, from which it goes into the library.
     #[cfg(target_arch = "wasm32")]
     pub fn tmp(&self) -> Option<toshokan::RelPath> {
         let rescued = self.backend.root().local().join(RESCUED);
@@ -886,8 +890,9 @@ impl Store {
         #[cfg(target_arch = "wasm32")]
         self.hinted();
         #[cfg(target_arch = "wasm32")]
-        for rescue in self.backend.rescued() {
-            browser.ask_rescue(rescue);
+        {
+            let found = self.backend.rescued();
+            self.take_in_rescues(found, workspace, browser, log);
         }
         browser.folders.place = Some(self.place());
         // The count of files found moves with no answer to wake the window.
@@ -1751,12 +1756,7 @@ impl Store {
         });
         self.prune(browser);
         self.fetch_tracked(workspace, browser);
-        #[cfg(not(target_arch = "wasm32"))]
-        if self.open() {
-            for rescue in self.shelved_rescues() {
-                browser.ask_rescue(rescue);
-            }
-        }
+        self.rescues_due = true;
     }
 
     /// Take in the changes other drawbars left unfinished as a read found them, read at
@@ -2492,18 +2492,71 @@ impl Store {
         found
     }
 
+    /// A write to the instrument has left a slot's former occupant on this computer:
+    /// look for it once the instrument is idle.
+    pub fn rescue_due(&mut self) {
+        self.rescues_due = true;
+    }
+
+    /// Take in the slots' former occupants writes left, once the library is listed and
+    /// something has said to look: on the desktop at once, in the browser once its storage
+    /// answers.
+    ///
+    /// ⚠️ Only while the instrument is idle: a write in progress holds its slot's
+    /// occupant under the name it takes as a rescue, and is not one.
+    pub fn look_for_rescues(
+        &mut self,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        log: &mut Log,
+    ) {
+        if !self.listed || !self.rescues_due {
+            return;
+        }
+        self.rescues_due = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let found = self.shelved_rescues();
+            self.take_in_rescues(found, workspace, browser, log);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (workspace, browser, log);
+            self.backend.look_for_rescues();
+        }
+    }
+
+    /// Put each slot's former occupant in the library as a file of its own, where the
+    /// library may be written. One that does not read, or that a library which cannot be
+    /// written leaves where it is, is asked about. One already on its way in is let be.
+    fn take_in_rescues(
+        &mut self,
+        found: Vec<Rescue>,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        log: &mut Log,
+    ) {
+        for rescue in found {
+            if self.shelved.values().any(|at| *at == rescue.at) {
+                continue;
+            }
+            match (&rescue.broken, self.open()) {
+                (None, true) => self.keep_rescue(rescue, workspace, browser, log),
+                _ => browser.ask_rescue(rescue),
+            }
+        }
+    }
+
     /// Do `what` with a slot's former occupant, and return the URL that shows it where
     /// that is what was asked.
     pub fn rescue(
-        &mut self,
+        &self,
         rescue: Rescue,
         what: Rescuing,
-        workspace: &mut Workspace,
         browser: &mut Browser,
         log: &mut Log,
     ) -> Option<String> {
         match what {
-            Rescuing::Keep => self.keep_rescue(rescue, workspace, browser, log),
             Rescuing::Show => {
                 let url = rescue_url(&rescue);
                 browser.ask_rescue(rescue);
@@ -2515,9 +2568,8 @@ impl Store {
         None
     }
 
-    /// Copy a rescue into the library's top level, under its own name or a free one, and
-    /// delete it once the copy lands.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Copy a rescue into the library's top level, under its own name or a free one, as
+    /// one change that can be undone, and delete it once the copy lands.
     fn keep_rescue(
         &mut self,
         rescue: Rescue,
@@ -2525,52 +2577,28 @@ impl Store {
         browser: &mut Browser,
         log: &mut Log,
     ) {
-        if !self.open() {
-            return log.trouble(format!(
-                "“{}” stays where it is: the library cannot be written.",
-                rescue.name
-            ));
-        }
         let free = browser
             .folders
             .free(&LibPath::root(), &rescue.name, workspace);
         let to = LibPath::root().join(&free);
-        let from = rescue.at;
+        #[cfg(not(target_arch = "wasm32"))]
+        let from = rescue.at.clone();
+        #[cfg(target_arch = "wasm32")]
+        let from = rescue.file;
         let Some(len) = super::outside_len(&from) else {
             return log.trouble(format!("“{}” could not be read.", rescue.name));
         };
         let origin = match rescue.slot {
-            Some(at) => Origin::Rescued { at },
+            Some(at) => {
+                log.say(format!(
+                    "{} may be empty after a write to it failed: what it held goes into the                      library as “{free}”.",
+                    crate::strings::shown(at)
+                ));
+                Origin::Rescued { at }
+            }
             None => Origin::File(free),
         };
-        let id = workspace.arrive(to, origin, CopyOf::Outside(from.clone()), len);
-        self.shelved.insert(id, from);
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn keep_rescue(
-        &mut self,
-        rescue: Rescue,
-        workspace: &mut Workspace,
-        browser: &mut Browser,
-        log: &mut Log,
-    ) {
-        if !self.open() {
-            return log.trouble(format!(
-                "“{}” stays where it is: the library cannot be written.",
-                rescue.name
-            ));
-        }
-        let free = browser
-            .folders
-            .free(&LibPath::root(), &rescue.name, workspace);
-        let to = LibPath::root().join(&free);
-        let len = super::outside_len(&rescue.file).unwrap_or_default();
-        let origin = match rescue.slot {
-            Some(at) => Origin::Rescued { at },
-            None => Origin::File(free),
-        };
-        let id = workspace.arrive(to, origin, CopyOf::Outside(rescue.file), len);
+        let id = workspace.arrive(to, origin, CopyOf::Outside(from), len);
         self.shelved.insert(id, rescue.at);
     }
 

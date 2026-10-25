@@ -657,13 +657,7 @@ impl DrawbarApp {
             let Some(store) = self.store.as_mut() else {
                 continue;
             };
-            let shown = store.rescue(
-                rescue,
-                what,
-                &mut self.workspace,
-                &mut self.browser,
-                &mut self.log,
-            );
+            let shown = store.rescue(rescue, what, &mut self.browser, &mut self.log);
             if let Some(url) = shown {
                 ctx.open_url(egui::OpenUrl::new_tab(url));
             }
@@ -983,8 +977,26 @@ impl eframe::App for DrawbarApp {
             &mut self.tabs,
             &mut self.queue,
         );
-        if let Some(store) = &mut self.store {
-            store.attached(self.device.state.card().map(DeviceCard::instrument));
+        let kept = self.device.take_kept();
+        match &mut self.store {
+            Some(store) => {
+                store.attached(self.device.state.card().map(DeviceCard::instrument));
+                if !kept.is_empty() {
+                    store.rescue_due();
+                }
+                if self.device.state.in_flight.is_none() {
+                    store.look_for_rescues(&mut self.workspace, &mut self.browser, &mut self.log);
+                }
+            }
+            None => {
+                for at in kept {
+                    self.log.trouble(format!(
+                        "{} may be empty. What was in it is kept on this computer, and goes \
+                         into the library drawbar opens next.",
+                        crate::strings::shown(at)
+                    ));
+                }
+            }
         }
         // An edit to an asset with a waiting entry changes what that write would do; the
         // queue diffs it again against the occupant it already read.
