@@ -582,7 +582,7 @@ async fn a_change_whose_answers_are_lost_is_unheard_not_refused() {
 }
 
 /// A rescue written through a worker lands whole in the library's own state and is
-/// offered at the next open, and one a write left under its partial name is deleted.
+/// found by the next look, and one a write left under its partial name is deleted.
 #[wasm_bindgen_test]
 async fn a_rescue_written_through_a_worker_is_offered_and_a_partial_one_deleted() {
     wipe(&opfs().await).await;
@@ -618,7 +618,16 @@ async fn a_rescue_written_through_a_worker_is_offered_and_a_partial_one_deleted(
 
     let (mut tab, opened) = Tab::open(Root::Private).await;
     assert!(matches!(opened, Event::Opened(Ok(_))), "{opened:?}");
-    let offered: Vec<String> = tab.backend.rescued().into_iter().map(|r| r.name).collect();
+    tab.backend.look_for_rescues();
+    let mut offered = Vec::new();
+    for _ in 0..10_000 {
+        offered = tab.backend.rescued();
+        if !offered.is_empty() {
+            break;
+        }
+        sleep(1).await;
+    }
+    let offered: Vec<String> = offered.into_iter().map(|r| r.name).collect();
     assert_eq!(offered, [whole]);
     let held = toshokan::web::private_dir(&dir).await.unwrap();
     let left = JsFuture::from(held.get_file_handle(cut)).await;
