@@ -5960,7 +5960,7 @@ fn a_crash_in_compaction_tears_a_snapshot_only_where_the_folder_cannot_rename<F:
             files.filter(|path| path.parent().is_some_and(|dir| dir.name() == Some("tmp")));
         staged.collect()
     };
-    let (mut torn, mut left, mut tidied) = (0, 0, 0);
+    let (mut torn, mut left, mut resumed) = (0, 0, 0);
     crash::sweep(
         setup,
         |disk| {
@@ -6002,10 +6002,10 @@ fn a_crash_in_compaction_tears_a_snapshot_only_where_the_folder_cannot_rename<F:
                 [],
                 "{shown}: the next compaction removes it"
             );
-            tidied += 1;
+            resumed += 1;
         },
     );
-    assert!(tidied > 0, "some crash leaves the writer to resume");
+    assert!(resumed > 0, "some crash leaves the writer to resume");
     assert_eq!(torn > 0, !renames, "torn snapshots: {torn}");
     assert_eq!(left > 0, renames, "staged snapshots left: {left}");
 }
