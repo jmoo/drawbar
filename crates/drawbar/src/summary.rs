@@ -1,13 +1,12 @@
 //! What a read of a file found, kept without its bytes.
 //!
-//! An asset whose file is not read this session still draws as it did once read: its
-//! kind, its family, the slot it matches and the library it plays come from its
-//! [`Summary`]. [`crate::store`] keeps summaries between sessions; see its cache.
+//! An asset let go of for room still draws as it did once read: its kind, its family, the
+//! slot it matches and the library it plays come from its [`Summary`]
+//! ([`crate::workspace::Workspace::evict`]).
 
 use nord_format::fields::Library;
 use nord_format::Entity;
 use nord_usb::ObjectClass;
-use serde::{Deserialize, Serialize};
 
 use crate::browser::Kind;
 use crate::store::LibPath;
@@ -65,7 +64,7 @@ impl Summary {
 }
 
 /// The library a program plays: its class, and the id the instrument knows it by.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Plays {
     Piano(u32),
     Sample(u32),
@@ -99,7 +98,7 @@ impl Plays {
 }
 
 /// What checking a file found, as [`VerifyState`] says it, without the words.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
     Ok,
     Checked,

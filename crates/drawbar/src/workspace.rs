@@ -798,9 +798,8 @@ impl LocalEntity {
         self.saved = saved;
     }
 
-    /// What a read of its file found before, while nothing has read it this session: its
-    /// kind, tag, slot checksum and what it plays, without its bytes. See
-    /// [`Workspace::remember`].
+    /// What a read of its file found before it was let go of for room: its kind, tag,
+    /// slot checksum and what it plays, without its bytes. See [`Workspace::evict`].
     pub fn remembered(&self) -> Option<&Summary> {
         self.saved.remembered()
     }
@@ -2319,8 +2318,8 @@ impl Workspace {
 
     /// These assets are selected, in place of those selected before: as
     /// [`Workspace::hurry`] while they stay selected, read after what is open or acted
-    /// on. One whose need was let go before its read, as when the cache remembered it or
-    /// a read in the background was refused for room, is asked for again.
+    /// on. One whose need was let go before its read, as when a read in the background
+    /// was refused for room, is asked for again.
     pub fn select(&mut self, ids: impl IntoIterator<Item = u64>) {
         #[cfg(test)]
         self.selections.set(self.selections.get() + 1);
@@ -2592,21 +2591,11 @@ impl Workspace {
         Some(stamp)
     }
 
-    /// Give an unread asset what a read of its file found before, so it draws as it did
-    /// once read without being read. Nothing for an asset read since, or one that could
-    /// not be read. A read wanted only for its row is no longer asked for; one needed
-    /// whole stays wanted.
+    /// Give an unread asset a summary of its file, as [`Workspace::evict`] leaves one.
+    #[cfg(test)]
     pub fn remember(&mut self, id: u64, summary: Summary) {
-        let Some(entity) = self.get_mut(id) else {
-            return;
-        };
-        if entity.unread() && entity.reading() {
+        if let Some(entity) = self.get_mut(id).filter(|entity| entity.unread()) {
             entity.know(summary);
-            let wanted = self.wanted.get_mut();
-            if wanted.get(&id) == Some(&Need::InView) {
-                wanted.remove(&id);
-            }
-            self.revision += 1;
         }
     }
 
@@ -5219,11 +5208,10 @@ mod tests {
         workspace.restore(unread_assets(3, 1), None, &mut log);
         let made = workspace.create(Fresh::Program, &mut log).unwrap();
         let summary = Summary::of(workspace.get(made).unwrap()).unwrap();
-        workspace.select([1, 2]);
-        workspace.in_view([3]);
-
         workspace.remember(1, summary.clone());
         workspace.remember(3, summary);
+        workspace.select([1, 2]);
+        workspace.in_view([3]);
         assert_eq!(workspace.take_wanted(), [1, 2], "remembered or not");
         assert!(!workspace.wanted(3), "a row drawn from what is remembered");
 
@@ -5253,8 +5241,8 @@ mod tests {
         workspace.restore(unread_assets(1, 1), None, &mut log);
         let made = workspace.create(Fresh::Program, &mut log).unwrap();
         let summary = Summary::of(workspace.get(made).unwrap()).unwrap();
-        workspace.select([1]);
         workspace.remember(1, summary);
+        workspace.select([1]);
         assert_eq!(workspace.take_wanted(), [1]);
 
         workspace.unasked(1);

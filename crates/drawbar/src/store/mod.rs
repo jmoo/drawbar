@@ -26,7 +26,6 @@
 //! the [`crate::workspace::Workspace`] into intents, and projects the library's view
 //! onto the workspace and the browser's tags.
 
-mod cache;
 mod counted;
 mod diff;
 #[cfg(any(target_arch = "wasm32", test))]
@@ -117,9 +116,6 @@ pub fn outside_len(from: &Outside) -> Option<u64> {
     Some(from.size() as u64)
 }
 
-#[cfg(target_arch = "wasm32")]
-pub use cache::keep_libraries;
-pub use cache::Cache;
 pub use exec::{opens, MOST_BYTES};
 pub use ids::Key;
 pub use keys::identity_of_bytes;

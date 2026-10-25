@@ -12,7 +12,6 @@ use std::sync::Arc;
 
 use toshokan::report::{By, What};
 
-use super::cache::{self, Cache};
 use super::diff;
 use super::drafts::Draft;
 use super::exec::too_much;
@@ -27,7 +26,6 @@ use crate::browser::{Browser, Rescuing};
 use crate::folders::{Folders, Op, Where};
 use crate::log::Log;
 use crate::queue::Queue;
-use crate::summary::Summary;
 use crate::tags::Asked;
 use crate::workspace::{
     precious, Content, FileAsk, Leaving, LocalEntity, Origin, Saved, Workspace,
@@ -66,7 +64,7 @@ enum Phase {
 pub enum Pass {
     /// The files: new ones, saves, moves and deletions.
     Files,
-    /// The files, and the cache of what was read, on the autosave cadence.
+    /// The files, and the unsaved edits, on the autosave cadence.
     Full,
     /// A full pass at exit, which runs even while a rescan is in flight, since nothing
     /// will read its answer.
@@ -89,9 +87,6 @@ struct Record {
     missing: bool,
     /// How drawbar holds what the file holds, while nothing has been saved over it.
     holds: Holds,
-    /// The [`crate::workspace::Baseline::stamp`] of the bytes whose summary the cache
-    /// holds for the file, so a summary is taken once per set of bytes.
-    summarized: Option<u64>,
 }
 
 use super::RESCUED;
@@ -233,10 +228,6 @@ pub struct Store {
     moving: Vec<(LibPath, LibPath)>,
     /// The most bytes of the library's files the assets may hold whole: [`MOST_BYTES`].
     budget: u64,
-    /// What was read of the library's files, this session and before.
-    cache: Cache,
-    /// The cache has forgotten the files the open's listing did not find.
-    pruned: bool,
     /// How many files have been asked of the backend to read.
     #[cfg(test)]
     pub(crate) asked_files: usize,
@@ -313,8 +304,6 @@ impl Store {
             reading: false,
             moving: Vec::new(),
             budget: MOST_BYTES,
-            cache: Cache::memory(),
-            pruned: false,
             #[cfg(test)]
             asked_files: 0,
             roomless: BTreeMap::new(),
@@ -342,12 +331,6 @@ impl Store {
             name: Some(name),
             ..self
         }
-    }
-
-    /// The same store, remembering what was read of the library's files in `cache`, which
-    /// outlives the session. Otherwise it remembers them only for the session.
-    pub fn remembering(self, cache: Cache) -> Store {
-        Store { cache, ..self }
     }
 
     /// The folder the library is.
@@ -860,7 +843,6 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) -> bool {
-        self.recalled(workspace, browser, log);
         self.ask(workspace, browser, queue, log);
         self.ask_tags(workspace, browser, log);
         let mut released = false;
@@ -995,8 +977,7 @@ impl Store {
 
     /// Ask the backend for the files of the unread assets something needs, reading at
     /// most what keeps the assets' whole bytes within [`MOST_BYTES`]. An asset refused
-    /// for want of room is asked for again once room can be made for it. Nothing is asked
-    /// until the cache has said what it remembers, so a row it remembers is not read.
+    /// for want of room is asked for again once room can be made for it.
     pub(crate) fn ask(
         &mut self,
         workspace: &mut Workspace,
@@ -1005,7 +986,7 @@ impl Store {
         log: &mut Log,
     ) {
         let waits = !workspace.wants() && self.roomless.is_empty();
-        if !self.opened() || waits || !self.cache.loaded() {
+        if !self.opened() || waits {
             return;
         }
         // Smallest first: where room cannot be made for one, it cannot for any larger,
@@ -1157,7 +1138,6 @@ impl Store {
                 record.path = Some(back);
             }
         }
-        self.cache.moved(to, from);
         self.ids.moved(to, from);
         // ⚠️ The folder changes not yet sent have moved the workspace on already. Those
         // after a folder's rename name the folder by its new name, and are moved back
@@ -1254,7 +1234,6 @@ impl Store {
             }
             record.fingerprint = Some(diff::kept(record.fingerprint, &found));
             record.holds = found.holds();
-            record.summarized = None;
             workspace.took(id, found.bytes, found.file);
         }
         for id in self.restoring.keys().copied().collect::<Vec<_>>() {
@@ -1270,21 +1249,6 @@ impl Store {
                 self.ask(workspace, browser, queue, log);
             }
         }
-    }
-
-    /// Wait for what the cache kept of earlier sessions, and take it in as
-    /// [`Store::poll`] would.
-    #[cfg(test)]
-    pub fn recall_kept(&mut self, workspace: &mut Workspace, browser: &Browser, log: &mut Log) {
-        if self.cache.arrive(log) {
-            self.took_in(workspace, browser);
-        }
-    }
-
-    /// What the cache holds now.
-    #[cfg(test)]
-    pub fn cache(&self) -> &Cache {
-        &self.cache
     }
 
     /// Whether a rescan is waiting for its answer.
@@ -1582,7 +1546,6 @@ impl Store {
                     crate::strings::quoted_some(&lost, SHOWN)
                 ));
             }
-            self.cache.finish(log);
             self.backend.abandon();
             return;
         }
@@ -1600,8 +1563,7 @@ impl Store {
                 break;
             }
         }
-        self.summarize(workspace);
-        self.cache.finish(log);
+        self.learn_crcs(workspace);
         self.backend.finish();
     }
 
@@ -1735,7 +1697,6 @@ impl Store {
             1 => "1 file on this computer.".to_string(),
             n => format!("{n} files on this computer."),
         });
-        self.prune(browser);
         self.fetch_tracked(workspace, browser);
         self.rescues_due = true;
     }
@@ -1903,7 +1864,7 @@ impl Store {
             shown: change,
             dirs,
             changes,
-            moves,
+            moves: _,
             undone,
             unlisted,
             unfinished,
@@ -1916,9 +1877,6 @@ impl Store {
         }
         // Until a scan has listed every file, what a view adds is what was there.
         let first = !self.listed;
-        for (from, to) in &moves {
-            self.cache.moved(from, to);
-        }
         self.quiet = undone.is_some();
         for (from, to) in undone.into_iter().flatten() {
             if let (Some(from), Some(to)) = (from, to) {
@@ -1990,7 +1948,6 @@ impl Store {
     /// moved from `from` to `to`: each asset in it keeps its id, and moves with it.
     fn follow_undone(&mut self, from: &LibPath, to: &LibPath, workspace: &mut Workspace) {
         self.ids.moved(from, to);
-        self.cache.moved(from, to);
         for record in self.records.values_mut() {
             if let Some(moved) = record.path.as_ref().and_then(|at| at.moved(from, to)) {
                 record.path = Some(moved);
@@ -2069,9 +2026,7 @@ impl Store {
             if record.path.as_ref() != Some(path) {
                 touched.insert(id);
                 moved += 1;
-                if let Some(from) = record.path.replace(path.clone()) {
-                    self.cache.moved(&from, path);
-                }
+                record.path = Some(path.clone());
                 let before = workspace.get(id).map(|entity| entity.name.clone());
                 workspace.follow(id, browser.folders.ahead(path));
                 if let Some(before) = before.filter(|_| !self.quiet) {
@@ -2180,7 +2135,6 @@ impl Store {
         for id in &ids {
             self.settle(*id, workspace);
             self.place_ahead(*id, workspace, &browser.folders);
-            self.recall(*id, workspace);
         }
         ids.len()
     }
@@ -2426,7 +2380,6 @@ impl Store {
         };
         if record.holds == Holds::Unread {
             record.fingerprint = Some(Fingerprint::unread(stat));
-            record.summarized = None;
             workspace.stale(id);
             return;
         }
@@ -2638,7 +2591,6 @@ impl Store {
         if !found.read() {
             if let Some(record) = self.records.get_mut(&id) {
                 record.fingerprint = Some(found.fingerprint());
-                record.summarized = None;
             }
             workspace.stale(id);
             return;
@@ -2710,9 +2662,7 @@ impl Store {
             ));
             return Vanished::Missing;
         }
-        if let Some(path) = self.records.remove(&id).and_then(|record| record.path) {
-            self.cache.forget(&path);
-        }
+        self.records.remove(&id);
         workspace.forget(id);
         if !self.quiet {
             log.say(format!("“{name}” was deleted outside drawbar."));
@@ -2807,7 +2757,6 @@ impl Store {
                 record.fingerprint = Some(found.fingerprint());
                 record.missing = false;
                 record.holds = found.holds();
-                record.summarized = None;
                 browser.folders.missing.remove(&id);
                 match found.file {
                     Some(file) => {
@@ -2904,7 +2853,6 @@ impl Store {
                 record.fingerprint = Some(found.fingerprint());
                 record.missing = false;
                 record.holds = found.holds();
-                record.summarized = None;
                 browser.folders.missing.remove(&id);
                 workspace.took(id, None, found.file);
                 #[cfg(not(target_arch = "wasm32"))]
@@ -2986,8 +2934,7 @@ impl Store {
         // A tag asked for with the files it waits on can go in their change.
         self.asked.extend(browser.take_tag_asks());
         if pass != Pass::Files {
-            self.summarize(workspace);
-            self.cache.write();
+            self.learn_crcs(workspace);
             self.keep_drafts(workspace);
         }
         self.keep_slot_edits(workspace, pass != Pass::Files);
@@ -3050,7 +2997,7 @@ impl Store {
     /// the next full pass. Files the index does not track are read once something needs
     /// them.
     fn fetch_tracked(&mut self, workspace: &mut Workspace, browser: &Browser) {
-        if !self.cache.loaded() || !self.opened() || !self.fetching.is_empty() {
+        if !self.opened() || !self.fetching.is_empty() {
             return;
         }
         if self.unfetched.is_empty() {
@@ -3074,96 +3021,24 @@ impl Store {
         self.next_fetches(workspace);
     }
 
-    /// Take in what the cache kept of earlier sessions, once it arrives: each unread file
-    /// it knows draws as it says, and the background reads wait for it.
-    fn recalled(&mut self, workspace: &mut Workspace, browser: &Browser, log: &mut Log) {
-        if self.cache.poll(log) {
-            self.took_in(workspace, browser);
-        }
-    }
-
-    /// Recall every unread file now that the cache's entries have arrived, and start what
-    /// waited for them.
-    fn took_in(&mut self, workspace: &mut Workspace, browser: &Browser) {
-        let unread: Vec<u64> = self
-            .records
-            .iter()
-            .filter(|(_, record)| record.holds == Holds::Unread)
-            .map(|(id, _)| *id)
-            .collect();
-        for id in unread {
-            self.recall(id, workspace);
-        }
-        self.prune(browser);
-        self.fetch_tracked(workspace, browser);
-    }
-
-    /// Give an unread asset what the cache holds for its file, where the file's length
-    /// and time are still the ones it was read at.
-    fn recall(&mut self, id: u64, workspace: &mut Workspace) {
-        let Some(record) = self.records.get_mut(&id) else {
-            return;
-        };
-        let (Some(path), Some(print), Holds::Unread) =
-            (&record.path, record.fingerprint, record.holds)
-        else {
-            return;
-        };
-        let Some(entry) = self.cache.fresh(path, print.stat()) else {
-            return;
-        };
-        workspace.remember(id, entry.summary.clone());
-        record.summarized = workspace.get(id).map(|entity| entity.saved.stamp());
-    }
-
-    /// Keep in the cache a summary of each file whose asset holds what the file does and
-    /// has been read and decoded, once per set of bytes.
-    fn summarize(&mut self, workspace: &Workspace) {
+    /// Give each fingerprint taken without its CRC the CRC of the file's contents, once
+    /// they have been read through while the asset still holds what the file does.
+    fn learn_crcs(&mut self, workspace: &Workspace) {
         for (id, record) in &mut self.records {
             let Some(entity) = workspace.get(*id) else {
                 continue;
             };
-            let stamp = entity.saved.stamp();
-            // A fingerprint taken without its CRC learns it once the contents have been
-            // read through, while the baseline is still what the file holds.
-            if let Some(print) = record
+            let Some(print) = record
                 .fingerprint
                 .as_mut()
                 .filter(|print| print.crc.is_none())
-            {
-                if !record.saving && stamp == record.saved {
-                    print.crc = entity.saved.whole_crc();
-                }
-            }
-            let (Some(path), Some(print)) = (&record.path, record.fingerprint) else {
+            else {
                 continue;
             };
-            let clean = record.saved == stamp && !entity.is_unsaved();
-            if record.summarized == Some(stamp) || !clean || record.saving || record.missing {
-                continue;
+            if !record.saving && entity.saved.stamp() == record.saved {
+                print.crc = entity.saved.whole_crc();
             }
-            let Some(summary) = Summary::of(entity) else {
-                continue;
-            };
-            self.cache
-                .put(path.clone(), cache::Entry::of(print.stat(), summary));
-            record.summarized = Some(stamp);
         }
-    }
-
-    /// Forget in the cache every file the open's listing did not find, once both are
-    /// here and the listing reached every folder.
-    fn prune(&mut self, browser: &Browser) {
-        let whole = browser.folders.unwalked.is_empty();
-        if self.pruned || !self.opened() || !self.cache.loaded() || !whole {
-            return;
-        }
-        self.pruned = true;
-        let listed = self
-            .records
-            .values()
-            .filter_map(|record| record.path.clone());
-        self.cache.keep_only(listed.collect());
     }
 
     /// Ask for the next few tracked files waiting to be read in the background.
@@ -3212,7 +3087,6 @@ impl Store {
             Op::MakeDir(path) => self.part(Intent::MakeDir { path }),
             Op::RemoveDir(path) => self.part(Intent::RemoveDir { path }),
             Op::MoveDir { from, to } => {
-                self.cache.moved(&from, &to);
                 for record in self.records.values_mut() {
                     if let Some(moved) = record.path.as_ref().and_then(|at| at.moved(&from, &to)) {
                         record.path = Some(moved);
@@ -3449,9 +3323,7 @@ impl Store {
             return;
         };
         self.ids.remove(from);
-        if let Some(path) = self.records.remove(&from).and_then(|record| record.path) {
-            self.cache.forget(&path);
-        }
+        self.records.remove(&from);
     }
 
     /// Move an asset's file to where the asset is now. `false` while a write over the file
@@ -3475,7 +3347,6 @@ impl Store {
         let (Some(expect), false) = (expect, record.missing) else {
             return true;
         };
-        self.cache.moved(&at, &to);
         self.ids.moved(&at, &to);
         self.moving.push((at.clone(), to.clone()));
         self.part(Intent::Move {
@@ -3517,7 +3388,6 @@ impl Store {
         let Some(at) = record.path else {
             return true;
         };
-        self.cache.forget(&at);
         if let (Some(print), false) = (record.fingerprint, record.missing) {
             self.part(Intent::Delete {
                 files: vec![(at, print.expect())],
@@ -3651,7 +3521,6 @@ impl Record {
             saving: false,
             missing: false,
             holds: Holds::Whole,
-            summarized: None,
         }
     }
 

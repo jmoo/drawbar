@@ -2200,35 +2200,7 @@ fn a_corrupted_piano_opens_and_then_shows_it_failed_verification() {
     assert_eq!(Kind::of(entity), Kind::Other);
 }
 
-/// The cache file a session that remembers keeps, under the shelf's folder.
-const CACHE: &str = "library-cache.ron";
-
 impl Session {
-    /// [`Session::listed`], remembering what was read in `shelf`, as the app keeps it in
-    /// its own data between sessions.
-    fn remembering(root: &Temp, shelf: &Temp) -> Session {
-        Session::kept_at(root, shelf.at(CACHE))
-    }
-
-    /// [`Session::remembering`] in the cache file `file`.
-    fn kept_at(root: &Temp, file: std::path::PathBuf) -> Session {
-        let bench = Bench::new();
-        let cache = Cache::at(&bench.ctx, file, &root.0);
-        let backend = crate::testing::backend(&bench.ctx, root);
-        let store = Store::start(backend).remembering(cache);
-        let mut session = Session { store, bench };
-        session.opened();
-        let Bench {
-            workspace,
-            browser,
-            log,
-            ..
-        } = &mut session.bench;
-        session.store.recall_kept(workspace, browser, log);
-        session.answer_reads();
-        session
-    }
-
     /// How many files have been asked of the library to read, in the background or for
     /// something that needs them.
     fn reads(&self) -> usize {
@@ -2236,367 +2208,13 @@ impl Session {
     }
 }
 
-/// Give a file the modification time `seconds` after the epoch.
-fn touch(path: &std::path::Path, seconds: u64) {
-    let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
-    fs::File::options()
-        .write(true)
-        .open(path)
-        .and_then(|file| file.set_modified(time))
-        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-}
-
-/// An Electro 5 program filed under a Stage 3 set list's extension, so what its name says
-/// and what a read of it found cannot be mistaken for each other.
-fn misnamed() -> (String, Vec<u8>) {
-    let name = format!("Gig.{}", nord_format::formats::ns3::song::FORMAT);
-    (name, with_gain(&Fresh::Program.bytes().unwrap(), "12"))
-}
-
-/// A file read in one session draws in the next as it did once read, without being read:
-/// its kind and family are what it holds, and it matches, or differs from, the slot that
-/// reports its checksum.
-#[test]
-fn a_file_read_once_draws_as_read_next_time_without_being_read() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    let (name, bytes) = misnamed();
-    fs::write(root.at(&name), &bytes).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    first.read_all();
-    let read = first.bench.workspace.get(first.named(&name)).unwrap();
-    assert_eq!(Kind::of(read), Kind::Program);
-    let crc32 = read.saved.crc32().expect("a program is a container");
-    let families = first.bench.workspace.families_present();
-    first.close();
-
-    let mut second = Session::remembering(&root, &shelf);
-    let id = second.named(&name);
-    let entity = second.bench.workspace.get(id).unwrap();
-    assert!(entity.unread(), "its bytes are not held");
-    assert!(entity.bytes.is_empty() && entity.entity.is_none());
-    assert_eq!(
-        Kind::of(entity),
-        Kind::Program,
-        "not the set list its name says"
-    );
-    assert_eq!(entity.tag(), "ne5p");
-    assert_eq!(
-        entity.verify().note(),
-        None,
-        "it does not say it is being read"
-    );
-    assert_eq!(second.bench.workspace.families_present(), families);
-    assert_eq!(entity.saved.crc32(), Some(crc32));
-
-    let Bench {
-        workspace,
-        device,
-        queue,
-        browser,
-        ..
-    } = &mut second.bench;
-    let row = |workspace: &crate::workspace::Workspace, device: &crate::device::Device| {
-        let item = crate::browser::Item::Local(id);
-        let row = crate::library::row_of(item, workspace, &device.state, queue, &browser.tags);
-        row.expect("a row").where_
-    };
-    device.pretend_bodies(ObjectClass::Program, 1, &[Some(("Gig", crc32))]);
-    device.relink(workspace);
-    let slot = (ObjectClass::Program, Location::from_user(1, 1));
-    assert_eq!(workspace.get(id).unwrap().link, Some(slot));
-    assert_eq!(
-        row(workspace, device),
-        crate::library::Where::Both(Some(true))
-    );
-    device.pretend_bodies(ObjectClass::Program, 1, &[Some(("Gig", crc32 ^ 1))]);
-    device.relink(workspace);
-    assert_eq!(
-        row(workspace, device),
-        crate::library::Where::Both(Some(false))
-    );
-    assert_eq!(second.reads(), 0, "nothing was read");
-}
-
-/// A row in view draws what was read of its file before, and is not read for it, even
-/// where it came into view before the cache said what it remembers. Something that needs
-/// it whole reads it.
-#[test]
-fn a_remembered_row_in_view_is_read_only_when_something_needs_it_whole() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    let program = Fresh::Program.bytes().unwrap();
-    fs::write(root.at("Grand.ne5p"), &program).unwrap();
-    fs::write(root.at("Other.ne5p"), with_gain(&program, "12")).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    let grand = first.named("Grand.ne5p");
-    first.read(&[grand]);
-    first.close();
-
-    let bench = Bench::new();
-    let cache = Cache::at(&bench.ctx, shelf.at(CACHE), &root.0);
-    let store = Store::start(crate::testing::backend(&bench.ctx, &root)).remembering(cache);
-    let mut second = Session { store, bench };
-    second.opened();
-    let (grand, other) = (second.named("Grand.ne5p"), second.named("Other.ne5p"));
-    second.bench.workspace.in_view([grand, other]);
-    let Bench {
-        workspace,
-        browser,
-        queue,
-        log,
-        ..
-    } = &mut second.bench;
-    second.store.ask(workspace, browser, queue, log);
-    assert_eq!(
-        second.store.asked_files, 0,
-        "reads wait for what the cache remembers"
-    );
-    second.store.recall_kept(workspace, browser, log);
-    second.answer_reads();
-    assert_eq!(second.reads(), 1, "only the one nothing is remembered of");
-    assert!(second.bench.workspace.get(grand).unwrap().unread());
-
-    second.read(&[grand]);
-    assert_eq!(second.reads(), 2);
-    let entity = second.bench.workspace.get(grand).unwrap();
-    assert!(!entity.unread());
-    assert_eq!(entity.bytes, program);
-}
-
-/// What the cache remembers may arrive before the library has answered its open, and
-/// still stands for the files the listing then finds.
-#[test]
-fn what_is_remembered_stands_when_it_arrives_before_the_listing() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    first.read_all();
-    first.close();
-
-    let bench = Bench::new();
-    let cache = Cache::at(&bench.ctx, shelf.at(CACHE), &root.0);
-    let store = Store::start(crate::testing::backend(&bench.ctx, &root)).remembering(cache);
-    let mut second = Session { store, bench };
-    let Bench {
-        workspace,
-        browser,
-        log,
-        ..
-    } = &mut second.bench;
-    second.store.recall_kept(workspace, browser, log);
-    second.opened();
-    let entity = second.bench.workspace.get(second.only()).unwrap();
-    assert!(entity.unread() && !entity.reading(), "remembered");
-    assert_eq!(second.store.cache().entries().len(), 1, "and still kept");
-}
-
-/// What was read of a file stands only while its length and time are the ones it was
-/// read at. Once either moves, the file draws by its name until it is read again.
-#[test]
-fn a_file_whose_length_or_time_moved_is_read_again() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    let program = Fresh::Program.bytes().unwrap();
-    fs::write(root.at("Touched.ne5p"), &program).unwrap();
-    fs::write(root.at("Longer.ne5p"), &program).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    first.read_all();
-    first.close();
-
-    fs::write(root.at("Touched.ne5p"), with_gain(&program, "96")).unwrap();
-    touch(&root.at("Touched.ne5p"), 1_000_000);
-    let mut longer = program.clone();
-    longer.push(0);
-    fs::write(root.at("Longer.ne5p"), &longer).unwrap();
-    let mut second = Session::remembering(&root, &shelf);
-    let ids = ["Touched.ne5p", "Longer.ne5p"].map(|name| second.named(name));
-    for id in ids {
-        let entity = second.bench.workspace.get(id).unwrap();
-        assert!(entity.reading(), "{}", entity.name);
-        assert_eq!(entity.verify().note(), Some("reading…"));
-        assert_eq!(entity.saved.crc32(), None);
-    }
-    assert_eq!(second.reads(), 0);
-
-    second.read(&ids);
-    assert_eq!(second.reads(), 2);
-    let touched = second.bench.workspace.get(ids[0]).unwrap();
-    assert_eq!(touched.bytes, with_gain(&program, "96"));
-}
-
-/// A cache file that does not read, or that another version wrote, is taken as empty:
-/// nothing is remembered, nothing is said about it beyond the log's detail, and the next
-/// session writes it again.
-#[test]
-fn a_cache_that_does_not_read_or_is_another_version_is_taken_as_empty() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    first.read_all();
-    first.close();
-    let written = fs::read_to_string(shelf.at(CACHE)).unwrap();
-    let version = format!("version:{}", super::cache::VERSION);
-    assert!(written.contains(&version), "{written}");
-    let newer = written.replace(&version, "version:4096");
-
-    for kept in ["not a cache at all".to_string(), newer] {
-        fs::write(shelf.at(CACHE), &kept).unwrap();
-        let mut second = Session::remembering(&root, &shelf);
-        let entity = second.bench.workspace.get(second.only()).unwrap();
-        assert!(entity.reading(), "nothing is remembered from {kept:?}");
-        let loud = second.bench.log.iter().filter(|entry| {
-            entry.level != crate::log::Level::Info && entry.text.contains("read before")
-        });
-        assert_eq!(loud.count(), 0);
-        second.read_all();
-        second.close();
-        let third = Session::remembering(&root, &shelf);
-        let entity = third.bench.workspace.get(third.only()).unwrap();
-        assert!(!entity.reading(), "written again over {kept:?}");
-        third.close();
-    }
-}
-
-/// A file renamed or moved with its folder inside drawbar is remembered at its new path.
-#[test]
-fn a_rename_inside_drawbar_keeps_what_was_read() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    fs::create_dir(root.at("Sets")).unwrap();
-    let program = Fresh::Program.bytes().unwrap();
-    fs::write(root.at("Sets/Grand.ne5p"), &program).unwrap();
-    fs::write(root.at("Sets/Pad.ne5p"), with_gain(&program, "12")).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    first.read_all();
-    let grand = first.named("Grand.ne5p");
-    let name = "Upright".to_string();
-    first
-        .bench
-        .act(vec![crate::browser::Act::RenameLocal { id: grand, name }]);
-    first.sync();
-    let sets = first
-        .bench
-        .browser
-        .folders
-        .id_of(&LibPath::parse("Sets").unwrap())
-        .unwrap();
-    first.rename_folder(sets, "Gigs");
-    first.sync();
-    first.close();
-    assert_eq!(root.names("Gigs"), ["Pad.ne5p", "Upright.ne5p"]);
-
-    let second = Session::remembering(&root, &shelf);
-    for name in ["Upright.ne5p", "Pad.ne5p"] {
-        let entity = second.bench.workspace.get(second.named(name)).unwrap();
-        assert!(entity.unread() && !entity.reading(), "{name} is remembered");
-    }
-    assert_eq!(second.reads(), 0);
-}
-
-/// A file renamed outside drawbar, and recognized by its contents as the asset it was,
-/// is remembered at its new path.
-#[test]
-fn a_rename_outside_recognized_by_contents_keeps_what_was_read() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    let id = first.only();
-    first.tag(&[id], "Sunday");
-    first.read_all();
-    first.close();
-    fs::rename(root.at("Grand.ne5p"), root.at("Upright.ne5p")).unwrap();
-
-    let second = Session::remembering(&root, &shelf);
-    let id = second.only();
-    assert_eq!(second.worn(id), ["Sunday"], "the same asset");
-    let entity = second.bench.workspace.get(id).unwrap();
-    assert_eq!(entity.name, "Upright.ne5p");
-    assert!(
-        entity.unread() && !entity.reading(),
-        "remembered at its new path"
-    );
-    assert_eq!(second.reads(), 0);
-}
-
-/// A file rewritten under the same length and time is remembered as it was, but a
-/// read takes it as it is, and the cache then holds its new summary.
-#[test]
-fn a_read_corrects_what_a_file_rewritten_under_its_old_stat_was_remembered_as() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    let program = Fresh::Program.bytes().unwrap();
-    let (old, new) = (with_gain(&program, "12"), with_gain(&program, "96"));
-    assert_eq!(old.len(), new.len());
-    fs::write(root.at("Grand.ne5p"), &old).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    let id = first.only();
-    first.read_all();
-    let was = first.bench.workspace.get(id).unwrap().saved.crc32();
-    first.close();
-
-    let at = fs::metadata(root.at("Grand.ne5p"))
-        .unwrap()
-        .modified()
-        .unwrap();
-    fs::write(root.at("Grand.ne5p"), &new).unwrap();
-    fs::File::options()
-        .write(true)
-        .open(root.at("Grand.ne5p"))
-        .and_then(|file| file.set_modified(at))
-        .unwrap();
-    let mut second = Session::remembering(&root, &shelf);
-    let id = second.only();
-    assert_eq!(second.bench.workspace.get(id).unwrap().saved.crc32(), was);
-    second.read(&[id]);
-    let now = second.bench.workspace.get(id).unwrap().saved.crc32();
-    assert_ne!(now, was);
-    second.close();
-
-    let third = Session::remembering(&root, &shelf);
-    let id = third.only();
-    assert_eq!(third.bench.workspace.get(id).unwrap().saved.crc32(), now);
-}
-
-/// Two libraries keep their entries apart in one cache file, even for files of one path,
-/// length and time.
-#[test]
-fn two_libraries_share_no_entries() {
-    let (a, b, shelf) = (Temp::new(), Temp::new(), Temp::new());
-    let program = Fresh::Program.bytes().unwrap();
-    fs::write(a.at("Grand.ne5p"), with_gain(&program, "12")).unwrap();
-    fs::write(b.at("Grand.ne5p"), with_gain(&program, "24")).unwrap();
-    for root in [&a, &b] {
-        touch(&root.at("Grand.ne5p"), 1_000_000);
-    }
-    let mut first = Session::remembering(&a, &shelf);
-    first.read_all();
-    let crc32 = first
-        .bench
-        .workspace
-        .get(first.only())
-        .unwrap()
-        .saved
-        .crc32();
-    first.close();
-
-    let mut other = Session::remembering(&b, &shelf);
-    let entity = other.bench.workspace.get(other.only()).unwrap();
-    assert!(
-        entity.reading(),
-        "the other library's file is not this one's"
-    );
-    other.read_all();
-    other.close();
-
-    let again = Session::remembering(&a, &shelf);
-    let entity = again.bench.workspace.get(again.only()).unwrap();
-    assert!(!entity.reading(), "the first library kept its own");
-    assert_eq!(entity.saved.crc32(), crc32);
-}
-
-/// Which projects name a WAV is answered from what was read of them, this session or
-/// before, without reading them again. A project never read is said to be unknown.
+/// Which projects name a WAV is answered from what was read of them this session,
+/// without reading them again. A project not read yet is said to be unknown.
 #[test]
 fn the_projects_naming_a_wav_are_answered_from_what_was_read() {
     use nord_format::formats::nsmpproj::{NewZone, Project};
 
-    let (root, shelf) = (Temp::new(), Temp::new());
+    let root = Temp::new();
     fs::create_dir_all(root.at("Marimba/audio")).unwrap();
     let zone = NewZone {
         path: "audio/c4.wav".into(),
@@ -2610,53 +2228,83 @@ fn the_projects_naming_a_wav_are_answered_from_what_was_read() {
     fs::write(root.at("Marimba/audio/c4.wav"), crate::testing::wav_bytes()).unwrap();
     let wav = LibPath::parse("Marimba/audio/c4.wav").unwrap();
 
-    let mut first = Session::remembering(&root, &shelf);
-    let id = first.named("Marimba.nsmpproj");
-    let naming = first.bench.workspace.projects_naming(&wav);
+    let mut session = Session::listed(&root);
+    let id = session.named("Marimba.nsmpproj");
+    let naming = session.bench.workspace.projects_naming(&wav);
     assert_eq!(
         (naming.by, naming.unknown),
         (vec![], vec![id]),
         "not read yet"
     );
-    first.read_all();
-    let naming = first.bench.workspace.projects_naming(&wav);
+    session.read_all();
+    let naming = session.bench.workspace.projects_naming(&wav);
     assert_eq!(naming.by, [id], "read this session");
-    first.close();
-
-    let second = Session::remembering(&root, &shelf);
-    let id = second.named("Marimba.nsmpproj");
-    let workspace = &second.bench.workspace;
-    let naming = workspace.projects_naming(&wav);
-    assert_eq!((naming.by, naming.unknown), (vec![id], vec![]));
     let elsewhere = LibPath::parse("audio/c4.wav").unwrap();
-    assert!(workspace.projects_naming(&elsewhere).by.is_empty());
-    assert_eq!(second.reads(), 0);
+    assert!(session
+        .bench
+        .workspace
+        .projects_naming(&elsewhere)
+        .by
+        .is_empty());
 }
 
-/// Nothing of the cache is written into the library: a library opened, read and closed
-/// holds only its own files, and a cache whose place would be inside the library is kept
-/// in memory only.
+/// A reopen knows nothing of what the last session read: every file is unread, a row is
+/// read only once it is drawn, and closing kept no summary anywhere, in the library or in
+/// this install's own state for it.
 #[test]
-fn the_cache_is_never_written_inside_the_library() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    first.read_all();
+fn a_reopen_reads_summaries_only_for_drawn_rows_and_nothing_was_kept() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    fs::write(root.at("Upright.ne5p"), with_gain(&program, "12")).unwrap();
+    let local = |root: &Temp| -> Vec<String> {
+        let mut found = Vec::new();
+        let mut dirs = vec![root.local()];
+        while let Some(dir) = dirs.pop() {
+            for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+                match entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    true => dirs.push(entry.path()),
+                    false => found.push(entry.file_name().to_string_lossy().into_owned()),
+                }
+            }
+        }
+        found.sort();
+        found
+    };
+    let first = Session::open(&root);
+    let before = local(&root);
     first.close();
-    assert_eq!(root.names(""), ["Grand.ne5p"]);
-    assert!(shelf.at(CACHE).is_file());
-
-    let inside = root.at("Support/drawbar").join(CACHE);
-    let mut second = Session::kept_at(&root, inside.clone());
-    second.read_all();
-    second.close();
+    assert_eq!(root.names(""), ["Grand.ne5p", "Upright.ne5p"]);
+    let after = local(&root);
     assert!(
-        !root.at("Support").exists(),
-        "nothing was made in the library"
+        after
+            .iter()
+            .all(|name| before.contains(name) || !name.contains("cache")),
+        "{after:?}"
     );
-    let third = Session::kept_at(&root, inside);
-    let entity = third.bench.workspace.get(third.only()).unwrap();
-    assert!(entity.reading(), "it was kept for that session only");
+
+    let mut second = Session::listed(&root);
+    let rows: Vec<u64> = second
+        .bench
+        .workspace
+        .listed()
+        .map(|entity| entity.id)
+        .collect();
+    for id in &rows {
+        let entity = second.bench.workspace.get(*id).unwrap();
+        assert!(
+            entity.unread() && entity.reading(),
+            "{}: nothing known",
+            entity.name
+        );
+    }
+    assert_eq!(second.reads(), 0, "nothing is read before a row is drawn");
+    let grand = second.named("Grand.ne5p");
+    second.bench.workspace.in_view([grand]);
+    second.answer_reads();
+    assert_eq!(second.reads(), 1, "the drawn row is read");
+    let upright = second.named("Upright.ne5p");
+    assert!(second.bench.workspace.get(upright).unwrap().unread());
 }
 
 /// A file from outside is copied into the folder it was dropped on, and left where it
@@ -2999,70 +2647,6 @@ fn a_file_from_outside_onto_a_taken_name_asks_and_overwrite_copies_over() {
         "the same asset holds the copy"
     );
     assert_eq!(session.worn(grand), ["Sunday"]);
-}
-
-/// The default library is a folder of drawbar's own data, and the cache sits in that
-/// data beside it, not inside it, so the cache is kept between sessions.
-#[test]
-fn the_cache_beside_a_library_in_the_same_data_is_kept() {
-    let data = Temp::new();
-    fs::create_dir_all(data.at("library")).unwrap();
-    let root = Temp(data.at("library"));
-    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-    let mut first = Session::kept_at(&root, data.at(CACHE));
-    first.read_all();
-    first.close();
-    assert!(data.at(CACHE).is_file());
-    assert_eq!(root.names(""), ["Grand.ne5p"]);
-
-    let second = Session::kept_at(&root, data.at(CACHE));
-    let entity = second.bench.workspace.get(second.only()).unwrap();
-    assert!(entity.unread() && !entity.reading(), "remembered");
-}
-
-/// A tracked file whose summary is remembered is not read in the background: what it is
-/// and the slot it matches are known without it.
-#[test]
-fn a_remembered_tracked_file_is_not_read_in_the_background() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    fs::write(root.at("Tagged.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    let tagged = first.only();
-    first.tag(&[tagged], "Sunday");
-    first.read_all();
-    first.close();
-
-    let second = Session::remembering(&root, &shelf);
-    let tagged = second.only();
-    let entity = second.bench.workspace.get(tagged).unwrap();
-    assert_eq!(second.worn(tagged), ["Sunday"]);
-    assert!(entity.unread() && !entity.reading());
-    assert!(entity.saved.crc32().is_some(), "it can match its slot");
-    assert_eq!(second.reads(), 0, "not read in the background");
-}
-
-/// The cache keeps only what a whole listing of the library finds: a file deleted
-/// between sessions is forgotten.
-#[test]
-fn a_file_gone_from_the_library_is_forgotten() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    let program = Fresh::Program.bytes().unwrap();
-    fs::write(root.at("Kept.ne5p"), &program).unwrap();
-    fs::write(root.at("Gone.ne5p"), with_gain(&program, "12")).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    first.read_all();
-    first.close();
-    fs::remove_file(root.at("Gone.ne5p")).unwrap();
-
-    let second = Session::remembering(&root, &shelf);
-    let paths: Vec<&str> = second
-        .store
-        .cache()
-        .entries()
-        .keys()
-        .map(LibPath::as_str)
-        .collect();
-    assert_eq!(paths, ["Kept.ne5p"]);
 }
 
 /// A library holding a three-zone sample instrument, opened, with the instrument resting

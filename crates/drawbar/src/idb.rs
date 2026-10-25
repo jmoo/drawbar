@@ -1,5 +1,4 @@
-//! drawbar's IndexedDB database in the browser: the folders picked lately, and what was
-//! read of each library's files.
+//! drawbar's IndexedDB database in the browser: the folders picked lately.
 
 use std::future::Future;
 
@@ -14,21 +13,16 @@ use crate::js::describe;
 const DATABASE: &str = "drawbar";
 
 /// The version the database is made at, with every store below.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// The folders picked lately, under one key. See [`crate::libraries`].
 pub const LIBRARIES: &str = "libraries";
 
-/// One record per file read, under its library's id and its path. See
-/// [`crate::store::Cache`].
-pub const FILES: &str = "files";
-
 /// drawbar's database, with every store it holds made at its first use.
 ///
 /// ⚠️ A database another build made at a version this one does not know is deleted and
-/// made again. It holds only what drawbar rebuilds (the folders picked lately, what was
-/// read of each library), so starting it empty costs a re-pick and some re-reads, where
-/// keeping it would leave both unusable.
+/// made again. It holds only what drawbar rebuilds, the folders picked lately, so
+/// starting it empty costs a re-pick, where keeping it would leave the list unusable.
 pub async fn database() -> Result<IdbDatabase, String> {
     let factory = web_sys::window()
         .and_then(|window| window.indexed_db().ok().flatten())
@@ -68,8 +62,12 @@ async fn open(factory: &web_sys::IdbFactory) -> Result<IdbDatabase, Refused> {
             return;
         };
         let db: IdbDatabase = db.unchecked_into();
-        for store in [LIBRARIES, FILES] {
-            let _ = db.create_object_store(store);
+        if !db.object_store_names().contains(LIBRARIES) {
+            let _ = db.create_object_store(LIBRARIES);
+        }
+        // Version 1 kept what was read of each library's files here.
+        if db.object_store_names().contains("files") {
+            let _ = db.delete_object_store("files");
         }
     });
     request.set_onupgradeneeded(Some(upgrade.as_ref().unchecked_ref()));

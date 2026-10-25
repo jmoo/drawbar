@@ -3,15 +3,19 @@
 //! the page, with how long each operation held the page's thread.
 //!
 //! `generate` writes the library once and leaves it for later runs of the same
-//! origin and profile; `measure` needs it. Neither runs unless named:
+//! origin and profile; `measure` writes it first where it is missing. Neither runs
+//! unless named:
 //!
 //! ```text
 //! cargo test --release -p toshokan --features web --target wasm32-unknown-unknown \
-//!     --test bench -- --nocapture generate measure
+//!     --test bench -- --nocapture measure
 //! ```
 //!
 //! `TOSHOKAN_BENCH_ENTITIES` at build time sets the size (default 100,000, with
-//! twice as many entries, a file per entity and three writers). Each run starts
+//! twice as many entries, a file per entity and three writers).
+//! `TOSHOKAN_BENCH_STALE` has the file facts state times a second apart from the
+//! files', as a copy that sets its own times leaves them, so each scan reads the
+//! identity of every file `identities.json` does not give. Each run starts
 //! from the library as generated: the writers earlier runs' installs added are
 //! removed. Beside the browser's own long tasks, where it reports them, each
 //! operation reports the longest the core held the page's thread. The runner's
@@ -163,13 +167,18 @@ fn entities() -> usize {
     option_env!("TOSHOKAN_BENCH_ENTITIES").map_or(100_000, |n| n.parse().unwrap())
 }
 
+/// Whether the facts state other times than the files have.
+fn stale() -> bool {
+    option_env!("TOSHOKAN_BENCH_STALE").is_some()
+}
+
 fn entries() -> usize {
     2 * entities()
 }
 
 /// The library's directory in the origin private file system.
 fn home() -> String {
-    format!("bench/{}-{}-{WRITERS}", entities(), entries())
+    format!("bench/{}-{}-{WRITERS}-{}", entities(), entries(), stale())
 }
 
 fn path(text: &str) -> RelPath {
@@ -518,6 +527,10 @@ fn log_marker() -> Vec<String> {
 /// files, then the log. A new log starts the measured install afresh.
 #[wasm_bindgen_test]
 async fn generate() {
+    generated().await;
+}
+
+async fn generated() {
     let files_cached = opfs_has(files_marker()).await.is_truthy();
     if files_cached && opfs_has(log_marker()).await.is_truthy() {
         say(&format!("bench library {} is cached", home()));
@@ -573,7 +586,10 @@ async fn generate() {
             files.push(Described {
                 path: at,
                 len: meta.len,
-                modified: meta.modified,
+                // As a sync that sets its own times leaves them on a second computer.
+                modified: meta
+                    .modified
+                    .map(|at| at + u64::from(stale()) * 1_000_000_000),
                 identity: identity(&file_bytes(i)),
             });
         }
@@ -883,6 +899,7 @@ thread_local! {
 
 #[wasm_bindgen_test]
 async fn measure() {
+    generated().await;
     assert!(
         opfs_has(log_marker()).await.is_truthy(),
         "no bench library at {}: run the generate test first",
@@ -1015,6 +1032,24 @@ async fn measure() {
     }
     warm.report("open, existing install");
     closes.report("close, dropping the library");
+
+    let mut kept = Samples::default();
+    for _ in 0..3 {
+        let mut library = open("own").await;
+        kept.time(library.rescan()).await.unwrap();
+        library.close().await.unwrap();
+        next_task().await;
+    }
+    kept.report("rescan after open, identities kept");
+    let mut none = Samples::default();
+    for _ in 0..3 {
+        let _ = opfs_remove(parts(&format!("{}/own/identities.json", home()))).await;
+        let mut library = open("own").await;
+        none.time(library.rescan()).await.unwrap();
+        library.close().await.unwrap();
+        next_task().await;
+    }
+    none.report("rescan after open, no identities.json");
 
     let library = open("own").await;
     report_memory("with the library open");

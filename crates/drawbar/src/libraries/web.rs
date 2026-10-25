@@ -179,12 +179,6 @@ impl Libraries {
                     "The list of recent libraries was not kept: {e}."
                 )));
             }
-            let kept = recent.iter().filter_map(|root| match root {
-                Root::Picked(picked) => Some(picked.id),
-                Root::Private => None,
-            });
-            // What is left of a library forgotten here is only read again if it opens.
-            let _ = crate::store::keep_libraries(kept.collect()).await;
         });
     }
 
