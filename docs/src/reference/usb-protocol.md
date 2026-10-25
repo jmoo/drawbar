@@ -65,8 +65,8 @@ during the read leaves only a `.partial` file and the slot as it was. `nord`
 writes its rescue file in the working directory,
 `nord-rescued-<bank>-<slot>.<tag>`, and deletes that file once the slot holds
 what it should; drawbar's handling is under
-[Reading by range](data-model.md#reading-by-range). Live slots and settings are
-written in place.
+[What this install keeps](data-model.md#what-this-install-keeps). Live slots and
+settings are written in place.
 
 Writing settings reloads the selected program, so unsaved panel changes are
 lost. After a write or rename succeeds, drawbar asks for the focus, and if the
