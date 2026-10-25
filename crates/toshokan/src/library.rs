@@ -2447,8 +2447,10 @@ fn carry_out<'a>(
 
 /// Appends the intent `logged` with what `applied` says the effects did, closed
 /// by `closing` if they complete and followed by `bind` entries pinning `pins`,
-/// removes the record once the entries are durable, and scans again the paths the
-/// effects moved files from and to. Once the entries are durable nothing fails.
+/// removes the record once the entries are durable, unless the writer retired
+/// meanwhile, since nothing writes a retired writer's directory again, and scans
+/// again the paths the effects moved files from and to. Once the entries are
+/// durable nothing fails.
 fn log_effects<'a>(
     library: &'a mut Library,
     logged: Logged,
@@ -2481,7 +2483,7 @@ fn log_effects<'a>(
             Ok(entries) => entries,
             Err(error) => return Flow::Done(Err(error)),
         };
-        let removed = match journaled {
+        let removed = match journaled && !retired {
             true => remove_record(library, name, &record),
             false => Flow::Done(library),
         };
