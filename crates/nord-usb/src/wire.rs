@@ -442,6 +442,16 @@ impl Classes {
             .unwrap_or(ObjectClass::Unknown(index))
     }
 
+    /// `class` as this table holds it: an [`ObjectClass::Unknown`] position the table
+    /// names becomes that class, so a partition addressed by number is treated as what
+    /// it holds.
+    pub fn resolve(&self, class: ObjectClass) -> ObjectClass {
+        match class {
+            ObjectClass::Unknown(index) => self.at(index),
+            named => named,
+        }
+    }
+
     /// The position holding `class`, or `None` where no partition holds it.
     pub fn index(&self, class: ObjectClass) -> Option<u32> {
         if let ObjectClass::Unknown(index) = class {
@@ -1280,6 +1290,21 @@ mod tests {
         assert_eq!(classes.at(2), ObjectClass::Unknown(2));
         assert_eq!(classes.index(ObjectClass::Program), None);
         assert_eq!(classes.index(ObjectClass::Piano), Some(1));
+    }
+
+    #[test]
+    fn a_partition_addressed_by_number_is_the_class_its_name_gives() {
+        let classes = electro5();
+        assert_eq!(classes.resolve(ObjectClass::Unknown(6)), ObjectClass::Live);
+        assert_eq!(
+            classes.resolve(ObjectClass::Unknown(7)),
+            ObjectClass::Settings
+        );
+        assert_eq!(
+            classes.resolve(ObjectClass::Unknown(2)),
+            ObjectClass::Unknown(2)
+        );
+        assert_eq!(classes.resolve(ObjectClass::Program), ObjectClass::Program);
     }
 
     #[test]

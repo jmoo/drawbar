@@ -303,7 +303,7 @@ struct Fetched {
 /// Read `roots` of `class`, every program a root set list plays, and every piano and
 /// sample those programs play, into a bundle at `out`. Read-only.
 pub fn get(ui: &Ui, class: ObjectClass, roots: Vec<Location>, out: &Path) -> Result<(), String> {
-    let mut device = open_instrument()?;
+    let (mut device, class) = open_instrument(class)?;
     let firmware = device
         .transport()
         .identity()

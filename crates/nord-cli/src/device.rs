@@ -509,11 +509,14 @@ fn read_geometry<T: Transport + Recorded>(device: &mut Device<T>) -> Result<&Geo
     nord_usb::block_on(device.geometry()).map_err(|e| e.to_string())
 }
 
-/// The attached instrument with its partition table read, which places every session.
-pub(crate) fn open_instrument() -> Result<Device<UsbTransport>, String> {
+/// The attached instrument with its partition table read, which places every session,
+/// and `class` as that table holds it.
+pub(crate) fn open_instrument(
+    class: ObjectClass,
+) -> Result<(Device<UsbTransport>, ObjectClass), String> {
     let mut device = open_usb()?;
-    read_geometry(&mut device)?;
-    Ok(device)
+    let class = read_geometry(&mut device)?.classes().resolve(class);
+    Ok((device, class))
 }
 
 fn declared_banks(
@@ -572,7 +575,7 @@ pub fn get(
     if body && out.is_none() {
         return Err("--body writes a file; give -o a path".into());
     }
-    let mut device = open_instrument()?;
+    let (mut device, class) = open_instrument(class)?;
     if let (Some(path), false) = (&out, body) {
         return get_into(ui, &mut device, at, class, path);
     }
@@ -662,7 +665,7 @@ pub fn sweep(
     body: bool,
 ) -> Result<(), String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let mut device = open_instrument()?;
+    let (mut device, class) = open_instrument(class)?;
     ui.note(format!(
         "sweeping {} ({}) into {}",
         shown(at),
@@ -912,9 +915,10 @@ pub fn send(
     // `None` means now; the device can refuse a timestamp it considers future.
     stamp: Option<u32>,
 ) -> Result<(), String> {
+    let (mut device, class) = open_instrument(class)?;
     send_with(
         ui,
-        &mut open_instrument()?,
+        &mut device,
         &rescue_dir(),
         file,
         at,
@@ -1481,7 +1485,7 @@ pub fn move_object(
     class: ObjectClass,
     confirmed: bool,
 ) -> Result<(), String> {
-    let mut device = open_instrument()?;
+    let (mut device, class) = open_instrument(class)?;
     let name = peek(&mut device, class, from)?;
     let dest = peek_dest(ui, &mut device, class, to, DestFate::Swapped);
     ui.note(format!(
@@ -1520,7 +1524,7 @@ pub fn delete(
     class: ObjectClass,
     confirmed: bool,
 ) -> Result<(), String> {
-    let mut device = open_instrument()?;
+    let (mut device, class) = open_instrument(class)?;
     for &at in slots {
         let name = peek(&mut device, class, at)?;
         ui.note(format!(
@@ -1577,7 +1581,7 @@ pub fn rename(
     class: ObjectClass,
     confirmed: bool,
 ) -> Result<(), String> {
-    let mut device = open_instrument()?;
+    let (mut device, class) = open_instrument(class)?;
     let old = peek(&mut device, class, at)?;
     ui.note(format!(
         "renaming {} from {:?} to {:?}",
@@ -1605,7 +1609,7 @@ pub fn duplicate(
     class: ObjectClass,
     confirmed: bool,
 ) -> Result<(), String> {
-    let mut device = open_instrument()?;
+    let (mut device, class) = open_instrument(class)?;
     let name = peek(&mut device, class, from)?;
     let dest = peek_dest(ui, &mut device, class, to, DestFate::Overwritten);
     ui.note(format!(
@@ -1632,7 +1636,7 @@ pub fn duplicate(
 /// Load an object live on the instrument, as a double-click in Nord Sound Manager does.
 /// It changes nothing stored, so no confirmation is needed.
 pub fn select(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
-    let mut device = open_instrument()?;
+    let (mut device, class) = open_instrument(class)?;
     read_at(&mut device, class, "select", at, usb_op::select).map_err(|e| explain(e, at))?;
     ui.note(format!("selected {} on the instrument", shown(at)));
     Ok(())
@@ -1669,7 +1673,7 @@ pub(crate) fn human_size(n: u32) -> Option<String> {
 
 /// List the piano and sample library objects an object depends on. Read-only.
 pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
-    let mut device = open_instrument()?;
+    let (mut device, class) = open_instrument(class)?;
     let deps = read_at(&mut device, class, "deps", at, usb_op::dependencies)
         .map_err(|e| explain(e, at))?;
 
@@ -1891,7 +1895,7 @@ pub fn controls(ui: &Ui, args: ControlsArgs) -> Result<(), String> {
 
 /// Report which object the panel has loaded in this class. Read-only.
 pub fn focus(ui: &Ui, class: ObjectClass) -> Result<(), String> {
-    let mut device = open_instrument()?;
+    let (mut device, class) = open_instrument(class)?;
     let (at, info) = transact(&mut device, format!("{} focus", noun(class)), |d| {
         nord_usb::block_on(d.read(class, async |s| {
             let at = usb_op::focus(s).await?;
@@ -1918,7 +1922,7 @@ pub fn focus(ui: &Ui, class: ObjectClass) -> Result<(), String> {
 /// The cursor walk and every `info` share one session, so a few hundred items take a few
 /// hundred exchanges, not a few hundred sessions.
 pub fn list(ui: &Ui, class: ObjectClass) -> Result<(), String> {
-    let mut device = open_instrument()?;
+    let (mut device, class) = open_instrument(class)?;
     let banks = declared_banks(&mut device, class)?;
     let rows = transact(&mut device, format!("{} walk", noun(class)), |d| {
         nord_usb::block_on(d.read(class, async |s| {
@@ -2061,6 +2065,7 @@ pub fn probe(ui: &Ui, class: ObjectClass, request: ProbeArgs) -> Result<(), Stri
     }
 
     let classes = read_geometry(&mut device)?.classes().clone();
+    let class = classes.resolve(class);
     let (reply, changed, close_failed) = nord_usb::block_on(async {
         let mut s = Session::open(device.transport(), &classes, class).await?;
         let r = s
@@ -2155,7 +2160,7 @@ fn dump(bytes: &[u8]) -> (String, String) {
 /// This is command `0x1e`: body length, format tag, version and CRC-32, the CBIN header
 /// fields a transfer leaves out, plus the name, which no `.ne5p` or `.ne5t` file stores.
 pub fn slot_info(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
-    let mut device = open_instrument()?;
+    let (mut device, class) = open_instrument(class)?;
     let info = peek_info(&mut device, class, at).map_err(|e| explain(e, at))?;
 
     let row = |label: &str, value: String| {
@@ -2190,7 +2195,7 @@ pub fn slot_info(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String
 
 /// Read one object's bytes with no printing, for `edit`'s read-modify-write.
 pub fn fetch(at: Location, class: ObjectClass) -> Result<Vec<u8>, String> {
-    let mut device = open_instrument()?;
+    let (mut device, class) = open_instrument(class)?;
     read_at(&mut device, class, "read", at, usb_op::read_program).map_err(|e| explain(e, at))
 }
 

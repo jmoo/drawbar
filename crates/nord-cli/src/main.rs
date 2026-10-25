@@ -159,7 +159,8 @@ enum Command {
     /// The slot verbs for any partition, given by its index.
     ///
     /// Use it for a partition with no noun of its own. Every model numbers its
-    /// partitions its own way; `nord device geometry` lists them.
+    /// partitions its own way; `nord device geometry` lists them. A partition whose name
+    /// gives it a class is treated as that class.
     #[command(hide = true)]
     Raw {
         /// The partition's index, as `nord device geometry` prints it.
