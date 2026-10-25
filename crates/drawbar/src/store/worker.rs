@@ -3,7 +3,7 @@
 //! The page starts the worker from [`BOOTSTRAP`] and posts it the URL of the bundle's
 //! wasm-bindgen glue, the module the page already compiled, and where the library is.
 //! The worker instantiates the same bundle and calls [`serve`], which answers `{ready}`
-//! or `{failed}`. From then on each command is `{id, text, attached}`, a
+//! or `{failed}`, and `{failed, outdated}` where the glue could not be imported. From then on each command is `{id, text, attached}`, a
 //! [`wire::Message`], and is answered by `{id, text, attached}` holding every answer it
 //! gave, in order; or by `{id, failed}`. A command with `{whole}` answers the whole view
 //! rather than what changed since the last answer, which the page lost. The worker runs
@@ -18,6 +18,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
+use std::io;
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -51,8 +52,13 @@ self.addEventListener("error", (event) => stopped(event.message));
 self.addEventListener("unhandledrejection", (event) => stopped(event.reason));
 self.onmessage = async ({ data }) => {
   self.onmessage = null;
+  let bundle;
   try {
-    const bundle = await import(data.glue);
+    bundle = await import(data.glue);
+  } catch (error) {
+    return self.postMessage({ failed: String(error?.message ?? error), outdated: true });
+  }
+  try {
     await bundle.default({ module_or_path: data.module });
     await bundle.drawbarWorker(data);
   } catch (error) {
@@ -66,6 +72,30 @@ extern "C" {
     /// The URL of the glue this code was bound by, which the worker imports.
     #[wasm_bindgen(thread_local_v2, js_namespace = ["import", "meta"], js_name = url)]
     static GLUE: String;
+}
+
+/// What a worker is started for, as its failures name it.
+#[derive(Clone, Copy)]
+enum Role {
+    Library,
+    Rescues,
+}
+
+impl Role {
+    fn name(self) -> &'static str {
+        match self {
+            Role::Library => "the library's worker",
+            Role::Rescues => "the worker that keeps rescues",
+        }
+    }
+
+    /// The name the browser's tools show for it.
+    fn label(self) -> &'static str {
+        match self {
+            Role::Library => "drawbar library",
+            Role::Rescues => "drawbar rescues",
+        }
+    }
 }
 
 /// One request of a worker started by [`Worker::rescues`], on the file of this name in
@@ -148,19 +178,29 @@ impl Worker {
             Folder::Private(path) => ("private", JsValue::from_str(path.as_str()), true),
             Folder::Picked { dir, rename } => ("picked", dir.into(), rename),
         };
-        Worker::spawn(&[
+        let start = [
             ("kind", kind.into()),
             ("folder", dir),
             ("rename", rename.into()),
             ("local", local.as_str().into()),
-        ])
-        .await
+        ];
+        let glue = GLUE.with(String::clone);
+        let started = Worker::spawn(Role::Library, &glue, &start).await;
+        started.map_err(|e| e.to_string())
     }
 
     /// Start a worker that writes rescues in `dir` of the origin private file system,
-    /// and wait until it is ready.
-    pub async fn rescues(dir: &RelPath) -> Result<Worker, String> {
-        Worker::spawn(&[("kind", "rescues".into()), ("folder", dir.as_str().into())]).await
+    /// and wait until it is ready. It fails with [`super::Outdated`] where the page's
+    /// bundle cannot be loaded again.
+    pub async fn rescues(dir: &RelPath) -> io::Result<Worker> {
+        Worker::rescues_from(dir, &GLUE.with(String::clone)).await
+    }
+
+    /// [`Worker::rescues`], loading the bundle's glue from `glue`.
+    #[doc(hidden)]
+    pub async fn rescues_from(dir: &RelPath, glue: &str) -> io::Result<Worker> {
+        let start = [("kind", "rescues".into()), ("folder", dir.as_str().into())];
+        Worker::spawn(Role::Rescues, glue, &start).await
     }
 
     /// Do `io` in the directory of a worker started by [`Worker::rescues`].
@@ -172,8 +212,10 @@ impl Worker {
         from_js(&reply).and_then(wire::decode::<Result<bool, String>>)?
     }
 
-    /// Start the worker, with `start` beside the bundle in its first message.
-    async fn spawn(start: &[(&str, JsValue)]) -> Result<Worker, String> {
+    /// Start the worker, with `start` beside the bundle, whose glue is at `glue`, in its
+    /// first message.
+    async fn spawn(role: Role, glue: &str, start: &[(&str, JsValue)]) -> io::Result<Worker> {
+        let js = |e: JsValue| io::Error::other(js(e));
         let parts = Array::of1(&JsValue::from_str(BOOTSTRAP));
         let kind = BlobPropertyBag::new();
         kind.set_type("text/javascript");
@@ -181,7 +223,7 @@ impl Worker {
         let url = Url::create_object_url_with_blob(&blob).map_err(js)?;
         let options = WorkerOptions::new();
         options.set_type(WorkerType::Module);
-        options.set_name("drawbar library");
+        options.set_name(role.label());
         let worker = web_sys::Worker::new_with_options(&url, &options).map_err(js)?;
 
         let replies = Rc::new(Replies::default());
@@ -207,7 +249,7 @@ impl Worker {
                         let _ = answer.call1(&JsValue::NULL, &data);
                     }
                     (None, Some(why)) => {
-                        replies.fail(format!("the library's worker stopped: {}", describe(&why)));
+                        replies.fail(format!("{} stopped: {}", role.name(), describe(&why)));
                     }
                     (None, None) => {}
                 }
@@ -219,7 +261,7 @@ impl Worker {
                 let why = field(&event, "message")
                     .and_then(|message| message.as_string())
                     .unwrap_or_else(|| "it could not be loaded".into());
-                replies.fail(format!("the library's worker stopped: {why}"));
+                replies.fail(format!("{} stopped: {why}", role.name()));
             })
         };
         worker.set_onmessage(Some(hear.as_ref().unchecked_ref()));
@@ -227,7 +269,7 @@ impl Worker {
         worker.set_onmessageerror(Some(fail.as_ref().unchecked_ref()));
 
         let bundle = [
-            ("glue", GLUE.with(|url| JsValue::from_str(url))),
+            ("glue", JsValue::from_str(glue)),
             ("module", wasm_bindgen::module()),
         ];
         let start = object(&[&bundle[..], start].concat());
@@ -244,9 +286,10 @@ impl Worker {
         let ready = JsFuture::from(started).await;
         let _ = Url::revoke_object_url(&url);
         let ready = ready.map_err(js)?;
-        match field(&ready, "failed") {
-            Some(why) => Err(describe(&why)),
-            None => Ok(worker),
+        match (field(&ready, "failed"), field(&ready, "outdated")) {
+            (Some(_), Some(_)) => Err(io::Error::other(super::Outdated)),
+            (Some(why), None) => Err(io::Error::other(describe(&why))),
+            (None, _) => Ok(worker),
         }
     }
 

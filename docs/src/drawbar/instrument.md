@@ -66,6 +66,9 @@ slot, even when the slot already holds the same sound.
 - Before writing over a sound, drawbar copies the old one. If the write fails,
   it puts the old one back. If that fails too, the old sound is kept on this
   computer, and the activity log says where.
+- In the browser, a page left open while drawbar.app is updated cannot copy the
+  old sound, so it writes over none until you reload it. Sending to an empty
+  slot still works.
 - An interrupted transfer cannot leave the instrument stuck on its progress
   screen.
 - Writing Settings, or the slot the panel is playing, reloads the panel, so

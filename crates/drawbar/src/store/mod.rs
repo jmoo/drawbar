@@ -65,6 +65,19 @@ pub use worker::{RescueIo, Unrun, Worker};
 /// occupants a write to the instrument leaves while the library is open.
 pub const RESCUED: &str = "rescued";
 
+/// Why a worker could not start: the page's bundle is no longer where the page loaded it
+/// from, as once drawbar.app is updated.
+#[derive(Debug)]
+pub struct Outdated;
+
+impl std::fmt::Display for Outdated {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("drawbar.app was updated since this page was loaded")
+    }
+}
+
+impl std::error::Error for Outdated {}
+
 /// Where a library is: a folder on the desktop.
 #[cfg(not(target_arch = "wasm32"))]
 pub type Root = std::path::PathBuf;

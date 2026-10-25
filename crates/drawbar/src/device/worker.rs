@@ -400,6 +400,20 @@ async fn execute<T: Transport>(
     }
 }
 
+/// Why a slot's occupant could not be kept on this computer, and what to do about it.
+fn unkeepable(e: &std::io::Error) -> String {
+    match e
+        .get_ref()
+        .is_some_and(|e| e.is::<crate::store::Outdated>())
+    {
+        true => format!(
+            "{e}. Reload the page to replace what a slot holds; sending to an empty slot \
+             still works"
+        ),
+        false => format!("there was nowhere on this computer to keep it: {e}"),
+    }
+}
+
 /// Read the occupant `info` describes into a new file from `scratch`, a transfer chunk
 /// at a time, close it, check it whole, and only then give it its name as a rescue, so
 /// it is on disk before anything is deleted. A read that fails leaves no file behind.
@@ -413,7 +427,7 @@ async fn back_up<T: Transport>(
     let mut kept = scratch
         .create(&envelope::rescue_name_for(at, &info.format))
         .await
-        .map_err(|e| format!("there was nowhere on this computer to keep it: {e}"))?;
+        .map_err(|e| unkeepable(&e))?;
     let read: Result<(), Error> = async {
         let received = op::read_into(s, at, &mut kept).await?;
         kept.close().await?;
@@ -1318,6 +1332,23 @@ fn entity_name(info: &ProgramInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ⚠️ A page whose drawbar.app was updated cannot start the worker that keeps a
+    /// slot's occupant, and only reloading lets it replace one again.
+    #[test]
+    fn an_occupant_an_updated_page_cannot_keep_says_to_reload() {
+        let why = unkeepable(&std::io::Error::other(crate::store::Outdated));
+        assert_eq!(
+            why,
+            "drawbar.app was updated since this page was loaded. Reload the page to replace \
+             what a slot holds; sending to an empty slot still works"
+        );
+        let why = unkeepable(&std::io::Error::other("the disk is full"));
+        assert_eq!(
+            why,
+            "there was nowhere on this computer to keep it: the disk is full"
+        );
+    }
 
     #[test]
     fn a_nameless_slot_still_gets_a_label() {

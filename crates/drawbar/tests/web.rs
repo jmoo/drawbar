@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use drawbar::store::shown::{Change, Shown};
 use drawbar::store::{
-    Backend, Cmd, Event, Failure, Fault, Found, Intent, Key, LibPath, Moving, Picked, RescueIo,
-    Root, Slot, Source, Unrun, Worker, RESCUED,
+    Backend, Cmd, Event, Failure, Fault, Found, Intent, Key, LibPath, Moving, Outdated, Picked,
+    RescueIo, Root, Slot, Source, Unrun, Worker, RESCUED,
 };
 use eframe::egui;
 use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
@@ -633,6 +633,18 @@ async fn a_rescue_written_through_a_worker_is_found_at_the_next_look_and_a_parti
     let left = JsFuture::from(held.get_file_handle(cut)).await;
     assert!(left.is_err(), "the partial rescue is deleted");
     tab.close().await;
+}
+
+/// A worker that keeps rescues, started where the page's bundle is gone, as once
+/// drawbar.app is updated, says drawbar.app was updated.
+#[wasm_bindgen_test]
+async fn a_rescue_worker_whose_bundle_is_gone_says_drawbar_was_updated() {
+    let dir = Root::Private.local().join(RESCUED).unwrap();
+    let started = Worker::rescues_from(&dir, "https://drawbar.invalid/gone.js").await;
+    let Err(e) = started else {
+        panic!("a worker started without its bundle");
+    };
+    assert!(e.get_ref().is_some_and(|e| e.is::<Outdated>()), "{e}");
 }
 
 /// A worker that never finishes a command shows no sign of life for as long, and once it

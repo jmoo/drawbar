@@ -49,8 +49,7 @@ impl Scratch {
                 return Ok(writer.clone());
             }
         }
-        let started = Worker::rescues(dir).await;
-        let writer = Rc::new(started.map_err(io::Error::other)?);
+        let writer = Rc::new(Worker::rescues(dir).await?);
         *self.writer.borrow_mut() = Some((dir.clone(), writer.clone()));
         Ok(writer)
     }
