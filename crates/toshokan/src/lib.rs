@@ -151,7 +151,6 @@ pub mod path;
 pub mod pending;
 pub mod plan;
 mod quick;
-mod reach;
 #[doc(hidden)]
 pub mod reader;
 #[doc(hidden)]

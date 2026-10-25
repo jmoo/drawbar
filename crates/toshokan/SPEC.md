@@ -15,9 +15,8 @@ the machine's file system, and the `asynch` driver on any async backend, such as
 a browser's; both run it on an in-memory disk that models what survives a crash.
 A directory listing with every file's metadata is one request, and so are many
 reads, so a scan of every file costs a request per directory rather than per
-file. A commit or a refresh binds files to entities again only as far as its
-changes reach: the entities and files that share a path, a name the volume
-takes for one, or an identity with what changed.
+file. After any change to the file facts or to the files a reader sees, every
+fact is bound again.
 Time, randomness, the app's identity function and the volume's name rules are
 injected, so the crash harness and the sync simulator replay every run exactly.
 
@@ -622,11 +621,10 @@ their identities:
    before until its length or time moves: a binding can then take it for what it
    held. A precondition is never fooled, since it reads the identity at the
    check. After a commit, only the paths its file effects moved files from and to
-   are scanned again, with the same identity reads, and of the other files only
-   those of the length of a file fact the commit wrote whose file is not at its
-   path, holding it: such a file may be that entity's, moved. Adopting a file
-   reads that file alone; the other files of its length are read by the next scan
-   of every file. A refresh scans again only the paths named by the file facts
+   are listed again. Identities are read by the same rule, of every file whose
+   identity is unread and now decides a binding, such as a file of the length of
+   a file fact the commit wrote whose file is not at its path: that file may be
+   the entity's, moved. A refresh scans again only the paths named by the file facts
    the entries it read changed, before and after, and the paths those entities
    were bound to, with the same identity reads. Such a path is found only under
    the spelling its directories list, since a volume that ignores case finds a

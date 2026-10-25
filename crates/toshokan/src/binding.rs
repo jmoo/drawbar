@@ -398,21 +398,6 @@ pub(crate) fn relist<'a>(
     visited.map_ok(|(scan, _)| scan)
 }
 
-/// The files of `scan` at or under each of `paths`.
-pub(crate) fn under_any(scan: &Scan, paths: &[RelPath]) -> Vec<RelPath> {
-    let mut found: BTreeSet<&RelPath> = BTreeSet::new();
-    for dir in paths {
-        let from = scan.files.range::<RelPath, _>(dir..);
-        let prefixed = from.take_while(|(path, _)| path.as_str().starts_with(dir.as_str()));
-        found.extend(
-            prefixed
-                .map(|(path, _)| path)
-                .filter(|path| path.starts_with(dir)),
-        );
-    }
-    found.into_iter().cloned().collect()
-}
-
 /// Whether `path` is one of `paths` or under one of them.
 fn under(path: &RelPath, paths: &BTreeSet<&str>) -> bool {
     let text = path.as_str();
@@ -438,11 +423,9 @@ pub(crate) fn resolve(
     if unknown.is_empty() {
         return Vec::new();
     }
-    let files = FileKeys::of(scan, names);
-    let mut away = Away::default();
+    let away = away(facts, &FileKeys::of(scan, names), names);
     let mut logged: HashMap<&RelPath, Vec<Said>> = HashMap::new();
     for (_, written) in facts {
-        away.entity(written, files.held(written, names));
         for fact in written.iter().map(|fact| &fact.value) {
             if unknown.binary_search(&fact.path).is_ok() {
                 let said = (fact.len, fact.modified, fact.identity);
@@ -450,7 +433,6 @@ pub(crate) fn resolve(
             }
         }
     }
-    away.finish();
     let mut needed = Vec::new();
     for path in &unknown {
         let file = scan.files.get_mut(path).expect("listed in the scan");
@@ -462,7 +444,7 @@ pub(crate) fn resolve(
         // A file of an entity's length at its path, at another time, is in sync
         // only where it holds its identity.
         let sized = said.iter().any(|(len, ..)| *len == file.len);
-        if file.identity.is_none() && (sized || away.lengths.contains(&file.len)) {
+        if file.identity.is_none() && (sized || away.contains(&file.len)) {
             needed.push((path.clone(), file.len));
         }
     }
@@ -498,7 +480,7 @@ fn earlier(scan: &mut Scan, previous: &Scan) -> Vec<RelPath> {
 /// paths compared under the volume's names. A file of such a length may be one of
 /// them, moved.
 #[derive(Default)]
-pub(crate) struct Away {
+struct Away {
     lengths: HashSet<u64>,
     /// Each key a file is at, by how many entities' facts name it.
     named: HashMap<String, usize>,
@@ -535,74 +517,35 @@ impl Away {
 
 /// How many files are at each key under the volume's names.
 #[derive(Clone, Default, Debug)]
-pub(crate) struct FileKeys(HashMap<String, usize>);
+struct FileKeys(HashMap<String, usize>);
 
 impl FileKeys {
-    pub(crate) fn of(scan: &Scan, names: &dyn Names) -> FileKeys {
+    fn of(scan: &Scan, names: &dyn Names) -> FileKeys {
         let mut keys = FileKeys::default();
         for path in scan.files.keys() {
-            keys.add(path, names);
+            *keys.0.entry(names.key(path.as_str())).or_default() += 1;
         }
         keys
     }
 
-    pub(crate) fn add(&mut self, path: &RelPath, names: &dyn Names) {
-        *self.0.entry(names.key(path.as_str())).or_default() += 1;
-    }
-
-    pub(crate) fn remove(&mut self, path: &RelPath, names: &dyn Names) {
-        let key = names.key(path.as_str());
-        if let Some(count) = self.0.get_mut(&key) {
-            *count -= 1;
-            if *count == 0 {
-                self.0.remove(&key);
-            }
-        }
-    }
-
     /// The keys of the paths of `written` a file is at.
-    fn held(&self, written: &[Fact], names: &dyn Names) -> Vec<String> {
-        self.after(&BTreeMap::new()).held(written, names)
-    }
-
-    /// The keys once `changes` are made, each one count up or down.
-    pub(crate) fn after<'k>(&'k self, changes: &'k BTreeMap<String, isize>) -> KeysAfter<'k> {
-        KeysAfter {
-            keys: self,
-            changes,
-        }
-    }
-}
-
-/// [`FileKeys`] as a change leaves them, without changing them.
-pub(crate) struct KeysAfter<'k> {
-    keys: &'k FileKeys,
-    changes: &'k BTreeMap<String, isize>,
-}
-
-impl KeysAfter<'_> {
-    fn holds(&self, key: &str) -> bool {
-        let before = self.keys.0.get(key).copied().unwrap_or(0) as isize;
-        before + self.changes.get(key).copied().unwrap_or(0) > 0
-    }
-
     fn held(&self, written: &[Fact], names: &dyn Names) -> Vec<String> {
         let keys = written
             .iter()
             .map(|fact| names.key(fact.value.path.as_str()));
-        keys.filter(|key| self.holds(key)).collect()
+        keys.filter(|key| self.0.contains_key(key)).collect()
     }
 }
 
 /// The lengths of the entities of `facts` that may have moved where `files` are the
 /// files' keys; see [`Away`].
-pub(crate) fn away(facts: &Facts, files: &KeysAfter<'_>, names: &dyn Names) -> BTreeSet<u64> {
+fn away(facts: &Facts, files: &FileKeys, names: &dyn Names) -> HashSet<u64> {
     let mut away = Away::default();
     for (_, written) in facts {
         away.entity(written, files.held(written, names));
     }
     away.finish();
-    away.lengths.into_iter().collect()
+    away.lengths
 }
 
 /// `scan` with the identities of `unknown` read; with the paths read. A file gone
@@ -1158,7 +1101,7 @@ mod tests {
                 }
             }
             let keys = FileKeys::of(&fresh, &ExactNames);
-            let away = away(&facts, &keys.after(&BTreeMap::new()), &ExactNames);
+            let away = away(&facts, &keys, &ExactNames);
             let at_path = |path: &RelPath, len: u64| {
                 let written = facts.values().flat_map(|written| written.iter());
                 written
