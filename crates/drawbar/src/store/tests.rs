@@ -4058,6 +4058,39 @@ fn a_slot_views_unsaved_edit_the_autosave_kept_survives_a_crash() {
     assert!(second.bytes(id) == edited);
 }
 
+/// A slot view's edit this install's own state could not keep is kept by the next
+/// autosave once it can, and is there again after a quit.
+#[cfg(unix)]
+#[test]
+fn a_slot_views_edit_the_autosave_failed_to_keep_is_kept_by_the_next() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let at = Location::from_user(1, 1);
+    let mut first = Session::open(&root);
+    let id = first.view_slot("N1", at, program.clone());
+    first.edit(id, "96");
+    first.autosave();
+    let kept = root.local().join("unsaved");
+    let mode = |mode| fs::set_permissions(&kept, fs::Permissions::from_mode(mode));
+    mode(0o555).unwrap();
+    let edited = first.edit(id, "12");
+    first.autosave();
+    mode(0o755).unwrap();
+    assert_eq!(
+        first.said("could not be kept for later"),
+        1,
+        "the keep failed"
+    );
+    first.autosave();
+    first.close();
+
+    let mut second = Session::open(&root);
+    let id = second.view_slot("N1", at, program);
+    assert!(second.bytes(id) == edited, "the latest edit");
+}
+
 /// A slot view's kept edit, over a slot that holds something else since, is shown over
 /// the view, and drawbar asks which to keep.
 #[test]

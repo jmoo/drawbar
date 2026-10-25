@@ -21,7 +21,8 @@ pub(super) fn refused(cmd: &Cmd) -> Refusing {
             Vec::new(),
         ),
         Cmd::Draft { of, .. } => Refusing::Draft(of.clone()),
-        Cmd::Discard(_) | Cmd::KeepSlot { .. } | Cmd::DiscardSlot(_) => Refusing::Kept,
+        Cmd::KeepSlot { slot, .. } => Refusing::SlotDraft(slot.clone()),
+        Cmd::Discard(_) | Cmd::DiscardSlot(_) => Refusing::Kept,
         Cmd::ReadSlot(slot) => Refusing::Slot(slot.clone()),
         Cmd::Read { files, .. } => Refusing::Read(files.iter().map(|(id, ..)| *id).collect()),
     };
@@ -35,6 +36,7 @@ pub(super) enum Refusing {
     /// The intent's label, and the answer each change to a file in it owes.
     Intent(String, Vec<Owing>),
     Draft(Key),
+    SlotDraft(Slot),
     Kept,
     Slot(Slot),
     Read(Vec<u64>),
@@ -77,6 +79,10 @@ impl Refusing {
             Refusing::Scan => vec![Event::Scanned(Err(why.to_string()))],
             Refusing::Draft(of) => vec![Event::Drafted {
                 of,
+                kept: Err(why.to_string()),
+            }],
+            Refusing::SlotDraft(slot) => vec![Event::SlotDrafted {
+                slot,
                 kept: Err(why.to_string()),
             }],
             Refusing::Kept => vec![Event::Unkept(why.to_string())],

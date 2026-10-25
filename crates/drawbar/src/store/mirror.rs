@@ -99,7 +99,8 @@ struct SlotView {
     base: blake3::Hash,
     /// Whether the edit an earlier session kept of the slot was read.
     read: bool,
-    /// The stamp of the edit kept, if one is, and the hash it was kept over.
+    /// The stamp of the edit kept, if one is, and the hash it was kept over, once the
+    /// keep is answered.
     kept: Option<(u64, blake3::Hash)>,
 }
 
@@ -169,6 +170,9 @@ pub struct Store {
     instrument: Option<String>,
     /// Each view of a slot seen, with what its unsaved edit is kept by.
     views: BTreeMap<u64, SlotView>,
+    /// The keeps of slot views' edits sent and not answered yet, in the order sent, as
+    /// [`SlotView::kept`] holds each once it is kept.
+    keeping: VecDeque<(u64, (u64, blake3::Hash))>,
     /// What names were last compared in for duplicates: the workspace's layout, and the
     /// [`crate::folders::Folders::names_hash`].
     compared: Option<(u64, u64)>,
@@ -282,6 +286,7 @@ impl Store {
             superseded: BTreeMap::new(),
             instrument: None,
             views: BTreeMap::new(),
+            keeping: VecDeque::new(),
             compared: None,
             deferred: BTreeSet::new(),
             focused: true,
@@ -532,8 +537,9 @@ impl Store {
             .filter(|id| !workspace.is_view(*id))
             .collect();
         for id in ended {
+            let keeping = self.keeping.iter().any(|sent| sent.0 == id);
             if let Some(view) = self.views.remove(&id) {
-                if view.kept.is_some() {
+                if view.kept.is_some() || keeping {
                     self.send(Cmd::DiscardSlot(view.slot));
                 }
             }
@@ -574,21 +580,23 @@ impl Store {
                 view.base = blake3::hash(entity.saved.bytes());
             }
             let held = (entity.stamp, view.base);
-            let cmd = match (view.read, entity.is_unsaved(), view.kept) {
-                (false, _, _) => None,
-                (true, true, kept) if kept != Some(held) => {
-                    view.kept = Some(held);
+            let sent = self.keeping.iter().rev().find(|sent| sent.0 == entity.id);
+            let latest = sent.map(|sent| sent.1).or(view.kept);
+            let cmd = match (view.read, entity.is_unsaved()) {
+                (false, _) => None,
+                (true, true) if latest != Some(held) => {
+                    self.keeping.push_back((entity.id, held));
                     Some(Cmd::KeepSlot {
                         slot: view.slot.clone(),
                         base: view.base,
                         bytes: entity.bytes.to_vec(),
                     })
                 }
-                (true, false, Some(_)) => {
+                (true, false) if view.kept.is_some() => {
                     view.kept = None;
                     Some(Cmd::DiscardSlot(view.slot.clone()))
                 }
-                (true, _, _) => None,
+                (true, _) => None,
             };
             if let Some(cmd) = cmd {
                 self.send(cmd);
@@ -1419,20 +1427,23 @@ impl Store {
                         self.drafted.insert(id, (key, stamp, base));
                     }
                     (_, Ok(())) => {}
-                    (_, Err(why)) => {
-                        log.error(format!("keeping an unsaved edit: {why}"));
-                        log.trouble(format!(
-                            "An unsaved edit could not be kept for later: {why}."
-                        ));
-                    }
+                    (_, Err(why)) => unkept(&why, log),
                 }
             }
-            Event::Unkept(why) => {
-                log.error(format!("keeping an unsaved edit: {why}"));
-                log.trouble(format!(
-                    "An unsaved edit could not be kept for later: {why}."
-                ));
+            Event::SlotDrafted { slot, kept } => {
+                let sent = self.keeping.pop_front();
+                match (sent, kept) {
+                    (Some((id, held)), Ok(())) => {
+                        let view = self.views.get_mut(&id).filter(|view| view.slot == slot);
+                        if let Some(view) = view {
+                            view.kept = Some(held);
+                        }
+                    }
+                    (None, Ok(())) => {}
+                    (_, Err(why)) => unkept(&why, log),
+                }
             }
+            Event::Unkept(why) => unkept(&why, log),
             Event::Failed(why) => {
                 log.error(why.as_str());
                 log.trouble(format!(
@@ -3882,6 +3893,14 @@ fn kept_rows(
         })
     });
     rows.collect()
+}
+
+/// Say that an unsaved edit could not be kept in this install's own state, or let go of.
+fn unkept(why: &str, log: &mut Log) {
+    log.error(format!("keeping an unsaved edit: {why}"));
+    log.trouble(format!(
+        "An unsaved edit could not be kept for later: {why}."
+    ));
 }
 
 /// A name as the library list shows it.

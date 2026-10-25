@@ -568,8 +568,8 @@ pub enum Cmd {
     /// Let go of the draft of the file a key names. Answered only on failure.
     Discard(Key),
     /// Keep the unsaved edit of a slot's view, made over the slot's bytes of hash
-    /// `base`, in this install's own state, never in the folder. Answered only on
-    /// failure, by [`Event::Unkept`].
+    /// `base`, in this install's own state, never in the folder. Answered by
+    /// [`Event::SlotDrafted`].
     KeepSlot {
         slot: Slot,
         base: blake3::Hash,
@@ -1047,7 +1047,12 @@ pub enum Event {
         of: Key,
         kept: Result<(), String>,
     },
-    /// An unsaved edit could not be let go of, or a slot's edit kept: why.
+    /// Whether [`Cmd::KeepSlot`] kept the unsaved edit of a slot's view.
+    SlotDrafted {
+        slot: Slot,
+        kept: Result<(), String>,
+    },
+    /// An unsaved edit could not be let go of: why.
     Unkept(String),
     /// The edit [`Cmd::ReadSlot`] found kept of a slot's view, with the hash of the
     /// slot's bytes it was made over, or why it could not be read.
@@ -1071,6 +1076,7 @@ impl Event {
             Event::Failed(_) => one("write"),
             Event::Unkept(_)
             | Event::Drafted { kept: Err(_), .. }
+            | Event::SlotDrafted { kept: Err(_), .. }
             | Event::SlotKept { kept: Err(_), .. } => one("draft"),
             Event::Read(answers) => answers
                 .iter()
@@ -1083,6 +1089,7 @@ impl Event {
             Event::Unheard { .. } => one("unheard"),
             Event::Opened(Ok(_))
             | Event::Drafted { kept: Ok(()), .. }
+            | Event::SlotDrafted { kept: Ok(()), .. }
             | Event::SlotKept { kept: Ok(_), .. }
             | Event::Trimmed(_)
             | Event::Scanned(Ok(_))

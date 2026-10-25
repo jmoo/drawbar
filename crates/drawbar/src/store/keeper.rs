@@ -143,14 +143,15 @@ impl<F: Fs> Keeper<F> {
             Cmd::KeepSlot { slot, base, bytes } => {
                 let kept = match storage_of(&self.library) {
                     Ok(fs) => {
-                        let of = Of::Slot(slot);
+                        let of = Of::Slot(slot.clone());
                         self.unsaved.keep(fs, of, Base::Slot(base), bytes).await
                     }
                     Err(e) => Err(e),
                 };
-                if let Err(e) = kept {
-                    answer(Event::Unkept(format!("keeping a slot's edit: {e}")));
-                }
+                answer(Event::SlotDrafted {
+                    slot,
+                    kept: kept.map_err(|e| e.to_string()),
+                });
             }
             Cmd::DiscardSlot(slot) => {
                 if let Err(e) = self.discard(&Of::Slot(slot)).await {
