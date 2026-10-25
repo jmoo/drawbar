@@ -279,6 +279,8 @@ impl<B: Backend> Library<B> {
         run(&mut self.backend, self.core.tidy())
     }
 
+    /// Compacts now, as tests and harnesses drive it; a writer compacts by itself.
+    #[doc(hidden)]
     pub fn compact(&mut self) -> Result<Compacted> {
         run(&mut self.backend, self.core.compact())
     }

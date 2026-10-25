@@ -681,7 +681,7 @@ through_both!(
     an_undo_that_stops_partway_fails_and_is_logged,
     settling_an_own_effect_that_stops_partway_fails_before_the_next_intent,
     a_settlement_that_stops_partway_leaves_the_record_open_until_settled_again,
-    a_folder_whose_renames_may_replace_is_written_and_says_so,
+    a_folder_whose_renames_may_replace_is_written,
     a_view_is_read_on_other_threads,
     a_commit_writes_to_the_local_root_only_what_it_adds,
     a_writers_directory_stays_bounded_across_sessions,
@@ -5577,7 +5577,7 @@ fn a_settlement_that_stops_partway_leaves_the_record_open_until_settled_again<F:
     }
 }
 
-fn a_folder_whose_renames_may_replace_is_written_and_says_so<F: Facade>() {
+fn a_folder_whose_renames_may_replace_is_written<F: Facade>() {
     let racy = Capabilities {
         no_replace: false,
         ..Capabilities::ALL
@@ -5585,10 +5585,7 @@ fn a_folder_whose_renames_may_replace_is_written_and_says_so<F: Facade>() {
     let folder = MemDisk::with_capabilities(racy, Capabilities::ALL);
     let clock = TestClock::at(1_000);
     let (mut a, opened) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
-    assert_eq!(
-        (opened.mode, opened.no_replace),
-        (toshokan::report::Mode::Writable, false)
-    );
+    assert_eq!(opened.mode, toshokan::report::Mode::Writable);
     let song = create(&mut a, "song.npno", b"song");
     put(&folder, "taken.npno", b"taken");
     let renamed = a.commit("Rename", |i| {

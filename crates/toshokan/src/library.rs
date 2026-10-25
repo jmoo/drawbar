@@ -193,7 +193,6 @@ impl Library {
                 flow::run(library.drafts_task()).map_ok(move |drafts| {
                     let opened = Opened {
                         mode: library.mode.clone(),
-                        no_replace: library.capabilities.no_replace,
                         start,
                         settled: library
                             .unsettled
@@ -206,8 +205,6 @@ impl Library {
                             .collect(),
                         orphaned: library.orphaned.clone(),
                         drafts,
-                        forks: report.forks,
-                        gaps: report.gaps,
                         unreadable: report
                             .unreadable
                             .into_iter()
@@ -655,6 +652,7 @@ impl Library {
     /// its last entry, and the instance stops writing as it. This writer's
     /// interrupted effects are settled first, and a failure to settle them fails
     /// the compaction.
+    #[doc(hidden)]
     pub fn compact(&mut self) -> Task<'_, Result<Compacted>> {
         if let Err(error) = self.writable() {
             return Task::ready(Err(error));

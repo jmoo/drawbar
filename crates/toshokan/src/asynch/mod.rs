@@ -373,6 +373,8 @@ impl<F: Fs> Library<F> {
         run(&self.fs, self.core.tidy()).await
     }
 
+    /// Compacts now, as tests and harnesses drive it; a writer compacts by itself.
+    #[doc(hidden)]
     pub async fn compact(&mut self) -> Result<Compacted> {
         run(&self.fs, self.core.compact()).await
     }

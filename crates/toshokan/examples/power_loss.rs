@@ -994,7 +994,8 @@ impl Crash<'_> {
                 .is_some_and(|b| pending::cut_short(b))
         };
         let ignored = opened.ignored.iter().all(cut_short);
-        if !opened.forks.is_empty() || !opened.gaps.is_empty() || !ignored {
+        let view = library.view();
+        if !view.forks().is_empty() || !view.gaps().is_empty() || !ignored {
             return Err(format!("opening found {opened:?}"));
         }
         if let Start::Rekeyed {
