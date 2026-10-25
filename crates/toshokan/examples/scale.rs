@@ -36,7 +36,7 @@ use toshokan::simulator::Machine;
 use toshokan::snapshot::Snapshot;
 use toshokan::{
     EntityId, EntryHash, Env, Expect, Hlc, Identify, Identity, Io, IoResult, Layout, MemDisk,
-    Nonce, Policy, Raw, Register, RelPath, Reply, Root, Schema, SegmentName, Set, WriterId,
+    Nonce, Raw, Register, RelPath, Reply, Root, Schema, SegmentName, Set, WriterId,
 };
 
 struct Counting;
@@ -1347,14 +1347,11 @@ fn main() {
             bench.measure("trash() list", || lib.trash().unwrap().len());
         }
         for run in 0..args.runs {
-            let total = (args.trash * 64) as u64;
-            let keep = total * (args.runs - run - 1) as u64 / args.runs as u64;
-            let policy = Policy {
-                max_age_ms: u64::MAX,
-                max_bytes: keep,
-            };
+            let keep = args.trash * (args.runs - run - 1) / args.runs;
+            let held = lib.trash().unwrap();
+            let kept = held.iter().rev().take(keep).map(|item| item.item).collect();
             let emptied = bench.measure("empty_trash (1/runs of items each)", || {
-                lib.empty_trash(policy).unwrap()
+                lib.empty_trash(kept).unwrap()
             });
             eprintln!("    removed {}", emptied.removed.len());
         }

@@ -28,8 +28,8 @@ use toshokan::snapshot::Snapshot;
 use toshokan::view::Conflicted;
 use toshokan::{
     Changed, EntityId, EntryHash, Env, Error, Expect, Field, FileRef, FileState, Hlc, Identify,
-    Identity, Invalid, Io, IoResult, Lag, Layout, Local, MemDisk, Nonce, Policy, Random, Refusal,
-    Register, RelPath, Reply, Root, Schema, Set, Unbindable, View, WriterId,
+    Identity, Invalid, Io, IoResult, Lag, Layout, Local, MemDisk, Nonce, Random, Refusal, Register,
+    RelPath, Reply, Root, Schema, Set, Unbindable, View, WriterId,
 };
 
 const ORIGIN: Register<String> = Register::new("origin");
@@ -345,8 +345,7 @@ trait Facade: Sized {
     fn rebound(&mut self) -> [(Bindings, Vec<Op>); 2];
     fn others(&mut self) -> Result<Vec<WriterInfo>, Error>;
     fn trash(&mut self) -> Result<Vec<TrashItem>, Error>;
-    fn empty_trash(&mut self, policy: Policy) -> Result<Emptied, Error>;
-    fn remove_trash(&mut self, items: Vec<Nonce>) -> Result<Emptied, Error>;
+    fn empty_trash(&mut self, kept: BTreeSet<Nonce>) -> Result<Emptied, Error>;
     fn tidy(&mut self) -> Result<Tidied, Error>;
     fn compact(&mut self) -> Result<Compacted, Error>;
     fn settle(
@@ -409,11 +408,8 @@ impl Facade for Blocking {
     fn trash(&mut self) -> Result<Vec<TrashItem>, Error> {
         self.0.trash()
     }
-    fn empty_trash(&mut self, policy: Policy) -> Result<Emptied, Error> {
-        self.0.empty_trash(policy)
-    }
-    fn remove_trash(&mut self, items: Vec<Nonce>) -> Result<Emptied, Error> {
-        self.0.remove_trash(items)
+    fn empty_trash(&mut self, kept: BTreeSet<Nonce>) -> Result<Emptied, Error> {
+        self.0.empty_trash(kept)
     }
     fn tidy(&mut self) -> Result<Tidied, Error> {
         self.0.tidy()
@@ -484,11 +480,8 @@ impl Facade for Async {
     fn trash(&mut self) -> Result<Vec<TrashItem>, Error> {
         pollster::block_on(self.0.trash())
     }
-    fn empty_trash(&mut self, policy: Policy) -> Result<Emptied, Error> {
-        pollster::block_on(self.0.empty_trash(policy))
-    }
-    fn remove_trash(&mut self, items: Vec<Nonce>) -> Result<Emptied, Error> {
-        pollster::block_on(self.0.remove_trash(items))
+    fn empty_trash(&mut self, kept: BTreeSet<Nonce>) -> Result<Emptied, Error> {
+        pollster::block_on(self.0.empty_trash(kept))
     }
     fn tidy(&mut self) -> Result<Tidied, Error> {
         pollster::block_on(self.0.tidy())
@@ -638,7 +631,7 @@ through_both!(
     an_intent_that_stops_partway_says_what_landed,
     a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept,
     losing_the_local_root_at_any_step_loses_nothing_of_the_library,
-    a_crash_at_any_step_is_settled_before_the_next_write,
+    a_crash_at_any_step_is_settled_whole_after_emptying_the_trash,
     an_empty_record_of_this_writer_is_removed_by_its_next_write,
     an_untrusted_folder_is_read_within_bounds_and_never_acted_on,
     the_trash_keeps_displaced_bytes_until_emptied,
@@ -4311,7 +4304,7 @@ fn losing_the_local_root_at_any_step_loses_nothing_of_the_library<F: Facade>() {
     assert!(orphaned > 0, "some crash interrupted an effect");
 }
 
-fn a_crash_at_any_step_is_settled_before_the_next_write<F: Facade>() {
+fn a_crash_at_any_step_is_settled_whole_after_emptying_the_trash<F: Facade>() {
     let one_disk = |disk: &MemDisk| Machine {
         folder: disk.clone(),
         local: disk.clone(),
@@ -4325,7 +4318,7 @@ fn a_crash_at_any_step_is_settled_before_the_next_write<F: Facade>() {
         steps(&mut library, &clock, &mut 0).unwrap();
         disk.mutations()
     };
-    let mut settled = 0;
+    let (mut settled, mut emptied) = (0, 0);
     for crash in 0..total {
         let disk = disk();
         let clock = TestClock::at(1_000);
@@ -4341,6 +4334,11 @@ fn a_crash_at_any_step_is_settled_before_the_next_write<F: Facade>() {
             .unwrap_or_else(|e| panic!("{shown}: {e}"));
         assert!(opened.orphaned.is_empty(), "{shown}: {:?}", opened.orphaned);
         settled += opened.settled.len();
+        let kept = again.empty_trash(BTreeSet::new());
+        emptied += kept
+            .unwrap_or_else(|e| panic!("{shown}: {e}"))
+            .removed
+            .len();
         let next = again.commit("Next", |i| {
             let (i, _) = i.create(|e| {
                 e.add(TAGS, tag("next"));
@@ -4366,6 +4364,7 @@ fn a_crash_at_any_step_is_settled_before_the_next_write<F: Facade>() {
         }
     }
     assert!(settled > 0, "some crash interrupted an effect");
+    assert!(emptied > 0, "some crash left what settling does not need");
 }
 
 #[test]
@@ -4572,10 +4571,9 @@ fn the_trash_keeps_displaced_bytes_until_emptied<F: Facade>() {
         (trash[0].from.clone(), trash[0].len),
         (path("song.npno"), 3)
     );
-    let kept = a.empty_trash(Policy::default()).unwrap();
-    assert_eq!(kept, Emptied::default(), "nothing is old or over the cap");
-    clock.advance(31 * 24 * 60 * 60 * 1000);
-    let emptied = a.empty_trash(Policy::default()).unwrap();
+    let kept = a.empty_trash([trash[0].item].into()).unwrap();
+    assert_eq!(kept, Emptied::default(), "what the app keeps stays");
+    let emptied = a.empty_trash(BTreeSet::new()).unwrap();
     assert_eq!((emptied.removed.len(), emptied.bytes), (1, 3));
     assert_eq!(a.trash().unwrap(), []);
     let present: BTreeSet<Vec<u8>> = folder.files(Root::Folder).into_values().collect();
@@ -4605,7 +4603,7 @@ fn the_items_an_app_names_leave_the_trash<F: Facade>() {
     }
     let trash = a.trash().unwrap();
     assert_eq!(trash.len(), 2);
-    let emptied = a.remove_trash(vec![trash[0].item]).unwrap();
+    let emptied = a.empty_trash([trash[1].item].into()).unwrap();
     assert_eq!((emptied.removed, emptied.bytes), (vec![trash[0].item], 3));
     assert_eq!(a.trash().unwrap(), [trash[1].clone()]);
     a.undo().unwrap();
@@ -4640,8 +4638,7 @@ fn emptied_trash_items_leave_the_next_snapshot<F: Facade>() {
     let clock = TestClock::at(1_000);
     let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
     let song = create(&mut a, "song.npno", b"one");
-    for (n, bytes) in [b"two".as_slice(), b"three"].into_iter().enumerate() {
-        clock.advance(31 * 24 * 60 * 60 * 1000 * n as u64);
+    for bytes in [b"two".as_slice(), b"three"] {
         a.commit("Save", |i| {
             let held = read(&folder, "song.npno").unwrap();
             i.save(
@@ -4661,9 +4658,9 @@ fn emptied_trash_items_leave_the_next_snapshot<F: Facade>() {
     };
     a.compact().unwrap();
     assert_eq!(trashed(&folder), 2);
-    clock.advance(10);
-    let emptied = a.empty_trash(Policy::default()).unwrap();
-    assert_eq!(emptied.removed.len(), 1, "the item displaced a month ago");
+    let newest = a.trash().unwrap().last().unwrap().item;
+    let emptied = a.empty_trash([newest].into()).unwrap();
+    assert_eq!(emptied.removed.len(), 1, "the older item");
     a.commit("Tag", |i| i.add(song, TAGS, tag("x"))).unwrap();
     a.compact().unwrap();
     assert_eq!(

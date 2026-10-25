@@ -15,7 +15,7 @@ use toshokan::io::{IoError, Kind, Range, Root};
 use toshokan::log::Settlement;
 use toshokan::plan::FactChange;
 use toshokan::report::{Item, Mode, Refreshed, Rekey, Start, What};
-use toshokan::{EntryHash, Env, Error, Expect, Policy, RelPath, View};
+use toshokan::{EntryHash, Env, Error, Expect, Nonce, RelPath, View};
 
 use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES};
 use super::shown::Change;
@@ -35,8 +35,7 @@ const MOST_ENTRIES: usize = 1_000_000;
 /// more than which app wrote.
 pub(super) const LABEL: &str = "drawbar";
 
-/// The most bytes a writer's trash holds in a session: the size toshokan's policy
-/// keeps.
+/// The most bytes of this session's undo the trash holds.
 const TRASH: u64 = 1 << 30;
 
 /// What toshokan is told of the volume and the time, for a library drawbar keeps.
@@ -166,8 +165,8 @@ impl<F: Fs> Keeper<F> {
         }
     }
 
-    /// Answer a change, an undo or a redo, and keep this writer's trash within
-    /// [`TRASH`] once it was made.
+    /// Answer a change, an undo or a redo, and empty the trash as
+    /// [`Keeper::empty_trash`] says once it was made.
     async fn made(
         &mut self,
         label: String,
@@ -183,36 +182,43 @@ impl<F: Fs> Keeper<F> {
             result: committed.map(|(_, viewed)| viewed),
         });
         if made.is_some() {
-            if let Some(trimmed) = self.trim().await {
+            if let Some(trimmed) = self.empty_trash().await {
                 answer(trimmed);
             }
         }
     }
 
-    /// Empty the oldest of this writer's trash where it holds more than [`TRASH`], and
-    /// say which changes' undo needed what went.
-    async fn trim(&mut self) -> Option<Event> {
+    /// Keep in the trash only what this session's undo reaches, newest first within
+    /// [`TRASH`], and say which of this session's changes lost what their undo needed.
+    /// toshokan also keeps what an unsettled change may still move.
+    async fn empty_trash(&mut self) -> Option<Event> {
         let library = self.library.as_mut()?;
         let held = library.trash().await.ok()?;
-        let bytes = held
+        let mut room = self.trash;
+        let reached = held
             .iter()
-            .map(|item| item.len)
-            .fold(0, u64::saturating_add);
-        if bytes <= self.trash {
+            .rev()
+            .filter(|item| self.session.contains(&item.by));
+        let kept: BTreeSet<Nonce> = reached
+            .take_while(|item| {
+                let fits = item.len <= room;
+                room = room.saturating_sub(item.len);
+                fits
+            })
+            .map(|item| item.item)
+            .collect();
+        if held.iter().all(|item| kept.contains(&item.item)) {
             return None;
         }
-        let policy = Policy {
-            max_age_ms: u64::MAX,
-            max_bytes: self.trash,
-        };
-        let emptied = match library.empty_trash(policy).await {
+        let emptied = match library.empty_trash(kept).await {
             Ok(emptied) => emptied,
             Err(e) => return Some(Event::Unkept(format!("emptying the trash: {e}"))),
         };
         let gone = held
             .iter()
-            .filter(|item| emptied.removed.contains(&item.item));
-        Some(Event::Trimmed(gone.map(|item| item.by).collect()))
+            .filter(|item| emptied.removed.contains(&item.item) && self.session.contains(&item.by));
+        let gone: Vec<EntryHash> = gone.map(|item| item.by).collect();
+        (!gone.is_empty()).then_some(Event::Trimmed(gone))
     }
 
     /// Keep `bytes` as the unsaved edit of the file `of` names, made over `base`, then
@@ -299,17 +305,11 @@ impl<F: Fs> Keeper<F> {
     /// Let the library go cleanly, once every command has run: this session's undo
     /// ends now, and the trash lets go of what only it needed.
     pub async fn close(&mut self) {
-        let Some(mut library) = self.library.take() else {
+        self.session.clear();
+        let _ = self.empty_trash().await;
+        let Some(library) = self.library.take() else {
             return;
         };
-        if let Ok(held) = library.trash().await {
-            let ended = held
-                .into_iter()
-                .filter(|item| self.session.contains(&item.by));
-            let _ = library
-                .remove_trash(ended.map(|item| item.item).collect())
-                .await;
-        }
         let _ = library.close().await;
     }
 
@@ -331,9 +331,6 @@ impl<F: Fs> Keeper<F> {
                 let settled = library.settle(orphan, Settlement::Finished).await;
                 trouble.extend(settled.err().map(|e| format!("finishing a change: {e}")));
             }
-            // Nothing an earlier session displaced can be undone now.
-            let emptied = library.empty_trash(Policy::default()).await;
-            trouble.extend(emptied.err().map(|e| format!("emptying the trash: {e}")));
         }
         let older = super::older::found(library.fs()).await;
         let older = older.unwrap_or_else(|e| {
@@ -359,6 +356,12 @@ impl<F: Fs> Keeper<F> {
             false
         });
         self.library = Some(library);
+        // After settling, which may need what the trash holds.
+        if writable.is_ok() {
+            if let Some(Event::Unkept(why)) = self.empty_trash().await {
+                trouble.push(why);
+            }
+        }
         let drafts = self.drafts(&view).await.unwrap_or_else(|e| {
             trouble.push(format!("reading the unsaved edits kept: {e}"));
             Vec::new()
@@ -1829,10 +1832,11 @@ mod tests {
     }
 
     /// The trash keeps what a session's undo needs up to its size, and empties the
-    /// oldest past it, naming the change whose undo needed them. Closing empties what
-    /// only this session's undo needed, and keeps what a session stopped short left.
+    /// oldest past it, naming the change whose undo needed them. The next open, once it
+    /// settled, empties what a session stopped short left, and closing empties what the
+    /// session's undo needed.
     #[test]
-    fn the_trash_keeps_what_undo_needs_within_its_size_and_no_longer() {
+    fn the_trash_keeps_what_this_sessions_undo_needs_within_its_size_and_no_longer() {
         let root = Temp::new();
         fs::write(root.at("c3.ne5p"), b"first").unwrap();
         let save = |keeper: &mut Keeper, bytes: &[u8]| {
@@ -1868,28 +1872,12 @@ mod tests {
         drop(first);
 
         let mut second = keeper(&root);
-        assert_eq!(
-            trash(&mut second).len(),
-            1,
-            "a session stopped short leaves it"
-        );
+        assert_eq!(trash(&mut second), [], "a session stopped short left it");
         save(&mut second, b"fourth");
+        assert_eq!(trash(&mut second).len(), 1, "the session's undo needs it");
         nord_usb::block_on(second.close());
         let mut third = keeper(&root);
-        assert_eq!(
-            trash(&mut third).len(),
-            1,
-            "only what the closed session's undo needed went"
-        );
-    }
-
-    /// The time a month and a day from now.
-    struct Later;
-
-    impl toshokan::Clock for Later {
-        fn now_ms(&mut self) -> u64 {
-            SystemClock.now_ms() + 31 * 24 * 60 * 60 * 1000
-        }
+        assert_eq!(trash(&mut third), [], "the closed session's undo needed it");
     }
 
     /// Opening counts the files the scan finds as it goes, leaving out drawbar's own and
@@ -1967,27 +1955,6 @@ mod tests {
         keeper.run_one(Cmd::Open);
         keeper.run_one(Cmd::Rescan);
         assert_eq!(signs.listed.load(Ordering::Relaxed), 3);
-    }
-
-    /// What a session stopped short left in the trash stays a month, and opening
-    /// empties what is older.
-    #[test]
-    fn opening_empties_the_trash_of_what_is_older_than_a_month() {
-        let root = Temp::new();
-        fs::write(root.at("c3.ne5p"), b"contents").unwrap();
-        let mut first = keeper(&root);
-        let expect = first.listed("c3.ne5p");
-        first.run_one(Cmd::Intent(Intent::Delete {
-            files: vec![(path("c3.ne5p"), expect)],
-        }));
-        drop(first);
-        let trash = Keeper::trash_now;
-
-        let mut soon = keeper(&root);
-        assert_eq!(trash(&mut soon).len(), 1, "kept for now");
-        nord_usb::block_on(soon.close());
-        let mut later = keeper_at(&root, Box::new(Later));
-        assert_eq!(trash(&mut later), []);
     }
 
     #[test]

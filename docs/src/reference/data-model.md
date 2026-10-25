@@ -603,12 +603,14 @@ to write it: bytes held whole are written from memory, and every copy and every
 edit through a resting file is streamed a chunk at a time. drawbar's own reads,
 like toshokan's writes, refuse a path through a folder that is a link.
 
-The trash keeps what a delete or a save displaced for undo. A commit that leaves
-this writer's trash past 1 GiB empties it of the oldest items, and the Edit menu
-stops at the first change whose undo needed one. Closing the library empties it
-of what this session's changes put there, since no later undo reaches them.
-Opening a library that may be written empties it of what was displaced more than
-30 days ago, and then of the oldest past 1 GiB (`toshokan::Policy::default`).
+The trash keeps what a delete or a save displaced for this session's undo, and
+nothing else, since undo reaches no earlier session (`Keeper::empty_trash`).
+After each commit drawbar keeps the items of this session's changes, newest
+first, up to 1 GiB, and empties the rest; the Edit menu stops at the first change
+whose undo needed an item it emptied. Closing the library empties every item.
+Opening a library that may be written empties it too, after settling, which may
+need what the trash holds; toshokan keeps any item a pending record not yet
+spent names.
 Which writer's trash an instance empties is in [Trash](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#trash).
 
 ### Drafts

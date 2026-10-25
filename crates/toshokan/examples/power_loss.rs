@@ -39,8 +39,8 @@ use toshokan::pending::{self, PendingRecord};
 use toshokan::reader::Reader;
 use toshokan::report::{Opened, Rekey, Start};
 use toshokan::{
-    EntryHash, Env, Expect, Identify, Identity, Io, IoError, IoResult, Layout, Policy, Register,
-    RelPath, Root, Schema, Set, View, WriterId,
+    EntryHash, Env, Expect, Identify, Identity, Io, IoError, IoResult, Layout, Register, RelPath,
+    Root, Schema, Set, View, WriterId,
 };
 
 const NAME: Register<String> = Register::new("name");
@@ -603,11 +603,8 @@ impl Runner {
             Step::Tidy => self.library().tidy().map(|_| None).map_err(shown)?,
             Step::Compact => self.library().compact().map(|_| None).map_err(shown)?,
             Step::EmptyTrash => {
-                let all = Policy {
-                    max_age_ms: 0,
-                    max_bytes: 0,
-                };
-                let emptied = self.library().empty_trash(all).map_err(shown)?;
+                let emptied = self.library().empty_trash(Default::default());
+                let emptied = emptied.map_err(shown)?;
                 if emptied.removed.is_empty() {
                     return Err(format!("{step:?} removed nothing"));
                 }

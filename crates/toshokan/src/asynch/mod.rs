@@ -1,6 +1,7 @@
 //! The async driver: runs the core's operations on an [`Fs`] in a loop. Futures
 //! carry no `Send` bound, so a single-threaded browser backend can implement it.
 
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::Poll;
@@ -21,7 +22,6 @@ use crate::report::{
     WriterInfo,
 };
 use crate::schema::Schema;
-use crate::trash::Policy;
 use crate::view::View;
 
 /// Storage that performs requests asynchronously, the batched ones included;
@@ -344,12 +344,8 @@ impl<F: Fs> Library<F> {
         run(&self.fs, self.core.trash()).await
     }
 
-    pub async fn empty_trash(&mut self, policy: Policy) -> Result<Emptied> {
-        run(&self.fs, self.core.empty_trash(policy)).await
-    }
-
-    pub async fn remove_trash(&mut self, items: Vec<Nonce>) -> Result<Emptied> {
-        run(&self.fs, self.core.remove_trash(items)).await
+    pub async fn empty_trash(&mut self, kept: BTreeSet<Nonce>) -> Result<Emptied> {
+        run(&self.fs, self.core.empty_trash(kept)).await
     }
 
     /// Removes the pending records this writer's commits left once their entries

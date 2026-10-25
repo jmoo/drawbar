@@ -97,11 +97,12 @@ naming it, is one undo. An edit you have not saved is taken back with **Revert**
 instead.
 
 Deleting a sound, or saving over one, moves the old file into drawbar's trash in
-the hidden folder, where Undo finds it. The trash holds at most 1 GiB; past
+the hidden folder, where Undo finds it. Undo reaches only the changes made since
+the library opened, and the trash keeps only what they need, at most 1 GiB. Past
 that, the oldest goes first, and the activity log says which change Undo no
-longer reaches. When you quit, drawbar empties the trash of what that window's
-changes put there. What a crash left there goes when the library next opens,
-once it is more than 30 days old, or past 1 GiB, oldest first.
+longer reaches. Quitting empties the trash. What a crash left there goes when
+the library next opens, once drawbar has finished any change the crash
+interrupted.
 
 **Export…** saves a copy somewhere else. Rename with F2. If a name is taken,
 drawbar asks whether to **Overwrite** the file there or **Keep both**.

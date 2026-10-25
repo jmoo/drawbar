@@ -1,35 +1,18 @@
 //! A writer's trash: bytes its intents displaced, kept for undo until it empties
 //! them. Emptying a trash is the only way bytes leave the folder, and only its
-//! owner empties it.
+//! owner empties it, never of what a pending record of its may still move.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use crate::effects::EffectStep;
 use crate::error::Result;
 use crate::flow::{self, each};
-use crate::ids::WriterId;
+use crate::ids::{Nonce, WriterId};
 use crate::io::{Kind, Root, Task};
 use crate::layout::Layout;
 use crate::path::RelPath;
+use crate::pending::{self, PendingRecord};
 use crate::report::{Emptied, TrashItem};
-
-/// What emptying keeps.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Policy {
-    /// Items displaced longer ago than this are removed.
-    pub max_age_ms: u64,
-    /// Then the oldest items are removed until the rest fit.
-    pub max_bytes: u64,
-}
-
-impl Default for Policy {
-    /// Thirty days, and a gibibyte.
-    fn default() -> Self {
-        Self {
-            max_age_ms: 30 * 24 * 60 * 60 * 1000,
-            max_bytes: 1 << 30,
-        }
-    }
-}
 
 /// The items of `logged`, what `writer`'s entries say they displaced, still in
 /// its trash, oldest first, each with its length there. Files in the trash no
@@ -63,42 +46,49 @@ pub fn list(
         .task()
 }
 
-/// The items `policy` does not keep at wall time `now_ms`, from `items` oldest
-/// first.
-pub fn expired(items: &[TrashItem], policy: Policy, now_ms: u64) -> Vec<TrashItem> {
-    let mut items = items.to_vec();
-    items.sort_by_key(|item| (item.at, item.item));
-    let mut kept: u64 = items
-        .iter()
-        .map(|item| item.len)
-        .fold(0, u64::saturating_add);
-    items
-        .into_iter()
-        .take_while(|item| {
-            let old = now_ms.saturating_sub(item.at.wall_ms) > policy.max_age_ms;
-            let remove = old || kept > policy.max_bytes;
-            if remove {
-                kept -= item.len;
-            }
-            remove
-        })
-        .collect()
-}
-
-/// Removes from `writer`'s trash the items of `items` that `policy` does not keep
-/// at wall time `now_ms`, then syncs the trash once.
+/// Removes from `writer`'s trash every item of `items` but those of `kept` and those
+/// a pending record of the writer names, which settling it may still move, then syncs
+/// the trash once. The records of `spent` have settled and keep nothing. While a
+/// record of the writer does not read, removes none.
 pub fn empty(
     layout: &Layout,
     writer: WriterId,
     items: Vec<TrashItem>,
-    policy: Policy,
-    now_ms: u64,
+    kept: BTreeSet<Nonce>,
+    spent: BTreeSet<Nonce>,
 ) -> Task<'static, Result<Emptied>> {
-    remove(layout, writer, expired(&items, policy, now_ms))
+    let layout = layout.clone();
+    flow::run(pending::read_all(&layout, writer))
+        .and_then(move |mut found| {
+            if !found.unreadable.is_empty() {
+                return flow::ok(Emptied::default());
+            }
+            found.records.retain(|(name, _)| !spent.contains(name));
+            let named = named(&found.records);
+            let removed = items
+                .into_iter()
+                .filter(|item| !kept.contains(&item.item) && !named.contains(&item.item));
+            flow::run(remove(&layout, writer, removed.collect()))
+        })
+        .task()
+}
+
+/// The trash items `records` name: those their steps move into the trash, out of
+/// it, or stage there.
+fn named(records: &[(Nonce, PendingRecord)]) -> BTreeSet<Nonce> {
+    let steps = records.iter().flat_map(|(_, record)| &record.steps);
+    let items = steps.filter_map(|step| match step {
+        EffectStep::ToTrash { item, .. } | EffectStep::FromTrash { item, .. } => Some(*item),
+        EffectStep::Place { staged, .. } => Some(*staged),
+        EffectStep::Rename { .. } | EffectStep::MakeDir { .. } | EffectStep::RemoveDir { .. } => {
+            None
+        }
+    });
+    items.collect()
 }
 
 /// Removes `removed` from `writer`'s trash, then syncs the trash once.
-pub fn remove(
+fn remove(
     layout: &Layout,
     writer: WriterId,
     removed: Vec<TrashItem>,
@@ -129,58 +119,104 @@ pub fn remove(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::{EntryHash, Hlc, Nonce};
+    use crate::effects::Moves;
+    use crate::line::Line;
 
-    const DAY: u64 = 24 * 60 * 60 * 1000;
+    fn nonce(n: u128) -> Nonce {
+        Nonce::from_u128(n)
+    }
 
-    fn item(n: u128, day: u64, len: u64) -> TrashItem {
-        TrashItem {
-            writer: crate::ids::WriterId::from_u128(1),
-            item: Nonce::from_u128(n),
-            len,
-            from: RelPath::new("f").unwrap(),
-            at: Hlc {
-                wall_ms: day * DAY,
-                counter: 0,
-            },
-            by: EntryHash::from_u128(n),
+    fn record(steps: Vec<EffectStep>) -> (Nonce, PendingRecord) {
+        let record = PendingRecord {
+            writer: WriterId::from_u128(1),
+            entry: Line::seal(format!(r#"{{"prev":"{}"}}"#, crate::ids::EntryHash::ZERO)).unwrap(),
+            label: "Save".into(),
+            steps,
+            files: Vec::new(),
+            unbound: Vec::new(),
+            trees: Vec::new(),
+            dirs: Vec::new(),
+            moves: Moves::Rename,
+        };
+        (nonce(9), record)
+    }
+
+    /// Emptying keeps what the app keeps and what an unsettled record of the writer
+    /// names, and removes the rest.
+    #[test]
+    fn emptying_keeps_what_the_app_keeps_and_what_an_unsettled_record_names() {
+        use crate::disk::MemDisk;
+        use crate::ids::{EntryHash, Hlc};
+        use crate::io::Io;
+
+        let layout = Layout::new(".t").unwrap();
+        let writer = WriterId::from_u128(1);
+        let disk = MemDisk::new();
+        let put = |path: RelPath, bytes: Vec<u8>| {
+            let dir = path.parent().unwrap();
+            disk.perform(Io::MakeDir {
+                root: Root::Folder,
+                path: dir,
+            })
+            .unwrap();
+            disk.perform(Io::Create {
+                root: Root::Folder,
+                path,
+                bytes,
+            })
+            .unwrap();
+        };
+        let items: Vec<TrashItem> = (1..=4)
+            .map(|n| TrashItem {
+                writer,
+                item: nonce(n),
+                len: 1,
+                from: RelPath::new("f").unwrap(),
+                at: Hlc::default(),
+                by: EntryHash::from_u128(n),
+            })
+            .collect();
+        for item in &items {
+            put(layout.trash(writer, item.item), b"x".to_vec());
         }
-    }
+        let (name, unsettled) = record(vec![EffectStep::FromTrash {
+            item: nonce(2),
+            path: RelPath::new("f").unwrap(),
+        }]);
+        put(layout.pending(writer, name), unsettled.encode());
+        let (_, settled) = record(vec![EffectStep::ToTrash {
+            path: RelPath::new("f").unwrap(),
+            item: nonce(4),
+        }]);
+        put(layout.pending(writer, nonce(8)), settled.encode());
 
-    fn names(items: &[TrashItem]) -> Vec<u128> {
-        items.iter().map(|item| item.item.to_u128()).collect()
-    }
-
-    #[test]
-    fn emptying_removes_what_is_older_than_the_age_then_the_oldest_over_the_cap() {
-        let policy = Policy {
-            max_age_ms: 30 * DAY,
-            max_bytes: 100,
-        };
-        let items = [
-            item(3, 40, 60),
-            item(1, 1, 10),
-            item(2, 39, 60),
-            item(4, 41, 30),
-        ];
-        assert_eq!(
-            names(&expired(&items, policy, 45 * DAY)),
-            [1, 2],
-            "day 1 by age, day 39 by size"
-        );
-        assert_eq!(names(&expired(&items, policy, 20 * DAY)), [1, 2]);
-        let roomy = Policy {
-            max_bytes: 1000,
-            ..policy
-        };
-        assert_eq!(names(&expired(&items, roomy, 20 * DAY)), Vec::<u128>::new());
-        assert_eq!(names(&expired(&items, roomy, 71 * DAY)), [1, 2, 3]);
+        let mut disk = disk;
+        let emptied = empty(&layout, writer, items, [nonce(3)].into(), [nonce(8)].into());
+        let emptied = crate::blocking::run(&mut disk, emptied).unwrap();
+        assert_eq!(emptied.removed, [nonce(1), nonce(4)]);
     }
 
     #[test]
-    fn the_default_policy_keeps_thirty_days_and_a_gibibyte() {
-        let items = [item(1, 0, 1 << 29), item(2, 10, 1 << 29), item(3, 20, 1)];
-        assert_eq!(names(&expired(&items, Policy::default(), 30 * DAY)), [1]);
-        assert_eq!(names(&expired(&items, Policy::default(), 31 * DAY)), [1]);
+    fn a_record_names_what_it_moves_into_or_out_of_the_trash_or_stages_there() {
+        let at = RelPath::new("f").unwrap();
+        let records = [record(vec![
+            EffectStep::ToTrash {
+                path: at.clone(),
+                item: nonce(1),
+            },
+            EffectStep::FromTrash {
+                item: nonce(2),
+                path: at.clone(),
+            },
+            EffectStep::Place {
+                staged: nonce(3),
+                path: at.clone(),
+            },
+            EffectStep::Rename {
+                from: at.clone(),
+                to: RelPath::new("g").unwrap(),
+            },
+        ])];
+        assert_eq!(named(&records), [1, 2, 3].map(nonce).into());
     }
 }
