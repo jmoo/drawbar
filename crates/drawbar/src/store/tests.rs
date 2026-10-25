@@ -4107,19 +4107,31 @@ fn a_slot_views_edit_whose_keep_has_not_landed_is_losing() {
     assert!(!session.store.losing(workspace, browser), "once kept");
 
     session.edit(id, "12");
-    session.store.patience(std::time::Duration::from_millis(50));
     session.store.fault(Fault::Stall);
     let Bench {
         workspace, browser, ..
     } = &mut session.bench;
     session.store.sync(workspace, browser, Pass::Full);
     let losing = session.store.losing(workspace, browser);
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    session.close();
+    session.let_go_stalled();
     assert!(losing, "while the keep of the next edit is stalled");
 }
 
 impl Session {
+    /// Close a library whose thread never finishes the command it took, once it is
+    /// asked about: a library not asked about would be waited for.
+    fn let_go_stalled(mut self) {
+        self.store.patience(std::time::Duration::ZERO);
+        for _ in 0..1000 {
+            self.poll();
+            if self.bench.browser.asking().is_some() {
+                return self.close();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("the stalled library was never asked about");
+    }
+
     /// The autosave's pass, with nothing it sent answered yet.
     fn autosave_unanswered(&mut self) {
         let Bench {
@@ -4151,6 +4163,40 @@ fn a_slot_view_reverted_while_its_keep_is_in_flight_leaves_no_kept_edit() {
     let id = second.view_slot("N1", at, program);
     assert!(!second.bench.workspace.get(id).unwrap().is_unsaved());
     assert_eq!(second.said("has the unsaved edit it had"), 0);
+}
+
+/// The answer to an older keep, folded in after a newer edit, marks only the older
+/// edit kept: the newer one, whose own keep failed, is kept by the next autosave.
+#[test]
+fn an_older_keeps_answer_never_marks_a_newer_edit_kept() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let at = Location::from_user(1, 1);
+    let mut first = Session::open(&root);
+    let id = first.view_slot("N1", at, program.clone());
+    first.edit(id, "96");
+    first.store.fault(Fault::Next(Box::new(Fault::Unread)));
+    first.autosave_unanswered();
+    let newer = first.edit(id, "12");
+    first.autosave_unanswered();
+    first.settle();
+    let Bench {
+        workspace, browser, ..
+    } = &first.bench;
+    assert!(
+        first.store.losing(workspace, browser),
+        "the newer edit is not kept"
+    );
+    first.autosave();
+    let Bench {
+        workspace, browser, ..
+    } = &first.bench;
+    assert!(!first.store.losing(workspace, browser), "kept once resent");
+    first.close();
+
+    let mut second = Session::open(&root);
+    let id = second.view_slot("N1", at, program);
+    assert!(second.bytes(id) == newer);
 }
 
 /// A keep that fails at every autosave is said once, and again only once a keep has
