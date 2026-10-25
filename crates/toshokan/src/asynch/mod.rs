@@ -89,9 +89,9 @@ where
     }
 }
 
-/// Every future's output, in order, the futures polled together. A poll of the join
-/// polls only the futures woken since the last one, so `n` futures that finish one
-/// at a time take about `2n` polls.
+/// Every future's output, in order, the futures polled together. A future is polled
+/// once at the start and again only when its waker fires, so `n` futures that finish
+/// one at a time take `2n` polls.
 pub(crate) async fn join<T>(futures: impl Iterator<Item = impl Future<Output = T>>) -> Vec<T> {
     let mut running: Vec<_> = futures.map(Box::pin).collect();
     let mut outputs: Vec<Option<T>> = running.iter().map(|_| None).collect();
@@ -130,41 +130,39 @@ pub(crate) async fn join<T>(futures: impl Iterator<Item = impl Future<Output = T
 
 /// The members of a [`join`] woken since it last polled them, and the waker of the
 /// task that polls the join.
-struct Woken {
-    queued: Mutex<Queued>,
-    task: Mutex<Option<Waker>>,
-}
+struct Woken(Mutex<Queued>);
 
 struct Queued {
     order: Vec<usize>,
     /// Whether each member is in `order`, so a member woken twice is polled once.
     flagged: Vec<bool>,
+    task: Option<Waker>,
 }
 
 impl Woken {
-    /// Every one of `n` members queued, as none has been polled yet.
     fn all(n: usize) -> Self {
-        let queued = Queued {
+        Self(Mutex::new(Queued {
             order: (0..n).collect(),
             flagged: vec![true; n],
-        };
-        Self {
-            queued: Mutex::new(queued),
-            task: Mutex::new(None),
-        }
+            task: None,
+        }))
     }
 
     fn wake_on(&self, waker: &Waker) {
-        let mut task = lock(&self.task);
-        if !task.as_ref().is_some_and(|known| known.will_wake(waker)) {
-            *task = Some(waker.clone());
+        let mut queued = lock(&self.0);
+        if !queued
+            .task
+            .as_ref()
+            .is_some_and(|known| known.will_wake(waker))
+        {
+            queued.task = Some(waker.clone());
         }
     }
 
     /// The members woken, in the order they woke, unqueued. A member that wakes
     /// while they are polled waits for the next poll, which its wake asks for.
     fn take(&self) -> Vec<usize> {
-        let mut queued = lock(&self.queued);
+        let mut queued = lock(&self.0);
         let order = std::mem::take(&mut queued.order);
         for &index in &order {
             queued.flagged[index] = false;
@@ -172,16 +170,20 @@ impl Woken {
         order
     }
 
+    /// Queues member `index` and wakes the task, unless the member is queued already.
+    /// The task's waker runs once the lock is let go: a foreign waker may do anything,
+    /// polling this join included.
     fn wake(&self, index: usize) {
-        {
-            let mut queued = lock(&self.queued);
+        let task = {
+            let mut queued = lock(&self.0);
             if std::mem::replace(&mut queued.flagged[index], true) {
                 return;
             }
             queued.order.push(index);
-        }
-        if let Some(task) = lock(&self.task).as_ref() {
-            task.wake_by_ref();
+            queued.task.clone()
+        };
+        if let Some(task) = task {
+            task.wake();
         }
     }
 }
@@ -202,8 +204,6 @@ impl Wake for Member {
     }
 }
 
-/// `mutex`, locked, poisoned or not: what it guards is left whole by every section
-/// that holds it.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -522,20 +522,80 @@ mod tests {
             })
         }
 
-        /// `join`'s output, its gates opened in `order`, each waking only its own future.
+        /// Wakes the future of gate `index` `times` times, its gate opened first where
+        /// `open`.
+        fn wake(&self, index: usize, open: bool, times: usize) {
+            self.open.borrow_mut()[index] |= open;
+            let waker = self.wakers.borrow_mut()[index].take();
+            let waker = waker.expect("a waiting future left its waker");
+            for _ in 0..times {
+                waker.wake_by_ref();
+            }
+        }
+
+        /// `join`'s output, its gates opened in `order`, each waking only its own
+        /// future. Before each gate opens, a poll of the join with nothing woken must
+        /// poll no future, and the gate's wake must wake the join's task once.
         fn drive<T>(&self, join: impl Future<Output = T>, order: impl Iterator<Item = usize>) -> T {
-            let mut join = std::pin::pin!(join);
-            let mut context = Context::from_waker(Waker::noop());
-            assert!(join.as_mut().poll(&mut context).is_pending());
+            let mut task = Task::new(join);
+            assert!(task.poll().is_pending());
             for index in order {
-                self.open.borrow_mut()[index] = true;
-                let waker = self.wakers.borrow_mut()[index].take();
-                waker.expect("a waiting future left its waker").wake();
-                if let Poll::Ready(output) = join.as_mut().poll(&mut context) {
+                let polls = self.polls.get();
+                assert!(task.poll().is_pending());
+                assert_eq!(
+                    self.polls.get(),
+                    polls,
+                    "a poll with nothing woken polled a future"
+                );
+                let wakes = task.wakes();
+                self.wake(index, true, 1);
+                assert_eq!(
+                    task.wakes(),
+                    wakes + 1,
+                    "opening gate {index} woke the task once"
+                );
+                if let Poll::Ready(output) = task.poll() {
                     return output;
                 }
             }
             panic!("the join still waits with every gate open");
+        }
+    }
+
+    /// A future polled by hand, with a waker that counts its wakes.
+    struct Task<'f, T> {
+        future: Pin<Box<dyn Future<Output = T> + 'f>>,
+        wakes: Arc<Wakes>,
+    }
+
+    #[derive(Default)]
+    struct Wakes(std::sync::atomic::AtomicUsize);
+
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    impl<'f, T> Task<'f, T> {
+        fn new(future: impl Future<Output = T> + 'f) -> Self {
+            Self {
+                future: Box::pin(future),
+                wakes: Arc::default(),
+            }
+        }
+
+        fn poll(&mut self) -> Poll<T> {
+            let waker = Waker::from(Arc::clone(&self.wakes));
+            self.future.as_mut().poll(&mut Context::from_waker(&waker))
+        }
+
+        fn wakes(&self) -> usize {
+            self.wakes.0.load(std::sync::atomic::Ordering::Relaxed)
         }
     }
 
@@ -550,6 +610,25 @@ mod tests {
             2 * n,
             "each future polled at its start and its wake"
         );
+    }
+
+    #[test]
+    fn a_future_woken_twice_before_the_join_polls_is_polled_once() {
+        let gates = Gates::new(2);
+        let mut task = Task::new(join((0..2).map(|index| gates.gated(index))));
+        assert!(task.poll().is_pending());
+        let (polls, wakes) = (gates.polls.get(), task.wakes());
+        gates.wake(0, false, 2);
+        assert_eq!(task.wakes(), wakes + 1, "the two wakes woke the task once");
+        assert!(task.poll().is_pending());
+        assert_eq!(
+            gates.polls.get(),
+            polls + 1,
+            "the future woken twice is polled once"
+        );
+        gates.wake(0, true, 1);
+        gates.wake(1, true, 1);
+        assert_eq!(task.poll(), Poll::Ready(vec![0, 1]));
     }
 
     #[test]
