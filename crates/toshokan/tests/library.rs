@@ -15,6 +15,7 @@ use toshokan::env::{ExactNames, PrefixIdentity, SeededRandom, TestClock};
 use toshokan::intent::{Driver, Intent};
 use toshokan::io::{Capabilities, Range};
 use toshokan::layout::SEGMENT_EXTENSION;
+use toshokan::library::COMPACT_AFTER;
 use toshokan::line::MAX_LINE;
 use toshokan::log::{Entry, EntryKind, FileFact, Genesis, Logged, Op, Run, Settlement};
 use toshokan::plan::FactChange;
@@ -584,6 +585,7 @@ through_both!(
     a_failed_rescan_after_a_rename_binds_no_copy_in_its_place,
     a_commit_whose_head_cannot_be_recorded_is_kept_and_continued,
     a_commit_removes_its_record_once_its_entries_are_durable,
+    a_commit_whose_compaction_retires_its_writer_leaves_the_record_in_place,
     a_record_whose_removal_fails_is_removed_before_the_next_write,
     closing_removes_a_record_whose_removal_failed,
     a_record_a_crash_left_spent_is_not_settled_again_and_goes_at_the_next_write,
@@ -2784,6 +2786,42 @@ fn a_commit_removes_its_record_once_its_entries_are_durable<F: Facade>() {
     assert_eq!(pending_files(&folder), [], "the rename's record is removed");
     let labels: Vec<String> = a.history().into_iter().map(|item| item.label).collect();
     assert_eq!(labels, ["Import", "Rename"]);
+}
+
+fn a_commit_whose_compaction_retires_its_writer_leaves_the_record_in_place<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    a.close().unwrap();
+    let there = here.cloned();
+    let (mut original, _) = F::open(Probe::new(&here), env("a", 2, &clock)).unwrap();
+    let (mut clone, _) = F::open(Probe::new(&there), env("a", 3, &clock)).unwrap();
+    clone
+        .commit("Tag", |i| i.add(song, TAGS, tag("there")))
+        .unwrap();
+    for n in 1..COMPACT_AFTER {
+        original
+            .commit("Tag", |i| i.add(song, TAGS, n.to_string()))
+            .unwrap();
+    }
+    let records = || -> Vec<RelPath> {
+        let files = pending_files(&folder).into_iter();
+        files.filter(|at| at.as_str().ends_with(".json")).collect()
+    };
+    assert_eq!(records(), []);
+    original
+        .commit("Rename", |i| {
+            i.rename(song, &path("b.npno"), Expect::Holds(identity(b"song")))
+        })
+        .unwrap();
+    assert_eq!(
+        original.view().forks().len(),
+        1,
+        "the compaction found the fork"
+    );
+    assert_eq!(records().len(), 1, "the retired writer's record stays");
 }
 
 /// Opens a library on `folder` and commits an import whose record removal fails,

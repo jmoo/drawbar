@@ -2144,12 +2144,17 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
 
 /// Removes this writer's record `name` once its entries are durable, with the
 /// others its entries closed. One that stays is removed before the next write.
+/// A writer that retired meanwhile leaves it where it is, since nothing writes a
+/// retired writer's directory again.
 fn remove_record<'a>(
     library: &'a mut Library,
     name: Nonce,
     record: &PendingRecord,
 ) -> Flow<'a, &'a mut Library> {
     library.unsettled.retain(|settling| settling.record != name);
+    if library.writer.as_ref().map(Writer::id) != Some(record.writer) {
+        return Flow::Done(library);
+    }
     library.spent.push((name, record.clone()));
     remove_spent(library).then(|(library, _)| Flow::Done(library))
 }
@@ -2456,9 +2461,8 @@ fn carry_out<'a>(
 
 /// Appends the intent `logged` with what `applied` says the effects did, closed
 /// by `closing` if they complete and followed by `bind` entries pinning `pins`,
-/// removes the record once the entries are durable, unless the writer retired
-/// meanwhile, since nothing writes a retired writer's directory again, and scans
-/// again the paths the effects moved files from and to. Once the entries are
+/// removes the record once the entries are durable, and scans again the paths
+/// the effects moved files from and to. Once the entries are
 /// durable nothing fails.
 fn log_effects<'a>(
     library: &'a mut Library,
@@ -2492,7 +2496,7 @@ fn log_effects<'a>(
             Ok(entries) => entries,
             Err(error) => return Flow::Done(Err(error)),
         };
-        let removed = match journaled && !retired {
+        let removed = match journaled {
             true => remove_record(library, name, &record),
             false => Flow::Done(library),
         };
