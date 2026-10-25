@@ -187,6 +187,79 @@ mod tests {
     }
 
     #[test]
+    fn emptying_reads_the_writers_records_before_it_removes_and_removes_none_while_one_does_not_read(
+    ) {
+        use crate::disk::MemDisk;
+        use crate::ids::{EntryHash, Hlc};
+        use crate::io::{Io, Operation, Step};
+
+        let layout = Layout::new(".t").unwrap();
+        let writer = WriterId::from_u128(1);
+        let disk = MemDisk::new();
+        let put = |path: RelPath, bytes: &[u8]| {
+            let dir = path.parent().unwrap();
+            disk.perform(Io::MakeDir {
+                root: Root::Folder,
+                path: dir,
+            })
+            .unwrap();
+            let _ = disk.perform(Io::Remove {
+                root: Root::Folder,
+                path: path.clone(),
+            });
+            disk.perform(Io::Create {
+                root: Root::Folder,
+                path,
+                bytes: bytes.to_vec(),
+            })
+            .unwrap();
+        };
+        let item = TrashItem {
+            writer,
+            item: nonce(1),
+            len: 1,
+            from: RelPath::new("f").unwrap(),
+            at: Hlc::default(),
+            by: EntryHash::from_u128(1),
+        };
+        put(layout.trash(writer, item.item), b"x");
+        let at = layout.pending(writer, nonce(9));
+        put(at.clone(), b"not a record");
+        let mut asked = Vec::new();
+        let mut emptying = empty(&layout, writer, vec![item.clone()], BTreeSet::new());
+        let mut result = None;
+        let emptied = loop {
+            match emptying.resume(result.take()) {
+                Step::Io(io) => {
+                    asked.push(io.clone());
+                    result = Some(disk.perform(io));
+                }
+                Step::Done(emptied) => break emptied.unwrap(),
+            }
+        };
+        assert_eq!(
+            emptied,
+            Emptied::default(),
+            "a record that does not read keeps all"
+        );
+        let pending = Io::List {
+            root: Root::Folder,
+            dir: layout.pending_dir(writer),
+        };
+        assert_eq!(asked.first(), Some(&pending), "{asked:?}");
+        assert!(!asked.iter().any(Io::mutates), "{asked:?}");
+
+        let (_, readable) = record(vec![]);
+        put(at, &readable.encode());
+        let mut disk = disk;
+        let emptied = crate::blocking::run(
+            &mut disk,
+            empty(&layout, writer, vec![item], BTreeSet::new()),
+        );
+        assert_eq!(emptied.unwrap().removed, [nonce(1)]);
+    }
+
+    #[test]
     fn a_record_names_what_it_moves_into_or_out_of_the_trash_or_stages_there() {
         let at = RelPath::new("f").unwrap();
         let records = [record(vec![

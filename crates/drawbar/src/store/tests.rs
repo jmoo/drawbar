@@ -3805,19 +3805,20 @@ fn keeping_an_unsaved_edit_writes_nothing_in_the_folder() {
     assert!(again.bytes(again.named("a.ne5p")) == edited);
 }
 
-/// Unsaved edits an earlier drawbar kept in a writer's own directory are named once,
-/// and neither read nor removed.
+/// Unsaved edits an earlier drawbar kept in a writer's own directory are found at every
+/// open, and neither read nor removed; nothing marks them told in the local root.
+/// Whether the user has been told is the app's to remember.
 #[test]
-fn unsaved_edits_an_earlier_drawbar_kept_are_named_once_and_left_alone() {
+fn unsaved_edits_an_earlier_drawbar_kept_are_found_at_each_open_and_left_alone() {
     let root = Temp::new();
     fs::write(root.at("a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
     let genesis = toshokan::EntryHash::from_u128(1).to_string();
     let drafts = root.local().join(&genesis).join("drafts");
     fs::create_dir_all(&drafts).unwrap();
     fs::write(drafts.join("old.json"), b"{\"base\":\"00\"}\nedit").unwrap();
-    let told = "does not read the unsaved edits an earlier version kept";
-    let first = Session::open(&root);
-    assert_eq!(first.said(told), 1);
+    let mut first = Session::open(&root);
+    assert!(first.store.take_earlier());
+    assert!(!first.store.take_earlier(), "taken once");
     assert!(!first
         .bench
         .workspace
@@ -3825,8 +3826,9 @@ fn unsaved_edits_an_earlier_drawbar_kept_are_named_once_and_left_alone() {
         .unwrap()
         .is_unsaved());
     first.close();
-    let again = Session::open(&root);
-    assert_eq!(again.said(told), 0, "said once");
+    let mut again = Session::open(&root);
+    assert!(again.store.take_earlier(), "found again");
+    assert!(!root.local().join("notices").exists());
     assert_eq!(
         fs::read(drafts.join("old.json")).unwrap(),
         b"{\"base\":\"00\"}\nedit"

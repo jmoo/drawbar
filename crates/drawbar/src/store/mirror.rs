@@ -251,6 +251,8 @@ pub struct Store {
     rescues_due: bool,
     /// What an older drawbar kept in the folder, as opening found it, until taken.
     older: Vec<super::Older>,
+    /// Whether opening found unsaved edits an earlier drawbar kept, until taken.
+    earlier: bool,
 }
 
 impl Store {
@@ -315,6 +317,7 @@ impl Store {
             shelved: BTreeMap::new(),
             rescues_due: false,
             older: Vec::new(),
+            earlier: false,
             left: Vec::new(),
         }
     }
@@ -1651,12 +1654,7 @@ impl Store {
             older,
             trouble,
         } = opened;
-        if earlier {
-            log.say(
-                "This drawbar does not read the unsaved edits an earlier version kept for \
-                 this library, so they are not shown.",
-            );
-        }
+        self.earlier = earlier;
         self.older = older;
         for why in trouble {
             log.error(format!("opening the library: {why}"));
@@ -2429,6 +2427,12 @@ impl Store {
     /// What an older drawbar kept in the folder, as opening found it, once.
     pub fn take_older(&mut self) -> Vec<super::Older> {
         std::mem::take(&mut self.older)
+    }
+
+    /// Whether opening found unsaved edits an earlier drawbar kept in this library's
+    /// local root, once.
+    pub fn take_earlier(&mut self) -> bool {
+        std::mem::take(&mut self.earlier)
     }
 
     /// The name the app keeps what it has told of this library under, among others'.

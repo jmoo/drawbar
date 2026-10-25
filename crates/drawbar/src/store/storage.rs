@@ -145,18 +145,6 @@ pub async fn create<F: Fs>(fs: &F, root: Root, path: &RelPath, bytes: Vec<u8>) -
     sync(fs, root, &dir).await
 }
 
-/// Leave an empty file at `path`, where none is yet: a mark that something happened.
-pub async fn mark<F: Fs>(fs: &F, root: Root, path: &RelPath) -> io::Result<()> {
-    let dir = path.parent().expect("a file has a parent");
-    ask(fs, Io::MakeDir { root, path: dir }).await?;
-    let path = path.clone();
-    let bytes = Vec::new();
-    match fs.perform(Io::Create { root, path, bytes }).await {
-        Ok(_) | Err(IoError::AlreadyExists) => Ok(()),
-        Err(error) => Err(failed(error)),
-    }
-}
-
 /// The whole file at `path`; `None` where no file is.
 pub async fn read_whole<F: Fs>(fs: &F, root: Root, path: &RelPath) -> io::Result<Option<Vec<u8>>> {
     let Some(meta) = meta(fs, root, path).await? else {

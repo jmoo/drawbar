@@ -2,7 +2,7 @@
 
 This document specifies everything toshokan writes and how it reads, merges and
 changes it, precisely enough for a second implementation to share a library with
-this one. The format is unstable while toshokan is a proof of concept.
+this one. The format may change before 1.0.
 
 All text is UTF-8. All hexadecimal is lowercase. JSON is written without
 insignificant whitespace.

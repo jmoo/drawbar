@@ -113,8 +113,9 @@ the edits another window still open kept, and of two windows' edits of one
 asset, the one kept later wins.
 
 Unsaved edits an earlier drawbar kept in a writer's own directory of the local
-root, `<genesis>/drafts/`, are not read. The first open that finds them says so
-once (`store::unsaved::earlier`) and leaves them there.
+root, `<genesis>/drafts/`, are not read and stay there. Each open finds them
+(`store::unsaved::earlier`), and the app says so once per library, remembering in
+its own store that it did, as it does for an older drawbar's files.
 
 An asset's draft is its unsaved bytes, or the edit held of a piano or sample
 instrument resting in its file, under a line that says which
@@ -873,7 +874,7 @@ In the browser:
 | Library files | The library folder | The private file system's root, or the picked folder |
 | Tags, origins, each drawbar's log, staging and trash | `.drawbar/library/` in the library | `.drawbar/library/` in the library |
 | Drafts, slot edits, identities, rescues | `libraries/<hash>/` beside `app.ron` | `.drawbar/local/private/` or `.drawbar/local/picked-<id>/` of OPFS |
-| Theme, panels, Show all files, the libraries told of an older drawbar's files | eframe's store: `app.ron` in the app's data folder | eframe's store, in local storage |
+| Theme, panels, Show all files, the libraries told of an older drawbar's files or an earlier one's unsaved edits | eframe's store: `app.ron` in the app's data folder | eframe's store, in local storage |
 | MIDI on or off, recent libraries | eframe's store (`drawbar.midi`, `drawbar.libraries`) | |
 | Recent picked folders, as handles | | IndexedDB: database `drawbar`, store `libraries`, key `recent`: `{id, handle}` |
 

@@ -508,7 +508,7 @@ async fn generated() {
     if !files_cached {
         opfs_remove(parts(&home)).await.unwrap();
     }
-    let worker = Executor::new(
+    let executor = Executor::new(
         Folder::Private(path(&format!("{home}/folder"))),
         &path(&format!("{home}/generated")),
     )
@@ -517,7 +517,7 @@ async fn generated() {
     if !files_cached {
         let start = now();
         put(
-            &worker,
+            &executor,
             (0..entities()).map(|i| (file_path(i), file_bytes(i))),
         )
         .await;
@@ -531,7 +531,7 @@ async fn generated() {
             path: path("ready"),
             bytes: Vec::new(),
         };
-        ok(&worker, marker).await;
+        ok(&executor, marker).await;
     }
     let log_root = layout().root().to_string();
     opfs_remove(parts(&format!("{home}/folder/{log_root}")))
@@ -545,7 +545,7 @@ async fn generated() {
             root: Root::Folder,
             dir: dir.clone(),
         };
-        let Reply::ListedStat(listed) = ok(&worker, listing).await else {
+        let Reply::ListedStat(listed) = ok(&executor, listing).await else {
             panic!("{dir} did not list");
         };
         for (name, meta) in listed {
@@ -573,14 +573,14 @@ async fn generated() {
         now() - start
     ));
     let start = now();
-    put(&worker, log).await;
+    put(&executor, log).await;
     say(&format!("log written in {:.0} ms", now() - start));
     let marker = Io::Create {
         root: Root::Local,
         path: path("numbered-log"),
         bytes: Vec::new(),
     };
-    ok(&worker, marker).await;
+    ok(&executor, marker).await;
 }
 
 /// One operation's samples: wall time, the longest its timers waited, and the
@@ -685,13 +685,13 @@ type Lib = Library<Watched>;
 
 async fn open(install: &str) -> Lib {
     let home = home();
-    let worker = Executor::new(
+    let executor = Executor::new(
         Folder::Private(path(&format!("{home}/folder"))),
         &path(&format!("{home}/{install}")),
     )
     .await
     .unwrap();
-    let watched = Watched(worker);
+    let watched = Watched(executor);
     watched.resumed();
     let (library, _) = Library::open(watched, layout(), &schema(), env(install))
         .await
@@ -767,13 +767,13 @@ fn said(name: &str, library: &Library<Traced>, total: f64) {
 #[wasm_bindgen_test]
 async fn trace() {
     let home = home();
-    let worker = Executor::new(
+    let executor = Executor::new(
         Folder::Private(path(&format!("{home}/folder"))),
         &path(&format!("{home}/own")),
     )
     .await
     .unwrap();
-    let traced = Traced(worker, RefCell::default());
+    let traced = Traced(executor, RefCell::default());
     let (mut a, _) = Library::open(traced, layout(), &schema(), env("own"))
         .await
         .unwrap();
@@ -813,7 +813,7 @@ async fn trace() {
         said("refresh, nothing new", &a, now() - start);
     }
     a.close().await.unwrap();
-    let worker = Executor::new(
+    let executor = Executor::new(
         Folder::Private(path(&format!("{home}/folder"))),
         &path(&format!("{home}/own")),
     )
@@ -821,7 +821,7 @@ async fn trace() {
     .unwrap();
     let start = now();
     let (b, _) = Library::open(
-        Traced(worker, RefCell::default()),
+        Traced(executor, RefCell::default()),
         layout(),
         &schema(),
         env("own"),

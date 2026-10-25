@@ -289,17 +289,13 @@ pub fn newest(found: Vec<Result<Unsaved, String>>) -> Option<Unsaved> {
     found.into_iter().flatten().max_by_key(|unsaved| unsaved.at)
 }
 
-/// Where this install remembers it told of unsaved edits an earlier drawbar kept.
-const TOLD: &str = "notices/earlier-drafts";
+/// What the user is told of the unsaved edits an earlier drawbar kept.
+pub const EARLIER: &str = "This drawbar does not read the unsaved edits an earlier version kept \
+     for this library, so they are not shown.";
 
 /// Whether the local root holds unsaved edits an earlier drawbar kept, in a writer's
-/// `drafts/`, the first time this install looks; then `false`, since it remembers it
-/// told. They are never read.
+/// `drafts/`. They are never read.
 pub async fn earlier<F: Fs>(fs: &F) -> io::Result<bool> {
-    let told = RelPath::new(TOLD).expect("a fixed path");
-    if storage::meta(fs, Root::Local, &told).await?.is_some() {
-        return Ok(false);
-    }
     let local = storage::list(fs, Root::Local, &RelPath::ROOT).await?;
     let writers = local
         .into_iter()
@@ -308,7 +304,6 @@ pub async fn earlier<F: Fs>(fs: &F) -> io::Result<bool> {
         let drafts = RelPath::new(&format!("{name}/drafts")).expect("two components");
         let meta = storage::meta(fs, Root::Local, &drafts).await?;
         if meta.is_some_and(|meta| meta.kind == Kind::Directory) {
-            storage::mark(fs, Root::Local, &told).await?;
             return Ok(true);
         }
     }

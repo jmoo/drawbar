@@ -121,6 +121,7 @@ pub use ids::Key;
 pub use keys::identity_of_bytes;
 pub use mirror::{Pass, Store};
 pub use older::{notice as older_notice, Older};
+pub use unsaved::EARLIER as EARLIER_UNSAVED;
 
 use std::sync::Arc;
 

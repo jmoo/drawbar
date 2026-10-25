@@ -14,7 +14,7 @@
 //! [`asynch::Fs`]. Time, randomness and the app's identity function come in
 //! through [`Env`], so tests replay exactly.
 //!
-//! **Status:** proof of concept. The on-disk format is unstable.
+//! The on-disk format may change before 1.0.
 //!
 //! # Using a library
 //!

@@ -584,7 +584,7 @@ async fn a_change_whose_answers_are_lost_is_unheard_not_refused() {
 /// A rescue written through a worker lands whole in the library's own state and is
 /// found by the next look, and one a write left under its partial name is deleted.
 #[wasm_bindgen_test]
-async fn a_rescue_written_through_a_worker_is_offered_and_a_partial_one_deleted() {
+async fn a_rescue_written_through_a_worker_is_found_at_the_next_look_and_a_partial_one_deleted() {
     wipe(&opfs().await).await;
     let dir = Root::Private.local().join(RESCUED).unwrap();
     let writer = Worker::rescues(&dir).await.unwrap();
