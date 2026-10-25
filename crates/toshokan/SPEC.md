@@ -108,8 +108,7 @@ exception (see Browsers).
 A **library path** is a path in the folder outside the root and outside the
 app's directory around it, other than the folder itself and a browser's swap
 file, and, where the app's layout hides them, other than a path with a name
-that starts with a dot. Only library paths are the user's
-files.
+that starts with a dot. Only library paths are the user's files.
 
 Each install keeps, per library, a local root of its own that is never synced:
 

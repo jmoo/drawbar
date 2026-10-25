@@ -790,8 +790,9 @@ impl Library {
     }
 
     /// `logged` with every file op and displaced item carrying out `effects` may
-    /// add, each as long as it can be: an intent whose widest entry does not fit
-    /// a line is refused before anything is written.
+    /// add, each as long as it can be, and the fork points of every writer they
+    /// name: an intent whose widest entry does not fit a line is refused before
+    /// anything is written.
     fn widest(&self, logged: &Logged, effects: &EffectPlan) -> Logged {
         let fact = |path: &RelPath| FileFact {
             path: path.clone(),
@@ -846,6 +847,7 @@ impl Library {
                 _ => None,
             })
             .collect();
+        widest.forks = self.known_forks(&widest.ops);
         widest
     }
 
@@ -2403,8 +2405,12 @@ fn carry_out<'a>(
         .n
         .checked_add(1)
         .and_then(|n| Entry::encode(head.hash, n, at, EntryKind::Intent(logged.clone())).ok());
+    let latest = Hlc {
+        wall_ms: u64::MAX,
+        counter: u32::MAX,
+    };
     let widest = EntryKind::Intent(library.widest(logged, &effects));
-    let widest = Entry::encode(head.hash, u64::MAX, at, widest);
+    let widest = Entry::encode(head.hash, u64::MAX, latest, widest);
     let (Some(entry), Ok(_)) = (encoded, widest) else {
         return Flow::Done(Err(Error::Refused(Refusal::Invalid(Invalid::TooLong))));
     };
@@ -2414,9 +2420,12 @@ fn carry_out<'a>(
         entry.line(),
         &effects,
     ));
+    let (name, journaled) = (effects.record, effects.moves_files());
+    if journaled && record.encode().len() as u64 > pending::MAX_RECORD {
+        return Flow::Done(Err(Error::Refused(Refusal::Invalid(Invalid::TooLong))));
+    }
     let layout = library.layout.clone();
     let identify = Rc::clone(&library.env.identify);
-    let (name, journaled) = (effects.record, effects.moves_files());
     let prepared = effects::prepare(&layout, effects, Rc::clone(&record), Rc::clone(&identify));
     flow::run(prepared).then(move |prepared| match prepared {
         Ok(Ok(())) => {

@@ -1142,6 +1142,111 @@ fn a_move_of_thousands_of_files_is_one_entry_and_undoes_as_one_change<F: Facade>
     );
 }
 
+#[test]
+fn an_intent_whose_record_would_outgrow_its_bound_is_refused_and_writes_nothing() {
+    for (len, fits) in [(7 << 20, true), (9 << 20, false)] {
+        let folder = disk();
+        let clock = TestClock::at(1_000);
+        let (mut a, _) =
+            Blocking::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+        create(&mut a, "song.npno", b"song");
+        let before = folder.files(Root::Folder);
+        let long = path(&format!("{}.wav", "x".repeat(len)));
+        let saved = a.commit("Save", |i| {
+            i.create(|e| _ = e.save(&long, b"x".to_vec(), Expect::Absent))
+                .0
+        });
+        match fits {
+            true => assert!(saved.is_ok(), "{len}: {saved:?}"),
+            false => {
+                assert!(
+                    matches!(
+                        saved,
+                        Err(Error::Refused(Refusal::Invalid(Invalid::TooLong)))
+                    ),
+                    "{len}: {saved:?}"
+                );
+                assert_eq!(
+                    folder.files(Root::Folder),
+                    before,
+                    "{len}: nothing is written"
+                );
+            }
+        }
+    }
+}
+
+/// The line, with its newline, of the intent labeled `label` in `folder`'s segments.
+fn line_of(folder: &MemDisk, label: &str) -> String {
+    let segments = folder.files(Root::Folder).into_iter();
+    let segments = segments.filter(|(path, _)| path.as_str().ends_with(SEGMENT_EXTENSION));
+    let named = format!(r#""label":"{label}""#);
+    let lines = segments.flat_map(|(_, bytes)| {
+        let text = String::from_utf8(bytes).unwrap();
+        text.lines().map(str::to_owned).collect::<Vec<_>>()
+    });
+    let line = lines.into_iter().find(|line| line.contains(&named));
+    line.expect("the intent is logged") + "\n"
+}
+
+#[test]
+fn near_the_line_limit_an_intent_naming_a_forked_writer_commits_whole_or_writes_nothing() {
+    let setup = || {
+        let folder = disk();
+        let clock = TestClock::at(1_000);
+        let root = machine(&folder);
+        let (mut a, _) = Blocking::open(Probe::new(&root), env("a", 1, &clock)).unwrap();
+        let song = create(&mut a, "song.npno", b"song");
+        a.close().unwrap();
+        close_all(fork::<Blocking>(&root, "a", 10, &clock, |library, side| {
+            library
+                .commit("Tag", |i| i.add(song, TAGS, tag(side)))
+                .unwrap();
+        }));
+        let (mut b, _) =
+            Blocking::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+        create(&mut b, "other.npno", b"other");
+        (folder, b, song)
+    };
+    let save = |b: &mut Blocking, song: EntityId, origin: String| {
+        b.commit("Save", |i| {
+            let held = Expect::Holds(identity(b"song"));
+            i.save(song, &path("song.npno"), b"saved".to_vec(), held)
+                .set(song, ORIGIN, origin)
+        })
+    };
+    let (folder, mut b, song) = setup();
+    save(&mut b, song, "x".into()).unwrap();
+    let logged = line_of(&folder, "Save");
+    assert!(
+        logged.contains(r#""forks":[["#),
+        "the save names a fork: {logged}"
+    );
+    let logged = logged.len();
+    let mut outcomes = BTreeSet::new();
+    for target in (MAX_LINE - 120..=MAX_LINE + 40).step_by(20) {
+        let (folder, mut b, song) = setup();
+        let before = folder.files(Root::Folder);
+        let saved = save(&mut b, song, "x".repeat(1 + target - logged));
+        match saved {
+            Ok(_) => {
+                assert_eq!(line_of(&folder, "Save").len(), target);
+                outcomes.insert("whole");
+            }
+            Err(Error::Refused(Refusal::Invalid(Invalid::TooLong))) => {
+                assert_eq!(
+                    folder.files(Root::Folder),
+                    before,
+                    "{target}: nothing written"
+                );
+                outcomes.insert("refused");
+            }
+            Err(error) => panic!("{target}: {error}"),
+        }
+    }
+    assert_eq!(outcomes, ["refused", "whole"].into());
+}
+
 fn an_intent_wider_than_a_line_is_refused_and_writes_nothing<F: Facade>() {
     let folder = disk();
     let clock = TestClock::at(1_000);
@@ -5652,8 +5757,8 @@ fn read_native(folder: &std::path::Path, name: &str) -> Vec<u8> {
 }
 
 /// A folder of any size renames as one change: its files no entity is bound to are
-/// not logged one by one, and the entities' files it moves spill over into `more`
-/// entries. Undo and redo each move it whole.
+/// not logged one by one, and the entities' files it moves are logged in one entry.
+/// Undo and redo each move it whole.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_folder_of_fifty_thousand_files_renames_and_undoes_as_one_change() {

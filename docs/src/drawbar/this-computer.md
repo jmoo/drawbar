@@ -93,9 +93,10 @@ cannot be undone. The menu says which change it is, such as **Undo Rename
 removed folder, and a change to tags can each be undone. One action is one
 step: dropping, moving or deleting several sounds at once, unpacking a bundle,
 writing over a sound, removing a folder with what is in it, or making a tag and
-naming it, is one undo. An action on so many files that the library cannot keep
-it as one step, many thousands at once, is refused whole and changes nothing; do
-it in smaller parts. An edit you have not saved is taken back with **Revert**
+naming it, is one undo. An action on more files than the library can keep as one
+step is refused whole and changes nothing; do it in smaller parts. That is tens of
+thousands of files with short names, and about ten thousand with names hundreds
+of characters long. An edit you have not saved is taken back with **Revert**
 instead.
 
 Deleting a sound, or saving over one, moves the old file into drawbar's trash in
