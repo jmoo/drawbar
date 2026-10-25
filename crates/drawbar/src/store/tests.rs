@@ -4091,6 +4091,34 @@ fn a_slot_views_edit_the_autosave_failed_to_keep_is_kept_by_the_next() {
     assert!(second.bytes(id) == edited, "the latest edit");
 }
 
+/// A slot view's edit kept loses nothing at a tab's close, and one whose keep has not
+/// landed does.
+#[test]
+fn a_slot_views_edit_whose_keep_has_not_landed_is_losing() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let mut session = Session::open(&root);
+    let id = session.view_slot("N1", Location::from_user(1, 1), program);
+    session.edit(id, "96");
+    session.autosave();
+    let Bench {
+        workspace, browser, ..
+    } = &session.bench;
+    assert!(!session.store.losing(workspace, browser), "once kept");
+
+    session.edit(id, "12");
+    session.store.patience(std::time::Duration::from_millis(50));
+    session.store.fault(Fault::Stall);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Full);
+    let losing = session.store.losing(workspace, browser);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    session.close();
+    assert!(losing, "while the keep of the next edit is stalled");
+}
+
 /// A slot view's kept edit, over a slot that holds something else since, is shown over
 /// the view, and drawbar asks which to keep.
 #[test]

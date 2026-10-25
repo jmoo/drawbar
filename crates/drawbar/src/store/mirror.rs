@@ -397,11 +397,22 @@ impl Store {
     }
 
     /// Whether letting the library go now, with no last pass, would lose an edit: an
-    /// unsaved one, an asset never written to a file, a write that has not landed, or a
-    /// change held in memory where nothing may be written. A browser tab may close
-    /// without that pass.
+    /// unsaved one, an asset never written to a file, a write that has not landed, a
+    /// slot view's edit not kept yet, or a change held in memory where nothing may be
+    /// written. A browser tab may close without that pass.
     pub fn losing(&self, workspace: &Workspace, browser: &Browser) -> bool {
-        self.writing() || self.unheld(workspace).next().is_some() || self.held(browser)
+        let unheld = self.unheld(workspace).next().is_some();
+        self.writing() || unheld || self.unkept_view(workspace) || self.held(browser)
+    }
+
+    /// Whether a slot view's unsaved edit is not kept as it stands, by a keep answered.
+    fn unkept_view(&self, workspace: &Workspace) -> bool {
+        let views = workspace.entities().iter().filter(|entity| !entity.kept);
+        let mut unsaved = views.filter(|entity| entity.is_unsaved());
+        unsaved.any(|entity| {
+            let view = self.views.get(&entity.id);
+            view.is_none_or(|view| view.kept != Some((entity.stamp, view.base)))
+        })
     }
 
     /// Whether a change is held in memory only, where nothing may be written: a deletion,
