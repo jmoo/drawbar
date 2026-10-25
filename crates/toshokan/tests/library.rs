@@ -1247,8 +1247,33 @@ fn forks_in(line: &str) -> usize {
         .count()
 }
 
+/// A line length well inside every widest entry's slack.
+const WELL_UNDER: usize = MAX_LINE - 1024;
+
+/// A value that makes a line, `logged` bytes long with a one-byte value, `len`
+/// bytes long.
+fn value_for(len: usize, logged: usize) -> String {
+    "x".repeat(1 + len - logged)
+}
+
+fn assert_too_long<T: std::fmt::Debug>(result: Result<T, Error>, folder: &MemDisk, before: Files) {
+    assert!(
+        matches!(
+            result,
+            Err(Error::Refused(Refusal::Invalid(Invalid::TooLong)))
+        ),
+        "{result:?}"
+    );
+    assert_eq!(folder.files(Root::Folder), before, "nothing is written");
+}
+
+type Files = BTreeMap<RelPath, Vec<u8>>;
+
+// An under-counted widest entry shows first where the line is one byte too
+// long, so each of these tests is refused there and logs whole well below it.
+
 #[test]
-fn near_the_line_limit_an_intent_naming_forked_writers_commits_whole_or_writes_nothing() {
+fn an_intent_naming_forked_writers_one_byte_too_long_is_refused_and_writes_nothing() {
     let setup = || {
         let folder = disk();
         let clock = TestClock::at(1_000);
@@ -1259,48 +1284,82 @@ fn near_the_line_limit_an_intent_naming_forked_writers_commits_whole_or_writes_n
         create(&mut b, "other.npno", b"other");
         (folder, b, song)
     };
-    let save = |b: &mut Blocking, song: EntityId, origin: String| {
-        b.commit("Save", |i| {
+    let move_song = |b: &mut Blocking, song: EntityId, origin: String| {
+        b.commit("Move", |i| {
             let held = Expect::Holds(identity(b"song"));
-            i.save(song, &path("song.npno"), b"saved".to_vec(), held)
+            i.rename(song, &path("moved.npno"), held)
                 .set(song, ORIGIN, origin)
         })
     };
     let (folder, mut b, song) = setup();
-    save(&mut b, song, "x".into()).unwrap();
-    let logged = line_of(&folder, "Save");
+    move_song(&mut b, song, "x".into()).unwrap();
+    let logged = line_of(&folder, "Move");
     assert_eq!(
         forks_in(&logged),
         FORKED.len(),
-        "the save names each forked writer: {logged}"
+        "the move names each forked writer: {logged}"
     );
     let logged = logged.len();
-    let mut outcomes = BTreeSet::new();
-    for target in (MAX_LINE - 200..=MAX_LINE + 40).step_by(10) {
-        let (folder, mut b, song) = setup();
-        let before = folder.files(Root::Folder);
-        let saved = save(&mut b, song, "x".repeat(1 + target - logged));
-        match saved {
-            Ok(_) => {
-                assert_eq!(line_of(&folder, "Save").len(), target);
-                outcomes.insert("whole");
-            }
-            Err(Error::Refused(Refusal::Invalid(Invalid::TooLong))) => {
-                assert_eq!(
-                    folder.files(Root::Folder),
-                    before,
-                    "{target}: nothing written"
-                );
-                outcomes.insert("refused");
-            }
-            Err(error) => panic!("{target}: {error}"),
-        }
-    }
-    assert_eq!(outcomes, ["refused", "whole"].into());
+    let (folder, mut b, song) = setup();
+    let before = folder.files(Root::Folder);
+    assert_too_long(
+        move_song(&mut b, song, value_for(MAX_LINE + 1, logged)),
+        &folder,
+        before,
+    );
+    let (folder, mut b, song) = setup();
+    move_song(&mut b, song, value_for(WELL_UNDER, logged)).unwrap();
+    assert_eq!(line_of(&folder, "Move").len(), WELL_UNDER);
 }
 
 #[test]
-fn near_the_line_limit_finishing_an_orphan_logs_its_facts_whole_or_writes_nothing() {
+fn a_save_stopped_partway_one_byte_too_long_is_refused_and_writes_nothing() {
+    let name = format!("{}.npno", "s".repeat(200));
+    let setup = || {
+        let folder = disk();
+        let clock = TestClock::at(1_000);
+        let probe = Probe::new(&machine(&folder));
+        let (mut a, _) = Blocking::open(probe.clone(), env("a", 1, &clock)).unwrap();
+        let song = create(&mut a, &name, b"song");
+        (folder, probe, a, song)
+    };
+    let save = |(probe, a, song): (&Probe, &mut Blocking, EntityId), origin: String| {
+        let placing = {
+            let name = name.clone();
+            move |io: &Io| matches!(io, Io::Rename { to, .. } if to.as_str() == name)
+        };
+        fail(probe, placing);
+        let saved = a.commit("Save", |i| {
+            let held = Expect::Holds(identity(b"song"));
+            i.save(song, &path(&name), b"saved".to_vec(), held)
+                .set(song, ORIGIN, origin)
+        });
+        heal(probe);
+        saved
+    };
+    let (folder, probe, mut a, song) = setup();
+    let stopped = save((&probe, &mut a, song), "x".into());
+    assert!(matches!(stopped, Err(Error::Partial(_))), "{stopped:?}");
+    let logged = line_of(&folder, "Save");
+    let displaced = logged.split(r#""displaced":"#).nth(1).unwrap_or_default();
+    assert_eq!(
+        displaced.matches(r#""item":"#).count(),
+        2,
+        "the old file and the staged one: {logged}"
+    );
+    let logged = logged.len();
+    let (folder, probe, mut a, song) = setup();
+    let before = folder.files(Root::Folder);
+    let refused = save((&probe, &mut a, song), value_for(MAX_LINE + 1, logged));
+    assert_too_long(refused, &folder, before);
+    let (folder, probe, mut a, song) = setup();
+    let stopped = save((&probe, &mut a, song), value_for(WELL_UNDER, logged));
+    assert!(matches!(stopped, Err(Error::Partial(_))), "{stopped:?}");
+    assert_eq!(line_of(&folder, "Save").len(), WELL_UNDER);
+}
+
+#[test]
+fn an_orphan_finishes_with_its_records_refs_in_the_line_its_writer_bounded() {
     let setup = |origin: String| {
         let folder = disk();
         let clock = TestClock::at(1_000);
@@ -1318,84 +1377,74 @@ fn near_the_line_limit_finishing_an_orphan_logs_its_facts_whole_or_writes_nothin
                 .set(song, ORIGIN, origin)
         });
         heal(&probe);
-        assert!(
-            stopped.is_err(),
-            "the move is neither made nor logged: {stopped:?}"
-        );
         w.close().unwrap();
         let (mut b, _) =
             Blocking::open(Probe::new(&machine(&folder)), env("b", 7, &clock)).unwrap();
         create(&mut b, "other.npno", b"other");
-        let orphan = b.refresh().unwrap().orphaned.remove(0);
-        (folder, b, orphan)
+        let orphans = b.refresh().unwrap().orphaned;
+        (folder, b, stopped, orphans)
     };
-    let (folder, mut b, orphan) = setup("x".into());
-    b.settle(orphan, Settlement::Finished).unwrap();
+    let (folder, mut b, _, mut orphans) = setup("x".into());
+    b.settle(orphans.remove(0), Settlement::Finished).unwrap();
     let logged = line_of(&folder, "Move");
     assert_eq!(
         forks_in(&logged),
-        FORKED.len(),
-        "finishing names each forked writer: {logged}"
+        0,
+        "finishing replaces what the record named: {logged}"
     );
     let logged = logged.len();
-    let mut outcomes = BTreeSet::new();
-    for target in (MAX_LINE - 270..=MAX_LINE + 30).step_by(30) {
-        let (folder, mut b, orphan) = setup("x".repeat(1 + target - logged));
-        let before = folder.files(Root::Folder);
-        match b.settle(orphan, Settlement::Finished) {
-            Ok(_) => {
-                assert_eq!(line_of(&folder, "Move").len(), target);
-                outcomes.insert("whole");
-            }
-            Err(Error::Refused(Refusal::Invalid(Invalid::TooLong))) => {
-                assert_eq!(
-                    folder.files(Root::Folder),
-                    before,
-                    "{target}: nothing written"
-                );
-                outcomes.insert("refused");
-            }
-            Err(error) => panic!("{target}: {error}"),
-        }
-    }
-    assert_eq!(outcomes, ["refused", "whole"].into());
+    let (folder, _, stopped, orphans) = setup(value_for(MAX_LINE + 1, logged));
+    assert!(
+        matches!(
+            stopped,
+            Err(Error::Refused(Refusal::Invalid(Invalid::TooLong)))
+        ),
+        "its writer refuses it: {stopped:?}"
+    );
+    assert_eq!((orphans.len(), pending_files(&folder)), (0, Vec::new()));
+    let (folder, mut b, _, mut orphans) = setup(value_for(WELL_UNDER, logged));
+    b.settle(orphans.remove(0), Settlement::Finished).unwrap();
+    assert_eq!(line_of(&folder, "Move").len(), WELL_UNDER);
 }
 
 #[test]
-fn an_intent_a_commit_accepted_near_the_line_limit_settles_whatever_others_wrote_since() {
-    let mut settled = 0;
-    for target in (MAX_LINE - 270..=MAX_LINE).step_by(45) {
+fn a_move_accepted_with_less_room_than_writes_it_did_not_know_of_would_take_settles() {
+    const WRITERS: [&str; 8] = ["c", "d", "e", "f", "g", "h", "i", "j"];
+    // Each reference is at least `["` 32 hex `",` a digit `,"` 32 hex `"]`.
+    const REF: usize = 73;
+    // The most room in the line that the refs of those writes would not fit.
+    const ROOM: usize = WRITERS.len() * REF - 1;
+    let commit = |origin: String, since: &[&str]| {
         let folder = disk();
         let clock = TestClock::at(1_000);
         let song = a_song(&folder, &clock);
         let probe = Probe::new(&machine(&folder));
         let (mut w, _) = Blocking::open(probe.clone(), env("w", 2, &clock)).unwrap();
         create(&mut w, "w.npno", b"w");
+        forked_file_writes(&folder, &clock, song, since);
         let moving = |io: &Io| matches!(io, Io::Rename { to, .. } if to.as_str() == "moved.npno");
         let logging = |io: &Io| io.root() == Root::Folder && io.path().as_str().ends_with(".txt");
         fail(&probe, move |io| moving(io) || io.mutates() && logging(io));
         let stopped = w.commit("Move", |i| {
             let held = Expect::Holds(identity(b"song"));
-            let origin = "x".repeat(target - 600);
             i.rename(song, &path("moved.npno"), held)
                 .set(song, ORIGIN, origin)
         });
         heal(&probe);
-        if matches!(stopped, Err(Error::Refused(_))) {
-            continue;
-        }
-        assert!(
-            stopped.is_err(),
-            "{target}: the move is neither made nor logged: {stopped:?}"
-        );
-        forked_file_writes(&folder, &clock, song, &["c", "d", "e", "f", "g", "h"]);
+        assert!(matches!(stopped, Err(Error::Io { .. })), "{stopped:?}");
+        (folder, w, song)
+    };
+    let settle = |folder: &MemDisk, w: &mut Blocking, song: EntityId| {
         w.refresh().unwrap();
-        let tagged = w.commit("Tag", |i| i.add(song, TAGS, tag("later")));
-        assert!(tagged.is_ok(), "{target}: {tagged:?}");
-        assert!(line_of(&folder, "Move").len() <= MAX_LINE);
-        settled += 1;
-    }
-    assert!(settled > 0, "some move near the limit is accepted");
+        w.commit("Tag", |i| i.add(song, TAGS, tag("later")))
+            .unwrap();
+        line_of(folder, "Move").len()
+    };
+    let (folder, mut w, song) = commit("x".into(), &[]);
+    let logged = settle(&folder, &mut w, song);
+    let (folder, mut w, song) = commit(value_for(MAX_LINE - ROOM, logged), &WRITERS);
+    let settled = settle(&folder, &mut w, song);
+    assert!((MAX_LINE - ROOM..=MAX_LINE).contains(&settled), "{settled}");
 }
 
 fn an_intent_wider_than_a_line_is_refused_and_writes_nothing<F: Facade>() {

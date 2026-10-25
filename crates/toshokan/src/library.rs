@@ -795,7 +795,9 @@ impl Library {
     /// and a fork point for every writer its ops name, as late as one can be. Its
     /// refs are fixed when the record is written, so no entry logging the intent,
     /// at commit or when the record settles, is longer: an intent whose widest
-    /// entry does not fit a line is refused before anything is written.
+    /// entry does not fit a line is refused before anything is written. A staged
+    /// file a stop sweeps to the trash is displaced in place of its file op, which
+    /// is longer.
     fn widest(&self, logged: &Logged, facts: &[Op], effects: &EffectPlan) -> Logged {
         let fact = |path: &RelPath| FileFact {
             path: path.clone(),
