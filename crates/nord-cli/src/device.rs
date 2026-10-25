@@ -1413,6 +1413,10 @@ fn referring_set_lists(
     targets: &[Location],
 ) -> Result<Vec<op::Referrer>, String> {
     let class = ObjectClass::SetList;
+    // An instrument with no set list partition has no set list to rewrite.
+    if read_geometry(device)?.classes().index(class).is_none() {
+        return Ok(Vec::new());
+    }
     let banks = declared_banks(device, class)?;
     let where_: Vec<String> = targets.iter().map(|&at| addr(at)).collect();
     let intent = format!("{} referrers {}", noun(class), where_.join(" "));

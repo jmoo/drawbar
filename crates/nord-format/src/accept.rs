@@ -55,9 +55,8 @@ pub enum Family {
 /// A class of storage on the instrument: the four libraries a decoded body can refer
 /// into, plus the two singleton buffers no reference points at.
 ///
-/// The wire codes live on `nord-usb`'s `ObjectClass`, which takes its library codes from
-/// [`Library`]. This enum names the same classes without the wire codes, so a caller
-/// holding both converts between them with no second table.
+/// `nord-usb`'s `ObjectClass` names the same classes, and each instrument's partition
+/// table says where it keeps them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Slot {
     Piano,

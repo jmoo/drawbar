@@ -1184,9 +1184,8 @@ impl Location {
 
 #[cfg(test)]
 mod tests {
-    /// A library reference in a decoded body and a session on the wire use the same
-    /// code for the same catalog, in both directions, and the acceptance table uses the
-    /// same storage class.
+    /// A library a decoded body refers into is the class of the same storage, and the
+    /// acceptance table uses that storage class.
     #[test]
     fn a_library_is_the_class_of_the_same_storage() {
         use super::ObjectClass;
