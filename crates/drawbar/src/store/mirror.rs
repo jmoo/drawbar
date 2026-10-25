@@ -3930,7 +3930,7 @@ fn kept_rows(
 /// and say whether one was not let go of before.
 fn let_go_of_keeps(keeping: &mut VecDeque<(u64, Option<(u64, blake3::Hash)>)>, id: u64) -> bool {
     let sent = keeping.iter_mut().filter(|sent| sent.0 == id);
-    sent.fold(false, |live, sent| sent.1.take().is_some() || live)
+    sent.filter_map(|sent| sent.1.take()).count() > 0
 }
 
 /// A name as the library list shows it.
