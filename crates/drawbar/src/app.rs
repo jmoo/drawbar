@@ -588,7 +588,6 @@ fn library(ctx: &egui::Context, root: crate::store::Root) -> Store {
     let name = crate::libraries::name(&root, crate::store::default_root().as_deref());
     #[cfg(target_arch = "wasm32")]
     let name = root.name();
-    let cache = crate::store::Cache::open(ctx, &root);
     #[cfg(not(target_arch = "wasm32"))]
     let backend = {
         let local = crate::store::local_root(&root);
@@ -596,7 +595,7 @@ fn library(ctx: &egui::Context, root: crate::store::Root) -> Store {
     };
     #[cfg(target_arch = "wasm32")]
     let backend = crate::store::Backend::start(ctx, root);
-    let store = Store::start(backend).remembering(cache);
+    let store = Store::start(backend);
     #[cfg(not(target_arch = "wasm32"))]
     let store = store.shelving(crate::device::shelf());
     match name {
