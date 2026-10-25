@@ -124,6 +124,7 @@ pub use exec::{opens, MOST_BYTES};
 pub use ids::Key;
 pub use keys::identity_of_bytes;
 pub use mirror::{Pass, Store};
+pub use older::{notice as older_notice, Older};
 
 use std::sync::Arc;
 
@@ -937,7 +938,7 @@ pub struct Opened {
     pub earlier: bool,
     /// How many pending records of other writers opening could not read.
     pub ignored: usize,
-    /// What an older drawbar kept in the folder, the first time this install opens it.
+    /// What an older drawbar kept in the folder.
     pub older: Vec<older::Older>,
     /// What opening tried to tidy and could not: finishing a change a crash or
     /// another window left, or emptying the trash.

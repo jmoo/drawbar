@@ -456,8 +456,8 @@ async fn discard(backup: Option<Kept>, emit: &Emit) {
     }
 }
 
-/// Leave a backup where it is when the slot may have lost what it held: the next open
-/// offers it. Returns where it is, in words for the failure.
+/// Leave a backup where it is when the slot may have lost what it held, for the app to
+/// put in the library. Returns where it is, in words for the failure.
 fn rescue(at: Location, backup: Kept, emit: &Emit) -> String {
     let place = backup.place();
     emit.send(DeviceEvent::Kept {
@@ -2068,8 +2068,8 @@ mod wire_tests {
     }
 
     /// A write that fails and cannot be put back is still one failure, and the occupant
-    /// it displaced is kept in one place only: the file it was read into, which the next
-    /// open offers. Nothing hands it on a second time.
+    /// it displaced is kept in one place only: the file it was read into, which goes into
+    /// the library. Nothing hands it on a second time.
     #[test]
     fn an_occupant_that_cannot_be_restored_is_kept_once() {
         let at = Location { bank: 0, slot: 3 };

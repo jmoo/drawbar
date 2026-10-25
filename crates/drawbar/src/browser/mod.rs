@@ -119,7 +119,6 @@ enum Answer {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Verb {
     Save,
-    Keep,
     Replace,
     Delete,
     Overwrite,
@@ -134,7 +133,6 @@ impl Verb {
     fn label(self) -> &'static str {
         match self {
             Verb::Save => "Save",
-            Verb::Keep => "Keep in library",
             Verb::Replace => "Replace",
             Verb::Delete => "Delete",
             Verb::Overwrite => "Overwrite",
@@ -150,9 +148,7 @@ impl Verb {
     fn button(self, ui: &mut egui::Ui) -> egui::Response {
         let (label, glyph) = (self.label(), self.glyph());
         match self {
-            Verb::Save | Verb::Keep | Verb::KeepBoth | Verb::Finish => {
-                sheet::primary(ui, Some(glyph), label)
-            }
+            Verb::Save | Verb::KeepBoth | Verb::Finish => sheet::primary(ui, Some(glyph), label),
             Verb::Replace
             | Verb::Delete
             | Verb::Overwrite
@@ -165,7 +161,6 @@ impl Verb {
     fn glyph(self) -> Glyph {
         match self {
             Verb::Save => Glyph::Save,
-            Verb::Keep => Glyph::LibraryBig,
             Verb::Replace => Glyph::Replace,
             Verb::Delete | Verb::Discard => Glyph::Trash2,
             Verb::Overwrite => Glyph::Replace,
@@ -913,6 +908,8 @@ impl Browser {
         });
     }
 
+    /// Ask what to do with a slot's former occupant the library could not take: one that
+    /// does not read, or one kept on this computer while the library cannot be written.
     pub(crate) fn ask_rescue(&mut self, rescue: Rescue) {
         let act = |what| vec![Act::Rescue(rescue.clone(), what)];
         let mut others = Vec::new();
@@ -920,22 +917,20 @@ impl Browser {
             others.push(("Show the file", act(Rescuing::Show)));
         }
         let ask = match &rescue.broken {
-            None => {
-                others.push(("Discard…", act(Rescuing::Confirm)));
-                Ask {
-                    title: format!("A write to the instrument left “{}”", rescue.name),
-                    note: Some(
-                        "It may be the only copy of what that slot held. Keep in library \
-                         puts it in the library, where you can send it back."
-                            .into(),
-                    ),
-                    verb: Verb::Keep,
-                    acts: act(Rescuing::Keep),
-                    others,
-                    cancel: "Later",
-                    strong: Answer::Verb,
-                }
-            }
+            None => Ask {
+                title: format!("A write to the instrument left “{}”", rescue.name),
+                note: Some(
+                    "It may be the only copy of what that slot held. The library cannot be \
+                     written, so it stays on this computer, and goes into the library the \
+                     next time one opens that can be written."
+                        .into(),
+                ),
+                verb: Verb::Discard,
+                acts: act(Rescuing::Confirm),
+                others,
+                cancel: "Later",
+                strong: Answer::Cancel,
+            },
             Some(why) => Ask {
                 title: format!(
                     "A write to the instrument left “{}”, which does not read",

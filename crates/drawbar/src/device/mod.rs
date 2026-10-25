@@ -245,13 +245,6 @@ fn words(verbs: (&str, &str, &str), what: String) -> Words {
     }
 }
 
-/// The library whose open offers a slot's former occupant kept in a file. In the
-/// browser that file is in drawbar's own storage, whatever folder is open.
-#[cfg(not(target_arch = "wasm32"))]
-const OFFERED: &str = "the library";
-#[cfg(target_arch = "wasm32")]
-const OFFERED: &str = "drawbar's own library in this browser";
-
 const READING: (&str, &str, &str) = ("Reading", "Read", "read");
 const COPYING: (&str, &str, &str) = ("Copying", "Copied", "copy");
 
@@ -1254,6 +1247,9 @@ pub struct Device {
     /// Whether a command failed, a copied slot was empty, or the instrument went, since
     /// the last [`Device::take_failed`].
     failed: bool,
+    /// The slots whose former occupants writes left on this computer since the last
+    /// [`Device::take_kept`].
+    kept: Vec<Location>,
     /// Counts what the instrument has reported and the links that moved since.
     revision: u64,
 }
@@ -1293,6 +1289,7 @@ impl Device {
             fetched: Vec::new(),
             gathered: None,
             failed: false,
+            kept: Vec::new(),
             revision: 0,
         }
     }
@@ -1375,6 +1372,11 @@ impl Device {
     /// Whether anything failed since the last call, once.
     pub fn take_failed(&mut self) -> bool {
         std::mem::take(&mut self.failed)
+    }
+
+    /// The slots whose former occupants writes left on this computer since the last call.
+    pub fn take_kept(&mut self) -> Vec<Location> {
+        std::mem::take(&mut self.kept)
     }
 
     /// The slots the last gather found, with its request, once.
@@ -1894,11 +1896,7 @@ impl Device {
                         "{} may have lost what it held; its bytes are kept at {place}",
                         shown(at)
                     ));
-                    log.trouble(format!(
-                        "{} may be empty. What was in it is kept at {place}, and drawbar \
-                         offers it the next time {OFFERED} opens.",
-                        shown(at)
-                    ));
+                    self.kept.push(at);
                 }
                 DeviceEvent::Summed {
                     class,

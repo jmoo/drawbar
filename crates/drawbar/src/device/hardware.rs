@@ -486,6 +486,9 @@ impl Rig {
         }
         let released = self.store.poll(workspace, browser, queue, log);
         device.poll(log, workspace, tabs, queue);
+        if !device.take_kept().is_empty() {
+            self.store.rescue_due();
+        }
         crate::queue::follow(workspace, device, queue, log);
         let mut acts = acts;
         if released {
@@ -700,31 +703,18 @@ impl Rig {
         rig
     }
 
-    /// Answer the question showing as a click on `label` would, and run the rescue acts
-    /// it gives as the app does, writing what they changed as its next frame does.
-    fn choose(&mut self, label: &str) {
+    /// Take in the rescues writes left, as the app's frame does while the instrument is
+    /// idle, writing what that changed as its next frame does.
+    fn take_in_rescues(&mut self) {
         let Bench {
             workspace,
             browser,
             log,
             ..
         } = &mut self.bench;
-        for act in browser.answer(label) {
-            let Act::Rescue(rescue, what) = act else {
-                panic!("{act:?} is not a rescue's act")
-            };
-            self.store.rescue(rescue, what, workspace, browser, log);
-        }
+        self.store.look_for_rescues(workspace, browser, log);
         self.store
             .sync(workspace, browser, crate::store::Pass::Files);
-    }
-
-    /// The title of the question showing, once one shows.
-    fn asked(&mut self) -> String {
-        self.until("a question shows", ATTACH_LIMIT, |rig| {
-            rig.bench.browser.asking().is_some()
-        });
-        self.bench.browser.asking().expect("one shows").0
     }
 }
 
@@ -1417,12 +1407,12 @@ fn s7_a_program_on_the_instrument_exports_as_nord_cli_bundles_it() {
 }
 
 /// A replace whose write fails and whose occupant cannot be put back leaves the occupant
-/// in this install's folder for the library. Keep in library makes it a file of the
-/// library, an entity that says which slot it came off, through a reopen, and the keep is
-/// one change undo takes back and redo makes again. Discard deletes another.
+/// in this install's folder for the library, and once the instrument is idle it goes into
+/// the library as a file of its own, an entity that says which slot it came off, through a
+/// reopen. Putting it there is one change undo takes back and redo makes again.
 #[test]
 #[ignore = "writes to an attached instrument; see the module's documentation"]
-fn s8_an_occupant_that_cannot_be_put_back_is_kept_in_the_library() {
+fn s8_an_occupant_that_cannot_be_put_back_goes_into_the_library() {
     use std::os::unix::fs::PermissionsExt as _;
 
     if !attached() {
@@ -1498,28 +1488,8 @@ fn s8_an_occupant_that_cannot_be_put_back_is_kept_in_the_library() {
     let name = rescues[0].0.clone();
     let rescue = kept_in.join(&name);
     fs::set_permissions(&rescue, mode(0o644)).expect("readable again");
-    let stem = name.strip_suffix(".npno").expect("a piano's name");
-    let second = format!("{stem} 2.npno");
-    fs::copy(&rescue, kept_in.join(&second)).expect("a second rescue");
-
-    // The rescues are offered in order of their names, the second copy's first, and
-    // a discard asks again: each question is answered by what it names.
-    let mut rig = rig.reopen();
-    let (mut kept, mut discarded) = (false, false);
-    while !(kept && discarded) {
-        let asked = rig.asked();
-        if asked.starts_with("Discard") && asked.contains(&second) {
-            rig.choose("Discard");
-            discarded = true;
-        } else if asked.contains(&second) {
-            rig.choose("Discard…");
-        } else if asked.contains(&name) {
-            rig.choose("Keep in library");
-            kept = true;
-        } else {
-            panic!("an unexpected question: {asked}");
-        }
-    }
+    // As the app's next frame with the instrument idle does.
+    rig.take_in_rescues();
     let landed = |rig: &Rig| {
         rig.bench
             .workspace
@@ -1529,16 +1499,13 @@ fn s8_an_occupant_that_cannot_be_put_back_is_kept_in_the_library() {
             && !rescue.exists()
     };
     rig.until("the rescue lands in the library", SEND_LIMIT, landed);
-    rig.until("the second rescue is deleted", ATTACH_LIMIT, |_| {
-        !kept_in.join(&second).exists()
-    });
 
     rig.store.undo();
-    rig.until("the keep is undone", ATTACH_LIMIT, |rig| {
+    rig.until("the rescue's placement is undone", ATTACH_LIMIT, |rig| {
         !rig.library.at(&name).exists()
     });
     rig.store.redo();
-    rig.until("the keep is redone", ATTACH_LIMIT, |rig| {
+    rig.until("the rescue's placement is redone", ATTACH_LIMIT, |rig| {
         rig.library.at(&name).exists()
     });
 
@@ -1555,7 +1522,7 @@ fn s8_an_occupant_that_cannot_be_put_back_is_kept_in_the_library() {
         "an entity says where it came from"
     );
     assert!(body_difference(&rig.library.at(&name), &piano).is_none());
-    assert_eq!(rig.backups(), [], "nothing is left to offer");
+    assert_eq!(rig.backups(), [], "nothing is left to take in");
     drop(rig);
     assert_no_strays(class);
 }

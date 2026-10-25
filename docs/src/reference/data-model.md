@@ -89,8 +89,8 @@ What only this install needs is kept in drawbar's own data, never in the library
 (`store::native::local_root`): `libraries/<hash of the library's path>/`, beside
 `app.ron`. It holds toshokan's local root, with the identities its scans read;
 `unsaved/`, for the unsaved edits of assets and of slot views
-(`store/unsaved.rs`); and `rescued/`, for a slot's former occupant that a write
-to the instrument left. Losing it loses the unsaved edits and nothing else. Two
+(`store/unsaved.rs`); and `rescued/`, for a slot's former occupant while a write
+to the instrument replaces it, and one the library could not take. Losing it loses the unsaved edits and nothing else. Two
 drawbars on one machine share it, each writing as a writer of its own; one that
 opens finishes the effects an idle one left unfinished.
 
@@ -251,8 +251,12 @@ stateDiagram-v2
   (`Workspace::read_now`). Decoding re-encodes and compares, as for any file
   that arrives.
 - **Resting.** A piano library or sample instrument stays in its file, indexed.
-  Its checksum is checked off the frame, one file at a time, and until then it
-  is `Checking`. A file that fails its check is not sent. On the desktop each
+  Its checksum is checked off the frame, one file at a time, once something needs
+  the verdict: opening it, sending it, or a background read for its slot
+  (`Workspace::check_soon`). A row drawn does not, so until then it is `Unchecked`,
+  and `Checking` while the check runs. A send queues an unchecked file and asks for
+  its check, and nothing is written until the check has passed. A file that fails
+  its check is not sent. On the desktop each
   resting file holds a file handle open, so the desktop raises its open-file
   limit at start (`ondisk::raise_open_files`). In the browser it holds the `File`
   snapshot the page took of it.
@@ -333,9 +337,9 @@ An asset needed this frame or the last, or selected, is not evicted.
 
 Once the listing is complete and the cache has answered, and again at each full
 pass, the store reads the unread files it tracks, whole: those with tags or a
-slot they came off (`Store::fetch_tracked`). Reading them decodes them and takes
-their slot checksum, so they match their slots on the instrument before anything
-shows them. A remembered file is skipped, since its summary already carries that
+slot they came off (`Store::fetch_tracked`). Reading them decodes them, or checks
+those that rest in their files, and takes their slot checksum, so they match their
+slots on the instrument before anything shows them. A remembered file is skipped, since its summary already carries that
 checksum. They go 32 files or 16 MiB at a time, and a read the user waits on runs
 after the batch in flight. None starts while a read something needs is wanted or
 in flight.
@@ -395,9 +399,10 @@ that and indexes it again.
 In the browser a read answers only later. The indexes read through a reader
 over the slices fetched so far (`ondisk::Slices`), which reports the file's
 real length and fails naming the range it lacks; the backend fetches that range,
-at least 64 KiB of it, and reads the index again. A piano's index arrives in one
-fetch after the 12 bytes that say what the file is, and a sample's in about one
-fetch per stroke. A read on the frame of a stroke not fetched yet answers
+at least 64 KiB of it within the file's first 64 KiB and 4 KiB past them
+(`ondisk::FETCH`, `ondisk::STEP`), and reads the index again. A piano's index
+arrives in one fetch after the 12 bytes that say what the file is, and a sample's
+in one small fetch per stroke, so indexing a sample reads little of its audio. A read on the frame of a stroke not fetched yet answers
 `WouldBlock` and fetches it, and the repaint when it lands plays it. A pass over
 the whole file, the checksum or a whole read, streams 4 MiB slices in a task of
 its own. A `File` snapshot fails to read once its file is written, so a move this
@@ -481,20 +486,26 @@ closed (`worker::put_back`): the instrument drops a write left unfinished when i
 session closes, but keeps it as an object in another slot when a second write
 follows it in the same session. The file is deleted once the slot holds what it
 should. Where the restore fails as well, or a delete may have landed, it stays,
-`DeviceEvent::Kept` names it in the log, and the next open offers it. It is the
-only copy drawbar keeps. The file is named as its rescue,
+`DeviceEvent::Kept` names it in the log. It is the only copy drawbar keeps. The file is named as its rescue,
 `nord-rescued-<bank>-<slot>.<tag>`, numbered where that name is taken. An open
 removes the `.partial` ones, which never are a slot's only copy.
 
-Once a library that may be written opens, each file named that way in both
-`rescued` folders is offered in a question (`Browser::ask_rescue`). Each is read
-through first and checked against its stored checksum (`envelope::verify`). One
-that does not read is said to be no copy of the slot, and offered only to be
-discarded. **Keep in library** copies it into the library's top level under its
-own name, or a free one, with the slot its name gives as its origin, and deletes
-it once the copy lands. **Show the file** opens its folder and asks again.
-**Discard** asks once more, then deletes it. **Later** leaves it to be offered at
-the next open.
+Once the library is listed, and after each `DeviceEvent::Kept` once the
+instrument is idle, drawbar looks in both `rescued` folders
+(`Store::look_for_rescues`). It waits for the instrument because a write in
+progress holds its slot's occupant under the name it takes as a rescue. Each file
+named as a rescue is read through and checked against its stored checksum
+(`envelope::verify`). Where the library may be written, a whole one is copied
+into the library's top level under its own name, or a free one, with the slot its
+name gives as its origin, in one intent that undo takes back, and deleted once the
+copy lands. One already being copied is not copied again. A crash after the copy
+lands and before the delete leaves the file to be copied again at the next open, so
+the library may hold the occupant twice, never not at all. One that does not read
+is said to be no copy of the slot, and offered only to be discarded. While the
+library cannot be written, a whole one stays where it is and is asked about
+(`Browser::ask_rescue`): **Show the file** opens its folder and asks again,
+**Discard** asks once more, then deletes it, and **Later** leaves it for the next
+open of a library that can take it.
 
 The queue compares a resting file with a slot's occupant by the checksum its
 check took, so its diff says only whether the bodies differ. The instrument
@@ -859,7 +870,7 @@ In the browser:
 | Library files | The library folder | The private file system's root, or the picked folder |
 | Tags, origins, each drawbar's log, staging and trash | `.drawbar/library/` in the library | `.drawbar/library/` in the library |
 | Drafts, slot edits, identities, rescues | `libraries/<hash>/` beside `app.ron` | `.drawbar/local/private/` or `.drawbar/local/picked-<id>/` of OPFS |
-| Theme, panels, Show all files | eframe's store: `app.ron` in the app's data folder | eframe's store, in local storage |
+| Theme, panels, Show all files, the libraries told of an older drawbar's files | eframe's store: `app.ron` in the app's data folder | eframe's store, in local storage |
 | MIDI on or off, recent libraries | eframe's store (`drawbar.midi`, `drawbar.libraries`) | |
 | Recent picked folders, as handles | | IndexedDB: database `drawbar`, store `libraries`, key `recent`: `{id, handle}` |
 | The derived cache | `library-cache.ron` beside `app.ron`, outside the default library | IndexedDB: database `drawbar`, store `files` |

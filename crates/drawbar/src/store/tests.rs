@@ -126,6 +126,18 @@ impl Session {
         while self.store.listing() || self.store.scanning() {
             assert!(self.next(), "the listing answered");
         }
+        self.look_for_rescues();
+    }
+
+    /// Take in the rescues left, as a frame does while the instrument is idle.
+    fn look_for_rescues(&mut self) {
+        let Bench {
+            workspace,
+            browser,
+            log,
+            ..
+        } = &mut self.bench;
+        self.store.look_for_rescues(workspace, browser, log);
     }
 
     /// Fold in what the library answered, as a frame does.
@@ -842,23 +854,18 @@ impl Session {
             let crate::browser::Act::Rescue(rescue, what) = act else {
                 panic!("{act:?} is not a rescue's act")
             };
-            let Bench {
-                workspace,
-                browser,
-                log,
-                ..
-            } = &mut self.bench;
-            self.store.rescue(rescue, what, workspace, browser, log);
+            let Bench { browser, log, .. } = &mut self.bench;
+            self.store.rescue(rescue, what, browser, log);
         }
         self.sync();
     }
 }
 
 /// A rescue still being written when drawbar stopped is never the slot's only copy, since
-/// the slot is not touched until it is whole. It is not offered, and is deleted, in the
-/// library and in drawbar's own data alike.
+/// the slot is not touched until it is whole. It is deleted, in this install's folder and
+/// in drawbar's own data alike, and nothing of it reaches the library.
 #[test]
-fn a_partial_rescue_file_is_never_offered() {
+fn a_rescue_cut_short_by_a_crash_is_deleted_and_never_reaches_the_library() {
     let (root, shelf) = (Temp::new(), Temp::new());
     let mut first = Session::open(&root);
     first.create();
@@ -875,9 +882,12 @@ fn a_partial_rescue_file_is_never_offered() {
     };
     session.opened();
 
+    session.sync();
     assert_eq!(session.bench.browser.asking(), None, "nothing is offered");
     assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
     assert_eq!(shelf.names(""), Vec::<String>::new());
+    let rescued = |name: &String| name.starts_with("nord-rescued");
+    assert!(!root.names("").iter().any(rescued), "{:?}", root.names(""));
 }
 
 /// A rescue file that does not read, such as one an older drawbar left half written, is
@@ -902,25 +912,20 @@ fn a_rescue_file_that_does_not_decode_is_reported_not_offered() {
     assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
 }
 
-/// Keep in library copies a rescue into the library's top level, where it is an asset
-/// like any other, an entity that says which slot it came off, and deletes it where it
-/// was. The copy is one change, which undo takes back and redo makes again.
+/// A rescue a write left goes into the library's top level once the library opens, as an
+/// asset like any other, an entity that says which slot it came off, and is deleted where
+/// it was. The copy is one change, which undo takes back and redo makes again, and the
+/// next open finds nothing more to take in.
 #[test]
-fn a_rescue_kept_moves_into_the_library_as_an_asset() {
+fn a_rescue_left_goes_into_the_library_once_with_its_slot_as_origin() {
     let root = Temp::new();
     with_rescue(&root);
 
     let mut second = Session::open(&root);
-    second.choose("Keep in library");
+    second.sync();
+    assert_eq!(second.bench.browser.asking(), None, "nothing is asked");
     assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
     assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue());
-    let names: Vec<&str> = second
-        .bench
-        .workspace
-        .listed()
-        .map(|entity| entity.name.as_str())
-        .collect();
-    assert!(names.contains(&"nord-rescued-1-4.npno"), "{names:?}");
 
     second.undo();
     assert!(!root.at("nord-rescued-1-4.npno").exists(), "undone");
@@ -929,11 +934,12 @@ fn a_rescue_kept_moves_into_the_library_as_an_asset() {
     second.close();
 
     let third = Session::open(&root);
-    assert_eq!(
-        third.bench.browser.asking(),
-        None,
-        "nothing is left to offer"
-    );
+    let rescues: Vec<String> = root
+        .names("")
+        .into_iter()
+        .filter(|name| name.starts_with("nord-rescued"))
+        .collect();
+    assert_eq!(rescues, ["nord-rescued-1-4.npno"], "taken in once");
     let kept = third.named("nord-rescued-1-4.npno");
     let origin = &third.bench.workspace.get(kept).unwrap().origin;
     assert!(
@@ -945,6 +951,68 @@ fn a_rescue_kept_moves_into_the_library_as_an_asset() {
         matches!(third.store.key(kept), Some(Key::Entity(_))),
         "an entity says where it came from"
     );
+}
+
+/// A rescue a write leaves while the library is open goes into it once the instrument is
+/// idle, once however often drawbar looks again before its copy lands.
+#[test]
+fn a_rescue_a_write_leaves_goes_into_the_open_library_once() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    fs::create_dir_all(rescued(&root)).unwrap();
+    fs::write(rescued(&root).join("nord-rescued-2-3.npno"), a_rescue()).unwrap();
+    for _ in 0..2 {
+        session.store.rescue_due();
+        session.look_for_rescues();
+    }
+    session.sync();
+    session.store.rescue_due();
+    session.look_for_rescues();
+    session.sync();
+
+    assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
+    let rescues: Vec<String> = root
+        .names("")
+        .into_iter()
+        .filter(|name| name.starts_with("nord-rescued"))
+        .collect();
+    assert_eq!(rescues, ["nord-rescued-2-3.npno"]);
+    let kept = session.named("nord-rescued-2-3.npno");
+    let origin = &session.bench.workspace.get(kept).unwrap().origin;
+    assert!(
+        matches!(origin, Origin::Rescued { at } if *at == Location::from_user(2, 3)),
+        "{}",
+        origin.label()
+    );
+}
+
+/// A library that cannot be written leaves a rescue where it is and asks about it: it may
+/// be shown or discarded, or left for the next open of a library that can take it.
+#[test]
+fn a_rescue_a_read_only_library_cannot_take_stays_and_is_offered() {
+    let (root, later) = newer_drawbar_wrote();
+    fs::create_dir_all(rescued(&root)).unwrap();
+    fs::write(rescued(&root).join("nord-rescued-1-4.npno"), a_rescue()).unwrap();
+    let mut second = Session::open(&root);
+    assert!(second.store.read_only().is_some(), "opened read-only");
+    let (title, answers) = second.bench.browser.asking().expect("a question is asked");
+    assert_eq!(
+        title,
+        "A write to the instrument left “nord-rescued-1-4.npno”"
+    );
+    assert_eq!(answers, ["Later", "Show the file", "Discard"]);
+    second.choose("Discard");
+    let (title, _) = second.bench.browser.asking().expect("asked again");
+    assert_eq!(title, "Discard “nord-rescued-1-4.npno”?");
+    second.choose("Later");
+    assert_eq!(names_at(&rescued(&root)), ["nord-rescued-1-4.npno"]);
+    second.close();
+    fs::remove_file(later).unwrap();
+
+    let mut third = Session::open(&root);
+    third.sync();
+    assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
+    assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue());
 }
 
 /// A rescue's name says the slot it came off.
@@ -994,61 +1062,15 @@ fn a_copy_off_a_slot_still_says_which_once_reopened() {
     );
 }
 
-/// Discard asks first, and deletes the rescue only once that is answered.
+/// Every rescue left, in this install's folder for the library and in drawbar's own data
+/// where no library could take one, goes into the library that opens.
 #[test]
-fn a_rescue_discarded_is_deleted_once_confirmed() {
-    let root = Temp::new();
-    with_rescue(&root);
-
-    let mut second = Session::open(&root);
-    second.choose("Discard…");
-    let (title, _) = second.bench.browser.asking().expect("asked again");
-    assert_eq!(title, "Discard “nord-rescued-1-4.npno”?");
-    assert_eq!(names_at(&rescued(&root)), ["nord-rescued-1-4.npno"]);
-    second.choose("Discard");
-    assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
-    assert!(!root
-        .names("")
-        .contains(&"nord-rescued-1-4.npno".to_string()));
-}
-
-/// Several rescues are offered one at a time in the order of their names, in which a
-/// numbered copy sorts before its first, and a discard is confirmed before the next.
-#[test]
-fn rescues_are_offered_in_the_order_of_their_names() {
-    let root = Temp::new();
-    with_rescue(&root);
-    fs::write(rescued(&root).join("nord-rescued-1-4 2.npno"), a_rescue()).unwrap();
-
-    let mut second = Session::open(&root);
-    let (title, _) = second.bench.browser.asking().expect("asked");
-    assert_eq!(
-        title,
-        "A write to the instrument left “nord-rescued-1-4 2.npno”"
-    );
-    second.choose("Discard…");
-    let (title, _) = second.bench.browser.asking().expect("asked again");
-    assert_eq!(title, "Discard “nord-rescued-1-4 2.npno”?");
-    second.choose("Discard");
-    let (title, _) = second.bench.browser.asking().expect("asked");
-    assert_eq!(
-        title,
-        "A write to the instrument left “nord-rescued-1-4.npno”"
-    );
-    second.choose("Keep in library");
-    assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
-    assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue());
-}
-
-/// A rescue in drawbar's own data, where no library could take it, is offered with the
-/// library's own, and Keep in library copies it in and deletes it there; Discard deletes
-/// it.
-#[test]
-fn a_rescue_in_drawbars_own_data_is_kept_or_discarded() {
+fn every_rescue_left_goes_into_the_library_that_opens() {
     let (root, shelf) = (Temp::new(), Temp::new());
-    for name in ["nord-rescued-1-4.npno", "nord-rescued-2-1.nsmp"] {
-        fs::write(shelf.at(name), a_rescue()).unwrap();
-    }
+    fs::create_dir_all(rescued(&root)).unwrap();
+    fs::write(rescued(&root).join("nord-rescued-1-4.npno"), a_rescue()).unwrap();
+    fs::write(rescued(&root).join("nord-rescued-1-4 2.npno"), a_rescue()).unwrap();
+    fs::write(shelf.at("nord-rescued-2-1.nsmp"), a_rescue()).unwrap();
     let bench = Bench::new();
     let store = Store::start(crate::testing::backend(&bench.ctx, &root));
     let mut session = Session {
@@ -1056,21 +1078,18 @@ fn a_rescue_in_drawbars_own_data_is_kept_or_discarded() {
         bench,
     };
     session.opened();
+    session.sync();
 
-    let (title, _) = session.bench.browser.asking().expect("asked");
-    assert!(title.contains("nord-rescued-1-4.npno"), "{title}");
-    session.choose("Keep in library");
-    assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue());
-    assert_eq!(shelf.names(""), ["nord-rescued-2-1.nsmp"]);
-
-    let (title, _) = session.bench.browser.asking().expect("asked");
-    assert!(title.contains("nord-rescued-2-1.nsmp"), "{title}");
-    session.choose("Discard…");
-    session.choose("Discard");
+    assert_eq!(session.bench.browser.asking(), None, "nothing is asked");
+    assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
     assert_eq!(shelf.names(""), Vec::<String>::new());
-    assert!(!root
-        .names("")
-        .contains(&"nord-rescued-2-1.nsmp".to_string()));
+    for name in [
+        "nord-rescued-1-4.npno",
+        "nord-rescued-1-4 2.npno",
+        "nord-rescued-2-1.nsmp",
+    ] {
+        assert_eq!(root.read(name), a_rescue(), "{name}");
+    }
 }
 
 /// Rows in view are read a batch at a time, and an asset opened meanwhile goes in the next
@@ -1143,10 +1162,9 @@ fn a_write_that_fails_leaves_the_file_as_it_was() {
     assert_eq!(session.said("was not saved"), 1);
 }
 
-/// A library whose hidden folder holds, in this install's own log, a change a newer
-/// drawbar wrote opens read-only: this build would write past what it cannot read.
-#[test]
-fn a_library_a_newer_drawbar_wrote_opens_read_only() {
+/// A copy of a library whose hidden folder holds, in this install's own log, a change a
+/// newer drawbar wrote, and the segment of the log that holds it.
+fn newer_drawbar_wrote() -> (Temp, std::path::PathBuf) {
     use toshokan::log::{Entry, EntryKind};
 
     let running = Temp::new();
@@ -1177,7 +1195,14 @@ fn a_library_a_newer_drawbar_wrote_opens_read_only() {
     )
     .unwrap();
     fs::write(writer.join("later.txt"), entry.to_bytes()).unwrap();
+    (root, writer.join("later.txt"))
+}
 
+/// A library whose hidden folder holds, in this install's own log, a change a newer
+/// drawbar wrote opens read-only: this build would write past what it cannot read.
+#[test]
+fn a_library_a_newer_drawbar_wrote_opens_read_only() {
+    let (root, _) = newer_drawbar_wrote();
     let second = Session::open(&root);
     let why = second.store.read_only().unwrap_or_default();
     assert!(why.contains("newer version"), "opened read-only: {why:?}");
@@ -2058,6 +2083,30 @@ fn a_clean_asset_holds_its_bytes_once() {
 
 /// A piano library the size a vendor ships: three strokes, each of the most blocks a
 /// stroke record can state, about 200 MB in all.
+/// A row drawn for a resting piano reads its index and nothing more: its checksum waits
+/// until it is opened, which reads it through.
+#[test]
+fn a_drawn_row_of_a_resting_piano_is_not_read_through_until_it_is_opened() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.npno"), large_piano()).unwrap();
+    let mut session = Session::listed(&root);
+    let id = session.only();
+    session.bench.workspace.in_view([id]);
+    session.answer_reads();
+    session.bench.workspace.settle_files(&mut session.bench.log);
+    let entity = session.bench.workspace.get(id).unwrap();
+    let file = entity.rests().expect("rests in its file").clone();
+    assert_eq!(entity.verify().badge(), "not checked");
+    assert_eq!(file.take_reads(), [], "read past its index");
+    assert_eq!(file.take_checks(), 0, "read through for its checksum");
+
+    session.bench.workspace.hurry(id);
+    session.bench.workspace.settle_files(&mut session.bench.log);
+    let entity = session.bench.workspace.get(id).unwrap();
+    assert_eq!(entity.verify().badge(), "ok");
+    assert_eq!(file.take_checks(), 1, "opening reads it through");
+}
+
 fn large_piano() -> Vec<u8> {
     use nord_format::formats::npno::synthetic::{take, Build};
     use nord_format::formats::npno::Bank;
@@ -6027,30 +6076,30 @@ fn a_draft_stays_while_its_save_is_in_flight() {
     assert!(again.bytes(id) == edited, "the edit is back");
 }
 
-/// A folder an older drawbar kept tags, unsaved edits and rescued slot contents in says
-/// so at its first open, and where, and leaves them as they are.
+/// What an older drawbar kept in a folder, tags, unsaved edits and rescued slot contents,
+/// is found at every open, named with where it is, and left as it is. Whether the user
+/// has been told is the app's to remember.
 #[test]
-fn an_older_drawbars_files_are_named_once_and_left_alone() {
+fn an_older_drawbars_files_are_found_at_each_open_and_left_alone() {
     let root = Temp::new();
     fs::create_dir_all(root.at(".drawbar/working")).unwrap();
     fs::create_dir_all(root.at(".drawbar/tmp")).unwrap();
     fs::write(root.at(".drawbar/library.ron"), b"(tags: [])").unwrap();
     fs::write(root.at(".drawbar/working/1-1"), b"edit").unwrap();
     fs::write(root.at(".drawbar/tmp/rescued-1.ne5p"), b"slot").unwrap();
-    let first = Session::open(&root);
-    let told = "An older drawbar kept tags in .drawbar/library.ron, unsaved edits in \
-                .drawbar/working and rescued slot contents in .drawbar/tmp in this folder. \
-                This drawbar does not read them, and leaves them where they are.";
-    let said = first.bench.log.iter().filter(|entry| entry.text == told);
+    let mut first = Session::open(&root);
+    let older = first.store.take_older();
+    assert_eq!(older, [Older::Tags, Older::Edits, Older::Rescues]);
     assert_eq!(
-        said.count(),
-        1,
-        "{:?}",
-        first.bench.log.iter().map(|e| &e.text).collect::<Vec<_>>()
+        crate::store::older_notice(&older),
+        "An older drawbar kept tags in .drawbar/library.ron, unsaved edits in \
+         .drawbar/working and rescued slot contents in .drawbar/tmp in this folder. This \
+         drawbar does not read them, and leaves them where they are."
     );
+    assert_eq!(first.store.take_older(), [], "taken once");
     first.close();
-    let again = Session::open(&root);
-    assert_eq!(again.said("An older drawbar kept"), 0, "said once");
+    let mut again = Session::open(&root);
+    assert_eq!(again.store.take_older(), older, "found again");
     assert_eq!(root.read(".drawbar/library.ron"), b"(tags: [])");
     assert_eq!(root.read(".drawbar/working/1-1"), b"edit");
     assert_eq!(root.read(".drawbar/tmp/rescued-1.ne5p"), b"slot");
