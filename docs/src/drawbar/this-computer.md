@@ -228,8 +228,8 @@ bring back any you deleted.
 - **Not read** or **not all listed.** drawbar could not read that file or
   folder, and the activity log names it. What is in such a folder is not shown
   until drawbar can read it.
-- **Failed verification.** The sample or piano file is damaged. drawbar will not
-  send it.
+- **Failed verification.** The sample or piano file is damaged. drawbar checks
+  one when you open or send it, and will not send a damaged one.
 - **No storage in the browser.** Some private windows give drawbar none. drawbar
   says so, and what you make lasts only until the tab closes. drawbar also cannot
   keep a copy of a sound it would replace, so it sends only to empty slots.

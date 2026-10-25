@@ -447,9 +447,22 @@ pub(crate) fn on_disk(dir: &Temp, name: &str, bytes: &[u8]) -> Arc<crate::ondisk
     Arc::new(indexed.expect("a piano or sample instrument is indexed"))
 }
 
-/// An asset resting in `file`, restored as a library restores one, and its id.
+/// An asset resting in `file`, restored as a library restores one, and its id. Its check
+/// is asked for, as opening or sending it asks.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn rest(workspace: &mut Workspace, name: &str, file: Arc<crate::ondisk::OnDisk>) -> u64 {
+    let id = rest_unchecked(workspace, name, file);
+    workspace.check_soon(id);
+    id
+}
+
+/// [`rest`], with nothing asking for its check.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn rest_unchecked(
+    workspace: &mut Workspace,
+    name: &str,
+    file: Arc<crate::ondisk::OnDisk>,
+) -> u64 {
     let id = workspace.next_id();
     workspace.restore(
         vec![crate::workspace::Saved {

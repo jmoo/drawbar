@@ -1376,6 +1376,14 @@ fn send_batch(queue: &mut Queue, workspace: &Workspace, device: &mut Device, log
     // ⚠️ The instrument attached now may not be the one each entry was queued against:
     // the queue survives a disconnection, so every entry is checked again.
     crate::queue::refit(workspace, &device.state, queue, log);
+    for held in will_write(queue) {
+        if workspace
+            .get(held.id)
+            .is_some_and(LocalEntity::awaits_check)
+        {
+            workspace.check_soon(held.id);
+        }
+    }
     // The whole batch is checked before the first delete-then-write.
     let batch = match grouped(queue, workspace) {
         Ok(batch) => batch,
@@ -1648,6 +1656,9 @@ fn save_doc(
             entity.name
         ));
     };
+    if entity.awaits_check() {
+        workspace.check_soon(id);
+    }
     // Refused before the write.
     let payload = match Payload::of(entity) {
         Ok(payload) => payload,
@@ -1696,8 +1707,11 @@ fn send(
     let Some(entity) = workspace.get(id) else {
         return;
     };
-    // Refused before anything is queued.
-    if let Err(e) = entity.sendable() {
+    // Refused before anything is queued. One whose check has not answered is queued,
+    // and its write waits for the check.
+    if entity.awaits_check() {
+        workspace.check_soon(id);
+    } else if let Err(e) = entity.sendable() {
         log.error(format!("{}: {e}", entity.name));
         log.trouble(format!(
             "“{}” is not a file the instrument takes.",
@@ -1802,6 +1816,44 @@ mod tests {
     /// A piano resting in its file is queued and batched without being read: the batch
     /// carries the file, and once it lands the asset stands on the slot with the
     /// checksum of the file, saved as the file, which nothing holds whole.
+    /// A resting piano nothing has checked is queued by a send, which asks for its check,
+    /// and nothing is written to the instrument until the check has passed.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_send_of_a_resting_piano_checks_it_before_anything_is_written() {
+        let mut bench = Bench::new();
+        let dir = crate::testing::Temp::new();
+        let file = crate::testing::on_disk(&dir, "Upright.npno", &crate::testing::piano(40));
+        let id = crate::testing::rest_unchecked(&mut bench.workspace, "Upright.npno", file.clone());
+        let verdict = |bench: &Bench| bench.workspace.get(id).unwrap().verify().badge();
+        assert_eq!(verdict(&bench), "not checked");
+
+        let class = ObjectClass::Piano;
+        let at = Location::from_user(1, 1);
+        bench.device.pretend_scanned(class, 1, &[""]);
+        bench.act(vec![Act::Send { id, class, at }]);
+        assert!(!bench.queue.is_empty(), "queued while its check runs");
+        bench.workspace.poll(&mut bench.log);
+        bench.act(vec![Act::SendAll]);
+        let batch = |bench: &Bench| {
+            bench
+                .device
+                .queued()
+                .iter()
+                .any(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }))
+        };
+        assert!(
+            !batch(&bench),
+            "nothing is written before the check answers"
+        );
+
+        bench.workspace.settle_files(&mut bench.log);
+        assert_eq!(verdict(&bench), "ok");
+        assert_eq!(file.take_checks(), 1, "the check read it through");
+        bench.act(vec![Act::SendAll]);
+        assert!(batch(&bench), "written once checked");
+    }
+
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn a_resting_piano_is_sent_from_its_file_and_stands_on_the_slot_it_landed_in() {
