@@ -299,11 +299,12 @@ For example:
 An intent is one line, file ops and `displaced` items included. Before it writes
 anything, a commit refuses an intent whose line would be longer than a line can
 be with the facts a settlement adds, every file op and `displaced` item its
-effects may add, and a fork point for every writer it names, each as long as it
-can be, or whose pending record would be longer than a reader reads
-(`Invalid::TooLong`). A file op replaces the writes its writer knew of when it
-wrote the record, so no entry that logs the intent, at commit or when the record
-settles, is longer. A commit appends its entries in one order: the
+effects may add whether they finish or stop, and a fork point for every writer it
+names, each as long as it can be, or whose pending record would be longer than a
+reader reads (`Invalid::TooLong`). A file op replaces the writes the intent's
+writer knew of when it planned it, which finishing another writer's record
+keeps, so no entry that logs the intent, at commit or when a record settles, is
+longer. A commit appends its entries in one order: the
 intent, the `settle` entry when it closes another writer's record, then its
 `bind` entries, each holding at most 1 MiB of ops.
 
@@ -848,8 +849,9 @@ A pending record is a JSON object:
 done; a `path` of `null` is no file. `"pin":true` marks a file the intent adopts
 as it is, logged as a `pin` op rather than a `file` op. `replaces`, omitted when
 empty, holds the references the entity's `file` or `pin` op replaces: the writes
-of its file register the writer knew of when it wrote the record. A reader reads
-at most 16 MiB of a record.
+of its file register the intent's writer knew of when it planned it. A record
+without `replaces` replaces nothing, so its file ops stand beside every write of
+the register they change. A reader reads at most 16 MiB of a record.
 
 ### Recovery
 
@@ -917,7 +919,8 @@ An open record of any other writer may belong to a live writer elsewhere, or to
 this install's own writer from before its local root was lost; a reader cannot
 tell them apart. It reports the record, and settles it only when the user asks,
 as an intent of its own: to finish, it carries out the remaining steps, skipping
-a `to_trash` whose path holds nothing, and logs the facts the record planned; to
+a `to_trash` whose path holds nothing, and logs the facts the record planned and
+its file ops with the record's `replaces`; to
 roll back, it reverses the done ones; to dismiss, it changes no file. It finds
 how far the steps got by checking them from the last, whichever way they move,
 since its own settling may have carried them further or reversed some; a

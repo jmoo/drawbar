@@ -1901,6 +1901,7 @@ fn commit<'a>(
                 record: None,
             };
             library.reversing = reverses;
+            let effects = library.with_replaces(effects);
             transact(library, logged, effects, None, pins.collect())
         })
         .and_then(move |(library, entries, ended)| {
@@ -2351,7 +2352,6 @@ fn transact<'a>(
     }
     let mut logged = logged;
     logged.record = effects.moves_files().then_some(effects.record);
-    let effects = library.with_replaces(effects);
     let facts = closing.as_ref().map_or(&[][..], |closing| &closing.facts);
     carry_out(library, &logged, facts, Rc::clone(&effects)).and_then(
         move |(library, record, applied)| {
