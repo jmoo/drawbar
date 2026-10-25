@@ -3,8 +3,8 @@
 //! The library is a directory tree: a folder in the browser is a directory, an asset is a
 //! file, and a move is a rename. What a file cannot say (its tags) is kept by toshokan in
 //! a hidden `.drawbar/library/` folder at the root, as facts about the entities that say
-//! it; every other file is known by its listing alone. Every running drawbar writes its
-//! own log there, so several may write one library at once.
+//! it; every other file is known by its listing alone. Every running drawbar appends only
+//! to its own log there, so the folder can be synced between computers.
 //!
 //! ```text
 //! <root>/

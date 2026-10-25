@@ -1,13 +1,13 @@
 [package]
 name = "toshokan"
 categories = ["data-structures", "filesystem", "wasm"]
-description = "Keep what a file cannot say about itself beside the file, for every writer"
+description = "Keep what a file cannot say about itself beside the file, in a folder that syncs"
 edition.workspace = true
 rust-version.workspace = true
 # The power-loss VM harness, the TLA+ model and the browser benchmark's driver run
 # from a checkout.
 exclude = ["power-loss/", "scripts/", "spec/"]
-keywords = ["crdt", "metadata", "offline-first", "sync", "tags"]
+keywords = ["metadata", "offline-first", "sync", "synced-folder", "tags"]
 license.workspace = true
 repository.workspace = true
 version = "0.1.0"

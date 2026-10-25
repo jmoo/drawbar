@@ -1,13 +1,14 @@
 # toshokan
 
-**Keep what a file can't say about itself beside the file, for every writer.**
+**Keep what a file can't say about itself beside the file, in a folder that syncs.**
 
 toshokan (図書館, "library") keeps tags, provenance and relations between files
-in a hidden directory inside a folder of real files. Every running instance of
-an app writes its own log there, offline and without coordinating, and every
-reader merges the logs to the same state, whatever order a sync client delivers
-them in. Files are saved, renamed and deleted without overwriting anything in
-place, so file changes can be undone.
+in a hidden directory inside a folder of real files, so the folder can live in
+Dropbox, OneDrive, iCloud or on a network share. Each running app appends only
+to files of its own, so a stale computer, files that arrive out of order, a
+partial restore or a conflicted copy needs no intervention, and once a sync
+settles every reader shows the same state. Nothing is overwritten in place, so
+an interrupted or conflicting change leaves every file recoverable.
 
 The on-disk format may change before 1.0.
 
