@@ -6035,30 +6035,30 @@ fn a_draft_stays_while_its_save_is_in_flight() {
     assert!(again.bytes(id) == edited, "the edit is back");
 }
 
-/// A folder an older drawbar kept tags, unsaved edits and rescued slot contents in says
-/// so at its first open, and where, and leaves them as they are.
+/// What an older drawbar kept in a folder, tags, unsaved edits and rescued slot contents,
+/// is found at every open, named with where it is, and left as it is. Whether the user
+/// has been told is the app's to remember.
 #[test]
-fn an_older_drawbars_files_are_named_once_and_left_alone() {
+fn an_older_drawbars_files_are_found_at_each_open_and_left_alone() {
     let root = Temp::new();
     fs::create_dir_all(root.at(".drawbar/working")).unwrap();
     fs::create_dir_all(root.at(".drawbar/tmp")).unwrap();
     fs::write(root.at(".drawbar/library.ron"), b"(tags: [])").unwrap();
     fs::write(root.at(".drawbar/working/1-1"), b"edit").unwrap();
     fs::write(root.at(".drawbar/tmp/rescued-1.ne5p"), b"slot").unwrap();
-    let first = Session::open(&root);
-    let told = "An older drawbar kept tags in .drawbar/library.ron, unsaved edits in \
-                .drawbar/working and rescued slot contents in .drawbar/tmp in this folder. \
-                This drawbar does not read them, and leaves them where they are.";
-    let said = first.bench.log.iter().filter(|entry| entry.text == told);
+    let mut first = Session::open(&root);
+    let older = first.store.take_older();
+    assert_eq!(older, [Older::Tags, Older::Edits, Older::Rescues]);
     assert_eq!(
-        said.count(),
-        1,
-        "{:?}",
-        first.bench.log.iter().map(|e| &e.text).collect::<Vec<_>>()
+        crate::store::older_notice(&older),
+        "An older drawbar kept tags in .drawbar/library.ron, unsaved edits in \
+         .drawbar/working and rescued slot contents in .drawbar/tmp in this folder. This \
+         drawbar does not read them, and leaves them where they are."
     );
+    assert_eq!(first.store.take_older(), [], "taken once");
     first.close();
-    let again = Session::open(&root);
-    assert_eq!(again.said("An older drawbar kept"), 0, "said once");
+    let mut again = Session::open(&root);
+    assert_eq!(again.store.take_older(), older, "found again");
     assert_eq!(root.read(".drawbar/library.ron"), b"(tags: [])");
     assert_eq!(root.read(".drawbar/working/1-1"), b"edit");
     assert_eq!(root.read(".drawbar/tmp/rescued-1.ne5p"), b"slot");

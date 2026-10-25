@@ -257,6 +257,8 @@ pub struct Store {
     /// The folders that keep the slots' former occupants are to be looked in: the
     /// library has been listed, or a write has left one since.
     rescues_due: bool,
+    /// What an older drawbar kept in the folder, as opening found it, until taken.
+    older: Vec<super::Older>,
 }
 
 impl Store {
@@ -322,6 +324,7 @@ impl Store {
             shelf: None,
             shelved: BTreeMap::new(),
             rescues_due: false,
+            older: Vec::new(),
             left: Vec::new(),
         }
     }
@@ -1701,20 +1704,7 @@ impl Store {
             older,
             trouble,
         } = opened;
-        if !older.is_empty() {
-            let said: Vec<String> = older
-                .iter()
-                .map(|older| {
-                    let (what, at) = older.said();
-                    format!("{what} in {}/{at}", super::keys::DIR)
-                })
-                .collect();
-            log.say(format!(
-                "An older drawbar kept {} in this folder. This drawbar does not read them, \
-                 and leaves them where they are.",
-                crate::strings::listed(&said)
-            ));
-        }
+        self.older = older;
         for why in trouble {
             log.error(format!("opening the library: {why}"));
         }
@@ -2490,6 +2480,23 @@ impl Store {
             .collect();
         found.sort_by(|a, b| a.name.cmp(&b.name));
         found
+    }
+
+    /// What an older drawbar kept in the folder, as opening found it, once.
+    pub fn take_older(&mut self) -> Vec<super::Older> {
+        std::mem::take(&mut self.older)
+    }
+
+    /// The name the app keeps what it has told of this library under, among others'.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn library_key(&self) -> String {
+        self.backend.root().display().to_string()
+    }
+
+    /// The name the app keeps what it has told of this library under, among others'.
+    #[cfg(target_arch = "wasm32")]
+    pub fn library_key(&self) -> String {
+        self.backend.root().local().to_string()
     }
 
     /// A write to the instrument has left a slot's former occupant on this computer:

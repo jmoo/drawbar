@@ -2680,6 +2680,54 @@ mod tests {
         assert_eq!(picked(&app), 0, "with nothing open, Escape lets go");
     }
 
+    /// What an older drawbar kept in a library is told once per library: the next session
+    /// over the same library, which app.ron says was told, says nothing, and another
+    /// library is told of its own.
+    #[test]
+    fn an_older_drawbars_files_are_told_once_per_library() {
+        let older = || {
+            let root = crate::testing::Temp::new();
+            std::fs::create_dir_all(root.at(".drawbar")).unwrap();
+            std::fs::write(root.at(".drawbar/library.ron"), b"(tags: [])").unwrap();
+            root
+        };
+        let told = |root: &crate::testing::Temp, store: &mut Fake| -> usize {
+            let ctx = egui::Context::default();
+            let library = crate::store::Store::start(crate::testing::backend(&ctx, root));
+            let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
+            cc.storage = Some(&*store);
+            let mut app = DrawbarApp::with_library(&cc, Some(library));
+            let mut frame = eframe::Frame::_new_kittest();
+            let started = std::time::Instant::now();
+            let opened = |app: &DrawbarApp| app.store.as_ref().is_some_and(|s| !s.listing());
+            while !opened(&app) || started.elapsed() < std::time::Duration::from_millis(50) {
+                assert!(
+                    started.elapsed() < std::time::Duration::from_secs(10),
+                    "opened"
+                );
+                testing::run(&ctx, testing::screen(SCREEN, Vec::new()), |ctx| {
+                    app.update(ctx, &mut frame)
+                });
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            app.save(store);
+            let said = app
+                .log
+                .iter()
+                .filter(|entry| entry.text.starts_with("An older drawbar"));
+            said.count()
+        };
+        let mut store = Fake::default();
+        let (first, second) = (older(), older());
+        assert_eq!(told(&first, &mut store), 1, "told at the first open");
+        assert_eq!(told(&first, &mut store), 0, "and not again");
+        assert_eq!(
+            told(&second, &mut store),
+            1,
+            "another library is told of its own"
+        );
+    }
+
     /// What was hidden comes back hidden in the next session's window.
     #[test]
     fn the_panels_come_back_where_the_last_session_left_them() {
