@@ -87,15 +87,35 @@ writer's `trash/`, where an undo finds them.
 
 What only this install needs is kept in drawbar's own data, never in the library
 (`store::native::local_root`): `libraries/<hash of the library's path>/`, beside
-`app.ron`. It holds toshokan's local root, with the identities its scans read and the drafts of unsaved edits; `slots/`, for the unsaved edits
-of slot views, each replaced whole under the lock `replacing.lock` so that two
-drawbars or tabs never interleave; and `rescued/`, for a slot's former occupant
-that a write to the instrument left. Losing it loses the drafts and nothing
-else. Two drawbars on one machine share it, each writing as a writer of its own;
-one that opens takes up what an idle one left, its drafts and its unfinished
-effects included.
+`app.ron`. It holds toshokan's local root, with the identities its scans read;
+`unsaved/`, for the unsaved edits of assets and of slot views
+(`store/unsaved.rs`); and `rescued/`, for a slot's former occupant that a write
+to the instrument left. Losing it loses the unsaved edits and nothing else. Two
+drawbars on one machine share it, each writing as a writer of its own; one that
+opens finishes the effects an idle one left unfinished.
 
-A draft is the asset's unsaved bytes, or the edit held of a piano or sample
+Each keep of an unsaved edit is a new file in `unsaved/`, written whole under a
+`.next` name, then renamed, and never changed after. No two drawbars or tabs
+write one file, so none waits for a lock. A file is a JSON line,
+`{"of":…,"base":…,"at":…}`, then the bytes: whose edit it is (an asset by its
+key, or a slot), what it was made over (the identity of the asset's file, or the
+BLAKE3 hash of the slot's bytes), and the keeping instance's clock in
+milliseconds. Its name is `<tag>-<instance>-<count>`: the first 16 bytes of the
+BLAKE3 hash of `of` as JSON, in hex, then the instance's random id and how many
+it kept before. Of the files of one edit, the one with the latest `at` is the
+edit. An instance's clock runs past every `at` it read, so an edit kept after
+another was read is the newer whatever the time says, and a keep of exactly
+what a file it read holds keeps that file's `at`. An instance removes the files
+of an edit it kept or read once it has kept the edit again or the edit ended,
+and never one it did not read. A window that opens the library therefore shows
+the edits another window still open kept, and of two windows' edits of one
+asset, the one kept later wins.
+
+Unsaved edits an earlier drawbar kept in a writer's own directory of the local
+root, `<genesis>/drafts/`, are not read. The first open that finds them says so
+once (`store::unsaved::earlier`) and leaves them there.
+
+An asset's draft is its unsaved bytes, or the edit held of a piano or sample
 instrument resting in its file, under a line that says which
 (`store/drafts.rs`), kept with the identity of the file it was made over. An
 edit is kept as RON text under a version of its own (`rewrite::Edit::working`):
@@ -177,10 +197,10 @@ file, and goes when its tab closes. `Workspace::keep` promotes one into the
 list, and closing the tab of a view that holds an edit, or that waits in the
 send queue, promotes it instead of dropping it. A view has no file a draft could
 be made over, so its unsaved edit is kept by its slot instead
-(`store/slots.rs`): in `slots/<instrument>-<class>-<bank>-<slot>`, named by the
-first 8 bytes of the BLAKE3 hash of the instrument's serial number, or its
-product name where it reports none, a line with the BLAKE3 hash of the bytes the
-view was opened over, then the view's bytes. A view asks for the edit kept of
+(`store::Slot`): the instrument's serial number, or its product name where it
+reports none, and the class, bank and slot, made over the BLAKE3 hash of the
+bytes the view was opened over (see
+[This install's own state](#this-installs-own-state)). A view asks for the edit kept of
 its slot at the first pass after it appears, and keeps none of its own before the
 answer. One over the same bytes is put back unsaved; one over other bytes is put
 back, and the user is asked which to keep, as for a file changed on disk. Where
@@ -500,7 +520,8 @@ reads files and makes folders through `exec::Fs` (`store/native.rs`).
 | `Intent` | A change to a file answers `Saved`, `Rewritten`, `Imported`, `Moved` or, for a delete that failed, `Failed`; then every intent answers `Committed`, with the view after it and whether it was made. |
 | `Undo`, `Redo` | `Committed`, with the files no entity is bound to that it moved. |
 | `Settle` | `Committed`: another drawbar's unfinished effect, finished, rolled back or left. |
-| `Draft`, `Discard` | Only `Unkept`, on failure. |
+| `Draft` | `Drafted`: whether the edit was kept. |
+| `Discard` | Only `Unkept`, on failure. |
 | `KeepSlot`, `DiscardSlot` | Only `Unkept`, on failure. |
 | `ReadSlot` | `SlotKept`: the edit kept of a slot's view, with the hash it was made over. |
 | `File(Read)` | `Read`: each file, held whole or resting, or why not. |
@@ -581,7 +602,7 @@ Which writer's trash an instance empties is in [Trash](https://github.com/jmoo/d
 
 ### Drafts
 
-An unsaved edit is kept as a toshokan draft in this install's own state, never in
+An unsaved edit is kept as a draft in this install's own state, never in
 the library (see [This install's own state](#this-installs-own-state)). A
 `Pass::Full`, at most every 2 seconds and on eframe's 5-second autosave, keeps
 each edit that changed since it was last kept, and lets go of the drafts of
@@ -590,13 +611,14 @@ for what is in flight, then runs a `Pass::Last`, repeating until nothing more is
 sent. A crash loses the edits made since the last full pass. A draft is made only
 over a file drawbar has read, by its identity, so an asset never written has
 none; a view's edit is kept by its slot (see
-[Views and kept assets](#views-and-kept-assets)). A library that cannot be written keeps no drafts, and says so when
-it opens.
+[Views and kept assets](#views-and-kept-assets)). Keeping a draft writes
+nothing in the folder. A library that cannot be written keeps no drafts, and
+says so when it opens.
 
 At open, each draft is put back over its asset once the asset's file is read,
-which the open asks for. A draft whose file no longer holds what it was made over
-is put back over the file as it is now, and the user is asked which to keep (see
-[Conflicts](#conflicts)). One whose file is gone is kept for when it is back.
+which the open asks for. A draft whose file no longer holds what it was made
+over, by the identity the open reads, is put back over the file as it is now,
+and the user is asked which to keep (see [Conflicts](#conflicts)). One whose file is gone is kept for when it is back.
 
 ### Opening and read-only
 

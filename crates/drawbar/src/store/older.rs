@@ -66,7 +66,7 @@ pub async fn found<F: Fs>(fs: &F) -> io::Result<Vec<Older>> {
         }
     }
     if !found.is_empty() {
-        storage::replace(fs, Root::Local, &at(TOLD), Vec::new()).await?;
+        storage::mark(fs, Root::Local, &at(TOLD)).await?;
     }
     Ok(found)
 }

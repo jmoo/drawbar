@@ -1,6 +1,6 @@
-//! An unsaved edit as toshokan keeps it, in this install's own state for the library:
-//! the bytes of an asset held whole, or the edit an editor holds of a piano or sample
-//! instrument resting in its file.
+//! What an asset's unsaved edit holds, as [`super::unsaved`] keeps it: the bytes of an
+//! asset held whole, or the edit an editor holds of a piano or sample instrument resting
+//! in its file.
 
 use crate::rewrite::Edit;
 
@@ -16,8 +16,8 @@ const BYTES: &[u8] = b"bytes\n";
 const EDIT: &[u8] = b"edit\n";
 
 impl Draft {
-    /// The draft's bytes as toshokan keeps them: the line that says its kind, then what
-    /// it holds, an edit as its working copy.
+    /// The draft's bytes as they are kept: the line that says its kind, then what it
+    /// holds, an edit as its working copy.
     pub fn encode(&self) -> Result<Vec<u8>, String> {
         let (kind, held) = match self {
             Draft::Bytes(bytes) => (BYTES, bytes.clone()),
