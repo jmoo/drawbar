@@ -104,21 +104,29 @@ pub enum Source {
 }
 
 pub fn status(ui: &Ui, source: Source, json: bool) -> Result<(), String> {
-    let report = match source {
+    let (report, classes) = match source {
         Source::Usb => {
             let mut device = open_usb()?;
-            transact(&mut device, "device status", |d| {
-                nord_usb::block_on(op::inventory(d.transport()))
+            let classes = read_geometry(&mut device)?.classes().clone();
+            let report = transact(&mut device, "device status", |d| {
+                nord_usb::block_on(op::inventory(d.transport(), &classes))
             })
-            .map_err(described)?
+            .map_err(described)?;
+            (report, classes)
         }
         Source::Replay(path) => {
             let text =
                 std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            let mut transport = nord_usb::ReplayTransport::from_script(&text)
+            let transport = nord_usb::ReplayTransport::from_script(&text)
                 .map_err(|e| e.to_string())?
                 .lenient();
-            nord_usb::block_on(op::inventory(&mut transport)).map_err(|e| e.to_string())?
+            let mut device = Device::new(transport);
+            nord_usb::block_on(async {
+                let classes = device.geometry().await?.classes().clone();
+                let report = op::inventory(device.transport(), &classes).await?;
+                Ok::<_, nord_usb::Error>((report, classes))
+            })
+            .map_err(|e| e.to_string())?
         }
     };
 
@@ -134,7 +142,7 @@ pub fn status(ui: &Ui, source: Source, json: bool) -> Result<(), String> {
     }
 
     if json {
-        print_json(ui, &report);
+        print_json(ui, &report, &classes);
     } else {
         print_table(ui, &report);
     }
@@ -273,14 +281,14 @@ fn print_table(ui: &Ui, report: &[Status]) {
     }
 }
 
-fn print_json(ui: &Ui, report: &[Status]) {
+fn print_json(ui: &Ui, report: &[Status], classes: &nord_usb::Classes) {
     ui.out("[");
     for (i, s) in report.iter().enumerate() {
         let comma = if i + 1 == report.len() { "" } else { "," };
         ui.out(format!(
             "  {{\"class\": \"{}\", \"code\": {}, \"items\": {}, \"used\": {}, \"free\": {}, \"dirty\": {}, \"available\": {}, \"capacity\": {}}}{comma}",
             s.class.label(),
-            s.class.to_raw(),
+            classes.index(s.class).expect("an inventoried class has a partition"),
             s.count,
             s.used,
             s.free,
@@ -490,12 +498,22 @@ pub(crate) fn open_usb() -> Result<Device<UsbTransport>, String> {
 }
 
 /// Cache geometry in its own intent so later recordings contain only their own frames.
+/// Once read, it records nothing again.
 fn read_geometry<T: Transport + Recorded>(device: &mut Device<T>) -> Result<&Geometry, String> {
-    transact(device, "device geometry", |d| {
-        nord_usb::block_on(d.geometry()).map(|_| ())
-    })
-    .map_err(described)?;
+    if !device.has_geometry() {
+        transact(device, "device geometry", |d| {
+            nord_usb::block_on(d.geometry()).map(|_| ())
+        })
+        .map_err(described)?;
+    }
     nord_usb::block_on(device.geometry()).map_err(|e| e.to_string())
+}
+
+/// The attached instrument with its partition table read, which places every session.
+pub(crate) fn open_instrument() -> Result<Device<UsbTransport>, String> {
+    let mut device = open_usb()?;
+    read_geometry(&mut device)?;
+    Ok(device)
 }
 
 fn declared_banks(
@@ -554,7 +572,7 @@ pub fn get(
     if body && out.is_none() {
         return Err("--body writes a file; give -o a path".into());
     }
-    let mut device = open_usb()?;
+    let mut device = open_instrument()?;
     if let (Some(path), false) = (&out, body) {
         return get_into(ui, &mut device, at, class, path);
     }
@@ -644,7 +662,7 @@ pub fn sweep(
     body: bool,
 ) -> Result<(), String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let mut device = open_usb()?;
+    let mut device = open_instrument()?;
     ui.note(format!(
         "sweeping {} ({}) into {}",
         shown(at),
@@ -896,7 +914,7 @@ pub fn send(
 ) -> Result<(), String> {
     send_with(
         ui,
-        &mut open_usb()?,
+        &mut open_instrument()?,
         &rescue_dir(),
         file,
         at,
@@ -1463,7 +1481,7 @@ pub fn move_object(
     class: ObjectClass,
     confirmed: bool,
 ) -> Result<(), String> {
-    let mut device = open_usb()?;
+    let mut device = open_instrument()?;
     let name = peek(&mut device, class, from)?;
     let dest = peek_dest(ui, &mut device, class, to, DestFate::Swapped);
     ui.note(format!(
@@ -1502,7 +1520,7 @@ pub fn delete(
     class: ObjectClass,
     confirmed: bool,
 ) -> Result<(), String> {
-    let mut device = open_usb()?;
+    let mut device = open_instrument()?;
     for &at in slots {
         let name = peek(&mut device, class, at)?;
         ui.note(format!(
@@ -1559,7 +1577,7 @@ pub fn rename(
     class: ObjectClass,
     confirmed: bool,
 ) -> Result<(), String> {
-    let mut device = open_usb()?;
+    let mut device = open_instrument()?;
     let old = peek(&mut device, class, at)?;
     ui.note(format!(
         "renaming {} from {:?} to {:?}",
@@ -1587,7 +1605,7 @@ pub fn duplicate(
     class: ObjectClass,
     confirmed: bool,
 ) -> Result<(), String> {
-    let mut device = open_usb()?;
+    let mut device = open_instrument()?;
     let name = peek(&mut device, class, from)?;
     let dest = peek_dest(ui, &mut device, class, to, DestFate::Overwritten);
     ui.note(format!(
@@ -1614,7 +1632,7 @@ pub fn duplicate(
 /// Load an object live on the instrument, as a double-click in Nord Sound Manager does.
 /// It changes nothing stored, so no confirmation is needed.
 pub fn select(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
-    let mut device = open_usb()?;
+    let mut device = open_instrument()?;
     read_at(&mut device, class, "select", at, usb_op::select).map_err(|e| explain(e, at))?;
     ui.note(format!("selected {} on the instrument", shown(at)));
     Ok(())
@@ -1651,7 +1669,7 @@ pub(crate) fn human_size(n: u32) -> Option<String> {
 
 /// List the piano and sample library objects an object depends on. Read-only.
 pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
-    let mut device = open_usb()?;
+    let mut device = open_instrument()?;
     let deps = read_at(&mut device, class, "deps", at, usb_op::dependencies)
         .map_err(|e| explain(e, at))?;
 
@@ -1729,8 +1747,8 @@ pub fn geometry(ui: &Ui) -> Result<(), String> {
     let geometry = read_geometry(&mut device)?;
 
     ui.out(ui.dim(format!(
-        "{:<4} {:<18} {:>6} {:>7} {:>10}  banks",
-        "code", "partition", "banks", "slots", "unit"
+        "{:<4} {:<18} {:<11} {:>6} {:>7} {:>10}  banks",
+        "code", "partition", "holds", "banks", "slots", "unit"
     )));
     for (p, banks) in geometry.entries() {
         // The sentinel is not a capacity and must not be summed into one.
@@ -1751,10 +1769,15 @@ pub fn geometry(ui: &Ui) -> Result<(), String> {
             Ok(unit) => format!("{} B", unit.get()),
             Err(e) => e.to_string(),
         };
+        let holds = match geometry.classes().at(p.index) {
+            ObjectClass::Unknown(_) => "—".to_string(),
+            class => class.label(),
+        };
         ui.out(format!(
-            "{:<4} {:<18} {:>6} {:>7} {:>10}  {}",
+            "{:<4} {:<18} {:<11} {:>6} {:>7} {:>10}  {}",
             p.index,
             p.name,
+            holds,
             banks.len(),
             slots,
             unit,
@@ -1762,8 +1785,9 @@ pub fn geometry(ui: &Ui) -> Result<(), String> {
         ));
     }
     ui.note("");
-    ui.note("the partition index is the object class number; (Native) partitions are a");
-    ui.note("second view of the same library, so their capacity is a sentinel, not a size");
+    ui.note("holds is the class a partition's name gives it, and — marks a name with none;");
+    ui.note("(Native) partitions are a second view of the same library, so their capacity");
+    ui.note("is a sentinel, not a size");
     ui.note("the unit is net of the block's own overhead");
     Ok(())
 }
@@ -1784,7 +1808,7 @@ pub fn wedge(ui: &Ui, class: ObjectClass, yes: bool) -> Result<(), String> {
     }
     let mut device = open_usb()?;
     nord_usb::block_on(async {
-        let s = Session::open(device.transport(), class).await?;
+        let s = Session::open(device.transport(), &nord_usb::Classes::default(), class).await?;
         s.abort();
         Ok::<(), nord_usb::Error>(())
     })
@@ -1867,7 +1891,7 @@ pub fn controls(ui: &Ui, args: ControlsArgs) -> Result<(), String> {
 
 /// Report which object the panel has loaded in this class. Read-only.
 pub fn focus(ui: &Ui, class: ObjectClass) -> Result<(), String> {
-    let mut device = open_usb()?;
+    let mut device = open_instrument()?;
     let (at, info) = transact(&mut device, format!("{} focus", noun(class)), |d| {
         nord_usb::block_on(d.read(class, async |s| {
             let at = usb_op::focus(s).await?;
@@ -1894,7 +1918,7 @@ pub fn focus(ui: &Ui, class: ObjectClass) -> Result<(), String> {
 /// The cursor walk and every `info` share one session, so a few hundred items take a few
 /// hundred exchanges, not a few hundred sessions.
 pub fn list(ui: &Ui, class: ObjectClass) -> Result<(), String> {
-    let mut device = open_usb()?;
+    let mut device = open_instrument()?;
     let banks = declared_banks(&mut device, class)?;
     let rows = transact(&mut device, format!("{} walk", noun(class)), |d| {
         nord_usb::block_on(d.read(class, async |s| {
@@ -2036,8 +2060,9 @@ pub fn probe(ui: &Ui, class: ObjectClass, request: ProbeArgs) -> Result<(), Stri
         return Ok(());
     }
 
+    let classes = read_geometry(&mut device)?.classes().clone();
     let (reply, changed, close_failed) = nord_usb::block_on(async {
-        let mut s = Session::open(device.transport(), class).await?;
+        let mut s = Session::open(device.transport(), &classes, class).await?;
         let r = s
             .probe(
                 svc,
@@ -2130,7 +2155,7 @@ fn dump(bytes: &[u8]) -> (String, String) {
 /// This is command `0x1e`: body length, format tag, version and CRC-32, the CBIN header
 /// fields a transfer leaves out, plus the name, which no `.ne5p` or `.ne5t` file stores.
 pub fn slot_info(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
-    let mut device = open_usb()?;
+    let mut device = open_instrument()?;
     let info = peek_info(&mut device, class, at).map_err(|e| explain(e, at))?;
 
     let row = |label: &str, value: String| {
@@ -2165,7 +2190,7 @@ pub fn slot_info(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String
 
 /// Read one object's bytes with no printing, for `edit`'s read-modify-write.
 pub fn fetch(at: Location, class: ObjectClass) -> Result<Vec<u8>, String> {
-    let mut device = open_usb()?;
+    let mut device = open_instrument()?;
     read_at(&mut device, class, "read", at, usb_op::read_program).map_err(|e| explain(e, at))
 }
 
@@ -2227,7 +2252,7 @@ mod tests {
                 let partitions = Partition::decode_all(&reply).unwrap();
                 reply.args = vec![0, 0, 0, 0, partitions.len() as u8];
                 for mut partition in partitions {
-                    if partition.index == ObjectClass::Program.to_raw() {
+                    if partition.name == "Program" {
                         partition.fields[..4].fill(0);
                     }
                     reply
@@ -2249,7 +2274,10 @@ mod tests {
                         .await
                         .expect_err("an unusable write allocation must leave the occupant alone");
                 assert!(
-                    matches!(error, nord_usb::Error::InvalidArgument(_)),
+                    matches!(
+                        error,
+                        nord_usb::Error::InvalidArgument(_) | nord_usb::Error::NoPartition(_)
+                    ),
                     "{class:?}: {error}"
                 );
             });
@@ -2411,12 +2439,12 @@ mod tests {
         const NAME: &str = "prog-8-14";
         pub(super) const STAMP: u32 = 0x6a89_f433;
 
-        /// The recorded transactions a put runs through: check-address, info, read,
-        /// geometry, delete, write.
+        /// The recorded transactions a put runs through: geometry, check-address, info,
+        /// read, delete, write.
         ///
         /// ⚠️ The geometry read is spliced in from its own recording. The put was
         /// captured against a build that already held the partition table, so the
-        /// capture has no frames for the transaction this one opens before deleting.
+        /// capture has no frames for the transaction that places every session.
         pub(super) fn recorded() -> Vec<Vec<Step>> {
             let steps = |text| {
                 Script::parse(text)
@@ -2428,7 +2456,7 @@ mod tests {
                     .collect::<Vec<_>>()
             };
             let mut out = steps(PUT);
-            out.splice(3..3, steps(GEOMETRY));
+            out.splice(0..0, steps(GEOMETRY));
             out
         }
 
@@ -2623,7 +2651,7 @@ mod tests {
         fn the_occupant_is_read_under_a_partial_name() {
             let dir = crate::edit::tests::scratch("send-partial");
             let put = recorded();
-            let begin_read = put[2][7].frame().expect("the BEGIN_READ").to_vec();
+            let begin_read = put[3][7].frame().expect("the BEGIN_READ").to_vec();
             let mut device = Device::new(Watched {
                 replay: ReplayTransport::new(put.concat()),
                 watch: begin_read,
@@ -2663,7 +2691,7 @@ mod tests {
         fn a_backup_whose_folder_cannot_be_synced_stops_the_put_before_the_delete() {
             let dir = crate::edit::tests::scratch("send-unsynced");
             let put = recorded();
-            let begin_read = put[2][7].frame().expect("the BEGIN_READ").to_vec();
+            let begin_read = put[3][7].frame().expect("the BEGIN_READ").to_vec();
             let delete = put[4][5].frame().expect("the DELETE").to_vec();
             let mut device = Device::new(Watched {
                 replay: ReplayTransport::new(put.concat()),
@@ -2951,11 +2979,11 @@ mod tests {
             steps
         }
 
-        /// The address check, then the `INFO` that finds `occupant`, or finds the slot
-        /// empty without one.
+        /// The geometry and the address check, then the `INFO` that finds `occupant`, or
+        /// finds the slot empty without one.
         fn checked(occupant: Option<&[u8]>) -> Vec<Step> {
             let put = recorded();
-            let mut steps = put[0].clone();
+            let mut steps = put[..2].concat();
             steps.extend(session(match occupant {
                 Some(body) => vec![
                     ask(cmd::INFO, slot()),
@@ -2969,11 +2997,9 @@ mod tests {
             steps
         }
 
-        /// The recorded geometry, and the recorded delete when `delete` is set.
-        fn geometry(delete: bool) -> Vec<Step> {
-            let put = recorded();
-            let last = put.len() - 1 - usize::from(!delete);
-            put[3..last].concat()
+        /// The recorded delete.
+        fn deleted() -> Vec<Step> {
+            recorded()[4].clone()
         }
 
         /// A file served through the trait, as a disk serves one, recording each read's
@@ -3029,7 +3055,6 @@ mod tests {
             let body = body(40 * CHUNK + 1234);
             let file = envelope::wrap("ne5p", AT, 4, &body).unwrap();
             let mut steps = checked(None);
-            steps.extend(geometry(false));
             steps.extend(session(write(&body, "big", None)));
 
             let mut served = Served {
@@ -3072,7 +3097,7 @@ mod tests {
             let new = body(2 * CHUNK);
             let mut steps = checked(Some(&occupant));
             steps.extend(session(read(&occupant)));
-            steps.extend(geometry(true));
+            steps.extend(deleted());
             steps.extend(session(write(&new, "big", Some(4))));
             steps.extend(session(write(&occupant, "Big", None)));
 
@@ -3093,7 +3118,7 @@ mod tests {
             let new = body(2 * CHUNK);
             let mut steps = checked(Some(&occupant));
             steps.extend(session(read(&occupant)));
-            steps.extend(geometry(true));
+            steps.extend(deleted());
             steps.extend(session(write(&new, "big", Some(4))));
             steps.extend(session(write(&occupant, "Big", Some(4))));
 
@@ -3122,7 +3147,8 @@ mod tests {
                 info(occupant.len(), nord_format::crc::crc32(&occupant)),
             ];
             steps.extend(read(&occupant));
-            let mut device = Device::new(ReplayTransport::new(session(steps)));
+            let geometry = recorded().remove(0);
+            let mut device = Device::new(ReplayTransport::new([geometry, session(steps)].concat()));
             let path = dir.join("big.ne5p");
 
             get_into(&Ui::piped(), &mut device, AT, ObjectClass::Program, &path).unwrap();

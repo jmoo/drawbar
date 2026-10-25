@@ -2406,7 +2406,7 @@ fn the_index_reads_back_what_was_written_and_a_newer_one_is_known_as_that() {
             }),
             tags: [4].into(),
             origin: Stored::Device {
-                class: ObjectClass::Piano.to_raw(),
+                class: 1,
                 bank: 0,
                 slot: 2,
             },
@@ -2434,6 +2434,42 @@ fn the_index_reads_back_what_was_written_and_a_newer_one_is_known_as_that() {
 
     assert_eq!(sidecar::read("(version: 2, assets: 7)"), Read::Newer(2));
     assert_eq!(sidecar::read("not an index"), Read::Unreadable);
+}
+
+/// The slot an asset came off is written with the class numbers the index has always
+/// written, whatever the attached instrument numbers its partitions.
+#[test]
+fn an_indexed_slot_keeps_its_class_by_the_indexs_own_numbers() {
+    let text = r#"(version: 1, next_id: 2, assets: {1: (name: "a", origin: Device(class: 4, bank: 6, slot: 12))})"#;
+    let Read::Known(index) = sidecar::read(text) else {
+        panic!("{text}");
+    };
+    let at = Location { bank: 6, slot: 12 };
+    let origin = Origin::Device {
+        class: ObjectClass::Program,
+        at,
+    };
+    assert!(matches!(
+        index.assets[&1].origin(),
+        Origin::Device { class: ObjectClass::Program, at: read } if read == at
+    ));
+    assert_eq!(
+        sidecar::Stored::from(&origin),
+        sidecar::Stored::Device {
+            class: 4,
+            bank: 6,
+            slot: 12
+        }
+    );
+    let unnamed = Origin::Device {
+        class: ObjectClass::Unknown(4),
+        at,
+    };
+    assert_eq!(
+        sidecar::Stored::from(&unnamed),
+        sidecar::Stored::Implied,
+        "a partition this build cannot name means nothing on another instrument"
+    );
 }
 
 /// A field or a kind this build does not know, at any depth, is what a newer drawbar that

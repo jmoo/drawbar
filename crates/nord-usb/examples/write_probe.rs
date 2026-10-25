@@ -14,7 +14,7 @@
 use std::time::Duration;
 
 use nord_usb::wire::cmd;
-use nord_usb::{op, Location, Message, ObjectClass, Service, Session};
+use nord_usb::{op, Classes, Location, Message, ObjectClass, Service, Session};
 
 const LIMIT: Duration = Duration::from_secs(10);
 
@@ -46,7 +46,7 @@ fn address(text: &str) -> Location {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let class = ObjectClass::from_raw(args[1].parse::<u32>().expect("class number"));
+    let class = ObjectClass::Unknown(args[1].parse::<u32>().expect("partition index"));
     let at = address(&args[2]);
 
     let send: Option<Vec<u8>> = args
@@ -68,7 +68,9 @@ fn main() {
     nord_usb::block_on(async {
         // Baseline: what the slot holds, read in its own session.
         let (info, before) = {
-            let mut s = Session::open(&mut transport, class).await.expect("open");
+            let mut s = Session::open(&mut transport, &Classes::default(), class)
+                .await
+                .expect("open");
             let info = op::info(&mut s, at).await.expect("info");
             let body = op::read_body(&mut s, at).await.expect("read body");
             s.commit().await.expect("close");
@@ -96,7 +98,7 @@ fn main() {
         }
 
         // The probe. Arguments are built as `op::write` builds them, keeping the name.
-        let mut s = Session::open(&mut transport, class)
+        let mut s = Session::open(&mut transport, &Classes::default(), class)
             .await
             .expect("open")
             .allow_destructive_writes();
@@ -141,7 +143,9 @@ fn main() {
         s.commit().await.expect("close after probe");
 
         // Aftermath: read the slot back and compare.
-        let mut s = Session::open(&mut transport, class).await.expect("reopen");
+        let mut s = Session::open(&mut transport, &Classes::default(), class)
+            .await
+            .expect("reopen");
         let after = op::read_body(&mut s, at).await.expect("re-read");
         s.commit().await.expect("close");
         println!(

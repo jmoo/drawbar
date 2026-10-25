@@ -44,7 +44,7 @@ post() {
 }
 
 visit='{"event":"visit","version":"0.0.0-test","navigation":"navigate","first_day":true,"first_month":true,"webusb":true,"fits":true,"referrer":"","language":"en"}'
-op='{"event":"op","version":"0.0.0-test","op":"put","class":"1","outcome":"device-status 0x15","took":"<1s","model":"Nord Electro 5D","firmware":"2.04"}'
+op='{"event":"op","version":"0.0.0-test","op":"put","class":"pianos","outcome":"device-status 0x15","took":"<1s","model":"Nord Electro 5D","firmware":"2.04"}'
 
 post /e "[$visit,$op]" -H "origin: $origin"
 expect 204 "a beacon of two rows" "${curl_args[@]}"

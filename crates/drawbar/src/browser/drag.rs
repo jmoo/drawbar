@@ -352,12 +352,12 @@ impl Item {
 
     /// Locals, then folders, then slots by class and address, then tags: the order a
     /// selection iterates in.
-    fn key(self) -> (u8, u32, u32, u64) {
+    fn key(self) -> (u8, Option<ObjectClass>, u32, u64) {
         match self {
-            Item::Local(id) => (0, 0, 0, id),
-            Item::Folder(id) => (1, 0, 0, id),
-            Item::Slot { class, at } => (2, class.to_raw(), at.bank, u64::from(at.slot)),
-            Item::Tag(id) => (3, 0, 0, id),
+            Item::Local(id) => (0, None, 0, id),
+            Item::Folder(id) => (1, None, 0, id),
+            Item::Slot { class, at } => (2, Some(class), at.bank, u64::from(at.slot)),
+            Item::Tag(id) => (3, None, 0, id),
         }
     }
 }

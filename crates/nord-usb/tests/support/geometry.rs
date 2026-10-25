@@ -9,12 +9,12 @@
 
 use nord_usb::device::Geometry;
 use nord_usb::transport::ReplayTransport;
-use nord_usb::wire::ObjectClass;
+use nord_usb::wire::{Classes, ObjectClass};
 use nord_usb::{Result, Session};
 
 pub async fn committed() -> Result<Geometry> {
     let mut t = ReplayTransport::new(crate::scripts::fixture("device/geometry.script").steps());
-    let mut session = Session::open(&mut t, ObjectClass::Program).await?;
+    let mut session = Session::open(&mut t, &Classes::default(), ObjectClass::Unknown(4)).await?;
     let read = Geometry::read(&mut session).await;
     let closed = session.commit().await;
     read.and_then(|geometry| closed.map(|()| geometry))

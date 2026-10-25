@@ -710,7 +710,7 @@ enum Ranked {
     Name,
     Text(String),
     Count(u64),
-    Address((bool, u32, u32, u32)),
+    Address((bool, Option<ObjectClass>, u32, u32)),
 }
 
 impl Key {
@@ -740,10 +740,10 @@ fn word(row: &Row) -> String {
 }
 
 /// A row with no address sorts after every row that has one.
-fn address(row: &Row) -> (bool, u32, u32, u32) {
+fn address(row: &Row) -> (bool, Option<ObjectClass>, u32, u32) {
     match row.at {
-        Some((class, at)) => (false, class.to_raw(), at.bank, at.slot),
-        None => (true, 0, 0, 0),
+        Some((class, at)) => (false, Some(class), at.bank, at.slot),
+        None => (true, None, 0, 0),
     }
 }
 
@@ -752,7 +752,7 @@ fn address(row: &Row) -> (bool, u32, u32, u32) {
 pub fn consequence(rows: &[&Row], device: &DeviceState, queue: &Queue) -> Option<String> {
     let mut going: Vec<(ObjectClass, Location)> =
         rows.iter().filter_map(|row| row.destination()).collect();
-    going.sort_unstable_by_key(|(class, at)| (class.to_raw(), at.bank, at.slot));
+    going.sort_unstable_by_key(|(class, at)| (*class, at.bank, at.slot));
 
     let mut said = Vec::new();
     if !going.is_empty() {

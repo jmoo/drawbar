@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use crate::error::{Error, Result};
 use crate::transport::Transport;
-use crate::wire::{cmd, ui, Message, ObjectClass, Service};
+use crate::wire::{cmd, ui, Classes, Message, ObjectClass, Service};
 
 /// Read-only capability. Cannot reach any operation that mutates the device.
 #[derive(Debug)]
@@ -50,6 +50,9 @@ pub struct Session<'t, T: Transport, C = ReadOnly> {
     // implementing `Drop` cannot be destructured.
     transport: Option<&'t mut T>,
     class: ObjectClass,
+    /// The partition `class` sits at, which `SESSION_OPEN` carried.
+    index: u32,
+    classes: Classes,
     closed: bool,
     device_changed: bool,
     read_limit: Duration,
@@ -57,14 +60,19 @@ pub struct Session<'t, T: Transport, C = ReadOnly> {
 }
 
 impl<'t, T: Transport> Session<'t, T, ReadOnly> {
-    /// Open a transaction scoped to one [`ObjectClass`].
+    /// Open a transaction scoped to one [`ObjectClass`], at the partition the
+    /// instrument's `classes` place it.
     ///
-    /// `STATUS` and the addressing operations report on the class that was opened, so
-    /// opening the wrong one yields plausible numbers about the wrong class.
-    pub async fn open(transport: &'t mut T, class: ObjectClass) -> Result<Self> {
+    /// `STATUS` and the addressing operations report on the partition that was opened,
+    /// so opening the wrong one yields plausible numbers about the wrong class. A class
+    /// the table does not hold sends nothing.
+    pub async fn open(transport: &'t mut T, classes: &Classes, class: ObjectClass) -> Result<Self> {
+        let index = classes.index(class).ok_or(Error::NoPartition(class))?;
         let mut s = Self {
             transport: Some(transport),
             class,
+            index,
+            classes: classes.clone(),
             closed: false,
             device_changed: false,
             read_limit: READ_LIMIT,
@@ -74,7 +82,7 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
         // ⚠️ An abandoned UI session makes every slot appear empty. Confirmed on hardware.
         s.handshake().await?;
 
-        let opened = s.open_class(class).await;
+        let opened = s.open_class().await;
 
         // ⚠️ This covers an abandoned class session only. An abandoned UI session
         // reports every slot as empty without an error; `op::recover` handles that case.
@@ -84,7 +92,7 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
                     s.release().await;
                     return Err(error);
                 }
-                s.open_class(class).await
+                s.open_class().await
             }
             other => other,
         };
@@ -120,10 +128,10 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
         Ok(())
     }
 
-    async fn open_class(&mut self, class: ObjectClass) -> Result<()> {
+    async fn open_class(&mut self) -> Result<()> {
         self.request(&Message::program(
             cmd::SESSION_OPEN,
-            class.to_raw().to_be_bytes(),
+            self.index.to_be_bytes(),
         ))
         .await
         .map(|_| ())
@@ -146,13 +154,17 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
     /// Escalate to a session that can mutate the device.
     pub fn allow_destructive_writes(mut self) -> Session<'t, T, ReadWrite> {
         let transport = self.transport.take();
-        let (class, closed, device_changed) = (self.class, self.closed, self.device_changed);
+        let (class, index, closed, device_changed) =
+            (self.class, self.index, self.closed, self.device_changed);
         let read_limit = self.read_limit;
+        let classes = std::mem::take(&mut self.classes);
         // The old session is about to drop and does not own the transaction.
         self.closed = true;
         Session {
             transport,
             class,
+            index,
+            classes,
             closed,
             device_changed,
             read_limit,
@@ -164,6 +176,17 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
 impl<T: Transport, C> Session<'_, T, C> {
     pub fn class(&self) -> ObjectClass {
         self.class
+    }
+
+    /// The partition this session opened, as the wire addresses it.
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+
+    /// The instrument's partition table, which reads the partition positions replies
+    /// carry.
+    pub fn classes(&self) -> &Classes {
+        &self.classes
     }
 
     /// Whether an unsolicited [`cmd::CHANGED`] notification arrived during this
@@ -435,6 +458,8 @@ mod tests {
             let _session: Session<'_, Silent, ReadOnly> = Session {
                 transport: Some(&mut transport),
                 class: ObjectClass::Program,
+                index: 4,
+                classes: Classes::default(),
                 closed: false,
                 device_changed: false,
                 read_limit: READ_LIMIT,

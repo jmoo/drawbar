@@ -13,7 +13,7 @@ use nord_usb::bundle::Library;
 use nord_usb::op as usb_op;
 use nord_usb::{Location, ObjectClass};
 
-use crate::device::{explain, explain_walk, open_usb, transact};
+use crate::device::{explain, explain_walk, open_instrument, transact};
 use crate::slot::{noun, shown};
 use crate::ui::Ui;
 
@@ -303,7 +303,7 @@ struct Fetched {
 /// Read `roots` of `class`, every program a root set list plays, and every piano and
 /// sample those programs play, into a bundle at `out`. Read-only.
 pub fn get(ui: &Ui, class: ObjectClass, roots: Vec<Location>, out: &Path) -> Result<(), String> {
-    let mut device = open_usb()?;
+    let mut device = open_instrument()?;
     let firmware = device
         .transport()
         .identity()

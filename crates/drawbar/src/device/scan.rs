@@ -27,10 +27,9 @@ pub struct Progress {
 #[derive(Default)]
 pub struct Scan {
     queue: VecDeque<ObjectClass>,
-    /// Keyed by the raw class number, because [`ObjectClass`] is not `Hash`.
-    progress: HashMap<u32, Progress>,
+    progress: HashMap<ObjectClass, Progress>,
     /// When each class last answered, on egui's clock.
-    read: HashMap<u32, f64>,
+    read: HashMap<ObjectClass, f64>,
 }
 
 impl Scan {
@@ -40,7 +39,7 @@ impl Scan {
             self.queue.push_back(class);
         }
         self.progress.insert(
-            class.to_raw(),
+            class,
             Progress {
                 done: 0,
                 total: None,
@@ -56,12 +55,12 @@ impl Scan {
 
     /// The class's counters arrived, and with them how many banks to expect.
     pub fn expect(&mut self, class: ObjectClass, total: Option<u32>) {
-        self.progress.entry(class.to_raw()).or_default().total = total;
+        self.progress.entry(class).or_default().total = total;
     }
 
     /// One bank landed.
     pub fn bank(&mut self, class: ObjectClass, bank: u32) {
-        let progress = self.progress.entry(class.to_raw()).or_default();
+        let progress = self.progress.entry(class).or_default();
         progress.done = progress.done.max(bank);
     }
 
@@ -69,11 +68,11 @@ impl Scan {
     /// running if it was asked for again meanwhile.
     pub fn finished(&mut self, class: ObjectClass) {
         let again = self.queue.contains(&class);
-        self.progress.entry(class.to_raw()).or_default().running = again;
+        self.progress.entry(class).or_default().running = again;
     }
 
     pub fn progress(&self, class: ObjectClass) -> Option<Progress> {
-        self.progress.get(&class.to_raw()).copied()
+        self.progress.get(&class).copied()
     }
 
     /// Note that the class has just answered, at `now` on egui's clock.
@@ -81,12 +80,12 @@ impl Scan {
     /// ⚠️ Called for every bank a walk delivers and at the end of the walk, because what
     /// matters is how stale the names on screen are, not when the session opened.
     pub fn heard(&mut self, class: ObjectClass, now: f64) {
-        self.read.insert(class.to_raw(), now);
+        self.read.insert(class, now);
     }
 
     /// When the class last answered, if it ever has.
     pub fn read_at(&self, class: ObjectClass) -> Option<f64> {
-        self.read.get(&class.to_raw()).copied()
+        self.read.get(&class).copied()
     }
 
     pub fn clear(&mut self) {

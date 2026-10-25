@@ -4264,7 +4264,7 @@ mod tests {
         const UNIT: u32 = 1024;
         let mut device = Device::new(egui::Context::default());
         device.pretend_partitions(&[(ObjectClass::Piano, "Piano", UNIT)]);
-        let unit = pretend_allocation_unit(ObjectClass::Piano, UNIT);
+        let unit = pretend_allocation_unit(UNIT);
         device.state.inventory.push(Status {
             class: ObjectClass::Piano,
             count: 1,

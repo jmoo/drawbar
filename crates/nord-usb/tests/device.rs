@@ -12,8 +12,8 @@ mod frames;
 mod scripts;
 
 use frames::{
-    changed, failed, notify, refusal, request, response, session_close, session_open, slot_args,
-    ui_request, ui_response, words,
+    changed, failed, notify, refusal, request, response, session_close, session_open,
+    session_open_at, slot_args, ui_request, ui_response, words,
 };
 use nord_usb::device::Device;
 use nord_usb::transport::{ReplayTransport, Step};
@@ -27,7 +27,7 @@ fn a_read_bracket_closes_its_transaction() {
     steps.push(response(cmd::FOCUS, &words(&[2, 13])));
     steps.extend(session_close());
 
-    let mut device = Device::new(ReplayTransport::new(steps));
+    let mut device = Device::new(ReplayTransport::new(after_geometry(steps)));
     let at = pollster::block_on(device.read(ObjectClass::Program, async |s| op::focus(s).await))
         .expect("the chain and its close both succeeded");
 
@@ -46,7 +46,7 @@ fn a_read_bracket_closes_after_a_failed_chain_and_reports_the_chains_error() {
     steps.push(refusal(cmd::INFO, 1));
     steps.extend(session_close());
 
-    let mut device = Device::new(ReplayTransport::new(steps));
+    let mut device = Device::new(ReplayTransport::new(after_geometry(steps)));
     let err = pollster::block_on(device.read(ObjectClass::SetList, async |s| {
         op::info(s, at).await?;
         op::info(s, at).await
@@ -71,7 +71,7 @@ fn a_pipe_that_fails_closing_outranks_the_chains_refusal() {
     steps.push(Step::InError);
     steps.push(failed(ui_request(ui::GOODBYE)));
 
-    let mut device = Device::new(ReplayTransport::new(steps));
+    let mut device = Device::new(ReplayTransport::new(after_geometry(steps)));
     let error = pollster::block_on(device.read(ObjectClass::Program, async |s| {
         op::info(s, at).await.map(|_| ())
     }))
@@ -142,11 +142,96 @@ fn a_class_the_instrument_does_not_have_is_an_error() {
 }
 
 #[test]
+fn the_electro_5_table_names_each_class_at_its_recorded_position() {
+    let steps = scripts::fixture("device/geometry.script").steps();
+    let mut device = Device::new(ReplayTransport::new(steps));
+    pollster::block_on(async {
+        let geometry = device.geometry().await.unwrap();
+        for class in ObjectClass::NAMED {
+            assert_eq!(
+                geometry.classes().index(class),
+                Some(frames::e5_index(class)),
+                "{}",
+                class.label()
+            );
+        }
+    });
+}
+
+/// The Electro 5's names with Program and Set List traded: synthetic, no model's table.
+const SWAPPED: [&str; 8] = [
+    "Piano (Native)",
+    "Piano",
+    "Samp Lib (Native)",
+    "Samp Lib",
+    "Set List",
+    "Program",
+    "Live",
+    "Settings",
+];
+
+#[test]
+fn a_session_opens_where_the_instruments_table_puts_its_class() {
+    let mut steps = geometry_steps(&SWAPPED);
+    steps.extend(session_open_at(5));
+    steps.push(request(cmd::FOCUS, &[]));
+    steps.push(response(cmd::FOCUS, &words(&[2, 13])));
+    steps.extend(session_close());
+
+    let mut device = Device::new(ReplayTransport::new(steps));
+    let at = pollster::block_on(device.read(ObjectClass::Program, async |s| op::focus(s).await))
+        .expect("programs sit at partition 5 on this table");
+
+    assert_eq!(at, Location { bank: 2, slot: 13 });
+    assert!(device.transport().is_exhausted());
+}
+
+#[test]
+fn a_class_the_table_holds_no_partition_for_sends_nothing() {
+    let names = ["Piano (Native)", "Piano", "Synth"];
+    let mut device = Device::new(ReplayTransport::new(geometry_steps(&names)));
+    let at = Location::from_user(1, 1);
+    let error = pollster::block_on(device.destructive(ObjectClass::Program, async |s| {
+        op::rename(s, at, "foo").await
+    }))
+    .expect_err("this table has no Program partition");
+
+    assert!(
+        matches!(error, Error::NoPartition(ObjectClass::Program)),
+        "{error}"
+    );
+    assert!(
+        device.transport().is_exhausted(),
+        "a session was opened past the geometry read"
+    );
+}
+
+#[test]
+fn a_write_reads_the_geometry_that_places_it() {
+    let steps = [
+        scripts::fixture("device/geometry.script").steps(),
+        scripts::fixture("program/rename_prog_6-13.script").steps(),
+    ]
+    .concat();
+    let mut device = Device::new(ReplayTransport::new(steps));
+    let at = Location::from_user(6, 13);
+    pollster::block_on(device.destructive(ObjectClass::Program, async |s| {
+        op::rename(s, at, "foo").await
+    }))
+    .expect("the rename as Nord Sound Manager sent it");
+
+    assert!(device.transport().is_exhausted());
+}
+
+#[test]
 fn a_refused_bank_list_fails_the_read_and_caches_nothing() {
     let bank_tables = |banks: &[(&str, u32)]| {
         let mut steps = session_open(ObjectClass::Program);
         steps.push(request(cmd::PARTITIONS, &[]));
-        steps.push(response(cmd::PARTITIONS, &partitions_payload(&[1, 100])));
+        steps.push(response(
+            cmd::PARTITIONS,
+            &partitions_payload(&electro5(&[1, 100])),
+        ));
         steps.push(request(cmd::BANKS, &0u32.to_be_bytes()));
         steps.push(response(cmd::BANKS, &banks_payload(0, banks)));
         steps
@@ -186,7 +271,10 @@ fn a_refused_bank_list_fails_the_read_and_caches_nothing() {
 fn a_bank_reply_for_another_partition_is_rejected() {
     let mut steps = session_open(ObjectClass::Program);
     steps.push(request(cmd::PARTITIONS, &[]));
-    steps.push(response(cmd::PARTITIONS, &partitions_payload(&[1])));
+    steps.push(response(
+        cmd::PARTITIONS,
+        &partitions_payload(&electro5(&[1])),
+    ));
     steps.push(request(cmd::BANKS, &0u32.to_be_bytes()));
     steps.push(response(cmd::BANKS, &banks_payload(1, &[("Bank 1", 50)])));
     steps.extend(session_close());
@@ -206,12 +294,42 @@ fn a_bank_reply_for_another_partition_is_rejected() {
     assert!(device.transport().is_exhausted());
 }
 
+/// The first `units.len()` of the Electro 5's partitions, each with its allocation unit.
+fn electro5(units: &[u32]) -> Vec<(&'static str, u32)> {
+    frames::ELECTRO5
+        .into_iter()
+        .zip(units.iter().copied())
+        .collect()
+}
+
+/// The committed Electro 5 geometry read, then `steps`: what a device bracket sends
+/// first on a new connection.
+fn after_geometry(steps: Vec<Step>) -> Vec<Step> {
+    [scripts::fixture("device/geometry.script").steps(), steps].concat()
+}
+
+/// A geometry read of a table with these partition names, each one 50-slot bank.
+fn geometry_steps(names: &[&str]) -> Vec<Step> {
+    let mut steps = session_open(ObjectClass::Program);
+    steps.push(request(cmd::PARTITIONS, &[]));
+    let partitions: Vec<(&str, u32)> = names.iter().map(|&name| (name, 1)).collect();
+    steps.push(response(cmd::PARTITIONS, &partitions_payload(&partitions)));
+    for partition in 0..names.len() as u32 {
+        steps.push(request(cmd::BANKS, &partition.to_be_bytes()));
+        steps.push(response(
+            cmd::BANKS,
+            &banks_payload(partition, &[("Bank 1", 50)]),
+        ));
+    }
+    steps.extend(session_close());
+    steps
+}
+
 /// A `PARTITIONS` payload: a record count, then `[u32 name_len][name][29 field bytes]`
 /// per partition, whose first field word is its allocation unit.
-fn partitions_payload(units: &[u32]) -> Vec<u8> {
-    let mut p = vec![units.len() as u8];
-    for (index, unit) in units.iter().enumerate() {
-        let name = format!("Partition {index}");
+fn partitions_payload(partitions: &[(&str, u32)]) -> Vec<u8> {
+    let mut p = vec![partitions.len() as u8];
+    for (name, unit) in partitions {
         p.extend_from_slice(&(name.len() as u32).to_be_bytes());
         p.extend_from_slice(name.as_bytes());
         let mut fields = unit.to_be_bytes().to_vec();
@@ -313,7 +431,9 @@ fn walk(banks: &[Bank], steps: Vec<Step>) -> (nord_usb::Result<Vec<Location>>, b
             .collect(),
     );
     let found = pollster::block_on(async {
-        let mut s = Session::open(&mut t, ObjectClass::Program).await.unwrap();
+        let mut s = Session::open(&mut t, &frames::electro5(), ObjectClass::Program)
+            .await
+            .unwrap();
         let found = op::occupied_slots(&mut s, banks).await;
         match found.is_ok() {
             true => s.commit().await.unwrap(),
@@ -466,7 +586,7 @@ fn a_library_write_reserves_only_its_shortfall() {
     steps.push(request(cmd::PARTITIONS, &[]));
     steps.push(response(
         cmd::PARTITIONS,
-        &partitions_payload(&[1, 1, 1, 100]),
+        &partitions_payload(&electro5(&[1, 1, 1, 100])),
     ));
     for partition in 0..4u32 {
         steps.push(request(cmd::BANKS, &partition.to_be_bytes()));
@@ -480,7 +600,7 @@ fn a_library_write_reserves_only_its_shortfall() {
     steps.extend(session_open(ObjectClass::Sample));
     steps.push(request(
         cmd::STATUS,
-        &ObjectClass::Sample.to_raw().to_be_bytes(),
+        &frames::e5_index(ObjectClass::Sample).to_be_bytes(),
     ));
     // count, free, used, dirty, spare.
     steps.push(response(cmd::STATUS, &words(&[138, 1, 2029, 18, 1])));
@@ -535,7 +655,7 @@ fn a_write_carrying_another_partitions_allocation_unit_is_refused_before_any_fra
                 .collect(),
         );
         let err = pollster::block_on(async {
-            let mut s = Session::open(&mut t, class)
+            let mut s = Session::open(&mut t, &frames::electro5(), class)
                 .await
                 .unwrap()
                 .allow_destructive_writes();
@@ -562,7 +682,10 @@ fn a_slot_class_write_sends_no_reserve_step() {
 
     let mut steps = session_open(ObjectClass::Program);
     steps.push(request(cmd::PARTITIONS, &[]));
-    steps.push(response(cmd::PARTITIONS, &partitions_payload(&[1; 6])));
+    steps.push(response(
+        cmd::PARTITIONS,
+        &partitions_payload(&electro5(&[1; 6])),
+    ));
     for partition in 0..6u32 {
         steps.push(request(cmd::BANKS, &partition.to_be_bytes()));
         steps.push(response(
@@ -599,7 +722,7 @@ fn a_slot_class_write_sends_no_reserve_step() {
 #[test]
 fn a_change_notification_reaches_the_caller_once() {
     let steps = scripts::fixture("session/changed_notification.script").steps();
-    let mut device = Device::new(ReplayTransport::new(steps));
+    let mut device = Device::new(ReplayTransport::new(after_geometry(steps)));
 
     pollster::block_on(device.read(ObjectClass::Program, async |_| Ok(())))
         .expect("the notification is drained, not mistaken for the reply");
@@ -624,7 +747,7 @@ fn a_change_notification_during_close_reaches_the_caller() {
         }
         steps.push(ui_response(ui::GOODBYE, 0));
 
-        let mut device = Device::new(ReplayTransport::new(steps));
+        let mut device = Device::new(ReplayTransport::new(after_geometry(steps)));
         pollster::block_on(device.read(ObjectClass::Program, async |_| Ok(()))).unwrap();
 
         assert!(

@@ -10,8 +10,8 @@ use crate::session::ReadWrite;
 use crate::session::{Session, WRITE_LIMIT};
 use crate::transport::Transport;
 use crate::wire::{
-    cmd, read_u32, ui, AllocationUnit, Bank, Dependency, Location, Message, ObjectClass, Partition,
-    ProgramInfo, Service, Status,
+    cmd, read_u32, ui, AllocationUnit, Bank, Classes, Dependency, Location, Message, ObjectClass,
+    Partition, ProgramInfo, Service, Status,
 };
 use nord_format::cbin::Generation;
 use nord_format::crc::Crc32Stream;
@@ -23,23 +23,27 @@ use nord_format::crc::Crc32Stream;
 pub async fn status<T: Transport, C>(session: &mut Session<'_, T, C>) -> Result<Status> {
     let class = session.class();
     let resp = session
-        .request(&Message::program(cmd::STATUS, class.to_raw().to_be_bytes()))
+        .request(&Message::program(
+            cmd::STATUS,
+            session.index().to_be_bytes(),
+        ))
         .await?;
     Status::decode(class, &resp)
 }
 
-/// Query every class worth reporting, one transaction each.
+/// Query every class worth reporting that the instrument's `classes` hold, one
+/// transaction each.
 ///
 /// Each class needs its own session because the class is fixed at `SESSION_OPEN`.
 /// Instruments differ in which classes they answer for, so two refusals skip the class:
 /// a refused `SESSION_OPEN` ([`Error::ClassRefused`]) and a refused `STATUS`. Every
 /// other error, including a refused `HELLO`, propagates.
-pub async fn inventory<T: Transport>(transport: &mut T) -> Result<Vec<Status>> {
+pub async fn inventory<T: Transport>(transport: &mut T, classes: &Classes) -> Result<Vec<Status>> {
     let mut out = Vec::new();
     for class in ObjectClass::INVENTORY {
-        let mut session = match Session::open(transport, class).await {
+        let mut session = match Session::open(transport, classes, class).await {
             Ok(s) => s,
-            Err(Error::ClassRefused { .. }) => continue,
+            Err(Error::ClassRefused { .. } | Error::NoPartition(_)) => continue,
             Err(e) => return Err(e),
         };
         let result = status(&mut session).await;
@@ -400,7 +404,7 @@ pub async fn write_from<T: Transport>(
     name: &str,
     timestamp: u32,
 ) -> Result<()> {
-    if !unit.belongs_to(session.class().to_raw()) {
+    if !unit.belongs_to(session.index()) {
         return Err(Error::InvalidArgument(format!(
             "the allocation unit belongs to another partition, not {}",
             session.class().label()
@@ -599,9 +603,9 @@ pub async fn recover<T: Transport>(transport: &mut T) -> Result<()> {
 
 /// Every storage partition the device reports. **Read-only.**
 ///
-/// The index of each entry is its object class code, so this also lists the classes the
-/// instrument has, including the `(Native)` library views that have no [`ObjectClass`]
-/// name.
+/// The index of each entry is the code sessions and dependency rows address it by, and
+/// [`Classes`] reads which class each holds, including the `(Native)` library views that
+/// have no [`ObjectClass`] name.
 pub async fn partitions<T: Transport, C>(
     session: &mut Session<'_, T, C>,
 ) -> Result<Vec<Partition>> {
@@ -642,7 +646,7 @@ pub async fn check_address<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     at: Location,
 ) -> Result<Option<String>> {
-    let banks = banks(session, session.class().to_raw()).await?;
+    let banks = banks(session, session.index()).await?;
     Ok(address_refusal(&banks, at))
 }
 
@@ -742,7 +746,7 @@ pub async fn next_occupied<T: Transport, C>(
 /// the class.
 ///
 /// `banks` is the instrument's own answer for this class: [`banks`] on the partition
-/// whose index is the class code, or [`Geometry::banks`](crate::device::Geometry::banks).
+/// holding it, or [`Geometry::banks`](crate::device::Geometry::banks).
 /// A bank ends where the device ends it (status `1` to a cursor request), and its
 /// declared capacity bounds how many objects it may yield.
 ///
@@ -805,7 +809,7 @@ pub async fn dependencies<T: Transport, C>(
     let resp = session
         .request(&Message::program(cmd::DEPENDENCIES, at.to_bytes()))
         .await?;
-    let dependencies = Dependency::decode_all(&resp)?;
+    let dependencies = Dependency::decode_all(&resp, session.classes())?;
     let reported = Location::read(resp.payload(), 0)?;
     if reported != at {
         return Err(Error::UnexpectedLocation {

@@ -69,7 +69,7 @@ pub async fn announce<T: Transport>(device: &mut Device<T>, emit: &Emit) -> Flow
         Ok(geometry) => geometry
             .entries()
             .map(|(partition, _)| Partition {
-                class: ObjectClass::from_raw(partition.index),
+                class: geometry.classes().at(partition.index),
                 name: partition.name.clone(),
                 native: partition.native,
                 unit: partition.allocation_unit().ok(),
@@ -1396,6 +1396,8 @@ mod wire_tests {
         info: u32,
         deaf: bool,
         banks: Vec<(&'static str, u32)>,
+        /// The partition names it declares, in table order.
+        partitions: [&'static str; 8],
         reports_geometry: bool,
         garbles_geometry: bool,
         filled: Option<Vec<(Location, &'static str)>>,
@@ -1424,6 +1426,18 @@ mod wire_tests {
         pulled: Option<std::path::PathBuf>,
     }
 
+    /// The Electro 5's partition names, which a default Puppet declares.
+    const ELECTRO5_PARTITIONS: [&str; 8] = [
+        "Piano (Native)",
+        "Piano",
+        "Samp Lib (Native)",
+        "Samp Lib",
+        "Program",
+        "Set List",
+        "Live",
+        "Settings",
+    ];
+
     /// The Electro 5's bank division, which a default Puppet uses.
     const EIGHT_BANKS: [(&str, u32); 8] = [
         ("Bank 1", 50),
@@ -1444,6 +1458,7 @@ mod wire_tests {
                 info,
                 deaf: false,
                 banks: EIGHT_BANKS.to_vec(),
+                partitions: ELECTRO5_PARTITIONS,
                 reports_geometry: true,
                 garbles_geometry: false,
                 filled: None,
@@ -1539,6 +1554,12 @@ mod wire_tests {
             self
         }
 
+        /// Declares the Electro 5's partitions with Program and Set List traded.
+        fn laid_out_otherwise(mut self) -> Puppet {
+            self.partitions.swap(4, 5);
+            self
+        }
+
         fn garbling_geometry(mut self) -> Puppet {
             self.garbles_geometry = true;
             self
@@ -1597,7 +1618,7 @@ mod wire_tests {
                 {
                     Some((4, Vec::new()))
                 }
-                cmd::PARTITIONS => Some((0, partition_table())),
+                cmd::PARTITIONS => Some((0, partition_table(&self.partitions))),
                 // Five words in the order `nord_usb::wire::Status` decodes them. Its doc
                 // describes this shape and the zero `dirty` and `spare` that classes
                 // outside the libraries report.
@@ -1724,17 +1745,17 @@ mod wire_tests {
         of.iter().flat_map(|w| w.to_be_bytes()).collect()
     }
 
-    /// Encode all class partitions with their reported allocation units.
-    fn partition_table() -> Vec<u8> {
-        const COUNT: u32 = 8;
+    /// Encode `names` as a partition table, each with the allocation unit its name's class
+    /// reports.
+    fn partition_table(names: &[&str]) -> Vec<u8> {
         const UNREAD_FIELDS: usize = 25;
 
-        let mut p = vec![COUNT as u8];
-        for index in 0..COUNT {
-            let name = format!("Partition {index}");
+        let mut p = vec![names.len() as u8];
+        for name in names {
             p.extend_from_slice(&(name.len() as u32).to_be_bytes());
             p.extend_from_slice(name.as_bytes());
-            let unit: u32 = match ObjectClass::from_raw(index).is_library() {
+            let library = ObjectClass::of_partition(name).is_some_and(ObjectClass::is_library);
+            let unit: u32 = match library {
                 true => 131_064,
                 false => 1,
             };
@@ -2626,10 +2647,19 @@ mod wire_tests {
         };
         assert_eq!(
             rows.iter().map(|row| row.class).collect::<Vec<_>>(),
-            (0..8).map(ObjectClass::from_raw).collect::<Vec<_>>(),
-            "the table's index is the class code"
+            [
+                ObjectClass::Unknown(0),
+                ObjectClass::Piano,
+                ObjectClass::Unknown(2),
+                ObjectClass::Sample,
+                ObjectClass::Program,
+                ObjectClass::SetList,
+                ObjectClass::Live,
+                ObjectClass::Settings,
+            ],
+            "each partition holds the class its name gives"
         );
-        assert_eq!(rows[4].name, "Partition 4", "the device's name");
+        assert_eq!(rows[4].name, "Program", "the device's name");
         // The libraries count blocks of net bytes; every other partition counts bytes.
         assert_eq!(
             rows.iter()
@@ -2638,6 +2668,45 @@ mod wire_tests {
             [1, 131_064, 1, 131_064, 1, 1, 1, 1].map(Some),
             "each partition's own unit"
         );
+    }
+
+    #[test]
+    fn a_class_is_announced_where_the_instruments_table_puts_it() {
+        let mut device = Device::new(Puppet::new(1).laid_out_otherwise());
+        let (tx, events) = std::sync::mpsc::channel();
+        let emit = Emit::new(tx, egui::Context::default());
+        assert!(nord_usb::block_on(announce(&mut device, &emit)) == Flow::Continue);
+
+        let rows = events
+            .try_iter()
+            .find_map(|event| match event {
+                DeviceEvent::Partitions(rows) => Some(rows),
+                _ => None,
+            })
+            .expect("the table is announced");
+        assert_eq!(rows[4].class, ObjectClass::SetList, "{:?}", rows[4].name);
+        assert_eq!(rows[5].class, ObjectClass::Program, "{:?}", rows[5].name);
+    }
+
+    #[test]
+    fn a_delete_opens_the_partition_the_instruments_table_names() {
+        let mut device = Puppet::new(1).laid_out_otherwise();
+        drive(
+            &mut device,
+            DeviceCmd::Delete {
+                class: ObjectClass::Program,
+                at: Location { bank: 6, slot: 3 },
+            },
+        );
+
+        let opened: Vec<u32> = device
+            .heard
+            .iter()
+            .filter(|msg| msg.command == cmd::SESSION_OPEN)
+            .map(|msg| u32::from_be_bytes(msg.args[..4].try_into().unwrap()))
+            .collect();
+        assert_eq!(opened.last(), Some(&5), "sessions opened at {opened:?}");
+        assert_eq!(counted(&device, cmd::DELETE), 1);
     }
 
     #[test]

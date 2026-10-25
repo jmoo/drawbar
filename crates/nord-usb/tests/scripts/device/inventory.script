@@ -5,6 +5,7 @@
 # classes' fourth and fifth STATUS words.
 # Format: '<O|I> <hex>' -- O = host->device, I = device->host.
 # source: synthetic
+# device: Nord Electro 5
 # intent: device status
 
 # ---- class 1 ----

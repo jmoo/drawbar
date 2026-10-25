@@ -212,9 +212,9 @@ impl Library {
     /// such as [`LibraryRefOf`](crate::components::LibraryRefOf), carries this code and
     /// turns it back with [`expect_code`](Self::expect_code).
     ///
-    /// The numbers are the object-class codes the instruments use on the wire, and
-    /// `nord-usb`'s `ObjectClass` takes its library codes from here, so a caller holding
-    /// both has one table.
+    /// The numbers are this type's own tags. They match the Electro 5's partition
+    /// positions, but no instrument's wire is read through them: `nord-usb` finds each
+    /// partition by name.
     pub const fn code(self) -> u8 {
         self as u8
     }

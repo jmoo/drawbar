@@ -156,13 +156,14 @@ enum Command {
         action: PianoAction,
     },
 
-    /// The slot verbs for any object class, given by number.
+    /// The slot verbs for any partition, given by its index.
     ///
-    /// The other nouns are this command with the class fixed. Use it for a class with no
-    /// noun of its own.
+    /// Use it for a partition with no noun of its own. Every model numbers its
+    /// partitions its own way; `nord device geometry` lists them.
     #[command(hide = true)]
     Raw {
-        #[arg(long, global = true, value_name = "N", default_value_t = 4, help = class_help())]
+        /// The partition's index, as `nord device geometry` prints it.
+        #[arg(long, global = true, value_name = "N", default_value_t = 4)]
         class: u32,
 
         #[command(subcommand)]
@@ -210,7 +211,7 @@ enum DeviceAction {
     /// Report the instrument's storage layout: partitions, banks and slot capacity.
     ///
     /// The layout is read from the instrument, so it is correct even for models this
-    /// tool has not seen. Partition indices are object class numbers.
+    /// tool has not seen, and each partition shows the class its name makes it.
     Geometry,
 
     /// Wedge the instrument by abandoning a session, to test recovery.
@@ -220,7 +221,7 @@ enum DeviceAction {
     #[cfg(feature = "wedge")]
     #[command(hide = true)]
     Wedge {
-        /// Object class to open the abandoned session on.
+        /// The partition to open the abandoned session on, by its index.
         #[arg(long, value_name = "N", default_value_t = 4)]
         class: u32,
 
@@ -742,7 +743,7 @@ fn main() -> ExitCode {
             DeviceAction::Geometry => device::geometry(&ui),
             #[cfg(feature = "wedge")]
             DeviceAction::Wedge { class, yes } => {
-                device::wedge(&ui, ObjectClass::from_raw(class), yes)
+                device::wedge(&ui, ObjectClass::Unknown(class), yes)
             }
             DeviceAction::Controls(args) => device::controls(&ui, args),
         },
@@ -791,7 +792,7 @@ fn main() -> ExitCode {
             SettingsAction::Slot(action) => slot_action(&ui, action.into(), ObjectClass::Settings),
             SettingsAction::Edit(args) => edit::run(&ui, args, ObjectClass::Settings),
         },
-        Command::Raw { class, action } => slot_action(&ui, action, ObjectClass::from_raw(class)),
+        Command::Raw { class, action } => slot_action(&ui, action, ObjectClass::Unknown(class)),
     };
 
     match result {
@@ -820,17 +821,6 @@ impl From<LiveSlotAction> for SlotAction {
             LiveSlotAction::Deps { at } => SlotAction::Deps { at },
         }
     }
-}
-
-/// `nord raw --class` help, naming every class [`ObjectClass::from_raw`] recognizes.
-fn class_help() -> String {
-    // Every class `from_raw` names has a one-byte code.
-    let named: Vec<String> = (0..=u8::MAX.into())
-        .map(ObjectClass::from_raw)
-        .filter(|class| !matches!(class, ObjectClass::Unknown(_)))
-        .map(|class| format!("{} {}", class.to_raw(), class.label()))
-        .collect();
-    format!("Object class: {}", named.join(", "))
 }
 
 /// Dispatch one verb against a fixed object class, whichever noun asked for it.
@@ -977,11 +967,5 @@ mod tests {
             .is_some_and(|raw| raw.is_hide_set()));
         let help = Cli::command().render_help().to_string();
         assert!(!help.contains(" raw "), "{help}");
-    }
-
-    #[test]
-    fn the_class_help_names_the_settings_singleton() {
-        let help = class_help();
-        assert!(help.contains("7 settings"), "{help}");
     }
 }

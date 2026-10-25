@@ -185,16 +185,35 @@ impl Stored {
     }
 }
 
+/// The number the index writes for each class it keeps a slot for. Fixed when the
+/// index format was set; no instrument's partition order changes it.
+const STORED_CLASSES: [(ObjectClass, u32); 6] = [
+    (ObjectClass::Piano, 1),
+    (ObjectClass::Sample, 3),
+    (ObjectClass::Program, 4),
+    (ObjectClass::SetList, 5),
+    (ObjectClass::Live, 6),
+    (ObjectClass::Settings, 7),
+];
+
 impl From<&Origin> for Stored {
     fn from(origin: &Origin) -> Stored {
         match origin {
             Origin::Fresh => Stored::Fresh,
             Origin::File(name) => Stored::File(name.clone()),
-            Origin::Device { class, at } => Stored::Device {
-                class: class.to_raw(),
-                bank: at.bank,
-                slot: at.slot,
-            },
+            Origin::Device { class, at } => {
+                // ⚠️ An unknown class names a partition of one instrument's table, so no
+                // number here would mean it again; its slot is not kept.
+                let Some(&(_, stored)) = STORED_CLASSES.iter().find(|(held, _)| held == class)
+                else {
+                    return Stored::Implied;
+                };
+                Stored::Device {
+                    class: stored,
+                    bank: at.bank,
+                    slot: at.slot,
+                }
+            }
             Origin::Rescued { at } => Stored::Rescued {
                 bank: at.bank,
                 slot: at.slot,
@@ -209,7 +228,10 @@ impl From<&Stored> for Origin {
             Stored::Implied | Stored::Fresh => Origin::Fresh,
             Stored::File(name) => Origin::File(name.clone()),
             Stored::Device { class, bank, slot } => Origin::Device {
-                class: ObjectClass::from_raw(*class),
+                class: STORED_CLASSES
+                    .iter()
+                    .find(|(_, stored)| stored == class)
+                    .map_or(ObjectClass::Unknown(*class), |(held, _)| *held),
                 at: Location {
                     bank: *bank,
                     slot: *slot,

@@ -9,7 +9,51 @@
 #![allow(dead_code)]
 
 use nord_usb::transport::Step;
-use nord_usb::wire::{cmd, ui, Location, Message, ObjectClass, Service};
+use nord_usb::wire::{cmd, ui, Classes, Location, Message, ObjectClass, Partition, Service};
+
+/// The Electro 5's partition names in table order, as `device/geometry.script` records
+/// them.
+pub const ELECTRO5: [&str; 8] = [
+    "Piano (Native)",
+    "Piano",
+    "Samp Lib (Native)",
+    "Samp Lib",
+    "Program",
+    "Set List",
+    "Live",
+    "Settings",
+];
+
+/// Where the Electro 5's table puts each class, as `device/geometry.script` records it.
+pub fn e5_index(class: ObjectClass) -> u32 {
+    match class {
+        ObjectClass::Piano => 1,
+        ObjectClass::Sample => 3,
+        ObjectClass::Program => 4,
+        ObjectClass::SetList => 5,
+        ObjectClass::Live => 6,
+        ObjectClass::Settings => 7,
+        ObjectClass::Unknown(index) => index,
+    }
+}
+
+/// Partitions with these names in table order, each with an empty record.
+pub fn partitions(names: &[&str]) -> Vec<Partition> {
+    (0..)
+        .zip(names)
+        .map(|(index, name)| Partition {
+            index,
+            name: name.to_string(),
+            native: name.contains("(Native)"),
+            fields: vec![0; 29],
+        })
+        .collect()
+}
+
+/// The Electro 5's table, for opening a session as an Electro 5 is addressed.
+pub fn electro5() -> Classes {
+    Classes::of(&partitions(&ELECTRO5))
+}
 
 /// The subsystem every [`Service::Program`] frame carries.
 pub const SUBSYSTEM: u32 = 10;
@@ -80,13 +124,19 @@ pub fn ui_response(command: u32, status: u32) -> Step {
     ))
 }
 
-/// The UI bracket a transaction opens with, and the class session inside it.
+/// The UI bracket a transaction opens with, and the class session inside it, at the
+/// partition an Electro 5 keeps `class` in.
 pub fn session_open(class: ObjectClass) -> Vec<Step> {
+    session_open_at(e5_index(class))
+}
+
+/// [`session_open`] at a partition index of any table.
+pub fn session_open_at(index: u32) -> Vec<Step> {
     vec![
         ui_request(ui::HELLO),
         ui_response(ui::HELLO, 0),
-        request(cmd::SESSION_OPEN, &class.to_raw().to_be_bytes()),
-        response(cmd::SESSION_OPEN, &class.to_raw().to_be_bytes()),
+        request(cmd::SESSION_OPEN, &index.to_be_bytes()),
+        response(cmd::SESSION_OPEN, &index.to_be_bytes()),
     ]
 }
 

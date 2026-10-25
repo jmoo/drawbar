@@ -25,7 +25,7 @@ fn unit(class: ObjectClass, bytes: u32) -> AllocationUnit {
     let mut fields = bytes.to_be_bytes().to_vec();
     fields.resize(29, 0);
     Partition {
-        index: class.to_raw(),
+        index: frames::e5_index(class),
         name: class.label(),
         native: false,
         fields,
@@ -80,7 +80,7 @@ fn sample_write(at: Location, body: &[u8], name: &str, stamp: u32) -> Vec<Step> 
     let mut steps = session_open(ObjectClass::Sample);
     steps.push(request(
         cmd::STATUS,
-        &ObjectClass::Sample.to_raw().to_be_bytes(),
+        &frames::e5_index(ObjectClass::Sample).to_be_bytes(),
     ));
     // count, free, used, dirty, spare.
     steps.push(response(cmd::STATUS, &words(&[1, 1000, 0, 0, 0])));
@@ -107,7 +107,7 @@ fn run(
 ) -> Run {
     let mut t = ReplayTransport::new(steps);
     let result = pollster::block_on(async {
-        let mut s = Session::open(&mut t, class)
+        let mut s = Session::open(&mut t, &frames::electro5(), class)
             .await
             .unwrap()
             .allow_destructive_writes();
