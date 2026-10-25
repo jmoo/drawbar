@@ -113,16 +113,17 @@ files.
 
 Each install keeps, per library, a local root of its own that is never synced:
 
-| Path                  | Contents                                     |
-| --------------------- | -------------------------------------------- |
-| `<genesis>/head.json` | The last entry this writer wrote             |
-| `<genesis>/lock`      | Held while an instance writes as this writer |
-| `<genesis>/retired`   | Empty; the writer is never written again     |
-| `identities.json`     | Identities the install's scans read          |
+| Path                  | Contents                                                     |
+| --------------------- | ------------------------------------------------------------ |
+| `<genesis>/head.json` | The last entry this writer wrote, and whether it is retired  |
+| `identities.json`     | Identities the install's scans read                          |
 
 toshokan reads and writes nothing else there, so the app may keep files of its
-own beside these, under names that are not a genesis hash. A `<genesis>/drafts/`
-directory an earlier version kept unsaved edits in is neither read nor removed.
+own beside these, under names that are not a genesis hash. A `drafts/`
+directory, `lock` or `retired` file an earlier version left in a writer's
+directory is neither read nor removed. A writer such a `retired` file marked is
+claimed again, and retires again where its history still forks or the folder
+still lacks its last entry.
 
 `<genesis>` is the hash of the writer's genesis entry. The directory is created
 only after that entry is durable in the folder, so the directories of the local
@@ -139,18 +140,22 @@ instance on this machine holds is `live`: that instance may be carrying it out
 still. Asking which writers other instances hold tries only the locks this
 instance does not hold itself.
 
-`head.json` is `{"writer":"<writer id>","head":"<entry hash>"}`, and
+`head.json` is `{"writer":"<writer id>","head":"<entry hash>"}`, with
+`"retired":true` last once the writer is never written again, and
 `identities.json` is
 `[["<library path>",<length>,<modification time or null>,"<identity>"],…]`.
-A file in the local root that is replaced, such as `identities.json`, is
-first written beside it as `<name>.next` and synced; then `<name>` is removed
-and `<name>.next` renamed to it. A reader takes `<name>`, or `<name>.next` when
-`<name>` is missing. Every `head.json` of one writer has the same length, so a
-`head.json` with the new record's length is written over in place and synced;
-any other is replaced as above. A crash can tear that write. What it leaves is
-the old or the new record whole, bytes that do not read, which leave the writer
-out of the pool, or a record naming an entry no log holds, which retires the
-writer (see Writers).
+A writer's lock is taken on its `head.json`; a backend that holds locks as file
+locks keeps the file readable and writable while it is held. So `head.json` is
+never replaced, which would make a new file another process could lock: it is
+written over in place and synced. Every record of one writer has the same
+length but the retired one, which is longer and written last, so no write leaves
+the end of an earlier record behind. A crash can tear that write. What it leaves
+is the old or the new record whole, bytes that do not read, which leave the
+writer out of the pool, or a record naming an entry no log holds, which retires
+the writer (see Writers). A file in the local root that is replaced, such as
+`identities.json`, is first written beside it as `<name>.next` and synced; then
+`<name>` is removed and `<name>.next` renamed to it. A reader takes `<name>`, or
+`<name>.next` when `<name>` is missing.
 
 ## Identifiers and clocks
 
@@ -480,12 +485,12 @@ left.
 ## Writers
 
 The writers of an install are the directories of its local root. An instance
-takes the first, in order of name, that has a readable `head.json`, no
-`retired`, and whose lock it gets. It continues that writer only if what it has
+takes the first, in order of name, whose lock it gets and whose `head.json`
+reads and is not retired. It continues that writer only if what it has
 read of the writer starts from its genesis entry, holds its recorded head, has
 one last entry and no fork point, and a file in its directory holds that last
-entry now. Otherwise it creates `retired`, releases the lock, and writes as a
-new writer from its next write: a copied local root, whose history another
+entry now. Otherwise it marks `head.json` retired, releases the lock, and writes
+as a new writer from its next write: a copied local root, whose history another
 instance also continues, and a folder restored from an older copy, which no
 longer holds the writer's last entry, each start a new writer. An instance that
 finds its own history forked while it runs does the same.
@@ -493,7 +498,7 @@ finds its own history forked while it runs does the same.
 A new writer is created at an instance's first write. Its first segment holds
 its genesis entry; the segment, its directory and every directory above it are
 synced. Only then does the writer get its directory in the local root, its lock
-and, last, `head.json`.
+and its `head.json`.
 
 A process appends to one segment, named at random when it first appends, and
 seals it when it closes it, compacts, or would take it past 1 MiB with an

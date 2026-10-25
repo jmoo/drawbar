@@ -9,9 +9,8 @@
 //!   trash/<nonce>              displaced user bytes
 //!   tmp/<nonce>.<extension>    staged files, under their destination's extension
 //! <local>/<genesis>/           one writer of this install, by its genesis entry
-//!   head.json                  the head this writer last wrote
-//!   lock                       held while an instance writes as this writer
-//!   retired                    present once the writer is never written again
+//!   head.json                  the head this writer last wrote, and whether it is
+//!                              retired; locked while an instance writes as it
 //! ```
 //!
 //! The app names `<root>`: one directory of the folder, or one inside a directory of
@@ -175,22 +174,14 @@ impl Layout {
         child(&RelPath::ROOT, &genesis.to_string())
     }
 
+    /// The writer's one file in the local root, which its lock is also taken on.
     pub fn head(genesis: EntryHash) -> RelPath {
         child(&Self::local(genesis), "head.json")
-    }
-
-    pub fn lock(genesis: EntryHash) -> RelPath {
-        child(&Self::local(genesis), "lock")
     }
 
     /// The identities this install's scans read that no fact gives.
     pub fn identities() -> RelPath {
         child(&RelPath::ROOT, "identities.json")
-    }
-
-    /// Present once the writer can no longer be continued: it leaves the pool.
-    pub fn retired(genesis: EntryHash) -> RelPath {
-        child(&Self::local(genesis), "retired")
     }
 }
 
@@ -260,13 +251,8 @@ mod tests {
     #[test]
     fn local_paths_live_in_the_writer_directory_named_by_its_genesis() {
         let genesis = EntryHash::from_u128(1);
-        for path in [
-            Layout::head(genesis),
-            Layout::lock(genesis),
-            Layout::retired(genesis),
-        ] {
-            assert_eq!(path.components().next(), Some(&*genesis.to_string()));
-        }
+        let head = Layout::head(genesis);
+        assert_eq!(head.components().next(), Some(&*genesis.to_string()));
     }
 
     #[test]
