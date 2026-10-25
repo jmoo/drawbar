@@ -17,8 +17,9 @@ says what it takes and keeps, in words for users.
 The collector keeps no request logs and stores no address or user agent.
 [`queries/`](queries) holds the queries used to read Analytics Engine.
 
-drawbar.app must be onboarded to Cloudflare Email Service as a sending domain, and
-reports@drawbar.app verified as a destination address, for the email to be sent.
+Reports come from reports@johndm.dev, which needs Cloudflare Email Routing on
+johndm.dev, and reports@drawbar.app must be a verified destination address. Email
+Routing sends to a verified address on the free plan; Email Sending is not needed.
 
 `node --test test/check.test.js` runs the tests; `nix flake check` runs them too. CI
 deploys from `master`.

@@ -8,7 +8,7 @@ const ADDRESS = /^[^\s@<>()[\]\\,;:"]+@[^\s@<>()[\]\\,;:"]+\.[^\s@<>()[\]\\,;:"]
 export function message(sent) {
   const reply = ADDRESS.test(sent.contact) ? { replyTo: sent.contact } : {};
   return {
-    from: { email: "reports@drawbar.app", name: "drawbar" },
+    from: { email: "reports@johndm.dev", name: "drawbar" },
     to: "reports@drawbar.app",
     subject: `drawbar ${sent.kind} ${sent.id}`,
     text: body(sent),
