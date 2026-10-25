@@ -171,8 +171,9 @@ pub struct Store {
     /// Each view of a slot seen, with what its unsaved edit is kept by.
     views: BTreeMap<u64, SlotView>,
     /// The keeps of slot views' edits sent and not answered yet, in the order sent, as
-    /// [`SlotView::kept`] holds each once it is kept.
-    keeping: VecDeque<(u64, (u64, blake3::Hash))>,
+    /// [`SlotView::kept`] holds each once it is kept, or `None` where the view's edit
+    /// was let go of since.
+    keeping: VecDeque<(u64, Option<(u64, blake3::Hash)>)>,
     /// What names were last compared in for duplicates: the workspace's layout, and the
     /// [`crate::folders::Folders::names_hash`].
     compared: Option<(u64, u64)>,
@@ -548,7 +549,7 @@ impl Store {
             .filter(|id| !workspace.is_view(*id))
             .collect();
         for id in ended {
-            let keeping = self.keeping.iter().any(|sent| sent.0 == id);
+            let keeping = let_go_of_keeps(&mut self.keeping, id);
             if let Some(view) = self.views.remove(&id) {
                 if view.kept.is_some() || keeping {
                     self.send(Cmd::DiscardSlot(view.slot));
@@ -592,19 +593,20 @@ impl Store {
             }
             let held = (entity.stamp, view.base);
             let sent = self.keeping.iter().rev().find(|sent| sent.0 == entity.id);
-            let latest = sent.map(|sent| sent.1).or(view.kept);
+            let latest = sent.map_or(view.kept, |sent| sent.1);
             let cmd = match (view.read, entity.is_unsaved()) {
                 (false, _) => None,
                 (true, true) if latest != Some(held) => {
-                    self.keeping.push_back((entity.id, held));
+                    self.keeping.push_back((entity.id, Some(held)));
                     Some(Cmd::KeepSlot {
                         slot: view.slot.clone(),
                         base: view.base,
                         bytes: entity.bytes.to_vec(),
                     })
                 }
-                (true, false) if view.kept.is_some() => {
+                (true, false) if latest.is_some() => {
                     view.kept = None;
+                    let_go_of_keeps(&mut self.keeping, entity.id);
                     Some(Cmd::DiscardSlot(view.slot.clone()))
                 }
                 (true, _) => None,
@@ -1444,13 +1446,13 @@ impl Store {
             Event::SlotDrafted { slot, kept } => {
                 let sent = self.keeping.pop_front();
                 match (sent, kept) {
-                    (Some((id, held)), Ok(())) => {
+                    (Some((id, Some(held))), Ok(())) => {
                         let view = self.views.get_mut(&id).filter(|view| view.slot == slot);
                         if let Some(view) = view {
                             view.kept = Some(held);
                         }
                     }
-                    (None, Ok(())) => {}
+                    (_, Ok(())) => {}
                     (_, Err(why)) => unkept(&why, log),
                 }
             }
@@ -3904,6 +3906,13 @@ fn kept_rows(
         })
     });
     rows.collect()
+}
+
+/// Let go of each keep of the view `id` in flight, so its answer marks nothing kept,
+/// and say whether one was not let go of before.
+fn let_go_of_keeps(keeping: &mut VecDeque<(u64, Option<(u64, blake3::Hash)>)>, id: u64) -> bool {
+    let sent = keeping.iter_mut().filter(|sent| sent.0 == id);
+    sent.fold(false, |live, sent| sent.1.take().is_some() || live)
 }
 
 /// Say that an unsaved edit could not be kept in this install's own state, or let go of.

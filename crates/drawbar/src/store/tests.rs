@@ -4119,6 +4119,40 @@ fn a_slot_views_edit_whose_keep_has_not_landed_is_losing() {
     assert!(losing, "while the keep of the next edit is stalled");
 }
 
+impl Session {
+    /// The autosave's pass, with nothing it sent answered yet.
+    fn autosave_unanswered(&mut self) {
+        let Bench {
+            workspace, browser, ..
+        } = &mut self.bench;
+        self.store.sync(workspace, browser, Pass::Full);
+    }
+}
+
+/// A slot view reverted while the keep of its edit is in flight lets go of that edit,
+/// so a drawbar stopped without a quit does not bring it back.
+#[test]
+fn a_slot_view_reverted_while_its_keep_is_in_flight_leaves_no_kept_edit() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let at = Location::from_user(1, 1);
+    let mut first = Session::open(&root);
+    let id = first.view_slot("N1", at, program.clone());
+    first.edit(id, "96");
+    first.autosave_unanswered();
+    let Bench { workspace, log, .. } = &mut first.bench;
+    workspace.revert(id, log);
+    first.autosave();
+    let crashed = Temp::new();
+    copy_tree(&root.0, &crashed.0);
+    copy_tree(&root.local(), &crashed.local());
+
+    let mut second = Session::open(&crashed);
+    let id = second.view_slot("N1", at, program);
+    assert!(!second.bench.workspace.get(id).unwrap().is_unsaved());
+    assert_eq!(second.said("has the unsaved edit it had"), 0);
+}
+
 /// A slot view's kept edit, over a slot that holds something else since, is shown over
 /// the view, and drawbar asks which to keep.
 #[test]
