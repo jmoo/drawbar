@@ -7,6 +7,8 @@ This repository contains Rust tools for Clavia Nord instruments:
 - `nord-cli` exposes both libraries from a terminal.
 - `nord-bits-derive` generates the bitfield implementations.
 - `drawbar` is the desktop and browser application.
+- `toshokan` keeps drawbar's library beside a folder of files, for any number of
+  writers.
 
 This is a public repository. Do not add personal information, secrets, agent
 memory, private notes, private RFCs, or the private specimen corpus. If a fact
