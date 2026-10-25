@@ -16,7 +16,6 @@ use std::sync::Arc;
 
 use crate::binding::{self, Bindings, Fact, Facts, Scan, Unscanned, Walk};
 use crate::contribution;
-use crate::cow::CowMap;
 use crate::derive::{self, Placed};
 use crate::drafts::{self, DraftRecord, Drafted};
 use crate::effects::{self, Applied, EffectPlan, EffectStep, FileEnd};
@@ -31,7 +30,7 @@ use crate::line::MAX_LINE;
 use crate::log::{
     Bound, Displaced, Entry, EntryKind, Forked, Genesis, Logged, More, Op, Settle, Settlement,
 };
-use crate::merge::{Folded, Part};
+use crate::merge::{side_by_side, Folded, Part};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord};
 use crate::plan::{FactChange, FileChange, Plan};
@@ -83,7 +82,7 @@ pub struct Library {
     scan: Scan,
     /// Each file the last scan listed, as the views show it; `None` until a scan of
     /// every file has run.
-    listing: Option<CowMap<RelPath, Listed>>,
+    listing: Option<Arc<BTreeMap<RelPath, Listed>>>,
     /// The directories the last scan of every file could not list.
     unlisted: Vec<RelPath>,
     /// The directories below the root a scan of every file just listed, until a
@@ -297,7 +296,7 @@ impl Library {
     fn scan_report(&self) -> ScanReport {
         let unbound = self.bindings.unbound.iter();
         ScanReport {
-            arrived: unbound.map(|(path, ())| path.clone()).collect(),
+            arrived: unbound.cloned().collect(),
             ..self.bindings.report.clone()
         }
     }
@@ -548,7 +547,7 @@ impl Library {
         if Arc::ptr_eq(before, &self.bindings) {
             return changes;
         }
-        for pair in self.bindings.bound.diff(&before.bound) {
+        for pair in side_by_side(&self.bindings.bound, &before.bound) {
             let (Some((entity, file)), was) = pair else {
                 continue;
             };
@@ -1925,9 +1924,13 @@ fn walked<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
 }
 
 /// The files of `scan`, as the views list them.
-fn listing(scan: &Scan) -> CowMap<RelPath, Listed> {
+fn listing(scan: &Scan) -> Arc<BTreeMap<RelPath, Listed>> {
     let files = scan.files.iter();
-    CowMap::from_sorted_iter(files.map(|(path, file)| (path.clone(), Listed::of(file))))
+    Arc::new(
+        files
+            .map(|(path, file)| (path.clone(), Listed::of(file)))
+            .collect(),
+    )
 }
 
 /// Keeps in the local root the identities [`Library::remembering`] gives, so a

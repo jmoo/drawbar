@@ -24,8 +24,7 @@
 //! entity bound to a file (`at`), by a search. Values compare by the JSON toshokan
 //! writes for them; `values` decodes each distinct value of the key. Searching
 //! names or derived metadata is the app's. `changed_since` gives the entities and
-//! files that differ from an earlier view, at a cost that follows the changes, so an
-//! app can redraw only those.
+//! files that differ from an earlier view, so an app can redraw only those.
 //!
 //! Opening scans no library file: each file is shown where its facts put it, as
 //! unscanned, until a scan of every file. `rescan` scans every library file, for
@@ -118,7 +117,6 @@ pub mod blocking;
 pub mod compaction;
 #[doc(hidden)]
 pub mod contribution;
-mod cow;
 #[doc(hidden)]
 pub mod crash;
 #[doc(hidden)]

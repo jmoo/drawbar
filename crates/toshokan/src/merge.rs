@@ -8,12 +8,12 @@
 //! write that holds something. An entity with no live existence write, which
 //! only a forgotten basis or a lost write leaves, shows its live fields.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::binding::{Fact, Facts};
 use crate::contribution::{FieldKey, Name, Trashed, Value};
-use crate::cow::CowMap;
 use crate::ids::{EntityId, EntryHash, Hlc, Nonce, WriterId};
 use crate::log::{FileFact, Ref};
 use crate::path::RelPath;
@@ -94,6 +94,28 @@ fn writes<V>(writes: Option<&Writes<V>>) -> &[Held<V>] {
     writes.map_or(&[], Vec::as_slice)
 }
 
+/// Each key `now` or `was` holds, with its entry in each.
+pub(crate) type Paired<'a, K, V> = (Option<(&'a K, &'a V)>, Option<(&'a K, &'a V)>);
+
+/// Each key `now` or `was` holds, with its entry in each, in order of key.
+pub(crate) fn side_by_side<'a, K: Ord, V>(
+    now: &'a BTreeMap<K, V>,
+    was: &'a BTreeMap<K, V>,
+) -> impl Iterator<Item = Paired<'a, K, V>> {
+    let (mut now, mut was) = (now.iter().peekable(), was.iter().peekable());
+    std::iter::from_fn(move || {
+        let order = match (now.peek(), was.peek()) {
+            (None, None) => return None,
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (Some((now, _)), Some((was, _))) => now.cmp(was),
+        };
+        let now = (order != Ordering::Greater).then(|| now.next()).flatten();
+        let was = (order != Ordering::Less).then(|| was.next()).flatten();
+        Some((now, was))
+    })
+}
+
 /// The live writes in `now` that `was` does not hold, marked gained, or, where
 /// there are none, those in `was` that `now` does not hold, marked lost.
 fn changed<'a, V>(now: &'a [Held<V>], was: &'a [Held<V>]) -> Vec<(&'a Held<V>, bool)> {
@@ -122,7 +144,7 @@ struct EntityState {
 /// one of them changes it.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Folded {
-    entities: CowMap<EntityId, Arc<EntityState>>,
+    entities: BTreeMap<EntityId, Arc<EntityState>>,
     trash: BTreeMap<(WriterId, Nonce), Trashed>,
     settled: BTreeSet<(WriterId, Nonce)>,
     unknown: BTreeSet<(EntryHash, Raw)>,
@@ -346,7 +368,7 @@ impl Folded {
             (entity, Arc::new(state))
         });
         Self {
-            entities: CowMap::from_sorted_iter(entities),
+            entities: entities.collect(),
             trash: beside.trash,
             settled: beside.settled,
             unknown: beside.unknown,
@@ -426,7 +448,7 @@ impl Folded {
     pub fn since(&self, before: &Folded) -> Vec<(EntityId, Part, WriterId)> {
         let mut found = Vec::new();
         let gone = EntityState::default();
-        for pair in self.entities.diff(&before.entities) {
+        for pair in side_by_side(&self.entities, &before.entities) {
             let (entity, now, old) = match pair {
                 (Some((entity, now)), old) => (*entity, &**now, old.map(|(_, old)| &**old)),
                 (None, Some((entity, old))) => (*entity, &gone, Some(&**old)),
@@ -476,7 +498,7 @@ impl Folded {
     /// The entities whose state differs from `before`'s, by id. A state a clone
     /// still shares with `before` is unchanged without being compared.
     pub fn changed(&self, before: &Folded) -> Vec<EntityId> {
-        let pairs = self.entities.diff(&before.entities);
+        let pairs = side_by_side(&self.entities, &before.entities);
         let differ = pairs.filter_map(|pair| match pair {
             (Some((_, now)), Some((_, was))) if Arc::ptr_eq(was, now) || was == now => None,
             (Some((entity, _)), _) | (None, Some((entity, _))) => Some(*entity),
@@ -488,22 +510,23 @@ impl Folded {
     /// Takes the state of each entity `before` holds unchanged from it, so a
     /// clone shares it again.
     pub fn share(&mut self, before: &Folded) {
-        let same: Vec<(EntityId, Arc<EntityState>)> = self
-            .entities
-            .diff(&before.entities)
-            .filter_map(|pair| match pair {
-                (Some((entity, now)), Some((_, was))) if !Arc::ptr_eq(was, now) && was == now => {
-                    Some((*entity, Arc::clone(was)))
-                }
-                _ => None,
-            })
-            .collect();
+        let same: Vec<(EntityId, Arc<EntityState>)> =
+            side_by_side(&self.entities, &before.entities)
+                .filter_map(|pair| match pair {
+                    (Some((entity, now)), Some((_, was)))
+                        if !Arc::ptr_eq(was, now) && was == now =>
+                    {
+                        Some((*entity, Arc::clone(was)))
+                    }
+                    _ => None,
+                })
+                .collect();
         for (entity, was) in same {
             self.entities.insert(entity, was);
         }
     }
 
-    /// What `entity` shows that a view indexes; `None` unless it is shown.
+    /// What `entity` shows; `None` unless it is shown.
     pub fn shown(&self, entity: EntityId) -> Option<Shown<'_>> {
         self.entities.get(&entity)?.shown()
     }
@@ -674,7 +697,7 @@ impl Folded {
     pub fn files(&self) -> Facts {
         let shown = self.entities.iter().filter(|(_, state)| state.present());
         let files = shown.map(|(entity, state)| (*entity, state.file_facts()));
-        Facts::from_sorted_iter(files.filter(|(_, writes)| !writes.is_empty()))
+        files.filter(|(_, writes)| !writes.is_empty()).collect()
     }
 
     /// [`Folded::files`] of one entity: empty unless it is shown.

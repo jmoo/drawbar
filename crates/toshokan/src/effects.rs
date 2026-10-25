@@ -426,10 +426,8 @@ impl Resolver<'_> {
                 let path = self.library(path)?;
                 let known = self.bindings.bound.values();
                 let known = known.filter(|file| file.state != FileState::Missing);
-                let unbound = self.bindings.unbound.seek(|file| file.cmp(&path));
-                let unbound = unbound
-                    .take_while(|(file, ())| file.as_str().starts_with(path.as_str()))
-                    .map(|(file, ())| file);
+                let unbound = self.bindings.unbound.range(path.clone()..);
+                let unbound = unbound.take_while(|file| file.as_str().starts_with(path.as_str()));
                 let steps = &self.plan.steps;
                 let taken: Vec<&RelPath> = steps.iter().filter_map(EffectStep::taken).collect();
                 let moved = |file: &RelPath| taken.iter().any(|at| file.starts_with(at));
@@ -579,12 +577,12 @@ impl Resolver<'_> {
             .filter(|(_, file)| file.state != FileState::Missing)
             .map(|(entity, file)| (&file.path, *entity))
             .collect();
-        let unbound = self.bindings.unbound.seek(|path| path.cmp(from));
-        let unbound = unbound.take_while(|(path, ())| path.as_str().starts_with(from.as_str()));
+        let unbound = self.bindings.unbound.range(from.clone()..);
+        let unbound = unbound.take_while(|path| path.as_str().starts_with(from.as_str()));
         let files: BTreeSet<&RelPath> = bound
             .keys()
             .copied()
-            .chain(unbound.map(|(path, ())| path))
+            .chain(unbound)
             .filter(|path| path.starts_with(from))
             .collect();
         for &entity in bound

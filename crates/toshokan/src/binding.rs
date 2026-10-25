@@ -10,7 +10,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
-use crate::cow::CowMap;
 use crate::env::{ExactNames, Identify, Names};
 use crate::error::{Result, Unbindable};
 use crate::flow::{self, fold, ok};
@@ -32,7 +31,7 @@ pub struct Fact {
 
 /// Every entity's surviving file-register writes that say where its file is,
 /// oldest first, as the merge gives them. More than one is a conflict.
-pub type Facts = CowMap<EntityId, Box<[Fact]>>;
+pub type Facts = BTreeMap<EntityId, Box<[Fact]>>;
 
 /// One library file as a scan found it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -52,10 +51,10 @@ pub struct Scan {
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Bindings {
     /// Every entity with a file fact, with where its file is.
-    pub bound: CowMap<EntityId, FileRef>,
+    pub bound: BTreeMap<EntityId, FileRef>,
     /// Library files no entity is bound to. Shared between the bindings a change
     /// makes of one another, so a change copies only what it touches.
-    pub unbound: CowMap<RelPath, ()>,
+    pub unbound: BTreeSet<RelPath>,
     /// What binding found, but for [`ScanReport::arrived`], which `unbound` holds.
     pub report: ScanReport,
 }
@@ -148,7 +147,7 @@ pub fn bind_known(
     known.files.retain(|path, _| !under(path, &paths));
     let left = facts
         .iter()
-        .filter(|(entity, written)| !unscanned.leaves_unknown(&paths, *entity, written));
+        .filter(|(entity, written)| !unscanned.leaves_unknown(&paths, **entity, written));
     let left: Facts = left
         .map(|(entity, written)| (*entity, written.clone()))
         .collect();
@@ -735,7 +734,7 @@ impl Progress {
             pins,
             ..
         } = self;
-        bindings.bound = CowMap::from_sorted(bound.into_iter().collect());
+        bindings.bound = bound;
         let report = &mut bindings.report;
         report.departed.sort();
         report.moved.sort_by_key(|moved| moved.entity);
@@ -878,7 +877,7 @@ impl Progress {
     /// Keeps a file no entity is bound to.
     fn unbound(&mut self, path: &RelPath) {
         if !self.taken.contains(path) {
-            self.bindings.unbound.insert(path.clone(), ());
+            self.bindings.unbound.insert(path.clone());
         }
     }
 
@@ -1275,7 +1274,7 @@ mod tests {
                         let rivals = facts
                             .iter()
                             .filter(|(other, w)| {
-                                *other != *entity && w[0].value.identity == fact.identity
+                                **other != *entity && w[0].value.identity == fact.identity
                             })
                             .count();
                         assert!(
@@ -1331,7 +1330,7 @@ mod tests {
                 facts.len(),
                 "{shown}: an entity is unaccounted for"
             );
-            let unbound: BTreeSet<&RelPath> = bindings.unbound.iter().map(|(p, ())| p).collect();
+            let unbound: BTreeSet<&RelPath> = bindings.unbound.iter().collect();
             for path in scan.files.keys() {
                 assert_ne!(
                     owners.contains_key(path),
@@ -1437,7 +1436,7 @@ mod tests {
         let scan = scanned(&[("A", 0), ("a", 0)], &facts);
         let bindings = bind(&facts, &scan, &Folding);
         assert_eq!(bindings.bound[&e].path, path("A"));
-        let unbound: Vec<&RelPath> = bindings.unbound.iter().map(|(p, ())| p).collect();
+        let unbound: Vec<&RelPath> = bindings.unbound.iter().collect();
         assert_eq!(unbound, [&path("a")]);
 
         let mut both = one("a");

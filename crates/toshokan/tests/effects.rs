@@ -301,7 +301,7 @@ mod suite {
     pub fn a_tree_moves_with_every_file_in_it(d: &mut impl Driven) {
         put(d, &[("x/y/1", b"1"), ("x/2", b"2"), ("xx", b"3")]);
         let mut bindings = bound(&[(E, "x/y/1")]);
-        bindings.unbound = [(path("x/2"), ()), (path("xx"), ())].into_iter().collect();
+        bindings.unbound = [path("x/2"), path("xx")].into();
         let tree = FileChange::MoveTree {
             from: path("x"),
             to: path("z/x"),
@@ -641,7 +641,7 @@ fn without_directory_renames_a_tree_moves_file_by_file_and_removes_its_directori
     let d = &mut common::BlockingMem(MemDisk::with_capabilities(caps, caps));
     put(d, &[("x/y/1", b"1"), ("x/2", b"2")]);
     let mut bindings = bound(&[(E, "x/y/1")]);
-    bindings.unbound = [(path("x/2"), ())].into_iter().collect();
+    bindings.unbound = [path("x/2")].into();
     let tree = FileChange::MoveTree {
         from: path("x"),
         to: path("z"),

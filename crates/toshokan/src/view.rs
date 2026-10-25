@@ -4,9 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::binding::{Bindings, Scanned};
-use crate::cow::CowMap;
 use crate::ids::EntityId;
-use crate::merge::Folded;
+use crate::merge::{side_by_side, Folded, Paired};
 use crate::path::RelPath;
 use crate::report::{Fork, Gap, Item, WriterInfo};
 use crate::schema::{Field, Key, KeyKind, Keyed, Members, Raw, Register, Set, Value, Written};
@@ -31,7 +30,7 @@ pub struct Parts {
     pub folded: Folded,
     pub bindings: Arc<Bindings>,
     /// The library files the last scan found; `None` until a scan of every file.
-    pub listing: Option<CowMap<RelPath, Listed>>,
+    pub listing: Option<Arc<BTreeMap<RelPath, Listed>>>,
     pub writers: Vec<WriterInfo>,
     pub forks: Vec<Fork>,
     pub gaps: Vec<Gap>,
@@ -250,12 +249,12 @@ impl View {
     /// Library files no entity is bound to, in order. They get an entity only when
     /// an intent says something about them.
     pub fn unbound(&self) -> impl Iterator<Item = &RelPath> {
-        self.parts().bindings.unbound.iter().map(|(path, ())| path)
+        self.parts().bindings.unbound.iter()
     }
 
     /// Whether the library file at `path` is one no entity is bound to.
     pub fn is_unbound(&self, path: &RelPath) -> bool {
-        self.parts().bindings.unbound.contains_key(path)
+        self.parts().bindings.unbound.contains(path)
     }
 
     /// The library file at `path` as the last scan listed it; `None` where it
@@ -265,24 +264,27 @@ impl View {
     }
 
     /// What differs from `before`, a view of the same library. Costs a step per
-    /// change where this view was made from `before`, as each view an instance
-    /// gives is made from the one before it, and a step per entity and file
-    /// otherwise.
+    /// entity and file.
     pub fn changed_since(&self, before: &View) -> Changed {
         let (now, was) = (self.parts(), before.parts());
         let mut entities: BTreeSet<EntityId> =
             now.folded.changed(&was.folded).into_iter().collect();
         let mut files = BTreeSet::new();
         if !Arc::ptr_eq(&now.bindings, &was.bindings) {
-            entities.extend(differing(now.bindings.bound.diff(&was.bindings.bound)));
-            files.extend(differing(now.bindings.unbound.diff(&was.bindings.unbound)));
+            let (bound, unbound) = (&now.bindings.unbound, &was.bindings.unbound);
+            entities.extend(differing(side_by_side(
+                &now.bindings.bound,
+                &was.bindings.bound,
+            )));
+            files.extend(bound.symmetric_difference(unbound).cloned());
         }
         match (&now.listing, &was.listing) {
-            (Some(listing), Some(listed)) => files.extend(differing(listing.diff(listed))),
+            (Some(listing), Some(listed)) if Arc::ptr_eq(listing, listed) => {}
+            (Some(listing), Some(listed)) => files.extend(differing(side_by_side(listing, listed))),
             (listing, listed) => {
-                let every = |listing: &Option<CowMap<RelPath, Listed>>| {
-                    let paths = listing.iter().flat_map(|listing| listing.iter());
-                    paths.map(|(path, _)| path.clone()).collect::<Vec<_>>()
+                let every = |listing: &Option<Arc<BTreeMap<RelPath, Listed>>>| {
+                    let paths = listing.iter().flat_map(|listing| listing.keys());
+                    paths.cloned().collect::<Vec<_>>()
                 };
                 files.extend(every(listing).into_iter().chain(every(listed)));
             }
@@ -302,9 +304,9 @@ pub struct Changed {
     pub files: BTreeSet<RelPath>,
 }
 
-/// The keys whose entries differ in a [`CowMap::diff`].
+/// The keys whose entries differ, of two maps [`side_by_side`].
 fn differing<'a, K: Clone + 'a, V: PartialEq + 'a>(
-    pairs: impl Iterator<Item = (Option<&'a (K, V)>, Option<&'a (K, V)>)> + 'a,
+    pairs: impl Iterator<Item = Paired<'a, K, V>> + 'a,
 ) -> impl Iterator<Item = K> + 'a {
     pairs.filter_map(|pair| match pair {
         (Some((_, now)), Some((_, was))) if now == was => None,
