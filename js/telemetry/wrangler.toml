@@ -26,3 +26,7 @@ simple = { limit = 5, period = 60 }
 # never stored.
 [observability]
 enabled = false
+
+# No scheduled work. Without this table a deploy leaves deployed crons in place.
+[triggers]
+crons = []
