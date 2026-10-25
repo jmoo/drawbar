@@ -6,10 +6,9 @@ use std::pin::Pin;
 use std::task::Poll;
 
 use crate::disk::MemDisk;
-use crate::drafts::{Draft, Drafted};
 use crate::env::Env;
 use crate::error::Result;
-use crate::ids::{EntityId, Identity, Nonce, WriterId};
+use crate::ids::{EntityId, Nonce};
 use crate::intent::{Driver, Intent};
 use crate::io::{Capabilities, Io, IoError, IoResult, Meta, Operation, Range, Reply, Root, Step};
 use crate::layout::Layout;
@@ -303,15 +302,6 @@ impl<F: Fs> Library<F> {
         Intent::new(self, label)
     }
 
-    pub fn draft(&mut self, entity: EntityId) -> Draft<&mut Self> {
-        Draft::new(self, Drafted::Entity(entity))
-    }
-
-    /// The draft of the file at `path`, which no entity is bound to.
-    pub fn draft_file(&mut self, path: &RelPath) -> Draft<&mut Self> {
-        Draft::new(self, Drafted::File(path.clone()))
-    }
-
     pub async fn undo(&mut self) -> Result<Committed> {
         run(&self.fs, self.core.undo()).await
     }
@@ -340,10 +330,6 @@ impl<F: Fs> Library<F> {
     /// those a watcher saw change.
     pub async fn rescan_paths(&mut self, paths: Vec<RelPath>) -> Result<Refreshed> {
         run(&self.fs, self.core.rescan_paths(paths)).await
-    }
-
-    pub async fn discard_pooled_draft(&mut self, writer: WriterId, of: Drafted) -> Result<()> {
-        run(&self.fs, self.core.discard_pooled_draft(writer, of)).await
     }
 
     pub async fn settle_interrupted(&mut self) -> Result<()> {
@@ -404,18 +390,6 @@ impl<'l, F: Fs + 'l> Intent<&'l mut Library<F>> {
     pub async fn commit(self) -> Result<Committed> {
         let (library, plan, sources) = self.into_parts();
         run_with(&library.fs, sources, library.core.commit(plan)).await
-    }
-}
-
-impl<F: Fs> Draft<&mut Library<F>> {
-    pub async fn put(self, base: Identity, bytes: Vec<u8>) -> Result<()> {
-        let (library, of) = self.into_parts();
-        run(&library.fs, library.core.put_draft(of, base, bytes)).await
-    }
-
-    pub async fn discard(self) -> Result<()> {
-        let (library, of) = self.into_parts();
-        run(&library.fs, library.core.discard_draft(of)).await
     }
 }
 

@@ -20,9 +20,10 @@ use toshokan::{EntryHash, Env, Error, Expect, Policy, RelPath, View};
 use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES};
 use super::shown::Change;
 use super::storage::{self, CHUNK};
+use super::unsaved::{self, Base, Of};
 use super::{
-    slots, Cmd, Event, Failure, Fingerprint, Found, Intent, Kept, KeptKey, Key, LibPath, Opened,
-    Part, Source, Stat, Viewed,
+    Cmd, Event, Failure, Fingerprint, Found, Intent, Kept, KeptKey, Key, LibPath, Opened, Part,
+    Source, Stat, Viewed,
 };
 use crate::rewrite::{self, Pieces};
 
@@ -53,10 +54,20 @@ pub fn env(
     }
 }
 
+/// One clock for toshokan and the unsaved edits.
+struct Shared(Rc<RefCell<Box<dyn toshokan::Clock>>>);
+
+impl toshokan::Clock for Shared {
+    fn now_ms(&mut self) -> u64 {
+        self.0.borrow_mut().now_ms()
+    }
+}
+
 pub struct Keeper<F> {
     /// The storage and what toshokan is told, until the library opens over them.
     unopened: Option<(F, Env)>,
     library: Option<Library<F>>,
+    unsaved: unsaved::Store,
     /// The entries this session logged, whose undo ends with it.
     session: BTreeSet<EntryHash>,
     /// The most bytes this writer's trash holds before its oldest go.
@@ -67,10 +78,14 @@ pub struct Keeper<F> {
 
 impl<F: Fs> Keeper<F> {
     /// The library on `fs`, opened by [`Cmd::Open`].
-    pub fn new(fs: F, env: Env) -> Keeper<F> {
+    pub fn new(fs: F, mut env: Env) -> Keeper<F> {
+        let clock = Rc::new(RefCell::new(env.clock));
+        env.clock = Box::new(Shared(clock.clone()));
+        let instance = env.random.next_u128();
         Keeper {
             unopened: Some((fs, env)),
             library: None,
+            unsaved: unsaved::Store::new(instance, Box::new(Shared(clock))),
             session: BTreeSet::new(),
             trash: TRASH,
             shown: None,
@@ -81,11 +96,6 @@ impl<F: Fs> Keeper<F> {
     #[cfg(any(target_arch = "wasm32", test))]
     pub fn forget_shown(&mut self) {
         self.shown = None;
-    }
-
-    /// The storage the library is kept on, once it is open.
-    pub fn fs(&self) -> Option<&F> {
-        self.library.as_ref().map(Library::fs)
     }
 
     /// Run a command on the library, and answer it.
@@ -120,43 +130,36 @@ impl<F: Fs> Keeper<F> {
                 bytes,
                 replaces,
             } => {
-                let mut kept = self.put_draft(&of, base, bytes).await;
-                for replaced in replaces {
-                    if kept.is_err() {
-                        break;
-                    }
-                    kept = self.discard(replaced).await;
-                }
-                answer(Event::Drafted { of, kept });
+                let kept = self.draft(&of, base, bytes, replaces).await;
+                answer(Event::Drafted {
+                    of,
+                    kept: kept.map_err(|e| e.to_string()),
+                });
             }
-            Cmd::Discard(kept) => {
-                if let Err(why) = self.discard(kept).await {
-                    answer(Event::Unkept(why));
+            Cmd::Discard(of) => {
+                if let Err(e) = self.discard(&Of::Asset(of)).await {
+                    answer(Event::Unkept(format!("letting go of an unsaved edit: {e}")));
                 }
             }
             Cmd::KeepSlot { slot, base, bytes } => {
-                let kept = match self.fs() {
-                    Some(fs) => slots::keep(fs, &slot, base, &bytes).await,
-                    None => Err(io::Error::other("the library is not open")),
+                let kept = match storage_of(&self.library) {
+                    Ok(fs) => {
+                        let of = Of::Slot(slot);
+                        self.unsaved.keep(fs, of, Base::Slot(base), bytes).await
+                    }
+                    Err(e) => Err(e),
                 };
                 if let Err(e) = kept {
                     answer(Event::Unkept(format!("keeping a slot's edit: {e}")));
                 }
             }
             Cmd::DiscardSlot(slot) => {
-                let discarded = match self.fs() {
-                    Some(fs) => slots::discard(fs, &slot).await,
-                    None => Err(io::Error::other("the library is not open")),
-                };
-                if let Err(e) = discarded {
+                if let Err(e) = self.discard(&Of::Slot(slot)).await {
                     answer(Event::Unkept(format!("letting go of a slot's edit: {e}")));
                 }
             }
             Cmd::ReadSlot(slot) => {
-                let kept = match self.fs() {
-                    Some(fs) => slots::read(fs, &slot).await.map_err(|e| e.to_string()),
-                    None => Err("the library is not open".to_string()),
-                };
+                let kept = self.read_slot(&slot).await.map_err(|e| e.to_string());
                 answer(Event::SlotKept { slot, kept });
             }
             Cmd::Read { .. } => unreachable!("the backend reads files itself"),
@@ -212,36 +215,85 @@ impl<F: Fs> Keeper<F> {
         Some(Event::Trimmed(gone.map(|item| item.by).collect()))
     }
 
-    /// Let go of a draft this instance's writer, or an idle writer of the pool, kept.
-    async fn discard(&mut self, kept: Kept) -> Result<(), String> {
-        let library = self.library.as_mut().ok_or("the library is not open")?;
-        let of = drafted(&kept.of)?;
-        let discarded = match kept.pooled {
-            Some(writer) => library.discard_pooled_draft(writer, of).await,
-            None => {
-                let draft = match of {
-                    toshokan::Drafted::Entity(entity) => library.draft(entity),
-                    toshokan::Drafted::File(path) => library.draft_file(&path),
-                };
-                draft.discard().await
-            }
-        };
-        discarded.map_err(|e| e.to_string())
-    }
-
-    /// Keep `bytes` as the draft of the file `of` names, made over `base`.
-    async fn put_draft(
+    /// Keep `bytes` as the unsaved edit of the file `of` names, made over `base`, then
+    /// let go of the edits it `replaces`.
+    async fn draft(
         &mut self,
         of: &Key,
         base: toshokan::Identity,
         bytes: Vec<u8>,
-    ) -> Result<(), String> {
-        let library = self.library.as_mut().ok_or("the library is not open")?;
-        let draft = match drafted(of)? {
-            toshokan::Drafted::Entity(entity) => library.draft(entity),
-            toshokan::Drafted::File(path) => library.draft_file(&path),
-        };
-        draft.put(base, bytes).await.map_err(|e| e.to_string())
+        replaces: Vec<Key>,
+    ) -> io::Result<()> {
+        let fs = storage_of(&self.library)?;
+        let unsaved = &mut self.unsaved;
+        unsaved
+            .keep(fs, Of::Asset(of.clone()), Base::File(base), bytes)
+            .await?;
+        for replaced in replaces {
+            unsaved.discard(fs, &Of::Asset(replaced)).await?;
+        }
+        Ok(())
+    }
+
+    /// Let go of the unsaved edit of `of`.
+    async fn discard(&mut self, of: &Of) -> io::Result<()> {
+        let fs = storage_of(&self.library)?;
+        self.unsaved.discard(fs, of).await
+    }
+
+    /// The newest edit kept of `slot`, with the hash of the slot's bytes it was made over.
+    async fn read_slot(
+        &mut self,
+        slot: &super::Slot,
+    ) -> io::Result<Option<(blake3::Hash, Vec<u8>)>> {
+        let fs = storage_of(&self.library)?;
+        let found = self.unsaved.read(fs, Some(&Of::Slot(slot.clone()))).await?;
+        let unreadable = found.iter().any(Result::is_err);
+        match unsaved::newest(found) {
+            Some(unsaved::Unsaved {
+                base: Base::Slot(base),
+                bytes,
+                ..
+            }) => Ok(Some((base, bytes))),
+            None if !unreadable => Ok(None),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "it is not an edit drawbar kept",
+            )),
+        }
+    }
+
+    /// The unsaved edits of assets an earlier session kept, each with whether its file
+    /// still holds what it was made over, as `view` places it and a read of it now finds,
+    /// or `Err` where the edit or its file does not read.
+    async fn drafts(&mut self, view: &View) -> io::Result<Vec<Result<Kept, String>>> {
+        let fs = storage_of(&self.library)?;
+        let mut drafts = Vec::new();
+        for found in self.unsaved.read(fs, None).await? {
+            let kept = match found {
+                Ok(unsaved::Unsaved {
+                    of: Of::Asset(of),
+                    base: Base::File(base),
+                    at,
+                    bytes,
+                }) => match file_holds(fs, view, &of, base).await {
+                    Ok(holds) => Ok(Kept {
+                        of,
+                        at,
+                        holds,
+                        bytes,
+                    }),
+                    Err(e) => Err(format!("its file could not be read: {e}")),
+                },
+                Ok(unsaved::Unsaved {
+                    of: Of::Slot(_), ..
+                }) => continue,
+                Ok(_) => Err("it is not an edit drawbar kept".to_string()),
+                Err(name) => Err(name),
+            };
+            drafts.push(kept);
+        }
+        Ok(drafts)
     }
 
     /// Let the library go cleanly, once every command has run: this session's undo
@@ -298,11 +350,24 @@ impl<F: Fs> Keeper<F> {
             ),
             ..committed_view(&library, &mut self.shown, Vec::new())
         };
+        let view = library.view();
+        let earlier = unsaved::earlier(library.fs()).await;
+        let earlier = earlier.unwrap_or_else(|e| {
+            trouble.push(format!(
+                "looking for unsaved edits an earlier drawbar kept: {e}"
+            ));
+            false
+        });
         self.library = Some(library);
+        let drafts = self.drafts(&view).await.unwrap_or_else(|e| {
+            trouble.push(format!("reading the unsaved edits kept: {e}"));
+            Vec::new()
+        });
         Ok(Opened {
             writable,
             viewed,
-            drafts: opened.drafts,
+            drafts,
+            earlier,
             ignored: opened.ignored.len(),
             older,
             trouble,
@@ -524,12 +589,38 @@ fn moved_folders(intent: &Intent) -> Vec<LibPath> {
     }
 }
 
-/// The draft `of` names, as toshokan names it.
-fn drafted(of: &Key) -> Result<toshokan::Drafted, String> {
-    Ok(match of {
-        Key::Entity(entity) => toshokan::Drafted::Entity(*entity),
-        Key::File(path) => toshokan::Drafted::File(relative(path).ok_or_else(|| no_path(path))?),
-    })
+/// The storage `library` is kept on, once it is open.
+fn storage_of<F: Fs>(library: &Option<Library<F>>) -> io::Result<&F> {
+    let library = library.as_ref();
+    library
+        .map(Library::fs)
+        .ok_or_else(|| io::Error::other("the library is not open"))
+}
+
+/// Whether the file `of` names in `view` holds the file of identity `base`, by its
+/// identity read now.
+async fn file_holds<F: Fs>(
+    fs: &F,
+    view: &View,
+    of: &Key,
+    base: toshokan::Identity,
+) -> io::Result<bool> {
+    let at = match of {
+        Key::Entity(entity) => view
+            .entity(*entity)
+            .and_then(|entity| entity.file())
+            .filter(|file| file.state != toshokan::FileState::Missing)
+            .map(|file| file.path),
+        Key::File(path) => relative(path),
+    };
+    let Some(at) = at else {
+        return Ok(false);
+    };
+    let Some(stat) = storage::stat(fs, &at).await? else {
+        return Ok(false);
+    };
+    let read = async |range| storage::read(fs, Root::Folder, &at, range).await;
+    Ok(storage::identity(&at, stat.len, read).await? == base)
 }
 
 type Built<'l, F> = toshokan::intent::Intent<&'l mut Library<F>>;
@@ -2071,7 +2162,7 @@ mod tests {
             modified: listed.modified,
         };
         let rewrite = root.at("Long.nsmp");
-        *keeper.fs().unwrap().meddle.borrow_mut() = Some(Box::new(move || {
+        *storage_of(&keeper.library).unwrap().meddle.borrow_mut() = Some(Box::new(move || {
             fs::write(rewrite, vec![b'b'; len + 1]).unwrap();
         }));
         let answers = run(

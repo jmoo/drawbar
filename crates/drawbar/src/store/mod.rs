@@ -45,8 +45,8 @@ pub mod shown;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
-mod slots;
 mod storage;
+mod unsaved;
 pub(crate) mod wire;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{default_root, local_root, openable, sync_dir, Backend};
@@ -513,19 +513,17 @@ pub enum Source {
     Edited(LibPath, Fingerprint, Arc<Pieces>),
 }
 
-/// A draft as this install keeps it: of the file `of` names, by this instance's writer,
-/// or by the idle writer of the install's pool that kept it.
+/// An unsaved edit of an asset an earlier session kept, as opening found it.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Kept {
+    /// The file it is of.
     pub of: Key,
-    pub pooled: Option<toshokan::WriterId>,
-}
-
-impl Kept {
-    /// A draft this instance's writer keeps.
-    pub fn own(of: Key) -> Kept {
-        Kept { of, pooled: None }
-    }
+    /// The clock it was kept at: of two kept of one asset, the later is the newer.
+    pub at: u64,
+    /// Whether the file still holds what the edit was made over.
+    pub holds: bool,
+    #[serde(with = "wire::bytes")]
+    pub bytes: Vec<u8>,
 }
 
 /// A slot of one instrument, which an unsaved edit of its view is kept by: the class's
@@ -560,16 +558,17 @@ pub enum Cmd {
     Redo,
     /// Keep an unsaved edit of the file `of` names, made over the file of identity
     /// `base`, in this install's own state, never in the folder, and once it is kept,
-    /// let go of the drafts it `replaces`. Answered by [`Event::Drafted`].
+    /// let go of the drafts of the files it `replaces`, as the keys they went by. Answered
+    /// by [`Event::Drafted`].
     Draft {
         of: Key,
         base: toshokan::Identity,
         #[serde(with = "wire::bytes")]
         bytes: Vec<u8>,
-        replaces: Vec<Kept>,
+        replaces: Vec<Key>,
     },
-    /// Let go of a draft. Answered only on failure.
-    Discard(Kept),
+    /// Let go of the draft of the file a key names. Answered only on failure.
+    Discard(Key),
     /// Keep the unsaved edit of a slot's view, made over the slot's bytes of hash
     /// `base`, in this install's own state, never in the folder. Answered only on
     /// failure, by [`Event::Unkept`].
@@ -931,9 +930,11 @@ pub struct Opened {
     /// What the library kept of its view, which lists no file until a
     /// [`Cmd::Rescan`] has scanned every one.
     pub viewed: Viewed,
-    /// The unsaved edits an earlier session kept, each with whether its file still holds
-    /// what the edit was made over.
-    pub drafts: Vec<toshokan::report::DraftStatus>,
+    /// The unsaved edits of assets an earlier session kept, or why one does not read.
+    pub drafts: Vec<Result<Kept, String>>,
+    /// Whether this install holds unsaved edits an earlier drawbar kept where this one
+    /// does not read them, the first time it opens the library.
+    pub earlier: bool,
     /// How many pending records of other writers opening could not read.
     pub ignored: usize,
     /// What an older drawbar kept in the folder, the first time this install opens it.

@@ -113,13 +113,16 @@ files.
 
 Each install keeps, per library, a local root of its own that is never synced:
 
-| Path                             | Contents                                     |
-| -------------------------------- | -------------------------------------------- |
-| `<genesis>/head.json`            | The last entry this writer wrote             |
-| `<genesis>/drafts/<entity>.json` | An unsaved edit; `file-<hash>.json` a file's |
-| `<genesis>/lock`                 | Held while an instance writes as this writer |
-| `<genesis>/retired`              | Empty; the writer is never written again     |
-| `identities.json`                | Identities the install's scans read          |
+| Path                  | Contents                                     |
+| --------------------- | -------------------------------------------- |
+| `<genesis>/head.json` | The last entry this writer wrote             |
+| `<genesis>/lock`      | Held while an instance writes as this writer |
+| `<genesis>/retired`   | Empty; the writer is never written again     |
+| `identities.json`     | Identities the install's scans read          |
+
+toshokan reads and writes nothing else there, so the app may keep files of its
+own beside these, under names that are not a genesis hash. A `<genesis>/drafts/`
+directory an earlier version kept unsaved edits in is neither read nor removed.
 
 `<genesis>` is the hash of the writer's genesis entry. The directory is created
 only after that entry is durable in the folder, so the directories of the local
@@ -127,12 +130,11 @@ root are the install's pool of writers. An instance writes as the first writer
 of the pool whose lock it takes. It also takes, as it opens and at each refresh,
 the lock of every other writer no instance writes as now, as another window of
 the app wrote until it closed, and
-keeps it while that writer left something to take up: it offers their drafts
-beside its own, and reports their open pending records as orphans that are the
-install's own (`ours`), to settle without asking. It lets go of such a lock at
-once when the writer left nothing, a record its own log closed counting as
-nothing, and as soon as its drafts are discarded and its records settled, so the next instance writes as it and the pool stays as
-large as the instances that run at once. An orphan whose writer's lock another
+keeps it while that writer left pending records open: it reports them as orphans
+that are the install's own (`ours`), to settle without asking. It lets go of such
+a lock at once when the writer left none, a record its own log closed counting as
+none, and as soon as its records are settled, so the next instance writes as it
+and the pool stays as large as the instances that run at once. An orphan whose writer's lock another
 instance on this machine holds is `live`: that instance may be carrying it out
 still. Asking which writers other instances hold tries only the locks this
 instance does not hold itself.
@@ -140,7 +142,7 @@ instance does not hold itself.
 `head.json` is `{"writer":"<writer id>","head":"<entry hash>"}`, and
 `identities.json` is
 `[["<library path>",<length>,<modification time or null>,"<identity>"],…]`.
-A file in the local root that is replaced, such as `identities.json` or a draft, is
+A file in the local root that is replaced, such as `identities.json`, is
 first written beside it as `<name>.next` and synced; then `<name>` is removed
 and `<name>.next` renamed to it. A reader takes `<name>`, or `<name>.next` when
 `<name>` is missing. Every `head.json` of one writer has the same length, so a
@@ -1003,21 +1005,6 @@ An instance lists the trash of every writer whose directory its local root
 holds: its writer's and those of the writers it retired. A retired writer's
 items stay where they are, since no instance writes as that writer again; undo
 reaches only the items of this session's writer.
-
-## Drafts
-
-`<genesis>/drafts/<entity>.json` is the JSON line `{"base":"<identity>"}`, an LF,
-then the unsaved bytes. The line's `"at"` is the writer's clock when it kept the
-draft, which orders drafts of one file kept by several writers as their entries
-are ordered, whatever the files' times say. The draft of a file no entity is bound to is
-`drafts/file-<hash>.json`, named by the first 16 bytes of the BLAKE3 hash of its
-path in hexadecimal, and its line also holds `"path"`; an edit alone does not
-make a file an entity. A draft whose name is not the one its `"path"` gives is
-reported unreadable, and discarding the draft of that path removes it too. A draft is kept only in the local root, so losing the
-local root loses drafts and nothing else. Opening restores a draft only while
-its file holds `base`; otherwise it reports what the file holds now, with the
-draft's bytes. An instance that has never written starts its writer before it
-keeps its first draft.
 
 ## What stays
 

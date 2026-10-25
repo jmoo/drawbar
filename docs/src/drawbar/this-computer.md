@@ -78,6 +78,11 @@ the browser, closing the tab before drawbar has kept your latest edit makes the
 browser ask whether to leave. Stay a moment, and the edit is kept. A read-only
 library keeps no unsaved edits.
 
+Unsaved edits belong to this computer's copy of drawbar, not to one window. A
+window or tab that opens the library shows the edits kept for it, including
+those of another window still open. Where two windows kept edits of one sound,
+the one kept last is shown, and the activity log says so.
+
 ## Undo
 
 **Edit ▸ Undo** (⌘Z) takes back the last change you made to your files and
@@ -198,6 +203,8 @@ bring back any you deleted.
   unsaved edits and rescued slot contents in the `.drawbar` folder. This version
   says so once and leaves them where they are, and an older drawbar that opens
   this library sees its files without the tags this version keeps.
+  Unsaved edits an earlier drawbar kept on this computer are not read either, and
+  the activity log says so once.
 - **A folder that stays.** Where a folder moves one file at a time, as in the
   browser, a folder that still holds a file drawbar does not list, such as one
   whose name starts with a dot, stays where it was, and the activity log names

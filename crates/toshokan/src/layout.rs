@@ -10,7 +10,6 @@
 //!   tmp/<nonce>.<extension>    staged files, under their destination's extension
 //! <local>/<genesis>/           one writer of this install, by its genesis entry
 //!   head.json                  the head this writer last wrote
-//!   drafts/<entity>.json       unsaved edits
 //!   lock                       held while an instance writes as this writer
 //!   retired                    present once the writer is never written again
 //! ```
@@ -21,7 +20,7 @@
 //! in a writer's directory is read by its contents.
 
 use crate::error::{Error, Result};
-use crate::ids::{EntityId, EntryHash, Nonce, SegmentName, WriterId};
+use crate::ids::{EntryHash, Nonce, SegmentName, WriterId};
 use crate::path::RelPath;
 
 pub const WRITERS: &str = "writers.2";
@@ -180,25 +179,6 @@ impl Layout {
         child(&Self::local(genesis), "head.json")
     }
 
-    pub fn drafts(genesis: EntryHash) -> RelPath {
-        child(&Self::local(genesis), "drafts")
-    }
-
-    pub fn draft(genesis: EntryHash, entity: EntityId) -> RelPath {
-        child(&Self::drafts(genesis), &format!("{entity}.json"))
-    }
-
-    /// Where the draft of the file at `path`, which no entity is bound to, is kept:
-    /// named by the first 16 bytes of the BLAKE3 hash of the path.
-    pub fn file_draft(genesis: EntryHash, path: &RelPath) -> RelPath {
-        let hash = blake3::hash(path.as_str().as_bytes());
-        let name: String = hash.as_bytes()[..16]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        child(&Self::drafts(genesis), &format!("file-{name}.json"))
-    }
-
     pub fn lock(genesis: EntryHash) -> RelPath {
         child(&Self::local(genesis), "lock")
     }
@@ -280,10 +260,8 @@ mod tests {
     #[test]
     fn local_paths_live_in_the_writer_directory_named_by_its_genesis() {
         let genesis = EntryHash::from_u128(1);
-        let entity = EntityId::from_u128(2);
         for path in [
             Layout::head(genesis),
-            Layout::draft(genesis, entity),
             Layout::lock(genesis),
             Layout::retired(genesis),
         ] {

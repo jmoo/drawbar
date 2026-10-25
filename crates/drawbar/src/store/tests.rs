@@ -3106,11 +3106,7 @@ fn a_resting_sample_changed_in_place_before_its_save_is_not_saved_over() {
     assert!(workspace.get(id).unwrap().is_unsaved());
     assert!(workspace.edit_of(id).is_some() && !workspace.saving_edit(id));
     assert_eq!(session.said("was not saved"), 1);
-    assert_eq!(
-        root.names(""),
-        [".drawbar", "Zoned.nsmp"],
-        "no copy is left"
-    );
+    assert_eq!(root.names(""), ["Zoned.nsmp"], "no copy is left");
 }
 
 /// A plan over a piano library resting in its file is saved by laying the library out
@@ -4157,6 +4153,51 @@ fn an_unsaved_edit_comes_back_after_a_quit() {
     assert!(second.bytes(id) == edited);
     assert_eq!(second.said("has the unsaved edit it had"), 1);
     assert_eq!(second.said("appeared"), 0, "what was there is not news");
+}
+
+/// Opening a library and keeping an unsaved edit of one of its files writes nothing in
+/// its folder: the edit is kept in this install's own state.
+#[test]
+fn keeping_an_unsaved_edit_writes_nothing_in_the_folder() {
+    let root = Temp::new();
+    fs::write(root.at("a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut first = Session::open(&root);
+    let a = first.named("a.ne5p");
+    let edited = first.edit(a, "96");
+    first.autosave();
+    first.close();
+    assert_eq!(root.names(""), ["a.ne5p"], "nothing beside the file");
+
+    let again = Session::open(&root);
+    assert!(again.bytes(again.named("a.ne5p")) == edited);
+}
+
+/// Unsaved edits an earlier drawbar kept in a writer's own directory are named once,
+/// and neither read nor removed.
+#[test]
+fn unsaved_edits_an_earlier_drawbar_kept_are_named_once_and_left_alone() {
+    let root = Temp::new();
+    fs::write(root.at("a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let genesis = toshokan::EntryHash::from_u128(1).to_string();
+    let drafts = root.local().join(&genesis).join("drafts");
+    fs::create_dir_all(&drafts).unwrap();
+    fs::write(drafts.join("old.json"), b"{\"base\":\"00\"}\nedit").unwrap();
+    let told = "does not read the unsaved edits an earlier version kept";
+    let first = Session::open(&root);
+    assert_eq!(first.said(told), 1);
+    assert!(!first
+        .bench
+        .workspace
+        .get(first.named("a.ne5p"))
+        .unwrap()
+        .is_unsaved());
+    first.close();
+    let again = Session::open(&root);
+    assert_eq!(again.said(told), 0, "said once");
+    assert_eq!(
+        fs::read(drafts.join("old.json")).unwrap(),
+        b"{\"base\":\"00\"}\nedit"
+    );
 }
 
 /// A whole view sent mid-session, as when most of what is shown changed at once, keeps
@@ -5263,8 +5304,8 @@ fn of_two_windows_edits_of_one_file_the_newer_comes_back() {
     assert!(last.bytes(last.named("a.ne5p")) == newer);
 }
 
-/// Two windows of this install keep their unsaved edits as two writers' drafts. Opened
-/// again with one window, both edits come back.
+/// Two windows of this install keep their unsaved edits of two files. Opened again with
+/// one window, both edits come back.
 #[test]
 fn both_windows_unsaved_edits_come_back_in_one() {
     let root = Temp::new();

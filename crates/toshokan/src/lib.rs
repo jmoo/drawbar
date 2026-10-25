@@ -42,11 +42,10 @@
 //!
 //! An intent can save, rename and trash a file nothing is said about by its path,
 //! without making it an entity, and `Committed::paths` says where such files went,
-//! an undo's included. A draft of an unsaved edit is kept for an entity or for such
-//! a path.
+//! an undo's included.
 //!
 //! `opened` reports what needs the user: effects another writer left unfinished,
-//! drafts and forks. When an instance's history forks, each branch is shown as an
+//! and forks. When an instance's history forks, each branch is shown as an
 //! item of the view (`items`) with the change it would make. One intent can take
 //! changes from several items (`Intent::take`); an item stays, with no changes once
 //! nothing is left to review, until an intent dismisses it (`Intent::dismiss`). The
@@ -123,7 +122,6 @@ pub mod crash;
 pub mod derive;
 pub mod disk;
 #[doc(hidden)]
-pub mod drafts;
 #[doc(hidden)]
 pub mod effects;
 pub mod env;
@@ -165,7 +163,6 @@ pub mod web;
 pub mod writer;
 
 pub use disk::MemDisk;
-pub use drafts::Drafted;
 pub use env::{Clock, Env, ExactNames, Identify, Names, Random};
 pub use error::{Error, Invalid, Mismatch, Refusal, Result, Unbindable, Why};
 pub use ids::{EntityId, EntryHash, Hlc, Identity, Nonce, SegmentName, WriterId};

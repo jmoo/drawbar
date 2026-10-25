@@ -163,12 +163,13 @@ pub struct Store {
     /// holds each once it is kept.
     drafting: VecDeque<(u64, Key, u64, toshokan::Identity)>,
     /// The drafts an earlier session kept, each put back over its asset once its file is
-    /// read: as it is kept, and whether its file changed since the draft was made.
-    restoring: BTreeMap<u64, (super::Kept, Draft, bool, Option<toshokan::Hlc>)>,
-    /// Drafts put back that another writer kept, or under a key the asset no longer
-    /// goes by, and the older of two windows' drafts of one asset, each let go of once
-    /// this writer keeps the edit itself.
-    superseded: BTreeMap<u64, Vec<super::Kept>>,
+    /// read: the key it is kept under, what it holds, whether its file changed since the
+    /// draft was made, and the clock it was kept at.
+    restoring: BTreeMap<u64, (Key, Draft, bool, u64)>,
+    /// The keys of drafts put back under a key the asset no longer goes by, and of the
+    /// older of two drafts of one asset, each let go of once this instance keeps the
+    /// edit itself.
+    superseded: BTreeMap<u64, Vec<Key>>,
     /// The instrument attached, as [`super::Slot::instrument`] names it.
     instrument: Option<String>,
     /// Each view of a slot seen, with what its unsaved edit is kept by.
@@ -197,7 +198,7 @@ pub struct Store {
     kept_runs: BTreeSet<toshokan::log::Run>,
     /// The unsaved edits an earlier session kept, taken up once a scan lists the files
     /// they were made over.
-    drafts_found: Vec<toshokan::report::DraftStatus>,
+    drafts_found: Vec<Result<super::Kept, String>>,
     /// Whether a scan of every file has listed the files since the library opened.
     listed: bool,
     /// The changes other drawbars left unfinished that the last read found, by writer
@@ -447,11 +448,8 @@ impl Store {
                 (true, true) => _ = self.drafted.insert(id, kept),
                 // The draft under the key it went by goes once the one under its new
                 // key is kept.
-                (true, false) => {
-                    let superseded = self.superseded.entry(id).or_default();
-                    superseded.push(super::Kept::own(kept.0));
-                }
-                (false, _) => self.send(Cmd::Discard(super::Kept::own(kept.0))),
+                (true, false) => self.superseded.entry(id).or_default().push(kept.0),
+                (false, _) => self.send(Cmd::Discard(kept.0)),
             }
         }
         let held = |id: &u64| workspace.get(*id).is_some();
@@ -501,8 +499,8 @@ impl Store {
                 continue;
             };
             let mut replaces = self.superseded.remove(&entity.id).unwrap_or_default();
-            // The draft this writer keeps under the key replaces its own in place.
-            replaces.retain(|kept| *kept != super::Kept::own(key.clone()));
+            // A keep under the key lets go of what was kept under it before.
+            replaces.retain(|kept| *kept != key);
             self.send(Cmd::Draft {
                 of: key.clone(),
                 base,
@@ -661,10 +659,7 @@ impl Store {
         if workspace.get(id).is_some_and(LocalEntity::is_unsaved) {
             return;
         }
-        let own = self
-            .drafted
-            .remove(&id)
-            .map(|(key, _, _)| super::Kept::own(key));
+        let own = self.drafted.remove(&id).map(|(key, _, _)| key);
         let superseded = self.superseded.remove(&id).unwrap_or_default();
         for kept in own.into_iter().chain(superseded) {
             self.send(Cmd::Discard(kept));
@@ -675,33 +670,22 @@ impl Store {
     /// the asset's file is read, which is asked for now.
     fn take_drafts(
         &mut self,
-        drafts: Vec<toshokan::report::DraftStatus>,
+        drafts: Vec<Result<super::Kept, String>>,
         workspace: &mut Workspace,
         log: &mut Log,
     ) {
-        use toshokan::report::DraftState;
-
         for draft in drafts {
-            let key = match &draft.of {
-                toshokan::Drafted::Entity(entity) => Key::Entity(*entity),
-                toshokan::Drafted::File(path) => match LibPath::parse(path.as_str()) {
-                    Some(path) => Key::File(path),
-                    None => continue,
-                },
+            let Ok(super::Kept {
+                of: key,
+                at: kept_at,
+                holds,
+                bytes,
+            }) = draft
+            else {
+                log.trouble("An unsaved edit drawbar kept could not be read.");
+                continue;
             };
-            let kept = super::Kept {
-                of: key.clone(),
-                pooled: draft.pooled,
-            };
-            let kept_at = draft.at;
-            let (bytes, changed) = match draft.state {
-                DraftState::Applies { bytes } => (bytes, false),
-                DraftState::BaseChanged { bytes, .. } => (bytes, true),
-                DraftState::Unreadable => {
-                    log.trouble("An unsaved edit drawbar kept could not be read.");
-                    continue;
-                }
-            };
+            let changed = !holds;
             // A file whose draft was kept by its path may have become an entity since.
             let at = |path: &LibPath| {
                 let mut listed = workspace.listed();
@@ -722,7 +706,7 @@ impl Store {
             };
             match Draft::decode(&bytes) {
                 Ok(draft) => {
-                    let restoring = (kept, draft, changed, kept_at);
+                    let restoring = (key.clone(), draft, changed, kept_at);
                     let older = match self.restoring.remove(&id) {
                         Some(earlier) if earlier.3 > restoring.3 => {
                             self.restoring.insert(id, earlier);
@@ -734,8 +718,8 @@ impl Store {
                         }
                     };
                     if let Some(older) = older {
-                        // ⚠️ Let go only once this writer keeps the newer: until then
-                        // the older may be the only copy left.
+                        // ⚠️ Let go only once this instance keeps the newer: until
+                        // then the older may be the only copy left.
                         self.superseded.entry(id).or_default().push(older);
                         let name = workspace.get(id).map(|entity| entity.name.clone());
                         log.say(format!(
@@ -769,7 +753,7 @@ impl Store {
         if workspace.get(id).is_none_or(LocalEntity::unread) {
             return;
         }
-        let Some((kept, draft, changed, _)) = self.restoring.remove(&id) else {
+        let Some((key, draft, changed, _)) = self.restoring.remove(&id) else {
             return;
         };
         match draft {
@@ -780,12 +764,12 @@ impl Store {
             return;
         };
         if !entity.is_unsaved() {
-            return self.send(Cmd::Discard(kept));
+            return self.send(Cmd::Discard(key));
         }
-        // This writer keeps the edit by the key the asset goes by now, and then lets
+        // This instance keeps the edit by the key the asset goes by now, and then lets
         // go of the draft it came from, where that is another.
-        if kept.pooled.is_some() || self.ids.key(id) != Some(&kept.of) {
-            self.superseded.entry(id).or_default().push(kept);
+        if self.ids.key(id) != Some(&key) {
+            self.superseded.entry(id).or_default().push(key);
         }
         match changed {
             true => conflict(id, workspace, browser, log),
@@ -1692,10 +1676,17 @@ impl Store {
             writable,
             viewed,
             drafts,
+            earlier,
             ignored,
             older,
             trouble,
         } = opened;
+        if earlier {
+            log.say(
+                "This drawbar does not read the unsaved edits an earlier version kept for \
+                 this library, so they are not shown.",
+            );
+        }
         if !older.is_empty() {
             let said: Vec<String> = older
                 .iter()
