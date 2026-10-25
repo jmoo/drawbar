@@ -2058,6 +2058,30 @@ fn a_clean_asset_holds_its_bytes_once() {
 
 /// A piano library the size a vendor ships: three strokes, each of the most blocks a
 /// stroke record can state, about 200 MB in all.
+/// A row drawn for a resting piano reads its index and nothing more: its checksum waits
+/// until it is opened, which reads it through.
+#[test]
+fn a_drawn_row_of_a_resting_piano_is_not_read_through_until_it_is_opened() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.npno"), large_piano()).unwrap();
+    let mut session = Session::listed(&root);
+    let id = session.only();
+    session.bench.workspace.in_view([id]);
+    session.answer_reads();
+    session.bench.workspace.settle_files(&mut session.bench.log);
+    let entity = session.bench.workspace.get(id).unwrap();
+    let file = entity.rests().expect("rests in its file").clone();
+    assert_eq!(entity.verify().badge(), "not checked");
+    assert_eq!(file.take_reads(), [], "read past its index");
+    assert_eq!(file.take_checks(), 0, "read through for its checksum");
+
+    session.bench.workspace.hurry(id);
+    session.bench.workspace.settle_files(&mut session.bench.log);
+    let entity = session.bench.workspace.get(id).unwrap();
+    assert_eq!(entity.verify().badge(), "ok");
+    assert_eq!(file.take_checks(), 1, "opening reads it through");
+}
+
 fn large_piano() -> Vec<u8> {
     use nord_format::formats::npno::synthetic::{take, Build};
     use nord_format::formats::npno::Bank;

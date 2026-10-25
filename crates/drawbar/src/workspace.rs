@@ -72,6 +72,9 @@ pub enum VerifyState {
     Checked,
     /// A file left on disk whose checksum is still being checked.
     Checking,
+    /// A file left on disk whose checksum nothing has needed yet: it is checked once the
+    /// asset is opened or sent.
+    Unchecked,
     /// Offset of the first byte that came back different.
     Differs {
         at: usize,
@@ -97,6 +100,7 @@ impl VerifyState {
         match self {
             VerifyState::Ok | VerifyState::Checked => "ok",
             VerifyState::Checking => "checking…",
+            VerifyState::Unchecked => "not checked",
             VerifyState::Reading => "reading…",
             VerifyState::Differs { .. } => "differs",
             VerifyState::Failed(_) => "failed",
@@ -116,6 +120,7 @@ impl VerifyState {
             VerifyState::Ok => "re-encoded byte-for-byte".into(),
             VerifyState::Checked => "its stored checksum matches its body".into(),
             VerifyState::Checking => "its checksum is being checked".into(),
+            VerifyState::Unchecked => "its checksum is checked once it is opened or sent".into(),
             VerifyState::Reading => "it is still being read".into(),
             VerifyState::Differs { at } => format!("first difference at byte {at:#06x}"),
             VerifyState::Failed(why) | VerifyState::NotRead(why) => why.clone(),
@@ -139,6 +144,7 @@ impl VerifyState {
                 crate::app::bad(visuals)
             }
             VerifyState::Checking
+            | VerifyState::Unchecked
             | VerifyState::Reading
             | VerifyState::NotApplicable(_)
             | VerifyState::Remembered(Verdict::NotApplicable) => visuals.weak_text_color(),
@@ -156,6 +162,7 @@ impl VerifyState {
             VerifyState::NotRead(_) => Some("not read"),
             VerifyState::Ok
             | VerifyState::Checked
+            | VerifyState::Unchecked
             | VerifyState::Differs { .. }
             | VerifyState::NotApplicable(_)
             | VerifyState::Remembered(_) => None,
@@ -338,6 +345,9 @@ pub struct Facts {
 /// How far the check of a resting file's stored checksum has got.
 #[derive(Clone)]
 pub enum Check {
+    /// Not asked for: nothing has needed the verdict, so the file has not been read
+    /// through.
+    Unchecked,
     /// Not answered yet. `reported` is the checksum a slot that a send of the file just
     /// landed in reports, which stands until the check answers.
     Checking { reported: Option<u32> },
@@ -365,11 +375,11 @@ impl Content {
         }
     }
 
-    /// A file left on disk, its checksum still to be checked.
+    /// A file left on disk, its checksum not checked until something needs it.
     pub fn resting(file: Arc<OnDisk>) -> Content {
         Content::Resting {
             file,
-            check: Check::Checking { reported: None },
+            check: Check::Unchecked,
         }
     }
 
@@ -420,7 +430,7 @@ impl Baseline {
             Content::Resting { check, .. } => match check {
                 Check::Checking { reported } => *reported,
                 Check::Checked(container) => Some(container.body_crc32),
-                Check::Failed(_) => None,
+                Check::Unchecked | Check::Failed(_) => None,
             },
         }
     }
@@ -500,6 +510,7 @@ impl Baseline {
             } => VerifyState::NotRead(why.clone()),
             Content::Remembered { summary, .. } => VerifyState::Remembered(summary.verdict),
             Content::Resting { check, .. } => match check {
+                Check::Unchecked => VerifyState::Unchecked,
                 Check::Checking { .. } => VerifyState::Checking,
                 Check::Checked(_) => VerifyState::Checked,
                 Check::Failed(why) => VerifyState::Failed(why.clone()),
@@ -895,7 +906,11 @@ impl LocalEntity {
         }
         match self.rests() {
             Some(file) => {
-                file.known_crc().is_none() && matches!(self.verify(), VerifyState::Checking)
+                file.known_crc().is_none()
+                    && matches!(
+                        self.verify(),
+                        VerifyState::Checking | VerifyState::Unchecked
+                    )
             }
             None => self.unread() && !matches!(self.verify(), VerifyState::NotRead(_)),
         }
@@ -942,6 +957,16 @@ impl LocalEntity {
         }
     }
 
+    /// Whether it rests in its file with its checksum not answered yet: a send waits for
+    /// the check, which [`Workspace::check_soon`] asks for.
+    pub fn awaits_check(&self) -> bool {
+        self.rests().is_some()
+            && matches!(
+                self.verify(),
+                VerifyState::Unchecked | VerifyState::Checking
+            )
+    }
+
     /// Whether the instrument can be sent this, and why not: bytes that are not what they
     /// claim to be must never reach a delete-then-write.
     pub fn sendable(&self) -> Result<(), String> {
@@ -961,6 +986,7 @@ impl LocalEntity {
             (VerifyState::Checking, _) => {
                 Err(format!("its {} bytes are still being checked", file.len))
             }
+            (VerifyState::Unchecked, _) => Err("its checksum has not been checked yet".into()),
             (state, _) => Err(state.detail()),
         }
     }
@@ -1607,6 +1633,9 @@ pub struct Workspace {
     /// time, in the order they arrived.
     checks: VecDeque<(u64, Arc<OnDisk>)>,
     checking: Option<Checking>,
+    /// Assets whose checksum something needs: one opened, sent, or read for its slot.
+    /// Each is checked once it rests in its file.
+    to_check: std::cell::RefCell<std::collections::BTreeSet<u64>>,
     /// Assets whose file is being copied in, each with what it is a copy of. Each is
     /// unread until its copy lands.
     arriving: std::collections::BTreeMap<u64, CopyOf>,
@@ -1734,6 +1763,7 @@ impl Workspace {
             demos: None,
             checks: VecDeque::new(),
             checking: None,
+            to_check: Default::default(),
             arriving: Default::default(),
             fetched: Default::default(),
             bundling: None,
@@ -2125,6 +2155,17 @@ impl Workspace {
     /// Leave an asset's bytes in `file`, which holds them, under `stamp`, and check the
     /// file's checksum off the frame.
     fn rest(&mut self, id: u64, file: Arc<OnDisk>, stamp: u64) {
+        let checked = self.get(id).is_some_and(|held| {
+            matches!(
+                held.saved.content,
+                Content::Resting {
+                    check: Check::Checking { .. } | Check::Checked(_) | Check::Failed(_),
+                    ..
+                }
+            )
+        });
+        // A file it was checked over is checked again where it rests now.
+        let wanted = self.to_check.get_mut().remove(&id);
         self.swap(id, |held| {
             LocalEntity::resting(
                 id,
@@ -2134,7 +2175,9 @@ impl Workspace {
                 stamp,
             )
         });
-        self.check(id, file);
+        if wanted || checked {
+            self.check(id, file);
+        }
         self.follow_edit(id);
     }
 
@@ -2161,8 +2204,35 @@ impl Workspace {
     /// Check the checksum of `file`, which holds an asset's saved bytes, once the checks
     /// before it have answered.
     fn check(&mut self, id: u64, file: Arc<OnDisk>) {
+        let content = self.get_mut(id).map(|entity| &mut entity.saved.content);
+        if let Some(Content::Resting {
+            check: check @ Check::Unchecked,
+            ..
+        }) = content
+        {
+            *check = Check::Checking { reported: None };
+        }
         self.checks.push_back((id, file));
         self.next_check();
+    }
+
+    /// Start the checks asked for of assets now resting unchecked in their files, and
+    /// let go of those asked for that hold nothing left to check.
+    fn start_checks(&mut self) {
+        let asked = std::mem::take(self.to_check.get_mut());
+        for id in asked {
+            let Some(entity) = self.get(id) else {
+                continue;
+            };
+            if entity.unread() {
+                self.to_check.get_mut().insert(id);
+                continue;
+            }
+            let file = entity.saved.file().cloned();
+            if let (Some(file), VerifyState::Unchecked) = (file, entity.saved.verify()) {
+                self.check(id, file);
+            }
+        }
     }
 
     fn next_check(&mut self) {
@@ -2290,6 +2360,9 @@ impl Workspace {
             return;
         }
         entity.seen.set(self.frame);
+        if need == Need::Now {
+            self.check_soon(id);
+        }
         let whole = need != Need::InView;
         let remembered = matches!(entity.verify(), VerifyState::Remembered(_));
         if !entity.reading() && !(whole && remembered) {
@@ -2451,7 +2524,20 @@ impl Workspace {
         if !unread || self.wanted.get_mut().contains_key(&id) {
             return false;
         }
+        // Matching it to its slot takes its checksum.
+        self.to_check.get_mut().insert(id);
         self.asked.insert(id)
+    }
+
+    /// Check the checksum of `id` once it rests in its file, unless a check has begun: a
+    /// send, and whatever needs its verdict, asks for it.
+    pub fn check_soon(&self, id: u64) {
+        let waits = self.get(id).is_some_and(|entity| {
+            entity.unread() || matches!(entity.saved.verify(), VerifyState::Unchecked)
+        });
+        if waits && self.to_check.borrow_mut().insert(id) {
+            self.ctx.request_repaint();
+        }
     }
 
     /// The library refused to read an asset asked of it, for want of room. It stays as it
@@ -3077,6 +3163,7 @@ impl Workspace {
                 Incoming::Failed(text) => log.trouble(text),
             }
         }
+        self.start_checks();
         if let Some(check) = &self.checking {
             let answer = check.job.poll();
             self.checked(answer, log);
@@ -3088,6 +3175,7 @@ impl Workspace {
     /// Wait for every check, read and decode in flight, and fold them in.
     #[cfg(test)]
     pub fn settle_files(&mut self, log: &mut Log) {
+        self.start_checks();
         loop {
             self.next_decodes();
             let Some(Decode { ids, job }) = self.decoding.pop() else {
@@ -3808,7 +3896,6 @@ impl Workspace {
                     LocalEntity::undecoded(id, name, origin, bytes, stamp)
                 }
                 (Content::Resting { file, .. }, None) => {
-                    self.checks.push_back((id, file.clone()));
                     LocalEntity::resting(id, name, origin, file, stamp)
                 }
                 (content, None) => LocalEntity::listed_as(id, name, origin, content, stamp),
@@ -4191,6 +4278,7 @@ mod tests {
                 file
             })
             .collect();
+        workspace.poll(&mut Log::default());
         let waiting = &files[2];
         assert!(Arc::strong_count(waiting) > 2, "its check waits its turn");
 
@@ -5308,7 +5396,15 @@ mod tests {
         let len = program.len() as u64;
         let nothing: Then = |_, _, _| {};
         let settle: Then = |workspace, log, _| workspace.settle_files(log);
-        let rows: [(&str, Content, Then, Reads); 8] = [
+        let checking: Then = |workspace, _, _| {
+            workspace.check_soon(1);
+            workspace.start_checks();
+        };
+        let checked: Then = |workspace, log, _| {
+            workspace.check_soon(1);
+            workspace.settle_files(log);
+        };
+        let rows: [(&str, Content, Then, Reads); 9] = [
             (
                 "a file not read",
                 Content::unread(len),
@@ -5340,15 +5436,21 @@ mod tests {
                 (false, false, false, len, "ok", slot_of(&program)),
             ),
             (
+                "a file nothing has checked",
+                Content::resting(file.clone()),
+                settle,
+                (false, false, true, sample.len() as u64, "not checked", None),
+            ),
+            (
                 "a file still being checked",
                 Content::resting(file.clone()),
-                nothing,
+                checking,
                 (false, false, true, sample.len() as u64, "checking…", None),
             ),
             (
                 "a file checked",
                 Content::resting(file.clone()),
-                settle,
+                checked,
                 (
                     false,
                     false,
@@ -5361,7 +5463,7 @@ mod tests {
             (
                 "a file that failed its check",
                 Content::resting(unsound.clone()),
-                settle,
+                checked,
                 (false, false, true, broken.len() as u64, "failed", None),
             ),
         ];
@@ -5522,6 +5624,8 @@ mod tests {
         let piano = crate::testing::piano(5);
         let second = crate::testing::on_disk(&dir, "Upright.npno", &piano);
         let (mut workspace, mut log) = restored(Content::resting(first.clone()), None);
+        workspace.check_soon(1);
+        workspace.start_checks();
         workspace.adopt_file(1, second.clone());
 
         let running = workspace.checking.as_ref().expect("the first file's check");
@@ -5571,6 +5675,7 @@ mod tests {
         let sample = crate::testing::sample_bytes();
         let file = crate::testing::on_disk(&dir, "Marimba.nsmp", &sample);
         let (mut workspace, mut log) = restored(Content::resting(file.clone()), None);
+        workspace.check_soon(1);
         workspace.settle_files(&mut log);
         workspace.landed(1, ObjectClass::Sample, at, sample.clone());
         let entity = workspace.get(1).unwrap();
@@ -5628,6 +5733,8 @@ mod tests {
         let sample = crate::testing::sample_bytes();
         let file = crate::testing::on_disk(&dir, "Marimba.nsmp", &sample);
         let (mut workspace, mut log) = restored(Content::resting(file.clone()), Some(edit));
+        workspace.check_soon(1);
+        workspace.start_checks();
         workspace.revert(1, &mut log);
         let entity = workspace.get(1).unwrap();
         assert!(entity.rests().is_some_and(|held| Arc::ptr_eq(held, &file)));

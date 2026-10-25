@@ -118,7 +118,10 @@ impl Verdict {
             VerifyState::Failed(_) => Some(Verdict::Failed),
             VerifyState::NotApplicable(_) => Some(Verdict::NotApplicable),
             VerifyState::Remembered(verdict) => Some(*verdict),
-            VerifyState::Checking | VerifyState::Reading | VerifyState::NotRead(_) => None,
+            VerifyState::Checking
+            | VerifyState::Unchecked
+            | VerifyState::Reading
+            | VerifyState::NotRead(_) => None,
         }
     }
 }

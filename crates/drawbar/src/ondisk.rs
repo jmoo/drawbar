@@ -117,6 +117,9 @@ pub struct OnDisk {
     /// Every range [`OnDisk::read`] or a send was asked for.
     #[cfg(test)]
     reads: std::sync::Mutex<Vec<Range<u64>>>,
+    /// How many checks have read the whole file through.
+    #[cfg(test)]
+    checks: AtomicU64,
     /// How many reads a send makes before the file reads as gone.
     #[cfg(test)]
     vanishes: std::sync::Mutex<Option<usize>>,
@@ -133,6 +136,8 @@ impl OnDisk {
             index,
             #[cfg(test)]
             reads: Default::default(),
+            #[cfg(test)]
+            checks: AtomicU64::new(0),
             #[cfg(test)]
             vanishes: Default::default(),
         }
@@ -168,6 +173,8 @@ impl OnDisk {
     /// Check the file's stored checksum in one streaming pass off the frame, taking the
     /// file's own CRC-32 on the way.
     pub fn verify(self: &Arc<Self>, ctx: &egui::Context) -> Job<Result<Sums, String>> {
+        #[cfg(test)]
+        self.checks.fetch_add(1, Ordering::Relaxed);
         let file = self.clone();
         let summing = Summing::new(self.len);
         self.pass(
@@ -224,6 +231,12 @@ impl OnDisk {
     #[cfg(test)]
     pub fn take_reads(&self) -> Vec<Range<u64>> {
         std::mem::take(&mut self.reads.lock().expect("unpoisoned"))
+    }
+
+    /// How many checks have read the whole file through so far, zeroed.
+    #[cfg(test)]
+    pub fn take_checks(&self) -> u64 {
+        self.checks.swap(0, Ordering::Relaxed)
     }
 
     /// Fail every read a send asks for once `reads` more have answered, as a file gone
@@ -359,11 +372,15 @@ impl Missing {
     }
 }
 
-/// The least a fetch for an index takes. A piano's container header, prefix and stroke
-/// directory sit together at its start, and a sample's section header beside the
-/// opening of its stroke, so a fetch this size usually holds all of a piano's index
-/// and one stroke's part of a sample's.
+/// The least a fetch for an index takes within the file's first [`FETCH`] bytes. A
+/// piano's container header, prefix and stroke directory sit together at its start, so
+/// a fetch this size usually holds all of a piano's index.
 pub const FETCH: u64 = 64 << 10;
+
+/// The least a fetch for an index takes past the file's start. A sample's sections run
+/// through its audio, each stroke's header and opening a few bytes beside the stroke's
+/// audio, so a fetch this size holds one stroke's part of the index and little audio.
+pub const STEP: u64 = 4 << 10;
 
 /// The parts of a file fetched so far, read as the file itself: a reader over them
 /// reports the file's whole length, and a read reaching a byte not fetched fails with
@@ -384,9 +401,14 @@ impl Slices {
     }
 
     /// The range to fetch for a read that needed `missing`: at least [`FETCH`] bytes
-    /// from its start, within the file.
+    /// from its start within the file's first [`FETCH`], at least [`STEP`] past them,
+    /// within the file.
     pub fn widen(&self, missing: &Range<u64>) -> Range<u64> {
-        let end = missing.end.max(missing.start.saturating_add(FETCH));
+        let least = match missing.start < FETCH {
+            true => FETCH,
+            false => STEP,
+        };
+        let end = missing.end.max(missing.start.saturating_add(least));
         missing.start..end.min(self.len)
     }
 
@@ -564,6 +586,68 @@ mod tests {
         assert!(
             fetched <= first_audio + FETCH,
             "{fetched} bytes fetched, audio starting at {first_audio}"
+        );
+    }
+
+    /// A sample's strokes sit one after another through its audio, and the index reads
+    /// a few bytes at each: it fetches about those, not the audio between them.
+    #[test]
+    fn a_sample_index_over_slices_fetches_its_strokes_openings_and_little_audio() {
+        use nord_format::formats::nsmp::{codec, encode};
+
+        const ZONES: u8 = 40;
+        let mut level = 0i32;
+        let sources: Vec<Vec<i16>> = (0..ZONES)
+            .map(|zone| {
+                (0..30_000u32)
+                    .map(|i| {
+                        let step = (i.wrapping_mul(2_654_435_761) ^ u32::from(zone)) % 4096;
+                        level = level * 7 / 8 + step as i32 - 2048;
+                        level as i16
+                    })
+                    .collect()
+            })
+            .collect();
+        let zones: Vec<encode::NewZone<'_>> = sources
+            .iter()
+            .zip(0u8..)
+            .map(|(source, i)| encode::NewZone {
+                source,
+                channels: 1,
+                root_key: 108 - i,
+                top_note: 108 - i,
+                global_id: 1 + u32::from(i),
+                loops: None,
+                secondary_start: encode::default_secondary_start(source.len(), None),
+                shift: None,
+                gain: 1.0,
+                loop_decay: encode::DEFAULT_LOOP_DECAY,
+            })
+            .collect();
+        let instrument = encode::Instrument {
+            name: "Strokes",
+            map_gain: 1.0,
+            predictor: encode::Predictor::default(),
+            layout: codec::Layout::V2,
+            preset: Default::default(),
+        };
+        let sample = encode::multi_zone(instrument, &zones).expect("the zones encode");
+        let bytes = nord_format::to_bytes(&nord_format::Entity::Sample(sample)).unwrap();
+        let spacing = bytes.len() as u64 / u64::from(ZONES);
+        assert!(
+            spacing < FETCH,
+            "strokes {spacing} bytes apart, closer than a wide fetch"
+        );
+        let (index, fetches, fetched) = converged(&bytes);
+        let Some(Index::Sample(index)) = index else {
+            panic!("a sample")
+        };
+        assert_eq!(index.zones().len(), usize::from(ZONES));
+        let most = FETCH + u64::from(ZONES) * 2 * STEP;
+        assert!(
+            fetched <= most,
+            "{fetched} of {} bytes fetched in {fetches} fetches, more than {most}",
+            bytes.len()
         );
     }
 

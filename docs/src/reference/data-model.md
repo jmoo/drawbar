@@ -251,8 +251,12 @@ stateDiagram-v2
   (`Workspace::read_now`). Decoding re-encodes and compares, as for any file
   that arrives.
 - **Resting.** A piano library or sample instrument stays in its file, indexed.
-  Its checksum is checked off the frame, one file at a time, and until then it
-  is `Checking`. A file that fails its check is not sent. On the desktop each
+  Its checksum is checked off the frame, one file at a time, once something needs
+  the verdict: opening it, sending it, or a background read for its slot
+  (`Workspace::check_soon`). A row drawn does not, so until then it is `Unchecked`,
+  and `Checking` while the check runs. A send queues an unchecked file and asks for
+  its check, and nothing is written until the check has passed. A file that fails
+  its check is not sent. On the desktop each
   resting file holds a file handle open, so the desktop raises its open-file
   limit at start (`ondisk::raise_open_files`). In the browser it holds the `File`
   snapshot the page took of it.
@@ -333,9 +337,9 @@ An asset needed this frame or the last, or selected, is not evicted.
 
 Once the listing is complete and the cache has answered, and again at each full
 pass, the store reads the unread files it tracks, whole: those with tags or a
-slot they came off (`Store::fetch_tracked`). Reading them decodes them and takes
-their slot checksum, so they match their slots on the instrument before anything
-shows them. A remembered file is skipped, since its summary already carries that
+slot they came off (`Store::fetch_tracked`). Reading them decodes them, or checks
+those that rest in their files, and takes their slot checksum, so they match their
+slots on the instrument before anything shows them. A remembered file is skipped, since its summary already carries that
 checksum. They go 32 files or 16 MiB at a time, and a read the user waits on runs
 after the batch in flight. None starts while a read something needs is wanted or
 in flight.
@@ -395,9 +399,10 @@ that and indexes it again.
 In the browser a read answers only later. The indexes read through a reader
 over the slices fetched so far (`ondisk::Slices`), which reports the file's
 real length and fails naming the range it lacks; the backend fetches that range,
-at least 64 KiB of it, and reads the index again. A piano's index arrives in one
-fetch after the 12 bytes that say what the file is, and a sample's in about one
-fetch per stroke. A read on the frame of a stroke not fetched yet answers
+at least 64 KiB of it within the file's first 64 KiB and 4 KiB past them
+(`ondisk::FETCH`, `ondisk::STEP`), and reads the index again. A piano's index
+arrives in one fetch after the 12 bytes that say what the file is, and a sample's
+in one small fetch per stroke, so indexing a sample reads little of its audio. A read on the frame of a stroke not fetched yet answers
 `WouldBlock` and fetches it, and the repaint when it lands plays it. A pass over
 the whole file, the checksum or a whole read, streams 4 MiB slices in a task of
 its own. A `File` snapshot fails to read once its file is written, so a move this
