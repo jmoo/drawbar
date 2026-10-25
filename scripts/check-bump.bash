@@ -142,7 +142,7 @@ version_is app 0.1.1
 requires app core 0.9.0
 
 # A publishable crate that depends by path on one never published is refused by
-# name, never left out of the release.
+# name, never left out of the release; a dev-dependency on one blocks nothing.
 scenario unpublished_path_dependency
 mkdir -p crates/private/src
 cat >crates/private/Cargo.toml <<'EOF'
@@ -155,13 +155,18 @@ EOF
 touch crates/private/src/lib.rs
 sed -i.bak 's/members = \["core", "app"\]/members = ["core", "app", "private"]/' crates/Cargo.toml
 rm crates/Cargo.toml.bak
+# Cargo drops a dev-dependency without a version when it publishes.
+cat >>crates/core/Cargo.toml <<'EOF'
+[dev-dependencies]
+private = { path = "../private" }
+EOF
+bash scripts/bump.bash
+version_is core 0.1.1
 echo 'private = { path = "../private" }' >>crates/app/Cargo.toml
 if bash scripts/bump.bash 2>refused.txt; then
   fail 'bump.bash went on without a crate it cannot place'
 fi
 grep -q 'app depends by path on private, which is never published' refused.txt ||
   fail "the refusal must name app and private: $(cat refused.txt)"
-version_is core 0.1.0
-version_is app 0.1.0
 
 echo 'ok: bumps converge, catch up hand edits, propagate dependency requirements, and refuse an unplaceable crate'

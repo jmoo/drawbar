@@ -12,14 +12,15 @@ meta="$(cargo metadata --manifest-path "$workspace/Cargo.toml" --no-deps --forma
 # shellcheck disable=SC2034 # release.bash
 repo_url="$(jq -r '.packages[0].repository // empty' <<<"$meta")"
 
-# Publishable crates, dependencies before dependents. A publishable crate that a
+# Publishable crates, normal and build dependencies before dependents; cargo drops
+# a dev-dependency without a version when it publishes. A publishable crate that a
 # path dependency keeps from its place stops every script that sources this file.
 crates_in_publish_order() {
   jq -r '
     (.packages | map({key: .name, value: (.publish == null or (.publish | length) > 0)}) | from_entries) as $publishable
     | [.packages[] | select($publishable[.name])] as $ws
     | ($ws | map(.name)) as $names
-    | ($ws | map({key: .name, value: ([.dependencies[] | select(.path != null) | .name] | unique)}) | from_entries) as $deps
+    | ($ws | map({key: .name, value: ([.dependencies[] | select(.path != null and .kind != "dev") | .name] | unique)}) | from_entries) as $deps
     | (reduce range(0; $names | length) as $_ ([];
         . as $done
         | . + [$names[] | select(. as $n | ($done | index($n) | not) and all($deps[$n][]; . as $d | $done | index($d)))]
