@@ -529,7 +529,10 @@ enum LiveSlotAction {
         at: String,
     },
 
-    /// List the piano and sample library objects the live panel uses. Read-only.
+    /// List the piano and sample ids the live panel stores. Read-only.
+    ///
+    /// The instrument names no dependencies for live slots, so a slot is read and its
+    /// stored ids printed, as for a file.
     Deps {
         /// Slot to inspect (1:1, 1:2 or 1:3), or a file.
         #[arg(value_name = "FILE|BANK:SLOT")]
