@@ -12,18 +12,30 @@ meta="$(cargo metadata --manifest-path "$workspace/Cargo.toml" --no-deps --forma
 # shellcheck disable=SC2034 # release.bash
 repo_url="$(jq -r '.packages[0].repository // empty' <<<"$meta")"
 
-# Publishable crates, dependencies before dependents.
+# Publishable crates, dependencies before dependents. A publishable crate that a
+# path dependency keeps from its place stops every script that sources this file.
 crates_in_publish_order() {
   jq -r '
-    [.packages[] | select(.publish == null or (.publish | length) > 0)] as $ws
+    (.packages | map({key: .name, value: (.publish == null or (.publish | length) > 0)}) | from_entries) as $publishable
+    | [.packages[] | select($publishable[.name])] as $ws
     | ($ws | map(.name)) as $names
-    | ($ws | map({key: .name, value: [.dependencies[] | select(.path != null) | .name]}) | from_entries) as $deps
-    | reduce range(0; $names | length) as $_ ([];
+    | ($ws | map({key: .name, value: ([.dependencies[] | select(.path != null) | .name] | unique)}) | from_entries) as $deps
+    | (reduce range(0; $names | length) as $_ ([];
         . as $done
         | . + [$names[] | select(. as $n | ($done | index($n) | not) and all($deps[$n][]; . as $d | $done | index($d)))]
-      )
-    | .[]' <<<"$meta"
+      )) as $done
+    | ($names - $done) as $left
+    | if $left == [] then $done[]
+      else
+        [$left[] as $n | $deps[$n][] | select(. as $d | $done | index($d) | not)
+          | "  \($n) depends by path on \(.), which \(if $publishable[.] then "cannot be placed either" else "is never published" end)"]
+        | "no order publishes every publishable crate:\n" + join("\n") + "\n" | halt_error(1)
+      end' <<<"$meta"
 }
+
+order="$(crates_in_publish_order)"
+# shellcheck disable=SC2034 # bump.bash, release.bash
+mapfile -t publish_order <<<"$order"
 
 crate_version() { jq -r --arg n "$1" '.packages[] | select(.name == $n) | .version' <<<"$meta"; }
 
