@@ -52,7 +52,11 @@ folder, in two windows, in two browser tabs, or in the browser and the desktop
 app on one folder. Each keeps its own record of what it changed in the hidden
 folder, so neither overwrites the other's. A tab shows another tab's changes as
 soon as they are made; otherwise drawbar shows what the others changed when you
-come back to the window, and the activity log says so.
+come back to the window, and the activity log says so. In the browser, and on a
+desktop disk that cannot refuse to move a file onto one already there, drawbar
+puts a saved, copied or moved file in place by checking that its name is free
+and then moving it there. A file another program makes at that name in the
+instant between is replaced, and what it held is lost.
 
 ## Adding and making sounds
 

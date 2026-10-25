@@ -606,6 +606,11 @@ to write it: bytes held whole are written from memory, and every copy and every
 edit through a resting file is streamed a chunk at a time. drawbar's own reads,
 like toshokan's writes, refuse a path through a folder that is a link.
 
+Where the folder's renames can replace, as in every browser, toshokan's check
+that a destination is free is the only guard: a file another program makes there
+between the check and the move is replaced, and its bytes leave the folder.
+A backend says which kind it is by `toshokan::io::Capabilities::no_replace`.
+
 The trash keeps what a delete or a save displaced for this session's undo, and
 nothing else, since undo reaches no earlier session (`Keeper::empty_trash`).
 After each commit drawbar keeps the items of this session's changes, newest
