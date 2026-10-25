@@ -39,8 +39,11 @@ The CRC is CRC-16/CCITT-FALSE. A response carries the request's command plus
 one, with a status word inserted before the echoed arguments. Two things bite.
 Request codes are not reliably even, so direction is recorded at decode time
 rather than inferred. And operations are generic primitives parameterized by
-object class (1 piano, 3 sample, 4 program, 5 set list, 6 live, 7 settings), so
-one `delete` command serves every class. The piano and sample libraries refuse
+object class, so one `delete` command serves every class. The wire carries a class as
+a position in the partition table the instrument reports, and each model orders its
+table its own way: the Electro 5 keeps programs at 4. `Classes` finds each class by its
+partition's name (`Piano`, `Samp Lib`, `Program`, `Set List`, `Live`, `Settings`), and
+a partition with any other name is an unknown class that nothing writes to. The piano and sample libraries refuse
 `rename` and `copy`, and refuse a write named like an object they already
 hold, matching case.
 

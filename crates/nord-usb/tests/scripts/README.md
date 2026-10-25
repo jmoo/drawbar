@@ -80,7 +80,7 @@ section with no `expect` expects `ok`.
 ## Intents
 
 Classes are the CLI's nouns: `program`, `setlist`, `live`, `settings`, `sample`,
-`piano`, `device`, and `class-<n>` for a class with no noun. Slots are `BANK:SLOT` as the
+`piano`, `device`, and `class-<n>` for the partition at index `n`, whatever it holds. Slots are `BANK:SLOT` as the
 panel labels them, counting from 1. A name with spaces is `"quoted"`. A file argument is
 a path beside the script.
 
@@ -107,9 +107,10 @@ a path beside the script.
 | `<class> rename <at> <name>` | rename |
 | `<class> delete <at>…` | delete every slot named, in one transaction |
 
-A walk is bounded by the banks the instrument declares, and a `put` into a library class
-reserves storage blocks of the size that partition reports. Both come from the script's
-own `device geometry` section where it has one. Without one, the committed
+Every session opens the partition the instrument's table gives its class, a walk is
+bounded by the banks the instrument declares, and a `put` into a library class reserves
+storage blocks of the size that partition reports. All three come from the script's own
+`device geometry` section where it has one. Without one, the committed
 `device/geometry.script` stands in, replayed on a transport of its own, but only for a
 script whose `device` field names the Nord Electro 5 it was read from. Any other script
 fails. A new recording carries its own.

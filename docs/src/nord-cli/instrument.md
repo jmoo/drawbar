@@ -8,6 +8,7 @@ been tested.
 ```sh
 nord device status                      # what the instrument holds; --json for scripts
 nord device info                        # what is attached
+nord device geometry                    # its partitions, banks and slots
 nord device recover                     # release a session an interrupted run left open
 
 nord program list                       # every occupied slot
