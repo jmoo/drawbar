@@ -196,37 +196,38 @@ pub enum PackedOrder {
 #[repr(u8)]
 pub enum Library {
     /// Piano instruments (`.npno`).
-    Piano = 1,
+    Piano,
     /// Sample instruments (`.nsmp`).
-    Sample = 3,
+    Sample,
     /// The instrument's own programs.
-    Program = 4,
+    Program,
     /// Set lists, which name programs in turn.
-    SetList = 5,
+    SetList,
 }
 
 impl Library {
-    /// The library's numeric code.
+    pub const ALL: [Library; 4] = [
+        Library::Piano,
+        Library::Sample,
+        Library::Program,
+        Library::SetList,
+    ];
+
+    /// The library's position in [`Self::ALL`].
     ///
     /// A const generic parameter cannot be an enum, so a type that carries its library,
     /// such as [`LibraryRefOf`](crate::components::LibraryRefOf), carries this code and
-    /// turns it back with [`expect_code`](Self::expect_code).
-    ///
-    /// The numbers are this type's own tags. They match the Electro 5's partition
-    /// positions, but no instrument's wire is read through them: `nord-usb` finds each
-    /// partition by name.
+    /// turns it back with [`expect_code`](Self::expect_code). No file or instrument
+    /// carries it.
     pub const fn code(self) -> u8 {
         self as u8
     }
 
     /// The library a [`code`](Self::code) names, or `None`; most bytes name none.
     pub const fn from_code(code: u8) -> Option<Library> {
-        match code {
-            1 => Some(Library::Piano),
-            3 => Some(Library::Sample),
-            4 => Some(Library::Program),
-            5 => Some(Library::SetList),
-            _ => None,
+        match (code as usize) < Self::ALL.len() {
+            true => Some(Self::ALL[code as usize]),
+            false => None,
         }
     }
 
@@ -509,15 +510,9 @@ mod tests {
         for unit in Unit::ALL {
             assert_eq!(Unit::expect_code(unit.code()), unit);
         }
-        for library in [
-            Library::Piano,
-            Library::Sample,
-            Library::Program,
-            Library::SetList,
-        ] {
+        for library in Library::ALL {
             assert_eq!(Library::from_code(library.code()), Some(library));
         }
-        assert_eq!(Library::Sample.code(), 3, "the wire's object class");
     }
 
     /// A refinement adds what the declaration site knows and the type cannot. A field
