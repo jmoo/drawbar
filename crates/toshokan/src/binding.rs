@@ -8,7 +8,6 @@
 //! reported. Scans never write; every commit pins the moves this writer found.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::ops::Bound;
 use std::rc::Rc;
 
 use crate::cow::CowMap;
@@ -141,9 +140,60 @@ pub fn bind_known(
     names: &dyn Names,
     unscanned: &Unscanned,
 ) -> (Bindings, Vec<Op>) {
-    let mut binding = Binding::new(facts, scan, unscanned);
-    binding.step(facts, scan, names, usize::MAX);
-    binding.finish()
+    if unscanned.is_empty() {
+        return bound(facts, scan, names).finish();
+    }
+    let paths: BTreeSet<&str> = unscanned.paths.iter().map(RelPath::as_str).collect();
+    let mut known = scan.clone();
+    known.files.retain(|path, _| !under(path, &paths));
+    let left = facts
+        .iter()
+        .filter(|(entity, written)| !unscanned.leaves_unknown(&paths, *entity, written));
+    let left: Facts = left
+        .map(|(entity, written)| (*entity, written.clone()))
+        .collect();
+    let mut progress = bound(&left, &known, names);
+    for (entity, written) in facts {
+        let latest = written.last();
+        let unknown = latest.filter(|_| unscanned.leaves_unknown(&paths, *entity, written));
+        if let Some(latest) = unknown {
+            let file = FileRef {
+                path: latest.value.path.clone(),
+                state: FileState::Unscanned,
+            };
+            progress.bound.insert(*entity, file);
+        }
+    }
+    progress.finish()
+}
+
+/// What binding `facts` to `scan` binds, with the pins of what it binds.
+fn bound(facts: &Facts, scan: &Scan, names: &dyn Names) -> Progress {
+    let mut progress = Progress::default();
+    for (entity, written) in facts {
+        progress.candidate(scan, names, *entity, written);
+    }
+    while let Some((path, claimants)) = progress.claims.pop_first() {
+        progress.claim(facts, scan, path, claimants);
+    }
+    for (path, file) in &scan.files {
+        progress.free(path, file);
+    }
+    while let Some((entity, fact)) = progress.departed.pop_front() {
+        progress.depart(facts, entity, fact);
+    }
+    while let Some((entity, fact, matches)) = progress.moves.pop_front() {
+        progress.moved(facts, entity, fact, matches);
+    }
+    for path in scan.files.keys() {
+        progress.unbound(path);
+    }
+    progress.reported();
+    let Progress { bound, pins, .. } = &mut progress;
+    for (entity, file) in &*bound {
+        pins.extend(pin(facts, scan, *entity, file));
+    }
+    progress
 }
 
 /// Lists every library file outside toshokan's root, with the paths whose
@@ -297,19 +347,9 @@ impl Walk {
     }
 
     /// Every file listed, its identity unread.
-    /// Adds to `scan` the files of the directories listed after `after`, until it
-    /// has added about `slice`. Returns the last directory taken, and whether
-    /// none is left.
-    pub fn found_after(
-        &self,
-        scan: &mut Scan,
-        after: Option<&RelPath>,
-        slice: usize,
-    ) -> (Option<RelPath>, bool) {
-        let from = after.map_or(Bound::Unbounded, Bound::Excluded);
-        let mut dirs = self.listed.range::<RelPath, _>((from, Bound::Unbounded));
-        let (mut added, mut last) = (0, None);
-        for (dir, entries) in dirs.by_ref() {
+    pub fn found(&self) -> Scan {
+        let mut scan = Scan::default();
+        for (dir, entries) in &self.listed {
             let files = entries.iter().filter(|(_, meta)| meta.kind == Kind::File);
             for (name, meta) in files {
                 let Ok(path) = dir.join(name) else {
@@ -321,14 +361,9 @@ impl Walk {
                     identity: None,
                 };
                 scan.files.insert(path, file);
-                added += 1;
-            }
-            last = Some(dir);
-            if added >= slice {
-                break;
             }
         }
-        (last.cloned(), dirs.next().is_none())
+        scan
     }
 }
 
@@ -399,23 +434,63 @@ pub(crate) fn resolve(
     previous: &Scan,
     names: &dyn Names,
 ) -> Vec<(RelPath, u64)> {
-    let mut resolving = Resolving::default();
-    while !resolving.step(scan, facts, previous, names, usize::MAX) {}
-    resolving.needed
+    let unknown = earlier(scan, previous);
+    if unknown.is_empty() {
+        return Vec::new();
+    }
+    let files = FileKeys::of(scan, names);
+    let mut away = Away::default();
+    let mut logged: HashMap<&RelPath, Vec<Said>> = HashMap::new();
+    for (_, written) in facts {
+        away.entity(written, files.held(written, names));
+        for fact in written.iter().map(|fact| &fact.value) {
+            if unknown.binary_search(&fact.path).is_ok() {
+                let said = (fact.len, fact.modified, fact.identity);
+                logged.entry(&fact.path).or_default().push(said);
+            }
+        }
+    }
+    away.finish();
+    let mut needed = Vec::new();
+    for path in &unknown {
+        let file = scan.files.get_mut(path).expect("listed in the scan");
+        let said: Vec<_> = logged.get(path).into_iter().flatten().rev().collect();
+        let same = said
+            .iter()
+            .find(|(len, modified, _)| (*len, *modified) == (file.len, file.modified));
+        file.identity = same.map(|(_, _, identity)| *identity);
+        // A file of an entity's length at its path, at another time, is in sync
+        // only where it holds its identity.
+        let sized = said.iter().any(|(len, ..)| *len == file.len);
+        if file.identity.is_none() && (sized || away.lengths.contains(&file.len)) {
+            needed.push((path.clone(), file.len));
+        }
+    }
+    needed
 }
 
-/// [`resolve`] a slice at a time.
-#[derive(Default)]
-pub(crate) struct Resolving {
-    stage: Resolve,
-    /// The files no earlier scan gives an identity, in order.
-    unknown: Vec<RelPath>,
-    /// What the facts naming an unknown file say of it, in order of the facts.
-    logged: HashMap<RelPath, Vec<(u64, Option<u64>, Identity)>>,
-    /// The keys of the files, once an entity asks.
-    files: Option<FileKeys>,
-    away: Away,
-    pub(crate) needed: Vec<(RelPath, u64)>,
+/// A file's length, time and identity, as a fact says them.
+type Said = (u64, Option<u64>, Identity);
+
+/// Gives each file of `scan` without an identity the one `previous` holds for its
+/// path, length and time; returns those left without one, in order.
+fn earlier(scan: &mut Scan, previous: &Scan) -> Vec<RelPath> {
+    let mut earlier = previous.files.iter().peekable();
+    let mut unknown = Vec::new();
+    for (path, file) in &mut scan.files {
+        while earlier.next_if(|(before, _)| *before < path).is_some() {}
+        if file.identity.is_some() {
+            continue;
+        }
+        let same = earlier.peek().filter(|(before, was)| {
+            *before == path && (was.len, was.modified) == (file.len, file.modified)
+        });
+        file.identity = same.and_then(|(_, was)| was.identity);
+        if file.identity.is_none() {
+            unknown.push(path.clone());
+        }
+    }
+    unknown
 }
 
 /// The lengths of the entities that may have moved, gathered an entity at a time:
@@ -528,130 +603,6 @@ pub(crate) fn away(facts: &Facts, files: &KeysAfter<'_>, names: &dyn Names) -> B
     }
     away.finish();
     away.lengths.into_iter().collect()
-}
-
-#[derive(Default)]
-enum Resolve {
-    /// Taking identities from the earlier scan, after a path.
-    #[default]
-    Earlier,
-    EarlierAfter(RelPath),
-    /// Gathering what the facts say, after an entity.
-    Facts(Option<EntityId>),
-    /// Giving the unknown files from this one on what the facts say.
-    Logged(usize),
-    Done,
-}
-
-impl Resolving {
-    /// Resolves about `slice` more files or entities; true once every file is
-    /// resolved. Each step must be given the same facts and earlier scan.
-    pub(crate) fn step(
-        &mut self,
-        scan: &mut Scan,
-        facts: &Facts,
-        previous: &Scan,
-        names: &dyn Names,
-        slice: usize,
-    ) -> bool {
-        self.stage = match std::mem::take(&mut self.stage) {
-            Resolve::Earlier => self.earlier(scan, previous, Bound::Unbounded, slice),
-            Resolve::EarlierAfter(after) => {
-                self.earlier(scan, previous, Bound::Excluded(&after), slice)
-            }
-            Resolve::Facts(after) => self.facts(facts, scan, names, after, slice),
-            Resolve::Logged(from) => self.logged(scan, from, slice),
-            Resolve::Done => Resolve::Done,
-        };
-        matches!(self.stage, Resolve::Done)
-    }
-
-    fn earlier(
-        &mut self,
-        scan: &mut Scan,
-        previous: &Scan,
-        after: Bound<&RelPath>,
-        slice: usize,
-    ) -> Resolve {
-        let mut earlier = previous
-            .files
-            .range::<RelPath, _>((after, Bound::Unbounded));
-        let mut earlier = earlier.by_ref().peekable();
-        let mut files = scan
-            .files
-            .range_mut::<RelPath, _>((after, Bound::Unbounded));
-        let mut last = None;
-        for (path, file) in files.by_ref().take(slice) {
-            last = Some(path);
-            while earlier.next_if(|(before, _)| *before < path).is_some() {}
-            if file.identity.is_some() {
-                continue;
-            }
-            let same = earlier.peek().filter(|(before, was)| {
-                *before == path && (was.len, was.modified) == (file.len, file.modified)
-            });
-            file.identity = same.and_then(|(_, was)| was.identity);
-            if file.identity.is_none() {
-                self.unknown.push(path.clone());
-            }
-        }
-        let more = files.next().is_some();
-        match (last.filter(|_| more), self.unknown.is_empty()) {
-            (Some(last), _) => Resolve::EarlierAfter(last.clone()),
-            (None, true) => Resolve::Done,
-            (None, false) => Resolve::Facts(None),
-        }
-    }
-
-    fn facts(
-        &mut self,
-        facts: &Facts,
-        scan: &Scan,
-        names: &dyn Names,
-        after: Option<EntityId>,
-        slice: usize,
-    ) -> Resolve {
-        let mut entities = facts.after(after);
-        let mut last = None;
-        for (entity, written) in entities.by_ref().take(slice) {
-            last = Some(*entity);
-            let files = self.files.get_or_insert_with(|| FileKeys::of(scan, names));
-            self.away.entity(written, files.held(written, names));
-            for fact in written.iter().map(|fact| &fact.value) {
-                if self.unknown.binary_search(&fact.path).is_ok() {
-                    let said = (fact.len, fact.modified, fact.identity);
-                    self.logged.entry(fact.path.clone()).or_default().push(said);
-                }
-            }
-        }
-        if entities.next().is_some() {
-            return Resolve::Facts(last);
-        }
-        self.away.finish();
-        Resolve::Logged(0)
-    }
-
-    fn logged(&mut self, scan: &mut Scan, from: usize, slice: usize) -> Resolve {
-        let to = from.saturating_add(slice).min(self.unknown.len());
-        for path in &self.unknown[from..to] {
-            let file = scan.files.get_mut(path).expect("listed in an earlier step");
-            let said: Vec<_> = self.logged.get(path).into_iter().flatten().rev().collect();
-            let same = said
-                .iter()
-                .find(|(len, modified, _)| (*len, *modified) == (file.len, file.modified));
-            file.identity = same.map(|(_, _, identity)| *identity);
-            // A file of an entity's length at its path, at another time, is in sync
-            // only where it holds its identity.
-            let sized = said.iter().any(|(len, ..)| *len == file.len);
-            if file.identity.is_none() && (sized || self.away.lengths.contains(&file.len)) {
-                self.needed.push((path.clone(), file.len));
-            }
-        }
-        match to == self.unknown.len() {
-            true => Resolve::Done,
-            false => Resolve::Logged(to),
-        }
-    }
 }
 
 /// `scan` with the identities of `unknown` read; with the paths read. A file gone
@@ -811,33 +762,8 @@ pub fn bindable(
     }
 }
 
-/// [`bind_known`] a slice at a time. It holds no reference to the facts or the
-/// scan: each step is handed them, ⚠️ the same ones every time.
-pub struct Binding {
-    /// What is bound in place of the facts and the scan where a failed scan left
-    /// something unknown, with what it left unknown.
-    known: Option<(Facts, Scan, Unscanned)>,
-    stage: Stage,
-    progress: Progress,
-}
-
-/// Where a [`Binding`] is. A stage that walks the facts or the scan goes on after
-/// the last key it took.
-enum Stage {
-    Candidates(Option<EntityId>),
-    Claims,
-    Free(Option<RelPath>),
-    Departed,
-    Moves,
-    Unbound(Option<RelPath>),
-    Pins(Option<EntityId>),
-    /// Binding the entities a failed scan left unknown as unscanned.
-    Unknown(Option<EntityId>),
-    Done,
-}
-
-/// What a [`Binding`] has found so far. A fact is named by its entity and its
-/// index among the entity's facts.
+/// What binding has found so far. A fact is named by its entity and its index
+/// among the entity's facts.
 #[derive(Default)]
 struct Progress {
     bindings: Bindings,
@@ -858,133 +784,14 @@ struct Progress {
     pins: Vec<Op>,
 }
 
-impl Binding {
-    pub fn new(facts: &Facts, scan: &Scan, unscanned: &Unscanned) -> Self {
-        let known = (!unscanned.is_empty()).then(|| {
-            let paths: BTreeSet<&str> = unscanned.paths.iter().map(RelPath::as_str).collect();
-            let mut known = scan.clone();
-            known.files.retain(|path, _| !under(path, &paths));
-            let facts = facts
-                .iter()
-                .filter(|(entity, written)| !unscanned.leaves_unknown(&paths, *entity, written));
-            let facts = facts.map(|(entity, written)| (*entity, written.clone()));
-            (facts.collect(), known, unscanned.clone())
-        });
-        Self {
-            known,
-            stage: Stage::Candidates(None),
-            progress: Progress::default(),
-        }
-    }
-
-    /// Binds about `slice` more entities or files of `facts` and `scan`; true once
-    /// every one is bound.
-    pub fn step(&mut self, facts: &Facts, scan: &Scan, names: &dyn Names, slice: usize) -> bool {
+impl Progress {
+    fn finish(self) -> (Bindings, Vec<Op>) {
         let Self {
-            known,
-            stage,
-            progress,
-        } = self;
-        let every = facts;
-        let (facts, scan) = match &*known {
-            Some((facts, scan, _)) => (facts, scan),
-            None => (facts, scan),
-        };
-        let mut budget = slice;
-        while budget > 0 {
-            let budget = &mut budget;
-            *stage = match std::mem::replace(stage, Stage::Done) {
-                Stage::Candidates(from) => {
-                    let facts_after = facts.after(from).map(|(entity, written)| (entity, written));
-                    let taken = take_from(facts_after, budget, |&entity, written| {
-                        progress.candidate(scan, names, entity, written);
-                    });
-                    taken.map_or(Stage::Claims, |last| Stage::Candidates(Some(last)))
-                }
-                Stage::Claims => match progress.claims.pop_first() {
-                    Some((path, claimants)) => {
-                        *budget -= 1;
-                        progress.claim(facts, scan, path, claimants);
-                        Stage::Claims
-                    }
-                    None => Stage::Free(None),
-                },
-                Stage::Free(from) => {
-                    let taken = take_after(&scan.files, from, budget, |path, file| {
-                        progress.free(path, file);
-                    });
-                    taken.map_or(Stage::Departed, |last| Stage::Free(Some(last)))
-                }
-                Stage::Departed => match progress.departed.pop_front() {
-                    Some((entity, fact)) => {
-                        *budget -= 1;
-                        progress.depart(facts, entity, fact);
-                        Stage::Departed
-                    }
-                    None => Stage::Moves,
-                },
-                Stage::Moves => match progress.moves.pop_front() {
-                    Some((entity, fact, matches)) => {
-                        *budget -= 1;
-                        progress.moved(facts, entity, fact, matches);
-                        Stage::Moves
-                    }
-                    None => Stage::Unbound(None),
-                },
-                Stage::Unbound(from) => {
-                    let taken = take_after(&scan.files, from, budget, |path, _| {
-                        progress.unbound(path);
-                    });
-                    match taken {
-                        Some(last) => Stage::Unbound(Some(last)),
-                        None => {
-                            progress.reported();
-                            Stage::Pins(None)
-                        }
-                    }
-                }
-                Stage::Pins(from) => {
-                    let Progress { bound, pins, .. } = progress;
-                    let taken = take_after(bound, from, budget, |&entity, file| {
-                        pins.extend(pin(facts, scan, entity, file));
-                    });
-                    taken.map_or(Stage::Unknown(None), |last| Stage::Pins(Some(last)))
-                }
-                Stage::Unknown(from) => {
-                    let Some((_, _, unscanned)) = &*known else {
-                        return true;
-                    };
-                    let paths = unscanned.paths.iter().map(RelPath::as_str).collect();
-                    let bound = &mut progress.bound;
-                    let every_after = every.after(from).map(|(entity, written)| (entity, written));
-                    let taken = take_from(every_after, budget, |&entity, written| {
-                        let latest = written.last();
-                        let unknown =
-                            latest.filter(|_| unscanned.leaves_unknown(&paths, entity, written));
-                        if let Some(latest) = unknown {
-                            let file = FileRef {
-                                path: latest.value.path.clone(),
-                                state: FileState::Unscanned,
-                            };
-                            bound.insert(entity, file);
-                        }
-                    });
-                    taken.map_or(Stage::Done, |last| Stage::Unknown(Some(last)))
-                }
-                Stage::Done => return true,
-            };
-        }
-        matches!(stage, Stage::Done)
-    }
-
-    /// ⚠️ Before [`Binding::step`] returns true, what is bound so far.
-    pub fn finish(self) -> (Bindings, Vec<Op>) {
-        let Progress {
             mut bindings,
             bound,
             pins,
             ..
-        } = self.progress;
+        } = self;
         bindings.bound = CowMap::from_sorted(bound.into_iter().collect());
         let report = &mut bindings.report;
         report.departed.sort();
@@ -992,38 +799,7 @@ impl Binding {
         report.ambiguous.sort_by_key(|ambiguous| ambiguous.entity);
         (bindings, pins)
     }
-}
 
-/// Calls `take` on the entries of `map` after `from`, a unit of `budget` each,
-/// at least one, while it lasts: the last key taken, or `None` once every entry
-/// was.
-fn take_after<K: Ord + Clone, V>(
-    map: &BTreeMap<K, V>,
-    from: Option<K>,
-    budget: &mut usize,
-    take: impl FnMut(&K, &V),
-) -> Option<K> {
-    let start = from.as_ref().map_or(Bound::Unbounded, Bound::Excluded);
-    take_from(map.range((start, Bound::Unbounded)), budget, take)
-}
-
-/// As [`take_after`], of `entries`, the entries after the last key taken.
-fn take_from<'a, K: Clone + 'a, V: 'a>(
-    entries: impl Iterator<Item = (&'a K, &'a V)>,
-    budget: &mut usize,
-    mut take: impl FnMut(&K, &V),
-) -> Option<K> {
-    for (key, value) in entries {
-        take(key, value);
-        *budget = budget.saturating_sub(1);
-        if *budget == 0 {
-            return Some(key.clone());
-        }
-    }
-    None
-}
-
-impl Progress {
     /// Finds the files `entity`'s facts name: by path, else by the name the
     /// volume takes for it.
     fn candidate(&mut self, scan: &Scan, names: &dyn Names, entity: EntityId, written: &[Fact]) {
@@ -1338,26 +1114,6 @@ mod tests {
     }
 
     #[test]
-    fn binding_in_slices_binds_what_binding_at_once_binds() {
-        let small = worlds()
-            .into_iter()
-            .map(|(f, s)| (f, s, Unscanned::default()));
-        for (facts, scan, unscanned) in small.chain(random_worlds(9, 3000)) {
-            for names in [&ExactNames as &dyn Names, &Folding] {
-                let whole = bind_known(&facts, &scan, names, &unscanned);
-                for slice in 1..4 {
-                    let mut binding = Binding::new(&facts, &scan, &unscanned);
-                    while !binding.step(&facts, &scan, names, slice) {}
-                    assert_eq!(
-                        binding.finish(),
-                        whole,
-                        "{slice}-item slices of {facts:?} {scan:?} {unscanned:?}"
-                    );
-                }
-            }
-        }
-    }
-    #[test]
     fn a_file_takes_the_identity_an_earlier_scan_else_the_last_fact_gives() {
         use crate::env::{Random, SeededRandom};
         let mut random = SeededRandom::new(12);
@@ -1419,20 +1175,11 @@ mod tests {
                     }
                 }
             }
-            let mut sliced = fresh.clone();
             let unknown = resolve(&mut fresh, &facts, &previous, &ExactNames);
             assert_eq!(
                 (fresh, unknown),
-                (expected.clone(), needed.clone()),
-                "{facts:?} {previous:?}"
-            );
-            let slice = 1 + pick(3);
-            let mut resolving = Resolving::default();
-            while !resolving.step(&mut sliced, &facts, &previous, &ExactNames, slice) {}
-            assert_eq!(
-                (sliced, resolving.needed),
                 (expected, needed),
-                "{slice}-item slices"
+                "{facts:?} {previous:?}"
             );
         }
     }
@@ -1477,8 +1224,7 @@ mod tests {
         assert_eq!(walk.next(), Some(path("Live")));
         walk.listed(&layout, path("Live"), Vec::new());
         assert_eq!(walk.next(), None, ".git is not entered");
-        let mut found = Scan::default();
-        walk.found_after(&mut found, None, usize::MAX);
+        let found = walk.found();
         let files: Vec<&RelPath> = found.files.keys().collect();
         assert_eq!(files, [&path("a.npno")]);
     }
@@ -1504,7 +1250,7 @@ mod tests {
     }
 
     #[test]
-    fn a_walk_gives_its_files_in_slices_as_it_listed_them() {
+    fn a_walk_gives_every_file_it_listed() {
         use crate::env::{Random, SeededRandom};
         let layout = Layout::new(".lib").unwrap();
         let mut random = SeededRandom::new(13);
@@ -1537,16 +1283,7 @@ mod tests {
                 entries.retain(|(_, meta)| !deep || meta.kind == Kind::File);
                 walk.listed(&layout, dir, entries);
             }
-            let slice = 1 + pick(4);
-            let (mut found, mut after) = (Scan::default(), None);
-            loop {
-                let (last, done) = walk.found_after(&mut found, after.as_ref(), slice);
-                after = last;
-                if done {
-                    break;
-                }
-            }
-            assert_eq!(found.files, listed, "{slice}-file slices");
+            assert_eq!(walk.found().files, listed);
         }
     }
 

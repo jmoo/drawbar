@@ -689,34 +689,9 @@ impl Folded {
     /// The live writes of every shown entity's file register that say where its
     /// file is. More than one is a conflict.
     pub fn files(&self) -> Facts {
-        let mut files = Facts::default();
-        self.files_slice(&mut files, &mut None, usize::MAX);
-        files
-    }
-
-    /// [`Folded::files`] a slice at a time: adds to `files` those of at most
-    /// `slice` entities after `after`, and moves `after` on; true once no entity
-    /// is left.
-    pub(crate) fn files_slice(
-        &self,
-        files: &mut Facts,
-        after: &mut Option<EntityId>,
-        slice: usize,
-    ) -> bool {
-        let from = *after;
-        let mut entities = self.entities.after(from);
-        for (entity, state) in entities.by_ref().take(slice) {
-            let entity = *entity;
-            *after = Some(entity);
-            if !state.present() {
-                continue;
-            }
-            let writes = state.file_facts();
-            if !writes.is_empty() {
-                files.insert(entity, writes);
-            }
-        }
-        entities.next().is_none()
+        let shown = self.entities.iter().filter(|(_, state)| state.present());
+        let files = shown.map(|(entity, state)| (*entity, state.file_facts()));
+        Facts::from_sorted_iter(files.filter(|(_, writes)| !writes.is_empty()))
     }
 
     /// [`Folded::files`] of one entity: empty unless it is shown.

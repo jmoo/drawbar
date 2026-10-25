@@ -27,9 +27,6 @@ use crate::snapshot::Snapshot;
 /// longer snapshot is not read.
 pub const MAX_FILE: u64 = 1 << 28;
 
-/// About how many bytes of lines one slice of parsing reads before it pauses.
-const PARSE_SLICE: usize = 1 << 17;
-
 /// What one file in a writer's directory holds, judged by its contents.
 #[derive(Clone, PartialEq, Debug)]
 pub enum WriterFile {
@@ -85,61 +82,6 @@ impl Segment {
         self.entries
             .windows(2)
             .all(|pair| pair[1].prev() == pair[0].hash())
-    }
-}
-
-/// A file parsed as [`WriterFile::parse`] parses it, a slice of its lines at a
-/// time.
-struct Parsing {
-    bytes: Vec<u8>,
-    segment: Segment,
-}
-
-impl Parsing {
-    fn new(bytes: Vec<u8>) -> Self {
-        Self {
-            bytes,
-            segment: Segment::default(),
-        }
-    }
-
-    /// The bytes read so far.
-    fn read(&self) -> usize {
-        self.segment.end as usize
-    }
-
-    /// Reads the lines in about the next `slice` bytes, up to the end of a line;
-    /// true once there is nothing left to read.
-    fn step(&mut self, slice: usize) -> bool {
-        let Self { bytes, segment } = self;
-        let rest = &bytes[segment.end as usize..];
-        let after = rest.get(slice..).unwrap_or_default();
-        let cut = after
-            .iter()
-            .position(|&b| b == b'\n')
-            .map_or(rest.len(), |at| slice + at + 1);
-        segment.extend(&rest[..cut]);
-        if cut == rest.len() {
-            return true;
-        }
-        if segment.stop.is_some() || segment.sealed {
-            // The line reading stopped at is judged again with all that follows it.
-            segment.extend(&bytes[segment.end as usize..]);
-            return true;
-        }
-        false
-    }
-
-    /// ⚠️ Before [`Parsing::step`] returns true, what the lines read so far say.
-    fn finish(self) -> WriterFile {
-        let Self { bytes, segment } = self;
-        if !segment.entries.is_empty() || segment.stop.is_none() {
-            return WriterFile::Segment(segment);
-        }
-        match Snapshot::decode(&bytes) {
-            Ok(snapshot) => WriterFile::Snapshot(Rc::new(snapshot)),
-            Err(not) => WriterFile::Unreadable { cut: not.cut },
-        }
     }
 }
 
@@ -271,12 +213,6 @@ pub struct Listing {
     everyone: bool,
 }
 
-/// A read being taken in by [`Reader::absorb_slice`].
-pub(crate) struct Absorbing {
-    listed: std::vec::IntoIter<Listed>,
-    report: ReadReport,
-}
-
 impl Reader {
     /// A reader that has read nothing yet.
     pub fn new(layout: Layout) -> Self {
@@ -287,14 +223,11 @@ impl Reader {
         }
     }
 
-    /// Lets go of what the reader derived, as a library closing does.
-    pub(crate) fn shed_logs(&mut self) {
-        drop(std::mem::take(&mut self.derived));
-    }
-
-    /// Lets go of what the reader found in each file, as a library closing does.
-    pub(crate) fn shed_files(&mut self) {
-        drop(std::mem::take(&mut self.folder));
+    /// Lets go of what the reader derived and found in each file, as a library
+    /// closing does.
+    pub(crate) fn shed(&mut self) {
+        self.derived = Rc::default();
+        self.folder = BTreeMap::new();
     }
 
     /// What the files derive, as of the last read.
@@ -437,16 +370,9 @@ impl Reader {
         report
     }
 
-    /// Takes in what [`Reader::list`] or [`Reader::list_writer`] read.
+    /// Takes in what [`Reader::list`] or [`Reader::list_writer`] read, and derives
+    /// what the files show when a file came, went or changed.
     pub fn absorb(&mut self, listing: Listing) -> ReadReport {
-        let mut absorbing = self.absorbing(listing);
-        self.absorb_slice(&mut absorbing, usize::MAX);
-        self.absorbed(absorbing)
-    }
-
-    /// Starts [`Reader::absorb`]: what the read found of writers' directories as a
-    /// whole is taken in, and no writer's files yet.
-    pub(crate) fn absorbing(&mut self, listing: Listing) -> Absorbing {
         let Listing {
             writers: listed,
             everyone,
@@ -454,48 +380,21 @@ impl Reader {
         let mut report = ReadReport::default();
         if everyone {
             let present: BTreeSet<WriterId> = listed.iter().map(|listed| listed.writer).collect();
-            let gone: Vec<WriterId> = self
-                .folder
-                .keys()
-                .filter(|writer| !present.contains(writer))
-                .copied()
-                .collect();
-            for writer in gone {
-                self.folder.remove(&writer);
-                report.folder_changed = true;
-            }
+            let before = self.folder.len();
+            self.folder.retain(|writer, _| present.contains(writer));
+            report.folder_changed = self.folder.len() != before;
         }
-        Absorbing {
-            listed: listed.into_iter(),
-            report,
+        for listed in listed {
+            self.gather(listed, &mut report);
         }
-    }
-
-    /// Takes in what about `slice` more files gave; true once every writer's are
-    /// taken in.
-    pub(crate) fn absorb_slice(&mut self, absorbing: &mut Absorbing, slice: usize) -> bool {
-        let mut budget = slice;
-        while budget > 0 {
-            let Some(listed) = absorbing.listed.next() else {
-                return true;
-            };
-            budget = budget.saturating_sub(listed.files.len().max(1));
-            self.gather(listed, &mut absorbing.report);
-        }
-        absorbing.listed.len() == 0
-    }
-
-    /// Ends [`Reader::absorb`] once [`Reader::absorb_slice`] returned true: derives
-    /// what the files show, when a file came, went or changed.
-    pub(crate) fn absorbed(&mut self, mut absorbing: Absorbing) -> ReadReport {
         for writer in self.folder.keys().copied().collect::<Vec<_>>() {
-            self.report_unreadable(writer, &mut absorbing.report);
+            self.report_unreadable(writer, &mut report);
         }
-        match absorbing.report.folder_changed {
-            true => self.rederive(&mut absorbing.report),
-            false => absorbing.report.gaps = self.gaps(),
+        match report.folder_changed {
+            true => self.rederive(&mut report),
+            false => report.gaps = self.gaps(),
         }
-        absorbing.report
+        report
     }
 
     /// What each writer's files show.
@@ -725,7 +624,7 @@ fn scan_writer<'a>(
                 .collect();
             read_planned(files)
         })
-        .and_then(|fetched| parsed(fetched).then(flow::ok))
+        .map_ok(parsed)
         .map_ok(move |files| Listed { writer, files })
 }
 
@@ -786,64 +685,21 @@ const DIRECTORY: Meta = Meta {
     modified: None,
 };
 
-/// Files fetched whole and not parsed yet, parsed a slice at a time.
-struct Parse {
-    fetched: std::vec::IntoIter<(RelPath, Fetched)>,
-    parsing: Option<(RelPath, Option<Stamp>, Parsing)>,
-    done: Vec<Scanned>,
-}
-
-impl Parse {
-    /// Parses about [`PARSE_SLICE`] bytes; true once every file is parsed.
-    fn slice(&mut self) -> bool {
-        let mut budget = PARSE_SLICE;
-        while budget > 0 {
-            let (path, stamp, mut parsing) = match self.parsing.take() {
-                Some(parsing) => parsing,
-                None => match self.fetched.next() {
-                    None => return true,
-                    Some((path, Fetched::Whole { bytes, stamp })) => {
-                        (path, stamp, Parsing::new(bytes))
-                    }
-                    Some((path, Fetched::Unchanged)) => {
-                        self.done.push(Scanned {
-                            path,
-                            found: Found::Unchanged,
-                        });
-                        continue;
-                    }
-                    Some((path, Fetched::Grown { bytes, stamp })) => {
-                        let found = Found::Grown { bytes, stamp };
-                        self.done.push(Scanned { path, found });
-                        continue;
-                    }
-                },
-            };
-            let before = parsing.read();
-            let finished = parsing.step(budget);
-            budget = budget.saturating_sub(parsing.read() - before);
-            match finished {
-                true => self.done.push(Scanned {
-                    path,
-                    found: Found::Read {
-                        file: parsing.finish(),
-                        stamp,
-                    },
-                }),
-                false => self.parsing = Some((path, stamp, parsing)),
-            }
-        }
-        self.parsing.is_none() && self.fetched.len() == 0
-    }
-}
-
-fn parsed<'a>(fetched: Vec<(RelPath, Fetched)>) -> Flow<'a, Vec<Scanned>> {
-    let parse = Parse {
-        fetched: fetched.into_iter(),
-        parsing: None,
-        done: Vec::new(),
+/// What each file fetched found, those fetched whole parsed.
+fn parsed(fetched: Vec<(RelPath, Fetched)>) -> Vec<Scanned> {
+    let found = |fetched| match fetched {
+        Fetched::Whole { bytes, stamp } => Found::Read {
+            file: WriterFile::parse(&bytes),
+            stamp,
+        },
+        Fetched::Unchanged => Found::Unchanged,
+        Fetched::Grown { bytes, stamp } => Found::Grown { bytes, stamp },
     };
-    flow::sliced(parse, Parse::slice).then(|parse| Flow::Done(parse.done))
+    let scanned = fetched.into_iter().map(|(path, fetched)| Scanned {
+        path,
+        found: found(fetched),
+    });
+    scanned.collect()
 }
 
 /// A file a writer's directory listed, and what to read of it first.
@@ -1202,44 +1058,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_file_parsed_in_slices_is_judged_as_parsed_whole() {
-        use crate::env::{Random, SeededRandom};
-        let entries = chain(6);
-        let mut segment = bytes_of(&entries.iter().collect::<Vec<_>>());
-        let whole = segment.clone();
-        segment.extend(line::seal_marker(entries[6].hash()));
-        let seeds = [whole, segment, snapshot(&entries).encode()];
-        let mut random = SeededRandom::new(11);
-        let mut pick = |n: usize| (random.next_u128() % n as u128) as usize;
-        for _ in 0..3000 {
-            let mut bytes = seeds[pick(seeds.len())].clone();
-            for _ in 0..pick(3) {
-                let at = pick(bytes.len().max(1));
-                match pick(5) {
-                    0 => bytes.truncate(at),
-                    1 if at < bytes.len() => bytes[at] ^= 1 << pick(8),
-                    2 => bytes.insert(at.min(bytes.len()), b"\t\n\0{}\"0"[pick(7)]),
-                    3 => bytes.extend(line::seal_marker(entries[pick(7)].hash())),
-                    _ => bytes.extend_from_within(at.min(bytes.len())..),
-                }
-            }
-            let mut parsing = Parsing::new(bytes.clone());
-            let slice = 1 + pick(400);
-            let mut steps = 0;
-            while !parsing.step(slice) {
-                steps += 1;
-                assert!(steps <= bytes.len(), "parsing stalls");
-            }
-            assert_eq!(
-                parsing.finish(),
-                WriterFile::parse(&bytes),
-                "{slice}-byte slices of {:?}",
-                String::from_utf8_lossy(&bytes)
-            );
-        }
-    }
-
     fn put(disk: &MemDisk, path: &RelPath, bytes: &[u8]) {
         let dir = path.parent().unwrap();
         disk.perform(Io::MakeDir {
@@ -1318,106 +1136,6 @@ mod tests {
         );
         assert_eq!(again.placed, BTreeMap::new());
         assert_eq!(again.unreadable, report.unreadable);
-    }
-
-    /// What a reader holds that a read changes, comparable.
-    fn state(reader: &Reader) -> impl PartialEq + std::fmt::Debug {
-        let files: Vec<_> = reader
-            .records()
-            .map(|(path, record)| (path.clone(), record.stamp.clone(), record.file.clone()))
-            .collect();
-        let merged: BTreeMap<WriterId, Vec<EntryHash>> = reader
-            .derived()
-            .writers
-            .iter()
-            .map(|(writer, placed)| (*writer, placed.merged.iter().map(|e| e.hash()).collect()))
-            .collect();
-        (files, merged)
-    }
-
-    #[test]
-    fn a_read_placed_in_slices_places_what_it_places_at_once() {
-        use crate::env::{Random, SeededRandom};
-        let layout = Layout::new(".lib").unwrap();
-        let mut random = SeededRandom::new(3);
-        let mut pick = |n: usize| (random.next_u128() % n.max(1) as u128) as usize;
-        for _ in 0..60 {
-            let disk = MemDisk::new();
-            let mut files: Vec<(RelPath, Vec<u8>)> = Vec::new();
-            for w in 1..=1 + pick(3) as u128 {
-                let writer = WriterId::from_u128(w);
-                let kind = EntryKind::Genesis(Genesis {
-                    writer,
-                    label: "w".into(),
-                });
-                let mut entries = vec![Entry::encode(EntryHash::ZERO, 0, at(0), kind).unwrap()];
-                for n in 1..pick(30) {
-                    let prev = &entries[pick(entries.len()).max(n.saturating_sub(2)).min(n - 1)];
-                    entries.push(after(prev, &format!("{w}-{n}")));
-                }
-                let mut order: Vec<&Entry> = entries.iter().collect();
-                for i in (1..order.len()).rev() {
-                    order.swap(i, pick(i + 1));
-                }
-                let dir = layout.writer(writer);
-                for (i, part) in order.chunks(1 + pick(6)).enumerate() {
-                    files.push((dir.join(&format!("s{i}.txt")).unwrap(), bytes_of(part)));
-                }
-                if pick(3) == 0 {
-                    let mut chain = vec![entries[0].clone()];
-                    while let Some(next) = entries
-                        .iter()
-                        .find(|e| e.prev() == chain.last().unwrap().hash())
-                    {
-                        chain.push(next.clone());
-                    }
-                    let folded = snapshot_of(writer, &chain[..1 + pick(chain.len())]);
-                    files.push((dir.join("snap.json").unwrap(), folded.encode()));
-                }
-            }
-            let mut whole = Reader::new(layout.clone());
-            let mut sliced = whole.clone();
-            let mut grown: Vec<(RelPath, Vec<u8>)> = Vec::new();
-            for round in 0..3 {
-                for (path, bytes) in std::mem::take(&mut grown) {
-                    grow(&disk, &path, &bytes);
-                }
-                for (path, bytes) in std::mem::take(&mut files) {
-                    let ends = bytes.iter().enumerate().filter(|(_, b)| **b == b'\n');
-                    let ends: Vec<usize> = ends.map(|(at, _)| at + 1).collect();
-                    match pick(4) {
-                        0 if round < 2 => files.push((path, bytes)),
-                        1 if round < 2 && ends.len() > 1 => {
-                            let cut = ends[pick(ends.len() - 1)];
-                            put(&disk, &path, &bytes[..cut]);
-                            grown.push((path, bytes[cut..].to_vec()));
-                        }
-                        _ => put(&disk, &path, &bytes),
-                    }
-                }
-                if round == 2 && pick(2) == 0 {
-                    let gone = disk.files(Root::Folder).into_keys().next().unwrap();
-                    disk.perform(Io::Remove {
-                        root: Root::Folder,
-                        path: gone,
-                    })
-                    .unwrap();
-                }
-                let listing = crate::blocking::run(&mut disk.clone(), whole.list()).unwrap();
-                let expected = whole.absorb(listing);
-                let listing = crate::blocking::run(&mut disk.clone(), sliced.list()).unwrap();
-                let slice = 1 + pick(5);
-                let mut absorbing = sliced.absorbing(listing);
-                while !sliced.absorb_slice(&mut absorbing, slice) {}
-                let report = sliced.absorbed(absorbing);
-                assert_eq!(report, expected, "round {round}, {slice}-entry slices");
-                assert_eq!(
-                    state(&sliced),
-                    state(&whole),
-                    "round {round}, {slice}-entry slices"
-                );
-            }
-        }
     }
 
     #[test]

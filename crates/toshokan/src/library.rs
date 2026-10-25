@@ -14,9 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::binding::{
-    self, Binding, Bindings, Fact, Facts, Resolving, Scan, Scanned, Unscanned, Walk,
-};
+use crate::binding::{self, Bindings, Fact, Facts, Scan, Scanned, Unscanned, Walk};
 use crate::contribution;
 use crate::cow::CowMap;
 use crate::derive::{self, Placed};
@@ -26,7 +24,7 @@ use crate::env::Env;
 use crate::error::{Error, Invalid, Refusal, Result, Why};
 use crate::flow::{self, fold, ok, Fallible, Flow};
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
-use crate::index::{Follow, Index, Indexing};
+use crate::index::Index;
 use crate::intent;
 use crate::io::{Capabilities, Io, Kind, Lock, Root, Task};
 use crate::layout::Layout;
@@ -38,8 +36,8 @@ use crate::merge::{Folded, Part};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord};
 use crate::plan::{FactChange, FileChange, Plan};
-use crate::reach::{self, Linking, Links, Reach};
-use crate::reader::{Listing, ReadReport, Reader, Stamp};
+use crate::reach::{self, Links, Reach};
+use crate::reader::{ReadReport, Reader, Stamp};
 use crate::recovery::{self, Settling};
 use crate::report::{
     By, Change, Committed, Compacted, DraftState, DraftStatus, Emptied, Fork, Gap, HistoryItem,
@@ -154,39 +152,38 @@ impl Library {
             .and_then(move |(picked, remembered)| {
                 let reader = Reader::new(layout.clone());
                 flow::run(reader.list()).and_then(move |listing| {
-                    absorbed(reader, listing).then(move |(reader, report)| {
-                        let claimed = match picked {
-                            Some(picked) => picked.resume(layout.clone(), &reader),
-                            None => Task::ready(Ok(Claimed {
-                                writer: None,
-                                start: Start::New,
-                            })),
-                        };
-                        flow::run(claimed).map_ok(move |claimed| {
-                            let library = Library::new(
-                                layout,
-                                schema,
-                                env,
-                                capabilities,
-                                reader,
-                                claimed.writer,
-                                remembered,
-                            );
-                            (library, report, claimed.start)
-                        })
+                    let mut reader = reader;
+                    let report = reader.absorb(listing);
+                    let claimed = match picked {
+                        Some(picked) => picked.resume(layout.clone(), &reader),
+                        None => Task::ready(Ok(Claimed {
+                            writer: None,
+                            start: Start::New,
+                        })),
+                    };
+                    flow::run(claimed).map_ok(move |claimed| {
+                        let library = Library::new(
+                            layout,
+                            schema,
+                            env,
+                            capabilities,
+                            reader,
+                            claimed.writer,
+                            remembered,
+                        );
+                        (library, report, claimed.start)
                     })
                 })
             })
-            .and_then(|(library, report, start)| {
-                fold_opened(library).then(move |library| ok((library, report, start)))
-            })
+            .map_ok(|(library, report, start)| (fold_opened(library), report, start))
             .and_then(|(library, report, start)| {
                 idle_pool(library)
                     .and_then(recover)
                     .map_ok(move |library| (library, report, start))
             })
-            .and_then(|(library, report, start)| {
-                presumed_bound(library).then(move |library| ok((library, report, start)))
+            .map_ok(|(mut library, report, start)| {
+                library.presume_bound();
+                (library, report, start)
             })
             .and_then(|(library, report, start)| {
                 flow::run(library.presence_task()).and_then(move |presence| {
@@ -195,7 +192,8 @@ impl Library {
                         orphan.live = presence.get(&orphan.writer) == Some(&Presence::SameMachine);
                     }
                     library.presence = presence;
-                    indexed(library).then(move |library| ok((library, report, start)))
+                    library.index();
+                    ok((library, report, start))
                 })
             })
             .and_then(|(library, report, start)| {
@@ -528,7 +526,8 @@ impl Library {
             })
             .and_then(|(library, retired)| {
                 let changes = library.since_view();
-                reshown(library).map_ok(move |library| Refreshed {
+                library.reshow();
+                ok(Refreshed {
                     changes,
                     scan: library.scan_report(),
                     unlisted: library.unlisted.clone(),
@@ -748,13 +747,14 @@ impl Library {
     /// Compacts the writer of a writable library, records its head if that lags,
     /// removes the spent pending records of a writable library, seals the open
     /// segment and releases the writer's lock, then lets go of what the library
-    /// holds a part at a time: nothing is left to view, and the library only
-    /// drops. A record it cannot remove stays for the next instance to find, and
-    /// that failure is returned once the library is closed. A library dropped without closing leaves its
-    /// segment open, as a crash does.
+    /// holds: nothing is left to view, and the library only drops. A record it
+    /// cannot remove stays for the next instance to find, and that failure is
+    /// returned once the library is closed. A library dropped without closing
+    /// leaves its segment open, as a crash does.
     pub fn close(&mut self) -> Task<'_, Result<()>> {
         let Some(writer) = self.writer.take() else {
-            return dismantled(self).then(|()| ok(())).task();
+            self.dismantle();
+            return Task::ready(Ok(()));
         };
         self.writer = Some(writer);
         compact_due(self, true)
@@ -768,34 +768,27 @@ impl Library {
                 Some(writer) => flow::run(writer.close()).map_ok(move |()| (library, tidied)),
                 None => ok((library, tidied)),
             })
-            .and_then(|(library, tidied)| {
-                dismantled(library).then(|()| Flow::Done(tidied.map(drop)))
+            .then(|closed| {
+                let closed = closed.and_then(|(library, tidied)| {
+                    library.dismantle();
+                    tidied.map(drop)
+                });
+                Flow::Done(closed)
             })
             .task()
     }
 
-    /// Lets go of part `part` of what the library holds, the largest first;
-    /// whether none is left.
-    fn shed(&mut self, part: usize) -> bool {
-        match part {
-            0 => drop(std::mem::replace(
-                &mut self.view,
-                View::new(Parts::default()),
-            )),
-            1 => drop(std::mem::take(&mut self.folded)),
-            2 => self.reader.shed_logs(),
-            3 => self.reader.shed_files(),
-            _ => {
-                drop(std::mem::take(&mut self.facts));
-                drop(std::mem::take(&mut self.scan));
-                drop(self.keys.take());
-                drop(std::mem::take(&mut self.reach));
-                drop(std::mem::take(&mut self.bindings));
-                drop(std::mem::take(&mut self.history));
-                return true;
-            }
-        }
-        false
+    /// Lets go of what the library holds: nothing is left to view.
+    fn dismantle(&mut self) {
+        self.view = View::new(Parts::default());
+        self.folded = Folded::default();
+        self.reader.shed();
+        self.facts = Facts::default();
+        self.scan = Scan::default();
+        self.keys = None;
+        self.reach = Reach::default();
+        self.bindings = Arc::default();
+        self.history = History::default();
     }
 
     /// Whether `theirs`, another writer's record `name`, is still open: confined
@@ -1169,23 +1162,58 @@ impl Library {
 
     /// Binds again where the facts or the scan changed since the last binding.
     fn bind_facts(&mut self) {
-        if self.reach.due() {
-            self.bind();
+        if !self.rebind_reached() {
+            self.bind_everything();
         }
     }
 
-    fn bind(&mut self) {
-        if self.rebind_reached() {
-            return;
-        }
-        let mut binding = Binding::new(&self.facts, &self.scan, &self.unscanned);
+    /// Binds every fact to the scan, then links what it bound unless a failed
+    /// scan left something unknown.
+    fn bind_everything(&mut self) {
         let names = &*self.env.names;
-        binding.step(&self.facts, &self.scan, names, usize::MAX);
+        let (bindings, pins) = binding::bind_known(&self.facts, &self.scan, names, &self.unscanned);
         let links = self
             .unscanned
             .is_empty()
             .then(|| Links::of(&self.facts, &self.scan, names));
-        self.bound(binding, links);
+        self.pins = pins;
+        self.bindings = Arc::new(bindings);
+        self.reach.bound(links);
+    }
+
+    /// Binds the facts to `scan`, unless neither changed.
+    fn rebind(&mut self, scan: Scan) {
+        if !self.reach.due() && scan == self.scan {
+            return;
+        }
+        self.scan = scan;
+        self.keys = None;
+        self.reach.everything();
+        self.bind_everything();
+    }
+
+    /// Binds every entity with a file where its facts say, knowing none of the
+    /// library's files until a scan of every one succeeds.
+    fn presume_bound(&mut self) {
+        self.unscanned.add(vec![RelPath::ROOT], &self.bindings);
+        self.reach.everything();
+        self.rebind(self.scan.clone());
+    }
+
+    /// Binds what is due, then builds the index of what is shown and shows it.
+    fn index(&mut self) {
+        self.bind_facts();
+        let index = Index::of(&self.folded, &self.bindings);
+        self.show_indexed(Arc::new(index));
+    }
+
+    /// Shows what changed since the view, if anything did.
+    fn reshow(&mut self) {
+        self.bind_facts();
+        let rebound = !Arc::ptr_eq(&self.view.parts().bindings, &self.bindings);
+        if self.unshown || rebound {
+            self.show();
+        }
     }
 
     /// Binds again only what the changes since the last binding reach, when they
@@ -1217,15 +1245,6 @@ impl Library {
             None => self.reach.everything(),
         }
         rebound.is_some()
-    }
-
-    /// Takes what a finished binding of everything bound, and the links of what
-    /// it bound unless a failed scan left something unknown.
-    fn bound(&mut self, binding: Binding, links: Option<Links>) {
-        let (bindings, pins) = binding.finish();
-        self.pins = pins;
-        self.bindings = Arc::new(bindings);
-        self.reach.bound(links);
     }
 
     /// The identities the local root should keep of those scans read that no fact
@@ -1672,50 +1691,15 @@ fn change_of(op: &Op) -> Option<Change> {
     })
 }
 
-/// About how many entries one slice of placing offers.
-const PLACE_SLICE: usize = 1 << 11;
-
-/// How many entities' file facts one slice takes.
-const FILE_SLICE: usize = 1 << 12;
-
-/// About how many entities or files one slice of binding takes.
-const BIND_SLICE: usize = 1 << 12;
-
-/// How many entities one slice of indexing takes.
-const INDEX_SLICE: usize = 1 << 12;
-
-/// About how many files listed one slice of a scan of every file takes.
-const FOUND_SLICE: usize = 1 << 13;
-
-/// Places what a read of every writer's directory found, a slice at a time.
-fn absorbed<'a>(mut reader: Reader, listing: Listing) -> Flow<'a, (Reader, ReadReport)> {
-    let absorbing = reader.absorbing(listing);
-    let placing = flow::sliced((reader, absorbing), |(reader, absorbing)| {
-        reader.absorb_slice(absorbing, PLACE_SLICE)
-    });
-    placing.then(|(mut reader, absorbing)| {
-        let report = reader.absorbed(absorbing);
-        Flow::Done((reader, report))
-    })
-}
-
-/// Takes what a library just opened shows, its file facts a slice at a time,
-/// then follows its clock readings and decides whether it may write.
-fn fold_opened(mut library: Library) -> Flow<'static, Library> {
+/// Takes what a library just opened shows and its file facts, then follows its
+/// clock readings and decides whether it may write.
+fn fold_opened(mut library: Library) -> Library {
     library.folded = library.reader.derived().folded.clone();
-    Flow::Done(library)
-        .then(|library| {
-            let filing = (library, Facts::new(), None);
-            flow::sliced(filing, |(library, facts, after)| {
-                library.folded.files_slice(facts, after, FILE_SLICE)
-            })
-        })
-        .then(|(mut library, facts, _)| {
-            library.refiled(facts);
-            library.follow(library.reader.readings().collect());
-            library.mode = library.mode_at_open();
-            Flow::Done(library)
-        })
+    let facts = library.folded.files();
+    library.refiled(facts);
+    library.follow(library.reader.readings().collect());
+    library.mode = library.mode_at_open();
+    library
 }
 
 /// How many of its own entries since its last snapshot a writer appends before
@@ -1802,73 +1786,6 @@ fn compact_due(library: &mut Library, closing: bool) -> Flow<'_, &mut Library> {
         return Flow::Done(library);
     }
     compacted(library).then(|(library, _)| Flow::Done(library))
-}
-
-/// Lets go of what `library` holds a part at a time, pausing between parts.
-fn dismantled(library: &mut Library) -> Flow<'_, ()> {
-    flow::sliced((library, 0), |(library, part)| {
-        let done = library.shed(*part);
-        *part += 1;
-        done
-    })
-    .then(|_| Flow::Done(()))
-}
-
-/// Shows what changed since the view, if anything did: moves the entries of the
-/// entities that changed in the view's index, or builds its paths or all of it
-/// again a slice at a time when most did.
-fn reshown<'a, L: BorrowMut<Library> + 'a>(mut library: L) -> Fallible<'a, L> {
-    let known = library.borrow_mut();
-    known.bind_facts();
-    let shown = known.view.parts();
-    let rebound = !Arc::ptr_eq(&shown.bindings, &known.bindings);
-    if !known.unshown && !rebound {
-        return ok(library);
-    }
-    let (before, after) = (
-        (&shown.folded, &*shown.bindings),
-        (&known.folded, &*known.bindings),
-    );
-    let mut index = Arc::clone(known.view.index());
-    match Index::changed(before, after) {
-        Follow::Build => return indexed(library).then(flow::ok),
-        Follow::Paths(entities) => {
-            let indexing = Indexing::paths(&index);
-            return reindexed(library, indexing, entities).then(flow::ok);
-        }
-        Follow::Move(entities) => Arc::make_mut(&mut index).move_entries(before, after, entities),
-    }
-    known.show_indexed(index);
-    ok(library)
-}
-
-/// Binds what is due, then builds the index of what is shown a slice of
-/// entities at a time, and shows it.
-fn indexed<'a, L: BorrowMut<Library> + 'a>(mut library: L) -> Flow<'a, L> {
-    library.borrow_mut().bind_facts();
-    reindexed(library, Indexing::default(), Vec::new())
-}
-
-/// Builds what `indexing` builds a slice of entities at a time, moves the
-/// entries of `entities` from the view's state to the library's, and shows it.
-fn reindexed<'a, L: BorrowMut<Library> + 'a>(
-    library: L,
-    indexing: Indexing,
-    entities: Vec<EntityId>,
-) -> Flow<'a, L> {
-    flow::sliced((library, indexing), |(library, indexing)| {
-        let known = library.borrow();
-        indexing.step(&known.folded, &known.bindings, INDEX_SLICE)
-    })
-    .then(|(mut library, indexing)| {
-        let known = library.borrow_mut();
-        let mut index = indexing.finish();
-        let shown = known.view.parts();
-        let before = (&shown.folded, &*shown.bindings);
-        index.move_entries(before, (&known.folded, &known.bindings), entities);
-        known.show_indexed(Arc::new(index));
-        Flow::Done(library)
-    })
 }
 
 /// Reads every writer's pending records and sorts out this writer's and the
@@ -2058,17 +1975,6 @@ fn scan_for<'a>(
     }
 }
 
-/// Binds every entity with a file where its facts say, knowing none of the
-/// library's files until a scan of every one succeeds.
-fn presumed_bound(mut library: Library) -> Flow<'static, Library> {
-    library
-        .unscanned
-        .add(vec![RelPath::ROOT], &library.bindings);
-    library.reach.everything();
-    let scan = library.scan.clone();
-    rebound(library, scan)
-}
-
 /// Scans every library file, going on from where a scan that stopped left off,
 /// and binds them, what a failed scan left unknown included.
 fn rescan<'a, L: BorrowMut<Library> + 'a>(mut library: L) -> Fallible<'a, L> {
@@ -2099,97 +2005,35 @@ fn walk<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
 
 /// Binds every file the finished walk listed.
 fn walked<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
-    flow::sliced(
-        (library, Scan::default(), None),
-        |(library, found, after)| {
-            let Some(walk) = library.borrow().walking.as_ref() else {
-                return true;
-            };
-            let (last, finished) = walk.found_after(found, after.as_ref(), FOUND_SLICE);
-            *after = last;
-            finished
-        },
-    )
-    .then(|(library, found, _)| {
-        let resolving = (library, found, Resolving::default());
-        flow::sliced(resolving, |(library, found, resolving)| {
-            let known = library.borrow();
-            resolving.step(
-                found,
-                &known.facts,
-                &known.scan,
-                &*known.env.names,
-                FOUND_SLICE,
-            )
-        })
-    })
-    .then(|(library, found, resolving)| {
-        let identify = &library.borrow().env.identify;
-        let identified = binding::identified(found, resolving.needed, identify);
-        identified.map_ok(move |read| (library, read))
-    })
-    .and_then(move |(library, (scan, read))| {
-        let mut library = library;
-        let known = library.borrow_mut();
-        let walk = known.walking.take();
-        known.walked = walk.as_ref().map(Walk::dirs);
-        let unlisted = walk.map(Walk::unlisted).unwrap_or_default();
-        let listing = scan
-            .files
-            .iter()
-            .map(|(path, file)| (path.clone(), Listed::of(file)));
-        known.listing = Some(CowMap::from_sorted_iter(listing));
-        if !known.unscanned.is_empty() || !unlisted.is_empty() {
-            known.unscanned = Unscanned::default();
-            known.unscanned.add(unlisted.clone(), &known.bindings);
-            known.reach.everything();
-        }
-        known.unlisted = unlisted;
-        known.reach.resolved();
-        known.behind.remove(&Lag::Scan);
-        rebound(library, scan).then(move |library| {
+    let known = library.borrow();
+    let mut found = known.walking.as_ref().map(Walk::found).unwrap_or_default();
+    let names = &*known.env.names;
+    let needed = binding::resolve(&mut found, &known.facts, &known.scan, names);
+    let identified = binding::identified(found, needed, &known.env.identify);
+    identified
+        .map_ok(move |read| (library, read))
+        .and_then(move |(library, (scan, read))| {
+            let mut library = library;
+            let known = library.borrow_mut();
+            let walk = known.walking.take();
+            known.walked = walk.as_ref().map(Walk::dirs);
+            let unlisted = walk.map(Walk::unlisted).unwrap_or_default();
+            let listing = scan
+                .files
+                .iter()
+                .map(|(path, file)| (path.clone(), Listed::of(file)));
+            known.listing = Some(CowMap::from_sorted_iter(listing));
+            if !known.unscanned.is_empty() || !unlisted.is_empty() {
+                known.unscanned = Unscanned::default();
+                known.unscanned.add(unlisted.clone(), &known.bindings);
+                known.reach.everything();
+            }
+            known.unlisted = unlisted;
+            known.reach.resolved();
+            known.behind.remove(&Lag::Scan);
+            known.rebind(scan);
             remember(library, read).then(|(library, kept)| Flow::Done(kept.map(|()| library)))
         })
-    })
-}
-
-/// Binds the facts to `scan` a slice at a time, unless neither changed.
-fn rebound<'a, L: BorrowMut<Library> + 'a>(mut library: L, scan: Scan) -> Flow<'a, L> {
-    let known = library.borrow_mut();
-    if !known.reach.due() && scan == known.scan {
-        return Flow::Done(library);
-    }
-    known.scan = scan;
-    known.keys = None;
-    known.reach.everything();
-    bind_everything(library)
-}
-
-/// Binds every fact to the scan a slice at a time, then links what it bound
-/// unless a failed scan left something unknown.
-fn bind_everything<'a, L: BorrowMut<Library> + 'a>(library: L) -> Flow<'a, L> {
-    let known = library.borrow();
-    let binding = Binding::new(&known.facts, &known.scan, &known.unscanned);
-    flow::sliced((library, binding), |(library, binding)| {
-        let known = library.borrow();
-        binding.step(&known.facts, &known.scan, &*known.env.names, BIND_SLICE)
-    })
-    .then(|(library, binding)| {
-        let linking = library.borrow().unscanned.is_empty().then(Linking::default);
-        flow::sliced((library, linking), |(library, linking)| {
-            let Some(linking) = linking else {
-                return true;
-            };
-            let known = library.borrow();
-            linking.step(&known.facts, &known.scan, &*known.env.names, BIND_SLICE)
-        })
-        .then(move |(mut library, linking)| {
-            library
-                .borrow_mut()
-                .bound(binding, linking.map(Linking::finish));
-            Flow::Done(library)
-        })
-    })
 }
 
 /// Keeps in the local root the identities [`Library::remembering`] gives, so a
@@ -2248,8 +2092,8 @@ fn rescan_paths(library: &mut Library, paths: Vec<RelPath>) -> Fallible<'_, &mut
                 Err(error) => return unscanned(library, paths, error),
             };
             let read = library.rescanned(changes, reading.into_iter().zip(identities));
-            bind_reached(library)
-                .then(move |library| remember(library, read).then(|(library, _)| ok(library)))
+            library.bind_facts();
+            remember(library, read).then(|(library, _)| ok(library))
         })
     })
 }
@@ -2265,15 +2109,6 @@ fn unscanned(
     library.lag(Lag::Scan, &Err(error));
     library.reach.everything();
     ok(library)
-}
-
-/// Binds again what changed reaches, or everything a slice at a time when it
-/// reaches too much.
-fn bind_reached<'a, L: BorrowMut<Library> + 'a>(mut library: L) -> Flow<'a, L> {
-    match library.borrow_mut().rebind_reached() {
-        true => Flow::Done(library),
-        false => bind_everything(library),
-    }
 }
 
 /// Once entries are durable, binds to what `scan` finds. A scan that fails does
@@ -2299,8 +2134,10 @@ fn rebind_logged<'a>(
             Err(error) => Flow::Done(Err(error)),
         };
         identified.then(move |scanned| match scanned {
-            Ok((scan, read)) => rebound(library, scan)
-                .then(move |library| remember(library, read).then(|(library, _)| ok(library))),
+            Ok((scan, read)) => {
+                library.rebind(scan);
+                remember(library, read).then(|(library, _)| ok(library))
+            }
             Err(error) => unscanned(library, unsure, error),
         })
     })

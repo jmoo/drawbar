@@ -86,11 +86,40 @@ fn facts_of<'a>(facts: &'a Facts, entity: &EntityId) -> &'a [Fact] {
 }
 
 impl Links {
-    /// The links of `facts` and `scan`, at once.
+    /// The links of `facts` and `scan`.
     pub(crate) fn of(facts: &Facts, scan: &Scan, names: &dyn Names) -> Self {
-        let mut linking = Linking::default();
-        while !linking.step(facts, scan, names, usize::MAX) {}
-        linking.finish()
+        fn sorted<K: Ord + Clone>(mut list: Vec<(K, ())>) -> CowMap<K, ()> {
+            list.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            list.dedup_by(|a, b| a.0 == b.0);
+            CowMap::from_sorted(list)
+        }
+        let (mut keys, mut identities, mut held, mut keyed) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut lengths: BTreeMap<u64, usize> = BTreeMap::new();
+        for (entity, written) in facts {
+            for fact in written.iter().map(|written| &written.value) {
+                let key = hashed(&names.key(fact.path.as_str()));
+                keys.push(((key, *entity), ()));
+                identities.push(((fact.identity, *entity), ()));
+                *lengths.entry(fact.len).or_default() += 1;
+            }
+        }
+        for (path, file) in &scan.files {
+            if let Some(identity) = file.identity {
+                held.push(((identity, path.clone()), ()));
+            }
+            let key = names.key(path.as_str());
+            if key != path.as_str() {
+                keyed.push(((hashed(&key), path.clone()), ()));
+            }
+        }
+        Self {
+            keys: sorted(keys),
+            identities: sorted(identities),
+            held: sorted(held),
+            keyed: sorted(keyed),
+            lengths,
+        }
     }
 
     fn add_facts(&mut self, entity: EntityId, written: &[Fact], names: &dyn Names) {
@@ -233,127 +262,6 @@ impl Links {
         let held = self.held.seek(|(other, _)| other.cmp(&identity));
         let held = held.take_while(|((other, _), _)| *other == identity);
         files.extend(held.map(|((_, path), _)| path.clone()));
-    }
-}
-
-/// [`Links::of`] a slice at a time.
-#[derive(Default)]
-pub(crate) struct Linking {
-    stage: Stage,
-    keys: Vec<((u64, EntityId), ())>,
-    identities: Vec<((Identity, EntityId), ())>,
-    held: Vec<((Identity, RelPath), ())>,
-    keyed: Vec<((u64, RelPath), ())>,
-    lengths: BTreeMap<u64, usize>,
-    links: Links,
-}
-
-#[derive(Default)]
-enum Stage {
-    #[default]
-    Facts,
-    FactsAfter(EntityId),
-    Files,
-    FilesAfter(RelPath),
-    Sort,
-    Done,
-}
-
-impl Linking {
-    /// Links about `slice` more facts or files; true once every one is linked.
-    /// ⚠️ Each step must be given the same facts and scan.
-    pub(crate) fn step(
-        &mut self,
-        facts: &Facts,
-        scan: &Scan,
-        names: &dyn Names,
-        slice: usize,
-    ) -> bool {
-        self.stage = match std::mem::take(&mut self.stage) {
-            Stage::Facts => self.facts(facts, None, names, slice),
-            Stage::FactsAfter(after) => self.facts(facts, Some(after), names, slice),
-            Stage::Files => self.files(scan, None, names, slice),
-            Stage::FilesAfter(after) => self.files(scan, Some(after), names, slice),
-            Stage::Sort => self.sort(),
-            Stage::Done => Stage::Done,
-        };
-        matches!(self.stage, Stage::Done)
-    }
-
-    fn facts(
-        &mut self,
-        facts: &Facts,
-        after: Option<EntityId>,
-        names: &dyn Names,
-        slice: usize,
-    ) -> Stage {
-        let mut entities = facts.after(after);
-        let mut last = None;
-        for (entity, written) in entities.by_ref().take(slice) {
-            last = Some(*entity);
-            for fact in written.iter().map(|written| &written.value) {
-                let key = hashed(&names.key(fact.path.as_str()));
-                self.keys.push(((key, *entity), ()));
-                self.identities.push(((fact.identity, *entity), ()));
-                *self.lengths.entry(fact.len).or_default() += 1;
-            }
-        }
-        match (entities.next(), last) {
-            (Some(_), Some(last)) => Stage::FactsAfter(last),
-            _ => Stage::Files,
-        }
-    }
-
-    fn files(
-        &mut self,
-        scan: &Scan,
-        after: Option<RelPath>,
-        names: &dyn Names,
-        slice: usize,
-    ) -> Stage {
-        let from = after
-            .as_ref()
-            .map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
-        let mut files = scan
-            .files
-            .range::<RelPath, _>((from, std::ops::Bound::Unbounded));
-        let mut last = None;
-        for (path, file) in files.by_ref().take(slice) {
-            last = Some(path);
-            if let Some(identity) = file.identity {
-                self.held.push(((identity, path.clone()), ()));
-            }
-            let key = names.key(path.as_str());
-            if key != path.as_str() {
-                self.keyed.push(((hashed(&key), path.clone()), ()));
-            }
-        }
-        match (files.next(), last) {
-            (Some(_), Some(last)) => Stage::FilesAfter(last.clone()),
-            _ => Stage::Sort,
-        }
-    }
-
-    fn sort(&mut self) -> Stage {
-        fn sorted<K: Ord + Clone>(mut list: Vec<(K, ())>) -> CowMap<K, ()> {
-            list.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-            list.dedup_by(|a, b| a.0 == b.0);
-            CowMap::from_sorted(list)
-        }
-        self.links = Links {
-            keys: sorted(std::mem::take(&mut self.keys)),
-            identities: sorted(std::mem::take(&mut self.identities)),
-            held: sorted(std::mem::take(&mut self.held)),
-            keyed: sorted(std::mem::take(&mut self.keyed)),
-            lengths: std::mem::take(&mut self.lengths),
-        };
-        Stage::Done
-    }
-
-    /// ⚠️ Before [`Linking::step`] returns true, links lacking what is not linked
-    /// yet.
-    pub(crate) fn finish(self) -> Links {
-        self.links
     }
 }
 

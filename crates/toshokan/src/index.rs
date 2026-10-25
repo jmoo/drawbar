@@ -52,30 +52,15 @@ struct Entries<'a> {
     conflicts: Vec<Conflicted>,
 }
 
-/// An index being built a slice of entities at a time, as [`Index::of`] builds
-/// it.
+/// An index being built, as [`Index::of`] builds it.
 #[derive(Default)]
 pub(crate) struct Indexing {
-    stage: Stage,
     /// The index whose values and conflicts are kept, when only the paths are
     /// built again.
     kept: Option<Index>,
     holding: BTreeMap<(KeyKind, String), Holding>,
-    keys: BTreeMap<(KeyKind, String), Arc<KeyIndex>>,
     paths: Vec<((RelPath, EntityId), FileState)>,
     conflicts: Vec<(Conflicted, ())>,
-}
-
-#[derive(Default)]
-enum Stage {
-    /// Taking entities, from the first.
-    #[default]
-    Entities,
-    /// Taking entities, after this one.
-    After(EntityId),
-    /// Building the index of each key gathered.
-    Keys,
-    Done,
 }
 
 impl Indexing {
@@ -88,33 +73,28 @@ impl Indexing {
         }
     }
 
-    /// Takes the next `slice` entities of `folded`, bound as `bindings` says, or
-    /// once every one is taken builds the indexes of keys holding about `slice`
-    /// values; true once every index is built. Each step must be given the same
-    /// state.
-    pub(crate) fn step(&mut self, folded: &Folded, bindings: &Bindings, slice: usize) -> bool {
-        match self.stage {
-            Stage::Entities => self.take(folded, bindings, None, slice),
-            Stage::After(after) => self.take(folded, bindings, Some(after), slice),
-            Stage::Keys => self.build(slice),
-            Stage::Done => {}
+    /// The index of `folded`, bound as `bindings` says.
+    pub(crate) fn build(mut self, folded: &Folded, bindings: &Bindings) -> Index {
+        match self.kept.is_some() {
+            true => self.take_paths(folded, bindings),
+            false => self.take(folded, bindings),
         }
-        matches!(self.stage, Stage::Done)
+        self.paths.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let paths = CowMap::from_sorted(self.paths);
+        if let Some(kept) = self.kept {
+            return Index { paths, ..kept };
+        }
+        let keys = self.holding.into_iter();
+        let keys = keys.map(|(key, held)| (key, Arc::new(KeyIndex::of(held))));
+        Index {
+            keys: keys.collect(),
+            paths,
+            conflicts: self.conflicts.into_iter().collect(),
+        }
     }
 
-    fn take(
-        &mut self,
-        folded: &Folded,
-        bindings: &Bindings,
-        after: Option<EntityId>,
-        slice: usize,
-    ) {
-        if self.kept.is_some() {
-            return self.take_paths(folded, bindings, after, slice);
-        }
-        let mut entities = folded.each_shown_after(after);
-        for (entity, shown) in entities.by_ref().take(slice) {
-            self.stage = Stage::After(entity);
+    fn take(&mut self, folded: &Folded, bindings: &Bindings) {
+        for (entity, shown) in folded.each_shown_after(None) {
             let Some(shown) = shown else {
                 continue;
             };
@@ -145,22 +125,11 @@ impl Indexing {
             self.conflicts
                 .extend(conflicts.map(|conflict| (conflict, ())));
         }
-        if entities.next().is_none() {
-            self.stage = Stage::Keys;
-        }
     }
 
-    /// Takes the paths of the next `slice` entities, as [`Entries`] gives them.
-    fn take_paths(
-        &mut self,
-        folded: &Folded,
-        bindings: &Bindings,
-        after: Option<EntityId>,
-        slice: usize,
-    ) {
-        let mut entities = folded.shown_paths_after(after);
-        for (entity, logged) in entities.by_ref().take(slice) {
-            self.stage = Stage::After(entity);
+    /// Takes the paths of every entity, as [`Entries`] gives them.
+    fn take_paths(&mut self, folded: &Folded, bindings: &Bindings) {
+        for (entity, logged) in folded.shown_paths_after(None) {
             let file = match bindings.bound.get(&entity) {
                 Some(file) => Some((&file.path, file.state)),
                 None => logged.map(|path| (path, FileState::Missing)),
@@ -169,47 +138,13 @@ impl Indexing {
                 self.paths.push(((path.clone(), entity), state));
             }
         }
-        if entities.next().is_none() {
-            self.stage = Stage::Keys;
-        }
-    }
-
-    /// Builds the indexes of the next keys gathered, until they hold `slice`
-    /// values, then of the paths.
-    fn build(&mut self, slice: usize) {
-        let mut built = 0;
-        while built < slice {
-            let Some((key, held)) = self.holding.pop_first() else {
-                self.paths.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-                self.stage = Stage::Done;
-                return;
-            };
-            built += held.held.len();
-            self.keys.insert(key, Arc::new(KeyIndex::of(held)));
-        }
-    }
-
-    /// ⚠️ Before [`Indexing::step`] returns true, an index lacking what is not
-    /// built yet.
-    pub(crate) fn finish(self) -> Index {
-        let paths = CowMap::from_sorted(self.paths);
-        match self.kept {
-            Some(kept) => Index { paths, ..kept },
-            None => Index {
-                keys: self.keys,
-                paths,
-                conflicts: self.conflicts.into_iter().collect(),
-            },
-        }
     }
 }
 
 impl Index {
     /// The index of a view of `folded` and `bindings`, built at once.
     pub fn of(folded: &Folded, bindings: &Bindings) -> Self {
-        let mut indexing = Indexing::default();
-        while !indexing.step(folded, bindings, usize::MAX) {}
-        indexing.finish()
+        Indexing::default().build(folded, bindings)
     }
 
     /// Follows the change from `before`, the folded state and bindings this index
@@ -218,9 +153,7 @@ impl Index {
         match Self::changed(before, after) {
             Follow::Move(entities) => self.move_entries(before, after, entities),
             Follow::Paths(entities) => {
-                let mut indexing = Indexing::paths(self);
-                while !indexing.step(after.0, after.1, usize::MAX) {}
-                *self = indexing.finish();
+                *self = Indexing::paths(self).build(after.0, after.1);
                 self.move_entries(before, after, entities);
             }
             Follow::Build => *self = Self::of(after.0, after.1),
@@ -762,36 +695,12 @@ mod tests {
                 let bound = bindings(&mut random, &folded);
                 let rebound = bindings(&mut random, &next);
                 let index = Index::of(&folded, &bound);
-                let mut indexing = Indexing::paths(&index);
-                let slice = 1 + below(&mut random, 4);
-                while !indexing.step(&next, &rebound, slice) {}
-                let mut index = indexing.finish();
+                let mut index = Indexing::paths(&index).build(&next, &rebound);
                 let entities = next.changed(&folded);
                 index.move_entries((&folded, &bound), (&next, &rebound), entities);
                 assert_eq!(index, Index::of(&next, &rebound), "seed {seed}, entry {n}");
                 folded = next;
             }
-        }
-    }
-
-    #[test]
-    fn an_index_built_a_slice_at_a_time_equals_one_built_at_once() {
-        for seed in 0..100 {
-            let mut random = SeededRandom::new(seed);
-            let mut chains = Chains::new();
-            let mut folded = Folded::default();
-            for n in 0..40 {
-                folded = chains.append(&mut random, WriterId::from_u128(1), n);
-            }
-            let bound = bindings(&mut random, &folded);
-            let slice = 1 + below(&mut random, 5);
-            let mut indexing = Indexing::default();
-            while !indexing.step(&folded, &bound, slice) {}
-            assert_eq!(
-                indexing.finish(),
-                Index::of(&folded, &bound),
-                "seed {seed}, {slice}-entity slices"
-            );
         }
     }
 }
