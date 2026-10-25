@@ -106,7 +106,7 @@ roughly in order.
 | `Retained` | The folder keeps every entry written, in a segment or folded in a snapshot, unless a restore or a dropped version took it. |
 | `EffectAccounted` | Every effect begun has a pending record or a closing entry in the folder, unless a restore took both. |
 | `DeliveredConverges` | Once every file has reached a reader, it merges, shows or has dismissed every kept entry, holds back only what follows a lost entry, and reports every fork among the kept entries it sees, whatever the delivery order. |
-| `DeliveredSettles` | Once every file has reached a reader, every effect is closed, reported, or that reader's own effect in flight; this includes the effects of a writer whose local root was lost. |
+| `DeliveredSettles` | Once every file has reached a reader, every effect is closed by an entry it holds, merged or on a branch it shows apart, reported, or that reader's own effect in flight; this includes the effects of a writer whose local root was lost. |
 | `Monotone` | As files arrive, a reader stops merging an entry only when it now shows it or has dismissed it. |
 | `NoFlip` | As files arrive, a run stays shown until it is dismissed. |
 | `OwnFileNoRetire` | A writer takes a new id for a fork only when an entry of its directory has two successors. |
