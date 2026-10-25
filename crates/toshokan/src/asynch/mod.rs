@@ -4,7 +4,8 @@
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
-use std::task::Poll;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::{Context, Poll, Wake, Waker};
 
 use crate::disk::MemDisk;
 use crate::env::Env;
@@ -88,32 +89,123 @@ where
     }
 }
 
-/// Every future's output, in order, the futures polled together.
+/// Every future's output, in order, the futures polled together. A poll of the join
+/// polls only the futures woken since the last one, so `n` futures that finish one
+/// at a time take about `2n` polls.
 pub(crate) async fn join<T>(futures: impl Iterator<Item = impl Future<Output = T>>) -> Vec<T> {
     let mut running: Vec<_> = futures.map(Box::pin).collect();
     let mut outputs: Vec<Option<T>> = running.iter().map(|_| None).collect();
+    let woken = Arc::new(Woken::all(running.len()));
+    let wakers: Vec<Waker> = (0..running.len())
+        .map(|index| {
+            let woken = Arc::clone(&woken);
+            Waker::from(Arc::new(Member { index, woken }))
+        })
+        .collect();
+    let mut left = running.len();
     std::future::poll_fn(|context| {
-        let mut waiting = false;
-        for (future, output) in running.iter_mut().zip(outputs.iter_mut()) {
-            if output.is_some() {
+        woken.wake_on(context.waker());
+        for index in woken.take() {
+            if outputs[index].is_some() {
                 continue;
             }
-            match future.as_mut().poll(context) {
-                Poll::Ready(value) => *output = Some(value),
-                Poll::Pending => waiting = true,
+            let mut own = Context::from_waker(&wakers[index]);
+            if let Poll::Ready(value) = running[index].as_mut().poll(&mut own) {
+                outputs[index] = Some(value);
+                left -= 1;
             }
         }
-        match waiting {
-            true => Poll::Pending,
-            false => Poll::Ready(
+        match left {
+            0 => Poll::Ready(
                 outputs
                     .iter_mut()
                     .map(|output| output.take().expect("every future is ready"))
                     .collect(),
             ),
+            _ => Poll::Pending,
         }
     })
     .await
+}
+
+/// The members of a [`join`] woken since it last polled them, and the waker of the
+/// task that polls the join.
+struct Woken {
+    queued: Mutex<Queued>,
+    task: Mutex<Option<Waker>>,
+}
+
+struct Queued {
+    order: Vec<usize>,
+    /// Whether each member is in `order`, so a member woken twice is polled once.
+    flagged: Vec<bool>,
+}
+
+impl Woken {
+    /// Every one of `n` members queued, as none has been polled yet.
+    fn all(n: usize) -> Self {
+        let queued = Queued {
+            order: (0..n).collect(),
+            flagged: vec![true; n],
+        };
+        Self {
+            queued: Mutex::new(queued),
+            task: Mutex::new(None),
+        }
+    }
+
+    fn wake_on(&self, waker: &Waker) {
+        let mut task = lock(&self.task);
+        if !task.as_ref().is_some_and(|known| known.will_wake(waker)) {
+            *task = Some(waker.clone());
+        }
+    }
+
+    /// The members woken, in the order they woke, unqueued. A member that wakes
+    /// while they are polled waits for the next poll, which its wake asks for.
+    fn take(&self) -> Vec<usize> {
+        let mut queued = lock(&self.queued);
+        let order = std::mem::take(&mut queued.order);
+        for &index in &order {
+            queued.flagged[index] = false;
+        }
+        order
+    }
+
+    fn wake(&self, index: usize) {
+        {
+            let mut queued = lock(&self.queued);
+            if std::mem::replace(&mut queued.flagged[index], true) {
+                return;
+            }
+            queued.order.push(index);
+        }
+        if let Some(task) = lock(&self.task).as_ref() {
+            task.wake_by_ref();
+        }
+    }
+}
+
+/// The waker of one member of a [`join`].
+struct Member {
+    index: usize,
+    woken: Arc<Woken>,
+}
+
+impl Wake for Member {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.woken.wake(self.index);
+    }
+}
+
+/// `mutex`, locked, poisoned or not: what it guards is left whole by every section
+/// that holds it.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl Fs for MemDisk {
@@ -383,8 +475,7 @@ impl<'l, F: Fs + 'l> Intent<&'l mut Library<F>> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
-    use std::task::Context;
+    use std::cell::{Cell, RefCell};
 
     use super::*;
 
@@ -402,6 +493,87 @@ mod tests {
             context.waker().wake_by_ref();
             Poll::Pending
         }
+    }
+
+    /// Futures that are each ready once its gate opens, and the polls they took.
+    struct Gates {
+        open: RefCell<Vec<bool>>,
+        wakers: RefCell<Vec<Option<Waker>>>,
+        polls: Cell<usize>,
+    }
+
+    impl Gates {
+        fn new(n: usize) -> Self {
+            Self {
+                open: RefCell::new(vec![false; n]),
+                wakers: RefCell::new(vec![None; n]),
+                polls: Cell::new(0),
+            }
+        }
+
+        fn gated(&self, index: usize) -> impl Future<Output = usize> + '_ {
+            std::future::poll_fn(move |context| {
+                self.polls.set(self.polls.get() + 1);
+                if self.open.borrow()[index] {
+                    return Poll::Ready(index);
+                }
+                self.wakers.borrow_mut()[index] = Some(context.waker().clone());
+                Poll::Pending
+            })
+        }
+
+        /// `join`'s output, its gates opened in `order`, each waking only its own future.
+        fn drive<T>(&self, join: impl Future<Output = T>, order: impl Iterator<Item = usize>) -> T {
+            let mut join = std::pin::pin!(join);
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(join.as_mut().poll(&mut context).is_pending());
+            for index in order {
+                self.open.borrow_mut()[index] = true;
+                let waker = self.wakers.borrow_mut()[index].take();
+                waker.expect("a waiting future left its waker").wake();
+                if let Poll::Ready(output) = join.as_mut().poll(&mut context) {
+                    return output;
+                }
+            }
+            panic!("the join still waits with every gate open");
+        }
+    }
+
+    #[test]
+    fn a_join_polls_only_the_futures_that_woke() {
+        let n = 1000;
+        let gates = Gates::new(n);
+        let joined = join((0..n).map(|index| gates.gated(index)));
+        assert_eq!(gates.drive(joined, 0..n), (0..n).collect::<Vec<_>>());
+        assert_eq!(
+            gates.polls.get(),
+            2 * n,
+            "each future polled at its start and its wake"
+        );
+    }
+
+    #[test]
+    fn a_join_answers_in_its_futures_order_whatever_order_they_finish_in() {
+        let gates = &Gates::new(5);
+        let failing = |index| async move {
+            match gates.gated(index).await {
+                odd if odd % 2 == 1 => Err(format!("failed {odd}")),
+                even => Ok(even),
+            }
+        };
+        let joined = join((0..5).map(failing));
+        let answered = gates.drive(joined, (0..5).rev());
+        let failed = |index: usize| format!("failed {index}");
+        let expected = [Ok(0), Err(failed(1)), Ok(2), Err(failed(3)), Ok(4)];
+        assert_eq!(answered, expected);
+        let first = answered
+            .into_iter()
+            .collect::<std::result::Result<Vec<_>, _>>();
+        assert_eq!(
+            first,
+            Err(failed(1)),
+            "the first failure in order, though 3 failed first"
+        );
     }
 
     #[test]
