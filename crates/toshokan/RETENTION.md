@@ -58,8 +58,16 @@ file holding one reaches a reader, under any name, the reader skips it:
 The by-hash rule is what makes certification complete; segment certificates only
 keep it small. Its writer knows segments from its own last snapshot, from the
 files it read or wrote since, and from the files in its directory now. A segment
-it does not know of costs hashes, not correctness. Certificates
-are kept forever.
+it does not know of costs hashes, not correctness.
+
+Certificates are kept forever, and they are the one part of a snapshot that
+grows with use. A file sync brings back, from a backup or a device that was away
+for a year, must be recognized as folded however old it is, and a fork that
+reuses entry numbers must still be told from it, so a tip keeps a fingerprint of
+every segment its writer wrote. A segment ends at every close of a process that
+appended, at every compaction and at each MiB, so certificates grow by about
+140 bytes per session that wrote and per 512 own entries. Nothing else in a
+snapshot grows with history, and nothing in it grows with the library's size.
 
 A snapshot's head is among the entries it certifies, as the last line it folds
 of a segment or by hash. A snapshot that carries the certificates of the
