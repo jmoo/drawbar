@@ -459,8 +459,9 @@ lets it, which a compaction cut short left, and looks first at that snapshot
 when it next confirms the entry. Otherwise it folds the entries after its
 previous snapshot's head into that snapshot's state, certifies every segment of
 its directory by the part of it on its chain, the snapshots of its directory on
-its chain by their certificates, and every other entry it folds by hash, and writes the snapshot. Where the folder renames files, it writes it
-to `tmp/` under its nonce, syncs it, renames it into place and syncs both
+its chain by their certificates, and every other entry it folds by hash, and
+writes the snapshot. Where the folder renames files, it writes it to `tmp/`
+under its nonce, syncs it, renames it into place and syncs both
 directories; a staged snapshot a crash leaves is removed with the other files of
 `tmp/` (see Recovery). Elsewhere it writes the snapshot in place and syncs it
 and its directory, and a crash can tear it, leaving a file reported as
