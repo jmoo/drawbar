@@ -27,7 +27,7 @@ use crate::flow::{self, each, fold, ok, Fallible, Flow, Held};
 use crate::ids::{EntityId, Nonce, WriterId};
 use crate::io::{Capabilities, Io, IoError, Kind, Meta, Root, Task};
 use crate::layout::Layout;
-use crate::log::{Displaced, FileFact};
+use crate::log::{Displaced, FileFact, Ref};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord};
 use crate::plan::{Content, Expect, FileChange};
@@ -182,6 +182,10 @@ pub struct FileEnd {
     /// undo leaves alone.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pin: bool,
+    /// The writes of the entity's file register its op replaces, as the writer
+    /// that carries the effects out knew them when it wrote the record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replaces: Vec<Ref>,
 }
 
 /// Where a file no entity is bound to is once the first `done_after` steps are
@@ -463,6 +467,7 @@ impl Resolver<'_> {
                     path: Some(path),
                     done_after: 0,
                     pin: true,
+                    replaces: Vec::new(),
                 });
             }
             FileChange::Restore {
@@ -795,12 +800,14 @@ impl Resolver<'_> {
             path,
             done_after,
             pin: false,
+            replaces: Vec::new(),
         });
     }
 }
 
 /// Stages and syncs the plan's files, checks every precondition, then writes
-/// `record` as the plan's pending record, whole or not at all. A failed
+/// `record` as the plan's pending record, whole or not at all. A record longer
+/// than a reader reads is refused before anything is written, and a failed
 /// precondition removes what was staged and refuses; nothing in a user path has
 /// changed. A plan that moves no file only checks.
 pub fn prepare(
@@ -819,6 +826,11 @@ pub fn prepare(
             .map_ok(|refused| refused.map_or(Ok(()), Err))
             .task();
     }
+    let bytes = record.encode();
+    if bytes.len() as u64 > pending::MAX_RECORD {
+        return Task::ready(Ok(Err(Refusal::Invalid(Invalid::TooLong))));
+    }
+    let moves = record.moves;
     stage(&layout, writer, Rc::clone(&plan))
         .and_then({
             let (layout, plan) = (layout.clone(), Rc::clone(&plan));
@@ -834,7 +846,7 @@ pub fn prepare(
                 each(staged.into_iter(), |path| flow::remove(Root::Folder, &path))
                     .map_ok(|()| Err(refusal))
             }
-            None => write_record(&layout, writer, plan.record, &record).map_ok(|()| Ok(())),
+            None => write_record(&layout, writer, plan.record, moves, bytes).map_ok(|()| Ok(())),
         })
         .task()
 }
@@ -849,21 +861,21 @@ pub fn check(
     refusal(layout, writer, plan, identify).task()
 }
 
-/// Writes the record whole: staged and synced first, then renamed into place, so
-/// a crash never leaves part of one. A record that moves by copying is created in
-/// place, and a crash can leave it empty where a create makes a file's name
-/// before its bytes land: [`crate::recovery::remove_empty`] removes it.
+/// Writes the record's `bytes` whole: staged and synced first, then renamed into
+/// place, so a crash never leaves part of one. A record that moves by copying is
+/// created in place, and a crash can leave it empty where a create makes a file's
+/// name before its bytes land: [`crate::recovery::remove_empty`] removes it.
 fn write_record<'a>(
     layout: &Layout,
     writer: WriterId,
     name: Nonce,
-    record: &PendingRecord,
+    moves: Moves,
+    bytes: Vec<u8>,
 ) -> Fallible<'a, ()> {
     let path = layout.pending(writer, name);
     let staged = layout.staged(writer, name, &path);
-    if record.moves == Moves::Copy {
+    if moves == Moves::Copy {
         let dir = layout.pending_dir(writer);
-        let bytes = record.encode();
         return flow::ensure_dir(Root::Folder, &dir)
             .and_then({
                 let path = path.clone();
@@ -881,7 +893,6 @@ fn write_record<'a>(
     flow::ensure_dir(Root::Folder, &layout.tmp_dir(writer))
         .and_then({
             let staged = staged.clone();
-            let bytes = record.encode();
             move |()| {
                 let created = flow::act(Io::Create {
                     root: Root::Folder,
