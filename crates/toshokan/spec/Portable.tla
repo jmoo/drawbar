@@ -314,7 +314,7 @@ Write(i) ==
 \* to since its last snapshot, deleted or not; it names by hash each entry
 \* since then that no file holds; and it carries forward the certificates of
 \* its last snapshot, which it read or wrote, and of the snapshots of its
-\* directory on its chain.
+\* directory on its chain, which name their anchors.
 Compact(i) ==
     LET sealed == IF seg[i] = None THEN files
                   ELSE [files EXCEPT ![seg[i]].sealed = TRUE]
@@ -326,7 +326,7 @@ Compact(i) ==
                     \cup IF lastSnap[i] = None THEN {} ELSE {lastSnap[i]}
         carried ==
             IF ~Carry THEN {}
-            ELSE UNION {sealed[f].certs \cup {sealed[f].anchor} : f \in held}
+            ELSE UNION {sealed[f].certs : f \in held}
         certs ==
             IF ~Certify THEN {}
             ELSE carried
@@ -334,8 +334,6 @@ Compact(i) ==
                                f \in {g \in Files : /\ sealed[g].dir = wid[i]
                                                     /\ sealed[g].kind = "seg"
                                                     /\ g \in here \/ Range(sealed[g].ents) \cap tail # {}}}
-                 \cup {sealed[f].anchor :
-                            f \in {g \in here : sealed[g].kind = "snap" /\ sealed[g].anchor \in chain}}
                  \cup (tail \ UNION {Range(sealed[f].ents) :
                                         f \in {g \in Files : sealed[g].kind = "seg"}})
         fs == Append(sealed, NewFile("snap", wid[i], s, <<>>, head[i], chain, certs, 0))

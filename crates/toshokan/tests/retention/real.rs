@@ -517,4 +517,8 @@ impl Design for Real {
             && s.certified.segments.len() <= b.segments
             && s.certified.hashes.len() <= state.dismissals.len() + b.drops
     }
+
+    fn names_its_head(&self, s: &Snapshot) -> bool {
+        s.certified.named().any(|named| named == s.head)
+    }
 }

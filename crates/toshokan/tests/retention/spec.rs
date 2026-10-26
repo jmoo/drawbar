@@ -30,7 +30,6 @@ pub struct SegmentCert {
 pub struct Certs {
     pub segments: BTreeSet<SegmentCert>,
     pub hashes: BTreeSet<Ref>,
-    pub heads: BTreeSet<Ref>,
 }
 
 impl Certs {
@@ -38,7 +37,6 @@ impl Certs {
     fn named(&self) -> impl Iterator<Item = Ref> + '_ {
         let ends = self.segments.iter().flat_map(|c| [c.first, c.last]);
         ends.chain(self.hashes.iter().copied())
-            .chain(self.heads.iter().copied())
     }
 }
 
@@ -142,9 +140,6 @@ impl Design for Spec {
             .previous
             .cloned()
             .unwrap_or_else(|| Contribution::empty(c.dir, head));
-        if let Some(p) = c.previous {
-            out.certs.heads.insert(p.head);
-        }
         out.head = head;
         for &h in since {
             let e = world.entry(h);
@@ -197,10 +192,8 @@ impl Design for Spec {
                     }
                 }
                 Body::Snapshot(s) if !f.deleted && chain.contains(&s.head.hash) => {
-                    out.certs.heads.insert(s.head);
                     out.certs.segments.extend(&s.certs.segments);
                     out.certs.hashes.extend(&s.certs.hashes);
-                    out.certs.heads.extend(&s.certs.heads);
                 }
                 _ => {}
             }
@@ -260,6 +253,10 @@ impl Design for Spec {
             && c.takes.len() <= b.fields * (b.writers - 1)
             && c.certs.segments.len() <= b.segments
             && c.certs.hashes.len() <= c.dismissals.len() + b.drops
+    }
+
+    fn names_its_head(&self, c: &Contribution) -> bool {
+        c.certs.named().any(|named| named == c.head)
     }
 }
 

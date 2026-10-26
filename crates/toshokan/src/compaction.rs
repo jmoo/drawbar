@@ -273,10 +273,10 @@ pub enum Found<'a> {
 /// The snapshot of `writer` that folds `since`, its entries after `previous`'s
 /// head in chain order, into `previous`, labeled `label` when there is no
 /// previous one. It certifies each segment `found` shows by its first line and
-/// the last line on the chain, the heads of the snapshots on the chain with
-/// their certificates, and by hash every other entry of `since` and the last
-/// entry of each dismissal of its own runs on the chain. `None` when it folds
-/// nothing.
+/// the last line on the chain, the snapshots on the chain by their
+/// certificates, and by hash every other entry of `since` and the last entry of
+/// each dismissal of its own runs on the chain, so its certificates name its
+/// head. `None` when it folds nothing.
 pub fn snapshot<'a>(
     writer: WriterId,
     genesis: EntryHash,
@@ -296,7 +296,6 @@ pub fn snapshot<'a>(
     let mut certified = previous
         .map(|tip| tip.certified.clone())
         .unwrap_or_default();
-    certified.heads.extend(previous.map(|tip| tip.head));
     let added: BTreeSet<EntryHash> = since.iter().map(|entry| entry.hash()).collect();
     let on_chain =
         |own: Own| added.contains(&own.hash) || previous.is_some_and(|tip| tip.names(own));
@@ -316,10 +315,8 @@ pub fn snapshot<'a>(
                 }
             }
             Found::Snapshot(old) if old.writer == writer && on_chain(old.head) => {
-                certified.heads.insert(old.head);
                 let theirs = &old.certified;
                 certified.segments.extend(theirs.segments.iter().copied());
-                certified.heads.extend(theirs.heads.iter().copied());
                 certified.hashes.extend(theirs.hashes.iter().copied());
             }
             Found::Snapshot(_) => {}
@@ -337,7 +334,6 @@ pub fn snapshot<'a>(
             certified.hashes.insert(run.last);
         }
     }
-    certified.heads.remove(&head);
     let at = since
         .last()
         .map(|entry| entry.at())

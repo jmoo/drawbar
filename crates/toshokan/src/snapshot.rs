@@ -39,9 +39,6 @@ pub struct Certified {
     /// of its lines the snapshot folds.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub segments: BTreeSet<SegmentCert>,
-    /// The heads of the snapshots of its directory on its chain.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub heads: BTreeSet<Own>,
     /// Every other folded entry, and the last entry each of its dismissals names
     /// on its chain.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
@@ -70,15 +67,15 @@ impl<'de> Deserialize<'de> for SegmentCert {
 }
 
 impl Certified {
-    /// The entries these certificates name: every segment's ends, every head,
-    /// every hash.
+    /// The entries these certificates name: every segment's ends, and every
+    /// hash. A compaction's head is among them, as the last line it folds of a
+    /// segment or by hash, so they name the head of every snapshot it folds.
     pub fn named(&self) -> impl Iterator<Item = Own> + '_ {
         let ends = self
             .segments
             .iter()
             .flat_map(|cert| [cert.first, cert.last]);
-        ends.chain(self.heads.iter().copied())
-            .chain(self.hashes.iter().copied())
+        ends.chain(self.hashes.iter().copied())
     }
 }
 
@@ -201,7 +198,7 @@ impl Snapshot {
     }
 
     /// Whether this snapshot certifies `own` by name: as its head, a segment's
-    /// end, an earlier snapshot's head, or by hash.
+    /// end, or by hash.
     pub fn names(&self, own: Own) -> bool {
         self.head == own || self.certified.named().any(|named| named == own)
     }
@@ -253,7 +250,6 @@ mod tests {
                     last: own(4),
                 }]
                 .into(),
-                heads: [own(4)].into(),
                 hashes: [own(7)].into(),
             },
             state: Contribution::default(),
@@ -280,6 +276,18 @@ mod tests {
         assert_eq!(read.state.later.len(), 1);
         let again = String::from_utf8(read.encode()).unwrap();
         assert!(again.contains(r#""also":[ true ]"#), "{again}");
+    }
+
+    #[test]
+    fn a_snapshot_reads_alike_with_the_heads_an_earlier_build_listed() {
+        let text = String::from_utf8(snapshot().encode()).unwrap();
+        let heads = format!(
+            r#""certified":{{"heads":[{}],"#,
+            serde_json::to_string(&own(4)).unwrap()
+        );
+        let earlier = text.replacen(r#""certified":{"#, &heads, 1);
+        assert_ne!(earlier, text);
+        assert_eq!(Snapshot::decode(earlier.as_bytes()).unwrap(), snapshot());
     }
 
     #[test]

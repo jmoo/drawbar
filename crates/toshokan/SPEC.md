@@ -404,11 +404,14 @@ and kept and merged like any other.
 Members a reader does not know are kept, and a compaction carries those of the
 snapshot it folds into the new one.
 
-`certified` is `{"segments"?,"heads"?,"hashes"?}`. Each member of `segments` is
+`certified` is `{"segments"?,"hashes"?}`. Each member of `segments` is
 `[[<n>,"<hash>"],[<n>,"<hash>"]]`: a segment the chain was written to, by its
-first line, and the last of its lines the snapshot folds. `heads` names the head
-of every snapshot of its directory on its chain, and `hashes` every other folded
-entry and the last entry of each dismissal of the writer's own runs on its chain.
+first line, and the last of its lines the snapshot folds. `hashes` names every
+other folded entry and the last entry of each dismissal of the writer's own runs
+on its chain. The snapshot's head is among the entries these name, so the
+certificates of the snapshots it folds name their heads. A reader ignores other
+members of `certified`, such as a `heads` list, whose entries the rest already
+name.
 A reader refuses a snapshot with a certificate whose last line comes before its
 first, or that names an entry numbered past its head.
 
@@ -456,8 +459,7 @@ lets it, which a compaction cut short left, and looks first at that snapshot
 when it next confirms the entry. Otherwise it folds the entries after its
 previous snapshot's head into that snapshot's state, certifies every segment of
 its directory by the part of it on its chain, the snapshots of its directory on
-its chain by their heads with their certificates, and every other entry it folds
-by hash, and writes the snapshot. Where the folder renames files, it writes it
+its chain by their certificates, and every other entry it folds by hash, and writes the snapshot. Where the folder renames files, it writes it
 to `tmp/` under its nonce, syncs it, renames it into place and syncs both
 directories; a staged snapshot a crash leaves is removed with the other files of
 `tmp/` (see Recovery). Elsewhere it writes the snapshot in place and syncs it

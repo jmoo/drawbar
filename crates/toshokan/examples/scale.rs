@@ -1478,7 +1478,7 @@ fn split(snapshot: &Snapshot) -> String {
     let certified = &snapshot.certified;
     format!(
         "own writes {} (removes {removes}, clears {clears}, killed {}, of deleted entities {of_deleted}); \
-         references {}; takes {}; dismissals {}; trash {}; certificates: segments {}, heads {}, hashes {}, {} bytes",
+         references {}; takes {}; dismissals {}; trash {}; certificates: segments {}, hashes {}, {} bytes",
         state.own.len(),
         state.killed.len(),
         state.refs.len(),
@@ -1486,7 +1486,6 @@ fn split(snapshot: &Snapshot) -> String {
         state.dismissals.len(),
         state.trash.len(),
         certified.segments.len(),
-        certified.heads.len(),
         certified.hashes.len(),
         serde_json::to_vec(certified).expect("certificates are JSON").len(),
     )

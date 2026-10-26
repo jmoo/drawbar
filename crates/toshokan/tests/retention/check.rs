@@ -4,7 +4,8 @@
 //! shows. P1: along a reader's deliveries, a value a merged write replaced never
 //! shows alone again. P4: a step by one branch of a forked writer changes no
 //! merged value. P7: no reader merges what a dismissal it holds names. P9: a
-//! contribution's size is bounded by fields and writers. P11: after a restore or
+//! contribution's size is bounded by fields and writers, and its certificates
+//! name its head. P11: after a restore or
 //! a dropped version, the folder wins. Five divergences are counted rather than
 //! failed: a conflict the oracle resolves, after a fork; an extra value beside
 //! the oracle's after a fault, on a field the design reports contradicted; a
@@ -545,6 +546,12 @@ impl<'a, D: Design> Checker<'a, D> {
                 segments,
                 drops,
             };
+            if !self.design.names_its_head(c) {
+                panic!(
+                    "P9: snapshot {} does not name its head: {c:?}\n  history: {:?}",
+                    f.id, self.history.acts
+                );
+            }
             if !self.design.bounded(c, bound) {
                 panic!(
                     "P9: snapshot {} is larger than its bound: {c:?}\n  history: {:?}",

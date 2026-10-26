@@ -157,9 +157,8 @@ violation; every other config must pass.
 The spec applies to the code because the code keeps the model's rules and its
 reader's obligations. [SPEC.md](../SPEC.md) states each in full.
 
-- Entries carry their number. A snapshot certifies every entry it folds: by the
-  segments its chain was written to, by the heads of the snapshots on its chain,
-  and by hash.
+- Entries carry their number. A snapshot certifies every entry it folds, its
+  head among them: by the segments its chain was written to, and by hash.
 - A reader reads every parseable file in a writer's directory whatever its name,
   and derives its tips, placement, fork points, runs and gaps from those files
   alone, the same whatever order they arrived in.

@@ -50,7 +50,6 @@ file holding one reaches a reader, under any name, the reader skips it:
 - by a segment certificate, where its writer knows a segment its chain was
   written to: the segment's first hash, and the hash and position of the last of
   its lines the snapshot folds;
-- by the head of every snapshot of its directory on its chain;
 - by hash, every other folded entry: one no segment it knows of holds, as after
   a sync client dropped a file's newest version;
 - by hash, the last entry each of its dismissals names on its chain, so a reader
@@ -61,6 +60,11 @@ keep it small. Its writer knows segments from its own last snapshot, from the
 files it read or wrote since, and from the files in its directory now. A segment
 it does not know of costs hashes, not correctness. Certificates
 are kept forever.
+
+A snapshot's head is among the entries it certifies, as the last line it folds
+of a segment or by hash. A snapshot that carries the certificates of the
+snapshots of its directory on its chain therefore certifies their heads, which
+a resurfaced copy of one is recognized by.
 
 **Matching a file to a segment certificate.** A file matches when its first line
 has the certificate's first hash and its line at the certified position has the
@@ -429,7 +433,6 @@ Steady state, for the schema the harness writes:
 | A deleted entity | ~100–150 B, forever | the same |
 | A removed member never re-added | one reference per remover, forever | the same |
 | Certificates | ~60 B per segment ever written | ~90 B per segment ever written |
-| Earlier snapshots' heads | ~40 B per compaction, one per 512 own entries at most | ~45 B per compaction |
 | Entries since the last snapshot | up to the compaction threshold, ~400 B each | ~250 B each |
 
 References exist only where one writer replaced another's write: at most
@@ -442,8 +445,6 @@ steady state is about 6 MB of memory and 4 MB of folder, plus:
 - per segment ever written, ~90 B: a segment holds up to 1 MiB, about 4,000
   entries, and every process that writes starts one, so 2M entries over years of
   daily use come to some thousands of segments, a few hundred KB;
-- per compaction, the head of the snapshot it replaced, which a resurfaced copy
-  of that snapshot is recognized by: under 0.1 B per entry;
 - per retired writer, its final contribution and the references others keep to
   it, at most what it wrote.
 

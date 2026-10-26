@@ -301,6 +301,10 @@ impl Design for Oracle {
     fn bounded(&self, _: &Folds, _: Bound) -> bool {
         true
     }
+
+    fn names_its_head(&self, _: &Folds) -> bool {
+        true
+    }
 }
 
 /// The value an entry's act writes, for display in failures.
