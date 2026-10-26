@@ -158,6 +158,43 @@ fn the_electro_5_table_names_each_class_at_its_recorded_position() {
     });
 }
 
+/// A Stage 4 orders its partitions its own way and holds no set lists. Its preset and
+/// pedal partitions carry names no class has.
+#[test]
+fn the_stage_4_table_holds_each_class_where_its_names_put_it() {
+    let steps = scripts::fixture("device/stage4-geometry.script").steps();
+    let mut device = Device::new(ReplayTransport::new(steps));
+    pollster::block_on(async {
+        let geometry = device.geometry().await.unwrap();
+        let classes = geometry.classes();
+        for (class, index) in [
+            (ObjectClass::Piano, Some(1)),
+            (ObjectClass::Sample, Some(5)),
+            (ObjectClass::Program, Some(6)),
+            (ObjectClass::SetList, None),
+            (ObjectClass::Live, Some(10)),
+            (ObjectClass::Settings, Some(11)),
+        ] {
+            assert_eq!(classes.index(class), index, "{}", class.label());
+        }
+        let unnamed: Vec<&str> = geometry
+            .entries()
+            .filter(|(p, _)| !p.native && classes.at(p.index) == ObjectClass::Unknown(p.index))
+            .map(|(p, _)| p.name.as_str())
+            .collect();
+        assert_eq!(
+            unnamed,
+            [
+                "Piano Pedal",
+                "Organ Preset",
+                "Piano Preset",
+                "Synth Preset"
+            ]
+        );
+    });
+    assert!(device.transport().is_exhausted());
+}
+
 /// The Electro 5's names with Program and Set List traded: synthetic, no model's table.
 const SWAPPED: [&str; 8] = [
     "Piano (Native)",
