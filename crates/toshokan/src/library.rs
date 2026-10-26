@@ -797,7 +797,8 @@ impl Library {
     /// at commit or when the record settles, is longer: an intent whose widest
     /// entry does not fit a line is refused before anything is written. A staged
     /// file a stop sweeps to the trash is displaced in place of its file op, which
-    /// is longer.
+    /// is longer; with no other displaced item, one is reserved for the list it
+    /// starts.
     fn widest(&self, logged: &Logged, facts: &[Op], effects: &EffectPlan) -> Logged {
         let fact = |path: &RelPath| FileFact {
             path: path.clone(),
@@ -839,19 +840,27 @@ impl Library {
             path: end.path.clone(),
             made: end.made,
         }));
+        let displaced = |item: &Nonce, from: &RelPath| Displaced {
+            item: *item,
+            from: from.clone(),
+            identity: Identity::from_u128(u128::MAX),
+            len: u64::MAX,
+        };
         widest.displaced = effects
             .steps
             .iter()
             .filter_map(|step| match step {
-                EffectStep::ToTrash { path, item } => Some(Displaced {
-                    item: *item,
-                    from: path.clone(),
-                    identity: Identity::from_u128(u128::MAX),
-                    len: u64::MAX,
-                }),
+                EffectStep::ToTrash { path, item } => Some(displaced(item, path)),
                 _ => None,
             })
             .collect();
+        if widest.displaced.is_empty() {
+            let placed = effects.steps.iter().find_map(|step| match step {
+                EffectStep::Place { staged, path } => Some(displaced(staged, path)),
+                _ => None,
+            });
+            widest.displaced.extend(placed);
+        }
         let named = named_writers(&widest.ops).into_iter();
         widest.forks = named
             .map(|writer| Forked {
