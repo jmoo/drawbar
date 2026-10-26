@@ -131,6 +131,10 @@ const REC_WINDOW: usize = 0x32;
 const REC_TRIM: usize = 0x34;
 const REC_DECAYS: usize = 0x36;
 const REC_ID: usize = 0x6e;
+/// u8 fade the instrument applies to a sounding stroke at note-off. 0 cuts it about
+/// 25 dB within 10 ms, heard as a crack; 33 fades it about 10 dB per 10 ms; 66 lets it
+/// ring on. Confirmed on hardware.
+const REC_NOTE_OFF: usize = 0x72;
 
 /// Predictor seeds a record carries per channel.
 const SEEDS: usize = 4;

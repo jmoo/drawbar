@@ -76,8 +76,8 @@ use super::{
     be32, block_bytes, midi_key, put16, put32, Bank, Library, Stroke, CNSP_MAGIC, DAMPER_TOP_AT,
     DECAYS, DIRECTORY_AT, FINE_TUNE_AT, FORMAT, GAIN_AT, KEY_MAP_AT, KIND_AT, LADDER_UNITY, MARKS,
     NOTES, RECORD, REC_BANK, REC_BLOCKS, REC_DECAY, REC_DECAYS, REC_FRAMES, REC_ID, REC_LAYER,
-    REC_MARKS, REC_MARK_BLOCK, REC_SEEDS, REC_START, REC_TRIM, REC_WINDOW, SEEDS, UNCOVERED,
-    VERSION_AT, VERSION_ECHO_AT,
+    REC_MARKS, REC_MARK_BLOCK, REC_NOTE_OFF, REC_SEEDS, REC_START, REC_TRIM, REC_WINDOW, SEEDS,
+    UNCOVERED, VERSION_AT, VERSION_ECHO_AT,
 };
 use crate::cbin::Header;
 use crate::error::{try_with_capacity, try_zeroed, Error, ParseError};
@@ -573,8 +573,8 @@ fn damper_cut(note: usize) -> u8 {
 }
 
 /// The record a stroke states when no template donates one: no length marks, a decay
-/// ladder that applies nothing, the trim its layer implies, and its place in the
-/// directory as the identifier.
+/// ladder that applies nothing, the trim its layer implies, a note-off fade for its
+/// bank, and its place in the directory as the identifier.
 ///
 /// [`record`] writes the audio's fields over this and leaves the marks at zero.
 fn rules_record(recording: &Recording, index: usize) -> [u8; RECORD] {
@@ -582,12 +582,23 @@ fn rules_record(recording: &Recording, index: usize) -> [u8; RECORD] {
     let (window, trim) = velocity_window(recording.bank, recording.layer);
     put16(&mut out, REC_WINDOW, window);
     put16(&mut out, REC_TRIM, trim);
+    out[REC_NOTE_OFF] = note_off_fade(recording.bank);
     for entry in 0..DECAYS {
         let at = REC_DECAYS + entry * 4;
         put32(&mut out, at, LADDER_UNITY);
     }
     put32(&mut out, REC_ID, index as u32 + 1);
     out
+}
+
+/// The fade [`REC_NOTE_OFF`] states for a stroke of `bank`, inside the range vendor
+/// electric pianos hold: 26 to 35 on attack strokes and 46 to 70 on release strokes.
+/// Inferred from specimens; not confirmed on hardware.
+fn note_off_fade(bank: Bank) -> u8 {
+    match bank {
+        Bank::Attack | Bank::Resonance => 32,
+        Bank::Release => 60,
+    }
 }
 
 /// The trim [`REC_TRIM`] states for a release stroke, in decibels.
@@ -1627,6 +1638,34 @@ mod tests {
             again.library.to_body().unwrap(),
             built.to_body().unwrap(),
             "a rule-written library is not a fixed point of a recode"
+        );
+    }
+
+    #[test]
+    fn a_rule_written_stroke_fades_out_at_note_off() {
+        let short = tone(6_000, 300.0, 1);
+        let built = build(
+            &Donor::Rules(Rules::new(Kind::ElectricPiano)),
+            &Options::new("Tines"),
+            &[
+                one(60, Bank::Attack, 0, short.clone()),
+                one(60, Bank::Resonance, 0, short.clone()),
+                one(60, Bank::Release, 0, short),
+            ],
+        )
+        .unwrap();
+        let fades: Vec<(Option<Bank>, u8)> = built
+            .strokes()
+            .iter()
+            .map(|s| (s.bank(), s.record()[REC_NOTE_OFF]))
+            .collect();
+        assert_eq!(
+            fades,
+            [
+                (Some(Bank::Attack), 32),
+                (Some(Bank::Resonance), 32),
+                (Some(Bank::Release), 60)
+            ]
         );
     }
 
