@@ -65,9 +65,9 @@ grows with use. A file sync brings back, from a backup or a device that was away
 for a year, must be recognized as folded however old it is, and a fork that
 reuses entry numbers must still be told from it, so a tip keeps a fingerprint of
 every segment its writer wrote. A segment ends at every close of a process that
-appended, at every compaction and at each MiB, so certificates grow by about
-140 bytes per session that wrote and per 512 own entries. Nothing else in a
-snapshot grows with history, and nothing in it grows with the library's size.
+appended, at every compaction and at each MiB, and its certificate takes about
+92 bytes. Nothing else in a snapshot grows with history, and nothing in it grows
+with the library's size.
 
 A snapshot's head is among the entries it certifies, as the last line it folds
 of a segment or by hash. A snapshot that carries the certificates of the

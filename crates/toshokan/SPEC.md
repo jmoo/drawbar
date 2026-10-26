@@ -1005,8 +1005,8 @@ reaches only the items of this session's writer.
 
 The folder keeps, for the life of a writer: one snapshot, holding at most one own
 write per field it wrote and per other writer two references and one take, and a
-certificate per segment it ever wrote and the head of each snapshot it replaced,
-about 140 bytes per session that wrote and per 512 own entries (see
+certificate per segment it ever wrote, about 92 bytes each, where a segment ends
+at each close of a process that appended, each compaction and each MiB (see
 [RETENTION.md](RETENTION.md)); the segments written since; one segment
 per process that crashed or was copied; trash items
 until the writer empties them; a spent pending record until the writer's next
