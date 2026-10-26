@@ -979,6 +979,9 @@ pub fn fit(state: &DeviceState, entity: &LocalEntity) -> Fit {
             // handled so a widened table cannot panic here.
             None => format!("A {tag} file is not one a {product} takes."),
         }),
+        Acceptance::Unknown if !family.written() => Fit::Warn(format!(
+            "Nothing has ever been written to a {product}. Sending to it is untried."
+        )),
         Acceptance::Unknown => unknown(),
     }
 }
@@ -2470,6 +2473,12 @@ mod tests {
         let mut log = Log::default();
         let (own, _) = program(&mut workspace, &mut log, Origin::Fresh);
         let (other, _) = stage(&mut workspace, &mut log, Origin::Fresh);
+        let shared = workspace.ingest(
+            "Pad.nsmp".into(),
+            Origin::Fresh,
+            include_bytes!("../../../nord-format/tests/fixtures/demo/drawbar-pad.nsmp").to_vec(),
+            &mut log,
+        );
         fn held(device: &Device, workspace: &Workspace, id: u64) -> Fit {
             fit(&device.state, workspace.get(id).expect("it is on the list"))
         }
@@ -2479,6 +2488,7 @@ mod tests {
 
         device.pretend_attached();
         assert_eq!(held(&device, own), Fit::Takes, "confirmed on hardware");
+        assert_eq!(held(&device, shared), Fit::Takes, "confirmed on hardware");
         match held(&device, other) {
             Fit::Refuses(why) => {
                 assert!(why.contains("Stage 4"), "{why}");
@@ -2491,6 +2501,10 @@ mod tests {
         match held(&device, other) {
             Fit::Warn(why) => assert!(why.contains("untried"), "{why}"),
             answer => panic!("a Stage 4 program on a Stage 4: {answer:?}"),
+        }
+        match held(&device, shared) {
+            Fit::Warn(why) => assert!(why.contains("untried"), "{why}"),
+            answer => panic!("a sample on a Stage 4, which nothing was written to: {answer:?}"),
         }
 
         // A model with no row in the table falls back to what the folder is holding.

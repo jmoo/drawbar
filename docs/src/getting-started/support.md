@@ -27,7 +27,8 @@ drawbar and nord-cli find programs, samples and the rest by the name the instrum
 gives each kind of storage, so another model's folders show what it keeps in them.
 A kind of storage drawbar has no name for, such as the Stage 4's presets, is listed
 under the instrument's own name and is read only. Writing to another model follows
-what the Electro 5 does and has not been tried.
+what the Electro 5 does and has not been tried, so drawbar and nord-cli warn before
+every such write.
 
 The safeguards drawbar applies when it writes, listed under
 [Safety](../drawbar/instrument.md#safety), have been confirmed on the Electro 5.

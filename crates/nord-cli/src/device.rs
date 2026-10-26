@@ -818,6 +818,9 @@ pub fn admit(product: Option<&str>, class: ObjectClass, tag: &str) -> Admit {
              kind has ever been written to one: this write is untried",
             family.label()
         )),
+        Acceptance::Unknown if !family.written() => Admit::Warn(format!(
+            "nothing has ever been written to a {product}: this write is untried"
+        )),
         Acceptance::Unknown => Admit::Warn(format!(
             "nothing here says whether a {product} takes a {tag} file"
         )),
@@ -2417,6 +2420,9 @@ mod tests {
 
         let untried = warning(Some("Nord Stage 2 EX"), ObjectClass::Program, "ns2p");
         assert!(untried.contains("untried"), "{untried}");
+
+        let unwritten = warning(Some("Nord Stage 4 88"), ObjectClass::Sample, "nsmp");
+        assert!(unwritten.contains("untried"), "{unwritten}");
 
         let unnamed = warning(Some("Nord Modular G2"), ObjectClass::Program, "ne5p");
         assert!(unnamed.contains("not in the acceptance table"), "{unnamed}");

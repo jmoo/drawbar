@@ -356,6 +356,12 @@ impl Family {
     }
 
     /// Whether this family keeps files under `tag` in `slot`.
+    /// Whether a file has ever been written to an instrument of this family and read
+    /// back, which is what every write's mechanics were measured on.
+    pub fn written(self) -> bool {
+        CONFIRMED.iter().any(|(family, _, _)| *family == self)
+    }
+
     pub fn accepts(self, slot: Slot, tag: &str) -> Acceptance {
         if CONFIRMED.contains(&(self, slot, tag)) {
             return Acceptance::Confirmed;
