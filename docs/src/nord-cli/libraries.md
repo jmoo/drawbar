@@ -59,7 +59,9 @@ velocity value directly, name the file with `v12` in place of `l00`.
 
 A WAV with a loop in its `smpl` chunk, which most sample editors write, makes a
 stroke that loops there while the key is held. Audio after the loop's end is not
-used. A stroke without a loop plays to its end, and a release stroke cannot loop.
+used, and the loop's last four samples are replaced by the four just before its
+start, which a seamless loop already has. A stroke without a loop plays to its
+end, and a release stroke cannot loop.
 A loop is exact in a WAV at 35,002 Hz. At any other rate its ends move to the
 nearest frame of the resampled audio.
 

@@ -173,8 +173,9 @@ pub struct BuildArgs {
     /// a WAV named any other way is refused.
     ///
     /// A stroke holds whole blocks and every frame of its WAV, so it includes the
-    /// silence that pads out the WAV's last block. The `frames` column in the output
-    /// counts the WAV's frames, not the stroke's.
+    /// silence that pads out the WAV's last block. A looped stroke ends with the block
+    /// holding its loop's end instead. The `frames` column in the output counts the
+    /// WAV's frames, not the stroke's.
     #[arg(value_name = "DIR")]
     pub dir: PathBuf,
 

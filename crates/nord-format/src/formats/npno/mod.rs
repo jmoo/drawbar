@@ -127,9 +127,9 @@ const REC_SEEDS: usize = 0x0c;
 const REC_MARKS: usize = 0x1c;
 /// u16 index of the block holding the loop start.
 const REC_MARK_BLOCK: usize = 0x2c;
-/// A one-pole coefficient like the [`DECAYS`] ladder's, which release strokes zero. It
-/// tracks each recording's own decay, which suggests the fade applied while the stroke
-/// loops. Inferred from specimens; not confirmed on hardware.
+/// The fade a held note's loop plays under from the loop's start: [`LADDER_UNITY`] holds
+/// its level, `0x7ffedc` fades it about 7 dB/s, and 0 silences the stroke at the loop's
+/// start. Confirmed on hardware. Release strokes zero it.
 const REC_DECAY: usize = 0x2e;
 /// u16 holding the layer value again in vendor records. Sweeping it moved nothing
 /// measurable. Confirmed on hardware.
@@ -667,7 +667,7 @@ impl<'a> Stroke<'a> {
         )
     }
 
-    /// The `+0x2e` decay coefficient, which a release stroke zeroes.
+    /// The `+0x2e` fade a held loop plays under, which a release stroke zeroes.
     pub fn decay(&self) -> u32 {
         be32(&self.record, REC_DECAY)
     }

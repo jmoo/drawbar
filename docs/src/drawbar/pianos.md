@@ -48,8 +48,9 @@ have.
 
 A WAV with a loop, which most sample editors can set, makes a stroke that loops
 there while the key is held, and the dialog marks it. Audio after the loop's end
-is not used. Without a loop, a stroke plays to its end. Release strokes cannot
-loop.
+is not used, and the loop's last four samples are replaced by the four just
+before its start, which a seamless loop already has. Without a loop, a stroke
+plays to its end. Release strokes cannot loop.
 
 [What is supported](../getting-started/support.md) says which of these edits
 have been played on an instrument.

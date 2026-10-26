@@ -74,9 +74,10 @@
 //!
 //! A recording with a [`Recording::sustain`] loop is coded up to the loop's end, and
 //! the last block is filled out with the loop again, so the stroke ends where a vendor
-//! stroke does. The marks state the loop and the blocks around its start. Inferred from
-//! specimens; not confirmed on hardware. A rule-written looped stroke applies no fade
-//! while it loops. A recording without a loop declares none, and plays to its end.
+//! stroke does. The marks state the loop and the blocks around its start. A held note
+//! repeats the loop until the key is released, and a rule-written looped stroke holds its
+//! level while it does. Confirmed on hardware. A recording without a loop declares none,
+//! and plays to its end.
 
 use super::codec::{self, MAX_ORDER, MAX_WIDTH, MIN_WIDTH, OVERLAP};
 use super::{
@@ -254,9 +255,14 @@ pub struct Recording {
     pub channels: Vec<Vec<i16>>,
     /// Where a held note loops, in frames of [`Recording::channels`]. The stroke ends
     /// with the block holding the loop's end, and frames past that end are replaced by
-    /// the loop. A release stroke plays once and cannot loop.
+    /// the loop. The loop's last four frames become the four before its start. A release
+    /// stroke plays once and cannot loop.
     pub sustain: Option<Loop>,
 }
+
+/// The fewest frames a loop may hold. Its last [`SEEDS`] frames restate the ones before
+/// its start, and must not overlap them or the first frames the seeds copy.
+const SHORTEST_LOOP: usize = 2 * SEEDS;
 
 /// The loop a WAV's `smpl` chunk states, moved from its `rate` onto the stroke lattice
 /// the way [`resample`] moves the frames.
@@ -500,7 +506,10 @@ pub fn build(
     for (index, (recording, donor)) in order.iter().zip(&donors).enumerate() {
         let seeds = seeds_for(&recording.channels);
         let (source, target) = match recording.sustain {
-            Some(sustain) => (looped(&recording.channels, sustain), sustain.end() as usize),
+            Some(sustain) => (
+                looped(&recording.channels, &seeds, sustain),
+                sustain.end() as usize,
+            ),
             None => (
                 Cow::Borrowed(&recording.channels[..]),
                 recording.channels[0].len(),
@@ -533,7 +542,17 @@ pub fn build(
 
 /// The frames a looped recording codes: its own up to the loop's end, then the loop
 /// again for as far as one block can reach past it.
-fn looped(channels: &[Vec<i16>], sustain: Loop) -> Cow<'static, [Vec<i16>]> {
+///
+/// The instrument keeps the predictor's history across the jump from the loop's end to
+/// its start, so the loop's last [`SEEDS`] frames are replaced by the history its start
+/// is decoded with: the frames before it, or `seeds` before the first frame. A seamless
+/// loop holds them already. Without them, the error a jump leaves grows until the note
+/// saturates within a few passes. Confirmed on hardware.
+fn looped(
+    channels: &[Vec<i16>],
+    seeds: &[[i16; SEEDS]; 2],
+    sustain: Loop,
+) -> Cow<'static, [Vec<i16>]> {
     let (start, end) = (sustain.start() as usize, sustain.end() as usize);
     let reach = codec::block_frames(
         MIN_WIDTH,
@@ -543,12 +562,17 @@ fn looped(channels: &[Vec<i16>], sustain: Loop) -> Cow<'static, [Vec<i16>]> {
     Cow::Owned(
         channels
             .iter()
-            .map(|channel| {
-                let loop_frames = &channel[start..end];
-                channel[..end]
+            .zip(seeds)
+            .map(|(channel, seeds)| {
+                let history = (start..start + SEEDS).map(|at| match at.checked_sub(SEEDS) {
+                    Some(frame) => channel[frame],
+                    None => seeds[at],
+                });
+                channel[..end - SEEDS]
                     .iter()
-                    .chain(loop_frames.iter().cycle().take(reach))
                     .copied()
+                    .chain(history)
+                    .chain(channel[start..end].iter().copied().cycle().take(reach))
                     .collect()
             })
             .collect(),
@@ -878,6 +902,13 @@ fn check_recordings(recordings: &[Recording]) -> Result<u16, Error> {
                     "{what} loops from frame {} to {}, past its {frames} frame(s)",
                     sustain.start(),
                     sustain.end()
+                )));
+            }
+            (Some(sustain), _) if (sustain.length() as usize) < SHORTEST_LOOP => {
+                return Err(refuse(format!(
+                    "{what} loops over {} frame(s), fewer than the {SHORTEST_LOOP} a loop \
+                     needs to restate the {SEEDS} before its start",
+                    sustain.length()
                 )));
             }
             _ => {}
@@ -1673,9 +1704,9 @@ mod tests {
             .collect()
     }
 
-    /// A looped stroke codes its recording up to the loop's end and then the loop
-    /// again, ends with the block holding the loop's end, and states the loop and the
-    /// blocks around its start the way vendor strokes do.
+    /// A looped stroke codes its recording up to the loop's last four frames and then
+    /// the loop again, ends with the block holding the loop's end, and states the loop
+    /// and the blocks around its start the way vendor strokes do.
     #[test]
     fn a_looped_stroke_repeats_its_loop_and_marks_the_blocks_around_its_start() {
         for channels in [1u16, 2] {
@@ -1702,9 +1733,9 @@ mod tests {
             );
             for (lane, original) in audio.lanes.iter().zip(&source) {
                 assert_eq!(
-                    lane[..end],
-                    original[..end],
-                    "the recording up to the loop's end"
+                    lane[..end - SEEDS],
+                    original[..end - SEEDS],
+                    "the recording up to the loop's last four frames"
                 );
                 let again: Vec<i16> = original[start..end]
                     .iter()
@@ -1730,8 +1761,38 @@ mod tests {
         }
     }
 
-    /// A loop that runs past the recording's end, or one on a release stroke, which
-    /// plays once, is refused before anything is coded.
+    /// The instrument keeps the predictor's history across the jump from a loop's end to
+    /// its start, so a loop ends on the history its start is decoded with: the frames
+    /// before it, or the record's seeds for a loop that starts at the beginning.
+    #[test]
+    fn a_loop_ends_on_the_history_its_start_is_decoded_with() {
+        for (channels, start) in [(1u16, 9_000u32), (2, 9_000), (1, 0), (2, 2)] {
+            let mut looped = one(
+                55,
+                Bank::Attack,
+                0,
+                tone(20_000, 196.0, usize::from(channels)),
+            );
+            looped.sustain = Loop::new(start, 4_500);
+            let piano = round_trip(channels, &[looped]);
+            let library = piano.library().unwrap();
+            let stroke = &library.strokes()[0];
+            let audio = codec::decode(stroke, channels).unwrap();
+            let (start, end) = (start as usize, start as usize + 4_500);
+            for (lane, seeds) in audio.lanes.iter().zip(stroke.seeds()) {
+                let history: Vec<i16> = seeds.iter().chain(lane).copied().collect();
+                assert_eq!(
+                    history[end..end + SEEDS],
+                    history[start..start + SEEDS],
+                    "{channels} channel(s), loop from {start}: the history at the loop's end"
+                );
+            }
+        }
+    }
+
+    /// A loop that runs past the recording's end, one too short to restate the history
+    /// before its start, or one on a release stroke, which plays once, is refused before
+    /// anything is coded.
     #[test]
     fn a_loop_a_stroke_cannot_play_is_refused() {
         let short = tone(6_000, 300.0, 1);
@@ -1741,6 +1802,7 @@ mod tests {
                 Loop::new(5_000, 1_001),
                 "past its 6000 frame(s)",
             ),
+            (Bank::Attack, Loop::new(100, 7), "fewer than the 8"),
             (
                 Bank::Release,
                 Loop::new(0, 1_000),

@@ -367,8 +367,9 @@ enum PianoAction {
     /// that `--kind` implies. Either way, each stroke is trimmed by its own layer value.
     ///
     /// A WAV whose `smpl` chunk declares a loop builds a stroke that loops there while
-    /// the key is held; the WAV's frames past the loop's end are not used. Any other
-    /// stroke plays to its end. A release stroke cannot loop.
+    /// the key is held; the WAV's frames past the loop's end are not used, and the
+    /// loop's last four frames become the four before its start, as a seamless loop has
+    /// them already. Any other stroke plays to its end. A release stroke cannot loop.
     ///
     /// Every key up to one semitone above the highest root sounds, playing the nearest
     /// root at or above it. Keys past that are silent. A key plays the largest layer
@@ -377,8 +378,8 @@ enum PianoAction {
     /// range.
     ///
     /// Confirmed on hardware: a library built this way loads and plays, mono and
-    /// stereo, on every key it covers. With the same source audio, libraries built with
-    /// and without a template sound the same.
+    /// stereo, on every key it covers, and its loops sustain at an even level. With the
+    /// same source audio, libraries built with and without a template sound the same.
     Build(piano::BuildArgs),
 
     /// Re-encode a library's audio from its decoded frames, and report how each
