@@ -1657,7 +1657,7 @@ mod tests {
         let fades: Vec<(Option<Bank>, u8)> = built
             .strokes()
             .iter()
-            .map(|s| (s.bank(), s.record()[REC_NOTE_OFF]))
+            .map(|s| (s.bank(), s.note_off_fade()))
             .collect();
         assert_eq!(
             fades,

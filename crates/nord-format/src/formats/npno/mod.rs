@@ -629,6 +629,12 @@ impl<'a> Stroke<'a> {
         be32(&self.record, REC_DECAY)
     }
 
+    /// The `+0x72` note-off fade: 0 cuts the stroke at key-up, and larger values fade it
+    /// out more slowly.
+    pub fn note_off_fade(&self) -> u8 {
+        self.record[REC_NOTE_OFF]
+    }
+
     /// The [`DECAYS`]-entry decay ladder from `+0x36`.
     pub fn ladder(&self) -> [u32; DECAYS] {
         std::array::from_fn(|entry| be32(&self.record, REC_DECAYS + entry * 4))
@@ -795,16 +801,25 @@ impl<'a> Library<'a> {
 
     /// Retrim the `index`-th stroke, in the decibels [`Stroke::trim`] reads.
     pub fn set_trim(&mut self, index: usize, decibels: u16) -> Result<(), Error> {
+        put16(&mut self.stroke_mut(index)?.record, REC_TRIM, decibels);
+        Ok(())
+    }
+
+    /// Set the `index`-th stroke's fade, the value [`Stroke::note_off_fade`] reads.
+    pub fn set_note_off_fade(&mut self, index: usize, fade: u8) -> Result<(), Error> {
+        self.stroke_mut(index)?.record[REC_NOTE_OFF] = fade;
+        Ok(())
+    }
+
+    fn stroke_mut(&mut self, index: usize) -> Result<&mut Stroke<'a>, Error> {
         let count = self.strokes.len();
-        let stroke = self
-            .strokes
-            .get_mut(index)
-            .ok_or_else(|| ParseError::OutOfBounds {
+        self.strokes.get_mut(index).ok_or_else(|| {
+            ParseError::OutOfBounds {
                 value: format!("stroke {index}"),
                 bound: format!("the {count} strokes the directory holds"),
-            })?;
-        put16(&mut stroke.record, REC_TRIM, decibels);
-        Ok(())
+            }
+            .into()
+        })
     }
 
     /// The `(name, variant)` pair, from the same field [`Piano::name`] reads.
@@ -1851,6 +1866,29 @@ mod tests {
             library.to_body().unwrap(),
             high,
             "a refused retrim leaves the directory alone"
+        );
+    }
+
+    #[test]
+    fn a_note_off_fade_writes_one_strokes_own_byte() {
+        let piano = Build::new().piano();
+        let mut library = piano.library().unwrap();
+        let before = library.to_body().unwrap();
+
+        library.set_note_off_fade(1, 32).unwrap();
+        let after = library.to_body().unwrap();
+        assert_eq!(library.strokes()[1].note_off_fade(), 32);
+        assert_eq!(
+            changed(&before, &after),
+            [DIRECTORY_AT + RECORD + REC_NOTE_OFF]
+        );
+
+        let error = library.set_note_off_fade(3, 60).unwrap_err().to_string();
+        assert!(error.contains("stroke 3"), "{error}");
+        assert_eq!(
+            library.to_body().unwrap(),
+            after,
+            "a refused fade leaves the directory alone"
         );
     }
 

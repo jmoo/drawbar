@@ -713,7 +713,8 @@ fn written_by_this_crate(s: &Specimen) -> Result<(), String> {
 
 /// A library built from rules alone, from the named library's decoded strokes,
 /// reproduces this file. A script outside this crate wrote it, so it is an
-/// independent oracle for the rules.
+/// independent oracle for the rules. The script wrote every note-off fade as 0 and
+/// the rules do not, so the build's fades are set to 0 before the comparison.
 ///
 /// Confirmed on hardware.
 fn recordings_from(s: &Specimen) -> Result<(), String> {
@@ -743,12 +744,27 @@ fn recordings_from(s: &Specimen) -> Result<(), String> {
         })
         .collect::<Result<_, String>>()?;
     let (library_name, variant) = library.name();
-    let built = npno::encode::build(
+    let mut built = npno::encode::build(
         &npno::encode::Donor::Rules(npno::encode::Rules::new(npno::encode::Kind::Grand)),
         &npno::encode::Options::new(&library_name).variant(&variant),
         &recordings,
     )
     .context("build")?;
+    let theirs = npno::Library::borrow(s.bytes).context("parse")?;
+    ensure!(
+        theirs.strokes().len() == built.strokes().len(),
+        "the rule-written library has {} strokes, the file {}",
+        built.strokes().len(),
+        theirs.strokes().len()
+    );
+    for (index, stroke) in theirs.strokes().iter().enumerate() {
+        ensure!(
+            stroke.note_off_fade() == 0,
+            "{stroke:?} has a note-off fade of {}, not the script's 0",
+            stroke.note_off_fade()
+        );
+        built.set_note_off_fade(index, 0).context("fade")?;
+    }
     let bytes = built
         .to_piano()
         .and_then(|p| nord_format::to_bytes(&Entity::Piano(p)))
