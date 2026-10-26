@@ -518,7 +518,8 @@ impl Design for Real {
             && s.certified.hashes.len() <= state.dismissals.len() + b.drops
     }
 
-    fn names_its_head(&self, s: &Snapshot) -> bool {
-        s.certified.named().any(|named| named == s.head)
+    fn names(&self, world: &World, s: &Snapshot, entry: Hash) -> bool {
+        let hash = Lines::of(world).entries[entry as usize].hash();
+        s.certified.named().any(|named| named.hash == hash)
     }
 }

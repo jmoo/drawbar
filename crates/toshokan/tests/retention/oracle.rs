@@ -302,7 +302,7 @@ impl Design for Oracle {
         true
     }
 
-    fn names_its_head(&self, _: &Folds) -> bool {
+    fn names(&self, _: &World, _: &Folds, _: Hash) -> bool {
         true
     }
 }

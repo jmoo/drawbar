@@ -90,7 +90,6 @@ pub trait Design {
     /// Whether a snapshot is within P9's bound.
     fn bounded(&self, s: &Self::Snapshot, bound: Bound) -> bool;
 
-    /// Whether a snapshot's certificates name its head, which lets them name
-    /// the heads of the snapshots it folds.
-    fn names_its_head(&self, s: &Self::Snapshot) -> bool;
+    /// Whether a snapshot's certificates name `entry`.
+    fn names(&self, world: &World, s: &Self::Snapshot, entry: Hash) -> bool;
 }

@@ -255,8 +255,8 @@ impl Design for Spec {
             && c.certs.hashes.len() <= c.dismissals.len() + b.drops
     }
 
-    fn names_its_head(&self, c: &Contribution) -> bool {
-        c.certs.named().any(|named| named == c.head)
+    fn names(&self, _: &World, c: &Contribution, entry: Hash) -> bool {
+        c.certs.named().any(|named| named.hash == entry)
     }
 }
 

@@ -460,6 +460,15 @@ pub fn materialize<D: Design>(history: &History, d: &D) -> Folder<D::Snapshot> {
                     recorded: &p.recorded,
                 });
                 let chain: BTreeSet<Hash> = p.chain.iter().copied().collect();
+                let held = files.iter().filter(|f| f.dir == dir && !f.deleted);
+                let held = held.filter(|f| matches!(f.body, Body::Snapshot(_)));
+                let folded = held.map(|f| f.id).chain(p.last);
+                for id in folded.filter(|id| chain.contains(&heads[id])) {
+                    assert!(
+                        d.names(world, &snapshot, heads[&id]),
+                        "P9: the snapshot of {inst} names no head of snapshot {id} on its chain"
+                    );
+                }
                 for f in files.iter_mut().filter(|f| f.dir == dir && !f.deleted) {
                     f.deleted = match &f.body {
                         Body::Segment(lines) => f.sealed && lines.iter().all(|h| chain.contains(h)),

@@ -877,7 +877,7 @@ fn whole(meta: &Meta, parts: Vec<Option<Vec<u8>>>) -> Option<Fetched> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compaction::snapshot as fold;
+    use crate::compaction::{snapshot as fold, Found};
     use crate::disk::MemDisk;
     use crate::io::Io;
     use crate::log::{EntryKind, Genesis, Logged};
@@ -936,6 +936,22 @@ mod tests {
 
     fn snapshot(entries: &[Entry]) -> Rc<Snapshot> {
         snapshot_of(W, entries)
+    }
+
+    #[test]
+    fn a_compaction_names_the_head_of_a_snapshot_it_folds_whose_segment_is_gone() {
+        let entries: Vec<Rc<Entry>> = chain(3).into_iter().map(Rc::new).collect();
+        let genesis = entries[0].hash();
+        let sealed = Found::Lines(&entries[..3]);
+        let old = fold(W, genesis, "a".into(), None, &entries[..3], [sealed]).unwrap();
+        let found = [Found::Lines(&entries), Found::Snapshot(&old)];
+        let new = fold(W, genesis, "a".into(), None, &entries, found).unwrap();
+        assert!(
+            new.certified.named().any(|own| own == old.head),
+            "{:?} names {:?}",
+            new.certified,
+            old.head
+        );
     }
 
     fn linked(entries: &[Entry]) -> Vec<Rc<Entry>> {
