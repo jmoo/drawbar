@@ -733,6 +733,21 @@ OwnDirectory ==
 \* snapshot, unless a restore took it.
 Retained == Kept \subseteq Holds(files)
 
+\* A snapshot certifies its own anchor, and, where it carries certificates, the
+\* anchor of each earlier snapshot of its directory on its chain that the folder
+\* holds: what lets certificates alone name the anchors of earlier snapshots.
+AnchorsCertified ==
+    \A s \in Files :
+        files[s].kind = "snap" /\ Certify =>
+            /\ files[s].anchor \in files[s].certs
+            /\ Carry =>
+                   \A t \in 1..(s - 1) :
+                       (/\ files[t].kind = "snap"
+                        /\ files[t].dir = files[s].dir
+                        /\ ~files[t].deleted
+                        /\ files[t].anchor \in files[s].folds)
+                       => files[t].anchor \in files[s].certs
+
 \* Every effect begun has a pending record or a closing entry in the folder,
 \* unless a restore took both.
 EffectAccounted ==
