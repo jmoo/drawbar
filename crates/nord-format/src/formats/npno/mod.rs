@@ -120,8 +120,16 @@ const REC_LAYER: usize = 0x05;
 const REC_FRAMES: usize = 0x06;
 const REC_BLOCKS: usize = 0x0a;
 const REC_SEEDS: usize = 0x0c;
+/// The sustain loop, four u32 marks: its start and length in frames, then the first
+/// frame of the block holding the start and of the block after it. Release strokes zero
+/// all four. That a held note loops there: Confirmed on hardware. The block marks:
+/// Inferred from specimens; not confirmed on hardware.
 const REC_MARKS: usize = 0x1c;
+/// u16 index of the block holding the loop start.
 const REC_MARK_BLOCK: usize = 0x2c;
+/// A one-pole coefficient like the [`DECAYS`] ladder's, which release strokes zero. It
+/// tracks each recording's own decay, which suggests the fade applied while the stroke
+/// loops. Inferred from specimens; not confirmed on hardware.
 const REC_DECAY: usize = 0x2e;
 /// u16 holding the layer value again in vendor records. Sweeping it moved nothing
 /// measurable. Confirmed on hardware.
@@ -135,7 +143,7 @@ const REC_ID: usize = 0x6e;
 /// Predictor seeds a record carries per channel.
 const SEEDS: usize = 4;
 
-/// Length marks a record carries at [`REC_MARKS`].
+/// Marks a record carries at [`REC_MARKS`].
 const MARKS: usize = 4;
 
 /// One-pole decay coefficients a record carries after the one at `0x2e`, from `0x36`
@@ -566,6 +574,37 @@ impl Extent {
     }
 }
 
+/// A sustain loop: a held note that reaches [`Loop::end`] goes on from [`Loop::start`]
+/// until the key is released.
+///
+/// The stroke past the loop's end repeats the audio from its start, up to the end of the
+/// block holding the loop's end. Inferred from specimens; not confirmed on hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Loop {
+    start: u32,
+    length: u32,
+}
+
+impl Loop {
+    /// `None` for an empty loop, or one ending past the last frame a stroke can state.
+    pub fn new(start: u32, length: u32) -> Option<Loop> {
+        (length > 0 && start.checked_add(length).is_some()).then_some(Loop { start, length })
+    }
+
+    pub fn start(self) -> u32 {
+        self.start
+    }
+
+    pub fn length(self) -> u32 {
+        self.length
+    }
+
+    /// The first frame past the loop.
+    pub fn end(self) -> u32 {
+        self.start + self.length
+    }
+}
+
 /// One recorded note: the directory record, and the audio bytes it owns.
 ///
 /// The record is kept as read except for its audio offset, which is recomputed every
@@ -618,6 +657,14 @@ impl<'a> Stroke<'a> {
     /// The `+0x34` trim, in decibels the instrument attenuates the stroke by.
     pub fn trim(&self) -> u16 {
         be16(&self.record, REC_TRIM)
+    }
+
+    /// The sustain loop the marks state, or `None` where they state an empty one.
+    pub fn sustain(&self) -> Option<Loop> {
+        Loop::new(
+            be32(&self.record, REC_MARKS),
+            be32(&self.record, REC_MARKS + 4),
+        )
     }
 
     /// The `+0x2e` decay coefficient, which a release stroke zeroes.
