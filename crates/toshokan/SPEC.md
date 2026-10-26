@@ -2,7 +2,9 @@
 
 This document specifies everything toshokan writes and how it reads, merges and
 changes it, precisely enough for a second implementation to share a library with
-this one. The format may change before 1.0.
+this one. A library lives in a folder that a sync client may deliver late, out of
+order, partly restored or with conflicted copies, and the rules here are written
+for it. The format may change before 1.0.
 
 All text is UTF-8. All hexadecimal is lowercase. JSON is written without
 insignificant whitespace.

@@ -5,8 +5,9 @@ specifies the format and protocol; this document gives the reasoning and the
 guarantees. The model in [spec/](spec/) follows it, and `tests/retention`
 checks toshokan against it.
 
-It keeps only as much history as stops two instances from overwriting each
-other's work; history is not kept for version-control features. Undo and redo
+It keeps only as much history as stops one instance from overwriting another's
+work, whether the other runs beside it or on a computer the sync left stale;
+history is not kept for version-control features. Undo and redo
 reach only this session's intents and end at close. A reader keeps nothing
 between opens: it derives what it shows from the files it sees. After a folder is
 restored from an older copy, the folder wins at once, and nothing asks the user

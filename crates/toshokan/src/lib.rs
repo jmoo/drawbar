@@ -1,12 +1,26 @@
-//! Keep what a file cannot say about itself beside the file, for every writer.
+//! Keep what a file cannot say about itself beside the file, in a folder that syncs.
 //!
 //! toshokan keeps facts about a folder of the user's files (tags, provenance,
-//! relations) in a hidden directory inside it. Every running instance of an app is
-//! a writer with its own hash-chained log there; writers never coordinate, and
-//! every reader merges the logs to the same state whatever order a sync client
-//! delivered them in. Concurrent edits are kept and shown as conflicts. Files are
-//! saved, renamed and deleted without overwriting anything in place: displaced
-//! bytes go to the writer's own trash, which also makes file undo durable.
+//! relations) in a hidden directory inside it, so the folder can be synced by
+//! Dropbox, OneDrive, iCloud or a network share. Sync goes wrong in ordinary ways
+//! even for someone who runs one app at a time: another computer has stale state,
+//! files arrive out of order, a backup restores part of the folder, or a
+//! conflicted copy appears. toshokan is built so that:
+//!
+//! - normal syncing needs no intervention;
+//! - once a sync settles, every reader shows the same state;
+//! - an interrupted or conflicting change leaves every file recoverable;
+//! - when recovery is needed, the app can say what happened without the user
+//!   knowing how the logs work.
+//!
+//! Every running instance of an app is a writer that appends only to a
+//! hash-chained log of its own, so a sync client never has two versions of one
+//! file to reconcile, and every reader merges the logs to the same state whatever
+//! order they arrived in. Several writers at once follow from the same design, and
+//! their concurrent edits are kept and shown as conflicts. An app that wants live
+//! collaboration should use a CRDT library such as Automerge. Files are saved,
+//! renamed and deleted without overwriting anything in place: displaced bytes go
+//! to the writer's own trash, which also makes file undo durable.
 //!
 //! The core is sans-IO: every operation is a state machine that emits [`Io`]
 //! requests and consumes their results ([`Operation`]). [`blocking`] runs it on the
