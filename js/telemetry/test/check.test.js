@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { MOST_ROWS, admitted, agent, allowed, report, rows } from "../src/check.js";
+import { message } from "../src/mail.js";
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 const schema = JSON.parse(read("../../../crates/drawbar/telemetry.json"));
@@ -99,6 +100,30 @@ test("a report is refused without text, with a bad id, or with an extra field", 
   assert.equal(report(JSON.stringify({ ...sent, id: "abcdefghi1" })), null);
   assert.equal(report(JSON.stringify({ ...sent, ip: "1.2.3.4" })), null);
   assert.equal(report(JSON.stringify({ ...sent, text: "x".repeat(5_001) }), edge), null);
+});
+
+test("a report's email is headed by its kind and number alone", () => {
+  const mail = message({ ...sent, text: "froze\r\nBcc: someone@example.com" });
+  assert.equal(mail.subject, "drawbar problem abcdefgh23");
+  assert.deepEqual(mail.headers, { References: "<abcdefgh23@drawbar.app>" });
+  assert.ok(mail.text.includes("froze\r\nBcc: someone@example.com"));
+});
+
+test("a contact address becomes the reply address, and other contact text does not", () => {
+  assert.equal(message({ ...sent, contact: "pat@example.com" }).replyTo, "pat@example.com");
+  for (const contact of ["", "Pat", "pat@example.com\r\nBcc: x@example.com", "a@b.c, d@e.f"]) {
+    const mail = message({ ...sent, contact });
+    assert.ok(!("replyTo" in mail), JSON.stringify(contact));
+  }
+});
+
+test("a report's email lists its details, its text, and each attachment sent", () => {
+  const text = message({ ...sent, contact: "Pat", log: "12:00 put Organ" }).text;
+  assert.equal(
+    text,
+    "contact: Pat\nversion: 0.9.1\nmodel: none\nfirmware: none\n\n" +
+      "The piano editor froze.\n\nrecent errors:\nusb: lost\n\nlog:\n12:00 put Organ",
+  );
 });
 
 test("the user agent is reduced to a family, a major version and an os", () => {

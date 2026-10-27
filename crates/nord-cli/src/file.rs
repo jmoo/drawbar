@@ -175,26 +175,30 @@ pub fn info(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
 /// slot form of the verb resolves them.
 pub fn deps(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
     let entity = nord_format::from_path(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let format = entity.identity().format;
-    check(path, format, class)?;
+    check(path, entity.identity().format, class)?;
+    stored_deps(
+        ui,
+        &path.display().to_string(),
+        &entity,
+        "(ids only: the instrument holds the names, and `deps BANK:SLOT` shows them)",
+    )
+}
 
-    let refs = match (entity.plays(), &entity) {
+/// The library ids `entity`'s body stores, as `label`'s dependencies, then `note`.
+pub(crate) fn stored_deps(ui: &Ui, label: &str, entity: &Entity, note: &str) -> Result<(), String> {
+    let format = entity.identity().format;
+    let refs = match (entity.plays(), entity) {
         (Some(refs), _) => refs,
         (None, Entity::Song(_)) => {
             return Err("a set list names program slots, not library objects; \
                  `nord setlist deps BANK:SLOT` asks the instrument, which resolves them"
                 .into())
         }
-        (None, _) => {
-            return Err(format!(
-                "{}: a {format} file carries no dependency ids",
-                path.display()
-            ))
-        }
+        (None, _) => return Err(format!("{label}: {format} carries no dependency ids")),
     };
 
     if refs.is_empty() {
-        ui.note(format!("{} references no library objects", path.display()));
+        ui.note(format!("{label} references no library objects"));
         return Ok(());
     }
     ui.out(ui.dim(format!("{:<8} id", "class")));
@@ -205,7 +209,7 @@ pub fn deps(ui: &Ui, path: &Path, class: ObjectClass) -> Result<(), String> {
             crate::summary::dep_id(reference.id)
         ));
     }
-    ui.note(ui.dim("(ids only: the instrument holds the names, and `deps BANK:SLOT` shows them)"));
+    ui.note(ui.dim(note));
     Ok(())
 }
 

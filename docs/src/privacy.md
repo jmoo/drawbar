@@ -47,15 +47,17 @@ build and instrument you are running, and the activity log, which names your fil
 The form shows exactly what will be sent before you send it. These are sent even when
 sharing is off, because you asked.
 
-Reports go only to drawbar's developer and are never published. They are deleted
+Reports are emailed to drawbar's developer and are never published. They are deleted
 after three months. When a report is sent, drawbar shows its number. Write to
 contact@drawbar.app with that number, or the email address you gave, to see what we
 hold or to have it deleted sooner.
 
 ## Who else is involved
 
-Both are stored with [Cloudflare](https://www.cloudflare.com/), which runs them for us
-under its data processing terms. Nothing is sold or shared with anyone else.
+[Cloudflare](https://www.cloudflare.com/) receives both and stores the counts.
+Reports are delivered by email to [Fastmail](https://www.fastmail.com/), which holds
+them. Both act for us under their data processing terms. Nothing is sold or shared with
+anyone else.
 
 If you are in the European Union or the United Kingdom and are not satisfied with our
 answer, you may complain to your data protection authority.

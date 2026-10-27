@@ -934,6 +934,18 @@ impl ObjectClass {
     pub fn names_its_slots(self) -> bool {
         !matches!(self, ObjectClass::Live | ObjectClass::Settings)
     }
+
+    /// Whether the device answers [`cmd::DEPENDENCIES`] for an object of this class.
+    ///
+    /// Confirmed on hardware.
+    ///
+    /// Pianos, samples, programs and set lists answer it. Every live slot and the
+    /// settings refuse it with status `0x12`, the code a stale session gets, but the
+    /// session stays usable and the next one opens as usual, so it is a refusal of the
+    /// command, not a wedge.
+    pub fn reports_dependencies(self) -> bool {
+        !matches!(self, ObjectClass::Live | ObjectClass::Settings)
+    }
 }
 
 /// What [`cmd::STATUS`] reports, for whichever [`ObjectClass`] the session opened.
