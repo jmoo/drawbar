@@ -130,7 +130,8 @@ impl Options {
 #[derive(Debug, Clone)]
 pub enum Donor<'a> {
     /// A library to copy them from: its prefix whole, and per stroke the decay
-    /// coefficients of its nearest stroke of the same bank.
+    /// coefficients of its nearest stroke of the same bank. A loop whose donor states no
+    /// loop fade holds its level.
     Template(&'a Library<'a>),
     /// Rules that state them, for a library built from recordings alone.
     Rules(Rules),
@@ -286,7 +287,10 @@ pub fn sustain(found: SampleLoop, rate: u32) -> Result<Loop, Error> {
     let end = lattice(u64::from(found.end) + 1);
     u32::try_from(start)
         .ok()
-        .zip(u32::try_from(end - start).ok())
+        .zip(
+            end.checked_sub(start)
+                .and_then(|length| u32::try_from(length).ok()),
+        )
         .and_then(|(start, length)| Loop::new(start, length))
         .ok_or_else(|| {
             refuse(format!(
@@ -493,6 +497,11 @@ pub fn build(
             Donor::Template(template) => *donor_record(template, recording)?,
             Donor::Rules(_) => rules_record(recording, index),
         };
+        // ⚠️ A donor stroke that never looped states 0 here, and 0 cuts the note off at
+        // the loop's start.
+        if recording.sustain.is_some() && be32(&stated, REC_DECAY) == 0 {
+            put32(&mut stated, REC_DECAY, LADDER_UNITY);
+        }
         let (window, trim) = velocity_window(recording.bank, recording.layer);
         put16(&mut stated, REC_WINDOW, window);
         put16(&mut stated, REC_TRIM, trim);
@@ -1844,6 +1853,31 @@ mod tests {
         assert_eq!(decays, [(60, LADDER_UNITY), (62, 0)]);
     }
 
+    /// A looped recording takes its template stroke's loop fade, and holds its level
+    /// where that stroke never looped and states none, rather than going silent at the
+    /// loop's start.
+    #[test]
+    fn a_loop_built_against_a_template_that_never_looped_holds_its_level() {
+        let short = tone(6_000, 300.0, 1);
+        let looped = || {
+            let mut recording = one(60, Bank::Attack, 0, short.clone());
+            recording.sustain = Loop::new(2_000, 3_000);
+            recording
+        };
+        let unlooped = build(
+            &Donor::Rules(Rules::default()),
+            &Options::new("Plain"),
+            &[one(60, Bank::Attack, 0, short.clone())],
+        )
+        .unwrap();
+        let faded = template(1);
+        for (template, fade) in [(unlooped, LADDER_UNITY), (faded.library().unwrap(), 0x2000)] {
+            let built =
+                build(&Donor::Template(&template), &Options::new("L"), &[looped()]).unwrap();
+            assert_eq!(built.strokes()[0].decay(), fade);
+        }
+    }
+
     /// A template's trim belongs to its own layer, so a stroke built against it is
     /// trimmed by its own layer value, as a rule-written stroke is.
     #[test]
@@ -1902,6 +1936,7 @@ mod tests {
             ),
             // Frames 4 and 5 both fall inside lattice frame 3, so a one-frame loop vanishes.
             (at(4, 4), "empty"),
+            (at(100, 0), "empty"),
         ];
         for (found, reason) in refused {
             let error = sustain(found, 44_100).unwrap_err().to_string();
