@@ -132,7 +132,8 @@ impl Options {
 pub enum Donor<'a> {
     /// A library to copy them from: its prefix whole, and per stroke the decay
     /// coefficients of its nearest stroke of the same bank. A loop whose donor states no
-    /// loop fade holds its level.
+    /// loop fade fades as the template's kind of instrument does, a grand's where the
+    /// kind is not one [`Kind`] names.
     Template(&'a Library<'a>),
     /// Rules that state them, for a library built from recordings alone.
     Rules(Rules),
@@ -524,6 +525,12 @@ pub fn build(
     let mut order: Vec<&Recording> = recordings.iter().collect();
     order.sort_by_key(|r| (r.root, r.bank.code(), r.layer));
 
+    let fade = match donor {
+        Donor::Template(template) => {
+            Rules::new(Kind::from_code(template.kind_code()).unwrap_or_default())
+        }
+        Donor::Rules(rules) => *rules,
+    };
     let mut donors = Vec::with_capacity(order.len());
     for (index, recording) in order.iter().enumerate() {
         let mut stated = match donor {
@@ -533,7 +540,7 @@ pub fn build(
         // ⚠️ A donor stroke that never looped states 0 here, and 0 cuts the note off at
         // the loop's start.
         if recording.sustain.is_some() && be32(&stated, REC_DECAY) == 0 {
-            put32(&mut stated, REC_DECAY, LADDER_UNITY);
+            put32(&mut stated, REC_DECAY, loop_decay(&fade, recording.root));
         }
         let (window, trim) = velocity_window(recording.bank, recording.layer);
         put16(&mut stated, REC_WINDOW, window);
@@ -1928,11 +1935,11 @@ mod tests {
         }
     }
 
-    /// A looped recording takes its template stroke's loop fade, and holds its level
-    /// where that stroke never looped and states none, rather than going silent at the
-    /// loop's start.
+    /// A looped recording takes its template stroke's loop fade. Where that stroke never
+    /// looped and states none, the loop fades as the template's kind does rather than
+    /// going silent at the loop's start.
     #[test]
-    fn a_loop_built_against_a_template_that_never_looped_holds_its_level() {
+    fn a_loop_built_against_a_template_that_never_looped_fades_as_its_kind() {
         let short = tone(6_000, 300.0, 1);
         let looped = || {
             let mut recording = one(60, Bank::Attack, 0, short.clone());
@@ -1940,13 +1947,15 @@ mod tests {
             recording
         };
         let unlooped = build(
-            &Donor::Rules(Rules::default()),
+            &Donor::Rules(Rules::new(Kind::Wurlitzer)),
             &Options::new("Plain"),
             &[one(60, Bank::Attack, 0, short.clone())],
         )
         .unwrap();
         let faded = template(1);
-        for (template, fade) in [(unlooped, LADDER_UNITY), (faded.library().unwrap(), 0x2000)] {
+        // A Wurlitzer fades 7.3 dB/s at C4: 304 units of 0.024 dB/s below unity.
+        let wurlitzer = LADDER_UNITY - 304;
+        for (template, fade) in [(unlooped, wurlitzer), (faded.library().unwrap(), 0x2000)] {
             let built =
                 build(&Donor::Template(&template), &Options::new("L"), &[looped()]).unwrap();
             assert_eq!(built.strokes()[0].decay(), fade);
