@@ -1527,7 +1527,8 @@ fn piano_lookup(
     panel::PianoLookup {
         id,
         name,
-        can_ask: slot.is_some() && device.state.connected(),
+        can_ask: slot.is_some_and(|(class, _)| class.reports_dependencies())
+            && device.state.connected(),
         refused: slot.is_some_and(|(class, at)| device.deps_refused(class, at)),
         asked: false,
         models,
@@ -2820,6 +2821,40 @@ mod tests {
             Some("Royal Grand 3D"),
             "the name survives another slot's read"
         );
+    }
+
+    /// The instrument refuses the dependency read for live slots, so a live slot's
+    /// document shows its piano by id and never asks.
+    #[test]
+    fn a_live_slot_document_never_asks_what_it_plays() {
+        let at = Location { bank: 0, slot: 0 };
+        let mut open = Open::empty();
+        open.device.pretend_attached();
+        let fresh = open
+            .workspace
+            .create(Fresh::Program, &mut open.log)
+            .expect("a fresh default");
+        let bytes = open.workspace.get(fresh).expect("just made").bytes.to_vec();
+        let (_, plays) = fields::apply(&bytes, &[("piano_panel.id".into(), "16909060".into())])
+            .expect("a live slot can name a piano");
+        open.id = open.workspace.ingest(
+            "Live-1.ne5l".into(),
+            Origin::Device {
+                class: ObjectClass::Live,
+                at,
+            },
+            plays,
+            &mut open.log,
+        );
+
+        open.frame(Vec::new());
+        let asked = open
+            .device
+            .queued()
+            .iter()
+            .filter(|cmd| matches!(cmd, crate::device::DeviceCmd::Deps { .. }))
+            .count();
+        assert_eq!(asked, 0);
     }
 
     /// Without a scan, the dial stays numeric and never shows a guessed name.

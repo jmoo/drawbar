@@ -240,9 +240,9 @@ pub struct Plan {
     /// The kind of instrument the library files itself under.
     #[serde(with = "codes::kind")]
     kind: Option<Kind>,
-    /// Decibels a stroke is attenuated by, keyed by `(root, bank code, layer value)`
-    /// because a drop moves the stroke's index in the directory.
-    trims: BTreeMap<(u8, u8, u8), u16>,
+    /// The signed trim a stroke is attenuated by, keyed by `(root, bank code, layer
+    /// value)` because a drop moves the stroke's index in the directory.
+    trims: BTreeMap<(u8, u8, u8), i16>,
     /// The root a re-routed key plays, `None` where it plays nothing.
     key_roots: BTreeMap<u8, Option<u8>>,
 }
@@ -573,8 +573,8 @@ struct Strike {
     /// a code the format does not name.
     bank: u8,
     layer: u8,
-    /// The `+0x34` attenuation, in decibels.
-    trim: u16,
+    /// The signed `+0x34` attenuation; [`TRIM_UNIT`] says what a unit is.
+    trim: i16,
     /// What the applied-decay ladder at `+0x36` states, in decibels a second; `None`
     /// where every entry of it applies nothing.
     decay: Option<f32>,
@@ -2865,15 +2865,15 @@ fn drop_root(facts: &Facts, plan: &mut Plan, index: usize) {
     }
 }
 
-/// What a stroke is attenuated by under this plan, in decibels.
-fn trim_of(facts: &Facts, plan: &Plan, strike: &Strike) -> u16 {
+/// The trim a stroke is attenuated by under this plan.
+fn trim_of(facts: &Facts, plan: &Plan, strike: &Strike) -> i16 {
     let key = (facts.roots[strike.root].note, strike.bank, strike.layer);
     plan.trims.get(&key).copied().unwrap_or(strike.trim)
 }
 
 /// The trim a lane's segment reads: one segment covers a root's layer in every bank
 /// that records it, and the attack stroke is the one a key sounds.
-fn segment_trim(facts: &Facts, plan: &Plan, root: usize, layer: u8) -> Option<u16> {
+fn segment_trim(facts: &Facts, plan: &Plan, root: usize, layer: u8) -> Option<i16> {
     facts
         .strikes
         .iter()
@@ -2916,9 +2916,13 @@ fn row_ink(visuals: &egui::Visuals, picked: bool, in_range: bool) -> RowInk {
 /// above it.
 const ROW_LAMPS: usize = 6;
 
-/// How far the trim control reaches, in decibels. A stroke trimmed further than this
-/// still shows the value the file states.
-const TRIM_REACH: u16 = 48;
+/// How far the trim control reaches, in decibels. A stored trim outside `0..=TRIM_REACH`,
+/// negative ones included, still shows the value the file states.
+const TRIM_REACH: i16 = 48;
+
+const TRIM_UNIT: &str =
+    "+0x34 in the stroke record. In 0x450 streams it is 1 dB a unit, and a negative trim \
+     silences the stroke; the unit in 0x464 streams is not known";
 
 /// One row per root: what it answers, which of its layers it keeps, what it costs, and
 /// the facts and actions under it when it is open.
@@ -3199,16 +3203,16 @@ fn open_row(
                             .speed(0.1)
                             .suffix(" dB"),
                     );
-                    let set = match held > TRIM_REACH {
-                        true => set.on_hover_text(format!(
-                            "+0x34 in the stroke record, 1 dB a unit. It holds {held} dB, \
-                             past the {TRIM_REACH} dB this control sets"
+                    let set = match (0..=TRIM_REACH).contains(&held) {
+                        true => set.on_hover_text(TRIM_UNIT),
+                        false => set.on_hover_text(format!(
+                            "{TRIM_UNIT}. It holds {held}, outside the 0 to {TRIM_REACH} dB \
+                             this control sets"
                         )),
-                        false => set.on_hover_text("+0x34 in the stroke record, 1 dB a unit"),
                     };
                     if set.changed() {
                         let key = (root.note, strike.bank, strike.layer);
-                        let picked = decibels.round() as u16;
+                        let picked = decibels.round() as i16;
                         match picked == strike.trim {
                             true => plan.trims.remove(&key),
                             false => plan.trims.insert(key, picked),
@@ -3573,7 +3577,7 @@ const CAPABILITIES: Stands = [
     (Cap::Editable, "per root; the index is the file's"),
     (
         Cap::Editable,
-        "trim per stroke at +0x34 (1 dB a unit); fine tune per key at 0x18c",
+        "signed trim per stroke at +0x34; fine tune per key at 0x18c",
     ),
     (Cap::Editable, "128 × fine tune at 0x18c"),
     (Cap::Editable, "0x40c, signed tenths of a dB"),
@@ -3643,7 +3647,7 @@ fn offsets() -> Vec<Offset> {
         },
         Offset {
             at: "record +0x34".to_string(),
-            holds: "u16".to_string(),
+            holds: "i16".to_string(),
             note: "trim per stroke in the directory at 0x732, 118 bytes a record",
         },
     ]
@@ -3988,7 +3992,7 @@ mod tests {
         routed.key_roots.insert(60, Some(ROOTS[0]));
         assert_eq!(moved(&saved, &routed), (whole, vec![KEY_MAP_AT + 60]));
 
-        // The trim is a u16 in the record of the stroke it names: the first record,
+        // The trim is two bytes in the record of the stroke it names: the first record,
         // which is the lowest root's loudest attack.
         let mut trimmed = plan();
         trimmed
@@ -4971,6 +4975,44 @@ mod tests {
             "opening the row planned a retrim: {:?}",
             editor.state.plans[&editor.id].trims,
         );
+    }
+
+    #[test]
+    fn a_stored_negative_trim_is_shown_negative_and_kept_through_another_edit() {
+        let mut build = built();
+        let held = build
+            .takes
+            .iter_mut()
+            .find(|take| take.root == ROOTS[2] && take.layer == LAYERS[0])
+            .expect("the highest root's loudest attack");
+        *held = held.trim(-24);
+        let saved = build.bytes().expect("the builder lays out a library");
+
+        let mut editor = Editor::of(saved.clone(), facts().total * 2);
+        editor.frame(Vec::new());
+        editor.state.view.rows.pick(2, false);
+        let opened = editor.driven(Vec::new(), |plan| plan.gain = Some(-20));
+
+        assert!(opened.said("ANSWERS FROM"), "the row is open");
+        assert!(opened.said("-24.0 dB"), "{:?}", opened.words);
+        let plan = &editor.state.plans[&editor.id];
+        assert!(
+            plan.trims.is_empty(),
+            "a retrim was planned: {:?}",
+            plan.trims
+        );
+
+        let made = rebuild(&saved, plan).unwrap();
+        let entity = nord_format::from_stream(&mut Cursor::new(&made)).unwrap();
+        let library = piano(&entity).unwrap().library().unwrap();
+        assert_eq!(library.gain(), -20, "the other edit landed");
+        let trims: Vec<i16> = library
+            .strokes()
+            .iter()
+            .filter(|stroke| stroke.trim() != 0)
+            .map(|stroke| stroke.trim())
+            .collect();
+        assert_eq!(trims, [-24]);
     }
 
     /// A save lays the plan out first: the act waits, the bytes it makes are the ones a

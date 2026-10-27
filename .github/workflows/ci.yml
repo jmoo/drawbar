@@ -12,9 +12,9 @@
 #   release: master pushes only, and only after check, build and corpus pass.
 #            scripts/release.bash publishes untagged crate versions and tags
 #            them. Cargo.toml is the only source of truth for versions.
-#   telemetry: master pushes only, after check. Applies the D1 migrations and
-#              deploys the collector in js/telemetry/ with the Cloudflare token of the
-#              drawbar-telemetry-deploy environment, which only master can use.
+#   telemetry: master pushes only, after check. Deploys the collector in
+#              js/telemetry/ with the Cloudflare token of the drawbar-telemetry-deploy
+#              environment, which only master can use.
 #   pages: every master push once release and telemetry have run. The app
 #          comes from the newest `drawbar-v*` tag and the guide from master. It
 #          hangs off release because a tag GITHUB_TOKEN creates fires no workflow
@@ -220,7 +220,7 @@ jobs:
     needs: [check]
     runs-on: ubuntu-latest
     concurrency:
-      cancel-in-progress: false # a migration must not be cut off halfway
+      cancel-in-progress: false
       group: telemetry
     environment: drawbar-telemetry-deploy
     env:
@@ -233,5 +233,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: nixbuild/nix-quick-install-action@v35
-      - run: nix shell --inputs-from ../.. nixpkgs#wrangler -c wrangler d1 migrations apply drawbar-reports --remote
       - run: nix shell --inputs-from ../.. nixpkgs#wrangler -c wrangler deploy

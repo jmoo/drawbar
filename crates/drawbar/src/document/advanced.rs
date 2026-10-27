@@ -638,19 +638,35 @@ fn slot(ui: &mut egui::Ui, entity: &LocalEntity, device: &Device) -> Option<Slot
     asked
 }
 
-/// The two reads the Advanced face asks for, in the order the CLI asks them.
-pub fn commands(details: SlotDetails) -> [DeviceCmd; 2] {
+/// The reads the Advanced face asks for, in the order the CLI asks them: the slot's
+/// info, then its dependencies where the instrument reports them for its class.
+pub fn commands(details: SlotDetails) -> Vec<DeviceCmd> {
     let SlotDetails { class, at } = details;
-    [
-        DeviceCmd::SlotInfo { class, at },
-        DeviceCmd::Deps { class, at },
-    ]
+    let deps = class
+        .reports_dependencies()
+        .then_some(DeviceCmd::Deps { class, at });
+    std::iter::once(DeviceCmd::SlotInfo { class, at })
+        .chain(deps)
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::workspace::Fresh;
+
+    #[test]
+    fn the_advanced_face_asks_dependencies_only_where_the_instrument_reports_them() {
+        let at = Location { bank: 0, slot: 0 };
+        let asks_deps = |class| {
+            commands(SlotDetails { class, at })
+                .iter()
+                .any(|cmd| matches!(cmd, DeviceCmd::Deps { .. }))
+        };
+        assert!(asks_deps(ObjectClass::Program));
+        assert!(!asks_deps(ObjectClass::Live));
+        assert!(!asks_deps(ObjectClass::Settings));
+    }
 
     #[test]
     fn a_changed_row_says_what_it_was_saved_as() {

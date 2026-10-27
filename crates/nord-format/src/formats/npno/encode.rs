@@ -504,7 +504,7 @@ pub fn build(
         }
         let (window, trim) = velocity_window(recording.bank, recording.layer);
         put16(&mut stated, REC_WINDOW, window);
-        put16(&mut stated, REC_TRIM, trim);
+        put16(&mut stated, REC_TRIM, trim as u16);
         donors.push(stated);
     }
     // A donor serving several recordings would name them all the same, so the
@@ -707,11 +707,11 @@ fn rules_record(recording: &Recording, index: usize) -> [u8; RECORD] {
 }
 
 /// The trim [`REC_TRIM`] states for a release stroke, in decibels.
-const RELEASE_TRIM: u16 = 12;
+const RELEASE_TRIM: i16 = 12;
 
 /// The largest trim [`velocity_window`] states, the top of the range the layer values
 /// are selected over ([`Stroke::layer`]).
-const WIDEST_TRIM: u16 = 31;
+const WIDEST_TRIM: i16 = 31;
 
 /// The pair at [`REC_WINDOW`] and [`REC_TRIM`] a stroke of `bank` and `layer` states.
 ///
@@ -719,12 +719,12 @@ const WIDEST_TRIM: u16 = 31;
 /// so a root's softer layers play softer than its loud ones by the amount their values
 /// state. A release stroke takes a fixed trim, since its layer value plays no part in
 /// selecting it.
-fn velocity_window(bank: Bank, layer: u8) -> (u16, u16) {
+fn velocity_window(bank: Bank, layer: u8) -> (u16, i16) {
     match bank {
         Bank::Release => (0, RELEASE_TRIM),
         Bank::Attack | Bank::Resonance => (
             u16::from(layer),
-            u16::from(layer).saturating_add(3).min(WIDEST_TRIM),
+            i16::from(layer).saturating_add(3).min(WIDEST_TRIM),
         ),
     }
 }
@@ -1896,7 +1896,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let trims: Vec<(u8, u16)> = built
+        let trims: Vec<(u8, i16)> = built
             .strokes()
             .iter()
             .map(|s| (s.layer(), s.trim()))
@@ -1988,7 +1988,7 @@ mod tests {
             "the kind names its own damper limit"
         );
 
-        let stated: Vec<(u8, u16, u16, u32)> = built
+        let stated: Vec<(u8, u16, i16, u32)> = built
             .strokes()
             .iter()
             .map(|s| {

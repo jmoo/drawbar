@@ -364,6 +364,7 @@ fn decode_target(
     let body = body(&bytes).map_err(|e| format!("{spec}: {e}"))?;
     let stem = stem(&origin, &body);
     let layout = body.layout().map_err(|e| e.to_string())?;
+    let file_peak = body.file_peak().map_err(|e| e.to_string())?;
 
     for (index, zone) in body.zones().map_err(|e| e.to_string())?.iter().enumerate() {
         coverage.zones += 1;
@@ -373,7 +374,7 @@ fn decode_target(
             note::name(zone.root_key),
             note::name(zone.top_note),
         );
-        match codec::decode(zone.stream, zone.at, layout) {
+        match codec::decode(zone.stream, zone.at, layout, file_peak) {
             Ok(audio) => {
                 coverage.decoded += 1;
                 coverage.fields += audio.samples.len();
@@ -435,15 +436,21 @@ fn pcm_source(path: &Path) -> Result<nord_format::wav::Pcm16, String> {
     Ok(source)
 }
 
-/// What one encoded stroke came out as, for the report.
-fn stroke_line(stream: &[u8], at: usize, layout: codec::Layout) -> Result<String, String> {
+/// What one encoded stroke of a file whose [`codec::file_peak`] is `file_peak` came out
+/// as, for the report.
+fn stroke_line(
+    stream: &[u8],
+    at: usize,
+    layout: codec::Layout,
+    file_peak: u32,
+) -> Result<String, String> {
     let walk = codec::walk(stream, at, layout).map_err(|e| e.to_string())?;
-    let audio = codec::decode(stream, at, layout).map_err(|e| e.to_string())?;
+    let audio = codec::decode(stream, at, layout, file_peak).map_err(|e| e.to_string())?;
     let mut line = format!(
         "{:>8} fields  {:>7.3} s  shift {}, peak {}, {} record(s), {}% predicted",
         walk.fields,
         audio.seconds(),
-        codec::shift(stream, layout).unwrap_or_default(),
+        codec::shift_against(stream, file_peak).unwrap_or_default(),
         codec::peak(stream, layout).unwrap_or_default(),
         walk.records.len(),
         100 * audio.differenced / audio.samples.len().max(1),
@@ -500,11 +507,12 @@ pub fn encode(ui: &Ui, args: EncodeArgs) -> Result<(), String> {
     let instrument = encode::instrument(&source.samples, &options).map_err(|e| e.to_string())?;
     let out = instrument.to_bytes().map_err(|e| e.to_string())?;
 
+    let file_peak = instrument.file_peak().map_err(|e| e.to_string())?;
     let (at, stroke) = instrument.stroke_streams()[0];
     ui.out(format!(
         "{} frames -> {}",
         source.frames(),
-        stroke_line(stroke, at, layout)?
+        stroke_line(stroke, at, layout, file_peak)?
     ));
 
     let path = args.out.unwrap_or_else(|| {
@@ -617,6 +625,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         )));
     }
     let placed = instrument.zones().map_err(|e| e.to_string())?;
+    let file_peak = instrument.file_peak().map_err(|e| e.to_string())?;
     for (index, zone) in resolved.iter().enumerate() {
         let stream = placed
             .get(index)
@@ -626,7 +635,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             index + 1,
             note::name(zone.root_key),
             note::name(zone.top_note),
-            stroke_line(stream.stream, stream.at, layout)?,
+            stroke_line(stream.stream, stream.at, layout, file_peak)?,
         ));
         let gain = match zone.gain == 1.0 {
             true => String::new(),
