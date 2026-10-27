@@ -692,9 +692,9 @@ fn ends_with<'a>(path: RelPath, len: u64, hash: EntryHash) -> Flow<'a, Result<bo
         .map_ok(move |bytes| bytes.is_some_and(|bytes| bytes == line::ending(hash)))
 }
 
-/// Whether a file in `writer`'s directory of the folder holds `head` now, in a
-/// segment or named by a snapshot: first any file whose last bytes end the line
-/// `head` names, then any file read whole.
+/// Whether a file in `writer`'s directory of the folder holds `head` now with
+/// nothing after it, as a segment's last entry or a snapshot's head: first any
+/// file whose last bytes end the line `head` names, then any file read whole.
 pub(crate) fn holds<'a>(layout: &Layout, writer: WriterId, head: Own) -> Flow<'a, Result<bool>> {
     let dir = layout.writer(writer);
     let ending = line::ending(head.hash);
@@ -727,11 +727,13 @@ pub(crate) fn holds<'a>(layout: &Layout, writer: WriterId, head: Own) -> Flow<'a
             flow::fold(whole.into_iter(), found, move |found, path| match found {
                 true => flow::ok(true),
                 false => flow::read_file(Root::Folder, &path, MAX_FILE).map_ok(move |bytes| {
+                    // A line after the head is one an append landed whose reply was lost.
                     bytes.is_some_and(|bytes| match WriterFile::parse(&bytes) {
-                        WriterFile::Segment(segment) => {
-                            segment.entries.iter().any(|entry| entry.own() == head)
-                        }
-                        WriterFile::Snapshot(snapshot) => snapshot.names(head),
+                        WriterFile::Segment(segment) => segment
+                            .entries
+                            .last()
+                            .is_some_and(|entry| entry.own() == head),
+                        WriterFile::Snapshot(snapshot) => snapshot.head == head,
                         WriterFile::Unreadable { .. } => false,
                     })
                 }),
