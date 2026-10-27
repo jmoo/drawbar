@@ -607,6 +607,7 @@ through_both!(
     a_record_a_crash_left_spent_is_not_settled_again_and_goes_at_the_next_write,
     a_record_whose_writing_seems_to_fail_is_settled_before_the_next_write,
     a_record_that_never_landed_is_not_carried_out_by_the_next_write,
+    a_copied_move_whose_source_removal_fails_leaves_no_copy_behind,
     a_spent_record_is_reported_only_where_its_entry_has_not_arrived,
     a_settled_record_is_removed_and_logged_once,
     identities_a_failed_write_lost_are_kept_by_the_next_scan,
@@ -3086,6 +3087,28 @@ fn closing_removes_a_record_whose_removal_failed<F: Facade>() {
     let (a, _, _) = with_a_record_left::<F>(&folder, &clock);
     a.close().unwrap();
     assert_eq!(pending_files(&folder), []);
+}
+
+fn a_copied_move_whose_source_removal_fails_leaves_no_copy_behind<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    let once = Cell::new(true);
+    fail(&probe, move |io| {
+        let source = matches!(io, Io::Remove { path, .. } if path.as_str() == "song.npno");
+        source && once.replace(false)
+    });
+    let held = Expect::Holds(identity(b"song"));
+    let renamed = a.commit("Rename", |i| i.rename(song, &path("b.npno"), held));
+    heal(&probe);
+    let files = folder.files(Root::Folder);
+    let library: Vec<&RelPath> = files
+        .keys()
+        .filter(|at| !at.as_str().starts_with(".t"))
+        .collect();
+    assert_eq!(library, [&path("b.npno")], "{renamed:?}");
 }
 
 fn a_record_that_never_landed_is_not_carried_out_by_the_next_write<F: Facade>() {

@@ -1190,6 +1190,11 @@ fn account<'a>(
             // How far steps got does not depend on how a copy was cut short.
             observe(&layout, name, &record)
                 .map_ok(move |seen| progress(&layout, &record, &seen, false))
+                .and_then(|progress| match progress.leftover.clone() {
+                    // A copy done but for removing its source, as recovery finishes one.
+                    Some(source) => flow::remove(Root::Folder, &source).map_ok(move |()| progress),
+                    None => ok(progress),
+                })
         }
     };
     done.and_then(move |progress| {
