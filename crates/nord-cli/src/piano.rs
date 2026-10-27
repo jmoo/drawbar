@@ -185,9 +185,10 @@ pub struct BuildArgs {
     /// the same bank and nearest root.
     ///
     /// Without a template, those fields follow fixed rules: no decay applied over the
-    /// recordings and the damper covering the keys `--kind` implies. A library built that
-    /// way has been played, and sounds the same as the same audio built with a template.
-    /// Either way, each stroke is trimmed by its own layer value.
+    /// recordings, a fade at key-up, and the damper covering the keys `--kind` implies.
+    /// A library built that way has been played, and sounds the same as the same audio
+    /// built with a template while a key is held. Either way, each stroke is trimmed by
+    /// its own layer value.
     #[arg(long, value_name = "FILE")]
     pub template: Option<PathBuf>,
 
@@ -1173,8 +1174,8 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         ),
         None => format!(
             "{} uses neutral playback in place of a template: no decay applied over the \
-             recordings, each stroke trimmed by its own layer value, {:+.1} dB of library \
-             gain, and the damper reaching {}",
+             recordings, each stroke trimmed by its own layer value, a fade at key-up, \
+             {:+.1} dB of library gain, and the damper reaching {}",
             args.out.display(),
             f64::from(rules.gain) / 10.0,
             damper_reach(rules.damper_top),

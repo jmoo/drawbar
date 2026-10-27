@@ -142,6 +142,10 @@ const REC_WINDOW: usize = 0x32;
 const REC_TRIM: usize = 0x34;
 const REC_DECAYS: usize = 0x36;
 const REC_ID: usize = 0x6e;
+/// u8 fade the instrument applies to a sounding stroke at note-off. 0 cuts it about
+/// 25 dB within 10 ms, heard as a crack; 33 fades it about 10 dB per 10 ms; 66 lets it
+/// ring on. Confirmed on hardware.
+const REC_NOTE_OFF: usize = 0x72;
 
 /// Predictor seeds a record carries per channel.
 const SEEDS: usize = 4;
@@ -678,6 +682,12 @@ impl<'a> Stroke<'a> {
         be32(&self.record, REC_DECAY)
     }
 
+    /// The `+0x72` note-off fade: 0 cuts the stroke at key-up, and larger values fade it
+    /// out more slowly.
+    pub fn note_off_fade(&self) -> u8 {
+        self.record[REC_NOTE_OFF]
+    }
+
     /// The [`DECAYS`]-entry decay ladder from `+0x36`.
     pub fn ladder(&self) -> [u32; DECAYS] {
         std::array::from_fn(|entry| be32(&self.record, REC_DECAYS + entry * 4))
@@ -854,16 +864,25 @@ impl<'a> Library<'a> {
             }
             .into());
         }
+        put16(&mut self.stroke_mut(index)?.record, REC_TRIM, trim as u16);
+        Ok(())
+    }
+
+    /// Set the `index`-th stroke's fade, the value [`Stroke::note_off_fade`] reads.
+    pub fn set_note_off_fade(&mut self, index: usize, fade: u8) -> Result<(), Error> {
+        self.stroke_mut(index)?.record[REC_NOTE_OFF] = fade;
+        Ok(())
+    }
+
+    fn stroke_mut(&mut self, index: usize) -> Result<&mut Stroke<'a>, Error> {
         let count = self.strokes.len();
-        let stroke = self
-            .strokes
-            .get_mut(index)
-            .ok_or_else(|| ParseError::OutOfBounds {
+        self.strokes.get_mut(index).ok_or_else(|| {
+            ParseError::OutOfBounds {
                 value: format!("stroke {index}"),
                 bound: format!("the {count} strokes the directory holds"),
-            })?;
-        put16(&mut stroke.record, REC_TRIM, trim as u16);
-        Ok(())
+            }
+            .into()
+        })
     }
 
     /// The `(name, variant)` pair, from the same field [`Piano::name`] reads.
@@ -1986,6 +2005,29 @@ mod tests {
         }
         let trims: Vec<i16> = library.strokes().iter().map(Stroke::trim).collect();
         assert_eq!(trims, [-24, 0, -162]);
+    }
+
+    #[test]
+    fn a_note_off_fade_writes_one_strokes_own_byte() {
+        let piano = Build::new().piano();
+        let mut library = piano.library().unwrap();
+        let before = library.to_body().unwrap();
+
+        library.set_note_off_fade(1, 32).unwrap();
+        let after = library.to_body().unwrap();
+        assert_eq!(library.strokes()[1].note_off_fade(), 32);
+        assert_eq!(
+            changed(&before, &after),
+            [DIRECTORY_AT + RECORD + REC_NOTE_OFF]
+        );
+
+        let error = library.set_note_off_fade(3, 60).unwrap_err().to_string();
+        assert!(error.contains("stroke 3"), "{error}");
+        assert_eq!(
+            library.to_body().unwrap(),
+            after,
+            "a refused fade leaves the directory alone"
+        );
     }
 
     #[test]

@@ -64,11 +64,15 @@
 //!
 //! [`Donor::Rules`] states them instead, so a library can be written from recordings
 //! alone. Every field is then a neutral playback parameter: no decay applied over the
-//! recordings, each stroke trimmed according to its layer value, and the damper
-//! covering the keys that kind of instrument damps. A library written this way plays
-//! like the same audio built against a template, within about a decibel at every
-//! velocity and key, and sustains longer because no extra decay is applied. Confirmed
-//! on hardware.
+//! recordings, each stroke trimmed according to its layer value, a fade at key-up, and
+//! the damper covering the keys that kind of instrument damps. A library written this
+//! way plays like the same audio built against a template while a key is held, within
+//! about a decibel at every velocity and key, and sustains longer because no extra
+//! decay is applied. Confirmed on hardware.
+//!
+//! The key-up fade takes its values from vendor electric pianos. On an attack stroke it
+//! takes a note 40 dB down in 25 to 35 ms, where 0 cuts it 40 dB within 10 ms.
+//! Confirmed on hardware.
 //!
 //! # Loops
 //!
@@ -84,8 +88,8 @@ use super::{
     be32, block_bytes, midi_key, put16, put32, Bank, Library, Loop, Stroke, CNSP_MAGIC,
     DAMPER_TOP_AT, DECAYS, DIRECTORY_AT, FINE_TUNE_AT, FORMAT, GAIN_AT, KEY_MAP_AT, KIND_AT,
     LADDER_UNITY, MARKS, NOTES, RECORD, REC_BANK, REC_BLOCKS, REC_DECAY, REC_DECAYS, REC_FRAMES,
-    REC_ID, REC_LAYER, REC_MARKS, REC_MARK_BLOCK, REC_SEEDS, REC_START, REC_TRIM, REC_WINDOW,
-    SEEDS, UNCOVERED, VERSION_AT, VERSION_ECHO_AT,
+    REC_ID, REC_LAYER, REC_MARKS, REC_MARK_BLOCK, REC_NOTE_OFF, REC_SEEDS, REC_START, REC_TRIM,
+    REC_WINDOW, SEEDS, UNCOVERED, VERSION_AT, VERSION_ECHO_AT,
 };
 use crate::cbin::Header;
 use crate::error::{try_with_capacity, try_zeroed, Error, ParseError};
@@ -689,8 +693,8 @@ fn damper_cut(note: usize) -> u8 {
 }
 
 /// The record a stroke states when no template donates one: a decay ladder that
-/// applies nothing, no fade while it loops, and its place in the directory as the
-/// identifier.
+/// applies nothing, no fade while it loops, a note-off fade for its bank, and its place
+/// in the directory as the identifier.
 ///
 /// [`record`] writes the audio's fields and the loop over this.
 fn rules_record(recording: &Recording, index: usize) -> [u8; RECORD] {
@@ -698,12 +702,24 @@ fn rules_record(recording: &Recording, index: usize) -> [u8; RECORD] {
     if recording.sustain.is_some() {
         put32(&mut out, REC_DECAY, LADDER_UNITY);
     }
+    out[REC_NOTE_OFF] = note_off_fade(recording.bank);
     for entry in 0..DECAYS {
         let at = REC_DECAYS + entry * 4;
         put32(&mut out, at, LADDER_UNITY);
     }
     put32(&mut out, REC_ID, index as u32 + 1);
     out
+}
+
+/// The fade [`REC_NOTE_OFF`] states for a stroke of `bank`, inside the range vendor
+/// electric pianos hold: 26 to 35 on attack strokes and 46 to 70 on release strokes.
+/// The attack value fades a released note without a click: Confirmed on hardware. The
+/// release value: Inferred from specimens; not confirmed on hardware.
+fn note_off_fade(bank: Bank) -> u8 {
+    match bank {
+        Bank::Attack | Bank::Resonance => 32,
+        Bank::Release => 60,
+    }
 }
 
 /// The trim [`REC_TRIM`] states for a release stroke, in decibels.
@@ -2017,6 +2033,34 @@ mod tests {
             again.library.to_body().unwrap(),
             built.to_body().unwrap(),
             "a rule-written library is not a fixed point of a recode"
+        );
+    }
+
+    #[test]
+    fn a_rule_written_stroke_fades_out_at_note_off() {
+        let short = tone(6_000, 300.0, 1);
+        let built = build(
+            &Donor::Rules(Rules::new(Kind::ElectricPiano)),
+            &Options::new("Tines"),
+            &[
+                one(60, Bank::Attack, 0, short.clone()),
+                one(60, Bank::Resonance, 0, short.clone()),
+                one(60, Bank::Release, 0, short),
+            ],
+        )
+        .unwrap();
+        let fades: Vec<(Option<Bank>, u8)> = built
+            .strokes()
+            .iter()
+            .map(|s| (s.bank(), s.note_off_fade()))
+            .collect();
+        assert_eq!(
+            fades,
+            [
+                (Some(Bank::Attack), 32),
+                (Some(Bank::Resonance), 32),
+                (Some(Bank::Release), 60)
+            ]
         );
     }
 
