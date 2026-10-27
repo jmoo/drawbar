@@ -2065,7 +2065,26 @@ fn settle_own(library: &mut Library) -> Fallible<'_, &mut Library> {
     })
 }
 
+/// Settles `settling` when the folder holds its record. One the folder does not
+/// hold never landed and journaled nothing, so it is dropped and its staging left
+/// to tidy; one the folder cannot be asked about fails this write, to try again.
 fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Library> {
+    let path = library
+        .layout
+        .pending(settling.pending.writer, settling.record);
+    flow::stat(Root::Folder, &path).and_then(move |held| match held {
+        Some(_) => resume(library, settling),
+        None => {
+            library
+                .unsettled
+                .retain(|open| open.record != settling.record);
+            ok(library)
+        }
+    })
+}
+
+/// Carries out the rest of the record `settling` and logs its entry.
+fn resume(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Library> {
     let name = settling.record;
     let record = Rc::new(settling.pending);
     let identify = Rc::clone(&library.env.identify);
@@ -2373,8 +2392,8 @@ fn transact<'a>(
 
 /// Stages, checks and journals `effects` for the intent `logged`, which settling
 /// a record adds `facts` to, then carries them out. A refusal changes nothing; a
-/// failure once the record is written leaves it to settle, and one before leaves
-/// nothing to settle.
+/// failure once the record may be written leaves it to settle before the next
+/// write, and one the folder shows came before leaves nothing to settle.
 fn carry_out<'a>(
     library: &'a mut Library,
     logged: &Logged,
@@ -2427,7 +2446,8 @@ fn carry_out<'a>(
         Err(error) if journaled => {
             let path = layout.pending(id, name);
             flow::stat(Root::Folder, &path).then(move |written| {
-                if let Ok(Some(_)) = written {
+                // A record the folder may hold is settled before the next write.
+                if !matches!(written, Ok(None)) {
                     library.interrupted(name, &record);
                 }
                 Flow::Done(Err(error))

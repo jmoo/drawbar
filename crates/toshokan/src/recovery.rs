@@ -9,8 +9,8 @@
 //! user's consent, by this writer and in its own log; only its owner ever removes
 //! it. Settling twice equals settling once.
 //!
-//! A record is open while its writer's log ends at the head the record was
-//! written after: the entry that closes it is the next one the writer appends.
+//! A record is closed by an entry that names it, in its writer's log or in a
+//! settlement; a record no entry names is open.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;

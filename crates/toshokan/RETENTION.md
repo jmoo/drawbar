@@ -60,14 +60,20 @@ keep it small. Its writer knows segments from its own last snapshot, from the
 files it read or wrote since, and from the files in its directory now. A segment
 it does not know of costs hashes, not correctness.
 
-Certificates are kept forever, and they are the one part of a snapshot that
-grows with use. A file sync brings back, from a backup or a device that was away
-for a year, must be recognized as folded however old it is, and a fork that
+Certificates are kept forever, and they are one of the two parts of a snapshot
+that grow with use. A file sync brings back, from a backup or a device that was
+away for a year, must be recognized as folded however old it is, and a fork that
 reuses entry numbers must still be told from it, so a tip keeps a fingerprint of
 every segment its writer wrote. A segment ends at every close of a process that
 appended, at every compaction and at each MiB, and its certificate takes about
-92 bytes. Nothing else in a snapshot grows with history, and nothing in it grows
-with the library's size.
+92 bytes.
+
+The other is `settled`: a pair, about 70 bytes, for every pending record the
+writer closed, one per commit that moved files and per settlement. A record
+file sync brings back must still read as closed once the entry that closed it is
+folded, and the entry after a record's position need not be the one that closed
+it where a clone wrote first, so only the pair tells. Nothing else in a snapshot
+grows with history, and nothing in it grows with the library's size.
 
 A snapshot's head is among the entries it certifies, as the last line it folds
 of a segment or by hash. A snapshot that carries the certificates of the
@@ -441,6 +447,7 @@ Steady state, for the schema the harness writes:
 | A deleted entity | ~100–150 B, forever | the same |
 | A removed member never re-added | one reference per remover, forever | the same |
 | Certificates | ~60 B per segment ever written | ~90 B per segment ever written |
+| Records closed | ~70 B per commit that moved files and per settlement | ~70 B each |
 | Entries since the last snapshot | up to the compaction threshold, ~400 B each | ~250 B each |
 
 References exist only where one writer replaced another's write: at most
@@ -453,10 +460,24 @@ steady state is about 6 MB of memory and 4 MB of folder, plus:
 - per segment ever written, ~90 B: a segment holds up to 1 MiB, about 4,000
   entries, and every process that writes starts one, so 2M entries over years of
   daily use come to some thousands of segments, a few hundred KB;
+- per pending record the writer closed, ~70 B: one per commit that moved files
+  and per settlement;
 - per retired writer, its final contribution and the references others keep to
   it, at most what it wrote.
 
-These grow with deletions, segments and writers, not with entries.
+These grow with deletions, segments, commits that moved files and writers, not
+with entries otherwise.
+
+`tests/no_growth.rs`, in the default suite, checks this for ten entities at
+10,000 and 100,000 entries: the folder, what open reads and keeps, and the
+requests of open, commit and refresh stay the same, but for the certificates and
+the record pairs the entries between add, and a digit per number. The scale
+example compares the same at full size, by hand:
+
+```text
+cargo run --release --example scale -- --entities 2000 --entries 200000 --writers 3 --tags 5
+cargo run --release --example scale -- --entities 2000 --entries 2000000 --writers 3 --tags 5
+```
 
 ## An old folder
 

@@ -444,10 +444,13 @@ for the file register.
 - `takes`: per field and other writer, the latest take of a run of that writer,
   below the run's `from`.
 - `dismissals`: the runs the writer dismissed, each with its entry.
+- `settled`: each pending record the writer closed, by its writer and nonce: its
+  own, by the intent naming it, and another writer's, by a settlement.
 
 A contribution holds at most one own write and one own delete per field, and per
-field and other writer one take and two references, so it is bounded by the
-fields its writer wrote, not by its history. Members of `state` a reader does
+field and other writer one take and two references, so these are bounded by the
+fields its writer wrote, not by its history; `settled` gains a pair per record
+closed (see What stays). Members of `state` a reader does
 not know are kept; members it does not know inside a record refuse the snapshot.
 
 Only a snapshot's writer compacts: at close, every 512 of its own entries, and
@@ -1004,16 +1007,16 @@ reaches only the items of this session's writer.
 
 ## What stays
 
-The folder keeps, for the life of a writer: one snapshot, holding at most one own
-write per field it wrote and per other writer two references and one take, and a
-certificate per segment it ever wrote, about 92 bytes each, where a segment ends
-at each close of a process that appended, each compaction and each MiB (see
-[RETENTION.md](RETENTION.md)); the segments written since; one segment
-per process that crashed or was copied; trash items
-until the writer empties them; a spent pending record until the writer's next
-write or close; and the pending records of a writer that will never run again,
-settled or not. The local root keeps one directory per writer
-the install has used.
+The folder keeps, for the life of a writer: one snapshot, holding at most one
+own write per field it wrote and per other writer two references and one take,
+and a certificate per segment it ever wrote, about 92 bytes each, where a
+segment ends at each close of a process that appended, each compaction and each
+MiB, and a pair in `settled`, about 70 bytes, per commit that moved files and
+per settlement (see [RETENTION.md](RETENTION.md)); the segments written since;
+one segment per process that crashed or was copied; trash items until the writer
+empties them; a spent pending record until the writer's next write or close; and
+the pending records of a writer that will never run again, settled or not. The
+local root keeps one directory per writer the install has used.
 
 ## Backends
 
