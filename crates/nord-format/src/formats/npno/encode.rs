@@ -581,7 +581,7 @@ fn rules_record(recording: &Recording, index: usize) -> [u8; RECORD] {
     let mut out = [0u8; RECORD];
     let (window, trim) = velocity_window(recording.bank, recording.layer);
     put16(&mut out, REC_WINDOW, window);
-    put16(&mut out, REC_TRIM, trim);
+    put16(&mut out, REC_TRIM, trim as u16);
     out[REC_NOTE_OFF] = note_off_fade(recording.bank);
     for entry in 0..DECAYS {
         let at = REC_DECAYS + entry * 4;
@@ -602,11 +602,11 @@ fn note_off_fade(bank: Bank) -> u8 {
 }
 
 /// The trim [`REC_TRIM`] states for a release stroke, in decibels.
-const RELEASE_TRIM: u16 = 12;
+const RELEASE_TRIM: i16 = 12;
 
 /// The largest trim [`velocity_window`] states, the top of the range the layer values
 /// are selected over ([`Stroke::layer`]).
-const WIDEST_TRIM: u16 = 31;
+const WIDEST_TRIM: i16 = 31;
 
 /// The pair at [`REC_WINDOW`] and [`REC_TRIM`] a stroke of `bank` and `layer` states.
 ///
@@ -614,12 +614,12 @@ const WIDEST_TRIM: u16 = 31;
 /// so a root's softer layers play softer than its loud ones by the amount their values
 /// state. A release stroke takes a fixed trim, since its layer value plays no part in
 /// selecting it.
-fn velocity_window(bank: Bank, layer: u8) -> (u16, u16) {
+fn velocity_window(bank: Bank, layer: u8) -> (u16, i16) {
     match bank {
         Bank::Release => (0, RELEASE_TRIM),
         Bank::Attack | Bank::Resonance => (
             u16::from(layer),
-            u16::from(layer).saturating_add(3).min(WIDEST_TRIM),
+            i16::from(layer).saturating_add(3).min(WIDEST_TRIM),
         ),
     }
 }
@@ -1609,7 +1609,7 @@ mod tests {
             "the kind names its own damper limit"
         );
 
-        let stated: Vec<(u8, u16, u16, u32)> = built
+        let stated: Vec<(u8, u16, i16, u32)> = built
             .strokes()
             .iter()
             .map(|s| {

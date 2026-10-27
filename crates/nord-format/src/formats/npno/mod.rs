@@ -89,6 +89,10 @@ pub const KNOWN_VERSIONS: &[u32] = &[0x450, 0x464];
 /// The stream version that also carries separate long-name and voicing fields.
 const VERSION_SPLIT_NAME: u16 = 0x464;
 
+/// The stream version whose instrument silences a stroke with a negative trim, so
+/// [`Library::set_trim`] refuses one. Confirmed on hardware.
+const VERSION_SILENCES_NEGATIVE_TRIM: u16 = 0x450;
+
 const KEY_MAP_AT: usize = 0x8c;
 const FINE_TUNE_AT: usize = 0x18c;
 const VERSION_AT: usize = 0x04;
@@ -126,8 +130,7 @@ const REC_DECAY: usize = 0x2e;
 /// u16 holding the layer value again in vendor records. Sweeping it moved nothing
 /// measurable. Confirmed on hardware.
 const REC_WINDOW: usize = 0x32;
-/// u16 the instrument attenuates the stroke by, one decibel per unit. Confirmed on
-/// hardware.
+/// i16 the instrument attenuates the stroke by; [`Stroke::trim`] states its unit.
 const REC_TRIM: usize = 0x34;
 const REC_DECAYS: usize = 0x36;
 const REC_ID: usize = 0x6e;
@@ -619,9 +622,12 @@ impl<'a> Stroke<'a> {
         be16(&self.record, REC_BLOCKS)
     }
 
-    /// The `+0x34` trim, in decibels the instrument attenuates the stroke by.
-    pub fn trim(&self) -> u16 {
-        be16(&self.record, REC_TRIM)
+    /// The signed `+0x34` trim the instrument attenuates the stroke by. In `0x450`
+    /// streams a unit is one decibel over 0..68, and a negative trim silences the
+    /// stroke. Confirmed on hardware. `0x464` streams also hold negative trims, in a
+    /// unit not known. Inferred from specimens; not confirmed on hardware.
+    pub fn trim(&self) -> i16 {
+        be16(&self.record, REC_TRIM) as i16
     }
 
     /// The `+0x2e` decay coefficient, which a release stroke zeroes.
@@ -799,9 +805,19 @@ impl<'a> Library<'a> {
         }
     }
 
-    /// Retrim the `index`-th stroke, in the decibels [`Stroke::trim`] reads.
-    pub fn set_trim(&mut self, index: usize, decibels: u16) -> Result<(), Error> {
-        put16(&mut self.stroke_mut(index)?.record, REC_TRIM, decibels);
+    /// Retrim the `index`-th stroke, in the unit [`Stroke::trim`] reads. An index past
+    /// the directory is refused, and so is a negative trim in a `0x450` stream, which
+    /// would silence the stroke.
+    pub fn set_trim(&mut self, index: usize, trim: i16) -> Result<(), Error> {
+        let version = self.stream_version();
+        if trim < 0 && version == VERSION_SILENCES_NEGATIVE_TRIM {
+            return Err(ParseError::OutOfBounds {
+                value: format!("trim {trim}"),
+                bound: format!("0 or more in a stream {version:#06x} library"),
+            }
+            .into());
+        }
+        put16(&mut self.stroke_mut(index)?.record, REC_TRIM, trim as u16);
         Ok(())
     }
 
@@ -1840,11 +1856,11 @@ mod tests {
         assert_eq!(library.to_body().unwrap(), before);
     }
 
-    /// The trim is a u16: a one-byte value and a two-byte value each write the whole
-    /// field and nothing else.
+    /// The trim is two bytes: a one-byte value, a two-byte value and a negative value
+    /// each write the whole field and nothing else.
     #[test]
     fn a_retrim_writes_both_bytes_of_one_strokes_own_field() {
-        let piano = Build::new().piano();
+        let piano = signed().piano();
         let mut library = piano.library().unwrap();
         assert!(library.strokes().iter().all(|s| s.trim() == 0));
         let before = library.to_body().unwrap();
@@ -1860,13 +1876,88 @@ mod tests {
         assert_eq!(library.strokes()[1].trim(), 0x0107);
         assert_eq!(changed(&low, &high), [at]);
 
+        library.set_trim(1, -24).unwrap();
+        let negative = library.to_body().unwrap();
+        assert_eq!(library.strokes()[1].trim(), -24);
+        assert_eq!(negative[at..at + 2], [0xff, 0xe8]);
+        assert_eq!(changed(&high, &negative), [at, at + 1]);
+
         let error = library.set_trim(3, 4).unwrap_err().to_string();
         assert!(error.contains("stroke 3"), "{error}");
         assert_eq!(
             library.to_body().unwrap(),
-            high,
+            negative,
             "a refused retrim leaves the directory alone"
         );
+    }
+
+    /// A `0x464` build, the stream version that holds negative trims.
+    fn signed() -> Build {
+        Build {
+            version: 0x464,
+            ..Build::new()
+        }
+    }
+
+    #[test]
+    fn a_negative_retrim_of_a_0x450_library_is_refused_and_writes_nothing() {
+        let piano = Build::new().piano();
+        let mut library = piano.library().unwrap();
+        assert_eq!(library.stream_version(), 0x450);
+        let before = library.to_body().unwrap();
+
+        let error = library.set_trim(1, -1).unwrap_err().to_string();
+        assert!(error.contains("trim -1"), "{error}");
+        assert_eq!(library.to_body().unwrap(), before);
+
+        library.set_trim(1, 0).unwrap();
+        assert_eq!(library.to_body().unwrap(), before, "0 is the trim it held");
+    }
+
+    #[test]
+    fn a_trim_stored_as_0xffe8_reads_as_minus_24() {
+        let mut body = signed().body();
+        let at = DIRECTORY_AT + RECORD + REC_TRIM;
+        body[at..at + 2].copy_from_slice(&[0xff, 0xe8]);
+        let piano = Piano {
+            file: Cbin {
+                header: Header::new(FORMAT, (0, 0), 530),
+                body: RawBody(body),
+            },
+        };
+        let library = piano.library().unwrap();
+        let trims: Vec<i16> = library.strokes().iter().map(Stroke::trim).collect();
+        assert_eq!(trims, [0, -24, 0]);
+    }
+
+    #[test]
+    fn an_edit_that_leaves_the_trim_alone_keeps_a_negative_trim_byte_for_byte() {
+        let mut build = signed();
+        build.takes[0] = build.takes[0].trim(-24);
+        build.takes[2] = build.takes[2].trim(-162);
+        let piano = build.piano();
+        let mut library = piano.library().unwrap();
+        let before = library.to_body().unwrap();
+        assert_eq!(
+            before,
+            build.body(),
+            "an unedited library rebuilds verbatim"
+        );
+
+        library.set_gain(-20);
+        library.set_fine_tune(60, -4).unwrap();
+        library.set_name("Renamed").unwrap();
+        let after = library.to_body().unwrap();
+        for index in [0, 2] {
+            let at = DIRECTORY_AT + index * RECORD + REC_TRIM;
+            assert_eq!(
+                after[at..at + 2],
+                before[at..at + 2],
+                "stroke {index}'s trim"
+            );
+        }
+        let trims: Vec<i16> = library.strokes().iter().map(Stroke::trim).collect();
+        assert_eq!(trims, [-24, 0, -162]);
     }
 
     #[test]
