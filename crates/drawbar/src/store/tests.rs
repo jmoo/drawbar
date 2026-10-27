@@ -1198,6 +1198,38 @@ fn a_save_whose_file_could_not_be_put_in_place_leaves_a_file_through_a_restart()
     );
 }
 
+/// A save that cannot be finished, as when another program put a file where it goes,
+/// leaves the library read-only, saying what to move, until it is opened again.
+#[test]
+fn a_save_that_cannot_be_finished_leaves_the_library_read_only_until_it_opens_again() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let new = with_gain(&root.read("untitled.ne5p"), "96");
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "untitled.ne5p"),
+    ));
+    let log = &mut session.bench.log;
+    session.bench.workspace.replace_bytes(id, new.clone(), log);
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    fs::write(root.at("untitled.ne5p"), b"theirs").unwrap();
+    session.make_tag("Sunday");
+    let why = session.store.read_only().unwrap_or_default().to_string();
+    assert!(
+        why.contains("in the way") && why.contains("untitled.ne5p"),
+        "read-only: {why:?}"
+    );
+    assert_eq!(session.said("read-only now"), 1);
+    session.close();
+
+    fs::rename(root.at("untitled.ne5p"), root.local().join("theirs")).unwrap();
+    let again = Session::open(&root);
+    assert_eq!(again.store.read_only(), None);
+    assert_eq!(root.read("untitled.ne5p"), new, "the save is finished");
+}
+
 /// A copy of a library whose hidden folder holds, in this install's own log, a change a
 /// newer drawbar wrote, and the segment of the log that holds it.
 fn newer_drawbar_wrote() -> (Temp, std::path::PathBuf) {

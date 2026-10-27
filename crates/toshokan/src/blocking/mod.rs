@@ -20,7 +20,8 @@ use crate::log::Settlement;
 use crate::path::RelPath;
 use crate::plan::{Splice, Splicing};
 use crate::report::{
-    Committed, Compacted, Emptied, HistoryItem, Opened, Orphan, Refreshed, TrashItem, WriterInfo,
+    Committed, Compacted, Emptied, HistoryItem, Mode, Opened, Orphan, Refreshed, TrashItem,
+    WriterInfo,
 };
 use crate::schema::Schema;
 use crate::view::View;
@@ -200,6 +201,11 @@ impl<B: Backend> Library<B> {
 
     pub fn history(&self) -> &[HistoryItem] {
         self.core.history()
+    }
+
+    /// Whether the library may be written now, and why not.
+    pub fn mode(&self) -> &Mode {
+        self.core.mode()
     }
 
     /// An intent to build and commit. Its saves take bytes, or any [`Source`]

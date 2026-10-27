@@ -1058,6 +1058,8 @@ pub enum Event {
     /// A command other than a save, a copy or a move failed: what it was doing, and
     /// why.
     Failed(String),
+    /// Nothing more may be written until the library is opened again, for this reason.
+    ReadOnly(String),
     /// Whether [`Cmd::Draft`] kept the unsaved edit of the file `of` names.
     Drafted {
         of: Key,
@@ -1086,6 +1088,7 @@ impl Event {
         match self {
             Event::Opened(Err(_)) => one("open"),
             Event::Opened(Ok(opened)) if opened.writable.is_err() => one("read-only"),
+            Event::ReadOnly(_) => one("read-only"),
             Event::Scanned(Err(_)) => one("rescan"),
             Event::Committed { result: Err(_), .. } => one("intent"),
             Event::Moved { result: Err(_), .. } => one("move"),

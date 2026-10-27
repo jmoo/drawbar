@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use toshokan::asynch::{Filling as Filled, Fs, Library, Source as Filler, Staging};
-use toshokan::error::Refusal;
+use toshokan::error::{Refusal, Why};
 use toshokan::io::{IoError, Kind, Range, Root};
 use toshokan::log::Settlement;
 use toshokan::plan::FactChange;
@@ -187,6 +187,10 @@ impl<F: Fs> Keeper<F> {
                 answer(trimmed);
             }
         }
+        let mode = self.library.as_ref().map(Library::mode);
+        if let Some(Mode::ReadOnly(why)) = mode {
+            answer(Event::ReadOnly(read_only(why)));
+        }
     }
 
     /// Keep in the trash only what this session's undo reaches, newest first within
@@ -319,14 +323,11 @@ impl<F: Fs> Keeper<F> {
         let (mut library, opened) = Library::open(fs, keys::layout(), &keys::schema(), env)
             .await
             .map_err(|e| e.to_string())?;
-        let writable = match &opened.mode {
-            Mode::Writable => Ok(()),
-            Mode::ReadOnly(why) => Err(why.to_string()),
-        };
         let mut trouble = Vec::new();
-        if writable.is_ok() {
+        if opened.mode == Mode::Writable {
             let settled = library.settle_interrupted().await;
-            trouble.extend(settled.err().map(|e| format!("finishing a change: {e}")));
+            let failed = settled.err().filter(|e| !matches!(e, Error::ReadOnly(_)));
+            trouble.extend(failed.map(|e| format!("finishing a change: {e}")));
             // Another window of this install left these: they are ours to finish.
             for orphan in opened.orphaned.into_iter().filter(|orphan| orphan.ours) {
                 let settled = library.settle(orphan, Settlement::Finished).await;
@@ -347,6 +348,10 @@ impl<F: Fs> Keeper<F> {
                 }
             ),
             ..committed_view(&library, &mut self.shown, Vec::new())
+        };
+        let writable = match library.mode() {
+            Mode::Writable => Ok(()),
+            Mode::ReadOnly(why) => Err(read_only(why)),
         };
         let view = library.view();
         let earlier = unsaved::earlier(library.fs()).await;
@@ -1309,6 +1314,26 @@ fn fill_failure(e: io::Error) -> Failure {
     match rewrite::is_changed(&e) {
         true => Failure::Moved,
         false => Failure::Io(e.to_string()),
+    }
+}
+
+/// Why nothing may be written, said so the user can put it right where they can.
+fn read_only(why: &Why) -> String {
+    let Why::Unfinished { label, path, error } = why else {
+        return why.to_string();
+    };
+    let unfinished = format!("drawbar could not finish “{label}”");
+    let again = "then quit drawbar and open it again";
+    match error {
+        IoError::AlreadyExists
+        | IoError::IsDirectory
+        | IoError::NotDirectory
+        | IoError::NotEmpty => {
+            format!("something is in the way at {path}, so {unfinished}: move it, {again}")
+        }
+        IoError::NoSpace => format!("the disk is full, so {unfinished}: make room, {again}"),
+        IoError::Denied => format!("{path} may not be written, so {unfinished}: allow it, {again}"),
+        error => format!("{unfinished} at {path} ({error}): {again}"),
     }
 }
 

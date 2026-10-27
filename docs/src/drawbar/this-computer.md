@@ -200,10 +200,11 @@ bring back any you deleted.
 
 ## If something goes wrong
 
-- **Read-only.** drawbar cannot write the library folder, or a newer drawbar
-  has written its hidden folder. Hover the library's name for the reason.
-  Changes you make in a read-only library are held in memory only, and are lost
-  when you quit.
+- **Read-only.** drawbar cannot write the library folder, a newer drawbar has
+  written its hidden folder, or drawbar could not finish a change, as when
+  another program put a file where a save was going. Hover the library's name
+  for the reason and what to do. Changes you make in a read-only library are
+  held in memory only, and are lost when you quit.
 - **A change left unfinished.** If drawbar on another computer, or in a browser
   on this one, stopped in the middle of changing files in a shared library,
   drawbar asks once the change has stood for a few seconds: **Finish** completes

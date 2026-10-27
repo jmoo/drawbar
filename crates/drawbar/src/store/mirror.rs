@@ -1475,6 +1475,14 @@ impl Store {
                 }
             }
             Event::Unkept(why) => self.say_unkept(&why, log),
+            Event::ReadOnly(why) if self.open() => {
+                log.trouble(format!(
+                    "This computer's library is read-only now: {why}. Edits made from now \
+                     on stay in memory until you quit."
+                ));
+                self.phase = Phase::ReadOnly(why);
+            }
+            Event::ReadOnly(_) => {}
             Event::Failed(why) => {
                 log.error(why.as_str());
                 log.trouble(format!(

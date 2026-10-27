@@ -320,6 +320,12 @@ impl Library {
         self.history.items()
     }
 
+    /// Whether the library may be written now, and why not: as it opened, or
+    /// read-only since a change of its own could not be finished.
+    pub fn mode(&self) -> &Mode {
+        &self.mode
+    }
+
     /// Settles this writer's interrupted effects, then checks every precondition
     /// against the view they leave and the files, logs the intent and carries out
     /// its file effects. Before its first write a new writer is created. A refusal
