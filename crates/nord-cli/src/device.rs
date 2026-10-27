@@ -1680,8 +1680,10 @@ pub(crate) fn human_size(n: u32) -> Option<String> {
 
 /// List the piano and sample library objects an object depends on. Read-only.
 pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
+    let (mut device, class) = open_instrument(class)?;
     if !class.reports_dependencies() {
-        let bytes = fetch(at, class)?;
+        let bytes = read_at(&mut device, class, "read", at, usb_op::read_program)
+            .map_err(|e| explain(e, at))?;
         let entity = nord_format::from_stream(&mut std::io::Cursor::new(&bytes))
             .map_err(|e| format!("{}: {e}", shown(at)))?;
         let note = format!(
@@ -1690,7 +1692,6 @@ pub fn deps(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String> {
         );
         return crate::file::stored_deps(ui, &shown(at), &entity, &note);
     }
-    let (mut device, class) = open_instrument(class)?;
     let deps = read_at(&mut device, class, "deps", at, usb_op::dependencies)
         .map_err(|e| explain(e, at))?;
 

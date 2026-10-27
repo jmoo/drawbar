@@ -187,16 +187,16 @@ impl Stored {
 
 /// The number the index writes for each class it keeps a slot for. Fixed when the
 /// index format was set; no instrument's partition order changes it.
-const STORED_CLASSES: [(ObjectClass, u32); 9] = [
+///
+/// ⚠️ An older index wrote any other class as its partition index, so no number past these
+/// can be given a class without misreading such an entry. The preset classes keep no slot.
+const STORED_CLASSES: [(ObjectClass, u32); 6] = [
     (ObjectClass::Piano, 1),
     (ObjectClass::Sample, 3),
     (ObjectClass::Program, 4),
     (ObjectClass::SetList, 5),
     (ObjectClass::Live, 6),
     (ObjectClass::Settings, 7),
-    (ObjectClass::OrganPreset, 8),
-    (ObjectClass::PianoPreset, 9),
-    (ObjectClass::SynthPreset, 10),
 ];
 
 impl From<&Origin> for Stored {
@@ -205,8 +205,9 @@ impl From<&Origin> for Stored {
             Origin::Fresh => Stored::Fresh,
             Origin::File(name) => Stored::File(name.clone()),
             Origin::Device { class, at } => {
-                // ⚠️ An unknown class names a partition of one instrument's table, so no
-                // number here would mean it again; its slot is not kept.
+                // ⚠️ A class with no number here keeps no slot: an unknown class names a
+                // partition of one instrument's table, and a preset has no number an older
+                // index did not already use.
                 let Some(&(_, stored)) = STORED_CLASSES.iter().find(|(held, _)| held == class)
                 else {
                     return Stored::Implied;

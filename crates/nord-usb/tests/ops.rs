@@ -313,10 +313,18 @@ fn inventory_propagates_a_malformed_status_after_closing_the_session() {
     );
 }
 
+/// The inventory classes an Electro 5's table holds.
+fn electro5_inventory() -> impl Iterator<Item = ObjectClass> {
+    ObjectClass::INVENTORY
+        .into_iter()
+        .filter(|class| frames::electro5().index(*class).is_some())
+}
+
 #[test]
 fn inventory_skips_a_class_that_refuses_its_status() {
     let mut steps = Vec::new();
-    for class in ObjectClass::INVENTORY {
+    // The Electro 5 keeps no presets, so they are skipped with nothing sent.
+    for class in electro5_inventory() {
         steps.extend(session_open(class));
         steps.push(request(cmd::STATUS, &frames::e5_index(class).to_be_bytes()));
         steps.push(refusal(cmd::STATUS, 5));
@@ -349,7 +357,8 @@ fn sample_unit() -> nord_usb::wire::AllocationUnit {
 #[test]
 fn inventory_skips_a_class_whose_session_the_device_refuses() {
     let mut steps = Vec::new();
-    for class in ObjectClass::INVENTORY {
+    // The Electro 5 keeps no presets, so they are skipped with nothing sent.
+    for class in electro5_inventory() {
         steps.push(ui_request(ui::HELLO));
         steps.push(ui_response(ui::HELLO, 0));
         steps.push(request(

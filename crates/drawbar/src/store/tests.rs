@@ -2470,6 +2470,31 @@ fn an_indexed_slot_keeps_its_class_by_the_indexs_own_numbers() {
         sidecar::Stored::Implied,
         "a partition this build cannot name means nothing on another instrument"
     );
+    for preset in [
+        ObjectClass::OrganPreset,
+        ObjectClass::PianoPreset,
+        ObjectClass::SynthPreset,
+    ] {
+        let origin = Origin::Device { class: preset, at };
+        assert_eq!(sidecar::Stored::from(&origin), sidecar::Stored::Implied);
+    }
+}
+
+/// An older index wrote a class it had no number for as its partition index, so a number
+/// past the index's own reads back as that partition, never as a class added since.
+#[test]
+fn an_older_indexs_partition_number_stays_a_partition() {
+    let text = r#"(version: 1, next_id: 2, assets: {1: (name: "a", origin: Device(class: 10, bank: 0, slot: 0))})"#;
+    let Read::Known(index) = sidecar::read(text) else {
+        panic!("{text}");
+    };
+    assert!(matches!(
+        index.assets[&1].origin(),
+        Origin::Device {
+            class: ObjectClass::Unknown(10),
+            ..
+        }
+    ));
 }
 
 /// A field or a kind this build does not know, at any depth, is what a newer drawbar that

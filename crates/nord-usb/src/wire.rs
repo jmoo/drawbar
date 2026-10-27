@@ -922,11 +922,14 @@ impl ObjectClass {
 
     /// The classes to query for an inventory. Live and Settings also answer but report
     /// zero items, because they are fixed buffers, not slot-counted storage.
-    pub const INVENTORY: [ObjectClass; 4] = [
+    pub const INVENTORY: [ObjectClass; 7] = [
         ObjectClass::Piano,
         ObjectClass::Sample,
         ObjectClass::Program,
         ObjectClass::SetList,
+        ObjectClass::OrganPreset,
+        ObjectClass::PianoPreset,
+        ObjectClass::SynthPreset,
     ];
 
     pub fn label(self) -> String {
