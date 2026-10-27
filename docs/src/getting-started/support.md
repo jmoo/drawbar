@@ -20,8 +20,10 @@ sample files. Connecting other instruments over USB has not been tried.
 
 Reading and writing programs, set lists, live slots, settings, samples and pianos
 works on the Electro 5 from macOS, Linux and the browser. Windows builds pass the
-protocol tests but have not been run against an instrument. No other instrument
-has been tested, so USB support for other models cannot be guaranteed.
+protocol tests, and drawbar on Windows has connected to a Stage 4 and listed its
+storage, but nothing has been written from Windows. The Stage 4 is the only other
+instrument connected so far, and no file has been read from it or written to it, so
+USB support for other models cannot be guaranteed.
 
 drawbar and nord-cli find programs, samples and the rest by the name the instrument
 gives each kind of storage, so another model's folders show what it keeps in them.
