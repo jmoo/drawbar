@@ -2921,8 +2921,8 @@ const ROW_LAMPS: usize = 6;
 const TRIM_REACH: i16 = 48;
 
 const TRIM_UNIT: &str =
-    "+0x34 in the stroke record, 1 dB a unit in 0x450 streams; the unit in 0x464 streams \
-     is not known";
+    "+0x34 in the stroke record. In 0x450 streams it is 1 dB a unit, and a negative trim \
+     silences the stroke; the unit in 0x464 streams is not known";
 
 /// One row per root: what it answers, which of its layers it keeps, what it costs, and
 /// the facts and actions under it when it is open.

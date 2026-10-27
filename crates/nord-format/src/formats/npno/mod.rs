@@ -89,6 +89,10 @@ pub const KNOWN_VERSIONS: &[u32] = &[0x450, 0x464];
 /// The stream version that also carries separate long-name and voicing fields.
 const VERSION_SPLIT_NAME: u16 = 0x464;
 
+/// The stream version whose instrument silences a stroke with a negative trim, so
+/// [`Library::set_trim`] refuses one. Confirmed on hardware.
+const VERSION_SILENCES_NEGATIVE_TRIM: u16 = 0x450;
+
 const KEY_MAP_AT: usize = 0x8c;
 const FINE_TUNE_AT: usize = 0x18c;
 const VERSION_AT: usize = 0x04;
@@ -615,9 +619,9 @@ impl<'a> Stroke<'a> {
     }
 
     /// The signed `+0x34` trim the instrument attenuates the stroke by. In `0x450`
-    /// streams a unit is one decibel over 0..31. Confirmed on hardware. `0x464` streams
-    /// also hold negative trims, in a unit not known. Inferred from specimens; not
-    /// confirmed on hardware.
+    /// streams a unit is one decibel over 0..68, and a negative trim silences the
+    /// stroke. Confirmed on hardware. `0x464` streams also hold negative trims, in a
+    /// unit not known. Inferred from specimens; not confirmed on hardware.
     pub fn trim(&self) -> i16 {
         be16(&self.record, REC_TRIM) as i16
     }
@@ -792,8 +796,17 @@ impl<'a> Library<'a> {
     }
 
     /// Retrim the `index`-th stroke, in the unit [`Stroke::trim`] reads. An index past
-    /// the directory is refused.
+    /// the directory is refused, and so is a negative trim in a `0x450` stream, which
+    /// would silence the stroke.
     pub fn set_trim(&mut self, index: usize, trim: i16) -> Result<(), Error> {
+        let version = self.stream_version();
+        if trim < 0 && version == VERSION_SILENCES_NEGATIVE_TRIM {
+            return Err(ParseError::OutOfBounds {
+                value: format!("trim {trim}"),
+                bound: format!("0 or more in a stream {version:#06x} library"),
+            }
+            .into());
+        }
         let count = self.strokes.len();
         let stroke = self
             .strokes
@@ -1828,7 +1841,7 @@ mod tests {
     /// each write the whole field and nothing else.
     #[test]
     fn a_retrim_writes_both_bytes_of_one_strokes_own_field() {
-        let piano = Build::new().piano();
+        let piano = signed().piano();
         let mut library = piano.library().unwrap();
         assert!(library.strokes().iter().all(|s| s.trim() == 0));
         let before = library.to_body().unwrap();
@@ -1859,9 +1872,32 @@ mod tests {
         );
     }
 
+    /// A `0x464` build, the stream version that holds negative trims.
+    fn signed() -> Build {
+        Build {
+            version: 0x464,
+            ..Build::new()
+        }
+    }
+
+    #[test]
+    fn a_negative_retrim_of_a_0x450_library_is_refused_and_writes_nothing() {
+        let piano = Build::new().piano();
+        let mut library = piano.library().unwrap();
+        assert_eq!(library.stream_version(), 0x450);
+        let before = library.to_body().unwrap();
+
+        let error = library.set_trim(1, -1).unwrap_err().to_string();
+        assert!(error.contains("trim -1"), "{error}");
+        assert_eq!(library.to_body().unwrap(), before);
+
+        library.set_trim(1, 0).unwrap();
+        assert_eq!(library.to_body().unwrap(), before, "0 is the trim it held");
+    }
+
     #[test]
     fn a_trim_stored_as_0xffe8_reads_as_minus_24() {
-        let mut body = Build::new().body();
+        let mut body = signed().body();
         let at = DIRECTORY_AT + RECORD + REC_TRIM;
         body[at..at + 2].copy_from_slice(&[0xff, 0xe8]);
         let piano = Piano {
@@ -1877,7 +1913,7 @@ mod tests {
 
     #[test]
     fn an_edit_that_leaves_the_trim_alone_keeps_a_negative_trim_byte_for_byte() {
-        let mut build = Build::new();
+        let mut build = signed();
         build.takes[0] = build.takes[0].trim(-24);
         build.takes[2] = build.takes[2].trim(-162);
         let piano = build.piano();
