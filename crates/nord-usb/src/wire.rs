@@ -882,6 +882,12 @@ pub enum ObjectClass {
     /// The global settings singleton. The Electro 5's is wire-addressed `0:0` and reports
     /// no body checksum (`0xffffffff`), like the library classes.
     Settings,
+    /// The organ presets of a model that keeps them apart from its programs.
+    OrganPreset,
+    /// The piano presets of a model that keeps them apart from its programs.
+    PianoPreset,
+    /// The synth presets of a model that keeps them apart from its programs.
+    SynthPreset,
     /// A partition this crate cannot name, by its index in the instrument's table. The
     /// `(Native)` partitions are among them: each lists a library's objects again, in
     /// storage order.
@@ -902,13 +908,16 @@ impl From<Library> for ObjectClass {
 
 impl ObjectClass {
     /// Every class a partition name can resolve to.
-    pub const NAMED: [ObjectClass; 6] = [
+    pub const NAMED: [ObjectClass; 9] = [
         ObjectClass::Piano,
         ObjectClass::Sample,
         ObjectClass::Program,
         ObjectClass::SetList,
         ObjectClass::Live,
         ObjectClass::Settings,
+        ObjectClass::OrganPreset,
+        ObjectClass::PianoPreset,
+        ObjectClass::SynthPreset,
     ];
 
     /// The classes to query for an inventory. Live and Settings also answer but report
@@ -928,12 +937,16 @@ impl ObjectClass {
             ObjectClass::SetList => "set lists".into(),
             ObjectClass::Live => "live slots".into(),
             ObjectClass::Settings => "settings".into(),
+            ObjectClass::OrganPreset => "organ presets".into(),
+            ObjectClass::PianoPreset => "piano presets".into(),
+            ObjectClass::SynthPreset => "synth presets".into(),
             ObjectClass::Unknown(v) => format!("partition {v}"),
         }
     }
 
-    /// The name an instrument's partition table gives this class's partition, as the
-    /// Electro 5's table spells it. `None` for a partition this crate does not name.
+    /// The name an instrument's partition table gives this class's partition: the Electro
+    /// 5's table spells the first six, and a Stage 4's the presets. `None` for a partition
+    /// this crate does not name.
     ///
     /// Confirmed on hardware.
     pub fn partition_name(self) -> Option<&'static str> {
@@ -944,6 +957,9 @@ impl ObjectClass {
             ObjectClass::SetList => Some("Set List"),
             ObjectClass::Live => Some("Live"),
             ObjectClass::Settings => Some("Settings"),
+            ObjectClass::OrganPreset => Some("Organ Preset"),
+            ObjectClass::PianoPreset => Some("Piano Preset"),
+            ObjectClass::SynthPreset => Some("Synth Preset"),
             ObjectClass::Unknown(_) => None,
         }
     }
@@ -965,6 +981,9 @@ impl ObjectClass {
             ObjectClass::SetList => Some(Slot::SetList),
             ObjectClass::Live => Some(Slot::Live),
             ObjectClass::Settings => Some(Slot::Settings),
+            ObjectClass::OrganPreset => Some(Slot::OrganPreset),
+            ObjectClass::PianoPreset => Some(Slot::PianoPreset),
+            ObjectClass::SynthPreset => Some(Slot::SynthPreset),
             ObjectClass::Unknown(_) => None,
         }
     }

@@ -296,6 +296,9 @@ pub fn class_of(token: &str) -> Result<Option<ObjectClass>> {
         "setlist" => ObjectClass::SetList,
         "live" => ObjectClass::Live,
         "settings" => ObjectClass::Settings,
+        "organ-preset" => ObjectClass::OrganPreset,
+        "piano-preset" => ObjectClass::PianoPreset,
+        "synth-preset" => ObjectClass::SynthPreset,
         // A partition by its index, as `nord raw --class N` reaches it.
         other => match other.strip_prefix("class-").and_then(|n| n.parse().ok()) {
             Some(index) => ObjectClass::Unknown(index),

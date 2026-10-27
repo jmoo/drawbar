@@ -187,13 +187,16 @@ impl Stored {
 
 /// The number the index writes for each class it keeps a slot for. Fixed when the
 /// index format was set; no instrument's partition order changes it.
-const STORED_CLASSES: [(ObjectClass, u32); 6] = [
+const STORED_CLASSES: [(ObjectClass, u32); 9] = [
     (ObjectClass::Piano, 1),
     (ObjectClass::Sample, 3),
     (ObjectClass::Program, 4),
     (ObjectClass::SetList, 5),
     (ObjectClass::Live, 6),
     (ObjectClass::Settings, 7),
+    (ObjectClass::OrganPreset, 8),
+    (ObjectClass::PianoPreset, 9),
+    (ObjectClass::SynthPreset, 10),
 ];
 
 impl From<&Origin> for Stored {

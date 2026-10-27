@@ -33,6 +33,9 @@ pub fn e5_index(class: ObjectClass) -> u32 {
         ObjectClass::SetList => 5,
         ObjectClass::Live => 6,
         ObjectClass::Settings => 7,
+        ObjectClass::OrganPreset | ObjectClass::PianoPreset | ObjectClass::SynthPreset => {
+            unreachable!("the Electro 5 keeps no presets apart from its programs")
+        }
         ObjectClass::Unknown(index) => index,
     }
 }

@@ -1015,7 +1015,8 @@ impl Entity {
 
     /// A new Electro 5 file of one class: the default body, addressed to the first slot. A
     /// set list points its four entries at `set_list`. `None` for the piano and sample
-    /// libraries, which have no default.
+    /// libraries, which have no default, and for the preset libraries, which the Electro 5
+    /// does not have.
     pub fn electro5(
         class: accept::Slot,
         set_list: [ne5::program::Location; ne5::song::PROGRAM_COUNT],
@@ -1033,7 +1034,11 @@ impl Entity {
                 ne5::song::new(Default::default(), ne5::song::DEFAULT_VERSION, set_list)
                     .map(|song| Entity::Song(Song::Electro5(song)))
             }
-            Slot::Piano | Slot::Sample => return None,
+            Slot::Piano
+            | Slot::Sample
+            | Slot::OrganPreset
+            | Slot::PianoPreset
+            | Slot::SynthPreset => return None,
         })
     }
 

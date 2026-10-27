@@ -542,6 +542,9 @@ pub fn folder(class: ObjectClass) -> &'static str {
         ObjectClass::SetList => "Set lists",
         ObjectClass::Live => "Live",
         ObjectClass::Settings => "Settings",
+        ObjectClass::OrganPreset => "Organ presets",
+        ObjectClass::PianoPreset => "Piano presets",
+        ObjectClass::SynthPreset => "Synth presets",
         ObjectClass::Unknown(_) => "Other",
     }
 }

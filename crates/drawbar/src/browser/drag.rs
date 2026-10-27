@@ -54,13 +54,16 @@ pub enum Kind {
 ///
 /// [`Kind::home`] reads the table forward and [`Kind::from_class`] backward, so a class
 /// and its kind cannot drift apart.
-const HOMES: [(Kind, ObjectClass); 6] = [
+const HOMES: [(Kind, ObjectClass); 9] = [
     (Kind::Program, ObjectClass::Program),
     (Kind::SetList, ObjectClass::SetList),
     (Kind::Sample, ObjectClass::Sample),
     (Kind::Piano, ObjectClass::Piano),
     (Kind::Live, ObjectClass::Live),
     (Kind::Settings, ObjectClass::Settings),
+    (Kind::OrganPreset, ObjectClass::OrganPreset),
+    (Kind::PianoPreset, ObjectClass::PianoPreset),
+    (Kind::Synth, ObjectClass::SynthPreset),
 ];
 
 impl Kind {

@@ -148,18 +148,20 @@ fn the_electro_5_table_names_each_class_at_its_recorded_position() {
     pollster::block_on(async {
         let geometry = device.geometry().await.unwrap();
         for class in ObjectClass::NAMED {
-            assert_eq!(
-                geometry.classes().index(class),
-                Some(frames::e5_index(class)),
-                "{}",
-                class.label()
-            );
+            let held = match class {
+                ObjectClass::OrganPreset | ObjectClass::PianoPreset | ObjectClass::SynthPreset => {
+                    None
+                }
+                kept => Some(frames::e5_index(kept)),
+            };
+            assert_eq!(geometry.classes().index(class), held, "{}", class.label());
         }
     });
 }
 
-/// A Stage 4 orders its partitions its own way and holds no set lists. Its preset and
-/// pedal partitions carry names no class has.
+/// A Stage 4 orders its partitions its own way, holds no set lists, and keeps organ, piano
+/// and synth presets in libraries of their own. Its pedal partition carries a name no
+/// class has.
 #[test]
 fn the_stage_4_table_holds_each_class_where_its_names_put_it() {
     let steps = scripts::fixture("device/stage4-geometry.script").steps();
@@ -174,6 +176,9 @@ fn the_stage_4_table_holds_each_class_where_its_names_put_it() {
             (ObjectClass::SetList, None),
             (ObjectClass::Live, Some(10)),
             (ObjectClass::Settings, Some(11)),
+            (ObjectClass::OrganPreset, Some(7)),
+            (ObjectClass::PianoPreset, Some(8)),
+            (ObjectClass::SynthPreset, Some(9)),
         ] {
             assert_eq!(classes.index(class), index, "{}", class.label());
         }
@@ -182,15 +187,7 @@ fn the_stage_4_table_holds_each_class_where_its_names_put_it() {
             .filter(|(p, _)| !p.native && classes.at(p.index) == ObjectClass::Unknown(p.index))
             .map(|(p, _)| p.name.as_str())
             .collect();
-        assert_eq!(
-            unnamed,
-            [
-                "Piano Pedal",
-                "Organ Preset",
-                "Piano Preset",
-                "Synth Preset"
-            ]
-        );
+        assert_eq!(unnamed, ["Piano Pedal"]);
     });
     assert!(device.transport().is_exhausted());
 }
