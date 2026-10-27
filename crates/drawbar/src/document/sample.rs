@@ -962,7 +962,8 @@ impl Cache {
                 .zone(zone, &stream)
                 .map_err(|e| e.to_string())
                 .and_then(|audio| {
-                    codec::decode(audio.stream, audio.at, index.layout()).map_err(|e| e.to_string())
+                    codec::decode(audio.stream, audio.at, index.layout(), index.file_peak())
+                        .map_err(|e| e.to_string())
                 })
                 .map(|audio| Decoded {
                     envelope: envelope(&audio.samples, audio.channels, COLUMNS),
@@ -995,11 +996,13 @@ fn placed(entity: &Entity, index: usize) -> Option<(usize, usize)> {
 fn decode(entity: &Entity, index: usize) -> Result<Decoded, String> {
     let sample = sample(entity).ok_or("this is not a sample instrument")?;
     let layout = sample.layout().map_err(|e| e.to_string())?;
+    let file_peak = sample.file_peak().map_err(|e| e.to_string())?;
     let zones = sample.zones().map_err(|e| e.to_string())?;
     let zone = zones
         .get(index)
         .ok_or_else(|| format!("there is no zone {}", index + 1))?;
-    let audio = codec::decode(zone.stream, zone.at, layout).map_err(|e| e.to_string())?;
+    let audio =
+        codec::decode(zone.stream, zone.at, layout, file_peak).map_err(|e| e.to_string())?;
     let envelope = envelope(&audio.samples, audio.channels, COLUMNS);
     Ok(Decoded { audio, envelope })
 }
