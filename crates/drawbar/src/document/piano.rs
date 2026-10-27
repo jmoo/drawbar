@@ -3583,11 +3583,11 @@ const CAPABILITIES: Stands = [
     (Cap::Editable, "0x40c, signed tenths of a dB"),
     (
         Cap::ReadOnly,
-        "marks in the stroke record, carried unchanged; meaning unknown",
+        "start and length at +0x1c, carried unchanged; a WAV's loop sets them in a build",
     ),
     (
         Cap::ReadOnly,
-        "the applied-decay ladder at +0x36, carried as read",
+        "the fade at +0x2e and the ladder at +0x36, carried as read",
     ),
     (Cap::Editable, "bank 2: drop or keep"),
     (Cap::Editable, "bank 1: what the Small library leaves out"),
@@ -5286,6 +5286,7 @@ mod tests {
                             ((frame as f32 / hz).sin() * 8_000.0) as i16
                         })
                         .collect()],
+                    sustain: None,
                 })
             })
             .collect();

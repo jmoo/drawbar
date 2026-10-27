@@ -16,8 +16,8 @@
 
 use eframe::egui;
 use nord_format::formats::npno::encode::{
-    build, parse_stroke_name, resample, Clash, Donor, Kind, LayerTag, Options, Recording, Rules,
-    Stem, HIGHEST_PLAYED_LAYER,
+    build, parse_stroke_name, resample, sustain, Clash, Donor, Kind, LayerTag, Options, Recording,
+    Rules, Stem, HIGHEST_PLAYED_LAYER,
 };
 use nord_format::formats::npno::{Bank, Library};
 use nord_format::formats::nsmp::codec::Layout;
@@ -27,7 +27,7 @@ use nord_format::formats::nsmpproj::{
     project_frames, NewZone, Project, HIGHEST_NOTE, LOWEST_NOTE, PROJECT_RATE,
 };
 use nord_format::note;
-use nord_format::wav::Pcm16;
+use nord_format::wav::{Pcm16, SampleLoop};
 use nord_format::Entity;
 
 use crate::document::controls::fits;
@@ -123,8 +123,9 @@ impl Making {
             }
             Making::Piano => {
                 "One stroke per WAV. A name like 060-b0-l00.wav sets the root, bank and \
-                 layer; set them here otherwise. Kind, gain and the damper limit are \
-                 edited in the document afterward."
+                 layer; set them here otherwise. A WAV with a loop loops there while \
+                 the key is held. Kind, gain and the damper limit are edited in the \
+                 document afterward."
             }
         }
     }
@@ -415,6 +416,7 @@ impl Draft {
                 samples: pcm.samples.clone(),
                 channels: pcm.channels,
                 rate: pcm.rate,
+                sample_loop: pcm.sample_loop,
                 root: take.root_key,
                 bank: take.bank,
                 layer,
@@ -524,6 +526,7 @@ struct Recorded {
     samples: Vec<i16>,
     channels: u16,
     rate: u32,
+    sample_loop: Option<SampleLoop>,
     root: u8,
     bank: Bank,
     layer: u8,
@@ -556,11 +559,17 @@ impl Coding {
             let audio = resample(&take.samples, usize::from(take.channels), take.rate)
                 .map_err(|e| format!("{}: {e}", take.path))?;
             clipped += audio.clipped;
+            let sustain = take
+                .sample_loop
+                .map(|found| sustain(found, take.rate))
+                .transpose()
+                .map_err(|e| format!("{}: {e}", take.path))?;
             recordings.push(Recording {
                 root: take.root,
                 bank: take.bank,
                 layer: take.layer,
                 channels: audio.channels,
+                sustain,
             });
         }
 
@@ -668,9 +677,13 @@ pub fn dialog(ctx: &egui::Context, workspace: &mut Workspace, log: &mut Log) -> 
                             (None, Some(pcm)) => {
                                 ui.label(
                                     egui::RichText::new(format!(
-                                        "{} Hz, {:.2} s",
+                                        "{} Hz, {:.2} s{}",
                                         pcm.rate,
-                                        take.frames as f64 / PROJECT_RATE as f64
+                                        take.frames as f64 / PROJECT_RATE as f64,
+                                        match (making, pcm.sample_loop) {
+                                            (Making::Piano, Some(_)) => ", loops",
+                                            _ => "",
+                                        }
                                     ))
                                     .small()
                                     .weak(),
@@ -873,6 +886,7 @@ fn answered(workspace: &mut Workspace, log: &mut Log) -> Option<u64> {
 mod tests {
     use super::*;
     use nord_format::formats::npno::encode::SOFTEST_LAYER;
+    use nord_format::formats::npno::Loop;
     use nord_format::formats::nsmp::codec::SOURCE_RATE;
 
     #[test]
@@ -1176,6 +1190,40 @@ mod tests {
             ],
             "the root's two layers spread from the loudest to the softest"
         );
+    }
+
+    /// A WAV's `smpl` loop reaches the built stroke.
+    #[test]
+    fn a_wav_with_a_loop_builds_a_stroke_that_loops_there() {
+        let mut looped = nord_format::wav::mono_pcm16(
+            &vec![1_000i16; 10_000],
+            nord_format::formats::npno::codec::RATE,
+        )
+        .unwrap();
+        let mut sampler = vec![0u8; 36];
+        sampler[28] = 1;
+        for word in [0u32, 0, 2_000, 6_999, 0, 0] {
+            sampler.extend_from_slice(&word.to_le_bytes());
+        }
+        looped.extend_from_slice(b"smpl");
+        looped.extend_from_slice(&(sampler.len() as u32).to_le_bytes());
+        looped.extend_from_slice(&sampler);
+        let riff = (looped.len() - 8) as u32;
+        looped[4..8].copy_from_slice(&riff.to_le_bytes());
+
+        let mut draft = Draft::plan(
+            Making::Piano,
+            vec![
+                ("Ep-060-b0-l00.wav".into(), looped),
+                ("Ep-060-b2-l00.wav".into(), stroke_wav(3_000)),
+            ],
+        )
+        .expect("files were picked");
+        draft.begin(&egui::Context::default(), None).unwrap();
+        let built = finish(&mut draft).expect("a library");
+        let library = Library::borrow(&built.bytes).unwrap();
+        let loops: Vec<_> = library.strokes().iter().map(|s| s.sustain()).collect();
+        assert_eq!(loops, [Loop::new(2_000, 5_000), None]);
     }
 
     /// A template supplies the playback fields a recording cannot carry, and is read

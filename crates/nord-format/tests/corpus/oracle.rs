@@ -749,6 +749,7 @@ fn recordings_from(s: &Specimen) -> Result<(), String> {
                     .ok_or_else(|| format!("{stroke:?} names no bank"))?,
                 layer: stroke.layer(),
                 channels: audio.lanes,
+                sustain: None,
             })
         })
         .collect::<Result<_, String>>()?;
