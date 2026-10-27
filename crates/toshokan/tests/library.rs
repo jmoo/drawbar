@@ -85,6 +85,9 @@ struct Seen {
     blind: bool,
     /// Requests this picks fail.
     failing: Option<Box<Picks>>,
+    /// Requests this picks are carried out, and then fail, as a reply a backend
+    /// loses.
+    unanswered: Option<Box<Picks>>,
     /// Bytes written in the local root.
     local_written: u64,
     /// The longest read of a file directly in a writer's directory.
@@ -267,6 +270,17 @@ impl Probe {
         }
     }
 
+    /// `done`, or a failure when the probe loses the reply to `io`.
+    fn answer(&self, io: &Io, done: IoResult) -> IoResult {
+        let seen = self.seen.borrow();
+        match seen.unanswered.as_ref().is_some_and(|picks| picks(io)) {
+            true => done.and(Err(toshokan::IoError::Other(
+                "unanswered by the test".into(),
+            ))),
+            false => done,
+        }
+    }
+
     fn len(&self, path: &RelPath) -> u64 {
         self.machine
             .folder
@@ -296,7 +310,8 @@ impl Backend for Probe {
     fn perform(&mut self, io: Io) -> IoResult {
         self.check(&io);
         self.refuse(&io)?;
-        self.machine.perform(io)
+        let done = self.machine.perform(io.clone());
+        self.answer(&io, done)
     }
 }
 
@@ -308,7 +323,8 @@ impl asynch::Fs for Probe {
     async fn perform(&self, io: Io) -> IoResult {
         self.check(&io);
         self.refuse(&io)?;
-        asynch::Fs::perform(&self.machine, io).await
+        let done = asynch::Fs::perform(&self.machine, io.clone()).await;
+        self.answer(&io, done)
     }
 }
 
@@ -589,6 +605,7 @@ through_both!(
     a_record_whose_removal_fails_is_removed_before_the_next_write,
     closing_removes_a_record_whose_removal_failed,
     a_record_a_crash_left_spent_is_not_settled_again_and_goes_at_the_next_write,
+    a_record_whose_writing_seems_to_fail_is_settled_before_the_next_write,
     a_spent_record_is_reported_only_where_its_entry_has_not_arrived,
     a_settled_record_is_removed_and_logged_once,
     identities_a_failed_write_lost_are_kept_by_the_next_scan,
@@ -2875,7 +2892,12 @@ fn fail(probe: &Probe, which: impl Fn(&Io) -> bool + 'static) {
 }
 
 fn heal(probe: &Probe) {
-    probe.seen.borrow_mut().failing = None;
+    let mut seen = probe.seen.borrow_mut();
+    (seen.failing, seen.unanswered) = (None, None);
+}
+
+fn unanswered(probe: &Probe, which: impl Fn(&Io) -> bool + 'static) {
+    probe.seen.borrow_mut().unanswered = Some(Box::new(which));
 }
 
 /// Picks writes in the local root to a file named one of `names`.
@@ -3063,6 +3085,54 @@ fn closing_removes_a_record_whose_removal_failed<F: Facade>() {
     let (a, _, _) = with_a_record_left::<F>(&folder, &clock);
     a.close().unwrap();
     assert_eq!(pending_files(&folder), []);
+}
+
+fn a_record_whose_writing_seems_to_fail_is_settled_before_the_next_write<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    let record = |path: &RelPath| path.as_str().contains("/pending/");
+    unanswered(&probe, move |io| match io {
+        Io::Rename { to, .. } | Io::Create { path: to, .. } => record(to),
+        _ => false,
+    });
+    let placed = folder.clone();
+    let written =
+        move |path: &RelPath| record(path) && placed.files(Root::Folder).contains_key(path);
+    fail(
+        &probe,
+        move |io| matches!(io, Io::Stat { path, .. } if written(path)),
+    );
+    let held = Expect::Holds(identity(b"song"));
+    let moved = a.commit("Rename", |i| i.rename(song, &path("b.npno"), held));
+    heal(&probe);
+    assert!(
+        moved.is_err(),
+        "the record's write seems to fail: {moved:?}"
+    );
+    let records = |folder: &MemDisk| -> Vec<RelPath> {
+        let files = pending_files(folder).into_iter();
+        files.filter(|at| at.as_str().ends_with(".json")).collect()
+    };
+    assert_eq!(records(&folder).len(), 1, "the record is in place");
+    let at = |a: &F, entity| a.view().entity(entity).unwrap().file().unwrap().path;
+    let from = at(&a, song);
+    let held = Expect::Holds(identity(b"song"));
+    let renamed = a.commit("Rename", |i| i.rename(song, &path("c.npno"), held));
+    assert!(renamed.is_ok(), "from {from}: {renamed:?}");
+    let other = create(&mut a, "song.npno", b"other");
+    a.close().unwrap();
+    let (mut a, _) = F::open(probe, env("a", 2, &clock)).unwrap();
+    a.commit("Tag", |i| i.add(song, TAGS, tag("later")))
+        .unwrap();
+    let files = folder.files(Root::Folder);
+    for (entity, bytes) in [(song, &b"song"[..]), (other, &b"other"[..])] {
+        let file = at(&a, entity);
+        assert_eq!(files.get(&file).map(Vec::as_slice), Some(bytes), "{file}");
+    }
+    assert_eq!(records(&folder), [], "the record is removed");
 }
 
 fn a_record_a_crash_left_spent_is_not_settled_again_and_goes_at_the_next_write<F: Facade>() {

@@ -2373,8 +2373,8 @@ fn transact<'a>(
 
 /// Stages, checks and journals `effects` for the intent `logged`, which settling
 /// a record adds `facts` to, then carries them out. A refusal changes nothing; a
-/// failure once the record is written leaves it to settle, and one before leaves
-/// nothing to settle.
+/// failure once the record may be written leaves it to settle before the next
+/// write, and one the folder shows came before leaves nothing to settle.
 fn carry_out<'a>(
     library: &'a mut Library,
     logged: &Logged,
@@ -2427,7 +2427,8 @@ fn carry_out<'a>(
         Err(error) if journaled => {
             let path = layout.pending(id, name);
             flow::stat(Root::Folder, &path).then(move |written| {
-                if let Ok(Some(_)) = written {
+                // A record the folder may hold is settled before the next write.
+                if !matches!(written, Ok(None)) {
                     library.interrupted(name, &record);
                 }
                 Flow::Done(Err(error))
