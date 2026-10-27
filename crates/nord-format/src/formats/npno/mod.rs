@@ -132,8 +132,9 @@ const REC_MARKS: usize = 0x1c;
 /// u16 index of the block holding the loop start.
 const REC_MARK_BLOCK: usize = 0x2c;
 /// The fade a held note's loop plays under from the loop's start: [`LADDER_UNITY`] holds
-/// its level, `0x7ffedc` fades it about 7 dB/s, and 0 silences the stroke at the loop's
-/// start. Confirmed on hardware. Release strokes zero it.
+/// its level, each unit below it fades the loop 0.024 dB/s whatever key plays it, and 0
+/// silences the stroke at the loop's start. Confirmed on hardware. Release strokes zero
+/// it.
 const REC_DECAY: usize = 0x2e;
 /// u16 holding the layer value again in vendor records. Sweeping it moved nothing
 /// measurable. Confirmed on hardware.
