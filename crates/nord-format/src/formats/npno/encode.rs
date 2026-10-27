@@ -79,9 +79,10 @@
 //! A recording with a [`Recording::sustain`] loop is coded up to the loop's end, and
 //! the last block is filled out with the loop again, so the stroke ends where a vendor
 //! stroke does. The marks state the loop and the blocks around its start. A held note
-//! repeats the loop until the key is released, and a rule-written looped stroke holds its
-//! level while it does. Confirmed on hardware. A recording without a loop declares none,
-//! and plays to its end.
+//! repeats the loop until the key is released, fading from the loop's start at the rate
+//! the stroke states. Confirmed on hardware. A rule-written loop fades at
+//! [`Rules::loop_fade`], faster up the keyboard, as a vendor loop of the same kind does.
+//! A recording without a loop declares none, and plays to its end.
 
 use super::codec::{self, MAX_ORDER, MAX_WIDTH, MIN_WIDTH, OVERLAP};
 use super::{
@@ -135,7 +136,8 @@ impl Options {
 pub enum Donor<'a> {
     /// A library to copy them from: its prefix whole, and per stroke the decay
     /// coefficients of its nearest stroke of the same bank. A loop whose donor states no
-    /// loop fade holds its level.
+    /// loop fade fades as the template's kind of instrument does, a grand's where the
+    /// kind is not one [`Kind`] names.
     Template(&'a Library<'a>),
     /// Rules that state them, for a library built from recordings alone.
     Rules(Rules),
@@ -197,6 +199,31 @@ impl Kind {
             _ => ALL_KEYS_DAMPED,
         }
     }
+
+    /// The [`Rules::loop_fade`] this kind of instrument has.
+    pub fn loop_fade(self) -> u16 {
+        self.fade_curve().0
+    }
+
+    /// How a held loop fades on this kind of instrument: tenths of a decibel per second
+    /// at middle C, and the semitones over which that rate doubles up the keyboard.
+    /// Vendor libraries state one rate per root, the same on every layer, on this curve.
+    /// Fitted to one library of each kind and two digital pianos; no mallet library was
+    /// at hand, so a mallet takes the grand's. Inferred from specimens; not confirmed on
+    /// hardware.
+    fn fade_curve(self) -> (u16, u8) {
+        match self {
+            Kind::ElectricGrand => (71, 15),
+            Kind::ElectricPiano => (49, 25),
+            Kind::Wurlitzer => (73, 19),
+            Kind::Clavinet => (78, 25),
+            Kind::Grand | Kind::Mallet => (52, 30),
+            Kind::Upright => (50, 33),
+            Kind::Harpsichord => (61, 33),
+            Kind::DigitalPiano => (48, 36),
+            Kind::Hybrid => (48, 37),
+        }
+    }
 }
 
 /// A [`Rules::damper_top`] above the highest key the instrument plays, so that every
@@ -210,7 +237,8 @@ pub const DEFAULT_GAIN: i8 = 50;
 ///
 /// These are the parameters a recording cannot carry, at their neutral settings: the
 /// library is heard at [`Rules::gain`], each stroke is trimmed according to its layer
-/// value, nothing is applied over the recordings' own decay, and the damper reaches
+/// value, nothing is applied over the recordings' own decay until a held note reaches
+/// its loop, which then fades at [`Rules::loop_fade`], and the damper reaches
 /// [`Rules::damper_top`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rules {
@@ -221,6 +249,11 @@ pub struct Rules {
     /// Body `0x40d`: the highest key the instrument damps at note-off. Keys above it
     /// ring on, and [`ALL_KEYS_DAMPED`] leaves none of them. Confirmed on hardware.
     pub damper_top: u8,
+    /// How fast a held loop at middle C fades, in tenths of a decibel per second, from
+    /// the loop's start until the key is released. The rate doubles up the keyboard as
+    /// [`Kind::loop_fade`]'s does for [`Rules::kind`], and 0 holds every loop at its
+    /// level. Confirmed on hardware.
+    pub loop_fade: u16,
 }
 
 impl Rules {
@@ -230,6 +263,7 @@ impl Rules {
             kind,
             gain: DEFAULT_GAIN,
             damper_top: kind.damper_top(),
+            loop_fade: kind.loop_fade(),
         }
     }
 }
@@ -495,16 +529,22 @@ pub fn build(
     let mut order: Vec<&Recording> = recordings.iter().collect();
     order.sort_by_key(|r| (r.root, r.bank.code(), r.layer));
 
+    let fade = match donor {
+        Donor::Template(template) => {
+            Rules::new(Kind::from_code(template.kind_code()).unwrap_or_default())
+        }
+        Donor::Rules(rules) => *rules,
+    };
     let mut donors = Vec::with_capacity(order.len());
     for (index, recording) in order.iter().enumerate() {
         let mut stated = match donor {
             Donor::Template(template) => *donor_record(template, recording)?,
-            Donor::Rules(_) => rules_record(recording, index),
+            Donor::Rules(rules) => rules_record(recording, index, rules),
         };
         // ⚠️ A donor stroke that never looped states 0 here, and 0 cuts the note off at
         // the loop's start.
         if recording.sustain.is_some() && be32(&stated, REC_DECAY) == 0 {
-            put32(&mut stated, REC_DECAY, LADDER_UNITY);
+            put32(&mut stated, REC_DECAY, loop_decay(&fade, recording.root));
         }
         let (window, trim) = velocity_window(recording.bank, recording.layer);
         put16(&mut stated, REC_WINDOW, window);
@@ -693,14 +733,14 @@ fn damper_cut(note: usize) -> u8 {
 }
 
 /// The record a stroke states when no template donates one: a decay ladder that
-/// applies nothing, no fade while it loops, a note-off fade for its bank, and its place
-/// in the directory as the identifier.
+/// applies nothing, the fade `rules` state for its loop, a note-off fade for its bank,
+/// and its place in the directory as the identifier.
 ///
 /// [`record`] writes the audio's fields and the loop over this.
-fn rules_record(recording: &Recording, index: usize) -> [u8; RECORD] {
+fn rules_record(recording: &Recording, index: usize, rules: &Rules) -> [u8; RECORD] {
     let mut out = [0u8; RECORD];
     if recording.sustain.is_some() {
-        put32(&mut out, REC_DECAY, LADDER_UNITY);
+        put32(&mut out, REC_DECAY, loop_decay(rules, recording.root));
     }
     out[REC_NOTE_OFF] = note_off_fade(recording.bank);
     for entry in 0..DECAYS {
@@ -709,6 +749,18 @@ fn rules_record(recording: &Recording, index: usize) -> [u8; RECORD] {
     }
     put32(&mut out, REC_ID, index as u32 + 1);
     out
+}
+
+/// Decibels per second that each unit below [`LADDER_UNITY`] at [`REC_DECAY`] fades a
+/// held loop by, whatever key plays it. Confirmed on hardware.
+const LOOP_FADE_PER_UNIT: f64 = 0.024;
+
+/// The [`REC_DECAY`] that fades a held loop on `root` at the rate `rules` state there.
+fn loop_decay(rules: &Rules, root: u8) -> u32 {
+    let (_, doubling) = rules.kind.fade_curve();
+    let octaves = (f64::from(root) - 60.0) / f64::from(doubling);
+    let per_second = f64::from(rules.loop_fade) / 10.0 * octaves.exp2();
+    LADDER_UNITY - (per_second / LOOP_FADE_PER_UNIT).round() as u32
 }
 
 /// The fade [`REC_NOTE_OFF`] states for a stroke of `bank`, inside the range vendor
@@ -1848,32 +1900,62 @@ mod tests {
         }
     }
 
-    /// Without a template the loop fades by nothing, which a looped stroke states with
-    /// the ladder's unity; a stroke that never loops leaves `+0x2e` at zero.
+    /// Without a template a held loop fades as a vendor loop of the library's kind does: a
+    /// grand's 5.2 dB/s at middle C, doubling every 30 semitones up the keyboard. A
+    /// stroke that never loops states no fade, and a fade of 0 holds every loop.
     #[test]
-    fn a_rule_written_loop_applies_no_fade() {
+    fn a_rule_written_loop_fades_faster_up_the_keyboard() {
         let short = tone(6_000, 300.0, 1);
-        let mut looped = one(60, Bank::Attack, 0, short.clone());
-        looped.sustain = Loop::new(2_000, 3_000);
-        let built = build(
-            &Donor::Rules(Rules::default()),
-            &Options::new("L"),
-            &[looped, one(62, Bank::Attack, 0, short)],
-        )
-        .unwrap();
-        let decays: Vec<(u8, u32)> = built
-            .strokes()
-            .iter()
-            .map(|s| (s.root, s.decay()))
-            .collect();
-        assert_eq!(decays, [(60, LADDER_UNITY), (62, 0)]);
+        let looped = |root| {
+            let mut recording = one(root, Bank::Attack, 0, short.clone());
+            recording.sustain = Loop::new(2_000, 3_000);
+            recording
+        };
+        let recordings = [
+            looped(30),
+            looped(60),
+            looped(90),
+            one(72, Bank::Attack, 0, short.clone()),
+        ];
+        let fades = |rules| {
+            let built = build(&Donor::Rules(rules), &Options::new("L"), &recordings).unwrap();
+            built
+                .strokes()
+                .iter()
+                .map(|s| (s.root, LADDER_UNITY - s.decay()))
+                .collect::<Vec<_>>()
+        };
+        // At 0.024 dB/s per unit: 5.2 dB/s is 217 units, 2.6 is 108, 10.4 is 433.
+        assert_eq!(
+            fades(Rules::new(Kind::Grand)),
+            [(30, 108), (60, 217), (72, LADDER_UNITY), (90, 433)]
+        );
+        let held = Rules {
+            loop_fade: 0,
+            ..Rules::new(Kind::Grand)
+        };
+        assert_eq!(fades(held), [(30, 0), (60, 0), (72, LADDER_UNITY), (90, 0)]);
     }
 
-    /// A looped recording takes its template stroke's loop fade, and holds its level
-    /// where that stroke never looped and states none, rather than going silent at the
-    /// loop's start.
+    /// The fastest fade a caller can state, on the top key of every kind's curve, still
+    /// leaves a coefficient between silence and unity.
     #[test]
-    fn a_loop_built_against_a_template_that_never_looped_holds_its_level() {
+    fn the_fastest_loop_fade_fits_its_field_on_every_kind() {
+        for kind in Kind::ALL {
+            let rules = Rules {
+                loop_fade: u16::MAX,
+                ..Rules::new(kind)
+            };
+            let decay = loop_decay(&rules, 127);
+            assert!(decay > 0 && decay < LADDER_UNITY, "{kind:?}: {decay:#x}");
+        }
+    }
+
+    /// A looped recording takes its template stroke's loop fade. Where that stroke never
+    /// looped and states none, the loop fades as the template's kind does rather than
+    /// going silent at the loop's start.
+    #[test]
+    fn a_loop_built_against_a_template_that_never_looped_fades_as_its_kind() {
         let short = tone(6_000, 300.0, 1);
         let looped = || {
             let mut recording = one(60, Bank::Attack, 0, short.clone());
@@ -1881,13 +1963,15 @@ mod tests {
             recording
         };
         let unlooped = build(
-            &Donor::Rules(Rules::default()),
+            &Donor::Rules(Rules::new(Kind::Wurlitzer)),
             &Options::new("Plain"),
             &[one(60, Bank::Attack, 0, short.clone())],
         )
         .unwrap();
         let faded = template(1);
-        for (template, fade) in [(unlooped, LADDER_UNITY), (faded.library().unwrap(), 0x2000)] {
+        // A Wurlitzer fades 7.3 dB/s at C4: 304 units of 0.024 dB/s below unity.
+        let wurlitzer = LADDER_UNITY - 304;
+        for (template, fade) in [(unlooped, wurlitzer), (faded.library().unwrap(), 0x2000)] {
             let built =
                 build(&Donor::Template(&template), &Options::new("L"), &[looped()]).unwrap();
             assert_eq!(built.strokes()[0].decay(), fade);
@@ -1982,6 +2066,7 @@ mod tests {
             kind: Kind::Wurlitzer,
             gain: -20,
             damper_top: 97,
+            loop_fade: Kind::Wurlitzer.loop_fade(),
         };
         let built = build(
             &Donor::Rules(rules),
