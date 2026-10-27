@@ -467,6 +467,17 @@ steady state is about 6 MB of memory and 4 MB of folder, plus:
 These grow with deletions, segments, commits that moved files and writers, not
 with entries otherwise.
 
+`tests/no_growth.rs`, in the default suite, checks this for ten entities at
+20,000 and 200,000 entries: the folder, what open reads and keeps, and the
+requests of open, commit and refresh stay the same, but for the certificates and
+the record pairs the entries between add, and a digit per number. The scale
+example compares the same at full size, by hand:
+
+```text
+cargo run --release --example scale -- --entities 2000 --entries 200000 --writers 3 --tags 5
+cargo run --release --example scale -- --entities 2000 --entries 2000000 --writers 3 --tags 5
+```
+
 ## An old folder
 
 There are no migrations before 1.0. This format lives under `writers.2/`; an old
