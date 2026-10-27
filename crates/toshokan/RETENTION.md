@@ -468,7 +468,7 @@ These grow with deletions, segments, commits that moved files and writers, not
 with entries otherwise.
 
 `tests/no_growth.rs`, in the default suite, checks this for ten entities at
-20,000 and 200,000 entries: the folder, what open reads and keeps, and the
+10,000 and 100,000 entries: the folder, what open reads and keeps, and the
 requests of open, commit and refresh stay the same, but for the certificates and
 the record pairs the entries between add, and a digit per number. The scale
 example compares the same at full size, by hand:

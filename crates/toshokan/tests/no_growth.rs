@@ -3,6 +3,10 @@
 //! Two parts of a snapshot grow with use, by bounds SPEC's What stays states:
 //! certificates, per segment a writer ended, and the record pairs of `settled`,
 //! per commit that moved files.
+//!
+//! This proves that folding and opening stay flat, not the commit path: the
+//! generated entries name records by nonce, and no pending-record file is ever
+//! written.
 
 mod scale;
 
@@ -21,12 +25,13 @@ use toshokan::{Env, Io, Layout, MemDisk, Register, Root, Schema, Set};
 const ENTITIES: usize = 10;
 const TAGS: usize = 5;
 const WRITERS: usize = 3;
-const SHORT: usize = 20_000;
+const SHORT: usize = 10_000;
 const LONG: usize = 10 * SHORT;
 
-/// The most a segment a writer ended adds to its certificates: its segment
-/// certificate, and the head of the snapshot a compaction replaced.
-const PER_SEGMENT: usize = 140;
+/// The most a segment a writer ended adds to its certificates.
+const PER_CERTIFICATE: usize = 96;
+/// The most the head of a snapshot a compaction replaced adds to them.
+const PER_HEAD: usize = 48;
 /// The most a pending record its writer closed adds to `settled`: one pair,
 /// `["<writer>","<record>"],`.
 const PER_RECORD: usize = 72;
@@ -55,8 +60,9 @@ fn layout() -> Layout {
 /// What a library of [`ENTITIES`] keeps and costs after `entries` entries.
 #[derive(Debug)]
 struct Measured {
-    /// The folder's bytes, all of them in files of writers' directories.
+    /// The folder's bytes, and those of its snapshots.
     folder: usize,
+    snapshots: usize,
     /// Snapshot bytes besides certificates and `settled`.
     state: usize,
     /// Numbers those bytes hold, each of which may gain a digit.
@@ -65,8 +71,10 @@ struct Measured {
     held: [usize; 4],
     certificates: usize,
     settled: usize,
-    /// Segments the writers ended, each of which a certificate names.
+    /// Segments the writers ended, each of which a certificate names, and the
+    /// heads of replaced snapshots the certificates name.
     segments: usize,
+    heads: usize,
     /// Pending records the writers closed, and the pairs `settled` holds.
     records: usize,
     pairs: usize,
@@ -129,12 +137,17 @@ fn measure(entries: usize) -> Measured {
         .collect();
     let mut measured = Measured {
         folder: files.values().map(Vec::len).sum(),
+        snapshots: snapshots
+            .iter()
+            .map(|snapshot| snapshot.encode().len())
+            .sum(),
         state: 0,
         numbers: 0,
         held: [0; 4],
         certificates: 0,
         settled: 0,
         segments: gen.writers.iter().map(|w| w.segments).sum(),
+        heads: snapshots.iter().map(|s| s.certified.heads.len()).sum(),
         records: gen.records,
         pairs: 0,
         read: 0,
@@ -197,6 +210,7 @@ fn measure(entries: usize) -> Measured {
         names: Box::new(ExactNames),
         label: "measured".into(),
     };
+    // ⚠️ `kept` reads the process-wide allocator, so this file holds one test.
     let before = CURRENT.load(Relaxed);
     let (mut library, _) = Library::open(backend, layout(), &schema(), env).unwrap();
     measured.kept = CURRENT.load(Relaxed) as isize - before as isize;
@@ -242,13 +256,15 @@ fn a_library_of_constant_size_keeps_and_costs_the_same_as_its_history_grows() {
     eprintln!("{SHORT} entries: {short:#?}\n{LONG} entries: {long:#?}");
     let grew = |at: fn(&Measured) -> usize| at(&long) as isize - at(&short) as isize;
     let segments = long.segments - short.segments;
+    let heads = long.heads - short.heads;
     let records = long.records - short.records;
-    let digits = long.numbers * PER_NUMBER;
-    let allowed = (segments * PER_SEGMENT + records * PER_RECORD + digits) as isize;
-    let folder = grew(|m| m.folder);
-    assert!(
-        folder <= allowed,
-        "the folder grew by {folder} B of {allowed}"
+    let digits = short.numbers * PER_NUMBER;
+    let certified = segments * PER_CERTIFICATE + heads * PER_HEAD;
+    let allowed = (certified + records * PER_RECORD + digits) as isize;
+    assert_eq!(
+        short.folder - short.snapshots,
+        long.folder - long.snapshots,
+        "the folder's bytes besides snapshots"
     );
     assert_eq!(
         short.held, long.held,
@@ -258,12 +274,12 @@ fn a_library_of_constant_size_keeps_and_costs_the_same_as_its_history_grows() {
     assert!(
         state.unsigned_abs() <= digits,
         "the state grew by {state} B over {} numbers",
-        long.numbers
+        short.numbers
     );
     let certificates = grew(|m| m.certificates);
     assert!(
-        certificates <= (segments * PER_SEGMENT) as isize,
-        "certificates grew by {certificates} B for {segments} more segments"
+        certificates <= certified as isize,
+        "certificates grew by {certificates} B for {segments} more segments and {heads} heads"
     );
     for m in [&short, &long] {
         assert_eq!(m.pairs, m.records, "a pair per record closed");

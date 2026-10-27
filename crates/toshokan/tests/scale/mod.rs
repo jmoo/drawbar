@@ -1,8 +1,10 @@
 //! The library generator, request counts and counting allocator that the
 //! `scale` example and the no-growth test share.
 
-// The example uses all of it; the test uses part.
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "the scale example uses all of it, the no-growth test part"
+)]
 
 use std::alloc::{GlobalAlloc, Layout as Alloc, System};
 use std::cell::RefCell;
