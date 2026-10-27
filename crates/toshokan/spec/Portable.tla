@@ -15,7 +15,8 @@
 (* writing it seals when it closes it), a snapshot (anchored at its last   *)
 (* entry, it reflects the chain it folds but lets a reader chain only from *)
 (* its anchor and recognize only the lines it certified) or a pending      *)
-(* record (one effect, in flight or spent: closed by a logged entry).      *)
+(* record (one effect, in flight or spent: closed by a logged entry; its   *)
+(* anchor is its writer's last entry when it was written, or None).        *)
 (* Files are never edited in place: segments only grow, and the owner      *)
 (* deletes whole files. Each reader sees each file through `vis`: nothing, *)
 (* a readable prefix, or all of it, independently of every other file and  *)
@@ -46,7 +47,8 @@ CONSTANTS
     UniqueNames,    \* no two histories give a segment the same name
     SealedOnly,     \* a writer deletes only segments with a seal marker
     FoldedOnly,     \* a writer deletes only segments one of its snapshots folds
-    CheckFirst      \* a writer confirms the folder holds what it builds on
+    CheckFirst,     \* a writer confirms the folder holds what it builds on
+    SettleFirst     \* a writer closes its open effect before it appends anything else
 
 None == 0
 First == CHOOSE i \in Instances : TRUE
@@ -245,14 +247,25 @@ Read(r, v) ==
 \* Entries the files a reader sees hold, in a segment or folded in a snapshot.
 VisHolds(v) == Present(v) \cup Folds(Snaps(v))
 
-\* Effects an entry the reader holds closes: merged, shown as a run, held back
-\* after a gap, or dismissed. One closed on a branch is that branch's, shown
-\* with it as an item, and never reported to settle again.
-Closed(r) == {ents[x].closes : x \in acc[r] \cup shown[r] \cup gaps[r] \cup dismissed[r]} \ {0}
-\* Pending records the reader sees whose effect no entry it holds closes.
+\* Entries the reader holds: merged, shown as a run, held back after a gap, or
+\* dismissed.
+Held(r) == acc[r] \cup shown[r] \cup gaps[r] \cup dismissed[r]
+\* Effects an entry the reader holds closes. One closed on a branch is that
+\* branch's, shown with it as an item, and never reported to settle again.
+Closed(r) == {ents[x].closes : x \in Held(r)} \ {0}
+\* Whether reader r takes record f as closed: by an entry of another directory
+\* that closes its effect, a settlement, or by any entry of its own directory
+\* after its anchor on a chain through it. It needs no other entry's `closes`.
+RecordClosed(r, f) ==
+    \E x \in Held(r) :
+        IF ents[x].dir # files[f].dir THEN ents[x].closes = files[f].eff
+        ELSE files[f].anchor = None \/ files[f].anchor \in Chain(x) \ {x}
+\* Pending records the reader sees that it does not take as closed.
 Reported(r) ==
-    {files[f].eff : f \in {g \in Files : files[g].kind = "pend" /\ vis[r][g] = 1}}
-        \ (Closed(r) \cup {inflight[r].eff})
+    {files[f].eff : f \in {g \in Files : /\ files[g].kind = "pend"
+                                         /\ vis[r][g] = 1
+                                         /\ ~RecordClosed(r, g)}}
+        \ {inflight[r].eff}
 
 \* Every file in the folder is wholly visible to r.
 Delivered(r) == \A f \in Files : ~files[f].deleted => vis[r][f] = FileLen(f)
@@ -302,7 +315,14 @@ AppendEntry(i, closes, dis) ==
        /\ seg' = [seg EXCEPT ![i] = f]
        /\ head' = [head EXCEPT ![i] = e]
 
+\* No effect of this writer is open.
+Idle(i) == inflight[i] = NoEffect \/ inflight[i].logged
+
+\* A writer appends only the entry that closes its open effect until it has.
+Appendable(i) == SettleFirst => Idle(i)
+
 Write(i) ==
+    /\ Appendable(i)
     /\ AppendEntry(i, 0, {})
     /\ UNCHANGED <<nW, nEff, clones, losses, role, wid, dying, lastSnap,
                    inflight, reader, folder, chaos>>
@@ -373,9 +393,6 @@ DeleteOne(i) ==
     /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, seg,
                    lastSnap, nextName, inflight, reader, folder, chaos>>
 
-\* No effect of this writer is open.
-Idle(i) == inflight[i] = NoEffect \/ inflight[i].logged
-
 \* A multi-step effect: write its pending record, then log the entry that
 \* closes it. The record is then spent, and its writer deletes it before it
 \* begins another effect.
@@ -385,7 +402,7 @@ Begin(i) ==
     /\ inflight[i] = NoEffect
     /\ nEff < MaxEffects
     /\ Len(files) < MaxFiles
-    /\ files' = Append(files, NewFile("pend", wid[i], f, <<>>, None, {}, {}, nEff + 1))
+    /\ files' = Append(files, NewFile("pend", wid[i], f, <<>>, head[i], {}, {}, nEff + 1))
     /\ inflight' = [inflight EXCEPT ![i] = [eff |-> nEff + 1, rec |-> f, logged |-> FALSE]]
     /\ nEff' = nEff + 1
     /\ UNCHANGED <<ents, nW, clones, losses, role, wid, head, seg, dying,
@@ -412,6 +429,7 @@ Unpend(i) ==
 \* deletes it. Consent is the choice to take this step.
 Settle(i) ==
     \E e \in Reported(i) :
+        /\ Appendable(i)
         /\ AppendEntry(i, e, {})
         /\ UNCHANGED <<nW, nEff, clones, losses, role, wid, dying,
                        lastSnap, inflight, reader, folder, chaos>>
@@ -419,6 +437,7 @@ Settle(i) ==
 \* The user dismisses the runs a writer's reader shows, by an entry naming
 \* them. Taking a run's writes instead is an ordinary write.
 Dismiss(i) ==
+    /\ Appendable(i)
     /\ shown[i] # {}
     /\ AppendEntry(i, 0, shown[i])
     /\ UNCHANGED <<nW, nEff, clones, losses, role, wid, dying, lastSnap,
@@ -734,6 +753,19 @@ OwnDirectory ==
 \* The folder keeps every entry written, in a segment or folded in a
 \* snapshot, unless a restore took it.
 Retained == Kept \subseteq Holds(files)
+
+\* The entry of a record's directory that follows the record's anchor closes
+\* it, so a reader can take the record as closed by position alone.
+ClosedInOrder ==
+    \A f \in Files : \A x \in All :
+        /\ files[f].kind = "pend"
+        /\ ents[x].dir = files[f].dir
+        /\ ents[x].prev = files[f].anchor
+        => ents[x].closes = files[f].eff
+
+\* A reader never reports an effect an entry it holds closes, which would let
+\* it be settled twice.
+ReportsOpen == \A r \in Instances : Reported(r) \cap Closed(r) = {}
 
 \* Every effect begun has a pending record or a closing entry in the folder,
 \* unless a restore took both.

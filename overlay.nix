@@ -834,6 +834,7 @@ in
         "Unnumbered"
         "Unquarantined"
         "Anchors"
+        "Unsettled"
       ];
       toshokan-spec-deep = toshokanSpec "toshokan-spec-deep" [
         "PortableWide"

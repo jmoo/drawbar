@@ -24,13 +24,14 @@ predecessor, so a writer's entries form a chain. A writer appends entries to
 segments, and a process that closes its segment seals it with a marker. A
 writer folds its own chain into a snapshot, and then deletes the snapshot the
 new one supersedes and the sealed segments that a snapshot in its directory
-folds. A multi-step effect writes a pending record and logs the entry that
-closes it, which names the record: the model closes an effect by its own
-`logged` flag, and the code closes a record only by an entry naming its nonce,
-never by its place in the chain. The record is then spent, and its owner deletes
-it before it begins another effect, or never. Another writer that sees the record
-of an effect no entry closes reports it, and with the user's consent closes it in
-its own log; only the record's owner deletes it.
+folds. A multi-step effect writes a pending record, anchored at its writer's
+last entry, and logs the entry that closes it; the writer appends nothing else
+until it has. A reader takes a record as closed by any entry of its directory
+after its anchor on a chain through it, or by another writer's entry that closes
+it. The record is then spent, and its owner deletes it before it begins another
+effect, or never. Another writer that sees the record of an effect no entry
+closes reports it, and with the user's consent closes it in its own log; only the
+record's owner deletes it.
 
 Each entry carries its number in its writer's chain. A snapshot lets a reader
 chain only from its anchor, and recognize the lines it certifies: those it folds
@@ -79,6 +80,7 @@ that drops it shows the failure it prevents:
 | A writer deletes only segments that end with a seal marker, which the process that closed the segment wrote. The segment open when a process crashed, or when its local root was copied, has none and is never deleted. | `SealedOnly` | [`Sealed.cfg`](Sealed.cfg): the clone compacts and deletes the segment the original still has open, and the original's next entry goes with it. |
 | A writer deletes only segments every entry of which a snapshot in its directory certifies. | `FoldedOnly` | [`Folded.cfg`](Folded.cfg): the original seals a segment after the fork, and the clone compacts and deletes it, though no snapshot folds the original's entry. |
 | Before each write, a writer confirms that the folder holds its last entry, and before deleting a superseded file, that it holds the snapshot superseding it. A writer whose last entry is gone takes a new id. | `CheckFirst` | [`Unchecked.cfg`](Unchecked.cfg): a restore takes the writer's last entry, and the writer appends after it. |
+| A writer with an open effect appends only the entry that closes it. | `SettleFirst` | [`Unsettled.cfg`](Unsettled.cfg): a writer appends after its record's anchor an entry that does not close the record, which a reader would take as closed. |
 
 Snapshots and pending records are named at random too. The model gives every
 file a unique name except segments under `UniqueNames = FALSE`.
@@ -105,6 +107,8 @@ roughly in order.
 | `OwnDirectory` | A writer creates, appends to and deletes files only in its own directory. |
 | `Retained` | The folder keeps every entry written, in a segment or folded in a snapshot, unless a restore or a dropped version took it. |
 | `EffectAccounted` | Every effect begun has a pending record or a closing entry in the folder, unless a restore took both. |
+| `ClosedInOrder` | The entry of a record's directory that follows the record's anchor closes it. |
+| `ReportsOpen` | A reader never reports an effect an entry it holds closes, so none is settled twice. |
 | `DeliveredConverges` | Once every file has reached a reader, it merges, shows or has dismissed every kept entry, holds back only what follows a lost entry, and reports every fork among the kept entries it sees, whatever the delivery order. |
 | `DeliveredSettles` | Once every file has reached a reader, every effect is closed by an entry it holds, merged or on a branch it shows apart, reported, or that reader's own effect in flight; this includes the effects of a writer whose local root was lost. |
 | `Monotone` | As files arrive, a reader stops merging an entry only when it now shows it or has dismissed it. |
@@ -132,7 +136,7 @@ replace them arrive.
 | `Resurface` | a deleted segment arriving after later compactions | `toshokan-spec` |
 | `Drop` | a sync client keeping an earlier version of a segment | `toshokan-spec` |
 | `ResumeMid` | a clone resumed mid-segment, appending to its own copy of it | `toshokan-spec-deep` |
-| `Names`, `Sealed`, `Folded`, `Unchecked`, `Uncertified`, `Uncarried`, `Unnumbered`, `Unquarantined` | expected violations | `toshokan-spec` |
+| `Names`, `Sealed`, `Folded`, `Unchecked`, `Uncertified`, `Uncarried`, `Unnumbered`, `Unquarantined`, `Unsettled` | expected violations | `toshokan-spec` |
 | `Anchors` | expected violation, four entries | `toshokan-spec` |
 | `PortableWide` | `Portable` with four files | `toshokan-spec-deep` |
 | `PortableDeep` | `Portable` with five files | `toshokan-spec-deep` |
@@ -173,6 +177,9 @@ reader's obligations. [SPEC.md](../SPEC.md) states each in full.
   the settling writer's own log, and removed only by its owner. An owner
   removes a record only once its log holds the closing entry, and never after
   it stops writing.
+- A writer settles its own open records before it appends anything else, so the
+  entry after a record's position closes it, and a reader takes its writer's
+  record as closed by position.
 - Each fork point the files show is reported.
 - After the local root is lost, the install reads from scratch as a new writer
   and never writes the old writer's directory again.
