@@ -17,7 +17,7 @@ says what it takes and keeps, in words for users.
 The collector keeps no request logs and stores no address or user agent.
 [`queries/`](queries) holds the queries used to read Analytics Engine.
 
-Reports come from reports@johndm.dev, which needs Cloudflare Email Routing on
+Reports come from noreply@johndm.dev, which needs Cloudflare Email Routing on
 johndm.dev, and reports@drawbar.app must be a verified destination address. Email
 Routing sends to a verified address on the free plan; Email Sending is not needed.
 
