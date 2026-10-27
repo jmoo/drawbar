@@ -5089,7 +5089,7 @@ mod tests {
             let render = |layout| instrument(&source, &options.clone().layout(layout)).unwrap();
             let shift = |file: &crate::Sample| {
                 let (_, stroke) = file.stroke_streams()[0];
-                codec::shift(stroke, file.layout().unwrap()).unwrap()
+                codec::shift_against(stroke, file.file_peak().unwrap()).unwrap()
             };
             for from in Layout::ALL {
                 for to in Layout::ALL {
@@ -5114,7 +5114,7 @@ mod tests {
         let v4 = instrument(&loud, &Options::new("Test").layout(Layout::V4)).unwrap();
         let shift = |file: &crate::Sample| {
             let (_, stroke) = file.stroke_streams()[0];
-            codec::shift(stroke, file.layout().unwrap()).unwrap()
+            codec::shift_against(stroke, file.file_peak().unwrap()).unwrap()
         };
         assert!(
             shift(&v2) > shift(&v4),

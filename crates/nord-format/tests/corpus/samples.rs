@@ -286,7 +286,7 @@ pub fn planned_key_map(
 /// peak.
 pub fn lattices(sample: &Sample) -> Result<Vec<nsmp::codec::Lattice>, String> {
     let layout = sample.layout().context("layout")?;
-    let file_peak = peak(&sample.stroke_streams(), layout) as u32;
+    let file_peak = sample.file_peak().context("file peak")?;
     sample
         .zones()
         .context("zones")?
