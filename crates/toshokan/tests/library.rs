@@ -609,6 +609,7 @@ through_both!(
     a_record_that_never_landed_is_not_carried_out_by_the_next_write,
     a_copied_move_whose_source_removal_fails_leaves_no_copy_behind,
     an_append_whose_reply_was_lost_stands_and_the_next_write_takes_a_new_writer,
+    a_new_segment_whose_reply_was_lost_stands_and_the_next_write_takes_a_new_writer,
     a_spent_record_is_reported_only_where_its_entry_has_not_arrived,
     a_settled_record_is_removed_and_logged_once,
     identities_a_failed_write_lost_are_kept_by_the_next_scan,
@@ -3091,15 +3092,33 @@ fn closing_removes_a_record_whose_removal_failed<F: Facade>() {
 }
 
 fn an_append_whose_reply_was_lost_stands_and_the_next_write_takes_a_new_writer<F: Facade>() {
+    a_lost_segment_write_stands::<F>(false);
+}
+
+fn a_new_segment_whose_reply_was_lost_stands_and_the_next_write_takes_a_new_writer<F: Facade>() {
+    a_lost_segment_write_stands::<F>(true);
+}
+
+/// Loses the reply to the write of a segment's first line when `fresh`, and to an
+/// append otherwise, then writes again.
+fn a_lost_segment_write_stands<F: Facade>(fresh: bool) {
     let folder = disk();
     let clock = TestClock::at(1_000);
     let probe = Probe::new(&machine(&folder));
     let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
     let song = create(&mut a, "song.npno", b"song");
+    if fresh {
+        a.close().unwrap();
+        a = F::open(probe.clone(), env("a", 1, &clock)).unwrap().0;
+    }
     let once = Cell::new(true);
     unanswered(&probe, move |io| {
         let segment = io.path().as_str().ends_with(SEGMENT_EXTENSION);
-        matches!(io, Io::Append { .. }) && segment && once.replace(false)
+        let write = match fresh {
+            true => matches!(io, Io::Create { .. }),
+            false => matches!(io, Io::Append { .. }),
+        };
+        write && segment && once.replace(false)
     });
     let lost = a.commit("Tag", |i| i.add(song, TAGS, tag("landed")));
     heal(&probe);
@@ -3109,11 +3128,11 @@ fn an_append_whose_reply_was_lost_stands_and_the_next_write_takes_a_new_writer<F
         matches!(
             stopped,
             Err(Error::Rekey {
-                why: Rekey::Restored,
+                why: Rekey::Landed,
                 ..
             })
         ),
-        "the writer finds a line after its head and stops: {stopped:?}"
+        "the writer finds its write landed and stops: {stopped:?}"
     );
     a.commit("Tag", |i| i.add(song, TAGS, tag("next"))).unwrap();
     assert_eq!(a.view().forks(), [], "no fork");

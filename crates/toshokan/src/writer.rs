@@ -34,6 +34,16 @@ pub struct Writer {
     open: Option<OpenSegment>,
     /// A file this process knew to hold its head.
     holder: Option<Holder>,
+    /// The file the last failed write went to, which it may have reached.
+    failed: Option<Failed>,
+}
+
+/// A write whose request failed: the file it went to, and the length that file
+/// has if the write landed whole. One cut short leaves a torn line, no entry.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Failed {
+    path: RelPath,
+    whole: u64,
 }
 
 /// A file known to hold a writer's head while its length and last bytes are
@@ -162,6 +172,7 @@ impl Writer {
             RelPath::parent,
         ));
         let writer = Writer {
+            failed: None,
             holder: Some(Holder {
                 path: path.clone(),
                 len,
@@ -367,8 +378,26 @@ impl Writer {
         self.holder = Some(Holder { path, len, tail });
     }
 
-    /// Where to append, once the folder is confirmed to hold this writer's head.
+    /// Where to append, once the folder is confirmed to hold this writer's head
+    /// and not to hold what its last failed write would have added.
     fn confirm<'a>(&self) -> Flow<'a, Result<Confirmed>> {
+        let Some(failed) = self.failed.clone() else {
+            return self.confirm_held();
+        };
+        let (id, held) = (self.id, self.confirm_held());
+        flow::stat(Root::Folder, &failed.path).and_then(move |meta| {
+            match meta.is_some_and(|meta| meta.len >= failed.whole) {
+                true => Flow::Done(Err(Error::Rekey {
+                    writer: id,
+                    why: Rekey::Landed,
+                })),
+                false => held,
+            }
+        })
+    }
+
+    /// Where to append, once the folder is confirmed to hold this writer's head.
+    fn confirm_held<'a>(&self) -> Flow<'a, Result<Confirmed>> {
         let (id, head) = (self.id, self.head.hash);
         let lost = move || {
             Err(Error::Rekey {
@@ -451,12 +480,15 @@ impl Writer {
                 }
             }
         };
+        let start = open.map_or(0, |open| open.len);
         flow::act(request).then(move |landed| {
             if let Err(error) = landed {
                 self.leave();
+                let whole = start + len;
+                self.failed = Some(Failed { path, whole });
                 return Flow::Done((self, Err(error)));
             }
-            let start = open.map_or(0, |open| open.len);
+            self.failed = None;
             self.open = Some(OpenSegment {
                 name: segment,
                 len: start + len,
@@ -543,6 +575,7 @@ impl Picked {
             Err(why) => return retire(genesis, id, why).task(),
         };
         let writer = Writer {
+            failed: None,
             holder: holder(reader, id, tip),
             layout,
             id,
@@ -692,9 +725,9 @@ fn ends_with<'a>(path: RelPath, len: u64, hash: EntryHash) -> Flow<'a, Result<bo
         .map_ok(move |bytes| bytes.is_some_and(|bytes| bytes == line::ending(hash)))
 }
 
-/// Whether a file in `writer`'s directory of the folder holds `head` now with
-/// nothing after it, as a segment's last entry or a snapshot's head: first any
-/// file whose last bytes end the line `head` names, then any file read whole.
+/// Whether a file in `writer`'s directory of the folder holds `head` now, in a
+/// segment or named by a snapshot: first any file whose last bytes end the line
+/// `head` names, then any file read whole.
 pub(crate) fn holds<'a>(layout: &Layout, writer: WriterId, head: Own) -> Flow<'a, Result<bool>> {
     let dir = layout.writer(writer);
     let ending = line::ending(head.hash);
@@ -727,13 +760,11 @@ pub(crate) fn holds<'a>(layout: &Layout, writer: WriterId, head: Own) -> Flow<'a
             flow::fold(whole.into_iter(), found, move |found, path| match found {
                 true => flow::ok(true),
                 false => flow::read_file(Root::Folder, &path, MAX_FILE).map_ok(move |bytes| {
-                    // A line after the head is one an append landed whose reply was lost.
                     bytes.is_some_and(|bytes| match WriterFile::parse(&bytes) {
-                        WriterFile::Segment(segment) => segment
-                            .entries
-                            .last()
-                            .is_some_and(|entry| entry.own() == head),
-                        WriterFile::Snapshot(snapshot) => snapshot.head == head,
+                        WriterFile::Segment(segment) => {
+                            segment.entries.iter().any(|entry| entry.own() == head)
+                        }
+                        WriterFile::Snapshot(snapshot) => snapshot.names(head),
                         WriterFile::Unreadable { .. } => false,
                     })
                 }),

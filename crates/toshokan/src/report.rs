@@ -59,6 +59,9 @@ pub enum Rekey {
     /// The folder no longer holds this writer's last entry: it was restored from an
     /// older copy.
     Restored,
+    /// A write reported as failed reached the folder all the same: the folder
+    /// holds an entry this writer does not know it wrote.
+    Landed,
 }
 
 /// One of this writer's interrupted effects, and how settling it will end.

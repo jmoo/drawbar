@@ -507,13 +507,13 @@ marker and syncs the segment. Nothing is appended to a sealed segment. Before
 each append, a writer confirms that the folder holds its last entry: its open
 segment has the length this process left it and ends with that entry's line.
 Otherwise, or with no segment open, a file in its directory must hold that
-entry with no line after it, and the writer leaves the segment without a seal
-marker and appends to a new one. It looks first at the file it last knew to hold the entry, unchanged in
+entry, and the writer leaves the segment without a seal marker and appends to a
+new one. It looks first at the file it last knew to hold the entry, unchanged in
 length and last 34 bytes, then at every file whose last 34 bytes end that
-entry's line, and only then reads files whole. If no file holds it so, the writer
-writes nothing and stops: a new writer takes over from the next write. An append
-that landed though its reply was lost ends a writer this way, and its entry
-stands. After the
+entry's line, and only then reads files whole. If no file holds it, the writer
+writes nothing and stops: a new writer takes over from the next write. A writer
+whose write failed checks the file it wrote before writing again; if the write
+landed whole, it stops in the same way, and the landed entry stands. After the
 append is synced it stats the segment and writes `head.json`, before the commit
 returns. An append that fails leaves the segment
 without a seal marker and appends nothing more to it, so nothing follows a torn
