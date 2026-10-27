@@ -87,7 +87,7 @@ a path beside the script.
 | Intent | Drives |
 |---|---|
 | `device status` | the inventory sweep, one transaction per class |
-| `device geometry` | the partition table, then every partition's banks |
+| `device geometry` | the partition table, then every partition's banks, with no session |
 | `device recover` | the two bare frames that release an abandoned session |
 | `<class> status` | that class's counters |
 | `<class> walk` | the occupied-slot enumeration, then an `info` per slot |

@@ -43,7 +43,9 @@ object class, so one `delete` command serves every class. The wire carries a cla
 a position in the partition table the instrument reports, and each model orders its
 table its own way: the Electro 5 keeps programs at 4. `Classes` finds each class by its
 partition's name (`Piano`, `Samp Lib`, `Program`, `Set List`, `Live`, `Settings`), and
-a partition with any other name is an unknown class that nothing writes to. The piano and sample libraries refuse
+a partition with any other name is an unknown class, which drawbar only lists. The
+table and every partition's banks are read before any session: the instrument answers
+both with no `HELLO` and no session open. The piano and sample libraries refuse
 `rename` and `copy`, and refuse a write named like an object they already
 hold, matching case.
 

@@ -31,7 +31,8 @@ let (info, file) = device
 
 Writes go through `device.destructive(class, …)`, which hands the closure a
 session that can write. Both find the class's partition by the name the instrument's
-partition table gives it. Both brackets close the transaction whether the closure
+partition table gives it, which the device is asked for first, with no session. Both
+brackets close the transaction whether the closure
 succeeds or fails. An abandoned transaction would leave the instrument stuck on
 its progress screen until it is power-cycled.
 
