@@ -364,7 +364,8 @@ enum PianoAction {
     /// tables, playback parameters and stream version) comes from `--template`, taken
     /// from the template's stroke of the same bank and nearest root. Without a template,
     /// the library uses neutral playback: no decay over the recordings, each stroke
-    /// trimmed by its own layer value, and the damper limit that `--kind` implies.
+    /// trimmed by its own layer value, a fade at key-up, and the damper limit that
+    /// `--kind` implies.
     ///
     /// Every key up to one semitone above the highest root sounds, playing the nearest
     /// root at or above it. Keys past that are silent. A key plays the largest layer
@@ -374,7 +375,8 @@ enum PianoAction {
     ///
     /// Confirmed on hardware: a library built this way loads and plays, mono and
     /// stereo, on every key it covers. With the same source audio, libraries built with
-    /// and without a template sound the same.
+    /// and without a template sound the same while a key is held. The fade a library
+    /// built without a template applies at key-up has not been played.
     Build(piano::BuildArgs),
 
     /// Re-encode a library's audio from its decoded frames, and report how each

@@ -65,11 +65,14 @@
 //!
 //! [`Donor::Rules`] states them instead, so a library can be written from recordings
 //! alone. Every field is then a neutral playback parameter: no decay applied over the
-//! recordings, each stroke trimmed according to its layer value, and the damper
-//! covering the keys that kind of instrument damps. A library written this way plays
-//! like the same audio built against a template, within about a decibel at every
-//! velocity and key, and sustains longer because no extra decay is applied. Confirmed
-//! on hardware.
+//! recordings, each stroke trimmed according to its layer value, a fade at key-up, and
+//! the damper covering the keys that kind of instrument damps. A library written this
+//! way plays like the same audio built against a template while a key is held, within
+//! about a decibel at every velocity and key, and sustains longer because no extra
+//! decay is applied. Confirmed on hardware.
+//!
+//! The key-up fade takes its values from vendor electric pianos. Inferred from
+//! specimens; not confirmed on hardware.
 
 use super::codec::{self, MAX_ORDER, MAX_WIDTH, MIN_WIDTH, OVERLAP};
 use super::{
