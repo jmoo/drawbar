@@ -21,6 +21,36 @@ have not been played on an instrument.
 Both take 16-bit PCM WAVs at 44.1 kHz, mono or stereo, in the plain or the
 extensible WAV format. Convert anything else first.
 
+## Converting between generations
+
+```sh
+nord convert strings.nsmp4 --to nsmp --dry-run          # what would not survive
+nord convert strings.nsmp4 --to nsmp -o strings.nsmp    # v4 to v2
+nord convert 3:14 --to nsmp4 --unverified -o pad.nsmp4  # from a slot, read only
+```
+
+`convert` writes a sample instrument as `nsmp`, `nsmp3` or `nsmp4` without
+decoding its audio: the stored audio is laid out again in the target's units, so
+nothing is resampled. Converting to a generation whose encoder keeps less detail
+can coarsen a zone by one bit, as the Sample Editor's own render of that
+generation would.
+
+Before writing, `convert` lists on stderr what the target drops, what it holds
+differently, and what it fills in by rule, field by field. A drop stops the
+conversion unless you pass `--force`. Where the target can meet a loss more than
+one way, you pick, and `--force` does not pick for you:
+
+| Flag | When it is needed |
+|---|---|
+| `--gain clamp` or `bake` | A zone gain above about +24 dB, past what v2 stores: keep the largest it holds, or keep that and scale the audio by the rest |
+| `--truncate-name` or `--name NEW` | A name longer than the 31 bytes v2 holds |
+| `--overlap lower` or `upper` | Zones whose key ranges overlap, going to v2, where zones cannot: which zone keeps the shared keys |
+| `--loop-mark resync` or `push` | A loop that starts too close to where v2 lets its stream restart: move the restart earlier, or start the loop later. Both play the same |
+
+`--dry-run` makes every check and writes nothing. The input is never
+overwritten, and replacing another existing file needs `--yes`. Writing `nsmp3`
+or `nsmp4` needs `--unverified`, as `encode` and `build` do.
+
 ## Pianos
 
 ```sh

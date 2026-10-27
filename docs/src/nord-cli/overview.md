@@ -17,6 +17,7 @@ nord --help
 | `inspect` | Files: print what is in them |
 | `verify` | Files: check that they re-encode byte for byte |
 | `edit` | Files: change fields in any editable file |
+| `convert` | Files: write an instrument in another format, reporting what does not survive |
 | `bundle` | Nord Sound Manager bundles: made from the instrument, packed and unpacked |
 | `device` | The instrument: what is attached and what it holds |
 | `program`, `setlist`, `live`, `settings` | Programs, set lists, live slots and settings on the instrument |
