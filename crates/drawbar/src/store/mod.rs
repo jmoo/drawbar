@@ -999,6 +999,9 @@ pub enum Fault {
     /// The command it takes next runs, and the fault comes with the one after.
     #[cfg(not(target_arch = "wasm32"))]
     Next(Box<Fault>),
+    /// From the command it takes next, the first request `which` picks fails.
+    #[cfg(not(target_arch = "wasm32"))]
+    Refuse(fn(&toshokan::Io) -> bool),
 }
 
 /// What a backend answers.

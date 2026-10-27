@@ -1162,6 +1162,42 @@ fn a_write_that_fails_leaves_the_file_as_it_was() {
     assert_eq!(session.said("was not saved"), 1);
 }
 
+/// A save whose file could not be put in place, with another change after it and a
+/// restart, leaves the file holding its old bytes or its new ones, never nothing.
+#[test]
+fn a_save_whose_file_could_not_be_put_in_place_leaves_a_file_through_a_restart() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let old = root.read("untitled.ne5p");
+    let new = with_gain(&old, "96");
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "untitled.ne5p"),
+    ));
+    let log = &mut session.bench.log;
+    session.bench.workspace.replace_bytes(id, new.clone(), log);
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    assert_eq!(session.said("was not saved"), 1, "the save failed");
+    session.make_tag("Sunday");
+    session.close();
+
+    let again = Session::open(&root);
+    let held = fs::read(root.at("untitled.ne5p")).ok();
+    assert!(
+        held.as_ref() == Some(&old) || held.as_ref() == Some(&new),
+        "the file holds {:?} bytes",
+        held.map(|bytes| bytes.len())
+    );
+    let entity = again.bench.workspace.get(again.only()).expect("the asset");
+    assert_eq!(
+        Some(entity.saved.bytes().to_vec()),
+        held,
+        "the asset is its file"
+    );
+}
+
 /// A copy of a library whose hidden folder holds, in this install's own log, a change a
 /// newer drawbar wrote, and the segment of the log that holds it.
 fn newer_drawbar_wrote() -> (Temp, std::path::PathBuf) {

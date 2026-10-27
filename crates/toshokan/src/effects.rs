@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::binding::Bindings;
 use crate::env::{Env, Identify};
-use crate::error::{Error, Invalid, Mismatch, Refusal, Result};
+use crate::error::{Invalid, Mismatch, Refusal, Result};
 use crate::flow::{self, each, fold, ok, Fallible, Flow, Held};
 use crate::ids::{EntityId, Nonce, WriterId};
 use crate::io::{Capabilities, Io, IoError, Kind, Meta, Root, Task};
@@ -274,7 +274,7 @@ impl EffectPlan {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Applied {
     /// Bytes now in this writer's trash because of the intent: what its steps
-    /// displaced, and staged bytes that could not be placed.
+    /// displaced.
     pub displaced: Vec<Displaced>,
     /// What each entity's file register should say, for the effects that are done.
     pub files: Vec<(EntityId, Option<FileFact>)>,
@@ -288,7 +288,6 @@ pub struct Applied {
     /// Each directory a step done was to remove that the folder still holds, as
     /// a file the plan did not know of keeps one.
     pub left: Vec<RelPath>,
-    pub outcome: Outcome,
 }
 
 /// Resolves `changes` into checks and steps. `bindings` says where existing
@@ -1048,8 +1047,8 @@ fn refusal<'a>(
 
 /// Carries out `record`'s steps from `start`, each destination durable before its
 /// source is gone, then reports what the folder shows. A step that fails stops the
-/// run with [`Outcome::Partial`]; staged bytes that were not placed then go to this
-/// writer's trash. The pending record `name` stays until [`finish`].
+/// run with its error, and the record stays open to settle. The pending record
+/// `name` stays until [`finish`].
 pub fn apply(
     layout: &Layout,
     name: Nonce,
@@ -1060,22 +1059,10 @@ pub fn apply(
     let layout = layout.clone();
     let runs = runs(&record.steps, start, record.moves);
     let running = (layout.clone(), Rc::clone(&record));
-    fold(
-        runs.into_iter(),
-        None,
-        move |failed: Option<IoError>, run: Range<usize>| match failed {
-            Some(failed) => ok(Some(failed)),
-            None => {
-                let first = run.start;
-                run_steps(&running.0, name, &running.1, run).then(move |result| match result {
-                    Ok(()) => ok(None),
-                    Err(Error::Io { error, .. }) => ok(Some(error)),
-                    Err(other) => ok(Some(IoError::Other(format!("step {first}: {other}")))),
-                })
-            }
-        },
-    )
-    .and_then(move |failed| account(layout, name, record, failed, identify))
+    each(runs.into_iter(), move |run| {
+        run_steps(&running.0, name, &running.1, run)
+    })
+    .and_then(move |()| account(layout, record, identify))
     .task()
 }
 
@@ -1174,132 +1161,43 @@ pub(crate) fn relocate<'a>(moves: Moves, from: &RelPath, to: &RelPath) -> Fallib
     }
 }
 
-/// What the steps did: every step when none failed, else what the folder shows.
+/// What the steps did, every one of them done.
 fn account<'a>(
     layout: Layout,
-    name: Nonce,
     record: Rc<PendingRecord>,
-    failed: Option<IoError>,
     identify: Rc<dyn Identify>,
 ) -> Fallible<'a, Applied> {
     let writer = record.writer;
-    let done: Fallible<'a, Progress> = match failed {
-        None => ok(Progress::upto(record.steps.len())),
-        Some(_) => {
-            let (layout, record) = (layout.clone(), Rc::clone(&record));
-            // How far steps got does not depend on how a copy was cut short.
-            observe(&layout, name, &record)
-                .map_ok(move |seen| progress(&layout, &record, &seen, false))
-                .and_then(|progress| match progress.leftover.clone() {
-                    // A copy done but for removing its source, as recovery finishes one.
-                    Some(source) => flow::remove(Root::Folder, &source).map_ok(move |()| progress),
-                    None => ok(progress),
+    let items: Vec<(Nonce, RelPath)> = record
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            EffectStep::ToTrash { path, item } => Some((*item, path.clone())),
+            _ => None,
+        })
+        .collect();
+    let ends = record.files.clone();
+    let unbound = record.unbound.clone();
+    let trees: Vec<(RelPath, RelPath)> = record
+        .trees
+        .iter()
+        .map(|end| (end.from.clone(), end.to.clone()))
+        .collect();
+    let dirs = record.dirs.clone();
+    let paths = items.iter().map(|(item, _)| layout.trash(writer, *item));
+    flow::observe_all(Root::Folder, paths.collect(), &identify)
+        .map_ok(move |seen| {
+            let seen = items.into_iter().zip(seen);
+            let displaced = seen.filter_map(|((item, from), seen)| {
+                let seen = seen?;
+                Some(Displaced {
+                    item,
+                    from,
+                    identity: seen.identity,
+                    len: seen.len,
                 })
-        }
-    };
-    done.and_then(move |progress| {
-        let unplaced: Vec<(Nonce, RelPath)> = record.steps[progress.done..]
-            .iter()
-            .filter_map(|step| match step {
-                EffectStep::Place { staged, path } => Some((*staged, path.clone())),
-                _ => None,
-            })
-            .collect();
-        let trashed: Vec<(Nonce, RelPath)> = record.steps[..progress.done]
-            .iter()
-            .filter_map(|step| match step {
-                EffectStep::ToTrash { path, item } => Some((*item, path.clone())),
-                _ => None,
-            })
-            .collect();
-        let ends: Vec<FileEnd> = record
-            .files
-            .iter()
-            .filter(|end| end.done_after <= progress.done)
-            .cloned()
-            .collect();
-        let unbound: Vec<UnboundEnd> = record
-            .unbound
-            .iter()
-            .filter(|end| end.done_after <= progress.done)
-            .cloned()
-            .collect();
-        let trees: Vec<(RelPath, RelPath)> = record
-            .trees
-            .iter()
-            .filter(|end| end.done_after <= progress.done)
-            .map(|end| (end.from.clone(), end.to.clone()))
-            .collect();
-        let dirs: Vec<DirEnd> = record
-            .dirs
-            .iter()
-            .filter(|end| end.done_after <= progress.done)
-            .cloned()
-            .collect();
-        let outcome = match record.steps.get(progress.done) {
-            None => Outcome::Complete,
-            Some(step) => Outcome::Partial(PartialReport {
-                applied: progress.done,
-                stopped: step.path().clone(),
-                error: failed.unwrap_or(IoError::NotFound),
-                record: Some(name),
-                landed: Vec::new(),
-                taken: record.steps[..progress.done]
-                    .iter()
-                    .filter_map(EffectStep::taken)
-                    .cloned()
-                    .collect(),
-            }),
-        };
-        let sweeping = layout.clone();
-        let moves = record.moves;
-        fold(
-            unplaced.into_iter(),
-            Vec::new(),
-            move |mut swept, (staged, path)| {
-                let from = sweeping.staged(writer, staged, &path);
-                let to = sweeping.trash(writer, staged);
-                flow::stat(Root::Folder, &from).and_then(move |meta| {
-                    if meta.is_none() {
-                        return ok(swept);
-                    }
-                    // The staged name is new, so a file under it in the trash is
-                    // what a sweep cut short left of the staged file.
-                    flow::stat(Root::Folder, &to)
-                        .and_then({
-                            let to = to.clone();
-                            move |meta| match meta {
-                                Some(_) => flow::remove(Root::Folder, &to),
-                                None => ok(()),
-                            }
-                        })
-                        .and_then(move |()| relocate(moves, &from, &to))
-                        .map_ok(move |()| {
-                            swept.push((staged, path));
-                            swept
-                        })
-                })
-            },
-        )
-        .and_then({
-            let identify = Rc::clone(&identify);
-            move |swept| {
-                let items: Vec<(Nonce, RelPath)> = trashed.into_iter().chain(swept).collect();
-                let paths = items.iter().map(|(item, _)| layout.trash(writer, *item));
-                flow::observe_all(Root::Folder, paths.collect(), &identify).map_ok(move |seen| {
-                    let seen = items.into_iter().zip(seen);
-                    let displaced = seen.filter_map(|((item, from), seen)| {
-                        let seen = seen?;
-                        Some(Displaced {
-                            item,
-                            from,
-                            identity: seen.identity,
-                            len: seen.len,
-                        })
-                    });
-                    displaced.collect::<Vec<Displaced>>()
-                })
-            }
+            });
+            displaced.collect::<Vec<Displaced>>()
         })
         .and_then(move |displaced| {
             // A directory a step made or removed is logged as the folder shows it.
@@ -1360,11 +1258,9 @@ fn account<'a>(
                     trees,
                     dirs,
                     left,
-                    outcome,
                 }
             })
         })
-    })
 }
 
 /// Removes the pending record `name` once the intent's entry is durable, after its
@@ -1679,7 +1575,6 @@ pub(crate) fn predict(
             stopped: step.path().clone(),
             error,
             record: Some(name),
-            landed: Vec::new(),
             taken: record.steps[..i]
                 .iter()
                 .filter_map(EffectStep::taken)

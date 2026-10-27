@@ -74,11 +74,13 @@
 //!
 //! A save takes bytes or a source the driver streams into staging a chunk at a
 //! time, such as a `Splice` of the file being rewritten, so a file of hundreds of
-//! megabytes is never held whole. A commit whose file effects stop partway fails
-//! with `Error::Partial`, which says what it logged. Any other commit whose entries
-//! reached the folder succeeds, and `Committed::local` says what the instance keeps
-//! beside the folder that lags it until the next commit, refresh or close. A commit
-//! removes the pending record of its file effects once its entries are durable.
+//! megabytes is never held whole. A commit whose file effects fail logs nothing
+//! and fails; the next write, or the next open, finishes them first, and where it
+//! cannot, the library is read-only until it is opened again. Any other commit
+//! whose entries reached the folder succeeds, and `Committed::local` says what the
+//! instance keeps beside the folder that lags it until the next commit, refresh or
+//! close. A commit removes the pending record of its file effects once its entries
+//! are durable.
 //!
 //! # In the browser
 //!
@@ -176,6 +178,6 @@ pub use io::{Io, IoError, IoResult, Operation, Reply, Root, Step, Task};
 pub use layout::Layout;
 pub use path::RelPath;
 pub use plan::{Expect, Plan};
-pub use report::{Committed, Lag, Local, Opened, Outcome, Partial};
+pub use report::{Committed, Lag, Local, Opened, Outcome};
 pub use schema::{Field, Keyed, Members, Raw, Register, Schema, Set, Value};
 pub use view::{Changed, Counts, EntityView, FileRef, FileState, Listed, View};

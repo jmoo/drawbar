@@ -21,7 +21,7 @@ use toshokan::pending::PendingRecord;
 use toshokan::plan::{Content, Expect, FileChange, Piece, Splice};
 use toshokan::recovery;
 use toshokan::{
-    EntityId, Error, Io, IoResult, MemDisk, Nonce, Operation, Outcome, Refusal, RelPath, Root, Step,
+    EntityId, Error, Io, IoResult, MemDisk, Nonce, Operation, Refusal, RelPath, Root, Step,
 };
 
 const E: EntityId = EntityId::from_u128(0xe);
@@ -95,7 +95,6 @@ mod suite {
         };
         let new = vec![Fill::Bytes(b"new bytes".to_vec())];
         let applied = commit(d, &[save], new, &bound(&[]), &mut env(1)).unwrap();
-        assert_eq!(applied.outcome, Outcome::Complete);
         fact("a.syx", b"new bytes", &applied.files);
         let [Displaced {
             from,
@@ -407,9 +406,8 @@ fn where_the_folder_cannot_rename_every_move_copies_and_then_removes_its_source(
         },
     ];
     let bindings = bound(&[(EntityId::from_u128(2), "b")]);
-    let (record, applied) = run_effects(&mut backend, &changes, b"new", &bindings).unwrap();
+    let (record, _) = run_effects(&mut backend, &changes, b"new", &bindings).unwrap();
     assert_eq!(record.moves, Moves::Copy);
-    assert_eq!(applied.outcome, Outcome::Complete);
     let renames: Vec<&Io> = backend
         .asked
         .iter()
@@ -490,8 +488,7 @@ fn where_moves_copy_a_long_file_moves_a_chunk_at_a_time() {
     let prepare = effects::prepare(&layout(), Rc::clone(&plan), Rc::clone(&record), identify());
     blocking::run(&mut backend, prepare).unwrap().unwrap();
     let apply = effects::apply(&layout(), plan.record, record, 0, identify());
-    let applied = blocking::run(&mut backend, apply).unwrap();
-    assert_eq!(applied.outcome, Outcome::Complete);
+    blocking::run(&mut backend, apply).unwrap();
     assert_eq!(backend.largest as u64, CHUNK);
     let d = &mut common::BlockingMem(disk);
     assert_eq!(sorted(d).user, user(&[("b", &long)]));
@@ -540,23 +537,27 @@ fn a_copy_cut_short_where_another_program_then_made_a_file_leaves_that_file() {
         .run(toshokan::pending::read_one(&layout(), WRITER, record))
         .unwrap()
         .unwrap();
-    let applied = d
-        .run(recovery::settle(
-            &layout(),
-            record,
-            Rc::new(pending),
-            identify(),
-            Capabilities::ALL,
-        ))
-        .unwrap();
+    let settled = d.run(recovery::settle(
+        &layout(),
+        record,
+        Rc::new(pending),
+        identify(),
+        Capabilities::ALL,
+    ));
     assert!(
-        matches!(&applied.outcome, Outcome::Partial(report) if report.error == IoError::AlreadyExists),
+        matches!(
+            &settled,
+            Err(Error::Io {
+                error: IoError::AlreadyExists,
+                ..
+            })
+        ),
         "{:?}",
-        applied.outcome
+        settled.err()
     );
     let folder = sorted(d);
     assert_eq!(
-        (folder.user, folder.trash),
+        (folder.user, folder.staged),
         (user(&[("d/n", b"theirs")]), vec![b"mine".to_vec()])
     );
 }
@@ -564,72 +565,6 @@ fn a_copy_cut_short_where_another_program_then_made_a_file_leaves_that_file() {
 fn pending_marker(path: &RelPath) -> bool {
     path.parent() == Some(layout().pending_dir(WRITER))
         && path.name().is_some_and(|name| !name.ends_with(".json"))
-}
-
-#[test]
-fn staged_bytes_a_sweep_into_the_trash_left_half_copied_are_swept_again() {
-    let save = FileChange::Save {
-        entity: E,
-        path: path("d/n"),
-        content: Content(0),
-        expect: Expect::Absent,
-    };
-    let mut counting = Refusing::new(copying(), Some("d/n"));
-    let (_, applied) = run_effects(
-        &mut counting,
-        std::slice::from_ref(&save),
-        b"mine",
-        &bound(&[]),
-    )
-    .unwrap();
-    assert!(matches!(applied.outcome, Outcome::Partial(_)));
-    let trash = layout().trash_dir(WRITER);
-    let mutations: Vec<&Io> = counting.asked.iter().filter(|io| io.mutates()).collect();
-    let swept = mutations
-        .iter()
-        .position(|io| matches!(io, Io::Create { path, .. } if path.starts_with(&trash)))
-        .expect("the staged file is swept into the trash");
-
-    let disk = copying();
-    disk.crash_after(swept as u64 + 1);
-    let mut crashing = Refusing::new(disk.clone(), Some("d/n"));
-    assert!(run_effects(
-        &mut crashing,
-        std::slice::from_ref(&save),
-        b"mine",
-        &bound(&[])
-    )
-    .is_err());
-    let disk = disk.restart();
-    let record = effects_record(&crashing);
-    let mut again = Refusing::new(disk.clone(), Some("d/n"));
-    let pending = blocking::run(
-        &mut again,
-        toshokan::pending::read_one(&layout(), WRITER, record),
-    )
-    .unwrap()
-    .unwrap();
-    let applied = blocking::run(
-        &mut again,
-        recovery::settle(
-            &layout(),
-            record,
-            Rc::new(pending),
-            identify(),
-            Capabilities::ALL,
-        ),
-    )
-    .unwrap();
-    assert!(
-        matches!(applied.outcome, Outcome::Partial(_)),
-        "{:?}",
-        applied.outcome
-    );
-    let folder = sorted(&mut common::BlockingMem(disk));
-    assert_eq!(
-        (folder.trash, folder.staged),
-        (vec![b"mine".to_vec()], Vec::<Vec<u8>>::new())
-    );
 }
 
 #[test]
@@ -668,8 +603,7 @@ fn without_directory_renames_a_tree_moves_file_by_file_and_removes_its_directori
             remove("x")
         ]
     );
-    let applied = commit(d, &[tree], vec![], &bindings, &mut env(1)).unwrap();
-    assert_eq!(applied.outcome, Outcome::Complete);
+    commit(d, &[tree], vec![], &bindings, &mut env(1)).unwrap();
     assert_eq!(sorted(d).user, user(&[("z/2", b"2"), ("z/y/1", b"1")]));
     assert!(!d.0.directories(Root::Folder).contains(&path("x")));
 }
@@ -976,13 +910,19 @@ fn where_renames_may_replace_a_file_made_at_a_destination_after_the_checks_is_ke
         .unwrap()
         .unwrap();
     let apply = effects::apply(&layout(), plan.record, record, 0, identify());
-    let applied = blocking::run(&mut intruder, apply).unwrap();
+    let applied = blocking::run(&mut intruder, apply);
     assert!(
-        matches!(&applied.outcome, Outcome::Partial(report) if report.error == IoError::AlreadyExists),
+        matches!(
+            &applied,
+            Err(Error::Io {
+                error: IoError::AlreadyExists,
+                ..
+            })
+        ),
         "{:?}",
-        applied.outcome
+        applied.err()
     );
     let d = &mut common::BlockingMem(disk);
     assert_eq!(sorted(d).user, user(&[("d/n", b"theirs")]));
-    assert_eq!(sorted(d).trash, [b"mine".to_vec()]);
+    assert_eq!(sorted(d).staged, [b"mine".to_vec()]);
 }

@@ -259,21 +259,11 @@ pub enum Lag {
     Scan,
 }
 
-/// How an intent's file effects end: all made, or stopped partway.
+/// How settling an interrupted effect will end: all made, or stopped partway.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Outcome {
     Complete,
     Partial(PartialReport),
-}
-
-/// An intent whose file effects stopped partway, logged with what they did.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Partial {
-    pub label: String,
-    /// The intent as logged: the facts it changed and the files as the folder
-    /// shows them.
-    pub committed: Committed,
-    pub report: PartialReport,
 }
 
 /// Where an intent's file effects stopped. Every effect before `applied` was made;
@@ -284,10 +274,6 @@ pub struct PartialReport {
     pub stopped: RelPath,
     pub error: IoError,
     pub record: Option<Nonce>,
-    /// The library paths the finished changes put a file at, and the directories
-    /// they made or moved a tree to: what of the intent landed. Filled where a
-    /// commit reports it; empty in a settlement's assessment.
-    pub landed: Vec<RelPath>,
     /// The library paths the finished steps took a file from, and the directories
     /// they removed.
     pub taken: Vec<RelPath>,

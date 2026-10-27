@@ -19,6 +19,26 @@ pub struct Signs {
     pub listed: AtomicUsize,
     /// The requests answered.
     pub answered: AtomicUsize,
+    /// A request to refuse the next time one is asked, as a folder that fails it.
+    #[cfg(test)]
+    pub refuse: std::sync::Mutex<Option<Picks>>,
+}
+
+/// Which requests a test picks.
+#[cfg(test)]
+type Picks = fn(&Io) -> bool;
+
+#[cfg(test)]
+impl Signs {
+    /// Whether `io` is the request to refuse, which is then refused only this once.
+    fn refuses(&self, io: &Io) -> bool {
+        let mut refuse = self.refuse.lock().expect("never poisoned");
+        let refused = refuse.is_some_and(|which| which(io));
+        if refused {
+            *refuse = None;
+        }
+        refused
+    }
 }
 
 /// `F`, counting into `signs` what it does.
@@ -44,6 +64,10 @@ impl<F: Fs> Fs for Counted<F> {
     }
 
     async fn perform(&self, io: Io) -> IoResult {
+        #[cfg(test)]
+        if self.signs.refuses(&io) {
+            return Err(toshokan::IoError::Other("refused by the test".into()));
+        }
         let first = match &io {
             Io::ListStat {
                 root: Root::Folder,

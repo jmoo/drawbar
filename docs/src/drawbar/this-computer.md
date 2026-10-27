@@ -209,8 +209,9 @@ bring back any you deleted.
   drawbar asks once the change has stood for a few seconds: **Finish** completes
   the change, **Roll back** puts the files back as they were, **Leave as is**
   stops asking, and **Later** asks next time. What
-  drawbar left unfinished on this computer, after a crash or in another window,
-  is finished without asking.
+  drawbar left unfinished on this computer, after a crash, a failed save or in
+  another window, is finished without asking, by its next change or when the
+  library next opens.
 - **An older drawbar.** A drawbar from before this version keeps its own tags,
   unsaved edits and rescued slot contents in the `.drawbar` folder. This version
   says so once and leaves them where they are, and an older drawbar that opens

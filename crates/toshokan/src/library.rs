@@ -37,8 +37,8 @@ use crate::reader::{ReadReport, Reader, Stamp};
 use crate::recovery::{self, Settling};
 use crate::report::{
     By, Change, Committed, Compacted, Emptied, Fork, Gap, HistoryItem, Item, ItemChange, Lag,
-    Local, Mode, Opened, Orphan, Outcome, Partial, PartialReport, PathChange, Presence, Refreshed,
-    Rekey, ScanReport, Settled, Start, TrashItem, What, WriterInfo,
+    Local, Mode, Opened, Orphan, Outcome, PathChange, Presence, Refreshed, Rekey, ScanReport,
+    Settled, Start, TrashItem, What, WriterInfo,
 };
 use crate::schema::Schema;
 use crate::trash;
@@ -324,10 +324,10 @@ impl Library {
     /// against the view they leave and the files, logs the intent and carries out
     /// its file effects. Before its first write a new writer is created. A refusal
     /// is [`crate::Error::Refused`], and the refused intent changes nothing. Effects
-    /// that stop partway are [`crate::Error::Partial`]; the intent is logged as far
-    /// as they got. Settling that stops partway is [`crate::Error::Unfinished`],
-    /// and the intent is not tried. Otherwise a commit whose entries are durable
-    /// succeeds, and [`Committed::local`] says what of this instance lags it.
+    /// that fail log nothing and fail the commit; the next write finishes them
+    /// first, and where it cannot, the library is read-only until it is opened
+    /// again. Otherwise a commit whose entries are
+    /// durable succeeds, and [`Committed::local`] says what of this instance lags it.
     pub fn commit(
         &mut self,
         plan: std::result::Result<Plan, Invalid>,
@@ -411,8 +411,9 @@ impl Library {
 
     /// Settles another writer's unfinished effect, with the user's consent, in
     /// this writer's own log: finishes it, rolls it back or dismisses it. Nothing
-    /// is written in the other writer's directory. Effects that stop partway are
-    /// [`crate::Error::Partial`] and leave the effect open to settle again. Finishing
+    /// is written in the other writer's directory. Effects that fail leave the
+    /// effect open to settle again, and this writer's own record of them to settle
+    /// at its next write. Finishing
     /// or rolling back a directory rename this folder cannot make is refused with
     /// [`crate::Refusal::Unsupported`]; dismissing it is not.
     pub fn settle(&mut self, orphan: Orphan, how: Settlement) -> Task<'_, Result<Committed>> {
@@ -795,10 +796,7 @@ impl Library {
     /// and a fork point for every writer its ops name, as late as one can be. Its
     /// refs are fixed when the record is written, so no entry logging the intent,
     /// at commit or when the record settles, is longer: an intent whose widest
-    /// entry does not fit a line is refused before anything is written. A staged
-    /// file a stop sweeps to the trash is displaced in place of its file op, which
-    /// is longer; with no other displaced item, one is reserved for the list it
-    /// starts.
+    /// entry does not fit a line is refused before anything is written.
     fn widest(&self, logged: &Logged, facts: &[Op], effects: &EffectPlan) -> Logged {
         let fact = |path: &RelPath| FileFact {
             path: path.clone(),
@@ -854,13 +852,6 @@ impl Library {
                 _ => None,
             })
             .collect();
-        if widest.displaced.is_empty() {
-            let placed = effects.steps.iter().find_map(|step| match step {
-                EffectStep::Place { staged, path } => Some(displaced(staged, path)),
-                _ => None,
-            });
-            widest.displaced.extend(placed);
-        }
         let named = named_writers(&widest.ops).into_iter();
         widest.forks = named
             .map(|writer| Forked {
@@ -1897,7 +1888,6 @@ fn commit<'a>(
         effects,
         reverses,
     } = resolved;
-    let shown = label.clone();
     ensure_writer(library, &effects)
         .and_then(tidy_staging)
         .and_then(move |library| {
@@ -1917,23 +1907,19 @@ fn commit<'a>(
         })
         .and_then(move |(library, entries, ended)| {
             library.reversing = None;
-            let Ended { outcome, left } = ended;
-            match committed(shown, &entries, created, outcome, library.local()) {
-                Ok(committed) => ok((library, Committed { left, ..committed })),
-                Err(partial) => Flow::Done(Err(Error::Partial(partial))),
-            }
+            let committed = committed(&entries, created, library.local());
+            ok((
+                library,
+                Committed {
+                    left: ended.left,
+                    ..committed
+                },
+            ))
         })
 }
 
-/// What appending `entries`, an intent labeled `label` and what followed it, did:
-/// the intent, or how its effects stopped partway.
-fn committed(
-    label: String,
-    entries: &[Entry],
-    created: Vec<EntityId>,
-    outcome: Outcome,
-    local: Local,
-) -> std::result::Result<Committed, Box<Partial>> {
+/// What appending `entries`, an intent and what followed it, did.
+fn committed(entries: &[Entry], created: Vec<EntityId>, local: Local) -> Committed {
     let kinds: Vec<EntryKind> = entries.iter().map(Entry::kind).collect();
     let ops = kinds.iter().flat_map(|kind| match kind {
         EntryKind::Intent(Logged { ops, .. }) | EntryKind::Bind(Bound { ops }) => ops.as_slice(),
@@ -1955,7 +1941,7 @@ fn committed(
         Some(EntryKind::Intent(logged)) => undo::joins(logged.ops.iter()),
         _ => false,
     };
-    let committed = Committed {
+    Committed {
         intent: entries[0].hash(),
         undoable,
         created,
@@ -1964,32 +1950,6 @@ fn committed(
         trees: trees.collect(),
         local,
         left: Vec::new(),
-    };
-    match outcome {
-        Outcome::Complete => Ok(committed),
-        Outcome::Partial(report) => {
-            let landed = ops.iter().filter_map(|op| match op {
-                Op::File {
-                    file: Some(file), ..
-                }
-                | Op::Pin { file, .. }
-                | Op::Path {
-                    file: Some(file), ..
-                } => Some(file.path.clone()),
-                Op::Tree { to, .. } => Some(to.clone()),
-                Op::Dir { path, made: true } => Some(path.clone()),
-                _ => None,
-            });
-            Err(Box::new(Partial {
-                label,
-                committed,
-                report: PartialReport {
-                    record: None,
-                    landed: landed.collect(),
-                    ..report
-                },
-            }))
-        }
     }
 }
 
@@ -2054,9 +2014,8 @@ fn ensure_writer<'a>(
 }
 
 /// Settles this writer's interrupted effects, oldest first, and shows what they
-/// leave. A record stays to settle while settling it fails, and is removed once
-/// its entry is durable. One whose effects stop partway is logged as far as they got,
-/// and fails the settling with [`Error::Unfinished`].
+/// leave. A record stays to settle while settling it fails, which fails the
+/// write, and is removed once its entry is durable.
 fn settle_own(library: &mut Library) -> Fallible<'_, &mut Library> {
     let open = library.unsettled.clone();
     flow::fold(open.into_iter(), library, settle_one).map_ok(|library| {
@@ -2083,9 +2042,12 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
     })
 }
 
-/// Carries out the rest of the record `settling` and logs its entry.
+/// Carries out the rest of the record `settling` and logs its entry. Where the
+/// folder refuses the rest, the record stays open and the library is read-only
+/// until it is opened again, which tries the rest again.
 fn resume(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Library> {
     let name = settling.record;
+    let label = settling.pending.label.clone();
     let record = Rc::new(settling.pending);
     let identify = Rc::clone(&library.env.identify);
     let settled = recovery::settle(
@@ -2098,12 +2060,19 @@ fn resume(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Librar
     let own = library.writer.as_ref().map(Writer::id);
     let closed = own.is_some_and(|own| library.closed_records().contains(&(own, name)));
     flow::run(settled)
-        .and_then(move |applied| {
+        .then(move |settled| match settled {
+            Ok(applied) => ok((library, applied)),
+            Err(Error::Io { path, error, .. }) => {
+                let why = Why::Unfinished { label, path, error };
+                library.mode = Mode::ReadOnly(why.clone());
+                Flow::Done(Err(Error::ReadOnly(why)))
+            }
+            Err(failed) => Flow::Done(Err(failed)),
+        })
+        .and_then(move |(library, applied)| {
             let mut planned = planned(&record);
             planned.record = Some(name);
             let file_ops = file_ops(&applied, &record.files);
-            let label = planned.label.clone();
-            let resumed = closed;
             let kinds = match closed {
                 true => Vec::new(),
                 false => {
@@ -2117,28 +2086,17 @@ fn resume(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Librar
                 true => ok((library, Vec::new())),
                 false => append(library, kinds),
             };
-            appended.and_then(move |(library, entries)| {
+            appended.and_then(move |(library, _)| {
                 // The writer is still the record's: compaction waits while a
                 // record is unsettled, and an append that rekeys fails.
                 remove_record(library, name, &record).then(move |library| {
                     let scan = library.scan_task();
-                    rebind_logged(library, scan, record.paths())
-                        .map_ok(move |library| (library, label, entries, applied.outcome, resumed))
+                    rebind_logged(library, scan, record.paths()).map_ok(|library| {
+                        library.show();
+                        library
+                    })
                 })
             })
-        })
-        .and_then(|(library, label, entries, outcome, resumed)| {
-            if resumed {
-                library.show();
-                return ok(library);
-            }
-            match committed(label, &entries, Vec::new(), outcome, library.local()) {
-                Ok(_) => ok(library),
-                Err(partial) => {
-                    library.show();
-                    Flow::Done(Err(Error::Unfinished(partial)))
-                }
-            }
         })
 }
 
@@ -2345,18 +2303,16 @@ fn close(mut logged: Logged, closing: Option<Closing>) -> (Logged, Option<Settle
     (logged, Some(settle))
 }
 
-/// How a commit's effects ended: whether they all ran, and the directories the
-/// folder still holds that they were to remove.
+/// The directories the folder still holds that a commit's effects were to remove.
 struct Ended {
-    outcome: Outcome,
     left: Vec<RelPath>,
 }
 
 /// Logs `logged`, carrying out `effects` under a pending record when there are
-/// any, closed by `closing` only when they complete, and followed by `bind`
-/// entries pinning `pins`. Returns the entries, the intent's first, and how the
-/// effects ended. An interrupted run leaves the record for the next write to
-/// settle.
+/// any, closed by `closing` and followed by `bind` entries pinning `pins`. Returns
+/// the entries, the intent's first, and how the effects ended. A run that fails
+/// or is interrupted leaves the record for the next write to settle, and logs
+/// nothing.
 fn transact<'a>(
     library: &'a mut Library,
     logged: Logged,
@@ -2373,10 +2329,7 @@ fn transact<'a>(
             })
             .map_ok(|(library, entries)| {
                 library.show();
-                let ended = Ended {
-                    outcome: Outcome::Complete,
-                    left: Vec::new(),
-                };
+                let ended = Ended { left: Vec::new() };
                 (library, entries, ended)
             });
     }
@@ -2512,7 +2465,7 @@ fn named_writers(ops: &[Op]) -> BTreeSet<WriterId> {
 }
 
 /// Appends the intent `logged` with what `applied` says the effects did, closed
-/// by `closing` if they complete and followed by `bind` entries pinning `pins`,
+/// by `closing` and followed by `bind` entries pinning `pins`,
 /// removes the record once the entries are durable, unless the writer retired
 /// meanwhile, since nothing writes a retired writer's directory again, and scans
 /// again the paths the effects moved files from and to. Once the entries are
@@ -2528,8 +2481,6 @@ fn log_effects<'a>(
 ) -> Fallible<'a, (&'a mut Library, Vec<Entry>, Ended)> {
     let (name, journaled) = (effects.record, effects.moves_files());
     let file_ops = file_ops(&applied, &record.files);
-    let outcome = applied.outcome;
-    let closing = closing.filter(|_| outcome == Outcome::Complete);
     let (mut logged, settle) = close(logged, closing);
     logged.ops.extend(file_ops);
     logged.displaced = applied.displaced;
@@ -2556,10 +2507,7 @@ fn log_effects<'a>(
         removed.then(move |library| {
             rescan_paths(library, touched).map_ok(move |library| {
                 library.show();
-                let ended = Ended {
-                    outcome,
-                    left: applied.left,
-                };
+                let ended = Ended { left: applied.left };
                 (library, entries, ended)
             })
         })
@@ -2569,8 +2517,9 @@ fn log_effects<'a>(
 /// Settles another writer's record `theirs` as `how` with `plan`, once this
 /// writer's own interrupted effects are settled: removes stale staging, then logs
 /// the settlement. Finishing logs the facts the other writer planned with it.
-/// Effects that stop partway are logged as far as they got, without those facts
-/// or the `settle` entry, and leave the record open to settle again.
+/// Effects that fail leave this writer's own record of them to settle at its next
+/// write, which logs what they did without those facts or the `settle` entry, and
+/// the other writer's record open to settle again.
 fn settle_orphan(
     library: &mut Library,
     orphan: Orphan,
@@ -2588,13 +2537,11 @@ fn settle_orphan(
         record: orphan.record,
         outcome: how,
     };
-    let label = theirs.label.clone();
     ensure_writer(library, &effects)
         .and_then(tidy_staging)
         .and_then(
             move |library| match effects.is_empty() && facts.is_empty() {
-                true => append(library, vec![EntryKind::Settle(settle)])
-                    .map_ok(|(library, entries)| (library, entries, Outcome::Complete)),
+                true => append(library, vec![EntryKind::Settle(settle)]),
                 false => {
                     let logged = Logged {
                         label: theirs.label,
@@ -2605,20 +2552,16 @@ fn settle_orphan(
                     };
                     let closing = Closing { facts, settle };
                     transact(library, logged, effects, Some(closing), Vec::new())
-                        .map_ok(|(library, entries, ended)| (library, entries, ended.outcome))
+                        .map_ok(|(library, entries, _)| (library, entries))
                 }
             },
         )
-        .and_then(move |(library, entries, outcome)| {
+        .and_then(move |(library, entries)| {
             library.show();
-            match committed(label, &entries, Vec::new(), outcome, library.local()) {
-                Err(partial) => Flow::Done(Err(Error::Partial(partial))),
-                Ok(committed) => {
-                    library
-                        .orphaned
-                        .retain(|o| (o.writer, o.record) != (orphan.writer, orphan.record));
-                    release_if_idle(library, orphan.writer).map_ok(move |_| committed)
-                }
-            }
+            let committed = committed(&entries, Vec::new(), library.local());
+            library
+                .orphaned
+                .retain(|o| (o.writer, o.record) != (orphan.writer, orphan.record));
+            release_if_idle(library, orphan.writer).map_ok(move |_| committed)
         })
 }

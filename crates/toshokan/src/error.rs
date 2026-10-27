@@ -4,7 +4,7 @@ use crate::ids::{EntityId, EntryHash, Identity, WriterId};
 use crate::io::{Capability, IoError, Root};
 use crate::path::RelPath;
 use crate::plan::Expect;
-use crate::report::{Partial, Rekey};
+use crate::report::Rekey;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -43,18 +43,6 @@ pub enum Error {
     #[error("refused: {0}")]
     Refused(Refusal),
 
-    /// The intent's file effects stopped partway. It is logged with what they did,
-    /// and each path holds its old bytes, its new bytes or, where a step stopped
-    /// between the two, nothing.
-    #[error("{} stopped partway at {}: {}", .0.label, .0.report.stopped, .0.report.error)]
-    Partial(Box<Partial>),
-
-    /// An effect this writer left unfinished, settled before the operation asked
-    /// for, stopped partway. It is logged with what it did; the operation asked for
-    /// wrote nothing and may be tried again.
-    #[error("finishing {} stopped partway at {}: {}", .0.label, .0.report.stopped, .0.report.error)]
-    Unfinished(Box<Partial>),
-
     /// This writer cannot write again: appending would continue a history the
     /// folder no longer holds, or that another instance also continues. Nothing
     /// was written; the library continues as a new writer.
@@ -62,7 +50,7 @@ pub enum Error {
     Rekey { writer: WriterId, why: Rekey },
 }
 
-/// Why a library opened read-only.
+/// Why a library is read-only.
 #[derive(ThisError, Clone, PartialEq, Eq, Debug)]
 #[non_exhaustive]
 pub enum Why {
@@ -77,6 +65,14 @@ pub enum Why {
     /// reading there is.
     #[error("this writer's clock is exhausted")]
     ClockExhausted,
+    /// A change this writer began stopped where the folder refused the rest at
+    /// `path`. It stays open, and opening the library again tries the rest again.
+    #[error("{label:?} could not be finished: {path}: {error}")]
+    Unfinished {
+        label: String,
+        path: RelPath,
+        error: IoError,
+    },
 }
 
 /// Why an intent, undo or redo was refused. A refusal changes nothing.

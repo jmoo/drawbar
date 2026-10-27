@@ -12,8 +12,9 @@ use toshokan::binding::Bindings;
 use toshokan::blocking::{self, Backend};
 use toshokan::crash;
 use toshokan::env::{ExactNames, PrefixIdentity, SeededRandom, TestClock};
+use toshokan::error::Why;
 use toshokan::intent::{Driver, Intent};
-use toshokan::io::{Capabilities, Range};
+use toshokan::io::{Capabilities, IoError, Range};
 use toshokan::layout::SEGMENT_EXTENSION;
 use toshokan::library::COMPACT_AFTER;
 use toshokan::line::MAX_LINE;
@@ -607,7 +608,7 @@ through_both!(
     a_record_a_crash_left_spent_is_not_settled_again_and_goes_at_the_next_write,
     a_record_whose_writing_seems_to_fail_is_settled_before_the_next_write,
     a_record_that_never_landed_is_not_carried_out_by_the_next_write,
-    a_copied_move_whose_source_removal_fails_leaves_no_copy_behind,
+    a_copied_move_whose_source_removal_fails_is_finished_by_the_next_write,
     an_append_whose_reply_was_lost_stands_and_the_next_write_takes_a_new_writer,
     a_new_segment_whose_reply_was_lost_stands_and_the_next_write_takes_a_new_writer,
     a_spent_record_is_reported_only_where_its_entry_has_not_arrived,
@@ -641,7 +642,7 @@ through_both!(
     a_directory_made_and_filled_in_one_change_is_undone_in_one,
     directories_made_and_removed_around_tree_moves_undo_and_redo,
     removing_an_empty_directory_is_undone_and_one_with_files_is_refused,
-    an_intent_that_stops_partway_says_what_landed,
+    an_intent_that_stops_partway_logs_nothing_until_the_next_write_finishes_it,
     a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept,
     losing_the_local_root_at_any_step_loses_nothing_of_the_library,
     a_crash_at_any_step_is_settled_whole_after_emptying_the_trash,
@@ -659,9 +660,9 @@ through_both!(
     what_is_shown_is_what_its_logs_fold_to,
     what_is_bound_is_what_binding_afresh_binds,
     one_intent_creates_entities_that_name_each_other,
-    effects_that_stop_partway_fail_the_commit_and_are_logged,
-    an_undo_that_stops_partway_fails_and_is_logged,
-    settling_an_own_effect_that_stops_partway_fails_before_the_next_intent,
+    effects_that_stop_partway_fail_the_commit_and_keep_both_versions,
+    an_undo_that_stops_partway_fails_and_the_next_write_finishes_it,
+    an_own_effect_that_cannot_be_finished_leaves_the_library_read_only_until_reopened,
     a_settlement_that_stops_partway_leaves_the_record_open_until_settled_again,
     a_folder_whose_renames_may_replace_is_written,
     a_view_is_read_on_other_threads,
@@ -1201,6 +1202,11 @@ fn an_intent_whose_record_would_outgrow_its_bound_is_refused_and_writes_nothing(
 
 /// The line, with its newline, of the intent labeled `label` in `folder`'s segments.
 fn line_of(folder: &MemDisk, label: &str) -> String {
+    logged(folder, label).expect("the intent is logged") + "\n"
+}
+
+/// The first line of a segment that logs an intent labeled `label`.
+fn logged(folder: &MemDisk, label: &str) -> Option<String> {
     let segments = folder.files(Root::Folder).into_iter();
     let segments = segments.filter(|(path, _)| path.as_str().ends_with(SEGMENT_EXTENSION));
     let named = format!(r#""label":"{label}""#);
@@ -1208,8 +1214,7 @@ fn line_of(folder: &MemDisk, label: &str) -> String {
         let text = String::from_utf8(bytes).unwrap();
         text.lines().map(str::to_owned).collect::<Vec<_>>()
     });
-    let line = lines.into_iter().find(|line| line.contains(&named));
-    line.expect("the intent is logged") + "\n"
+    lines.into_iter().find(|line| line.contains(&named))
 }
 
 const FORKED: [&str; 3] = ["c", "d", "e"];
@@ -1334,7 +1339,7 @@ fn an_intent_naming_forked_writers_one_byte_too_long_is_refused_and_writes_nothi
 }
 
 #[test]
-fn a_save_stopped_partway_one_byte_too_long_is_refused_and_writes_nothing() {
+fn a_save_finished_after_its_place_failed_is_bounded_by_the_line_it_was_planned_in() {
     let name = format!("{}.npno", "s".repeat(200));
     let setup = || {
         let folder = disk();
@@ -1360,22 +1365,17 @@ fn a_save_stopped_partway_one_byte_too_long_is_refused_and_writes_nothing() {
     };
     let (folder, probe, mut a, song) = setup();
     let stopped = save((&probe, &mut a, song), "x".into());
-    assert!(matches!(stopped, Err(Error::Partial(_))), "{stopped:?}");
-    let logged = line_of(&folder, "Save");
-    let displaced = logged.split(r#""displaced":"#).nth(1).unwrap_or_default();
-    assert_eq!(
-        displaced.matches(r#""item":"#).count(),
-        2,
-        "the old file and the staged one: {logged}"
-    );
-    let logged = logged.len();
+    assert!(matches!(stopped, Err(Error::Io { .. })), "{stopped:?}");
+    a.0.settle_interrupted().unwrap();
+    let logged = line_of(&folder, "Save").len();
     let (folder, probe, mut a, song) = setup();
     let before = folder.files(Root::Folder);
     let refused = save((&probe, &mut a, song), value_for(MAX_LINE + 1, logged));
     assert_too_long(refused, &folder, before);
     let (folder, probe, mut a, song) = setup();
     let stopped = save((&probe, &mut a, song), value_for(WELL_UNDER, logged));
-    assert!(matches!(stopped, Err(Error::Partial(_))), "{stopped:?}");
+    assert!(matches!(stopped, Err(Error::Io { .. })), "{stopped:?}");
+    a.0.settle_interrupted().unwrap();
     assert_eq!(line_of(&folder, "Save").len(), WELL_UNDER);
 }
 
@@ -3167,7 +3167,7 @@ fn a_lost_segment_write_stands<F: Facade>(fresh: bool) {
     );
 }
 
-fn a_copied_move_whose_source_removal_fails_leaves_no_copy_behind<F: Facade>() {
+fn a_copied_move_whose_source_removal_fails_is_finished_by_the_next_write<F: Facade>() {
     let folder = disk();
     let clock = TestClock::at(1_000);
     let probe = Probe::new(&machine(&folder));
@@ -3179,14 +3179,15 @@ fn a_copied_move_whose_source_removal_fails_leaves_no_copy_behind<F: Facade>() {
         source && once.replace(false)
     });
     let held = Expect::Holds(identity(b"song"));
-    let renamed = a.commit("Rename", |i| i.rename(song, &path("b.npno"), held));
+    let _ = a.commit("Rename", |i| i.rename(song, &path("b.npno"), held));
     heal(&probe);
+    create(&mut a, "next.npno", b"next");
     let files = folder.files(Root::Folder);
     let library: Vec<&RelPath> = files
         .keys()
         .filter(|at| !at.as_str().starts_with(".t"))
         .collect();
-    assert_eq!(library, [&path("b.npno")], "{renamed:?}");
+    assert_eq!(library, [&path("b.npno"), &path("next.npno")]);
 }
 
 fn a_record_that_never_landed_is_not_carried_out_by_the_next_write<F: Facade>() {
@@ -4477,7 +4478,7 @@ fn removing_an_empty_directory_is_undone_and_one_with_files_is_refused<F: Facade
     assert!(there("Empty"), "made again");
 }
 
-fn an_intent_that_stops_partway_says_what_landed<F: Facade>() {
+fn an_intent_that_stops_partway_logs_nothing_until_the_next_write_finishes_it<F: Facade>() {
     let folder = disk();
     let clock = TestClock::at(1_000);
     let probe = Probe::new(&machine(&folder));
@@ -4493,11 +4494,28 @@ fn an_intent_that_stops_partway_says_what_landed<F: Facade>() {
             .trash_file(&path("late.wav"), Expect::Holds(identity(b"late")))
     });
     heal(&probe);
-    let Err(Error::Partial(partial)) = stopped else {
-        panic!("{stopped:?}");
-    };
-    assert_eq!(partial.report.landed, [path("a.wav")]);
-    assert_eq!(partial.report.taken, [path("old.wav")]);
+    assert!(
+        matches!(&stopped, Err(Error::Io { path, .. }) if path.as_str() == "b.wav"),
+        "{stopped:?}"
+    );
+    assert_eq!(logged(&folder, "Copy in"), None);
+    a.commit("Next", |i| {
+        i.save_file(&path("c.wav"), b"c".to_vec(), Expect::Absent)
+    })
+    .unwrap();
+    let held = |name| read(&folder, name);
+    assert_eq!(
+        ["old.wav", "a.wav", "b.wav", "late.wav", "c.wav"].map(held),
+        [
+            None,
+            Some(b"a".to_vec()),
+            Some(b"b".to_vec()),
+            None,
+            Some(b"c".to_vec())
+        ]
+    );
+    let labels: Vec<String> = a.history().into_iter().map(|item| item.label).collect();
+    assert_eq!(labels, ["Copy in", "Next"]);
 }
 
 fn a_view_says_what_changed_since_the_view_before<F: Facade>() {
@@ -5549,7 +5567,7 @@ fn refuse(probe: &Probe, text: Option<&str>) {
     probe.seen.borrow_mut().refused = text.map(path);
 }
 
-fn effects_that_stop_partway_fail_the_commit_and_are_logged<F: Facade>() {
+fn effects_that_stop_partway_fail_the_commit_and_keep_both_versions<F: Facade>() {
     let folder = disk();
     let clock = TestClock::at(1_000);
     let (mut a, probe) = open_probed::<F>(&folder, &clock);
@@ -5564,30 +5582,35 @@ fn effects_that_stop_partway_fail_the_commit_and_are_logged<F: Facade>() {
         )
         .set(song, ORIGIN, "saved".into())
     });
-    let Err(Error::Partial(partial)) = saved else {
-        panic!("{saved:?}");
-    };
-    assert_eq!(
-        (partial.label.as_str(), partial.report.stopped.as_str()),
-        ("Save", "song.npno")
+    refuse(&probe, None);
+    assert!(
+        matches!(&saved, Err(Error::Io { path, .. }) if path.as_str() == "song.npno"),
+        "{saved:?}"
     );
-    assert_eq!(partial.report.applied, 1, "the old bytes went to the trash");
-    assert_eq!(a.history().last().unwrap().intent, partial.committed.intent);
+    assert_ne!(a.history().last().unwrap().label, "Save");
+    assert_eq!(a.view().entity(song).unwrap().get(ORIGIN), Field::Unset);
+    assert_eq!(read(&folder, "song.npno"), None);
+    let kept: Vec<Vec<u8>> = folder
+        .files(Root::Folder)
+        .into_iter()
+        .filter(|(path, _)| layout().owns(path))
+        .map(|(_, bytes)| bytes)
+        .filter(|bytes| [b"song".as_slice(), b"saved"].contains(&bytes.as_slice()))
+        .collect();
+    assert_eq!(kept.len(), 2, "the old bytes in the trash, the new staged");
+
+    create(&mut a, "next.npno", b"next");
+    assert_eq!(
+        read(&folder, "song.npno").as_deref(),
+        Some(b"saved".as_slice())
+    );
     assert_eq!(
         a.view().entity(song).unwrap().get(ORIGIN),
-        Field::Value("saved".into()),
-        "the intent's facts are logged"
-    );
-    assert_eq!(read(&folder, "song.npno"), None);
-    let trashed: Vec<u64> = a.trash().unwrap().iter().map(|item| item.len).collect();
-    assert_eq!(
-        trashed.iter().sum::<u64>(),
-        9,
-        "{trashed:?}: both versions kept"
+        Field::Value("saved".into())
     );
 }
 
-fn an_undo_that_stops_partway_fails_and_is_logged<F: Facade>() {
+fn an_undo_that_stops_partway_fails_and_the_next_write_finishes_it<F: Facade>() {
     let folder = disk();
     let clock = TestClock::at(1_000);
     let (mut a, probe) = open_probed::<F>(&folder, &clock);
@@ -5603,13 +5626,19 @@ fn an_undo_that_stops_partway_fails_and_is_logged<F: Facade>() {
     .unwrap();
     refuse(&probe, Some("song.npno"));
     let undone = a.undo();
-    let Err(Error::Partial(partial)) = undone else {
-        panic!("{undone:?}");
-    };
-    assert_eq!(partial.report.stopped, path("song.npno"));
-    assert!(a.history()[1].undone, "the undo is logged");
     refuse(&probe, None);
+    assert!(
+        matches!(&undone, Err(Error::Io { path, .. }) if path.as_str() == "song.npno"),
+        "{undone:?}"
+    );
+    assert!(!a.history()[1].undone, "the undo is not logged");
     assert_eq!(read(&folder, "song.npno"), None);
+    create(&mut a, "next.npno", b"next");
+    assert!(a.history()[1].undone);
+    assert_eq!(
+        read(&folder, "song.npno").as_deref(),
+        Some(b"one".as_slice())
+    );
 }
 
 /// The disk `change` of `song.npno` leaves after each crash that leaves its
@@ -5666,7 +5695,7 @@ fn interrupted_renames<F: Facade>(each: impl FnMut(MemDisk, &str)) {
     );
 }
 
-fn settling_an_own_effect_that_stops_partway_fails_before_the_next_intent<F: Facade>() {
+fn an_own_effect_that_cannot_be_finished_leaves_the_library_read_only_until_reopened<F: Facade>() {
     interrupted_renames::<F>(|disk, shown| {
         let machine = Machine {
             folder: disk.clone(),
@@ -5677,24 +5706,40 @@ fn settling_an_own_effect_that_stops_partway_fails_before_the_next_intent<F: Fac
         assert_eq!(opened.settled.len(), 1, "{shown}");
         put(&disk, "b.npno", b"theirs");
         let song = again.view().entities()[0].id();
-        let next = again.commit("Tag", |i| i.add(song, TAGS, tag("next")));
-        let Err(Error::Unfinished(partial)) = next else {
-            panic!("{shown}: {next:?}");
+        let unfinished = Why::Unfinished {
+            label: "Rename".into(),
+            path: path("b.npno"),
+            error: IoError::AlreadyExists,
         };
-        assert_eq!(
-            (partial.label.as_str(), partial.report.stopped.as_str()),
-            ("Rename", "b.npno"),
-            "{shown}"
-        );
+        for attempt in ["the first write", "the next"] {
+            let next = again.commit("Tag", |i| i.add(song, TAGS, tag("next")));
+            assert!(
+                matches!(&next, Err(Error::ReadOnly(why)) if *why == unfinished),
+                "{shown}, {attempt}: {next:?}"
+            );
+        }
         assert_eq!(tags(&again.view(), song), ["new"], "{shown}: not tried");
-        again
-            .commit("Tag", |i| i.add(song, TAGS, tag("next")))
-            .unwrap_or_else(|e| panic!("{shown}: {e}"));
-        assert_eq!(read(&disk, "b.npno").as_deref(), Some(b"theirs".as_slice()));
         assert_eq!(
             read(&disk, "song.npno").as_deref(),
-            Some(b"song".as_slice())
+            Some(b"song".as_slice()),
+            "{shown}"
         );
+        again
+            .close()
+            .unwrap_or_else(|e| panic!("{shown}: closing: {e}"));
+
+        disk.perform(Io::Remove {
+            root: Root::Folder,
+            path: path("b.npno"),
+        })
+        .unwrap();
+        let (mut reopened, opened) = F::open(Probe::new(&machine), env("a", 2, &clock)).unwrap();
+        assert_eq!(opened.mode, toshokan::report::Mode::Writable, "{shown}");
+        reopened
+            .commit("Tag", |i| i.add(song, TAGS, tag("next")))
+            .unwrap_or_else(|e| panic!("{shown}: {e}"));
+        assert_eq!(read(&disk, "b.npno").as_deref(), Some(b"song".as_slice()));
+        assert_eq!(read(&disk, "song.npno"), None, "{shown}");
     });
 }
 
@@ -5744,7 +5789,7 @@ fn a_settlement_that_stops_partway_leaves_the_record_open_until_settled_again<F:
                 refuse(&probe, Some("song.npno"));
                 let settled = heir.settle(orphan.clone(), how);
                 refuse(&probe, None);
-                let Err(Error::Partial(partial)) = settled else {
+                let Err(Error::Io { path: at, .. }) = settled else {
                     assert!(
                         how == Settlement::RolledBack && settled.is_ok(),
                         "{shown}: {settled:?}"
@@ -5752,14 +5797,14 @@ fn a_settlement_that_stops_partway_leaves_the_record_open_until_settled_again<F:
                     return;
                 };
                 stopped += 1;
-                assert_eq!(partial.report.stopped, path("song.npno"), "{shown}");
+                assert_eq!(at, path("song.npno"), "{shown}");
 
                 let (between, opened) =
                     F::open(Probe::new(&machine(&disk)), env("c", 3, &clock)).unwrap();
-                assert_eq!(
-                    opened.orphaned,
-                    std::slice::from_ref(orphan),
-                    "{shown}: still open"
+                assert!(
+                    opened.orphaned.contains(orphan),
+                    "{shown}: still open: {:?}",
+                    opened.orphaned
                 );
                 let song = between.view().entities()[0].id();
                 assert_eq!(tags(&between.view(), song), ["new"], "{shown}");

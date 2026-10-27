@@ -465,8 +465,8 @@ impl<'l, F: Fs + 'l> Driver for &'l mut Library<F> {
 }
 
 impl<'l, F: Fs + 'l> Intent<&'l mut Library<F>> {
-    /// Commits the intent. One whose file effects stop partway is logged as far as
-    /// they got and fails with [`crate::Error::Partial`].
+    /// Commits the intent. One whose file effects fail logs nothing and fails; the
+    /// next write finishes them first.
     pub async fn commit(self) -> Result<Committed> {
         let (library, plan, sources) = self.into_parts();
         run_with(&library.fs, sources, library.core.commit(plan)).await

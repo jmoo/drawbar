@@ -148,6 +148,8 @@ impl Backend {
         let fault = Arc::new(std::sync::Mutex::new(None));
         #[cfg(test)]
         let faults = fault.clone();
+        #[cfg(test)]
+        let refusing = signs.clone();
         let clock = Box::new(SystemClock);
         let worker = std::thread::spawn(move || {
             // toshokan's library stays on the thread that opened it.
@@ -173,6 +175,9 @@ impl Backend {
                         }
                         Some(super::Fault::Next(after)) => {
                             *faults.lock().expect("never poisoned") = Some(*after);
+                        }
+                        Some(super::Fault::Refuse(which)) => {
+                            *refusing.refuse.lock().expect("never poisoned") = Some(which);
                         }
                         None => {}
                     }

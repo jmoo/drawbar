@@ -456,17 +456,22 @@ fn recover(disk: &MemDisk) -> Result<Vec<Outcome>, Error> {
     assert!(found.orphaned.is_empty(), "{found:?}");
     let mut outcomes = Vec::new();
     for settling in &found.own {
-        let applied = d.run(recovery::settle(
+        let settled = d.run(recovery::settle(
             &layout,
             settling.record,
             Rc::new(settling.pending.clone()),
             identify(),
             capabilities,
-        ))?;
-        assert_eq!(applied.outcome, settling.outcome, "predicted");
-        outcomes.push(applied.outcome);
-        close(d, WRITER, settling.record)?;
-        d.run(effects::finish(&layout, settling.record, &settling.pending))?;
+        ));
+        outcomes.push(settling.outcome.clone());
+        match settling.outcome {
+            Outcome::Complete => {
+                settled?;
+                close(d, WRITER, settling.record)?;
+                d.run(effects::finish(&layout, settling.record, &settling.pending))?;
+            }
+            _ => assert!(settled.is_err(), "{:?}", settling.outcome),
+        }
     }
     for (name, record) in &found.spent {
         d.run(effects::finish(&layout, *name, record))?;
@@ -736,16 +741,14 @@ fn carry_out(d: &mut Process, plan: EffectPlan, how: Settlement) {
     if plan.is_empty() {
         return;
     }
-    let applied = d
-        .run(effects::apply(
-            &layout,
-            plan.record,
-            Rc::clone(&record),
-            0,
-            identify(),
-        ))
-        .unwrap();
-    assert_eq!(applied.outcome, Outcome::Complete, "{how:?}");
+    d.run(effects::apply(
+        &layout,
+        plan.record,
+        Rc::clone(&record),
+        0,
+        identify(),
+    ))
+    .unwrap_or_else(|error| panic!("{how:?}: {error}"));
     d.run(effects::finish(&layout, plan.record, &record))
         .unwrap();
 }
@@ -1015,7 +1018,6 @@ fn records_that_are_unchained_unconfined_or_settled_are_not_acted_on() {
             stopped: path("b"),
             error: toshokan::io::IoError::NotFound,
             record: Some(Nonce::from_u128(1)),
-            landed: Vec::new(),
             taken: Vec::new(),
         }),
         "the source is not there"

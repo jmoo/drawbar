@@ -757,27 +757,13 @@ fn save_part<'l, F: Fs + 'l>(
     (built, failed)
 }
 
-/// How one part of a batch is answered once the batch is committed: the path that
-/// tells whether it landed, and the event it answers with.
+/// How one part of a batch is answered once the batch is committed: the event it
+/// answers with.
 struct Owed {
     /// The part of the batch it is of, in order.
     part: usize,
-    at: Option<Spot>,
     failed: Option<FillFailure>,
     answer: Answering,
-}
-
-/// Where a part of a batch puts a file or a folder, or takes one from.
-enum Spot {
-    Puts(RelPath),
-    Takes(RelPath),
-}
-
-/// What of a batch that stopped partway landed: the paths its finished steps put a
-/// file or a folder at, and those they took one from.
-struct Reached {
-    put: BTreeSet<RelPath>,
-    taken: BTreeSet<RelPath>,
 }
 
 enum Answering {
@@ -929,7 +915,6 @@ async fn batch<F: Fs>(
 struct Tried {
     owed: Vec<Owed>,
     refused: Vec<Event>,
-    reached: Option<Reached>,
     changes: Option<toshokan::Committed>,
     why: Option<Failure>,
 }
@@ -944,7 +929,6 @@ impl Tried {
         let Tried {
             owed,
             refused,
-            reached,
             changes,
             why,
         } = self;
@@ -952,19 +936,12 @@ impl Tried {
             answer(event);
         }
         for Owed {
-            at,
             failed,
             answer: answering,
             ..
         } in owed
         {
-            let landed = match (&reached, &at) {
-                (None, _) => true,
-                (Some(reached), Some(Spot::Puts(at))) => reached.put.contains(at),
-                (Some(reached), Some(Spot::Takes(at))) => reached.taken.contains(at),
-                (Some(_), None) => changes.is_some(),
-            };
-            let event = match landed {
+            let event = match changes.is_some() {
                 true => answering.landed(fs).await,
                 false => {
                     let filled = failed.and_then(|failed| failed.take()).map(fill_failure);
@@ -1026,34 +1003,13 @@ async fn attempt<F: Fs>(library: &mut Library<F>, label: &str, parts: Vec<Intent
     }
     let Parting { built, owed, .. } = parting;
     let built = built.expect("each part puts the intent back");
-    let (reached, changes, why) = match built.commit().await {
-        Ok(committed) => (None, Some(committed), None),
-        Err(Error::Partial(partial)) => {
-            // ⚠️ Only a commit's report says what landed; a settlement's leaves it empty.
-            let report = &partial.report;
-            let reached = Reached {
-                put: report.landed.iter().cloned().collect(),
-                taken: report.taken.iter().cloned().collect(),
-            };
-            let why = format!("the change stopped at {}", partial.report.stopped);
-            (
-                Some(reached),
-                Some(partial.committed),
-                Some(Failure::Io(why)),
-            )
-        }
-        Err(e) => {
-            let nothing = Reached {
-                put: BTreeSet::new(),
-                taken: BTreeSet::new(),
-            };
-            (Some(nothing), None, Some(failure(e, None)))
-        }
+    let (changes, why) = match built.commit().await {
+        Ok(committed) => (Some(committed), None),
+        Err(e) => (None, Some(failure(e, None))),
     };
     Tried {
         owed,
         refused,
-        reached,
         changes,
         why,
     }
@@ -1185,7 +1141,7 @@ impl<'l, F: Fs + 'l> Parting<'l, '_, F> {
                         Some(entity) => built.rename(entity, &to, moving.expect),
                         None => built.rename_file(&from, &to, moving.expect),
                     });
-                    self.owe(Some(Spot::Puts(to)), None, answering);
+                    self.owe(None, answering);
                 }
                 Ok(())
             }
@@ -1203,7 +1159,7 @@ impl<'l, F: Fs + 'l> Parting<'l, '_, F> {
                     }
                 };
                 self.built = Some(self.take().move_tree(&from, &to));
-                self.owe(Some(Spot::Puts(to)), None, answering);
+                self.owe(None, answering);
                 Ok(())
             }
             Intent::Delete { files } => {
@@ -1217,7 +1173,7 @@ impl<'l, F: Fs + 'l> Parting<'l, '_, F> {
                         Some(entity) => built.trash(entity, expect).delete(entity),
                         None => built.trash_file(&at, expect),
                     });
-                    self.owe(Some(Spot::Takes(at)), None, doing);
+                    self.owe(None, doing);
                 }
                 Ok(())
             }
@@ -1226,7 +1182,7 @@ impl<'l, F: Fs + 'l> Parting<'l, '_, F> {
                     .map_err(|why| Box::new(Event::Failed(format!("making {path}: {why}"))))?;
                 self.built = Some(self.take().make_dir(&at));
                 let doing = Answering::Quiet(format!("making {path}"));
-                self.owe(Some(Spot::Puts(at)), None, doing);
+                self.owe(None, doing);
                 Ok(())
             }
             Intent::RemoveDir { path } => {
@@ -1234,7 +1190,7 @@ impl<'l, F: Fs + 'l> Parting<'l, '_, F> {
                     .map_err(|why| Box::new(Event::Failed(format!("removing {path}: {why}"))))?;
                 self.built = Some(self.take().remove_dir(&at));
                 let doing = Answering::Quiet(format!("removing {path}"));
-                self.owe(Some(Spot::Takes(at)), None, doing);
+                self.owe(None, doing);
                 Ok(())
             }
             Intent::Tag { files, name, make } => {
@@ -1261,7 +1217,7 @@ impl<'l, F: Fs + 'l> Parting<'l, '_, F> {
                     false => built,
                 });
                 let doing = Answering::Quiet(format!("tagging with “{name}”"));
-                self.owe(None, None, doing);
+                self.owe(None, doing);
                 Ok(())
             }
             other => Err(Box::new(Event::Failed(format!(
@@ -1282,7 +1238,7 @@ impl<'l, F: Fs + 'l> Parting<'l, '_, F> {
         let built = self.take();
         let (built, failed) = save_part(built, self.view, &at, to, fill, tags);
         self.built = Some(built);
-        self.owe(Some(Spot::Puts(at)), Some(failed), answering);
+        self.owe(Some(failed), answering);
         Ok(())
     }
 
@@ -1290,11 +1246,10 @@ impl<'l, F: Fs + 'l> Parting<'l, '_, F> {
         self.built.take().expect("each part puts the intent back")
     }
 
-    fn owe(&mut self, at: Option<Spot>, failed: Option<FillFailure>, answer: Answering) {
+    fn owe(&mut self, failed: Option<FillFailure>, answer: Answering) {
         let part = self.part;
         self.owed.push(Owed {
             part,
-            at,
             failed,
             answer,
         });

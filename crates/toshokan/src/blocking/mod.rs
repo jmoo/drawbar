@@ -278,8 +278,8 @@ impl<'l, B: Backend + 'l> Driver for &'l mut Library<B> {
 }
 
 impl<'l, B: Backend + 'l> Intent<&'l mut Library<B>> {
-    /// Commits the intent. One whose file effects stop partway is logged as far as
-    /// they got and fails with [`crate::Error::Partial`].
+    /// Commits the intent. One whose file effects fail logs nothing and fails; the
+    /// next write finishes them first.
     pub fn commit(self) -> Result<Committed> {
         let (library, plan, sources) = self.into_parts();
         run_with(&mut library.backend, sources, library.core.commit(plan))

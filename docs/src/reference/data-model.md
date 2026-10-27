@@ -121,8 +121,9 @@ otherwise.
 
 toshokan then stages the new bytes in the writer's `tmp/`, records the change as
 pending, moves the bytes it displaces to the writer's `trash/`, and logs what it
-did. A crash leaves each path holding its old bytes or its new ones, and the
-next open finishes the change or rolls it back.
+did. A crash or a failed write leaves each path holding its old bytes or its
+new ones. The next change finishes what a failed write left, and the next open
+finishes what a crash left or rolls it back.
 [File effects and pending records](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#file-effects-and-pending-records)
 has the steps. drawbar never reads a file whole to write it: a copy, or an edit
 of a resting file, streams a chunk at a time.
@@ -171,9 +172,11 @@ drawbar asks only once the change has stood unmoved for five seconds, since a
 drawbar in a browser tab may still be making it.
 
 A library opens read-only when its folder cannot be written, or when this
-writer's log holds entries a newer build wrote. Another drawbar on the folder
-never makes it read-only. Changes in a read-only library are held in memory
-only.
+writer's log holds entries a newer build wrote. It turns read-only until it is
+opened again when a change it began cannot be finished, as when another program
+put a file where the change puts one; opening it again tries once more. Another
+drawbar on the folder never makes it read-only. Changes in a read-only library
+are held in memory only.
 
 A reader keeps nothing between opens: what it shows comes from the files in the
 folder. After a restore from a backup, facts no file holds now are gone at the

@@ -706,17 +706,15 @@ A commit:
 Building an intent writes nothing, but draws the id of each entity it creates,
 so one intent can create entities that name each other.
 
-A commit whose file effects stop partway is logged with what they did, and
-fails, saying where they stopped and which library paths its finished changes
-put files at, made directories at or moved trees to.
+A commit whose file effects fail logs nothing and fails, leaving its record
+open (see File effects and pending records).
 
 An intent may make a directory where nothing is, and remove one that holds no
 file the library knows but those its earlier changes move out; anything else in
 it keeps it, and the removal is then not logged. Neither touches a path, so one
 intent can make a directory and move files into it, or move them out and remove
 it. Each logs a `dir` op as the folder shows it afterwards. When settling one of this writer's unfinished
-effects at step 4 stops partway, that settlement is logged and the commit fails
-before its own intent is tried.
+effects at step 4 fails, the commit fails before its own intent is tried.
 
 Otherwise a commit whose entries are durable succeeds, whatever fails after
 them, and says which parts of the instance's own state lag it: `head.json` not
@@ -835,10 +833,10 @@ the folder. A move that copies creates its destination, which replaces nothing
 where the backend's creates refuse an existing file in the same step; a
 browser's do not (see Browsers). Opening says which kind of folder it is.
 
-If a step fails, the rest are not tried: staged files not placed are moved to
-`trash/<their nonce>`, replacing what a move cut short left there, the entry
-records the effects that were made, and the intent reports that it stopped
-partway. Each library path holds its old bytes, nothing, or its new bytes, and
+If a step fails, the rest are not tried and nothing is logged: the record stays
+open, and the next write, or the next open, settles it forward from what the
+folder shows. If that fails, the writer stops writing until the library is
+opened again. Each library path holds its old bytes, nothing, or its new bytes, and
 while it holds nothing a pending record names it. Where moves copy, a library
 path may also hold a copy of its new bytes cut short while a pending record
 names it: no longer than them, holding their start or, where a crash zeroed or
@@ -943,10 +941,10 @@ them, and moves a library file it displaces into its own trash. A `from_trash`
 of an item a `to_trash` it carried out itself put aside takes the file from its
 own trash, where that step put it. Once its steps
 are done, it appends a `settle` entry naming the writer and record, after which
-no reader reports the record. If its steps stop partway, the settlement fails
-and its intent is logged with what they did, without the planned facts or a
-`settle` entry. The record stays open, and settling it again finds from the
-folder what remains. Only the record's writer removes it.
+no reader reports the record. If a step fails, the settlement fails as an
+intent does: the settler's own record stays open, and the other writer's record
+stays open until the settlement is made again, which finds from the folder what
+remains. Only the record's writer removes it.
 
 A record written where directories rename may move a tree by one `rename`. A
 reader whose folder cannot rename directories refuses to finish that step or roll
