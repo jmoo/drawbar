@@ -606,6 +606,7 @@ through_both!(
     closing_removes_a_record_whose_removal_failed,
     a_record_a_crash_left_spent_is_not_settled_again_and_goes_at_the_next_write,
     a_record_whose_writing_seems_to_fail_is_settled_before_the_next_write,
+    a_record_that_never_landed_is_not_carried_out_by_the_next_write,
     a_spent_record_is_reported_only_where_its_entry_has_not_arrived,
     a_settled_record_is_removed_and_logged_once,
     identities_a_failed_write_lost_are_kept_by_the_next_scan,
@@ -3085,6 +3086,48 @@ fn closing_removes_a_record_whose_removal_failed<F: Facade>() {
     let (a, _, _) = with_a_record_left::<F>(&folder, &clock);
     a.close().unwrap();
     assert_eq!(pending_files(&folder), []);
+}
+
+fn a_record_that_never_landed_is_not_carried_out_by_the_next_write<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    let journal = |path: &RelPath| {
+        let text = path.as_str();
+        text.ends_with(".json") && (text.contains("/pending/") || text.contains("/tmp/"))
+    };
+    fail(&probe, move |io| match io {
+        Io::Create { path, .. } => journal(path),
+        Io::Stat { path, .. } => path.as_str().contains("/pending/"),
+        _ => false,
+    });
+    let held = Expect::Holds(identity(b"song"));
+    let moved = a.commit("Rename", |i| i.rename(song, &path("b.npno"), held));
+    heal(&probe);
+    assert!(moved.is_err(), "the record is not written: {moved:?}");
+    let before = folder.files(Root::Folder);
+    let library = |files: &BTreeMap<RelPath, Vec<u8>>| -> Vec<(RelPath, Vec<u8>)> {
+        let outside = files
+            .iter()
+            .filter(|(at, _)| !at.as_str().starts_with(".t"));
+        outside
+            .map(|(at, bytes)| (at.clone(), bytes.clone()))
+            .collect()
+    };
+    a.commit("Tag", |i| i.add(song, TAGS, tag("later")))
+        .unwrap();
+    let after = folder.files(Root::Folder);
+    assert_eq!(
+        library(&after),
+        library(&before),
+        "the rename is not carried out"
+    );
+    let file = a.view().entity(song).unwrap().file().unwrap();
+    assert_eq!(file.path, path("song.npno"));
+    let undone: Vec<String> = a.history().into_iter().map(|item| item.label).collect();
+    assert_eq!(undone, ["Import", "Tag"], "the rename is not logged");
 }
 
 fn a_record_whose_writing_seems_to_fail_is_settled_before_the_next_write<F: Facade>() {

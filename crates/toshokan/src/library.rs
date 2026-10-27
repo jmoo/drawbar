@@ -2065,7 +2065,26 @@ fn settle_own(library: &mut Library) -> Fallible<'_, &mut Library> {
     })
 }
 
+/// Settles `settling` when the folder holds its record. One the folder does not
+/// hold never landed and journaled nothing, so it is dropped and its staging left
+/// to tidy; one the folder cannot be asked about fails this write, to try again.
 fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Library> {
+    let path = library
+        .layout
+        .pending(settling.pending.writer, settling.record);
+    flow::stat(Root::Folder, &path).and_then(move |held| match held {
+        Some(_) => resume(library, settling),
+        None => {
+            library
+                .unsettled
+                .retain(|open| open.record != settling.record);
+            ok(library)
+        }
+    })
+}
+
+/// Carries out the rest of the record `settling` and logs its entry.
+fn resume(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Library> {
     let name = settling.record;
     let record = Rc::new(settling.pending);
     let identify = Rc::clone(&library.env.identify);
