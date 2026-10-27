@@ -27,7 +27,8 @@ USB support for other models cannot be guaranteed.
 
 drawbar and nord-cli find programs, samples and the rest by the name the instrument
 gives each kind of storage, so another model's folders show what it keeps in them.
-A kind of storage drawbar has no name for, such as the Stage 4's presets, is listed
+The Stage 4's organ, piano and synth presets get folders of their own. A kind of
+storage drawbar has no name for, such as the Stage 4's piano pedal sounds, is listed
 under the instrument's own name and is read only. Writing to another model follows
 what the Electro 5 does and has not been tried, so drawbar and nord-cli warn before
 every such write.
