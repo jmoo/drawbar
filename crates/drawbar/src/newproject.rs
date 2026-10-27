@@ -17,9 +17,9 @@
 use eframe::egui;
 use nord_format::formats::npno::encode::{
     build, parse_stroke_name, resample, sustain, Clash, Donor, Kind, LayerTag, Options, Recording,
-    Rules, Stem, HIGHEST_PLAYED_LAYER,
+    Rules, Stem,
 };
-use nord_format::formats::npno::{Bank, Library};
+use nord_format::formats::npno::{Bank, Library, Version};
 use nord_format::formats::nsmp::codec::Layout;
 use nord_format::formats::nsmp::zone::derive_top_notes;
 use nord_format::formats::nsmp::{encode, MAX_NAME_LEN};
@@ -198,6 +198,8 @@ pub struct Draft {
     pub takes: Vec<Take>,
     /// The piano document a build copies its playback fields from, if one is chosen.
     pub template: Option<u64>,
+    /// The format a piano library is written in: the template's, once one is chosen.
+    pub version: Version,
     /// The build in flight, once Create has been pressed.
     job: Option<Job<Result<Built, String>>>,
     /// Why the last build failed, kept with the takes so they can be fixed.
@@ -314,6 +316,7 @@ impl Draft {
             name: draft_name(making, &paths),
             takes,
             template: None,
+            version: Version::default(),
             job: None,
             refused: None,
         })
@@ -348,7 +351,7 @@ impl Draft {
         // ⚠️ The library encoder checks every other rule about its strokes when it
         // builds, and reports it with the takes still here to be fixed.
         if self.making == Making::Piano {
-            return layer_values(&self.takes).err();
+            return layer_values(&self.takes, self.version).err();
         }
         if self.making == Making::Instrument && self.name.len() > MAX_NAME_LEN {
             return Some(format!(
@@ -405,7 +408,8 @@ impl Draft {
 
     /// Everything a build needs, owned, so it can run apart from the dialog.
     fn coding(&self, donor: Option<Library<'static>>) -> Result<Coding, String> {
-        let values = layer_values(&self.takes)?;
+        let version = donor.as_ref().map_or(self.version, Library::version);
+        let values = layer_values(&self.takes, version)?;
         let mut takes = Vec::with_capacity(self.takes.len());
         for (take, layer) in self.takes.iter().zip(values) {
             let pcm = take
@@ -424,6 +428,7 @@ impl Draft {
         }
         Ok(Coding {
             name: self.name.clone(),
+            version,
             donor,
             takes,
         })
@@ -535,6 +540,8 @@ struct Recorded {
 /// A piano library build, detached from the dialog that set it up.
 struct Coding {
     name: String,
+    /// The format written where no template donates one.
+    version: Version,
     donor: Option<Library<'static>>,
     takes: Vec<Recorded>,
 }
@@ -576,7 +583,7 @@ impl Coding {
         progress.say(format!("coding {count} strokes…"));
         let donor = match &self.donor {
             Some(template) => Donor::Template(template),
-            None => Donor::Rules(Rules::new(Kind::Grand)),
+            None => Donor::Rules(Rules::new(self.version, Kind::Grand)),
         };
         let library =
             build(&donor, &Options::new(&self.name), &recordings).map_err(|e| e.to_string())?;
@@ -591,23 +598,38 @@ impl Coding {
     }
 }
 
-/// The layer value of each take's stroke, in list order, as
-/// [`nord_format::formats::npno::encode::layer_values`] computes it.
-fn layer_values(takes: &[Take]) -> Result<Vec<u8>, String> {
+/// The layer value of each take's stroke in a `version` library, in list order, as
+/// [`nord_format::formats::npno::encode::layer_values`] computes it. A value no velocity
+/// selects is refused by the take that names it.
+fn layer_values(takes: &[Take], version: Version) -> Result<Vec<u8>, String> {
     let named: Vec<(u8, Bank, LayerTag)> = takes
         .iter()
         .map(|take| (take.root_key, take.bank, take.layer))
         .collect();
-    nord_format::formats::npno::encode::layer_values(&named).map_err(|clash| {
-        let what = format!("root {} {}", note::name(clash.root), clash.bank.name());
-        match clash.how {
-            Clash::BothForms => format!(
-                "{what} names some of its layers by index and some by value; one root's \
-                 bank names them one way"
-            ),
-            Clash::Twice => format!("{what} names one of its layers twice"),
-        }
-    })
+    let values =
+        nord_format::formats::npno::encode::layer_values(&named, version).map_err(|clash| {
+            let what = format!("root {} {}", note::name(clash.root), clash.bank.name());
+            match clash.how {
+                Clash::BothForms => format!(
+                    "{what} names some of its layers by index and some by value; one root's \
+                     bank names them one way"
+                ),
+                Clash::Twice => format!("{what} names one of its layers twice"),
+            }
+        })?;
+    let highest = version.highest_played_layer();
+    match takes
+        .iter()
+        .zip(&values)
+        .find(|(_, &value)| value > highest)
+    {
+        Some((take, value)) => Err(format!(
+            "{}: no velocity selects layer value {value}; {highest} is the largest a key of \
+             a {version} library sounds",
+            take.path
+        )),
+        None => Ok(values),
+    }
 }
 
 /// The dialog between picking WAVs and having what they make, if a draft is waiting.
@@ -664,7 +686,7 @@ pub fn dialog(ctx: &egui::Context, workspace: &mut Workspace, log: &mut Log) -> 
                             take.root_key = note;
                         }
                         if making == Making::Piano {
-                            stroke_controls(ui, i, take);
+                            stroke_controls(ui, i, take, draft.version);
                         }
                         match (take.refusal(making), take.pcm()) {
                             (Some(why), _) => {
@@ -698,6 +720,7 @@ pub fn dialog(ctx: &egui::Context, workspace: &mut Workspace, log: &mut Log) -> 
             ui.add_space(4.0);
             egui::CollapsingHeader::new("Advanced").show(ui, |ui| {
                 template_picker(ui, draft, &templates);
+                format_picker(ui, draft);
             });
         }
         let refusal = draft.refusal();
@@ -753,8 +776,9 @@ pub fn dialog(ctx: &egui::Context, workspace: &mut Workspace, log: &mut Log) -> 
     }
 }
 
-/// The bank and layer controls a piano take has beyond a root key.
-fn stroke_controls(ui: &mut egui::Ui, i: usize, take: &mut Take) {
+/// The bank and layer controls a piano take has beyond a root key, on the layer scale
+/// of a `version` library.
+fn stroke_controls(ui: &mut egui::Ui, i: usize, take: &mut Take, version: Version) {
     egui::ComboBox::from_id_salt(("draft_bank", i))
         .width(92.0)
         .selected_text(take.bank.name())
@@ -775,11 +799,11 @@ fn stroke_controls(ui: &mut egui::Ui, i: usize, take: &mut Take) {
             ui.selectable_value(&mut take.layer, LayerTag::Value(number), "value");
         });
     let mut set = number;
-    // The value scale is the format's: above HIGHEST_PLAYED_LAYER no velocity selects the
-    // stroke, and `build` refuses it. An index ranks the takes sharing a root and bank,
-    // and no root plays more layers than that either.
+    // The value scale is the format's: above its highest played layer no velocity selects
+    // the stroke, and `build` refuses it. An index ranks the takes sharing a root and
+    // bank, and no root plays more layers than that either.
     if ui
-        .add(egui::DragValue::new(&mut set).range(0..=HIGHEST_PLAYED_LAYER))
+        .add(egui::DragValue::new(&mut set).range(0..=version.highest_played_layer()))
         .changed()
     {
         take.layer = match take.layer {
@@ -792,37 +816,82 @@ fn stroke_controls(ui: &mut egui::Ui, i: usize, take: &mut Take) {
 /// The template picker's label for no template, also shown when the list is empty.
 const NO_TEMPLATE: &str = "none (default rules)";
 
-fn template_picker(ui: &mut egui::Ui, draft: &mut Draft, templates: &[(u64, String)]) {
+/// A piano document a build can donate from: its id, its name and its format.
+struct Template {
+    id: u64,
+    name: String,
+    version: Version,
+}
+
+fn template_picker(ui: &mut egui::Ui, draft: &mut Draft, templates: &[Template]) {
     ui.horizontal(|ui| {
         ui.label("Template");
         let shown = draft
             .template
-            .and_then(|id| templates.iter().find(|(open, _)| *open == id))
-            .map_or(NO_TEMPLATE, |(_, name)| name.as_str());
+            .and_then(|id| templates.iter().find(|open| open.id == id))
+            .map_or(NO_TEMPLATE, |open| open.name.as_str());
         egui::ComboBox::from_id_salt("draft_template")
             .width(300.0)
             .selected_text(shown)
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut draft.template, None, NO_TEMPLATE);
-                for (id, name) in templates {
-                    ui.selectable_value(&mut draft.template, Some(*id), name);
+                for open in templates {
+                    if ui
+                        .selectable_value(&mut draft.template, Some(open.id), &open.name)
+                        .clicked()
+                    {
+                        draft.version = open.version;
+                    }
                 }
             });
     });
 }
 
+/// The format a library without a template is written in. A template's format decides
+/// once one is chosen.
+fn format_picker(ui: &mut egui::Ui, draft: &mut Draft) {
+    ui.horizontal(|ui| {
+        ui.label("Format");
+        ui.add_enabled_ui(draft.template.is_none(), |ui| {
+            egui::ComboBox::from_id_salt("draft_format")
+                .width(80.0)
+                .selected_text(draft.version.to_string())
+                .show_ui(ui, |ui| {
+                    for version in Version::ALL {
+                        ui.selectable_value(&mut draft.version, version, version.to_string());
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "6.x states velocity on a finer scale; 5.x is for instruments that do not \
+                     play 6.x. A template's format decides when one is chosen.",
+                )
+                .on_disabled_hover_text("the template's format decides");
+        });
+    });
+}
+
 /// The piano documents on this computer, by name, for a build to donate from.
-fn templates(workspace: &Workspace) -> Vec<(u64, String)> {
-    let mut open: Vec<(u64, String)> = workspace
+fn templates(workspace: &Workspace) -> Vec<Template> {
+    let mut open: Vec<Template> = workspace
         .entities()
         .iter()
-        .filter(|entity| {
-            matches!(entity.entity.as_deref(), Some(Entity::Piano(_)))
-                || matches!(entity.indexed(), Some(crate::ondisk::Index::Piano(_)))
+        .filter_map(|entity| {
+            let version = match (entity.indexed(), entity.entity.as_deref()) {
+                (Some(crate::ondisk::Index::Piano(index)), _) => index.library().version(),
+                (_, Some(Entity::Piano(piano))) => {
+                    Version::from_stream(piano.stream_version().ok()?)?
+                }
+                _ => return None,
+            };
+            Some(Template {
+                id: entity.id,
+                name: entity.name.clone(),
+                version,
+            })
         })
-        .map(|entity| (entity.id, entity.name.clone()))
         .collect();
-    open.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+    open.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
     open
 }
 
@@ -885,7 +954,6 @@ fn answered(workspace: &mut Workspace, log: &mut Log) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nord_format::formats::npno::encode::SOFTEST_LAYER;
     use nord_format::formats::npno::Loop;
     use nord_format::formats::nsmp::codec::SOURCE_RATE;
 
@@ -1119,8 +1187,8 @@ mod tests {
     fn a_roots_layers_are_spread_over_the_velocity_range_loudest_first() {
         let draft = piano_draft(&["060-b0-l02", "060-b0-l00", "060-b0-l01", "072-b0-l00"]);
         assert_eq!(
-            layer_values(&draft.takes).unwrap(),
-            vec![27, 0, 14, 0],
+            layer_values(&draft.takes, Version::V6).unwrap(),
+            vec![135, 0, 68, 0],
             "the list order is kept; the rank is the layer's own"
         );
     }
@@ -1185,11 +1253,45 @@ mod tests {
             strokes,
             [
                 (60, Some(Bank::Attack), 0),
-                (60, Some(Bank::Attack), SOFTEST_LAYER),
+                (60, Some(Bank::Attack), Version::V6.softest_layer()),
                 (72, Some(Bank::Release), 0),
             ],
             "the root's two layers spread from the loudest to the softest"
         );
+        assert_eq!(
+            library.version(),
+            Version::V6,
+            "a new library is 6.x unless chosen"
+        );
+        assert_eq!(library.strokes()[1].threshold(), 68);
+    }
+
+    #[test]
+    fn a_piano_draft_set_to_5_x_writes_5_x_and_its_scale() {
+        let mut draft = piano_draft(&["060-b0-l00", "060-b0-l01"]);
+        draft.version = Version::V5;
+        draft
+            .begin(&egui::Context::default(), None)
+            .expect("the takes state a library");
+        let built = finish(&mut draft).expect("a library");
+        let library = Library::borrow(&built.bytes).unwrap();
+        assert_eq!(library.version(), Version::V5);
+        let layers: Vec<(u8, u8)> = library
+            .strokes()
+            .iter()
+            .map(|stroke| (stroke.layer(), stroke.threshold()))
+            .collect();
+        assert_eq!(layers, [(0, 0), (Version::V5.softest_layer(), 0)]);
+    }
+
+    #[test]
+    fn a_layer_value_no_velocity_of_the_format_selects_is_refused() {
+        let draft = piano_draft(&["060-b0-v00", "060-b0-v100"]);
+        assert!(draft.refusal().is_none(), "6.x selects up to 150");
+        let mut older = piano_draft(&["060-b0-v00", "060-b0-v100"]);
+        older.version = Version::V5;
+        let why = older.refusal().expect("5.x selects up to 30");
+        assert!(why.contains("060-b0-v100"), "{why}");
     }
 
     /// A WAV's `smpl` loop reaches the built stroke.
@@ -1253,12 +1355,22 @@ mod tests {
     /// the takes still there.
     #[test]
     fn what_the_coder_refuses_comes_back_as_the_dialogs_own_line() {
-        let mut draft = piano_draft(&["a-060-b0-v31", "b-072-b0-v31"]);
+        let stereo = nord_format::wav::pcm16(
+            &vec![1_000i16; 6_000],
+            nord_format::formats::npno::codec::RATE,
+            2,
+        )
+        .unwrap();
+        let files = vec![
+            ("060-b0-l00.wav".to_string(), stroke_wav(3_000)),
+            ("072-b0-l00.wav".to_string(), stereo),
+        ];
+        let mut draft = Draft::plan(Making::Piano, files).unwrap();
         assert!(draft.refusal().is_none(), "the dialog does not check this");
 
         draft.begin(&egui::Context::default(), None).unwrap();
-        let why = finish(&mut draft).expect_err("a layer no velocity selects");
-        assert!(why.contains("no velocity selects"), "{why}");
+        let why = finish(&mut draft).expect_err("takes of two channel counts");
+        assert!(why.contains("one channel count"), "{why}");
         assert_eq!(draft.refused.as_deref(), Some(why.as_str()));
         assert_eq!(draft.takes.len(), 2, "the takes stay, to be fixed");
     }

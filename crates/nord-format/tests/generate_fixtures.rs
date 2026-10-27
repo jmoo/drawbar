@@ -7,7 +7,7 @@
 #![cfg(feature = "bundle")]
 
 use nord_format::formats::npno::encode::{self as piano, Donor, Kind, Recording, Rules};
-use nord_format::formats::npno::Bank;
+use nord_format::formats::npno::{Bank, Version};
 use nord_format::formats::nsmp::codec::Layout;
 use nord_format::formats::nsmp::encode as sample;
 use nord_format::formats::{cn3, midi, ne5, sysex};
@@ -56,7 +56,7 @@ fn sample_bytes(layout: Layout) -> Vec<u8> {
         .unwrap()
 }
 
-fn piano_bytes() -> Vec<u8> {
+fn piano_bytes(version: Version) -> Vec<u8> {
     let recording = Recording {
         root: 60,
         bank: Bank::Attack,
@@ -65,7 +65,7 @@ fn piano_bytes() -> Vec<u8> {
         sustain: None,
     };
     let library = piano::build(
-        &Donor::Rules(Rules::new(Kind::Grand)),
+        &Donor::Rules(Rules::new(version, Kind::Grand)),
         &piano::Options::new("Tone"),
         &[recording],
     )
@@ -171,7 +171,8 @@ const SNIFFED: usize = 12;
 #[ignore = "writes tests/fixtures; run to regenerate"]
 fn write_encoded_and_carried_fixtures() {
     write("nsmp/tone.nsmp3", &sample_bytes(Layout::V3));
-    write("npno/tone.npno", &piano_bytes());
+    write("npno/tone.npno", &piano_bytes(Version::V5));
+    write("npno/tone-v6.npno", &piano_bytes(Version::V6));
 
     write(
         "zip/electro5.ne5tbundle",
@@ -179,7 +180,7 @@ fn write_encoded_and_carried_fixtures() {
             ("First", program_at(0, 1)),
             ("song", read("ne5/song.ne5t")),
             ("Tone", sample_bytes(Layout::V2)),
-            ("Tone", piano_bytes()),
+            ("Tone", piano_bytes(Version::V5)),
         ]),
     );
     write(
