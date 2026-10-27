@@ -190,7 +190,7 @@ impl Version {
 
 /// The highest velocity that reaches each threshold on the velocity scale, for
 /// thresholds 0, [`REACH_STEP`], twice that, and so on, measured at every second
-/// velocity. The reach follows the instrument's velocity curve at about six thresholds a
+/// velocity with the program's KBD Touch at 0. The reach follows the instrument's velocity curve at about six thresholds a
 /// decibel, so it stops rising where the curve flattens below velocity 21, and 205 is
 /// past reach at velocity 1. Confirmed on hardware.
 const REACH: [u8; 21] = [
@@ -208,8 +208,11 @@ pub const HIGHEST_THRESHOLD: u16 = (REACH.len() as u16 - 1) * REACH_STEP;
 /// reaches, and of strokes with one threshold the last. The threshold is
 /// [`Stroke::threshold`] in a [`Version::V6`] library and [`Version::threshold`] in a
 /// [`Version::V5`] one. So a layer plays from 1 up to this velocity, less what softer
-/// layers take. Measured every ten thresholds, interpolated between them, and within two
-/// velocities of where a layer switches. Confirmed on hardware.
+/// layers take. Measured every ten thresholds with the program's KBD Touch at 0,
+/// interpolated between them, and within two velocities of where a layer switches.
+/// Confirmed on hardware. The other three KBD Touch settings ask less force for a high
+/// velocity, which this does not model. Reported by public documentation; not confirmed
+/// on hardware.
 pub fn top_velocity(threshold: u16) -> u8 {
     if threshold > HIGHEST_THRESHOLD {
         return 0;
