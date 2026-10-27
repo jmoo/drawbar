@@ -415,6 +415,9 @@ pub enum Fault {
     /// It writes half its bytes, and fails: a short write, which only a request
     /// that carries bytes can make.
     Short,
+    /// It takes effect and its reply is lost, and every request after it fails, as
+    /// when a disk is unplugged, until the fault is cleared.
+    Unplugged,
 }
 
 /// What a [`Faulty`] backend is told to do.
@@ -492,6 +495,7 @@ impl<B> Faulty<B> {
         }
         match arms.fault {
             Some((index, fault)) if index == at => Doing::Fault(fault),
+            Some((index, Fault::Unplugged)) if index < at => Doing::Fault(Fault::Fails),
             _ => Doing::Perform,
         }
     }
@@ -562,7 +566,9 @@ impl<B: Backend> Backend for Faulty<B> {
             Doing::Perform => self.inner.perform(io),
             Doing::Refuse => Err(IoError::Other("the process stopped".into())),
             Doing::Fault(Fault::Fails) => Err(faulted()),
-            Doing::Fault(Fault::Unanswered) => self.inner.perform(io).and(Err(faulted())),
+            Doing::Fault(Fault::Unanswered | Fault::Unplugged) => {
+                self.inner.perform(io).and(Err(faulted()))
+            }
             Doing::Fault(Fault::Short) => {
                 let short = short(&io).expect("a short write of a request with bytes");
                 self.inner.perform(short).and(Err(faulted()))
@@ -581,7 +587,9 @@ impl<B: asynch::Fs> asynch::Fs for Faulty<B> {
             Doing::Perform => self.inner.perform(io).await,
             Doing::Refuse => Err(IoError::Other("the process stopped".into())),
             Doing::Fault(Fault::Fails) => Err(faulted()),
-            Doing::Fault(Fault::Unanswered) => self.inner.perform(io).await.and(Err(faulted())),
+            Doing::Fault(Fault::Unanswered | Fault::Unplugged) => {
+                self.inner.perform(io).await.and(Err(faulted()))
+            }
             Doing::Fault(Fault::Short) => {
                 let short = short(&io).expect("a short write of a request with bytes");
                 self.inner.perform(short).await.and(Err(faulted()))
