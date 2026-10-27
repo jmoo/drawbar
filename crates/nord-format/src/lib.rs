@@ -483,6 +483,16 @@ impl Sample {
         }
     }
 
+    /// The [`nsmp::codec::file_peak`] of every stroke, which [`nsmp::codec::decode`]
+    /// takes for each of them.
+    pub fn file_peak(&self) -> Result<u32, Error> {
+        let streams = self.stroke_streams();
+        Ok(nsmp::codec::file_peak(
+            streams.iter().map(|&(_, stream)| stream),
+            self.layout()?,
+        ))
+    }
+
     /// Every stroke's stream in file order, whether or not a zone names it.
     pub fn stroke_streams(&self) -> Vec<(usize, &[u8])> {
         match self {

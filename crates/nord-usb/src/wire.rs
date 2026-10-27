@@ -867,9 +867,9 @@ impl Message {
 /// [`Classes`] gives the index on the attached instrument.
 ///
 /// ⚠️ How each class takes a write ([`Self::overwrites_in_place`],
-/// [`Self::renames_and_copies`], [`Self::names_its_slots`], [`Self::is_library`]) and how
-/// Live and Settings are addressed were measured on the Electro 5. Every other model is
-/// assumed to match.
+/// [`Self::renames_and_copies`], [`Self::names_its_slots`], [`Self::is_library`]), which
+/// classes answer [`Self::reports_dependencies`], and how Live and Settings are addressed
+/// were measured on the Electro 5. Every other model is assumed to match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ObjectClass {
     Piano,
@@ -1029,6 +1029,18 @@ impl ObjectClass {
     /// argument and discard it. Partition record word 3, the slot-family name length, is
     /// `0` for both.
     pub fn names_its_slots(self) -> bool {
+        !matches!(self, ObjectClass::Live | ObjectClass::Settings)
+    }
+
+    /// Whether the device answers [`cmd::DEPENDENCIES`] for an object of this class.
+    ///
+    /// Confirmed on hardware.
+    ///
+    /// Pianos, samples, programs and set lists answer it. Every live slot and the
+    /// settings refuse it with status `0x12`, the code a stale session gets, but the
+    /// session stays usable and the next one opens as usual, so it is a refusal of the
+    /// command, not a wedge.
+    pub fn reports_dependencies(self) -> bool {
         !matches!(self, ObjectClass::Live | ObjectClass::Settings)
     }
 }

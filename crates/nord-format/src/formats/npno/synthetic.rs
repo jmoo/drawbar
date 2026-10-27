@@ -28,6 +28,8 @@ pub struct Take {
     pub marks: [u32; MARKS],
     /// The decay coefficient at `+0x2e`.
     pub decay: u32,
+    /// The trim at `+0x34`.
+    pub trim: i16,
     /// The decay ladder at `+0x36`.
     pub ladder: [u32; DECAYS],
     /// The identifier at `+0x6e`. When the caller names none, the stroke's place in the
@@ -45,6 +47,7 @@ pub fn take(root: u8, bank: Bank, layer: u8, blocks: u16) -> Take {
         blocks,
         marks: [0; MARKS],
         decay: 0,
+        trim: 0,
         ladder: [0; DECAYS],
         id: None,
         silent: false,
@@ -59,6 +62,11 @@ impl Take {
 
     pub fn decay(mut self, decay: u32) -> Take {
         self.decay = decay;
+        self
+    }
+
+    pub fn trim(mut self, trim: i16) -> Take {
+        self.trim = trim;
         self
     }
 
@@ -162,6 +170,7 @@ impl Build {
                 put32(&mut body, field, *value);
             }
             put32(&mut body, record + REC_DECAY, take.decay);
+            put16(&mut body, record + REC_TRIM, take.trim as u16);
             for (entry, value) in take.ladder.iter().enumerate() {
                 let field = record + REC_DECAYS + entry * 4;
                 put32(&mut body, field, *value);
