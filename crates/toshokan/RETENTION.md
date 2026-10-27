@@ -61,14 +61,20 @@ keep it small. Its writer knows segments from its own last snapshot, from the
 files it read or wrote since, and from the files in its directory now. A segment
 it does not know of costs hashes, not correctness.
 
-Certificates are kept forever, and they are the one part of a snapshot that
-grows with use. A file sync brings back, from a backup or a device that was away
-for a year, must be recognized as folded however old it is, and a fork that
+Certificates are kept forever, and they are one of the two parts of a snapshot
+that grow with use. A file sync brings back, from a backup or a device that was
+away for a year, must be recognized as folded however old it is, and a fork that
 reuses entry numbers must still be told from it, so a tip keeps a fingerprint of
 every segment its writer wrote. A segment ends at every close of a process that
 appended, at every compaction and at each MiB, so certificates grow by about
-140 bytes per session that wrote and per 512 own entries. Nothing else in a
-snapshot grows with history, and nothing in it grows with the library's size.
+140 bytes per session that wrote and per 512 own entries.
+
+The other is `settled`: a pair, about 70 bytes, for every pending record the
+writer closed, one per commit that moved files and per settlement. A record
+file sync brings back must still read as closed once the entry that closed it is
+folded, and the entry after a record's position need not be the one that closed
+it where a clone wrote first, so only the pair tells. Nothing else in a snapshot
+grows with history, and nothing in it grows with the library's size.
 
 **Matching a file to a segment certificate.** A file matches when its first line
 has the certificate's first hash and its line at the certified position has the
@@ -438,6 +444,7 @@ Steady state, for the schema the harness writes:
 | A removed member never re-added | one reference per remover, forever | the same |
 | Certificates | ~60 B per segment ever written | ~90 B per segment ever written |
 | Earlier snapshots' heads | ~40 B per compaction, one per 512 own entries at most | ~45 B per compaction |
+| Records closed | ~70 B per commit that moved files and per settlement | ~70 B each |
 | Entries since the last snapshot | up to the compaction threshold, ~400 B each | ~250 B each |
 
 References exist only where one writer replaced another's write: at most
@@ -452,10 +459,13 @@ steady state is about 6 MB of memory and 4 MB of folder, plus:
   daily use come to some thousands of segments, a few hundred KB;
 - per compaction, the head of the snapshot it replaced, which a resurfaced copy
   of that snapshot is recognized by: under 0.1 B per entry;
+- per pending record the writer closed, ~70 B: one per commit that moved files
+  and per settlement;
 - per retired writer, its final contribution and the references others keep to
   it, at most what it wrote.
 
-These grow with deletions, segments and writers, not with entries.
+These grow with deletions, segments, commits that moved files and writers, not
+with entries otherwise.
 
 ## An old folder
 
