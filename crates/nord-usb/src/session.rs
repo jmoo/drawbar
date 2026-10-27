@@ -293,50 +293,27 @@ impl<T: Transport, C> Session<'_, T, C> {
     /// it can be paired with its request, so the transaction is released before the
     /// error is reported.
     async fn response_to(&mut self, command: u32) -> Result<Message> {
-        let expected = command.checked_add(1).ok_or_else(|| {
-            Error::InvalidArgument("command 0xffffffff has no response code".into())
-        })?;
-        let mut drained = 0;
-        loop {
-            let resp = match self.read_frame().await {
-                Ok(Some(resp)) => resp,
-                // A timed-out request desynchronizes replies, but the canceled read
-                // may still let the release land.
-                Ok(None) => {
-                    self.release().await;
-                    return Err(Error::Transport(format!(
-                        "no reply to command {command:#04x} within the session's read limit"
-                    )));
-                }
-                Err(e) => {
-                    self.release().await;
-                    return Err(e);
-                }
-            };
-
-            if resp.command != expected {
-                if resp.command == cmd::CHANGED && drained < DRAIN_CAP {
-                    drained += 1;
-                    self.device_changed = true;
-                    continue;
-                }
-                self.release().await;
-                return Err(Error::UnexpectedResponse {
-                    expected,
-                    got: resp.command,
-                });
-            }
-            return match resp.status() {
-                // A refusal leaves request and reply in step: the session stays usable,
-                // and the caller still owes it a close.
-                Some(0) => Ok(resp),
-                Some(code) => Err(Error::DeviceStatus(code)),
-                None => {
-                    self.release().await;
-                    Err(Error::Truncated { got: 0, need: 4 })
-                }
-            };
+        let transport = self
+            .transport
+            .as_deref_mut()
+            .ok_or_else(|| Error::Transport("session has no transport".into()))?;
+        let answered = answer(
+            transport,
+            self.read_limit,
+            command,
+            &mut self.device_changed,
+        )
+        .await;
+        // A refusal leaves request and reply in step: the session stays usable, and the
+        // caller still owes it a close. Anything else is a desync, and a timed-out read
+        // was canceled, so the release may still land.
+        if answered
+            .as_ref()
+            .is_err_and(|e| !matches!(e, Error::DeviceStatus(_)))
+        {
+            self.release().await;
         }
+        answered
     }
 
     /// Best-effort, idempotent release after a failed exchange.
@@ -364,20 +341,13 @@ impl<T: Transport, C> Session<'_, T, C> {
             .transport
             .as_mut()
             .ok_or_else(|| Error::Transport("session has no transport".into()))?;
-        let encoded = msg.encode();
-        if transport.write_timeout(&encoded, WRITE_LIMIT).await? {
+        if transport.write_timeout(&msg.encode(), WRITE_LIMIT).await? {
             Ok(())
         } else {
             // Nothing more can be delivered, so closing would only wait out the limit
             // again for every frame it sends.
             self.closed = true;
-            Err(Error::Transport(format!(
-                "the device did not accept command {:#04x} within {}s: its bulk endpoints \
-                 are stalled. Only a power cycle clears them; `nord device recover` cannot, \
-                 because its frames cannot be delivered either",
-                msg.command,
-                WRITE_LIMIT.as_secs()
-            )))
+            Err(stalled(msg))
         }
     }
 
@@ -434,6 +404,106 @@ impl<T: Transport, C> Drop for Session<'_, T, C> {
 }
 
 // With `panic = "abort"`, the panic these tests catch would end the test binary.
+/// The transport with no session around it, for the commands the device answers
+/// outside one: [`cmd::PARTITIONS`] and [`cmd::BANKS`]. No `HELLO`, no
+/// `SESSION_OPEN`, and nothing to close. The Electro 5 answers both this way, and
+/// another model is assumed to.
+///
+/// Confirmed on hardware.
+pub struct Bare<'t, T: Transport> {
+    transport: &'t mut T,
+    device_changed: bool,
+}
+
+impl<'t, T: Transport> Bare<'t, T> {
+    pub fn new(transport: &'t mut T) -> Self {
+        Self {
+            transport,
+            device_changed: false,
+        }
+    }
+
+    /// Whether an unsolicited [`cmd::CHANGED`] notification arrived, as
+    /// [`Session::instrument_changed`] reports it.
+    pub fn instrument_changed(&self) -> bool {
+        self.device_changed
+    }
+
+    /// Send one request and read its reply as a session does.
+    pub(crate) async fn request(&mut self, msg: &Message) -> Result<Message> {
+        if !self
+            .transport
+            .write_timeout(&msg.encode(), WRITE_LIMIT)
+            .await?
+        {
+            return Err(stalled(msg));
+        }
+        answer(
+            self.transport,
+            READ_LIMIT,
+            msg.command,
+            &mut self.device_changed,
+        )
+        .await
+    }
+}
+
+/// Read the reply to `command`, enforcing the framing invariants: it must carry
+/// `command + 1` and must report success.
+///
+/// Unsolicited [`cmd::CHANGED`] notifications are drained, up to [`DRAIN_CAP`], and noted
+/// in `changed`. A status other than success is [`Error::DeviceStatus`]; every other error
+/// leaves replies out of step with requests.
+async fn answer<T: Transport>(
+    transport: &mut T,
+    limit: Duration,
+    command: u32,
+    changed: &mut bool,
+) -> Result<Message> {
+    let expected = command
+        .checked_add(1)
+        .ok_or_else(|| Error::InvalidArgument("command 0xffffffff has no response code".into()))?;
+    let mut drained = 0;
+    loop {
+        let Some(raw) = transport
+            .read_timeout(crate::transport::READ_BUFFER, limit)
+            .await?
+        else {
+            return Err(Error::Transport(format!(
+                "no reply to command {command:#04x} within the read limit"
+            )));
+        };
+        let resp = Message::decode_response(&raw)?;
+        if resp.command != expected {
+            if resp.command == cmd::CHANGED && drained < DRAIN_CAP {
+                drained += 1;
+                *changed = true;
+                continue;
+            }
+            return Err(Error::UnexpectedResponse {
+                expected,
+                got: resp.command,
+            });
+        }
+        return match resp.status() {
+            Some(0) => Ok(resp),
+            Some(code) => Err(Error::DeviceStatus(code)),
+            None => Err(Error::Truncated { got: 0, need: 4 }),
+        };
+    }
+}
+
+/// The error for a frame the device's bulk endpoints would not take.
+fn stalled(msg: &Message) -> Error {
+    Error::Transport(format!(
+        "the device did not accept command {:#04x} within {}s: its bulk endpoints are \
+         stalled. Only a power cycle clears them; `nord device recover` cannot, because its \
+         frames cannot be delivered either",
+        msg.command,
+        WRITE_LIMIT.as_secs()
+    ))
+}
+
 #[cfg(all(test, panic = "unwind"))]
 mod tests {
     use super::*;

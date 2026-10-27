@@ -14,12 +14,12 @@
 //! - [`Device::take_changed`] carries the instrument's change notification out of the
 //!   transaction it arrived in.
 //!
-//! This module sends no frames itself; [`op`] and [`Session`] do.
+//! This module sends no frames itself; [`op`], [`Session`] and [`Bare`] do.
 
 use crate::envelope::FileSource;
 use crate::error::{Error, Result};
 use crate::op;
-use crate::session::{ReadOnly, ReadWrite, Session};
+use crate::session::{Bare, ReadOnly, ReadWrite, Session};
 use crate::transport::Transport;
 use crate::wire::{AllocationUnit, Bank, Classes, Location, ObjectClass, Partition};
 
@@ -41,21 +41,16 @@ struct Entry {
     banks: Vec<Bank>,
 }
 
-/// The partition every session that reads the tables opens, before anything says which
-/// partitions exist. Every recorded exchange, all from the Electro 5, opens this one, and
-/// another model is assumed to have a partition 4.
-const BOOTSTRAP: ObjectClass = ObjectClass::Unknown(4);
-
 impl Geometry {
-    /// Read both tables: `PARTITIONS`, then `BANKS` for each partition's index in table
-    /// order.
+    /// Read both tables with no session: `PARTITIONS`, then `BANKS` for each partition's
+    /// index in table order.
     ///
     /// A refused `BANKS` fails the whole read with its [`Error::DeviceStatus`], because
     /// geometry missing a partition can neither bound a walk nor size a write.
-    pub async fn read<T: Transport, C>(session: &mut Session<'_, T, C>) -> Result<Self> {
+    pub async fn read<T: Transport>(bare: &mut Bare<'_, T>) -> Result<Self> {
         let mut entries = Vec::new();
-        for partition in op::partitions(session).await? {
-            let banks = op::banks(session, partition.index).await?;
+        for partition in op::partitions(bare).await? {
+            let banks = op::banks(bare, partition.index).await?;
             entries.push(Entry { partition, banks });
         }
         let partitions: Vec<Partition> = entries.iter().map(|e| e.partition.clone()).collect();
@@ -204,14 +199,10 @@ impl<T: Transport> Device<T> {
     /// Inferred from specimens; not confirmed on hardware.
     pub async fn geometry(&mut self) -> Result<&Geometry> {
         if self.geometry.is_none() {
-            // Both tables are device-wide, so any partition's session reads them.
-            let session =
-                Session::open(&mut self.transport, &Classes::default(), BOOTSTRAP).await?;
-            let read = bracket(&mut self.changed, session, async |s| {
-                Geometry::read(s).await
-            })
-            .await?;
-            self.geometry = Some(read);
+            let mut bare = Bare::new(&mut self.transport);
+            let read = Geometry::read(&mut bare).await;
+            self.changed |= bare.instrument_changed();
+            self.geometry = Some(read?);
         }
         Ok(self.geometry.as_ref().expect("just read"))
     }

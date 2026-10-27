@@ -2427,13 +2427,13 @@ mod wire_tests {
             ["Africa-Split", "Squabble-B"],
             "one name per item"
         );
-        // One session for the geometry read and one destructive session around the pair.
+        // The geometry read opens no session, and one destructive session holds the pair.
         let opens = device
             .commands()
             .into_iter()
             .filter(|command| *command == cmd::SESSION_OPEN)
             .count();
-        assert_eq!(opens, 2);
+        assert_eq!(opens, 1);
     }
 
     #[test]

@@ -263,8 +263,7 @@ fn a_write_reads_the_geometry_that_places_it() {
 #[test]
 fn a_refused_bank_list_fails_the_read_and_caches_nothing() {
     let bank_tables = |banks: &[(&str, u32)]| {
-        let mut steps = session_open(ObjectClass::Program);
-        steps.push(request(cmd::PARTITIONS, &[]));
+        let mut steps = vec![request(cmd::PARTITIONS, &[])];
         steps.push(response(
             cmd::PARTITIONS,
             &partitions_payload(&electro5(&[1, 100])),
@@ -277,12 +276,10 @@ fn a_refused_bank_list_fails_the_read_and_caches_nothing() {
     let mut refused = bank_tables(&[("Bank 1", 50), ("Bank 2", 50)]);
     refused.push(request(cmd::BANKS, &1u32.to_be_bytes()));
     refused.push(refusal(cmd::BANKS, 0x15));
-    refused.extend(session_close());
 
     let mut answered = bank_tables(&[("Bank 1", 50), ("Bank 2", 50)]);
     answered.push(request(cmd::BANKS, &1u32.to_be_bytes()));
     answered.push(response(cmd::BANKS, &banks_payload(1, &[("Grand", 20)])));
-    answered.extend(session_close());
 
     let mut device = Device::new(ReplayTransport::new(
         refused.into_iter().chain(answered).collect(),
@@ -306,15 +303,13 @@ fn a_refused_bank_list_fails_the_read_and_caches_nothing() {
 
 #[test]
 fn a_bank_reply_for_another_partition_is_rejected() {
-    let mut steps = session_open(ObjectClass::Program);
-    steps.push(request(cmd::PARTITIONS, &[]));
+    let mut steps = vec![request(cmd::PARTITIONS, &[])];
     steps.push(response(
         cmd::PARTITIONS,
         &partitions_payload(&electro5(&[1])),
     ));
     steps.push(request(cmd::BANKS, &0u32.to_be_bytes()));
     steps.push(response(cmd::BANKS, &banks_payload(1, &[("Bank 1", 50)])));
-    steps.extend(session_close());
 
     let mut device = Device::new(ReplayTransport::new(steps));
     let error = pollster::block_on(device.geometry())
@@ -345,10 +340,10 @@ fn after_geometry(steps: Vec<Step>) -> Vec<Step> {
     [scripts::fixture("device/geometry.script").steps(), steps].concat()
 }
 
-/// A geometry read of a table with these partition names, each one 50-slot bank.
+/// A geometry read, with no session, of a table with these partition names, each one
+/// 50-slot bank.
 fn geometry_steps(names: &[&str]) -> Vec<Step> {
-    let mut steps = session_open(ObjectClass::Program);
-    steps.push(request(cmd::PARTITIONS, &[]));
+    let mut steps = vec![request(cmd::PARTITIONS, &[])];
     let partitions: Vec<(&str, u32)> = names.iter().map(|&name| (name, 1)).collect();
     steps.push(response(cmd::PARTITIONS, &partitions_payload(&partitions)));
     for partition in 0..names.len() as u32 {
@@ -358,7 +353,6 @@ fn geometry_steps(names: &[&str]) -> Vec<Step> {
             &banks_payload(partition, &[("Bank 1", 50)]),
         ));
     }
-    steps.extend(session_close());
     steps
 }
 
@@ -619,8 +613,7 @@ fn a_library_write_reserves_only_its_shortfall() {
     let file = envelope::wrap("nsmp", at, 1, &body).unwrap();
     let (name, timestamp) = ("two blocks", 1_787_522_949);
 
-    let mut steps = session_open(ObjectClass::Program);
-    steps.push(request(cmd::PARTITIONS, &[]));
+    let mut steps = vec![request(cmd::PARTITIONS, &[])];
     steps.push(response(
         cmd::PARTITIONS,
         &partitions_payload(&electro5(&[1, 1, 1, 100])),
@@ -632,7 +625,6 @@ fn a_library_write_reserves_only_its_shortfall() {
             &banks_payload(partition, &[("Lib", 1)]),
         ));
     }
-    steps.extend(session_close());
 
     steps.extend(session_open(ObjectClass::Sample));
     steps.push(request(
@@ -717,8 +709,7 @@ fn a_slot_class_write_sends_no_reserve_step() {
     let file = envelope::wrap("ne5t", at, 1, &body).unwrap();
     let (name, timestamp) = ("Friday", 1_787_428_287);
 
-    let mut steps = session_open(ObjectClass::Program);
-    steps.push(request(cmd::PARTITIONS, &[]));
+    let mut steps = vec![request(cmd::PARTITIONS, &[])];
     steps.push(response(
         cmd::PARTITIONS,
         &partitions_payload(&electro5(&[1; 6])),
@@ -730,7 +721,6 @@ fn a_slot_class_write_sends_no_reserve_step() {
             &banks_payload(partition, &[("Bank 1", 50)]),
         ));
     }
-    steps.extend(session_close());
     steps.extend(session_open(ObjectClass::SetList));
     steps.push(notify(ui::label("Downloading...").unwrap()));
     let mut begin = slot_args(at);

@@ -11,7 +11,7 @@
 use crate::envelope::{self, FileSink, FileSource, Opened};
 use crate::error::{Error, Result};
 use crate::session::ReadWrite;
-use crate::session::{Session, WRITE_LIMIT};
+use crate::session::{Bare, Session, WRITE_LIMIT};
 use crate::transport::Transport;
 use crate::wire::{
     cmd, read_u32, ui, AllocationUnit, Bank, Classes, Dependency, Location, Message, ObjectClass,
@@ -605,28 +605,29 @@ pub async fn recover<T: Transport>(transport: &mut T) -> Result<()> {
     Ok(())
 }
 
-/// Every storage partition the device reports. **Read-only.**
+/// Every storage partition the device reports, asked with no session. **Read-only.**
 ///
 /// The index of each entry is the code sessions and dependency rows address it by, and
 /// [`Classes`] reads which class each holds, including the `(Native)` library views that
 /// have no [`ObjectClass`] name.
-pub async fn partitions<T: Transport, C>(
-    session: &mut Session<'_, T, C>,
-) -> Result<Vec<Partition>> {
-    let resp = session
+pub async fn partitions<T: Transport>(bare: &mut Bare<'_, T>) -> Result<Vec<Partition>> {
+    let resp = bare
         .request(&Message::program(cmd::PARTITIONS, Vec::new()))
         .await?;
     Partition::decode_all(&resp)
 }
 
-/// One partition's banks and their slot capacities. **Read-only.**
-pub async fn banks<T: Transport, C>(
-    session: &mut Session<'_, T, C>,
-    partition: u32,
-) -> Result<Vec<Bank>> {
-    let resp = session
+/// One partition's banks and their slot capacities, asked with no session.
+/// **Read-only.**
+pub async fn banks<T: Transport>(bare: &mut Bare<'_, T>, partition: u32) -> Result<Vec<Bank>> {
+    let resp = bare
         .request(&Message::program(cmd::BANKS, partition.to_be_bytes()))
         .await?;
+    banks_reply(&resp, partition)
+}
+
+/// A [`cmd::BANKS`] reply, which must echo the partition it was asked about.
+fn banks_reply(resp: &Message, partition: u32) -> Result<Vec<Bank>> {
     let reported = read_u32(resp.payload(), 0)?;
     if reported != partition {
         return Err(Error::UnexpectedPartition {
@@ -634,7 +635,7 @@ pub async fn banks<T: Transport, C>(
             reported,
         });
     }
-    Bank::decode_all(&resp)
+    Bank::decode_all(resp)
 }
 
 /// Whether an address exists on this instrument, per the device's own geometry.
@@ -650,8 +651,11 @@ pub async fn check_address<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     at: Location,
 ) -> Result<Option<String>> {
-    let banks = banks(session, session.index()).await?;
-    Ok(address_refusal(&banks, at))
+    let partition = session.index();
+    let resp = session
+        .request(&Message::program(cmd::BANKS, partition.to_be_bytes()))
+        .await?;
+    Ok(address_refusal(&banks_reply(&resp, partition)?, at))
 }
 
 /// Why `at` is not an address among `banks`, or `None` where it is.

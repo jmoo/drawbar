@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use nord_usb::device::Geometry;
 use nord_usb::transport::ReplayTransport;
 use nord_usb::wire::{AllocationUnit, Bank, Classes, ObjectClass};
-use nord_usb::{op, Error, Location, Result, Session};
+use nord_usb::{op, Bare, Error, Location, Result, Session};
 
 /// Bytes an intent produced, and the file it named to compare them against.
 pub struct Produced {
@@ -67,12 +67,7 @@ pub async fn drive(
         }
         ("recover", None) => op::recover(t).await.map(|_| None),
         ("geometry", None) => {
-            // The partition every recorded geometry read opens, before any table is known.
-            let bootstrap = ObjectClass::Unknown(4);
-            let read = session!(t, &Classes::default(), bootstrap, |s| Geometry::read(
-                &mut s
-            ))?;
-            *geometry = Some(read);
+            *geometry = Some(Geometry::read(&mut Bare::new(t)).await?);
             Ok(None)
         }
         ("get" | "read" | "get-body" | "read-body", _) => {
