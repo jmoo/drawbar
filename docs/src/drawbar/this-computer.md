@@ -84,7 +84,8 @@ open; if the slot changed since, drawbar asks which to keep. drawbar also keeps
 edits every few seconds, so after a crash you may lose the last few seconds. In
 the browser, closing the tab before drawbar has kept your latest edit makes the
 browser ask whether to leave. Stay a moment, and the edit is kept. A read-only
-library keeps no unsaved edits.
+library keeps no unsaved edits, unless a change drawbar could not finish made it
+read-only.
 
 Unsaved edits belong to this computer's copy of drawbar, not to one window. A
 window or tab that opens the library shows the edits kept for it, including

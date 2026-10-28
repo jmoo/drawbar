@@ -38,6 +38,8 @@ pub struct History {
     origins: BTreeMap<EntryHash, usize>,
     /// Each intent of this session, with what reversing it needs.
     kept: BTreeMap<EntryHash, (Logged, Before)>,
+    /// The entry of the latest intent, undo or redo.
+    last: Option<EntryHash>,
 }
 
 /// What an intent replaced, as reversing it needs: the state it was committed
@@ -160,6 +162,7 @@ impl History {
         }
         let label = logged.label.clone();
         let hash = entry.hash();
+        self.last = Some(hash);
         self.kept.insert(hash, (logged, before));
         let reversed = reverses.and_then(|reverses| {
             let item = *self.origins.get(&reverses)?;
@@ -196,6 +199,11 @@ impl History {
 
     pub fn items(&self) -> &[HistoryItem] {
         &self.items
+    }
+
+    /// The entry of this session's latest intent, undo or redo.
+    pub fn last(&self) -> Option<EntryHash> {
+        self.last
     }
 
     /// Lets go of the intent the next undo would reverse, as once its undo is

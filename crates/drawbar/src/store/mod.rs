@@ -38,7 +38,6 @@ mod keys;
 mod mirror;
 pub mod names;
 mod older;
-#[cfg(any(target_arch = "wasm32", test))]
 mod refusing;
 pub mod shown;
 
@@ -933,12 +932,32 @@ impl KeptApart {
     }
 }
 
+/// Which change of this session's own waits, after a change, for the next write to
+/// finish it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Waiting {
+    Nothing,
+    /// The one an earlier write left unfinished, if any, since this change was not tried.
+    Earlier,
+    /// This one, which failed partway.
+    This,
+}
+
+/// Why nothing may be written to a library as it opened.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Unwritable {
+    /// For this reason, so every edit stays in memory.
+    ReadOnly(String),
+    /// A change of drawbar's own still cannot be finished, for this reason. Unsaved
+    /// edits are still kept.
+    Unfinished(String),
+}
+
 /// What opening found.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Opened {
-    /// `Err` with the reason when nothing may be written here. The library still opens,
-    /// and every edit stays in memory.
-    pub writable: Result<(), String>,
+    /// `Err` with the reason when nothing may be written here. The library still opens.
+    pub writable: Result<(), Unwritable>,
     /// What the library kept of its view, which lists no file until a
     /// [`Cmd::Rescan`] has scanned every one.
     pub viewed: Viewed,
@@ -1025,6 +1044,10 @@ pub enum Event {
         /// Whether an undo or a redo was refused, and let go of: the next reaches the
         /// step before it.
         forgot: bool,
+        /// The entry that logged the change of this session's own an earlier write left
+        /// unfinished, where this one finished it first.
+        finished: Option<toshokan::EntryHash>,
+        waiting: Waiting,
         result: Result<Viewed, String>,
     },
     /// The answers to the change `label` were lost: whether it was made is not known.

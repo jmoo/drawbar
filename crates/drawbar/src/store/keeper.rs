@@ -23,7 +23,7 @@ use super::storage::{self, CHUNK};
 use super::unsaved::{self, Base, Of};
 use super::{
     Cmd, Event, Failure, Fingerprint, Found, Intent, Kept, KeptKey, Key, LibPath, Opened, Part,
-    Source, Stat, Viewed,
+    Source, Stat, Unwritable, Viewed, Waiting,
 };
 use crate::rewrite::{self, Pieces};
 
@@ -102,6 +102,18 @@ impl<F: Fs> Keeper<F> {
 
     /// Run a command on the library, and answer it.
     pub async fn run(&mut self, cmd: Cmd, answer: &mut impl FnMut(Event)) {
+        let changes = matches!(
+            cmd,
+            Cmd::Intent(_) | Cmd::Undo | Cmd::Redo | Cmd::Settle { .. }
+        );
+        let finished = match changes {
+            true => self.finish_earlier().await,
+            false => (None, Ok(())),
+        };
+        let finished = match finished {
+            (finished, Ok(())) => finished,
+            (finished, Err(why)) => return self.not_tried(&cmd, finished, &why, answer),
+        };
         match cmd {
             Cmd::Open => {
                 let opened = self.open().await;
@@ -112,19 +124,21 @@ impl<F: Fs> Keeper<F> {
             Cmd::Intent(intent) => {
                 let label = intent.label().to_string();
                 let committed = self.commit(intent, answer).await;
-                self.made(label, committed, false, answer).await;
+                self.made(label, finished, committed, false, answer).await;
             }
             Cmd::Undo => {
                 let (undone, forgot) = self.undone(false).await;
-                self.made("Undo".to_string(), undone, forgot, answer).await;
+                self.made("Undo".to_string(), finished, undone, forgot, answer)
+                    .await;
             }
             Cmd::Redo => {
                 let (redone, forgot) = self.undone(true).await;
-                self.made("Redo".to_string(), redone, forgot, answer).await;
+                self.made("Redo".to_string(), finished, redone, forgot, answer)
+                    .await;
             }
             Cmd::Settle { orphan, how } => {
                 let settled = self.settled(orphan, how).await;
-                self.made("Settle".to_string(), settled, false, answer)
+                self.made("Settle".to_string(), finished, settled, false, answer)
                     .await;
             }
             Cmd::Draft {
@@ -170,18 +184,76 @@ impl<F: Fs> Keeper<F> {
         }
     }
 
+    /// Finish first this session's own change an earlier write left unfinished, as the
+    /// next write would, so the answer can say which entry logged it: none where it
+    /// never landed. The result is `Err` with why it still waits, though it may have
+    /// logged it.
+    async fn finish_earlier(&mut self) -> (Option<EntryHash>, Result<(), String>) {
+        let Some(library) = self.library.as_mut() else {
+            return (None, Ok(()));
+        };
+        if library.finishing().is_empty() {
+            return (None, Ok(()));
+        }
+        let before = library.last_logged();
+        let settled = library.settle_interrupted().await.map_err(|e| told(&e));
+        let finished = library
+            .last_logged()
+            .filter(|_| library.last_logged() != before);
+        self.session.extend(finished);
+        (finished, settled)
+    }
+
+    /// Answer the change `cmd` as one not tried, since this session's own change an
+    /// earlier write left unfinished could not be finished first, for `why`.
+    fn not_tried(
+        &mut self,
+        cmd: &Cmd,
+        finished: Option<EntryHash>,
+        why: &str,
+        answer: &mut impl FnMut(Event),
+    ) {
+        let waiting = match self.waits() {
+            true => Waiting::Earlier,
+            false => Waiting::Nothing,
+        };
+        self.tell_read_only(answer);
+        for mut event in super::refusing::refused(cmd).answers(why, true) {
+            if let Event::Committed {
+                finished: told,
+                waiting: waits,
+                ..
+            } = &mut event
+            {
+                (*told, *waits) = (finished, waiting);
+            }
+            answer(event);
+        }
+    }
+
+    /// Whether a change of this session's own waits for the next write to finish it.
+    fn waits(&self) -> bool {
+        let finishing = self.library.as_ref().map(Library::finishing);
+        finishing.is_some_and(|paths| !paths.is_empty())
+    }
+
     /// Answer a change, an undo or a redo, after saying once that the library may no
     /// longer be written, and empty the trash as [`Keeper::empty_trash`] says once it
     /// was made.
     async fn made(
         &mut self,
         label: String,
+        finished: Option<EntryHash>,
         committed: Result<(Option<Made>, Viewed), String>,
         forgot: bool,
         answer: &mut impl FnMut(Event),
     ) {
         let made = committed.as_ref().ok().and_then(|(made, _)| *made);
         self.session.extend(made.map(|(entry, _)| entry));
+        let waiting = match self.waits() {
+            true => Waiting::This,
+            false => Waiting::Nothing,
+        };
         // Ahead of the change's own answer, which is all a sender waits for.
         self.tell_read_only(answer);
         answer(Event::Committed {
@@ -189,6 +261,8 @@ impl<F: Fs> Keeper<F> {
             made: made.map(|(entry, _)| entry),
             undoable: made.is_some_and(|(_, undoable)| undoable),
             forgot,
+            finished,
+            waiting,
             result: committed.map(|(_, viewed)| viewed),
         });
         if made.is_some() {
@@ -366,7 +440,12 @@ impl<F: Fs> Keeper<F> {
         };
         let writable = match library.mode() {
             Mode::Writable => Ok(()),
-            Mode::ReadOnly(why) => Err(read_only(why)),
+            Mode::ReadOnly(why @ Why::Unfinished { .. }) => {
+                Err(Unwritable::Unfinished(read_only(why)))
+            }
+            Mode::ReadOnly(
+                why @ (Why::NewerOwnHistory { .. } | Why::FolderNotWritable | Why::ClockExhausted),
+            ) => Err(Unwritable::ReadOnly(read_only(why))),
         };
         self.told_read_only = writable.is_err();
         let view = library.view();
@@ -414,6 +493,11 @@ impl<F: Fs> Keeper<F> {
             .into_iter()
             .partition::<Vec<_>, _>(|orphan| orphan.ours);
         refreshed.orphaned = theirs;
+        // Not while this session's own change waits: settling would finish it unheard.
+        let ours = match library.finishing().is_empty() {
+            true => ours,
+            false => Vec::new(),
+        };
         for mut orphan in ours {
             if library
                 .settle(orphan.clone(), Settlement::Finished)

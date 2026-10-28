@@ -20,7 +20,7 @@ use super::keys::{Came, TAGS, TAG_NAMES};
 use super::shown::Shown;
 use super::{
     names, Backend, Cmd, CopyOf, Event, Failure, Fingerprint, Found, Holds, Intent, Key, LibPath,
-    Moving, Opened, Rescue, Source, Stat, Viewed, MOST_BYTES,
+    Moving, Opened, Rescue, Source, Stat, Unwritable, Viewed, Waiting, MOST_BYTES,
 };
 use crate::browser::{Browser, Rescuing};
 use crate::folders::{Folders, Op, Where};
@@ -1392,10 +1392,13 @@ impl Store {
                 made,
                 undoable,
                 forgot,
+                finished,
+                waiting,
                 result,
             } => {
                 self.committing = self.committing.saturating_sub(1);
                 let step = self.answering.pop_front();
+                self.history.waited(finished, waiting, step.as_ref());
                 let forgotten = match (&step, forgot) {
                     (Some(step), true) => self.history.forget(step),
                     _ => None,
@@ -1749,12 +1752,19 @@ impl Store {
         }
         self.phase = match writable {
             Ok(()) => Phase::Open,
-            Err(why) => {
+            Err(Unwritable::ReadOnly(why)) => {
                 log.trouble(format!(
                     "This computer's library opened read-only: {why}. Edits stay in memory \
                      until you quit."
                 ));
                 Phase::ReadOnly(why)
+            }
+            Err(Unwritable::Unfinished(why)) => {
+                log.trouble(format!(
+                    "This computer's library opened read-only: {why}. Unsaved edits are \
+                     still kept."
+                ));
+                Phase::Unfinished(why)
             }
         };
         self.viewed(viewed, workspace, browser, queue, log);
@@ -3567,6 +3577,7 @@ fn settling(how: toshokan::log::Settlement) -> &'static str {
 }
 
 /// One answer of the library this session's undo history follows.
+#[derive(Clone, PartialEq, Debug)]
 enum Step {
     /// A change, as the Edit menu names it.
     Change(String),
@@ -3581,9 +3592,30 @@ enum Step {
 struct History {
     done: Vec<(String, toshokan::EntryHash)>,
     undone: Vec<(String, toshokan::EntryHash)>,
+    /// The step that failed partway and waits for the next write to finish it.
+    waiting: Option<Step>,
 }
 
 impl History {
+    /// Follow what became of the step that waited, which the change `step` finished
+    /// first where `finished` logged it, and which step waits now.
+    fn waited(
+        &mut self,
+        finished: Option<toshokan::EntryHash>,
+        waiting: Waiting,
+        step: Option<&Step>,
+    ) {
+        let earlier = self.waiting.take();
+        if let (Some(entry), Some(earlier)) = (finished, earlier.clone()) {
+            self.took(earlier, entry);
+        }
+        self.waiting = match waiting {
+            Waiting::Nothing => None,
+            Waiting::Earlier => earlier,
+            Waiting::This => step.cloned(),
+        };
+    }
+
     /// Follow a step the library made, which `entry` logged.
     fn took(&mut self, step: Step, entry: toshokan::EntryHash) {
         match step {
@@ -4191,5 +4223,38 @@ mod tests {
         );
         assert!(history.done.is_empty());
         assert_eq!(history.undone.len(), 1, "the redo needs none of it");
+    }
+
+    #[test]
+    fn an_undo_a_later_write_finishes_is_undone_and_can_be_redone() {
+        let mut history = History::default();
+        history.took(Step::Change("Save “a”".to_string()), entry(0));
+        history.took(Step::Change("Save “b”".to_string()), entry(1));
+        history.waited(None, Waiting::This, Some(&Step::Undo));
+        history.waited(Some(entry(2)), Waiting::Nothing, None);
+        let names = |steps: &[(String, toshokan::EntryHash)]| {
+            steps
+                .iter()
+                .map(|(change, _)| change.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&history.done), ["Save “a”"]);
+        assert_eq!(names(&history.undone), ["Save “b”"]);
+        assert_eq!(history.undone[0].1, entry(2), "the redo reverses the undo");
+    }
+
+    #[test]
+    fn a_step_that_waits_stays_while_the_next_change_is_not_tried_and_goes_where_it_never_landed() {
+        let mut history = History::default();
+        let save = Step::Change("Save “a”".to_string());
+        history.waited(None, Waiting::This, Some(&save));
+        history.waited(None, Waiting::Earlier, Some(&Step::Undo));
+        assert_eq!(history.waiting, Some(save));
+        history.waited(None, Waiting::Nothing, None);
+        assert_eq!(history.waiting, None);
+        assert!(
+            history.done.is_empty(),
+            "a step that never landed is not undone"
+        );
     }
 }

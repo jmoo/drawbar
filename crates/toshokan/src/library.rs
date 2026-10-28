@@ -324,6 +324,12 @@ impl Library {
         self.history.items()
     }
 
+    /// The entry of this session's latest intent, undo or redo, as one that finishes
+    /// a change left unfinished logs it.
+    pub fn last_logged(&self) -> Option<EntryHash> {
+        self.history.last()
+    }
+
     /// Whether the library may be written now, and why not: as it opened, or
     /// read-only since a change of its own could not be finished.
     pub fn mode(&self) -> &Mode {

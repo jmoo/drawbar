@@ -1251,6 +1251,111 @@ fn a_save_that_cannot_be_finished_leaves_the_library_read_only_until_it_opens_ag
     );
 }
 
+/// A save the next change finishes joins Undo, before that change, and keeps what its
+/// undo needs.
+#[test]
+fn a_save_the_next_change_finishes_can_be_undone_after_it() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let old = root.read("untitled.ne5p");
+    let new = with_gain(&old, "96");
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "untitled.ne5p"),
+    ));
+    let log = &mut session.bench.log;
+    session.bench.workspace.replace_bytes(id, new.clone(), log);
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    session.make_tag("Sunday");
+    assert_eq!(root.read("untitled.ne5p"), new, "the save is finished");
+    session.undo();
+    assert!(session.tag_names().is_empty(), "the tag is undone");
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo Save “untitled.ne5p”")
+    );
+    session.undo();
+    assert_eq!(root.read("untitled.ne5p"), old, "the save is undone");
+}
+
+/// An undo the next change finishes leaves Undo at the step before the one it undid.
+#[test]
+fn an_undo_the_next_change_finishes_leaves_undo_at_the_step_before() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let old = root.read("untitled.ne5p");
+    let log = &mut session.bench.log;
+    session
+        .bench
+        .workspace
+        .replace_bytes(id, with_gain(&old, "96"), log);
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "untitled.ne5p"),
+    ));
+    session.undo();
+    session.make_tag("Sunday");
+    assert_eq!(root.read("untitled.ne5p"), old, "the undo is finished");
+    session.undo();
+    assert!(session.tag_names().is_empty(), "the tag is undone");
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo New “untitled.ne5p”")
+    );
+}
+
+/// A library a change of drawbar's own left read-only still keeps unsaved edits when it
+/// opens read-only again.
+#[test]
+fn a_library_reopened_while_a_change_still_cannot_be_finished_keeps_edits() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let old = root.read("untitled.ne5p");
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "b.ne5p"),
+    ));
+    let rename = crate::browser::Act::RenameLocal {
+        id,
+        name: "b.ne5p".into(),
+    };
+    session.bench.act(vec![rename]);
+    session.sync();
+    fs::write(root.at("b.ne5p"), with_gain(&old, "96")).unwrap();
+    session.make_tag("Sunday");
+    assert!(
+        session.store.read_only().is_some(),
+        "the move cannot finish"
+    );
+    session.close();
+
+    let mut again = Session::open(&root);
+    assert!(
+        again.store.read_only().is_some(),
+        "the move still cannot finish"
+    );
+    let id = again.named("untitled.ne5p");
+    let edit = with_gain(&old, "12");
+    let log = &mut again.bench.log;
+    again.bench.workspace.replace_bytes(id, edit.clone(), log);
+    again.close();
+
+    fs::remove_file(root.at("b.ne5p")).unwrap();
+    let last = Session::open(&root);
+    assert_eq!(last.store.read_only(), None);
+    let entity = last.bench.workspace.get(last.only()).expect("the asset");
+    assert_eq!(
+        *entity.bytes, edit,
+        "the edit made after opening read-only again was kept"
+    );
+}
+
 /// A copy of a library whose hidden folder holds, in this install's own log, a change a
 /// newer drawbar wrote, and the segment of the log that holds it.
 fn newer_drawbar_wrote() -> (Temp, std::path::PathBuf) {
@@ -3533,6 +3638,8 @@ fn a_failed_answer_counts_each_step_and_how_it_failed_once() {
         made: None,
         undoable: false,
         forgot: false,
+        finished: None,
+        waiting: Waiting::Nothing,
         label: "Tag".into(),
         result: Err("read-only".into()),
     };

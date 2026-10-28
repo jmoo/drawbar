@@ -436,14 +436,10 @@ async fn drive(
             folder.follow(&moved(&answers)).await;
         }
         for answer in answers {
-            if let (
-                Event::Committed {
-                    made: Some(made), ..
-                },
-                Some(hints),
-            ) = (&answer, &hints)
-            {
-                hints.announce(*made);
+            if let (Event::Committed { made, finished, .. }, Some(hints)) = (&answer, &hints) {
+                if let Some(newest) = made.or(*finished) {
+                    hints.announce(newest);
+                }
             }
             let answer = match &folder {
                 Ok(folder) => exec::rest_landed(folder, answer).await,

@@ -1,7 +1,7 @@
 //! What a command is answered with where it could not run, or where its answers were
 //! lost on their way back, so nothing waits on it.
 
-use super::{Cmd, Event, Failure, Intent, Key, LibPath, Slot};
+use super::{Cmd, Event, Failure, Intent, Key, LibPath, Slot, Waiting};
 
 /// How to answer `cmd` where it could not run, or its answers could not be read: each
 /// change to a file says it did not land, or that whether it did is unheard, so nothing
@@ -122,6 +122,8 @@ impl Refusing {
                         made: None,
                         undoable: false,
                         forgot: false,
+                        finished: None,
+                        waiting: Waiting::Earlier,
                         result: Err(why.to_string()),
                     },
                     false => Event::Unheard { label },
