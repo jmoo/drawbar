@@ -2434,6 +2434,11 @@ mod tests {
                 _ => false,
             };
             assert!(refused, "{label}: {answers:?}");
+            let read_only = answers.iter().any(|e| matches!(e, Event::ReadOnly(_)));
+            assert!(
+                !read_only,
+                "{label}: the library stays writable: {answers:?}"
+            );
         }
         assert_eq!(outside.names(""), ["x.ne5p"]);
         assert_eq!(outside.read("x.ne5p"), b"outside");
