@@ -7,7 +7,8 @@
 //! contribution's size is bounded by fields and writers, and its certificates
 //! name the head of every snapshot of its directory on its chain. P11: after a restore,
 //! a dropped version, or a compacted segment back shorter and unsealed, the folder
-//! wins. Six divergences are counted rather than failed: a conflict the oracle
+//! wins, and nothing the oracle shows is missing from both the design's merge and
+//! its items of the writer that wrote it. Six divergences are counted rather than failed: a conflict the oracle
 //! resolves, after a fork; an extra value beside the oracle's after a fault, on a
 //! field the design reports contradicted; a value the oracle shows after a fault
 //! that a held line's chain replaced, through an entry the fault took; a merged
@@ -298,31 +299,56 @@ fn with_existence(world: &World, shown: &Shown) -> BTreeMap<Field, BTreeSet<Val>
     values
 }
 
-/// Whether every value the oracle merges the design merges too, or offers in a
-/// run of the writer that wrote it, as the run's value or as a forgotten basis.
-/// An entity shows as created while it exists, and as deleted while it does not
-/// or its deletion is a conflict.
-fn kept_apart(world: &World, oracle: &Shown, spec: &Shown) -> bool {
+/// A value the oracle shows, merged or as a write one of its items keeps visible,
+/// that the design neither merges nor shows in an item of `kinds` of the writer
+/// that wrote it, as the item's value or as a forgotten basis. Besides its
+/// merged writes, an entity shows as created while it exists, and as deleted
+/// while it does not or its deletion is a conflict. A merged value `chained`
+/// does not show, one a held line's chain replaced through an entry a fault
+/// took, may be gone.
+fn shown_nowhere(
+    world: &World,
+    oracle: &Shown,
+    spec: &Shown,
+    kinds: &[ItemKind],
+    chained: &Shown,
+) -> Option<(Field, Val)> {
     let merged = with_existence(world, spec);
-    let shown = |field: &Field, v: &Val| match (field.is_exist(), v) {
-        (true, Val::Created) => spec.exists(field.entity),
-        (true, _) => spec
-            .entities
-            .get(&field.entity)
-            .is_none_or(|e| !e.exists || e.deletion_conflict),
-        (false, _) => merged.get(field).is_some_and(|m| m.contains(v)),
+    let implied = with_existence(world, chained);
+    let replaced = |field: &Field, v: &Val| implied.get(field).is_none_or(|c| !c.contains(v));
+    let in_merge = |field: &Field, v: &Val| {
+        let entity = spec.entities.get(&field.entity);
+        merged.get(field).is_some_and(|m| m.contains(v))
+            || match (field.is_exist(), v) {
+                (true, Val::Created) => spec.exists(field.entity),
+                (true, _) => entity.is_none_or(|e| !e.exists || e.deletion_conflict),
+                (false, _) => false,
+            }
     };
-    let offered = |field: &Field, v: &Val| {
-        let writes = oracle.writes.get(field).into_iter().flatten();
-        let by = |&&e: &&Hash| world.entry(e).write.is_some_and(|w| w.value == Some(*v));
-        let writers: BTreeSet<Dir> = writes.filter(by).map(|&e| world.entry(e).dir).collect();
-        let runs = spec.items.iter().filter(|i| i.kind == ItemKind::Run);
-        runs.filter(|i| writers.contains(&i.dir))
+    let in_item = |writers: &BTreeSet<Dir>, field: &Field, v: &Val| {
+        let items = spec.items.iter().filter(|i| kinds.contains(&i.kind));
+        items
+            .filter(|i| writers.contains(&i.dir))
             .any(|i| i.change.get(field) == Some(&Some(*v)) || i.forgotten.contains(field))
     };
-    with_existence(world, oracle)
-        .iter()
-        .all(|(field, values)| values.iter().all(|v| shown(field, v) || offered(field, v)))
+    let writers_of = |field: &Field, v: &Val| -> BTreeSet<Dir> {
+        let writes = oracle.writes.get(field).into_iter().flatten();
+        let by = |&&e: &&Hash| world.entry(e).write.is_some_and(|w| w.value == Some(*v));
+        writes.filter(by).map(|&e| world.entry(e).dir).collect()
+    };
+    let mut shown: Vec<(BTreeSet<Dir>, Field, Val)> = Vec::new();
+    for (field, values) in with_existence(world, oracle) {
+        let values = values.into_iter().filter(|v| !replaced(&field, v));
+        shown.extend(values.map(|v| (writers_of(&field, &v), field, v)));
+    }
+    for item in &oracle.items {
+        let values = item.change.iter().filter_map(|(&f, &v)| Some((f, v?)));
+        shown.extend(values.map(|(field, v)| (BTreeSet::from([item.dir]), field, v)));
+    }
+    shown
+        .into_iter()
+        .find(|(writers, field, v)| !in_merge(field, v) && !in_item(writers, field, v))
+        .map(|(_, field, v)| (field, v))
 }
 
 /// The values a reader merged: everything but its items.
@@ -750,7 +776,8 @@ impl<'a, D: Design> Checker<'a, D> {
 
     /// P11: after a restore of the folder or of one directory, a dropped version,
     /// or a compacted segment back shorter and unsealed, a reader of the new folder
-    /// shows what the oracle shows of it.
+    /// shows what the oracle shows of it, and shows every value the oracle shows
+    /// somewhere: merged, or in a run, gap or unplaced item of its writer.
     fn faults(&self) {
         let world = self.world();
         let mut variants: Vec<Fault<D::Snapshot>> = Vec::new();
@@ -839,14 +866,22 @@ impl<'a, D: Design> Checker<'a, D> {
                 // A certificate names a segment by its first line and a position,
                 // so a shorter unsealed copy of one cannot be told from another
                 // instance's copy that left the chain there: it may show as a run.
-                if resurfaced && kept_apart(world, &o, &after) {
-                    self.tally.add(&self.tally.apart, 1);
-                    continue;
+                let runs = [ItemKind::Run];
+                if !resurfaced || shown_nowhere(world, &o, &after, &runs, &chained).is_some() {
+                    self.fail(
+                        &format!("P11: after {label}, the folder does not win"),
+                        &seen,
+                        format!("{e}\n  oracle {o:?}\n  design {after:?}"),
+                    );
                 }
+                self.tally.add(&self.tally.apart, 1);
+            }
+            let every = [ItemKind::Run, ItemKind::Gap, ItemKind::Unplaced];
+            if let Some((field, v)) = shown_nowhere(world, &o, &after, &every, &chained) {
                 self.fail(
-                    &format!("P11: after {label}, the folder does not win"),
+                    &format!("P11: after {label}, a value the oracle shows is shown nowhere"),
                     &seen,
-                    format!("{e}\n  oracle {o:?}\n  design {after:?}"),
+                    format!("{field:?}={v:?}\n  oracle {o:?}\n  design {after:?}"),
                 );
             }
         }
