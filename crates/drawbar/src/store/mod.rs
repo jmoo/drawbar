@@ -944,7 +944,7 @@ pub enum Waiting {
 }
 
 /// Why nothing may be written to a library as it opened.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Unwritable {
     /// For this reason, so every edit stays in memory.
     ReadOnly(String),
