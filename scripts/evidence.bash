@@ -2,7 +2,8 @@
 # nix-deps: coreutils gnugrep nix procps
 # Runs the evidence for a change, its independent parts at once, and prints each
 # part's wall time. The full tier gates a merge; `--fast` is the tier for every
-# change. TLC's model check, `nix build .#nord.toshokan-spec`, runs apart.
+# change. TLC's model check, `nix build .#nord.toshokan-spec`, runs apart. Every
+# crate's tests run in its Nix build, with its declared test features.
 # shellcheck disable=SC2329 # `part` runs the functions it names
 set -euo pipefail
 
@@ -33,8 +34,8 @@ system="$(nix eval --raw --impure --expr builtins.currentSystem)"
 export CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo/crates/target}"
 
 # Peak resident memory on an 8-core, 31 GB host: a power-loss VM 1.4 GB, a
-# workspace build at -j 8 2.3 GB per rustc, the sweep 40 MB. TLC, when it runs,
-# keeps 10 GB.
+# cargo build at -j 8 2.3 GB per rustc, the sweep 230 MB. TLC, when it runs, keeps
+# 10 GB.
 if [[ -r /proc/meminfo ]]; then
   mem_gb=$(($(grep MemTotal /proc/meminfo | grep -o '[0-9]*') >> 20))
 else
@@ -76,11 +77,6 @@ sweep_binary() {
   grep -o '/[^ ]*/retention_sweep-[0-9a-f]*' <<<"$built"
 }
 
-workspace() {
-  cd "$repo/crates"
-  cargo test --workspace --profile release-tests -j "$cargo_jobs" --no-fail-fast
-}
-
 # The browser suites run on Linux, and the power-loss VMs need x86_64 Linux.
 linux=$([[ $system == *-linux ]] && echo 1 || true)
 linux_x86=$([[ $system == x86_64-linux ]] && echo 1 || true)
@@ -100,7 +96,6 @@ full)
     exit 1
   }
   part sweep nice -n 19 "$sweep" --ignored --test-threads 1 --nocapture
-  part workspace workspace
   ;;
 esac
 wait

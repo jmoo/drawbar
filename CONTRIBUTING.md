@@ -230,8 +230,8 @@ Cargo from `crates/` inside the development shell; the parent
   seeded store or R2 credentials. `.#nord.corpus` and `.#nord.corpus-full` are
   the corpus assemblies.
 - `scripts/evidence.bash` runs, at once, the evidence a toshokan change needs:
-  the workspace's tests, the retention sweep, every Nix build and check but
-  TLC's, and the power-loss replay. `--fast` is the tier for every change.
+  the retention sweep, every Nix build and check but TLC's, and the power-loss
+  replay. `--fast` is the tier for every change.
 - `nix build .#docs` renders the user guide, the mdBook under `docs/`.
   `mdbook serve docs` previews it from the development shell.
 - `nix build .#site` assembles this checkout's Pages tree for local preview: its

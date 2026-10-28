@@ -123,8 +123,8 @@ names, and runs only when named.
 
 A change to toshokan also needs its value-level retention sweep and its
 power-loss replay, which CI does not run. `scripts/evidence.bash` runs all of
-it at once and prints each part's wall time: the workspace's tests, the sweep,
-every Nix build and check, and on x86_64 Linux the replay. TLC's model check,
+it at once and prints each part's wall time: the sweep, every Nix build and
+check, each crate's tests among them, and on x86_64 Linux the replay. TLC's model check,
 `nix build .#nord.toshokan-spec`, runs on its own. `--fast` runs toshokan's own
 suite and Clippy, and the replay on ext4, for every change in between.
 
