@@ -81,7 +81,7 @@ as stops one drawbar overwriting another's work.
 - **Every change is one step.** Tagging, renaming, moving, deleting, importing and saving
   each go to the library as one change. Undo and Redo take them back while the library is
   open. Undo is refused, saying why, when another drawbar has since changed the same thing,
-  or when the trash no longer holds the bytes it needs. A refused undo or redo is let go,
+  or when the trash no longer holds the bytes it needs. These refusals let go of the step,
   so the next Undo reaches the step before it.
 - **Nothing is overwritten in place.** Deleted and overwritten files go to drawbar's trash
   inside the library, which keeps at most 1 GiB and is emptied when drawbar quits. The
@@ -103,8 +103,9 @@ as stops one drawbar overwriting another's work.
 - **After a restore from a backup, the folder wins** the next time drawbar looks.
 - **Unsaved edits stay on this computer**, in drawbar's own data, and come back after a quit
   or a crash. drawbar saves them every few seconds, so a crash can lose the last few
-  seconds. A read-only library holds unsaved edits in memory only, except one that turned
-  read-only because a change could not finish, which still keeps them.
+  seconds. A read-only library holds unsaved edits in memory only, except one that is
+  read-only because a change could not finish, which still keeps them, also when it opens
+  read-only again.
 - **Older libraries are not migrated.** drawbar does not read what earlier versions kept in
   `.drawbar/`: tags in `library.ron`, unsaved edits and rescued slot contents stay on disk,
   unread, and opening such a library says so.
@@ -197,9 +198,9 @@ specifies each part.
   user path holds the old bytes, nothing, or the new bytes. Where moves copy, a path may
   also hold a cut-short copy of its new bytes while a pending record names it. Recovery
   finishes or reports every step. A refused commit changes nothing. A step that fails logs
-  nothing and leaves its record open, and the next write or open settles it forward. If that
-  cannot finish, the library turns read-only until it is opened again (File ▸ Open recent
-  library).
+  nothing and leaves its record open, and the next write or open settles it forward. A step
+  the next write finishes joins Undo ahead of that write. If it cannot finish, the library
+  turns read-only until it is opened again (File ▸ Open recent library).
 - **Plans from what the volume can do** (Durability, Backends). Each backend states whether
   it can sync, append, rename, and rename without replacing, and toshokan plans from that,
   never from a request that failed. Where a crash can tear a rename (FAT, exFAT, NTFS, HFS,
