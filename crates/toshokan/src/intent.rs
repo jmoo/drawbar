@@ -151,6 +151,12 @@ impl<L: Driver> Intent<L> {
         self
     }
 
+    /// Makes `change` as this writer's own, settling nothing against any run.
+    pub fn change(mut self, change: FactChange) -> Self {
+        self.plan.facts.push((change, None));
+        self
+    }
+
     /// Takes `change`, one of the changes [`crate::report::Item`] shows of the
     /// run `run`: it is committed as any change, and settles its field against
     /// that run's writes. An intent may take from several runs.
