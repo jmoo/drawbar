@@ -634,6 +634,18 @@ fn a_native_root_reaches_nothing_through_a_linked_directory() {
             root: Root::Folder,
             path: path("linked/x"),
         },
+        Io::Stat {
+            root: Root::Folder,
+            path: path("linked/new"),
+        },
+        Io::MakeDir {
+            root: Root::Folder,
+            path: path("linked/d"),
+        },
+        Io::ListStat {
+            root: Root::Folder,
+            dir: path("linked"),
+        },
     ] {
         let done = native.perform(io.clone());
         assert!(done.is_err(), "{io:?}: {done:?}");

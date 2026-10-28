@@ -17,7 +17,7 @@ use crate::path::RelPath;
 /// two directories, and locks as OS file locks on files in the local root.
 ///
 /// Symbolic links and special files are not library files: listings leave them
-/// out, and naming one fails, as does reading or changing a path through a
+/// out, and naming one fails, as does any request on a path through a
 /// directory that is a link. What a root's renames promise is probed without
 /// writing, from its volume's file system: by type on Linux and Android, by type
 /// and the volume's capabilities on Apple systems, and by name on Windows. A
@@ -369,30 +369,35 @@ impl Backend for Native {
 }
 
 impl Native {
-    /// Refuses a read or a change of a path whose directories include a link, which
-    /// would reach outside the root. A link made between this look and the request is
-    /// still followed.
+    /// Refuses a request on a path whose directories include a link, which would
+    /// reach outside the root, as is a directory listed that is one. A link made
+    /// between this look and the request is still followed.
     fn unlinked(&self, io: &Io) -> Result<(), IoError> {
-        let paths: Vec<&RelPath> = match io {
+        /// `path`, and how many of its names are directories a request on it passes.
+        fn within(path: &RelPath) -> (&RelPath, usize) {
+            (path, path.components().count().saturating_sub(1))
+        }
+        let paths: Vec<(&RelPath, usize)> = match io {
             Io::Read { path, .. }
             | Io::Create { path, .. }
             | Io::Append { path, .. }
             | Io::Write { path, .. }
             | Io::Remove { path, .. }
             | Io::RemoveDir { path, .. }
-            | Io::Sync { path, .. } => vec![path],
-            Io::ReadMany { reads, .. } => reads.iter().map(|(path, _)| path).collect(),
-            Io::Rename { from, to, .. } => vec![from, to],
+            | Io::Sync { path, .. }
+            | Io::Stat { path, .. }
+            | Io::MakeDir { path, .. } => vec![within(path)],
+            Io::List { dir, .. } | Io::ListStat { dir, .. } => {
+                vec![(dir, dir.components().count())]
+            }
+            Io::ReadMany { reads, .. } => reads.iter().map(|(path, _)| within(path)).collect(),
+            Io::Rename { from, to, .. } => vec![within(from), within(to)],
             _ => Vec::new(),
         };
         let top = self.top(io.root());
-        for path in paths {
+        for (path, dirs) in paths {
             let mut at = top.to_path_buf();
-            let mut dirs = path.components().peekable();
-            while let Some(name) = dirs.next() {
-                if dirs.peek().is_none() {
-                    break;
-                }
+            for name in path.components().take(dirs) {
                 at.push(name);
                 match fs::symlink_metadata(&at) {
                     Ok(meta) if meta.file_type().is_symlink() => {
