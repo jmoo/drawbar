@@ -185,9 +185,10 @@ pub struct BuildArgs {
     /// the same bank and nearest root.
     ///
     /// Without a template, those fields follow fixed rules: no decay applied over the
-    /// recordings and the damper covering the keys `--kind` implies. A library built that
-    /// way has been played, and sounds the same as the same audio built with a template.
-    /// Either way, each stroke is trimmed by its own layer value.
+    /// recordings, held loops fading as `--loop-fade` says, a fade at key-up, and the
+    /// damper covering the keys `--kind` implies. A library built that way has been
+    /// played, and sounds the same as the same audio built with a template while a key
+    /// is held. Either way, each stroke is trimmed by its own layer value.
     #[arg(long, value_name = "FILE")]
     pub template: Option<PathBuf>,
 
@@ -211,6 +212,13 @@ pub struct BuildArgs {
     /// the instrument plays damps every key.
     #[arg(long, value_name = "KEY", conflicts_with = "template")]
     pub damper_top: Option<String>,
+
+    /// How fast a held loop at middle C fades, in decibels per second, from the loop's
+    /// start until the key is released. The rate rises up the keyboard as it does on
+    /// the instrument's own pianos of `--kind`, which also sets the default. 0 holds
+    /// every loop at its level.
+    #[arg(long, value_name = "DB_PER_S", conflicts_with = "template")]
+    pub loop_fade: Option<f64>,
 
     /// The library's name, the half of its name field before the `#`.
     #[arg(long)]
@@ -1055,10 +1063,22 @@ fn build_rules(args: &BuildArgs) -> Result<encode::Rules, String> {
         Some(key) => note::parse(key)?,
         None => kind.damper_top(),
     };
+    let loop_fade = match args.loop_fade {
+        Some(rate) => {
+            let tenths = (rate * 10.0).round();
+            (tenths.is_finite() && (0.0..=f64::from(u16::MAX)).contains(&tenths))
+                .then_some(tenths as u16)
+                .ok_or_else(|| {
+                    format!("--loop-fade {rate} dB/s is outside the 0 to 6553.5 the rules hold")
+                })?
+        }
+        None => kind.loop_fade(),
+    };
     Ok(encode::Rules {
         kind,
         gain,
         damper_top,
+        loop_fade,
     })
 }
 
@@ -1158,6 +1178,15 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         ui.note(format!(
             "{looped} stroke(s) loop where their WAV's smpl chunk says while the key is held"
         ));
+        if args.template.is_none() {
+            ui.note(match rules.loop_fade {
+                0 => "a held loop keeps its level until the key is released".to_string(),
+                tenths => format!(
+                    "a held loop fades {:.1} dB/s at C4, faster up the keyboard",
+                    f64::from(tenths) / 10.0
+                ),
+            });
+        }
     }
     if clipped > 0 {
         ui.note(format!(
@@ -1173,8 +1202,8 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         ),
         None => format!(
             "{} uses neutral playback in place of a template: no decay applied over the \
-             recordings, each stroke trimmed by its own layer value, {:+.1} dB of library \
-             gain, and the damper reaching {}",
+             recordings, each stroke trimmed by its own layer value, a fade at key-up, \
+             {:+.1} dB of library gain, and the damper reaching {}",
             args.out.display(),
             f64::from(rules.gain) / 10.0,
             damper_reach(rules.damper_top),
