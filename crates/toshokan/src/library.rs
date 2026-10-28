@@ -60,6 +60,9 @@ pub struct Library {
     clock: Hlc,
     /// This writer's interrupted effects, settled before its next write is planned.
     unsettled: Vec<Settling>,
+    /// Whether a compaction was refused as its snapshot would be longer than a
+    /// reader holds, so that none is due again until the library opens again.
+    snapshot_too_long: bool,
     /// This writer's records whose entries are logged and that are still in the
     /// folder: those opening found, and one whose removal at commit failed. Each
     /// is removed before the next write.
@@ -232,6 +235,7 @@ impl Library {
             writer,
             clock: Hlc::ZERO,
             unsettled: Vec::new(),
+            snapshot_too_long: false,
             spent: Vec::new(),
             orphaned: Vec::new(),
             pooled: BTreeMap::new(),
@@ -1504,7 +1508,11 @@ fn compacted(library: &mut Library) -> Flow<'_, (&mut Library, Result<Compacted>
                         .stop_writing()
                         .then(move |stopped| Flow::Done((library, stopped.and(Err(error)))))
                 }
-                Err(error) => Flow::Done((library, Err(error))),
+                Err(error) => {
+                    let too_long = matches!(error, Error::Refused(Refusal::SnapshotTooLong));
+                    library.snapshot_too_long |= too_long;
+                    Flow::Done((library, Err(error)))
+                }
                 Ok(compacted) => flow::run(library.reader.list_writer(id)).then(move |listing| {
                     let listing = match listing {
                         Ok(listing) => listing,
@@ -1549,7 +1557,8 @@ fn compact_due(library: &mut Library, closing: bool) -> Flow<'_, &mut Library> {
         .and_then(|own| library.reader.derived().writers.get(&own))
         .map_or(0, |placed| placed.merged.len());
     let due = since >= COMPACT_AFTER || (closing && since > 0);
-    if !due || !library.unsettled.is_empty() || library.writable().is_err() {
+    let blocked = library.snapshot_too_long || !library.unsettled.is_empty();
+    if !due || blocked || library.writable().is_err() {
         return Flow::Done(library);
     }
     compacted(library).then(|(library, _)| Flow::Done(library))

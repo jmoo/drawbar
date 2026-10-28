@@ -464,9 +464,10 @@ previous snapshot's head into that snapshot's state, certifies every segment of
 its directory by the part of it on its chain, the snapshots of its directory on
 its chain by their certificates, and every other entry it folds by hash, and
 writes the snapshot. A snapshot longer than a reader reads (see Reading) is
-refused before anything is written, so the log it would fold stays. Where the folder renames files, it writes it to `tmp/`
-under its nonce, syncs it, renames it into place and syncs both
-directories; a staged snapshot a crash leaves is removed with the other files of
+refused before anything is written, so the log it would fold stays, and the
+instance compacts no more on its own until it opens again. Where the folder
+renames files, it writes it to `tmp/` under its nonce, syncs it, renames it into
+place and syncs both directories; a staged snapshot a crash leaves is removed with the other files of
 `tmp/` (see Recovery). Elsewhere it writes the snapshot in place and syncs it
 and its directory, and a crash can tear it, leaving a file reported as
 unreadable. The writer's next compaction there deletes a `snapshot-` file of its
