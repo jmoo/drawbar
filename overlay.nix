@@ -844,7 +844,7 @@ in
         "RestoreFork"
         "ResumeMid"
         "Sync"
-        "LivenessDeep"
+        "Faults"
       ];
 
       # The corpus assemblies themselves.
