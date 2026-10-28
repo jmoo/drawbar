@@ -75,7 +75,7 @@ class Replay:
         self.rng = random.Random(f"{seed} {fs} {workload}")
         self.data, self.log = devices["data"], devices["log"]
         self.base, self.cow = devices["replay"], devices["cow"]
-        self.logged = f"power-loss-log-{slot}"
+        self.logged = f"power-loss-logged-{slot}"
         self.snapshot = f"power-loss-snapshot-{slot}"
         self.run_dir = f"/mnt/run-{slot}"
         self.check_dir = f"/mnt/check-{slot}"

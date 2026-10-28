@@ -122,6 +122,10 @@ let
     inherit size;
     driveConfig = lib.recursiveUpdate { deviceExtraOpts.serial = serial; } extra;
   };
+
+  # dm-log-writes records the guest's flushes above the virtual disk, and a
+  # replay never outlives its VM, so the host need not make them durable.
+  scratch = serial: size: disk serial size { driveExtraOpts.cache = "unsafe"; };
 in
 {
   # ⚠️ QEMU's `quit`, which `crash()` sends, completes and flushes the writes its
@@ -165,10 +169,10 @@ in
     testers.runNixOSTest {
       name = "toshokan-power-loss-${fs}";
       nodes.machine = lib.recursiveUpdate (machine [
-        (disk "data" (512 * workloads) { })
-        (disk "log" (4096 * workloads) { })
-        (disk "replay" (512 * workloads) { })
-        (disk "cow" (512 * workloads) { })
+        (scratch "data" (512 * workloads))
+        (scratch "log" (4096 * workloads))
+        (scratch "replay" (512 * workloads))
+        (scratch "cow" (512 * workloads))
       ]) { virtualisation = replayMachine; };
       testScript = ''
         machine.wait_for_unit("multi-user.target")
