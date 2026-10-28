@@ -6,7 +6,7 @@ layer that delivers each file to each reader independently and in any order.
 
 ```sh
 nix build .#nord.toshokan-spec       # small bounds, a few minutes; `nix flake check` runs it
-nix build .#nord.toshokan-spec-deep  # larger bounds, about an hour on eight cores
+nix build .#nord.toshokan-spec-deep  # larger bounds, about 70 minutes on eight cores
 ```
 
 This model follows the bounded retention of [RETENTION.md](../RETENTION.md):
@@ -15,8 +15,8 @@ every folded hash, and forks shown as runs instead of merged.
 
 To run one config by hand, `nix shell nixpkgs#tlaplus18`, then
 `tlc -workers 8 -lncheck final -config Portable.cfg Portable.tla` in this
-directory. On an otherwise idle eight-core machine, `Deep` takes about 20
-minutes, `LivenessDeep` about 12, `Sync` and `PortableDeep` under 10 each, and
+directory. On an otherwise idle eight-core machine, `Deep` takes 20 to 25
+minutes, `LivenessDeep` and `Sync` 10 to 12 each, `PortableDeep` under 10, and
 every other config a few minutes.
 
 ## The protocol
