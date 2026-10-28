@@ -46,6 +46,15 @@ at any sample rate. A file named like `060-b0-l00.wav` fills in its root (MIDI
 note 60), bank and layer for you. Otherwise set them in the dialog. **Template** builds on a library you already
 have.
 
+A WAV with a loop, which most sample editors can set, makes a stroke that loops
+there while the key is held, and the dialog marks it. Audio after the loop's end
+is not used, and the loop's last four samples are replaced by the four just
+before its start, which a seamless loop already has. While the key is held, the
+loop fades the way the instrument's own grand pianos do, faster on higher keys;
+with **Template** it fades as the template's does, or as pianos of the template's
+kind do when the template itself never loops. Without a loop, a stroke plays
+to its end. Release strokes cannot loop.
+
 [What is supported](../getting-started/support.md) says which of these edits
 have been played on an instrument.
 

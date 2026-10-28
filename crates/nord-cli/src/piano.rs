@@ -173,20 +173,22 @@ pub struct BuildArgs {
     /// a WAV named any other way is refused.
     ///
     /// A stroke holds whole blocks and every frame of its WAV, so it includes the
-    /// silence that pads out the WAV's last block. The `frames` column in the output
-    /// counts the WAV's frames, not the stroke's.
+    /// silence that pads out the WAV's last block. A looped stroke ends with the block
+    /// holding its loop's end instead. The `frames` column in the output counts the
+    /// WAV's frames, not the stroke's.
     #[arg(value_name = "DIR")]
     pub dir: PathBuf,
 
-    /// A library to take everything the audio does not decide from: the length marks,
-    /// decay coefficients, per-note tables, playback parameters, stream version and
-    /// the word at the start of the body. Each new stroke inherits from the template's
-    /// stroke of the same bank and nearest root.
+    /// A library to take everything the audio does not decide from: the decay
+    /// coefficients, per-note tables, playback parameters, stream version and the word
+    /// at the start of the body. Each new stroke inherits from the template's stroke of
+    /// the same bank and nearest root.
     ///
     /// Without a template, those fields follow fixed rules: no decay applied over the
-    /// recordings, each stroke trimmed by its own layer value, and the damper covering
-    /// the keys `--kind` implies. A library built that way has been played, and sounds
-    /// the same as the same audio built with a template.
+    /// recordings, held loops fading as `--loop-fade` says, a fade at key-up, and the
+    /// damper covering the keys `--kind` implies. A library built that way has been
+    /// played, and sounds the same as the same audio built with a template while a key
+    /// is held. Either way, each stroke is trimmed by its own layer value.
     #[arg(long, value_name = "FILE")]
     pub template: Option<PathBuf>,
 
@@ -210,6 +212,13 @@ pub struct BuildArgs {
     /// the instrument plays damps every key.
     #[arg(long, value_name = "KEY", conflicts_with = "template")]
     pub damper_top: Option<String>,
+
+    /// How fast a held loop at middle C fades, in decibels per second, from the loop's
+    /// start until the key is released. The rate rises up the keyboard as it does on
+    /// the instrument's own pianos of `--kind`, which also sets the default. 0 holds
+    /// every loop at its level.
+    #[arg(long, value_name = "DB_PER_S", conflicts_with = "template")]
+    pub loop_fade: Option<f64>,
 
     /// The library's name, the half of its name field before the `#`.
     #[arg(long)]
@@ -1054,10 +1063,22 @@ fn build_rules(args: &BuildArgs) -> Result<encode::Rules, String> {
         Some(key) => note::parse(key)?,
         None => kind.damper_top(),
     };
+    let loop_fade = match args.loop_fade {
+        Some(rate) => {
+            let tenths = (rate * 10.0).round();
+            (tenths.is_finite() && (0.0..=f64::from(u16::MAX)).contains(&tenths))
+                .then_some(tenths as u16)
+                .ok_or_else(|| {
+                    format!("--loop-fade {rate} dB/s is outside the 0 to 6553.5 the rules hold")
+                })?
+        }
+        None => kind.loop_fade(),
+    };
     Ok(encode::Rules {
         kind,
         gain,
         damper_top,
+        loop_fade,
     })
 }
 
@@ -1088,16 +1109,23 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
     let mut recordings = Vec::new();
     let mut clipped = 0usize;
     let mut resampled = 0usize;
+    let mut looped = 0usize;
     for (file, layer) in files.iter().zip(values) {
         let path = &file.path;
         let pcm = crate::wav::pcm16(path)?;
         let audio = encode::resample(&pcm.samples, usize::from(pcm.channels), pcm.rate)
             .map_err(|e| format!("{}: {e}", path.display()))?;
+        let sustain = pcm
+            .sample_loop
+            .map(|found| encode::sustain(found, pcm.rate))
+            .transpose()
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        looped += usize::from(sustain.is_some());
         clipped += audio.clipped;
         resampled += usize::from(pcm.rate != codec::RATE);
         let frames = audio.channels.first().map_or(0, Vec::len);
         ui.out(format!(
-            "  {:>26}  {:>6} {:>10} {:>5} {:>9} {:>8.3}{}",
+            "  {:>26}  {:>6} {:>10} {:>5} {:>9} {:>8.3}{}{}",
             path.file_name().unwrap_or_default().to_string_lossy(),
             note::name(file.root),
             file.bank.name(),
@@ -1108,6 +1136,14 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
                 String::new()
             } else {
                 format!("  from {} Hz", pcm.rate)
+            },
+            match sustain {
+                Some(sustain) => format!(
+                    "  loops {:.3} s from {:.3} s",
+                    f64::from(sustain.length()) / f64::from(codec::RATE),
+                    f64::from(sustain.start()) / f64::from(codec::RATE)
+                ),
+                None => String::new(),
             }
         ));
         recordings.push(encode::Recording {
@@ -1115,6 +1151,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             bank: file.bank,
             layer,
             channels: audio.channels,
+            sustain,
         });
     }
 
@@ -1137,6 +1174,20 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             codec::RATE
         ));
     }
+    if looped > 0 {
+        ui.note(format!(
+            "{looped} stroke(s) loop where their WAV's smpl chunk says while the key is held"
+        ));
+        if args.template.is_none() {
+            ui.note(match rules.loop_fade {
+                0 => "a held loop keeps its level until the key is released".to_string(),
+                tenths => format!(
+                    "a held loop fades {:.1} dB/s at C4, faster up the keyboard",
+                    f64::from(tenths) / 10.0
+                ),
+            });
+        }
+    }
     if clipped > 0 {
         ui.note(format!(
             "{clipped} resampled sample(s) clipped at the 16-bit limit; the source is \
@@ -1145,15 +1196,14 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
     }
     ui.note(match &args.template {
         Some(_) => format!(
-            "{} takes the length marks, decay coefficients, per-note tables, playback \
-             parameters and the word at the start of the body from the template; the \
-             instrument accepts them, but their effect is not known",
+            "{} takes the decay coefficients, per-note tables, playback parameters and \
+             the word at the start of the body from the template",
             args.out.display()
         ),
         None => format!(
             "{} uses neutral playback in place of a template: no decay applied over the \
-             recordings, each stroke trimmed by its own layer value, {:+.1} dB of library \
-             gain, and the damper reaching {}",
+             recordings, each stroke trimmed by its own layer value, a fade at key-up, \
+             {:+.1} dB of library gain, and the damper reaching {}",
             args.out.display(),
             f64::from(rules.gain) / 10.0,
             damper_reach(rules.damper_top),

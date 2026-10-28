@@ -11,9 +11,9 @@ This repository contains Rust tools for Clavia Nord instruments:
   be synced.
 
 This is a public repository. Do not add personal information, secrets, agent
-memory, private notes, private RFCs, or the private specimen corpus. If a fact
-is needed to understand public code, state the fact in the public repository;
-do not point at a private note.
+memory, private notes, or the private specimen corpus. If a fact is needed to
+understand public code, state the fact in the public repository; do not point at a
+private note.
 
 The project is not affiliated with, authorized by, or endorsed by Clavia DMI
 AB. Keep the trademark disclaimers in crate READMEs and generated docs.
@@ -127,7 +127,7 @@ Delete comments that:
 - contain corpus counts or dates that will silently age;
 - use emphasis, metaphor, or conversational filler in place of a fact.
 
-Git records history. Private RFCs record extended design rationale. Neither
+Git records history. RFCs in `rfc/` record extended design rationale. Neither
 belongs inline as a story about the current code.
 
 Use `///` for a contract a caller can rely on without reading the body. Use
@@ -286,6 +286,35 @@ Before declaring a change done:
 Refactors are behavior-preserving. The default suite and, where available, the
 corpus round trip are the proof. Do not commit unless asked. When commits are
 requested, use small logical commits and branch from `master`.
+
+## RFCs
+
+An RFC records a decision that is hard to reverse, crosses crates, or has real
+alternatives worth keeping. Anything else is an issue or a pull request. When in
+doubt, it is not an RFC.
+
+RFCs live in `rfc/`, one Markdown file each, named `NNNN-short-title.md`. The
+number is the number of the pull request that proposes the RFC, padded to four
+digits. Copy `rfc/0000-template.md`, open the pull request, then name the file and
+fill in its header. A number never changes and is never reused. The template's
+sections follow the Rust project's RFC template.
+
+The pull request is the discussion, and the maintainer decides. A merged RFC is
+accepted. A closed one was rejected or withdrawn, and its pull request keeps the
+record; the closing comment says which. Pull requests that propose an RFC carry
+the `rfc` label.
+
+A merged RFC records a decision. The code and `docs/` describe the current state.
+A merged RFC is not edited, with one exception: the pull request that supersedes
+it adds `Superseded by RFC-NNNN` under its title. The tracking issue in an RFC's
+header says how far it is implemented.
+
+An RFC carries its own evidence. Aggregate facts measured on the private corpus
+may be stated, as pull request descriptions already do. Specimens, their paths and
+anything proprietary stay out.
+
+Issues and pull requests that implement an RFC cite it in their titles, such as
+`feat: rfc-0268 …`. Code and comments do not cite RFC numbers.
 
 ## Pull requests and releases
 

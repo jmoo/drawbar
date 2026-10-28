@@ -78,6 +78,19 @@ pub struct Pcm16 {
     pub channels: u16,
     /// Frames interleaved by channel, as stored.
     pub samples: Vec<i16>,
+    /// The first loop a `smpl` chunk declares, if there is one.
+    pub sample_loop: Option<SampleLoop>,
+}
+
+/// One loop of a `smpl` chunk, in frames of the file it was read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SampleLoop {
+    pub start: u32,
+    /// The loop's last frame, which the chunk counts as part of the loop.
+    pub end: u32,
+    /// The chunk's loop type 0, played start to end and around again. Types 1 and 2
+    /// alternate direction or play backward.
+    pub forward: bool,
 }
 
 impl Pcm16 {
@@ -214,6 +227,7 @@ pub fn read_pcm16(bytes: &[u8]) -> Result<Pcm16, Error> {
     let bytes = &bytes[..riff_len];
     let mut format = None;
     let mut data = None;
+    let mut sampler = None;
     let mut at = 12;
     while bytes.len() - at >= 8 {
         let id = &bytes[at..at + 4];
@@ -230,6 +244,7 @@ pub fn read_pcm16(bytes: &[u8]) -> Result<Pcm16, Error> {
         match id {
             b"fmt " => format = Some(body..end),
             b"data" => data = Some(body..end),
+            b"smpl" => sampler = Some(body..end),
             _ => {}
         }
         at = end
@@ -291,6 +306,11 @@ pub fn read_pcm16(bytes: &[u8]) -> Result<Pcm16, Error> {
         .into());
     }
 
+    let frames = data.len() / usize::from(expected_block);
+    let sample_loop = match sampler {
+        Some(sampler) => first_loop(&bytes[sampler], frames)?,
+        None => None,
+    };
     let samples = bytes[data]
         .chunks_exact(2)
         .map(|s| i16::from_le_bytes([s[0], s[1]]))
@@ -299,7 +319,51 @@ pub fn read_pcm16(bytes: &[u8]) -> Result<Pcm16, Error> {
         rate,
         channels,
         samples,
+        sample_loop,
     })
+}
+
+/// Bytes of a `smpl` chunk ahead of its loops; the loop count is the u32 at 28.
+const SAMPLER_HEAD: usize = 36;
+/// Bytes per loop: cue id, type, start, end, fraction and play count, each a u32.
+const SAMPLER_LOOP: usize = 24;
+
+/// The first loop of a `smpl` chunk over `frames` frames of audio.
+fn first_loop(chunk: &[u8], frames: usize) -> Result<Option<SampleLoop>, Error> {
+    let u32_at =
+        |at: usize| u32::from_le_bytes([chunk[at], chunk[at + 1], chunk[at + 2], chunk[at + 3]]);
+    if chunk.len() < SAMPLER_HEAD {
+        return Err(ParseError::AssertFail(format!(
+            "smpl chunk is {} bytes; its header is {SAMPLER_HEAD}",
+            chunk.len()
+        ))
+        .into());
+    }
+    if u32_at(28) == 0 {
+        return Ok(None);
+    }
+    if chunk.len() < SAMPLER_HEAD + SAMPLER_LOOP {
+        return Err(ParseError::AssertFail(format!(
+            "smpl chunk declares {} loop(s) but is {} bytes, too short for one",
+            u32_at(28),
+            chunk.len()
+        ))
+        .into());
+    }
+    let at = SAMPLER_HEAD;
+    let found = SampleLoop {
+        start: u32_at(at + 8),
+        end: u32_at(at + 12),
+        forward: u32_at(at + 4) == 0,
+    };
+    if found.start > found.end || found.end as usize >= frames {
+        return Err(ParseError::AssertFail(format!(
+            "smpl loop runs from frame {} to {}, outside the {frames} frame(s) of audio",
+            found.start, found.end
+        ))
+        .into());
+    }
+    Ok(Some(found))
 }
 
 #[cfg(test)]
@@ -489,6 +553,69 @@ mod tests {
             err.contains("trailing"),
             "refused for the wrong reason: {err}"
         );
+    }
+
+    /// A `smpl` chunk declaring `loops` as (type, start, end), appended to `wav`.
+    fn with_sampler(wav: &[u8], loops: &[(u32, u32, u32)]) -> Vec<u8> {
+        let mut chunk = vec![0u8; SAMPLER_HEAD];
+        chunk[28..32].copy_from_slice(&(loops.len() as u32).to_le_bytes());
+        for &(kind, start, end) in loops {
+            for word in [0, kind, start, end, 0, 0] {
+                chunk.extend_from_slice(&u32::to_le_bytes(word));
+            }
+        }
+        let mut out = wav.to_vec();
+        out.extend_from_slice(b"smpl");
+        out.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
+        out.extend_from_slice(&chunk);
+        let riff = (out.len() - 8) as u32;
+        out[4..8].copy_from_slice(&riff.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn the_first_loop_a_sampler_chunk_declares_is_read() {
+        let wav = mono_pcm16(&[0; 100], 44_100).unwrap();
+        let read = read_pcm16(&with_sampler(&wav, &[(0, 20, 79), (1, 0, 9)])).unwrap();
+        assert_eq!(
+            read.sample_loop,
+            Some(SampleLoop {
+                start: 20,
+                end: 79,
+                forward: true
+            })
+        );
+        let read = read_pcm16(&with_sampler(&wav, &[(1, 0, 99)])).unwrap();
+        assert_eq!(read.sample_loop.map(|l| l.forward), Some(false));
+
+        assert_eq!(read_pcm16(&wav).unwrap().sample_loop, None);
+        assert_eq!(
+            read_pcm16(&with_sampler(&wav, &[])).unwrap().sample_loop,
+            None
+        );
+    }
+
+    #[test]
+    fn a_sampler_chunk_that_cannot_hold_its_loop_is_refused() {
+        let wav = mono_pcm16(&[0; 100], 44_100).unwrap();
+        for (loops, reason) in [
+            (vec![(0, 20, 100)], "outside the 100 frame(s)"),
+            (vec![(0, 50, 40)], "outside the 100 frame(s)"),
+        ] {
+            let err = read_pcm16(&with_sampler(&wav, &loops))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(reason), "want {reason:?}, got {err}");
+        }
+
+        let mut short = with_sampler(&wav, &[(0, 0, 9)]);
+        short.truncate(short.len() - SAMPLER_LOOP);
+        let chunk = short.len() - SAMPLER_HEAD;
+        short[chunk - 4..chunk].copy_from_slice(&(SAMPLER_HEAD as u32).to_le_bytes());
+        let riff = (short.len() - 8) as u32;
+        short[4..8].copy_from_slice(&riff.to_le_bytes());
+        let err = read_pcm16(&short).unwrap_err().to_string();
+        assert!(err.contains("too short for one"), "{err}");
     }
 
     #[test]

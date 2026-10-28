@@ -17,9 +17,11 @@ A piano library or sample instrument can run to hundreds of megabytes, and a
 whole read holds all of it in memory. `npno::Index` and `nsmp::Index` read only a
 file's headers and stroke directory, through `Read` and `Seek`, and give the byte
 range of each stroke's audio. A caller reads one stroke by its range and decodes
-it. The index does not verify the container checksum, which covers every byte;
-`cbin::inspect` checks it in one streaming pass, and `cbin::Verifier` does the
-same over chunks a caller supplies. Both report the body's CRC-32, the number an
+it. A sample stroke decodes against the file's peak, the largest statistic B of
+any of its strokes, which `nsmp::Index::file_peak` gives. The index does not
+verify the container checksum, which covers every byte; `cbin::inspect` checks
+it in one streaming pass, and `cbin::Verifier` does the same over chunks a caller
+supplies. Both report the body's CRC-32, the number an
 instrument reports for the slot holding it, whichever checksum the file stores. `Verifier::seal` gives the checksum such
 chunks call for, for a writer that streams a body before its checksum is known.
 

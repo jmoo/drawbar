@@ -242,7 +242,7 @@ fn editor_render(s: &Specimen) -> Result<(), String> {
             let layout = nsmp::codec::Layout::from_version(sample.header.version)
                 .ok_or("a content version the codec does not model")?;
             let streams = sample.stroke_streams();
-            let peak = samples::peak(&streams, layout);
+            let peak = u64::from(nsmp::codec::file_peak(streams.iter().map(|s| s.1), layout));
             for (_, stroke) in &streams {
                 let decibels =
                     nsmp::codec::zone_gain_db(stroke, layout).ok_or("no decibel field")?;
@@ -258,7 +258,10 @@ fn editor_render(s: &Specimen) -> Result<(), String> {
                 .collect::<Result<_, _>>()?;
             let zones = sample.zones().context("zones")?;
             let streams = sample.stroke_streams();
-            let peak = samples::peak(&streams, nsmp::codec::Layout::V2);
+            let peak = u64::from(nsmp::codec::file_peak(
+                streams.iter().map(|s| s.1),
+                nsmp::codec::Layout::V2,
+            ));
             for (_, stroke) in &streams {
                 let id = stroke[3];
                 let from_wide = wide.iter().find_map(|(_, entity)| {
@@ -303,8 +306,9 @@ fn sine_at_root_key(s: &Specimen) -> Result<(), String> {
     let sample = samples::sample(s.entity)?;
     let zones = sample.zones().context("zones")?;
     let zone = zones.first().ok_or("no zone")?;
-    let audio = nsmp::codec::decode(zone.stream, zone.at, sample.layout().context("layout")?)
-        .context("decode")?;
+    let layout = sample.layout().context("layout")?;
+    let file_peak = sample.file_peak().context("file peak")?;
+    let audio = nsmp::codec::decode(zone.stream, zone.at, layout, file_peak).context("decode")?;
     let want = 440.0 * 2f64.powf((f64::from(zone.root_key) - 69.0) / 12.0);
     let window: Vec<f64> = audio
         .samples
@@ -342,8 +346,9 @@ enum Channel {
 /// The first stroke's two channels, deinterleaved.
 fn channels(sample: &Sample) -> Result<[Vec<i16>; 2], String> {
     let (at, stroke) = *sample.stroke_streams().first().ok_or("no stroke")?;
-    let audio =
-        nsmp::codec::decode(stroke, at, sample.layout().context("layout")?).context("decode")?;
+    let layout = sample.layout().context("layout")?;
+    let file_peak = sample.file_peak().context("file peak")?;
+    let audio = nsmp::codec::decode(stroke, at, layout, file_peak).context("decode")?;
     ensure!(audio.channels == 2, "{} channels", audio.channels);
     Ok([
         audio.samples.iter().step_by(2).copied().collect(),
@@ -461,9 +466,13 @@ fn builds_from_source(s: &Specimen) -> Result<(), String> {
         );
     }
 
+    let file_peak = nsmp::codec::file_peak(
+        twin.stroke_streams().iter().map(|s| s.1),
+        nsmp::codec::Layout::V2,
+    );
     for (index, zone) in zones.iter().enumerate() {
         let (at, stream) = twin.zone_stream(index).context(format!("zone {index}"))?;
-        let editor = nsmp::codec::decode(stream, at, nsmp::codec::Layout::V2)
+        let editor = nsmp::codec::decode(stream, at, nsmp::codec::Layout::V2, file_peak)
             .context(format!("zone {index}"))?;
         let plan = nsmp::encode::Plan::new(
             nsmp::codec::Layout::V2,
@@ -526,11 +535,12 @@ fn wide_renders(s: &Specimen) -> Result<(), String> {
     }
     let first = |sample: &Sample| -> Result<(nsmp::codec::Audio, i32, bool), String> {
         let layout = sample.layout().context("layout")?;
+        let file_peak = sample.file_peak().context("file peak")?;
         let (at, stroke) = *sample.stroke_streams().first().ok_or("no stroke")?;
         let directory = nsmp::codec::Directory::read(stroke).ok_or("no directory")?;
         Ok((
-            nsmp::codec::decode(stroke, at, layout).context("decode")?,
-            nsmp::codec::shift(stroke, layout).ok_or("no shift")?,
+            nsmp::codec::decode(stroke, at, layout, file_peak).context("decode")?,
+            nsmp::codec::shift_against(stroke, file_peak).ok_or("no shift")?,
             directory.mark != directory.terminator,
         ))
     };
@@ -713,7 +723,8 @@ fn written_by_this_crate(s: &Specimen) -> Result<(), String> {
 
 /// A library built from rules alone, from the named library's decoded strokes,
 /// reproduces this file. A script outside this crate wrote it, so it is an
-/// independent oracle for the rules.
+/// independent oracle for the rules. The script wrote every note-off fade as 0 and
+/// the rules do not, so the build's fades are set to 0 before the comparison.
 ///
 /// Confirmed on hardware.
 fn recordings_from(s: &Specimen) -> Result<(), String> {
@@ -739,16 +750,32 @@ fn recordings_from(s: &Specimen) -> Result<(), String> {
                     .ok_or_else(|| format!("{stroke:?} names no bank"))?,
                 layer: stroke.layer(),
                 channels: audio.lanes,
+                sustain: None,
             })
         })
         .collect::<Result<_, String>>()?;
     let (library_name, variant) = library.name();
-    let built = npno::encode::build(
+    let mut built = npno::encode::build(
         &npno::encode::Donor::Rules(npno::encode::Rules::new(npno::encode::Kind::Grand)),
         &npno::encode::Options::new(&library_name).variant(&variant),
         &recordings,
     )
     .context("build")?;
+    let theirs = npno::Library::borrow(s.bytes).context("parse")?;
+    ensure!(
+        theirs.strokes().len() == built.strokes().len(),
+        "the rule-written library has {} strokes, the file {}",
+        built.strokes().len(),
+        theirs.strokes().len()
+    );
+    for (index, stroke) in theirs.strokes().iter().enumerate() {
+        ensure!(
+            stroke.note_off_fade() == 0,
+            "{stroke:?} has a note-off fade of {}, not the script's 0",
+            stroke.note_off_fade()
+        );
+        built.set_note_off_fade(index, 0).context("fade")?;
+    }
     let bytes = built
         .to_piano()
         .and_then(|p| nord_format::to_bytes(&Entity::Piano(p)))

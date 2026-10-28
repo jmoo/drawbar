@@ -28,7 +28,8 @@ nord program deps patch.ne5p           # the piano and sample ids it refers to
 ```
 
 A file stores ids, not names. `deps` on a slot asks the instrument for the
-names. On a file, it prints the ids.
+names. On a file, it prints the ids. The instrument names no dependencies for live
+slots, so `nord live deps` prints the ids for a slot too.
 
 ## Bundles
 

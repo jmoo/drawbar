@@ -62,6 +62,7 @@ fn piano_bytes() -> Vec<u8> {
         bank: Bank::Attack,
         layer: 0,
         channels: vec![tone(1_024)],
+        sustain: None,
     };
     let library = piano::build(
         &Donor::Rules(Rules::new(Kind::Grand)),

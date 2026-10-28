@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Exercise a running collector over HTTP: what it accepts, what it refuses, and that a
-# report sent twice is kept once.
+# Exercise a running collector over HTTP: what it accepts and what it refuses.
 #
 #   js/telemetry/smoke.bash URL ORIGIN
 #
 # URL is the collector (`http://127.0.0.1:8787` under `wrangler dev`, or
 # `https://t.drawbar.app`); ORIGIN is the origin it accepts (`DEV_ORIGIN` locally,
 # `https://drawbar.app` in production). Rows and reports carry version `0.0.0-test`, and
-# it prints the report ids, so both can be found and deleted afterward.
+# it prints the report ids, so both can be found and deleted afterward. It sends three
+# reports, which the collector's own limit of five a minute admits.
 #
 # Set SMOKE_GAP=4 against production: the edge's rate limit on /report answers 429 to
 # more than three reports in ten seconds from one address.

@@ -57,9 +57,21 @@ above it. Keys beyond that are silent. Within a root, velocity picks the layer,
 with the layers spread across the velocity range in order. To set a layer's
 velocity value directly, name the file with `v12` in place of `l00`.
 
+A WAV with a loop in its `smpl` chunk, which most sample editors write, makes a
+stroke that loops there while the key is held. Audio after the loop's end is not
+used, and the loop's last four samples are replaced by the four just before its
+start, which a seamless loop already has. While the key is held, the loop fades
+the way the instrument's own pianos of that `--kind` do, faster on higher keys.
+`--loop-fade` sets the rate at middle C in decibels per second, and `0` holds the
+loop at its level. A stroke without a loop plays to its end, and a release stroke
+cannot loop.
+A loop is exact in a WAV at 35,002 Hz. At any other rate its ends move to the
+nearest frame of the resampled audio.
+
 Whatever the audio does not decide, such as decay and per-note tables, comes from
-`--template` when you give one. Without a template, `--kind`, `--gain` and
-`--damper-top` set the playback values, and the rest uses neutral defaults.
+`--template` when you give one. Without a template, `--kind`, `--gain`,
+`--damper-top` and `--loop-fade` set the playback values, and the rest uses neutral defaults. Each
+stroke's level follows its layer either way.
 
 [What is supported](../getting-started/support.md) says which of these libraries
 have been played on an instrument.
