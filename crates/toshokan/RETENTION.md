@@ -93,7 +93,11 @@ shows everything it wrote. A sealed file cannot still be arriving, so a sealed
 file shorter than the certificate diverged from it, as does a file whose line at
 that position has another hash, as copies of a virtual machine resumed twice do:
 only its first line is folded, and the rest is placed or shown as a run by the
-rules below.
+rules below. A certificate names a segment by its first line and a position, so
+a shorter unsealed copy of a certified segment cannot be told from another
+instance's copy that left the chain there; where a certificate of that other
+copy matches it, the reader takes its lines as a branch and shows them as a run,
+never merging them silently.
 
 **Contribution**, per entity:
 

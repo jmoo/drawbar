@@ -560,7 +560,10 @@ Per writer, from the files it reads, a reader derives:
   starts like a certified segment but is shorter, held back: it may be a
   version a sync client dropped, a copy that diverged before its end, or a file
   still arriving. A sealed file shorter than the certificate, or one with
-  another line at its position, diverged: only its first line is folded.
+  another line at its position, diverged: only its first line is folded. A
+  certificate names a segment by its first line and a position, so where a
+  shorter certificate with the same first line matches the file, its lines past
+  that one are a branch, shown as a run and never merged.
 - **Merged** entries: one numbered one past its predecessor, which is a tip's
   head or merged, or a genesis entry when the writer has no tip.
 - **Fork points**: an entry with two successors; a folded entry, not a tip's

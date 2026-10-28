@@ -48,9 +48,13 @@ certifies before an entry no tip folds, or the highest entry every tip of a
 writer certifies; every entry of that writer numbered above it is a run, so no
 two branches are ever merged. Where a writer has several tips, the reader merges
 only what they all fold. Folds are ghosts: the model treats a snapshot as the
-whole chain it folds, so it checks placement only. What a snapshot's lossy
-contribution keeps, where the code's tips part by the hashes they name, and how
-references kill are checked by the value-level tests in `tests/retention`. A dismissal, an entry naming runs, takes
+whole chain it folds, so it checks placement only. Its certificates are exact:
+a tip knows every entry it folds, while the code's segment certificate names a
+segment by its first line and a position only, so a shorter copy of one cannot
+be told from another copy with the same first line. That ambiguity, what a
+snapshot's lossy contribution keeps, where the code's tips part by the hashes
+they name, and how references kill are checked by the value-level tests in
+`tests/retention`. A dismissal, an entry naming runs, takes
 them out of view for good: a reader never merges what a dismissal names, and
 shows an entry after one as a run. A reader keeps nothing between reads: each
 read derives its tips, placement, fork points, runs and gaps from the files it
