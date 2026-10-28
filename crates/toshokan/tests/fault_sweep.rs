@@ -20,6 +20,7 @@ use power_loss::{
 use toshokan::blocking::Library;
 use toshokan::error::Why;
 use toshokan::io::Capabilities;
+use toshokan::report::Rekey;
 use toshokan::simulator::Machine;
 use toshokan::{Error, Io, MemDisk, Root};
 
@@ -105,11 +106,16 @@ impl Place for Mem {
 /// How the run goes on once a step fails.
 #[derive(Clone, Copy, Debug)]
 enum Then {
-    /// The library writes again, which settles what the failure left.
-    Writes,
+    /// The library writes again, which settles what the failure left, with that
+    /// write's request of the index given faulted as well.
+    Writes(Option<(u64, Fault)>),
     /// The library is dropped, as an app that quits.
     Quits,
 }
+
+/// How many of the mutating requests that settle what a failure left are faulted
+/// in turn as the library writes again.
+const SETTLE_FAULTS: usize = 4;
 
 /// One faulted run.
 struct Case {
@@ -185,8 +191,13 @@ fn steps<L: Lib<Machine>>(
         }
     }
     let seen = runner.arms.borrow_mut().seen.take().unwrap_or_default();
-    runner.arms.borrow_mut().fault = None;
-    if let (Some(mut library), Then::Writes) = (runner.library.take(), then) {
+    let mut settling = Vec::new();
+    if let (Some(mut library), Then::Writes(second)) = (runner.library.take(), then) {
+        let finishing = !library.finishing().is_empty();
+        {
+            let mut arms = runner.arms.borrow_mut();
+            (arms.fault, arms.counted, arms.seen) = (second, 0, Some(Vec::new()));
+        }
         let mut probe = || {
             library.commit("Probe", |intent| {
                 let (intent, _) = intent.create(|e| {
@@ -195,32 +206,55 @@ fn steps<L: Lib<Machine>>(
                 intent
             })
         };
-        // A write that finds a failed write of its own landed, or a change it
-        // cannot finish, writes nothing; the first takes a new writer for the next.
-        let wrote = match probe() {
-            Err(Error::Rekey { .. }) => probe(),
-            wrote => wrote,
-        };
+        let mut wrote = probe();
+        let probed = runner.arms.borrow_mut().seen.take().unwrap_or_default();
+        runner.arms.borrow_mut().fault = None;
+        if finishing && second.is_none() {
+            settling = probed;
+        }
+        let faulted = second.is_some();
+        // A write that finds a failed write of its own landed writes nothing and
+        // stops its writer; so does a second fault, and the write after either goes
+        // on with a healthy folder.
+        for _ in 0..2 {
+            let again = match &wrote {
+                Err(Error::Rekey {
+                    why: Rekey::Landed, ..
+                }) => true,
+                Err(Error::ReadOnly(_)) | Ok(_) => false,
+                Err(_) => faulted,
+            };
+            if !again {
+                break;
+            }
+            wrote = probe();
+        }
         match wrote {
-            Ok(_) | Err(Error::ReadOnly(Why::Unfinished { .. })) => {}
+            Ok(_) => {}
+            // Only a settle the second fault failed may leave the session read-only.
+            Err(Error::ReadOnly(Why::Unfinished { .. })) if faulted => {}
             Err(e) => return Err(format!("the next write: {e}")),
         }
         library.close().map_err(|e| format!("closing: {e}"))?;
     }
+    runner.arms.borrow_mut().fault = None;
     Ok(Ran {
         done,
         acked,
         seen,
+        settling,
         failed,
     })
 }
 
 /// What a run did: how many steps returned, the entries they committed, the
-/// requests it made, and the error of the step that failed.
+/// requests its steps made, those of the write after a failure that settled what
+/// it left, and the error of the step that failed.
 struct Ran {
     done: usize,
     acked: Vec<Acked>,
     seen: Vec<power_loss::Seen>,
+    settling: Vec<power_loss::Seen>,
     failed: Option<String>,
 }
 
@@ -243,7 +277,8 @@ fn sweep<L: Lib<Machine>>(
             (shortens && io.shortens).then_some(Fault::Short),
         ];
         for fault in faults.into_iter().flatten() {
-            for then in [Then::Writes, Then::Quits] {
+            let mut thens = vec![Then::Writes(None), Then::Quits];
+            while let Some(then) = thens.pop() {
                 let case = Case {
                     workload: workload.name,
                     folder: name,
@@ -256,6 +291,11 @@ fn sweep<L: Lib<Machine>>(
                 let place = Mem::new(folder);
                 let ran = steps::<L>(workload, &place, Some((case.request, fault)), then);
                 let checked = ran.and_then(|ran| {
+                    let settles = ran.settling.iter().enumerate();
+                    let mutating = settles.filter(|(_, io)| io.mutates).take(SETTLE_FAULTS);
+                    let second =
+                        mutating.map(|(at, _)| Then::Writes(Some((at as u64, Fault::Fails))));
+                    thens.extend(second);
                     let step = ran.failed.unwrap_or_default();
                     let checked = check(workload, &place, ran.done, &ran.acked);
                     checked
@@ -271,15 +311,12 @@ fn sweep<L: Lib<Machine>>(
     failed
 }
 
-/// Sweeps every workload in `folder` through both drivers.
-fn sweep_in(folder: (&'static str, Capabilities, bool)) {
-    let mut failed = Vec::new();
-    for workload in workloads() {
-        failed.extend(sweep::<Library<Faulty<Machine>>>(
-            &workload, folder, "blocking",
-        ));
-        failed.extend(sweep::<Async<Machine>>(&workload, folder, "async"));
-    }
+/// Sweeps every workload in `folder` through the driver `L` names.
+fn sweep_in<L: Lib<Machine>>(folder: (&'static str, Capabilities, bool), driver: &'static str) {
+    let failed: Vec<(Case, String)> = workloads()
+        .iter()
+        .flat_map(|workload| sweep::<L>(workload, folder, driver))
+        .collect();
     let shown: Vec<String> = failed
         .iter()
         .map(|(case, error)| format!("{case}\n    {error}"))
@@ -292,17 +329,34 @@ fn sweep_in(folder: (&'static str, Capabilities, bool)) {
     );
 }
 
+type Blocking = Library<Faulty<Machine>>;
+
 #[test]
 fn every_request_faulted_in_a_renaming_folder_leaves_what_a_power_loss_may() {
-    sweep_in(FOLDERS[0]);
+    sweep_in::<Blocking>(FOLDERS[0], "blocking");
+}
+
+#[test]
+fn every_request_faulted_in_a_renaming_folder_through_async_leaves_what_a_power_loss_may() {
+    sweep_in::<Async<Machine>>(FOLDERS[0], "async");
 }
 
 #[test]
 fn every_request_faulted_in_a_picked_folder_leaves_what_a_power_loss_may() {
-    sweep_in(FOLDERS[1]);
+    sweep_in::<Blocking>(FOLDERS[1], "blocking");
+}
+
+#[test]
+fn every_request_faulted_in_a_picked_folder_through_async_leaves_what_a_power_loss_may() {
+    sweep_in::<Async<Machine>>(FOLDERS[1], "async");
 }
 
 #[test]
 fn every_request_faulted_in_a_fat_folder_leaves_what_a_power_loss_may() {
-    sweep_in(FOLDERS[2]);
+    sweep_in::<Blocking>(FOLDERS[2], "blocking");
+}
+
+#[test]
+fn every_request_faulted_in_a_fat_folder_through_async_leaves_what_a_power_loss_may() {
+    sweep_in::<Async<Machine>>(FOLDERS[2], "async");
 }

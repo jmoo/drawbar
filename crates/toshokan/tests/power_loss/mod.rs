@@ -620,6 +620,7 @@ pub trait Lib<B>: Sized {
     fn compact(&mut self) -> toshokan::Result<()>;
     fn empty_trash(&mut self) -> toshokan::Result<Emptied>;
     fn settle(&mut self, orphan: Orphan) -> toshokan::Result<Committed>;
+    fn finishing(&self) -> Vec<RelPath>;
     fn close(self) -> toshokan::Result<()>;
 }
 
@@ -656,6 +657,9 @@ impl<B: Backend> Lib<B> for Library<Faulty<B>> {
     }
     fn settle(&mut self, orphan: Orphan) -> toshokan::Result<Committed> {
         Library::settle(self, orphan, Settlement::Finished)
+    }
+    fn finishing(&self) -> Vec<RelPath> {
+        Library::finishing(self)
     }
     fn close(self) -> toshokan::Result<()> {
         Library::close(self).map(|_| ())
@@ -700,6 +704,9 @@ impl<B: asynch::Fs> Lib<B> for Async<B> {
     }
     fn settle(&mut self, orphan: Orphan) -> toshokan::Result<Committed> {
         pollster::block_on(self.0.settle(orphan, Settlement::Finished))
+    }
+    fn finishing(&self) -> Vec<RelPath> {
+        self.0.finishing()
     }
     fn close(self) -> toshokan::Result<()> {
         pollster::block_on(self.0.close()).map(|_| ())
