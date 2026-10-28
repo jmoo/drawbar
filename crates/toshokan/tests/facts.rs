@@ -722,6 +722,24 @@ fn undo_is_refused_where_another_writer_changed_the_thing_since() {
 }
 
 #[test]
+fn an_undo_let_go_of_after_its_refusal_leaves_the_intent_before_it_to_undo() {
+    let e = entity(1);
+    let (mut a, mut b) = pair(e);
+    a.commit(plan(intent("").set(e, NAME, "mine".into())), 2)
+        .unwrap();
+    a.commit(plan(intent("").add(e, TAGS, "b".into())), 3)
+        .unwrap();
+    b.sync(&a);
+    b.commit(plan(intent("").remove(e, TAGS, &"b".into())), 4)
+        .unwrap();
+    a.sync(&b);
+    assert!(matches!(a.undo(5), Err(Refusal::ChangedSince { .. })));
+    a.history.forget_undo();
+    a.undo(6).unwrap();
+    assert_eq!(name(&a, e), Field::Value("first".into()));
+}
+
+#[test]
 fn undoing_a_create_is_refused_once_another_writer_wrote_to_it() {
     let e = entity(1);
     let (mut a, mut b) = pair(e);

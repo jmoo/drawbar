@@ -401,6 +401,16 @@ impl<F: Fs> Library<F> {
         run(&self.fs, self.core.redo()).await
     }
 
+    /// As [`crate::library::Library::forget_undo`].
+    pub fn forget_undo(&mut self) {
+        self.core.forget_undo();
+    }
+
+    /// As [`crate::library::Library::forget_redo`].
+    pub fn forget_redo(&mut self) {
+        self.core.forget_redo();
+    }
+
     pub async fn settle(&mut self, orphan: Orphan, how: Settlement) -> Result<Committed> {
         run(&self.fs, self.core.settle(orphan, how)).await
     }

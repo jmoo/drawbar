@@ -359,6 +359,17 @@ impl Library {
         })
     }
 
+    /// Lets go of what the next undo would reverse, as once its undo is refused:
+    /// the next undo reaches this session's intent before it.
+    pub fn forget_undo(&mut self) {
+        self.history.forget_undo();
+    }
+
+    /// Lets go of what the next redo would reverse, as once its redo is refused.
+    pub fn forget_redo(&mut self) {
+        self.history.forget_redo();
+    }
+
     /// Settles now this writer's effects a crash interrupted, as
     /// [`Opened::settled`] reports them, rather than before its next write, so the
     /// files they moved are where their outcome puts them.

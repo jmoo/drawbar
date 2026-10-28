@@ -198,6 +198,17 @@ impl History {
         &self.items
     }
 
+    /// Lets go of the intent the next undo would reverse, as once its undo is
+    /// refused: the next undo reaches the one before it.
+    pub fn forget_undo(&mut self) {
+        self.done.pop();
+    }
+
+    /// Lets go of the undo the next redo would reverse, as once its redo is refused.
+    pub fn forget_redo(&mut self) {
+        self.undone.pop();
+    }
+
     /// The plan reversing the latest intent not undone, with [`Plan::reverses`]
     /// naming it. `writer` is this writer's id.
     pub fn plan_undo(&self, writer: WriterId, view: &View) -> Result<Plan, Refusal> {
