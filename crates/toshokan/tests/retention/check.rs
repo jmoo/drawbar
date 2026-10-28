@@ -5,15 +5,17 @@
 //! shows alone again. P4: a step by one branch of a forked writer changes no
 //! merged value. P7: no reader merges what a dismissal it holds names. P9: a
 //! contribution's size is bounded by fields and writers, and its certificates
-//! name the head of every snapshot of its directory on its chain. P11: after a restore or
-//! a dropped version, the folder wins. Five divergences are counted rather than
-//! failed: a conflict the oracle resolves, after a fork; an extra value beside
-//! the oracle's after a fault, on a field the design reports contradicted; a
-//! value the oracle shows after a fault that a held line's chain replaced,
-//! through an entry the fault took; a merged value the design shows only in an
-//! item, as a forgotten basis, because a fork lies inside a segment, or because a
-//! fault left a file it cannot place; and a faulted reading that shows such
-//! unplaced lines.
+//! name the head of every snapshot of its directory on its chain. P11: after a restore,
+//! a dropped version, or a compacted segment back shorter and unsealed, the folder
+//! wins. Six divergences are counted rather than failed: a conflict the oracle
+//! resolves, after a fork; an extra value beside the oracle's after a fault, on a
+//! field the design reports contradicted; a value the oracle shows after a fault
+//! that a held line's chain replaced, through an entry the fault took; a merged
+//! value the design shows only in an item, as a forgotten basis, because a fork
+//! lies inside a segment, or because a fault left a file it cannot place; a
+//! faulted reading that shows such unplaced lines; and, after a compacted segment
+//! came back shorter, a reading that shows as a run to take what the oracle
+//! merges, since a certificate cannot tell that copy from another instance's.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -44,6 +46,9 @@ pub struct Tally {
     /// Faulted readings that show lines of a file shorter than a certificate,
     /// which the reader cannot place.
     pub unplaced: AtomicUsize,
+    /// Readings after a compacted segment came back shorter and unsealed that
+    /// show what the oracle merges as a run to take.
+    pub apart: AtomicUsize,
     /// Set when a worker finds a violation, so the others stop.
     pub failed: AtomicBool,
 }
@@ -56,7 +61,7 @@ impl Tally {
     pub fn report(&self) -> String {
         let n = |c: &AtomicUsize| c.load(Ordering::Relaxed);
         format!(
-            "{} histories, {} reads; {} fields shown as a conflict the oracle resolves, {} fields whose merged value shows only in an item, {} fields after a fault where a reference to a lost write no longer covers an earlier one, {} fields after a fault whose oracle value a held line's chain replaced, {} faulted readings with unplaced lines",
+            "{} histories, {} reads; {} fields shown as a conflict the oracle resolves, {} fields whose merged value shows only in an item, {} fields after a fault where a reference to a lost write no longer covers an earlier one, {} fields after a fault whose oracle value a held line's chain replaced, {} faulted readings with unplaced lines, {} readings after a segment came back shorter that show a merged value as a run",
             n(&self.histories),
             n(&self.reads),
             n(&self.conflicts),
@@ -64,6 +69,7 @@ impl Tally {
             n(&self.contradicted),
             n(&self.chained),
             n(&self.unplaced),
+            n(&self.apart),
         )
     }
 }
@@ -140,16 +146,7 @@ fn agree(
     if oracle == spec {
         return Ok(());
     }
-    let with_existence = |shown: &Shown| {
-        let mut values = shown.values.clone();
-        for (field, writes) in shown.writes.iter().filter(|(f, _)| f.is_exist()) {
-            let exist = writes
-                .iter()
-                .filter_map(|&h| world.entry(h).write.and_then(|w| w.value));
-            values.insert(*field, exist.collect());
-        }
-        values
-    };
+    let with_existence = |shown: &Shown| with_existence(world, shown);
     let (ov, sv) = (with_existence(oracle), with_existence(spec));
     let chained = faulted.map(with_existence);
     let forks = oracle::place(world, held).forks;
@@ -289,6 +286,45 @@ fn agree(
     Ok(())
 }
 
+/// The values `shown` merges, an entity's existence among them.
+fn with_existence(world: &World, shown: &Shown) -> BTreeMap<Field, BTreeSet<Val>> {
+    let mut values = shown.values.clone();
+    for (field, writes) in shown.writes.iter().filter(|(f, _)| f.is_exist()) {
+        let exist = writes
+            .iter()
+            .filter_map(|&h| world.entry(h).write.and_then(|w| w.value));
+        values.insert(*field, exist.collect());
+    }
+    values
+}
+
+/// Whether every value the oracle merges the design merges too, or offers in a
+/// run of the writer that wrote it, as the run's value or as a forgotten basis.
+/// An entity shows as created while it exists, and as deleted while it does not
+/// or its deletion is a conflict.
+fn kept_apart(world: &World, oracle: &Shown, spec: &Shown) -> bool {
+    let merged = with_existence(world, spec);
+    let shown = |field: &Field, v: &Val| match (field.is_exist(), v) {
+        (true, Val::Created) => spec.exists(field.entity),
+        (true, _) => spec
+            .entities
+            .get(&field.entity)
+            .is_none_or(|e| !e.exists || e.deletion_conflict),
+        (false, _) => merged.get(field).is_some_and(|m| m.contains(v)),
+    };
+    let offered = |field: &Field, v: &Val| {
+        let writes = oracle.writes.get(field).into_iter().flatten();
+        let by = |&&e: &&Hash| world.entry(e).write.is_some_and(|w| w.value == Some(*v));
+        let writers: BTreeSet<Dir> = writes.filter(by).map(|&e| world.entry(e).dir).collect();
+        let runs = spec.items.iter().filter(|i| i.kind == ItemKind::Run);
+        runs.filter(|i| writers.contains(&i.dir))
+            .any(|i| i.change.get(field) == Some(&Some(*v)) || i.forgotten.contains(field))
+    };
+    with_existence(world, oracle)
+        .iter()
+        .all(|(field, values)| values.iter().all(|v| shown(field, v) || offered(field, v)))
+}
+
 /// The values a reader merged: everything but its items.
 fn merged(s: &Shown) -> (&BTreeMap<u8, Existence>, &BTreeMap<Field, BTreeSet<Val>>) {
     (&s.entities, &s.values)
@@ -363,6 +399,9 @@ pub struct Checker<'a, D: Design> {
     pub tally: &'a Tally,
     pub depth: Depth,
     pub design: D,
+    /// Whether a compacted segment may come back shorter, as [`Bounds::drops`]
+    /// allows.
+    pub drops: bool,
 }
 
 impl<'a, D: Design> Checker<'a, D> {
@@ -372,6 +411,7 @@ impl<'a, D: Design> Checker<'a, D> {
         tally: &'a Tally,
         depth: Depth,
         design: D,
+        drops: bool,
     ) -> Self {
         Self {
             history,
@@ -381,6 +421,7 @@ impl<'a, D: Design> Checker<'a, D> {
             tally,
             depth,
             design,
+            drops,
         }
     }
 
@@ -707,8 +748,9 @@ impl<'a, D: Design> Checker<'a, D> {
         }
     }
 
-    /// P11: after a restore of the folder or of one directory, or a dropped
-    /// version, a reader of the new folder shows what the oracle shows of it.
+    /// P11: after a restore of the folder or of one directory, a dropped version,
+    /// or a compacted segment back shorter and unsealed, a reader of the new folder
+    /// shows what the oracle shows of it.
     fn faults(&self) {
         let world = self.world();
         let mut variants: Vec<Fault<D::Snapshot>> = Vec::new();
@@ -728,8 +770,23 @@ impl<'a, D: Design> Checker<'a, D> {
                 if let Body::Segment(l) = &mut o[i].body {
                     l.truncate(k);
                 }
-                variants.push((format!("segment {i} dropped to {k} lines"), s, o));
+                variants.push((format!("segment {i} dropped to {k} lines"), s, o, false));
             }
+        }
+        // A sync client brings back an older version of a segment a compaction
+        // sealed and deleted: unsealed, without its newest line.
+        for (i, f) in self.spec.files.iter().enumerate() {
+            let Body::Segment(lines) = &f.body else {
+                continue;
+            };
+            if !self.drops || !f.deleted || lines.len() < 2 {
+                continue;
+            }
+            let (mut s, mut o) = (self.spec.files.clone(), self.oracle.files.clone());
+            back_unsealed(&mut s[i]);
+            back_unsealed(&mut o[i]);
+            let label = format!("segment {i} back unsealed without its last line");
+            variants.push((label, s, o, true));
         }
         for ancestor in self.ancestors {
             let s_old = materialize(ancestor, &self.design).files;
@@ -748,10 +805,11 @@ impl<'a, D: Design> Checker<'a, D> {
                     label,
                     restore(&self.spec.files, &s_old, &within),
                     restore(&self.oracle.files, &o_old, &within),
+                    false,
                 ));
             }
         }
-        for (label, spec_files, oracle_files) in variants {
+        for (label, spec_files, oracle_files, resurfaced) in variants {
             let seen: Vec<Seen> = spec_files
                 .iter()
                 .filter(|f| !f.deleted && !empty(f))
@@ -778,6 +836,13 @@ impl<'a, D: Design> Checker<'a, D> {
                 self.tally,
                 Some(&chained),
             ) {
+                // A certificate names a segment by its first line and a position,
+                // so a shorter unsealed copy of one cannot be told from another
+                // instance's copy that left the chain there: it may show as a run.
+                if resurfaced && kept_apart(world, &o, &after) {
+                    self.tally.add(&self.tally.apart, 1);
+                    continue;
+                }
                 self.fail(
                     &format!("P11: after {label}, the folder does not win"),
                     &seen,
@@ -788,8 +853,18 @@ impl<'a, D: Design> Checker<'a, D> {
     }
 }
 
-/// A faulted folder: what happened, and the files each design then holds.
-type Fault<S> = (String, Vec<File<S>>, Vec<File<oracle::Folds>>);
+/// A faulted folder: what happened, the files each design then holds, and
+/// whether a compacted segment came back shorter and unsealed.
+type Fault<S> = (String, Vec<File<S>>, Vec<File<oracle::Folds>>, bool);
+
+/// `file`, a deleted segment, back in the folder unsealed and without its last line.
+fn back_unsealed<S>(file: &mut File<S>) {
+    file.deleted = false;
+    file.sealed = false;
+    if let Body::Segment(lines) = &mut file.body {
+        lines.pop();
+    }
+}
 
 /// Every segment copied under another name, as a sync client's conflicted copy.
 fn copy<S: Clone>(files: &mut Vec<File<S>>) {
@@ -974,7 +1049,15 @@ impl<D: Design + Copy> Run<'_, D> {
             ancestors,
             before,
         } = step;
-        let shown = Checker::new(history, ancestors, self.tally, self.depth, self.design).check();
+        let checker = Checker::new(
+            history,
+            ancestors,
+            self.tally,
+            self.depth,
+            self.design,
+            self.bounds.drops,
+        );
+        let shown = checker.check();
         if let (Some(before), Some(parent)) = (before, ancestors.last()) {
             if branch_step(parent, history) && !branch_kept(before, &shown, self.tally) {
                 panic!(
@@ -1021,5 +1104,5 @@ pub fn replay<D: Design + Copy + Sync>(bounds: Bounds, depth: Depth, design: D, 
             .find(|c| c.acts.iter().zip(acts).all(|(a, b)| a == b))
             .unwrap_or_else(|| panic!("no child after {:?}", h.acts));
     }
-    Checker::new(&h, &ancestors, &tally, depth, design).check();
+    Checker::new(&h, &ancestors, &tally, depth, design, bounds.drops).check();
 }
