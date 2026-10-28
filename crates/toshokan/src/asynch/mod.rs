@@ -393,6 +393,12 @@ impl<F: Fs> Library<F> {
         self.core.mode()
     }
 
+    /// The library paths a change of this writer's own still names while it waits
+    /// to be finished by the next write or the next open.
+    pub fn finishing(&self) -> Vec<RelPath> {
+        self.core.finishing()
+    }
+
     /// An intent to build and commit. Its saves take bytes, or any [`Source`]
     /// boxed, such as a [`Splice`].
     pub fn intent(&mut self, label: &str) -> Intent<&mut Self> {

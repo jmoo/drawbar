@@ -326,6 +326,17 @@ impl Library {
         &self.mode
     }
 
+    /// The library paths a change of this writer's own still names while it waits
+    /// to be finished by the next write or the next open.
+    pub fn finishing(&self) -> Vec<RelPath> {
+        let paths = self
+            .unsettled
+            .iter()
+            .flat_map(|settling| settling.pending.paths());
+        let paths: BTreeSet<RelPath> = paths.collect();
+        paths.into_iter().collect()
+    }
+
     /// Settles this writer's interrupted effects, then checks every precondition
     /// against the view they leave and the files, logs the intent and carries out
     /// its file effects. Before its first write a new writer is created. A refusal

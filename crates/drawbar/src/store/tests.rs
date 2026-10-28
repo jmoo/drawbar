@@ -1180,7 +1180,17 @@ fn a_save_whose_file_could_not_be_put_in_place_leaves_a_file_through_a_restart()
     session.bench.workspace.mark_saved(id);
     session.sync();
     assert_eq!(session.said("was not saved"), 1, "the save failed");
+    assert_eq!(
+        session.said("is missing"),
+        0,
+        "the file waits for the save to finish"
+    );
     session.make_tag("Sunday");
+    assert_eq!(session.said("Finished saving “untitled.ne5p”."), 1);
+    session.settle();
+    assert_eq!(session.said("changed on disk"), 0);
+    let held = session.bench.workspace.get(id).expect("the asset");
+    assert!(!held.is_unsaved(), "the edit is what the file holds");
     session.close();
 
     let again = Session::open(&root);

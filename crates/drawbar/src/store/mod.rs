@@ -984,6 +984,8 @@ pub struct Viewed {
     /// The folders a change was to remove that are still there, as ones a file it did
     /// not know of keeps.
     pub left: Vec<LibPath>,
+    /// The paths a change of drawbar's own names that its next change finishes.
+    pub finishing: Vec<LibPath>,
 }
 
 /// A fault a test makes the library's thread or worker show.

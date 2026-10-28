@@ -1524,6 +1524,7 @@ fn committed_view<F: Fs>(
         kept: kept(library),
         retired: false,
         left: Vec::new(),
+        finishing: shown_paths(&library.finishing()),
     }
 }
 
@@ -1618,6 +1619,7 @@ fn viewed<F: Fs>(library: &Library<F>, shown: &mut Option<View>, refreshed: Refr
         kept: kept(library),
         retired: refreshed.retired.is_some(),
         left: Vec::new(),
+        finishing: shown_paths(&library.finishing()),
     }
 }
 

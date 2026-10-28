@@ -143,6 +143,10 @@ pub struct Store {
     /// Assets read again after an undo or redo changed their files, which take what the
     /// files hold now without a word.
     quietly: BTreeSet<u64>,
+    /// The paths a change of drawbar's own names that its next change finishes.
+    finishing: BTreeSet<LibPath>,
+    /// Assets whose file waits for such a change, which take what it leaves.
+    awaiting: BTreeSet<u64>,
     /// This session's changes, as the Edit menu names them.
     history: History,
     /// What each change, undo or redo sent and not answered is, in order.
@@ -280,6 +284,8 @@ impl Store {
             deleting_with: BTreeMap::new(),
             quiet: false,
             quietly: BTreeSet::new(),
+            finishing: BTreeSet::new(),
+            awaiting: BTreeSet::new(),
             history: History::default(),
             answering: VecDeque::new(),
             rechecking: BTreeSet::new(),
@@ -1919,7 +1925,9 @@ impl Store {
             kept,
             retired,
             left,
+            finishing,
         } = viewed;
+        self.finishing = finishing.into_iter().collect();
         if let (Some(standing), Phase::Open) = (unfinished, &self.phase) {
             self.found_unfinished(workspace.ctx().input(|input| input.time), standing);
         }
@@ -2045,6 +2053,22 @@ impl Store {
                 continue;
             };
             let unsettled_at = |path: &LibPath| unsettled(&self.moving, path);
+            if record
+                .path
+                .as_ref()
+                .is_some_and(|path| self.finishing.contains(path))
+            {
+                self.deferred.insert(id);
+                self.awaiting.insert(id);
+                continue;
+            }
+            if let (true, Some(path)) = (self.awaiting.remove(&id), record.path.clone()) {
+                if let Some(entity) = workspace.get(id).filter(|entity| entity.is_unsaved()) {
+                    log.say(format!("Finished saving “{}”.", entity.name));
+                }
+                self.read_unheard(id, path, workspace);
+                continue;
+            }
             if record.saving || record.path.as_ref().is_some_and(unsettled_at) {
                 self.deferred.insert(id);
                 continue;
