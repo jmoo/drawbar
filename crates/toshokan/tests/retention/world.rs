@@ -159,7 +159,7 @@ pub struct File<S> {
 
 /// What a reader sees of one file: a segment's first `lines` lines, or all of a
 /// snapshot.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Seen {
     pub file: usize,
     pub lines: usize,

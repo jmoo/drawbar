@@ -15,7 +15,7 @@
 //! fault left a file it cannot place; and a faulted reading that shows such
 //! unplaced lines.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::history::{materialize, writer_view, Bounds, Folder, History, ViewOf};
@@ -299,14 +299,14 @@ fn merged(s: &Shown) -> (&BTreeMap<u8, Existence>, &BTreeMap<Field, BTreeSet<Val
 /// reference or as a later write of its writer, never shows alone
 /// again on its field without an item or a contradiction report touching it,
 /// unless every write that replaced it was dismissed or lies beyond a fork.
-fn no_silent_return(world: &World, states: &[(Shown, BTreeSet<Hash>)]) -> Result<(), String> {
+fn no_silent_return(world: &World, states: &[&(Shown, BTreeSet<Hash>)]) -> Result<(), String> {
     let replaces = |newer: Hash, w: Hash| {
         let (n, o) = (world.entry(newer), world.entry(w));
         n.replaces.iter().chain(&n.observed).any(|r| r.hash == w) || (n.dir == o.dir && n.n > o.n)
     };
     let mut replaced: BTreeMap<(Field, Hash), BTreeSet<Hash>> = BTreeMap::new();
     for pair in states.windows(2) {
-        let ((before, _), (after, dismissed)) = (&pair[0], &pair[1]);
+        let ((before, _), (after, dismissed)) = (pair[0], pair[1]);
         for (field, writes) in &before.writes {
             let now = after.writes.get(field).cloned().unwrap_or_default();
             let then = before.values.get(field).cloned().unwrap_or_default();
@@ -418,18 +418,23 @@ impl<'a, D: Design> Checker<'a, D> {
         &self.history.world
     }
 
-    /// The oracle's and the design's fresh reads of `seen`.
-    fn fresh(&self, seen: &[Seen]) -> (Shown, Shown, BTreeSet<Hash>) {
-        self.tally.add(&self.tally.reads, 1);
-        let r = Reading {
+    /// What the oracle reads in the files `seen` shows.
+    fn oracle_reading<'b>(&'b self, seen: &'b [Seen]) -> Reading<'b, oracle::Folds> {
+        Reading {
             world: self.world(),
             files: &self.oracle.files,
             seen,
-        };
-        let held = Oracle.holds(&r);
-        let o = Oracle.read(&r);
-        let s = read(&self.design, self.world(), &self.spec.files, seen);
-        (o, s, held)
+        }
+    }
+
+    /// The design's fresh read of `seen`, and the entries those files hold.
+    fn fresh(&self, seen: &[Seen]) -> (Shown, BTreeSet<Hash>) {
+        self.tally.add(&self.tally.reads, 1);
+        let held = Oracle.holds(&self.oracle_reading(seen));
+        (
+            read(&self.design, self.world(), &self.spec.files, seen),
+            held,
+        )
     }
 
     /// Every property on this history.
@@ -438,7 +443,8 @@ impl<'a, D: Design> Checker<'a, D> {
         self.sizes();
         let mut rest_shown = None;
         for seen in rests(&self.spec.files) {
-            let (o, s, held) = self.fresh(&seen);
+            let (s, held) = self.fresh(&seen);
+            let o = Oracle.read(&self.oracle_reading(&seen));
             if let Err(e) = agree(
                 self.world(),
                 &held,
@@ -559,13 +565,8 @@ impl<'a, D: Design> Checker<'a, D> {
     /// value's return being silent: what its dismissals name, and what lies
     /// beyond a fork point the files show.
     fn excused(&self, seen: &[Seen]) -> BTreeSet<Hash> {
-        let r = Reading {
-            world: self.world(),
-            files: &self.oracle.files,
-            seen,
-        };
-        let placement = oracle::place(self.world(), &Oracle.holds(&r));
         let mut excused = self.dismissed(seen);
+        let placement = oracle::place(self.world(), &Oracle.holds(&self.oracle_reading(seen)));
         excused.extend(placement.runs);
         excused
     }
@@ -605,6 +606,10 @@ impl<'a, D: Design> Checker<'a, D> {
             .filter(|f| f.deleted && !empty(f))
             .map(whole)
             .collect();
+        // Orders share prefixes, and a read is a function of what it sees, so
+        // each sequence of files is read once.
+        let mut looked: HashMap<Vec<Seen>, usize> = HashMap::new();
+        let mut views: Vec<(Shown, BTreeSet<Hash>)> = Vec::new();
         // Deleted files: never seen; seen first and gone last; or seen first and
         // gone before anything else arrives, as when a compaction's deletions
         // overtake its snapshot.
@@ -618,8 +623,13 @@ impl<'a, D: Design> Checker<'a, D> {
                 };
                 let mut states = Vec::new();
                 let mut look = |seen: &[Seen]| {
-                    let s = read(&self.design, self.world(), files, seen);
-                    states.push((s, self.excused(seen)));
+                    let next = views.len();
+                    let at = *looked.entry(seen.to_vec()).or_insert(next);
+                    if at == next {
+                        let s = read(&self.design, self.world(), files, seen);
+                        views.push((s, self.excused(seen)));
+                    }
+                    states.push(at);
                 };
                 if matches!(mode, 1 | 2) {
                     look(&seen);
@@ -639,6 +649,8 @@ impl<'a, D: Design> Checker<'a, D> {
                     }
                 }
                 self.tally.add(&self.tally.reads, states.len());
+                let states: Vec<&(Shown, BTreeSet<Hash>)> =
+                    states.iter().map(|&at| &views[at]).collect();
                 if let Err(e) = no_silent_return(self.world(), &states) {
                     let trail: Vec<String> = states
                         .iter()
@@ -671,7 +683,7 @@ impl<'a, D: Design> Checker<'a, D> {
                 .filter(|(i, _)| mask & (1 << i) != 0)
                 .map(|(_, s)| *s)
                 .collect();
-            let (_, s, held) = self.fresh(&seen);
+            let (s, held) = self.fresh(&seen);
             let placement = oracle::place(self.world(), &held);
             let mut written: BTreeMap<Field, BTreeSet<super::world::Val>> = BTreeMap::new();
             for &e in held.difference(&placement.dismissed) {
@@ -870,34 +882,79 @@ pub fn sweep<D: Design + Copy + Sync>(bounds: Bounds, depth: Depth, design: D) -
         tally: &tally,
         view: &view,
     };
-    let first = root.children(&bounds, &view);
-    let next = AtomicUsize::new(0);
     let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
-    std::thread::scope(|scope| {
+    let mut level: Vec<Step> = root
+        .children(&bounds, &view)
+        .into_iter()
+        .map(|history| Step {
+            history,
+            ancestors: vec![root.clone()],
+            before: None,
+        })
+        .collect();
+    // Subtrees differ in size by orders of magnitude, so the top levels are
+    // checked level by level until there are many subtrees to share out.
+    while !level.is_empty() && level.len() < SUBTREES_PER_WORKER * workers {
+        level = parallel(&level, workers, &tally, |step| run.step(step))
+            .into_iter()
+            .flatten()
+            .collect();
+    }
+    parallel(&level, workers, &tally, |step| run.explore(step));
+    tally
+}
+
+/// How many subtrees each worker should have to choose from.
+const SUBTREES_PER_WORKER: usize = 64;
+
+/// `f` of each of `items` on `workers` threads, in the items' order. A panic
+/// stops the other workers through `tally` and resumes with its own payload.
+fn parallel<T: Sync, R: Send>(
+    items: &[T],
+    workers: usize,
+    tally: &Tally,
+    f: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
+    let next = AtomicUsize::new(0);
+    let mut done: Vec<(usize, R)> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..workers)
             .map(|_| {
                 scope.spawn(|| {
+                    let mut done = Vec::new();
                     let work = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        while let Some(h) = first.get(next.fetch_add(1, Ordering::Relaxed)) {
-                            let mut ancestors = vec![root.clone()];
-                            let shown = Checker::new(h, &ancestors, &tally, depth, design).check();
-                            run.explore(h, &shown, &mut ancestors);
+                        while !tally.failed.load(Ordering::Relaxed) {
+                            let i = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(item) = items.get(i) else { break };
+                            done.push((i, f(item)));
                         }
                     }));
                     if let Err(payload) = work {
                         tally.failed.store(true, Ordering::Relaxed);
                         std::panic::resume_unwind(payload);
                     }
+                    done
                 })
             })
             .collect();
+        let mut done = Vec::new();
         for handle in handles {
-            if let Err(payload) = handle.join() {
-                std::panic::resume_unwind(payload);
+            match handle.join() {
+                Ok(part) => done.extend(part),
+                Err(payload) => std::panic::resume_unwind(payload),
             }
         }
+        done
     });
-    tally
+    done.sort_by_key(|(i, _)| *i);
+    done.into_iter().map(|(_, r)| r).collect()
+}
+
+/// A history to check, the states before it, and what a reader showed of the
+/// one just before it, for P4.
+struct Step {
+    history: History,
+    ancestors: Vec<History>,
+    before: Option<Shown>,
 }
 
 /// One sweep's settings.
@@ -910,23 +967,43 @@ struct Run<'a, D> {
 }
 
 impl<D: Design + Copy> Run<'_, D> {
-    fn explore(&self, h: &History, shown: &Shown, ancestors: &mut Vec<History>) {
-        if h.written() >= self.bounds.entries || self.tally.failed.load(Ordering::Relaxed) {
-            return;
-        }
-        ancestors.push(h.clone());
-        for child in h.children(&self.bounds, self.view) {
-            let child_shown =
-                Checker::new(&child, ancestors, self.tally, self.depth, self.design).check();
-            if branch_step(h, &child) && !branch_kept(shown, &child_shown, self.tally) {
+    /// Checks `step`'s history; the steps after it.
+    fn step(&self, step: &Step) -> Vec<Step> {
+        let Step {
+            history,
+            ancestors,
+            before,
+        } = step;
+        let shown = Checker::new(history, ancestors, self.tally, self.depth, self.design).check();
+        if let (Some(before), Some(parent)) = (before, ancestors.last()) {
+            if branch_step(parent, history) && !branch_kept(before, &shown, self.tally) {
                 panic!(
-                    "P4: a step by a branch of a forked writer changes merged values\n  before {shown:?}\n  after {child_shown:?}\n  history: {:?}",
-                    child.acts
+                    "P4: a step by a branch of a forked writer changes merged values\n  before {before:?}\n  after {shown:?}\n  history: {:?}",
+                    history.acts
                 );
             }
-            self.explore(&child, &child_shown, ancestors);
         }
-        ancestors.pop();
+        if history.written() >= self.bounds.entries || self.tally.failed.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
+        let mut ancestors = ancestors.clone();
+        ancestors.push(history.clone());
+        history
+            .children(&self.bounds, self.view)
+            .into_iter()
+            .map(|child| Step {
+                history: child,
+                ancestors: ancestors.clone(),
+                before: Some(shown.clone()),
+            })
+            .collect()
+    }
+
+    /// Checks `step`'s history and every history after it.
+    fn explore(&self, step: &Step) {
+        for next in self.step(step) {
+            self.explore(&next);
+        }
     }
 }
 
