@@ -1,8 +1,8 @@
-# RFC-NNNN: Build piano libraries from a recorded take
+# RFC-0276: Build piano libraries from a recorded take
 
 - Start date: 2026-10-28
 - Authors: mikesprad
-- RFC PR: [jmoo/drawbar#NNNN](https://github.com/jmoo/drawbar/pull/NNNN)
+- RFC PR: [jmoo/drawbar#276](https://github.com/jmoo/drawbar/pull/276)
 - Tracking issue: none yet
 
 ## Summary
