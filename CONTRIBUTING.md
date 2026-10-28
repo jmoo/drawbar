@@ -298,7 +298,7 @@ Each RFC opens with this front matter:
 
 ```yaml
 ---
-rfc: 270
+rfc: 268
 title: RFCs in the open
 authors: [jmoo]
 status: proposed
@@ -324,7 +324,7 @@ may be stated, as pull request descriptions already do. Specimens, their paths a
 anything proprietary stay out.
 
 Issues and pull requests that implement an RFC cite it in their titles, such as
-`feat: rfc-0270 build piano libraries from a recorded take`. Code and comments do
+`docs: rfc-0268 keep RFCs in the open`. Code and comments do
 not cite RFC numbers.
 
 RFC-0001 to RFC-0037 predate this process and are private, though older issues

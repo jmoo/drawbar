@@ -1,5 +1,5 @@
 ---
-rfc: XXXX
+rfc: 268
 title: RFCs in the open
 authors: [jmoo]
 status: proposed
@@ -8,7 +8,7 @@ decided:
 superseded_by:
 ---
 
-# RFC-XXXX: RFCs in the open
+# RFC-0268: RFCs in the open
 
 No decision has been made. This RFC proposes how RFCs work from now on, and it is
 the first one to follow its own proposal. The rules it would adopt are the RFCs
