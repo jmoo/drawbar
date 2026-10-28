@@ -67,7 +67,6 @@ merged RFC receives.
 
 - Rejected RFCs are not in the tree. Their record is a closed pull request, which
   is less visible than a file and depends on GitHub.
-- Earlier decisions stay in private notes, so some rationale remains out of reach.
 - A merged RFC can read as current after the code has moved on. The supersede line
   covers replaced decisions; it does not cover drift without a new RFC.
 - A number is known only after the pull request opens, so the file is renamed once.
@@ -109,7 +108,7 @@ sections and writes its own guidance.
 
 ## Unresolved questions
 
-- Whether an old private RFC should ever be published here, and under which number.
+None.
 
 ## Future possibilities
 
