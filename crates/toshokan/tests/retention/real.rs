@@ -113,11 +113,20 @@ struct Lines {
 }
 
 impl Lines {
-    fn of(world: &World) -> Self {
+    fn of(world: &World) -> Rc<Self> {
         thread_local! {
             static MADE: RefCell<Made> = RefCell::new(HashMap::new());
+            // A history's checks read the same world many times in a row.
+            static LAST: RefCell<Option<(Vec<Entry>, Rc<Lines>)>> = const { RefCell::new(None) };
         }
-        MADE.with_borrow_mut(|made| {
+        let last = LAST.with_borrow(|last| {
+            let (entries, lines) = last.as_ref()?;
+            (*entries == world.entries).then(|| Rc::clone(lines))
+        });
+        if let Some(lines) = last {
+            return lines;
+        }
+        let lines = Rc::new(MADE.with_borrow_mut(|made| {
             if made.len() > 1 << 20 {
                 made.clear();
             }
@@ -138,7 +147,9 @@ impl Lines {
                 lines.entries.push(Rc::clone(entry));
             }
             lines
-        })
+        }));
+        LAST.set(Some((world.entries.clone(), Rc::clone(&lines))));
+        lines
     }
 
     fn of_ref(&self, at: Ref) -> log::Ref {

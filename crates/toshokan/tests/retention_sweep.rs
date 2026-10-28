@@ -1,5 +1,5 @@
 //! The full value-level sweep of the retention design, of its rules and of
-//! toshokan: `cargo test --release --test retention_sweep -- --ignored`.
+//! toshokan: `cargo test --profile release-tests --test retention_sweep -- --ignored`.
 
 mod retention;
 

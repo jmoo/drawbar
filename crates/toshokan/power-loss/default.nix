@@ -33,6 +33,14 @@ let
   # The states a replay samples between two flushes.
   samples = 16;
 
+  # The workloads a replay runs at once, each in its own slice of the disks, and
+  # the machine that runs them.
+  workloads = 8;
+  replayMachine = {
+    cores = 4;
+    memorySize = 3072;
+  };
+
   replay-log = runCommand "replay-log" { } ''
     mkdir -p "$out/bin"
     ln -s ${xfstests}/lib/xfstests/src/log-writes/replay-log "$out/bin/replay-log"
@@ -114,6 +122,10 @@ let
     inherit size;
     driveConfig = lib.recursiveUpdate { deviceExtraOpts.serial = serial; } extra;
   };
+
+  # dm-log-writes records the guest's flushes above the virtual disk, and a
+  # replay never outlives its VM, so the host need not make them durable.
+  scratch = serial: size: disk serial size { driveExtraOpts.cache = "unsafe"; };
 in
 {
   # ⚠️ QEMU's `quit`, which `crash()` sends, completes and flushes the writes its
@@ -156,24 +168,21 @@ in
     fs:
     testers.runNixOSTest {
       name = "toshokan-power-loss-${fs}";
-      nodes.machine = machine [
-        (disk "data" 512 { })
-        (disk "log" 4096 { })
-        (disk "replay" 512 { })
-        (disk "cow" 512 { })
-      ];
+      nodes.machine = lib.recursiveUpdate (machine [
+        (scratch "data" (512 * workloads))
+        (scratch "log" (4096 * workloads))
+        (scratch "replay" (512 * workloads))
+        (scratch "cow" (512 * workloads))
+      ]) { virtualisation = replayMachine; };
       testScript = ''
         machine.wait_for_unit("multi-user.target")
         workloads = machine.succeed("power_loss list").split()[::2]
-        failed = []
-        for workload in workloads:
-            status, out = machine.execute(
-                f"power-loss-replay ${fs} '${mkfs.${fs}}' {workload} ${toString samples} 1 2>&1", timeout=None
-            )
-            print(out)
-            if status != 0:
-                failed.append(workload)
-        assert not failed, f"crash states of {failed} failed their checks"
+        assert len(workloads) <= ${toString workloads}, f"{len(workloads)} workloads, slices for ${toString workloads}"
+        status, out = machine.execute(
+            f"power-loss-replay ${fs} '${mkfs.${fs}}' ${toString samples} 1 {' '.join(workloads)} 2>&1", timeout=None
+        )
+        print(out)
+        assert status == 0, "crash states failed their checks"
       '';
     }
   );
