@@ -33,6 +33,14 @@ let
   # The states a replay samples between two flushes.
   samples = 16;
 
+  # The workloads a replay runs at once, each in its own slice of the disks, and
+  # the machine that runs them.
+  workloads = 8;
+  replayMachine = {
+    cores = 4;
+    memorySize = 4096;
+  };
+
   replay-log = runCommand "replay-log" { } ''
     mkdir -p "$out/bin"
     ln -s ${xfstests}/lib/xfstests/src/log-writes/replay-log "$out/bin/replay-log"
@@ -156,24 +164,21 @@ in
     fs:
     testers.runNixOSTest {
       name = "toshokan-power-loss-${fs}";
-      nodes.machine = machine [
-        (disk "data" 512 { })
-        (disk "log" 4096 { })
-        (disk "replay" 512 { })
-        (disk "cow" 512 { })
-      ];
+      nodes.machine = lib.recursiveUpdate (machine [
+        (disk "data" (512 * workloads) { })
+        (disk "log" (4096 * workloads) { })
+        (disk "replay" (512 * workloads) { })
+        (disk "cow" (512 * workloads) { })
+      ]) { virtualisation = replayMachine; };
       testScript = ''
         machine.wait_for_unit("multi-user.target")
         workloads = machine.succeed("power_loss list").split()[::2]
-        failed = []
-        for workload in workloads:
-            status, out = machine.execute(
-                f"power-loss-replay ${fs} '${mkfs.${fs}}' {workload} ${toString samples} 1 2>&1", timeout=None
-            )
-            print(out)
-            if status != 0:
-                failed.append(workload)
-        assert not failed, f"crash states of {failed} failed their checks"
+        assert len(workloads) <= ${toString workloads}, f"{len(workloads)} workloads, slices for ${toString workloads}"
+        status, out = machine.execute(
+            f"power-loss-replay ${fs} '${mkfs.${fs}}' ${toString samples} 1 {' '.join(workloads)} 2>&1", timeout=None
+        )
+        print(out)
+        assert status == 0, "crash states failed their checks"
       '';
     }
   );
