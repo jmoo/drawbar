@@ -6,7 +6,7 @@ layer that delivers each file to each reader independently and in any order.
 
 ```sh
 nix build .#nord.toshokan-spec       # small bounds, a few minutes; `nix flake check` runs it
-nix build .#nord.toshokan-spec-deep  # larger bounds, under an hour on eight cores
+nix build .#nord.toshokan-spec-deep  # larger bounds, about an hour on eight cores
 ```
 
 This model follows the bounded retention of [RETENTION.md](../RETENTION.md):
@@ -16,8 +16,8 @@ every folded hash, and forks shown as runs instead of merged.
 To run one config by hand, `nix shell nixpkgs#tlaplus18`, then
 `tlc -workers 8 -lncheck final -config Portable.cfg Portable.tla` in this
 directory. On an otherwise idle eight-core machine, `Deep` takes about 20
-minutes, `Sync` and `PortableDeep` under 10 each, and every other config a few
-minutes.
+minutes, `LivenessDeep` about 12, `Sync` and `PortableDeep` under 10 each, and
+every other config a few minutes.
 
 ## The protocol
 
@@ -135,11 +135,10 @@ step but a delivery spends a bounded budget: entries, files, writer ids, clones,
 lost local roots, effects, restores, dropped versions, sync faults, a pending
 deletion, an open segment or a spent record. A delivery that spends no sync
 fault never shrinks a file the folder keeps. So only deliveries remain after
-some point, and fairness then delivers every file. The configs that check
-`Convergence` itself, `Liveness` and `LivenessRestore`, catch a change that
-breaks this: a step that repeats without spending a budget, a free way to hide
-a kept file, or a fairness that no longer forces delivery. `Faults` checks the
-invariants at larger bounds.
+some point, and fairness then delivers every file. The liveness configs check
+`Convergence` itself, and so catch a change that breaks this: a step that
+repeats without spending a budget, a free way to hide a kept file, or a fairness
+that no longer forces delivery.
 
 TLC evaluates a conjunction or a disjunction from the left, so the writer
 actions test their bounds before `Writable`, and `Monotone` and `NoFlip` test
@@ -175,6 +174,7 @@ replace them arrive.
 | `RestoreFork` | a restored folder or directory, a clone | `toshokan-spec-deep` |
 | `Sync` | two sync faults: torn, hidden or resurrected files | `toshokan-spec-deep` |
 | `Faults` | `Liveness` with four files, every safety property | `toshokan-spec-deep` |
+| `LivenessDeep` | `Convergence` at the bounds of `Faults` | `toshokan-spec-deep` |
 
 A config whose first line reads `\* Violates <Property>: …` must fail with that
 violation; every other config must pass. Every bound is a budget: a config

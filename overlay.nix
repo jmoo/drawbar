@@ -845,6 +845,7 @@ in
         "ResumeMid"
         "Sync"
         "Faults"
+        "LivenessDeep"
       ];
 
       # The corpus assemblies themselves.
