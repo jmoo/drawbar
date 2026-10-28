@@ -896,17 +896,22 @@ fn layer_name(rank: usize, count: usize) -> String {
     }
 }
 
-/// The velocities at which each of a root's layer values sounds, for `(value,
-/// threshold)` pairs loudest first, in the order they are given.
+/// The KBD Touch the velocity spans are given for. The setting belongs to the program
+/// that plays the library, which the editor does not know, so it names this one.
+const KBD_TOUCH: u8 = 0;
+
+/// The velocities at which each of a root's layer values sounds at [`KBD_TOUCH`], for
+/// `(value, threshold)` pairs loudest first, in the order they are given.
 ///
 /// A key sounds the softest layer whose threshold its velocity reaches
 /// ([`npno::top_velocity`]), so a softer layer plays up to its own top and the louder one
 /// from the next velocity up. A layer no velocity ever reaches gets an empty range.
 fn spans(layers: &[(u8, u16)]) -> Vec<(u8, RangeInclusive<u8>)> {
+    let touch = npno::Touch::try_from(KBD_TOUCH).expect("a KBD Touch the panel offers");
     let mut out: Vec<(u8, RangeInclusive<u8>)> = Vec::with_capacity(layers.len());
     let mut below = 0u8;
     for &(value, threshold) in layers.iter().rev() {
-        let top = npno::top_velocity(threshold);
+        let top = npno::top_velocity(threshold, touch);
         out.push((value, below.saturating_add(1)..=top));
         below = below.max(top);
     }
@@ -2303,7 +2308,7 @@ fn switches(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, summary: &Summary
             was: (kept != held).then(|| room::measure(held)),
             hint: format!(
                 "layer index {layer} in the file, where 0 is the loudest; a root \
-                 holding every layer sounds it at {}",
+                 holding every layer sounds it at {} under KBD Touch {KBD_TOUCH}",
                 span_text(&whole[rank].1)
             ),
             throws: Throw::Layer(layer),
@@ -3533,8 +3538,11 @@ impl State {
         controls::heading(
             ui,
             "Velocity layers",
-            "the switch applies to every root; a segment is one root, and clicking it \
-             drops that layer for that root only",
+            &format!(
+                "the switch applies to every root; a segment is one root, and clicking it \
+                 drops that layer for that root only. Velocities are for KBD Touch \
+                 {KBD_TOUCH}; a program set higher reaches each layer with a softer note"
+            ),
             None,
         );
         ui.horizontal_top(|ui| {

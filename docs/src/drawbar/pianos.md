@@ -28,7 +28,9 @@ cheapest cut that would make it fit. A library that does not fit cannot be
 queued.
 
 **Velocity layers** goes finer: one lane per layer, one segment per root. Click a
-segment to drop that layer for that root only.
+segment to drop that layer for that root only. Each segment gives the velocities
+its layer plays at with the program's KBD Touch at 0. A higher KBD Touch reaches
+each softer layer with a softer note.
 
 ## Playback
 
