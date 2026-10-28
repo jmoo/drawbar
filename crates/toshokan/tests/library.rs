@@ -584,6 +584,7 @@ through_both!(
     thousands_of_entities_deleted_beside_their_files_come_back_with_undo,
     a_fork_compaction_finds_retires_the_writer,
     one_intent_takes_from_runs_of_two_forked_writers,
+    a_change_made_as_ones_own_names_no_run,
     a_file_change_is_taken_only_while_the_folder_holds_that_file,
     a_run_counts_and_spans_its_entries_whether_or_not_its_branch_compacted,
     a_run_that_would_change_nothing_is_shown_until_dismissed,
@@ -2016,6 +2017,21 @@ fn logged_ops(folder: &MemDisk, view: &View, committed: &Committed) -> Vec<Op> {
         Some(EntryKind::Intent(logged)) => logged.ops,
         kind => panic!("{kind:?}"),
     }
+}
+
+fn a_change_made_as_ones_own_names_no_run<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    let committed = a.commit("Tag", |i| i.change(added(song, "own"))).unwrap();
+    assert_eq!(tags(&a.view(), song), ["new", "own"]);
+    let ops = logged_ops(&folder, &a.view(), &committed);
+    let takes: Vec<_> = ops
+        .iter()
+        .map(|op| (op.entity(), op.take().copied()))
+        .collect();
+    assert_eq!(takes, [(Some(song), None)]);
 }
 
 fn one_intent_takes_from_runs_of_two_forked_writers<F: Facade>() {
