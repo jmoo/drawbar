@@ -463,7 +463,8 @@ when it next confirms the entry. Otherwise it folds the entries after its
 previous snapshot's head into that snapshot's state, certifies every segment of
 its directory by the part of it on its chain, the snapshots of its directory on
 its chain by their certificates, and every other entry it folds by hash, and
-writes the snapshot. Where the folder renames files, it writes it to `tmp/`
+writes the snapshot. A snapshot longer than a reader reads (see Reading) is
+refused before anything is written, so the log it would fold stays. Where the folder renames files, it writes it to `tmp/`
 under its nonce, syncs it, renames it into place and syncs both
 directories; a staged snapshot a crash leaves is removed with the other files of
 `tmp/` (see Recovery). Elsewhere it writes the snapshot in place and syncs it

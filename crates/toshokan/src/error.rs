@@ -99,6 +99,9 @@ pub enum Refusal {
     /// There is nothing to undo, redo, settle, compact or adopt.
     #[error("there is nothing to do")]
     Nothing,
+    /// The snapshot a compaction would write is longer than a reader holds.
+    #[error("the snapshot is longer than a reader holds")]
+    SnapshotTooLong,
     /// The bytes an undo would bring back have left the trash.
     #[error("the trash no longer holds what undo needs")]
     Emptied,
