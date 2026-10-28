@@ -5,16 +5,19 @@ synced folder and how every reader merges them. TLC checks it against a sync
 layer that delivers each file to each reader independently and in any order.
 
 ```sh
-nix build .#nord.toshokan-spec       # small bounds, about five minutes; `nix flake check` runs it
-nix build .#nord.toshokan-spec-deep  # larger bounds, several hours
+nix build .#nord.toshokan-spec       # small bounds, a few minutes; `nix flake check` runs it
+nix build .#nord.toshokan-spec-deep  # larger bounds, about an hour on eight cores
 ```
 
 This model follows the bounded retention of [RETENTION.md](../RETENTION.md):
 snapshots that certify the files their chain was written to instead of listing
 every folded hash, and forks shown as runs instead of merged.
 
-To run one config by hand, `nix shell nixpkgs#tlaplus`, then
-`tlc -workers auto -config Portable.cfg Portable.tla` in this directory.
+To run one config by hand, `nix shell nixpkgs#tlaplus18`, then
+`tlc -workers 8 -lncheck final -config Portable.cfg Portable.tla` in this
+directory. On an otherwise idle eight-core machine, `Deep` takes about 20
+minutes, `LivenessDeep` about 12, `Sync` and `PortableDeep` under 10 each, and
+every other config a few minutes.
 
 ## The protocol
 
@@ -112,6 +115,35 @@ roughly in order.
 | `OwnFileNoRetire` | A writer takes a new id for a fork only when an entry of its directory has two successors. |
 | `Convergence` | With fair delivery, every reader eventually converges and settles or reports every effect. |
 
+`Spec` states the fairness of `DeliverAll(r)` as `[]<>Delivered(r) \/
+[]<><<DeliverAll(r)>>_vars`, which is `WF_vars(DeliverAll(r))` written out.
+`DeliverAll(r)` is enabled exactly when `Delivered(r)` is false, and every step
+of `Next` that delivers an undeleted file whole is a `Deliver(r)` step, which
+reads. `DeliverAll(r)` constrains only `vis`, so TLC checks fairness without
+evaluating `ENABLED` or a read at every state and step. The equivalence needs
+every step that changes `vis` to read, as `Show` does.
+
+The deep configs with a clone set `SYMMETRY Symmetric`, so TLC explores one of
+each pair of states that differ only by swapping the two instances. Only `Init`
+names `First`, so `Next` and every safety property treat the instances alike and
+the reduction is sound. It is not sound for liveness, and no liveness config
+uses it.
+
+`Convergence` holds wherever `DeliveredConverges` and `DeliveredSettles` do, as
+long as under fair delivery each reader is eventually `Delivered` for good. Every
+step but a delivery spends a bounded budget: entries, files, writer ids, clones,
+lost local roots, effects, restores, dropped versions, sync faults, a pending
+deletion, an open segment or a spent record. A delivery that spends no sync
+fault never shrinks a file the folder keeps. So only deliveries remain after
+some point, and fairness then delivers every file. The liveness configs check
+`Convergence` itself, and so catch a change that breaks this: a step that
+repeats without spending a budget, a free way to hide a kept file, or a fairness
+that no longer forces delivery.
+
+TLC evaluates a conjunction or a disjunction from the left, so the writer
+actions test their bounds before `Writable`, and `Monotone` and `NoFlip` test
+their conclusion before `Arriving`.
+
 `Agree` compares a reader with the view of the folder alone, so it is not a
 consequence of reading from scratch: a reader that has seen every file may
 still see files that were deleted, in whole or in part, and these must change
@@ -125,7 +157,7 @@ replace them arrive.
 | --- | --- | --- |
 | `Portable` | a clone, crashes, compaction | `toshokan-spec` |
 | `Recovery` | two effects, a lost local root | `toshokan-spec` |
-| `Liveness` | a clone, a lost local root, one sync fault | `toshokan-spec` |
+| `Liveness` | `Convergence` with a clone, a lost local root, an effect and one sync fault | `toshokan-spec` |
 | `LivenessRestore` | `Convergence` with a restored folder | `toshokan-spec` |
 | `RestoreDir` | a restored folder or directory | `toshokan-spec` |
 | `RestoreWide` | a restored folder or directory, four files | `toshokan-spec` |
@@ -134,23 +166,23 @@ replace them arrive.
 | `ResumeMid` | a clone resumed mid-segment, appending to its own copy of it | `toshokan-spec-deep` |
 | `Names`, `Sealed`, `Folded`, `Unchecked`, `Uncertified`, `Uncarried`, `Unnumbered`, `Unquarantined` | expected violations | `toshokan-spec` |
 | `Anchors` | expected violation, four entries | `toshokan-spec` |
-| `PortableWide` | `Portable` with four files | `toshokan-spec-deep` |
 | `PortableDeep` | `Portable` with five files | `toshokan-spec-deep` |
-| `Entries` | `Portable` with four entries | `toshokan-spec-deep` |
-| `Dismiss` | a clone and dismissals, four entries and four files | `toshokan-spec-deep` |
-| `RestoreDirFork` | `RestoreDir` with a clone | `toshokan-spec-deep` |
+| `Dismiss` | `Portable` with four entries and four files: a clone and dismissals | `toshokan-spec-deep` |
 | `Branches` | a clone, six entries and six files: both branches compacting past each other | by hand, by simulation |
 | `Deep` | a clone, effects and a lost local root together | `toshokan-spec-deep` |
 | `Restore` | a restored folder, two effects | `toshokan-spec-deep` |
-| `RestoreFork` | a restored folder, a clone | `toshokan-spec-deep` |
+| `RestoreFork` | a restored folder or directory, a clone | `toshokan-spec-deep` |
 | `Sync` | two sync faults: torn, hidden or resurrected files | `toshokan-spec-deep` |
-| `LivenessDeep` | `Liveness` with effects and more files | `toshokan-spec-deep` |
+| `Faults` | `Liveness` with four files, every safety property | `toshokan-spec-deep` |
+| `LivenessDeep` | `Convergence` at the bounds of `Faults` | `toshokan-spec-deep` |
 
 A config whose first line reads `\* Violates <Property>: …` must fail with that
-violation; every other config must pass.
+violation; every other config must pass. Every bound is a budget: a config
+reaches every state of one with the same rules and no larger bounds, so neither
+set holds a config another in it includes.
 
 `Branches` is too large to explore whole. Run it by random simulation:
-`tlc -simulate -depth 40 -workers auto -config Branches.cfg Portable.tla`.
+`tlc -simulate -depth 40 -workers 8 -config Branches.cfg Portable.tla`.
 
 ## Refinement
 
