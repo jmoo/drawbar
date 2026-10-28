@@ -1205,7 +1205,7 @@ fn a_library_a_newer_drawbar_wrote_opens_read_only() {
     let (root, _) = newer_drawbar_wrote();
     let second = Session::open(&root);
     let why = second.store.read_only().unwrap_or_default();
-    assert!(why.contains("newer version"), "opened read-only: {why:?}");
+    assert!(why.contains("update drawbar"), "opened read-only: {why:?}");
 }
 
 /// A delete that fails the same way twice is logged twice: only a commit's retries are
@@ -3443,6 +3443,7 @@ fn a_failed_answer_counts_each_step_and_how_it_failed_once() {
     let refused = Event::Committed {
         made: None,
         undoable: false,
+        forgot: false,
         label: "Tag".into(),
         result: Err("read-only".into()),
     };
@@ -4734,6 +4735,88 @@ fn a_selection_deleted_together_is_one_undo_step() {
     assert_eq!(root.names(""), files, "two undos bring all three back");
 }
 
+/// The segments of drawbar's history in the library folder, each with what it holds.
+fn segments(root: &Temp) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    let writers = root.at(".drawbar/library/writers.2");
+    let dirs = fs::read_dir(writers)
+        .unwrap()
+        .map(|dir| dir.unwrap().path());
+    let files = dirs.flat_map(|dir| fs::read_dir(dir).unwrap().map(|file| file.unwrap().path()));
+    let segments = files.filter(|path| path.extension().is_some_and(|ext| ext == "txt"));
+    segments
+        .map(|path| (path.clone(), fs::read(path).unwrap()))
+        .collect()
+}
+
+#[test]
+fn an_older_copy_of_drawbars_history_restored_from_a_backup_keeps_nothing_apart() {
+    let root = Temp::new();
+    mixed(&root);
+    let mut session = Session::listed(&root);
+    let grand = session.named("Grand.ne5p");
+    let tag = session.tag(&[grand], "Gig");
+    let older = segments(&root);
+    session.bench.act(vec![crate::browser::Act::Untag {
+        ids: vec![grand],
+        tag,
+    }]);
+    session.decided();
+    session.close();
+    for (path, bytes) in older {
+        fs::write(path, bytes).unwrap();
+    }
+    let session = Session::listed(&root);
+    assert!(session.bench.browser.folders.kept.is_empty());
+    assert!(tagged(&session).is_empty());
+}
+
+#[test]
+fn a_library_this_computer_never_opened_opens_without_trouble() {
+    let root = Temp::new();
+    mixed(&root);
+    let session = Session::listed(&root);
+    let log = session.bench.log.iter();
+    let trouble: Vec<&str> = log
+        .filter(|entry| entry.level == crate::log::Level::Error)
+        .map(|entry| entry.text.as_str())
+        .collect();
+    assert!(trouble.is_empty(), "{trouble:?}");
+}
+
+#[test]
+fn an_undo_another_drawbar_refuses_is_let_go_of_for_the_change_before_it() {
+    let root = Temp::new();
+    mixed(&root);
+    let mut first = Session::listed(&root);
+    let grand = first.named("Grand.ne5p");
+    let organ = first.named("Organ.ne5p");
+    first.tag(&[grand], "Gig");
+    first.tag(&[organ], "Gig");
+    let elsewhere = Temp::new();
+    let mut second = Session::open_at(&root, &elsewhere.0);
+    let organ = second.named("Organ.ne5p");
+    let tags = second.bench.browser.tags.all();
+    let tag = tags
+        .iter()
+        .find(|tag| tag.name == "Gig")
+        .expect("the tag")
+        .id;
+    second.bench.act(vec![crate::browser::Act::Untag {
+        ids: vec![organ],
+        tag,
+    }]);
+    second.decided();
+    first.refresh();
+    let refused = first.store.undo_label().expect("a change to undo");
+    first.undo();
+    let change = refused.trim_start_matches("Undo ");
+    let told = format!("{change} cannot be undone: another drawbar has changed it since.");
+    assert_eq!(first.said(&told), 1);
+    assert_ne!(first.store.undo_label(), Some(refused));
+    first.undo();
+    assert!(tagged(&first).is_empty());
+}
+
 /// Assets moved together in one gesture are one change: one undo moves every file back.
 #[test]
 fn a_selection_moved_together_is_one_undo_step() {
@@ -5147,21 +5230,26 @@ fn both_windows_unsaved_edits_come_back_in_one() {
 }
 
 /// toshokan's file system for a library, stopped as a crash stops it right after a
-/// file moves into a writer's trash.
+/// rename `stops` names, and renaming folders whole only where `rename_dir` says.
 struct Crashing {
     native: toshokan::blocking::Native,
+    stops: fn(&toshokan::Io) -> bool,
+    rename_dir: bool,
     stopped: bool,
 }
 
 impl toshokan::blocking::Backend for Crashing {
     fn capabilities(&self, root: toshokan::Root) -> toshokan::io::Capabilities {
-        self.native.capabilities(root)
+        let native = self.native.capabilities(root);
+        toshokan::io::Capabilities {
+            rename_dir: native.rename_dir && self.rename_dir,
+            ..native
+        }
     }
 
     fn perform(&mut self, io: toshokan::Io) -> toshokan::IoResult {
         assert!(!self.stopped, "crashed");
-        let stops =
-            matches!(&io, toshokan::Io::Rename { to, .. } if to.as_str().contains("/trash/"));
+        let stops = (self.stops)(&io);
         let done = self.native.perform(io);
         self.stopped = stops;
         done
@@ -5182,13 +5270,60 @@ fn leave_unfinished_save_in(
     root: &Temp,
     local: &std::path::Path,
 ) -> (Vec<u8>, toshokan::blocking::Library<Crashing>) {
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    let saved = with_gain(&program, "77");
+    let at = toshokan::RelPath::new("Grand.ne5p").unwrap();
+    let expect =
+        toshokan::Expect::Holds(keys::identity_of_bytes(&path("Grand.ne5p"), &program).unwrap());
+    let bytes = saved.clone();
+    fn into_trash(io: &toshokan::Io) -> bool {
+        matches!(io, toshokan::Io::Rename { to, .. } if to.as_str().contains("/trash/"))
+    }
+    let other = interrupted(root, local, (into_trash, true), |other| {
+        let _ = other.intent("Save").save_file(&at, bytes, expect).commit();
+    });
+    (saved, other)
+}
+
+/// Leave in `root` a rename of the folder “Bulk”, which holds `a.ne5p` and `b.ne5p`, to
+/// “Bulk2” that another install's drawbar, moving one file at a time as a browser does,
+/// stopped after the first.
+fn leave_unfinished_folder_rename(root: &Temp) {
+    let program = Fresh::Program.bytes().unwrap();
+    fs::create_dir(root.at("Bulk")).unwrap();
+    fs::write(root.at("Bulk/a.ne5p"), &program).unwrap();
+    fs::write(root.at("Bulk/b.ne5p"), &program).unwrap();
+    let elsewhere = Temp::new();
+    fn into_bulk2(io: &toshokan::Io) -> bool {
+        matches!(io, toshokan::Io::Rename { to, .. } if to.as_str().starts_with("Bulk2/"))
+    }
+    let (from, to) = (
+        toshokan::RelPath::new("Bulk").unwrap(),
+        toshokan::RelPath::new("Bulk2").unwrap(),
+    );
+    interrupted(root, &elsewhere.0, (into_bulk2, false), |other| {
+        let _ = other.intent("Rename").move_tree(&from, &to).commit();
+    });
+}
+
+/// Open the library in `root` as a drawbar keeping its own state in `local`, and make
+/// `change` there, which a crash stops right after a rename `stops` names. The drawbar
+/// renames folders whole where `rename_dir` says. Returns that drawbar, which holds its
+/// writer until it is dropped.
+fn interrupted(
+    root: &Temp,
+    local: &std::path::Path,
+    (stops, rename_dir): (fn(&toshokan::Io) -> bool, bool),
+    change: impl FnOnce(&mut toshokan::blocking::Library<Crashing>),
+) -> toshokan::blocking::Library<Crashing> {
     use std::panic::AssertUnwindSafe;
     use toshokan::blocking::{Library, Native};
 
-    let program = Fresh::Program.bytes().unwrap();
-    fs::write(root.at("Grand.ne5p"), &program).unwrap();
     let crashing = Crashing {
         native: Native::new(&root.0, local),
+        stops,
+        rename_dir,
         stopped: false,
     };
     let env = toshokan::Env {
@@ -5200,16 +5335,9 @@ fn leave_unfinished_save_in(
     };
     let (mut other, _) = Library::open(crashing, keys::layout(), &keys::schema(), env).unwrap();
     other.rescan().unwrap();
-    let saved = with_gain(&program, "77");
-    let at = toshokan::RelPath::new("Grand.ne5p").unwrap();
-    let expect =
-        toshokan::Expect::Holds(keys::identity_of_bytes(&path("Grand.ne5p"), &program).unwrap());
-    let bytes = saved.clone();
-    let stopped = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        let _ = other.intent("Save").save_file(&at, bytes, expect).commit();
-    }));
-    assert!(stopped.is_err(), "the other drawbar stopped mid-save");
-    (saved, other)
+    let stopped = std::panic::catch_unwind(AssertUnwindSafe(|| change(&mut other)));
+    assert!(stopped.is_err(), "the other drawbar stopped partway");
+    other
 }
 
 /// A change another window of this install left, which stopped after this one opened,
@@ -5289,6 +5417,36 @@ fn a_change_another_install_left_unfinished_is_asked_about() {
     }
     session.decided();
     assert!(root.read("Grand.ne5p") == saved, "the save is finished");
+}
+
+/// A folder's rename another drawbar left unfinished, finished or rolled back, moves its
+/// files as drawbar's own change: the log says nothing of files changed outside drawbar.
+#[test]
+fn settling_a_rename_another_drawbar_left_is_no_change_outside() {
+    for (how, at) in [("Finish", "Bulk2"), ("Roll back", "Bulk")] {
+        let root = Temp::new();
+        leave_unfinished_folder_rename(&root);
+        let mut session = Session::listed(&root);
+        session.a_minute_later();
+        let (title, _) = session.bench.browser.asking().expect("a question is asked");
+        assert_eq!(title, "Another drawbar left “Rename” unfinished");
+        for act in session.bench.browser.answer(how) {
+            let crate::browser::Act::Settle(orphan, how) = act else {
+                panic!("{act:?} settles nothing");
+            };
+            session.store.settle_unfinished(orphan, how);
+        }
+        session.decided();
+        session.settle();
+        assert_eq!(root.names(at), ["a.ne5p", "b.ne5p"], "{how}");
+        let said: Vec<&str> = session
+            .bench
+            .log
+            .iter()
+            .map(|entry| entry.text.as_str())
+            .collect();
+        assert_eq!(session.said("utside drawbar"), 0, "{how}: {said:?}");
+    }
 }
 
 /// A change whose paths keep moving between reads is being carried out still, however
@@ -5527,7 +5685,7 @@ fn a_forked_writers_branches_show_as_changes_kept_apart() {
         assert_eq!(kept.len(), 2, "one per branch: {kept:?}");
         assert!(kept.iter().all(|kept| kept.kind == KeptKind::Run));
         assert_eq!(session.worn(id), ["New"], "neither branch is merged");
-        assert_eq!(session.said("kept apart from the library"), 2);
+        assert_eq!(session.said("kept apart from the library"), 1);
     }
     let kept = here.kept("gains the tag “Here”");
     let mut said: Vec<&str> = kept.rows.iter().map(|row| row.said.as_str()).collect();
@@ -5554,6 +5712,100 @@ fn a_change_kept_apart_is_taken_and_undone() {
     assert_eq!(here.worn(at_here), ["Here", "New"]);
     here.undo();
     assert_eq!(here.worn(at_here), ["New"], "undone");
+}
+
+/// Taking a change to an asset a branch made makes the asset, at its file, with it.
+#[test]
+fn a_change_to_an_asset_a_branch_made_is_taken_with_the_asset() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    first.create();
+    first.sync();
+    first.close();
+    let copy = Temp::new();
+    copy_tree(&root.local(), &copy.0);
+    let mut here = Session::open(&root);
+    let mut there = Session::open_at(&root, &copy.0);
+    here.tag(&[here.only()], "Here");
+    there.create();
+    there.sync();
+    here.settle();
+    let kept = here.kept("its origin becomes");
+    let row = kept
+        .rows
+        .iter()
+        .find(|row| row.said.contains("its origin becomes"));
+    here.take_kept(kept.run, vec![row.unwrap().key.clone()]);
+    assert_eq!(here.said("did not change as asked"), 0);
+    let left = here.bench.browser.folders.kept.iter();
+    let left = left.filter(|left| left.run == kept.run);
+    assert!(
+        left.flat_map(|left| &left.rows).next().is_none(),
+        "the asset is made at its file: {:?}",
+        here.bench.browser.folders.kept
+    );
+}
+
+/// Two copies of one install's data, each tagging `Live/Grand.ne5p` before either
+/// reads the other, then the one at `root` tagging it “Later”: each branch's change is
+/// kept apart, and the library has since recorded the file as an asset of its own.
+/// Returns that session, and the asset.
+fn forked_over_one_file(root: &Temp) -> (Session, u64) {
+    mixed(root);
+    let mut first = Session::open(root);
+    let organ = first.named("Organ.ne5p");
+    first.tag(&[organ], "New");
+    first.close();
+    let copy = Temp::new();
+    copy_tree(&root.local(), &copy.0);
+    let mut here = Session::open(root);
+    let mut there = Session::open_at(root, &copy.0);
+    here.tag(&[here.named("Grand.ne5p")], "Here");
+    there.tag(&[there.named("Grand.ne5p")], "There");
+    here.settle();
+    let grand = here.named("Grand.ne5p");
+    here.tag(&[grand], "Later");
+    (here, grand)
+}
+
+/// A branch's change to a file the library has since recorded as an asset of its own is
+/// listed and taken as a change to that asset, and once taken nothing of it is left.
+#[test]
+fn a_branchs_change_to_a_file_the_library_recorded_since_is_taken_onto_its_asset() {
+    let root = Temp::new();
+    let (mut here, grand) = forked_over_one_file(&root);
+    let theirs = here.kept("gains the tag “There”");
+    assert_eq!(
+        theirs
+            .rows
+            .iter()
+            .map(|row| row.said.as_str())
+            .collect::<Vec<_>>(),
+        ["“Grand” gains the tag “There”"]
+    );
+    here.take_kept(theirs.run, Vec::new());
+    assert_eq!(here.said("did not change as asked"), 0);
+    assert_eq!(here.worn(grand), ["Later", "There"]);
+    let mut left = here.bench.browser.folders.kept.iter();
+    let left = left.find(|left| left.run == theirs.run);
+    let left = left.expect("the run stays until it is dismissed");
+    assert_eq!(left.rows, Vec::new(), "nothing left to review");
+}
+
+/// A change to an asset that only a dismissed branch made is not listed, since nothing
+/// could take it; the tag it made still is.
+#[test]
+fn a_change_to_an_asset_only_a_dismissed_branch_made_is_not_listed() {
+    let root = Temp::new();
+    let (mut here, _) = forked_over_one_file(&root);
+    let theirs = here.kept("gains the tag “There”").run;
+    let ours = here.kept("gains the tag “Here”").run;
+    here.dismiss_kept(ours);
+    let mut left = here.bench.browser.folders.kept.iter();
+    let left = left.find(|left| left.run == theirs);
+    let left = left.expect("the run stays until it is dismissed");
+    let said: Vec<&str> = left.rows.iter().map(|row| row.said.as_str()).collect();
+    assert_eq!(said, ["Made the tag “There”"]);
 }
 
 /// Taking all of a run's changes makes each, and dismissing a run leaves it shown to no
@@ -5592,7 +5844,7 @@ fn changes_kept_apart_are_taken_whole_or_dismissed_for_every_reader() {
 }
 
 /// What another drawbar logged after a part of its history the folder does not hold yet
-/// waits apart, with nothing to take, and is merged once that part arrives.
+/// waits apart, to take or leave, and is merged once that part arrives.
 #[test]
 fn changes_after_history_a_sync_has_not_brought_wait_apart_until_it_does() {
     let root = Temp::new();
@@ -5620,7 +5872,7 @@ fn changes_after_history_a_sync_has_not_brought_wait_apart_until_it_does() {
     let mut ours = Session::listed(&root);
     let kept = ours.kept("gains the tag “Monday”");
     assert_eq!(kept.kind, KeptKind::Gap);
-    assert_eq!(crate::browser::kept::offers(kept.kind), (false, false));
+    assert_eq!(crate::browser::kept::offers(kept.kind), (true, false));
     assert_eq!(tagged(&ours), Vec::<(String, Vec<String>)>::new());
 
     fs::rename(&away, &snapshot).unwrap();

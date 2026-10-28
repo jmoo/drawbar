@@ -467,13 +467,13 @@ async fn drive(
 /// Every file and folder `answers` say moved, from and to, in order.
 fn moved(answers: &[Event]) -> Vec<(LibPath, LibPath)> {
     let viewed = |viewed: &super::Viewed| {
-        let undone = viewed.undone.iter().flatten();
-        let undone = undone.filter_map(|(from, to)| Some((from.clone()?, to.clone()?)));
+        let followed = viewed.followed.iter().flatten();
+        let followed = followed.filter_map(|(from, to)| Some((from.clone()?, to.clone()?)));
         viewed
             .moves
             .iter()
             .cloned()
-            .chain(undone)
+            .chain(followed)
             .collect::<Vec<_>>()
     };
     answers

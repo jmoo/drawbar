@@ -852,10 +852,11 @@ pub struct KeptApart {
 pub enum KeptKind {
     /// A branch of a writer's history: its changes may be taken, or it dismissed.
     Run,
-    /// Entries waiting for an earlier one to sync, merged once it does.
+    /// Entries waiting for an earlier one to sync, merged once it does: their
+    /// changes may be taken meanwhile.
     Gap,
     /// A version of a writer's history a sync client dropped: its changes may be
-    /// taken.
+    /// taken, or it dismissed.
     Unplaced,
 }
 
@@ -966,10 +967,10 @@ pub struct Viewed {
     pub changes: Vec<toshokan::report::Change>,
     /// The files the answer's scan found moved outside drawbar, from and to.
     pub moves: Vec<(LibPath, LibPath)>,
-    /// What this session's undo or redo did, which the workspace follows without a
-    /// word: each tree it moved, then each file no entity is bound to that it made,
-    /// moved or trashed, from and to.
-    pub undone: Option<Vec<(Option<LibPath>, Option<LibPath>)>>,
+    /// What this session's undo, redo or settling of an unfinished change did, which
+    /// the workspace follows without a word: each tree it moved, then each file no
+    /// entity is bound to that it made, moved or trashed, from and to.
+    pub followed: Option<Vec<(Option<LibPath>, Option<LibPath>)>>,
     /// The folders a scan of every file could not list, where the answer scanned every
     /// file. What is in them is not known.
     pub unlisted: Option<Vec<LibPath>>,
@@ -1016,6 +1017,9 @@ pub enum Event {
         /// Whether the change joined this session's undo: every one does but a
         /// dismissal.
         undoable: bool,
+        /// Whether an undo or a redo was refused, and let go of: the next reaches the
+        /// step before it.
+        forgot: bool,
         result: Result<Viewed, String>,
     },
     /// The answers to the change `label` were lost: whether it was made is not known.

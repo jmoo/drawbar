@@ -104,8 +104,9 @@ writing over a sound, removing a folder with what is in it, or making a tag and
 naming it, is one undo. An action on more files than the library can keep as one
 step is refused whole and changes nothing; do it in smaller parts. That is tens of
 thousands of files with short names, and about ten thousand with names hundreds
-of characters long. An edit you have not saved is taken back with **Revert**
-instead.
+of characters long. If another drawbar has changed what an undo would take
+back, that undo is refused, and Undo goes on to the change before it. An edit
+you have not saved is taken back with **Revert** instead.
 
 Deleting a sound, or saving over one, moves the old file into drawbar's trash in
 the hidden folder, where Undo finds it. Undo reaches only the changes made since
@@ -166,15 +167,17 @@ This happens when:
   making changes. Each copy's changes are a branch of their own, and the
   activity log says that this drawbar goes on with a history of its own.
 - A sync has brought later changes before the earlier ones they follow. These
-  wait until the rest arrives and are merged then, so there is nothing to do
-  with them.
-- A sync replaced part of the history with an older version, leaving changes
-  only that version holds. These can be taken but not dismissed.
+  wait until the rest arrives and are merged then. Meanwhile they can be taken
+  but not dismissed.
+- A sync or a backup replaced part of the history with an older version, leaving
+  changes only that version holds. These can be taken or dismissed.
 
 Nothing kept apart changes your library until you choose to:
 
 - **Take** makes one change. **Take all** makes every change in the group. Each
-  is one step that **Edit ▸ Undo** takes back.
+  is one step that **Edit ▸ Undo** takes back. Taking a change to a sound the
+  branch added brings the sound too, at its file. Where your library already has
+  a sound at that file, the change is made to it.
 - Taking a change to where a sound's file is makes the sound's file the one at
   that path. The file must be there, as drawbar last found it, and belong to no
   other sound; otherwise the activity log says why it was not taken.

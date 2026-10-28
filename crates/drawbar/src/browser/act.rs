@@ -3091,6 +3091,25 @@ mod tests {
         );
     }
 
+    /// A selected tag the library's view no longer names leaves the selection, so the
+    /// inspector does not go on describing a row nothing draws.
+    #[test]
+    fn a_selected_tag_the_library_drops_leaves_the_selection() {
+        let mut bench = Bench::new();
+        let named = std::collections::BTreeSet::from(["Gig".to_string()]);
+        bench.browser.tags.project(named, Default::default());
+        let tag = bench.browser.tags.all()[0].id;
+        bench.browser.selection.only(Item::Tag(tag));
+
+        bench
+            .browser
+            .tags
+            .project(Default::default(), Default::default());
+        bench.browser.forget_gone(&bench.workspace);
+
+        assert!(!bench.browser.selection.holds(Item::Tag(tag)));
+    }
+
     /// Nothing may be written to a read-only library, so deleting or saving there only
     /// changes what drawbar holds in memory, and the question and the status say so.
     #[test]

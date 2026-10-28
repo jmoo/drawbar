@@ -129,7 +129,8 @@ of a resting file, streams a chunk at a time.
 
 Undo reaches only this session's intents. It is refused where another drawbar
 changed the same thing since
-([Undo and redo](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#undo-and-redo)).
+([Undo and redo](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#undo-and-redo)),
+and drawbar then lets go of that step, so the next undo reaches the one before.
 An intent too large for one log entry is refused before it writes anything.
 
 The trash holds what a delete or a save displaced, for this session's undo and
@@ -209,11 +210,12 @@ ahead only if nothing it would send changed on disk.
 shown apart from the merged state. Most of it is branches. A writer's history
 forks when two installs go on from one copy of drawbar's own data, and each
 branch's changes after the fork wait for the user. The rest is entries whose
-predecessor has not synced yet, merged once it arrives, and lines of a log
-segment whose newest lines a sync client dropped.
+predecessor has not synced yet, merged once it arrives, and lines of an older
+copy of a log segment, as a sync client or a backup leaves. Of those lines, only
+what the writer's later history never changed again is shown.
 
-Taking changes from a branch is one intent, which undo takes back. Dismissing a
-branch hides it from every reader and cannot be undone. A writer that finds its
+Taking changes is one intent, which undo takes back. Dismissing a branch, or the
+lines of an older segment, hides it from every reader and cannot be undone. A writer that finds its
 own history forked goes on as a new writer.
 [Kept apart](../drawbar/this-computer.md#kept-apart) says what the user sees,
 and [Runs](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/RETENTION.md#5-runs)

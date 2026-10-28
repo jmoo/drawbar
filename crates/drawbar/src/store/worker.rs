@@ -84,8 +84,8 @@ enum Role {
 impl Role {
     fn name(self) -> &'static str {
         match self {
-            Role::Library => "the library's worker",
-            Role::Rescues => "the worker that keeps rescues",
+            Role::Library => "drawbar's work on the library",
+            Role::Rescues => "drawbar's keeping of rescued sounds",
         }
     }
 
@@ -248,8 +248,8 @@ impl Worker {
                     (Some(answer), _) => {
                         let _ = answer.call1(&JsValue::NULL, &data);
                     }
-                    (None, Some(why)) => {
-                        replies.fail(format!("{} stopped: {}", role.name(), describe(&why)));
+                    (None, Some(_)) => {
+                        replies.fail(format!("{} stopped unexpectedly", role.name()));
                     }
                     (None, None) => {}
                 }
@@ -257,11 +257,8 @@ impl Worker {
         };
         let fail = {
             let replies = Rc::clone(&replies);
-            Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
-                let why = field(&event, "message")
-                    .and_then(|message| message.as_string())
-                    .unwrap_or_else(|| "it could not be loaded".into());
-                replies.fail(format!("{} stopped: {why}", role.name()));
+            Closure::<dyn FnMut(JsValue)>::new(move |_: JsValue| {
+                replies.fail(format!("{} stopped unexpectedly", role.name()));
             })
         };
         worker.set_onmessage(Some(hear.as_ref().unchecked_ref()));
@@ -327,7 +324,7 @@ impl Worker {
     pub fn abandon(&self) {
         self.worker.terminate();
         self.replies
-            .fail("the library's worker was let go".to_string());
+            .fail("drawbar closed the library to open it again".to_string());
     }
 
     /// Run `cmd` in the worker, and every answer it gave.
@@ -677,7 +674,7 @@ impl Queue {
                 keeper.run(cmd, &mut |event| events.push(event)).await;
                 wire::encode(&events)
             }
-            Err(why) => Err(format!("the library's worker was sent {why}")),
+            Err(_) => Err("drawbar could not pass the change on to the library".to_string()),
         };
         let posted = match answered {
             Ok(message) => {
