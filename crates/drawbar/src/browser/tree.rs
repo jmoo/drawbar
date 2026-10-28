@@ -485,10 +485,10 @@ pub fn library_items(
         Picking::Absent => {}
     }
     if !folders.libraries.is_empty() {
-        menu::button(ui, "Open recent library", |ui| {
+        menu::button(ui, crate::menu::RECENT, |ui| {
             for library in &folders.libraries {
-                if marked(ui, &library.name, library.open) && !library.open {
-                    acts.push(Act::OpenLibrary(library.root.clone()));
+                if marked(ui, &library.name, library.open) {
+                    acts.extend(recent(folders, library));
                 }
             }
         });
@@ -499,6 +499,17 @@ pub fn library_items(
             ui.ctx().open_url(egui::OpenUrl::new_tab(url));
             ui.close();
         }
+    }
+}
+
+/// What choosing `library` among the recent libraries does: opens it, or opens the
+/// open one again where nothing may be written to it.
+pub(crate) fn recent(folders: &Folders, library: &crate::folders::Library) -> Option<Act> {
+    let read_only = folders.place.as_ref().is_some_and(|at| at.read_only);
+    match (library.open, read_only) {
+        (false, _) => Some(Act::OpenLibrary(library.root.clone())),
+        (true, true) => Some(Act::ReopenLibrary),
+        (true, false) => None,
     }
 }
 

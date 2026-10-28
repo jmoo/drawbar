@@ -176,7 +176,8 @@ writer's log holds entries a newer build wrote. It turns read-only until it is
 opened again when a change it began cannot be finished, as when another program
 put a file where the change puts one; opening it again tries once more. Another
 drawbar on the folder never makes it read-only. Changes in a read-only library
-are held in memory only.
+are held in memory only, except unsaved edits after a change could not be
+finished, which this install's own state still keeps.
 
 A reader keeps nothing between opens: what it shows comes from the files in the
 folder. After a restore from a backup, facts no file holds now are gone at the

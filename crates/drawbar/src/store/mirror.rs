@@ -55,6 +55,10 @@ enum Phase {
     Open,
     /// Opened, and nothing may be written, for this reason.
     ReadOnly(String),
+    /// Opened, and nothing may be written to the folder until it opens again, since a
+    /// change of drawbar's own could not be finished, for this reason. Unsaved edits
+    /// are still kept.
+    Unfinished(String),
     /// Not opened, for this reason.
     Failed(String),
 }
@@ -441,7 +445,7 @@ impl Store {
     /// Whether a change is held in memory only, where nothing may be written: a deletion,
     /// a save, a rename or move, or a folder change.
     fn held(&self, browser: &Browser) -> bool {
-        let read_only = matches!(self.phase, Phase::ReadOnly(_));
+        let read_only = matches!(self.phase, Phase::ReadOnly(_) | Phase::Unfinished(_));
         read_only && (browser.folders.changed() || !self.asks.is_empty())
     }
 
@@ -470,7 +474,7 @@ impl Store {
     /// Keep each unsaved edit as a draft where it changed since it was last kept, and let
     /// go of the drafts of assets saved, gone or known by another key since.
     fn keep_drafts(&mut self, workspace: &Workspace) {
-        if !self.open() {
+        if !matches!(self.phase, Phase::Open | Phase::Unfinished(_)) {
             return;
         }
         for (id, kept) in std::mem::take(&mut self.drafted) {
@@ -856,7 +860,10 @@ impl Store {
     }
 
     fn opened(&self) -> bool {
-        matches!(self.phase, Phase::Open | Phase::ReadOnly(_))
+        matches!(
+            self.phase,
+            Phase::Open | Phase::ReadOnly(_) | Phase::Unfinished(_)
+        )
     }
 
     /// Where the library is, and what state it is in, for the browser's header.
@@ -872,10 +879,10 @@ impl Store {
                     n => format!("opening… {n} files found"),
                 }),
                 Phase::Opening | Phase::Open => None,
-                Phase::ReadOnly(why) => Some(format!("read-only: {why}")),
+                Phase::ReadOnly(why) | Phase::Unfinished(why) => Some(format!("read-only: {why}")),
                 Phase::Failed(why) => Some(format!("not opened: {why}")),
             },
-            read_only: matches!(self.phase, Phase::ReadOnly(_)),
+            read_only: matches!(self.phase, Phase::ReadOnly(_) | Phase::Unfinished(_)),
             opening: self.listing(),
         }
     }
@@ -1330,7 +1337,7 @@ impl Store {
     #[cfg(test)]
     pub fn read_only(&self) -> Option<&str> {
         match &self.phase {
-            Phase::ReadOnly(why) => Some(why),
+            Phase::ReadOnly(why) | Phase::Unfinished(why) => Some(why),
             _ => None,
         }
     }
@@ -1483,10 +1490,10 @@ impl Store {
             Event::Unkept(why) => self.say_unkept(&why, log),
             Event::ReadOnly(why) if self.open() => {
                 log.trouble(format!(
-                    "This computer's library is read-only now: {why}. Edits made from now \
-                     on stay in memory until you quit."
+                    "This computer's library is read-only now: {why}. Unsaved edits are \
+                     still kept."
                 ));
-                self.phase = Phase::ReadOnly(why);
+                self.phase = Phase::Unfinished(why);
             }
             Event::ReadOnly(_) => {}
             Event::Failed(why) => {
@@ -2285,7 +2292,7 @@ impl Store {
         match &self.phase {
             Phase::Opening => return,
             Phase::Open => {}
-            Phase::ReadOnly(why) | Phase::Failed(why) => {
+            Phase::ReadOnly(why) | Phase::Unfinished(why) | Phase::Failed(why) => {
                 let why = why.clone();
                 self.asked.clear();
                 return log.trouble(format!("The tags did not change: {why}."));

@@ -1232,12 +1232,23 @@ fn a_save_that_cannot_be_finished_leaves_the_library_read_only_until_it_opens_ag
         "read-only: {why:?}"
     );
     assert_eq!(session.said("read-only now"), 1);
+    let later = with_gain(&new, "12");
+    let log = &mut session.bench.log;
+    session
+        .bench
+        .workspace
+        .replace_bytes(id, later.clone(), log);
     session.close();
 
     fs::rename(root.at("untitled.ne5p"), root.local().join("theirs")).unwrap();
     let again = Session::open(&root);
     assert_eq!(again.store.read_only(), None);
     assert_eq!(root.read("untitled.ne5p"), new, "the save is finished");
+    let entity = again.bench.workspace.get(again.only()).expect("the asset");
+    assert_eq!(
+        *entity.bytes, later,
+        "the edit made while read-only was kept"
+    );
 }
 
 /// A copy of a library whose hidden folder holds, in this install's own log, a change a

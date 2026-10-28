@@ -658,14 +658,11 @@ impl DrawbarApp {
                     .as_ref()
                     .map(|library| Act::OpenLibrary(library.root.clone())),
             ),
-            Command::Recent(at) => acts.extend(
-                self.browser
-                    .folders
-                    .libraries
-                    .get(at)
-                    .filter(|library| !library.open)
-                    .map(|library| Act::OpenLibrary(library.root.clone())),
-            ),
+            Command::Recent(at) => {
+                let folders = &self.browser.folders;
+                let chosen = folders.libraries.get(at);
+                acts.extend(chosen.and_then(|library| crate::browser::recent(folders, library)));
+            }
             Command::RevealLibrary => {
                 let place = self.browser.folders.place.as_ref();
                 if let Some(url) = place.and_then(|at| at.reveal.as_ref()) {

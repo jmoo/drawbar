@@ -73,6 +73,8 @@ pub struct Keeper<F> {
     trash: u64,
     /// The view the app was last shown.
     shown: Option<View>,
+    /// Whether the app was told the library may not be written.
+    told_read_only: bool,
 }
 
 impl<F: Fs> Keeper<F> {
@@ -88,6 +90,7 @@ impl<F: Fs> Keeper<F> {
             session: BTreeSet::new(),
             trash: TRASH,
             shown: None,
+            told_read_only: false,
         }
     }
 
@@ -188,7 +191,8 @@ impl<F: Fs> Keeper<F> {
             }
         }
         let mode = self.library.as_ref().map(Library::mode);
-        if let Some(Mode::ReadOnly(why)) = mode {
+        if let (Some(Mode::ReadOnly(why)), false) = (mode, self.told_read_only) {
+            self.told_read_only = true;
             answer(Event::ReadOnly(read_only(why)));
         }
     }
@@ -353,6 +357,7 @@ impl<F: Fs> Keeper<F> {
             Mode::Writable => Ok(()),
             Mode::ReadOnly(why) => Err(read_only(why)),
         };
+        self.told_read_only = writable.is_err();
         let view = library.view();
         let earlier = unsaved::earlier(library.fs()).await;
         let earlier = earlier.unwrap_or_else(|e| {
@@ -1323,7 +1328,7 @@ fn read_only(why: &Why) -> String {
         return why.to_string();
     };
     let unfinished = format!("drawbar could not finish “{label}”");
-    let again = "then quit drawbar and open it again";
+    let again = format!("then open it again from File ▸ {}", crate::menu::RECENT);
     match error {
         IoError::AlreadyExists
         | IoError::IsDirectory
