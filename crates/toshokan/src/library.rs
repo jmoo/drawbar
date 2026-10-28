@@ -2030,16 +2030,18 @@ fn settle_own(library: &mut Library) -> Fallible<'_, &mut Library> {
     })
 }
 
-/// Settles `settling` when the folder holds its record. One the folder does not
-/// hold never landed and journaled nothing, so it is dropped and its staging left
-/// to tidy; one the folder cannot be asked about fails this write, to try again.
+/// Settles `settling` when the folder holds its record whole. One the folder does
+/// not hold, or holds cut short, never landed and journaled nothing, so it is
+/// dropped and its staging and any part of it left to tidy; one the folder cannot
+/// be asked about fails this write, to try again.
 fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Library> {
     let path = library
         .layout
         .pending(settling.pending.writer, settling.record);
-    flow::stat(Root::Folder, &path).and_then(move |held| match held {
-        Some(_) => resume(library, settling),
-        None => {
+    let whole = settling.pending.encode();
+    flow::read_file(Root::Folder, &path, pending::MAX_RECORD).and_then(move |held| match held {
+        Some(bytes) if bytes == whole => resume(library, settling),
+        _ => {
             library
                 .unsettled
                 .retain(|open| open.record != settling.record);
