@@ -15,8 +15,9 @@ every folded hash, and forks shown as runs instead of merged.
 
 To run one config by hand, `nix shell nixpkgs#tlaplus18`, then
 `tlc -workers 8 -lncheck final -config Portable.cfg Portable.tla` in this
-directory. With eight workers, `Deep` takes 20 to 30 minutes, `PortableDeep`
-about 10, and every other config a few minutes.
+directory. On an otherwise idle eight-core machine, `Deep` takes about 20
+minutes, `Sync` and `PortableDeep` under 10 each, and every other config a few
+minutes.
 
 ## The protocol
 
