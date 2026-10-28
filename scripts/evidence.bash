@@ -74,7 +74,9 @@ sweep_binary() {
     echo "$built" >&2
     return 1
   }
-  grep -o '/[^ ]*/retention_sweep-[0-9a-f]*' <<<"$built"
+  # Cargo names it relative to crates/ when the target directory is under it.
+  built=$(grep -o '[^ (]*/retention_sweep-[0-9a-f]*' <<<"$built")
+  (cd "$repo/crates" && realpath "$built")
 }
 
 # The browser suites run on Linux, and the power-loss VMs need x86_64 Linux.
