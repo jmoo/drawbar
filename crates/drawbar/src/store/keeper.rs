@@ -169,8 +169,9 @@ impl<F: Fs> Keeper<F> {
         }
     }
 
-    /// Answer a change, an undo or a redo, and empty the trash as
-    /// [`Keeper::empty_trash`] says once it was made.
+    /// Answer a change, an undo or a redo, after saying once that the library may no
+    /// longer be written, and empty the trash as [`Keeper::empty_trash`] says once it
+    /// was made.
     async fn made(
         &mut self,
         label: String,
@@ -179,6 +180,12 @@ impl<F: Fs> Keeper<F> {
     ) {
         let made = committed.as_ref().ok().and_then(|(made, _)| *made);
         self.session.extend(made.map(|(entry, _)| entry));
+        // Ahead of the change's own answer, which is all a sender waits for.
+        let mode = self.library.as_ref().map(Library::mode);
+        if let (Some(Mode::ReadOnly(why)), false) = (mode, self.told_read_only) {
+            self.told_read_only = true;
+            answer(Event::ReadOnly(read_only(why)));
+        }
         answer(Event::Committed {
             label,
             made: made.map(|(entry, _)| entry),
@@ -189,11 +196,6 @@ impl<F: Fs> Keeper<F> {
             if let Some(trimmed) = self.empty_trash().await {
                 answer(trimmed);
             }
-        }
-        let mode = self.library.as_ref().map(Library::mode);
-        if let (Some(Mode::ReadOnly(why)), false) = (mode, self.told_read_only) {
-            self.told_read_only = true;
-            answer(Event::ReadOnly(read_only(why)));
         }
     }
 
