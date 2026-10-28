@@ -9,9 +9,9 @@ This repository contains Rust tools for Clavia Nord instruments:
 - `drawbar` is the desktop and browser application.
 
 This is a public repository. Do not add personal information, secrets, agent
-memory, private notes, private RFCs, or the private specimen corpus. If a fact
-is needed to understand public code, state the fact in the public repository;
-do not point at a private note.
+memory, private notes, the private RFCs numbered below 0038, or the private
+specimen corpus. If a fact is needed to understand public code, state the fact in
+the public repository; do not point at a private note.
 
 The project is not affiliated with, authorized by, or endorsed by Clavia DMI
 AB. Keep the trademark disclaimers in crate READMEs and generated docs.
@@ -125,7 +125,7 @@ Delete comments that:
 - contain corpus counts or dates that will silently age;
 - use emphasis, metaphor, or conversational filler in place of a fact.
 
-Git records history. Private RFCs record extended design rationale. Neither
+Git records history. RFCs in `rfc/` record extended design rationale. Neither
 belongs inline as a story about the current code.
 
 Use `///` for a contract a caller can rely on without reading the body. Use
@@ -282,6 +282,54 @@ Before declaring a change done:
 Refactors are behavior-preserving. The default suite and, where available, the
 corpus round trip are the proof. Do not commit unless asked. When commits are
 requested, use small logical commits and branch from `master`.
+
+## RFCs
+
+An RFC records a decision that is hard to reverse, crosses crates, or has real
+alternatives worth keeping. Anything else is an issue or a pull request. When in
+doubt, it is not an RFC.
+
+RFCs live in `rfc/`, one Markdown file each, named `NNNN-short-title.md`. The
+number is the number of the pull request that proposes the RFC, padded to four
+digits. Open the pull request, then name the file. A number never changes and is
+never reused.
+
+Each RFC opens with this front matter:
+
+```yaml
+---
+rfc: 270
+title: RFCs in the open
+authors: [jmoo]
+status: proposed
+created: 2026-10-28
+decided:
+superseded_by:
+---
+```
+
+The body has the sections Problem, Constraints, Options, Recommendation and
+Consequences. Options may be dropped when there genuinely are none. The first
+paragraph says whether a decision has been made.
+
+The pull request is the discussion, and the RFC is `proposed` while it is open.
+The maintainer decides. Merging records the decision as `accepted` or
+`rejected`. A rejected RFC is merged too, because the reasons not to do something
+are most of what an RFC is worth. Later changes of status, to `implemented` or
+`superseded`, are small pull requests of their own. Otherwise a merged RFC is not
+edited; a changed decision is a new RFC that supersedes it.
+
+An RFC carries its own evidence. Aggregate facts measured on the private corpus
+may be stated, as pull request descriptions already do. Specimens, their paths and
+anything proprietary stay out.
+
+Issues and pull requests that implement an RFC cite it in their titles, such as
+`feat: rfc-0270 build piano libraries from a recorded take`. Code and comments do
+not cite RFC numbers.
+
+RFC-0001 to RFC-0037 predate this process and are private, though older issues
+cite them. The maintainer may publish one under its original number. Numbers
+taken from pull requests are all higher.
 
 ## Pull requests and releases
 
