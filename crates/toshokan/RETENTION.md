@@ -84,9 +84,12 @@ a resurfaced copy of one is recognized by.
 has the certificate's first hash and its line at the certified position has the
 certified hash; its lines up to that position are folded. An unsealed file that
 starts with the first hash but is shorter has its lines past the first held back
-as items the user can take from: the reader cannot tell a version a sync client
+as unplaced (section 4): the reader cannot tell a version a sync client
 dropped, or one it is still bringing, from a copy that diverged before its end.
-They are not evidence of a fork. A sealed file cannot still be arriving, so a sealed
+They are not evidence of a fork. So the two ways a copy diverges are not shown
+alike: an unsealed copy that stops short hides its write to a field the other
+copy wrote at a higher number, while one a line longer, or sealed, is a run and
+shows everything it wrote. A sealed file cannot still be arriving, so a sealed
 file shorter than the certificate diverged from it, as does a file whose line at
 that position has another hash, as copies of a virtual machine resumed twice do:
 only its first line is folded, and the rest is placed or shown as a run by the
@@ -336,7 +339,7 @@ see less than the folder holds:
   writer's facts the deleted segments held are not shown, and the writer's later
   entries, which follow the missing snapshot's head, wait as a gap.
 - A segment can arrive before the entries it continues: a gap.
-- A segment still arriving, shorter than a certificate, shows its lines past
+- A segment still arriving, shorter than a certificate, holds its lines past
   the first as unplaced (section 2) until it is whole.
 - A reference to an entry sync has not brought is contradicted (section 3):
   what it replaced shows beside the current value as a conflict until the entry
@@ -350,7 +353,8 @@ alone, and nothing another writer wrote is lost.
 A snapshot lost by hand, or by a sync fault, while a newer segment survives
 leaves that segment held back as a gap until the writer's next snapshot reaches
 it. A dropped version of a segment holds its surviving lines past the first as
-unplaced, which show only what its writer's later history never decided. Neither is something the protocol does.
+unplaced, which show only what its writer's later history never decided.
+Neither is something the protocol does.
 
 ## 8. Writers, pending records and undo
 
@@ -397,8 +401,9 @@ removes named, its file effects. It ends at close.
   earlier references of its writer covered, that a snapshot holding the
   reference no longer names, comes back beside the current value as a conflict.
 - A segment a sync client dropped the newest lines of: its surviving lines past
-  the first shown as unplaced, and a later line of the same chain held back as
-  a gap, until the writer's next snapshot reaches both.
+  the first held back as unplaced, which show only what the writer's later
+  history never decided again, usually nothing, and a later line of the same
+  chain held back as a gap, until the writer's next snapshot reaches both.
 - A fork inside a segment, when an instance copied while its segment was open
   and both copies compacted: pre-fork entries with no effect left can show as
   runs, and own writes that may be pre-fork as a forgotten basis.
@@ -438,6 +443,9 @@ removes named, its file effects. It ends at close.
 - Reviving a deleted entity brings back only the concurrent edit.
 - A reader may show a field empty, or as a conflict, until the write that
   replaced the value it showed arrives.
+- A copy of a segment that diverged and stops short, unsealed, hides its write
+  to a field the other copy wrote at a higher number; a copy one line longer is
+  a run, and shows it.
 
 ## Expected size
 
