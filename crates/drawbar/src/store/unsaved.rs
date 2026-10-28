@@ -296,7 +296,10 @@ pub const EARLIER: &str = "This drawbar does not read the unsaved edits an earli
 /// Whether the local root holds unsaved edits an earlier drawbar kept, in a writer's
 /// `drafts/`. They are never read.
 pub async fn earlier<F: Fs>(fs: &F) -> io::Result<bool> {
-    let local = storage::list(fs, Root::Local, &RelPath::ROOT).await?;
+    let local = match storage::list(fs, Root::Local, &RelPath::ROOT).await {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        local => local?,
+    };
     let writers = local
         .into_iter()
         .filter(|(name, meta)| meta.kind == Kind::Directory && name.parse::<EntryHash>().is_ok());

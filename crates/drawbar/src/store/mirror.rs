@@ -185,6 +185,9 @@ pub struct Store {
     /// Whether the log has said an unsaved edit could not be kept since a keep last
     /// succeeded.
     told_unkept: bool,
+    /// The change answered next is the one that turned the library read-only, which
+    /// the log has said already.
+    turned_read_only: bool,
     /// What names were last compared in for duplicates: the workspace's layout, and the
     /// [`crate::folders::Folders::names_hash`].
     compared: Option<(u64, u64)>,
@@ -302,6 +305,7 @@ impl Store {
             views: BTreeMap::new(),
             keeping: VecDeque::new(),
             told_unkept: false,
+            turned_read_only: false,
             compared: None,
             deferred: BTreeSet::new(),
             focused: true,
@@ -1387,22 +1391,35 @@ impl Store {
                 label,
                 made,
                 undoable,
+                forgot,
                 result,
             } => {
                 self.committing = self.committing.saturating_sub(1);
                 let step = self.answering.pop_front();
+                let forgotten = match (&step, forgot) {
+                    (Some(step), true) => self.history.forget(step),
+                    _ => None,
+                };
                 if let (Some(entry), Some(step), true) = (made, step, undoable) {
                     self.history.took(step, entry);
                 }
+                let told = std::mem::take(&mut self.turned_read_only);
                 match result {
                     Ok(viewed) => {
                         self.viewed(viewed, workspace, browser, queue, log);
                     }
                     Err(why) => {
-                        log.error(format!("{label}: {why}"));
-                        log.trouble(format!("The library did not change as asked: {why}."));
+                        match forgotten {
+                            Some(forgotten) => log.trouble(format!("{forgotten}: {why}.")),
+                            None if told => log.error(format!("{label}: {why}")),
+                            None => {
+                                log.error(format!("{label}: {why}"));
+                                log.trouble(format!("The library did not change as asked: {why}."));
+                            }
+                        }
                         if let Some(shown) = self.shown.take() {
                             self.project_tags(&shown, browser);
+                            browser.forget_gone(workspace);
                             self.shown = Some(shown);
                         }
                     }
@@ -1494,6 +1511,7 @@ impl Store {
                      still kept."
                 ));
                 self.phase = Phase::Unfinished(why);
+                self.turned_read_only = true;
             }
             Event::ReadOnly(_) => {}
             Event::Failed(why) => {
@@ -1853,7 +1871,7 @@ impl Store {
         self.send(Cmd::Intent(intent));
     }
 
-    /// Show what the library keeps apart, and say once that each new run of it is.
+    /// Show what the library keeps apart, and say once when new runs of it appear.
     fn keep_apart(
         &mut self,
         kept: Vec<super::KeptApart>,
@@ -1881,12 +1899,16 @@ impl Store {
                     rows,
                 }
             })
+            // A run stays until it is dismissed; a gap or unplaced lines go once
+            // nothing is left to review.
+            .filter(|kept| kept.kind == super::KeptKind::Run || !kept.rows.is_empty())
             .collect();
-        for kept in shown
+        let mut new = shown
             .iter()
             .filter(|kept| !self.kept_runs.contains(&kept.run))
-        {
-            log.say(match kept.rows.len() {
+            .peekable();
+        if new.peek().is_some() {
+            log.say(match new.map(|kept| kept.rows.len()).sum() {
                 0 => "Changes are kept apart from the library: see Kept apart.".to_string(),
                 1 => "1 change is kept apart from the library: see Kept apart.".to_string(),
                 n => format!("{n} changes are kept apart from the library: see Kept apart."),
@@ -1926,7 +1948,7 @@ impl Store {
             dirs,
             changes,
             moves: _,
-            undone,
+            followed,
             unlisted,
             unfinished,
             kept,
@@ -1940,10 +1962,10 @@ impl Store {
         }
         // Until a scan has listed every file, what a view adds is what was there.
         let first = !self.listed;
-        self.quiet = undone.is_some();
-        for (from, to) in undone.into_iter().flatten() {
+        self.quiet = followed.is_some();
+        for (from, to) in followed.into_iter().flatten() {
             if let (Some(from), Some(to)) = (from, to) {
-                self.follow_undone(&from, &to, workspace);
+                self.follow_own(&from, &to, workspace);
             }
         }
         let mut shown = self.shown.take().unwrap_or_default();
@@ -1972,6 +1994,7 @@ impl Store {
         }
         self.lose(&shown, workspace, browser);
         self.project_tags(&shown, browser);
+        browser.forget_gone(workspace);
         if retired {
             log.say(
                 "drawbar's own data for this library was copied and used elsewhere too, so \
@@ -2007,9 +2030,9 @@ impl Store {
         touched
     }
 
-    /// Follow a tree, or a file no entity is bound to, that this session's undo or redo
-    /// moved from `from` to `to`: each asset in it keeps its id, and moves with it.
-    fn follow_undone(&mut self, from: &LibPath, to: &LibPath, workspace: &mut Workspace) {
+    /// Follow a tree, or a file no entity is bound to, that this session's undo, redo or
+    /// settling moved from `from` to `to`: each asset in it keeps its id, and moves with it.
+    fn follow_own(&mut self, from: &LibPath, to: &LibPath, workspace: &mut Workspace) {
         self.ids.moved(from, to);
         for record in self.records.values_mut() {
             if let Some(moved) = record.path.as_ref().and_then(|at| at.moved(from, to)) {
@@ -3579,6 +3602,18 @@ impl History {
                 }
             }
         }
+    }
+
+    /// Let go of the step a refused undo or redo `step` would have reversed, and say
+    /// what can no longer be done with it.
+    fn forget(&mut self, step: &Step) -> Option<String> {
+        let (steps, cannot) = match step {
+            Step::Undo => (&mut self.done, "cannot be undone"),
+            Step::Redo => (&mut self.undone, "cannot be made again"),
+            Step::Change(_) => return None,
+        };
+        let (change, _) = steps.pop()?;
+        Some(format!("{change} {cannot}"))
     }
 
     /// Let go of the steps whose undo or redo needs what `entries` displaced, and of

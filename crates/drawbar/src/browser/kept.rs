@@ -23,8 +23,8 @@ const ABOUT: &str = "These changes were made where the library's history split, 
 pub(crate) fn offers(kind: KeptKind) -> (bool, bool) {
     match kind {
         KeptKind::Run => (true, true),
-        KeptKind::Unplaced => (true, false),
-        KeptKind::Gap => (false, false),
+        KeptKind::Unplaced => (true, true),
+        KeptKind::Gap => (true, false),
     }
 }
 
@@ -170,9 +170,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_run_is_taken_or_dismissed_unplaced_lines_only_taken_and_a_gap_neither() {
+    fn a_run_or_unplaced_lines_are_taken_or_dismissed_and_a_gap_only_taken() {
         assert_eq!(offers(KeptKind::Run), (true, true));
-        assert_eq!(offers(KeptKind::Unplaced), (true, false));
-        assert_eq!(offers(KeptKind::Gap), (false, false));
+        assert_eq!(offers(KeptKind::Unplaced), (true, true));
+        assert_eq!(offers(KeptKind::Gap), (true, false));
     }
 }

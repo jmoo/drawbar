@@ -52,37 +52,51 @@
 //!
 //! # What the audio does not say
 //!
-//! A stroke record carries fields no audio predicts: four length marks, fifteen
-//! one-pole decay coefficients, a velocity window, a per-stroke identifier, and two
-//! bytes the later streams use. The audio does not predict the prefix's per-note
-//! tables and playback parameters either. [`build`] gets them from a [`Donor`].
+//! A stroke record carries fields no audio predicts: fifteen one-pole decay
+//! coefficients, a velocity window, a per-stroke identifier, and two bytes the later
+//! streams use. The audio does not predict the prefix's per-note tables and playback
+//! parameters either. [`build`] gets them from a [`Donor`]. The trim follows the
+//! recording's layer value whatever the donor, as [`Donor::Rules`] states it.
 //!
 //! [`Donor::Template`] copies them from a library: for each recording, from the
-//! template stroke of the same bank and nearest root, with the marks rescaled to the
-//! new stroke's length. Otherwise they go in unchanged. The instrument accepts them,
-//! but what it does with them is not known, and they carry the vendor's tuning of a
-//! different instrument.
+//! template stroke of the same bank and nearest root. The instrument accepts them, but
+//! they carry the vendor's tuning of a different instrument.
 //!
 //! [`Donor::Rules`] states them instead, so a library can be written from recordings
 //! alone. Every field is then a neutral playback parameter: no decay applied over the
-//! recordings, each stroke trimmed according to its layer value, and the damper
-//! covering the keys that kind of instrument damps. A library written this way plays
-//! like the same audio built against a template, within about a decibel at every
-//! velocity and key, and sustains longer because no extra decay is applied. Confirmed
-//! on hardware.
+//! recordings, each stroke trimmed according to its layer value, a fade at key-up, and
+//! the damper covering the keys that kind of instrument damps. A library written this
+//! way plays like the same audio built against a template while a key is held, within
+//! about a decibel at every velocity and key, and sustains longer because no extra
+//! decay is applied. Confirmed on hardware.
+//!
+//! The key-up fade takes its values from vendor electric pianos. On an attack stroke it
+//! takes a note 40 dB down in 25 to 35 ms, where 0 cuts it 40 dB within 10 ms.
+//! Confirmed on hardware.
+//!
+//! # Loops
+//!
+//! A recording with a [`Recording::sustain`] loop is coded up to the loop's end, and
+//! the last block is filled out with the loop again, so the stroke ends where a vendor
+//! stroke does. The marks state the loop and the blocks around its start. A held note
+//! repeats the loop until the key is released, fading from the loop's start at the rate
+//! the stroke states. Confirmed on hardware. A rule-written loop fades at
+//! [`Rules::loop_fade`], faster up the keyboard, as a vendor loop of the same kind does.
+//! A recording without a loop declares none, and plays to its end.
 
 use super::codec::{self, MAX_ORDER, MAX_WIDTH, MIN_WIDTH, OVERLAP};
 use super::{
-    be32, block_bytes, midi_key, put16, put32, Bank, Library, Stroke, CNSP_MAGIC, DAMPER_TOP_AT,
-    DECAYS, DIRECTORY_AT, FINE_TUNE_AT, FORMAT, GAIN_AT, KEY_MAP_AT, KIND_AT, LADDER_UNITY, MARKS,
-    NOTES, RECORD, REC_BANK, REC_BLOCKS, REC_DECAY, REC_DECAYS, REC_FRAMES, REC_ID, REC_LAYER,
-    REC_MARKS, REC_MARK_BLOCK, REC_SEEDS, REC_START, REC_TRIM, REC_WINDOW, SEEDS, UNCOVERED,
-    VERSION_AT, VERSION_ECHO_AT,
+    be32, block_bytes, midi_key, put16, put32, Bank, Library, Loop, Stroke, CNSP_MAGIC,
+    DAMPER_TOP_AT, DECAYS, DIRECTORY_AT, FINE_TUNE_AT, FORMAT, GAIN_AT, KEY_MAP_AT, KIND_AT,
+    LADDER_UNITY, MARKS, NOTES, RECORD, REC_BANK, REC_BLOCKS, REC_DECAY, REC_DECAYS, REC_FRAMES,
+    REC_ID, REC_LAYER, REC_MARKS, REC_MARK_BLOCK, REC_NOTE_OFF, REC_SEEDS, REC_START, REC_TRIM,
+    REC_WINDOW, SEEDS, UNCOVERED, VERSION_AT, VERSION_ECHO_AT,
 };
 use crate::cbin::Header;
 use crate::error::{try_with_capacity, try_zeroed, Error, ParseError};
 use crate::formats::nsmp::kernel;
 use crate::formats::predictor;
+use crate::wav::SampleLoop;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -120,8 +134,10 @@ impl Options {
 /// Where [`build`] gets the fields no audio predicts.
 #[derive(Debug, Clone)]
 pub enum Donor<'a> {
-    /// A library to copy them from: its prefix whole, and per stroke the length marks
-    /// and decay ladder of its nearest stroke of the same bank.
+    /// A library to copy them from: its prefix whole, and per stroke the decay
+    /// coefficients of its nearest stroke of the same bank. A loop whose donor states no
+    /// loop fade fades as the template's kind of instrument does, a grand's where the
+    /// kind is not one [`Kind`] names.
     Template(&'a Library<'a>),
     /// Rules that state them, for a library built from recordings alone.
     Rules(Rules),
@@ -183,6 +199,31 @@ impl Kind {
             _ => ALL_KEYS_DAMPED,
         }
     }
+
+    /// The [`Rules::loop_fade`] this kind of instrument has.
+    pub fn loop_fade(self) -> u16 {
+        self.fade_curve().0
+    }
+
+    /// How a held loop fades on this kind of instrument: tenths of a decibel per second
+    /// at middle C, and the semitones over which that rate doubles up the keyboard.
+    /// Vendor libraries state one rate per root, the same on every layer, on this curve.
+    /// Fitted to one library of each kind and two digital pianos; no mallet library was
+    /// at hand, so a mallet takes the grand's. Inferred from specimens; not confirmed on
+    /// hardware.
+    fn fade_curve(self) -> (u16, u8) {
+        match self {
+            Kind::ElectricGrand => (71, 15),
+            Kind::ElectricPiano => (49, 25),
+            Kind::Wurlitzer => (73, 19),
+            Kind::Clavinet => (78, 25),
+            Kind::Grand | Kind::Mallet => (52, 30),
+            Kind::Upright => (50, 33),
+            Kind::Harpsichord => (61, 33),
+            Kind::DigitalPiano => (48, 36),
+            Kind::Hybrid => (48, 37),
+        }
+    }
 }
 
 /// A [`Rules::damper_top`] above the highest key the instrument plays, so that every
@@ -196,7 +237,8 @@ pub const DEFAULT_GAIN: i8 = 50;
 ///
 /// These are the parameters a recording cannot carry, at their neutral settings: the
 /// library is heard at [`Rules::gain`], each stroke is trimmed according to its layer
-/// value, nothing is applied over the recordings' own decay, and the damper reaches
+/// value, nothing is applied over the recordings' own decay until a held note reaches
+/// its loop, which then fades at [`Rules::loop_fade`], and the damper reaches
 /// [`Rules::damper_top`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rules {
@@ -207,6 +249,11 @@ pub struct Rules {
     /// Body `0x40d`: the highest key the instrument damps at note-off. Keys above it
     /// ring on, and [`ALL_KEYS_DAMPED`] leaves none of them. Confirmed on hardware.
     pub damper_top: u8,
+    /// How fast a held loop at middle C fades, in tenths of a decibel per second, from
+    /// the loop's start until the key is released. The rate doubles up the keyboard as
+    /// [`Kind::loop_fade`]'s does for [`Rules::kind`], and 0 holds every loop at its
+    /// level. Confirmed on hardware.
+    pub loop_fade: u16,
 }
 
 impl Rules {
@@ -216,6 +263,7 @@ impl Rules {
             kind,
             gain: DEFAULT_GAIN,
             damper_top: kind.damper_top(),
+            loop_fade: kind.loop_fade(),
         }
     }
 }
@@ -240,10 +288,57 @@ pub struct Recording {
     /// One vector per channel at [`codec::RATE`], all the same length. Every
     /// recording of one library states the same channel count, 1 or 2.
     ///
-    /// The stroke holds whole blocks and all of these frames, so it also states the
-    /// silence that fills out the last block. The recording is never cut back to a
-    /// block boundary.
+    /// Without a loop, the stroke holds whole blocks and all of these frames, so it also
+    /// states the silence that fills out the last block. The recording is never cut back
+    /// to a block boundary.
     pub channels: Vec<Vec<i16>>,
+    /// Where a held note loops, in frames of [`Recording::channels`]. The stroke ends
+    /// with the block holding the loop's end, and frames past that end are replaced by
+    /// the loop. The loop's last four frames become the four before its start. A release
+    /// stroke plays once and cannot loop.
+    pub sustain: Option<Loop>,
+}
+
+/// The fewest frames a loop may hold. Its last [`SEEDS`] frames restate the ones before
+/// its start, and must not overlap them or the first frames the seeds copy.
+const SHORTEST_LOOP: usize = 2 * SEEDS;
+
+/// The loop a WAV's `smpl` chunk states, moved from its `rate` onto the stroke lattice
+/// the way [`resample`] moves the frames.
+///
+/// A loop is exact only in a source already at [`codec::RATE`]. Elsewhere its ends land
+/// on the nearest lattice frame at or before them, and its length may lose a fraction of
+/// a frame.
+pub fn sustain(found: SampleLoop, rate: u32) -> Result<Loop, Error> {
+    if rate == 0 {
+        return Err(refuse("a loop at 0 Hz has no place on the lattice"));
+    }
+    if !found.forward {
+        return Err(refuse(format!(
+            "the loop from frame {} to {} does not play forward, and a stroke loops only \
+             forward",
+            found.start, found.end
+        )));
+    }
+    let lattice = |frame: u64| frame * u64::from(codec::RATE) / u64::from(rate);
+    let start = lattice(u64::from(found.start));
+    let end = lattice(u64::from(found.end) + 1);
+    u32::try_from(start)
+        .ok()
+        .zip(
+            end.checked_sub(start)
+                .and_then(|length| u32::try_from(length).ok()),
+        )
+        .and_then(|(start, length)| Loop::new(start, length))
+        .ok_or_else(|| {
+            refuse(format!(
+                "the loop from frame {} to {} at {rate} Hz is empty or out of reach on the \
+                 {} Hz lattice",
+                found.start,
+                found.end,
+                codec::RATE
+            ))
+        })
 }
 
 /// The softest layer value a root is given when [`layer_value`] spreads it: the top
@@ -434,12 +529,27 @@ pub fn build(
     let mut order: Vec<&Recording> = recordings.iter().collect();
     order.sort_by_key(|r| (r.root, r.bank.code(), r.layer));
 
+    let fade = match donor {
+        Donor::Template(template) => {
+            Rules::new(Kind::from_code(template.kind_code()).unwrap_or_default())
+        }
+        Donor::Rules(rules) => *rules,
+    };
     let mut donors = Vec::with_capacity(order.len());
     for (index, recording) in order.iter().enumerate() {
-        donors.push(match donor {
+        let mut stated = match donor {
             Donor::Template(template) => *donor_record(template, recording)?,
-            Donor::Rules(_) => rules_record(recording, index),
-        });
+            Donor::Rules(rules) => rules_record(recording, index, rules),
+        };
+        // ⚠️ A donor stroke that never looped states 0 here, and 0 cuts the note off at
+        // the loop's start.
+        if recording.sustain.is_some() && be32(&stated, REC_DECAY) == 0 {
+            put32(&mut stated, REC_DECAY, loop_decay(&fade, recording.root));
+        }
+        let (window, trim) = velocity_window(recording.bank, recording.layer);
+        put16(&mut stated, REC_WINDOW, window);
+        put16(&mut stated, REC_TRIM, trim as u16);
+        donors.push(stated);
     }
     // A donor serving several recordings would name them all the same, so the
     // identifiers only carry over when they stay distinct.
@@ -448,8 +558,18 @@ pub fn build(
 
     for (index, (recording, donor)) in order.iter().zip(&donors).enumerate() {
         let seeds = seeds_for(&recording.channels);
-        let target = recording.channels[0].len();
-        let coded = code(&recording.channels, &seeds, target)?;
+        let (source, target) = match recording.sustain {
+            Some(sustain) => (
+                looped(&recording.channels, &seeds, sustain),
+                sustain.end() as usize,
+            ),
+            None => (
+                Cow::Borrowed(&recording.channels[..]),
+                recording.channels[0].len(),
+            ),
+        };
+        let coded = code(&source, &seeds, target)?;
+        let marks = loop_marks(recording.sustain, &coded.starts, coded.owned);
         let id = if keep_ids {
             be32(donor, REC_ID)
         } else {
@@ -464,12 +584,52 @@ pub fn build(
                 recording.layer,
                 &seeds,
                 id,
+                marks,
             )?,
             audio: Cow::Owned(coded.audio),
             from: None,
         });
     }
     Ok(library)
+}
+
+/// The frames a looped recording codes: its own up to the loop's end, then the loop
+/// again for as far as one block can reach past it.
+///
+/// The instrument keeps the predictor's history across the jump from the loop's end to
+/// its start, so the loop's last [`SEEDS`] frames are replaced by the history its start
+/// is decoded with: the frames before it, or `seeds` before the first frame. A seamless
+/// loop holds them already. Without them, the error a jump leaves grows until the note
+/// saturates within a few passes. Confirmed on hardware.
+fn looped(
+    channels: &[Vec<i16>],
+    seeds: &[[i16; SEEDS]; 2],
+    sustain: Loop,
+) -> Cow<'static, [Vec<i16>]> {
+    let (start, end) = (sustain.start() as usize, sustain.end() as usize);
+    let reach = codec::block_frames(
+        MIN_WIDTH,
+        block_bytes(channels.len() as u16),
+        channels.len(),
+    );
+    Cow::Owned(
+        channels
+            .iter()
+            .zip(seeds)
+            .map(|(channel, seeds)| {
+                let history = (start..start + SEEDS).map(|at| match at.checked_sub(SEEDS) {
+                    Some(frame) => channel[frame],
+                    None => seeds[at],
+                });
+                channel[..end - SEEDS]
+                    .iter()
+                    .copied()
+                    .chain(history)
+                    .chain(channel[start..end].iter().copied().cycle().take(reach))
+                    .collect()
+            })
+            .collect(),
+    )
 }
 
 /// The content version the container states when no template donates one: a library's
@@ -572,16 +732,17 @@ fn damper_cut(note: usize) -> u8 {
     }
 }
 
-/// The record a stroke states when no template donates one: no length marks, a decay
-/// ladder that applies nothing, the trim its layer implies, and its place in the
-/// directory as the identifier.
+/// The record a stroke states when no template donates one: a decay ladder that
+/// applies nothing, the fade `rules` state for its loop, a note-off fade for its bank,
+/// and its place in the directory as the identifier.
 ///
-/// [`record`] writes the audio's fields over this and leaves the marks at zero.
-fn rules_record(recording: &Recording, index: usize) -> [u8; RECORD] {
+/// [`record`] writes the audio's fields and the loop over this.
+fn rules_record(recording: &Recording, index: usize, rules: &Rules) -> [u8; RECORD] {
     let mut out = [0u8; RECORD];
-    let (window, trim) = velocity_window(recording.bank, recording.layer);
-    put16(&mut out, REC_WINDOW, window);
-    put16(&mut out, REC_TRIM, trim);
+    if recording.sustain.is_some() {
+        put32(&mut out, REC_DECAY, loop_decay(rules, recording.root));
+    }
+    out[REC_NOTE_OFF] = note_off_fade(recording.bank);
     for entry in 0..DECAYS {
         let at = REC_DECAYS + entry * 4;
         put32(&mut out, at, LADDER_UNITY);
@@ -590,12 +751,35 @@ fn rules_record(recording: &Recording, index: usize) -> [u8; RECORD] {
     out
 }
 
+/// Decibels per second that each unit below [`LADDER_UNITY`] at [`REC_DECAY`] fades a
+/// held loop by, whatever key plays it. Confirmed on hardware.
+const LOOP_FADE_PER_UNIT: f64 = 0.024;
+
+/// The [`REC_DECAY`] that fades a held loop on `root` at the rate `rules` state there.
+fn loop_decay(rules: &Rules, root: u8) -> u32 {
+    let (_, doubling) = rules.kind.fade_curve();
+    let octaves = (f64::from(root) - 60.0) / f64::from(doubling);
+    let per_second = f64::from(rules.loop_fade) / 10.0 * octaves.exp2();
+    LADDER_UNITY - (per_second / LOOP_FADE_PER_UNIT).round() as u32
+}
+
+/// The fade [`REC_NOTE_OFF`] states for a stroke of `bank`, inside the range vendor
+/// electric pianos hold: 26 to 35 on attack strokes and 46 to 70 on release strokes.
+/// The attack value fades a released note without a click: Confirmed on hardware. The
+/// release value: Inferred from specimens; not confirmed on hardware.
+fn note_off_fade(bank: Bank) -> u8 {
+    match bank {
+        Bank::Attack | Bank::Resonance => 32,
+        Bank::Release => 60,
+    }
+}
+
 /// The trim [`REC_TRIM`] states for a release stroke, in decibels.
-const RELEASE_TRIM: u16 = 12;
+const RELEASE_TRIM: i16 = 12;
 
 /// The largest trim [`velocity_window`] states, the top of the range the layer values
 /// are selected over ([`Stroke::layer`]).
-const WIDEST_TRIM: u16 = 31;
+const WIDEST_TRIM: i16 = 31;
 
 /// The pair at [`REC_WINDOW`] and [`REC_TRIM`] a stroke of `bank` and `layer` states.
 ///
@@ -603,12 +787,12 @@ const WIDEST_TRIM: u16 = 31;
 /// so a root's softer layers play softer than its loud ones by the amount their values
 /// state. A release stroke takes a fixed trim, since its layer value plays no part in
 /// selecting it.
-fn velocity_window(bank: Bank, layer: u8) -> (u16, u16) {
+fn velocity_window(bank: Bank, layer: u8) -> (u16, i16) {
     match bank {
         Bank::Release => (0, RELEASE_TRIM),
         Bank::Attack | Bank::Resonance => (
             u16::from(layer),
-            u16::from(layer).saturating_add(3).min(WIDEST_TRIM),
+            i16::from(layer).saturating_add(3).min(WIDEST_TRIM),
         ),
     }
 }
@@ -649,6 +833,7 @@ pub fn rebuild(library: &Library<'_>) -> Result<Rebuilt, Error> {
                 stroke.layer(),
                 &seeds,
                 stroke.id(),
+                marks_of(stroke.record()),
             )?,
             audio: Cow::Owned(coded.audio),
             from: None,
@@ -783,6 +968,28 @@ fn check_recordings(recordings: &[Recording]) -> Result<u16, Error> {
                  the largest a key ever sounds"
             )));
         }
+        match (recording.sustain, recording.bank) {
+            (Some(_), Bank::Release) => {
+                return Err(refuse(format!(
+                    "{what} has a loop; a release stroke plays once"
+                )));
+            }
+            (Some(sustain), _) if sustain.end() as usize > frames => {
+                return Err(refuse(format!(
+                    "{what} loops from frame {} to {}, past its {frames} frame(s)",
+                    sustain.start(),
+                    sustain.end()
+                )));
+            }
+            (Some(sustain), _) if (sustain.length() as usize) < SHORTEST_LOOP => {
+                return Err(refuse(format!(
+                    "{what} loops over {} frame(s), fewer than the {SHORTEST_LOOP} a loop \
+                     needs to restate the {SEEDS} before its start",
+                    sustain.length()
+                )));
+            }
+            _ => {}
+        }
         if !seen.insert((recording.root, recording.bank.code(), recording.layer)) {
             return Err(refuse(format!(
                 "{what} is recorded twice; a root's layers are numbered within one bank"
@@ -820,9 +1027,9 @@ fn key_map(roots: &BTreeSet<u8>) -> [u8; NOTES] {
 /// The template stroke a recording inherits the fields no audio predicts from: the
 /// same bank and nearest root, then the nearest layer.
 ///
-/// A release stroke zeroes the marks and the `+0x2e` decay coefficient it would
-/// inherit, so any stroke can donate to one. Any other stroke needs a non-release
-/// donor, which carries marks.
+/// A release stroke zeroes the `+0x2e` decay coefficient it would inherit, so any
+/// stroke can donate to one. Any other stroke needs a non-release donor, which carries
+/// that coefficient.
 fn donor_record<'a>(
     template: &'a Library<'_>,
     recording: &Recording,
@@ -853,8 +1060,8 @@ fn donor_record<'a>(
         .map(|s| s.record())
         .ok_or_else(|| {
             refuse(format!(
-                "the template records no stroke to take {}'s length marks and decay \
-                 coefficients from, and nothing in the audio predicts them",
+                "the template records no stroke to take {}'s decay coefficients from, \
+                 and nothing in the audio predicts them",
                 describe(recording)
             ))
         })
@@ -1138,12 +1345,11 @@ fn seeds_for(source: &[Vec<i16>]) -> [[i16; SEEDS]; 2] {
     out
 }
 
-/// A donor record with everything the audio decides written over it.
+/// A donor record with everything the audio decides written over it, and `marks`.
 ///
-/// The length marks scale with the stroke's length so they stay inside it. A release
-/// stroke declares no marks and zeroes the decay coefficient at `+0x2e`, but like a
-/// stroke of any bank it keeps the donor's fourteen-entry ladder at `+0x36`. The block
-/// index at `+0x2c` is the block holding the first mark.
+/// The block index at `+0x2c` is the block holding the loop's start. A release stroke
+/// zeroes the decay coefficient at `+0x2e`, but like a stroke of any bank it keeps the
+/// donor's fourteen-entry ladder at `+0x36`.
 fn record(
     donor: &[u8; RECORD],
     coded: &Coded,
@@ -1151,6 +1357,7 @@ fn record(
     layer: u8,
     seeds: &[[i16; SEEDS]; 2],
     id: u32,
+    marks: [u32; MARKS],
 ) -> Result<[u8; RECORD], Error> {
     let owned = u32::try_from(coded.owned).map_err(|_| ParseError::OutOfBounds {
         value: format!("{} frames", coded.owned),
@@ -1174,37 +1381,45 @@ fn record(
         }
     }
 
-    let silent = bank == Bank::Release.code();
-    let donor_frames = be32(donor, REC_FRAMES);
-    let mut first = 0u32;
-    for mark in 0..MARKS {
-        let at = REC_MARKS + mark * 4;
-        let scaled = match (silent, donor_frames) {
-            (true, _) | (_, 0) => 0,
-            _ => rescale(be32(donor, at), owned, donor_frames),
-        };
-        put32(&mut out, at, scaled);
-        if mark == 0 {
-            first = scaled;
-        }
+    for (mark, value) in marks.into_iter().enumerate() {
+        put32(&mut out, REC_MARKS + mark * 4, value);
     }
     let holding = coded
         .starts
         .iter()
-        .rposition(|&start| start as u64 <= u64::from(first))
+        .rposition(|&start| start as u64 <= u64::from(marks[0]))
         .unwrap_or(0);
     put16(&mut out, REC_MARK_BLOCK, holding as u16);
-    if silent {
+    if bank == Bank::Release.code() {
         out[REC_DECAY..REC_DECAY + 4].fill(0);
     }
     put32(&mut out, REC_ID, id);
     Ok(out)
 }
 
-/// A mark at the same place in a stroke of `owned` frames, and inside it.
-fn rescale(mark: u32, owned: u32, donor_frames: u32) -> u32 {
-    let moved = u64::from(mark) * u64::from(owned) / u64::from(donor_frames);
-    moved.min(u64::from(owned.saturating_sub(1))) as u32
+/// The marks `sustain` states over blocks starting at `starts`: the loop's start and
+/// length, then the first frame of the block holding the start and of the next block,
+/// which is `owned` past the last. All zero without a loop.
+fn loop_marks(sustain: Option<Loop>, starts: &[usize], owned: usize) -> [u32; MARKS] {
+    let Some(sustain) = sustain else {
+        return [0; MARKS];
+    };
+    let holding = starts
+        .iter()
+        .rposition(|&start| start as u64 <= u64::from(sustain.start()))
+        .unwrap_or(0);
+    let first = |block: usize| starts.get(block).map_or(owned, |&start| start) as u32;
+    [
+        sustain.start(),
+        sustain.length(),
+        first(holding),
+        first(holding + 1),
+    ]
+}
+
+/// The marks a record states, kept as they are when its stroke is coded again.
+fn marks_of(record: &[u8; RECORD]) -> [u32; MARKS] {
+    std::array::from_fn(|mark| be32(record, REC_MARKS + mark * 4))
 }
 
 /// How `coded` compares with the span it was coded from, block by block.
@@ -1232,8 +1447,9 @@ mod tests {
     use super::*;
     use crate::formats::npno::{be16, Piano, DECAYS};
 
-    /// A one-stroke library to donate from: a prefix and one record holding marks and a
-    /// full decay ladder for a new stroke to inherit, over a decodable block of silence.
+    /// A one-stroke library to donate from: a prefix and one record holding a loop and a
+    /// full decay ladder, over a decodable block of silence. A new stroke inherits the
+    /// ladder and none of the loop.
     fn template(channels: u16) -> Piano {
         let mut build = Build::new();
         build.channels = channels;
@@ -1269,6 +1485,7 @@ mod tests {
             bank,
             layer,
             channels,
+            sustain: None,
         }
     }
 
@@ -1511,11 +1728,12 @@ mod tests {
         assert_eq!(values, [0, 6, 12]);
     }
 
-    /// Only the coefficient at `+0x2e` depends on the bank. A release stroke built from a
-    /// donor with all fifteen coefficients zeroes that one and keeps the donor's
-    /// fourteen-entry ladder, as a stroke of any other bank does.
+    /// A stroke built without a loop declares none, even from a donor that has one. A
+    /// release stroke built from a donor with all fifteen coefficients zeroes the one at
+    /// `+0x2e` and keeps the donor's fourteen-entry ladder, as a stroke of any other bank
+    /// does.
     #[test]
-    fn a_release_stroke_declares_no_marks_and_zeroes_one_decay_coefficient() {
+    fn a_stroke_without_a_loop_declares_none_and_a_release_zeroes_one_decay_coefficient() {
         let short = tone(6_000, 300.0, 1);
         let piano = round_trip(
             1,
@@ -1531,26 +1749,298 @@ mod tests {
             let marks: Vec<u32> = (0..MARKS)
                 .map(|m| be32(record, REC_MARKS + m * 4))
                 .collect();
+            assert_eq!(marks, [0; MARKS], "{stroke:?} declares no loop");
+            assert_eq!(be16(record, REC_MARK_BLOCK), 0);
             assert_eq!(
                 stroke.ladder(),
                 donated,
                 "a stroke of any bank inherits the donor's ladder unchanged"
             );
-            if stroke.bank() == Some(Bank::Release) {
-                assert_eq!(marks, [0; MARKS], "a release stroke declares no marks");
+            let decay = stroke.decay();
+            match stroke.bank() {
+                Some(Bank::Release) => assert_eq!(decay, 0, "a release zeroes +0x2e"),
+                _ => assert_eq!(decay, 0x2000, "another bank inherits the donor's +0x2e"),
+            }
+        }
+    }
+
+    /// The frame each of `stroke`'s blocks starts at, read off the block headers: every
+    /// block owns its frame count less the overlap it restates.
+    fn block_starts(stroke: &Stroke<'_>, channels: u16) -> Vec<u32> {
+        let block = block_bytes(channels);
+        let mut at = 0;
+        stroke
+            .audio()
+            .chunks_exact(block)
+            .map(|header| {
+                let start = at;
+                let width = header[1] & 0x1f;
+                at += (codec::block_frames(width, block, usize::from(channels)) - OVERLAP) as u32;
+                start
+            })
+            .collect()
+    }
+
+    /// A looped stroke codes its recording up to the loop's last four frames and then
+    /// the loop again, ends with the block holding the loop's end, and states the loop
+    /// and the blocks around its start the way vendor strokes do.
+    #[test]
+    fn a_looped_stroke_repeats_its_loop_and_marks_the_blocks_around_its_start() {
+        for channels in [1u16, 2] {
+            let mut source = tone(30_000, 220.0, usize::from(channels));
+            for channel in &mut source {
+                channel[25_000..].fill(1234);
+            }
+            let sustain = Loop::new(14_321, 7_000).unwrap();
+            let mut looped = one(60, Bank::Attack, 0, source.clone());
+            looped.sustain = Some(sustain);
+            let piano = round_trip(channels, &[looped]);
+            let library = piano.library().unwrap();
+            let stroke = &library.strokes()[0];
+            let audio = codec::decode(stroke, channels).unwrap();
+
+            let (start, end) = (sustain.start() as usize, sustain.end() as usize);
+            let starts = block_starts(stroke, channels);
+            let last = *starts.last().unwrap() as usize;
+            assert!(
+                (last..audio.frames()).contains(&end),
+                "the stroke ends with the block holding the loop's end {end}: blocks from \
+                 {last} to {}",
+                audio.frames()
+            );
+            for (lane, original) in audio.lanes.iter().zip(&source) {
                 assert_eq!(
-                    stroke.decay(),
-                    0,
-                    "a release stroke zeroes the coefficient at +0x2e"
+                    lane[..end - SEEDS],
+                    original[..end - SEEDS],
+                    "the recording up to the loop's last four frames"
                 );
-            } else {
-                assert!(marks.iter().all(|&m| m > 0 && m < stroke.frames()));
-                assert_ne!(
-                    stroke.decay(),
-                    0,
-                    "a stroke of another bank inherits the donor's coefficient at +0x2e"
+                let again: Vec<i16> = original[start..end]
+                    .iter()
+                    .cycle()
+                    .take(lane.len() - end)
+                    .copied()
+                    .collect();
+                assert_eq!(lane[end..], again[..], "the loop again past its end");
+            }
+
+            let holding = starts.iter().rposition(|&s| s <= sustain.start()).unwrap();
+            let marks: Vec<u32> = (0..MARKS)
+                .map(|m| be32(stroke.record(), REC_MARKS + m * 4))
+                .collect();
+            let next = starts.get(holding + 1).copied().unwrap_or(stroke.frames());
+            assert_eq!(
+                marks,
+                [14_321, 7_000, starts[holding], next],
+                "{channels} channel(s)"
+            );
+            assert_eq!(usize::from(be16(stroke.record(), REC_MARK_BLOCK)), holding);
+            assert_eq!(stroke.sustain(), Some(sustain));
+        }
+    }
+
+    /// The instrument keeps the predictor's history across the jump from a loop's end to
+    /// its start, so a loop ends on the history its start is decoded with: the frames
+    /// before it, or the record's seeds for a loop that starts at the beginning.
+    #[test]
+    fn a_loop_ends_on_the_history_its_start_is_decoded_with() {
+        for (channels, start) in [(1u16, 9_000u32), (2, 9_000), (1, 0), (2, 2)] {
+            let mut looped = one(
+                55,
+                Bank::Attack,
+                0,
+                tone(20_000, 196.0, usize::from(channels)),
+            );
+            looped.sustain = Loop::new(start, 4_500);
+            let piano = round_trip(channels, &[looped]);
+            let library = piano.library().unwrap();
+            let stroke = &library.strokes()[0];
+            let audio = codec::decode(stroke, channels).unwrap();
+            let (start, end) = (start as usize, start as usize + 4_500);
+            for (lane, seeds) in audio.lanes.iter().zip(stroke.seeds()) {
+                let history: Vec<i16> = seeds.iter().chain(lane).copied().collect();
+                assert_eq!(
+                    history[end..end + SEEDS],
+                    history[start..start + SEEDS],
+                    "{channels} channel(s), loop from {start}: the history at the loop's end"
                 );
             }
+        }
+    }
+
+    /// A loop that runs past the recording's end, one too short to restate the history
+    /// before its start, or one on a release stroke, which plays once, is refused before
+    /// anything is coded.
+    #[test]
+    fn a_loop_a_stroke_cannot_play_is_refused() {
+        let short = tone(6_000, 300.0, 1);
+        let cases = [
+            (
+                Bank::Attack,
+                Loop::new(5_000, 1_001),
+                "past its 6000 frame(s)",
+            ),
+            (Bank::Attack, Loop::new(100, 7), "fewer than the 8"),
+            (
+                Bank::Release,
+                Loop::new(0, 1_000),
+                "a release stroke plays once",
+            ),
+        ];
+        for (bank, sustain, reason) in cases {
+            let mut recording = one(60, bank, 0, short.clone());
+            recording.sustain = sustain;
+            let error = build(
+                &Donor::Rules(Rules::default()),
+                &Options::new("L"),
+                &[recording],
+            )
+            .expect_err("expected a refusal")
+            .to_string();
+            assert!(error.contains(reason), "want {reason:?}, got {error}");
+        }
+    }
+
+    /// Without a template a held loop fades as a vendor loop of the library's kind does: a
+    /// grand's 5.2 dB/s at middle C, doubling every 30 semitones up the keyboard. A
+    /// stroke that never loops states no fade, and a fade of 0 holds every loop.
+    #[test]
+    fn a_rule_written_loop_fades_faster_up_the_keyboard() {
+        let short = tone(6_000, 300.0, 1);
+        let looped = |root| {
+            let mut recording = one(root, Bank::Attack, 0, short.clone());
+            recording.sustain = Loop::new(2_000, 3_000);
+            recording
+        };
+        let recordings = [
+            looped(30),
+            looped(60),
+            looped(90),
+            one(72, Bank::Attack, 0, short.clone()),
+        ];
+        let fades = |rules| {
+            let built = build(&Donor::Rules(rules), &Options::new("L"), &recordings).unwrap();
+            built
+                .strokes()
+                .iter()
+                .map(|s| (s.root, LADDER_UNITY - s.decay()))
+                .collect::<Vec<_>>()
+        };
+        // At 0.024 dB/s per unit: 5.2 dB/s is 217 units, 2.6 is 108, 10.4 is 433.
+        assert_eq!(
+            fades(Rules::new(Kind::Grand)),
+            [(30, 108), (60, 217), (72, LADDER_UNITY), (90, 433)]
+        );
+        let held = Rules {
+            loop_fade: 0,
+            ..Rules::new(Kind::Grand)
+        };
+        assert_eq!(fades(held), [(30, 0), (60, 0), (72, LADDER_UNITY), (90, 0)]);
+    }
+
+    /// The fastest fade a caller can state, on the top key of every kind's curve, still
+    /// leaves a coefficient between silence and unity.
+    #[test]
+    fn the_fastest_loop_fade_fits_its_field_on_every_kind() {
+        for kind in Kind::ALL {
+            let rules = Rules {
+                loop_fade: u16::MAX,
+                ..Rules::new(kind)
+            };
+            let decay = loop_decay(&rules, 127);
+            assert!(decay > 0 && decay < LADDER_UNITY, "{kind:?}: {decay:#x}");
+        }
+    }
+
+    /// A looped recording takes its template stroke's loop fade. Where that stroke never
+    /// looped and states none, the loop fades as the template's kind does rather than
+    /// going silent at the loop's start.
+    #[test]
+    fn a_loop_built_against_a_template_that_never_looped_fades_as_its_kind() {
+        let short = tone(6_000, 300.0, 1);
+        let looped = || {
+            let mut recording = one(60, Bank::Attack, 0, short.clone());
+            recording.sustain = Loop::new(2_000, 3_000);
+            recording
+        };
+        let unlooped = build(
+            &Donor::Rules(Rules::new(Kind::Wurlitzer)),
+            &Options::new("Plain"),
+            &[one(60, Bank::Attack, 0, short.clone())],
+        )
+        .unwrap();
+        let faded = template(1);
+        // A Wurlitzer fades 7.3 dB/s at C4: 304 units of 0.024 dB/s below unity.
+        let wurlitzer = LADDER_UNITY - 304;
+        for (template, fade) in [(unlooped, wurlitzer), (faded.library().unwrap(), 0x2000)] {
+            let built =
+                build(&Donor::Template(&template), &Options::new("L"), &[looped()]).unwrap();
+            assert_eq!(built.strokes()[0].decay(), fade);
+        }
+    }
+
+    /// A template's trim belongs to its own layer, so a stroke built against it is
+    /// trimmed by its own layer value, as a rule-written stroke is.
+    #[test]
+    fn a_template_build_trims_each_stroke_by_its_own_layer() {
+        let donor = template(1);
+        let mut library = donor.library().unwrap();
+        put16(&mut library.strokes[0].record, REC_TRIM, 20);
+        let short = tone(6_000, 300.0, 1);
+        let built = build(
+            &Donor::Template(&library),
+            &Options::new("Synth"),
+            &[
+                one(60, Bank::Attack, 0, short.clone()),
+                one(60, Bank::Attack, 9, short.clone()),
+                one(60, Bank::Release, 0, short),
+            ],
+        )
+        .unwrap();
+        let trims: Vec<(u8, i16)> = built
+            .strokes()
+            .iter()
+            .map(|s| (s.layer(), s.trim()))
+            .collect();
+        assert_eq!(trims, [(0, 3), (9, 12), (0, RELEASE_TRIM)]);
+    }
+
+    /// A WAV's loop counts the last frame as part of the loop. On the lattice it keeps
+    /// its frames exactly, and from another rate both ends land at or before where they
+    /// fall.
+    #[test]
+    fn a_wav_loop_moves_onto_the_lattice_with_its_frames() {
+        let at = |start, end| SampleLoop {
+            start,
+            end,
+            forward: true,
+        };
+        assert_eq!(
+            sustain(at(100, 199), codec::RATE).unwrap(),
+            Loop::new(100, 100).unwrap()
+        );
+        // 44,100 frames are 35,002 on the lattice; 1,000 → 793.69 and 2,000 → 1,587.39.
+        assert_eq!(
+            sustain(at(1_000, 1_999), 44_100).unwrap(),
+            Loop::new(793, 794).unwrap()
+        );
+
+        let error = sustain(at(0, 99), 0).unwrap_err().to_string();
+        assert!(error.contains("0 Hz"), "{error}");
+        let refused = [
+            (
+                SampleLoop {
+                    forward: false,
+                    ..at(0, 99)
+                },
+                "does not play forward",
+            ),
+            // Frames 4 and 5 both fall inside lattice frame 3, so a one-frame loop vanishes.
+            (at(4, 4), "empty"),
+            (at(100, 0), "empty"),
+        ];
+        for (found, reason) in refused {
+            let error = sustain(found, 44_100).unwrap_err().to_string();
+            assert!(error.contains(reason), "want {reason:?}, got {error}");
         }
     }
 
@@ -1576,6 +2066,7 @@ mod tests {
             kind: Kind::Wurlitzer,
             gain: -20,
             damper_top: 97,
+            loop_fade: Kind::Wurlitzer.loop_fade(),
         };
         let built = build(
             &Donor::Rules(rules),
@@ -1598,7 +2089,7 @@ mod tests {
             "the kind names its own damper limit"
         );
 
-        let stated: Vec<(u8, u16, u16, u32)> = built
+        let stated: Vec<(u8, u16, i16, u32)> = built
             .strokes()
             .iter()
             .map(|s| {
@@ -1627,6 +2118,34 @@ mod tests {
             again.library.to_body().unwrap(),
             built.to_body().unwrap(),
             "a rule-written library is not a fixed point of a recode"
+        );
+    }
+
+    #[test]
+    fn a_rule_written_stroke_fades_out_at_note_off() {
+        let short = tone(6_000, 300.0, 1);
+        let built = build(
+            &Donor::Rules(Rules::new(Kind::ElectricPiano)),
+            &Options::new("Tines"),
+            &[
+                one(60, Bank::Attack, 0, short.clone()),
+                one(60, Bank::Resonance, 0, short.clone()),
+                one(60, Bank::Release, 0, short),
+            ],
+        )
+        .unwrap();
+        let fades: Vec<(Option<Bank>, u8)> = built
+            .strokes()
+            .iter()
+            .map(|s| (s.bank(), s.note_off_fade()))
+            .collect();
+        assert_eq!(
+            fades,
+            [
+                (Some(Bank::Attack), 32),
+                (Some(Bank::Resonance), 32),
+                (Some(Bank::Release), 60)
+            ]
         );
     }
 
@@ -1898,10 +2417,7 @@ mod tests {
         )
         .expect_err("expected a refusal")
         .to_string();
-        assert!(
-            error.contains("length marks and decay coefficients"),
-            "{error}"
-        );
+        assert!(error.contains("decay coefficients"), "{error}");
     }
 
     /// A recording followed by digital silence, which is what a take trimmed to a
@@ -1918,11 +2434,14 @@ mod tests {
     /// container around them. A stroke states only the frames its blocks own, so the
     /// width search gets the same room the second time.
     ///
-    /// The cases end the recording inside a single block, partway down a decay, and
-    /// after it has reached digital silence.
+    /// The cases end the recording inside a single block, partway down a decay, after
+    /// it has reached digital silence, and at a loop's end.
     #[test]
     fn rebuilding_a_library_this_module_wrote_reproduces_every_block() {
-        let cases: [(&str, u16, Vec<Recording>); 4] = [
+        let mut looped = one(55, Bank::Attack, 0, tone(20_000, 196.0, 2));
+        looped.sustain = Loop::new(9_000, 4_500);
+        let cases: [(&str, u16, Vec<Recording>); 5] = [
+            ("a looped stereo stroke", 2, vec![looped]),
             (
                 "a source shorter than one block",
                 2,

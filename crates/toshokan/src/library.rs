@@ -376,6 +376,17 @@ impl Library {
         })
     }
 
+    /// Lets go of what the next undo would reverse, as once its undo is refused:
+    /// the next undo reaches this session's intent before it.
+    pub fn forget_undo(&mut self) {
+        self.history.forget_undo();
+    }
+
+    /// Lets go of what the next redo would reverse, as once its redo is refused.
+    pub fn forget_redo(&mut self) {
+        self.history.forget_redo();
+    }
+
     /// Settles now this writer's effects a crash interrupted, as
     /// [`Opened::settled`] reports them, rather than before its next write, so the
     /// files they moved are where their outcome puts them.
@@ -644,7 +655,9 @@ impl Library {
     /// segments of its directory the snapshot certifies. A writer also compacts
     /// at close and every [`COMPACT_AFTER`] entries. Refused with
     /// [`Refusal::Nothing`] when this instance writes as no writer yet, and when
-    /// a snapshot in the writer's directory already has its last entry. Fails
+    /// a snapshot in the writer's directory already has its last entry, and with
+    /// [`Refusal::SnapshotTooLong`] when the snapshot would be longer than a
+    /// reader holds, writing nothing. Fails
     /// with [`Error::Rekey`] when the writer's history forked or the folder lost
     /// its last entry, and the instance stops writing as it. This writer's
     /// interrupted effects are settled first, and a failure to settle them fails

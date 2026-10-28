@@ -407,7 +407,8 @@ impl Report {
             }
             State::Refused(403) => "Only drawbar.app can send reports.".to_string(),
             State::Refused(429) => {
-                "drawbar has had too many reports today. Please try again tomorrow.".to_string()
+                "drawbar has had too many reports just now. Please try again in a minute."
+                    .to_string()
             }
             State::Refused(status) => format!("The report was not accepted (error {status})."),
         }

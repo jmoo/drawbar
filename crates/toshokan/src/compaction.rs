@@ -12,7 +12,7 @@ use crate::io::{Capabilities, Io, Range, Root, Task};
 use crate::line;
 use crate::log::{Entry, EntryKind, Own};
 use crate::path::RelPath;
-use crate::reader::{Reader, Stamp, WriterFile};
+use crate::reader::{Reader, Stamp, WriterFile, MAX_FILE};
 use crate::report::{Compacted, Rekey};
 use crate::snapshot::{SegmentCert, Snapshot};
 use crate::writer::Writer;
@@ -36,7 +36,9 @@ use crate::writer::Writer;
 /// with [`Refusal::Nothing`] when a snapshot the reader found in the writer's
 /// directory already has its head; it then writes
 /// nothing, deletes what that snapshot lets it that a compaction cut short
-/// left, and confirms its head from that snapshot from then on.
+/// left, and confirms its head from that snapshot from then on. Refused with
+/// [`Refusal::SnapshotTooLong`], writing nothing, when the snapshot would be
+/// longer than a reader holds.
 pub fn compact(
     writer: Writer,
     reader: &Reader,
@@ -97,25 +99,29 @@ pub fn compact(
                 .state
                 .trash
                 .retain(|item, _| held.contains(&item.to_string()));
+            let bytes = snapshot.encode();
+            if bytes.len() as u64 > MAX_FILE {
+                let refused = Error::Refused(Refusal::SnapshotTooLong);
+                return Flow::Done((writer, Err(refused)));
+            }
             writer.head_held().then(move |held| match held {
                 Ok(true) => writer
                     .seal()
-                    .then(move |(writer, sealed)| Flow::Done((writer, sealed.map(|()| snapshot)))),
+                    .then(move |(writer, sealed)| Flow::Done((writer, sealed.map(|()| bytes)))),
                 Ok(false) => Flow::Done((writer, Err(lost()))),
                 Err(error) => Flow::Done((writer, Err(error))),
             })
         })
-        .then(move |(mut writer, sealed): (Writer, Result<Snapshot>)| {
-            let bytes = sealed.as_ref().map(Snapshot::encode).unwrap_or_default();
+        .then(move |(mut writer, sealed): (Writer, Result<Vec<u8>>)| {
+            let bytes = match sealed {
+                Ok(bytes) => bytes,
+                Err(error) => return Flow::Done((writer, Err(error))),
+            };
             let (len, tail) = (
                 bytes.len() as u64,
                 bytes[bytes.len() - ending(&bytes)..].to_vec(),
             );
-            let written = match sealed {
-                Ok(_) => write_snapshot(path.clone(), dir.clone(), staged, bytes),
-                Err(error) => Flow::Done(Err(error)),
-            };
-            written.then(move |written| {
+            write_snapshot(path.clone(), dir.clone(), staged, bytes).then(move |written| {
                 match written {
                     Ok(true) => {}
                     Ok(false) => return Flow::Done((writer, Err(lost()))),

@@ -360,11 +360,17 @@ enum PianoAction {
     /// Each WAV's name gives the root, bank and layer it holds. Any sample rate is
     /// resampled to the rate the instrument plays at.
     ///
-    /// What the audio does not decide (the length marks, decay coefficients, per-note
-    /// tables, playback parameters and stream version) comes from `--template`, taken
-    /// from the template's stroke of the same bank and nearest root. Without a template,
-    /// the library uses neutral playback: no decay over the recordings, each stroke
-    /// trimmed by its own layer value, and the damper limit that `--kind` implies.
+    /// What the audio does not decide (the decay coefficients, per-note tables,
+    /// playback parameters and stream version) comes from `--template`, taken from the
+    /// template's stroke of the same bank and nearest root. Without a template, the
+    /// library uses neutral playback: no decay over the recordings, held loops fading as
+    /// the instrument's own pianos of `--kind` do, a fade at key-up, and the damper limit
+    /// that `--kind` implies. Either way, each stroke is trimmed by its own layer value.
+    ///
+    /// A WAV whose `smpl` chunk declares a loop builds a stroke that loops there while
+    /// the key is held; the WAV's frames past the loop's end are not used, and the
+    /// loop's last four frames become the four before its start, as a seamless loop has
+    /// them already. Any other stroke plays to its end. A release stroke cannot loop.
     ///
     /// Every key up to one semitone above the highest root sounds, playing the nearest
     /// root at or above it. Keys past that are silent. A key plays the largest layer
@@ -373,8 +379,10 @@ enum PianoAction {
     /// range.
     ///
     /// Confirmed on hardware: a library built this way loads and plays, mono and
-    /// stereo, on every key it covers. With the same source audio, libraries built with
-    /// and without a template sound the same.
+    /// stereo, on every key it covers, and its loops sustain at an even level. With the
+    /// same source audio, libraries built with and without a template sound the same
+    /// while a key is held, and one built without a template fades a note out within
+    /// about 30 ms of key-up.
     Build(piano::BuildArgs),
 
     /// Re-encode a library's audio from its decoded frames, and report how each
@@ -529,7 +537,10 @@ enum LiveSlotAction {
         at: String,
     },
 
-    /// List the piano and sample library objects the live panel uses. Read-only.
+    /// List the piano and sample ids the live panel stores. Read-only.
+    ///
+    /// The instrument names no dependencies for live slots, so a slot is read and its
+    /// stored ids printed, as for a file.
     Deps {
         /// Slot to inspect (1:1, 1:2 or 1:3), or a file.
         #[arg(value_name = "FILE|BANK:SLOT")]

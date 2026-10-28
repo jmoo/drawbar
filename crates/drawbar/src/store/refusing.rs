@@ -121,6 +121,7 @@ impl Refusing {
                         label,
                         made: None,
                         undoable: false,
+                        forgot: false,
                         result: Err(why.to_string()),
                     },
                     false => Event::Unheard { label },

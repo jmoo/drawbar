@@ -903,6 +903,10 @@ fn items(
     };
     let known_before =
         |field: &FieldKey, n: u64| merged_own.iter().any(|(f, at)| f == field && *at < n);
+    // An unplaced line is an older or diverged copy of what the merge holds from
+    // there on: the writer's own later history already decided what it wrote.
+    let known_since =
+        |field: &FieldKey, n: u64| merged_own.iter().any(|(f, at)| f == field && *at >= n);
     let taken = |field: &FieldKey| kills.takes.contains_key(&(field.clone(), w.writer));
     // A tip's own write the merge leaves out, above the fork point or dismissed,
     // that replaced an own write the merge does not hold: a forgotten basis.
@@ -1009,6 +1013,9 @@ fn items(
             group.span = widen(group.span, entry.at());
             for op in contribution::ops(&entry.kind()) {
                 for write in contribution::said(op).writes {
+                    if kind == ItemKind::Unplaced && known_since(&write.field, entry.n()) {
+                        continue;
+                    }
                     group.writes.push((
                         write.field,
                         entry.own().of(w.writer),
@@ -1033,7 +1040,8 @@ fn items(
                 .map(|(field, write)| (field.clone(), write.clone())),
         );
         let shown_empty = group.kind == ItemKind::Run && group.entries > 0;
-        if latest.is_empty() && !shown_empty {
+        let dismissed = group.kind == ItemKind::Unplaced && dismissals.0.contains(&group.run);
+        if dismissed || (latest.is_empty() && !shown_empty) {
             continue;
         }
         items.push(Item {
@@ -1490,6 +1498,49 @@ mod tests {
                 "{case}: a forked tip is shown as an item"
             );
         }
+    }
+
+    #[test]
+    fn unplaced_lines_show_only_what_the_writers_own_later_history_never_decided() {
+        let entries = chain(W, &["a", "b", "c"]);
+        let tip = folded(&entries);
+        let other = Op::Write {
+            entity: E,
+            key: "j".into(),
+            value: Some(Raw::of(&"x").unwrap()),
+            replaces: Vec::new(),
+            take: None,
+        };
+        let diverged = entry(Some(&entries[0]), vec![set("x", Vec::new()), other], "x");
+        let diverged = vec![Rc::clone(&entries[0]), diverged];
+        let dismissing = dismissal(&diverged[1], &diverged[1]);
+        let fields = |copy: &[Rc<Entry>], dismissed: bool| -> Vec<FieldKey> {
+            let mut seen = vec![(
+                W,
+                Seen {
+                    segments: vec![lines(copy, false)],
+                    snapshots: vec![Rc::clone(&tip)],
+                },
+            )];
+            if dismissed {
+                let segments = vec![lines(&dismissing, false)];
+                let snapshots = Vec::new();
+                seen.push((
+                    X,
+                    Seen {
+                        segments,
+                        snapshots,
+                    },
+                ));
+            }
+            let derived = derived(seen);
+            let items = derived.items.get(&W).into_iter().flatten();
+            items.flat_map(|item| item.change.keys().cloned()).collect()
+        };
+        assert!(fields(&entries[..2], false).is_empty(), "a dropped version");
+        let only_its_own = FieldKey::Register(E, contribution::name("j"));
+        assert_eq!(fields(&diverged, false), [only_its_own], "a diverged copy");
+        assert!(fields(&diverged, true).is_empty(), "until it is dismissed");
     }
 
     #[test]

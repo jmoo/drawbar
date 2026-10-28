@@ -14,7 +14,7 @@ use toshokan::error::{Refusal, Why};
 use toshokan::io::{IoError, Kind, Range, Root};
 use toshokan::log::Settlement;
 use toshokan::plan::FactChange;
-use toshokan::report::{Item, Mode, Refreshed, Rekey, Start, What};
+use toshokan::report::{Item, ItemChange, ItemKind, Mode, Refreshed, Rekey, Start, What};
 use toshokan::{EntryHash, Env, Error, Expect, Nonce, RelPath, View};
 
 use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES};
@@ -112,19 +112,20 @@ impl<F: Fs> Keeper<F> {
             Cmd::Intent(intent) => {
                 let label = intent.label().to_string();
                 let committed = self.commit(intent, answer).await;
-                self.made(label, committed, answer).await;
+                self.made(label, committed, false, answer).await;
             }
             Cmd::Undo => {
-                let undone = self.undone(false).await;
-                self.made("Undo".to_string(), undone, answer).await;
+                let (undone, forgot) = self.undone(false).await;
+                self.made("Undo".to_string(), undone, forgot, answer).await;
             }
             Cmd::Redo => {
-                let redone = self.undone(true).await;
-                self.made("Redo".to_string(), redone, answer).await;
+                let (redone, forgot) = self.undone(true).await;
+                self.made("Redo".to_string(), redone, forgot, answer).await;
             }
             Cmd::Settle { orphan, how } => {
                 let settled = self.settled(orphan, how).await;
-                self.made("Settle".to_string(), settled, answer).await;
+                self.made("Settle".to_string(), settled, false, answer)
+                    .await;
             }
             Cmd::Draft {
                 of,
@@ -176,26 +177,33 @@ impl<F: Fs> Keeper<F> {
         &mut self,
         label: String,
         committed: Result<(Option<Made>, Viewed), String>,
+        forgot: bool,
         answer: &mut impl FnMut(Event),
     ) {
         let made = committed.as_ref().ok().and_then(|(made, _)| *made);
         self.session.extend(made.map(|(entry, _)| entry));
         // Ahead of the change's own answer, which is all a sender waits for.
-        let mode = self.library.as_ref().map(Library::mode);
-        if let (Some(Mode::ReadOnly(why)), false) = (mode, self.told_read_only) {
-            self.told_read_only = true;
-            answer(Event::ReadOnly(read_only(why)));
-        }
+        self.tell_read_only(answer);
         answer(Event::Committed {
             label,
             made: made.map(|(entry, _)| entry),
             undoable: made.is_some_and(|(_, undoable)| undoable),
+            forgot,
             result: committed.map(|(_, viewed)| viewed),
         });
         if made.is_some() {
             if let Some(trimmed) = self.empty_trash().await {
                 answer(trimmed);
             }
+        }
+    }
+
+    /// Say once that the library may no longer be written, where it may not.
+    fn tell_read_only(&mut self, answer: &mut impl FnMut(Event)) {
+        let mode = self.library.as_ref().map(Library::mode);
+        if let (Some(Mode::ReadOnly(why)), false) = (mode, self.told_read_only) {
+            self.told_read_only = true;
+            answer(Event::ReadOnly(read_only(why)));
         }
     }
 
@@ -223,7 +231,7 @@ impl<F: Fs> Keeper<F> {
         }
         let emptied = match library.empty_trash(kept).await {
             Ok(emptied) => emptied,
-            Err(e) => return Some(Event::Unkept(format!("emptying the trash: {e}"))),
+            Err(e) => return Some(Event::Unkept(format!("emptying the trash: {}", told(&e)))),
         };
         let gone = held
             .iter()
@@ -328,16 +336,17 @@ impl<F: Fs> Keeper<F> {
         let (fs, env) = self.unopened.take().ok_or("the library opened before")?;
         let (mut library, opened) = Library::open(fs, keys::layout(), &keys::schema(), env)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| told(&e))?;
         let mut trouble = Vec::new();
         if opened.mode == Mode::Writable {
+            let finishing = |e: Error| format!("finishing a change: {}", told(&e));
             let settled = library.settle_interrupted().await;
             let failed = settled.err().filter(|e| !matches!(e, Error::ReadOnly(_)));
-            trouble.extend(failed.map(|e| format!("finishing a change: {e}")));
+            trouble.extend(failed.map(finishing));
             // Another window of this install left these: they are ours to finish.
             for orphan in opened.orphaned.into_iter().filter(|orphan| orphan.ours) {
                 let settled = library.settle(orphan, Settlement::Finished).await;
-                trouble.extend(settled.err().map(|e| format!("finishing a change: {e}")));
+                trouble.extend(settled.err().map(finishing));
             }
         }
         let older = super::older::found(library.fs()).await;
@@ -398,7 +407,7 @@ impl<F: Fs> Keeper<F> {
             true => library.rescan().await,
             false => library.refresh().await,
         };
-        let mut refreshed = refreshed.map_err(|e| e.to_string())?;
+        let mut refreshed = refreshed.map_err(|e| told(&e))?;
         // Another window of this install left these and closed since: they are ours to
         // finish, as at open. One that will not finish is the user's to settle.
         let (ours, theirs) = std::mem::take(&mut refreshed.orphaned)
@@ -419,27 +428,37 @@ impl<F: Fs> Keeper<F> {
     }
 
     /// Undo, or redo where `again`, and the view after it, with the files no entity is
-    /// bound to that it moved for the app to follow.
-    async fn undone(&mut self, again: bool) -> Result<(Option<Made>, Viewed), String> {
-        let library = self.library.as_mut().ok_or("the library is not open")?;
+    /// bound to that it moved for the app to follow. One refused is let go of, which
+    /// the second value says.
+    async fn undone(&mut self, again: bool) -> (Result<(Option<Made>, Viewed), String>, bool) {
+        let Some(library) = self.library.as_mut() else {
+            return (Err("the library is not open".to_string()), false);
+        };
         let committed = match again {
             true => library.redo().await,
             false => library.undo().await,
         };
-        let committed = committed.map_err(|e| e.to_string())?;
-        let path = |path: Option<RelPath>| path.and_then(|path| LibPath::parse(path.as_str()));
-        let trees = committed.trees.into_iter();
-        let trees = trees.map(|(from, to)| (path(Some(from)), path(Some(to))));
-        let paths = committed.paths.into_iter();
-        let paths = paths.map(|moved| (path(moved.from), path(moved.to)));
-        let paths = trees.chain(paths);
+        let committed = match committed {
+            Ok(committed) => committed,
+            Err(e @ Error::Refused(_)) => {
+                match again {
+                    true => library.forget_redo(),
+                    false => library.forget_undo(),
+                }
+                return (Err(told(&e)), true);
+            }
+            Err(e) => return (Err(told(&e)), false),
+        };
         let viewed = Viewed {
-            undone: Some(paths.collect()),
+            followed: Some(followed(&committed)),
             dirs: Some(folders(library.fs()).await),
             left: shown_paths(&committed.left),
             ..committed_view(library, &mut self.shown, committed.changes)
         };
-        Ok((Some((committed.intent, committed.undoable)), viewed))
+        (
+            Ok((Some((committed.intent, committed.undoable)), viewed)),
+            false,
+        )
     }
 
     /// Settle another writer's unfinished change, and the view after it.
@@ -449,11 +468,9 @@ impl<F: Fs> Keeper<F> {
         how: Settlement,
     ) -> Result<(Option<Made>, Viewed), String> {
         let library = self.library.as_mut().ok_or("the library is not open")?;
-        let committed = library
-            .settle(orphan, how)
-            .await
-            .map_err(|e| e.to_string())?;
+        let committed = library.settle(orphan, how).await.map_err(|e| told(&e))?;
         let viewed = Viewed {
+            followed: Some(followed(&committed)),
             dirs: Some(folders(library.fs()).await),
             ..committed_view(library, &mut self.shown, committed.changes)
         };
@@ -479,7 +496,7 @@ impl<F: Fs> Keeper<F> {
             looked = library
                 .rescan_paths(paths)
                 .await
-                .map_err(|e| e.to_string())?
+                .map_err(|e| told(&e))?
                 .changes;
         }
         let changes = match intent {
@@ -489,7 +506,7 @@ impl<F: Fs> Keeper<F> {
                 // first leaves that only to one that adopts it in the moment between.
                 let mut changes = Vec::new();
                 if files.iter().any(|key| matches!(key, Key::File(_))) {
-                    changes = library.refresh().await.map_err(|e| e.to_string())?.changes;
+                    changes = library.refresh().await.map_err(|e| told(&e))?.changes;
                 }
                 let mut committed = facts(library, label, |built, view| {
                     let built = tag(built, view, &files, &name)?;
@@ -557,11 +574,12 @@ impl<F: Fs> Keeper<F> {
                 let view = library.view();
                 let item = view.items().iter().find(|item| item.run == run);
                 let item = item.ok_or("those changes are no longer kept apart")?;
-                let takes = taking(item, &changes).into_iter();
-                let built = takes.fold(library.intent(label), |built, change| {
-                    built.take(run, change)
+                let takes = taking(&listed(item, &view), &changes).into_iter();
+                let built = takes.fold(library.intent(label), |built, (change, onto)| match onto {
+                    true => built.change(change),
+                    false => built.take(run, change),
                 });
-                Some(built.commit().await.map_err(not_taken)?)
+                Some(built.commit().await.map_err(|e| told(&e))?)
             }
             Intent::Dismiss { run } => {
                 let dismissed = facts(library, label, |built, _| Ok(built.dismiss(run)));
@@ -583,6 +601,17 @@ impl<F: Fs> Keeper<F> {
         };
         Ok((intent, viewed))
     }
+}
+
+/// What `committed` moved, for the app to follow without a word: each tree, then each
+/// file no entity is bound to that it made, moved or trashed, from and to.
+fn followed(committed: &toshokan::report::Committed) -> Vec<(Option<LibPath>, Option<LibPath>)> {
+    let path = |path: Option<&RelPath>| path.and_then(|path| LibPath::parse(path.as_str()));
+    let trees = committed.trees.iter();
+    let trees = trees.map(|(from, to)| (path(Some(from)), path(Some(to))));
+    let paths = committed.paths.iter();
+    let paths = paths.map(|moved| (path(moved.from.as_ref()), path(moved.to.as_ref())));
+    trees.chain(paths).collect()
 }
 
 /// The entry that logged a change, and whether the change joined this session's undo.
@@ -650,7 +679,7 @@ async fn facts<'a, F: Fs + 'a>(
 ) -> Result<toshokan::Committed, String> {
     let view = library.view();
     let built = build(library.intent(label), &view)?;
-    built.commit().await.map_err(|e| e.to_string())
+    built.commit().await.map_err(|e| told(&e))
 }
 
 /// Add the tag `name` to the library's list of tags.
@@ -1309,10 +1338,7 @@ fn failure(e: Error, filled: Option<io::Error>) -> Failure {
     }
     match e {
         Error::Refused(Refusal::Changed(_) | Refusal::Directory(_)) => Failure::Moved,
-        Error::Refused(Refusal::Invalid(toshokan::Invalid::TooLong)) => {
-            Failure::Io(TOO_LARGE.to_string())
-        }
-        e => Failure::Io(e.to_string()),
+        e => Failure::Io(told(&e)),
     }
 }
 
@@ -1321,26 +1347,6 @@ fn fill_failure(e: io::Error) -> Failure {
     match rewrite::is_changed(&e) {
         true => Failure::Moved,
         false => Failure::Io(e.to_string()),
-    }
-}
-
-/// Why nothing may be written, said so the user can put it right where they can.
-fn read_only(why: &Why) -> String {
-    let Why::Unfinished { label, path, error } = why else {
-        return why.to_string();
-    };
-    let unfinished = format!("drawbar could not finish “{label}”");
-    let again = format!("then open it again from File ▸ {}", crate::menu::RECENT);
-    match error {
-        IoError::AlreadyExists
-        | IoError::IsDirectory
-        | IoError::NotDirectory
-        | IoError::NotEmpty => {
-            format!("something is in the way at {path}, so {unfinished}: move it, {again}")
-        }
-        IoError::NoSpace => format!("the disk is full, so {unfinished}: make room, {again}"),
-        IoError::Denied => format!("{path} may not be written, so {unfinished}: allow it, {again}"),
-        error => format!("{unfinished} at {path} ({error}): {again}"),
     }
 }
 
@@ -1525,7 +1531,7 @@ fn committed_view<F: Fs>(
         dirs: None,
         changes,
         moves: Vec::new(),
-        undone: None,
+        followed: None,
         unlisted: None,
         unfinished: None,
         kept: kept(library),
@@ -1535,71 +1541,264 @@ fn committed_view<F: Fs>(
     }
 }
 
-/// The changes of `item` that `named` names, or all it can take where it names none,
-/// each once. A tag taken brings its entry in the library's list of tags where the run
-/// added it there too.
-fn taking(item: &Item, named: &[KeptKey]) -> Vec<FactChange> {
-    let can = item.changes.iter();
-    let picked: Vec<&FactChange> = can
-        .clone()
-        .filter(|change| named.is_empty() || named.contains(&(change.entity, change.what.clone())))
-        .filter_map(|change| change.change.as_ref())
-        .collect();
-    let listed = can
-        .filter_map(|change| change.change.as_ref())
-        .filter(|change| {
-            let FactChange::Add { key, value, .. } = change else {
-                return false;
-            };
-            key == TAG_NAMES.name()
-                && picked.iter().any(|taken| {
-                    matches!(taken, FactChange::Add { key, value: tag, .. }
-                    if key == TAGS.name() && tag == value)
-                })
-        });
-    let listed: Vec<&FactChange> = listed.collect();
-    // A list of tags the run made is made with the first entry taken from it.
-    let made = item.changes.iter().filter(|change| {
-        change.what == What::Created
-            && picked.iter().chain(&listed).any(|taken| {
-                matches!(taken, FactChange::Add { entity, key, .. }
-                    if *entity == change.entity && key == TAG_NAMES.name())
-            })
+/// One change Kept apart lists, and whether taking it makes it on the library's own
+/// record of a file rather than taking it from the run.
+struct Listed {
+    change: ItemChange,
+    onto: bool,
+}
+
+/// The changes of `item` as Kept apart lists them, each one taking it can make. A
+/// change to an entity the library does not show is listed where the item makes the
+/// entity, or as one to the entity the library binds the entity's file to, which a kept
+/// item names. Moved there, it is listed only while it would change that entity, and
+/// making or placing the item's entity is not listed. A change to an entity nothing can
+/// make is not listed. A gap, which waits for the history it follows, lists its changes
+/// as they are.
+fn listed(item: &Item, view: &View) -> Vec<Listed> {
+    let kept = view.items().iter().flat_map(|item| &item.changes);
+    let files = kept.filter_map(|change| match &change.change {
+        Some(FactChange::File { entity, file }) => Some((*entity, &file.path)),
+        _ => None,
     });
-    let made = made.filter_map(|change| change.change.as_ref());
-    let mut takes: Vec<FactChange> = Vec::new();
-    for change in made
-        .chain(picked.iter().copied())
-        .chain(listed.iter().copied())
-    {
-        if !takes.contains(change) {
-            takes.push(change.clone());
+    let held = files.filter(|(made, _)| view.entity(*made).is_none());
+    let held = held.filter_map(|(made, path)| Some((made, view.at(path)?.id())));
+    let onto: BTreeMap<toshokan::EntityId, toshokan::EntityId> = held.collect();
+    let made: BTreeSet<toshokan::EntityId> = item
+        .changes
+        .iter()
+        .filter(|change| change.what == What::Created)
+        .map(|change| change.entity)
+        .collect();
+    let listed = item.changes.iter().filter_map(|change| {
+        let own = || Listed {
+            change: change.clone(),
+            onto: false,
+        };
+        if item.kind == ItemKind::Gap || view.entity(change.entity).is_some() {
+            return Some(own());
+        }
+        let Some(to) = onto.get(&change.entity) else {
+            return made.contains(&change.entity).then(own);
+        };
+        let moved = field_onto(change.change.as_ref()?, *to)?;
+        if changes_nothing(&moved, view) {
+            return None;
+        }
+        let change = ItemChange {
+            entity: *to,
+            what: change.what.clone(),
+            change: Some(moved),
+            forgotten: false,
+        };
+        Some(Listed { change, onto: true })
+    });
+    listed.collect()
+}
+
+/// `change` made to the same field of `to`; `None` where it makes, ends or places an
+/// entity rather than changing a field.
+fn field_onto(change: &FactChange, to: toshokan::EntityId) -> Option<FactChange> {
+    Some(match change.clone() {
+        FactChange::Set { key, value, .. } => FactChange::Set {
+            entity: to,
+            key,
+            value,
+        },
+        FactChange::Clear { key, .. } => FactChange::Clear { entity: to, key },
+        FactChange::Add { key, value, .. } => FactChange::Add {
+            entity: to,
+            key,
+            value,
+        },
+        FactChange::Remove { key, value, .. } => FactChange::Remove {
+            entity: to,
+            key,
+            value,
+        },
+        FactChange::Delete { .. } | FactChange::Revive { .. } | FactChange::File { .. } => {
+            return None
+        }
+    })
+}
+
+/// Whether making `change` would leave the field it changes as `view` shows it.
+fn changes_nothing(change: &FactChange, view: &View) -> bool {
+    let folded = view.folded();
+    match change {
+        FactChange::Add { entity, key, value } => folded.members(*entity, key).contains(value),
+        FactChange::Remove { entity, key, value } => !folded.members(*entity, key).contains(value),
+        FactChange::Set { entity, key, value } => {
+            let writes = folded.register(*entity, key);
+            !writes.is_empty() && writes.iter().all(|write| write.value == *value)
+        }
+        FactChange::Clear { entity, key } => folded.register(*entity, key).is_empty(),
+        FactChange::Delete { .. } | FactChange::Revive { .. } | FactChange::File { .. } => false,
+    }
+}
+
+/// The changes of `listed` that `named` names, or all it can take where it names none,
+/// each once, and whether each is made on the library's own record. A tag taken brings
+/// its entry in the library's list of tags where the run added it there too, and a
+/// change taken to an entity the run made brings its making and its file.
+fn taking(listed: &[Listed], named: &[KeptKey]) -> Vec<(FactChange, bool)> {
+    let picked: Vec<&Listed> = listed
+        .iter()
+        .filter(|listed| {
+            let change = &listed.change;
+            named.is_empty() || named.contains(&(change.entity, change.what.clone()))
+        })
+        .collect();
+    let gained = |tag: &toshokan::Raw| {
+        picked.iter().any(|taken| {
+            matches!(&taken.change.change, Some(FactChange::Add { key, value, .. })
+                if key == TAGS.name() && value == tag)
+        })
+    };
+    let tag_list = listed.iter().filter(|listed| {
+        matches!(&listed.change.change, Some(FactChange::Add { key, value, .. })
+            if key == TAG_NAMES.name() && gained(value))
+    });
+    let taken: Vec<&Listed> = picked.iter().copied().chain(tag_list).collect();
+    let made = |entity| {
+        let mut changes = listed.iter().map(|listed| &listed.change);
+        changes.any(|change| change.entity == entity && change.what == What::Created)
+    };
+    let (made, taken) = (&made, &taken);
+    let along = |what: What| {
+        listed.iter().filter(move |listed| {
+            let change = &listed.change;
+            change.what == what
+                && made(change.entity)
+                && taken
+                    .iter()
+                    .any(|taken| taken.change.entity == change.entity)
+        })
+    };
+    let all = along(What::Created)
+        .chain(along(What::File))
+        .chain(taken.iter().copied());
+    let mut takes: Vec<(FactChange, bool)> = Vec::new();
+    for listed in all {
+        let Some(change) = &listed.change.change else {
+            continue;
+        };
+        if !takes.iter().any(|(taken, _)| taken == change) {
+            takes.push((change.clone(), listed.onto));
         }
     }
     takes
 }
 
-/// Why a take of changes kept apart was refused, in the user's words: a file change
-/// names its file by path, and never by the entity bound to it.
-fn not_taken(e: Error) -> String {
+/// Why the library did not do what was asked, in the user's words: a file by its path
+/// in the library, never an id, a record of drawbar's own, or a name of toshokan's.
+fn told(e: &Error) -> String {
+    match e {
+        Error::Io { root, path, error } => format!("{}: {error}", place(*root, path)),
+        Error::InvalidPath { path, reason } => {
+            format!("“{path}” cannot be a name in the library: {reason}")
+        }
+        Error::Corrupt { .. } => "drawbar's own data on this computer is damaged".to_string(),
+        // Why is said once, when the library opens or turns read-only.
+        Error::ReadOnly(_) => "the library is read-only".to_string(),
+        Error::Refused(refusal) => refused(refusal),
+        Error::Rekey { .. } => "this drawbar's history of the library went on elsewhere too, \
+                                so it starts one of its own; try again"
+            .to_string(),
+        _ => "drawbar could not make the change".to_string(),
+    }
+}
+
+/// What `path` in `root` is, in the user's words.
+fn place(root: Root, path: &RelPath) -> String {
+    match root {
+        Root::Folder if !keys::layout().owns(path) => format!("“{path}”"),
+        Root::Folder => "drawbar's records in the library folder".to_string(),
+        Root::Local => "drawbar's own data on this computer".to_string(),
+    }
+}
+
+/// Why nothing may be written, in the user's words, and how to put it right where
+/// they can.
+fn read_only(why: &Why) -> String {
+    match why {
+        Why::NewerOwnHistory { .. } => {
+            "a newer drawbar changed it from this computer; update drawbar to change it".to_string()
+        }
+        Why::FolderNotWritable => "the library folder cannot be written".to_string(),
+        Why::ClockExhausted => {
+            "this computer's clock reads a time drawbar cannot record".to_string()
+        }
+        Why::Unfinished { label, path, error } => unfinished(label, path, error),
+        _ => "drawbar cannot write to it".to_string(),
+    }
+}
+
+/// Why drawbar could not finish the change `label` at `path`, and what to do.
+fn unfinished(label: &str, path: &RelPath, error: &IoError) -> String {
+    let unfinished = format!("drawbar could not finish “{label}”");
+    let again = format!("then open it again from File ▸ {}", crate::menu::RECENT);
+    match error {
+        IoError::AlreadyExists
+        | IoError::IsDirectory
+        | IoError::NotDirectory
+        | IoError::NotEmpty => {
+            format!("something is in the way at {path}, so {unfinished}: move it, {again}")
+        }
+        IoError::NoSpace => format!("the disk is full, so {unfinished}: make room, {again}"),
+        IoError::Denied => format!("{path} may not be written, so {unfinished}: allow it, {again}"),
+        error => format!("{unfinished} at {path} ({error}): {again}"),
+    }
+}
+
+/// Why a change was refused before anything was written, in the user's words.
+fn refused(refusal: &Refusal) -> String {
     use toshokan::{Invalid, Unbindable};
-    let Error::Refused(Refusal::Invalid(Invalid::Unbindable { path, why, .. })) = &e else {
-        return e.to_string();
-    };
-    let why = match why {
-        Unbindable::Absent => "no file is there",
-        Unbindable::Changed => "the file there holds something else now",
-        Unbindable::Unscanned => "drawbar has not looked at it yet",
-        Unbindable::Bound(_) => "it is another asset's file",
-        _ => "it cannot be bound now",
-    };
-    format!("the file at {path} cannot be taken: {why}")
+    match refusal {
+        Refusal::Changed(mismatch) => format!("“{}” is not as drawbar last saw it", mismatch.path),
+        Refusal::Directory(path) => format!("“{path}” is a folder"),
+        Refusal::ChangedSince { .. } => "another drawbar has changed it since".to_string(),
+        Refusal::Nothing => "there is nothing to do".to_string(),
+        Refusal::Emptied => "drawbar no longer keeps what undoing it needs".to_string(),
+        Refusal::Unsupported(capability) => match capability {
+            toshokan::io::Capability::RenameDir => "the library folder cannot rename a folder",
+            toshokan::io::Capability::RenameFile => "the library folder cannot rename a file",
+            _ => "the library folder cannot do what it needs",
+        }
+        .to_string(),
+        Refusal::Invalid(Invalid::Unbindable { path, why, .. }) => {
+            let why = match why {
+                Unbindable::Absent => "no file is there",
+                Unbindable::Changed => "the file there holds something else now",
+                Unbindable::Unscanned => "drawbar has not looked at it yet",
+                Unbindable::Bound(_) => "it is another asset's file",
+                _ => "it cannot be bound now",
+            };
+            format!("the file at {path} cannot be taken: {why}")
+        }
+        Refusal::Invalid(Invalid::NoEntity(_)) => "it is no longer in the library".to_string(),
+        Refusal::Invalid(Invalid::NoFile(_)) => "it has no file".to_string(),
+        Refusal::Invalid(Invalid::Bound(path)) => format!("“{path}” is another asset's file"),
+        Refusal::Invalid(Invalid::ReservedPath(path)) => format!("“{path}” is drawbar's own"),
+        Refusal::Invalid(Invalid::NotEmpty(path)) => format!("“{path}” holds files"),
+        Refusal::Invalid(Invalid::TooLong) => TOO_LARGE.to_string(),
+        Refusal::Invalid(Invalid::Empty) => "it changes nothing".to_string(),
+        _ => "drawbar could not make the change".to_string(),
+    }
 }
 
 /// What the library keeps apart, as its view shows it.
 fn kept<F: Fs>(library: &Library<F>) -> Vec<super::KeptApart> {
     let view = library.view();
-    view.items().iter().map(super::KeptApart::of).collect()
+    let items = view.items().iter().map(|item| Item {
+        changes: listed(item, &view)
+            .into_iter()
+            .map(|listed| listed.change)
+            .collect(),
+        ..item.clone()
+    });
+    let items = items.filter(|item| item.kind == ItemKind::Run || !item.changes.is_empty());
+    items.map(|item| super::KeptApart::of(&item)).collect()
 }
 
 /// What the answer to a scan shows, with every folder where it scanned every file.
@@ -1621,7 +1820,7 @@ fn viewed<F: Fs>(library: &Library<F>, shown: &mut Option<View>, refreshed: Refr
         dirs,
         moves: moves.collect(),
         changes: refreshed.changes,
-        undone: None,
+        followed: None,
         unfinished: Some(theirs.collect()),
         kept: kept(library),
         retired: refreshed.retired.is_some(),

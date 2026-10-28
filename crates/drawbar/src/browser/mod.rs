@@ -373,6 +373,24 @@ impl Browser {
         self.selection.forget(what);
     }
 
+    /// Forget each selected row whose asset, folder or tag is gone, as when another
+    /// drawbar or a sync took it away.
+    pub(crate) fn forget_gone(&mut self, workspace: &Workspace) {
+        let gone: Vec<Item> = self
+            .selection
+            .items()
+            .filter(|item| match *item {
+                Item::Local(id) => workspace.get(id).is_none(),
+                Item::Folder(id) => self.folders.name_of(id).is_none(),
+                Item::Tag(id) => self.tags.name_of(id).is_none(),
+                Item::Slot { .. } => false,
+            })
+            .collect();
+        for item in gone {
+            self.forget_rename(item);
+        }
+    }
+
     fn start_rename(&mut self, what: Item, from: &str) {
         self.selection.only(what);
         self.rename = Some(Rename {

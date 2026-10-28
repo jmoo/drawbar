@@ -20,6 +20,7 @@ use toshokan::library::COMPACT_AFTER;
 use toshokan::line::MAX_LINE;
 use toshokan::log::{Entry, EntryKind, FileFact, Genesis, Logged, Op, Run, Settlement};
 use toshokan::plan::FactChange;
+use toshokan::reader::MAX_FILE;
 use toshokan::report::{
     By, Change, Committed, Compacted, Emptied, HistoryItem, Item, ItemKind, Opened, PathChange,
     Presence, Refreshed, Rekey, Start, TrashItem, What, WriterInfo,
@@ -1198,6 +1199,35 @@ fn an_intent_whose_record_would_outgrow_its_bound_is_refused_and_writes_nothing(
             }
         }
     }
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "minutes unoptimized; runs in release")]
+fn a_compaction_whose_snapshot_would_outgrow_what_readers_hold_is_refused_and_keeps_the_log() {
+    const ORIGIN_LEN: usize = 15 << 20;
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = Blocking::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    for _ in 0..=MAX_FILE as usize / ORIGIN_LEN {
+        a.commit("Origin", |i| {
+            i.create(|e| _ = e.set(ORIGIN, "x".repeat(ORIGIN_LEN))).0
+        })
+        .unwrap();
+    }
+    let before = folder.files(Root::Folder);
+    let compacted = a.compact();
+    assert!(
+        matches!(compacted, Err(Error::Refused(Refusal::SnapshotTooLong))),
+        "{compacted:?}"
+    );
+    assert!(folder.files(Root::Folder) == before, "nothing is written");
+    let fresh = Blocking::open(Probe::new(&machine(&folder)), env("b", 2, &clock))
+        .unwrap()
+        .0;
+    assert!(
+        facts(&fresh.view()) == facts(&a.view()),
+        "a fresh open reads every origin"
+    );
 }
 
 /// The line, with its newline, of the intent labeled `label` in `folder`'s segments.
