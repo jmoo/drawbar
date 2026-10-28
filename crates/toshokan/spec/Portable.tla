@@ -24,7 +24,7 @@
 (* The protocol rules are constants, TRUE when in force, so that a config  *)
 (* can drop one and exhibit the failure it permits.                        *)
 (***************************************************************************)
-EXTENDS Naturals, Sequences, FiniteSets
+EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS
     Instances,      \* the first element starts as a writer, the rest as readers
@@ -50,6 +50,9 @@ CONSTANTS
 
 None == 0
 First == CHOOSE i \in Instances : TRUE
+\* Only Init names First, so Next and every safety property are symmetric in
+\* Instances. TLC's symmetry reduction is unsound for liveness.
+Symmetric == Permutations(Instances)
 
 VARIABLES
     ents,       \* entry records, indexed by entry
@@ -133,8 +136,8 @@ Folds(S) == UNION {files[s].folds : s \in S}
 Tips(S) ==
     {s \in S : ~\E t \in S : /\ t # s
                              /\ files[t].dir = files[s].dir
-                             /\ files[s].anchor \in Know(t)
-                             /\ files[t].anchor # files[s].anchor \/ t < s}
+                             /\ IF files[t].anchor = files[s].anchor THEN t < s
+                                ELSE files[s].anchor \in files[t].certs}
 TipsIn(T, d) == {t \in T : files[t].dir = d}
 Multi(T, d) == Cardinality(TipsIn(T, d)) > 1
 \* What every tip of directory d folds: the part of its branches they share.
@@ -245,10 +248,13 @@ Read(r, v) ==
 \* Entries the files a reader sees hold, in a segment or folded in a snapshot.
 VisHolds(v) == Present(v) \cup Folds(Snaps(v))
 
-\* Effects an entry the reader holds closes: merged, shown as a run, held back
-\* after a gap, or dismissed. One closed on a branch is that branch's, shown
-\* with it as an item, and never reported to settle again.
-Closed(r) == {ents[x].closes : x \in acc[r] \cup shown[r] \cup gaps[r] \cup dismissed[r]} \ {0}
+\* The entries reader r's last read accounted for: merged, shown as a run, held
+\* back after a gap, or dismissed.
+Holding(r) == acc[r] \cup shown[r] \cup dismissed[r] \cup gaps[r]
+
+\* Effects an entry the reader holds closes. One closed on a branch is that
+\* branch's, shown with it as an item, and never reported to settle again.
+Closed(r) == {ents[x].closes : x \in Holding(r)} \ {0}
 \* Pending records the reader sees whose effect no entry it holds closes.
 Reported(r) ==
     {files[f].eff : f \in {g \in Files : files[g].kind = "pend" /\ vis[r][g] = 1}}
@@ -287,9 +293,9 @@ AppendEntry(i, closes, dis) ==
     LET e == Len(ents) + 1
         new == seg[i] = None
         f == IF new THEN Len(files) + 1 ELSE seg[i]
-    IN /\ Writable(i)
-       /\ Len(ents) < MaxEntries
+    IN /\ Len(ents) < MaxEntries
        /\ new => Len(files) < MaxFiles
+       /\ Writable(i)
        /\ ents' = Append(ents, [dir |-> wid[i], prev |-> head[i], closes |-> closes,
                                  n |-> IF head[i] = None THEN 0 ELSE N(head[i]) + 1,
                                  dis |-> dis, orphan |-> HeadLost(i)])
@@ -301,11 +307,10 @@ AppendEntry(i, closes, dis) ==
                       THEN [nextName EXCEPT ![i] = @ + 1] ELSE nextName
        /\ seg' = [seg EXCEPT ![i] = f]
        /\ head' = [head EXCEPT ![i] = e]
+       /\ UNCHANGED <<nW, nEff, clones, losses, role, wid, dying, lastSnap, reader,
+                      folder, chaos>>
 
-Write(i) ==
-    /\ AppendEntry(i, 0, {})
-    /\ UNCHANGED <<nW, nEff, clones, losses, role, wid, dying, lastSnap,
-                   inflight, reader, folder, chaos>>
+Write(i) == AppendEntry(i, 0, {}) /\ UNCHANGED inflight
 
 \* The owner seals its segment, folds its own chain into a snapshot, and
 \* deletes the snapshot the new one supersedes and the segments of its
@@ -319,11 +324,11 @@ Compact(i) ==
     LET sealed == IF seg[i] = None THEN files
                   ELSE [files EXCEPT ![seg[i]].sealed = TRUE]
         s == Len(files) + 1
+        old == IF lastSnap[i] = None THEN {} ELSE {lastSnap[i]}
         chain == Chain(head[i])
-        tail == chain \ IF lastSnap[i] = None THEN {} ELSE files[lastSnap[i]].folds
+        tail == chain \ Folds(old)
         here == {f \in Files : sealed[f].dir = wid[i] /\ ~sealed[f].deleted}
-        held == {g \in here : sealed[g].kind = "snap" /\ sealed[g].anchor \in chain}
-                    \cup IF lastSnap[i] = None THEN {} ELSE {lastSnap[i]}
+        held == {g \in here : sealed[g].kind = "snap" /\ sealed[g].anchor \in chain} \cup old
         carried ==
             IF ~Carry THEN {}
             ELSE UNION {sealed[f].certs : f \in held}
@@ -337,15 +342,14 @@ Compact(i) ==
                  \cup (tail \ UNION {Range(sealed[f].ents) :
                                         f \in {g \in Files : sealed[g].kind = "seg"}})
         fs == Append(sealed, NewFile("snap", wid[i], s, <<>>, head[i], chain, certs, 0))
-        old == IF lastSnap[i] = None THEN {} ELSE {lastSnap[i]}
         superseded == {f \in Files : /\ fs[f].kind = "seg"
                                      /\ fs[f].dir = wid[i]
                                      /\ ~fs[f].deleted
                                      /\ MayDelete(fs, wid[i], f)}
-    IN /\ Writable(i)
-       /\ head[i] # None
-       /\ lastSnap[i] # None => files[lastSnap[i]].anchor # head[i]
+    IN /\ head[i] # None
        /\ Len(files) < MaxFiles
+       /\ lastSnap[i] # None => files[lastSnap[i]].anchor # head[i]
+       /\ Writable(i)
        /\ files' = fs
        /\ lastSnap' = [lastSnap EXCEPT ![i] = s]
        /\ seg' = [seg EXCEPT ![i] = None]
@@ -357,6 +361,7 @@ Compact(i) ==
 \* name, which for a segment name two histories chose may be the other's.
 \* A segment the writer may no longer delete is left in place.
 DeleteOne(i) ==
+    /\ dying[i] # {}
     /\ Writable(i)
     /\ \E f \in dying[i] :
         LET namesake == {g \in Files : /\ files[g].kind = files[f].kind
@@ -379,10 +384,10 @@ Idle(i) == inflight[i] = NoEffect \/ inflight[i].logged
 \* begins another effect.
 Begin(i) ==
     LET f == Len(files) + 1 IN
-    /\ Writable(i)
-    /\ inflight[i] = NoEffect
     /\ nEff < MaxEffects
+    /\ inflight[i] = NoEffect
     /\ Len(files) < MaxFiles
+    /\ Writable(i)
     /\ files' = Append(files, NewFile("pend", wid[i], f, <<>>, None, {}, {}, nEff + 1))
     /\ inflight' = [inflight EXCEPT ![i] = [eff |-> nEff + 1, rec |-> f, logged |-> FALSE]]
     /\ nEff' = nEff + 1
@@ -394,12 +399,10 @@ Close(i) ==
     /\ ~inflight[i].logged
     /\ AppendEntry(i, inflight[i].eff, {})
     /\ inflight' = [inflight EXCEPT ![i].logged = TRUE]
-    /\ UNCHANGED <<nW, nEff, clones, losses, role, wid, dying, lastSnap,
-                   reader, folder, chaos>>
 
 Unpend(i) ==
-    /\ Writable(i)
     /\ inflight[i].logged
+    /\ Writable(i)
     /\ files' = [files EXCEPT ![inflight[i].rec].deleted = TRUE]
     /\ inflight' = [inflight EXCEPT ![i] = NoEffect]
     /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, seg, dying,
@@ -408,19 +411,14 @@ Unpend(i) ==
 \* With the user's consent, a writer closes an effect it reports by logging
 \* the closing entry in its own directory. The record stays: only its owner
 \* deletes it. Consent is the choice to take this step.
-Settle(i) ==
-    \E e \in Reported(i) :
-        /\ AppendEntry(i, e, {})
-        /\ UNCHANGED <<nW, nEff, clones, losses, role, wid, dying,
-                       lastSnap, inflight, reader, folder, chaos>>
+Settle(i) == \E e \in Reported(i) : AppendEntry(i, e, {}) /\ UNCHANGED inflight
 
 \* The user dismisses the runs a writer's reader shows, by an entry naming
 \* them. Taking a run's writes instead is an ordinary write.
 Dismiss(i) ==
     /\ shown[i] # {}
     /\ AppendEntry(i, 0, shown[i])
-    /\ UNCHANGED <<nW, nEff, clones, losses, role, wid, dying, lastSnap,
-                   inflight, reader, folder, chaos>>
+    /\ UNCHANGED inflight
 
 \* A copied local root (a restored backup, a cloned disk, copied app data)
 \* opens on another machine as the same writer with the same history. A
@@ -451,8 +449,8 @@ Clone(i, j) ==
 \* A process that quits seals its segment with a durable marker. The next
 \* open starts a new segment.
 Quit(i) ==
-    /\ Writable(i)
     /\ seg[i] # None
+    /\ Writable(i)
     /\ files' = [files EXCEPT ![seg[i]].sealed = TRUE]
     /\ seg' = [seg EXCEPT ![i] = None]
     /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, dying,
@@ -479,6 +477,7 @@ Renew(i) ==
     /\ lastSnap' = [lastSnap EXCEPT ![i] = None]
     /\ nextName' = [nextName EXCEPT ![i] = 0]
     /\ inflight' = [inflight EXCEPT ![i] = NoEffect]
+    /\ UNCHANGED <<ents, files, nEff, clones, role, reader, folder, chaos>>
 
 \* Losing the local root loses the effect in flight; the next open is a new
 \* writer.
@@ -487,7 +486,6 @@ LoseRoot(i) ==
     /\ losses < MaxLosses
     /\ losses' = losses + 1
     /\ Renew(i)
-    /\ UNCHANGED <<ents, files, nEff, clones, role, reader, folder, chaos>>
 
 \* An instance that sees an entry of its own directory with two successors
 \* takes a new writer id.
@@ -496,7 +494,7 @@ LeaveFork(i) ==
     /\ Idle(i)
     /\ \E fk \in reported[i] : fk[1] = wid[i]
     /\ Renew(i)
-    /\ UNCHANGED <<ents, files, nEff, clones, losses, role, reader, folder, chaos>>
+    /\ UNCHANGED losses
 
 \* An instance whose head is no longer in the folder takes a new writer id
 \* rather than append after it.
@@ -505,7 +503,7 @@ LeaveRestored(i) ==
     /\ role[i] = "writer"
     /\ HeadLost(i)
     /\ Renew(i)
-    /\ UNCHANGED <<ents, files, nEff, clones, losses, role, reader, folder, chaos>>
+    /\ UNCHANGED losses
 
 -----------------------------------------------------------------------------
 (* Restores. The folder, not a local root, goes back to an earlier state:  *)
@@ -535,17 +533,11 @@ BackedUp(b, ds) ==
                      ELSE IF f <= Len(b) THEN b[f]
                      ELSE [files[f] EXCEPT !.deleted = TRUE]]
 
+\* The folder, or one writer's directory alone, goes back to its backup.
 Restore ==
     /\ restores < MaxRestores
-    /\ \E b \in backup : Becomes(BackedUp(b, 0..MaxWriters))
-    /\ restores' = restores + 1
-    /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, seg, dying,
-                   lastSnap, nextName, inflight, reader, backup, drops, chaos>>
-
-\* One writer's directory alone goes back to its backup.
-RestoreDir ==
-    /\ restores < MaxRestores
-    /\ \E b \in backup : \E d \in 1..nW : Becomes(BackedUp(b, {d}))
+    /\ \E b \in backup : \E ds \in {0..MaxWriters} \cup {{d} : d \in 1..nW} :
+           Becomes(BackedUp(b, ds))
     /\ restores' = restores + 1
     /\ UNCHANGED <<ents, nW, nEff, clones, losses, role, wid, head, seg, dying,
                    lastSnap, nextName, inflight, reader, backup, drops, chaos>>
@@ -582,12 +574,13 @@ Deliver(r) ==
            ELSE chaos < MaxChaos /\ chaos' = chaos + 1
         /\ Show(r, f, k)
 
+\* A step that delivers a whole file to reader r. Every such step of Next is a
+\* Deliver(r) step, which reads.
 DeliverAll(r) ==
     \E f \in Files :
         /\ ~files[f].deleted
         /\ vis[r][f] # FileLen(f)
-        /\ Show(r, f, FileLen(f))
-        /\ UNCHANGED chaos
+        /\ vis' = [vis EXCEPT ![r][f] = FileLen(f)]
 
 -----------------------------------------------------------------------------
 
@@ -638,12 +631,15 @@ Next ==
         \/ \E j \in Instances : Clone(i, j)
     \/ Backup
     \/ Restore
-    \/ RestoreDir
     \/ DropVersion
     \/ \E r \in Instances : Deliver(r)
 
-\* Writers may stop at any time; sync eventually delivers every file.
-Spec == Init /\ [][Next]_vars /\ \A r \in Instances : WF_vars(DeliverAll(r))
+\* Writers may stop at any time; sync eventually delivers every file. This is
+\* WF_vars(DeliverAll(r)) without ENABLED: DeliverAll(r) is enabled exactly when
+\* ~Delivered(r).
+Spec ==
+    /\ Init /\ [][Next]_vars
+    /\ \A r \in Instances : []<>Delivered(r) \/ []<><<DeliverAll(r)>>_vars
 
 -----------------------------------------------------------------------------
 (* Safety.                                                                 *)
@@ -658,7 +654,7 @@ ChainOrder ==
 \* conflicted copy, is read.
 NothingIgnored ==
     \A r \in Instances :
-        Present(vis[r]) \subseteq acc[r] \cup gaps[r] \cup shown[r] \cup dismissed[r]
+        Present(vis[r]) \subseteq Holding(r)
 
 \* What a reader shows as a run it does not merge.
 ShownApart == \A r \in Instances : shown[r] \cap acc[r] = {}
@@ -675,14 +671,14 @@ Forked(x) ==
 \* An entry is shown as a run only when its chain forked at or before it, or
 \* a restore or a dropped version took it.
 NoSpuriousConflict ==
-    \A r \in Instances : \A x \in shown[r] : Forked(x) \/ x \in lost
+    \A r \in Instances : \A x \in shown[r] : x \in lost \/ Forked(x)
 
 \* Once every file has reached a reader, it merges every kept entry that no
 \* fork precedes and that follows nothing a restore or a dropped version
 \* took.
 UnforkedMerged ==
     \A r \in Instances : Delivered(r) =>
-        \A x \in Kept : ~Forked(x) /\ Chain(x) \cap lost = {} => x \in acc[r]
+        \A x \in Kept : x \in acc[r] \/ Forked(x) \/ Chain(x) \cap lost # {}
 
 \* A writer never appends after an entry the folder no longer holds.
 NoOrphan == \A e \in All : ~ents[e].orphan
@@ -690,9 +686,6 @@ NoOrphan == \A e \in All : ~ents[e].orphan
 \* The folder as a reader sees it once every file and every deletion has
 \* reached it.
 Folder == [f \in 1..MaxFiles |-> IF f \in Files /\ ~files[f].deleted THEN FileLen(f) ELSE 0]
-
-\* The entries reader r's last read accounted for.
-Holding(r) == acc[r] \cup shown[r] \cup dismissed[r] \cup gaps[r]
 
 \* The files the reader last read hold what a restore or a dropped version
 \* took.
@@ -759,10 +752,9 @@ EffectAccounted ==
 \* every entry the folder keeps, whatever the delivery order, holds back only
 \* what follows an entry a restore or a dropped version took, and reports
 \* every fork among the kept entries it sees.
-AfterLost == {x \in All : Chain(x) \cap lost # {}}
 Converged(r) ==
-    /\ Kept \subseteq acc[r] \cup shown[r] \cup dismissed[r] \cup (gaps[r] \cap AfterLost)
-    /\ gaps[r] \subseteq AfterLost
+    /\ Kept \subseteq Holding(r)
+    /\ \A x \in gaps[r] : Chain(x) \cap lost # {}
     /\ ForksIn(Kept \cap Present(vis[r])) \subseteq reported[r]
 DeliveredConverges == \A r \in Instances : Delivered(r) => Converged(r)
 
@@ -782,19 +774,19 @@ Arriving(r) ==
 \* As files arrive, a reader stops merging an entry only when it now shows it
 \* or has dismissed it.
 Monotone ==
-    [][\A r \in Instances : Arriving(r) =>
-           acc[r] \subseteq acc'[r] \cup shown'[r] \cup dismissed'[r]]_vars
+    [][\A r \in Instances :
+           acc[r] \subseteq acc'[r] \cup shown'[r] \cup dismissed'[r] \/ ~Arriving(r)]_vars
 
 \* As files arrive, a run stays shown until it is dismissed.
 NoFlip ==
-    [][\A r \in Instances : Arriving(r) =>
-           shown[r] \subseteq shown'[r] \cup dismissed'[r]]_vars
+    [][\A r \in Instances :
+           shown[r] \subseteq shown'[r] \cup dismissed'[r] \/ ~Arriving(r)]_vars
 
 \* A writer takes a new id for a fork only when an entry of its directory has
 \* two successors.
 OwnFileNoRetire ==
     [][\A i \in Instances :
-           (role[i] = "writer" /\ wid[i] # 0 /\ wid'[i] # wid[i] /\ losses' = losses /\ ~HeadLost(i))
+           (wid'[i] # wid[i] /\ role[i] = "writer" /\ wid[i] # 0 /\ losses' = losses /\ ~HeadLost(i))
                => \E x, y \in All : x # y /\ ents[x].dir = wid[i] /\ ents[y].dir = wid[i]
                                        /\ ents[x].prev = ents[y].prev]_vars
 

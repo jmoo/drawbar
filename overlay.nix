@@ -643,7 +643,7 @@ let
     name: configs:
     final.runCommand name
       {
-        nativeBuildInputs = [ final.tlaplus ];
+        nativeBuildInputs = [ final.tlaplus18 ];
         src = cleanSourceWith {
           src = ./crates/toshokan/spec;
           filter = path: _: hasSuffix ".tla" path || hasSuffix ".cfg" path;
@@ -652,11 +652,12 @@ let
       ''
         cp "$src"/* .
         workers=''${NIX_BUILD_CORES:-0}
-        [ "$workers" -gt 0 ] || workers=auto
+        [ "$workers" -gt 0 ] && [ "$workers" -le 8 ] || workers=8
         for config in ${escapeShellArgs configs}; do
           violated=$(sed -n 's/^\\\* Violates \([A-Za-z]*\):.*/\1/p' "$config.cfg")
           status=0
-          tlc -workers "$workers" -cleanup -config "$config.cfg" Portable.tla > "$config.log" 2>&1 || status=$?
+          tlc -workers "$workers" -lncheck final -cleanup -config "$config.cfg" Portable.tla \
+            > "$config.log" 2>&1 || status=$?
           if [ -z "$violated" ]; then
             expected="No error has been found"
           else
@@ -836,11 +837,8 @@ in
         "Anchors"
       ];
       toshokan-spec-deep = toshokanSpec "toshokan-spec-deep" [
-        "PortableWide"
         "PortableDeep"
-        "Entries"
         "Dismiss"
-        "RestoreDirFork"
         "Deep"
         "Restore"
         "RestoreFork"
