@@ -1501,6 +1501,74 @@ mod tests {
     }
 
     #[test]
+    fn an_unplaced_write_shows_only_where_no_tip_keeps_it_merged() {
+        let write = |key: &str, value: &str, replaces: Vec<Ref>| Op::Write {
+            entity: E,
+            key: key.into(),
+            value: Some(Raw::of(&value).unwrap()),
+            replaces,
+            take: None,
+        };
+        let genesis = entry(None, vec![write("g", "g", Vec::new())], "g");
+        let pre = entry(Some(&genesis), vec![set("pre", Vec::new())], "pre");
+        let mid = entry(Some(&pre), vec![write("m", "m", Vec::new())], "mid");
+        let here = entry(Some(&mid), vec![write("j", "here", Vec::new())], "here");
+        let there = entry(
+            Some(&mid),
+            vec![set("there", vec![pre.own().of(W)])],
+            "there",
+        );
+        // Both branches certify the segment they share up to `mid`, so they part
+        // after it; a copy of that segment that stops at `pre` leaves `pre` unplaced.
+        let shared = vec![Rc::clone(&genesis), Rc::clone(&pre), Rc::clone(&mid)];
+        let tip = |own: Rc<Entry>| {
+            let mut since = shared.clone();
+            since.push(Rc::clone(&own));
+            let branch = [own];
+            let found = [Found::Lines(&shared), Found::Lines(&branch)];
+            Rc::new(snapshot(W, genesis.hash(), "w".into(), None, &since, found).unwrap())
+        };
+        let dropped = vec![Rc::clone(&genesis), Rc::clone(&pre)];
+        let k = FieldKey::Register(E, contribution::name("k"));
+        let unplaced = |derived: &Derived| -> Vec<FieldKey> {
+            let items = derived.items.get(&W).into_iter().flatten();
+            let unplaced = items.filter(|item| item.kind == ItemKind::Unplaced);
+            unplaced
+                .flat_map(|item| item.change.keys().cloned())
+                .collect()
+        };
+        let both = derived(vec![(
+            W,
+            Seen {
+                segments: vec![lines(&dropped, false)],
+                snapshots: vec![tip(Rc::clone(&here)), tip(Rc::clone(&there))],
+            },
+        )]);
+        assert_eq!(both.writers[&W].fork, Some(2));
+        assert_eq!(
+            values(&both),
+            ["pre"],
+            "below the parting, the union is merged"
+        );
+        assert_eq!(unplaced(&both), [], "which decided the line");
+        // The other branch never compacted: only its own segment is there.
+        let branch = [here];
+        let one = derived(vec![(
+            W,
+            Seen {
+                segments: vec![lines(&dropped, false), lines(&branch, false)],
+                snapshots: vec![tip(there)],
+            },
+        )]);
+        assert_eq!(
+            values(&one),
+            [] as [&str; 0],
+            "the branch took it out of the merge"
+        );
+        assert_eq!(unplaced(&one), [k], "so the line shows it");
+    }
+
+    #[test]
     fn unplaced_lines_show_only_what_the_writers_own_later_history_never_decided() {
         let entries = chain(W, &["a", "b", "c"]);
         let tip = folded(&entries);
