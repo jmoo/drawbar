@@ -1,8 +1,8 @@
-# RFC-XXXX: Per-writer library store
+# RFC-0271: Per-writer library store
 
 - Start date: 2026-10-27
 - Authors: jmoo
-- RFC PR: none yet
+- RFC PR: [jmoo/drawbar#271](https://github.com/jmoo/drawbar/pull/271)
 - Tracking issue: none yet
 
 ## Summary
