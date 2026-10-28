@@ -1708,9 +1708,13 @@ fn told(e: &Error) -> String {
         Error::Rekey { .. } => "this drawbar's history of the library went on elsewhere too, \
                                 so it starts one of its own; try again"
             .to_string(),
-        _ => "drawbar could not make the change".to_string(),
+        Error::InvalidId { .. } => "drawbar found a record of its own it cannot read".to_string(),
+        Error::DuplicateKey { .. } | Error::InvalidKey { .. } => FAULT.to_string(),
     }
 }
+
+/// What a refusal only a fault in drawbar itself can cause says.
+const FAULT: &str = "drawbar has a fault that stops it making the change; please report it";
 
 /// What `path` in `root` is, in the user's words.
 fn place(root: Root, path: &RelPath) -> String {
@@ -1733,7 +1737,6 @@ fn read_only(why: &Why) -> String {
             "this computer's clock reads a time drawbar cannot record".to_string()
         }
         Why::Unfinished { label, path, error } => unfinished(label, path, error),
-        _ => "drawbar cannot write to it".to_string(),
     }
 }
 
@@ -1763,19 +1766,25 @@ fn refused(refusal: &Refusal) -> String {
         Refusal::ChangedSince { .. } => "another drawbar has changed it since".to_string(),
         Refusal::Nothing => "there is nothing to do".to_string(),
         Refusal::Emptied => "drawbar no longer keeps what undoing it needs".to_string(),
-        Refusal::Unsupported(capability) => match capability {
-            toshokan::io::Capability::RenameDir => "the library folder cannot rename a folder",
-            toshokan::io::Capability::RenameFile => "the library folder cannot rename a file",
-            _ => "the library folder cannot do what it needs",
+        Refusal::Unsupported(capability) => {
+            use toshokan::io::Capability;
+            match capability {
+                Capability::RenameDir => "the library folder cannot rename a folder",
+                Capability::RenameFile => "the library folder cannot rename a file",
+                Capability::Append => "the library folder cannot add to a file",
+                Capability::Fsync => "the library folder cannot make sure a change is kept",
+            }
+            .to_string()
         }
-        .to_string(),
+        Refusal::SnapshotTooLong => {
+            "the library's history is too long to fold into one record".to_string()
+        }
         Refusal::Invalid(Invalid::Unbindable { path, why, .. }) => {
             let why = match why {
                 Unbindable::Absent => "no file is there",
                 Unbindable::Changed => "the file there holds something else now",
                 Unbindable::Unscanned => "drawbar has not looked at it yet",
                 Unbindable::Bound(_) => "it is another asset's file",
-                _ => "it cannot be bound now",
             };
             format!("the file at {path} cannot be taken: {why}")
         }
@@ -1786,7 +1795,12 @@ fn refused(refusal: &Refusal) -> String {
         Refusal::Invalid(Invalid::NotEmpty(path)) => format!("“{path}” holds files"),
         Refusal::Invalid(Invalid::TooLong) => TOO_LARGE.to_string(),
         Refusal::Invalid(Invalid::Empty) => "it changes nothing".to_string(),
-        _ => "drawbar could not make the change".to_string(),
+        Refusal::Invalid(Invalid::Overlapping(path)) => {
+            format!("two parts of the change are at “{path}”")
+        }
+        Refusal::Invalid(Invalid::UndeclaredKey(_) | Invalid::Unencodable { .. }) => {
+            FAULT.to_string()
+        }
     }
 }
 

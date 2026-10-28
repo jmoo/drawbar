@@ -9,7 +9,6 @@ use crate::report::Rekey;
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(ThisError, Debug)]
-#[non_exhaustive]
 pub enum Error {
     #[error("{root:?} {path}: {error}")]
     Io {
@@ -52,7 +51,6 @@ pub enum Error {
 
 /// Why a library is read-only.
 #[derive(ThisError, Clone, PartialEq, Eq, Debug)]
-#[non_exhaustive]
 pub enum Why {
     /// This writer's own history holds entries this build does not understand, so
     /// it cannot append without misrepresenting it.
@@ -77,7 +75,6 @@ pub enum Why {
 
 /// Why an intent, undo or redo was refused. A refusal changes nothing.
 #[derive(ThisError, Clone, PartialEq, Eq, Debug)]
-#[non_exhaustive]
 pub enum Refusal {
     /// A file was not as the intent expected.
     #[error("{} is not as expected", .0.path)]
@@ -116,7 +113,6 @@ pub struct Mismatch {
 }
 
 #[derive(ThisError, Clone, PartialEq, Eq, Debug)]
-#[non_exhaustive]
 pub enum Invalid {
     #[error("{0} does not exist")]
     NoEntity(EntityId),
@@ -151,7 +147,6 @@ pub enum Invalid {
 /// Why an entity cannot be bound to the file a run names, as the last scan
 /// found the library's files.
 #[derive(ThisError, Clone, Copy, PartialEq, Eq, Debug)]
-#[non_exhaustive]
 pub enum Unbindable {
     #[error("no file is there")]
     Absent,
