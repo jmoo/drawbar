@@ -291,41 +291,26 @@ doubt, it is not an RFC.
 
 RFCs live in `rfc/`, one Markdown file each, named `NNNN-short-title.md`. The
 number is the number of the pull request that proposes the RFC, padded to four
-digits. Open the pull request, then name the file. A number never changes and is
-never reused.
+digits. Copy `rfc/0000-template.md`, open the pull request, then name the file and
+fill in its header. A number never changes and is never reused. The template's
+sections follow the Rust project's RFC template.
 
-Each RFC opens with this front matter:
+The pull request is the discussion, and the maintainer decides. A merged RFC is
+accepted. A closed one was rejected or withdrawn, and its pull request keeps the
+record; the closing comment says which. Pull requests that propose an RFC carry
+the `rfc` label.
 
-```yaml
----
-rfc: 268
-title: RFCs in the open
-authors: [jmoo]
-status: proposed
-created: 2026-10-28
-decided:
-superseded_by:
----
-```
-
-The body has the sections Problem, Constraints, Options, Recommendation and
-Consequences. Options may be dropped when there genuinely are none. The first
-paragraph says whether a decision has been made.
-
-The pull request is the discussion, and the RFC is `proposed` while it is open.
-The maintainer decides. Merging records the decision as `accepted` or
-`rejected`. A rejected RFC is merged too, because the reasons not to do something
-are most of what an RFC is worth. Later changes of status, to `implemented` or
-`superseded`, are small pull requests of their own. Otherwise a merged RFC is not
-edited; a changed decision is a new RFC that supersedes it.
+A merged RFC records a decision. The code and `docs/` describe the current state.
+A merged RFC is not edited, with one exception: the pull request that supersedes
+it adds `Superseded by RFC-NNNN` under its title. The tracking issue in an RFC's
+header says how far it is implemented.
 
 An RFC carries its own evidence. Aggregate facts measured on the private corpus
 may be stated, as pull request descriptions already do. Specimens, their paths and
 anything proprietary stay out.
 
 Issues and pull requests that implement an RFC cite it in their titles, such as
-`docs: rfc-0268 keep RFCs in the open`. Code and comments do
-not cite RFC numbers.
+`feat: rfc-0268 …`. Code and comments do not cite RFC numbers.
 
 ## Pull requests and releases
 
