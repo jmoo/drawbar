@@ -50,7 +50,7 @@ the folder, a conflicted copy appears. The store has to treat each of these as n
 The folder can also sit on any volume the user picks: APFS, NTFS, ext4, FAT or exFAT on a
 removable drive, a network share, the browser's private storage, or a folder picked in the
 browser. They differ in whether a rename can replace a file or be torn by a crash, how names
-compare by case and Unicode normalisation, and whether files can be renamed at all.
+compare by case and Unicode normalization, and whether files can be renamed at all.
 
 The library is also about to hold more than tags and origins. Unpacking a bundle forgets
 which pianos and samples its programs play, so exporting it again leaves them out
@@ -67,6 +67,9 @@ Goals:
 - An interrupted or conflicting change leaves every sound file recoverable.
 - When recovery is needed, drawbar says what happened without asking the user to understand
   the store.
+- A library that stays the same size does not get slower or larger with every edit. A heavy
+  user writes about 36,000 entries a year; kept whole, they would add about 10 MB of folder
+  and 100 ms of open time a year to a library that never changed.
 
 Not goals: live collaboration, and version history. The store keeps only as much history
 as stops one drawbar overwriting another's work.
@@ -76,16 +79,20 @@ as stops one drawbar overwriting another's work.
 ### What a user sees
 
 - **Every change is one step.** Tagging, renaming, moving, deleting, importing and saving
-  each go to the library as one change. Undo and Redo take them back for as long as the
-  library is open.
+  each go to the library as one change. Undo and Redo take them back while the library is
+  open. Undo is refused, saying why, when another drawbar has since changed the same thing,
+  or when the trash no longer holds the bytes it needs.
 - **Nothing is overwritten in place.** Deleted and overwritten files go to drawbar's trash
-  inside the library, which keeps at most 1 GiB and is emptied when drawbar quits.
+  inside the library, which keeps at most 1 GiB and is emptied when drawbar quits. The
+  trash keeps the newest changes first, so deleting a file larger than 1 GiB leaves that
+  delete with no undo.
 - **A synced folder stays whole.** Each drawbar writes only its own files in
   `.drawbar/library/`, so a sync client never has two versions of one file to reconcile.
   Another drawbar's changes appear when the window is focused again, and at once in another
   tab of the same browser.
-- **Concurrent edits are kept.** If two machines rename a tag or set an origin differently
-  while offline, drawbar shows the latest and keeps both; neither is silently dropped.
+- **Concurrent edits are kept.** If two machines set an origin differently while offline,
+  drawbar shows the latest and keeps both; neither is silently dropped. Tags are sets, so
+  if two machines rename one tag differently while offline, both new names appear.
 - **Kept apart.** History that cannot be merged yet is listed in a Kept apart sheet rather
   than mixed in: two branches made by a copied app-data folder, part of a history a sync
   replaced with an older version, or changes that arrived before the ones they follow. The
@@ -93,7 +100,11 @@ as stops one drawbar overwriting another's work.
   join by themselves when those arrive.
 - **After a restore from a backup, the folder wins** the next time drawbar looks.
 - **Unsaved edits stay on this computer**, in drawbar's own data, and come back after a quit
-  or a crash.
+  or a crash. drawbar saves them every few seconds, so a crash can lose the last few
+  seconds. A read-only library holds unsaved edits in memory only.
+- **Older libraries are not migrated.** drawbar does not read what earlier versions kept in
+  `.drawbar/`: tags in `library.ron`, unsaved edits and rescued slot contents stay on disk,
+  unread, and opening such a library says so.
 - **An action too large to keep as one step is refused whole**, before anything changes.
 
 ### What a contributor sees
@@ -169,8 +180,9 @@ specifies each part.
   keep concurrent adds, and a delete keeps an entity that has a concurrent edit it did not
   see. Whatever a reader does not understand, it keeps.
 - **Bounded history** (Snapshots, `RETENTION.md`). A writer compacts its own log. The store
-  keeps only as much history as stops one instance overwriting another's work, and at a
-  fixed library size it stops growing.
+  keeps only as much history as stops one instance overwriting another's work. At a fixed
+  library size, what remains grows only by tens of bytes per deleted entity, removed tag,
+  segment written and commit that moved files; `RETENTION.md` sizes each term.
 - **Derived bindings** (Binding). Which file is an entity's is worked out from paths and
   file identities, with Godot's rule for copies, and is never written at open. The identity
   function is the app's. drawbar reads only the header and the last two bytes of a Nord
@@ -178,14 +190,16 @@ specifies each part.
   confirmed on hardware.
 - **Journaled file effects** (File effects and pending records, Recovery). A save or a
   delete stages, records, and moves the displaced bytes into the writer's trash, so every
-  user path holds the old bytes, nothing, or the new bytes, and recovery finishes or reports
-  every step.
+  user path holds the old bytes, nothing, or the new bytes. Where moves copy, a path may
+  also hold a cut-short copy of its new bytes while a pending record names it. Recovery
+  finishes or reports every step. A refused commit changes nothing; a step that fails stops
+  the commit there, which logs the effects it made and reports that it stopped partway.
 - **Plans from what the volume can do** (Durability, Backends). Each backend states whether
   it can sync, append, rename, and rename without replacing, and toshokan plans from that,
   never from a request that failed. Where a crash can tear a rename (FAT, exFAT, NTFS, HFS,
   UDF, any FUSE file system) or the browser cannot rename, a move copies and then removes
   its source under the same pending record. Paths compare under the volume's rules for case
-  and Unicode normalisation. A folder that cannot append opens read-only.
+  and Unicode normalization. A folder that cannot append opens read-only.
 - **A core with no I/O** (Design, Backends). One state machine, with a blocking driver for
   native and an async driver for the browser. The crash harness, the sync simulator and the
   model's traces drive the real code.
@@ -248,7 +262,7 @@ struct Link { to: EntityId, learned: Source }
 ```
 
 - **Stable targets.** Entity ids are random and never reused, and binding follows a file
-  through renames and moves, so a relation needs no rewriting when the user reorganises the
+  through renames and moves, so a relation needs no rewriting when the user reorganizes the
   folder outside drawbar. Relations by path break on rename (Obsidian's links, Ableton's
   sets) or require rewriting every referrer (Logseq's page renames).
 - **Created with their target.** Being linked is something a file cannot say, so an intent
@@ -256,9 +270,9 @@ struct Link { to: EntityId, learned: Source }
 - **Merged as sets.** Links added on two machines are both kept; a removal kills only the
   links it saw. A single-target relation uses a register, and two targets set offline show
   as a conflict.
-- **Reverse lookups.** `view.find(PLAYS, &link)` lists every program that plays a piano,
-  which is what a delete needs to warn about and an export needs to collect a bundle's
-  members.
+- **Reverse lookups.** Listing every program that plays a piano is what a delete needs to
+  warn about and an export needs to collect a bundle's members. `view.find` matches whole
+  values, provenance included, so this needs a lookup by target alone.
 - **Dangling targets are reported.** Deleting a linked file leaves its relations in place,
   shown as unresolved, so an undo or a restored file reconnects them.
 - **Provenance travels with the link.** Each value records how it was learned (the
@@ -269,8 +283,8 @@ For [#183](https://github.com/jmoo/drawbar/issues/183), unpacking a bundle would
 would collect members from the store before asking the instrument.
 
 toshokan does not yet treat entity references specially: a link is the app's JSON like any
-other value. Resolving targets in the view and reporting dangling ones is the work this
-needs.
+other value. Indexing links by target, resolving targets in the view and reporting dangling
+ones is the work this needs.
 
 ### Evidence from the proof of concept
 
@@ -308,8 +322,8 @@ drawbar grows by about 2,900 lines in the areas it changes.
 - **The trash syncs.** A displaced piano is copied to every synced machine until the trash
   is emptied. The 1 GiB cap and emptying at quit bound this.
 - **Writers accumulate.** Every cleared browser profile and every copied app-data folder
-  leaves a writer behind. Each is bounded by its facts, and retired writers an install owns
-  are folded, but the count only grows.
+  leaves a writer behind. Each is bounded by what it wrote, and nothing folds a writer that
+  will not write again, so the count only grows.
 - **Every open derives everything.** Nothing derived is kept between opens except file
   identities, so a second open costs as much as the first.
 - **A narrow race remains** where renames can replace a file, as in every browser and on
@@ -528,7 +542,8 @@ depend on those notes.
 - **Dot-directory sync.** Do Dropbox, iCloud Drive, OneDrive, Google Drive and Syncthing all
   carry `.drawbar/`? If any skips it, the root needs a visible name.
 - **References as a value kind.** Whether toshokan gains a reference type that the view
-  resolves and reports when dangling, or the app resolves links itself.
+  indexes by target, resolves, and reports when dangling, or the app resolves links itself
+  and scans for referrers.
 - **Conflict display per field kind.** How drawbar shows a register conflict, a deletion
   conflict and a conflicted file, beyond showing the latest value.
 - **A downgraded build writing.** Whether an older drawbar may keep writing when its own
@@ -542,7 +557,7 @@ depend on those notes.
   above, learned from the instrument and from bundle manifests, so offline export carries
   every member.
 - **Set list relations**, from set lists read off the instrument.
-- **User metadata**: notes, ratings and colours on tags, each one key.
+- **User metadata**: notes, ratings and colors on tags, each one key.
 - **Export of facts** into a bundle or a sidecar on request, for tools that cannot read the
   store.
 - **A name search index** fed by the per-entity changes each commit and refresh return.
