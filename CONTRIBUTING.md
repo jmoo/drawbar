@@ -9,9 +9,9 @@ This repository contains Rust tools for Clavia Nord instruments:
 - `drawbar` is the desktop and browser application.
 
 This is a public repository. Do not add personal information, secrets, agent
-memory, private notes, the private RFCs numbered below 0038, or the private
-specimen corpus. If a fact is needed to understand public code, state the fact in
-the public repository; do not point at a private note.
+memory, private notes, or the private specimen corpus. If a fact is needed to
+understand public code, state the fact in the public repository; do not point at a
+private note.
 
 The project is not affiliated with, authorized by, or endorsed by Clavia DMI
 AB. Keep the trademark disclaimers in crate READMEs and generated docs.
@@ -326,10 +326,6 @@ anything proprietary stay out.
 Issues and pull requests that implement an RFC cite it in their titles, such as
 `docs: rfc-0268 keep RFCs in the open`. Code and comments do
 not cite RFC numbers.
-
-RFC-0001 to RFC-0037 predate this process and are private, though older issues
-cite them. The maintainer may publish one under its original number. Numbers
-taken from pull requests are all higher.
 
 ## Pull requests and releases
 

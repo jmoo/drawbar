@@ -16,10 +16,10 @@ section of `CONTRIBUTING.md`, changed in the same pull request.
 
 ## Problem
 
-The project's design decisions so far are RFC-0001 to RFC-0037, kept in the
-maintainer's private notes. Issue and pull request titles cite them (`rfc-0015`,
-`rfc-0029`), and `CONTRIBUTING.md` keeps them out of this repository. That worked
-while one person wrote the code.
+The project's design decisions so far are RFCs kept in the maintainer's private
+notes. Issue and pull request titles cite them (`rfc-0015`, `rfc-0029`), but the
+documents are not in this repository. That worked while one person wrote the
+code.
 
 There are now outside contributors. They can read that a decision was made but
 not why, and they cannot propose, review or amend a decision where the project
@@ -47,8 +47,8 @@ the notes.
 | # | Option | Cost | Key tradeoff |
 |---|---|---|---|
 | A | Keep RFCs private; the maintainer transcribes outside proposals | Low | Contributors cannot see rationale, and every proposal goes through one person |
-| B | Publish every RFC, old and new | High | 0001 to 0037 hold corpus paths, specimen names and private notes; cleaning them is a large job and breaks the public-repository rule until done |
-| C | New RFCs are Markdown files in `rfc/`, reviewed as pull requests; old ones stay private | Low | Two places to look until the old ones stop mattering |
+| B | Publish every RFC, old and new | High | The existing RFCs hold corpus paths, specimen names and private notes, and cleaning them is a large job |
+| C | New RFCs are Markdown files in `rfc/`, reviewed as pull requests | Low | Earlier decisions stay where they are |
 | D | New RFCs are GitHub issues or discussions | Low | Only the author and the maintainer can edit the text, revisions are not diffable, and the decision is not part of the tree |
 | E | New RFCs are pages in the GitHub wiki | Low | Edits land without review, anyone with write access can change a decided page, and a clone of the repository does not include it |
 
@@ -56,8 +56,8 @@ Numbering for C:
 
 | # | Scheme | Tradeoff |
 |---|---|---|
-| C1 | Continue the private sequence from 0038 | Two open pull requests can claim the same number, so the maintainer reconciles before merging |
-| C2 | Use the number of the pull request that proposes the RFC | Unique without coordination, and above every private number, since pull request numbers are already past 260; the sequence jumps from 0037 |
+| C1 | Continue the existing sequence | Two open pull requests can claim the same number, so the maintainer reconciles before merging |
+| C2 | Use the number of the pull request that proposes the RFC | Unique without coordination, and higher than any existing RFC number; the sequence has gaps |
 
 ## Recommendation
 
@@ -74,8 +74,6 @@ C with C2: RFCs as files in `rfc/`, numbered by their pull request.
   RFC that supersedes the old one.
 - **Evidence** is stated as facts and aggregates, which pull request descriptions
   already do. Specimens and their paths stay private.
-- **Old RFCs stay where they are.** The maintainer may publish one under its
-  original number when a contributor needs it.
 - **Code does not cite RFC numbers.** Titles of the issues and pull requests that
   implement an RFC do.
 
@@ -84,8 +82,8 @@ early discussion, with the decision still landing as a file.
 
 ## Consequences
 
-- `CONTRIBUTING.md` gains an RFCs section and drops the rule that RFCs are private.
-  `CLAUDE.md` and `AGENTS.md` link to it, so coding agents follow the same rules.
+- `CONTRIBUTING.md` gains an RFCs section. `CLAUDE.md` and `AGENTS.md` link to it,
+  so coding agents follow the same rules.
 - An RFC's number is known only once its pull request is open. The author opens the
   pull request, then names the file.
 - The maintainer's notes keep research and private remarks. They no longer hold
