@@ -81,7 +81,8 @@ as stops one drawbar overwriting another's work.
 - **Every change is one step.** Tagging, renaming, moving, deleting, importing and saving
   each go to the library as one change. Undo and Redo take them back while the library is
   open. Undo is refused, saying why, when another drawbar has since changed the same thing,
-  or when the trash no longer holds the bytes it needs.
+  or when the trash no longer holds the bytes it needs. A refused undo or redo is let go,
+  so the next Undo reaches the step before it.
 - **Nothing is overwritten in place.** Deleted and overwritten files go to drawbar's trash
   inside the library, which keeps at most 1 GiB and is emptied when drawbar quits. The
   trash keeps the newest changes first, so deleting a file larger than 1 GiB leaves that
@@ -96,12 +97,14 @@ as stops one drawbar overwriting another's work.
 - **Kept apart.** History that cannot be merged yet is listed in a Kept apart sheet rather
   than mixed in: two branches made by a copied app-data folder, part of a history a sync
   replaced with an older version, or changes that arrived before the ones they follow. The
-  user takes the changes they want or dismisses a branch. Changes waiting on earlier ones
-  join by themselves when those arrive.
+  user takes the changes they want, or dismisses a branch or the changes an older version
+  left. Changes waiting on earlier ones cannot be dismissed, and join by themselves when
+  those arrive.
 - **After a restore from a backup, the folder wins** the next time drawbar looks.
 - **Unsaved edits stay on this computer**, in drawbar's own data, and come back after a quit
   or a crash. drawbar saves them every few seconds, so a crash can lose the last few
-  seconds. A read-only library holds unsaved edits in memory only.
+  seconds. A read-only library holds unsaved edits in memory only, except one that turned
+  read-only because a change could not finish, which still keeps them.
 - **Older libraries are not migrated.** drawbar does not read what earlier versions kept in
   `.drawbar/`: tags in `library.ron`, unsaved edits and rescued slot contents stay on disk,
   unread, and opening such a library says so.
@@ -163,7 +166,7 @@ specifies each part.
 | Kind | What | Where | Rules | Losing it costs |
 |---|---|---|---|---|
 | Shared truth | The user's files; each writer's log, snapshots, pending records, trash and staging | The library folder | One writer per file; changed only by append or by a journaled step; synced | That writer's facts |
-| Local truth | Unsaved edits; which writer this instance is, and its lock | The app's own data, per install | Never synced | This install's unsaved edits; the next open writes as a new writer |
+| Local truth | drawbar's unsaved edits; toshokan's record of which writer this instance is, and its lock | The app's own data, per install | Never synced | This install's unsaved edits; the next open writes as a new writer |
 | Derived | The merged view, bindings of files, file identities | Memory, and one identity cache per install | Rebuildable from the above at any time; never trusted for a write | Time |
 
 ### The design in brief
@@ -181,8 +184,9 @@ specifies each part.
   see. Whatever a reader does not understand, it keeps.
 - **Bounded history** (Snapshots, `RETENTION.md`). A writer compacts its own log. The store
   keeps only as much history as stops one instance overwriting another's work. At a fixed
-  library size, what remains grows only by tens of bytes per deleted entity, removed tag,
-  segment written and commit that moved files; `RETENTION.md` sizes each term.
+  library size, what remains grows only with deleted entities, removed tags, a certificate
+  of about 92 bytes per segment its writer ended, and a pair in `settled` of about 70 bytes
+  per commit that moved files and per settlement; `RETENTION.md` sizes each term.
 - **Derived bindings** (Binding). Which file is an entity's is worked out from paths and
   file identities, with Godot's rule for copies, and is never written at open. The identity
   function is the app's. drawbar reads only the header and the last two bytes of a Nord
@@ -192,8 +196,10 @@ specifies each part.
   delete stages, records, and moves the displaced bytes into the writer's trash, so every
   user path holds the old bytes, nothing, or the new bytes. Where moves copy, a path may
   also hold a cut-short copy of its new bytes while a pending record names it. Recovery
-  finishes or reports every step. A refused commit changes nothing; a step that fails stops
-  the commit there, which logs the effects it made and reports that it stopped partway.
+  finishes or reports every step. A refused commit changes nothing. A step that fails logs
+  nothing and leaves its record open, and the next write or open settles it forward. If that
+  cannot finish, the library turns read-only until it is opened again (File ▸ Open recent
+  library).
 - **Plans from what the volume can do** (Durability, Backends). Each backend states whether
   it can sync, append, rename, and rename without replacing, and toshokan plans from that,
   never from a request that failed. Where a crash can tear a rename (FAT, exFAT, NTFS, HFS,
@@ -202,7 +208,7 @@ specifies each part.
   and Unicode normalization. A folder that cannot append opens read-only.
 - **A core with no I/O** (Design, Backends). One state machine, with a blocking driver for
   native and an async driver for the browser. The crash harness, the sync simulator and the
-  model's traces drive the real code.
+  value-level harness drive the real code.
 
 ### Plain metadata instead of per-file sidecars
 
@@ -293,13 +299,14 @@ onto it.
 
 | Check | Result |
 |---|---|
-| Workspace tests, release | 2,982 passed, 0 failed |
-| Retention sweep: an oracle that keeps every entry, the retention rules and the implementation, over every history of writers, a clone, registers, sets, deletes, takes and dismissals, every compaction point, delivery orders up to a cap, conflicted copies, restores and dropped file versions | 6,729,273 histories; the implementation matches the rules exactly |
-| TLA+ model of the protocol between writers, sync and readers, deep configuration | No error: 65,304,399 distinct states, the whole space |
-| TLA+ liveness, deep configuration | No error: 11,519,322 distinct states |
-| Power loss: every flush point, sampled write subsets between flushes, each single write omitted, eight workloads | ext4, XFS, Btrfs, exFAT: 0 of 32 runs failed |
-| No growth: two histories ten times apart at a fixed library | Equal state and folder outside snapshots; the two growing terms within their bounds |
-| drawbar's hardware suite on a Nord Electro 5 | 9 of 9 |
+| Every crate's tests, in its Nix build with its declared features | Pass |
+| I/O-fault sweep: every request of the eight power-loss workloads, in renaming, picked and copying folders and both drivers, made to fail, lose its reply, unplug the backend or land short, then written again or reopened, with the write that settles it faulted too | Every run satisfies the power-loss invariants; a failed commit is fully absent or fully settled, and no writer stays wedged |
+| Retention sweep: an oracle that keeps every entry, the retention rules and the implementation, over every history of writers, a clone, registers, sets, deletes, takes and dismissals, every compaction point, delivery orders up to a cap, conflicted copies, restores, dropped file versions and older versions a sync brings back | 6,729,273 histories; the implementation matches the rules exactly, no field shows a conflict the oracle resolves, and every value the oracle shows appears in the merge or an item |
+| TLA+ model of the protocol between writers, sync and readers, deep configuration (`Deep`) | No error: 45,766,142 distinct states under symmetry over instances, the whole space |
+| TLA+ liveness, deep configuration (`LivenessDeep`) | No error: 11,519,322 distinct states |
+| Power loss: every flush point, sampled write subsets between flushes, each single write omitted, eight workloads | ext4, XFS, Btrfs, exFAT: 0 of 32 runs failed, over 14,039 crash states |
+| No growth: two histories ten times apart at a fixed library | Equal state, requests and folder outside snapshots; certificates and record pairs within their stated bounds |
+| drawbar's hardware suite on a Nord Electro 5 | 9 of 9 at 05c8f5dd; not yet rerun since the keeper's read-only and fault changes |
 | drawbar's and toshokan's browser suites, headless Chromium and Firefox | Pass |
 
 At 2,000 entities and three writers, a native open takes about 160 ms after 200,000
@@ -329,6 +336,10 @@ drawbar grows by about 2,900 lines in the areas it changes.
 - **A narrow race remains** where renames can replace a file, as in every browser and on
   network shares: a file another program makes at a path between drawbar's check and its
   move is replaced, and its bytes leave the folder.
+- **An older copy can show as a branch.** A certificate names a segment by its first line
+  and a position, so an older, shorter copy of a compacted segment that a sync brings back
+  cannot be told from another instance's copy that left the chain there. It shows as a Kept
+  apart branch, never merged silently, even when nothing forked.
 
 ## Rationale and alternatives
 
@@ -361,8 +372,8 @@ Within the design:
 - **Bounded history.** History exists to stop overwrites, not for version control, so
   undo is per session and a restored folder wins.
 - **Sans-IO.** The web is async only and native is simpler blocking; one core with two
-  drivers serves both, and lets the model checker's traces, the crash harness and the sync
-  simulator drive the real code without a file system.
+  drivers serves both, and lets the crash harness, the sync simulator and the value-level
+  harness drive the real code without a file system.
 
 If nothing is done, the issues under Motivation stay open, and every new kind of fact
 (relations, learned ids) lands in the same shared file.
@@ -530,12 +541,11 @@ writer.
 
 ### Earlier decisions here
 
-The design went through four revisions in the maintainer's private notes before this RFC
-process existed: one shared operation log; per-writer logs with a shared content-addressed
-store, built as the first version of the proof of concept; a revision without durable file
-undo; and the per-writer trash described here, later simplified to drop the cached view,
-the index layer and unbounded history. This RFC states the result in full so it does not
-depend on those notes.
+The design went through four revisions before this RFC process existed: one shared
+operation log; per-writer logs with a shared content-addressed store, built as the first
+version of the proof of concept; a revision without durable file undo; and the per-writer
+trash described here, later simplified to drop the cached view, the index layer and
+unbounded history.
 
 ## Unresolved questions
 
