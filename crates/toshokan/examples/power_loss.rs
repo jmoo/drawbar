@@ -164,7 +164,10 @@ fn main() -> ExitCode {
             let dirs = Dirs::new(Path::new(dir))?;
             run::<_, Library<Faulty<Native>>>(&workload, &dirs, |label| {
                 marks.mark(label)?;
-                println!("{label}");
+                // replay.py counts the labels printed as the steps that returned.
+                if label != "setup" {
+                    println!("{label}");
+                }
                 Ok(())
             })
         }),
