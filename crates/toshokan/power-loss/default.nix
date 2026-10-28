@@ -38,7 +38,7 @@ let
   workloads = 8;
   replayMachine = {
     cores = 4;
-    memorySize = 4096;
+    memorySize = 3072;
   };
 
   replay-log = runCommand "replay-log" { } ''
