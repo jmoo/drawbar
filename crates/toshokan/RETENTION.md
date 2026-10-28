@@ -195,7 +195,10 @@ Per writer `y`, from the files the reader sees:
   resurfaced files and the folded part of a segment that runs on past a tip's
   head.
 - **Unplaced.** The lines past the first of an unsealed file that starts like a
-  certified segment but is shorter (section 2). Shown as an item.
+  certified segment but is shorter (section 2). Shown as an item, without a
+  line's write to a field its writer's merged history writes at the line's
+  number or above, which already decided it. The user can take its changes, or
+  dismiss it by naming exactly its lines.
 - **Placed.** An entry whose predecessor is a tip's head or placed, or a genesis
   entry when `y` has no tip.
 - **Gap.** Any other entry whose predecessor may still come after the tips'
@@ -346,8 +349,8 @@ alone, and nothing another writer wrote is lost.
 
 A snapshot lost by hand, or by a sync fault, while a newer segment survives
 leaves that segment held back as a gap until the writer's next snapshot reaches
-it. A dropped version of a segment shows its surviving lines past the first as
-unplaced. Neither is something the protocol does.
+it. A dropped version of a segment holds its surviving lines past the first as
+unplaced, which show only what its writer's later history never decided. Neither is something the protocol does.
 
 ## 8. Writers, pending records and undo
 

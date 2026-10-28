@@ -267,6 +267,10 @@ impl History {
         };
         let conflict = |e: u8| shown.entities.get(&e).is_some_and(|x| x.deletion_conflict);
         let runs = || shown.items.iter().filter(|it| it.kind == ItemKind::Run);
+        let dismissable = || {
+            let items = shown.items.iter();
+            items.filter(|it| matches!(it.kind, ItemKind::Run | ItemKind::Unplaced))
+        };
         let mut takes = None;
         let (write, replaces, observed, dismisses) = match act {
             Act::Set(e, r, v) if shown.exists(e) => (
@@ -305,9 +309,12 @@ impl History {
                 vec![],
                 vec![],
             ),
-            Act::Dismiss if runs().next().is_some() => {
-                (None, vec![], vec![], runs().map(|it| it.run).collect())
-            }
+            Act::Dismiss if dismissable().next().is_some() => (
+                None,
+                vec![],
+                vec![],
+                dismissable().map(|it| it.run).collect(),
+            ),
             Act::Take => {
                 let item = runs().next()?;
                 let (&field, &value) = item.change.iter().next()?;

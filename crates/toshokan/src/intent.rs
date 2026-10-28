@@ -160,7 +160,8 @@ impl<L: Driver> Intent<L> {
     }
 
     /// Dismisses the run `run` of an item: no reader merges or shows it again,
-    /// nor the entries after it.
+    /// nor the entries after it. Unplaced lines stay hidden while their `run` is
+    /// exactly this one.
     pub fn dismiss(mut self, run: Run) -> Self {
         self.plan.dismiss.push(run);
         self

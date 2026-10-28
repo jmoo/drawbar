@@ -816,7 +816,14 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>) -> Shown {
                 forced: BTreeMap::new(),
             });
             group.last = entry.at();
-            if let Some(write) = entry.write {
+            // The writer's own merged writes from an unplaced line on decided its fields.
+            let decided = |write: &Write| {
+                writes.values().any(|o| {
+                    o.at.dir == entry.dir && o.write.field == write.field && o.at.n >= entry.n
+                })
+            };
+            let write = entry.write;
+            if let Some(write) = write.filter(|w| kind != ItemKind::Unplaced || !decided(w)) {
                 group.writes.push(Live {
                     at: entry.at(),
                     write,
@@ -825,6 +832,15 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>) -> Shown {
         }
     }
     for ((kind, _), group) in groups {
+        let run = Dismissal {
+            dir: group.dir,
+            first: group.first,
+            last: group.last,
+            tip: group.tip,
+        };
+        if kind == ItemKind::Unplaced && dismissals.contains(&run) {
+            continue;
+        }
         let mut change = change(&group.writes, &base);
         change.extend(group.forced.iter().map(|(&f, &(_, v))| (f, v)));
         if change.is_empty() {
@@ -836,12 +852,7 @@ fn derive(spec: &Spec, r: &Reading<'_, Contribution>) -> Shown {
         items.insert(Item {
             dir: group.dir,
             kind,
-            run: Dismissal {
-                dir: group.dir,
-                first: group.first,
-                last: group.last,
-                tip: group.tip,
-            },
+            run,
             writes: latest_writes,
             change,
             forgotten: group.forced.into_keys().collect(),

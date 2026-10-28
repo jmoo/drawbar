@@ -126,17 +126,19 @@ pub enum ItemKind {
     /// Entries whose predecessor may still arrive. Merged once it does.
     Gap,
     /// Lines of an unsealed file shorter than a snapshot certified it: a version
-    /// a sync client dropped, a copy that diverged, or a file still arriving.
+    /// a sync client dropped, a copy that diverged, or a file still arriving. A
+    /// line's write to a field its writer's merged history writes at the line's
+    /// number or above is left out.
     Unplaced,
 }
 
 /// Entries a reader shows apart from the merged state, with the net change they
 /// would make. The user keeps the current state or takes changes, with
-/// [`crate::intent::Intent::take`] naming `run`, and may dismiss a run with
-/// [`crate::intent::Intent::dismiss`]; a gap or unplaced lines cannot be
+/// [`crate::intent::Intent::take`] naming `run`, and may dismiss a run or
+/// unplaced lines with [`crate::intent::Intent::dismiss`]; a gap cannot be
 /// dismissed. A run is shown until it is dismissed, with no changes once it
-/// would change nothing; a gap or unplaced lines only while they would change
-/// something.
+/// would change nothing; a gap only while it would change something, and
+/// unplaced lines while they would and no dismissal names exactly their `run`.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Item {
     pub kind: ItemKind,

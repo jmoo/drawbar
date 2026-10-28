@@ -580,9 +580,12 @@ A tip's own write the merge leaves out that replaced an own write of its writer
 no merged entry holds is a forgotten basis: its run shows that field whatever
 the merged state shows, until an intent takes a run of that writer on that
 field. An intent takes changes from an item with ops that name its run in
-`take`, and dismisses a run with a `dismiss` op; a gap or unplaced lines cannot
+`take`, and dismisses a run or unplaced lines with a `dismiss` op; a gap cannot
 be dismissed. A run is shown until it is dismissed, with no change once it would
-change nothing; a gap or unplaced lines only while they would change something.
+change nothing; a gap only while it would change something, and unplaced lines
+while they would and no dismissal names them exactly. An unplaced line's write
+to a field its writer's merged history writes at the line's number or above
+changes nothing: that history already decided the field.
 A gap holding only
 `more` entries is not shown: their intent, which names them, has not arrived.
 
