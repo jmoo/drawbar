@@ -220,6 +220,9 @@ const GAIN_AT: usize = 0x40c;
 /// on hardware.
 const DAMPER_TOP_AT: usize = 0x40d;
 
+/// The per-key release level, [`NOTES`] bytes; [`Library::release_level`].
+const RELEASE_LEVEL_AT: usize = 0x30c;
+
 /// First byte of the stroke directory, and so the length of the prefix.
 const DIRECTORY_AT: usize = 0x732;
 
@@ -1062,6 +1065,22 @@ impl<'a> Library<'a> {
     pub fn set_fine_tune(&mut self, key: u8, units: i8) -> Result<(), Error> {
         let at = FINE_TUNE_AT + midi_key("key", key)?;
         self.prefix[at] = units as u8;
+        Ok(())
+    }
+
+    /// The level a [`Version::V5`] key plays its release stroke at, from the per-key
+    /// table at `0x30c`. 0 plays no release at all; 43 plays it about 5 dB under where a
+    /// [`Version::V6`] release of the same stroke plays, 32 about 13 dB under 43, and 21
+    /// near silence. A release follows the note's level at key-up either way. A
+    /// [`Version::V6`] key ignores the table. Confirmed on hardware. Vendor libraries
+    /// state 38 to 47 at every key whose root has a release stroke, and 0 at every other
+    /// key. Inferred from specimens; not confirmed on hardware.
+    pub fn release_level(&self, key: u8) -> Result<u8, Error> {
+        Ok(self.prefix[RELEASE_LEVEL_AT + midi_key("key", key)?])
+    }
+
+    pub fn set_release_level(&mut self, key: u8, level: u8) -> Result<(), Error> {
+        self.prefix[RELEASE_LEVEL_AT + midi_key("key", key)?] = level;
         Ok(())
     }
 

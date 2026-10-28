@@ -779,6 +779,16 @@ fn recordings_from(s: &Specimen) -> Result<(), String> {
         );
         built.set_note_off_fade(index, 0).context("fade")?;
     }
+    // The script wrote no release level, so the file's releases never sounded on a 5.x
+    // key; the table is restated as the file holds it.
+    for key in 0..npno::NOTES as u8 {
+        let theirs = theirs.release_level(key).context("release level")?;
+        ensure!(
+            theirs == 0,
+            "key {key} holds release level {theirs}, not the script's 0"
+        );
+        built.set_release_level(key, 0).context("release level")?;
+    }
     let bytes = built
         .to_piano()
         .and_then(|p| nord_format::to_bytes(&Entity::Piano(p)))

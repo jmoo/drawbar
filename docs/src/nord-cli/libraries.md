@@ -69,7 +69,8 @@ start, which a seamless loop already has. While the key is held, the loop fades
 the way the instrument's own pianos of that `--kind` do, faster on higher keys.
 `--loop-fade` sets the rate at middle C in decibels per second, and `0` holds the
 loop at its level. A stroke without a loop plays to its end, and a release stroke
-cannot loop.
+cannot loop. A release plays at the level the note has fallen to at key-up, and
+not at all when the attack recording is silent there.
 A loop is exact in a WAV at 35,002 Hz. At any other rate its ends move to the
 nearest frame of the resampled audio.
 
