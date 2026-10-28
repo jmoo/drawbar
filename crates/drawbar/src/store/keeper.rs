@@ -440,7 +440,10 @@ impl<F: Fs> Keeper<F> {
         };
         let committed = match committed {
             Ok(committed) => committed,
-            Err(e @ Error::Refused(_)) => {
+            // A step another drawbar changed since, or whose trash item went, can
+            // never be taken back; any other refusal may pass once the files are
+            // looked at again.
+            Err(e @ Error::Refused(Refusal::ChangedSince { .. } | Refusal::Emptied)) => {
                 match again {
                     true => library.forget_redo(),
                     false => library.forget_undo(),
