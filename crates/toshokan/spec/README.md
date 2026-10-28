@@ -269,7 +269,9 @@ and checks each state after the file system's own recovery. One VM per file
 system runs every workload at once, each on its own slice of the disks, and a
 state that keeps the same writes as one already checked, with the same steps
 acknowledged, counts that check. An exFAT state that
-`fsck.exfat` finds corrupt is checked but counted apart. A write is replayed
+`fsck.exfat` finds corrupt is checked but counted apart. With every directory
+sync skipped, only exFAT's replay fails; ext4, XFS and Btrfs keep the
+directories' changes through the file syncs that follow them. A write is replayed
 whole, never torn; the crash harness covers torn writes.
 [examples/power_loss.rs](../examples/power_loss.rs) holds the workloads and the
 checker. Neither test covers APFS, NTFS or a browser's storage.
