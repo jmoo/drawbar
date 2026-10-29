@@ -583,19 +583,17 @@ struct Strike {
     decay: Option<f32>,
 }
 
-/// What the applied-decay ladder is worth, in decibels a second, read off its first
-/// entry: a one-pole coefficient of `entry / 2^23` a frame at [`npno::codec::RATE`], so
-/// `20·log10(e)·rate·(1 − entry/2^23)`.
-///
-/// Inferred from specimens; not confirmed on hardware.
+/// What the applied-decay ladder fades the stroke by on its own root, in decibels a
+/// second: entry 1, the one the root plays, below [`npno::LADDER_UNITY`] in units of
+/// [`npno::DECAY_PER_UNIT`].
 ///
 /// `None` where every entry is [`npno::LADDER_UNITY`], which applies nothing.
 fn decay_rate(ladder: &[u32; npno::DECAYS]) -> Option<f32> {
-    let held = 1.0 - f64::from(ladder[0]) / f64::from(npno::LADDER_UNITY);
+    let below = f64::from(npno::LADDER_UNITY) - f64::from(ladder[1]);
     ladder
         .iter()
         .any(|entry| *entry != npno::LADDER_UNITY)
-        .then_some((8.686 * f64::from(npno::codec::RATE) * held) as f32)
+        .then_some((below * npno::DECAY_PER_UNIT) as f32)
 }
 
 /// Everything the piano editor draws from, read once out of the saved baseline.
@@ -4212,18 +4210,19 @@ mod tests {
         assert_eq!(span_text(&reach[0].1), "v 1–127");
     }
 
-    /// The ladder holds a per-frame coefficient, and the stroke's line reads it as the
-    /// rate it decays at. Unity applies nothing at all.
+    /// The stroke's line reads the ladder as the rate it decays at on its own root,
+    /// which plays entry 1. Unity applies nothing at all.
     #[test]
-    fn an_applied_decay_reads_as_the_rate_its_ladder_states() {
+    fn an_applied_decay_reads_as_the_rate_its_ladder_states_on_the_root() {
         let unity = [npno::LADDER_UNITY; npno::DECAYS];
         assert_eq!(decay_rate(&unity), None);
 
         let mut ladder = unity;
-        ladder[0] = npno::LADDER_UNITY - 1000;
+        ladder[0] = npno::LADDER_UNITY - 1059;
+        ladder[1] = npno::LADDER_UNITY - 1000;
         let rate = decay_rate(&ladder).expect("an entry below unity applies something");
-        // 8.686 × 35002 × 1000/2^23 = 36.2 dB a second.
-        assert!((rate - 36.2).abs() < 0.1, "{rate}");
+        // 1000 × 0.024 = 24.0 dB a second.
+        assert!((rate - 24.0).abs() < 0.01, "{rate}");
     }
 
     /// Every figure the trim section prints comes off the strokes' own byte lengths,

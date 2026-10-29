@@ -59,7 +59,7 @@ velocity value directly, name the file with `v12` in place of `l00`.
 
 `build` writes piano format 6 unless `--format 5` asks for the older format, for
 an instrument that does not play format 6. A template's format decides when you
-give one. Layer values run from 0 to 135 in format 6 and from 0 to 27 in format 5;
+give one. Layer values run from 0 to 100 in format 6 and from 0 to 20 in format 5;
 `nord piano inspect` names a library's format.
 
 A WAV with a loop in its `smpl` chunk, which most sample editors write, makes a
@@ -75,9 +75,13 @@ A loop is exact in a WAV at 35,002 Hz. At any other rate its ends move to the
 nearest frame of the resampled audio.
 
 Whatever the audio does not decide, such as decay and per-note tables, comes from
-`--template` when you give one. Without a template, `--kind`, `--gain`,
-`--damper-top` and `--loop-fade` set the playback values, and the rest uses neutral defaults. Each
-stroke's level follows its layer either way.
+`--template` when you give one, and each stroke's level follows its layer. Without a
+template, `--kind`, `--gain`, `--damper-top` and `--loop-fade` set the playback
+values, and each stroke decays from note-on as the instrument's own pianos of that
+kind do, faster on higher keys. In format 6, each layer is trimmed to play at the
+level of its root's loudest layer, and each release is trimmed 18 dB below that. When a soft
+layer needs more boost than the instrument gives at `--gain`, the whole library is
+turned down to fit. In format 5, each stroke's level follows its layer.
 
 [What is supported](../getting-started/support.md) says which of these libraries
 have been played on an instrument.

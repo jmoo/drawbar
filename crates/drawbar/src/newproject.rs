@@ -1188,7 +1188,7 @@ mod tests {
         let draft = piano_draft(&["060-b0-l02", "060-b0-l00", "060-b0-l01", "072-b0-l00"]);
         assert_eq!(
             layer_values(&draft.takes, Version::V6).unwrap(),
-            vec![135, 0, 68, 0],
+            vec![100, 0, 50, 0],
             "the list order is kept; the rank is the layer's own"
         );
     }
@@ -1225,7 +1225,12 @@ mod tests {
 
     #[test]
     fn a_piano_draft_codes_the_takes_into_a_library() {
-        let mut draft = piano_draft(&["Grand-060-b0-l00", "Grand-060-b0-l01", "Grand-072-b2-l00"]);
+        let mut draft = piano_draft(&[
+            "Grand-060-b0-l00",
+            "Grand-060-b0-l01",
+            "Grand-072-b0-l00",
+            "Grand-072-b2-l00",
+        ]);
         assert_eq!(
             draft.name, "Grand",
             "the stroke suffix is not part of the name"
@@ -1236,7 +1241,7 @@ mod tests {
             .begin(&egui::Context::default(), None)
             .expect("the takes state a library");
         let built = finish(&mut draft).expect("a library");
-        assert_eq!((built.strokes, built.roots), (3, 2));
+        assert_eq!((built.strokes, built.roots), (4, 2));
         assert_eq!(built.clipped, 0);
 
         let entity = nord_format::from_stream(&mut std::io::Cursor::new(&built.bytes)).unwrap();
@@ -1254,6 +1259,7 @@ mod tests {
             [
                 (60, Some(Bank::Attack), 0),
                 (60, Some(Bank::Attack), Version::V6.softest_layer()),
+                (72, Some(Bank::Attack), 0),
                 (72, Some(Bank::Release), 0),
             ],
             "the root's two layers spread from the loudest to the softest"
@@ -1263,7 +1269,7 @@ mod tests {
             Version::V6,
             "a new library is 6.x unless chosen"
         );
-        assert_eq!(library.strokes()[1].threshold(), 68);
+        assert_eq!(library.strokes()[1].threshold(), 50);
     }
 
     #[test]
