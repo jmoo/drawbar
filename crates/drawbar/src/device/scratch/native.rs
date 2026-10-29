@@ -154,13 +154,11 @@ mod tests {
     fn a_file_goes_to_a_fresh_librarys_tmp_folder() {
         let (library, shelf) = (Temp::new(), Temp::new());
         let scratch = Scratch::shelved_in(shelf.0.clone());
-        scratch.keep_in(Some(library.at(".drawbar/tmp")));
+        let tmp = library.at(".drawbar/tmp");
+        scratch.keep_in(Some(tmp.clone()));
         let mut kept = nord_usb::block_on(scratch.create("Grand.npno")).unwrap();
         nord_usb::block_on(kept.finish()).unwrap();
-        assert_eq!(
-            kept.place(),
-            library.at(".drawbar/tmp/Grand.npno").display().to_string()
-        );
+        assert_eq!(kept.place(), tmp.join("Grand.npno").display().to_string());
     }
 
     /// A file is not called by its name until it is finished, and never takes the name
