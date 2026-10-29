@@ -67,6 +67,9 @@ Goals:
 - An interrupted or conflicting change leaves every sound file recoverable.
 - When recovery is needed, drawbar says what happened without asking the user to understand
   the store.
+- drawbar never leaves a library in a state the user cannot recover from. It always opens and
+  can be read, and whatever stops drawbar writing comes with a step the user can take that
+  lets it write again.
 - A library that stays the same size does not get slower or larger with every edit. A heavy
   user writes about 36,000 entries a year; kept whole, they would add about 10 MB of folder
   and 100 ms of open time a year to a library that never changed.
@@ -200,7 +203,9 @@ specifies each part.
   finishes or reports every step. A refused commit changes nothing. A step that fails logs
   nothing and leaves its record open, and the next write or open settles it forward. A step
   the next write finishes joins Undo ahead of that write. If it cannot finish, the library
-  turns read-only until it is opened again (File ▸ Open recent library).
+  turns read-only until it is opened again (File ▸ Open recent library). If what it moves
+  is gone, so no retry could finish it, the writer gives it up and goes on as a new one,
+  and drawbar asks whether to roll it back or leave it.
 - **Plans from what the volume can do** (Durability, Backends). Each backend states whether
   it can sync, append, rename, and rename without replacing, and toshokan plans from that,
   never from a request that failed. Where a crash can tear a rename (FAT, exFAT, NTFS, HFS,
