@@ -23,12 +23,12 @@ use crate::env::{Env, Identify};
 use crate::error::{Refusal, Result};
 use crate::flow::{self, each, fold, Fallible};
 use crate::ids::{Nonce, WriterId};
-use crate::io::{Capabilities, Capability, Kind, Root, Task};
+use crate::io::{Capabilities, Capability, IoError, Kind, Root, Task};
 use crate::layout::Layout;
 use crate::log::{Own, Settlement};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord, Records, MAX_RECORD};
-use crate::report::{Orphan, Outcome};
+use crate::report::{Orphan, Outcome, PartialReport};
 
 /// What recovery needs of a writer's placed history.
 pub trait Chain {
@@ -209,22 +209,32 @@ fn standing(
 /// step left beside its destination and the start of a copy the next step left,
 /// and setting aside in the trash any other copy cut short there. The caller then
 /// appends the record's entry with what [`Applied`] says, after which
-/// [`effects::finish`] may remove the record.
+/// [`effects::finish`] may remove the record. Where what a remaining step moves is
+/// gone, it does nothing and says so.
 pub fn settle(
     layout: &Layout,
     name: Nonce,
     record: Rc<PendingRecord>,
     identify: Rc<dyn Identify>,
     capabilities: Capabilities,
-) -> Task<'static, Result<Applied>> {
+) -> Task<'static, Result<Resumed>> {
     let layout = layout.clone();
     effects::observe(&layout, name, &record)
         .and_then(move |seen| {
+            let progress = effects::progress(&layout, &record, &seen, capabilities.fsync);
+            let outcome = effects::predict(&layout, name, &record, &seen, &progress);
+            if let Outcome::Partial(PartialReport {
+                error: IoError::NotFound,
+                ..
+            }) = outcome
+            {
+                return flow::ok(Resumed::Gone);
+            }
             let Progress {
                 done,
                 leftover,
                 partial,
-            } = effects::progress(&layout, &record, &seen, capabilities.fsync);
+            } = progress;
             let (start, aside): (Vec<Cut>, Vec<Cut>) =
                 partial.into_iter().partition(|cut| cut.start);
             let stale = leftover
@@ -248,8 +258,17 @@ pub fn settle(
                 .and_then(move |()| {
                     flow::run(effects::apply(&layout, name, record, done, identify))
                 })
+                .map_ok(Resumed::Applied)
         })
         .task()
+}
+
+/// How resuming a record of this writer's own went.
+pub enum Resumed {
+    /// Its remaining steps were carried out, as this says.
+    Applied(Applied),
+    /// What a remaining step moves is gone, so none was taken.
+    Gone,
 }
 
 /// The step of a record whose cut-short copy is set aside.
@@ -403,8 +422,8 @@ pub(crate) fn glance<'a>(
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Reached {
     progress: Progress,
-    /// The library paths its `to_trash` steps move that hold nothing.
-    vacant: BTreeSet<RelPath>,
+    /// The record's paths the folder holds, once what resuming removes is gone.
+    present: BTreeSet<RelPath>,
     /// The library paths its steps name that are directories.
     directories: BTreeSet<RelPath>,
 }
@@ -420,14 +439,7 @@ pub fn progress(
     let theirs = theirs.clone();
     effects::observe(&layout, name, &theirs)
         .map_ok(move |seen| {
-            let vacant = theirs
-                .steps
-                .iter()
-                .filter_map(|step| match step {
-                    EffectStep::ToTrash { path, .. } if !seen.holds(path) => Some(path.clone()),
-                    _ => None,
-                })
-                .collect();
+            let progress = effects::reached(&layout, &theirs, &seen, capabilities.fsync);
             let directories = theirs
                 .steps
                 .iter()
@@ -436,8 +448,8 @@ pub fn progress(
                 .cloned()
                 .collect();
             Reached {
-                progress: effects::reached(&layout, &theirs, &seen, capabilities.fsync),
-                vacant,
+                present: seen.present_after(&progress),
+                progress,
                 directories,
             }
         })
@@ -468,7 +480,7 @@ pub fn orphan_plan(
     Orphaned {
         layout,
         theirs,
-        vacant: &reached.vacant,
+        present: reached.present.clone(),
         directories: &reached.directories,
         rename_dir: capabilities.rename_dir && moves.renames(),
         plan: EffectPlan {
@@ -484,7 +496,8 @@ pub fn orphan_plan(
 struct Orphaned<'a> {
     layout: &'a Layout,
     theirs: &'a PendingRecord,
-    vacant: &'a BTreeSet<RelPath>,
+    /// The record's paths the folder will hold once the steps planned so far ran.
+    present: BTreeSet<RelPath>,
     directories: &'a BTreeSet<RelPath>,
     rename_dir: bool,
     plan: EffectPlan,
@@ -539,22 +552,25 @@ impl Orphaned<'_> {
     fn finish(&mut self, step: &EffectStep) -> std::result::Result<(), Refusal> {
         let writer = self.theirs.writer;
         match step {
-            EffectStep::ToTrash { path, .. } if self.vacant.contains(path) => {}
+            EffectStep::ToTrash { path, .. } if !self.present.contains(path) => {}
             EffectStep::ToTrash { path, item } => {
                 let ours = self.trash(path);
                 self.relayed.insert(*item, ours);
             }
             EffectStep::Place { staged, path } => {
-                self.copy(self.layout.staged(writer, *staged, path), path)
+                return self.copy(self.layout.staged(writer, *staged, path), path)
             }
             // A way-point through the trash this settlement began is taken up from
             // this writer's trash, where it put it.
             EffectStep::FromTrash { item, path } => match self.relayed.get(item) {
-                Some(&ours) => self.plan.steps.push(EffectStep::FromTrash {
-                    item: ours,
-                    path: path.clone(),
-                }),
-                None => self.copy(self.layout.trash(writer, *item), path),
+                Some(&ours) => {
+                    self.present.insert(path.clone());
+                    self.plan.steps.push(EffectStep::FromTrash {
+                        item: ours,
+                        path: path.clone(),
+                    });
+                }
+                None => return self.copy(self.layout.trash(writer, *item), path),
             },
             EffectStep::Rename { from, to } => return self.rename(from, to),
             EffectStep::MakeDir { .. } | EffectStep::RemoveDir { .. } => {
@@ -567,9 +583,13 @@ impl Orphaned<'_> {
     fn undo(&mut self, step: &EffectStep) -> std::result::Result<(), Refusal> {
         let writer = self.theirs.writer;
         match step {
-            EffectStep::ToTrash { path, item } => self.copy(self.layout.trash(writer, *item), path),
+            EffectStep::ToTrash { path, item } => {
+                return self.copy(self.layout.trash(writer, *item), path)
+            }
             EffectStep::Place { path, .. } | EffectStep::FromTrash { path, .. } => {
-                self.trash(path);
+                if self.present.contains(path) {
+                    self.trash(path);
+                }
             }
             EffectStep::Rename { from, to } => return self.rename(to, from),
             EffectStep::MakeDir { .. } => {}
@@ -585,6 +605,10 @@ impl Orphaned<'_> {
         if self.directories.contains(from) && !self.rename_dir {
             return Err(Refusal::Unsupported(Capability::RenameDir));
         }
+        if !self.present.remove(from) {
+            return Err(Refusal::Gone(to.clone()));
+        }
+        self.present.insert(to.clone());
         self.plan.steps.push(EffectStep::Rename {
             from: from.clone(),
             to: to.clone(),
@@ -593,6 +617,7 @@ impl Orphaned<'_> {
     }
 
     fn trash(&mut self, path: &RelPath) -> Nonce {
+        self.present.remove(path);
         let item = self.env.nonce();
         self.plan.steps.push(EffectStep::ToTrash {
             path: path.clone(),
@@ -601,9 +626,14 @@ impl Orphaned<'_> {
         item
     }
 
-    fn copy(&mut self, source: RelPath, path: &RelPath) {
+    fn copy(&mut self, source: RelPath, path: &RelPath) -> std::result::Result<(), Refusal> {
+        if !self.present.contains(&source) {
+            return Err(Refusal::Gone(path.clone()));
+        }
+        self.present.insert(path.clone());
         let staged = self.env.nonce();
         self.plan.place(staged, Staged::Copy(source), path.clone());
+        Ok(())
     }
 }
 

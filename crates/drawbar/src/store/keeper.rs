@@ -22,8 +22,8 @@ use super::shown::Change;
 use super::storage::{self, CHUNK};
 use super::unsaved::{self, Base, Of};
 use super::{
-    Cmd, Event, Failure, Fingerprint, Found, Intent, Kept, KeptKey, Key, LibPath, Opened, Part,
-    Source, Stat, Unwritable, Viewed, Waiting,
+    Cmd, Event, Failure, Fingerprint, Found, Intent, Kept, KeptKey, Key, Leftover, LibPath, Opened,
+    Part, Source, Stat, Unwritable, Viewed, Waiting,
 };
 use crate::rewrite::{self, Pieces};
 
@@ -75,6 +75,10 @@ pub struct Keeper<F> {
     shown: Option<View>,
     /// Whether the app was told the library may not be written.
     told_read_only: bool,
+    /// The writer the library wrote as, as the app was last told.
+    writer: Option<toshokan::WriterId>,
+    /// Whether the app was told the trash could not be emptied.
+    told_unemptied: bool,
 }
 
 impl<F: Fs> Keeper<F> {
@@ -91,6 +95,8 @@ impl<F: Fs> Keeper<F> {
             trash: TRASH,
             shown: None,
             told_read_only: false,
+            writer: None,
+            told_unemptied: false,
         }
     }
 
@@ -119,8 +125,15 @@ impl<F: Fs> Keeper<F> {
                 let opened = self.open().await;
                 answer(Event::Opened(opened));
             }
-            Cmd::Rescan => answer(Event::Scanned(self.scanned(true).await)),
-            Cmd::Refresh => answer(Event::Scanned(self.scanned(false).await)),
+            Cmd::Rescan | Cmd::Refresh => {
+                let scanned = self.scanned(matches!(cmd, Cmd::Rescan)).await;
+                // A history that forked is said with the scan's answer.
+                let forked = scanned.as_ref().is_ok_and(|viewed| viewed.retired);
+                if self.restarted() && !forked {
+                    answer(Event::Restarted);
+                }
+                answer(Event::Scanned(scanned));
+            }
             Cmd::Intent(intent) => {
                 let label = intent.label().to_string();
                 let committed = self.commit(intent, answer).await;
@@ -217,6 +230,7 @@ impl<F: Fs> Keeper<F> {
             true => Waiting::Earlier,
             false => Waiting::Nothing,
         };
+        self.tell_restarted(answer);
         self.tell_read_only(answer);
         for mut event in super::refusing::refused(cmd).answers(why, true) {
             if let Event::Committed {
@@ -255,6 +269,7 @@ impl<F: Fs> Keeper<F> {
             false => Waiting::Nothing,
         };
         // Ahead of the change's own answer, which is all a sender waits for.
+        self.tell_restarted(answer);
         self.tell_read_only(answer);
         answer(Event::Committed {
             label,
@@ -270,6 +285,27 @@ impl<F: Fs> Keeper<F> {
                 answer(trimmed);
             }
         }
+    }
+
+    /// Say once a session why the trash could not be emptied.
+    fn unemptied(&mut self, why: String) -> Option<Event> {
+        let told = std::mem::replace(&mut self.told_unemptied, true);
+        (!told).then_some(Event::Unemptied(why))
+    }
+
+    /// Say that this session's undo history began again, where the library stopped
+    /// writing as the writer it wrote as.
+    fn tell_restarted(&mut self, answer: &mut impl FnMut(Event)) {
+        if self.restarted() {
+            answer(Event::Restarted);
+        }
+    }
+
+    /// Whether the library stopped writing as the writer it wrote as when last asked.
+    fn restarted(&mut self) -> bool {
+        let writer = self.library.as_ref().and_then(Library::writer_id);
+        let was = std::mem::replace(&mut self.writer, writer);
+        was.is_some() && writer != was
     }
 
     /// Say once that the library may no longer be written, where it may not.
@@ -305,8 +341,14 @@ impl<F: Fs> Keeper<F> {
         }
         let emptied = match library.empty_trash(kept).await {
             Ok(emptied) => emptied,
-            Err(e) => return Some(Event::Unkept(format!("emptying the trash: {}", told(&e)))),
+            Err(e) => return self.unemptied(told(&e)),
         };
+        if let Some(record) = emptied.held.first() {
+            return self.unemptied(format!(
+                "“{record}” in the library folder is no record drawbar reads, and while it \
+                 is there, drawbar keeps everything in its trash: move it out"
+            ));
+        }
         let gone = held
             .iter()
             .filter(|item| emptied.removed.contains(&item.item) && self.session.contains(&item.by));
@@ -459,8 +501,8 @@ impl<F: Fs> Keeper<F> {
         self.library = Some(library);
         // After settling, which may need what the trash holds.
         if writable.is_ok() {
-            if let Some(Event::Unkept(why)) = self.empty_trash().await {
-                trouble.push(why);
+            if let Some(Event::Unemptied(why)) = self.empty_trash().await {
+                trouble.push(format!("emptying the trash: {why}"));
             }
         }
         let drafts = self.drafts(&view).await.unwrap_or_else(|e| {
@@ -498,17 +540,21 @@ impl<F: Fs> Keeper<F> {
             true => ours,
             false => Vec::new(),
         };
+        let mut unfinishable = Vec::new();
         for mut orphan in ours {
-            if library
-                .settle(orphan.clone(), Settlement::Finished)
-                .await
-                .is_err()
-            {
-                orphan.ours = false;
-                refreshed.orphaned.push(orphan);
+            match library.settle(orphan.clone(), Settlement::Finished).await {
+                Ok(_) => {}
+                Err(e @ Error::Refused(Refusal::Gone(_))) => unfinishable.push(Leftover {
+                    orphan,
+                    unfinishable: Some(told(&e)),
+                }),
+                Err(_) => {
+                    orphan.ours = false;
+                    refreshed.orphaned.push(orphan);
+                }
             }
         }
-        Ok(viewed(library, &mut self.shown, refreshed))
+        Ok(viewed(library, &mut self.shown, refreshed, unfinishable))
     }
 
     /// Undo, or redo where `again`, and the view after it, with the files no entity is
@@ -1785,7 +1831,6 @@ fn told(e: &Error) -> String {
         Error::InvalidPath { path, reason } => {
             format!("“{path}” cannot be a name in the library: {reason}")
         }
-        Error::Corrupt { .. } => "drawbar's own data on this computer is damaged".to_string(),
         // Why is said once, when the library opens or turns read-only.
         Error::ReadOnly(_) => "the library is read-only".to_string(),
         Error::Refused(refusal) => refused(refusal),
@@ -1860,6 +1905,7 @@ fn refused(refusal: &Refusal) -> String {
             }
             .to_string()
         }
+        Refusal::Gone(path) => format!("what was to go at “{path}” is gone"),
         Refusal::SnapshotTooLong => {
             "the library's history is too long to fold into one record".to_string()
         }
@@ -1903,7 +1949,12 @@ fn kept<F: Fs>(library: &Library<F>) -> Vec<super::KeptApart> {
 }
 
 /// What the answer to a scan shows, with every folder where it scanned every file.
-fn viewed<F: Fs>(library: &Library<F>, shown: &mut Option<View>, refreshed: Refreshed) -> Viewed {
+fn viewed<F: Fs>(
+    library: &Library<F>,
+    shown: &mut Option<View>,
+    refreshed: Refreshed,
+    unfinishable: Vec<Leftover>,
+) -> Viewed {
     let moves = refreshed.scan.moved.iter().filter_map(|moved| {
         let from = LibPath::parse(moved.from.as_str())?;
         Some((from, LibPath::parse(moved.to.as_str())?))
@@ -1911,6 +1962,10 @@ fn viewed<F: Fs>(library: &Library<F>, shown: &mut Option<View>, refreshed: Refr
     let unlisted = refreshed.unlisted.iter();
     let unlisted = unlisted.filter_map(|dir| LibPath::parse(dir.as_str()));
     let theirs = refreshed.orphaned.into_iter().filter(|orphan| !orphan.ours);
+    let theirs = theirs.map(|orphan| Leftover {
+        orphan,
+        unfinishable: None,
+    });
     let dirs = refreshed.dirs.map(|dirs| {
         let shown = dirs.iter().filter_map(|dir| LibPath::parse(dir.as_str()));
         shown.collect::<Vec<_>>()
@@ -1922,7 +1977,7 @@ fn viewed<F: Fs>(library: &Library<F>, shown: &mut Option<View>, refreshed: Refr
         moves: moves.collect(),
         changes: refreshed.changes,
         followed: None,
-        unfinished: Some(theirs.collect()),
+        unfinished: Some(theirs.chain(unfinishable).collect()),
         kept: kept(library),
         retired: refreshed.retired.is_some(),
         left: Vec::new(),
@@ -2200,8 +2255,46 @@ mod tests {
         assert_eq!(trash(&mut third), [], "the closed session's undo needed it");
     }
 
-    /// Opening counts the files the scan finds as it goes, leaving out drawbar's own and
-    /// every other name that starts with a dot.
+    /// A file another program leaves among drawbar's records keeps nothing in the trash,
+    /// and a record that does not read keeps everything, saying what to move.
+    #[test]
+    fn only_a_record_that_does_not_read_stops_the_trash_emptying() {
+        let root = Temp::new();
+        fs::write(root.at("c3.ne5p"), b"first").unwrap();
+        let mut keeper = keeper(&root);
+        keeper.trash = 0;
+        let save = |keeper: &mut Keeper, bytes: &[u8]| {
+            let expect = keeper.listed("c3.ne5p");
+            keeper.run_one(Cmd::Intent(Intent::Save {
+                id: 1,
+                path: path("c3.ne5p"),
+                bytes: bytes.to_vec(),
+                expect,
+                came: None,
+            }))
+        };
+        save(&mut keeper, b"second");
+        let writers = root.at(".drawbar/library/writers.2");
+        let writer = fs::read_dir(&writers).unwrap().next().unwrap().unwrap();
+        let pending = writer.path().join("pending");
+        fs::create_dir_all(&pending).unwrap();
+        fs::write(pending.join(".DS_Store"), b"Bud1").unwrap();
+        save(&mut keeper, b"third");
+        assert_eq!(keeper.trash_now(), [], "the stray file holds nothing");
+
+        fs::write(pending.join(format!("{:032x}.json", 7)), b"{\"torn").unwrap();
+        let answers = save(&mut keeper, b"fourth");
+        let why = answers.iter().find_map(|event| match event {
+            Event::Unemptied(why) => Some(why.clone()),
+            _ => None,
+        });
+        assert!(
+            why.as_deref().is_some_and(|why| why.contains("pending")),
+            "{answers:?}"
+        );
+        assert_eq!(keeper.trash_now().len(), 1, "the trash keeps what it holds");
+    }
+
     #[test]
     fn an_answer_after_one_the_app_lost_shows_the_whole_view() {
         let root = Temp::new();

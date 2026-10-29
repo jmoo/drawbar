@@ -14,15 +14,17 @@ mod power_loss;
 use std::cell::RefCell;
 
 use power_loss::{
-    before, check, models, verify, workloads, Acked, Async, Fault, Faulty, Lib, Place, Runner,
-    Step, Workload, NAME, PROBE,
+    before, check, env, layout, models, records, schema, verify, workloads, Acked, Async, Fault,
+    Faulty, Lib, Place, Runner, Step, Workload, NAME, PROBE,
 };
 use toshokan::blocking::Library;
+use toshokan::env::TestClock;
 use toshokan::error::Why;
 use toshokan::io::Capabilities;
+use toshokan::log::Settlement;
 use toshokan::report::Rekey;
 use toshokan::simulator::Machine;
-use toshokan::{Error, Io, MemDisk, Root};
+use toshokan::{Error, Io, MemDisk, Refusal, RelPath, Root};
 
 /// A folder that can neither rename nor sync, whose moves copy, as a browser's
 /// picked folder: a write lands whole when its stream closes, so none is short.
@@ -359,4 +361,123 @@ fn every_request_faulted_in_a_fat_folder_leaves_what_a_power_loss_may() {
 #[test]
 fn every_request_faulted_in_a_fat_folder_through_async_leaves_what_a_power_loss_may() {
     sweep_in::<Async<Machine>>(FOLDERS[2], "async");
+}
+
+/// Each record a failed request leaves open, with one file it may still need taken
+/// away before the install opens again: what drawbar does at open leaves the library
+/// writable, and each change left unfinished can be rolled back or left, where
+/// finishing it is refused and changes nothing.
+#[test]
+fn a_record_whose_file_is_gone_never_stops_the_library_writing() {
+    let mut failed = Vec::new();
+    for (name, folder, _) in FOLDERS {
+        for workload in workloads().iter() {
+            let unfaulted = steps::<Blocking>(workload, &Mem::new(folder), None, Then::Quits);
+            let requests = unfaulted.map_or(0, |ran| ran.seen.len()) as u64;
+            for request in 0..requests {
+                let left = || {
+                    let place = Mem::new(folder);
+                    let fault = Some((request, Fault::Fails));
+                    steps::<Blocking>(workload, &place, fault, Then::Quits).map(|_| place)
+                };
+                let Ok(place) = left() else { continue };
+                for gone in needed(&place) {
+                    let place = left().expect("the same run as before");
+                    place
+                        .folder
+                        .perform(Io::Remove {
+                            root: Root::Folder,
+                            path: gone.clone(),
+                        })
+                        .unwrap();
+                    if let Err(error) = way_out(&place) {
+                        let at = workload.name;
+                        failed.push(format!(
+                            "{at} in a {name} folder, request {request} failed, {gone} gone: {error}"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "{} runs had no way out:\n{}",
+        failed.len(),
+        failed.join("\n")
+    );
+}
+
+/// The files of `place`'s folder an open record may need: the library files the
+/// records name, and everything in the writers' staging and trash.
+fn needed(place: &Mem) -> Vec<RelPath> {
+    let tree = place.tree().expect("the folder reads");
+    let named = records(&tree).expect("the records read");
+    if named.is_empty() {
+        return Vec::new();
+    }
+    let held = tree.keys().map(|path| power_loss::rel(path));
+    let hidden = |path: &RelPath| {
+        let parts: Vec<&str> = path.as_str().split('/').collect();
+        matches!(parts[..], [_, _, _, "tmp" | "trash", _])
+    };
+    held.filter(|path| named.contains(path) || hidden(path))
+        .collect()
+}
+
+/// Opens `place` as drawbar does, finishing what it left, then writes, and settles
+/// each change left unfinished: finishes it, or where that is refused, which changes
+/// nothing, rolls it back, or where that is refused too, leaves it as is.
+fn way_out(place: &Mem) -> Result<(), String> {
+    let clock = TestClock::at(1_950_000_000_000);
+    let (mut library, _) = Library::open(place.backend(), layout(), &schema(), env(77, &clock))
+        .map_err(|e| format!("opening: {e}"))?;
+    library
+        .settle_interrupted()
+        .map_err(|e| format!("finishing at open: {e}"))?;
+    probe(&mut library).map_err(|e| format!("the next write: {e}"))?;
+    let orphaned = library
+        .refresh()
+        .map_err(|e| format!("reading: {e}"))?
+        .orphaned;
+    for orphan in orphaned {
+        let mut settled = Err(String::new());
+        for how in [
+            Settlement::Finished,
+            Settlement::RolledBack,
+            Settlement::Dismissed,
+        ] {
+            let before = place.tree()?;
+            match library.settle(orphan.clone(), how) {
+                Ok(_) => {
+                    settled = Ok(());
+                    break;
+                }
+                Err(Error::Refused(Refusal::Gone(_) | Refusal::Unsupported(_))) => {
+                    if place.tree()? != before {
+                        return Err(format!("a refused {how:?} changed the folder"));
+                    }
+                }
+                Err(e) => return Err(format!("{how:?} “{}”: {e}", orphan.label)),
+            }
+        }
+        settled.map_err(|_| format!("“{}” could not be settled", orphan.label))?;
+    }
+    let left = library
+        .refresh()
+        .map_err(|e| format!("reading: {e}"))?
+        .orphaned;
+    if !left.is_empty() {
+        return Err(format!("still unfinished: {left:?}"));
+    }
+    probe(&mut library).map_err(|e| format!("the write after settling: {e}"))?;
+    Ok(())
+}
+
+/// Commits a new entity named as the checker's probe.
+fn probe(library: &mut Library<Machine>) -> toshokan::Result<toshokan::report::Committed> {
+    let (intent, _) = library.intent("Probe").create(|e| {
+        e.set(NAME, PROBE.into());
+    });
+    intent.commit()
 }

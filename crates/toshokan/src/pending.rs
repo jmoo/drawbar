@@ -13,7 +13,7 @@ use crate::error::Result;
 use crate::flow::{self, fold, ok, Flow};
 use crate::ids::{Nonce, WriterId};
 use crate::io::{Kind, Root, Task};
-use crate::layout::{is_swap_file, Layout};
+use crate::layout::Layout;
 use crate::line::Line;
 use crate::log::{Entry, Own};
 use crate::path::RelPath;
@@ -161,7 +161,7 @@ impl PendingRecord {
 pub struct Records {
     /// Records that decode and name the directory's writer, by name.
     pub records: Vec<(Nonce, PendingRecord)>,
-    /// Everything else in the directory but markers.
+    /// Everything else named as a record.
     pub unreadable: Vec<RelPath>,
 }
 
@@ -190,9 +190,9 @@ pub fn read_all(layout: &Layout, writer: WriterId) -> Task<'static, Result<Recor
                         .name
                         .strip_suffix(".json")
                         .and_then(|n| n.parse().ok());
-                    let skipped = marker(&entry.name).is_some() || is_swap_file(&entry.name);
                     match (entry.kind, name) {
-                        (Kind::File, _) if skipped => ok(found),
+                        // Markers, and what other programs leave, as `.DS_Store`.
+                        (_, None) => ok(found),
                         (Kind::File, Some(name)) => {
                             read(path.clone(), writer).map_ok(move |record| {
                                 match record {
@@ -202,7 +202,7 @@ pub fn read_all(layout: &Layout, writer: WriterId) -> Task<'static, Result<Recor
                                 found
                             })
                         }
-                        _ => {
+                        (_, Some(_)) => {
                             found.unreadable.push(path);
                             ok(found)
                         }

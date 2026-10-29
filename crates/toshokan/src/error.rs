@@ -29,11 +29,6 @@ pub enum Error {
     #[error("{name:?} is not a valid key name")]
     InvalidKey { name: &'static str },
 
-    /// A file in this install's local root cannot be read as its format requires.
-    /// Files in the folder never cause this: what cannot be read there is reported.
-    #[error("{path} in the local root is corrupt: {reason}")]
-    Corrupt { path: RelPath, reason: String },
-
     /// The library is open read-only, so nothing can be written.
     #[error("the library is read-only: {0}")]
     ReadOnly(Why),
@@ -102,6 +97,10 @@ pub enum Refusal {
     /// rename a directory that writer's folder renamed whole.
     #[error("the folder cannot {0}")]
     Unsupported(Capability),
+    /// What settling an effect would put at this library path is gone from the
+    /// folder, so the effect cannot be carried that way.
+    #[error("what goes at {0} is gone")]
+    Gone(RelPath),
 }
 
 /// What the intent expected at a path, and what was found; `None` is nothing.

@@ -1117,7 +1117,7 @@ fn run_step<'a>(
     step: &EffectStep,
 ) -> Fallible<'a, ()> {
     let writer = record.writer;
-    match (step, step.ends(layout, writer)) {
+    let moved = match (step, step.ends(layout, writer)) {
         (_, Some((from, to))) if record.moves == Moves::Copy => mark(layout, writer, name, index)
             .and_then(move |()| flow::copy_move(Root::Folder, &from, &to)),
         (_, Some((from, to))) => flow::rename(Root::Folder, &from, &to),
@@ -1135,6 +1135,25 @@ fn run_step<'a>(
             })
         }
         (_, None) => unreachable!("only directory steps have no ends"),
+    };
+    // A file gone before it could go to the trash leaves nothing to keep.
+    match step {
+        EffectStep::ToTrash { path, .. } => {
+            let path = path.clone();
+            moved.then(move |moved| match moved {
+                Err(
+                    failed @ crate::Error::Io {
+                        error: IoError::NotFound,
+                        ..
+                    },
+                ) => flow::stat(Root::Folder, &path).then(move |held| match held {
+                    Ok(None) => ok(()),
+                    _ => Flow::Done(Err(failed)),
+                }),
+                moved => Flow::Done(moved),
+            })
+        }
+        _ => moved,
     }
 }
 
@@ -1306,14 +1325,20 @@ pub(crate) struct Observation {
 }
 
 impl Observation {
-    /// Whether the folder holds `path`, one of the record's paths.
-    pub(crate) fn holds(&self, path: &RelPath) -> bool {
-        self.present.contains(path)
-    }
-
     /// Whether `path`, one of the record's paths, is a directory.
     pub(crate) fn is_directory(&self, path: &RelPath) -> bool {
         self.directories.contains(path)
+    }
+
+    /// The record's paths the folder holds once resuming from `progress` removed
+    /// the source the last done step left and the copy the next one cut short.
+    pub(crate) fn present_after(&self, progress: &Progress) -> BTreeSet<RelPath> {
+        let mut present = self.present.clone();
+        let partial = progress.partial.iter().map(|cut| &cut.path);
+        for removed in progress.leftover.iter().chain(partial) {
+            present.remove(removed);
+        }
+        present
     }
 }
 
@@ -1552,16 +1577,13 @@ pub(crate) fn predict(
     seen: &Observation,
     progress: &Progress,
 ) -> Outcome {
-    let mut present = seen.present.clone();
-    let partial = progress.partial.iter().map(|cut| &cut.path);
-    for removed in progress.leftover.iter().chain(partial) {
-        present.remove(removed);
-    }
+    let mut present = seen.present_after(progress);
     for (i, step) in record.steps.iter().enumerate().skip(progress.done) {
         let Some((from, to)) = step.ends(layout, record.writer) else {
             continue;
         };
         let error = match (present.contains(&from), present.contains(&to)) {
+            (false, _) if matches!(step, EffectStep::ToTrash { .. }) => continue,
             (false, _) => IoError::NotFound,
             (true, true) => IoError::AlreadyExists,
             (true, false) => {

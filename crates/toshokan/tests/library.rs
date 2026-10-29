@@ -665,6 +665,9 @@ through_both!(
     effects_that_stop_partway_fail_the_commit_and_keep_both_versions,
     an_undo_that_stops_partway_fails_and_the_next_write_finishes_it,
     an_own_effect_that_cannot_be_finished_leaves_the_library_read_only_until_reopened,
+    an_own_effect_whose_source_is_gone_is_left_to_settle_with_consent,
+    an_own_save_whose_staged_bytes_are_gone_rolls_back_to_the_old_bytes,
+    an_own_save_over_a_file_deleted_since_is_finished,
     a_settlement_that_stops_partway_leaves_the_record_open_until_settled_again,
     a_folder_whose_renames_may_replace_is_written,
     a_view_is_read_on_other_threads,
@@ -5787,6 +5790,128 @@ fn an_own_effect_that_cannot_be_finished_leaves_the_library_read_only_until_reop
         assert_eq!(read(&disk, "b.npno").as_deref(), Some(b"song".as_slice()));
         assert_eq!(read(&disk, "song.npno"), None, "{shown}");
     });
+}
+
+fn an_own_effect_whose_source_is_gone_is_left_to_settle_with_consent<F: Facade>() {
+    interrupted_renames::<F>(|disk, shown| {
+        let machine = Machine {
+            folder: disk.clone(),
+            local: disk.clone(),
+        };
+        let clock = TestClock::at(2_000);
+        disk.perform(Io::Remove {
+            root: Root::Folder,
+            path: path("song.npno"),
+        })
+        .unwrap();
+        let (mut again, _) = F::open(Probe::new(&machine), env("a", 2, &clock)).unwrap();
+        let song = again.view().entities()[0].id();
+        again
+            .commit("Tag", |i| i.add(song, TAGS, tag("next")))
+            .unwrap_or_else(|e| panic!("{shown}: the next write is made: {e}"));
+        let orphaned = again.refresh().unwrap().orphaned;
+        let [orphan] = &orphaned[..] else {
+            panic!("{shown}: one change to settle: {orphaned:?}");
+        };
+        assert_eq!(orphan.label, "Rename", "{shown}");
+        let finished = again.settle(orphan.clone(), Settlement::Finished);
+        assert!(
+            matches!(&finished, Err(Error::Refused(Refusal::Gone(at))) if at.as_str() == "b.npno"),
+            "{shown}: {finished:?}"
+        );
+        again
+            .settle(orphan.clone(), Settlement::RolledBack)
+            .unwrap_or_else(|e| panic!("{shown}: rolled back: {e}"));
+        assert!(again.refresh().unwrap().orphaned.is_empty(), "{shown}");
+    });
+}
+
+fn an_own_save_whose_staged_bytes_are_gone_rolls_back_to_the_old_bytes<F: Facade>() {
+    let folder = disk();
+    let machine = machine(&folder);
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine);
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    refuse(&probe, Some("song.npno"));
+    let saved = a.commit("Save", |i| {
+        i.save(
+            song,
+            &path("song.npno"),
+            b"saved".to_vec(),
+            Expect::Holds(identity(b"song")),
+        )
+    });
+    refuse(&probe, None);
+    assert!(saved.is_err(), "{saved:?}");
+    let staged = folder
+        .files(Root::Folder)
+        .into_iter()
+        .find_map(|(at, bytes)| (layout().owns(&at) && bytes == b"saved").then_some(at));
+    folder
+        .perform(Io::Remove {
+            root: Root::Folder,
+            path: staged.expect("the new bytes are staged"),
+        })
+        .unwrap();
+
+    a.commit("Tag", |i| i.add(song, TAGS, tag("next")))
+        .expect("the next write is made");
+    let orphaned = a.refresh().unwrap().orphaned;
+    let [orphan] = &orphaned[..] else {
+        panic!("one change to settle: {orphaned:?}");
+    };
+    assert!(orphan.ours, "this install's to settle");
+    a.settle(orphan.clone(), Settlement::RolledBack)
+        .expect("rolled back");
+    assert_eq!(
+        read(&folder, "song.npno").as_deref(),
+        Some(b"song".as_slice()),
+        "the old bytes are back"
+    );
+}
+
+fn an_own_save_over_a_file_deleted_since_is_finished<F: Facade>() {
+    interrupted::<F>(
+        |library, song| {
+            library.commit("Save", |i| {
+                i.save(
+                    song,
+                    &path("song.npno"),
+                    b"saved".to_vec(),
+                    Expect::Holds(identity(b"song")),
+                )
+            })
+        },
+        |disk| read(disk, "song.npno").as_deref() == Some(b"song".as_slice()),
+        |disk, shown| {
+            let machine = Machine {
+                folder: disk.clone(),
+                local: disk.clone(),
+            };
+            disk.perform(Io::Remove {
+                root: Root::Folder,
+                path: path("song.npno"),
+            })
+            .unwrap();
+            let clock = TestClock::at(2_000);
+            let (mut again, _) = F::open(Probe::new(&machine), env("a", 2, &clock)).unwrap();
+            let song = again.view().entities()[0].id();
+            again
+                .commit("Tag", |i| i.add(song, TAGS, tag("next")))
+                .unwrap_or_else(|e| panic!("{shown}: {e}"));
+            assert_eq!(
+                read(&disk, "song.npno").as_deref(),
+                Some(b"saved".as_slice()),
+                "{shown}: the save is finished"
+            );
+            let orphaned = again.refresh().unwrap().orphaned;
+            assert!(
+                orphaned.is_empty(),
+                "{shown}: nothing is left: {orphaned:?}"
+            );
+        },
+    );
 }
 
 /// Every entry in `writer`'s segments in the folder.

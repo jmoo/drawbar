@@ -127,6 +127,7 @@ enum Verb {
     TakeTheirs,
     Discard,
     Finish,
+    RollBack,
     Reopen,
 }
 
@@ -141,6 +142,7 @@ impl Verb {
             Verb::TakeTheirs => "Take theirs",
             Verb::Discard => "Discard",
             Verb::Finish => "Finish",
+            Verb::RollBack => "Roll back",
             Verb::Reopen => "Close and reopen",
         }
     }
@@ -149,7 +151,9 @@ impl Verb {
     fn button(self, ui: &mut egui::Ui) -> egui::Response {
         let (label, glyph) = (self.label(), self.glyph());
         match self {
-            Verb::Save | Verb::KeepBoth | Verb::Finish => sheet::primary(ui, Some(glyph), label),
+            Verb::Save | Verb::KeepBoth | Verb::Finish | Verb::RollBack => {
+                sheet::primary(ui, Some(glyph), label)
+            }
             Verb::Replace
             | Verb::Delete
             | Verb::Overwrite
@@ -168,6 +172,7 @@ impl Verb {
             Verb::KeepBoth => Glyph::Copy,
             Verb::TakeTheirs => Glyph::RotateCcw,
             Verb::Finish => Glyph::Check,
+            Verb::RollBack => Glyph::RotateCcw,
             Verb::Reopen => Glyph::RefreshCw,
         }
     }
@@ -897,34 +902,46 @@ impl Browser {
         self.raise(ask);
     }
 
-    /// Offer what to do with a slot's former occupant an interrupted write to the
-    /// instrument left on this computer. Show the file is offered where the system can
-    /// show it. A file that does not read is said to be no copy, and offered only to be
-    /// discarded.
-    /// Ask what to do with a change another drawbar, of another computer or an earlier
-    /// install, left unfinished.
-    pub(crate) fn ask_unfinished(&mut self, orphan: toshokan::report::Orphan) {
+    /// Ask what to do with a change a drawbar left unfinished: one of another computer
+    /// or an earlier install, or one of this install's own it could not finish, which
+    /// cannot be finished but by hand.
+    pub(crate) fn ask_unfinished(&mut self, leftover: crate::store::Leftover) {
         use toshokan::log::Settlement;
 
         const SHOWN: usize = 3;
+        let orphan = &leftover.orphan;
         let act = |how| vec![Act::Settle(orphan.clone(), how)];
         let paths = crate::strings::quoted_some(&orphan.paths, SHOWN);
-        self.raise(Ask {
-            title: format!("Another drawbar left “{}” unfinished", orphan.label),
-            note: Some(format!(
-                "It was changing {}. Finish completes the change, Roll back puts the files \
-                 back as they were, and Leave as is stops asking.",
-                paths
-            )),
-            verb: Verb::Finish,
-            acts: act(Settlement::Finished),
-            others: vec![
-                ("Roll back", act(Settlement::RolledBack)),
-                ("Leave as is", act(Settlement::Dismissed)),
-            ],
-            cancel: "Later",
-            strong: Answer::Verb,
-        });
+        let ask = match &leftover.unfinishable {
+            None => Ask {
+                title: format!("Another drawbar left “{}” unfinished", orphan.label),
+                note: Some(format!(
+                    "It was changing {paths}. Finish completes the change, Roll back puts \
+                     the files back as they were, and Leave as is stops asking."
+                )),
+                verb: Verb::Finish,
+                acts: act(Settlement::Finished),
+                others: vec![
+                    ("Roll back", act(Settlement::RolledBack)),
+                    ("Leave as is", act(Settlement::Dismissed)),
+                ],
+                cancel: "Later",
+                strong: Answer::Verb,
+            },
+            Some(why) => Ask {
+                title: format!("drawbar could not finish “{}”", orphan.label),
+                note: Some(format!(
+                    "It was changing {paths}, and {why}. Roll back puts the files back as \
+                     they were, and Leave as is leaves them as they are now."
+                )),
+                verb: Verb::RollBack,
+                acts: act(Settlement::RolledBack),
+                others: vec![("Leave as is", act(Settlement::Dismissed))],
+                cancel: "Later",
+                strong: Answer::Verb,
+            },
+        };
+        self.raise(ask);
     }
 
     /// Ask what to do with a slot's former occupant the library could not take: one that

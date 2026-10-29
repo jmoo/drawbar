@@ -48,7 +48,8 @@ pub fn list(
 
 /// Removes from `writer`'s trash every item of `items` but those of `kept` and those
 /// a pending record of the writer names, which settling it may still move, then syncs
-/// the trash once. While a record of the writer does not read, removes none.
+/// the trash once. While a record of the writer does not read, removes none, and
+/// [`Emptied::held`] names it.
 pub fn empty(
     layout: &Layout,
     writer: WriterId,
@@ -59,7 +60,10 @@ pub fn empty(
     flow::run(pending::read_all(&layout, writer))
         .and_then(move |found| {
             if !found.unreadable.is_empty() {
-                return flow::ok(Emptied::default());
+                return flow::ok(Emptied {
+                    held: found.unreadable,
+                    ..Emptied::default()
+                });
             }
             let named = named(&found.records);
             let removed = items
@@ -96,6 +100,7 @@ fn remove(
             .iter()
             .map(|item| item.len)
             .fold(0, u64::saturating_add),
+        held: Vec::new(),
     };
     if removed.is_empty() {
         return Task::ready(Ok(emptied));
@@ -187,8 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn emptying_reads_the_writers_records_before_it_removes_and_removes_none_while_one_does_not_read(
-    ) {
+    fn emptying_reads_the_writers_records_first_and_removes_none_while_one_does_not_read() {
         use crate::disk::MemDisk;
         use crate::ids::{EntryHash, Hlc};
         use crate::io::{Io, Operation, Step};
@@ -239,7 +243,10 @@ mod tests {
         };
         assert_eq!(
             emptied,
-            Emptied::default(),
+            Emptied {
+                held: vec![at.clone()],
+                ..Emptied::default()
+            },
             "a record that does not read keeps all"
         );
         let pending = Io::List {
@@ -251,12 +258,20 @@ mod tests {
 
         let (_, readable) = record(vec![]);
         put(at, &readable.encode());
+        put(
+            layout.pending_dir(writer).join(".DS_Store").unwrap(),
+            b"Bud1",
+        );
         let mut disk = disk;
         let emptied = crate::blocking::run(
             &mut disk,
             empty(&layout, writer, vec![item], BTreeSet::new()),
         );
-        assert_eq!(emptied.unwrap().removed, [nonce(1)]);
+        assert_eq!(
+            emptied.unwrap().removed,
+            [nonce(1)],
+            "what is not named as a record holds nothing"
+        );
     }
 
     #[test]

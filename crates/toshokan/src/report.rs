@@ -376,6 +376,8 @@ pub struct TrashItem {
 pub struct Emptied {
     pub removed: Vec<Nonce>,
     pub bytes: u64,
+    /// The writer's pending records that do not read, while which nothing is removed.
+    pub held: Vec<RelPath>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

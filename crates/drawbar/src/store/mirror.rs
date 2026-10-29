@@ -45,7 +45,7 @@ const UNFINISHED_STANDS: f64 = 5.0;
 /// A change another drawbar left unfinished: when this session first found it, and
 /// whether the user was told of it.
 struct Unfinished {
-    orphan: toshokan::report::Orphan,
+    leftover: super::Leftover,
     seen: f64,
     told: bool,
 }
@@ -1508,6 +1508,21 @@ impl Store {
                 }
             }
             Event::Unkept(why) => self.say_unkept(&why, log),
+            Event::Restarted => {
+                self.history = History::default();
+                // What waited to be finished never will be, but as the user settles it.
+                self.awaiting.clear();
+                log.say(
+                    "Undo no longer reaches the changes made before: drawbar could not go on \
+                     with its record of this library, so it began a new one.",
+                );
+                // What the record it gave up left unfinished is the user's to settle.
+                self.refresh();
+            }
+            Event::Unemptied(why) => {
+                log.error(format!("emptying the trash: {why}"));
+                log.trouble(format!("drawbar's trash could not be emptied: {why}."));
+            }
             Event::ReadOnly(why) if self.open() => {
                 log.trouble(format!(
                     "This computer's library is read-only now: {why}. Unsaved edits are \
@@ -1792,26 +1807,27 @@ impl Store {
 
     /// Take in the changes other drawbars left unfinished as a read found them, read at
     /// `now`: one that is gone was finished or settled.
-    fn found_unfinished(&mut self, now: f64, standing: Vec<toshokan::report::Orphan>) {
-        let key = |orphan: &toshokan::report::Orphan| (orphan.writer, orphan.record);
+    fn found_unfinished(&mut self, now: f64, standing: Vec<super::Leftover>) {
+        let key = |leftover: &super::Leftover| (leftover.orphan.writer, leftover.orphan.record);
         let keys: BTreeSet<_> = standing.iter().map(key).collect();
         self.unfinished.retain(|known, _| keys.contains(known));
-        for orphan in standing {
-            let known = self.unfinished.entry(key(&orphan));
+        for leftover in standing {
+            let known = self.unfinished.entry(key(&leftover));
             let known = known.or_insert_with(|| Unfinished {
-                orphan: orphan.clone(),
+                leftover: leftover.clone(),
                 seen: now,
                 told: false,
             });
+            let (was, is) = (&known.leftover.orphan, &leftover.orphan);
             // A change whose paths moved since, or whose window has gone, may have
             // been in progress: it is asked about once it stands again.
-            if orphan.progress != known.orphan.progress {
+            if is.progress != was.progress {
                 known.seen = now;
             }
-            if known.orphan.live && !orphan.live {
+            if was.live && !is.live {
                 (known.seen, known.told) = (now, false);
             }
-            known.orphan = orphan;
+            known.leftover = leftover;
         }
         self.looked = now;
         let due = self.unfinished.values().filter(|known| !known.told);
@@ -1830,7 +1846,7 @@ impl Store {
     ) {
         let now = ctx.input(|input| input.time);
         for known in self.unfinished.values_mut().filter(|known| !known.told) {
-            let orphan = &known.orphan;
+            let orphan = &known.leftover.orphan;
             if orphan.live {
                 // ⚠️ Another window may be making it now: finishing or rolling it back
                 // would race it.
@@ -1840,7 +1856,7 @@ impl Store {
                 ));
                 known.told = true;
             } else if self.looked >= known.seen + UNFINISHED_STANDS {
-                browser.ask_unfinished(orphan.clone());
+                browser.ask_unfinished(known.leftover.clone());
                 known.told = true;
             }
         }
@@ -2006,6 +2022,8 @@ impl Store {
         self.project_tags(&shown, browser);
         browser.forget_gone(workspace);
         if retired {
+            self.history = History::default();
+            self.awaiting.clear();
             log.say(
                 "drawbar's own data for this library was copied and used elsewhere too, so \
                  their histories split. This drawbar goes on with a history of its own; \

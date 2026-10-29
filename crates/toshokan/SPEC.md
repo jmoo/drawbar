@@ -779,7 +779,10 @@ A save over a file is `to_trash` then `place`; a save where nothing is, `place`;
 a trash, `to_trash`; a rename, `rename`, refused when something is at the
 destination; restoring a trash item over a file, `to_trash` then `from_trash`. A
 directory moves by one `rename` where the backend renames directories, otherwise
-by one `rename` per file the last scan saw, then `remove_dir` deepest first.
+by one `rename` per file the last scan saw, then `remove_dir` deepest first. A
+`to_trash` whose path holds nothing when it runs is skipped, as there is nothing to
+keep, and a `place` or `rename` makes the directories its destination needs, so a
+save into a folder removed meanwhile makes it again.
 
 A rename whose two paths the environment's `Names` take for one, as a change of
 case alone where names fold case, finds the renamed file itself at the
@@ -844,7 +847,8 @@ browser's do not (see Browsers). Opening says which kind of folder it is.
 If a step fails, the rest are not tried and nothing is logged: the record stays
 open, and the next write, or the next open, settles it forward from what the
 folder shows. If that fails, the writer stops writing until the library is
-opened again. Each library path holds its old bytes, nothing, or its new bytes, and
+opened again; where what the rest moves is gone, it gives the record up to be
+settled with consent (see Recovery). Each library path holds its old bytes, nothing, or its new bytes, and
 while it holds nothing a pending record names it. Where moves copy, a library
 path may also hold a copy of its new bytes cut short while a pending record
 names it: no longer than them, holding their start or, where a crash zeroed or
@@ -906,6 +910,14 @@ short before its bytes landed, before any of its steps ran: one that is empty
 or, in a folder that syncs, one of at most 16 MiB that holds a zero byte or is
 the start of a JSON value. Any other record that does not decode stays.
 
+A record whose remaining steps move something the folder no longer holds, so
+that no retry could carry them out, is not resumed: the writer stops writing, as
+when its history cannot go on, and the record is an open record of another writer
+to settle with the user's consent, below. Settling it changes nothing until then.
+What is gone is judged from one look at the folder, so a file only briefly absent,
+as where a tool replaces it by removing it first, gives the record up as well. A
+`to_trash` whose path holds nothing is skipped rather than gone.
+
 Settling twice ends as settling once.
 
 The steps of a record whose moves copy are found from its markers instead,
@@ -937,7 +949,9 @@ tell them apart. It reports the record, and settles it only when the user asks,
 as an intent of its own: to finish, it carries out the remaining steps, skipping
 a `to_trash` whose path holds nothing, and logs the facts the record planned and
 its file ops with the record's `replaces`; to
-roll back, it reverses the done ones; to dismiss, it changes no file. It finds
+roll back, it reverses the done ones, skipping a file it would trash that is not
+there; to dismiss, it changes no file. Finishing or rolling back is refused, and
+changes nothing, where a step would move what the folder no longer holds. It finds
 how far the steps got by checking them from the last, whichever way they move,
 since its own settling may have carried them further or reversed some; a
 `to_trash` of a record whose moves copy shows done as any other move does. A
@@ -975,7 +989,9 @@ is final: it is not kept, so an undo after it reverses the intent before it.
   the register values, members and file the delete ended.
 - A `file` op is reversed by putting back what it changed: the displaced bytes
   from the trash, under a precondition on what the path holds now; the old name;
-  or the trash, for a file the intent added.
+  or the trash, for a file the intent added. A save over a file that was gone
+  before it could go to the trash displaced nothing, so its undo leaves the saved
+  file.
 - `pin` ops are left alone, so undoing an adoption leaves the file.
 - A `dir` op is reversed by removing the directory it made or making the one it
   removed.
@@ -1002,7 +1018,9 @@ intent staged and could not place. An item is listed with the entry whose
 which first removes the writer's spent records, then every item but those the
 app keeps and those a pending record of the writer still in the folder names,
 since settling the record may move them. While a pending record of the writer
-does not read, emptying removes nothing. An
+does not read, emptying removes nothing and names the record. A file in
+`pending/` named as neither a record nor a marker, as one another program leaves,
+is no record and holds nothing. An
 item no entry names is never emptied. Emptying removes the items, then syncs the
 trash once; an item whose removal a crash undid is removed by the next emptying.
 

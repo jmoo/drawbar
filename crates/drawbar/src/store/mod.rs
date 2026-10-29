@@ -932,6 +932,14 @@ impl KeptApart {
     }
 }
 
+/// A change a drawbar left unfinished, which the user settles.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Leftover {
+    pub orphan: toshokan::report::Orphan,
+    /// Why this install could not finish it, where it is one of its own.
+    pub unfinishable: Option<String>,
+}
+
 /// Which change of this session's own waits, after a change, for the next write to
 /// finish it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -993,9 +1001,9 @@ pub struct Viewed {
     /// The folders a scan of every file could not list, where the answer scanned every
     /// file. What is in them is not known.
     pub unlisted: Option<Vec<LibPath>>,
-    /// The changes other installs' drawbars left unfinished as they stand now, which the
-    /// user settles, where the answer read them.
-    pub unfinished: Option<Vec<toshokan::report::Orphan>>,
+    /// The changes drawbars left unfinished as they stand now, which the user settles,
+    /// where the answer read them.
+    pub unfinished: Option<Vec<Leftover>>,
     /// The changes the library keeps apart, as the view after the answer shows them.
     pub kept: Vec<KeptApart>,
     /// Whether the answer found this install's history forked, as by a copy of its own
@@ -1101,6 +1109,10 @@ pub enum Event {
     },
     /// An unsaved edit could not be let go of: why.
     Unkept(String),
+    /// The trash could not be emptied, so it keeps what it holds: why.
+    Unemptied(String),
+    /// This session's undo history began again, and reaches none of the changes before.
+    Restarted,
     /// The edit [`Cmd::ReadSlot`] found kept of a slot's view, with the hash of the
     /// slot's bytes it was made over, or why it could not be read.
     SlotKept {
@@ -1122,6 +1134,7 @@ impl Event {
             Event::Committed { result: Err(_), .. } => one("intent"),
             Event::Moved { result: Err(_), .. } => one("move"),
             Event::Failed(_) => one("write"),
+            Event::Unemptied(_) => one("trash"),
             Event::Unkept(_)
             | Event::Drafted { kept: Err(_), .. }
             | Event::SlotDrafted { kept: Err(_), .. }
@@ -1140,6 +1153,7 @@ impl Event {
             | Event::SlotDrafted { kept: Ok(()), .. }
             | Event::SlotKept { kept: Ok(_), .. }
             | Event::Trimmed(_)
+            | Event::Restarted
             | Event::Scanned(Ok(_))
             | Event::Committed { result: Ok(_), .. }
             | Event::Moved { result: Ok(()), .. } => Default::default(),

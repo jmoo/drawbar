@@ -10,7 +10,7 @@ use std::task::{Context, Poll, Wake, Waker};
 use crate::disk::MemDisk;
 use crate::env::Env;
 use crate::error::Result;
-use crate::ids::{EntityId, EntryHash, Nonce};
+use crate::ids::{EntityId, EntryHash, Nonce, WriterId};
 use crate::intent::{Driver, Intent};
 use crate::io::{Capabilities, Io, IoError, IoResult, Meta, Operation, Range, Reply, Root, Step};
 use crate::layout::Layout;
@@ -392,6 +392,12 @@ impl<F: Fs> Library<F> {
     /// a change left unfinished logs it.
     pub fn last_logged(&self) -> Option<EntryHash> {
         self.core.last_logged()
+    }
+
+    /// The writer this instance writes as: none before its first write, and none
+    /// once it stopped writing as one, until it writes again as another.
+    pub fn writer_id(&self) -> Option<WriterId> {
+        self.core.writer_id()
     }
 
     /// Whether the library may be written now, and why not.

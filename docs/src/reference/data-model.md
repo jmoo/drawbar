@@ -168,7 +168,10 @@ of each change it commits, and they read it at once.
 
 A change another drawbar left unfinished is settled. One this install left,
 after a crash or in a window since closed, is finished without asking. One
-another install left is asked about: finish it, roll it back, or leave it.
+another install left is asked about: finish it, roll it back, or leave it. One
+of this install's own that can no longer be finished, since a file it moves is
+gone, is asked about too: roll it back or leave it. Its writer stops writing, so
+a new one goes on, and Undo starts again.
 drawbar asks only once the change has stood unmoved for five seconds, since a
 drawbar in a browser tab may still be making it.
 

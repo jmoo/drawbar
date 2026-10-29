@@ -76,7 +76,9 @@
 //! time, such as a `Splice` of the file being rewritten, so a file of hundreds of
 //! megabytes is never held whole. A commit whose file effects fail logs nothing
 //! and fails; the next write, or the next open, finishes them first, and where it
-//! cannot, the library is read-only until it is opened again. Any other commit
+//! cannot, the library is read-only until it is opened again. Where what they move
+//! is gone, the writer gives them up as effects left unfinished, for the app to
+//! ask the user about, and goes on as a new writer. Any other commit
 //! whose entries reached the folder succeeds, and `Committed::local` says what the
 //! instance keeps beside the folder that lags it until the next commit, refresh or
 //! close. A commit removes the pending record of its file effects once its entries

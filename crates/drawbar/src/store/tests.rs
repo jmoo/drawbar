@@ -5615,6 +5615,102 @@ fn a_change_another_install_left_unfinished_is_asked_about() {
     assert!(root.read("Grand.ne5p") == saved, "the save is finished");
 }
 
+/// A save of drawbar's own that can no longer be finished, since its new bytes are gone,
+/// leaves the library writable: drawbar asks whether to roll it back or leave it, and
+/// Roll back puts the old bytes back.
+#[test]
+fn a_save_that_can_no_longer_be_finished_is_asked_about_and_rolls_back() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let old = root.read("untitled.ne5p");
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "untitled.ne5p"),
+    ));
+    let log = &mut session.bench.log;
+    session
+        .bench
+        .workspace
+        .replace_bytes(id, with_gain(&old, "96"), log);
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    let writers = root.at(".drawbar/library/writers.2");
+    let writer = fs::read_dir(&writers).unwrap().next().unwrap().unwrap();
+    for staged in fs::read_dir(writer.path().join("tmp")).unwrap() {
+        fs::remove_file(staged.unwrap().path()).unwrap();
+    }
+
+    session.make_tag("Sunday");
+    assert_eq!(
+        session.store.read_only(),
+        None,
+        "the library stays writable"
+    );
+    assert_eq!(session.tag_names(), ["Sunday"], "the next change is made");
+    assert_eq!(session.said("Undo no longer reaches"), 1);
+    session.settle();
+    assert_eq!(
+        session.said("Finished saving"),
+        0,
+        "the save was not finished"
+    );
+    assert!(
+        session.bench.workspace.get(id).unwrap().is_unsaved(),
+        "the edit is kept"
+    );
+    session.a_minute_later();
+    let (title, answers) = session.bench.browser.asking().expect("a question is asked");
+    assert_eq!(title, "drawbar could not finish “Save”");
+    assert_eq!(answers, ["Later", "Leave as is", "Roll back"]);
+    for act in session.bench.browser.answer("Roll back") {
+        let crate::browser::Act::Settle(orphan, how) = act else {
+            panic!("{act:?} settles nothing");
+        };
+        session.store.settle_unfinished(orphan, how);
+    }
+    session.decided();
+    assert_eq!(root.read("untitled.ne5p"), old, "the old bytes are back");
+}
+
+/// The same, where that save was the session's first change: drawbar still says Undo
+/// began again, and never that the save was finished.
+#[test]
+fn a_first_save_that_can_no_longer_be_finished_is_not_said_to_be_finished() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    let mut session = Session::listed(&root);
+    let id = session.named("Grand.ne5p");
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "Grand.ne5p"),
+    ));
+    let log = &mut session.bench.log;
+    session
+        .bench
+        .workspace
+        .replace_bytes(id, with_gain(&program, "96"), log);
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    let writers = root.at(".drawbar/library/writers.2");
+    let writer = fs::read_dir(&writers).unwrap().next().unwrap().unwrap();
+    for staged in fs::read_dir(writer.path().join("tmp")).unwrap() {
+        fs::remove_file(staged.unwrap().path()).unwrap();
+    }
+
+    session.make_tag("Sunday");
+    session.settle();
+    assert_eq!(session.said("Undo no longer reaches"), 1);
+    assert_eq!(
+        session.said("Finished saving"),
+        0,
+        "the save was not finished"
+    );
+    session.a_minute_later();
+    let (title, _) = session.bench.browser.asking().expect("a question is asked");
+    assert_eq!(title, "drawbar could not finish “Save”");
+}
+
 /// A folder's rename another drawbar left unfinished, finished or rolled back, moves its
 /// files as drawbar's own change: the log says nothing of files changed outside drawbar.
 #[test]

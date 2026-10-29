@@ -218,7 +218,9 @@ bring back any you deleted.
   stops asking, and **Later** asks next time. What
   drawbar left unfinished on this computer, after a crash, a failed save or in
   another window, is finished without asking, by its next change or when the
-  library next opens.
+  library next opens. If it can no longer be finished, because a file it was
+  moving is gone, drawbar asks whether to roll it back or leave it as is, and
+  Undo no longer reaches the changes before it.
 - **An older drawbar.** A drawbar from before this version keeps its own tags,
   unsaved edits and rescued slot contents in the `.drawbar` folder. This version
   says so once and leaves them where they are, and an older drawbar that opens

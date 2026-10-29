@@ -34,7 +34,7 @@ use crate::path::RelPath;
 use crate::pending::{self, PendingRecord};
 use crate::plan::{FactChange, FileChange, Plan};
 use crate::reader::{ReadReport, Reader, Stamp};
-use crate::recovery::{self, Settling};
+use crate::recovery::{self, Resumed, Settling};
 use crate::report::{
     By, Change, Committed, Compacted, Emptied, Fork, Gap, HistoryItem, Item, ItemChange, Lag,
     Local, Mode, Opened, Orphan, Outcome, PathChange, Presence, Refreshed, Rekey, ScanReport,
@@ -328,6 +328,12 @@ impl Library {
     /// a change left unfinished logs it.
     pub fn last_logged(&self) -> Option<EntryHash> {
         self.history.last()
+    }
+
+    /// The writer this instance writes as: none before its first write, and none
+    /// once it stopped writing as one, until it writes again as another.
+    pub fn writer_id(&self) -> Option<WriterId> {
+        self.writer.as_ref().map(Writer::id)
     }
 
     /// Whether the library may be written now, and why not: as it opened, or
@@ -681,7 +687,11 @@ impl Library {
             return Task::ready(Err(Error::Refused(Refusal::Nothing)));
         }
         settle_first(self)
-            .and_then(|library| compacted(library).then(|(_, compacted)| Flow::Done(compacted)))
+            .and_then(|library| match library.writer {
+                Some(_) => compacted(library).then(|(_, compacted)| Flow::Done(compacted)),
+                // Settling stopped it writing.
+                None => Flow::Done(Err(Error::Refused(Refusal::Nothing))),
+            })
             .task()
     }
 
@@ -2074,6 +2084,10 @@ fn settle_own(library: &mut Library) -> Fallible<'_, &mut Library> {
 /// dropped and its staging and any part of it left to tidy; one the folder cannot
 /// be asked about fails this write, to try again.
 fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Library> {
+    // A record before it stopped this writer writing, which made it an orphan.
+    if library.writer.is_none() {
+        return ok(library);
+    }
     let path = library
         .layout
         .pending(settling.pending.writer, settling.record);
@@ -2091,7 +2105,9 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
 
 /// Carries out the rest of the record `settling` and logs its entry. Where the
 /// folder refuses the rest, the record stays open and the library is read-only
-/// until it is opened again, which tries the rest again.
+/// until it is opened again, which tries the rest again. Where what the rest
+/// moves is gone, so no retry could finish it, the writer stops writing, and the
+/// record is an orphan to settle with the user's consent.
 fn resume(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Library> {
     let name = settling.record;
     let label = settling.pending.label.clone();
@@ -2104,47 +2120,55 @@ fn resume(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Librar
         identify,
         library.capabilities,
     );
+    flow::run(settled).then(move |settled| match settled {
+        Ok(Resumed::Applied(applied)) => log_resumed(library, name, record, applied),
+        Ok(Resumed::Gone) => library.stop_writing().map_ok(move |()| library),
+        Err(Error::Io { path, error, .. }) => {
+            let why = Why::Unfinished { label, path, error };
+            library.mode = Mode::ReadOnly(why.clone());
+            Flow::Done(Err(Error::ReadOnly(why)))
+        }
+        Err(failed) => Flow::Done(Err(failed)),
+    })
+}
+
+/// Logs the entry of this writer's record `name`, whose rest `applied` says was
+/// carried out, then removes the record.
+fn log_resumed(
+    library: &mut Library,
+    name: Nonce,
+    record: Rc<PendingRecord>,
+    applied: Applied,
+) -> Fallible<'_, &mut Library> {
     let own = library.writer.as_ref().map(Writer::id);
     let closed = own.is_some_and(|own| library.closed_records().contains(&(own, name)));
-    flow::run(settled)
-        .then(move |settled| match settled {
-            Ok(applied) => ok((library, applied)),
-            Err(Error::Io { path, error, .. }) => {
-                let why = Why::Unfinished { label, path, error };
-                library.mode = Mode::ReadOnly(why.clone());
-                Flow::Done(Err(Error::ReadOnly(why)))
-            }
-            Err(failed) => Flow::Done(Err(failed)),
-        })
-        .and_then(move |(library, applied)| {
-            let mut planned = planned(&record);
-            planned.record = Some(name);
-            let file_ops = file_ops(&applied, &record.files);
-            let kinds = match closed {
-                true => Vec::new(),
-                false => {
-                    planned.ops.extend(file_ops);
-                    planned.displaced = applied.displaced;
-                    planned.forks = library.known_forks(&planned.ops);
-                    vec![EntryKind::Intent(planned)]
-                }
-            };
-            let appended = match kinds.is_empty() {
-                true => ok((library, Vec::new())),
-                false => append(library, kinds),
-            };
-            appended.and_then(move |(library, _)| {
-                // The writer is still the record's: compaction waits while a
-                // record is unsettled, and an append that rekeys fails.
-                remove_record(library, name, &record).then(move |library| {
-                    let scan = library.scan_task();
-                    rebind_logged(library, scan, record.paths()).map_ok(|library| {
-                        library.show();
-                        library
-                    })
-                })
+    let mut planned = planned(&record);
+    planned.record = Some(name);
+    let file_ops = file_ops(&applied, &record.files);
+    let kinds = match closed {
+        true => Vec::new(),
+        false => {
+            planned.ops.extend(file_ops);
+            planned.displaced = applied.displaced;
+            planned.forks = library.known_forks(&planned.ops);
+            vec![EntryKind::Intent(planned)]
+        }
+    };
+    let appended = match kinds.is_empty() {
+        true => ok((library, Vec::new())),
+        false => append(library, kinds),
+    };
+    appended.and_then(move |(library, _)| {
+        // The writer is still the record's: compaction waits while a
+        // record is unsettled, and an append that rekeys fails.
+        remove_record(library, name, &record).then(move |library| {
+            let scan = library.scan_task();
+            rebind_logged(library, scan, record.paths()).map_ok(|library| {
+                library.show();
+                library
             })
         })
+    })
 }
 
 /// Removes this writer's record `name` once its entries are durable, with the
