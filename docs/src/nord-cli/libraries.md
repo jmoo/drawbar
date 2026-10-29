@@ -59,8 +59,9 @@ velocity value directly, name the file with `v12` in place of `l00`.
 
 `build` writes piano format 6 unless `--format 5` asks for the older format, for
 an instrument that does not play format 6. A template's format decides when you
-give one. Layer values run from 0 to 100 in format 6 and from 0 to 20 in format 5;
-`nord piano inspect` names a library's format.
+give one. In format 6, `l00`, `l01`, … step 20 apart, spanning at least 0 to 50
+and at most 0 to 100, and format 5 uses a fifth of each value. `nord piano inspect`
+names a library's format.
 
 A WAV with a loop in its `smpl` chunk, which most sample editors write, makes a
 stroke that loops there while the key is held. Audio after the loop's end is not
@@ -79,7 +80,8 @@ Whatever the audio does not decide, such as decay and per-note tables, comes fro
 template, `--kind`, `--gain`, `--damper-top` and `--loop-fade` set the playback
 values, and each stroke decays from note-on as the instrument's own pianos of that
 kind do, faster on higher keys. In format 6, each layer is trimmed to play at the
-level of its root's loudest layer, and each release is trimmed 18 dB below that. When a soft
+level of its root's loudest layer, softer layers a little louder as that kind's are,
+up to 6 dB for a Wurlitzer, and each release 18 dB below the loudest. When a soft
 layer needs more boost than the instrument gives at `--gain`, the whole library is
 turned down to fit. In format 5, each stroke's level follows its layer.
 

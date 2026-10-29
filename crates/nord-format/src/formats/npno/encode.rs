@@ -245,6 +245,25 @@ impl Kind {
             Kind::Clavinet | Kind::Hybrid => None,
         }
     }
+
+    /// How much louder than its root's loudest layer a softer attack or resonance layer
+    /// of this kind plays, by [`level`] less its trim: tenths of a decibel per 100 of
+    /// version 6 layer value. Fitted to vendor 6.x attack strokes; vendor harpsichords
+    /// have one layer, so lift none. Inferred from specimens; not confirmed on hardware.
+    fn layer_lift(self) -> u16 {
+        match self {
+            Kind::ElectricGrand => 20,
+            Kind::ElectricPiano => 40,
+            Kind::Wurlitzer => 60,
+            Kind::Clavinet => 28,
+            Kind::Grand => 12,
+            Kind::Upright => 9,
+            Kind::Harpsichord => 0,
+            Kind::DigitalPiano => 4,
+            Kind::Hybrid => 35,
+            Kind::Mallet => 16,
+        }
+    }
 }
 
 /// Decibels per second at `root` of a rate stated as tenths of a decibel per second at
@@ -373,7 +392,7 @@ pub fn sustain(found: SampleLoop, rate: u32) -> Result<Loop, Error> {
 
 /// The value the `index`-th loudest of a root's `layers` takes in a `version` library
 /// when the caller states none: `round(index·s/(layers − 1))` up to the
-/// [`Version::softest_layer`] `s`, and 0 for a root with one layer.
+/// [`Version::softest_layer`] `s` of `layers`, and 0 for a root with one layer.
 ///
 /// A key plays a softer layer the softer it is struck ([`Stroke::layer`]). Spreading
 /// the values puts a layer change under each part of the velocity range; values packed
@@ -385,7 +404,7 @@ pub fn layer_value(index: usize, layers: usize, version: Version) -> u8 {
         return 0;
     }
     let index = index.min(last);
-    let scale = usize::from(version.softest_layer());
+    let scale = usize::from(version.softest_layer(layers));
     ((index * scale * 2 + last) / (last * 2)) as u8
 }
 
@@ -527,8 +546,9 @@ impl Recoded {
 /// resonance stroke is trimmed 3 dB more than its layer value states and a release
 /// stroke 12 dB. A [`Version::V6`] library built from rules is trimmed by the strokes'
 /// levels instead. Each attack or resonance stroke plays at the level of its root's
-/// loudest layer in its bank, less 3 dB, and each release stroke is trimmed 18 dB under
-/// its root's loudest attack stroke. A recording's level is the most power any 10 ms of its first
+/// loudest layer in its bank, less 3 dB, raised at a rate per [`Kind`] for each unit of
+/// layer value above the loudest's, and each release stroke is trimmed 18 dB under its root's
+/// loudest attack stroke. A recording's level is the most power any 10 ms of its first
 /// half second holds, on its louder channel. Where a stroke would need more boost than
 /// [`V6_MOST_BOOST`] leaves at the library's gain, every stroke is turned down by the
 /// shortfall, so the balance holds. A recording silent over its first half second, or a
@@ -917,7 +937,7 @@ fn window(bank: Bank, layer: u8) -> u16 {
 /// otherwise.
 fn trims(donor: &Donor<'_>, version: Version, order: &[&Recording]) -> Result<Vec<i16>, Error> {
     match (donor, version) {
-        (Donor::Rules(rules), Version::V6) => level_trims(order, rules.gain),
+        (Donor::Rules(rules), Version::V6) => level_trims(order, rules),
         _ => Ok(order
             .iter()
             .map(|recording| layer_trim(version, recording.bank, recording.layer))
@@ -980,13 +1000,13 @@ fn level(channels: &[Vec<i16>]) -> Option<f64> {
 }
 
 /// The trims [`build`] states for `order`'s recordings in a [`Version::V6`] library
-/// from rules at `gain`, with `order` sorted as the directory sorts them, so that the
-/// first of each root and bank is its loudest layer.
+/// from `rules`, with `order` sorted as the directory sorts them, so that the first of
+/// each root and bank is its loudest layer.
 ///
 /// A stroke's playback level is its audio through the instrument's velocity curve, less
 /// its trim, plus the library gain; the layer value and threshold do not change it.
 /// Confirmed on hardware.
-fn level_trims(order: &[&Recording], gain: i8) -> Result<Vec<i16>, Error> {
+fn level_trims(order: &[&Recording], rules: &Rules) -> Result<Vec<i16>, Error> {
     let levels = order
         .iter()
         .map(|recording| {
@@ -999,21 +1019,22 @@ fn level_trims(order: &[&Recording], gain: i8) -> Result<Vec<i16>, Error> {
             })
         })
         .collect::<Result<Vec<f64>, Error>>()?;
-    let mut loudest: BTreeMap<(u8, u8), f64> = BTreeMap::new();
+    let mut loudest: BTreeMap<(u8, u8), (f64, u8)> = BTreeMap::new();
     for (recording, &level) in order.iter().zip(&levels) {
         loudest
             .entry((recording.root, recording.bank.code()))
-            .or_insert(level);
+            .or_insert((level, recording.layer));
     }
 
+    let lift = f64::from(rules.kind.layer_lift()) / 10.0 / 100.0;
     let step = Version::V6.trim_step();
     let mut tenths = Vec::with_capacity(order.len());
     for (recording, level) in order.iter().zip(levels) {
-        let (against, under) = match recording.bank {
-            Bank::Attack | Bank::Resonance => (recording.bank, LAYER_TRIM),
-            Bank::Release => (Bank::Attack, LAYER_TRIM + RELEASE_UNDER_ATTACK),
+        let against = match recording.bank {
+            Bank::Attack | Bank::Resonance => recording.bank,
+            Bank::Release => Bank::Attack,
         };
-        let reference = loudest
+        let &(reference, loudest_layer) = loudest
             .get(&(recording.root, against.code()))
             .ok_or_else(|| {
                 refuse(format!(
@@ -1021,10 +1042,16 @@ fn level_trims(order: &[&Recording], gain: i8) -> Result<Vec<i16>, Error> {
                     describe(recording)
                 ))
             })?;
+        let under = match recording.bank {
+            Bank::Attack | Bank::Resonance => {
+                LAYER_TRIM - lift * (f64::from(recording.layer) - f64::from(loudest_layer))
+            }
+            Bank::Release => LAYER_TRIM + RELEASE_UNDER_ATTACK,
+        };
         tenths.push(((under + level - reference) / step).round());
     }
 
-    let lowest = f64::from(gain) - f64::from(V6_MOST_BOOST);
+    let lowest = f64::from(rules.gain) - f64::from(V6_MOST_BOOST);
     let shortfall = tenths
         .iter()
         .fold(0.0, |most, &trim| f64::max(most, lowest - trim));
@@ -1970,21 +1997,33 @@ mod tests {
     }
 
     /// The default spread decides which velocities reach which layer, so its values are
-    /// the contract.
+    /// the contract: 20 a layer in 6.x, spanning at least 50 and at most 100, and a
+    /// fifth of that in 5.x.
     #[test]
-    fn the_default_layer_values_spread_a_root_over_the_selection_range() {
+    fn the_default_layer_values_step_20_a_layer_between_spans_of_50_and_100() {
         let spread = |layers, version| {
             (0..layers)
                 .map(|i| layer_value(i, layers, version))
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            spread(1, Version::V5),
+            spread(1, Version::V6),
             vec![0],
             "a lone layer plays at every velocity"
         );
-        assert_eq!(spread(2, Version::V5), vec![0, 20]);
-        assert_eq!(spread(3, Version::V5), vec![0, 10, 20]);
+        assert_eq!(spread(2, Version::V6), vec![0, 50]);
+        assert_eq!(spread(3, Version::V6), vec![0, 25, 50]);
+        assert_eq!(spread(4, Version::V6), vec![0, 20, 40, 60]);
+        assert_eq!(spread(6, Version::V6), vec![0, 20, 40, 60, 80, 100]);
+        assert_eq!(
+            spread(9, Version::V6),
+            vec![0, 13, 25, 38, 50, 63, 75, 88, 100]
+        );
+
+        assert_eq!(spread(1, Version::V5), vec![0]);
+        assert_eq!(spread(2, Version::V5), vec![0, 10]);
+        assert_eq!(spread(3, Version::V5), vec![0, 5, 10]);
+        assert_eq!(spread(6, Version::V5), vec![0, 4, 8, 12, 16, 20]);
         assert_eq!(spread(9, Version::V5), vec![0, 3, 5, 8, 10, 13, 15, 18, 20]);
         assert_eq!(
             layer_value(9, 9, Version::V5),
@@ -1992,13 +2031,6 @@ mod tests {
             "an index past the last is the last"
         );
         assert_eq!(layer_value(0, 0, Version::V5), 0);
-
-        assert_eq!(spread(1, Version::V6), vec![0]);
-        assert_eq!(spread(3, Version::V6), vec![0, 50, 100]);
-        assert_eq!(
-            spread(9, Version::V6),
-            vec![0, 13, 25, 38, 50, 63, 75, 88, 100]
-        );
     }
 
     /// A layer value is a field of the record, not a position in the directory, so a
@@ -2458,7 +2490,8 @@ mod tests {
     /// A version 6 library built from rules states the stream, the container version and
     /// the names a vendor version 6 library does, its trims in tenths of a decibel, and a
     /// threshold midway between each layer value and the next louder one's. Layers of
-    /// one level take one trim, and a release of that level is trimmed 18 dB under them.
+    /// one level are lifted 1.2 dB per 100 of layer value over the root's loudest, as a
+    /// grand's are, and a release of that level is trimmed 18 dB under the loudest.
     #[test]
     fn a_version_6_library_built_from_rules_states_its_own_scale() {
         let short = tone(6_000, 300.0, 1);
@@ -2487,8 +2520,8 @@ mod tests {
             stated,
             [
                 (60, 0, 30, 0),
-                (60, 50, 30, 25),
-                (60, 100, 30, 75),
+                (60, 50, 24, 25),
+                (60, 100, 18, 75),
                 (60, 0, 210, 0),
                 (72, 50, 30, 25),
             ]
@@ -2517,10 +2550,10 @@ mod tests {
         ]
     }
 
-    fn trims_at(version: Version, gain: i8, recordings: &[Recording]) -> Vec<i16> {
+    fn trims_at(version: Version, kind: Kind, gain: i8, recordings: &[Recording]) -> Vec<i16> {
         let rules = Rules {
             gain,
-            ..Rules::new(version, Kind::Grand)
+            ..Rules::new(version, kind)
         };
         build(&Donor::Rules(rules), &Options::new("Level"), recordings)
             .unwrap()
@@ -2532,17 +2565,18 @@ mod tests {
 
     /// A 6.x library from rules trims each stroke against its root's loudest layer, so a
     /// layer recorded 12 dB softer is boosted by 12 dB and plays at the loudest's level,
-    /// and a release is trimmed 18 dB under it. A 5.x library keeps trimming by layer value.
+    /// and a release is trimmed 18 dB under it. A harpsichord lifts no layer above that.
+    /// A 5.x library keeps trimming by layer value.
     #[test]
     fn a_6_x_rule_build_levels_each_stroke_against_its_roots_loudest_layer() {
         let recordings = twelve_decibels_apart();
         assert_eq!(
-            trims_at(Version::V6, 0, &recordings),
+            trims_at(Version::V6, Kind::Harpsichord, 0, &recordings),
             [30, -90, 90],
             "3 dB on the loudest, 3 − 12 on the soft layer, 3 + 18 − 12 on the release"
         );
         assert_eq!(
-            trims_at(Version::V5, 0, &recordings),
+            trims_at(Version::V5, Kind::Harpsichord, 0, &recordings),
             [3, 13, 12],
             "a 5.x stroke is trimmed by its layer value whatever its audio"
         );
@@ -2553,8 +2587,34 @@ mod tests {
     #[test]
     fn a_layer_too_quiet_for_the_boost_left_moves_every_trim_by_the_shortfall() {
         assert_eq!(
-            trims_at(Version::V6, DEFAULT_GAIN, &twelve_decibels_apart()),
+            trims_at(
+                Version::V6,
+                Kind::Harpsichord,
+                DEFAULT_GAIN,
+                &twelve_decibels_apart()
+            ),
             [62, -58, 122]
+        );
+    }
+
+    /// A softer layer plays louder than its root's loudest by its kind's lift per 100 of
+    /// layer value counted from the loudest's: 6 dB for a Wurlitzer, so a root recorded
+    /// at one level and valued 20/45/70 is trimmed 3.0, 1.5 and 0 dB.
+    #[test]
+    fn a_6_x_rule_build_lifts_softer_layers_by_their_kinds_rate() {
+        let recordings = [
+            one(60, Bank::Attack, 20, steady(2_000)),
+            one(60, Bank::Attack, 45, steady(2_000)),
+            one(60, Bank::Attack, 70, steady(2_000)),
+        ];
+        assert_eq!(
+            trims_at(Version::V6, Kind::Wurlitzer, 0, &recordings),
+            [30, 15, 0]
+        );
+        assert_eq!(
+            trims_at(Version::V6, Kind::Grand, 0, &recordings),
+            [30, 27, 24],
+            "a grand lifts 1.2 dB per 100"
         );
     }
 
@@ -2840,7 +2900,7 @@ mod tests {
         ];
         assert_eq!(
             layer_values(&named, Version::V5).unwrap(),
-            [20, 0, 10, 0, 0, 20],
+            [10, 0, 5, 0, 0, 10],
             "values come back in the order given, ranked within each root and bank"
         );
     }
