@@ -724,7 +724,9 @@ fn written_by_this_crate(s: &Specimen) -> Result<(), String> {
 /// A library built from rules alone, from the named library's decoded strokes,
 /// reproduces this file. A script outside this crate wrote it, so it is an
 /// independent oracle for the rules. The script wrote every note-off fade as 0 and
-/// the rules do not, so the build's fades are set to 0 before the comparison.
+/// the rules do not, so the build's fades are set to 0 before the comparison. The script
+/// wrote no decay ladder, which the rules state only for a kind like the clavinet, so the
+/// build is made as one and filed as a grand.
 ///
 /// Confirmed on hardware.
 fn recordings_from(s: &Specimen) -> Result<(), String> {
@@ -755,15 +757,17 @@ fn recordings_from(s: &Specimen) -> Result<(), String> {
         })
         .collect::<Result<_, String>>()?;
     let (library_name, variant) = library.name();
+    let rules = npno::encode::Rules {
+        kind: npno::encode::Kind::Clavinet,
+        ..npno::encode::Rules::new(npno::Version::V5, npno::encode::Kind::Grand)
+    };
     let mut built = npno::encode::build(
-        &npno::encode::Donor::Rules(npno::encode::Rules::new(
-            npno::Version::V5,
-            npno::encode::Kind::Grand,
-        )),
+        &npno::encode::Donor::Rules(rules),
         &npno::encode::Options::new(&library_name).variant(&variant),
         &recordings,
     )
     .context("build")?;
+    built.set_kind(npno::encode::Kind::Grand);
     let theirs = npno::Library::borrow(s.bytes).context("parse")?;
     ensure!(
         theirs.strokes().len() == built.strokes().len(),

@@ -363,10 +363,16 @@ enum PianoAction {
     ///
     /// What the audio does not decide (the decay coefficients, per-note tables,
     /// playback parameters and stream version) comes from `--template`, taken from the
-    /// template's stroke of the same bank and nearest root. Without a template, the
-    /// library uses neutral playback: no decay over the recordings, held loops fading as
-    /// the instrument's own pianos of `--kind` do, a fade at key-up, and the damper limit
-    /// that `--kind` implies. Either way, each stroke is trimmed by its own layer value.
+    /// template's stroke of the same bank and nearest root, and each stroke is trimmed
+    /// by its own layer value.
+    ///
+    /// Without a template, each stroke decays from note-on and each held loop fades as
+    /// the instrument's own pianos of `--kind` do, with a fade at key-up and the damper
+    /// limit that `--kind` implies. In format 6, each layer is trimmed to play at the
+    /// level of its root's loudest layer, and each release is trimmed 18 dB under that; where the
+    /// quietest needs more boost than the instrument gives at `--gain`, the whole
+    /// library is turned down until it fits. In format 5, each stroke is trimmed by its
+    /// own layer value.
     ///
     /// A WAV whose `smpl` chunk declares a loop builds a stroke that loops there while
     /// the key is held; the WAV's frames past the loop's end are not used, and the
@@ -375,15 +381,13 @@ enum PianoAction {
     ///
     /// Every key up to one semitone above the highest root sounds, playing the nearest
     /// root at or above it. Keys past that are silent. Each layer plays from halfway to
-    /// the next louder layer's value, and a root's `l00`, `l01`, … spread over 0..135 in
-    /// format 6 and 0..27 in format 5, so that each layer covers its own part of the
+    /// the next louder layer's value, and a root's `l00`, `l01`, … spread over 0..100 in
+    /// format 6 and 0..20 in format 5, so that each layer covers its own part of the
     /// velocity range.
     ///
     /// Confirmed on hardware: a library built this way loads and plays, mono and
-    /// stereo, on every key it covers, and its loops sustain at an even level. With the
-    /// same source audio, libraries built with and without a template sound the same
-    /// while a key is held, and one built without a template fades a note out within
-    /// about 30 ms of key-up.
+    /// stereo, on every key it covers, and its loops sustain at an even level. One built
+    /// without a template fades a note out within about 30 ms of key-up.
     Build(piano::BuildArgs),
 
     /// Re-encode a library's audio from its decoded frames, and report how each
