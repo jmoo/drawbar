@@ -240,7 +240,9 @@ Cargo from `crates/` inside the development shell; the parent
   uses a character no face draws.
 
 CI runs each crate with its declared `testFeatures`, rejects anything `nix fmt`
-would change, and treats Clippy and rustdoc warnings as failures. The public suite
+would change, and treats Clippy and rustdoc warnings as failures. The `autofix`
+PR label runs `nix fmt` on the branch and pushes a `style: nix fmt` commit when
+it changes anything; it reruns on pushes while the label is on. The public suite
 must compile and pass without private corpus access. `tests/corpus` discovers the
 committed fixtures, plus the corpus when enabled, by content, and applies sidecar
 `.oracle.json` files where present. Test code names no corpus path: a claim about
