@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::RangeInclusive;
 
 use eframe::egui;
+use nord_format::formats::ne5::velocity;
 use nord_format::formats::npno::encode::{Kind, ALL_KEYS_DAMPED};
 use nord_format::formats::npno::{self, Bank, FINE_TUNE_CENTS_PER_UNIT};
 use nord_format::note;
@@ -896,22 +897,23 @@ fn layer_name(rank: usize, count: usize) -> String {
     }
 }
 
-/// The KBD Touch the velocity spans are given for. The setting belongs to the program
-/// that plays the library, which the editor does not know, so it names this one.
+/// The KBD Touch the velocity spans are given for, on an Electro 5, the only instrument
+/// whose reach is measured. The setting belongs to the program that plays the library,
+/// which the editor does not know, so it names this one.
 const KBD_TOUCH: u8 = 0;
 
 /// The velocities at which each of a root's layer values sounds at [`KBD_TOUCH`], for
 /// `(value, threshold)` pairs loudest first, in the order they are given.
 ///
 /// A key sounds the softest layer whose threshold its velocity reaches
-/// ([`npno::top_velocity`]), so a softer layer plays up to its own top and the louder one
+/// ([`velocity::top_velocity`]), so a softer layer plays up to its own top and the louder one
 /// from the next velocity up. A layer no velocity ever reaches gets an empty range.
 fn spans(layers: &[(u8, u16)]) -> Vec<(u8, RangeInclusive<u8>)> {
-    let touch = npno::Touch::try_from(KBD_TOUCH).expect("a KBD Touch the panel offers");
+    let touch = velocity::Touch::try_from(KBD_TOUCH).expect("a KBD Touch the panel offers");
     let mut out: Vec<(u8, RangeInclusive<u8>)> = Vec::with_capacity(layers.len());
     let mut below = 0u8;
     for &(value, threshold) in layers.iter().rev() {
-        let top = npno::top_velocity(threshold, touch);
+        let top = velocity::top_velocity(threshold, touch);
         out.push((value, below.saturating_add(1)..=top));
         below = below.max(top);
     }
@@ -2308,7 +2310,7 @@ fn switches(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, summary: &Summary
             was: (kept != held).then(|| room::measure(held)),
             hint: format!(
                 "layer index {layer} in the file, where 0 is the loudest; a root \
-                 holding every layer sounds it at {} under KBD Touch {KBD_TOUCH}",
+                 holding every layer sounds it at {} on an Electro 5 at KBD Touch {KBD_TOUCH}",
                 span_text(&whole[rank].1)
             ),
             throws: Throw::Layer(layer),
@@ -3540,8 +3542,8 @@ impl State {
             "Velocity layers",
             &format!(
                 "the switch applies to every root; a segment is one root, and clicking it \
-                 drops that layer for that root only. Velocities are for KBD Touch \
-                 {KBD_TOUCH}; a program set higher reaches each layer with a softer note"
+                 drops that layer for that root only. Velocities are an Electro 5's at KBD \
+                 Touch {KBD_TOUCH}; a program set higher reaches each layer with a softer note"
             ),
             None,
         );

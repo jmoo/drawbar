@@ -13,6 +13,7 @@ pub use settings::Settings;
 pub mod song;
 pub use song::Song;
 pub mod program;
+pub mod velocity;
 pub use program::{
     B3PercSpeed, B3Vib, Drawbars, EqualizerPart, FarfisaVib, Fx1Type, Fx2Type, Fx3Type, Fx5Type,
     OrganModel, OrganType, PianoCategory, Preset, Program, Routing, VoxVib,

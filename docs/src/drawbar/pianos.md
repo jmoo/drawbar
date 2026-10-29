@@ -29,8 +29,9 @@ queued.
 
 **Velocity layers** goes finer: one lane per layer, one segment per root. Click a
 segment to drop that layer for that root only. Each segment gives the velocities
-its layer plays at with the program's KBD Touch at 0. A higher KBD Touch reaches
-each softer layer with a softer note.
+its layer plays at with the program's KBD Touch at 0, on the instrument
+[What is supported](../getting-started/support.md) names. A higher KBD Touch
+reaches each softer layer with a softer note.
 
 ## Playback
 
