@@ -28,7 +28,10 @@ cheapest cut that would make it fit. A library that does not fit cannot be
 queued.
 
 **Velocity layers** goes finer: one lane per layer, one segment per root. Click a
-segment to drop that layer for that root only.
+segment to drop that layer for that root only. Each segment gives the velocities
+its layer plays at with the program's KBD Touch at 0, on the instrument
+[What is supported](../getting-started/support.md) names. A higher KBD Touch
+reaches each softer layer with a softer note.
 
 ## Playback
 
@@ -37,7 +40,9 @@ which is what the instrument files the library under. Kind changes nothing about
 the sound.
 
 **Roots** lists each root. Open one to trim its level, hear it, save it as a
-WAV, or drop it. **Per key** paints a fine tune across the keyboard.
+WAV, or drop it. A 6.x library trims in tenths of a decibel and can also boost a
+stroke, by up to about 10.8 dB together with the instrument gain. A 5.x library
+trims in whole decibels and cannot boost. **Per key** paints a fine tune across the keyboard.
 
 ## A new library
 
@@ -45,6 +50,11 @@ WAV, or drop it. **Per key** paints a fine tune across the keyboard.
 at any sample rate. A file named like `060-b0-l00.wav` fills in its root (MIDI
 note 60), bank and layer for you. Otherwise set them in the dialog. **Template** builds on a library you already
 have.
+
+A new library is written in piano format 6.x. **Advanced ▸ Format** offers 5.x
+for an instrument that does not play 6.x. With a template, the library takes the
+template's format. A layer's value is on its format's scale: 0 to 135 spreads a
+root over the velocity range in 6.x, and 0 to 27 in 5.x.
 
 A WAV with a loop, which most sample editors can set, makes a stroke that loops
 there while the key is held, and the dialog marks it. Audio after the loop's end

@@ -373,10 +373,10 @@ enum PianoAction {
     /// them already. Any other stroke plays to its end. A release stroke cannot loop.
     ///
     /// Every key up to one semitone above the highest root sounds, playing the nearest
-    /// root at or above it. Keys past that are silent. A key plays the largest layer
-    /// value its root holds that is at most (127 − velocity)·31/127, and a root's `l00`,
-    /// `l01`, … spread over 0..27 so that each layer covers its own part of the velocity
-    /// range.
+    /// root at or above it. Keys past that are silent. Each layer plays from halfway to
+    /// the next louder layer's value, and a root's `l00`, `l01`, … spread over 0..135 in
+    /// format 6 and 0..27 in format 5, so that each layer covers its own part of the
+    /// velocity range.
     ///
     /// Confirmed on hardware: a library built this way loads and plays, mono and
     /// stereo, on every key it covers, and its loops sustain at an even level. With the

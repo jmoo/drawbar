@@ -22,7 +22,7 @@ pub struct PianoPanel {
     #[bits(17..=18)]
     pub acoustics: RangedU8<3>,
     #[bits(19..=20)]
-    pub touch: RangedU8<3>,
+    pub touch: super::velocity::Touch,
     #[bits(21..=21)]
     pub mono: bool,
     /// The piano (`.npno`) this program depends on: a stable id, independent of where

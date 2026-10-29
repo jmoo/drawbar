@@ -3746,7 +3746,7 @@ fn a_large_piano_opens_and_draws_before_its_check_answers() {
 
     let words = session.document(id);
     assert!(
-        words.iter().any(|word| word == "npno 0x464"),
+        words.iter().any(|word| word == "npno 6.x"),
         "the header reads the index: {words:?}"
     );
     assert_eq!(file.take_reads(), [], "the frame read none of its body");

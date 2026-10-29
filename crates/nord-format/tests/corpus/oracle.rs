@@ -756,7 +756,10 @@ fn recordings_from(s: &Specimen) -> Result<(), String> {
         .collect::<Result<_, String>>()?;
     let (library_name, variant) = library.name();
     let mut built = npno::encode::build(
-        &npno::encode::Donor::Rules(npno::encode::Rules::new(npno::encode::Kind::Grand)),
+        &npno::encode::Donor::Rules(npno::encode::Rules::new(
+            npno::Version::V5,
+            npno::encode::Kind::Grand,
+        )),
         &npno::encode::Options::new(&library_name).variant(&variant),
         &recordings,
     )

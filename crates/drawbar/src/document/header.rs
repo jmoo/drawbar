@@ -1029,10 +1029,16 @@ pub(super) fn badge(entity: &LocalEntity) -> (String, String) {
             )
         }
         Kind::Piano => match stream_version(entity) {
-            Some(stream) => (
-                format!("npno {stream:#05x}"),
-                format!("stream version {stream:#05x}"),
-            ),
+            Some(stream) => match nord_format::formats::npno::Version::from_stream(stream) {
+                Some(version) => (
+                    format!("npno {version}"),
+                    format!("piano format {version}, stream version {stream:#05x}"),
+                ),
+                None => (
+                    format!("npno {stream:#05x}"),
+                    format!("stream version {stream:#05x}"),
+                ),
+            },
             None => (tag, sentence),
         },
         Kind::Project => (
