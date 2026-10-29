@@ -369,10 +369,11 @@ enum PianoAction {
     /// Without a template, each stroke decays from note-on and each held loop fades as
     /// the instrument's own pianos of `--kind` do, with a fade at key-up and the damper
     /// limit that `--kind` implies. In format 6, each layer is trimmed to play at the
-    /// level of its root's loudest layer, and each release is trimmed 18 dB under that; where the
-    /// quietest needs more boost than the instrument gives at `--gain`, the whole
-    /// library is turned down until it fits. In format 5, each stroke is trimmed by its
-    /// own layer value.
+    /// level of its root's loudest layer, softer layers a little above it as the
+    /// instrument's own pianos of `--kind` are, and each release 18 dB under the
+    /// loudest; where the quietest needs more boost than the instrument gives at
+    /// `--gain`, the whole library is turned down until it fits. In format 5, each
+    /// stroke is trimmed by its own layer value.
     ///
     /// A WAV whose `smpl` chunk declares a loop builds a stroke that loops there while
     /// the key is held; the WAV's frames past the loop's end are not used, and the
@@ -381,9 +382,9 @@ enum PianoAction {
     ///
     /// Every key up to one semitone above the highest root sounds, playing the nearest
     /// root at or above it. Keys past that are silent. Each layer plays from halfway to
-    /// the next louder layer's value, and a root's `l00`, `l01`, … spread over 0..100 in
-    /// format 6 and 0..20 in format 5, so that each layer covers its own part of the
-    /// velocity range.
+    /// the next louder layer's value, and a root's `l00`, `l01`, … step 20 apart in
+    /// format 6, spanning at least 0..50 and at most 0..100, and a fifth of that in
+    /// format 5, so that each layer covers its own part of the velocity range.
     ///
     /// Confirmed on hardware: a library built this way loads and plays, mono and
     /// stereo, on every key it covers, and its loops sustain at an even level. One built

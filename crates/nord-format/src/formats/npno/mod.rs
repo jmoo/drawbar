@@ -159,15 +159,15 @@ impl Version {
         (ne5::velocity::HIGHEST_THRESHOLD / self.layer_scale()) as u8
     }
 
-    /// The layer value [`encode::layer_value`] spreads a root's layers up to: where
-    /// vendor libraries put a root's softest layer, mostly 90 to 110 in version 6 and
-    /// about a fifth of that in the version 5 release of the same library. Inferred from
-    /// specimens; not confirmed on hardware.
-    pub fn softest_layer(self) -> u8 {
-        match self {
-            Version::V5 => 20,
-            Version::V6 => 100,
-        }
+    /// The layer value [`encode::layer_value`] gives the softest of a root's `layers`:
+    /// 20 on the version 6 scale for each layer below the loudest, kept between 50 and
+    /// 100, and a fifth of that in version 5. Vendor version 6 roots step about 20 a
+    /// layer, span about 50 with two or three layers, and stop near 100 with many; their
+    /// version 5 editions state a fifth of each value. Inferred from specimens; not
+    /// confirmed on hardware.
+    pub fn softest_layer(self, layers: usize) -> u8 {
+        let v6 = (20 * layers.saturating_sub(1)).clamp(50, 100);
+        (v6 / usize::from(self.layer_scale())) as u8
     }
 
     /// Decibels one unit of [`Stroke::trim`] attenuates a stroke by. Confirmed on
@@ -770,7 +770,7 @@ impl<'a> Stroke<'a> {
     /// alone, and there the layer value changes neither which stroke plays nor how loud.
     /// Either way the loudest layer plays at the top of the velocity range
     /// ([`ne5::velocity::top_velocity`]). Confirmed on hardware. Vendor libraries spread a
-    /// root over 0..[`Version::softest_layer`].
+    /// root about as [`Version::softest_layer`] says.
     pub fn layer(&self) -> u8 {
         self.record[REC_LAYER]
     }

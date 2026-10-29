@@ -1188,7 +1188,7 @@ mod tests {
         let draft = piano_draft(&["060-b0-l02", "060-b0-l00", "060-b0-l01", "072-b0-l00"]);
         assert_eq!(
             layer_values(&draft.takes, Version::V6).unwrap(),
-            vec![100, 0, 50, 0],
+            vec![50, 0, 25, 0],
             "the list order is kept; the rank is the layer's own"
         );
     }
@@ -1258,7 +1258,7 @@ mod tests {
             strokes,
             [
                 (60, Some(Bank::Attack), 0),
-                (60, Some(Bank::Attack), Version::V6.softest_layer()),
+                (60, Some(Bank::Attack), Version::V6.softest_layer(2)),
                 (72, Some(Bank::Attack), 0),
                 (72, Some(Bank::Release), 0),
             ],
@@ -1269,7 +1269,7 @@ mod tests {
             Version::V6,
             "a new library is 6.x unless chosen"
         );
-        assert_eq!(library.strokes()[1].threshold(), 50);
+        assert_eq!(library.strokes()[1].threshold(), 25);
     }
 
     #[test]
@@ -1287,7 +1287,7 @@ mod tests {
             .iter()
             .map(|stroke| (stroke.layer(), stroke.threshold()))
             .collect();
-        assert_eq!(layers, [(0, 0), (Version::V5.softest_layer(), 0)]);
+        assert_eq!(layers, [(0, 0), (Version::V5.softest_layer(2), 0)]);
     }
 
     #[test]

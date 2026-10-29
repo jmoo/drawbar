@@ -169,8 +169,9 @@ pub struct BuildArgs {
     /// A directory of WAVs, one per stroke, named `<root>-b<bank>-l<layer>.wav`:
     /// `060-b0-l00.wav` is MIDI note 60, the attack bank, the loudest layer. Banks are
     /// 0 attack, 1 pedal resonance and 2 release. `l00`, `l01`, … count from the
-    /// loudest and are spread over the layer values the instrument selects by, 0..100
-    /// in format 6 and 0..20 in format 5. Write `v12` in place of `l00` to set a
+    /// loudest and are spread over the layer values the instrument selects by, 20 apart
+    /// in format 6 between spans of 0..50 and 0..100, and a fifth of that in format 5.
+    /// Write `v12` in place of `l00` to set a
     /// layer's value directly; all layers of one root and bank must use the same form.
     /// Files that are not WAVs are skipped, and a WAV named any other way is refused.
     ///
@@ -190,7 +191,8 @@ pub struct BuildArgs {
     /// note-on as the instrument's own pianos of `--kind` do, held loops fading as
     /// `--loop-fade` says, a fade at key-up, and the damper covering the keys `--kind`
     /// implies. A format 6 library trims each layer to play at the level of its root's
-    /// loudest, and a format 5 library trims each stroke by its own layer value.
+    /// loudest, softer layers a little above it as pianos of `--kind` are, and a format
+    /// 5 library trims each stroke by its own layer value.
     #[arg(long, value_name = "FILE")]
     pub template: Option<PathBuf>,
 
@@ -1236,7 +1238,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             args.out.display(),
             match version {
                 Version::V5 => "each stroke trimmed by its own layer value",
-                Version::V6 => "each layer trimmed to its root's loudest",
+                Version::V6 => "each layer trimmed to its root's loudest, softer layers lifted as its kind's are",
             },
             f64::from(rules.gain) / 10.0,
             damper_reach(rules.damper_top),
