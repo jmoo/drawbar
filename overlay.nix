@@ -182,6 +182,18 @@ let
     windows = {
       crossPkgs = final.pkgsCross.mingwW64;
       libs = [ final.pkgsCross.mingwW64.windows.pthreads ];
+    }
+    // optionalAttrs (emulators ? windows) {
+      # Wine runs the suite, so code only Windows compiles runs as well.
+      testRunner = {
+        # ⚠️ Wine ends each line with CR LF, and a build log keeps only what follows
+        # a line's last CR, so each line would show empty.
+        cmd = "${final.writeShellScript "wine-tests" ''
+          set -o pipefail
+          WINEDEBUG=fixme-all,warn-all,trace-all ${emulators.windows.package}/bin/wine "$@" 2>&1 | tr -d '\r'
+        ''}";
+        packages = [ ];
+      };
     };
 
     wasip1 = {
@@ -248,13 +260,19 @@ let
         "AR_${triple}" = "${cc.bintools.bintools}/bin/${cc.targetPrefix}ar";
       }
     )
-    // optionalAttrs (spec ? libs) {
-      # Put static libs on rustc's path directly; the cc wrapper can miss rustc's own
-      # `-l:` requests.
-      "CARGO_TARGET_${envTriple (tripleOf spec)}_RUSTFLAGS" = concatMapStringsSep " " (
-        l: "-L native=${l}/lib"
-      ) spec.libs;
-    }
+    // optionalAttrs (spec ? libs) (
+      let
+        paths = concatMapStringsSep " " (l: "-L native=${l}/lib") spec.libs;
+      in
+      {
+        # Put static libs on rustc's path directly; the cc wrapper can miss rustc's own
+        # `-l:` requests.
+        "CARGO_TARGET_${envTriple (tripleOf spec)}_RUSTFLAGS" = paths;
+        # rustdoc links doctests without the target's RUSTFLAGS; a cross build's
+        # doctests are all the target's.
+        RUSTDOCFLAGS = paths;
+      }
+    )
     // optionalAttrs (spec ? testRunner) {
       # cargo hands each test binary to this runner, which is what lets a foreign
       # target's tests run here.

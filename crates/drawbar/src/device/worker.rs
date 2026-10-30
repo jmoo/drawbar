@@ -1496,6 +1496,7 @@ mod wire_tests {
         }
 
         /// Removes `dir` when it hears the first read, so nothing in it can be synced.
+        #[cfg(unix)]
         fn pulling(mut self, dir: &crate::testing::Temp) -> Puppet {
             self.pulled = Some(dir.0.clone());
             self

@@ -428,7 +428,7 @@ pub(crate) fn largest_allocation<T>(f: impl FnOnce() -> T) -> (T, usize) {
 /// device's worker thread as well as this one.
 ///
 /// ⚠️ Every thread of the test process counts, so tests running alongside count too.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(crate) fn largest_allocation_anywhere<T>(f: impl FnOnce() -> T) -> (T, usize) {
     LARGEST_ANYWHERE.store(0, Ordering::SeqCst);
     EVERY_THREAD.store(true, Ordering::SeqCst);
