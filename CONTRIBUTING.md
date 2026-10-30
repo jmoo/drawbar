@@ -209,38 +209,30 @@ need editing; stale text is a bug.
 
 ## Tooling and checks
 
-This is a Nix-native project. Do not assume a tool is installed globally. Run
+This is a Nix-native project. Do not assume a tool is installed globally. Prefer
+Nix; where it is not available, follow
+[Build by hand](docs/src/reference/building.md#build-by-hand) and
+[Checks by hand](docs/src/reference/building.md#checks-by-hand). Run
 Cargo from `crates/` inside the development shell; the parent
 `.cargo/config.toml` supplies the cfg needed by wasm builds.
+[Building from source](docs/src/reference/building.md) covers building, running,
+the guide and the site, generated files, and the checks, with or without Nix.
+[Testing](docs/src/reference/testing.md) covers what each suite verifies and the
+corpus builds.
 
-- `nix develop -c cargo test --workspace` runs the default test suite.
+Before a change is done:
+
 - `nix fmt` formats Rust, Nix, TOML, and shell with the pinned tools.
-- `nix flake check` checks formatting, runs Clippy, builds every crate's rustdoc
-  with warnings denied, runs the tests of `scripts/bump.bash`, and evaluates every
-  flake output.
-- `nix build .#<crate>` builds and tests one crate.
-- `nix build .#nord.all` covers every crate and cross target.
+- `nix develop -c cargo test --workspace` runs the default test suite.
+- `nix flake check` runs what CI's check job runs.
 - `nix build .#nord.all-corpus` runs all suites against the pinned private
-  corpus; `.#nord.<crate>-corpus` selects one crate.
-- `nix build .#nord.all-corpus-full` uses the R2 corpus tier and requires a
-  seeded store or R2 credentials. `.#nord.corpus` and `.#nord.corpus-full` are
-  the corpus assemblies.
-- `nix build .#docs` renders the user guide, the mdBook under `docs/`.
-  `mdbook serve docs` previews it from the development shell.
-- `nix build .#site` assembles this checkout's Pages tree for local preview: its
-  browser build at the root, its guide at `/docs`. `nix run .#drawbar-web`
-  serves that tree. `scripts/site.bash` assembles the tree that is deployed,
-  which is the same layout with the app taken from the latest `drawbar-v*` tag.
-- `scripts/licenses.bash` regenerates the license notices drawbar shows for its
-  Rust crates. The drawbar suite fails when the registry packages drawbar reaches
-  in `Cargo.lock` change, until the script is re-run.
-- `scripts/glyphs.py` regenerates `drawbar-glyphs.ttf`, which draws the
-  characters drawbar's text uses that no other bundled font has. Change a glyph
-  in the script's table and re-run it; the drawbar suite fails when the text
-  uses a character no face draws.
+  corpus, when the change touches decoded layout or protocol evidence;
+  `.#nord.<crate>-corpus` selects one crate.
 
 CI runs each crate with its declared `testFeatures`, rejects anything `nix fmt`
-would change, and treats Clippy and rustdoc warnings as failures. The public suite
+would change, and treats Clippy and rustdoc warnings as failures. The `autofix`
+PR label runs `nix fmt` on the branch and pushes a `style: nix fmt` commit when
+it changes anything; it reruns on pushes while the label is on. The public suite
 must compile and pass without private corpus access. `tests/corpus` discovers the
 committed fixtures, plus the corpus when enabled, by content, and applies sidecar
 `.oracle.json` files where present. Test code names no corpus path: a claim about

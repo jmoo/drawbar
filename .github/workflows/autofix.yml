@@ -1,0 +1,66 @@
+# Put the `autofix` label on a PR and whatever `nix fmt` changes gets committed
+# to the branch as `style: nix fmt`, which bumps no version. It is the formatter
+# the check job's treefmt check runs. The job re-runs on every later push while
+# the label is on and commits nothing once the branch is formatted.
+#
+# The app token lets the pushed commit trigger CI and receive its own required
+# checks, as in bump.yml. If a bump commit lands first, the push here is rejected
+# and the run that the bump push triggers formats the new head.
+name: autofix
+
+on:
+  pull_request:
+    types: [labeled, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  autofix:
+    if: >-
+      (github.event.action == 'labeled' && github.event.label.name == 'autofix')
+      || (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'autofix'))
+    runs-on: ubuntu-latest
+    concurrency:
+      cancel-in-progress: true
+      group: autofix-${{ github.event.pull_request.number }}
+    permissions:
+      actions: write # cache-nix-action purges superseded caches
+      contents: read
+    steps:
+      - name: mint an app token
+        id: token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.AUTOMERGE_APP_ID }}
+          private-key: ${{ secrets.AUTOMERGE_APP_PRIVATE_KEY }}
+      # The branch itself, not the merge ref: the format commit is pushed to it.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ steps.token.outputs.token }}
+      - uses: nixbuild/nix-quick-install-action@v35
+        with:
+          nix_conf: |
+            keep-env-derivations = true
+            keep-outputs = true
+      - uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-autofix-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix') }}
+          restore-prefixes-first-match: nix-autofix-${{ runner.os }}-
+          gc-max-store-size-linux: 4G
+          purge: true
+          purge-prefixes: nix-autofix-${{ runner.os }}-
+          purge-created: 0
+          purge-primary-key: never
+      - run: nix fmt
+      - name: commit and push
+        run: |
+          if git diff --quiet; then
+            echo "already formatted"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add --all
+          git commit -m "style: nix fmt"
+          git push
