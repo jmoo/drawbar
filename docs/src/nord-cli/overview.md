@@ -26,8 +26,9 @@ nord --help
 to transfer, `move`, `rename`, `duplicate`, `delete` and `select` to organize,
 `info`, `deps`, `list` and `focus` to look, and `edit`. `live` and `settings`
 keep only the verbs that make sense for them. The read-only verbs and `edit` also
-take a file in place of a slot. The hidden `raw --class N` reaches an object
-class by number, for anything without a command of its own.
+take a file in place of a slot. The hidden `raw --class N` reaches the
+partition at index `N`, as `nord device geometry` lists them, for anything without a
+command of its own.
 
 ## Slots
 

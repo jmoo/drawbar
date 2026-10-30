@@ -41,7 +41,7 @@ fn deps_reply(at: Location, programs: &[Location]) -> Step {
         args.push(1); // live
         for w in [
             0u32,
-            ObjectClass::Program.to_raw(),
+            frames::e5_index(ObjectClass::Program),
             0, // id: slot-addressed content carries none
             0, // name length
             1, // has_location
@@ -98,7 +98,9 @@ fn walk_of_three() -> Vec<Step> {
 fn scan(steps: Vec<Step>, targets: &[Location]) -> (Vec<op::Referrer>, bool) {
     let mut t = ReplayTransport::new(steps);
     let found = pollster::block_on(async {
-        let mut s = Session::open(&mut t, ObjectClass::SetList).await.unwrap();
+        let mut s = Session::open(&mut t, &frames::electro5(), ObjectClass::SetList)
+            .await
+            .unwrap();
         let r = op::set_lists_referencing(&mut s, &banks(), targets).await;
         let closed = s.commit().await;
         closed.unwrap();
@@ -194,15 +196,15 @@ fn rows_that_are_not_dependencies_are_not_referrers() {
     let mut deps = slot_args(set_list(0));
     deps.extend_from_slice(&3u32.to_be_bytes());
     deps.push(0);
-    for w in [0u32, ObjectClass::Program.to_raw(), 0, 0, 1, 0, 6] {
+    for w in [0u32, frames::e5_index(ObjectClass::Program), 0, 0, 1, 0, 6] {
         deps.extend_from_slice(&w.to_be_bytes());
     }
     deps.push(1);
-    for w in [0u32, ObjectClass::Program.to_raw(), 0, 0, 0, 0, 0] {
+    for w in [0u32, frames::e5_index(ObjectClass::Program), 0, 0, 0, 0, 0] {
         deps.extend_from_slice(&w.to_be_bytes());
     }
     deps.push(1);
-    for w in [0u32, ObjectClass::Sample.to_raw(), 0, 0, 1, 0, 6] {
+    for w in [0u32, frames::e5_index(ObjectClass::Sample), 0, 0, 1, 0, 6] {
         deps.extend_from_slice(&w.to_be_bytes());
     }
 
@@ -231,7 +233,9 @@ fn a_dependency_reply_must_echo_the_set_list_queried() {
 
     let mut t = ReplayTransport::new(steps);
     let err = pollster::block_on(async {
-        let mut s = Session::open(&mut t, ObjectClass::SetList).await.unwrap();
+        let mut s = Session::open(&mut t, &frames::electro5(), ObjectClass::SetList)
+            .await
+            .unwrap();
         let r = op::set_lists_referencing(&mut s, &banks(), &[moved]).await;
         s.abort();
         r.unwrap_err()
@@ -252,7 +256,9 @@ fn a_dependency_reply_must_echo_the_set_list_queried() {
 fn referrers_require_a_set_list_session() {
     let mut t = ReplayTransport::new(session_open(ObjectClass::Program));
     let err = pollster::block_on(async {
-        let mut s = Session::open(&mut t, ObjectClass::Program).await.unwrap();
+        let mut s = Session::open(&mut t, &frames::electro5(), ObjectClass::Program)
+            .await
+            .unwrap();
         let r = op::set_lists_referencing(&mut s, &banks(), &[Location { bank: 0, slot: 6 }]).await;
         s.abort();
         r.unwrap_err()
@@ -274,7 +280,9 @@ fn an_empty_target_list_sends_nothing() {
             .collect(),
     );
     let found = pollster::block_on(async {
-        let mut s = Session::open(&mut t, ObjectClass::SetList).await.unwrap();
+        let mut s = Session::open(&mut t, &frames::electro5(), ObjectClass::SetList)
+            .await
+            .unwrap();
         let r = op::set_lists_referencing(&mut s, &banks(), &[]).await;
         s.commit().await.unwrap();
         r.unwrap()

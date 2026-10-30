@@ -141,7 +141,9 @@ fn run<R>(
 ) -> Run<R> {
     let mut t = ReplayTransport::new(steps);
     let result = pollster::block_on(async {
-        let mut s = Session::open(&mut t, class).await.unwrap();
+        let mut s = Session::open(&mut t, &frames::electro5(), class)
+            .await
+            .unwrap();
         let r = read(&mut s).await;
         s.commit().await.expect("the session closes after the read");
         r

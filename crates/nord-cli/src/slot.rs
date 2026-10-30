@@ -72,6 +72,9 @@ pub fn noun(class: ObjectClass) -> String {
         ObjectClass::SetList => "setlist".into(),
         ObjectClass::Live => "live".into(),
         ObjectClass::Settings => "settings".into(),
+        ObjectClass::OrganPreset => "organ-preset".into(),
+        ObjectClass::PianoPreset => "piano-preset".into(),
+        ObjectClass::SynthPreset => "synth-preset".into(),
         ObjectClass::Unknown(n) => format!("class-{n}"),
     }
 }

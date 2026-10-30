@@ -1,4 +1,5 @@
 # source: synthetic
+# device: Nord Electro 5
 # note: a mid-session reply to the wrong command is a desync, because nothing read
 #   after it pairs with its request, so the transaction ends. The script ends with
 #   the GOODBYE exchange, which proves the release sent it and the caller's commit

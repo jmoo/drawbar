@@ -30,7 +30,9 @@ fn program_status() -> ReplayTransport {
 fn status_decodes_the_counters_a_real_transaction_carried() {
     let mut t = program_status();
     let got = pollster::block_on(async {
-        let mut s = Session::open(&mut t, ObjectClass::Program).await.unwrap();
+        let mut s = Session::open(&mut t, &frames::electro5(), ObjectClass::Program)
+            .await
+            .unwrap();
         let status = op::status(&mut s).await.unwrap();
         s.commit().await.unwrap();
         status
@@ -119,7 +121,7 @@ fn a_status_reply_truncated_inside_an_optional_word_is_refused() {
 fn an_exact_replay_rejects_a_frame_that_differs_from_the_script() {
     let mut t = program_status();
     let err = pollster::block_on(async {
-        match Session::open(&mut t, ObjectClass::Piano).await {
+        match Session::open(&mut t, &frames::electro5(), ObjectClass::Piano).await {
             Ok(s) => {
                 s.abort();
                 None
@@ -143,7 +145,7 @@ fn an_exact_replay_rejects_a_frame_that_differs_from_the_script() {
 fn lenient_mode_tolerates_differing_requests() {
     let mut t = program_status().lenient();
     let ok = pollster::block_on(async {
-        let mut s = Session::open(&mut t, ObjectClass::Piano).await?;
+        let mut s = Session::open(&mut t, &frames::electro5(), ObjectClass::Piano).await?;
         let st = op::status(&mut s).await?;
         s.commit().await?;
         Ok::<_, nord_usb::Error>(st)
@@ -320,7 +322,9 @@ fn a_large_body_is_read_in_chunks() {
 
     let mut t = ReplayTransport::new(script);
     let got = pollster::block_on(async {
-        let mut s = Session::open(&mut t, ObjectClass::Program).await.unwrap();
+        let mut s = Session::open(&mut t, &frames::electro5(), ObjectClass::Program)
+            .await
+            .unwrap();
         let r = match op::read_body(&mut s, at).await {
             Ok(b) => b,
             Err(e) => {
@@ -350,7 +354,7 @@ fn byte_granular_unit(class: ObjectClass) -> nord_usb::wire::AllocationUnit {
     let mut fields = 1u32.to_be_bytes().to_vec();
     fields.resize(29, 0);
     nord_usb::wire::Partition {
-        index: class.to_raw(),
+        index: frames::e5_index(class),
         name: "Prog".into(),
         native: false,
         fields,
@@ -416,7 +420,7 @@ fn a_large_body_is_written_in_chunks() {
 
     let mut t = ReplayTransport::new(script);
     pollster::block_on(async {
-        let mut s = Session::open(&mut t, ObjectClass::Program)
+        let mut s = Session::open(&mut t, &frames::electro5(), ObjectClass::Program)
             .await
             .unwrap()
             .allow_destructive_writes();

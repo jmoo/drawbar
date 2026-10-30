@@ -3687,7 +3687,7 @@ const CAPABILITIES: Stands = [
     (Cap::Editable, "strokes are self-contained"),
     (Cap::Editable, "one stroke at a time, on request"),
     (Cap::Editable, "banks, layers, range"),
-    (Cap::Editable, "class 1"),
+    (Cap::Editable, "into the instrument's piano library"),
     (
         Cap::Verified,
         "directory and audio re-laid, checksum recomputed",
@@ -4368,7 +4368,7 @@ mod tests {
         const UNIT: u32 = 1024;
         let mut device = Device::new(egui::Context::default());
         device.pretend_partitions(&[(ObjectClass::Piano, "Piano", UNIT)]);
-        let unit = pretend_allocation_unit(ObjectClass::Piano, UNIT);
+        let unit = pretend_allocation_unit(UNIT);
         device.state.inventory.push(Status {
             class: ObjectClass::Piano,
             count: 1,

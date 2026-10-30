@@ -20,8 +20,18 @@ sample files. Connecting other instruments over USB has not been tried.
 
 Reading and writing programs, set lists, live slots, settings, samples and pianos
 works on the Electro 5 from macOS, Linux and the browser. Windows builds pass the
-protocol tests but have not been run against an instrument. No other instrument
-has been connected, so USB support for other models cannot be guaranteed.
+protocol tests, and drawbar on Windows has connected to a Stage 4 and listed its
+storage, but nothing has been written from Windows. The Stage 4 is the only other
+instrument connected so far, and no file has been read from it or written to it, so
+USB support for other models cannot be guaranteed.
+
+drawbar and nord-cli find programs, samples and the rest by the name the instrument
+gives each kind of storage, so another model's folders show what it keeps in them.
+The Stage 4's organ, piano and synth presets get folders of their own. A kind of
+storage drawbar has no name for, such as the Stage 4's piano pedal sounds, is listed
+under the instrument's own name and is read only. Writing to another model follows
+what the Electro 5 does and has not been tried, so drawbar and nord-cli warn before
+every such write.
 
 The safeguards drawbar applies when it writes, listed under
 [Safety](../drawbar/instrument.md#safety), have been confirmed on the Electro 5.

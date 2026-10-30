@@ -2540,7 +2540,10 @@ pub fn capabilities(generation: &str) -> Stands {
             "each zone's bytes are read; nothing here drops one",
         ),
         by(
-            (Cap::Editable, "the header's Queue send, a class 3 write"),
+            (
+                Cap::Editable,
+                "the header's Queue send, into the sample library",
+            ),
             (Cap::Editable, "the header's Queue send"),
         ),
         (Cap::Verified, "every stroke is written back byte for byte"),

@@ -115,7 +115,7 @@ enum Command {
         action: DeviceAction,
     },
 
-    /// Programs on the instrument (object class 4), or `.ne5p` files.
+    /// Programs on the instrument, or `.ne5p` files.
     ///
     /// Slots are `BANK:SLOT`, as the instrument displays them. The read-only verbs and
     /// `edit` also take a file.
@@ -124,45 +124,46 @@ enum Command {
         action: ProgramAction,
     },
 
-    /// Set lists on the instrument (object class 5). Same verbs as `nord program`.
+    /// Set lists on the instrument. Same verbs as `nord program`.
     Setlist {
         #[command(subcommand)]
         action: SetlistAction,
     },
 
-    /// Live slots 1:1 to 1:3, which hold the panel as it stands (object class 6).
+    /// Live slots, which hold the panel as it stands.
     Live {
         #[command(subcommand)]
         action: LiveAction,
     },
 
-    /// The global settings singleton (object class 7): the System, MIDI and Sound
-    /// menus, plus the panel state the instrument restores at power-up.
+    /// The global settings singleton: the System, MIDI and Sound menus, plus the panel
+    /// state the instrument restores at power-up.
     Settings {
         #[command(subcommand)]
         action: SettingsAction,
     },
 
-    /// Sample instruments in the instrument's library (object class 3), or `.nsmp`
-    /// files.
+    /// Sample instruments in the instrument's library, or `.nsmp` files.
     Sample {
         #[command(subcommand)]
         action: SampleAction,
     },
 
-    /// Piano libraries on the instrument (object class 1), or `.npno` files.
+    /// Piano libraries on the instrument, or `.npno` files.
     Piano {
         #[command(subcommand)]
         action: PianoAction,
     },
 
-    /// The slot verbs for any object class, given by number.
+    /// The slot verbs for any partition, given by its index.
     ///
-    /// The other nouns are this command with the class fixed. Use it for a class with no
-    /// noun of its own.
+    /// Use it for a partition with no noun of its own. Every model numbers its
+    /// partitions its own way; `nord device geometry` lists them. A partition whose name
+    /// gives it a class is treated as that class.
     #[command(hide = true)]
     Raw {
-        #[arg(long, global = true, value_name = "N", default_value_t = 4, help = class_help())]
+        /// The partition's index, as `nord device geometry` prints it.
+        #[arg(long, global = true, value_name = "N", default_value_t = 4)]
         class: u32,
 
         #[command(subcommand)]
@@ -210,7 +211,7 @@ enum DeviceAction {
     /// Report the instrument's storage layout: partitions, banks and slot capacity.
     ///
     /// The layout is read from the instrument, so it is correct even for models this
-    /// tool has not seen. Partition indices are object class numbers.
+    /// tool has not seen, and each partition shows the class its name makes it.
     Geometry,
 
     /// Wedge the instrument by abandoning a session, to test recovery.
@@ -220,7 +221,7 @@ enum DeviceAction {
     #[cfg(feature = "wedge")]
     #[command(hide = true)]
     Wedge {
-        /// Object class to open the abandoned session on.
+        /// The partition to open the abandoned session on, by its index.
         #[arg(long, value_name = "N", default_value_t = 4)]
         class: u32,
 
@@ -431,8 +432,8 @@ enum LiveAction {
     /// Change fields in a live slot, in a `.ne5l` file or on the instrument.
     ///
     /// A live slot holds a program body under another tag, so the fields are the same as
-    /// `nord program edit`'s. Slots are 1:1 to 1:3, and the instrument overwrites them
-    /// in place.
+    /// `nord program edit`'s. An Electro 5 has slots 1:1 to 1:3 and overwrites them in
+    /// place.
     Edit(EditArgs),
 }
 
@@ -524,15 +525,15 @@ enum SettingsSlotAction {
 enum LiveSlotAction {
     /// Read a live slot from the instrument or a `.ne5l` file. Read-only.
     ///
-    /// Prints a summary, or with `--out` writes the file. Live slots are 1:1, 1:2 and
-    /// 1:3. The live slot is the panel itself, so each `--sweep` step can capture one
-    /// change without storing a program.
+    /// Prints a summary, or with `--out` writes the file. An Electro 5 has live slots 1:1,
+    /// 1:2 and 1:3. The live slot is the panel itself, so each `--sweep` step can capture
+    /// one change without storing a program.
     Get(GetArgs),
 
     /// Report everything the instrument knows about a live slot, or a `.ne5l` file's
     /// header. Read-only.
     Info {
-        /// Slot to describe (1:1, 1:2 or 1:3), or a file.
+        /// Slot to describe, such as 1:1, or a file.
         #[arg(value_name = "FILE|BANK:SLOT")]
         at: String,
     },
@@ -542,7 +543,7 @@ enum LiveSlotAction {
     /// The instrument names no dependencies for live slots, so a slot is read and its
     /// stored ids printed, as for a file.
     Deps {
-        /// Slot to inspect (1:1, 1:2 or 1:3), or a file.
+        /// Slot to inspect, such as 1:1, or a file.
         #[arg(value_name = "FILE|BANK:SLOT")]
         at: String,
     },
@@ -753,7 +754,7 @@ fn main() -> ExitCode {
             DeviceAction::Geometry => device::geometry(&ui),
             #[cfg(feature = "wedge")]
             DeviceAction::Wedge { class, yes } => {
-                device::wedge(&ui, ObjectClass::from_raw(class), yes)
+                device::wedge(&ui, ObjectClass::Unknown(class), yes)
             }
             DeviceAction::Controls(args) => device::controls(&ui, args),
         },
@@ -802,7 +803,7 @@ fn main() -> ExitCode {
             SettingsAction::Slot(action) => slot_action(&ui, action.into(), ObjectClass::Settings),
             SettingsAction::Edit(args) => edit::run(&ui, args, ObjectClass::Settings),
         },
-        Command::Raw { class, action } => slot_action(&ui, action, ObjectClass::from_raw(class)),
+        Command::Raw { class, action } => slot_action(&ui, action, ObjectClass::Unknown(class)),
     };
 
     match result {
@@ -831,17 +832,6 @@ impl From<LiveSlotAction> for SlotAction {
             LiveSlotAction::Deps { at } => SlotAction::Deps { at },
         }
     }
-}
-
-/// `nord raw --class` help, naming every class [`ObjectClass::from_raw`] recognizes.
-fn class_help() -> String {
-    // Every class `from_raw` names has a one-byte code.
-    let named: Vec<String> = (0..=u8::MAX.into())
-        .map(ObjectClass::from_raw)
-        .filter(|class| !matches!(class, ObjectClass::Unknown(_)))
-        .map(|class| format!("{} {}", class.to_raw(), class.label()))
-        .collect();
-    format!("Object class: {}", named.join(", "))
 }
 
 /// Dispatch one verb against a fixed object class, whichever noun asked for it.
@@ -988,11 +978,5 @@ mod tests {
             .is_some_and(|raw| raw.is_hide_set()));
         let help = Cli::command().render_help().to_string();
         assert!(!help.contains(" raw "), "{help}");
-    }
-
-    #[test]
-    fn the_class_help_names_the_settings_singleton() {
-        let help = class_help();
-        assert!(help.contains("7 settings"), "{help}");
     }
 }

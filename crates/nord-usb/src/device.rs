@@ -4,8 +4,9 @@
 //! [`op`] has one function per protocol operation, each pinned by captures, and
 //! [`Session`] is the transaction they run in. This module combines them:
 //!
-//! - [`Device::read`] and [`Device::destructive`] open a transaction, hand the chain the
-//!   raw [`Session`], and attempt cleanup before returning.
+//! - [`Device::read`] and [`Device::destructive`] open a transaction at the partition
+//!   [`Geometry`] places a class, hand the chain the raw [`Session`], and attempt
+//!   cleanup before returning.
 //! - [`Geometry`] holds the instrument's partition and bank tables, so walks and library
 //!   writes are bounded and sized by numbers the device supplied.
 //! - [`Device::write`] and [`Device::write_from`] size a library's cleaning pass from
@@ -13,23 +14,25 @@
 //! - [`Device::take_changed`] carries the instrument's change notification out of the
 //!   transaction it arrived in.
 //!
-//! This module sends no frames itself; [`op`] and [`Session`] do.
+//! This module sends no frames itself; [`op`], [`Session`] and [`Bare`] do.
 
 use crate::envelope::FileSource;
 use crate::error::{Error, Result};
 use crate::op;
-use crate::session::{ReadOnly, ReadWrite, Session};
+use crate::session::{Bare, ReadOnly, ReadWrite, Session};
 use crate::transport::Transport;
-use crate::wire::{AllocationUnit, Bank, Location, ObjectClass, Partition};
+use crate::wire::{AllocationUnit, Bank, Classes, Location, ObjectClass, Partition};
 
 /// What the instrument says it holds: every partition, and each one's banks.
 ///
-/// The partition index is the object class code, so this says whether the instrument
-/// has a class, how many banks it has, and how large they are, without constants. The
-/// two `(Native)` partitions are kept but never consulted: each is a second view of a
-/// library this crate addresses through its user partition.
+/// Each model orders its partitions its own way, so this is the only place a class
+/// becomes a partition index: whether the instrument has a class, where it sits, how
+/// many banks it has and how large they are all come from the device. The `(Native)`
+/// partitions are kept but never consulted: each is a second view of a library this
+/// crate addresses through its user partition.
 pub struct Geometry {
     entries: Vec<Entry>,
+    classes: Classes,
 }
 
 /// One partition and the banks the device reported for it.
@@ -39,18 +42,22 @@ struct Entry {
 }
 
 impl Geometry {
-    /// Read both tables: `PARTITIONS`, then `BANKS` for each partition's index in table
-    /// order.
+    /// Read both tables with no session: `PARTITIONS`, then `BANKS` for each partition's
+    /// index in table order.
     ///
     /// A refused `BANKS` fails the whole read with its [`Error::DeviceStatus`], because
     /// geometry missing a partition can neither bound a walk nor size a write.
-    pub async fn read<T: Transport, C>(session: &mut Session<'_, T, C>) -> Result<Self> {
+    pub async fn read<T: Transport>(bare: &mut Bare<'_, T>) -> Result<Self> {
         let mut entries = Vec::new();
-        for partition in op::partitions(session).await? {
-            let banks = op::banks(session, partition.index).await?;
+        for partition in op::partitions(bare).await? {
+            let banks = op::banks(bare, partition.index).await?;
             entries.push(Entry { partition, banks });
         }
-        Ok(Self { entries })
+        let partitions: Vec<Partition> = entries.iter().map(|e| e.partition.clone()).collect();
+        Ok(Self {
+            classes: Classes::of(&partitions),
+            entries,
+        })
     }
 
     /// Every partition in table order with its banks, including the `(Native)`
@@ -59,6 +66,11 @@ impl Geometry {
         self.entries
             .iter()
             .map(|entry| (&entry.partition, entry.banks.as_slice()))
+    }
+
+    /// Which class each partition holds.
+    pub fn classes(&self) -> &Classes {
+        &self.classes
     }
 
     /// The partition storing `class`. An instrument without one is an error.
@@ -85,12 +97,11 @@ impl Geometry {
     }
 
     fn entry(&self, class: ObjectClass) -> Result<&Entry> {
+        let index = self.classes.index(class).ok_or(Error::NoPartition(class))?;
         self.entries
             .iter()
-            .find(|entry| entry.partition.index == class.to_raw())
-            .ok_or_else(|| {
-                Error::InvalidArgument(format!("the instrument has no {} partition", class.label()))
-            })
+            .find(|entry| entry.partition.index == index)
+            .ok_or(Error::NoPartition(class))
     }
 }
 
@@ -136,7 +147,9 @@ impl<T: Transport> Device<T> {
         class: ObjectClass,
         f: impl AsyncFnOnce(&mut Session<'_, T, ReadOnly>) -> Result<R>,
     ) -> Result<R> {
-        let session = Session::open(&mut self.transport, class).await?;
+        self.geometry().await?;
+        let classes = self.geometry.as_ref().expect("just read").classes();
+        let session = Session::open(&mut self.transport, classes, class).await?;
         bracket(&mut self.changed, session, f).await
     }
 
@@ -150,7 +163,9 @@ impl<T: Transport> Device<T> {
         class: ObjectClass,
         f: impl AsyncFnOnce(&mut Session<'_, T, ReadWrite>) -> Result<R>,
     ) -> Result<R> {
-        let session = Session::open(&mut self.transport, class)
+        self.geometry().await?;
+        let classes = self.geometry.as_ref().expect("just read").classes();
+        let session = Session::open(&mut self.transport, classes, class)
             .await?
             .allow_destructive_writes();
         bracket(&mut self.changed, session, f).await
@@ -163,6 +178,11 @@ impl<T: Transport> Device<T> {
     /// means state read during any completed transaction may be stale.
     pub fn take_changed(&mut self) -> bool {
         std::mem::take(&mut self.changed)
+    }
+
+    /// Whether the [`Geometry`] has been read, so [`Self::geometry`] sends nothing.
+    pub fn has_geometry(&self) -> bool {
+        self.geometry.is_some()
     }
 
     /// The instrument's [`Geometry`], read on first use and kept.
@@ -179,11 +199,10 @@ impl<T: Transport> Device<T> {
     /// Inferred from specimens; not confirmed on hardware.
     pub async fn geometry(&mut self) -> Result<&Geometry> {
         if self.geometry.is_none() {
-            // Any class opens a session; both tables are device-wide.
-            let read = self
-                .read(ObjectClass::Program, async |s| Geometry::read(s).await)
-                .await?;
-            self.geometry = Some(read);
+            let mut bare = Bare::new(&mut self.transport);
+            let read = Geometry::read(&mut bare).await;
+            self.changed |= bare.instrument_changed();
+            self.geometry = Some(read?);
         }
         Ok(self.geometry.as_ref().expect("just read"))
     }

@@ -6,7 +6,7 @@
 use nord_format::cbin::Generation;
 use nord_format::crc::Crc32Stream;
 use nord_usb::transport::Transport;
-use nord_usb::wire::{AllocationUnit, Message, ObjectClass, Partition};
+use nord_usb::wire::{Classes, Message, ObjectClass, Partition};
 use nord_usb::{envelope, op, FileSource, Location, Result, Session};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::io;
@@ -110,17 +110,16 @@ impl Transport for Sink {
     }
 }
 
-fn byte_unit() -> AllocationUnit {
+/// A table of one byte-granular program partition.
+fn programs() -> Partition {
     let mut fields = 1u32.to_be_bytes().to_vec();
     fields.resize(29, 0);
     Partition {
-        index: ObjectClass::Program.to_raw(),
+        index: 0,
         name: "Program".into(),
         native: false,
         fields,
     }
-    .allocation_unit()
-    .unwrap()
 }
 
 #[test]
@@ -133,13 +132,21 @@ fn a_streamed_write_holds_a_few_chunks_whatever_the_files_size() {
     let before = LIVE.load(Ordering::SeqCst);
     PEAK.store(before, Ordering::SeqCst);
     pollster::block_on(async {
-        let mut s = Session::open(&mut sink, ObjectClass::Program)
+        let classes = Classes::of(&[programs()]);
+        let mut s = Session::open(&mut sink, &classes, ObjectClass::Program)
             .await
             .unwrap()
             .allow_destructive_writes();
-        op::write_from(&mut s, byte_unit(), at, &mut file, "Big", 0)
-            .await
-            .expect("the sink accepts the write");
+        op::write_from(
+            &mut s,
+            programs().allocation_unit().unwrap(),
+            at,
+            &mut file,
+            "Big",
+            0,
+        )
+        .await
+        .expect("the sink accepts the write");
         s.commit().await.unwrap();
     });
     let held = PEAK.load(Ordering::SeqCst) - before;

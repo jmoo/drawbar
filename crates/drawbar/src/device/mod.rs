@@ -321,7 +321,7 @@ impl DeviceCmd {
         };
         Some(crate::telemetry::Op {
             name,
-            class: Some(class.to_raw()),
+            class: Some(*class),
             asked,
         })
     }
@@ -585,22 +585,22 @@ pub struct DeviceState {
     /// The background read of every class.
     pub scan: Scan,
     /// The slot the panel has loaded in a class, as the instrument last reported it.
-    focus: HashMap<u32, Option<Location>>,
+    focus: HashMap<ObjectClass, Option<Location>>,
     /// The device's banks per class, with their names and capacities.
-    geometry: HashMap<u32, Vec<Bank>>,
+    geometry: HashMap<ObjectClass, Vec<Bank>>,
     /// The instrument's partition table, in table order. Empty until it is read, which
     /// means unknown, not an instrument with no folders.
     partitions: Vec<Partition>,
-    banks: HashMap<(u32, u32), Vec<Option<ProgramInfo>>>,
+    banks: HashMap<(ObjectClass, u32), Vec<Option<ProgramInfo>>>,
     /// What the instrument called a library object, by class and id, from every
     /// dependency list it has answered with.
     ///
     /// ⚠️ An id names an object only in the library as it is now, so this is cleared when
     /// the instrument reports a change or disconnects.
-    named: HashMap<(u32, u32), String>,
+    named: HashMap<(ObjectClass, u32), String>,
     /// What each set list or program the instrument has listed dependencies for needs,
     /// by class and slot. Cleared with [`DeviceState::named`].
-    needs: HashMap<(u32, u32, u32), Vec<nord_format::bundle::Key>>,
+    needs: HashMap<(ObjectClass, u32, u32), Vec<nord_format::bundle::Key>>,
     pub detail: Detail,
 }
 
@@ -637,7 +637,7 @@ impl DeviceState {
     pub fn bank_name(&self, class: ObjectClass, bank: u32) -> Option<&str> {
         let name = self
             .geometry
-            .get(&class.to_raw())?
+            .get(&class)?
             .iter()
             .find(|held| user_bank(held.index) == Some(bank))?
             .name
@@ -650,12 +650,12 @@ impl DeviceState {
     ///
     /// ⚠️ A selection made on the panel itself is not in here until one of those.
     pub fn focused(&self, class: ObjectClass) -> Option<Location> {
-        self.focus.get(&class.to_raw()).copied().flatten()
+        self.focus.get(&class).copied().flatten()
     }
 
     /// Whether the panel loads slots of this class, as far as its reads have said.
     fn has_focus(&self, class: ObjectClass) -> bool {
-        self.focus.contains_key(&class.to_raw())
+        self.focus.contains_key(&class)
     }
 
     /// Record what a slot said it depends on. The list belongs to that slot, and each name
@@ -670,11 +670,10 @@ impl DeviceState {
         for dep in &deps {
             let name = dep.name.trim();
             if !name.is_empty() {
-                self.named
-                    .insert((dep.class.to_raw(), dep.id), name.to_string());
+                self.named.insert((dep.class, dep.id), name.to_string());
             }
         }
-        let key = (class.to_raw(), at.bank, at.slot);
+        let key = (class, at.bank, at.slot);
         self.needs.insert(key, nord_usb::bundle::needs(&deps));
         self.detail.deps = Some(deps);
     }
@@ -685,7 +684,7 @@ impl DeviceState {
         class: ObjectClass,
         at: Location,
     ) -> Option<&[nord_format::bundle::Key]> {
-        let key = (class.to_raw(), at.bank, at.slot);
+        let key = (class, at.bank, at.slot);
         self.needs.get(&key).map(Vec::as_slice)
     }
 
@@ -695,7 +694,7 @@ impl DeviceState {
     /// as bare ids. `None` means no dependency list has named it yet, not that it has no
     /// name.
     pub fn dependency_name(&self, class: ObjectClass, id: u32) -> Option<&str> {
-        self.named.get(&(class.to_raw(), id)).map(String::as_str)
+        self.named.get(&(class, id)).map(String::as_str)
     }
 
     /// The id the instrument has given a library object of this name, where it has named
@@ -704,7 +703,7 @@ impl DeviceState {
         let mut ids = self
             .named
             .iter()
-            .filter(|((held, _), named)| *held == class.to_raw() && named.trim() == name)
+            .filter(|((held, _), named)| *held == class && named.trim() == name)
             .map(|((_, id), _)| *id);
         let id = ids.next()?;
         ids.next().is_none().then_some(id)
@@ -712,7 +711,7 @@ impl DeviceState {
 
     /// A scanned bank's slots, or `None` if it has not been scanned.
     pub fn bank(&self, class: ObjectClass, bank: u32) -> Option<&[Option<ProgramInfo>]> {
-        self.banks.get(&(class.to_raw(), bank)).map(Vec::as_slice)
+        self.banks.get(&(class, bank)).map(Vec::as_slice)
     }
 
     /// The classes the instrument declares, in its own table order.
@@ -762,7 +761,7 @@ impl DeviceState {
     /// ⚠️ The device's division of the class, read at the start of its walk, not the banks
     /// scanned so far ([`DeviceState::banks_of`]). Zero until that geometry arrives.
     pub fn banks(&self, class: ObjectClass) -> usize {
-        self.geometry.get(&class.to_raw()).map_or(0, Vec::len)
+        self.geometry.get(&class).map_or(0, Vec::len)
     }
 
     /// The banks of a class that have been read, in order.
@@ -770,7 +769,7 @@ impl DeviceState {
         let mut banks: Vec<u32> = self
             .banks
             .keys()
-            .filter(|(raw, _)| *raw == class.to_raw())
+            .filter(|(raw, _)| *raw == class)
             .map(|(_, bank)| *bank)
             .collect();
         banks.sort_unstable();
@@ -848,7 +847,7 @@ impl DeviceState {
 
     /// Drop one bank's cached names, because something just changed them.
     fn forget_bank(&mut self, class: ObjectClass, bank: u32) {
-        self.banks.remove(&(class.to_raw(), bank));
+        self.banks.remove(&(class, bank));
     }
 
     fn forget_everything(&mut self) {
@@ -891,9 +890,9 @@ pub fn occupancy(
 /// Built from a partition record, the only way to build one, so a test cannot invent a
 /// unit the wire could not carry.
 #[cfg(test)]
-pub fn pretend_allocation_unit(class: ObjectClass, bytes: u32) -> AllocationUnit {
+pub fn pretend_allocation_unit(bytes: u32) -> AllocationUnit {
     nord_usb::wire::Partition {
-        index: class.to_raw(),
+        index: 0,
         name: String::new(),
         native: false,
         fields: bytes.to_be_bytes().to_vec(),
@@ -980,6 +979,9 @@ pub fn fit(state: &DeviceState, entity: &LocalEntity) -> Fit {
             // handled so a widened table cannot panic here.
             None => format!("A {tag} file is not one a {product} takes."),
         }),
+        Acceptance::Unknown if !family.written() => Fit::Warn(format!(
+            "Nothing has ever been written to a {product}. Sending to it is untried."
+        )),
         Acceptance::Unknown => unknown(),
     }
 }
@@ -1194,8 +1196,8 @@ pub fn loadable(state: &DeviceState, class: ObjectClass, at: Location) -> bool {
 /// What a write into this class disturbs beyond the slot it lands in, for the question
 /// asked before it happens.
 ///
-/// A settings write makes the instrument reload the selected program, so panel state
-/// the player has not stored is lost.
+/// A settings write makes the Electro 5 reload the selected program, so panel state the
+/// player has not stored is lost. Another model is assumed to do the same.
 ///
 /// Confirmed on hardware.
 pub fn write_warning(class: ObjectClass) -> Option<&'static str> {
@@ -1464,8 +1466,8 @@ impl Device {
         if self.asked_deps.as_ref().is_some_and(rewritten) {
             self.asked_deps = None;
         }
-        // Confirmed on hardware.
-        // Writing the loaded slot requires SELECT to reload it.
+        // Writing the Electro 5's loaded slot requires SELECT to reload it, and another
+        // model is assumed alike. Confirmed on hardware.
         let written = match &cmd {
             DeviceCmd::Put { class, at, .. } | DeviceCmd::Rename { class, at, .. } => {
                 Some((*class, vec![*at]))
@@ -1565,7 +1567,7 @@ impl Device {
                 })
             })
             .collect();
-        self.state.banks.insert((class.to_raw(), bank), slots);
+        self.state.banks.insert((class, bank), slots);
     }
 
     /// Give the instrument the partition table it would have declared: the class of each
@@ -1578,7 +1580,7 @@ impl Device {
                 class: *class,
                 name: (*name).to_string(),
                 native: false,
-                unit: Some(pretend_allocation_unit(*class, *bytes)),
+                unit: Some(pretend_allocation_unit(*bytes)),
             })
             .collect();
     }
@@ -1605,7 +1607,7 @@ impl Device {
                 })
             })
             .collect();
-        self.state.banks.insert((class.to_raw(), bank), slots);
+        self.state.banks.insert((class, bank), slots);
     }
 
     /// Fill in a bank as a walk of a piano or sample library would have: a name and a
@@ -1633,7 +1635,7 @@ impl Device {
                 })
             })
             .collect();
-        self.state.banks.insert((class.to_raw(), bank), slots);
+        self.state.banks.insert((class, bank), slots);
     }
 
     /// Give a class the banks the device would have reported, for a headless render.
@@ -1648,7 +1650,7 @@ impl Device {
                 slots: *slots,
             })
             .collect();
-        self.state.geometry.insert(class.to_raw(), banks);
+        self.state.geometry.insert(class, banks);
     }
 
     /// Answer for a slot's dependencies, as a `DEPENDENCIES` read would have.
@@ -1660,7 +1662,7 @@ impl Device {
     /// Put the panel on a slot, as a walk's `FOCUS` read would have.
     #[cfg(test)]
     pub fn pretend_focused(&mut self, class: ObjectClass, at: Location) {
-        self.state.focus.insert(class.to_raw(), Some(at));
+        self.state.focus.insert(class, Some(at));
     }
 
     /// Point every asset at the slot holding its bytes.
@@ -1808,15 +1810,15 @@ impl Device {
                     self.resync();
                 }
                 DeviceEvent::Geometry { class, banks } => {
-                    self.state.geometry.insert(class.to_raw(), banks);
+                    self.state.geometry.insert(class, banks);
                 }
                 DeviceEvent::Focus { class, at } => {
-                    self.state.focus.insert(class.to_raw(), at);
+                    self.state.focus.insert(class, at);
                 }
                 // An empty bank is still an answer: dropping it would leave its old names
                 // in place.
                 DeviceEvent::BankScanned { class, bank, slots } => {
-                    self.state.banks.insert((class.to_raw(), bank), slots);
+                    self.state.banks.insert((class, bank), slots);
                     self.state.scan.bank(class, bank);
                     self.state.scan.heard(class, now);
                     self.disagreements(class, bank, workspace, log);
@@ -2019,13 +2021,13 @@ mod tests {
                 class: ObjectClass::Piano,
                 name: "Piano".into(),
                 native: false,
-                unit: Some(pretend_allocation_unit(ObjectClass::Piano, 261_632)),
+                unit: Some(pretend_allocation_unit(261_632)),
             },
             Partition {
                 class: ObjectClass::Sample,
                 name: "Samp Lib".into(),
                 native: false,
-                unit: Some(pretend_allocation_unit(ObjectClass::Sample, 131_064)),
+                unit: Some(pretend_allocation_unit(131_064)),
             },
             Partition {
                 class: ObjectClass::Unknown(9),
@@ -2187,12 +2189,7 @@ mod tests {
             "the count alone until the unit lands"
         );
         assert_eq!(
-            occupancy(
-                class,
-                &inventory,
-                Some(pretend_allocation_unit(class, 131_064))
-            )
-            .as_deref(),
+            occupancy(class, &inventory, Some(pretend_allocation_unit(131_064))).as_deref(),
             Some("184.0/192.0 MB")
         );
 
@@ -2226,11 +2223,11 @@ mod tests {
                 spare: 0,
             }]
         };
-        let byte = |class| Some(pretend_allocation_unit(class, 1));
+        let byte = Some(pretend_allocation_unit(1));
 
         let live = ObjectClass::Live;
         assert_eq!(
-            occupancy(live, &partition(live, 121, 379), byte(live)).as_deref(),
+            occupancy(live, &partition(live, 121, 379), byte).as_deref(),
             Some("121/500 B")
         );
 
@@ -2238,7 +2235,7 @@ mod tests {
         // and look larger than the 24 kB it sits inside.
         let settings = ObjectClass::Settings;
         assert_eq!(
-            occupancy(settings, &partition(settings, 500, 24_076), byte(settings)).as_deref(),
+            occupancy(settings, &partition(settings, 500, 24_076), byte).as_deref(),
             Some("0.5/24.0 kB")
         );
 
@@ -2247,7 +2244,7 @@ mod tests {
             occupancy(
                 samples,
                 &partition(samples, 128, 128),
-                Some(pretend_allocation_unit(samples, 1024 * 1024))
+                Some(pretend_allocation_unit(1024 * 1024))
             )
             .as_deref(),
             Some("128.0/256.0 MB")
@@ -2287,7 +2284,7 @@ mod tests {
         let class = ObjectClass::Program;
         device.pretend_scanned(class, 1, &["Africa Split"]);
         device.state.geometry.insert(
-            class.to_raw(),
+            class,
             vec![Bank {
                 index: u32::MAX,
                 name: "Nowhere".into(),
@@ -2476,6 +2473,12 @@ mod tests {
         let mut log = Log::default();
         let (own, _) = program(&mut workspace, &mut log, Origin::Fresh);
         let (other, _) = stage(&mut workspace, &mut log, Origin::Fresh);
+        let shared = workspace.ingest(
+            "Pad.nsmp".into(),
+            Origin::Fresh,
+            include_bytes!("../../../nord-format/tests/fixtures/demo/drawbar-pad.nsmp").to_vec(),
+            &mut log,
+        );
         fn held(device: &Device, workspace: &Workspace, id: u64) -> Fit {
             fit(&device.state, workspace.get(id).expect("it is on the list"))
         }
@@ -2485,6 +2488,7 @@ mod tests {
 
         device.pretend_attached();
         assert_eq!(held(&device, own), Fit::Takes, "confirmed on hardware");
+        assert_eq!(held(&device, shared), Fit::Takes, "confirmed on hardware");
         match held(&device, other) {
             Fit::Refuses(why) => {
                 assert!(why.contains("Stage 4"), "{why}");
@@ -2497,6 +2501,10 @@ mod tests {
         match held(&device, other) {
             Fit::Warn(why) => assert!(why.contains("untried"), "{why}"),
             answer => panic!("a Stage 4 program on a Stage 4: {answer:?}"),
+        }
+        match held(&device, shared) {
+            Fit::Warn(why) => assert!(why.contains("untried"), "{why}"),
+            answer => panic!("a sample on a Stage 4, which nothing was written to: {answer:?}"),
         }
 
         // A model with no row in the table falls back to what the folder is holding.
