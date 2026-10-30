@@ -212,25 +212,26 @@ need editing; stale text is a bug.
 This is a Nix-native project. Do not assume a tool is installed globally. Run
 Cargo from `crates/` inside the development shell; the parent
 `.cargo/config.toml` supplies the cfg needed by wasm builds.
+[Building from source](docs/src/reference/building.md) covers building, running,
+previewing the guide and the site, and the checks, with or without Nix.
+[Testing](docs/src/reference/testing.md) covers what each suite verifies.
 
-- `nix develop -c cargo test --workspace` runs the default test suite.
+Before a change is done:
+
 - `nix fmt` formats Rust, Nix, TOML, and shell with the pinned tools.
-- `nix flake check` checks formatting, runs Clippy, builds every crate's rustdoc
-  with warnings denied, runs the tests of `scripts/bump.bash`, and evaluates every
-  flake output.
-- `nix build .#<crate>` builds and tests one crate.
-- `nix build .#nord.all` covers every crate and cross target.
+- `nix develop -c cargo test --workspace` runs the default test suite.
+- `nix flake check` runs what CI's check job runs.
 - `nix build .#nord.all-corpus` runs all suites against the pinned private
-  corpus; `.#nord.<crate>-corpus` selects one crate.
+  corpus, when the change touches decoded layout or protocol evidence;
+  `.#nord.<crate>-corpus` selects one crate.
+
+Maintenance tools the guide does not cover:
+
 - `nix build .#nord.all-corpus-full` uses the R2 corpus tier and requires a
   seeded store or R2 credentials. `.#nord.corpus` and `.#nord.corpus-full` are
   the corpus assemblies.
-- `nix build .#docs` renders the user guide, the mdBook under `docs/`.
-  `mdbook serve docs` previews it from the development shell.
-- `nix build .#site` assembles this checkout's Pages tree for local preview: its
-  browser build at the root, its guide at `/docs`. `nix run .#drawbar-web`
-  serves that tree. `scripts/site.bash` assembles the tree that is deployed,
-  which is the same layout with the app taken from the latest `drawbar-v*` tag.
+- `scripts/site.bash` assembles the Pages tree that is deployed: the layout of
+  `nix build .#site`, with the app taken from the latest `drawbar-v*` tag.
 - `scripts/licenses.bash` regenerates the license notices drawbar shows for its
   Rust crates. The drawbar suite fails when the registry packages drawbar reaches
   in `Cargo.lock` change, until the script is re-run.

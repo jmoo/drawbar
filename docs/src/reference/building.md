@@ -19,8 +19,9 @@ for another port.
 `nix flake check` runs the formatting check, Clippy and rustdoc with warnings
 denied, and the tests of `scripts/bump.bash`. `nix build .#nord.all` builds every
 crate with its tests, the cross targets, the browser build and this guide. CI runs
-both. `nix fmt` formats everything. [Testing](testing.md) describes the suites,
-and [Contributing](contributing.md) the house rules.
+both. `nix build .#<crate>` builds and tests one crate. `nix fmt` formats
+everything. [Testing](testing.md) describes the suites, and
+[Contributing](contributing.md) the house rules.
 
 ## Build by hand
 
