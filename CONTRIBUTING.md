@@ -213,8 +213,9 @@ This is a Nix-native project. Do not assume a tool is installed globally. Run
 Cargo from `crates/` inside the development shell; the parent
 `.cargo/config.toml` supplies the cfg needed by wasm builds.
 [Building from source](docs/src/reference/building.md) covers building, running,
-previewing the guide and the site, and the checks, with or without Nix.
-[Testing](docs/src/reference/testing.md) covers what each suite verifies.
+the guide and the site, generated files, and the checks, with or without Nix.
+[Testing](docs/src/reference/testing.md) covers what each suite verifies and the
+corpus builds.
 
 Before a change is done:
 
@@ -224,21 +225,6 @@ Before a change is done:
 - `nix build .#nord.all-corpus` runs all suites against the pinned private
   corpus, when the change touches decoded layout or protocol evidence;
   `.#nord.<crate>-corpus` selects one crate.
-
-Maintenance tools the guide does not cover:
-
-- `nix build .#nord.all-corpus-full` uses the R2 corpus tier and requires a
-  seeded store or R2 credentials. `.#nord.corpus` and `.#nord.corpus-full` are
-  the corpus assemblies.
-- `scripts/site.bash` assembles the Pages tree that is deployed: the layout of
-  `nix build .#site`, with the app taken from the latest `drawbar-v*` tag.
-- `scripts/licenses.bash` regenerates the license notices drawbar shows for its
-  Rust crates. The drawbar suite fails when the registry packages drawbar reaches
-  in `Cargo.lock` change, until the script is re-run.
-- `scripts/glyphs.py` regenerates `drawbar-glyphs.ttf`, which draws the
-  characters drawbar's text uses that no other bundled font has. Change a glyph
-  in the script's table and re-run it; the drawbar suite fails when the text
-  uses a character no face draws.
 
 CI runs each crate with its declared `testFeatures`, rejects anything `nix fmt`
 would change, and treats Clippy and rustdoc warnings as failures. The `autofix`

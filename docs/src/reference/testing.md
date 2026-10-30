@@ -96,3 +96,8 @@ the last test checks that every class holds what it held when the run started.
 
 `nix flake check` and `nix build .#nord.all` run what CI runs. See
 [Building from source](building.md).
+
+`nix build .#nord.all-corpus` runs every suite against the pinned private corpus,
+and `.#nord.<crate>-corpus` runs one crate's. `.#nord.all-corpus-full` uses the
+corpus's R2 tier and needs a seeded store or R2 credentials. `.#nord.corpus` and
+`.#nord.corpus-full` are the corpus trees themselves.
