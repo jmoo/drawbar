@@ -489,7 +489,10 @@ impl<F: Fs> Keeper<F> {
                 Err(Unwritable::Unfinished(read_only(why)))
             }
             Mode::ReadOnly(
-                why @ (Why::NewerOwnHistory { .. } | Why::FolderNotWritable | Why::ClockExhausted),
+                why @ (Why::NewerOwnHistory { .. }
+                | Why::NewerLayout { .. }
+                | Why::FolderNotWritable
+                | Why::ClockExhausted),
             ) => Err(Unwritable::ReadOnly(read_only(why))),
         };
         self.told_read_only = writable.is_err();
@@ -1944,6 +1947,9 @@ fn read_only(why: &Why) -> String {
     match why {
         Why::NewerOwnHistory { .. } => {
             "a newer drawbar changed it from this computer; update drawbar to change it".to_string()
+        }
+        Why::NewerLayout { .. } => {
+            "a newer drawbar keeps it in a newer way; update drawbar to change it".to_string()
         }
         Why::FolderNotWritable => "the library folder cannot be written".to_string(),
         Why::ClockExhausted => {

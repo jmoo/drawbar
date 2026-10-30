@@ -20,25 +20,19 @@ pub const LIBRARIES: &str = "libraries";
 
 /// drawbar's database, with every store it holds made at its first use.
 ///
-/// ⚠️ A database another build made at a version this one does not know is deleted and
-/// made again. It holds only what drawbar rebuilds, the folders picked lately, so
-/// starting it empty costs a re-pick, where keeping it would leave the list unusable.
+/// ⚠️ A database at a version this build does not know was made by a newer one, still open
+/// in another tab after a deploy, or opened since: it is left alone, since the folders it
+/// names are where each one's own data in this browser is kept.
 pub async fn database() -> Result<IdbDatabase, String> {
     let factory = web_sys::window()
         .and_then(|window| window.indexed_db().ok().flatten())
         .ok_or("this browser has no IndexedDB")?;
-    match open(&factory).await {
-        Err(Refused::Version) => {
-            deleted(&factory).await?;
-            open(&factory).await.map_err(Refused::into_reason)
-        }
-        opened => opened.map_err(Refused::into_reason),
-    }
+    open(&factory).await.map_err(Refused::into_reason)
 }
 
 /// Why the database did not open.
 enum Refused {
-    /// It is at a version this build does not know.
+    /// A newer build made it, at a version past this build's.
     Version,
     Other(String),
 }
@@ -46,7 +40,11 @@ enum Refused {
 impl Refused {
     fn into_reason(self) -> String {
         match self {
-            Refused::Version => "IndexedDB holds drawbar's database at another version".into(),
+            Refused::Version => {
+                "a newer drawbar keeps its list of libraries in this browser; reload the page to \
+                 use it"
+                    .into()
+            }
             Refused::Other(why) => why,
         }
     }
@@ -80,26 +78,6 @@ async fn open(factory: &web_sys::IdbFactory) -> Result<IdbDatabase, Refused> {
             _ => Err(Refused::Other(why)),
         },
     }
-}
-
-/// Delete drawbar's database. Refused while another tab holds it open, rather than
-/// waiting for that tab to let go.
-async fn deleted(factory: &web_sys::IdbFactory) -> Result<(), String> {
-    let request = factory
-        .delete_database(DATABASE)
-        .map_err(|e| describe(&e))?;
-    let answered = Promise::new(&mut |resolve, reject| {
-        request.set_onsuccess(Some(&resolve));
-        request.set_onerror(Some(&reject));
-        request.set_onblocked(Some(&reject));
-    });
-    let answer = JsFuture::from(answered).await;
-    request.set_onsuccess(None);
-    request.set_onerror(None);
-    request.set_onblocked(None);
-    answer
-        .map(|_| ())
-        .map_err(|_| "another tab holds drawbar's database open".to_string())
 }
 
 /// Once `transaction` has committed, or why it did not.

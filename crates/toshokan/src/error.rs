@@ -54,6 +54,10 @@ pub enum Why {
     /// The folder cannot append to files, which writing needs.
     #[error("the folder cannot be written")]
     FolderNotWritable,
+    /// The library's root holds the directory of a layout newer than this build's,
+    /// `writers.2`, which a newer build writes instead.
+    #[error("a newer version keeps this library in {dir}")]
+    NewerLayout { dir: String },
     /// The clock cannot advance past this writer's last entry: it holds the last
     /// reading there is.
     #[error("this writer's clock is exhausted")]

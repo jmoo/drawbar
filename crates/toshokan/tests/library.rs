@@ -668,6 +668,7 @@ through_both!(
     an_own_effect_whose_source_is_gone_is_left_to_settle_with_consent,
     an_own_save_whose_staged_bytes_are_gone_rolls_back_to_the_old_bytes,
     an_own_save_over_a_file_deleted_since_is_finished,
+    a_newer_layout_beside_this_one_opens_the_library_read_only,
     a_settlement_that_stops_partway_leaves_the_record_open_until_settled_again,
     a_folder_whose_renames_may_replace_is_written,
     a_view_is_read_on_other_threads,
@@ -5912,6 +5913,29 @@ fn an_own_save_over_a_file_deleted_since_is_finished<F: Facade>() {
             );
         },
     );
+}
+
+fn a_newer_layout_beside_this_one_opens_the_library_read_only<F: Facade>() {
+    let clock = TestClock::at(1_000);
+    for (dir, newer) in [
+        ("writers", false),
+        ("writers.1", false),
+        ("writers.3", true),
+    ] {
+        let folder = disk();
+        folder
+            .perform(Io::MakeDir {
+                root: Root::Folder,
+                path: path(&format!(".t/{dir}")),
+            })
+            .unwrap();
+        let (_, opened) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+        let expected = match newer {
+            true => toshokan::report::Mode::ReadOnly(Why::NewerLayout { dir: dir.into() }),
+            false => toshokan::report::Mode::Writable,
+        };
+        assert_eq!(opened.mode, expected, "{dir}");
+    }
 }
 
 /// Every entry in `writer`'s segments in the folder.

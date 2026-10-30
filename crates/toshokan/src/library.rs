@@ -23,8 +23,8 @@ use crate::error::{Error, Invalid, Refusal, Result, Why};
 use crate::flow::{self, fold, ok, Fallible, Flow};
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
 use crate::intent;
-use crate::io::{Capabilities, Io, Kind, Lock, Root, Task};
-use crate::layout::Layout;
+use crate::io::{Capabilities, DirEntry, Io, Kind, Lock, Root, Task};
+use crate::layout::{Layout, WRITERS};
 use crate::log::{
     Bound, Displaced, Entry, EntryKind, FileFact, Forked, Genesis, Logged, Op, Ref, Settle,
     Settlement,
@@ -170,6 +170,15 @@ impl Library {
                 })
             })
             .map_ok(|(library, report, start)| (fold_opened(library), report, start))
+            .and_then(|(mut library, report, start)| {
+                let root = library.layout.root().clone();
+                flow::list(Root::Folder, &root).map_ok(move |entries| {
+                    if let Some(dir) = newer_layout(&entries) {
+                        library.mode = Mode::ReadOnly(Why::NewerLayout { dir });
+                    }
+                    (library, report, start)
+                })
+            })
             .and_then(|(library, report, start)| {
                 idle_pool(library)
                     .and_then(recover)
@@ -271,7 +280,7 @@ impl Library {
         }
     }
 
-    /// Whether a library just opened may write.
+    /// Whether a library just opened may write, as its writer's history says.
     fn mode_at_open(&self) -> Mode {
         match (&self.writer, self.capabilities.append) {
             (_, false) => Mode::ReadOnly(Why::FolderNotWritable),
@@ -1918,6 +1927,16 @@ fn moved_paths(steps: &[EffectStep]) -> Vec<RelPath> {
 
 /// Removes this writer's spent records, then settles its interrupted effects, so
 /// that what is planned next is planned against the facts and history they leave.
+/// The directory of a layout newer than this build's, where the library's root holds
+/// one beside it: what it holds is written in a way this build may not write over.
+fn newer_layout(entries: &[DirEntry]) -> Option<String> {
+    let version = |name: &str| name.strip_prefix("writers.")?.parse::<u32>().ok();
+    let own = version(WRITERS).expect("the layout's version");
+    let mut dirs = entries.iter().filter(|entry| entry.kind == Kind::Directory);
+    dirs.find(|entry| version(&entry.name).is_some_and(|k| k > own))
+        .map(|entry| entry.name.clone())
+}
+
 /// A spent record that cannot be removed fails the write.
 fn settle_first(library: &mut Library) -> Fallible<'_, &mut Library> {
     remove_spent(library).then(

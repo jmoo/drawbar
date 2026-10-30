@@ -1,7 +1,6 @@
 //! What drawbar keeps in a library's toshokan root: its keys, where the root is, and
 //! the identity toshokan binds files by.
 
-use nord_format::formats;
 use nord_usb::{Location, ObjectClass};
 use serde::{Deserialize, Serialize};
 use toshokan::env::{Blake3, Digest};
@@ -86,11 +85,30 @@ const TAIL: u64 = 2;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Contents;
 
+/// The extensions of the files whose identity reads only their head and their checksum:
+/// the CBIN formats nord-format read when the library's format was set.
+///
+/// ⚠️ Part of the library's format: an identity is how a file is known across renames and
+/// computers, so a name added or removed here makes every tagged file of that extension
+/// look changed outside drawbar. A CBIN format added since is read whole.
+const CHECKSUMMED: [&str; 75] = [
+    "nc2p", "nc2s", "ncpg", "ncsy", "nd2p", "nd3k", "ne4l", "ne4p", "ne4s", "ne5l", "ne5p", "ne5s",
+    "ne5t", "ne6l", "ne6p", "ne6t", "ne7l", "ne7p", "ne7t", "neop", "nepg", "ng2l", "ng2p", "ng2t",
+    "nl4p", "nl4s", "nl4t", "nlap", "nlas", "nlat", "no3p", "no3t", "np2l", "np2p", "np2s", "np3l",
+    "np3p", "np3s", "np4l", "np4p", "np4t", "np5l", "np5p", "np5t", "npip", "npli", "npno", "nppg",
+    "npsy", "ns2l", "ns2p", "ns2s", "ns2y", "ns3f", "ns3l", "ns3s", "ns3t", "ns3y", "ns4l", "ns4n",
+    "ns4o", "ns4p", "ns4t", "ns4y", "nsmp", "nsmp3", "nsmp4", "nsp", "nspg", "nss", "nw2l", "nw2p",
+    "nw2s", "nwp", "nwsy",
+];
+
 /// Whether the file at `path` is, by its name, a Nord file whose checksum covers it.
 fn checksummed(path: &RelPath) -> bool {
     let extension = path.name().and_then(|name| name.rsplit_once('.'));
-    let format = extension.and_then(|(_, extension)| formats::by_extension(extension));
-    format.is_some_and(|format| nord_format::cbin_formats().any(|tag| tag == format.tag))
+    extension.is_some_and(|(_, extension)| {
+        CHECKSUMMED
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(extension))
+    })
 }
 
 impl Identify for Contents {
@@ -388,5 +406,13 @@ mod tests {
             identity_of(&path, &mut file).unwrap(),
             identity("a.wav", &bytes)
         );
+    }
+    #[test]
+    fn every_checksummed_extension_is_still_a_cbin_format() {
+        for extension in CHECKSUMMED {
+            let format = nord_format::formats::by_extension(extension);
+            let cbin = format.is_some_and(|f| nord_format::cbin_formats().any(|t| t == f.tag));
+            assert!(cbin, "{extension}");
+        }
     }
 }
