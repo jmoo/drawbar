@@ -260,13 +260,19 @@ let
         "AR_${triple}" = "${cc.bintools.bintools}/bin/${cc.targetPrefix}ar";
       }
     )
-    // optionalAttrs (spec ? libs) {
-      # Put static libs on rustc's path directly; the cc wrapper can miss rustc's own
-      # `-l:` requests.
-      "CARGO_TARGET_${envTriple (tripleOf spec)}_RUSTFLAGS" = concatMapStringsSep " " (
-        l: "-L native=${l}/lib"
-      ) spec.libs;
-    }
+    // optionalAttrs (spec ? libs) (
+      let
+        paths = concatMapStringsSep " " (l: "-L native=${l}/lib") spec.libs;
+      in
+      {
+        # Put static libs on rustc's path directly; the cc wrapper can miss rustc's own
+        # `-l:` requests.
+        "CARGO_TARGET_${envTriple (tripleOf spec)}_RUSTFLAGS" = paths;
+        # rustdoc links doctests without the target's RUSTFLAGS; a cross build's
+        # doctests are all the target's.
+        RUSTDOCFLAGS = paths;
+      }
+    )
     // optionalAttrs (spec ? testRunner) {
       # cargo hands each test binary to this runner, which is what lets a foreign
       # target's tests run here.
