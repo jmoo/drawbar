@@ -222,9 +222,12 @@ bring back any you deleted.
   moving is gone, drawbar asks whether to roll it back or leave it as is, and
   Undo no longer reaches the changes before it.
 - **An older drawbar.** A drawbar from before this version keeps its own tags,
-  unsaved edits and rescued slot contents in the `.drawbar` folder. This version
-  says so once and leaves them where they are, and an older drawbar that opens
-  this library sees its files without the tags this version keeps.
+  unsaved edits and rescued slot contents in the `.drawbar` folder. The first
+  time this version opens such a library where it can write, it takes in the
+  tags and where each file came from, once, and the activity log says for how
+  many files. It leaves the unsaved edits and rescued slot contents where they
+  are, and says so once. An older drawbar that opens this library sees its files
+  without the tags this version keeps.
   Unsaved edits an earlier drawbar kept on this computer are not read either, and
   the activity log says so once.
 - **A folder that stays.** Where a folder moves one file at a time, as in the

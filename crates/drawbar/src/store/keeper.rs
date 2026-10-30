@@ -15,9 +15,9 @@ use toshokan::io::{IoError, Kind, Range, Root};
 use toshokan::log::Settlement;
 use toshokan::plan::FactChange;
 use toshokan::report::{Item, ItemChange, ItemKind, Mode, Refreshed, Rekey, Start, What};
-use toshokan::{EntryHash, Env, Error, Expect, Nonce, RelPath, View};
+use toshokan::{EntryHash, Env, Error, Expect, Field, Nonce, RelPath, View};
 
-use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES};
+use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES, TAKEN_IN};
 use super::shown::Change;
 use super::storage::{self, CHUNK};
 use super::unsaved::{self, Base, Of};
@@ -79,6 +79,8 @@ pub struct Keeper<F> {
     writer: Option<toshokan::WriterId>,
     /// Whether the app was told the trash could not be emptied.
     told_unemptied: bool,
+    /// Whether this session looked for an older drawbar's index to take in.
+    looked_for_older: bool,
 }
 
 impl<F: Fs> Keeper<F> {
@@ -97,6 +99,7 @@ impl<F: Fs> Keeper<F> {
             told_read_only: false,
             writer: None,
             told_unemptied: false,
+            looked_for_older: false,
         }
     }
 
@@ -126,7 +129,7 @@ impl<F: Fs> Keeper<F> {
                 answer(Event::Opened(opened));
             }
             Cmd::Rescan | Cmd::Refresh => {
-                let scanned = self.scanned(matches!(cmd, Cmd::Rescan)).await;
+                let scanned = self.scanned(matches!(cmd, Cmd::Rescan), answer).await;
                 // A history that forked is said with the scan's answer.
                 let forked = scanned.as_ref().is_ok_and(|viewed| viewed.retired);
                 if self.restarted() && !forked {
@@ -522,7 +525,11 @@ impl<F: Fs> Keeper<F> {
 
     /// Read what other writers logged since, and scan every file where `whole`, or else
     /// only the files their entries moved.
-    async fn scanned(&mut self, whole: bool) -> Result<Viewed, String> {
+    async fn scanned(
+        &mut self,
+        whole: bool,
+        answer: &mut impl FnMut(Event),
+    ) -> Result<Viewed, String> {
         let library = self.library.as_mut().ok_or("the library is not open")?;
         let refreshed = match whole {
             true => library.rescan().await,
@@ -552,6 +559,12 @@ impl<F: Fs> Keeper<F> {
                     orphan.ours = false;
                     refreshed.orphaned.push(orphan);
                 }
+            }
+        }
+        // Once a scan has listed every file, as taking in binds them.
+        if whole && !std::mem::replace(&mut self.looked_for_older, true) {
+            if let Some(took) = take_in_older(library).await {
+                answer(Event::TookIn(took));
             }
         }
         Ok(viewed(library, &mut self.shown, refreshed, unfinishable))
@@ -813,6 +826,77 @@ async fn facts<'a, F: Fs + 'a>(
     let view = library.view();
     let built = build(library.intent(label), &view)?;
     built.commit().await.map_err(|e| told(&e))
+}
+
+/// Take into a writable `library`, once, the tags and origins an older drawbar's index
+/// kept for the files it lists, and the tags it made: how many files took any, or why
+/// none did. `None` where there is none to take in.
+async fn take_in_older<F: Fs>(library: &mut Library<F>) -> Option<Result<usize, String>> {
+    if !matches!(library.mode(), Mode::Writable) {
+        return None;
+    }
+    let index = match super::older::index(library.fs()).await {
+        Ok(index) => index?,
+        Err(e) => return Some(Err(format!("reading an older drawbar's index: {e}"))),
+    };
+    if !library.view().find(TAKEN_IN, &index.hash).is_empty() {
+        return None;
+    }
+    let mut took = 0;
+    let committed = facts(library, "Take in older tags", |mut built, view| {
+        for (path, (tags, came)) in &index.files {
+            let Ok(at) = RelPath::new(path) else {
+                continue;
+            };
+            if let Some(entity) = view.at(&at) {
+                let id = entity.id();
+                for tag in tags {
+                    built = built.add(id, TAGS, tag.clone());
+                }
+                if let (Some(came), Field::Unset) = (came, entity.get(ORIGIN)) {
+                    built = built.set(id, ORIGIN, *came);
+                }
+            } else if let Some(listed) = view.listed(&at) {
+                let expect = Expect::Listed {
+                    len: listed.len,
+                    modified: listed.modified,
+                };
+                built = built
+                    .create(|e| {
+                        e.adopt(&at, expect);
+                        for tag in tags {
+                            e.add(TAGS, tag.clone());
+                        }
+                        if let Some(came) = came {
+                            e.set(ORIGIN, *came);
+                        }
+                    })
+                    .0;
+            } else {
+                continue;
+            }
+            took += 1;
+        }
+        let names = index.tags.iter().cloned();
+        let list = view.with(TAG_NAMES).into_iter().min();
+        Ok(match list {
+            Some(list) => names
+                .fold(built, |built, name| built.add(list, TAG_NAMES, name))
+                .add(list, TAKEN_IN, index.hash.clone()),
+            None => {
+                built
+                    .create(|list| {
+                        for name in names {
+                            list.add(TAG_NAMES, name);
+                        }
+                        list.add(TAKEN_IN, index.hash.clone());
+                    })
+                    .0
+            }
+        })
+    })
+    .await;
+    Some(committed.map(|_| took))
 }
 
 /// Add the tag `name` to the library's list of tags.

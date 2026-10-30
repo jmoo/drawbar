@@ -1113,6 +1113,9 @@ pub enum Event {
     Unemptied(String),
     /// This session's undo history began again, and reaches none of the changes before.
     Restarted,
+    /// How many files' tags and origins an older drawbar's index gave the library, or
+    /// why it gave none.
+    TookIn(Result<usize, String>),
     /// The edit [`Cmd::ReadSlot`] found kept of a slot's view, with the hash of the
     /// slot's bytes it was made over, or why it could not be read.
     SlotKept {
@@ -1135,6 +1138,7 @@ impl Event {
             Event::Moved { result: Err(_), .. } => one("move"),
             Event::Failed(_) => one("write"),
             Event::Unemptied(_) => one("trash"),
+            Event::TookIn(Err(_)) => one("take-in"),
             Event::Unkept(_)
             | Event::Drafted { kept: Err(_), .. }
             | Event::SlotDrafted { kept: Err(_), .. }
@@ -1154,6 +1158,7 @@ impl Event {
             | Event::SlotKept { kept: Ok(_), .. }
             | Event::Trimmed(_)
             | Event::Restarted
+            | Event::TookIn(Ok(_))
             | Event::Scanned(Ok(_))
             | Event::Committed { result: Ok(_), .. }
             | Event::Moved { result: Ok(()), .. } => Default::default(),

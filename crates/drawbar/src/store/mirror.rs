@@ -1519,6 +1519,19 @@ impl Store {
                 // What the record it gave up left unfinished is the user's to settle.
                 self.refresh();
             }
+            Event::TookIn(Ok(files)) => log.say(match files {
+                1 => "drawbar took in the tags and origin an older drawbar kept for 1 file."
+                    .to_string(),
+                n => format!(
+                    "drawbar took in the tags and origins an older drawbar kept for {n} files."
+                ),
+            }),
+            Event::TookIn(Err(why)) => {
+                log.error(format!("taking in an older drawbar's tags: {why}"));
+                log.trouble(format!(
+                    "drawbar could not take in the tags an older drawbar kept: {why}."
+                ));
+            }
             Event::Unemptied(why) => {
                 log.error(format!("emptying the trash: {why}"));
                 log.trouble(format!("drawbar's trash could not be emptied: {why}."));

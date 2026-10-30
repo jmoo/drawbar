@@ -18,6 +18,10 @@ pub const TAGS: Set<String> = Set::new("tags");
 /// a list at once each keep one, and the tags are all their names together.
 pub const TAG_NAMES: Set<String> = Set::new("tag names");
 
+/// The indexes older drawbars kept in the folder, `.drawbar/library.ron`, whose tags and
+/// origins the library took in, by the BLAKE3 of their bytes: each is taken in once.
+pub const TAKEN_IN: Set<String> = Set::new("taken in");
+
 /// Where an asset came from, where its file cannot say: made new in drawbar, copied off
 /// a slot, or the occupant a write to a slot could not put back. A file opened from
 /// anywhere else says nothing, and has no entity for it.
@@ -126,7 +130,8 @@ pub fn identity_of_bytes(path: &LibPath, bytes: &[u8]) -> Option<Identity> {
 pub const DIR: &str = ".drawbar";
 
 pub fn schema() -> Schema {
-    Schema::of(&[TAGS.key(), TAG_NAMES.key(), ORIGIN.key()]).expect("drawbar's keys are distinct")
+    Schema::of(&[TAGS.key(), TAG_NAMES.key(), ORIGIN.key(), TAKEN_IN.key()])
+        .expect("drawbar's keys are distinct")
 }
 
 /// Where toshokan keeps the library's facts, in [`DIR`], and what its scans leave out:
