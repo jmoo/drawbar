@@ -1,0 +1,46 @@
+{
+  "mode": "writable",
+  "start": "resumed 10e2c46865e9874614d7973c5c2a449c",
+  "writers": { "10e2c46865e9874614d7973c5c2a449c": "fixture" },
+  "entities": {
+    "910a2dec89025cc1beeb8da1658eec67": {
+      "origin": "uno",
+      "note": null,
+      "tags": ["b"],
+      "file": { "path": "one.syx", "state": "in-sync", "bytes": "one v2" }
+    },
+    "71bb54d8d101b5b9c34d0bff90150280": {
+      "file": { "path": "loose/adopt.syx", "state": "in-sync", "bytes": "adopted" }
+    },
+    "e099ec6cd7363ca585e7bb0f12278575": {
+      "tags": ["tree"],
+      "file": { "path": "forest/sub/four.syx", "state": "in-sync", "bytes": "four" }
+    },
+    "491718de357e3da8cb435c8e74616796": {
+      "file": { "path": "moved/five.syx", "state": "in-sync", "bytes": "five" }
+    }
+  },
+  "unbound": ["forest/a.syx", "made/inside.txt", "new.txt", "renamed.txt"],
+  "items": [],
+  "forks": [],
+  "gaps": [],
+  "orphans": [],
+  "ignored": [],
+  "unreadable": [],
+  "settled": [
+    ["10e2c46865e9874614d7973c5c2a449c", "6775dc7701564f619afcd44d14cf8bfe"],
+    ["10e2c46865e9874614d7973c5c2a449c", "86c5d1b05ce2ce141180b23a1075b77f"],
+    ["10e2c46865e9874614d7973c5c2a449c", "990cd70b12c5d084962b1967c90789ba"],
+    ["10e2c46865e9874614d7973c5c2a449c", "9b679c859acd7aaf27cd5f9ec8c694cc"],
+    ["10e2c46865e9874614d7973c5c2a449c", "b86c9a98359e0b6247a9dc6739325fac"],
+    ["10e2c46865e9874614d7973c5c2a449c", "d16aa4b296eb9d18ab27a171be5b133c"],
+    ["10e2c46865e9874614d7973c5c2a449c", "e4d9303221373073e9a6100461edd57a"]
+  ],
+  "trash": [
+    { "writer": "10e2c46865e9874614d7973c5c2a449c", "item": "536000f4bd6ae8f8f0af3ce429ca1790", "from": "junk.txt", "len": 4, "bytes": "junk" },
+    { "writer": "10e2c46865e9874614d7973c5c2a449c", "item": "65ace2685a072c6d70616f2f48dce01c", "from": "one.syx", "len": 6, "bytes": "one v1" },
+    { "writer": "10e2c46865e9874614d7973c5c2a449c", "item": "dca0c749607e2c86b54b3c40881e2907", "from": "two.syx", "len": 3, "bytes": "two" }
+  ],
+  "unknown": 0,
+  "extended": 0
+}

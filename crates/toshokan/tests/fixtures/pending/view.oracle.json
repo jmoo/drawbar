@@ -1,0 +1,69 @@
+{
+  "mode": "writable",
+  "start": "resumed e1b9ae67265f78875330404c13ee7598",
+  "writers": {
+    "04464e105d48fb2eec76f7042092ba03": "settled",
+    "0724c2795fbb072e90de9a11db7fe1f7": "settled",
+    "1823f14ea9a96fdf1316bb0743840562": "spent",
+    "317736dff1a9905b28971ce2c4e28d5c": "setup",
+    "895787111aaa1d835a18dbf36e14dada": "cut",
+    "9f3dcca584e099082a1b3b46de4ad356": "copy",
+    "b57e5657675ef005ff2ee709c280bf44": "open",
+    "e1b9ae67265f78875330404c13ee7598": "settler",
+    "fbdc427a649f505375d19e0ae727ce09": "settled"
+  },
+  "entities": {
+    "06ca0a95b7e825c7ea4fff2925fed5bf": {
+      "file": { "path": "one.syx", "state": "changed-outside", "bytes": "one v2" }
+    },
+    "8664aefe785ec6bfa6ad050a0bbb75c1": {
+      "file": { "path": "two-moved.syx", "state": "in-sync", "bytes": "two" }
+    },
+    "1710fe9a0c7f3ee974cc8f4e2f79868f": {
+      "file": { "path": "three.syx", "state": "in-sync", "bytes": "three" }
+    },
+    "d8f0b6efeba21e06151f60a7e413a1d1": {
+      "file": { "path": "four.syx", "state": "in-sync", "bytes": "four" }
+    },
+    "5bc5767abf3788feb15f38f3bf901dcc": {
+      "file": { "path": "spent.syx", "state": "in-sync", "bytes": "spent v2" }
+    },
+    "974e35325981068aabf8064ca5c7fe0a": {
+      "file": { "path": "c/x.syx", "state": "in-sync", "bytes": "copied" }
+    }
+  },
+  "unbound": ["c/y.syx", "loose.txt", "t2/in.txt", "u.txt"],
+  "items": [],
+  "forks": [],
+  "gaps": [],
+  "orphans": [
+    {
+      "writer": "9f3dcca584e099082a1b3b46de4ad356",
+      "record": "c2ac20669c44c72e73a696105cd5a52f",
+      "label": "Copy move",
+      "paths": ["c/x.syx", "c/y.syx"]
+    },
+    {
+      "writer": "b57e5657675ef005ff2ee709c280bf44",
+      "record": "1398b51ced0a2833ac2549ffe6a5ea42",
+      "label": "Everything",
+      "paths": ["nd", "one.syx", "t", "t2", "u.txt", "v.txt"]
+    }
+  ],
+  "ignored": [".t/writers.2/895787111aaa1d835a18dbf36e14dada/pending/905c768ad49f146cb579d288df624bb6.json"],
+  "unreadable": [],
+  "settled": [
+    ["04464e105d48fb2eec76f7042092ba03", "e8d7da001b0181d6993810e13b72e5f7"],
+    ["0724c2795fbb072e90de9a11db7fe1f7", "aac8c00000a81e44a56a748bb815cbab"],
+    ["1823f14ea9a96fdf1316bb0743840562", "c3b7f4e80f554dda74196ed460e5206b"],
+    ["317736dff1a9905b28971ce2c4e28d5c", "c2cbbe2d2e71795b8ba9c70cf1c423c1"],
+    ["9f3dcca584e099082a1b3b46de4ad356", "193deacf1c9a88f3a849c7bd5e6d40e2"],
+    ["e1b9ae67265f78875330404c13ee7598", "bb7b49ab8801cf70ba57b7db607f9d1a"],
+    ["fbdc427a649f505375d19e0ae727ce09", "a208c12cf0c7b70921541a4c43555ce8"]
+  ],
+  "trash": [
+    { "writer": "1823f14ea9a96fdf1316bb0743840562", "item": "487697695975fa78536501a8a94878a8", "from": "spent.syx", "len": 5, "bytes": "spent" }
+  ],
+  "unknown": 0,
+  "extended": 0
+}
