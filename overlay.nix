@@ -186,8 +186,13 @@ let
     // optionalAttrs (emulators ? windows) {
       # Wine runs the suite, so code only Windows compiles runs as well.
       testRunner = {
-        inherit (emulators.windows) cmd;
-        packages = [ emulators.windows.package ];
+        # ⚠️ Wine ends each line with CR LF, and a build log keeps only what follows
+        # a line's last CR, so each line would show empty.
+        cmd = "${final.writeShellScript "wine-tests" ''
+          set -o pipefail
+          WINEDEBUG=-all ${emulators.windows.package}/bin/wine "$@" 2>&1 | tr -d '\r'
+        ''}";
+        packages = [ ];
       };
     };
 

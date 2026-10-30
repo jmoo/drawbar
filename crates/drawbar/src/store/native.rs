@@ -457,6 +457,7 @@ mod tests {
     use super::*;
     use crate::testing::Temp;
 
+    #[cfg(unix)]
     fn disk(root: &Temp) -> Disk {
         Disk {
             root: root.0.clone(),
