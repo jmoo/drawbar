@@ -27,11 +27,6 @@ jobs:
       actions: write # cache-nix-action purges superseded caches
       contents: read
     steps:
-      - name: same-repo branches only
-        if: github.event.pull_request.head.repo.full_name != github.repository
-        run: |
-          echo "::error::cannot push to a fork; run nix fmt locally"
-          exit 1
       - name: mint an app token
         id: token
         uses: actions/create-github-app-token@v2
