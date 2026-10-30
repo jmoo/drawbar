@@ -182,6 +182,13 @@ let
     windows = {
       crossPkgs = final.pkgsCross.mingwW64;
       libs = [ final.pkgsCross.mingwW64.windows.pthreads ];
+    }
+    // optionalAttrs (emulators ? windows) {
+      # Wine runs the suite, so code only Windows compiles runs as well.
+      testRunner = {
+        inherit (emulators.windows) cmd;
+        packages = [ emulators.windows.package ];
+      };
     };
 
     wasip1 = {
