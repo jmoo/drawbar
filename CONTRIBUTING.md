@@ -209,7 +209,10 @@ need editing; stale text is a bug.
 
 ## Tooling and checks
 
-This is a Nix-native project. Do not assume a tool is installed globally. Run
+This is a Nix-native project. Do not assume a tool is installed globally. Prefer
+Nix; where it is not available, follow
+[Build by hand](docs/src/reference/building.md#build-by-hand) and
+[Checks by hand](docs/src/reference/building.md#checks-by-hand). Run
 Cargo from `crates/` inside the development shell; the parent
 `.cargo/config.toml` supplies the cfg needed by wasm builds.
 [Building from source](docs/src/reference/building.md) covers building, running,
