@@ -131,10 +131,9 @@ pub mod cmd {
 
     /// List the device's storage partitions. No arguments.
     ///
-    /// The partition index is the object class code. The classes this crate names are
-    /// positions in this table, so the numbering has gaps: 0 and 2 are `(Native)`
-    /// variants of the piano and sample libraries, holding the same objects in a
-    /// different order.
+    /// A partition's position in the reply is what sessions and dependency rows address
+    /// it by. On the Electro 5, 0 and 2 are `(Native)` variants of the piano and sample
+    /// libraries, holding the same objects in a different order.
     pub const PARTITIONS: u32 = 0x00;
 
     /// List one partition's banks and their slot capacity. Args: partition index.
@@ -158,27 +157,12 @@ pub mod cmd {
     /// ⚠️ Omitting the direction word is refused `0x11` after any write since power-up.
     pub const NEXT_SLOT: u32 = 0x20;
 
-    /// Erases an entire partition.
-    ///
-    /// Reported by public documentation; not confirmed on hardware.
-    ///
-    /// ⚠️ It is left untested because the session's class selects the partition: in a
-    /// library session it would erase the whole piano or sample store, hundreds of
-    /// megabytes to restore from a backup. It is named so it can be recognized and
-    /// refused.
-    pub const ERASE_ALL: u32 = 0x24;
-
     /// Highest command the instrument has been seen to answer.
     ///
     /// ⚠️ The codes above this are unexplored but not empty: at least one reaches a
     /// destructive path, shows its own progress label, never replies, and needs a power
     /// cycle. A code far from the known range may still be implemented.
     pub const HIGHEST_ANSWERING: u32 = 0x3d;
-
-    /// Wedges the instrument: no reply, the session's close goes unanswered, and the
-    /// bulk endpoints stall until a power cycle. It is reported elsewhere as the read
-    /// half of [`NOTIFY_ENABLE`], but that is not what it does here.
-    pub const NOTIFY_READ_WEDGE: u32 = 0x2a;
 
     /// Unsolicited device → host notification. No request pairs with it, so it arrives
     /// in place of whatever reply the host reads next. A front-panel STORE queues one
@@ -189,10 +173,6 @@ pub mod cmd {
     /// Unexplained: what it announces. It is absent from the capture corpus, and a
     /// front-panel STORE is the only trigger observed.
     pub const CHANGED: u32 = 0x2c;
-
-    /// Enable or disable change notifications for a class: `class, on`. The reported
-    /// read half is [`NOTIFY_READ_WEDGE`].
-    pub const NOTIFY_ENABLE: u32 = 0x2d;
 }
 
 /// The UI/session service (service 6, subsystem 1): the transaction's outer handshake,
@@ -378,11 +358,11 @@ fn checked_end(buf: &[u8], start: usize, len: usize) -> Result<usize> {
 
 /// One of the device's storage partitions, from [`cmd::PARTITIONS`].
 ///
-/// The index in the reply is the object class code: [`ObjectClass::from_raw`] takes
-/// positions in this table, gaps included.
+/// A partition's position in this table is the code every session and dependency row
+/// addresses it by. [`Classes`] says which class each position holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Partition {
-    /// Position in the table, and therefore the class code.
+    /// Position in the table, which sessions and dependency rows carry.
     pub index: u32,
     /// The device's own name: `Piano`, `Samp Lib`, `Program`, `Set List`, …
     pub name: String,
@@ -397,6 +377,70 @@ pub struct Partition {
     ///
     /// Confirmed on hardware.
     pub fields: Vec<u8>,
+}
+
+/// Which class each partition of one instrument's table holds, by position.
+///
+/// A partition holds the class whose [`ObjectClass::partition_name`] it carries. A
+/// `(Native)` partition, a name no class has, and a name two partitions share all
+/// resolve to [`ObjectClass::Unknown`], so no class is addressed at a guessed position.
+/// An `Unknown` class addresses its own position on any table.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Classes {
+    by_index: Vec<ObjectClass>,
+}
+
+impl Classes {
+    pub fn of(partitions: &[Partition]) -> Classes {
+        let named = |partition: &Partition| match partition.native {
+            true => None,
+            false => ObjectClass::of_partition(&partition.name),
+        };
+        let shared = |class: ObjectClass| {
+            partitions
+                .iter()
+                .filter(|p| named(p) == Some(class))
+                .count()
+                > 1
+        };
+        let by_index = partitions
+            .iter()
+            .map(|partition| match named(partition) {
+                Some(class) if !shared(class) => class,
+                _ => ObjectClass::Unknown(partition.index),
+            })
+            .collect();
+        Classes { by_index }
+    }
+
+    /// The class at `index`, or [`ObjectClass::Unknown`] for a position the table does
+    /// not name.
+    pub fn at(&self, index: u32) -> ObjectClass {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.by_index.get(i))
+            .copied()
+            .unwrap_or(ObjectClass::Unknown(index))
+    }
+
+    /// `class` as this table holds it: an [`ObjectClass::Unknown`] position the table
+    /// names becomes that class, so a partition addressed by number is treated as what
+    /// it holds.
+    pub fn resolve(&self, class: ObjectClass) -> ObjectClass {
+        match class {
+            ObjectClass::Unknown(index) => self.at(index),
+            named => named,
+        }
+    }
+
+    /// The position holding `class`, or `None` where no partition holds it.
+    pub fn index(&self, class: ObjectClass) -> Option<u32> {
+        if let ObjectClass::Unknown(index) = class {
+            return Some(index);
+        }
+        let i = self.by_index.iter().position(|held| *held == class)?;
+        u32::try_from(i).ok()
+    }
 }
 
 /// One bank within a partition, from [`cmd::BANKS`].
@@ -584,8 +628,9 @@ impl Dependency {
     ///
     /// Layout after the leading `bank, slot, count`, each entry is
     /// `[u8 flag][u32 reserved][u32 class][u32 id][u32 name_len][name][u32 has_location][u32 bank][u32 slot]`
-    /// with no alignment padding, so an entry is `29 + name_len` bytes.
-    pub fn decode_all(msg: &Message) -> Result<Vec<Self>> {
+    /// with no alignment padding, so an entry is `29 + name_len` bytes. The `class` word
+    /// is a partition index, read through the instrument's `classes`.
+    pub fn decode_all(msg: &Message, classes: &Classes) -> Result<Vec<Self>> {
         let p = msg.response_payload("dependency list")?;
         if p.len() < 12 {
             return Err(Error::Truncated {
@@ -603,7 +648,7 @@ impl Dependency {
             // flag(1) + reserved(4) + class(4) + id(4) + name_len(4) = 17 bytes.
             let name_start = checked_end(p, i, 17)?;
             let flag = p[i];
-            let class = ObjectClass::from_raw(word(i + 5));
+            let class = classes.at(word(i + 5));
             let id = word(i + 9);
             let name_len = word(i + 13) as usize;
             let name_end = checked_end(p, name_start, name_len)?;
@@ -797,30 +842,40 @@ impl Message {
 
 /// The kind of object a session addresses.
 ///
-/// `SESSION_OPEN` carries one of these, and [`cmd::STATUS`] then reports on that class
-/// alone. Confirmed on hardware. The class code is the device's partition index, and
-/// the partition table names each class. An unrecognized code is kept in
-/// [`ObjectClass::Unknown`].
+/// `SESSION_OPEN` carries a partition index, and [`cmd::STATUS`] then reports on that
+/// partition alone. Confirmed on hardware. Each model orders its partitions its own way,
+/// so a class is found by its partition's name ([`Self::partition_name`]), and
+/// [`Classes`] gives the index on the attached instrument.
 ///
-/// The gaps at `0` and `2` are the `Piano (Native)` and `Samp Lib (Native)` partitions,
-/// which list the same objects in storage order instead of by category. Both are
-/// readable, and neither is modeled here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// ⚠️ How each class takes a write ([`Self::overwrites_in_place`],
+/// [`Self::renames_and_copies`], [`Self::names_its_slots`], [`Self::is_library`]), which
+/// classes answer [`Self::reports_dependencies`], and how Live and Settings are addressed
+/// were measured on the Electro 5. Every other model is assumed to match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ObjectClass {
     Piano,
     Sample,
     Program,
     SetList,
-    /// The three Live slots. Wire-addressed `0:0..0:2`; bodies are `ne5p`-shaped.
+    /// The live buffer: the panel as it stands. The Electro 5's has three slots,
+    /// wire-addressed `0:0..0:2`, holding `ne5p`-shaped bodies.
     Live,
-    /// The global settings singleton, wire-addressed `0:0`. Reports no body checksum
-    /// (`0xffffffff`), like the library classes.
+    /// The global settings singleton. The Electro 5's is wire-addressed `0:0` and reports
+    /// no body checksum (`0xffffffff`), like the library classes.
     Settings,
+    /// The organ presets of a model that keeps them apart from its programs.
+    OrganPreset,
+    /// The piano presets of a model that keeps them apart from its programs.
+    PianoPreset,
+    /// The synth presets of a model that keeps them apart from its programs.
+    SynthPreset,
+    /// A partition this crate cannot name, by its index in the instrument's table. The
+    /// `(Native)` partitions are among them: each lists a library's objects again, in
+    /// storage order.
     Unknown(u32),
 }
 
-/// The four library classes are the libraries a decoded body can refer to, and their
-/// codes are [`Library::code`]'s, so a caller holding both uses one table.
+/// The four library classes are the libraries a decoded body can refer to.
 impl From<Library> for ObjectClass {
     fn from(library: Library) -> Self {
         match library {
@@ -833,36 +888,29 @@ impl From<Library> for ObjectClass {
 }
 
 impl ObjectClass {
-    pub fn from_raw(v: u32) -> Self {
-        if let Some(library) = u8::try_from(v).ok().and_then(Library::from_code) {
-            return library.into();
-        }
-        match v {
-            6 => ObjectClass::Live,
-            7 => ObjectClass::Settings,
-            other => ObjectClass::Unknown(other),
-        }
-    }
-
-    pub fn to_raw(self) -> u32 {
-        match self {
-            ObjectClass::Piano => Library::Piano.code().into(),
-            ObjectClass::Sample => Library::Sample.code().into(),
-            ObjectClass::Program => Library::Program.code().into(),
-            ObjectClass::SetList => Library::SetList.code().into(),
-            ObjectClass::Live => 6,
-            ObjectClass::Settings => 7,
-            ObjectClass::Unknown(v) => v,
-        }
-    }
-
-    /// The classes to query for an inventory. Live and Settings also answer but report
-    /// zero items, because they are fixed buffers, not slot-counted storage.
-    pub const INVENTORY: [ObjectClass; 4] = [
+    /// Every class a partition name can resolve to.
+    pub const NAMED: [ObjectClass; 9] = [
         ObjectClass::Piano,
         ObjectClass::Sample,
         ObjectClass::Program,
         ObjectClass::SetList,
+        ObjectClass::Live,
+        ObjectClass::Settings,
+        ObjectClass::OrganPreset,
+        ObjectClass::PianoPreset,
+        ObjectClass::SynthPreset,
+    ];
+
+    /// The classes to query for an inventory. Live and Settings also answer but report
+    /// zero items, because they are fixed buffers, not slot-counted storage.
+    pub const INVENTORY: [ObjectClass; 7] = [
+        ObjectClass::Piano,
+        ObjectClass::Sample,
+        ObjectClass::Program,
+        ObjectClass::SetList,
+        ObjectClass::OrganPreset,
+        ObjectClass::PianoPreset,
+        ObjectClass::SynthPreset,
     ];
 
     pub fn label(self) -> String {
@@ -873,12 +921,42 @@ impl ObjectClass {
             ObjectClass::SetList => "set lists".into(),
             ObjectClass::Live => "live slots".into(),
             ObjectClass::Settings => "settings".into(),
-            ObjectClass::Unknown(v) => format!("class {v}"),
+            ObjectClass::OrganPreset => "organ presets".into(),
+            ObjectClass::PianoPreset => "piano presets".into(),
+            ObjectClass::SynthPreset => "synth presets".into(),
+            ObjectClass::Unknown(v) => format!("partition {v}"),
         }
     }
 
+    /// The name an instrument's partition table gives this class's partition: the Electro
+    /// 5's table spells the first six, and a Stage 4's the presets. `None` for a partition
+    /// this crate does not name.
+    ///
+    /// Confirmed on hardware.
+    pub fn partition_name(self) -> Option<&'static str> {
+        match self {
+            ObjectClass::Piano => Some("Piano"),
+            ObjectClass::Sample => Some("Samp Lib"),
+            ObjectClass::Program => Some("Program"),
+            ObjectClass::SetList => Some("Set List"),
+            ObjectClass::Live => Some("Live"),
+            ObjectClass::Settings => Some("Settings"),
+            ObjectClass::OrganPreset => Some("Organ Preset"),
+            ObjectClass::PianoPreset => Some("Piano Preset"),
+            ObjectClass::SynthPreset => Some("Synth Preset"),
+            ObjectClass::Unknown(_) => None,
+        }
+    }
+
+    /// The class whose partition carries `name`, or `None` for a name no class has.
+    pub fn of_partition(name: &str) -> Option<ObjectClass> {
+        Self::NAMED
+            .into_iter()
+            .find(|class| class.partition_name() == Some(name))
+    }
+
     /// The storage class `nord_format`'s acceptance table uses for this class. `None` for
-    /// a code this crate does not name.
+    /// a partition this crate does not name.
     pub fn storage(self) -> Option<Slot> {
         match self {
             ObjectClass::Piano => Some(Slot::Piano),
@@ -887,6 +965,9 @@ impl ObjectClass {
             ObjectClass::SetList => Some(Slot::SetList),
             ObjectClass::Live => Some(Slot::Live),
             ObjectClass::Settings => Some(Slot::Settings),
+            ObjectClass::OrganPreset => Some(Slot::OrganPreset),
+            ObjectClass::PianoPreset => Some(Slot::PianoPreset),
+            ObjectClass::SynthPreset => Some(Slot::SynthPreset),
             ObjectClass::Unknown(_) => None,
         }
     }
@@ -1118,11 +1199,10 @@ impl Location {
 
 #[cfg(test)]
 mod tests {
-    /// A library reference in a decoded body and a session on the wire use the same
-    /// code for the same catalog, in both directions, and the acceptance table uses the
-    /// same storage class.
+    /// A library a decoded body refers into is the class of the same storage, and the
+    /// acceptance table uses that storage class.
     #[test]
-    fn a_library_class_code_is_the_librarys_own() {
+    fn a_library_is_the_class_of_the_same_storage() {
         use super::ObjectClass;
         use nord_format::accept::Slot;
         use nord_format::fields::Library;
@@ -1133,8 +1213,6 @@ mod tests {
             Library::SetList,
         ] {
             let class = ObjectClass::from(library);
-            assert_eq!(class.to_raw(), u32::from(library.code()), "{library:?}");
-            assert_eq!(ObjectClass::from_raw(library.code().into()), class);
             assert_eq!(class.storage(), Some(Slot::from(library)), "{library:?}");
         }
         assert_eq!(
@@ -1145,6 +1223,118 @@ mod tests {
     }
 
     use super::*;
+
+    fn partitions(names: &[&str]) -> Vec<Partition> {
+        (0..)
+            .zip(names)
+            .map(|(index, name)| Partition {
+                index,
+                name: name.to_string(),
+                native: name.contains("(Native)"),
+                fields: vec![0; PARTITION_FIELDS],
+            })
+            .collect()
+    }
+
+    /// The Electro 5's partition names in table order, as `device/geometry.script`
+    /// records them.
+    const ELECTRO5: [&str; 8] = [
+        "Piano (Native)",
+        "Piano",
+        "Samp Lib (Native)",
+        "Samp Lib",
+        "Program",
+        "Set List",
+        "Live",
+        "Settings",
+    ];
+
+    fn electro5() -> Classes {
+        Classes::of(&partitions(&ELECTRO5))
+    }
+
+    #[test]
+    fn the_electro_5_table_holds_each_class_at_its_recorded_position() {
+        let classes = electro5();
+        let held: Vec<ObjectClass> = (0..8).map(|index| classes.at(index)).collect();
+        assert_eq!(
+            held,
+            [
+                ObjectClass::Unknown(0),
+                ObjectClass::Piano,
+                ObjectClass::Unknown(2),
+                ObjectClass::Sample,
+                ObjectClass::Program,
+                ObjectClass::SetList,
+                ObjectClass::Live,
+                ObjectClass::Settings,
+            ]
+        );
+        for (index, class) in (0..).zip(held) {
+            assert_eq!(classes.index(class), Some(index), "{}", class.label());
+        }
+    }
+
+    /// Synthetic: the Electro 5's names in another order, with a partition no class has.
+    #[test]
+    fn a_class_is_found_by_its_partitions_name_wherever_it_sits() {
+        let classes = Classes::of(&partitions(&[
+            "Piano (Native)",
+            "Piano",
+            "Synth",
+            "Samp Lib (Native)",
+            "Samp Lib",
+            "Program",
+            "Settings",
+        ]));
+        assert_eq!(classes.index(ObjectClass::Program), Some(5));
+        assert_eq!(classes.index(ObjectClass::Sample), Some(4));
+        assert_eq!(
+            classes.at(2),
+            ObjectClass::Unknown(2),
+            "a name no class has"
+        );
+        assert_eq!(
+            classes.at(3),
+            ObjectClass::Unknown(3),
+            "a (Native) partition"
+        );
+        assert_eq!(classes.index(ObjectClass::SetList), None);
+        assert_eq!(classes.index(ObjectClass::Live), None);
+    }
+
+    #[test]
+    fn a_name_two_partitions_share_resolves_to_neither() {
+        let classes = Classes::of(&partitions(&["Program", "Piano", "Program"]));
+        assert_eq!(classes.at(0), ObjectClass::Unknown(0));
+        assert_eq!(classes.at(2), ObjectClass::Unknown(2));
+        assert_eq!(classes.index(ObjectClass::Program), None);
+        assert_eq!(classes.index(ObjectClass::Piano), Some(1));
+    }
+
+    #[test]
+    fn a_partition_addressed_by_number_is_the_class_its_name_gives() {
+        let classes = electro5();
+        assert_eq!(classes.resolve(ObjectClass::Unknown(6)), ObjectClass::Live);
+        assert_eq!(
+            classes.resolve(ObjectClass::Unknown(7)),
+            ObjectClass::Settings
+        );
+        assert_eq!(
+            classes.resolve(ObjectClass::Unknown(2)),
+            ObjectClass::Unknown(2)
+        );
+        assert_eq!(classes.resolve(ObjectClass::Program), ObjectClass::Program);
+    }
+
+    #[test]
+    fn an_unknown_class_addresses_its_own_position() {
+        let classes = electro5();
+        assert_eq!(classes.index(ObjectClass::Unknown(2)), Some(2));
+        assert_eq!(classes.at(12), ObjectClass::Unknown(12));
+        assert_eq!(Classes::default().index(ObjectClass::Unknown(4)), Some(4));
+        assert_eq!(Classes::default().index(ObjectClass::Program), None);
+    }
 
     /// The request in the middle exchange of `move_prog_8-13_to_7-16`, as captured.
     const MOVE: &str = "000000220000000c0000000a00000018000000070000000c000000060000000f4a55";
@@ -1366,8 +1556,10 @@ mod tests {
         let raw = hex(
             "000000820000000c0000000a0000002900000000000000060000000200000002000000000000000001d303b5f20000001a526f79616c204772616e64203344205961533620584c20352e3400000000ffffffffffffffff010000000000000003f2f5cadc0000000c6166726963615f73706c697400000000ffffffffffffffffc791",
         );
-        assert!(Dependency::decode_all(&Message::decode(&raw).unwrap()).is_err());
-        assert!(Dependency::decode_all(&Message::decode_response(&raw).unwrap()).is_ok());
+        assert!(Dependency::decode_all(&Message::decode(&raw).unwrap(), &electro5()).is_err());
+        assert!(
+            Dependency::decode_all(&Message::decode_response(&raw).unwrap(), &electro5()).is_ok()
+        );
     }
 
     /// The dependency list read back after a captured duplicate: a piano and a sample,
@@ -1378,7 +1570,7 @@ mod tests {
             "000000820000000c0000000a0000002900000000000000060000000200000002000000000000000001d303b5f20000001a526f79616c204772616e64203344205961533620584c20352e3400000000ffffffffffffffff010000000000000003f2f5cadc0000000c6166726963615f73706c697400000000ffffffffffffffffc791",
         ))
         .unwrap();
-        let deps = Dependency::decode_all(&resp).unwrap();
+        let deps = Dependency::decode_all(&resp, &electro5()).unwrap();
         assert_eq!(deps.len(), 2);
 
         assert_eq!(deps[0].class, ObjectClass::Piano);
@@ -1436,7 +1628,8 @@ mod tests {
         assert_eq!(args.len() - 4, 128);
 
         let raw = Message::new(Service::Program, 10, cmd::DEPENDENCIES + 1, args).encode();
-        let deps = Dependency::decode_all(&Message::decode_response(&raw).unwrap()).unwrap();
+        let deps =
+            Dependency::decode_all(&Message::decode_response(&raw).unwrap(), &electro5()).unwrap();
 
         assert_eq!(deps.len(), 4);
         let slots: Vec<u32> = deps.iter().map(|d| d.location.unwrap().slot).collect();
@@ -1545,7 +1738,7 @@ mod tests {
 
         assert!(
             matches!(
-                Dependency::decode_all(&response(cmd::DEPENDENCIES, &[0; 11])),
+                Dependency::decode_all(&response(cmd::DEPENDENCIES, &[0; 11]), &electro5()),
                 Err(Error::Truncated { got: 11, need: 12 })
             ),
             "a reply too short to carry its own count"
@@ -1554,7 +1747,7 @@ mod tests {
         let claims_two = [&header(2).concat()[..], &row(0)[..]].concat();
         assert!(
             matches!(
-                Dependency::decode_all(&response(cmd::DEPENDENCIES, &claims_two)),
+                Dependency::decode_all(&response(cmd::DEPENDENCIES, &claims_two), &electro5()),
                 Err(Error::Truncated { got: 41, need: 58 })
             ),
             "a count larger than the payload holds"
@@ -1563,7 +1756,7 @@ mod tests {
         let long_name = [&header(1).concat()[..], &row(256)[..17]].concat();
         assert!(
             matches!(
-                Dependency::decode_all(&response(cmd::DEPENDENCIES, &long_name)),
+                Dependency::decode_all(&response(cmd::DEPENDENCIES, &long_name), &electro5()),
                 Err(Error::Truncated { got: 29, need: 285 })
             ),
             "a name length past the end of the payload"
@@ -1572,7 +1765,7 @@ mod tests {
         let cut_location = [&header(1).concat()[..], &row(0)[..21]].concat();
         assert!(
             matches!(
-                Dependency::decode_all(&response(cmd::DEPENDENCIES, &cut_location)),
+                Dependency::decode_all(&response(cmd::DEPENDENCIES, &cut_location), &electro5()),
                 Err(Error::Truncated { got: 33, need: 41 })
             ),
             "a row cut inside its trailing location words"

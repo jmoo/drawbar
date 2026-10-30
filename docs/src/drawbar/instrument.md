@@ -15,7 +15,8 @@ lists the browsers that can connect.
 Once connected, drawbar reads the instrument's folders, and its slots appear,
 labeled the way the panel shows them: `7:4 Africa Split`. Empty slots are listed
 too, as places to drop things. **Instrument ▸ Read everything** (⌘R) reads them
-again.
+again. A folder drawbar cannot name keeps the instrument's name for it and is read
+only.
 
 ## Slots
 

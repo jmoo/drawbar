@@ -122,9 +122,9 @@ const LIST: [Track; 5] = [
 /// The center's view of the attached instrument.
 #[derive(Default)]
 pub struct Keyboard {
-    /// The bank each folder shows, by raw class number. A folder keeps its bank while
+    /// The bank each folder shows, by class. A folder keeps its bank while
     /// another folder is shown.
-    banks: BTreeMap<u32, u32>,
+    banks: BTreeMap<ObjectClass, u32>,
 }
 
 /// Everything a slot is drawn from, other than the slot itself.
@@ -169,7 +169,7 @@ impl Keyboard {
     /// first bank read.
     fn bank(&self, class: ObjectClass, banks: &[u32]) -> Option<u32> {
         self.banks
-            .get(&class.to_raw())
+            .get(&class)
             .copied()
             .filter(|held| banks.contains(held))
             .or_else(|| banks.first().copied())
@@ -204,7 +204,7 @@ impl Keyboard {
             .count();
         let said = sentence(held, slots.len(), incoming);
         if let Some(picked) = bank_row(ui, bank, &banks, &said) {
-            self.banks.insert(class.to_raw(), picked);
+            self.banks.insert(class, picked);
         }
 
         let list: Vec<Item> = (0..slots.len())
@@ -567,7 +567,7 @@ fn cell(
     let selected = browser.picked().holds(item);
     let response = ui.interact(
         rect,
-        ui.id().with(("cell", class.to_raw(), at.bank, at.slot)),
+        ui.id().with(("cell", class, at.bank, at.slot)),
         egui::Sense::click_and_drag(),
     );
     let state = State::of(

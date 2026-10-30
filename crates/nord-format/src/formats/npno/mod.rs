@@ -13,10 +13,10 @@
 //! | body offset | field |
 //! |---|---|
 //! | `0x00` | `"CNSP"` |
-//! | `0x04` | u16 stream version, `0x450` or `0x464` |
+//! | `0x04` | u16 stream version, `0x450` or `0x464`: the [`Version`] |
 //! | `0x06` | u32, unique per file; meaning unknown |
 //! | `0x1c` | `Name#Variant`, NUL-padded to 32 bytes |
-//! | `0x3c` | the bare name, and at `0x5c` the voicing (`0x464` streams only) |
+//! | `0x3c` | the bare name, and at `0x5c` the voicing ([`Version::V6`] only) |
 //! | `0x8c` | 128-entry key map: the root note that plays each key, `0xFF` uncovered |
 //! | `0x18c` | 128-entry per-key fine tune, one of ten per-note tables from `0x10c` |
 //! | `0x61c` | u16 stream version, echoed |
@@ -64,6 +64,7 @@ pub use index::Index;
 
 use crate::cbin::{self, Cbin, Header, RawBody};
 use crate::error::{Error, ParseError};
+use crate::formats::ne5;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -84,14 +85,121 @@ pub const UNCOVERED: u8 = 0xff;
 /// The stream versions the prefix offsets are validated against. A body with another
 /// version still reads and writes unchanged, but its fields are refused, since the
 /// offsets may not hold them.
-pub const KNOWN_VERSIONS: &[u32] = &[0x450, 0x464];
+pub const KNOWN_VERSIONS: &[u32] = &[Version::V5.stream() as u32, Version::V6.stream() as u32];
 
-/// The stream version that also carries separate long-name and voicing fields.
-const VERSION_SPLIT_NAME: u16 = 0x464;
+/// The two piano formats, which vendor libraries name by their content version: 5.x
+/// and 6.x. A library states its format in the stream version at body `0x04`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Version {
+    /// Stream `0x450`.
+    V5,
+    /// Stream `0x464`, which adds the long name and the voicing and states velocity on a
+    /// finer scale.
+    #[default]
+    V6,
+}
 
-/// The stream version whose instrument silences a stroke with a negative trim, so
-/// [`Library::set_trim`] refuses one. Confirmed on hardware.
-const VERSION_SILENCES_NEGATIVE_TRIM: u16 = 0x450;
+impl Version {
+    pub const ALL: [Version; 2] = [Version::V5, Version::V6];
+
+    pub const fn stream(self) -> u16 {
+        match self {
+            Version::V5 => 0x450,
+            Version::V6 => 0x464,
+        }
+    }
+
+    pub fn from_stream(stream: u16) -> Option<Version> {
+        Self::ALL.into_iter().find(|v| v.stream() == stream)
+    }
+
+    /// The major version vendor libraries name the format by: 5 or 6.
+    pub fn number(self) -> u8 {
+        match self {
+            Version::V5 => 5,
+            Version::V6 => 6,
+        }
+    }
+
+    /// Whether the prefix carries the long name at `0x3c` and the voicing at `0x5c`.
+    fn split_name(self) -> bool {
+        self == Version::V6
+    }
+
+    /// Units of the velocity scale [`ne5::velocity::top_velocity`] reads that one unit of
+    /// [`Stroke::layer`] is worth: a [`Version::V6`] library states its layer values and
+    /// thresholds on that scale, and a [`Version::V5`] library on one five times coarser.
+    /// Confirmed on hardware.
+    pub fn layer_scale(self) -> u16 {
+        match self {
+            Version::V5 => 5,
+            Version::V6 => 1,
+        }
+    }
+
+    /// The threshold on the velocity scale between a stroke of layer value `layer` and
+    /// the next louder layer of its root and bank, of value `louder`: the midpoint of the
+    /// two on that scale, rounded up, or of 0 and `layer` for the loudest layer.
+    ///
+    /// A [`Version::V5`] key selects by it, and ignores [`Stroke::threshold`]. A
+    /// [`Version::V6`] key selects by [`Stroke::threshold`]. Confirmed on hardware.
+    /// Vendor version 6 libraries state this there. Inferred from specimens; not
+    /// confirmed on hardware.
+    pub fn threshold(self, louder: Option<u8>, layer: u8) -> u16 {
+        let scale = self.layer_scale();
+        (u16::from(louder.unwrap_or(0)) * scale + u16::from(layer) * scale).div_ceil(2)
+    }
+
+    /// The largest [`Stroke::layer`] a note-on at velocity 1, the softest a key sends,
+    /// reaches on an Electro 5 wherever the next louder layer sits: its threshold is at
+    /// most the layer value on the velocity scale, and
+    /// [`HIGHEST_THRESHOLD`](ne5::velocity::HIGHEST_THRESHOLD) is the most any velocity
+    /// reaches there.
+    pub fn highest_played_layer(self) -> u8 {
+        (ne5::velocity::HIGHEST_THRESHOLD / self.layer_scale()) as u8
+    }
+
+    /// The layer value vendor libraries give a root's softest layer, which
+    /// [`encode::layer_value`] spreads a root's layers up to. Version 6 libraries state
+    /// five times the value their version 5 releases do. Inferred from specimens; not
+    /// confirmed on hardware.
+    pub fn softest_layer(self) -> u8 {
+        match self {
+            Version::V5 => 27,
+            Version::V6 => 135,
+        }
+    }
+
+    /// Decibels one unit of [`Stroke::trim`] attenuates a stroke by. Confirmed on
+    /// hardware.
+    pub fn trim_step(self) -> f64 {
+        match self {
+            Version::V5 => 1.0,
+            Version::V6 => 0.1,
+        }
+    }
+
+    /// The trims that play as [`Version::trim_step`] says. A negative trim silences a
+    /// [`Version::V5`] stroke and boosts a [`Version::V6`] one, until the library gain
+    /// and the boost together reach [`V6_MOST_BOOST`]. Confirmed on hardware.
+    pub fn trims(self) -> RangeInclusive<i16> {
+        match self {
+            Version::V5 => 0..=i16::MAX,
+            Version::V6 => i16::MIN..=i16::MAX,
+        }
+    }
+}
+
+/// The most a [`Version::V6`] stroke is boosted by, in tenths of a decibel: the library
+/// gain ([`Library::gain`]) and a negative trim together boost no further. Confirmed on
+/// hardware.
+pub const V6_MOST_BOOST: i16 = 108;
+
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.x", self.number())
+    }
+}
 
 const KEY_MAP_AT: usize = 0x8c;
 const FINE_TUNE_AT: usize = 0x18c;
@@ -111,6 +219,9 @@ const GAIN_AT: usize = 0x40c;
 /// The highest key the instrument damps at note-off; keys above it ring on. Confirmed
 /// on hardware.
 const DAMPER_TOP_AT: usize = 0x40d;
+
+/// The per-key release level, [`NOTES`] bytes; [`Library::release_level`].
+const RELEASE_LEVEL_AT: usize = 0x30c;
 
 /// First byte of the stroke directory, and so the length of the prefix.
 const DIRECTORY_AT: usize = 0x732;
@@ -137,7 +248,7 @@ const REC_MARK_BLOCK: usize = 0x2c;
 /// it.
 const REC_DECAY: usize = 0x2e;
 /// u16 holding the layer value again in vendor records. Sweeping it moved nothing
-/// measurable. Confirmed on hardware.
+/// measurable, in either version. Confirmed on hardware.
 const REC_WINDOW: usize = 0x32;
 /// i16 the instrument attenuates the stroke by; [`Stroke::trim`] states its unit.
 const REC_TRIM: usize = 0x34;
@@ -147,6 +258,8 @@ const REC_ID: usize = 0x6e;
 /// 25 dB within 10 ms, heard as a crack; 33 fades it about 10 dB per 10 ms; 66 lets it
 /// ring on. Confirmed on hardware.
 const REC_NOTE_OFF: usize = 0x72;
+/// u8 velocity threshold a [`Version::V6`] stroke is selected at; [`Stroke::threshold`].
+const REC_THRESHOLD: usize = 0x74;
 
 /// Predictor seeds a record carries per channel.
 const SEEDS: usize = 4;
@@ -221,11 +334,12 @@ impl fmt::Display for Bank {
 
 /// Which velocity layers of a root to keep.
 ///
-/// A root's layers are counted within one [`Bank`], since each bank indexes its own
-/// set. Kept layers are not renumbered. The instrument selects a layer by the value it
-/// states ([`Stroke::layer`]), not by its rank, so the survivors keep their place in the
-/// velocity range and the softest one left takes over the velocities below it.
-/// Confirmed on hardware.
+/// A root's layers are counted within one [`Bank`], since each bank indexes its own set.
+/// Kept layers are not renumbered. The instrument selects a layer by what it states, not by
+/// its rank ([`ne5::velocity::top_velocity`]), and the softest one left takes over the
+/// velocities below it. A [`Version::V6`] survivor keeps the threshold it states, so the
+/// louder neighbor of a dropped layer takes over its velocities; a [`Version::V5`] root
+/// splits again midway between the values it keeps. Confirmed on hardware.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Layers {
     /// The loudest `n` of each root and bank: the `n` lowest layer values.
@@ -258,12 +372,12 @@ impl TextField {
         at: 0x1c,
         len: 0x20,
     };
-    /// The long name, present only on [`VERSION_SPLIT_NAME`] streams.
+    /// The long name, present only on [`Version::V6`] streams.
     const LONG_NAME: TextField = TextField {
         at: 0x3c,
         len: 0x20,
     };
-    /// The voicing, present only on [`VERSION_SPLIT_NAME`] streams.
+    /// The voicing, present only on [`Version::V6`] streams.
     const VOICING: TextField = TextField {
         at: 0x5c,
         len: 0x20,
@@ -642,14 +756,23 @@ impl<'a> Stroke<'a> {
     /// Softness within the root's bank, where 0 is the loudest recording. A bank's
     /// values need not be contiguous or start at zero.
     ///
-    /// A key plays the largest value the root holds that is at most
-    /// `(127 − velocity)·31/127`, so 0 plays at the top of the velocity range and a
-    /// value above 30 ([`encode::HIGHEST_PLAYED_LAYER`]) never plays at all. Confirmed
-    /// on hardware. The 31 is measured to about ±2, so a layer sitting on the bound
-    /// switches a few velocities either side of where the formula puts it. Vendor
-    /// libraries spread a root over 0..[`encode::SOFTEST_LAYER`].
+    /// A [`Version::V5`] key selects a layer by its value and the next louder one's
+    /// ([`Version::threshold`]); a [`Version::V6`] key selects by [`Stroke::threshold`]
+    /// alone, and there the layer value changes neither which stroke plays nor how loud.
+    /// Either way the loudest layer plays at the top of the velocity range
+    /// ([`ne5::velocity::top_velocity`]). Confirmed on hardware. Vendor libraries spread a
+    /// root over 0..[`Version::softest_layer`].
     pub fn layer(&self) -> u8 {
         self.record[REC_LAYER]
+    }
+
+    /// The threshold at `+0x74` a [`Version::V6`] key selects the stroke by, on the
+    /// velocity scale [`ne5::velocity::top_velocity`] reads. Strokes stating 0 throughout
+    /// leave only the last of them sounding. Confirmed on hardware. Vendor libraries state
+    /// [`Version::threshold`], and [`Version::V5`] libraries, whose keys ignore the byte,
+    /// state 0. Inferred from specimens; not confirmed on hardware.
+    pub fn threshold(&self) -> u8 {
+        self.record[REC_THRESHOLD]
     }
 
     /// Frames the stroke owns, excluding the block overlap. [`codec::decode`] emits
@@ -662,10 +785,9 @@ impl<'a> Stroke<'a> {
         be16(&self.record, REC_BLOCKS)
     }
 
-    /// The signed `+0x34` trim the instrument attenuates the stroke by. In `0x450`
-    /// streams a unit is one decibel over 0..68, and a negative trim silences the
-    /// stroke. Confirmed on hardware. `0x464` streams also hold negative trims, in a
-    /// unit not known. Inferred from specimens; not confirmed on hardware.
+    /// The signed `+0x34` trim the instrument attenuates the stroke by, in units
+    /// [`Version::trim_step`] says, over the range [`Version::trims`] says. Confirmed
+    /// on hardware.
     pub fn trim(&self) -> i16 {
         be16(&self.record, REC_TRIM) as i16
     }
@@ -820,6 +942,12 @@ impl<'a> Library<'a> {
         be16(&self.prefix, VERSION_AT)
     }
 
+    /// The format the stream version states.
+    pub fn version(&self) -> Version {
+        Version::from_stream(self.stream_version())
+            .expect("a library is only parsed or built at a known stream version")
+    }
+
     pub fn channels(&self) -> u16 {
         self.channels
     }
@@ -854,14 +982,15 @@ impl<'a> Library<'a> {
     }
 
     /// Retrim the `index`-th stroke, in the unit [`Stroke::trim`] reads. An index past
-    /// the directory is refused, and so is a negative trim in a `0x450` stream, which
+    /// the directory is refused, and so is a trim outside [`Version::trims`], which
     /// would silence the stroke.
     pub fn set_trim(&mut self, index: usize, trim: i16) -> Result<(), Error> {
-        let version = self.stream_version();
-        if trim < 0 && version == VERSION_SILENCES_NEGATIVE_TRIM {
+        let version = self.version();
+        let trims = version.trims();
+        if !trims.contains(&trim) {
             return Err(ParseError::OutOfBounds {
                 value: format!("trim {trim}"),
-                bound: format!("0 or more in a stream {version:#06x} library"),
+                bound: format!("{} or more in a {version} library", trims.start()),
             }
             .into());
         }
@@ -939,6 +1068,22 @@ impl<'a> Library<'a> {
         Ok(())
     }
 
+    /// The level a [`Version::V5`] key plays its release stroke at, from the per-key
+    /// table at `0x30c`. 0 plays no release at all; 43 plays it about 5 dB under where a
+    /// [`Version::V6`] release of the same stroke plays, 32 about 13 dB under 43, and 21
+    /// near silence. A release follows the note's level at key-up either way. A
+    /// [`Version::V6`] key ignores the table. Confirmed on hardware. Vendor libraries
+    /// state 38 to 47 at every key whose root has a release stroke, and 0 at every other
+    /// key. Inferred from specimens; not confirmed on hardware.
+    pub fn release_level(&self, key: u8) -> Result<u8, Error> {
+        Ok(self.prefix[RELEASE_LEVEL_AT + midi_key("key", key)?])
+    }
+
+    pub fn set_release_level(&mut self, key: u8, level: u8) -> Result<(), Error> {
+        self.prefix[RELEASE_LEVEL_AT + midi_key("key", key)?] = level;
+        Ok(())
+    }
+
     /// The gain over the whole library at `0x40c`, in tenths of a decibel.
     pub fn gain(&self) -> i8 {
         self.prefix[GAIN_AT] as i8
@@ -973,8 +1118,8 @@ impl<'a> Library<'a> {
         self.prefix[KIND_AT] = kind.code();
     }
 
-    /// The long name at `0x3c` and the voicing at `0x5c`, which only version `0x464`
-    /// streams carry. Both are `None` on the older stream.
+    /// The long name at `0x3c` and the voicing at `0x5c`, which only [`Version::V6`]
+    /// libraries carry. Both are `None` on [`Version::V5`].
     ///
     /// They are separate fields, not a split of `Name#Variant`: a library can
     /// spell the long name differently from the name before the `#`, and the voicing
@@ -989,7 +1134,9 @@ impl<'a> Library<'a> {
     }
 
     fn split_field(&self, field: TextField) -> Option<String> {
-        (self.stream_version() == VERSION_SPLIT_NAME).then(|| field.read(&self.prefix))
+        self.version()
+            .split_name()
+            .then(|| field.read(&self.prefix))
     }
 
     /// Rename the library, leaving the variant alone.
@@ -1028,7 +1175,7 @@ impl<'a> Library<'a> {
         check_half("name", name)?;
         check_half("variant", variant)?;
         let combined = format!("{name}{NAME_SEPARATOR}{variant}");
-        let long = (self.stream_version() == VERSION_SPLIT_NAME).then_some(name);
+        let long = self.version().split_name().then_some(name);
         TextField::COMBINED.check(&combined)?;
         if let Some(long) = long {
             TextField::LONG_NAME.check(long)?;
@@ -1042,11 +1189,11 @@ impl<'a> Library<'a> {
 
     /// Replace the voicing at `0x5c`. Refused on a stream with no such field.
     pub fn set_voicing(&mut self, voicing: &str) -> Result<(), Error> {
-        if self.stream_version() != VERSION_SPLIT_NAME {
+        if !self.version().split_name() {
             return Err(ParseError::AssertFail(format!(
-                "stream {:#06x} carries no voicing field; the variant after the \
+                "a {} library carries no voicing field; the variant after the \
                  {NAME_SEPARATOR:?} is where it records one",
-                self.stream_version()
+                self.version()
             ))
             .into());
         }
@@ -1795,7 +1942,7 @@ mod tests {
     #[test]
     fn a_rename_carries_the_long_name_with_it_and_leaves_the_voicing_alone() {
         let mut build = Build::new();
-        build.version = VERSION_SPLIT_NAME;
+        build.version = Version::V6.stream();
         let piano = build.piano();
         let mut library = piano.library().unwrap();
         library.set_voicing("Nordiska").unwrap();
@@ -1937,6 +2084,19 @@ mod tests {
             negative,
             "a refused retrim leaves the directory alone"
         );
+    }
+
+    /// A 6.x threshold sits midway between a layer's value and the louder one's; a 5.x key
+    /// splits at the same midpoint of its values taken five times over.
+    #[test]
+    fn a_layer_plays_from_halfway_to_the_louder_one_on_its_versions_scale() {
+        assert_eq!(Version::V6.threshold(None, 68), 34);
+        assert_eq!(Version::V6.threshold(Some(30), 60), 45);
+        assert_eq!(Version::V5.threshold(None, 0), 0);
+        assert_eq!(Version::V5.threshold(Some(0), 6), 15);
+        assert_eq!(Version::V5.threshold(Some(6), 12), 45);
+        assert_eq!(Version::V5.highest_played_layer(), 40);
+        assert_eq!(Version::V6.highest_played_layer(), 200);
     }
 
     /// A `0x464` build, the stream version that holds negative trims.

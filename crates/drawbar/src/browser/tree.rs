@@ -46,10 +46,10 @@ pub(super) enum Branch {
     Computer,
     Folder(u64),
     Instrument,
-    Class(u32),
+    Class(ObjectClass),
     /// ⚠️ The bank as the panel numbers it, which keys the scan cache. Never a
     /// [`Location`]'s zero-based bank.
-    Bank(u32, u64),
+    Bank(ObjectClass, u64),
 }
 
 /// Which of the three sections are showing.
@@ -197,11 +197,9 @@ impl Line {
             Line::Lost(id) => egui::Id::new(("lost", id)),
             Line::Note { under, said, .. } => egui::Id::new(("note", under, said)),
             Line::Instrument => egui::Id::new("instrument"),
-            Line::Class(class) => egui::Id::new(("class", class.to_raw())),
-            Line::Bank(class, bank) => egui::Id::new(("bank", class.to_raw(), bank)),
-            Line::Slot { class, at, .. } => {
-                egui::Id::new(("slot", class.to_raw(), at.bank, at.slot))
-            }
+            Line::Class(class) => egui::Id::new(("class", class)),
+            Line::Bank(class, bank) => egui::Id::new(("bank", class, bank)),
+            Line::Slot { class, at, .. } => egui::Id::new(("slot", class, at.bank, at.slot)),
             Line::State(state) => egui::Id::new(("state", state.title())),
             Line::Kept => egui::Id::new("kept apart"),
             Line::Kind(kind) => egui::Id::new(("kind", Kind::ALL.iter().position(|k| *k == kind))),
@@ -537,7 +535,7 @@ fn worth_choosing(kinds: &[Kind]) -> bool {
 
 /// The open-set key for one bank's rows.
 pub(super) fn bank_branch(class: ObjectClass, bank: u64) -> Branch {
-    Branch::Bank(class.to_raw(), bank)
+    Branch::Bank(class, bank)
 }
 
 /// What a local row's kind word needs from outside the row: what this computer's list
@@ -658,7 +656,7 @@ impl Browser {
         let Some((class, at)) = self.jump else {
             return;
         };
-        self.open.insert(Branch::Class(class.to_raw()));
+        self.open.insert(Branch::Class(class));
         self.open.insert(bank_branch(class, at.user_bank()));
         // ⚠️ A jump to a slot no scan has reached would hold the branch open as long as
         // the instrument stays attached, because no line is laid out to land it.
@@ -903,13 +901,13 @@ impl Browser {
         }
         for class in device.state.classes() {
             lines.push(Line::Class(class));
-            if !self.open.contains(&Branch::Class(class.to_raw())) {
+            if !self.open.contains(&Branch::Class(class)) {
                 continue;
             }
             let banks = device.state.banks_of(class);
             if banks.is_empty() {
                 lines.push(Line::Note {
-                    under: Branch::Class(class.to_raw()),
+                    under: Branch::Class(class),
                     said: "nothing read yet",
                     depth: 2,
                 });
@@ -1541,7 +1539,7 @@ impl Browser {
         workspace: &Workspace,
         acts: &mut Vec<Act>,
     ) {
-        let open = self.open.contains(&Branch::Class(class.to_raw()));
+        let open = self.open.contains(&Branch::Class(class));
         let progress = device.state.scan.progress(class);
         let count = match progress {
             Some(p) if p.running => Some(match p.total {
@@ -1570,7 +1568,7 @@ impl Browser {
         );
         if drawn.response.clicked() {
             match on_triangle(&drawn) {
-                true => self.twist(Branch::Class(class.to_raw())),
+                true => self.twist(Branch::Class(class)),
                 false => acts.push(Act::ShowClass(class)),
             }
         }

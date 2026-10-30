@@ -257,6 +257,12 @@ third-party/chromium/LICENSE.
                 ],
             },
             Holder {
+                notice: "Copyright (c) 2014 Mathijs van de Nes",
+                crates: &[
+                    "zip 9.0.5",
+                ],
+            },
+            Holder {
                 notice: "Copyright (c) 2014 The Rust Project Developers",
                 crates: &[
                     "bitflags 1.3.2",
@@ -296,6 +302,12 @@ third-party/chromium/LICENSE.
                 notice: "Copyright (c) 2015 Alice Maz",
                 crates: &[
                     "base64 0.22.1",
+                ],
+            },
+            Holder {
+                notice: "Copyright (c) 2015 Carl Lerche + nix-rust Authors",
+                crates: &[
+                    "nix 0.31.3",
                 ],
             },
             Holder {
@@ -426,7 +438,7 @@ third-party/chromium/LICENSE.
             Holder {
                 notice: "Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>",
                 crates: &[
-                    "rustls 0.23.45",
+                    "rustls 0.23.46",
                     "rustls-native-certs 0.8.4",
                 ],
             },
@@ -1031,6 +1043,7 @@ third-party/chromium/LICENSE.
             "thiserror 2.0.20",
             "thiserror-impl 1.0.69",
             "thiserror-impl 2.0.20",
+            "typed-path 0.12.4",
             "unicode-ident 1.0.24",
             "utf8-zero 0.8.1",
             "winnow 1.0.4",
@@ -1095,35 +1108,6 @@ and labelled as such in comments in the individual source files. All
 have been licensed under extremely permissive terms.
 ------------------------------------------------------------------------------
 "#,
-            },
-            Text {
-                crates: &[
-                    "zip 2.4.2",
-                ],
-                text: r#"The MIT License (MIT)
-
-Copyright (c) 2014 Mathijs van de Nes
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-Some files in the "tests/data" subdirectory of this repository are under other
-licences; see files named LICENSE.*.txt for details."#,
             },
         ],
     },
@@ -1231,7 +1215,6 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("anstyle-parse", "1.0.0"),
     ("anstyle-query", "1.1.5"),
     ("anstyle-wincon", "3.0.11"),
-    ("arbitrary", "1.4.2"),
     ("arboard", "3.6.1"),
     ("arrayref", "0.3.9"),
     ("arrayvec", "0.7.8"),
@@ -1304,7 +1287,6 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("cursor-icon", "1.2.0"),
     ("dasp_sample", "0.11.0"),
     ("data-url", "0.3.2"),
-    ("derive_arbitrary", "1.4.2"),
     ("dispatch", "0.2.0"),
     ("dispatch2", "0.3.1"),
     ("displaydoc", "0.2.7"),
@@ -1430,6 +1412,7 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("ndk", "0.9.0"),
     ("ndk-context", "0.1.1"),
     ("ndk-sys", "0.6.0+11769913"),
+    ("nix", "0.31.3"),
     ("nohash-hasher", "0.2.0"),
     ("nu-ansi-term", "0.50.3"),
     ("num-bigint", "0.4.8"),
@@ -1522,7 +1505,7 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("rustc_version", "0.4.1"),
     ("rustix", "0.38.44"),
     ("rustix", "1.1.4"),
-    ("rustls", "0.23.45"),
+    ("rustls", "0.23.46"),
     ("rustls-native-certs", "0.8.4"),
     ("rustls-pki-types", "1.15.1"),
     ("rustls-webpki", "0.103.15"),
@@ -1583,6 +1566,7 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("tracing-core", "0.1.36"),
     ("ttf-parser", "0.25.1"),
     ("type-map", "0.5.1"),
+    ("typed-path", "0.12.4"),
     ("uds_windows", "1.2.1"),
     ("unicode-ident", "1.0.24"),
     ("unicode-normalization", "0.1.26"),
@@ -1701,7 +1685,8 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("zerotrie", "0.2.4"),
     ("zerovec", "0.11.6"),
     ("zerovec-derive", "0.11.3"),
-    ("zip", "2.4.2"),
+    ("zip", "9.0.5"),
+    ("zlib-rs", "0.6.8"),
     ("zmij", "1.0.23"),
     ("zopfli", "0.8.3"),
     ("zune-core", "0.5.3"),

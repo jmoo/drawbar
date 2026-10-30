@@ -57,6 +57,11 @@ above it. Keys beyond that are silent. Within a root, velocity picks the layer,
 with the layers spread across the velocity range in order. To set a layer's
 velocity value directly, name the file with `v12` in place of `l00`.
 
+`build` writes piano format 6 unless `--format 5` asks for the older format, for
+an instrument that does not play format 6. A template's format decides when you
+give one. Layer values run from 0 to 135 in format 6 and from 0 to 27 in format 5;
+`nord piano inspect` names a library's format.
+
 A WAV with a loop in its `smpl` chunk, which most sample editors write, makes a
 stroke that loops there while the key is held. Audio after the loop's end is not
 used, and the loop's last four samples are replaced by the four just before its
@@ -64,7 +69,8 @@ start, which a seamless loop already has. While the key is held, the loop fades
 the way the instrument's own pianos of that `--kind` do, faster on higher keys.
 `--loop-fade` sets the rate at middle C in decibels per second, and `0` holds the
 loop at its level. A stroke without a loop plays to its end, and a release stroke
-cannot loop.
+cannot loop. A release plays at the level the note has fallen to at key-up, and
+not at all when the attack recording is silent there.
 A loop is exact in a WAV at 35,002 Hz. At any other rate its ends move to the
 nearest frame of the resampled audio.
 

@@ -591,6 +591,9 @@ impl Store {
             let Some((class, at)) = entity.origin.slot() else {
                 continue;
             };
+            let Some(class) = super::keys::class_code(class) else {
+                continue;
+            };
             let saved = entity.saved.stamp();
             let Some(view) = self.views.get_mut(&entity.id) else {
                 let Some(instrument) = self.instrument.clone() else {
@@ -598,7 +601,7 @@ impl Store {
                 };
                 let slot = super::Slot {
                     instrument,
-                    class: class.to_raw(),
+                    class,
                     bank: at.bank,
                     slot: at.slot,
                 };

@@ -53,11 +53,11 @@ pub enum Family {
 }
 
 /// A class of storage on the instrument: the four libraries a decoded body can refer
-/// into, plus the two singleton buffers no reference points at.
+/// into, the two singleton buffers no reference points at, and the preset libraries of
+/// the models that keep organ, piano or synth settings apart from their programs.
 ///
-/// The wire codes live on `nord-usb`'s `ObjectClass`, which takes its library codes from
-/// [`Library`]. This enum names the same classes without the wire codes, so a caller
-/// holding both converts between them with no second table.
+/// `nord-usb`'s `ObjectClass` names the same classes, and each instrument's partition
+/// table says where it keeps them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Slot {
     Piano,
@@ -68,6 +68,9 @@ pub enum Slot {
     Live,
     /// The global settings singleton.
     Settings,
+    OrganPreset,
+    PianoPreset,
+    SynthPreset,
 }
 
 impl From<Library> for Slot {
@@ -82,13 +85,16 @@ impl From<Library> for Slot {
 }
 
 impl Slot {
-    pub const ALL: [Slot; 6] = [
+    pub const ALL: [Slot; 9] = [
         Slot::Piano,
         Slot::Sample,
         Slot::Program,
         Slot::SetList,
         Slot::Live,
         Slot::Settings,
+        Slot::OrganPreset,
+        Slot::PianoPreset,
+        Slot::SynthPreset,
     ];
 }
 
@@ -118,7 +124,11 @@ pub enum Acceptance {
 /// instrument refuses it. Only a tag listed here can refuse another family's instrument.
 const CARRIES: &[(&str, Family, Option<Slot>)] = &[
     (ne3::program::FORMAT, Family::Electro3, Some(Slot::Program)),
-    (ne3::organ_preset::FORMAT, Family::Electro3, None),
+    (
+        ne3::organ_preset::FORMAT,
+        Family::Electro3,
+        Some(Slot::OrganPreset),
+    ),
     (ne4::program::FORMAT, Family::Electro4, Some(Slot::Program)),
     (ne4::live::FORMAT, Family::Electro4, Some(Slot::Live)),
     (
@@ -153,7 +163,11 @@ const CARRIES: &[(&str, Family, Option<Slot>)] = &[
         Family::StageClassic,
         Some(Slot::Program),
     ),
-    (nsclassic::synth::FORMAT, Family::StageClassic, None),
+    (
+        nsclassic::synth::FORMAT,
+        Family::StageClassic,
+        Some(Slot::SynthPreset),
+    ),
     (
         nsclassic::piano_library::FORMAT,
         Family::StageClassic,
@@ -161,18 +175,26 @@ const CARRIES: &[(&str, Family, Option<Slot>)] = &[
     ),
     (ns2::program::FORMAT, Family::Stage2, Some(Slot::Program)),
     (ns2::live::FORMAT, Family::Stage2, Some(Slot::Live)),
-    (ns2::synth::FORMAT, Family::Stage2, None),
+    (ns2::synth::FORMAT, Family::Stage2, Some(Slot::SynthPreset)),
     (ns2::settings::FORMAT, Family::Stage2, Some(Slot::Settings)),
     (ns3::program::FORMAT, Family::Stage3, Some(Slot::Program)),
     (ns3::live::FORMAT, Family::Stage3, Some(Slot::Live)),
     (ns3::song::FORMAT, Family::Stage3, Some(Slot::SetList)),
-    (ns3::synth::FORMAT, Family::Stage3, None),
+    (ns3::synth::FORMAT, Family::Stage3, Some(Slot::SynthPreset)),
     (ns3::settings::FORMAT, Family::Stage3, Some(Slot::Settings)),
     (ns4::program::FORMAT, Family::Stage4, Some(Slot::Program)),
     (ns4::live::FORMAT, Family::Stage4, Some(Slot::Live)),
-    (ns4::synth::FORMAT, Family::Stage4, None),
-    (ns4::piano_preset::FORMAT, Family::Stage4, None),
-    (ns4::organ_preset::FORMAT, Family::Stage4, None),
+    (ns4::synth::FORMAT, Family::Stage4, Some(Slot::SynthPreset)),
+    (
+        ns4::piano_preset::FORMAT,
+        Family::Stage4,
+        Some(Slot::PianoPreset),
+    ),
+    (
+        ns4::organ_preset::FORMAT,
+        Family::Stage4,
+        Some(Slot::OrganPreset),
+    ),
     (ns4::settings::FORMAT, Family::Stage4, Some(Slot::Settings)),
     (np::program::FORMAT, Family::Piano, Some(Slot::Program)),
     (np::live::FORMAT, Family::Piano, Some(Slot::Live)),
@@ -357,6 +379,12 @@ impl Family {
     }
 
     /// Whether this family keeps files under `tag` in `slot`.
+    /// Whether a file has ever been written to an instrument of this family and read
+    /// back, which is what every write's mechanics were measured on.
+    pub fn written(self) -> bool {
+        CONFIRMED.iter().any(|(family, _, _)| *family == self)
+    }
+
     pub fn accepts(self, slot: Slot, tag: &str) -> Acceptance {
         if CONFIRMED.contains(&(self, slot, tag)) {
             return Acceptance::Confirmed;
@@ -414,6 +442,28 @@ mod tests {
                 open.len() <= 1,
                 "{} leaves its own {tag} unrefused in {open:?}",
                 owner.label(),
+            );
+        }
+    }
+
+    /// The Stage 4 keeps each kind of preset in its own library, and nowhere else.
+    #[test]
+    fn a_stage_4_preset_lands_in_its_own_preset_library() {
+        for (slot, tag) in [
+            (Slot::OrganPreset, ns4::organ_preset::FORMAT),
+            (Slot::PianoPreset, ns4::piano_preset::FORMAT),
+            (Slot::SynthPreset, ns4::synth::FORMAT),
+        ] {
+            assert_eq!(
+                Family::Stage4.accepts(slot, tag),
+                Acceptance::Inferred,
+                "{tag}"
+            );
+            assert_eq!(Family::Stage4.tag(slot), Some(tag));
+            assert_eq!(
+                Family::Stage4.accepts(Slot::Program, tag),
+                Acceptance::Refused,
+                "{tag}"
             );
         }
     }

@@ -180,7 +180,7 @@ impl Instrument {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Op {
     pub name: &'static str,
-    pub class: Option<u32>,
+    pub class: Option<nord_usb::ObjectClass>,
     /// The operator asked for it, so a success is worth a row too. The walks and reads
     /// the app makes on its own report failures only.
     pub asked: bool,
@@ -287,7 +287,7 @@ impl Event {
                 took,
                 instrument,
             } => {
-                let class = op.class.map(|class| class.to_string()).unwrap_or_default();
+                let class = op.class.map(|class| class.label()).unwrap_or_default();
                 let mut values = vec![
                     version,
                     ("op", Value::Text(op.name)),
@@ -523,7 +523,7 @@ mod tests {
             Event::Op {
                 op: Op {
                     name: "put",
-                    class: Some(1),
+                    class: Some(nord_usb::ObjectClass::Piano),
                     asked: true,
                 },
                 outcome: "device-status 0x15".into(),
@@ -547,7 +547,7 @@ mod tests {
         assert_eq!(
             op.json(),
             format!(
-                "{{\"event\":\"op\",\"version\":\"{}\",\"op\":\"put\",\"class\":\"1\",\
+                "{{\"event\":\"op\",\"version\":\"{}\",\"op\":\"put\",\"class\":\"pianos\",\
                  \"outcome\":\"device-status 0x15\",\"took\":\"<1s\",\
                  \"model\":\"Nord Electro 5D\",\"firmware\":\"2.04\"}}",
                 crate::sheet::VERSION
@@ -591,7 +591,7 @@ mod tests {
     fn a_success_the_operator_did_not_ask_for_sends_nothing() {
         let walk = Op {
             name: "scan-bank",
-            class: Some(1),
+            class: Some(nord_usb::ObjectClass::Piano),
             asked: false,
         };
         let before = recent().len();

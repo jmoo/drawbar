@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 
 use nord_usb::device::Geometry;
 use nord_usb::transport::ReplayTransport;
-use nord_usb::wire::{AllocationUnit, Bank, ObjectClass};
-use nord_usb::{op, Error, Location, Result, Session};
+use nord_usb::wire::{AllocationUnit, Bank, Classes, ObjectClass};
+use nord_usb::{op, Bare, Error, Location, Result, Session};
 
 /// Bytes an intent produced, and the file it named to compare them against.
 pub struct Produced {
@@ -28,8 +28,8 @@ pub struct Produced {
 /// Run one transaction and close it whatever the operation did. An abandoned session
 /// leaves the instrument mid-transaction, and every script pins the closing exchanges.
 macro_rules! session {
-    ($t:expr, $class:expr, |$s:ident| $body:expr) => {{
-        let mut $s = Session::open($t, $class).await?;
+    ($t:expr, $classes:expr, $class:expr, |$s:ident| $body:expr) => {{
+        let mut $s = Session::open($t, $classes, $class).await?;
         let r = $body.await;
         finish(r, $s.commit().await)
     }};
@@ -37,8 +37,10 @@ macro_rules! session {
 
 /// The same, escalated to a session that may mutate the device.
 macro_rules! rw_session {
-    ($t:expr, $class:expr, |$s:ident| $body:expr) => {{
-        let mut $s = Session::open($t, $class).await?.allow_destructive_writes();
+    ($t:expr, $classes:expr, $class:expr, |$s:ident| $body:expr) => {{
+        let mut $s = Session::open($t, $classes, $class)
+            .await?
+            .allow_destructive_writes();
         let r = $body.await;
         finish(r, $s.commit().await)
     }};
@@ -59,15 +61,18 @@ pub async fn drive(
     dir: &Path,
 ) -> Result<Option<Produced>> {
     match (verb, class) {
-        ("status", None) => op::inventory(t).await.map(|_| None),
+        ("status", None) => {
+            let classes = Declared { geometry, device }.classes().await?;
+            op::inventory(t, &classes).await.map(|_| None)
+        }
         ("recover", None) => op::recover(t).await.map(|_| None),
         ("geometry", None) => {
-            let read = session!(t, ObjectClass::Program, |s| Geometry::read(&mut s))?;
-            *geometry = Some(read);
+            *geometry = Some(Geometry::read(&mut Bare::new(t)).await?);
             Ok(None)
         }
         ("get" | "read" | "get-body" | "read-body", _) => {
-            drive_read(t, need_class(class)?, verb, args, dir).await
+            let geometry = Declared { geometry, device };
+            drive_read(t, geometry, need_class(class)?, verb, args, dir).await
         }
         ("put" | "move" | "duplicate" | "rename" | "delete", _) => {
             let geometry = Declared { geometry, device };
@@ -103,6 +108,13 @@ impl Declared<'_> {
         }
     }
 
+    async fn classes(&self) -> Result<Classes> {
+        match self.geometry {
+            Some(read) => Ok(read.classes().clone()),
+            None => Ok(self.committed().await?.classes().clone()),
+        }
+    }
+
     async fn committed(&self) -> Result<Geometry> {
         let model = self.device.and_then(|d| d.split(',').next()).map(str::trim);
         if model != Some(COMMITTED_DEVICE) {
@@ -124,9 +136,10 @@ async fn drive_query(
     verb: &str,
     args: &[String],
 ) -> Result<Option<Produced>> {
+    let classes = &geometry.classes().await?;
     match verb {
-        "status" => session!(t, need_class(class)?, |s| op::status(&mut s)).map(|_| None),
-        "focus" => session!(t, need_class(class)?, |s| async {
+        "status" => session!(t, classes, need_class(class)?, |s| op::status(&mut s)).map(|_| None),
+        "focus" => session!(t, classes, need_class(class)?, |s| async {
             // The CLI follows focus with an `info` on the loaded slot. An empty focused
             // slot answers status 1, which is not a fault.
             let at = op::focus(&mut s).await?;
@@ -138,19 +151,25 @@ async fn drive_query(
         .map(|()| None),
         "info" => {
             let at = slot(args, 0)?;
-            session!(t, need_class(class)?, |s| op::info(&mut s, at)).map(|_| None)
+            session!(t, classes, need_class(class)?, |s| op::info(&mut s, at)).map(|_| None)
         }
         "deps" => {
             let at = slot(args, 0)?;
-            session!(t, need_class(class)?, |s| op::dependencies(&mut s, at)).map(|_| None)
+            session!(t, classes, need_class(class)?, |s| op::dependencies(
+                &mut s, at
+            ))
+            .map(|_| None)
         }
         "check-address" => {
             let at = slot(args, 0)?;
-            session!(t, need_class(class)?, |s| op::check_address(&mut s, at)).map(|_| None)
+            session!(t, classes, need_class(class)?, |s| op::check_address(
+                &mut s, at
+            ))
+            .map(|_| None)
         }
         "select" => {
             let at = slot(args, 0)?;
-            session!(t, need_class(class)?, |s| op::select(&mut s, at)).map(|_| None)
+            session!(t, classes, need_class(class)?, |s| op::select(&mut s, at)).map(|_| None)
         }
         "walk" => {
             if !args.is_empty() {
@@ -158,7 +177,7 @@ async fn drive_query(
             }
             let class = need_class(class)?;
             let banks = geometry.banks(class).await?;
-            session!(t, class, |s| async {
+            session!(t, classes, class, |s| async {
                 for at in op::occupied_slots(&mut s, &banks).await? {
                     op::info(&mut s, at).await?;
                 }
@@ -180,7 +199,7 @@ async fn drive_query(
                 .map(|i| slot(args, i))
                 .collect::<Result<_>>()?;
             let banks = geometry.banks(class).await?;
-            session!(t, class, |s| op::set_lists_referencing(
+            session!(t, classes, class, |s| op::set_lists_referencing(
                 &mut s, &banks, &targets
             ))
             .map(|_| None)
@@ -191,6 +210,7 @@ async fn drive_query(
 
 async fn drive_read(
     t: &mut ReplayTransport,
+    geometry: Declared<'_>,
     class: ObjectClass,
     verb: &str,
     args: &[String],
@@ -199,7 +219,8 @@ async fn drive_read(
     let at = slot(args, 0)?;
     let named = args.get(1).map(|file| dir.join(file));
     let (name_first, whole) = (verb.starts_with("get"), !verb.ends_with("body"));
-    let bytes = session!(t, class, |s| async {
+    let classes = &geometry.classes().await?;
+    let bytes = session!(t, classes, class, |s| async {
         if name_first {
             op::info(&mut s, at).await?;
         }
@@ -219,6 +240,7 @@ async fn drive_write(
     args: &[String],
     dir: &Path,
 ) -> Result<Option<Produced>> {
+    let classes = &geometry.classes().await?;
     match verb {
         "put" => {
             let file = std::fs::read(dir.join(text(args, 0)?))?;
@@ -228,22 +250,22 @@ async fn drive_write(
                 number(args.get(3).map_or("", String::as_str))?,
             );
             let unit = geometry.unit(class).await?;
-            rw_session!(t, class, |s| op::write(
+            rw_session!(t, classes, class, |s| op::write(
                 &mut s, unit, at, &file, name, stamp
             ))
             .map(|()| None)
         }
         "move" => {
             let (from, to) = (slot(args, 0)?, slot(args, 1)?);
-            rw_session!(t, class, |s| op::move_object(&mut s, from, to)).map(|()| None)
+            rw_session!(t, classes, class, |s| op::move_object(&mut s, from, to)).map(|()| None)
         }
         "duplicate" => {
             let (from, to) = (slot(args, 0)?, slot(args, 1)?);
-            rw_session!(t, class, |s| op::duplicate(&mut s, from, to)).map(|()| None)
+            rw_session!(t, classes, class, |s| op::duplicate(&mut s, from, to)).map(|()| None)
         }
         "rename" => {
             let (at, name) = (slot(args, 0)?, text(args, 1)?);
-            rw_session!(t, class, |s| op::rename(&mut s, at, name)).map(|()| None)
+            rw_session!(t, classes, class, |s| op::rename(&mut s, at, name)).map(|()| None)
         }
         "delete" => {
             if args.is_empty() {
@@ -252,7 +274,7 @@ async fn drive_write(
             let slots: Vec<Location> = (0..args.len())
                 .map(|i| slot(args, i))
                 .collect::<Result<_>>()?;
-            rw_session!(t, class, |s| async {
+            rw_session!(t, classes, class, |s| async {
                 for at in &slots {
                     op::delete(&mut s, *at).await?;
                 }
@@ -274,9 +296,12 @@ pub fn class_of(token: &str) -> Result<Option<ObjectClass>> {
         "setlist" => ObjectClass::SetList,
         "live" => ObjectClass::Live,
         "settings" => ObjectClass::Settings,
-        // The classes with no noun of their own, reached as `nord raw --class N`.
+        "organ-preset" => ObjectClass::OrganPreset,
+        "piano-preset" => ObjectClass::PianoPreset,
+        "synth-preset" => ObjectClass::SynthPreset,
+        // A partition by its index, as `nord raw --class N` reaches it.
         other => match other.strip_prefix("class-").and_then(|n| n.parse().ok()) {
-            Some(raw) => ObjectClass::from_raw(raw),
+            Some(index) => ObjectClass::Unknown(index),
             None => return Err(bad(format!("unknown object class {other:?}"))),
         },
     }))

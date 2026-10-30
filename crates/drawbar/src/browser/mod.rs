@@ -426,7 +426,7 @@ impl Browser {
             Item::Folder(_) => vec![Branch::Computer],
             Item::Slot { class, at } => vec![
                 Branch::Instrument,
-                Branch::Class(class.to_raw()),
+                Branch::Class(class),
                 tree::bank_branch(class, at.user_bank()),
             ],
         };
@@ -1199,7 +1199,7 @@ mod tests {
             device.pretend_partitions(&crate::device::ELECTRO5);
             // Every branch of the instrument open, so every row shape is painted.
             for class in device.state.classes() {
-                browser.open.insert(Branch::Class(class.to_raw()));
+                browser.open.insert(Branch::Class(class));
                 for bank in 0..=8 {
                     browser.open.insert(tree::bank_branch(class, bank));
                 }

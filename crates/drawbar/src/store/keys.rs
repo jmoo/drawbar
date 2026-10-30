@@ -23,8 +23,39 @@ pub const TAG_NAMES: Set<String> = Set::new("tag names");
 /// anywhere else says nothing, and has no entity for it.
 pub const ORIGIN: Register<Came> = Register::new("origin");
 
-/// An [`ORIGIN`], as the library keeps it. A slot is its class's code and its bank and
-/// slot from zero, as the wire numbers them.
+/// The code the library keeps for each class an asset can come off. Part of the format:
+/// the first six are the codes the index of the drawbar before the store fixed, which
+/// were the Electro 5's partition numbers then.
+const CLASSES: [(ObjectClass, u32); 9] = [
+    (ObjectClass::Piano, 1),
+    (ObjectClass::Sample, 3),
+    (ObjectClass::Program, 4),
+    (ObjectClass::SetList, 5),
+    (ObjectClass::Live, 6),
+    (ObjectClass::Settings, 7),
+    (ObjectClass::OrganPreset, 8),
+    (ObjectClass::PianoPreset, 9),
+    (ObjectClass::SynthPreset, 10),
+];
+
+/// The code the library keeps for `class`; none for a partition no class names.
+pub fn class_code(class: ObjectClass) -> Option<u32> {
+    let mut known = CLASSES.iter();
+    known
+        .find(|(held, _)| *held == class)
+        .map(|&(_, code)| code)
+}
+
+/// The class `code` is the code of; a code a newer build gave reads as unknown.
+pub fn class_of(code: u32) -> ObjectClass {
+    let mut known = CLASSES.iter();
+    known
+        .find(|(_, held)| *held == code)
+        .map_or(ObjectClass::Unknown(code), |&(class, _)| class)
+}
+
+/// An [`ORIGIN`], as the library keeps it. A slot is its class's code ([`class_code`])
+/// and its bank and slot from zero, as the wire numbers them.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 #[serde(tag = "from", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Came {
@@ -40,7 +71,7 @@ impl Came {
             Origin::File(_) => None,
             Origin::Fresh => Some(Came::New),
             Origin::Device { class, at } => Some(Came::Slot {
-                class: class.to_raw(),
+                class: class_code(*class)?,
                 bank: at.bank,
                 slot: at.slot,
             }),
@@ -56,7 +87,7 @@ impl Came {
         match self {
             Came::New => Origin::Fresh,
             Came::Slot { class, bank, slot } => Origin::Device {
-                class: ObjectClass::from_raw(class),
+                class: class_of(class),
                 at: Location { bank, slot },
             },
             Came::Rescued { bank, slot } => Origin::Rescued {
@@ -382,6 +413,29 @@ mod tests {
         assert_eq!(
             identity_of(&path, &mut file).unwrap(),
             identity("a.wav", &bytes)
+        );
+    }
+
+    #[test]
+    fn every_class_keeps_its_code_and_a_program_slot_is_kept_as_it_was() {
+        for (class, code) in CLASSES {
+            assert_eq!(
+                (class_code(class), class_of(code)),
+                (Some(code), class),
+                "{class:?}"
+            );
+        }
+        assert_eq!(class_code(ObjectClass::Unknown(3)), None);
+        assert_eq!(class_of(42), ObjectClass::Unknown(42));
+        // The bytes the drawbar before the store wrote for this slot's class, as the
+        // library keeps them.
+        let came = Came::of(&Origin::Device {
+            class: ObjectClass::Program,
+            at: Location { bank: 1, slot: 7 },
+        });
+        assert_eq!(
+            serde_json::to_string(&came).unwrap(),
+            r#"{"from":"slot","class":4,"bank":1,"slot":7}"#
         );
     }
 }

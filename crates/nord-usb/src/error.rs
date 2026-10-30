@@ -69,6 +69,11 @@ pub enum Error {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 
+    /// The instrument's partition table names no partition for this class, so nothing
+    /// addresses it.
+    #[error("the instrument has no partition for {}", .0.label())]
+    NoPartition(ObjectClass),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -98,6 +103,7 @@ impl Error {
             | Error::Transport(_)
             | Error::Envelope(_)
             | Error::InvalidArgument(_)
+            | Error::NoPartition(_)
             | Error::Io(_) => ErrKind::Transport,
         }
     }

@@ -37,9 +37,9 @@ pub mod wire;
 pub use device::{Device, Geometry};
 pub use envelope::{FileSink, FileSource};
 pub use error::{Error, Result};
-pub use session::{ReadOnly, ReadWrite, Session};
+pub use session::{Bare, ReadOnly, ReadWrite, Session};
 pub use transport::Transport;
-pub use wire::{Location, Message, ObjectClass, Service, Status};
+pub use wire::{Classes, Location, Message, ObjectClass, Service, Status};
 
 #[cfg(feature = "replay")]
 pub use transport::ReplayTransport;

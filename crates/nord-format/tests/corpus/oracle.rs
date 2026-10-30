@@ -756,7 +756,10 @@ fn recordings_from(s: &Specimen) -> Result<(), String> {
         .collect::<Result<_, String>>()?;
     let (library_name, variant) = library.name();
     let mut built = npno::encode::build(
-        &npno::encode::Donor::Rules(npno::encode::Rules::new(npno::encode::Kind::Grand)),
+        &npno::encode::Donor::Rules(npno::encode::Rules::new(
+            npno::Version::V5,
+            npno::encode::Kind::Grand,
+        )),
         &npno::encode::Options::new(&library_name).variant(&variant),
         &recordings,
     )
@@ -775,6 +778,16 @@ fn recordings_from(s: &Specimen) -> Result<(), String> {
             stroke.note_off_fade()
         );
         built.set_note_off_fade(index, 0).context("fade")?;
+    }
+    // The script wrote no release level, so the file's releases never sounded on a 5.x
+    // key; the table is restated as the file holds it.
+    for key in 0..npno::NOTES as u8 {
+        let theirs = theirs.release_level(key).context("release level")?;
+        ensure!(
+            theirs == 0,
+            "key {key} holds release level {theirs}, not the script's 0"
+        );
+        built.set_release_level(key, 0).context("release level")?;
     }
     let bytes = built
         .to_piano()

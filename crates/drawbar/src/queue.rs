@@ -1425,7 +1425,7 @@ const PICKER_COLUMNS: usize = 6;
 /// ⚠️ Derived from the entry, not from `ui.id()`: the picker is drawn in a popup's `Ui`,
 /// not the row's, and two entries' pickers must not share a bank or a cell.
 fn salt(held: &Queued) -> egui::Id {
-    egui::Id::new(("picker", held.class.to_raw(), held.id))
+    egui::Id::new(("picker", held.class, held.id))
 }
 
 /// The picker behind the chip: a row of bank chips, then the shown bank's slots drawn as

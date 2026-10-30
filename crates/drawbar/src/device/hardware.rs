@@ -191,7 +191,7 @@ struct Run {
     pianos: usize,
     samples: usize,
     /// What each class held when the run started.
-    held: HashMap<u32, Vec<(Location, String)>>,
+    held: HashMap<ObjectClass, Vec<(Location, String)>>,
     sources: Mutex<HashMap<String, PathBuf>>,
 }
 
@@ -209,12 +209,7 @@ fn run() -> &'static Run {
         let samples = cli.count(ObjectClass::Sample);
         let held = [ObjectClass::Piano, ObjectClass::Sample]
             .into_iter()
-            .map(|class| {
-                (
-                    class.to_raw(),
-                    cli.list(class).unwrap_or_else(|why| panic!("{why}")),
-                )
-            })
+            .map(|class| (class, cli.list(class).unwrap_or_else(|why| panic!("{why}"))))
             .collect();
         eprintln!("at the start: {pianos} pianos, {samples} samples; run folder {dir:?}");
         Run {
@@ -294,7 +289,7 @@ impl Run {
     /// suite gives, apart from those it claimed: objects a write left somewhere it did not
     /// address.
     fn strays(&self, class: ObjectClass) -> Result<Vec<(Location, String)>, String> {
-        let before = &self.held[&class.to_raw()];
+        let before = &self.held[&class];
         let claimed = self.written();
         let mut strays: Vec<(Location, String)> = self
             .cli

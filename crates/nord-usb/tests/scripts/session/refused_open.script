@@ -1,4 +1,5 @@
 # source: synthetic
+# device: Nord Electro 5
 # note: a refused SESSION_OPEN must still release the UI session the HELLO opened.
 # intent: program status
 # expect: err class-refused 0x5

@@ -47,7 +47,7 @@ byte map. There are three tiers:
   the Stage 4 synth, piano and organ presets.
 - **Structurally decoded**: the container and layout are understood, and the
   audio is decoded and encoded. Sample instruments in every layout, piano
-  libraries, and Sample Editor projects.
+  libraries in both formats (5.x and 6.x), and Sample Editor projects.
 - **Container-verified**: recognized, checksummed and kept byte for byte. Every
   other CBIN tag, the Lead SysEx banks, the `.cn3` library, and ZIP backup
   bundles behind the `bundle` feature.

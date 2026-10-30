@@ -79,7 +79,9 @@ fn info_rejects_a_response_for_a_different_location() {
         ],
     );
     let err = pollster::block_on(async {
-        let mut session = Session::open(&mut t, ObjectClass::Program).await.unwrap();
+        let mut session = Session::open(&mut t, &frames::electro5(), ObjectClass::Program)
+            .await
+            .unwrap();
         let err = nord_usb::op::info(&mut session, requested)
             .await
             .expect_err("a mismatched INFO location must be rejected");
@@ -119,7 +121,9 @@ fn a_reply_whose_crc_is_wrong_is_refused_and_releases_the_session() {
             .collect(),
     );
     let err = pollster::block_on(async {
-        let mut session = Session::open(&mut t, ObjectClass::Program).await.unwrap();
+        let mut session = Session::open(&mut t, &frames::electro5(), ObjectClass::Program)
+            .await
+            .unwrap();
         let err = op::info(&mut session, at)
             .await
             .expect_err("a frame whose CRC does not match its bytes is not a reply");
@@ -140,7 +144,7 @@ fn unanswered_status() -> Vec<Step> {
     let mut steps = session_open(ObjectClass::Program);
     steps.push(request(
         cmd::STATUS,
-        &ObjectClass::Program.to_raw().to_be_bytes(),
+        &frames::e5_index(ObjectClass::Program).to_be_bytes(),
     ));
     steps.push(Step::InTimeout);
     steps.push(ui_request(ui::GOODBYE));
@@ -149,7 +153,9 @@ fn unanswered_status() -> Vec<Step> {
 
 fn status_then_commit(t: &mut ReplayTransport) -> nord_usb::Error {
     pollster::block_on(async {
-        let mut session = Session::open(t, ObjectClass::Program).await.unwrap();
+        let mut session = Session::open(t, &frames::electro5(), ObjectClass::Program)
+            .await
+            .unwrap();
         let err = op::status(&mut session)
             .await
             .expect_err("the device said nothing about the class within the read limit");
@@ -207,7 +213,9 @@ fn probe_surfaces_a_short_statusless_reply() {
         ],
     );
     let (command, status, payload) = pollster::block_on(async {
-        let mut session = Session::open(&mut t, ObjectClass::Program).await.unwrap();
+        let mut session = Session::open(&mut t, &frames::electro5(), ObjectClass::Program)
+            .await
+            .unwrap();
         let reply = session
             .probe(
                 Service::Program,
@@ -236,14 +244,16 @@ fn probe_limit_covers_close_without_changing_ordinary_reads() {
             vec![
                 request(0x99, &[]),
                 Step::InTimeout,
-                request(cmd::STATUS, &class.to_raw().to_be_bytes()),
+                request(cmd::STATUS, &frames::e5_index(class).to_be_bytes()),
                 response(cmd::STATUS, &words(&[1, 2, 3, 4, 5])),
             ],
         ),
         limits: Vec::new(),
     };
     pollster::block_on(async {
-        let mut session = Session::open(&mut t, ObjectClass::Program).await.unwrap();
+        let mut session = Session::open(&mut t, &frames::electro5(), ObjectClass::Program)
+            .await
+            .unwrap();
         assert!(session
             .probe(Service::Program, 10, 0x99, &[], Duration::from_secs(7),)
             .await
@@ -272,7 +282,7 @@ fn probe_limit_covers_close_without_changing_ordinary_reads() {
 #[test]
 fn inventory_propagates_transport_failure_while_opening_a_class() {
     let mut transport = ReplayTransport::new(Vec::new());
-    let err = pollster::block_on(op::inventory(&mut transport))
+    let err = pollster::block_on(op::inventory(&mut transport, &frames::electro5()))
         .expect_err("a failed transport cannot describe an empty inventory");
     assert!(
         matches!(err, nord_usb::Error::Replay(_)),
@@ -286,12 +296,12 @@ fn inventory_propagates_a_malformed_status_after_closing_the_session() {
     // exchange.
     let class = ObjectClass::INVENTORY[0];
     let mut steps = session_open(class);
-    steps.push(request(cmd::STATUS, &class.to_raw().to_be_bytes()));
+    steps.push(request(cmd::STATUS, &frames::e5_index(class).to_be_bytes()));
     steps.push(response(cmd::STATUS, &words(&[1, 2])));
     steps.extend(session_close());
 
     let mut transport = ReplayTransport::new(steps);
-    let err = pollster::block_on(op::inventory(&mut transport))
+    let err = pollster::block_on(op::inventory(&mut transport, &frames::electro5()))
         .expect_err("a malformed status must not become an empty inventory");
     assert!(matches!(
         err,
@@ -303,18 +313,26 @@ fn inventory_propagates_a_malformed_status_after_closing_the_session() {
     );
 }
 
+/// The inventory classes an Electro 5's table holds.
+fn electro5_inventory() -> impl Iterator<Item = ObjectClass> {
+    ObjectClass::INVENTORY
+        .into_iter()
+        .filter(|class| frames::electro5().index(*class).is_some())
+}
+
 #[test]
 fn inventory_skips_a_class_that_refuses_its_status() {
     let mut steps = Vec::new();
-    for class in ObjectClass::INVENTORY {
+    // The Electro 5 keeps no presets, so they are skipped with nothing sent.
+    for class in electro5_inventory() {
         steps.extend(session_open(class));
-        steps.push(request(cmd::STATUS, &class.to_raw().to_be_bytes()));
+        steps.push(request(cmd::STATUS, &frames::e5_index(class).to_be_bytes()));
         steps.push(refusal(cmd::STATUS, 5));
         steps.extend(session_close());
     }
 
     let mut transport = ReplayTransport::new(steps);
-    let statuses = pollster::block_on(op::inventory(&mut transport)).unwrap();
+    let statuses = pollster::block_on(op::inventory(&mut transport, &frames::electro5())).unwrap();
     assert!(statuses.is_empty());
     assert!(
         transport.is_exhausted(),
@@ -327,7 +345,7 @@ fn sample_unit() -> nord_usb::wire::AllocationUnit {
     let mut fields = 131_064u32.to_be_bytes().to_vec();
     fields.resize(29, 0);
     nord_usb::wire::Partition {
-        index: ObjectClass::Sample.to_raw(),
+        index: frames::e5_index(ObjectClass::Sample),
         name: "Samp Lib".into(),
         native: false,
         fields,
@@ -339,17 +357,21 @@ fn sample_unit() -> nord_usb::wire::AllocationUnit {
 #[test]
 fn inventory_skips_a_class_whose_session_the_device_refuses() {
     let mut steps = Vec::new();
-    for class in ObjectClass::INVENTORY {
+    // The Electro 5 keeps no presets, so they are skipped with nothing sent.
+    for class in electro5_inventory() {
         steps.push(ui_request(ui::HELLO));
         steps.push(ui_response(ui::HELLO, 0));
-        steps.push(request(cmd::SESSION_OPEN, &class.to_raw().to_be_bytes()));
+        steps.push(request(
+            cmd::SESSION_OPEN,
+            &frames::e5_index(class).to_be_bytes(),
+        ));
         steps.push(refusal(cmd::SESSION_OPEN, 5));
         steps.push(ui_request(ui::GOODBYE));
         steps.push(ui_response(ui::GOODBYE, 0));
     }
 
     let mut transport = ReplayTransport::new(steps);
-    let statuses = pollster::block_on(op::inventory(&mut transport)).unwrap();
+    let statuses = pollster::block_on(op::inventory(&mut transport, &frames::electro5())).unwrap();
     assert!(statuses.is_empty());
     assert!(
         transport.is_exhausted(),
@@ -365,7 +387,7 @@ fn inventory_propagates_a_refused_hello_rather_than_reporting_nothing() {
         ui_request(ui::GOODBYE),
         ui_response(ui::GOODBYE, 0),
     ]);
-    let err = pollster::block_on(op::inventory(&mut transport))
+    let err = pollster::block_on(op::inventory(&mut transport, &frames::electro5()))
         .expect_err("a refused HELLO is not one class declining to answer");
     assert!(
         matches!(err, nord_usb::Error::DeviceStatus(5)),
@@ -384,7 +406,10 @@ fn write_stops_on_a_malformed_cleaning_reply_without_polling_again() {
     let mut transport = session_frames(
         ObjectClass::Sample,
         vec![
-            request(cmd::STATUS, &ObjectClass::Sample.to_raw().to_be_bytes()),
+            request(
+                cmd::STATUS,
+                &frames::e5_index(ObjectClass::Sample).to_be_bytes(),
+            ),
             response(cmd::STATUS, &words(&[0, 0, 0, 0, 0])),
             notify(ui::label("Cleaning...").unwrap()),
             notify(ui::percent(0)),
@@ -395,7 +420,7 @@ fn write_stops_on_a_malformed_cleaning_reply_without_polling_again() {
         ],
     );
     let err = pollster::block_on(async {
-        let session = Session::open(&mut transport, ObjectClass::Sample)
+        let session = Session::open(&mut transport, &frames::electro5(), ObjectClass::Sample)
             .await
             .unwrap();
         let mut session = session.allow_destructive_writes();
@@ -420,7 +445,9 @@ fn write_stops_on_a_malformed_cleaning_reply_without_polling_again() {
 fn a_failed_commit_reports_rather_than_panicking() {
     let mut t = replaying("session/refused_close.script");
     let err = pollster::block_on(async {
-        let s = Session::open(&mut t, ObjectClass::Program).await.unwrap();
+        let s = Session::open(&mut t, &frames::electro5(), ObjectClass::Program)
+            .await
+            .unwrap();
         s.commit().await.expect_err("the device refused the close")
     });
     assert!(
@@ -438,7 +465,9 @@ fn a_failed_commit_reports_rather_than_panicking() {
 fn an_unsolicited_changed_notification_is_drained_not_mistaken_for_the_reply() {
     let mut t = replaying("session/changed_notification.script");
     pollster::block_on(async {
-        let s = Session::open(&mut t, ObjectClass::Program).await.unwrap();
+        let s = Session::open(&mut t, &frames::electro5(), ObjectClass::Program)
+            .await
+            .unwrap();
         assert!(
             s.instrument_changed(),
             "the drained notification must be surfaced, not silently skipped"
@@ -453,7 +482,7 @@ fn an_unsolicited_changed_notification_is_drained_not_mistaken_for_the_reply() {
 fn a_notification_flood_bails_rather_than_looping() {
     let mut t = replaying("session/notification_flood.script");
     let err = pollster::block_on(async {
-        match Session::open(&mut t, ObjectClass::Program).await {
+        match Session::open(&mut t, &frames::electro5(), ObjectClass::Program).await {
             Ok(s) => {
                 s.abort();
                 panic!("a flood of notifications was reported as a successful open");
@@ -476,7 +505,7 @@ fn a_notification_flood_bails_rather_than_looping() {
 fn a_stale_session_is_cleared_and_the_open_retried() {
     let mut t = replaying("session/stale_session_retried.script");
     pollster::block_on(async {
-        let s = Session::open(&mut t, ObjectClass::Program)
+        let s = Session::open(&mut t, &frames::electro5(), ObjectClass::Program)
             .await
             .expect("a stale session should have been cleared and the open retried");
         s.commit().await.expect("close");
@@ -541,7 +570,9 @@ fn a_read_timeout_inside_a_chunked_read_releases_the_session() {
     let mut t = ReplayTransport::new(steps);
 
     let err = pollster::block_on(async {
-        let mut session = Session::open(&mut t, ObjectClass::Program).await.unwrap();
+        let mut session = Session::open(&mut t, &frames::electro5(), ObjectClass::Program)
+            .await
+            .unwrap();
         let err = op::read_body(&mut session, at)
             .await
             .expect_err("the second chunk never arrived");
@@ -565,7 +596,7 @@ fn a_write_the_device_does_not_accept_mid_transfer_ends_the_transaction() {
     let mut unit = 1u32.to_be_bytes().to_vec();
     unit.resize(29, 0);
     let unit = nord_usb::wire::Partition {
-        index: ObjectClass::Program.to_raw(),
+        index: frames::e5_index(ObjectClass::Program),
         name: "Program".into(),
         native: false,
         fields: unit,
@@ -589,7 +620,7 @@ fn a_write_the_device_does_not_accept_mid_transfer_ends_the_transaction() {
     let mut t = ReplayTransport::new(steps);
 
     let (err, committed) = pollster::block_on(async {
-        let mut session = Session::open(&mut t, ObjectClass::Program)
+        let mut session = Session::open(&mut t, &frames::electro5(), ObjectClass::Program)
             .await
             .unwrap()
             .allow_destructive_writes();
