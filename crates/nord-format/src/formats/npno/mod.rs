@@ -159,15 +159,15 @@ impl Version {
         (ne5::velocity::HIGHEST_THRESHOLD / self.layer_scale()) as u8
     }
 
-    /// The layer value vendor libraries give a root's softest layer, which
-    /// [`encode::layer_value`] spreads a root's layers up to. Version 6 libraries state
-    /// five times the value their version 5 releases do. Inferred from specimens; not
+    /// The layer value [`encode::layer_value`] gives the softest of a root's `layers`:
+    /// 20 on the version 6 scale for each layer below the loudest, kept between 50 and
+    /// 100, and a fifth of that in version 5. Vendor version 6 roots step about 20 a
+    /// layer, span about 50 with two or three layers, and stop near 100 with many; their
+    /// version 5 editions state a fifth of each value. Inferred from specimens; not
     /// confirmed on hardware.
-    pub fn softest_layer(self) -> u8 {
-        match self {
-            Version::V5 => 27,
-            Version::V6 => 135,
-        }
+    pub fn softest_layer(self, layers: usize) -> u8 {
+        let v6 = (20 * layers.saturating_sub(1)).clamp(50, 100);
+        (v6 / usize::from(self.layer_scale())) as u8
     }
 
     /// Decibels one unit of [`Stroke::trim`] attenuates a stroke by. Confirmed on
@@ -243,9 +243,9 @@ const REC_MARKS: usize = 0x1c;
 /// u16 index of the block holding the loop start.
 const REC_MARK_BLOCK: usize = 0x2c;
 /// The fade a held note's loop plays under from the loop's start: [`LADDER_UNITY`] holds
-/// its level, each unit below it fades the loop 0.024 dB/s whatever key plays it, and 0
-/// silences the stroke at the loop's start. Confirmed on hardware. Release strokes zero
-/// it.
+/// its level, each unit below it fades the loop [`DECAY_PER_UNIT`] whatever key plays
+/// it, and 0 silences the stroke at the loop's start. Confirmed on hardware. Release
+/// strokes zero it.
 const REC_DECAY: usize = 0x2e;
 /// u16 holding the layer value again in vendor records. Sweeping it moved nothing
 /// measurable, in either version. Confirmed on hardware.
@@ -269,15 +269,24 @@ const MARKS: usize = 4;
 
 /// One-pole decay coefficients a record carries after the one at `0x2e`, from `0x36`
 /// up to the identifier. This ladder is decay the instrument applies on top of the
-/// stroke's own. Its entries are non-decreasing, and strokes of every bank carry it,
-/// including release strokes, which zero only the coefficient at `0x2e`. This crate
-/// does not derive them from audio. Confirmed on hardware.
+/// stroke's own, from note-on until the loop's start. A key `t` semitones above its root
+/// plays entry `1 − t`: entry 0 a semitone up, entry 1 the root itself, and entry 13 an
+/// octave down. Each unit an entry sits below [`LADDER_UNITY`] fades the stroke
+/// [`DECAY_PER_UNIT`], at every root, stroke length and velocity, in both formats. Its
+/// entries are non-decreasing, and strokes of every bank carry it, including release
+/// strokes, which zero only the coefficient at `0x2e`. A [`Version::V5`] release stroke
+/// fades about 35 dB/s under any entry below unity. Confirmed on hardware.
 pub const DECAYS: usize = 14;
 const _: () = assert!(REC_DECAYS + DECAYS * 4 == REC_ID);
 
 /// A [`DECAYS`] ladder entry that applies no decay: 1.0 in the ladder's fixed point.
 /// Vendor entries sit just below it.
 pub const LADDER_UNITY: u32 = 0x0080_0000;
+
+/// Decibels per second that each unit below [`LADDER_UNITY`] fades a stroke by, in the
+/// coefficient at `0x2e` and in each entry of the [`DECAYS`] ladder. Confirmed on
+/// hardware.
+pub const DECAY_PER_UNIT: f64 = 0.024;
 
 /// The audio grid's offset from a whole number of blocks.
 ///
@@ -761,7 +770,7 @@ impl<'a> Stroke<'a> {
     /// alone, and there the layer value changes neither which stroke plays nor how loud.
     /// Either way the loudest layer plays at the top of the velocity range
     /// ([`ne5::velocity::top_velocity`]). Confirmed on hardware. Vendor libraries spread a
-    /// root over 0..[`Version::softest_layer`].
+    /// root about as [`Version::softest_layer`] says.
     pub fn layer(&self) -> u8 {
         self.record[REC_LAYER]
     }

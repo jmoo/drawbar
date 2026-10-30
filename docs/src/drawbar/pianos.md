@@ -53,8 +53,17 @@ have.
 
 A new library is written in piano format 6.x. **Advanced ▸ Format** offers 5.x
 for an instrument that does not play 6.x. With a template, the library takes the
-template's format. A layer's value is on its format's scale: 0 to 135 spreads a
-root over the velocity range in 6.x, and 0 to 27 in 5.x.
+template's format. A layer's value is on its format's scale: in 6.x a root's
+layers step 20 apart, spanning at least 0 to 50 and at most 0 to 100, and 5.x
+uses a fifth of each value.
+
+Without a template, each stroke decays from the moment its key is struck as the
+instrument's own grand pianos do, faster on higher keys. A 6.x library trims each
+layer to play at the level of its root's loudest layer, softer layers a little
+louder as the instrument's own grand pianos have them, so the recordings carry the
+dynamics, and trims each release 18 dB below the loudest. When a soft layer needs more
+boost than the instrument gives, the whole library is turned down to fit. A 5.x
+library trims each layer by its value, as a library built on a template does.
 
 A WAV with a loop, which most sample editors can set, makes a stroke that loops
 there while the key is held, and the dialog marks it. Audio after the loop's end

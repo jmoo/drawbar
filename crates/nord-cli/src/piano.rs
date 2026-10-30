@@ -169,8 +169,9 @@ pub struct BuildArgs {
     /// A directory of WAVs, one per stroke, named `<root>-b<bank>-l<layer>.wav`:
     /// `060-b0-l00.wav` is MIDI note 60, the attack bank, the loudest layer. Banks are
     /// 0 attack, 1 pedal resonance and 2 release. `l00`, `l01`, … count from the
-    /// loudest and are spread over the layer values the instrument selects by, 0..135
-    /// in format 6 and 0..27 in format 5. Write `v12` in place of `l00` to set a
+    /// loudest and are spread over the layer values the instrument selects by, 20 apart
+    /// in format 6 between spans of 0..50 and 0..100, and a fifth of that in format 5.
+    /// Write `v12` in place of `l00` to set a
     /// layer's value directly; all layers of one root and bank must use the same form.
     /// Files that are not WAVs are skipped, and a WAV named any other way is refused.
     ///
@@ -184,13 +185,14 @@ pub struct BuildArgs {
     /// A library to take everything the audio does not decide from: the decay
     /// coefficients, per-note tables, playback parameters, format and the word at the
     /// start of the body. Each new stroke inherits from the template's stroke of the
-    /// same bank and nearest root.
+    /// same bank and nearest root, and is trimmed by its own layer value.
     ///
-    /// Without a template, those fields follow fixed rules: no decay applied over the
-    /// recordings, held loops fading as `--loop-fade` says, a fade at key-up, and the
-    /// damper covering the keys `--kind` implies. A library built that way has been
-    /// played, and sounds the same as the same audio built with a template while a key
-    /// is held. Either way, each stroke is trimmed by its own layer value.
+    /// Without a template, those fields follow fixed rules: each stroke decaying from
+    /// note-on as the instrument's own pianos of `--kind` do, held loops fading as
+    /// `--loop-fade` says, a fade at key-up, and the damper covering the keys `--kind`
+    /// implies. A format 6 library trims each layer to play at the level of its root's
+    /// loudest, softer layers a little above it as pianos of `--kind` are, and a format
+    /// 5 library trims each stroke by its own layer value.
     #[arg(long, value_name = "FILE")]
     pub template: Option<PathBuf>,
 
@@ -1230,10 +1232,14 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             args.out.display()
         ),
         None => format!(
-            "{} uses neutral playback in place of a template: no decay applied over the \
-             recordings, each stroke trimmed by its own layer value, a fade at key-up, \
-             {:+.1} dB of library gain, and the damper reaching {}",
+            "{} uses playback rules in place of a template: each stroke decaying as the \
+             instrument's own pianos of its kind do, {}, a fade at key-up, {:+.1} dB of \
+             library gain, and the damper reaching {}",
             args.out.display(),
+            match version {
+                Version::V5 => "each stroke trimmed by its own layer value",
+                Version::V6 => "each layer trimmed to its root's loudest, softer layers lifted as its kind's are",
+            },
             f64::from(rules.gain) / 10.0,
             damper_reach(rules.damper_top),
         ),

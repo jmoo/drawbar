@@ -56,19 +56,17 @@
 //! coefficients, a velocity window, a per-stroke identifier, and two bytes the later
 //! streams use. The audio does not predict the prefix's per-note tables and playback
 //! parameters either. [`build`] gets them from a [`Donor`]. The trim follows the
-//! recording's layer value whatever the donor, as [`Donor::Rules`] states it.
+//! recording's layer value, except in a [`Version::V6`] library built from [`Rules`],
+//! where it follows the recording's level.
 //!
 //! [`Donor::Template`] copies them from a library: for each recording, from the
 //! template stroke of the same bank and nearest root. The instrument accepts them, but
 //! they carry the vendor's tuning of a different instrument.
 //!
 //! [`Donor::Rules`] states them instead, so a library can be written from recordings
-//! alone. Every field is then a neutral playback parameter: no decay applied over the
-//! recordings, each stroke trimmed according to its layer value, a fade at key-up, and
-//! the damper covering the keys that kind of instrument damps. A library written this
-//! way plays like the same audio built against a template while a key is held, within
-//! about a decibel at every velocity and key, and sustains longer because no extra
-//! decay is applied. Confirmed on hardware.
+//! alone: a decay over each stroke and a fade over each held loop as vendor libraries
+//! of that kind of instrument apply them, a fade at key-up, and the damper covering the
+//! keys that kind of instrument damps.
 //!
 //! The key-up fade takes its values from vendor electric pianos. On an attack stroke it
 //! takes a note 40 dB down in 25 to 35 ms, where 0 cuts it 40 dB within 10 ms.
@@ -88,11 +86,11 @@ use super::codec::{self, MAX_ORDER, MAX_WIDTH, MIN_WIDTH, OVERLAP};
 use super::Version;
 use super::{
     be32, block_bytes, midi_key, put16, put32, Bank, Library, Loop, Stroke, CNSP_MAGIC,
-    DAMPER_TOP_AT, DECAYS, DIRECTORY_AT, FINE_TUNE_AT, FORMAT, GAIN_AT, KEY_MAP_AT, KIND_AT,
-    LADDER_UNITY, MARKS, NOTES, RECORD, REC_BANK, REC_BLOCKS, REC_DECAY, REC_DECAYS, REC_FRAMES,
-    REC_ID, REC_LAYER, REC_MARKS, REC_MARK_BLOCK, REC_NOTE_OFF, REC_SEEDS, REC_START,
-    REC_THRESHOLD, REC_TRIM, REC_WINDOW, RELEASE_LEVEL_AT, SEEDS, UNCOVERED, VERSION_AT,
-    VERSION_ECHO_AT,
+    DAMPER_TOP_AT, DECAYS, DECAY_PER_UNIT, DIRECTORY_AT, FINE_TUNE_AT, FORMAT, GAIN_AT, KEY_MAP_AT,
+    KIND_AT, LADDER_UNITY, MARKS, NOTES, RECORD, REC_BANK, REC_BLOCKS, REC_DECAY, REC_DECAYS,
+    REC_FRAMES, REC_ID, REC_LAYER, REC_MARKS, REC_MARK_BLOCK, REC_NOTE_OFF, REC_SEEDS, REC_START,
+    REC_THRESHOLD, REC_TRIM, REC_WINDOW, RELEASE_LEVEL_AT, SEEDS, UNCOVERED, V6_MOST_BOOST,
+    VERSION_AT, VERSION_ECHO_AT,
 };
 use crate::cbin::Header;
 use crate::error::{try_with_capacity, try_zeroed, Error, ParseError};
@@ -228,6 +226,51 @@ impl Kind {
             Kind::Hybrid => (48, 37),
         }
     }
+
+    /// How the [`DECAYS`] ladder fades an attack or resonance stroke of this kind from
+    /// note-on, on the key it was recorded at: tenths of a decibel per second at middle
+    /// C, and the semitones over which that rate doubles up the keyboard. `None` where
+    /// vendor libraries of the kind apply no decay. Fitted to vendor 6.x attack ladders
+    /// against their roots. Inferred from specimens; not confirmed on hardware.
+    fn ladder_curve(self) -> Option<(u16, u8)> {
+        match self {
+            Kind::ElectricGrand => Some((22, 52)),
+            Kind::ElectricPiano => Some((25, 21)),
+            Kind::Wurlitzer => Some((38, 18)),
+            Kind::Grand => Some((32, 39)),
+            Kind::Upright => Some((34, 44)),
+            Kind::Harpsichord => Some((39, 30)),
+            Kind::DigitalPiano => Some((21, 39)),
+            Kind::Mallet => Some((131, 32)),
+            Kind::Clavinet | Kind::Hybrid => None,
+        }
+    }
+
+    /// How much louder than its root's loudest layer a softer attack or resonance layer
+    /// of this kind plays, by [`level`] less its trim: tenths of a decibel per 100 of
+    /// version 6 layer value. Fitted to vendor 6.x attack strokes; vendor harpsichords
+    /// have one layer, so lift none. Inferred from specimens; not confirmed on hardware.
+    fn layer_lift(self) -> u16 {
+        match self {
+            Kind::ElectricGrand => 20,
+            Kind::ElectricPiano => 40,
+            Kind::Wurlitzer => 60,
+            Kind::Clavinet => 28,
+            Kind::Grand => 12,
+            Kind::Upright => 9,
+            Kind::Harpsichord => 0,
+            Kind::DigitalPiano => 4,
+            Kind::Hybrid => 35,
+            Kind::Mallet => 16,
+        }
+    }
+}
+
+/// Decibels per second at `root` of a rate stated as tenths of a decibel per second at
+/// middle C and the semitones over which it doubles up the keyboard.
+fn per_second((tenths, doubling): (u16, u8), root: u8) -> f64 {
+    let octaves = (f64::from(root) - 60.0) / f64::from(doubling);
+    f64::from(tenths) / 10.0 * octaves.exp2()
 }
 
 /// A [`Rules::damper_top`] above the highest key the instrument plays, so that every
@@ -239,11 +282,10 @@ pub const DEFAULT_GAIN: i8 = 50;
 
 /// What a library states about its playback where no template donates it.
 ///
-/// These are the parameters a recording cannot carry, at their neutral settings: the
-/// library is heard at [`Rules::gain`], each stroke is trimmed according to its layer
-/// value, nothing is applied over the recordings' own decay until a held note reaches
-/// its loop, which then fades at [`Rules::loop_fade`], and the damper reaches
-/// [`Rules::damper_top`].
+/// These are the parameters a recording cannot carry: the library is heard at
+/// [`Rules::gain`], each stroke is trimmed as [`build`] says, it decays from note-on
+/// until its loop as vendor libraries of [`Rules::kind`] decay, the loop then fades at
+/// [`Rules::loop_fade`], and the damper reaches [`Rules::damper_top`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rules {
     /// The format the library is written in.
@@ -350,7 +392,7 @@ pub fn sustain(found: SampleLoop, rate: u32) -> Result<Loop, Error> {
 
 /// The value the `index`-th loudest of a root's `layers` takes in a `version` library
 /// when the caller states none: `round(index·s/(layers − 1))` up to the
-/// [`Version::softest_layer`] `s`, and 0 for a root with one layer.
+/// [`Version::softest_layer`] `s` of `layers`, and 0 for a root with one layer.
 ///
 /// A key plays a softer layer the softer it is struck ([`Stroke::layer`]). Spreading
 /// the values puts a layer change under each part of the velocity range; values packed
@@ -362,7 +404,7 @@ pub fn layer_value(index: usize, layers: usize, version: Version) -> u8 {
         return 0;
     }
     let index = index.min(last);
-    let scale = usize::from(version.softest_layer());
+    let scale = usize::from(version.softest_layer(layers));
     ((index * scale * 2 + last) / (last * 2)) as u8
 }
 
@@ -499,6 +541,19 @@ impl Recoded {
 /// then layer, the ascending root order the per-root counts require. The key map routes
 /// every key up to one semitone above the highest root. The per-key fine tune starts at
 /// zero, even with a template.
+///
+/// Built against a template, or from rules in a [`Version::V5`] library, an attack or
+/// resonance stroke is trimmed 3 dB more than its layer value states and a release
+/// stroke 12 dB. A [`Version::V6`] library built from rules is trimmed by the strokes'
+/// levels instead. Each attack or resonance stroke plays at the level of its root's
+/// loudest layer in its bank, less 3 dB, raised at a rate per [`Kind`] for each unit of
+/// layer value above the loudest's, and each release stroke is trimmed 18 dB under its root's
+/// loudest attack stroke. A recording's level is the most power any 10 ms of its first
+/// half second holds, on its louder channel. Where a stroke would need more boost than
+/// [`V6_MOST_BOOST`] leaves at the library's gain, every stroke is turned down by the
+/// shortfall, so the balance holds. A recording silent over its first half second, or a
+/// release stroke whose root has no attack stroke, has nothing to be leveled against
+/// and is refused.
 pub fn build(
     donor: &Donor<'_>,
     options: &Options,
@@ -548,8 +603,11 @@ pub fn build(
         Donor::Rules(rules) => *rules,
     };
     let thresholds = thresholds(&order, version);
+    let trims = trims(donor, version, &order)?;
     let mut donors = Vec::with_capacity(order.len());
-    for (index, (recording, threshold)) in order.iter().zip(thresholds).enumerate() {
+    for (index, ((recording, threshold), trim)) in
+        order.iter().zip(thresholds).zip(trims).enumerate()
+    {
         let mut stated = match donor {
             Donor::Template(template) => *donor_record(template, recording)?,
             Donor::Rules(rules) => rules_record(recording, index, rules),
@@ -559,8 +617,11 @@ pub fn build(
         if recording.sustain.is_some() && be32(&stated, REC_DECAY) == 0 {
             put32(&mut stated, REC_DECAY, loop_decay(&fade, recording.root));
         }
-        let (window, trim) = velocity_window(version, recording.bank, recording.layer);
-        put16(&mut stated, REC_WINDOW, window);
+        put16(
+            &mut stated,
+            REC_WINDOW,
+            window(recording.bank, recording.layer),
+        );
         put16(&mut stated, REC_TRIM, trim as u16);
         stated[REC_THRESHOLD] = threshold;
         donors.push(stated);
@@ -769,9 +830,9 @@ fn damper_cut(note: usize) -> u8 {
     }
 }
 
-/// The record a stroke states when no template donates one: a decay ladder that
-/// applies nothing, the fade `rules` state for its loop, a note-off fade for its bank,
-/// and its place in the directory as the identifier.
+/// The record a stroke states when no template donates one: the decay ladder `rules`
+/// state for its bank and root, the fade they state for its loop, a note-off fade for
+/// its bank, and its place in the directory as the identifier.
 ///
 /// [`record`] writes the audio's fields and the loop over this.
 fn rules_record(recording: &Recording, index: usize, rules: &Rules) -> [u8; RECORD] {
@@ -780,24 +841,54 @@ fn rules_record(recording: &Recording, index: usize, rules: &Rules) -> [u8; RECO
         put32(&mut out, REC_DECAY, loop_decay(rules, recording.root));
     }
     out[REC_NOTE_OFF] = note_off_fade(recording.bank);
-    for entry in 0..DECAYS {
-        let at = REC_DECAYS + entry * 4;
-        put32(&mut out, at, LADDER_UNITY);
+    let rate = ladder_rate(rules, recording.bank, recording.root);
+    for (entry, value) in ladder(rate).into_iter().enumerate() {
+        put32(&mut out, REC_DECAYS + entry * 4, value);
     }
     put32(&mut out, REC_ID, index as u32 + 1);
     out
 }
 
-/// Decibels per second that each unit below [`LADDER_UNITY`] at [`REC_DECAY`] fades a
-/// held loop by, whatever key plays it. Confirmed on hardware.
-const LOOP_FADE_PER_UNIT: f64 = 0.024;
+/// The coefficient that fades a stroke `per_second` decibels a second.
+fn fading(per_second: f64) -> u32 {
+    LADDER_UNITY - (per_second / DECAY_PER_UNIT).round() as u32
+}
 
 /// The [`REC_DECAY`] that fades a held loop on `root` at the rate `rules` state there.
 fn loop_decay(rules: &Rules, root: u8) -> u32 {
     let (_, doubling) = rules.kind.fade_curve();
-    let octaves = (f64::from(root) - 60.0) / f64::from(doubling);
-    let per_second = f64::from(rules.loop_fade) / 10.0 * octaves.exp2();
-    LADDER_UNITY - (per_second / LOOP_FADE_PER_UNIT).round() as u32
+    fading(per_second((rules.loop_fade, doubling), root))
+}
+
+/// Decibels per second the ladder fades a [`Version::V6`] rule-written release stroke
+/// by on its root, at every pitch: inside the 28 to 42 vendor 6.x release strokes
+/// state. Inferred from specimens; not confirmed on hardware.
+const RELEASE_DECAY: f64 = 36.0;
+
+/// Decibels per second the ladder fades a rule-written stroke of `bank` by, played on
+/// its own `root`: [`Kind::ladder_curve`] for an attack or resonance stroke, and
+/// [`RELEASE_DECAY`] for a [`Version::V6`] release stroke. A [`Version::V5`] release
+/// stroke takes none, since it fades about 35 dB/s under any ladder below unity.
+/// Confirmed on hardware.
+fn ladder_rate(rules: &Rules, bank: Bank, root: u8) -> f64 {
+    match (bank, rules.version) {
+        (Bank::Attack | Bank::Resonance, _) => rules
+            .kind
+            .ladder_curve()
+            .map_or(0.0, |curve| per_second(curve, root)),
+        (Bank::Release, Version::V6) => RELEASE_DECAY,
+        (Bank::Release, Version::V5) => 0.0,
+    }
+}
+
+/// The [`DECAYS`] ladder that fades a stroke `per_second` decibels a second on its root.
+///
+/// Entry `k` serves the key `1 − k` semitones above the root, and sits `2^((1 − k)/12)`
+/// times entry 1's distance below [`LADDER_UNITY`], so the decay a key applies scales
+/// with the rate it plays the stroke at, as vendor ladders do. Inferred from specimens;
+/// not confirmed on hardware.
+fn ladder(per_second: f64) -> [u32; DECAYS] {
+    std::array::from_fn(|entry| fading(per_second * ((1.0 - entry as f64) / 12.0).exp2()))
 }
 
 /// The fade [`REC_NOTE_OFF`] states for a stroke of `bank`, inside the range vendor
@@ -811,14 +902,15 @@ fn note_off_fade(bank: Bank) -> u8 {
     }
 }
 
-/// The trim a release stroke states, in decibels.
+/// The trim [`layer_trim`] gives a release stroke, in decibels.
 const RELEASE_TRIM: f64 = 12.0;
 
-/// The trim an attack or resonance stroke states beyond the softness its layer value
-/// states, in decibels.
+/// The trim an attack or resonance stroke states beyond its softness, in decibels: the
+/// softness its layer value states in [`layer_trim`], and its level against its root's
+/// loudest layer in [`level_trims`].
 const LAYER_TRIM: f64 = 3.0;
 
-/// The largest trim [`velocity_window`] states, in decibels.
+/// The largest trim [`layer_trim`] states, in decibels.
 const WIDEST_TRIM: f64 = 31.0;
 
 /// Layer value units per decibel of softness: vendor libraries trim a stroke by about
@@ -831,25 +923,155 @@ fn layer_units_per_decibel(version: Version) -> f64 {
     }
 }
 
-/// The pair at [`REC_WINDOW`] and [`REC_TRIM`] a stroke of `bank` and `layer` states in a
-/// `version` library.
+/// The u16 at [`REC_WINDOW`] a stroke of `bank` and `layer` states: its layer value, as
+/// vendor records hold it, and 0 on a release stroke.
+fn window(bank: Bank, layer: u8) -> u16 {
+    match bank {
+        Bank::Release => 0,
+        Bank::Attack | Bank::Resonance => u16::from(layer),
+    }
+}
+
+/// The [`REC_TRIM`] each of `order`'s recordings states, sorted as the directory sorts
+/// them: [`level_trims`] in a [`Version::V6`] library from rules, and [`layer_trim`]
+/// otherwise.
+fn trims(donor: &Donor<'_>, version: Version, order: &[&Recording]) -> Result<Vec<i16>, Error> {
+    match (donor, version) {
+        (Donor::Rules(rules), Version::V6) => level_trims(order, rules),
+        _ => Ok(order
+            .iter()
+            .map(|recording| layer_trim(version, recording.bank, recording.layer))
+            .collect()),
+    }
+}
+
+/// The trim a stroke of `bank` and `layer` states in a `version` library, by its layer
+/// value alone.
 ///
 /// An attack or resonance stroke is trimmed three decibels more than the softness its
 /// layer value states, so a root's softer layers play softer than its loud ones by that
 /// amount. A release stroke takes a fixed trim, since its layer value plays no part in
 /// selecting it.
-fn velocity_window(version: Version, bank: Bank, layer: u8) -> (u16, i16) {
+fn layer_trim(version: Version, bank: Bank, layer: u8) -> i16 {
     let decibels = match bank {
         Bank::Release => RELEASE_TRIM,
         Bank::Attack | Bank::Resonance => {
             (f64::from(layer) / layer_units_per_decibel(version) + LAYER_TRIM).min(WIDEST_TRIM)
         }
     };
-    let window = match bank {
-        Bank::Release => 0,
-        Bank::Attack | Bank::Resonance => u16::from(layer),
-    };
-    (window, (decibels / version.trim_step()).round() as i16)
+    (decibels / version.trim_step()).round() as i16
+}
+
+/// How far a [`Version::V6`] rule-written release stroke is trimmed under its root's
+/// loudest attack stroke, in decibels, as a tester chose it by ear on a Stage 4. On an
+/// Electro 5 such a release plays about 35 dB under the note at key-up. Confirmed on
+/// hardware. Vendor 6.x libraries, whose release audio is as loud as their attacks',
+/// trim their releases about 9 dB over their attacks instead. Inferred from specimens;
+/// not confirmed on hardware.
+const RELEASE_UNDER_ATTACK: f64 = 18.0;
+
+/// Frames [`level`] averages power over: 10 ms.
+const LEVEL_WINDOW: usize = codec::RATE as usize / 100;
+
+/// Frames from a recording's start that [`level`] reads: half a second.
+const LEVEL_SPAN: usize = codec::RATE as usize / 2;
+
+/// How loud a recording plays, in decibels over a steady sample of one unit: the most
+/// power any [`LEVEL_WINDOW`] of its first [`LEVEL_SPAN`] frames averages, on its
+/// louder channel. A recording shorter than the window is measured whole, and silence
+/// has no level.
+fn level(channels: &[Vec<i16>]) -> Option<f64> {
+    let power = |sample: &i16| i64::from(*sample).pow(2);
+    let loudest = channels
+        .iter()
+        .map(|channel| {
+            let span = &channel[..channel.len().min(LEVEL_SPAN)];
+            let width = span.len().min(LEVEL_WINDOW);
+            let mut sum: i64 = span[..width].iter().map(power).sum();
+            let mut most = sum;
+            for (leaving, entering) in span.iter().zip(&span[width..]) {
+                sum += power(entering) - power(leaving);
+                most = most.max(sum);
+            }
+            most as f64 / width as f64
+        })
+        .fold(0.0, f64::max);
+    (loudest > 0.0).then(|| 10.0 * loudest.log10())
+}
+
+/// The trims [`build`] states for `order`'s recordings in a [`Version::V6`] library
+/// from `rules`, with `order` sorted as the directory sorts them, so that the first of
+/// each root and bank is its loudest layer.
+///
+/// A stroke's playback level is its audio through the instrument's velocity curve, less
+/// its trim, plus the library gain; the layer value and threshold do not change it.
+/// Confirmed on hardware.
+fn level_trims(order: &[&Recording], rules: &Rules) -> Result<Vec<i16>, Error> {
+    let levels = order
+        .iter()
+        .map(|recording| {
+            level(&recording.channels).ok_or_else(|| {
+                refuse(format!(
+                    "{} is silent over its first half second, so it has no level to set \
+                     against its root's",
+                    describe(recording)
+                ))
+            })
+        })
+        .collect::<Result<Vec<f64>, Error>>()?;
+    let mut loudest: BTreeMap<(u8, u8), (f64, u8)> = BTreeMap::new();
+    for (recording, &level) in order.iter().zip(&levels) {
+        loudest
+            .entry((recording.root, recording.bank.code()))
+            .or_insert((level, recording.layer));
+    }
+
+    let lift = f64::from(rules.kind.layer_lift()) / 10.0 / 100.0;
+    let step = Version::V6.trim_step();
+    let mut tenths = Vec::with_capacity(order.len());
+    for (recording, level) in order.iter().zip(levels) {
+        let against = match recording.bank {
+            Bank::Attack | Bank::Resonance => recording.bank,
+            Bank::Release => Bank::Attack,
+        };
+        let &(reference, loudest_layer) = loudest
+            .get(&(recording.root, against.code()))
+            .ok_or_else(|| {
+                refuse(format!(
+                    "{} has no attack stroke at its root to set its level against",
+                    describe(recording)
+                ))
+            })?;
+        let under = match recording.bank {
+            Bank::Attack | Bank::Resonance => {
+                LAYER_TRIM - lift * (f64::from(recording.layer) - f64::from(loudest_layer))
+            }
+            Bank::Release => LAYER_TRIM + RELEASE_UNDER_ATTACK,
+        };
+        tenths.push(((under + level - reference) / step).round());
+    }
+
+    let lowest = f64::from(rules.gain) - f64::from(V6_MOST_BOOST);
+    let shortfall = tenths
+        .iter()
+        .fold(0.0, |most, &trim| f64::max(most, lowest - trim));
+    tenths
+        .into_iter()
+        .map(|trim| v6_trim(trim + shortfall))
+        .collect()
+}
+
+/// `tenths` of a decibel as a [`Version::V6`] trim, refused outside [`Version::trims`].
+fn v6_trim(tenths: f64) -> Result<i16, Error> {
+    let range = Version::V6.trims();
+    if !(f64::from(*range.start())..=f64::from(*range.end())).contains(&tenths) {
+        return Err(ParseError::OutOfBounds {
+            value: format!("a trim of {tenths} tenths of a decibel"),
+            bound: "the trims a 6.x stroke plays".into(),
+        }
+        .into());
+    }
+    Ok(tenths as i16)
 }
 
 /// The [`REC_THRESHOLD`] each of `order`'s recordings states, sorted as the directory
@@ -1775,38 +1997,40 @@ mod tests {
     }
 
     /// The default spread decides which velocities reach which layer, so its values are
-    /// the contract.
+    /// the contract: 20 a layer in 6.x, spanning at least 50 and at most 100, and a
+    /// fifth of that in 5.x.
     #[test]
-    fn the_default_layer_values_spread_a_root_over_the_selection_range() {
+    fn the_default_layer_values_step_20_a_layer_between_spans_of_50_and_100() {
         let spread = |layers, version| {
             (0..layers)
                 .map(|i| layer_value(i, layers, version))
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            spread(1, Version::V5),
+            spread(1, Version::V6),
             vec![0],
             "a lone layer plays at every velocity"
         );
-        assert_eq!(spread(2, Version::V5), vec![0, 27]);
-        assert_eq!(spread(3, Version::V5), vec![0, 14, 27]);
+        assert_eq!(spread(2, Version::V6), vec![0, 50]);
+        assert_eq!(spread(3, Version::V6), vec![0, 25, 50]);
+        assert_eq!(spread(4, Version::V6), vec![0, 20, 40, 60]);
+        assert_eq!(spread(6, Version::V6), vec![0, 20, 40, 60, 80, 100]);
         assert_eq!(
-            spread(9, Version::V5),
-            vec![0, 3, 7, 10, 14, 17, 20, 24, 27]
+            spread(9, Version::V6),
+            vec![0, 13, 25, 38, 50, 63, 75, 88, 100]
         );
+
+        assert_eq!(spread(1, Version::V5), vec![0]);
+        assert_eq!(spread(2, Version::V5), vec![0, 10]);
+        assert_eq!(spread(3, Version::V5), vec![0, 5, 10]);
+        assert_eq!(spread(6, Version::V5), vec![0, 4, 8, 12, 16, 20]);
+        assert_eq!(spread(9, Version::V5), vec![0, 3, 5, 8, 10, 13, 15, 18, 20]);
         assert_eq!(
             layer_value(9, 9, Version::V5),
-            27,
+            20,
             "an index past the last is the last"
         );
         assert_eq!(layer_value(0, 0, Version::V5), 0);
-
-        assert_eq!(spread(1, Version::V6), vec![0]);
-        assert_eq!(spread(3, Version::V6), vec![0, 68, 135]);
-        assert_eq!(
-            spread(9, Version::V6),
-            vec![0, 17, 34, 51, 68, 84, 101, 118, 135]
-        );
     }
 
     /// A layer value is a field of the record, not a position in the directory, so a
@@ -2079,7 +2303,7 @@ mod tests {
     }
 
     /// A template's trim belongs to its own layer, so a stroke built against it is
-    /// trimmed by its own layer value, as a rule-written stroke is.
+    /// trimmed by its own layer value, as a rule-written 5.x stroke is.
     #[test]
     fn a_template_build_trims_each_stroke_by_its_own_layer() {
         let donor = template(1);
@@ -2196,9 +2420,9 @@ mod tests {
     }
 
     /// A library built from rules reads back the kind, gain and damper limit the rules
-    /// state, strokes trimmed according to their layer values with no decay applied
-    /// over them, and identifiers counting the directory. The corpus suite compares
-    /// these bytes with a library that has been played.
+    /// state, 5.x strokes trimmed according to their layer values, and identifiers
+    /// counting the directory. The corpus suite compares these bytes with a library that
+    /// has been played.
     #[test]
     fn a_library_built_from_rules_states_them_and_needs_no_template() {
         let short = tone(6_000, 300.0, 1);
@@ -2249,9 +2473,9 @@ mod tests {
             let record = stroke.record();
             assert!((0..MARKS).all(|m| be32(record, REC_MARKS + m * 4) == 0));
             assert_eq!(
-                (stroke.decay(), stroke.ladder()),
-                (0, [LADDER_UNITY; DECAYS]),
-                "a rule-written stroke of any bank applies no decay over the recording"
+                stroke.decay(),
+                0,
+                "{stroke:?} never loops, so states no fade"
             );
         }
 
@@ -2265,7 +2489,9 @@ mod tests {
 
     /// A version 6 library built from rules states the stream, the container version and
     /// the names a vendor version 6 library does, its trims in tenths of a decibel, and a
-    /// threshold midway between each layer value and the next louder one's.
+    /// threshold midway between each layer value and the next louder one's. Layers of
+    /// one level are lifted 1.2 dB per 100 of layer value over the root's loudest, as a
+    /// grand's are, and a release of that level is trimmed 18 dB under the loudest.
     #[test]
     fn a_version_6_library_built_from_rules_states_its_own_scale() {
         let short = tone(6_000, 300.0, 1);
@@ -2274,8 +2500,8 @@ mod tests {
             &Options::new("Felt").variant("Soft"),
             &[
                 one(60, Bank::Attack, 0, short.clone()),
-                one(60, Bank::Attack, 68, short.clone()),
-                one(60, Bank::Attack, 135, short.clone()),
+                one(60, Bank::Attack, 50, short.clone()),
+                one(60, Bank::Attack, 100, short.clone()),
                 one(60, Bank::Release, 0, short.clone()),
                 one(72, Bank::Attack, 50, short),
             ],
@@ -2294,14 +2520,244 @@ mod tests {
             stated,
             [
                 (60, 0, 30, 0),
-                (60, 68, 166, 34),
-                (60, 135, 300, 102),
-                (60, 0, 120, 0),
-                (72, 50, 130, 25),
+                (60, 50, 24, 25),
+                (60, 100, 18, 75),
+                (60, 0, 210, 0),
+                (72, 50, 30, 25),
             ]
         );
         let piano = built.to_piano().unwrap();
         assert_eq!(piano.library().unwrap().version(), Version::V6);
+    }
+
+    /// A square wave of `amplitude`, whose power over any window is `amplitude²`.
+    fn steady(amplitude: i16) -> Vec<Vec<i16>> {
+        vec![(0..6_000)
+            .map(|n| match (n / 20) % 2 {
+                0 => amplitude,
+                _ => -amplitude,
+            })
+            .collect()]
+    }
+
+    /// A loud attack layer, then a soft one and a release 12 dB under it:
+    /// 20·log10(7962/2000) = 12.00.
+    fn twelve_decibels_apart() -> [Recording; 3] {
+        [
+            one(60, Bank::Attack, 0, steady(7_962)),
+            one(60, Bank::Attack, 10, steady(2_000)),
+            one(60, Bank::Release, 0, steady(2_000)),
+        ]
+    }
+
+    fn trims_at(version: Version, kind: Kind, gain: i8, recordings: &[Recording]) -> Vec<i16> {
+        let rules = Rules {
+            gain,
+            ..Rules::new(version, kind)
+        };
+        build(&Donor::Rules(rules), &Options::new("Level"), recordings)
+            .unwrap()
+            .strokes()
+            .iter()
+            .map(|s| s.trim())
+            .collect()
+    }
+
+    /// A 6.x library from rules trims each stroke against its root's loudest layer, so a
+    /// layer recorded 12 dB softer is boosted by 12 dB and plays at the loudest's level,
+    /// and a release is trimmed 18 dB under it. A harpsichord lifts no layer above that.
+    /// A 5.x library keeps trimming by layer value.
+    #[test]
+    fn a_6_x_rule_build_levels_each_stroke_against_its_roots_loudest_layer() {
+        let recordings = twelve_decibels_apart();
+        assert_eq!(
+            trims_at(Version::V6, Kind::Harpsichord, 0, &recordings),
+            [30, -90, 90],
+            "3 dB on the loudest, 3 − 12 on the soft layer, 3 + 18 − 12 on the release"
+        );
+        assert_eq!(
+            trims_at(Version::V5, Kind::Harpsichord, 0, &recordings),
+            [3, 13, 12],
+            "a 5.x stroke is trimmed by its layer value whatever its audio"
+        );
+    }
+
+    /// At +5.0 dB of gain a 6.x stroke boosts at most 5.8 dB, short of the 9.0 the soft
+    /// layer needs, so every stroke gives up the 3.2 dB missing and the balance holds.
+    #[test]
+    fn a_layer_too_quiet_for_the_boost_left_moves_every_trim_by_the_shortfall() {
+        assert_eq!(
+            trims_at(
+                Version::V6,
+                Kind::Harpsichord,
+                DEFAULT_GAIN,
+                &twelve_decibels_apart()
+            ),
+            [62, -58, 122]
+        );
+    }
+
+    /// A softer layer plays louder than its root's loudest by its kind's lift per 100 of
+    /// layer value counted from the loudest's: 6 dB for a Wurlitzer, so a root recorded
+    /// at one level and valued 20/45/70 is trimmed 3.0, 1.5 and 0 dB.
+    #[test]
+    fn a_6_x_rule_build_lifts_softer_layers_by_their_kinds_rate() {
+        let recordings = [
+            one(60, Bank::Attack, 20, steady(2_000)),
+            one(60, Bank::Attack, 45, steady(2_000)),
+            one(60, Bank::Attack, 70, steady(2_000)),
+        ];
+        assert_eq!(
+            trims_at(Version::V6, Kind::Wurlitzer, 0, &recordings),
+            [30, 15, 0]
+        );
+        assert_eq!(
+            trims_at(Version::V6, Kind::Grand, 0, &recordings),
+            [30, 27, 24],
+            "a grand lifts 1.2 dB per 100"
+        );
+    }
+
+    /// A 6.x library from rules levels every stroke against its root's, so a silent
+    /// recording, or a release with no attack stroke at its root, is refused by name.
+    #[test]
+    fn a_6_x_rule_build_refuses_a_stroke_it_cannot_level() {
+        let cases = [
+            (
+                vec![
+                    one(60, Bank::Attack, 0, steady(2_000)),
+                    one(60, Bank::Attack, 10, vec![vec![0; 6_000]]),
+                ],
+                "root 60 attack layer 10 is silent over its first half second",
+            ),
+            (
+                vec![
+                    one(60, Bank::Attack, 0, steady(2_000)),
+                    one(72, Bank::Release, 0, steady(2_000)),
+                ],
+                "root 72 release layer 0 has no attack stroke at its root",
+            ),
+        ];
+        for (recordings, reason) in cases {
+            let error = build(
+                &Donor::Rules(Rules::new(Version::V6, Kind::Grand)),
+                &Options::new("Level"),
+                &recordings,
+            )
+            .expect_err("expected a refusal")
+            .to_string();
+            assert!(error.contains(reason), "want {reason:?}, got {error}");
+        }
+    }
+
+    /// Each entry's distance below unity, in units of 0.024 dB/s.
+    fn below_unity(stroke: &Stroke<'_>) -> [u32; DECAYS] {
+        stroke.ladder().map(|entry| LADDER_UNITY - entry)
+    }
+
+    /// An attack or resonance stroke decays from note-on as vendor libraries of its kind
+    /// do: a tine piano 2.5 dB/s on its root at C4, doubling 21 semitones up. Entry 1
+    /// plays the root, entry 0 a semitone up, and entry 13 an octave down at half the
+    /// rate. A clavinet applies none.
+    #[test]
+    fn a_rule_written_ladder_decays_as_the_kinds_curve_says() {
+        let short = tone(6_000, 300.0, 1);
+        let ladders = |kind| {
+            build(
+                &Donor::Rules(Rules::new(Version::V6, kind)),
+                &Options::new("Decay"),
+                &[
+                    one(60, Bank::Attack, 0, short.clone()),
+                    one(60, Bank::Resonance, 0, short.clone()),
+                    one(81, Bank::Attack, 0, short.clone()),
+                ],
+            )
+            .unwrap()
+            .strokes()
+            .iter()
+            .map(below_unity)
+            .collect::<Vec<_>>()
+        };
+        let tines = ladders(Kind::ElectricPiano);
+        // 2.5 / 0.024 = 104.2, 2.5·2^(1/12) / 0.024 = 110.4, 1.25 / 0.024 = 52.1.
+        assert_eq!(
+            (tines[0][1], tines[0][0], tines[0][13]),
+            (104, 110, 52),
+            "C4"
+        );
+        assert_eq!(
+            tines[1], tines[0],
+            "a resonance stroke decays as its attack"
+        );
+        // 5.0 / 0.024 = 208.3.
+        assert_eq!(tines[2][1], 208, "A5, 21 semitones up");
+        assert!(
+            ladders(Kind::Clavinet)
+                .iter()
+                .all(|ladder| *ladder == [0; DECAYS]),
+            "a clavinet keeps every entry at unity"
+        );
+    }
+
+    /// A 6.x release stroke decays 36 dB/s on every root, scaled per entry as an attack
+    /// ladder is. A 5.x release stroke fades fast under any ladder, so it states unity,
+    /// while the 5.x attack stroke beside it still decays.
+    #[test]
+    fn a_rule_written_release_decays_flat_in_6_x_and_not_at_all_in_5_x() {
+        let short = tone(6_000, 300.0, 1);
+        let recordings = [
+            one(36, Bank::Attack, 0, short.clone()),
+            one(36, Bank::Release, 0, short.clone()),
+            one(96, Bank::Attack, 0, short.clone()),
+            one(96, Bank::Release, 0, short.clone()),
+        ];
+        let releases = |version| {
+            build(
+                &Donor::Rules(Rules::new(version, Kind::Grand)),
+                &Options::new("Release"),
+                &recordings,
+            )
+            .unwrap()
+            .strokes()
+            .iter()
+            .map(|s| (s.bank(), below_unity(s)))
+            .collect::<Vec<_>>()
+        };
+        for (bank, ladder) in releases(Version::V6) {
+            if bank == Some(Bank::Release) {
+                // 36 / 0.024 = 1500, 36·2^(1/12) / 0.024 = 1589.2, and half of 1500.
+                assert_eq!((ladder[1], ladder[0], ladder[13]), (1500, 1589, 750));
+            }
+        }
+        for (bank, ladder) in releases(Version::V5) {
+            match bank {
+                Some(Bank::Release) => assert_eq!(ladder, [0; DECAYS], "5.x release"),
+                _ => assert_ne!(ladder, [0; DECAYS], "5.x attack"),
+            }
+        }
+    }
+
+    /// On every key a library can hold, every kind's ladder stays between silence and
+    /// unity and never decreases from entry to entry, as vendor ladders do.
+    #[test]
+    fn every_rule_written_ladder_fits_its_field_and_never_decreases() {
+        for kind in Kind::ALL {
+            for version in Version::ALL {
+                let rules = Rules::new(version, kind);
+                for (bank, root) in [Bank::Attack, Bank::Resonance, Bank::Release]
+                    .into_iter()
+                    .flat_map(|bank| (0..NOTES as u8).map(move |root| (bank, root)))
+                {
+                    let entries = ladder(ladder_rate(&rules, bank, root));
+                    let what = format!("{kind:?} {version} {bank} root {root}: {entries:?}");
+                    assert!(
+                        entries.iter().all(|&e| e > 0 && e <= LADDER_UNITY),
+                        "{what}"
+                    );
+                    assert!(entries.windows(2).all(|w| w[0] <= w[1]), "{what}");
+                }
+            }
+        }
     }
 
     /// A 5.x key plays no release stroke while its release level is 0, so every key whose
@@ -2444,7 +2900,7 @@ mod tests {
         ];
         assert_eq!(
             layer_values(&named, Version::V5).unwrap(),
-            [27, 0, 14, 0, 0, 27],
+            [10, 0, 5, 0, 0, 10],
             "values come back in the order given, ranked within each root and bank"
         );
     }
