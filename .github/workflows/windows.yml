@@ -1,8 +1,8 @@
 # toshokan's suite on a hosted Windows runner, where NTFS, its locks and its
 # renames are Windows' own rather than Wine's, and antivirus runs beside it.
 #
-# The one job outside Nix, since Nix does not run on Windows: rustup installs the
-# Rust that nixpkgs pins, and Cargo.lock pins the rest. It runs only when toshokan,
+# Outside Nix, since Nix does not run on Windows: rustup installs the Rust that
+# nixpkgs pins, and Cargo.lock pins the rest. It runs only when toshokan,
 # the lock file or this workflow changes; the cross build in ci.yml runs every
 # crate's Windows suite under Wine on every push.
 name: windows
