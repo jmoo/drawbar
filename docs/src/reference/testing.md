@@ -106,12 +106,19 @@ Chromium and Firefox:
 nix build .#drawbar-web-tests .#toshokan-web
 ```
 
+CI also runs them in Edge on Windows and in Safari on macOS whenever toshokan or
+drawbar's library changes. Safari cannot pick a folder, so its run skips drawbar's
+picked-folder test.
+
 Elsewhere, from `crates/` in `nix develop`, point the runner at a browser's driver:
 
 ```sh
 CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
   CHROMEDRIVER=chromedriver cargo test -p drawbar --target wasm32-unknown-unknown --test web
 ```
+
+Safari runs them in a window, with `SAFARIDRIVER=/usr/bin/safaridriver`, once
+`sudo safaridriver --enable` has allowed remote automation.
 
 `--test bench` times the browser's library at the size `DRAWBAR_BENCH_FILES`
 names, and runs only when named.
