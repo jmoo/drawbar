@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 
 use toshokan::env::TestClock;
+use toshokan::line::Line;
 use toshokan::log::Settlement;
 use toshokan::report::Orphan;
 use toshokan::simulator::Machine;
@@ -15,7 +16,7 @@ use toshokan::{EntityId, Expect, Io, MemDisk, Root};
 
 use crate::fixture::{
     identity, layout, open, path, put, Fault, Faulty, Library, COPYING, EMPTY_DIRS, NOTE, ORIGIN,
-    TAGS,
+    REVERSE, TAGS,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -145,6 +146,7 @@ fn fixtures() {
     two_writers_fork();
     pending();
     local();
+    reverse();
 }
 
 /// The library files one writer starts from.
@@ -651,5 +653,271 @@ fn local() {
              it, the writer that took over, and the identities its scans read: of \
              `other.syx`, which is as long as the file of an entity whose file is gone.",
         ),
+    );
+}
+
+/// Seals each of `jsons` as a line after the one before it, the first after
+/// `prev`: each `@prev@` is that line's predecessor's hash.
+fn chain(prev: &str, jsons: &[&str]) -> Vec<u8> {
+    let mut prev = prev.to_owned();
+    let mut bytes = Vec::new();
+    for json in jsons {
+        let line = Line::seal(json.replace("@prev@", &prev)).unwrap();
+        prev = line.hash().to_string();
+        bytes.extend(line.to_bytes());
+    }
+    bytes
+}
+
+/// Writes reverse case `name`: files that stand for what a newer build writes,
+/// laid over state `base`'s trees. A file of `base` at one of their paths is
+/// replaced.
+fn write_case(name: &str, base: &str, what: &str, files: &[(&str, &str, Vec<u8>)]) {
+    let dir = crate::fixture::fixtures().join(REVERSE).join(name);
+    if dir.exists() {
+        println!("{REVERSE}/{name}: kept");
+        return;
+    }
+    for (tree, file, bytes) in files {
+        let at = dir.join(tree).join(file);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, bytes).unwrap();
+    }
+    let readme = format!(
+        "# {name}\n\n{what}\n\nLaid over the state `{base}`. Its bytes are written by hand in \
+         `tests/format/generate.rs`, each line sealed by toshokan {VERSION} with \
+         `cargo test -p toshokan --test format -- --ignored --exact generate::fixtures`.\n"
+    );
+    std::fs::write(dir.join("README.md"), readme).unwrap();
+    println!("{REVERSE}/{name}: written");
+}
+
+/// A file of state `state`'s tree `tree`.
+fn base_file(state: &str, tree: &str, file: &str) -> String {
+    let at = crate::fixture::fixtures().join(state).join(tree).join(file);
+    std::fs::read_to_string(&at).unwrap_or_else(|e| panic!("{}: {e}", at.display()))
+}
+
+const W: &str = "10e2c46865e9874614d7973c5c2a449c";
+const W_HEAD: &str = "8ba7d4f5c6e616f69f641f70c1492f38";
+const ONE: &str = "910a2dec89025cc1beeb8da1658eec67";
+const FOUR: &str = "e099ec6cd7363ca585e7bb0f12278575";
+const FIVE: &str = "491718de357e3da8cb435c8e74616796";
+const W_SNAPSHOT: &str = "snapshot-29663e9ea0ec2561d2c61eeb27a21187.json";
+const SETTLER: &str = "e1b9ae67265f78875330404c13ee7598";
+const SETTLER_HEAD: &str = "15c674c4ba5c3de5e25ad492887a5719";
+const OPEN_WRITER: &str = "b57e5657675ef005ff2ee709c280bf44";
+const OPEN_RECORD: &str = "1398b51ced0a2833ac2549ffe6a5ea42";
+const LOCAL_LIVE: &str = "37e9671c45376d5dccf635ee9e9e2fa4";
+const LOCAL_HEAD: &str = "ec61e32324b10c4319fded13f0b0715d";
+const LOCAL_GENESIS: &str = "7b79fb37fde703566b96e2ea2ae865e8";
+
+fn in_writer(writer: &str, file: &str) -> String {
+    format!(".t/writers.2/{writer}/{file}")
+}
+
+fn reverse() {
+    let newer = in_writer(W, "newer.txt");
+    write_case(
+        "unknown-kind-and-op",
+        "one-writer-open",
+        "An entry of a kind this build does not know, then an intent holding an op it \
+         does not know beside a known one, after the writer's last entry.",
+        &[(
+            "folder",
+            &newer,
+            chain(
+                W_HEAD,
+                &[
+                    r#"{"prev":"@prev@","n":11,"at":[11000,0],"kind":"retag","from":"tags","to":"labels"}"#,
+                    &format!(
+                        r#"{{"prev":"@prev@","n":12,"at":[12000,0],"kind":"intent","label":"Newer","ops":[{{"op":"rename-key","entity":"{ONE}","from":"tags","to":"labels"}},{{"op":"add","entity":"{ONE}","key":"tags","value":"newer","replaces":[]}}]}}"#
+                    ),
+                ],
+            ),
+        )],
+    );
+    write_case(
+        "novel-members",
+        "one-writer-open",
+        "An intent of known ops holding a member this build does not know at every \
+         depth: the entry, an op, a file, a run taken and a displaced item.",
+        &[(
+            "folder",
+            &newer,
+            chain(
+                W_HEAD,
+                &[&format!(
+                    r#"{{"prev":"@prev@","n":11,"at":[11000,0],"kind":"intent","label":"Novel","ops":[{{"op":"add","entity":"{ONE}","key":"tags","value":"novel","replaces":[],"novel-op":{{"a":[1,"b"]}}}},{{"op":"write","entity":"{FOUR}","key":"origin","value":"four","replaces":[],"take":{{"writer":"00000000000000000000000000000abc","from":1,"first":"00000000000000000000000000000def","last":[1,"00000000000000000000000000000def"],"novel-run":true}}}},{{"op":"pin","entity":"{FIVE}","file":{{"path":"moved/five.syx","identity":"b54985dd2de94a903f3291d085c61e26","len":4,"modified":39,"novel-file":"x"}},"replaces":[["{W}",10,"{W_HEAD}"]]}}],"displaced":[{{"item":"00000000000000000000000000000123","from":"novel.txt","identity":"00000000000000000000000000000456","len":1,"novel-item":null}}],"novel-entry":[{{"deep":{{}}}}]}}"#
+                )],
+            ),
+        )],
+    );
+    write_case(
+        "novel-member-in-observed",
+        "one-writer-open",
+        "A delete whose observed write holds a member this build does not know.",
+        &[(
+            "folder",
+            &newer,
+            chain(
+                W_HEAD,
+                &[&format!(
+                    r#"{{"prev":"@prev@","n":11,"at":[11000,0],"kind":"intent","label":"Delete","ops":[{{"op":"delete","entity":"{FIVE}","replaces":[["{W}",1,"e51078c850b9291b77d4caf311be09ca"]],"observed":[{{"file":true,"at":["{W}",10,"{W_HEAD}"],"novel-observed":1}}]}}]}}"#
+                )],
+            ),
+        )],
+    );
+    write_case(
+        "at-extra-element",
+        "one-writer-open",
+        "An intent whose clock reading has a third element, then an intent after it.",
+        &[(
+            "folder",
+            &newer,
+            chain(
+                W_HEAD,
+                &[
+                    &format!(
+                        r#"{{"prev":"@prev@","n":11,"at":[11000,0,1],"kind":"intent","label":"Later clock","ops":[{{"op":"add","entity":"{ONE}","key":"tags","value":"clock","replaces":[]}}]}}"#
+                    ),
+                    &format!(
+                        r#"{{"prev":"@prev@","n":12,"at":[12000,0],"kind":"intent","label":"After it","ops":[{{"op":"add","entity":"{ONE}","key":"tags","value":"after-clock","replaces":[]}}]}}"#
+                    ),
+                ],
+            ),
+        )],
+    );
+
+    let snapshot = in_writer(W, W_SNAPSHOT);
+    let held = base_file("one-writer-compacted", "folder", &snapshot);
+    let novel = held
+        .replacen(r#"{"writer":"#, r#"{"novel-top":{"since":2},"writer":"#, 1)
+        .replacen(
+            r#""certified":{"#,
+            r#""certified":{"novel-certified":true,"#,
+            1,
+        )
+        .replacen(r#""state":{"#, r#""state":{"novel-state":[1,2],"#, 1);
+    write_case(
+        "snapshot-novel-members",
+        "one-writer-compacted",
+        "The writer's snapshot with a member this build does not know at its top \
+         level, in `certified` and in `state`.",
+        &[("folder", &snapshot, novel.into_bytes())],
+    );
+    let refused = held.replacen(r#""stamp":"#, r#""novel-record":1,"stamp":"#, 1);
+    write_case(
+        "snapshot-refused-record",
+        "one-writer-compacted",
+        "A second snapshot of the writer, `snapshot-newer.json`, whose first record \
+         holds a member this build does not know.",
+        &[(
+            "folder",
+            &in_writer(W, "snapshot-newer.json"),
+            refused.into_bytes(),
+        )],
+    );
+    let unknown = held.replacen(
+        r#""settled":"#,
+        &format!(
+            r#""unknown":[["{W_HEAD}",{{"op":"rename-key","entity":"{ONE}","from":"tags","to":"labels"}}]],"settled":"#
+        ),
+        1,
+    );
+    write_case(
+        "snapshot-unknown-entries",
+        "one-writer-compacted",
+        "The writer's snapshot holding an op this build does not know, as a newer \
+         build compacts one.",
+        &[("folder", &snapshot, unknown.into_bytes())],
+    );
+
+    let record = in_writer(OPEN_WRITER, &format!("pending/{OPEN_RECORD}.json"));
+    let open_record = base_file("pending", "folder", &record);
+    let novel = open_record.replacen(r#""label":"#, r#""novel-record":{"x":1},"label":"#, 1);
+    write_case(
+        "pending-novel-member",
+        "pending",
+        "The open record `Everything` with a member this build does not know.",
+        &[("folder", &record, novel.into_bytes())],
+    );
+    let entry = format!(
+        r#"{{"prev":"{SETTLER_HEAD}","n":5,"at":[14000,0],"kind":"intent","label":"Newer","ops":[]}}"#
+    );
+    let step = format!(
+        r#"{{"writer":"{SETTLER}","entry":{entry},"label":"Link","steps":[{{"step":"link","from":"u.txt","to":"w.txt"}}],"files":[]}}"#
+    );
+    let moves = format!(
+        r#"{{"writer":"{SETTLER}","entry":{entry},"label":"Clone","steps":[{{"step":"rename","from":"u.txt","to":"w.txt"}}],"files":[],"moves":"clone"}}"#
+    );
+    write_case(
+        "pending-unknown-step-and-moves",
+        "pending",
+        "Two records of the settler, chained to its head: one with a step this build \
+         does not know, one whose moves it does not know.",
+        &[
+            (
+                "folder",
+                &in_writer(SETTLER, "pending/00000000000000000000000000000a01.json"),
+                step.into_bytes(),
+            ),
+            (
+                "folder",
+                &in_writer(SETTLER, "pending/00000000000000000000000000000a02.json"),
+                moves.into_bytes(),
+            ),
+        ],
+    );
+    write_case(
+        "settle-unknown-outcome",
+        "pending",
+        "A settlement by the settler of the open record `Everything` with an outcome \
+         this build does not know.",
+        &[(
+            "folder",
+            &in_writer(SETTLER, "newer.txt"),
+            chain(
+                SETTLER_HEAD,
+                &[&format!(
+                    r#"{{"prev":"@prev@","n":5,"at":[14000,0],"kind":"settle","writer":"{OPEN_WRITER}","record":"{OPEN_RECORD}","outcome":"adopted"}}"#
+                )],
+            ),
+        )],
+    );
+
+    let head = format!(r#"{{"writer":"{LOCAL_LIVE}","head":"{LOCAL_HEAD}","since":3}}"#);
+    write_case(
+        "head-extra-member",
+        "local",
+        "The live writer's `head.json` with a member this build does not know.",
+        &[(
+            "local",
+            &format!("{LOCAL_GENESIS}/head.json"),
+            head.into_bytes(),
+        )],
+    );
+    let identities = base_file("local", "local", "identities.json").replacen("\"]]", "\",7]]", 1);
+    write_case(
+        "identities-extra-element",
+        "local",
+        "`identities.json` whose row has a fifth element.",
+        &[("local", "identities.json", identities.into_bytes())],
+    );
+    let other = "00000000000000000000000000000b03";
+    write_case(
+        "writers-3",
+        "local",
+        "A writer's directory in `writers.3/`, a later layout, beside `writers.2/`.",
+        &[(
+            "folder",
+            &format!(".t/writers.3/{other}/00000000000000000000000000000b04.txt"),
+            chain(
+                "00000000000000000000000000000000",
+                &[&format!(
+                    r#"{{"prev":"@prev@","n":0,"at":[20000,0],"kind":"genesis","writer":"{other}","label":"newer"}}"#
+                )],
+            ),
+        )],
     );
 }

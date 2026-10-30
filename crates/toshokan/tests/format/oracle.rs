@@ -225,3 +225,13 @@ pub fn oracle(state: &str, name: &str) -> Value {
     let text = std::fs::read(&at).unwrap_or_else(|e| panic!("{}: {e}", at.display()));
     serde_json::from_slice(&text).unwrap_or_else(|e| panic!("{}: {e}", at.display()))
 }
+
+/// Panics, listing every fact that differs, unless `found` is what `expected` says.
+pub fn assert_facts(what: &str, expected: &Value, found: &Value) {
+    let differ = differences("", expected, found);
+    assert!(
+        differ.is_empty(),
+        "{what} differs from its oracle:\n{}\nfound in full: {found:#}",
+        differ.join("\n")
+    );
+}

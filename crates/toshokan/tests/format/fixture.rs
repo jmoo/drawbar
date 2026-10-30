@@ -69,6 +69,9 @@ pub const STATES: [&str; 5] = [
 /// Beside a state's trees: the directories of each that hold nothing.
 pub const EMPTY_DIRS: &str = "empty-dirs.json";
 
+/// The directory under the fixtures holding the reverse cases.
+pub const REVERSE: &str = "reverse";
+
 /// The directory holding every fixture state.
 pub fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -243,5 +246,27 @@ pub fn load_with(state: &str, folder: Capabilities) -> Machine {
 pub fn load_folder(state: &str) -> Machine {
     let machine = load(state);
     machine.local.lose_local();
+    machine
+}
+
+/// State `base` with reverse case `case` laid over it: each of the case's files
+/// replaces `base`'s at its path, or is added.
+pub fn load_case(base: &str, case: &str) -> Machine {
+    let machine = load(base);
+    let dir = fixtures().join(REVERSE).join(case);
+    assert!(dir.is_dir(), "no reverse case {case}");
+    for (tree, disk, root) in [
+        ("folder", &machine.folder, Root::Folder),
+        ("local", &machine.local, Root::Local),
+    ] {
+        let files = read_tree(&dir.join(tree));
+        for file in files.keys() {
+            let _ = disk.perform(Io::Remove {
+                root,
+                path: file.clone(),
+            });
+        }
+        put(disk, root, &files);
+    }
     machine
 }

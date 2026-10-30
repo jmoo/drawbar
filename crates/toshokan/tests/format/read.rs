@@ -7,7 +7,7 @@ use toshokan::env::TestClock;
 use toshokan::simulator::Machine;
 use toshokan::Root;
 
-use crate::fixture::{fixtures, load, load_folder, open, Faulty, STATES};
+use crate::fixture::{fixtures, load, load_folder, open, Faulty, REVERSE, STATES};
 use crate::oracle::{differences, observed, oracle};
 
 /// What a reader on `machine` shows once it has scanned every file.
@@ -55,6 +55,7 @@ fn every_state_is_read() {
         .map(|entry| entry.unwrap())
         .filter(|entry| entry.file_type().unwrap().is_dir())
         .map(|entry| entry.file_name().into_string().unwrap())
+        .filter(|name| name != REVERSE)
         .collect();
     found.sort();
     let mut states = STATES.to_vec();
