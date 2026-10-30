@@ -1095,7 +1095,7 @@ pub(super) fn lives(entity: &LocalEntity) -> String {
 
 /// The home directory, where the host has one to compare a path against.
 fn home() -> Option<String> {
-    std::env::var( "HOME" ).ok().filter(|home|   !home.is_empty())
+    std::env::var("HOME").ok().filter(|home| !home.is_empty())
 }
 
 /// The folder a path is in, with the home directory written `~`.
