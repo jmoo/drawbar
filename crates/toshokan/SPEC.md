@@ -1074,9 +1074,10 @@ ext2, and ext4 made without a journal, report ext4's type and are taken to
 rename atomically, as is any file system not named here. It declares
 `no_replace` where renames also refuse an existing destination (see File
 effects). On Windows it syncs a file through a handle that may write and a
-directory through one opened for backup semantics, taking a volume that refuses
-to flush a directory to journal its names; its renames return once they are on
-the disk. A request another program holds the file of for a moment, as antivirus
+directory through one opened for backup semantics, and its renames return once
+they are on the disk. Where a volume refuses to flush a directory, a file's flush
+and a rename written through still flush its log through every earlier change of
+names. A request another program holds the file of for a moment, as antivirus
 does after a write, is tried again for about half a second.
 
 ### Browsers

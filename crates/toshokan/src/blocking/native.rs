@@ -26,7 +26,9 @@ use crate::path::RelPath;
 /// move copies, and one whose renames refuse an existing destination declares
 /// [`Capabilities::no_replace`], as every other volume on Windows does. On
 /// Windows names containing `\` or `:` are refused, and a request another
-/// program holds the file of for a moment is tried again. The local root's
+/// program holds the file of for a moment is tried again. A create or rename
+/// through a file fails as [`IoError::NotDirectory`] everywhere; other requests
+/// there fail as [`IoError::NotFound`] on Windows. The local root's
 /// directory, and those it is in, are made where missing at its first change or
 /// lock.
 pub struct Native {
@@ -284,12 +286,15 @@ impl Native {
         if self.locks.contains_key(&name) {
             return Ok(Lock::Acquired);
         }
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(self.full(Root::Local, &name)?)
-            .map_err(io_error)?;
+        let full = self.full(Root::Local, &name)?;
+        let open = || {
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&full)
+        };
+        let file = patiently(open).map_err(io_error)?;
         match try_lock(&file).map_err(io_error)? {
             true => {
                 self.locks.insert(name, file);
@@ -358,12 +363,39 @@ fn flush(path: &Path, _: Kind) -> io::Result<()> {
 }
 
 /// Makes what `path`, a `kind`, holds durable: a file's bytes, a directory's names.
-/// Windows flushes only through a handle that may write, and opens a directory
-/// only for backup semantics.
 #[cfg(windows)]
 fn flush(path: &Path, kind: Kind) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED,
+    };
+
+    const REFUSED: [u32; 3] = [
+        ERROR_ACCESS_DENIED,
+        ERROR_INVALID_FUNCTION,
+        ERROR_NOT_SUPPORTED,
+    ];
+    match writable(path, kind).and_then(|file| file.sync_all()) {
+        // A file's flush, and a rename written through, flush the volume's log
+        // through every earlier change of names, so a volume that cannot flush a
+        // directory keeps its names all the same. Reported by public documentation;
+        // not confirmed on hardware.
+        Err(error)
+            if kind == Kind::Directory
+                && error
+                    .raw_os_error()
+                    .is_some_and(|code| REFUSED.iter().any(|&refused| refused as i32 == code)) =>
+        {
+            Ok(())
+        }
+        flushed => flushed,
+    }
+}
+
+/// `path`, a `kind`, opened so that it can be flushed: Windows flushes only through a
+/// handle that may write, and opens a directory only for backup semantics.
+#[cfg(windows)]
+fn writable(path: &Path, kind: Kind) -> io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
 
     let mut open = OpenOptions::new();
@@ -371,17 +403,7 @@ fn flush(path: &Path, kind: Kind) -> io::Result<()> {
     if kind == Kind::Directory {
         open.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
     }
-    match open.open(path).and_then(|file| file.sync_all()) {
-        // A volume that refuses to flush a directory journals its names, as OpenJDK
-        // and Lucene take it to; renames are written through besides.
-        Err(error)
-            if kind == Kind::Directory
-                && error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) =>
-        {
-            Ok(())
-        }
-        flushed => flushed,
-    }
+    open.open(path)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -390,7 +412,8 @@ fn flush(_: &Path, _: Kind) -> io::Result<()> {
 }
 
 /// Runs `op` again, for about half a second, while another program holds the file
-/// it names, as antivirus and indexing do for a moment after a file is written.
+/// it names, as antivirus and indexing do for a moment after a file is written. A
+/// refusal that lasts, as of a read-only folder, is said that much later.
 #[cfg(windows)]
 fn patiently<T>(mut op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     use windows_sys::Win32::Foundation::{
@@ -943,12 +966,17 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn a_file_and_a_directory_are_synced_on_windows() {
+    fn a_file_and_a_directory_are_flushed_on_windows() {
         let dir = std::env::temp_dir().join(format!("toshokan-sync-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("a.npno"), b"a").unwrap();
-        flush(&dir.join("a.npno"), Kind::File).unwrap();
-        flush(&dir, Kind::Directory).unwrap();
+        for (path, kind) in [
+            (dir.join("a.npno"), Kind::File),
+            (dir.clone(), Kind::Directory),
+        ] {
+            let file = writable(&path, kind).unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+            file.sync_all().unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 

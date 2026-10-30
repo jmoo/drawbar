@@ -190,7 +190,7 @@ let
         # a line's last CR, so each line would show empty.
         cmd = "${final.writeShellScript "wine-tests" ''
           set -o pipefail
-          WINEDEBUG=-all ${emulators.windows.package}/bin/wine "$@" 2>&1 | tr -d '\r'
+          WINEDEBUG=fixme-all,warn-all,trace-all ${emulators.windows.package}/bin/wine "$@" 2>&1 | tr -d '\r'
         ''}";
         packages = [ ];
       };
