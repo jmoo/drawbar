@@ -206,6 +206,13 @@ pub struct DrawbarApp {
     /// user agreed to lose what the open one cannot keep.
     #[cfg(target_arch = "wasm32")]
     waiting: Option<(crate::store::Root, bool)>,
+    /// A copy of a library to open into the browser's own once the open library has no
+    /// answer outstanding.
+    #[cfg(target_arch = "wasm32")]
+    restoring: Option<crate::store::Outside>,
+    /// Whether this session told the user what may delete the browser's own library.
+    #[cfg(target_arch = "wasm32")]
+    told_risk: bool,
     /// eframe's store still holds a library kept the old way, to empty at the first
     /// frame that can write it.
     leaving: bool,
@@ -319,6 +326,10 @@ impl DrawbarApp {
             libraries: crate::libraries::Libraries::default(),
             #[cfg(target_arch = "wasm32")]
             waiting: None,
+            #[cfg(target_arch = "wasm32")]
+            restoring: None,
+            #[cfg(target_arch = "wasm32")]
+            told_risk: false,
             leaving,
             synced: 0,
             synced_at: 0.0,
@@ -873,19 +884,83 @@ impl DrawbarApp {
                     }
                 }
                 Heard::Open(root) => self.waiting = Some((root, false)),
+                Heard::Copy(from) => self.restoring = Some(from),
                 Heard::Trouble(why) => self.log.trouble(why),
             }
         }
-        if self.waiting.is_none() {
+        if self.waiting.is_none() && self.restoring.is_none() {
             return;
         }
         let settled = match &mut self.store {
             Some(store) => store.settled(&mut self.workspace, &mut self.browser),
             None => true,
         };
-        if let Some((root, discard)) = self.waiting.take_if(|_| settled) {
+        if !settled {
+            return;
+        }
+        if let Some(from) = self.restoring.take() {
+            self.restore_library(ctx, from);
+        }
+        if let Some((root, discard)) = self.waiting.take() {
             self.open_library(ctx, root, discard);
         }
+    }
+
+    /// Pick a copy of a library to open into the browser's own, which must hold no
+    /// files.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn open_copy(&mut self, ctx: &egui::Context) {
+        if self.browser.folders.count(None, &self.workspace) > 0 {
+            self.log.say(
+                "A copy opens only into an empty library, and the library in this browser \
+                 holds files.",
+            );
+            return;
+        }
+        self.libraries.pick_copy(ctx);
+    }
+
+    /// Let the library go, and open the copy `from` into the browser's own library,
+    /// which then opens.
+    #[cfg(target_arch = "wasm32")]
+    fn restore_library(&mut self, ctx: &egui::Context, from: crate::store::Outside) {
+        self.let_library_go();
+        let backend = crate::store::Backend::start(ctx, crate::store::Root::Private);
+        self.store = Some(Store::restore(backend, from));
+        self.opened();
+        self.synced = self.workspace.revision();
+    }
+
+    /// Tell the user once a session what may delete the library, where it is the
+    /// browser's own and something may.
+    #[cfg(target_arch = "wasm32")]
+    fn tell_risk(&mut self) {
+        use crate::store::Risk;
+
+        let risk = self.store.as_ref().and_then(Store::risk);
+        let Some(risk) = risk.filter(|_| !self.told_risk) else {
+            return;
+        };
+        self.told_risk = true;
+        let what = match risk {
+            Risk::Unvisited => {
+                "This browser deletes it after seven days without a visit, unless drawbar \
+                 is added to the Dock or the Home Screen."
+            }
+            Risk::Pressure => "This browser may clear it when space runs low.",
+        };
+        let elsewhere = match crate::libraries::picking() {
+            crate::libraries::Picking::On => format!(
+                " File ▸ {} keeps it in a folder on this computer instead.",
+                crate::menu::OPEN_LIBRARY
+            ),
+            _ => String::new(),
+        };
+        self.log.say(format!(
+            "The library is kept only in this browser's storage. {what} Keep a copy with \
+             File ▸ {}.{elsewhere}",
+            crate::menu::SAVE_COPY
+        ));
     }
 }
 
@@ -1071,7 +1146,10 @@ impl eframe::App for DrawbarApp {
         #[cfg(not(target_arch = "wasm32"))]
         arrived.extend(self.picker.picked().map(browser::Act::OpenLibrary));
         #[cfg(target_arch = "wasm32")]
-        self.follow_libraries(ctx);
+        {
+            self.follow_libraries(ctx);
+            self.tell_risk();
+        }
         if released {
             arrived.push(browser::Act::SendAll);
         }

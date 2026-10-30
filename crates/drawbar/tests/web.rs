@@ -828,3 +828,69 @@ async fn two_installs_see_each_others_changes() {
     first.close().await;
     second.close().await;
 }
+
+/// A copy of a library, as File ▸ Save a copy of the library saves it, opens into an
+/// empty one with its files, its folders and its tags, through the library's worker.
+#[wasm_bindgen_test]
+async fn a_copy_saved_of_a_library_opens_into_an_empty_one() {
+    wipe(&opfs().await).await;
+    let local = |name: &str| RelPath::new(&format!("local/{name}")).unwrap();
+    let in_folder = |name: &str| Folder::Private(RelPath::new(name).unwrap());
+    let saved = Worker::start(in_folder("Saved"), &local("saved"))
+        .await
+        .unwrap();
+    saved.run(Cmd::Open).await.unwrap();
+    let made = [
+        Intent::MakeDir {
+            path: path("Empty"),
+        },
+        Intent::Save {
+            id: 1,
+            path: path("c3.ne5p"),
+            bytes: b"c3".to_vec(),
+            expect: Expect::Absent,
+            came: None,
+        },
+        Intent::Tag {
+            files: vec![Key::File(path("c3.ne5p"))],
+            name: "Gig".into(),
+            make: true,
+        },
+    ];
+    for intent in made {
+        committed(&saved.run(Cmd::Intent(intent)).await.unwrap());
+    }
+    saved.close().await;
+
+    let copy = drawbar::store::copy_of(&RelPath::new("Saved").unwrap())
+        .await
+        .unwrap();
+    let copy = web_sys::File::new_with_blob_sequence(&Array::of1(&copy), "copy.zip").unwrap();
+    let opened = Worker::start(in_folder("Restored"), &local("restored"))
+        .await
+        .unwrap();
+    let restored = opened.run(Cmd::Restore(copy)).await.unwrap();
+    assert!(
+        matches!(restored[..], [Event::Restored(Ok(1))]),
+        "{restored:?}"
+    );
+    let mut shown = Shown::default();
+    for cmd in [Cmd::Open, Cmd::Rescan] {
+        for event in opened.run(cmd).await.unwrap() {
+            if let Event::Opened(Ok(opened)) = &event {
+                shown.apply(opened.viewed.shown.clone());
+            }
+            if let Event::Scanned(Ok(viewed)) = &event {
+                shown.apply(viewed.shown.clone());
+            }
+        }
+    }
+    assert_eq!(shown.wearing("Gig").len(), 1, "the tag came with the copy");
+    let restored = private_dir(&RelPath::new("Restored").unwrap())
+        .await
+        .unwrap();
+    JsFuture::from(restored.get_directory_handle("Empty"))
+        .await
+        .expect("the empty folder came with the copy");
+    opened.close().await;
+}

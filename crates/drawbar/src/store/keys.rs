@@ -147,6 +147,10 @@ pub fn identity_of_bytes(path: &LibPath, bytes: &[u8]) -> Option<Identity> {
 /// build's index stays there, unread.
 pub const DIR: &str = ".drawbar";
 
+/// The directory of [`DIR`] that holds each install's own state, in a browser's own
+/// library, which no copy of the library takes.
+pub const LOCAL: &str = "local";
+
 pub fn schema() -> Schema {
     Schema::of(&[TAGS.key(), TAG_NAMES.key(), ORIGIN.key(), TAKEN_IN.key()])
         .expect("drawbar's keys are distinct")

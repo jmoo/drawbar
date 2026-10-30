@@ -46,6 +46,8 @@ pub enum Heard {
     Restored { recent: Vec<Root>, permitted: bool },
     /// A library the user chose, which may be opened now.
     Open(Root),
+    /// A copy of a library the user chose to open into the browser's own.
+    Copy(web_sys::File),
     /// Something the user asked for did not happen, and why, in their terms.
     Trouble(String),
 }
@@ -127,6 +129,26 @@ impl Libraries {
             };
             let _ = tx.send(heard);
             ctx.request_repaint();
+        });
+    }
+
+    /// Show the browser's file picker for a copy of a library. The file comes back as
+    /// [`Heard::Copy`].
+    ///
+    /// ⚠️ Only from a click the user has just made.
+    pub fn pick_copy(&self, ctx: &egui::Context) {
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        crate::workspace::spawn(async move {
+            let picked = rfd::AsyncFileDialog::new()
+                .set_title("Open a copy of a library")
+                .add_filter("ZIP archive", &["zip"])
+                .pick_file()
+                .await;
+            if let Some(picked) = picked {
+                let _ = tx.send(Heard::Copy(picked.inner().to_owned()));
+                ctx.request_repaint();
+            }
         });
     }
 

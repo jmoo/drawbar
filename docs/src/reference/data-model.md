@@ -258,6 +258,16 @@ Other differences:
 - The first write asks the browser to keep the storage
   (`navigator.storage.persist()`). Where the browser gives the page no storage,
   the library lasts until the tab closes.
+- **Save a copy of the library** is a ZIP of stored entries: every file of the
+  folder, `.drawbar/library/` among them, but not `.drawbar/local/` or Chromium's
+  `.crswap` files. The page reads each file once for its CRC-32 while no command
+  of its tab runs, then hands the browser a Blob of the headers and the files'
+  snapshots; drawbar's own files go in as read, since toshokan appends to its
+  logs in place. **Open a copy…** runs in the worker before the library opens:
+  it refuses unless the folder holds no file outside `.drawbar/local/`, reads
+  the archive by position, writes each entry as it is, and takes back what it
+  wrote if any entry fails. The library then opens as a new writer over the
+  copied history, as it would over a restored backup.
 
 [Browsers](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#browsers)
 has what each browser can do.

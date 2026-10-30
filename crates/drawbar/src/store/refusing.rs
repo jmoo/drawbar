@@ -25,6 +25,7 @@ pub(super) fn refused(cmd: &Cmd) -> Refusing {
         Cmd::Discard(_) | Cmd::DiscardSlot(_) => Refusing::Kept,
         Cmd::ReadSlot(slot) => Refusing::Slot(slot.clone()),
         Cmd::Read { files, .. } => Refusing::Read(files.iter().map(|(id, ..)| *id).collect()),
+        Cmd::Restore(_) => Refusing::Restore,
     };
     refusing
 }
@@ -40,6 +41,7 @@ pub(super) enum Refusing {
     Kept,
     Slot(Slot),
     Read(Vec<u64>),
+    Restore,
 }
 
 /// The answer one change to a file owes.
@@ -90,6 +92,7 @@ impl Refusing {
                 slot,
                 kept: Err(why.to_string()),
             }],
+            Refusing::Restore => vec![Event::Restored(Err(why.to_string()))],
             Refusing::Read(ids) => vec![Event::Read(
                 ids.into_iter().map(|id| (id, Err(failed()))).collect(),
             )],

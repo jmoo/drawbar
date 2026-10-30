@@ -275,6 +275,14 @@ pub struct Store {
 }
 
 impl Store {
+    /// Open the copy `from` into the library the backend holds, which must hold no files,
+    /// and then open the library, which reads what the copy held.
+    #[cfg(target_arch = "wasm32")]
+    pub fn restore(mut backend: Backend, from: super::Outside) -> Store {
+        backend.send(Cmd::Restore(from));
+        Store::start(backend)
+    }
+
     /// Open the library the backend holds.
     pub fn start(mut backend: Backend) -> Store {
         backend.send(Cmd::Open);
@@ -853,6 +861,19 @@ impl Store {
         String::new()
     }
 
+    /// What may delete the library, where it is the browser's own and something may.
+    #[cfg(target_arch = "wasm32")]
+    pub fn risk(&self) -> Option<super::Risk> {
+        self.backend.risk()
+    }
+
+    /// Save a copy of the library as a ZIP the browser downloads, once what was sent
+    /// before has run.
+    #[cfg(target_arch = "wasm32")]
+    pub fn save_copy(&mut self) {
+        self.backend.save_copy();
+    }
+
     fn open(&self) -> bool {
         matches!(self.phase, Phase::Open)
     }
@@ -875,6 +896,7 @@ impl Store {
         Where {
             name: self.name.clone(),
             label: self.backend.label(),
+            kept: self.kept(),
             reveal: self.backend.reveal(),
             note: match &self.phase {
                 _ if self.listing() => Some(match self.backend.listed() {
@@ -1531,6 +1553,22 @@ impl Store {
                 log.trouble(format!(
                     "drawbar could not take in the tags an older drawbar kept: {why}."
                 ));
+            }
+            Event::Restored(Ok(files)) => log.say(match files {
+                1 => "drawbar opened the copy of the library, which holds 1 file.".to_string(),
+                n => format!("drawbar opened the copy of the library, which holds {n} files."),
+            }),
+            Event::Restored(Err(why)) => {
+                log.error(format!("opening a copy of the library: {why}"));
+                log.trouble(format!("The copy was not opened: {why}."));
+            }
+            Event::Copied(Ok((name, files))) => log.say(match files {
+                1 => format!("Saved a copy of the library as {name}, with 1 file."),
+                n => format!("Saved a copy of the library as {name}, with {n} files."),
+            }),
+            Event::Copied(Err(why)) => {
+                log.error(format!("saving a copy of the library: {why}"));
+                log.trouble(format!("No copy of the library was saved: {why}."));
             }
             Event::Unemptied(why) => {
                 log.error(format!("emptying the trash: {why}"));

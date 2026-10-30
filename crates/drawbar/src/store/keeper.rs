@@ -197,6 +197,13 @@ impl<F: Fs> Keeper<F> {
                 answer(Event::SlotKept { slot, kept });
             }
             Cmd::Read { .. } => unreachable!("the backend reads files itself"),
+            Cmd::Restore(from) => {
+                let restored = match &self.unopened {
+                    Some((fs, _)) => super::copy::restore(fs, &from).await,
+                    None => Err("the library was already open".to_string()),
+                };
+                answer(Event::Restored(restored));
+            }
         }
     }
 
@@ -2277,6 +2284,103 @@ mod tests {
         let view = keeper.library.as_ref().unwrap().view();
         let file = view.entity(entity).unwrap().file().unwrap();
         assert_eq!(file.state, toshokan::FileState::InSync);
+    }
+
+    /// The keeper of the library in `root`, not opened yet.
+    fn unopened(root: &Temp) -> Keeper {
+        native::keeper(
+            &root.0,
+            &root.local(),
+            Arc::default(),
+            Box::new(SystemClock),
+        )
+    }
+
+    /// A copy of the library in `from`, as File ▸ Save a copy of the library saves it,
+    /// in a folder of its own.
+    fn saved(from: &Temp) -> (Temp, std::path::PathBuf) {
+        let saved = Temp::new();
+        fs::write(saved.at("copy.zip"), super::super::copy::saved(&from.0)).unwrap();
+        let at = saved.at("copy.zip");
+        (saved, at)
+    }
+
+    #[test]
+    fn a_copy_opened_into_an_empty_library_brings_its_files_and_their_tags() {
+        let from = Temp::new();
+        fs::create_dir(from.at("Set")).unwrap();
+        fs::write(from.at("Set/Grand.ne5p"), b"grand").unwrap();
+        let mut keeper = keeper(&from);
+        keeper.run_one(Cmd::Intent(Intent::Tag {
+            files: vec![Key::File(path("Set/Grand.ne5p"))],
+            name: "Live".into(),
+            make: false,
+        }));
+        nord_usb::block_on(keeper.close());
+        let (_saved, copy) = saved(&from);
+
+        let to = Temp::new();
+        let mut keeper = unopened(&to);
+        let restored = keeper.run_one(Cmd::Restore(copy));
+        assert!(
+            matches!(restored[..], [Event::Restored(Ok(1))]),
+            "{restored:?}"
+        );
+        let opened = keeper.run_one(Cmd::Open);
+        assert!(matches!(opened[..], [Event::Opened(Ok(_))]), "{opened:?}");
+        keeper.run_one(Cmd::Rescan);
+        assert_eq!(to.read("Set/Grand.ne5p"), b"grand");
+        let view = keeper.library.as_ref().unwrap().view();
+        let entity = view.entities()[0].id();
+        let worn = view.entity(entity).unwrap().members(TAGS).values;
+        assert_eq!(worn.into_iter().collect::<Vec<_>>(), ["Live"]);
+    }
+
+    #[test]
+    fn a_copy_is_not_opened_into_a_library_that_holds_files() {
+        let from = Temp::new();
+        fs::write(from.at("a.ne5p"), b"a").unwrap();
+        let (_saved, copy) = saved(&from);
+        let to = Temp::new();
+        fs::write(to.at("b.ne5p"), b"b").unwrap();
+        let answers = unopened(&to).run_one(Cmd::Restore(copy));
+        let [Event::Restored(Err(why))] = &answers[..] else {
+            panic!("{answers:?}")
+        };
+        assert!(why.contains("already holds files"), "{why}");
+        assert_eq!(to.names(""), ["b.ne5p"]);
+    }
+
+    #[test]
+    fn a_damaged_copy_takes_back_what_it_wrote() {
+        let from = Temp::new();
+        fs::write(from.at("a.ne5p"), b"first").unwrap();
+        fs::write(from.at("b.ne5p"), b"second").unwrap();
+        let (saved, copy) = saved(&from);
+        let mut bytes = fs::read(&copy).unwrap();
+        let at = bytes.windows(6).position(|run| run == b"second").unwrap();
+        bytes[at] ^= 1;
+        fs::write(&copy, bytes).unwrap();
+        let to = Temp::new();
+        let answers = unopened(&to).run_one(Cmd::Restore(copy));
+        let [Event::Restored(Err(why))] = &answers[..] else {
+            panic!("{answers:?}")
+        };
+        assert!(why.contains("damaged"), "{why}");
+        assert!(to.names("").is_empty(), "{:?}", to.names(""));
+        drop(saved);
+    }
+
+    #[test]
+    fn a_copy_is_not_opened_into_a_library_already_open() {
+        let from = Temp::new();
+        let (_saved, copy) = saved(&from);
+        let to = Temp::new();
+        let answers = keeper(&to).run_one(Cmd::Restore(copy));
+        assert!(
+            matches!(&answers[..], [Event::Restored(Err(_))]),
+            "{answers:?}"
+        );
     }
 
     /// A scan leaves out every name that starts with a dot, as drawbar never lists one:
