@@ -668,8 +668,10 @@ fn read_zip(reader: &mut (impl Read + Seek)) -> Result<Entity, Error> {
         let zip = zip::ZipArchive::new(&mut *reader)?;
         // Counting a directory or the manifest would make an archive of directories an
         // empty bundle, and a `kits/` entry would stop a drum bank from classifying as one.
-        let names: Vec<&str> = zip
+        let names: Vec<_> = zip
             .file_names()
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
             .filter(|name| formats::is_member(name))
             .collect();
         // An archive with nothing in it would satisfy the all-members checks below
@@ -680,7 +682,7 @@ fn read_zip(reader: &mut (impl Read + Seek)) -> Result<Entity, Error> {
         // ⚠️ `meta.xml` is shared across product families; only `.ne5*` members identify
         // an Electro 5 bundle.
         if names.iter().any(|n| {
-            std::path::Path::new(n)
+            std::path::Path::new(n.as_ref())
                 .extension()
                 .is_some_and(|e| e.to_string_lossy().starts_with("ne5"))
         }) {

@@ -257,7 +257,7 @@ fn another_zip_reader_reads_what_the_writer_wrote() {
         let mut file = zip.by_index(i).unwrap();
         let mut body = String::new();
         file.read_to_string(&mut body).unwrap();
-        names.push((file.name().to_string(), body));
+        names.push((file.name().unwrap().into_owned(), body));
     }
     assert_eq!(
         names,
