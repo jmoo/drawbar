@@ -254,6 +254,10 @@ committed fixtures, plus the corpus when enabled, by content, and applies sideca
 every file of a kind runs once per such file, and a claim about one file lives in
 its sidecar.
 
+Each crate's Windows build runs its suite under Wine. When toshokan changes, the
+`windows` workflow also runs toshokan's suite on a hosted Windows runner. It is
+the one check outside Nix, so it pins the Rust that nixpkgs pins by version.
+
 The CI corpus job runs the committed tier for in-repository pull requests and
 gates publishing. It reads `jmoo/nord-corpus` through the read-only
 `NORD_CORPUS_DEPLOY_KEY`; forks cannot receive that secret, so the job skips them.
