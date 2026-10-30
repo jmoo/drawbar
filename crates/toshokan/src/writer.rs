@@ -685,18 +685,28 @@ fn record_head<'a>(writer: WriterId, genesis: EntryHash, head: EntryHash) -> Flo
 /// same length but the retired one, which is longer and written last, so no write
 /// leaves the end of an older record behind.
 fn write_head<'a>(genesis: EntryHash, record: &HeadRecord) -> Flow<'a, Result<()>> {
-    let bytes = serde_json::to_vec(record).expect("a head record is JSON");
+    let mut bytes = serde_json::to_vec(record).expect("a head record is JSON");
     let path = Layout::head(genesis);
     flow::stat(Root::Local, &path).and_then(move |meta| {
         let write = match meta {
             Some(Meta {
-                kind: Kind::File, ..
-            }) => Io::Write {
-                root: Root::Local,
-                path: path.clone(),
-                offset: 0,
-                bytes,
-            },
+                kind: Kind::File,
+                len,
+                ..
+            }) => {
+                // A longer record, as a newer build may have written, is padded over
+                // with spaces, which JSON reads past.
+                let held = usize::try_from(len).unwrap_or(usize::MAX);
+                if held > bytes.len() {
+                    bytes.resize(held, b' ');
+                }
+                Io::Write {
+                    root: Root::Local,
+                    path: path.clone(),
+                    offset: 0,
+                    bytes,
+                }
+            }
             _ => Io::Create {
                 root: Root::Local,
                 path: path.clone(),

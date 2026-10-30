@@ -1427,7 +1427,7 @@ fn last_at(placed: &Placed) -> Option<Hlc> {
     tips.chain(entries.map(|entry| entry.at())).max()
 }
 
-/// An entry of `writer`'s own history this build does not understand.
+/// An entry of `writer`'s own history this build does not understand or cannot place.
 fn newer_entry(reader: &Reader, writer: WriterId) -> Option<EntryHash> {
     let placed = reader.derived().writers.get(&writer)?;
     let folded = placed.tips.iter().flat_map(|tip| &tip.state.unknown);
@@ -1441,7 +1441,13 @@ fn newer_entry(reader: &Reader, writer: WriterId) -> Option<EntryHash> {
             .any(|op| matches!(op, Op::Unknown(_)));
         op || matches!(kind, EntryKind::Unknown(_))
     };
-    placed.merged.iter().find(unknown).map(|entry| entry.hash())
+    let merged = placed.merged.iter().find(unknown);
+    // This install wrote every line of its own writer, so one it cannot place is a
+    // newer build's, and so is every line after it.
+    let unplaced = placed.unplaced.iter().chain(&placed.gaps);
+    merged
+        .or(unplaced.into_iter().next())
+        .map(|entry| entry.hash())
 }
 
 /// How far past this machine's wall clock a reading in the folder may be and still

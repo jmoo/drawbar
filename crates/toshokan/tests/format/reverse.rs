@@ -183,7 +183,7 @@ fn a_delete_whose_observed_write_holds_a_member_this_build_does_not_know_is_an_u
 }
 
 #[test]
-fn a_clock_reading_with_an_extra_element_leaves_its_line_unplaced_and_deletes_nothing() {
+fn a_clock_reading_with_an_extra_element_leaves_its_line_unplaced_and_its_writer_read_only() {
     let lines = newer_lines("at-extra-element", W);
     assert_eq!(Entry::parse(&lines[0]).unwrap().n(), Entry::UNNUMBERED);
     let after = hash_of(&lines[1]);
@@ -202,7 +202,8 @@ fn a_clock_reading_with_an_extra_element_leaves_its_line_unplaced_and_deletes_no
 
     let machine = load_case("one-writer-open", "at-extra-element");
     let before = machine.folder.files(Root::Folder);
-    let (library, _) = opened(&machine);
+    let (library, first) = opened(&machine);
+    assert_eq!(first.mode, newer_own_history(hash_of(&lines[1])));
     library.close().unwrap();
     let after = machine.folder.files(Root::Folder);
     let gone: Vec<&RelPath> = before.keys().filter(|p| !after.contains_key(*p)).collect();
@@ -334,6 +335,21 @@ fn a_head_record_with_a_member_this_build_does_not_know_still_resumes_its_writer
     let machine = load_case("local", "head-extra-member");
     let expected = oracle("local", "view.oracle.json");
     assert_facts("head-extra-member", &expected, &facts(&machine));
+
+    let machine = load_case("local", "head-extra-member");
+    let (mut library, first) = opened(&machine);
+    let Start::Resumed(own) = first.start else {
+        panic!("resumed: {:?}", first.start);
+    };
+    let (intent, _) = library.intent("Make").create(|_| {});
+    intent.commit().unwrap();
+    library.close().unwrap();
+    let (_, again) = opened(&machine);
+    assert_eq!(
+        again.start,
+        Start::Resumed(own),
+        "the shorter record reads after a write"
+    );
 }
 
 /// A machine that keeps the library files whose bytes it is asked for.
