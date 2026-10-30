@@ -39,8 +39,8 @@ pub const MOST_ENTRIES: usize = 1_000_000;
 pub const MOST_BYTES: u64 = 1 << 30;
 
 /// Whether drawbar opens a file of this name, by its extension: a Nord file, a Sample
-/// Editor project, a note, a MIDI file or a SysEx dump. Any other file is listed by its
-/// name only.
+/// Editor project, a note, a WAV, a MIDI file or a SysEx dump. Any other file is listed
+/// by its name only.
 pub fn opens(name: &str) -> bool {
     crate::browser::tagged(name).is_some()
 }

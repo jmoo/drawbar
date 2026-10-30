@@ -2634,6 +2634,7 @@ mod tests {
             &mut app.device,
             &mut app.tabs,
             &mut app.queue,
+            &mut app.builds,
             &mut app.log,
         );
         assert!(app.shell.log_open && app.shell.log_problems);

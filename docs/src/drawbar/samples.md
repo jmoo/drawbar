@@ -30,15 +30,37 @@ them as two lanes you paint across, or as a table for one key at a time.
 
 A project opens in the same editor with everything editable: both ends of each
 zone, velocity windows, trims, loops, crossfades, source files and the sound
-parameters. It is saved back as the text file the Sample Editor reads. drawbar
-cannot build a project into an instrument yet.
+parameters. It is saved back as the text file the Sample Editor reads.
 
-## From WAVs
+**Build → .nsmp** in the header builds the instrument a project describes. It
+is offered once every WAV the project plays is in the library, at the path the
+project gives from its own folder. A name that differs only in case counts.
+Otherwise the header reads **N WAVs missing**, and hovering over it lists each
+one and why: not in the library, outside it (an absolute path, or one that
+climbs above the library's folder), or matching two files whose names differ
+only in case.
 
-Drop a WAV on the window and its document can **Encode** it into a one-zone
-instrument. **New ▸ Sample instrument…** takes several WAVs, one zone each, with a
-root key for each. **New ▸ Sample Editor project…** makes a project from them
-instead, and the Sample Editor expects the WAVs to stay beside it.
+A build reads the project and its WAVs as drawbar holds them, unsaved edits
+included, and writes a v2 instrument beside the project under the project file's
+name, numbered if that name is taken. The instrument opens in a tab. Settings the instrument cannot hold
+are listed in the activity log, and anything the encoder cannot reproduce stops
+the build with the reason.
+
+## WAVs
+
+A WAV in your library opens as a document of its own: the whole file's waveform,
+one lane per channel, with its rate, channels and length in the header.
+**Play** plays it. **Gain** with **Apply gain** scales every sample by that
+gain, and the line beside it first says how many samples would clip. A gain is an
+edit like any other: Save writes it into the file and Revert takes it back.
+**Encode** makes a one-zone instrument from the WAV. A WAV drawbar cannot read,
+such as a 24-bit one, says why and offers none of these.
+
+**New ▸ Sample instrument…** takes several WAVs, one zone each, with a root key
+for each. **New ▸ Sample Editor project…** makes a project from them instead, in
+a new folder named after it with a copy of each WAV, so it builds at once and
+the Sample Editor finds its WAVs beside it. Two WAVs with the same name are
+numbered apart, as `c3 2.wav`.
 
 The WAVs must be 16-bit PCM at 44.1 kHz, mono or stereo, in the plain or the
 extensible WAV format. Convert anything else, such as a 24-bit or 48 kHz file,
