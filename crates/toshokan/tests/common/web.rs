@@ -17,8 +17,7 @@ use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    Blob, BlobPropertyBag, DedicatedWorkerGlobalScope, FileSystemDirectoryHandle, MessageEvent,
-    Url, WorkerOptions, WorkerType,
+    Blob, BlobPropertyBag, DedicatedWorkerGlobalScope, MessageEvent, Url, WorkerOptions, WorkerType,
 };
 
 use super::{path, wire, Driven, Fill};
@@ -134,17 +133,15 @@ impl Bridge {
             let _ = resolve.call1(&JsValue::NULL, &event.data());
         });
         worker.set_onmessage(Some(hear.unchecked_ref()));
-        let (kind_name, dir, rename) = match kind {
-            Kind::Private => ("private", JsValue::from_str(folder.as_str()), true),
-            Kind::Picked { rename } => {
-                ("picked", private_dir(folder).await.unwrap().into(), rename)
-            }
+        let (kind_name, rename) = match kind {
+            Kind::Private => ("private", true),
+            Kind::Picked { rename } => ("picked", rename),
         };
         let start = object(&[
             ("glue", BUNDLE.with(|url| JsValue::from_str(url))),
             ("module", wasm_bindgen::module()),
             ("kind", kind_name.into()),
-            ("folder", dir),
+            ("folder", folder.as_str().into()),
             ("rename", rename.into()),
             ("local", local.as_str().into()),
             ("shared", shared.clone().into()),
@@ -197,16 +194,8 @@ impl Drop for Bridge {
 #[wasm_bindgen(js_name = toshokanBridge)]
 pub async fn bridge(start: JsValue) {
     let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
-    let text = |name| path(&get(&start, name).as_string().unwrap());
-    let folder = match get(&start, "kind").as_string().as_deref() {
-        Some("private") => Folder::Private(text("folder")),
-        _ => Folder::Picked {
-            dir: get(&start, "folder").unchecked_into::<FileSystemDirectoryHandle>(),
-            rename: get(&start, "rename").as_bool() == Some(true),
-        },
-    };
     let shared: SharedArrayBuffer = get(&start, "shared").unchecked_into();
-    let executor = match Executor::new(folder, &text("local")).await {
+    let executor = match executor(&start).await {
         Ok(executor) => std::rc::Rc::new(executor),
         Err(error) => {
             let _ = scope.post_message(&object(&[("failed", error.to_string().into())]));
@@ -246,6 +235,20 @@ pub async fn bridge(start: JsValue) {
     scope.set_onmessage(Some(hear.as_ref().unchecked_ref()));
     hear.forget();
     let _ = scope.post_message(&ready);
+}
+
+/// The executor `start` asks for. A picked folder is a directory of the private
+/// file system found here by path: WebKit cannot send a directory handle to a worker.
+async fn executor(start: &JsValue) -> Result<Executor, IoError> {
+    let text = |name| path(&get(start, name).as_string().unwrap());
+    let folder = match get(start, "kind").as_string().as_deref() {
+        Some("private") => Folder::Private(text("folder")),
+        _ => Folder::Picked {
+            dir: private_dir(&text("folder")).await?,
+            rename: get(start, "rename").as_bool() == Some(true),
+        },
+    };
+    Executor::new(folder, &text("local")).await
 }
 
 fn get(object: &JsValue, name: &str) -> JsValue {
