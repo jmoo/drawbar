@@ -1,0 +1,99 @@
+# The browser suites in Edge on a hosted Windows runner and in Safari on a hosted
+# macOS one, which Nix cannot drive. ci.yml runs them in Chromium and Firefox on
+# every push.
+#
+# Outside Nix, like windows.yml: rustup installs the Rust that nixpkgs pins, and
+# the runner is the wasm-bindgen-cli that matches Cargo.lock. It runs only when
+# toshokan, drawbar's library, the lock file or this workflow changes.
+name: browsers
+
+on:
+  pull_request:
+    paths:
+      - crates/toshokan/**
+      - crates/drawbar/src/store/**
+      - crates/drawbar/tests/web.rs
+      - crates/Cargo.lock
+      - .github/workflows/browsers.yml
+  push:
+    branches: [master]
+    paths:
+      - crates/toshokan/**
+      - crates/drawbar/src/store/**
+      - crates/drawbar/tests/web.rs
+      - crates/Cargo.lock
+      - .github/workflows/browsers.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browsers-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  WASM_BINDGEN_TEST_TIMEOUT: "300"
+
+jobs:
+  suites:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - browser: Edge
+            os: windows-latest
+          # Safari cannot pick a folder, and WebKit cannot send a directory handle
+          # to a worker, so drawbar's test of a picked folder cannot start there.
+          - browser: Safari
+            os: macos-latest
+            drawbar: --skip the_whole_workflow_runs_in_a_picked_folder
+    name: ${{ matrix.browser }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+        working-directory: crates
+    steps:
+      - uses: actions/checkout@v4
+      # ⚠️ Keep in step with the rustc nixpkgs pins (`nix develop -c rustc --version`)
+      # and the wasm-bindgen in Cargo.lock.
+      - run: rustup toolchain install 1.97.1 --profile minimal --target wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.121
+      - if: matrix.browser == 'Edge'
+        run: |
+          echo "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner" >>"$GITHUB_ENV"
+          echo "MSEDGEDRIVER=$EdgeWebDriver/msedgedriver.exe" >>"$GITHUB_ENV"
+      - if: matrix.browser == 'Safari'
+        run: |
+          sudo safaridriver --enable
+          echo "SAFARIDRIVER=/usr/bin/safaridriver" >>"$GITHUB_ENV"
+          # ⚠️ On hosted runners safaridriver sometimes drops a session asked for
+          # just after the last suite's, with "Peer disconnected"; the suite then
+          # never starts, so it is asked for again.
+          cat >"$RUNNER_TEMP/safari-runner" <<'EOF'
+          #!/bin/bash
+          for _ in 1 2 3; do
+            wasm-bindgen-test-runner "$@" 2>&1 | tee "$RUNNER_TEMP/suite.log"
+            status=${PIPESTATUS[0]}
+            grep -q "Error: io: Peer disconnected" "$RUNNER_TEMP/suite.log" || exit "$status"
+            echo "safaridriver dropped the session; asking again" >&2
+            sleep 5
+          done
+          exit "$status"
+          EOF
+          chmod +x "$RUNNER_TEMP/safari-runner"
+          echo "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=$RUNNER_TEMP/safari-runner" >>"$GITHUB_ENV"
+      - name: toshokan
+        run: >-
+          cargo +1.97.1 test --locked --no-fail-fast --profile release-tests
+          --target wasm32-unknown-unknown -p toshokan --features web
+          --test backends --test effects --test hints --test web
+      - name: drawbar
+        if: ${{ !cancelled() }}
+        run: >-
+          cargo +1.97.1 test --locked --no-fail-fast --profile release-tests
+          --target wasm32-unknown-unknown -p drawbar --test web
+          -- ${{ matrix.drawbar }}
