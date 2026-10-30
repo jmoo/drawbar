@@ -1965,28 +1965,8 @@ pub fn probe(ui: &Ui, class: ObjectClass, request: ProbeArgs) -> Result<(), Stri
         words.extend_from_slice(&a.to_be_bytes());
     }
 
-    // A known wedge costs a power cycle but no data, so this only warns, and `--yes`
-    // still proceeds.
-    if op == nord_usb::wire::cmd::NOTIFY_READ_WEDGE {
-        ui.note(format!(
-            "{op:#04x} is known to wedge the instrument (no reply, session lost, \
-             power cycle to recover); nothing stored has ever been harmed by it"
-        ));
-    }
-
-    // The one code known to destroy data. The session's class aims it, so the warning
-    // names the class it is aimed at.
-    if op == nord_usb::wire::cmd::ERASE_ALL {
-        ui.note(format!(
-            "{op:#04x} is reported to erase an ENTIRE PARTITION: as aimed, all of {}. \
-             Unlike the wedges, this costs the data, not a power cycle; restoring a \
-             library takes a backup and a long upload",
-            class.label()
-        ));
-    }
-
-    // The general form of that warning. Codes above the answering range are not
-    // unused: one of them starts erasing and cannot be stopped.
+    // Codes above the answering range are not unused: one of them starts erasing and
+    // cannot be stopped.
     if op > nord_usb::wire::cmd::HIGHEST_ANSWERING {
         ui.note(format!(
             "{op:#04x} is above {:#04x}, the highest command this instrument has been \
