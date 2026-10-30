@@ -410,12 +410,39 @@ fn stat(meta: &fs::Metadata) -> Stat {
     }
 }
 
-/// Make a rename or a new entry in `dir` survive a power cut, not only a crash. Does
-/// nothing off Unix, where a folder cannot be opened to sync.
+/// Make a rename or a new entry in `dir` survive a power cut, not only a crash.
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
     #[cfg(unix)]
     File::open(dir)?.sync_all()?;
-    #[cfg(not(unix))]
+    // Windows opens a folder only for backup semantics, and flushes only through a
+    // handle that may write. Where a volume refuses to flush a folder, the flush of
+    // the file put in it flushes the volume's log through its new entry. Reported by
+    // public documentation; not confirmed on hardware.
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Foundation::{
+            ERROR_ACCESS_DENIED, ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED,
+        };
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+        let folder = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(dir)?;
+        let refused = [
+            ERROR_ACCESS_DENIED,
+            ERROR_INVALID_FUNCTION,
+            ERROR_NOT_SUPPORTED,
+        ];
+        match folder.sync_all() {
+            Err(error)
+                if error
+                    .raw_os_error()
+                    .is_some_and(|code| refused.iter().any(|&r| r as i32 == code)) => {}
+            synced => synced?,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     let _ = dir;
     Ok(())
 }
@@ -457,6 +484,7 @@ mod tests {
     use super::*;
     use crate::testing::Temp;
 
+    #[cfg(unix)]
     fn disk(root: &Temp) -> Disk {
         Disk {
             root: root.0.clone(),

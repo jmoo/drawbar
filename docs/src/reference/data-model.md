@@ -105,7 +105,7 @@ can take back, and then deletes it. While the library cannot be written, the
 file stays where it is, and drawbar asks about it.
 
 A rescued occupant survives a power cut only where drawbar can sync its folder
-to disk: on macOS and Linux, not on Windows or in the browser. In the browser,
+to disk: on macOS, Linux and Windows, not in the browser. In the browser,
 the worker that writes the file loads from the bundle the page loaded, so after
 drawbar.app is deployed again, a send that would replace an occupant can be
 refused until the page is reloaded.

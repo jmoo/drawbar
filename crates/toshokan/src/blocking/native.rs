@@ -25,9 +25,12 @@ use crate::path::RelPath;
 /// [`Capabilities::rename_file`] or [`Capabilities::rename_dir`], so that every
 /// move copies, and one whose renames refuse an existing destination declares
 /// [`Capabilities::no_replace`], as every other volume on Windows does. On
-/// Windows a directory's names cannot be flushed, so `fsync` is not declared,
-/// and names containing `\` or `:` are refused. The local root's directory, and
-/// those it is in, are made where missing at its first change or lock.
+/// Windows names containing `\` or `:` are refused, and a request another
+/// program holds the file of for a moment is tried again. A create or rename
+/// through a file fails as [`IoError::NotDirectory`] everywhere; other requests
+/// there fail as [`IoError::NotFound`] on Windows. The local root's
+/// directory, and those it is in, are made where missing at its first change or
+/// lock.
 pub struct Native {
     folder: PathBuf,
     local: PathBuf,
@@ -112,6 +115,26 @@ impl Native {
         }
     }
 
+    /// `error`, which a request at `path` failed with, as Unix says it: a file in the
+    /// way of a directory `path` is in, which Windows reports as nothing there, is
+    /// [`IoError::NotDirectory`].
+    fn in_the_way(&self, root: Root, path: &RelPath, error: IoError) -> IoError {
+        if error != IoError::NotFound {
+            return error;
+        }
+        let mut above = path.parent();
+        while let Some(dir) = above.filter(|dir| !dir.is_root()) {
+            if let Ok(Some(Meta {
+                kind: Kind::File, ..
+            })) = self.stat(root, &dir)
+            {
+                return IoError::NotDirectory;
+            }
+            above = dir.parent();
+        }
+        error
+    }
+
     fn file(&self, root: Root, path: &RelPath) -> Result<PathBuf, IoError> {
         match self.stat(root, path)?.map(|meta| meta.kind) {
             Some(Kind::File) => self.full(root, path),
@@ -170,11 +193,9 @@ impl Native {
     fn create(&self, root: Root, path: &RelPath, bytes: &[u8]) -> Result<(), IoError> {
         refuse_root(path)?;
         let full = self.full(root, path)?;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&full)
-            .map_err(io_error)?;
+        let open = || OpenOptions::new().write(true).create_new(true).open(&full);
+        let mut file =
+            patiently(open).map_err(|error| self.in_the_way(root, path, io_error(error)))?;
         if let Err(error) = file.write_all(bytes) {
             drop(file);
             let _ = fs::remove_file(&full);
@@ -184,10 +205,9 @@ impl Native {
     }
 
     fn append(&self, root: Root, path: &RelPath, bytes: &[u8]) -> Result<(), IoError> {
-        let mut file = OpenOptions::new()
-            .append(true)
-            .open(self.file(root, path)?)
-            .map_err(io_error)?;
+        let full = self.file(root, path)?;
+        let open = || OpenOptions::new().append(true).open(&full);
+        let mut file = patiently(open).map_err(io_error)?;
         let len = file.metadata().map_err(io_error)?.len();
         if let Err(error) = file.write_all(bytes) {
             let _ = file.set_len(len);
@@ -205,19 +225,19 @@ impl Native {
         if to.starts_with(from) {
             return Err(IoError::IntoItself);
         }
-        let (from, to) = (self.full(root, from)?, self.full(root, to)?);
-        match self.renames(root) {
-            Renames::Exclusive => volume::rename(&from, &to),
-            Renames::Replacing | Renames::Torn => fs::rename(&from, &to),
-        }
-        .map_err(io_error)
+        let (source, destination) = (self.full(root, from)?, self.full(root, to)?);
+        let renames = self.renames(root);
+        patiently(|| match renames {
+            Renames::Exclusive => volume::rename(&source, &destination),
+            Renames::Replacing | Renames::Torn => fs::rename(&source, &destination),
+        })
+        .map_err(|error| self.in_the_way(root, to, io_error(error)))
     }
 
     fn write(&self, root: Root, path: &RelPath, offset: u64, bytes: &[u8]) -> Result<(), IoError> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .open(self.file(root, path)?)
-            .map_err(io_error)?;
+        let full = self.file(root, path)?;
+        let mut file =
+            patiently(|| OpenOptions::new().write(true).open(&full)).map_err(io_error)?;
         file.seek(SeekFrom::Start(offset)).map_err(io_error)?;
         file.write_all(bytes).map_err(io_error)
     }
@@ -227,8 +247,10 @@ impl Native {
         let found = self.stat(root, path)?.ok_or(IoError::NotFound)?.kind;
         let full = self.full(root, path)?;
         match (found, kind) {
-            (Kind::File, Kind::File) => fs::remove_file(full).map_err(io_error),
-            (Kind::Directory, Kind::Directory) => fs::remove_dir(full).map_err(io_error),
+            (Kind::File, Kind::File) => patiently(|| fs::remove_file(&full)).map_err(io_error),
+            (Kind::Directory, Kind::Directory) => {
+                patiently(|| fs::remove_dir(&full)).map_err(io_error)
+            }
             (Kind::Directory, Kind::File) => Err(IoError::IsDirectory),
             (Kind::File, Kind::Directory) => Err(IoError::NotDirectory),
         }
@@ -256,27 +278,23 @@ impl Native {
 
     fn sync(&self, root: Root, path: &RelPath) -> Result<(), IoError> {
         let full = self.full(root, path)?;
-        if self.stat(root, path)?.is_none() {
-            return Err(IoError::NotFound);
-        }
-        match FSYNC {
-            true => File::open(full)
-                .and_then(|file| file.sync_all())
-                .map_err(io_error),
-            false => Ok(()),
-        }
+        let kind = self.stat(root, path)?.ok_or(IoError::NotFound)?.kind;
+        patiently(|| flush(&full, kind)).map_err(io_error)
     }
 
     fn lock(&mut self, name: RelPath) -> Result<Lock, IoError> {
         if self.locks.contains_key(&name) {
             return Ok(Lock::Acquired);
         }
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(self.full(Root::Local, &name)?)
-            .map_err(io_error)?;
+        let full = self.full(Root::Local, &name)?;
+        let open = || {
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&full)
+        };
+        let file = patiently(open).map_err(io_error)?;
         match try_lock(&file).map_err(io_error)? {
             true => {
                 self.locks.insert(name, file);
@@ -336,7 +354,96 @@ fn try_lock(file: &File) -> io::Result<bool> {
     }
 }
 
-const FSYNC: bool = cfg!(unix);
+const FSYNC: bool = cfg!(any(unix, windows));
+
+/// Makes what `path`, a `kind`, holds durable: a file's bytes, a directory's names.
+#[cfg(unix)]
+fn flush(path: &Path, _: Kind) -> io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+/// Makes what `path`, a `kind`, holds durable: a file's bytes, a directory's names.
+#[cfg(windows)]
+fn flush(path: &Path, kind: Kind) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED,
+    };
+
+    const REFUSED: [u32; 3] = [
+        ERROR_ACCESS_DENIED,
+        ERROR_INVALID_FUNCTION,
+        ERROR_NOT_SUPPORTED,
+    ];
+    match writable(path, kind).and_then(|file| file.sync_all()) {
+        // A file's flush, and a rename written through, flush the volume's log
+        // through every earlier change of names, so a volume that cannot flush a
+        // directory keeps its names all the same. Reported by public documentation;
+        // not confirmed on hardware.
+        Err(error)
+            if kind == Kind::Directory
+                && error
+                    .raw_os_error()
+                    .is_some_and(|code| REFUSED.iter().any(|&refused| refused as i32 == code)) =>
+        {
+            Ok(())
+        }
+        flushed => flushed,
+    }
+}
+
+/// `path`, a `kind`, opened so that it can be flushed: Windows flushes only through a
+/// handle that may write, and opens a directory only for backup semantics.
+#[cfg(windows)]
+fn writable(path: &Path, kind: Kind) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+
+    let mut open = OpenOptions::new();
+    open.write(true);
+    if kind == Kind::Directory {
+        open.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    }
+    open.open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn flush(_: &Path, _: Kind) -> io::Result<()> {
+    Ok(())
+}
+
+/// Runs `op` again, for about half a second, while another program holds the file
+/// it names, as antivirus and indexing do for a moment after a file is written. A
+/// refusal that lasts, as of a read-only folder, is said that much later.
+#[cfg(windows)]
+fn patiently<T>(mut op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    use windows_sys::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION,
+    };
+
+    const HELD: [u32; 3] = [
+        ERROR_SHARING_VIOLATION,
+        ERROR_LOCK_VIOLATION,
+        ERROR_ACCESS_DENIED,
+    ];
+    for wait in [10, 40, 150, 400] {
+        match op() {
+            Err(error)
+                if error
+                    .raw_os_error()
+                    .is_some_and(|code| HELD.iter().any(|&held| held as i32 == code)) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(wait));
+            }
+            done => return done,
+        }
+    }
+    op()
+}
+
+#[cfg(not(windows))]
+fn patiently<T>(mut op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    op()
+}
 
 impl Backend for Native {
     fn capabilities(&self, root: Root) -> Capabilities {
@@ -683,6 +790,7 @@ mod volume {
 
     use windows_sys::Win32::Storage::FileSystem::{
         GetVolumeInformationByHandleW, MoveFileExW, FILE_FLAG_BACKUP_SEMANTICS,
+        MOVEFILE_WRITE_THROUGH,
     };
 
     /// File systems by the name Windows gives them, whose renames are torn.
@@ -727,15 +835,34 @@ mod volume {
         Some(renames(&String::from_utf16(&name[..len]).ok()?))
     }
 
+    /// Renames `from` to `to`, refusing an existing `to`, and returns once the
+    /// rename is on the disk.
     pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
-        let wide =
-            |path: &Path| -> Vec<u16> { path.as_os_str().encode_wide().chain([0]).collect() };
-        let (from, to) = (wide(from), wide(to));
+        let (from, to) = (verbatim(from)?, verbatim(to)?);
         // SAFETY: both paths are NUL-terminated UTF-16 that outlive the call.
-        match unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } {
+        match unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_WRITE_THROUGH) } {
             0 => Err(io::Error::last_os_error()),
             _ => Ok(()),
         }
+    }
+
+    /// `path` as Windows reads it past `MAX_PATH`, as `std::fs` passes every path:
+    /// absolute, under the verbatim prefix, NUL-terminated.
+    pub fn verbatim(path: &Path) -> io::Result<Vec<u16>> {
+        let absolute: Vec<u16> = std::path::absolute(path)?
+            .as_os_str()
+            .encode_wide()
+            .collect();
+        let wide = |text: &str| text.encode_utf16().collect::<Vec<u16>>();
+        let prefixed =
+            if absolute.starts_with(&wide(r"\\?\")) || absolute.starts_with(&wide(r"\\.\")) {
+                absolute
+            } else if let Some(share) = absolute.strip_prefix(wide(r"\\").as_slice()) {
+                [wide(r"\\?\UNC\").as_slice(), share].concat()
+            } else {
+                [wide(r"\\?\").as_slice(), &absolute].concat()
+            };
+        Ok(prefixed.into_iter().chain([0]).collect())
     }
 }
 
@@ -804,6 +931,53 @@ mod tests {
         }
         assert_eq!(volume::renames("apfs", true), Renames::Exclusive);
         assert_eq!(volume::renames("smbfs", false), Renames::Replacing);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_verbatim_path_keeps_its_drive_or_its_share() {
+        let text = |path: &str| {
+            let wide = volume::verbatim(Path::new(path)).unwrap();
+            String::from_utf16(&wide[..wide.len() - 1]).unwrap()
+        };
+        assert_eq!(text(r"C:\a\b.npno"), r"\\?\C:\a\b.npno");
+        assert_eq!(text(r"\\host\share\a"), r"\\?\UNC\host\share\a");
+        assert_eq!(text(r"\\?\C:\a"), r"\\?\C:\a");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_rename_past_max_path_is_made_and_refuses_what_is_there() {
+        let deep = std::env::temp_dir()
+            .join(format!("toshokan-long-{}", std::process::id()))
+            .join("d".repeat(120))
+            .join("e".repeat(120));
+        fs::create_dir_all(&deep).unwrap();
+        let (from, to) = (deep.join("a.npno"), deep.join("b.npno"));
+        assert!(to.as_os_str().len() > 260, "{}", to.display());
+        fs::write(&from, b"a").unwrap();
+        volume::rename(&from, &to).unwrap();
+        assert_eq!(fs::read(&to).unwrap(), b"a");
+        fs::write(&from, b"again").unwrap();
+        let refused = volume::rename(&from, &to).unwrap_err();
+        assert_eq!(io_error(refused), IoError::AlreadyExists);
+        let _ = fs::remove_dir_all(deep.ancestors().nth(2).unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_file_and_a_directory_are_flushed_on_windows() {
+        let dir = std::env::temp_dir().join(format!("toshokan-sync-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.npno"), b"a").unwrap();
+        for (path, kind) in [
+            (dir.join("a.npno"), Kind::File),
+            (dir.clone(), Kind::Directory),
+        ] {
+            let file = writable(&path, kind).unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+            file.sync_all().unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[cfg(windows)]
