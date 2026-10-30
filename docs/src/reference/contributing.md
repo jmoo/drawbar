@@ -1,10 +1,8 @@
 # Contributing
 
 [CONTRIBUTING.md](https://github.com/jmoo/drawbar/blob/master/CONTRIBUTING.md) is
-the authority on style, tests, tooling and releases. Its
-[Without Nix](https://github.com/jmoo/drawbar/blob/master/CONTRIBUTING.md#without-nix)
-section gives the commands that format, lint and test a change by hand. Issues and
-pull requests are on [GitHub](https://github.com/jmoo/drawbar/issues).
+the authority on style, tests, tooling and releases. Issues and pull requests are
+on [GitHub](https://github.com/jmoo/drawbar/issues).
 
 Two rules bear repeating. All reverse engineering is black-box work for
 interoperability, from files and USB traffic produced by instruments the

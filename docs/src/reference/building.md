@@ -65,3 +65,30 @@ crate with its tests, the cross targets, the browser build and this guide. CI ru
 both.
 `nix fmt` formats everything. [Testing](testing.md) describes the suites, and
 [Contributing](contributing.md) the house rules.
+
+## Checks without Nix
+
+The same checks run by hand with stable Rust (rustfmt and Clippy), taplo, shfmt,
+shellcheck and nixfmt. On Linux, building drawbar also needs the ALSA headers and
+`pkg-config`. CI uses the versions Nix pins, so a different version can still
+disagree. A pull request labeled `autofix` gets CI's formatting committed to it.
+
+Format from the repository root. The file lists come from Git, so `git add` new
+files first.
+
+```sh
+cargo fmt --manifest-path crates/Cargo.toml --all
+git ls-files -z '*.toml' | xargs -0 taplo format --option array_auto_collapse=false
+git ls-files -z '*.sh' '*.bash' | xargs -0 shfmt -w -i 2 -s
+git ls-files -z '*.sh' '*.bash' | xargs -0 shellcheck --external-sources
+git ls-files -z '*.nix' | xargs -0 nixfmt
+```
+
+Lint and test from `crates/`. The features are each crate's `testFeatures`, and
+Clippy adds `corpus` so the corpus suites compile.
+
+```sh
+cargo clippy --locked --workspace --all-targets --features nord-format/bundle,nord-format/corpus,nord-usb/blocking,nord-usb/replay,nord-usb/corpus -- --deny warnings
+RUSTDOCFLAGS="--deny warnings" cargo doc --locked --workspace --no-deps
+cargo test --locked --workspace --features nord-format/bundle,nord-usb/blocking,nord-usb/replay
+```

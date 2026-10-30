@@ -249,33 +249,6 @@ committed fixtures, plus the corpus when enabled, by content, and applies sideca
 every file of a kind runs once per such file, and a claim about one file lives in
 its sidecar.
 
-### Without Nix
-
-The same checks run by hand with stable Rust (rustfmt and Clippy), taplo, shfmt,
-shellcheck, and nixfmt. On Linux, building drawbar also needs the ALSA headers and
-`pkg-config`. CI uses the versions Nix pins, so a different version can still
-disagree; the `autofix` label settles formatting.
-
-Format from the repository root. The file lists come from Git, so `git add` new
-files first.
-
-```bash
-cargo fmt --manifest-path crates/Cargo.toml --all
-git ls-files -z '*.toml' | xargs -0 taplo format --option array_auto_collapse=false
-git ls-files -z '*.sh' '*.bash' | xargs -0 shfmt -w -i 2 -s
-git ls-files -z '*.sh' '*.bash' | xargs -0 shellcheck --external-sources
-git ls-files -z '*.nix' | xargs -0 nixfmt
-```
-
-Lint and test from `crates/`. The features are each crate's `testFeatures`, and
-Clippy adds `corpus` so the corpus suites compile.
-
-```bash
-cargo clippy --locked --workspace --all-targets --features nord-format/bundle,nord-format/corpus,nord-usb/blocking,nord-usb/replay,nord-usb/corpus -- --deny warnings
-RUSTDOCFLAGS="--deny warnings" cargo doc --locked --workspace --no-deps
-cargo test --locked --workspace --features nord-format/bundle,nord-usb/blocking,nord-usb/replay
-```
-
 The CI corpus job runs the committed tier for in-repository pull requests and
 gates publishing. It reads `jmoo/nord-corpus` through the read-only
 `NORD_CORPUS_DEPLOY_KEY`; forks cannot receive that secret, so the job skips them.
