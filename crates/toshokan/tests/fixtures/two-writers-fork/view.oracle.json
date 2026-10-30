@@ -1,0 +1,43 @@
+{
+  "mode": "writable",
+  "start": "resumed 23aaef4961e33e31c0226ee14acb119f",
+  "writers": { "19bb512052f09f64c7ace7416bba95ea": "a", "23aaef4961e33e31c0226ee14acb119f": "b" },
+  "entities": {
+    "50f5647d2380309d432a5cd27a6b13a1": {
+      "origin": "b",
+      "tags": ["here", "lines", "x"],
+      "file": { "path": "song.syx", "state": "in-sync", "bytes": "song" }
+    },
+    "943ff9fc99de8f03f080aa269da8a457": {
+      "origin": "b3",
+      "file": { "path": "other.syx", "state": "in-sync", "bytes": "other" }
+    }
+  },
+  "unbound": [],
+  "items": [
+    {
+      "kind": "run",
+      "run": {
+        "writer": "19bb512052f09f64c7ace7416bba95ea",
+        "from": 3,
+        "last": [3, "f9278463e89b960d5474547fa048d686"],
+        "tip": [3, "f9278463e89b960d5474547fa048d686"]
+      },
+      "by": "a",
+      "entries": 1,
+      "changes": []
+    }
+  ],
+  "forks": [{ "writer": "19bb512052f09f64c7ace7416bba95ea", "at": 2 }],
+  "gaps": [],
+  "orphans": [],
+  "ignored": [],
+  "unreadable": [],
+  "settled": [
+    ["19bb512052f09f64c7ace7416bba95ea", "a356be306e9b126d812e6299272e6df0"],
+    ["23aaef4961e33e31c0226ee14acb119f", "3c17d7d72f7f76eee7a3880290e669c9"]
+  ],
+  "trash": [],
+  "unknown": 0,
+  "extended": 0
+}
