@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::RangeInclusive;
 
 use eframe::egui;
+use nord_format::formats::ne5::velocity;
 use nord_format::formats::npno::encode::{Kind, ALL_KEYS_DAMPED};
 use nord_format::formats::npno::{self, Bank, FINE_TUNE_CENTS_PER_UNIT};
 use nord_format::note;
@@ -240,8 +241,8 @@ pub struct Plan {
     /// The kind of instrument the library files itself under.
     #[serde(with = "codes::kind")]
     kind: Option<Kind>,
-    /// The signed trim a stroke is attenuated by, keyed by `(root, bank code, layer
-    /// value)` because a drop moves the stroke's index in the directory.
+    /// The signed trim a stroke is attenuated by, in the file's units, keyed by `(root,
+    /// bank code, layer value)` because a drop moves the stroke's index in the directory.
     trims: BTreeMap<(u8, u8, u8), i16>,
     /// The root a re-routed key plays, `None` where it plays nothing.
     key_roots: BTreeMap<u8, Option<u8>>,
@@ -505,12 +506,12 @@ fn replanned<'a>(mut library: npno::Library<'a>, plan: &Plan) -> Result<npno::Li
     // After the drops: a trim names the stroke it belongs to, and the index that stroke
     // sits at moves as strokes before it go. A trim on a stroke that has gone has no
     // record left to write.
-    for ((root, bank, layer), decibels) in &plan.trims {
+    for ((root, bank, layer), units) in &plan.trims {
         let at = library.strokes().iter().position(|stroke| {
             (stroke.root, stroke.bank_code(), stroke.layer()) == (*root, *bank, *layer)
         });
         if let Some(at) = at {
-            library.set_trim(at, *decibels).map_err(|e| e.to_string())?;
+            library.set_trim(at, *units).map_err(|e| e.to_string())?;
         }
     }
     Ok(library)
@@ -573,7 +574,9 @@ struct Strike {
     /// a code the format does not name.
     bank: u8,
     layer: u8,
-    /// The signed `+0x34` attenuation; [`TRIM_UNIT`] says what a unit is.
+    /// The threshold at `+0x74`, which a 6.x key selects the stroke by.
+    threshold: u8,
+    /// The signed `+0x34` attenuation; [`trim_unit`] says what a unit is.
     trim: i16,
     /// What the applied-decay ladder at `+0x36` states, in decibels a second; `None`
     /// where every entry of it applies nothing.
@@ -603,6 +606,7 @@ struct Facts {
     name: String,
     variant: String,
     stream: u16,
+    version: npno::Version,
     channels: u16,
     /// The file's own size, which is the scale the trim section measures against.
     total: u64,
@@ -684,6 +688,7 @@ impl Facts {
                 root,
                 bank: stroke.bank_code(),
                 layer: stroke.layer(),
+                threshold: stroke.threshold(),
                 trim: stroke.trim(),
                 decay: decay_rate(&stroke.ladder()),
             });
@@ -709,6 +714,7 @@ impl Facts {
             name,
             variant,
             stream: library.stream_version(),
+            version: library.version(),
             channels: library.channels(),
             total,
             strokes: library.strokes().len(),
@@ -891,24 +897,42 @@ fn layer_name(rank: usize, count: usize) -> String {
     }
 }
 
-/// The velocities at which each of a root's layer values sounds, in the order the
-/// values are given.
+/// The KBD Touch the velocity spans are given for, on an Electro 5, the only instrument
+/// whose reach is measured. The setting belongs to the program that plays the library,
+/// which the editor does not know, so it names this one.
+const KBD_TOUCH: u8 = 0;
+
+/// The velocities at which each of a root's layer values sounds at [`KBD_TOUCH`], for
+/// `(value, threshold)` pairs loudest first, in the order they are given.
 ///
-/// A key sounds the largest value its root holds that is at most `(127 − v)·31/127`
-/// ([`npno::Stroke::layer`]), so between a louder value `a` and the next softer `b` the
-/// split is at `v = 127 − ⌈b·127/31⌉`: `b` plays up to there and `a` from the next
-/// velocity up. A value no velocity ever reaches gets an empty range.
-fn spans(values: &[u8]) -> Vec<(u8, RangeInclusive<u8>)> {
-    let mut out: Vec<(u8, RangeInclusive<u8>)> = Vec::with_capacity(values.len());
+/// A key sounds the softest layer whose threshold its velocity reaches
+/// ([`velocity::top_velocity`]), so a softer layer plays up to its own top and the louder one
+/// from the next velocity up. A layer no velocity ever reaches gets an empty range.
+fn spans(layers: &[(u8, u16)]) -> Vec<(u8, RangeInclusive<u8>)> {
+    let touch = velocity::Touch::try_from(KBD_TOUCH).expect("a KBD Touch the panel offers");
+    let mut out: Vec<(u8, RangeInclusive<u8>)> = Vec::with_capacity(layers.len());
     let mut below = 0u8;
-    for value in values.iter().rev() {
-        let over = (u32::from(*value) * 127).div_ceil(31).min(127) as u8;
-        let top = 127 - over;
-        out.push((*value, below.saturating_add(1)..=top));
+    for &(value, threshold) in layers.iter().rev() {
+        let top = velocity::top_velocity(threshold, touch);
+        out.push((value, below.saturating_add(1)..=top));
         below = below.max(top);
     }
     out.reverse();
     out
+}
+
+/// The `(value, threshold)` pairs of a root holding every one of `values`, loudest
+/// first, with the thresholds its values give in a `version` library.
+fn every_layer(version: npno::Version, values: &[u8]) -> Vec<(u8, u16)> {
+    let mut louder = None;
+    values
+        .iter()
+        .map(|&value| {
+            let threshold = version.threshold(louder, value);
+            louder = Some(value);
+            (value, threshold)
+        })
+        .collect()
 }
 
 /// A velocity span as the lanes print it.
@@ -2246,7 +2270,7 @@ struct Switch {
 /// The switch rows of the trim section: what the plan keeps, against what it holds.
 fn switches(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, summary: &Summary) {
     let layers = facts.layers.len();
-    let whole = spans(&facts.layers);
+    let whole = spans(&every_layer(facts.version, &facts.layers));
     let mut rows: Vec<Switch> = Vec::new();
     for (rank, layer) in facts.shown_layers() {
         let holding: Vec<(usize, &Root)> = facts
@@ -2286,7 +2310,7 @@ fn switches(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, summary: &Summary
             was: (kept != held).then(|| room::measure(held)),
             hint: format!(
                 "layer index {layer} in the file, where 0 is the loudest; a root \
-                 holding every layer sounds it at {}",
+                 holding every layer sounds it at {} on an Electro 5 at KBD Touch {KBD_TOUCH}",
                 span_text(&whole[rank].1)
             ),
             throws: Throw::Layer(layer),
@@ -2670,7 +2694,7 @@ fn lanes(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, picked: Option<usize
     // A root missing a layer the file holds answers over the gap it leaves, so the
     // spans are the ones that root's own values give.
     let held: Vec<Vec<(u8, RangeInclusive<u8>)>> = (0..facts.roots.len())
-        .map(|index| spans(&root_layers(facts, index)))
+        .map(|index| spans(&root_thresholds(facts, index)))
         .collect();
     let mut thrown: Option<(u8, bool)> = None;
     let mut excepted: Option<(u8, u8, bool)> = None;
@@ -2795,8 +2819,8 @@ fn lanes(ui: &mut egui::Ui, facts: &Facts, plan: &mut Plan, picked: Option<usize
             if !span.is_empty() {
                 said.push_str(&format!(" · {span}"));
             }
-            if let Some(decibels) = segment_trim(facts, plan, index, layer) {
-                said.push_str(&format!(" · trim {decibels} dB"));
+            if let Some(units) = segment_trim(facts, plan, index, layer) {
+                said.push_str(&format!(" · trim {}", trim_text(facts.version, units)));
             }
             let response = ui
                 .interact(
@@ -2853,6 +2877,28 @@ fn root_layers(facts: &Facts, root: usize) -> Vec<u8> {
     values.sort_unstable();
     values.dedup();
     values
+}
+
+/// Each of one root's layer values with the threshold a key selects it at, loudest
+/// first. A 6.x key reads the threshold of the root's stroke at that layer in the lowest
+/// bank, the one a key sounds; a 5.x key splits between the root's own values.
+fn root_thresholds(facts: &Facts, root: usize) -> Vec<(u8, u16)> {
+    let layers = root_layers(facts, root);
+    match facts.version {
+        npno::Version::V5 => every_layer(facts.version, &layers),
+        npno::Version::V6 => layers
+            .into_iter()
+            .map(|layer| {
+                let stated = facts
+                    .strikes
+                    .iter()
+                    .filter(|strike| strike.root == root && strike.layer == layer)
+                    .min_by_key(|strike| strike.bank)
+                    .map_or(0, |strike| strike.threshold);
+                (layer, u16::from(stated))
+            })
+            .collect(),
+    }
 }
 
 /// Drop every layer one root still keeps: the ones it records whose switch is on. A
@@ -2916,13 +2962,42 @@ fn row_ink(visuals: &egui::Visuals, picked: bool, in_range: bool) -> RowInk {
 /// above it.
 const ROW_LAMPS: usize = 6;
 
-/// How far the trim control reaches, in decibels. A stored trim outside `0..=TRIM_REACH`,
-/// negative ones included, still shows the value the file states.
-const TRIM_REACH: i16 = 48;
+/// How far the trim control attenuates, in decibels. A stored trim past it, or below
+/// what the format plays, still shows the value the file states.
+const TRIM_REACH: f64 = 48.0;
 
-const TRIM_UNIT: &str =
-    "+0x34 in the stroke record. In 0x450 streams it is 1 dB a unit, and a negative trim \
-     silences the stroke; the unit in 0x464 streams is not known";
+/// The decibels the trim control reaches in a `version` library under `gain` tenths of
+/// library gain: from the most a trim boosts, which in 5.x is none, to [`TRIM_REACH`].
+fn trim_range(version: npno::Version, gain: i8) -> RangeInclusive<f64> {
+    let boost = match version {
+        npno::Version::V5 => 0,
+        npno::Version::V6 => (npno::V6_MOST_BOOST - i16::from(gain)).max(0),
+    };
+    -f64::from(boost) / 10.0..=TRIM_REACH
+}
+
+/// What a trim of `units` is in a `version` library, as the editor prints it.
+fn trim_text(version: npno::Version, units: i16) -> String {
+    let decibels = f64::from(units) * version.trim_step();
+    match version {
+        npno::Version::V5 => format!("{decibels:.0} dB"),
+        npno::Version::V6 => format!("{decibels:.1} dB"),
+    }
+}
+
+/// What a trim unit is worth in a `version` library.
+fn trim_unit(version: npno::Version) -> String {
+    match version {
+        npno::Version::V5 => "+0x34 in the stroke record: 1 dB a unit, and a negative trim \
+                              silences the stroke"
+            .to_string(),
+        npno::Version::V6 => format!(
+            "+0x34 in the stroke record: 0.1 dB a unit, and a negative trim boosts the \
+             stroke until it and the library gain together reach {}",
+            trim_text(version, npno::V6_MOST_BOOST)
+        ),
+    }
+}
 
 /// One row per root: what it answers, which of its layers it keeps, what it costs, and
 /// the facts and actions under it when it is open.
@@ -3192,27 +3267,32 @@ fn open_row(
                         .halign(egui::Align::LEFT),
                     );
                     let held = trim_of(facts, plan, strike);
-                    let mut decibels = f64::from(held);
+                    let step = facts.version.trim_step();
+                    let reach = trim_range(facts.version, plan.gain.unwrap_or(facts.gain));
+                    let mut decibels = f64::from(held) * step;
                     // ⚠️ `clamp_existing_to_range`: egui otherwise pulls a stored trim
                     // past the bound back to it and reports the change, which would
                     // plan a retrim of a stroke nobody touched.
                     let set = ui.add(
                         egui::DragValue::new(&mut decibels)
-                            .range(0.0..=f64::from(TRIM_REACH))
+                            .range(reach.clone())
                             .clamp_existing_to_range(false)
-                            .speed(0.1)
+                            .speed(step.min(0.1))
+                            .fixed_decimals(usize::from(step < 1.0))
                             .suffix(" dB"),
                     );
-                    let set = match (0..=TRIM_REACH).contains(&held) {
-                        true => set.on_hover_text(TRIM_UNIT),
+                    let unit = trim_unit(facts.version);
+                    let set = match reach.contains(&decibels) {
+                        true => set.on_hover_text(unit),
                         false => set.on_hover_text(format!(
-                            "{TRIM_UNIT}. It holds {held}, outside the 0 to {TRIM_REACH} dB \
-                             this control sets"
+                            "{unit}. It holds {held}, outside the {} to {TRIM_REACH} dB this \
+                             control sets",
+                            reach.start()
                         )),
                     };
                     if set.changed() {
                         let key = (root.note, strike.bank, strike.layer);
-                        let picked = decibels.round() as i16;
+                        let picked = (decibels / step).round() as i16;
                         match picked == strike.trim {
                             true => plan.trims.remove(&key),
                             false => plan.trims.insert(key, picked),
@@ -3460,8 +3540,11 @@ impl State {
         controls::heading(
             ui,
             "Velocity layers",
-            "the switch applies to every root; a segment is one root, and clicking it \
-             drops that layer for that root only",
+            &format!(
+                "the switch applies to every root; a segment is one root, and clicking it \
+                 drops that layer for that root only. Velocities are an Electro 5's at KBD \
+                 Touch {KBD_TOUCH}; a program set higher reaches each layer with a softer note"
+            ),
             None,
         );
         ui.horizontal_top(|ui| {
@@ -3507,7 +3590,11 @@ impl State {
         capability::about(
             ui,
             &[
-                fact("Format", "npno".to_string(), "a piano library"),
+                fact(
+                    "Format",
+                    format!("npno {}", facts.version),
+                    "a piano library, in piano format 5.x or 6.x",
+                ),
                 fact(
                     "Stream version",
                     format!("{:#05x}", facts.stream),
@@ -3668,7 +3755,7 @@ mod tests {
 
     /// The roots the test library records, and the layer values it spreads them over.
     const ROOTS: [u8; 3] = [48, 60, 72];
-    const LAYERS: [u8; 3] = [0, 6, 12];
+    const LAYERS: [u8; 3] = [0, 30, 60];
 
     /// A library shaped like a small vendor one: three roots of three attack layers,
     /// one of them also carrying a pedal-resonance and a release stroke, and a map that
@@ -3680,12 +3767,11 @@ mod tests {
         let mut takes = Vec::new();
         for (index, root) in ROOTS.into_iter().enumerate() {
             for (rank, layer) in LAYERS.into_iter().enumerate() {
-                takes.push(take(
-                    root,
-                    Bank::Attack,
-                    layer,
-                    (8 - rank * 2 + index) as u16,
-                ));
+                let louder = rank.checked_sub(1).map(|louder| LAYERS[louder]);
+                takes.push(
+                    take(root, Bank::Attack, layer, (8 - rank * 2 + index) as u16)
+                        .threshold(npno::Version::V6.threshold(louder, layer) as u8),
+                );
             }
             if root == 60 {
                 takes.push(take(root, Bank::Resonance, 0, 5));
@@ -4093,19 +4179,33 @@ mod tests {
         assert!(!status(&facts, &cut, 105).0);
     }
 
-    /// A key sounds the largest layer value its root holds that is at most
-    /// `(127 − v)·31/127`, so each value answers from the split with the value below it
-    /// up to its own.
+    /// A 6.x key sounds the softest layer whose threshold its velocity reaches, and
+    /// layers stating one threshold leave only the softest of them sounding.
     #[test]
-    fn a_layer_value_answers_the_velocities_no_softer_value_reaches() {
-        assert_eq!(spans(&[0]), [(0, 1..=127)]);
+    fn a_6_x_layer_answers_the_velocities_its_threshold_reaches() {
+        let v6 = npno::Version::V6;
         assert_eq!(
-            spans(&[0, 6, 12]),
-            [(0, 103..=127), (6, 78..=102), (12, 1..=77)]
+            spans(&every_layer(v6, &[0, 68, 135])),
+            [(0, 97..=127), (68, 57..=96), (135, 1..=56)]
+        );
+        let flat = spans(&[(0, 0), (30, 0)]);
+        assert!(flat[0].1.is_empty(), "{flat:?}");
+        assert_eq!(flat[1], (30, 1..=127));
+    }
+
+    /// A 5.x key splits a root's layers midway between their values, on a scale five
+    /// times coarser than 6.x's, so each value answers from that split down to the next.
+    #[test]
+    fn a_5_x_layer_value_answers_from_halfway_to_the_louder_one() {
+        let v5 = |values: &[u8]| spans(&every_layer(npno::Version::V5, values));
+        assert_eq!(v5(&[0]), [(0, 1..=127)]);
+        assert_eq!(
+            v5(&[0, 6, 12]),
+            [(0, 107..=127), (6, 90..=106), (12, 1..=89)]
         );
 
-        // 31 is past the bound at every velocity a key can send, so nothing reaches it.
-        let reach = spans(&[0, 31]);
+        // 82 is past the reach of every velocity a key can send, so nothing reaches it.
+        let reach = v5(&[0, 82]);
         assert_eq!(reach[0], (0, 1..=127));
         assert!(reach[1].1.is_empty(), "{:?}", reach[1]);
         assert_eq!(span_text(&reach[1].1), "no velocity");
@@ -4726,7 +4826,7 @@ mod tests {
         assert!(painted.said("fits ·"));
         assert!(painted.said("INSTRUMENT GAIN"), "{:?}", painted.words);
         assert!(
-            painted.said("v 78–102"),
+            painted.said("v 90–106"),
             "a layer lane names its velocities"
         );
         assert_eq!(painted.whites.len(), 52, "a full piano's white keys");
@@ -4953,7 +5053,8 @@ mod tests {
     fn a_stored_trim_above_the_controls_reach_is_shown_and_not_replanned() {
         let mut held = plan();
         let stroke = (ROOTS[2], Bank::Attack.code(), LAYERS[0]);
-        held.trims.insert(stroke, TRIM_REACH + 12);
+        let past = (TRIM_REACH + 12.0) / npno::Version::V6.trim_step();
+        held.trims.insert(stroke, past.round() as i16);
         let saved = rebuild(&bytes(), &held).expect("the library takes the trim");
 
         let mut editor = Editor::of(saved, facts().total * 2);
@@ -4994,7 +5095,7 @@ mod tests {
         let opened = editor.driven(Vec::new(), |plan| plan.gain = Some(-20));
 
         assert!(opened.said("ANSWERS FROM"), "the row is open");
-        assert!(opened.said("-24.0 dB"), "{:?}", opened.words);
+        assert!(opened.said("-2.4 dB"), "{:?}", opened.words);
         let plan = &editor.state.plans[&editor.id];
         assert!(
             plan.trims.is_empty(),

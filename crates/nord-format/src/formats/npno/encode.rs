@@ -85,12 +85,13 @@
 //! A recording without a loop declares none, and plays to its end.
 
 use super::codec::{self, MAX_ORDER, MAX_WIDTH, MIN_WIDTH, OVERLAP};
+use super::Version;
 use super::{
     be32, block_bytes, midi_key, put16, put32, Bank, Library, Loop, Stroke, CNSP_MAGIC,
     DAMPER_TOP_AT, DECAYS, DIRECTORY_AT, FINE_TUNE_AT, FORMAT, GAIN_AT, KEY_MAP_AT, KIND_AT,
     LADDER_UNITY, MARKS, NOTES, RECORD, REC_BANK, REC_BLOCKS, REC_DECAY, REC_DECAYS, REC_FRAMES,
-    REC_ID, REC_LAYER, REC_MARKS, REC_MARK_BLOCK, REC_NOTE_OFF, REC_SEEDS, REC_START, REC_TRIM,
-    REC_WINDOW, SEEDS, UNCOVERED, VERSION_AT, VERSION_ECHO_AT,
+    REC_ID, REC_LAYER, REC_MARKS, REC_MARK_BLOCK, REC_NOTE_OFF, REC_SEEDS, REC_START,
+    REC_THRESHOLD, REC_TRIM, REC_WINDOW, SEEDS, UNCOVERED, VERSION_AT, VERSION_ECHO_AT,
 };
 use crate::cbin::Header;
 use crate::error::{try_with_capacity, try_zeroed, Error, ParseError};
@@ -113,7 +114,9 @@ const WIDTHS: usize = MAX_WIDTH as usize + 1;
 pub struct Options {
     /// The half of the `Name#Variant` field before the separator.
     pub name: String,
-    /// The half after it, where vendor libraries record the voicing and the size.
+    /// The half after it, where vendor libraries record the voicing and the size. A
+    /// [`Version::V6`] library states it as its voicing too, so a template's voicing is
+    /// not carried over.
     pub variant: String,
 }
 
@@ -242,6 +245,8 @@ pub const DEFAULT_GAIN: i8 = 50;
 /// [`Rules::damper_top`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rules {
+    /// The format the library is written in.
+    pub version: Version,
     pub kind: Kind,
     /// Body `0x40c`: a gain over the whole library in tenths of a decibel. Confirmed
     /// on hardware.
@@ -257,9 +262,10 @@ pub struct Rules {
 }
 
 impl Rules {
-    /// The neutral rules for one kind of instrument.
-    pub fn new(kind: Kind) -> Rules {
+    /// The neutral rules for one kind of instrument, in one format.
+    pub fn new(version: Version, kind: Kind) -> Rules {
         Rules {
+            version,
             kind,
             gain: DEFAULT_GAIN,
             damper_top: kind.damper_top(),
@@ -270,7 +276,7 @@ impl Rules {
 
 impl Default for Rules {
     fn default() -> Rules {
-        Rules::new(Kind::default())
+        Rules::new(Version::default(), Kind::default())
     }
 }
 
@@ -341,33 +347,21 @@ pub fn sustain(found: SampleLoop, rate: u32) -> Result<Loop, Error> {
         })
 }
 
-/// The softest layer value a root is given when [`layer_value`] spreads it: the top
-/// of the range vendor libraries use, and well inside [`HIGHEST_PLAYED_LAYER`].
-pub const SOFTEST_LAYER: u8 = 27;
-
-/// The largest layer value any velocity sounds: `(127 − 1)·31/127`, the selection
-/// bound at velocity 1, the softest note-on a key can send.
+/// The value the `index`-th loudest of a root's `layers` takes in a `version` library
+/// when the caller states none: `round(index·s/(layers − 1))` up to the
+/// [`Version::softest_layer`] `s`, and 0 for a root with one layer.
 ///
-/// A key plays the largest value its root holds that is at most
-/// `(127 − velocity)·31/127` ([`Stroke::layer`]). That bound falls as velocity rises,
-/// so no velocity reaches a stroke stating more than this, and [`build`] refuses one.
-pub const HIGHEST_PLAYED_LAYER: u8 = ((127 - 1) * 31 / 127) as u8;
-
-/// The value the `index`-th loudest of a root's `layers` takes when the caller states
-/// none: `round(index·27/(layers − 1))`, and 0 for a root with one layer.
-///
-/// A key plays the largest layer value its root holds that is at most
-/// `(127 − velocity)·31/127` ([`Stroke::layer`]). Spreading the values puts a layer
-/// change under each part of the velocity range; values packed at the loud end would
-/// leave the softest layer playing almost everywhere. An `index` past the last layer
-/// is treated as the last.
-pub fn layer_value(index: usize, layers: usize) -> u8 {
+/// A key plays a softer layer the softer it is struck ([`Stroke::layer`]). Spreading
+/// the values puts a layer change under each part of the velocity range; values packed
+/// at the loud end would leave the softest layer playing almost everywhere. An `index`
+/// past the last layer is treated as the last.
+pub fn layer_value(index: usize, layers: usize, version: Version) -> u8 {
     let last = layers.saturating_sub(1);
     if last == 0 {
         return 0;
     }
     let index = index.min(last);
-    let scale = usize::from(SOFTEST_LAYER);
+    let scale = usize::from(version.softest_layer());
     ((index * scale * 2 + last) / (last * 2)) as u8
 }
 
@@ -428,11 +422,15 @@ pub enum Clash {
     Twice,
 }
 
-/// The layer value each stroke states, in the order they were given.
+/// The layer value each stroke states in a `version` library, in the order they were
+/// given.
 ///
 /// A [`LayerTag::Value`] is that value; a [`LayerTag::Index`] is spread across its root
 /// and bank's own layers, loudest first, by [`layer_value`].
-pub fn layer_values(strokes: &[(u8, Bank, LayerTag)]) -> Result<Vec<u8>, LayerClash> {
+pub fn layer_values(
+    strokes: &[(u8, Bank, LayerTag)],
+    version: Version,
+) -> Result<Vec<u8>, LayerClash> {
     let mut groups: BTreeMap<(u8, Bank), Vec<usize>> = BTreeMap::new();
     for (index, &(root, bank, _)) in strokes.iter().enumerate() {
         groups.entry((root, bank)).or_default().push(index);
@@ -459,7 +457,7 @@ pub fn layer_values(strokes: &[(u8, Bank, LayerTag)]) -> Result<Vec<u8>, LayerCl
         for (rank, index) in members.into_iter().enumerate() {
             values[index] = match strokes[index].2 {
                 LayerTag::Value(value) => value,
-                LayerTag::Index(_) => layer_value(rank, layers),
+                LayerTag::Index(_) => layer_value(rank, layers, version),
             };
         }
     }
@@ -507,13 +505,19 @@ pub fn build(
 ) -> Result<Library<'static>, Error> {
     let channels = check_recordings(recordings)?;
 
-    let (header, mut prefix) = match donor {
-        Donor::Template(template) => (template.header.clone(), template.prefix.clone()),
+    let (version, header, mut prefix) = match donor {
+        Donor::Template(template) => (
+            template.version(),
+            template.header.clone(),
+            template.prefix.clone(),
+        ),
         Donor::Rules(rules) => (
-            Header::new(FORMAT, (0, 0), CONTENT_VERSION),
+            rules.version,
+            Header::new(FORMAT, (0, 0), content_version(rules.version)),
             rules_prefix(rules),
         ),
     };
+    check_layers(recordings, version)?;
     prefix[FINE_TUNE_AT..FINE_TUNE_AT + NOTES].fill(0);
     let roots: BTreeSet<u8> = recordings.iter().map(|r| r.root).collect();
     prefix[KEY_MAP_AT..KEY_MAP_AT + NOTES].copy_from_slice(&key_map(&roots));
@@ -525,18 +529,23 @@ pub fn build(
         strokes: Vec::new(),
     };
     library.set_name_and_variant(&options.name, &options.variant)?;
+    if version == Version::V6 {
+        library.set_voicing(&options.variant)?;
+    }
 
     let mut order: Vec<&Recording> = recordings.iter().collect();
     order.sort_by_key(|r| (r.root, r.bank.code(), r.layer));
 
     let fade = match donor {
-        Donor::Template(template) => {
-            Rules::new(Kind::from_code(template.kind_code()).unwrap_or_default())
-        }
+        Donor::Template(template) => Rules::new(
+            version,
+            Kind::from_code(template.kind_code()).unwrap_or_default(),
+        ),
         Donor::Rules(rules) => *rules,
     };
+    let thresholds = thresholds(&order, version);
     let mut donors = Vec::with_capacity(order.len());
-    for (index, recording) in order.iter().enumerate() {
+    for (index, (recording, threshold)) in order.iter().zip(thresholds).enumerate() {
         let mut stated = match donor {
             Donor::Template(template) => *donor_record(template, recording)?,
             Donor::Rules(rules) => rules_record(recording, index, rules),
@@ -546,9 +555,10 @@ pub fn build(
         if recording.sustain.is_some() && be32(&stated, REC_DECAY) == 0 {
             put32(&mut stated, REC_DECAY, loop_decay(&fade, recording.root));
         }
-        let (window, trim) = velocity_window(recording.bank, recording.layer);
+        let (window, trim) = velocity_window(version, recording.bank, recording.layer);
         put16(&mut stated, REC_WINDOW, window);
         put16(&mut stated, REC_TRIM, trim as u16);
+        stated[REC_THRESHOLD] = threshold;
         donors.push(stated);
     }
     // A donor serving several recordings would name them all the same, so the
@@ -633,20 +643,23 @@ fn looped(
 }
 
 /// The content version the container states when no template donates one: a library's
-/// own version times a hundred, as the instrument reports it. A library stating it
-/// loads and plays. Confirmed on hardware.
-const CONTENT_VERSION: u32 = 540;
-
-/// The stream version a rule-written prefix states, at [`VERSION_AT`],
-/// [`VERSION_REPEAT_AT`] and [`VERSION_ECHO_AT`].
-const RULES_VERSION: u16 = 0x450;
+/// own version times a hundred, as the instrument reports it. Vendor libraries of each
+/// version state 500..540 and 600..630, and a library stating these loads and plays.
+/// Confirmed on hardware.
+fn content_version(version: Version) -> u32 {
+    match version {
+        Version::V5 => 540,
+        Version::V6 => 600,
+    }
+}
 
 /// u32 that vendor libraries make distinct per library. The instrument does not read
 /// it, so a rule-written prefix states a fixed value. Confirmed on hardware.
 const FILE_ID_AT: usize = 0x06;
 const FILE_ID: u32 = 1;
 
-/// The stream version again, ahead of the echo at [`VERSION_ECHO_AT`].
+/// The stream version again, ahead of the echo at [`VERSION_ECHO_AT`]. A rule-written
+/// prefix states [`Version::stream`] at all three.
 const VERSION_REPEAT_AT: usize = 0x16;
 
 /// The three bytes after [`KIND_AT`]: a model id within the kind and the library's
@@ -688,7 +701,7 @@ fn rules_prefix(rules: &Rules) -> Vec<u8> {
     let mut prefix = vec![0u8; DIRECTORY_AT];
     prefix[..CNSP_MAGIC.len()].copy_from_slice(CNSP_MAGIC);
     for at in [VERSION_AT, VERSION_REPEAT_AT, VERSION_ECHO_AT] {
-        put16(&mut prefix, at, RULES_VERSION);
+        put16(&mut prefix, at, rules.version.stream());
     }
     put32(&mut prefix, FILE_ID_AT, FILE_ID);
     prefix[KIND_AT] = rules.kind.code();
@@ -774,27 +787,65 @@ fn note_off_fade(bank: Bank) -> u8 {
     }
 }
 
-/// The trim [`REC_TRIM`] states for a release stroke, in decibels.
-const RELEASE_TRIM: i16 = 12;
+/// The trim a release stroke states, in decibels.
+const RELEASE_TRIM: f64 = 12.0;
 
-/// The largest trim [`velocity_window`] states, the top of the range the layer values
-/// are selected over ([`Stroke::layer`]).
-const WIDEST_TRIM: i16 = 31;
+/// The trim an attack or resonance stroke states beyond the softness its layer value
+/// states, in decibels.
+const LAYER_TRIM: f64 = 3.0;
 
-/// The pair at [`REC_WINDOW`] and [`REC_TRIM`] a stroke of `bank` and `layer` states.
-///
-/// An attack or resonance stroke is trimmed three decibels more than its layer value,
-/// so a root's softer layers play softer than its loud ones by the amount their values
-/// state. A release stroke takes a fixed trim, since its layer value plays no part in
-/// selecting it.
-fn velocity_window(bank: Bank, layer: u8) -> (u16, i16) {
-    match bank {
-        Bank::Release => (0, RELEASE_TRIM),
-        Bank::Attack | Bank::Resonance => (
-            u16::from(layer),
-            i16::from(layer).saturating_add(3).min(WIDEST_TRIM),
-        ),
+/// The largest trim [`velocity_window`] states, in decibels.
+const WIDEST_TRIM: f64 = 31.0;
+
+/// Layer value units per decibel of softness: vendor libraries trim a stroke by about
+/// its layer value in decibels, and state five times the version 5 value in version 6.
+/// Inferred from specimens; not confirmed on hardware.
+fn layer_units_per_decibel(version: Version) -> f64 {
+    match version {
+        Version::V5 => 1.0,
+        Version::V6 => 5.0,
     }
+}
+
+/// The pair at [`REC_WINDOW`] and [`REC_TRIM`] a stroke of `bank` and `layer` states in a
+/// `version` library.
+///
+/// An attack or resonance stroke is trimmed three decibels more than the softness its
+/// layer value states, so a root's softer layers play softer than its loud ones by that
+/// amount. A release stroke takes a fixed trim, since its layer value plays no part in
+/// selecting it.
+fn velocity_window(version: Version, bank: Bank, layer: u8) -> (u16, i16) {
+    let decibels = match bank {
+        Bank::Release => RELEASE_TRIM,
+        Bank::Attack | Bank::Resonance => {
+            (f64::from(layer) / layer_units_per_decibel(version) + LAYER_TRIM).min(WIDEST_TRIM)
+        }
+    };
+    let window = match bank {
+        Bank::Release => 0,
+        Bank::Attack | Bank::Resonance => u16::from(layer),
+    };
+    (window, (decibels / version.trim_step()).round() as i16)
+}
+
+/// The [`REC_THRESHOLD`] each of `order`'s recordings states, sorted as the directory
+/// sorts them: [`Version::threshold`] in a [`Version::V6`] library, as vendor libraries
+/// state it, and 0 in a [`Version::V5`] library, whose keys ignore the byte.
+fn thresholds(order: &[&Recording], version: Version) -> Vec<u8> {
+    let mut previous: Option<(u8, Bank, u8)> = None;
+    order
+        .iter()
+        .map(|recording| {
+            let louder = previous
+                .filter(|&(root, bank, _)| (root, bank) == (recording.root, recording.bank))
+                .map(|(_, _, layer)| layer);
+            previous = Some((recording.root, recording.bank, recording.layer));
+            match version {
+                Version::V5 => 0,
+                Version::V6 => version.threshold(louder, recording.layer) as u8,
+            }
+        })
+        .collect()
 }
 
 /// Code every stroke of `library` again from the frames it decodes to, each keeping
@@ -962,12 +1013,6 @@ fn check_recordings(recordings: &[Recording]) -> Result<u16, Error> {
         if frames == 0 {
             return Err(refuse(format!("{what} has no frames")));
         }
-        if recording.layer > HIGHEST_PLAYED_LAYER {
-            return Err(refuse(format!(
-                "{what} states a layer value no velocity selects; {HIGHEST_PLAYED_LAYER} is \
-                 the largest a key ever sounds"
-            )));
-        }
         match (recording.sustain, recording.bank) {
             (Some(_), Bank::Release) => {
                 return Err(refuse(format!(
@@ -997,6 +1042,19 @@ fn check_recordings(recordings: &[Recording]) -> Result<u16, Error> {
         }
     }
     Ok(channels as u16)
+}
+
+/// Refuse a recording whose layer value no velocity selects in a `version` library.
+fn check_layers(recordings: &[Recording], version: Version) -> Result<(), Error> {
+    let highest = version.highest_played_layer();
+    match recordings.iter().find(|r| r.layer > highest) {
+        Some(recording) => Err(refuse(format!(
+            "{} states a layer value no velocity selects; {highest} is the largest a key \
+             of a {version} library ever sounds",
+            describe(recording)
+        ))),
+        None => Ok(()),
+    }
 }
 
 fn describe(recording: &Recording) -> String {
@@ -1696,17 +1754,35 @@ mod tests {
     /// the contract.
     #[test]
     fn the_default_layer_values_spread_a_root_over_the_selection_range() {
-        let spread = |layers| {
+        let spread = |layers, version| {
             (0..layers)
-                .map(|i| layer_value(i, layers))
+                .map(|i| layer_value(i, layers, version))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(spread(1), vec![0], "a lone layer plays at every velocity");
-        assert_eq!(spread(2), vec![0, 27]);
-        assert_eq!(spread(3), vec![0, 14, 27]);
-        assert_eq!(spread(9), vec![0, 3, 7, 10, 14, 17, 20, 24, 27]);
-        assert_eq!(layer_value(9, 9), 27, "an index past the last is the last");
-        assert_eq!(layer_value(0, 0), 0);
+        assert_eq!(
+            spread(1, Version::V5),
+            vec![0],
+            "a lone layer plays at every velocity"
+        );
+        assert_eq!(spread(2, Version::V5), vec![0, 27]);
+        assert_eq!(spread(3, Version::V5), vec![0, 14, 27]);
+        assert_eq!(
+            spread(9, Version::V5),
+            vec![0, 3, 7, 10, 14, 17, 20, 24, 27]
+        );
+        assert_eq!(
+            layer_value(9, 9, Version::V5),
+            27,
+            "an index past the last is the last"
+        );
+        assert_eq!(layer_value(0, 0, Version::V5), 0);
+
+        assert_eq!(spread(1, Version::V6), vec![0]);
+        assert_eq!(spread(3, Version::V6), vec![0, 68, 135]);
+        assert_eq!(
+            spread(9, Version::V6),
+            vec![0, 17, 34, 51, 68, 84, 101, 118, 135]
+        );
     }
 
     /// A layer value is a field of the record, not a position in the directory, so a
@@ -1927,12 +2003,12 @@ mod tests {
         };
         // At 0.024 dB/s per unit: 5.2 dB/s is 217 units, 2.6 is 108, 10.4 is 433.
         assert_eq!(
-            fades(Rules::new(Kind::Grand)),
+            fades(Rules::new(Version::V6, Kind::Grand)),
             [(30, 108), (60, 217), (72, LADDER_UNITY), (90, 433)]
         );
         let held = Rules {
             loop_fade: 0,
-            ..Rules::new(Kind::Grand)
+            ..Rules::new(Version::V6, Kind::Grand)
         };
         assert_eq!(fades(held), [(30, 0), (60, 0), (72, LADDER_UNITY), (90, 0)]);
     }
@@ -1944,7 +2020,7 @@ mod tests {
         for kind in Kind::ALL {
             let rules = Rules {
                 loop_fade: u16::MAX,
-                ..Rules::new(kind)
+                ..Rules::new(Version::V6, kind)
             };
             let decay = loop_decay(&rules, 127);
             assert!(decay > 0 && decay < LADDER_UNITY, "{kind:?}: {decay:#x}");
@@ -1963,7 +2039,7 @@ mod tests {
             recording
         };
         let unlooped = build(
-            &Donor::Rules(Rules::new(Kind::Wurlitzer)),
+            &Donor::Rules(Rules::new(Version::V6, Kind::Wurlitzer)),
             &Options::new("Plain"),
             &[one(60, Bank::Attack, 0, short.clone())],
         )
@@ -2001,7 +2077,47 @@ mod tests {
             .iter()
             .map(|s| (s.layer(), s.trim()))
             .collect();
-        assert_eq!(trims, [(0, 3), (9, 12), (0, RELEASE_TRIM)]);
+        assert_eq!(trims, [(0, 3), (9, 12), (0, 12)]);
+    }
+
+    /// A version 6 template states trims in tenths of a decibel and selects by
+    /// threshold, so a stroke built against one is trimmed and placed on that scale.
+    #[test]
+    fn a_version_6_template_build_trims_and_thresholds_on_its_own_scale() {
+        let mut donor = Build::new();
+        donor.version = Version::V6.stream();
+        donor.map = vec![(60, 60)];
+        donor.takes = vec![take(60, Bank::Attack, 0, 1).silent()];
+        let piano = donor.piano();
+        let mut template = piano.library().unwrap();
+        template.set_voicing("Suitcase").unwrap();
+        let short = tone(6_000, 300.0, 1);
+        let built = build(
+            &Donor::Template(&template),
+            &Options::new("Synth").variant("Soft"),
+            &[
+                one(60, Bank::Attack, 0, short.clone()),
+                one(60, Bank::Attack, 45, short.clone()),
+                one(60, Bank::Attack, 135, short.clone()),
+                one(60, Bank::Release, 20, short),
+            ],
+        )
+        .unwrap();
+        assert_eq!(built.version(), Version::V6);
+        assert_eq!(
+            built.voicing().as_deref(),
+            Some("Soft"),
+            "the template's voicing stays"
+        );
+        let stated: Vec<(u8, i16, u8)> = built
+            .strokes()
+            .iter()
+            .map(|s| (s.layer(), s.trim(), s.threshold()))
+            .collect();
+        assert_eq!(
+            stated,
+            [(0, 30, 0), (45, 120, 23), (135, 300, 90), (20, 120, 10)]
+        );
     }
 
     /// A WAV's loop counts the last frame as part of the loop. On the lattice it keeps
@@ -2063,6 +2179,7 @@ mod tests {
     fn a_library_built_from_rules_states_them_and_needs_no_template() {
         let short = tone(6_000, 300.0, 1);
         let rules = Rules {
+            version: Version::V5,
             kind: Kind::Wurlitzer,
             gain: -20,
             damper_top: 97,
@@ -2082,9 +2199,10 @@ mod tests {
         assert_eq!(Kind::from_code(built.kind_code()), Some(Kind::Wurlitzer));
         assert_eq!(built.gain(), -20);
         assert_eq!(built.damper_top(), 97);
-        assert_eq!(built.stream_version(), RULES_VERSION);
+        assert_eq!(built.version(), Version::V5);
+        assert_eq!(built.header.version, 540);
         assert_eq!(
-            Rules::new(Kind::Wurlitzer).damper_top,
+            Rules::new(Version::V6, Kind::Wurlitzer).damper_top,
             rules.damper_top,
             "the kind names its own damper limit"
         );
@@ -2121,11 +2239,52 @@ mod tests {
         );
     }
 
+    /// A version 6 library built from rules states the stream, the container version and
+    /// the names a vendor version 6 library does, its trims in tenths of a decibel, and a
+    /// threshold midway between each layer value and the next louder one's.
+    #[test]
+    fn a_version_6_library_built_from_rules_states_its_own_scale() {
+        let short = tone(6_000, 300.0, 1);
+        let built = build(
+            &Donor::Rules(Rules::new(Version::V6, Kind::Grand)),
+            &Options::new("Felt").variant("Soft"),
+            &[
+                one(60, Bank::Attack, 0, short.clone()),
+                one(60, Bank::Attack, 68, short.clone()),
+                one(60, Bank::Attack, 135, short.clone()),
+                one(60, Bank::Release, 0, short.clone()),
+                one(72, Bank::Attack, 50, short),
+            ],
+        )
+        .unwrap();
+        assert_eq!(built.version(), Version::V6);
+        assert_eq!(built.header.version, 600);
+        assert_eq!(be16(&built.prefix, VERSION_REPEAT_AT), Version::V6.stream());
+        assert_eq!(built.long_name().as_deref(), Some("Felt"));
+        let stated: Vec<(u8, u8, i16, u8)> = built
+            .strokes()
+            .iter()
+            .map(|s| (s.root, s.layer(), s.trim(), s.threshold()))
+            .collect();
+        assert_eq!(
+            stated,
+            [
+                (60, 0, 30, 0),
+                (60, 68, 166, 34),
+                (60, 135, 300, 102),
+                (60, 0, 120, 0),
+                (72, 50, 130, 25),
+            ]
+        );
+        let piano = built.to_piano().unwrap();
+        assert_eq!(piano.library().unwrap().version(), Version::V6);
+    }
+
     #[test]
     fn a_rule_written_stroke_fades_out_at_note_off() {
         let short = tone(6_000, 300.0, 1);
         let built = build(
-            &Donor::Rules(Rules::new(Kind::ElectricPiano)),
+            &Donor::Rules(Rules::new(Version::V6, Kind::ElectricPiano)),
             &Options::new("Tines"),
             &[
                 one(60, Bank::Attack, 0, short.clone()),
@@ -2226,7 +2385,7 @@ mod tests {
             (72, Bank::Attack, LayerTag::Index(1)),
         ];
         assert_eq!(
-            layer_values(&named).unwrap(),
+            layer_values(&named, Version::V5).unwrap(),
             [27, 0, 14, 0, 0, 27],
             "values come back in the order given, ranked within each root and bank"
         );
@@ -2239,7 +2398,7 @@ mod tests {
             (60, Bank::Attack, LayerTag::Value(6)),
             (60, Bank::Attack, LayerTag::Value(12)),
         ];
-        assert_eq!(layer_values(&named).unwrap(), [0, 6, 12]);
+        assert_eq!(layer_values(&named, Version::V5).unwrap(), [0, 6, 12]);
     }
 
     /// Indices and stated values disagree about how many layers a root has, and two
@@ -2251,7 +2410,7 @@ mod tests {
             (60, Bank::Attack, LayerTag::Value(12)),
         ];
         assert_eq!(
-            layer_values(&mixed),
+            layer_values(&mixed, Version::V5),
             Err(LayerClash {
                 root: 60,
                 bank: Bank::Attack,
@@ -2263,7 +2422,7 @@ mod tests {
             (60, Bank::Attack, LayerTag::Index(0)),
         ];
         assert_eq!(
-            layer_values(&twice),
+            layer_values(&twice, Version::V5),
             Err(LayerClash {
                 root: 60,
                 bank: Bank::Attack,
@@ -2275,7 +2434,7 @@ mod tests {
             (60, Bank::Release, LayerTag::Value(12)),
         ];
         assert_eq!(
-            layer_values(&apart).unwrap(),
+            layer_values(&apart, Version::V5).unwrap(),
             [0, 12],
             "each bank may use its own form"
         );
@@ -2333,21 +2492,17 @@ mod tests {
             one(60, Bank::Attack, 0, short.clone()),
         ])
         .contains("recorded twice"));
-        let unplayable = error(&[one(
-            60,
-            Bank::Attack,
-            HIGHEST_PLAYED_LAYER + 1,
-            short.clone(),
-        )]);
+        let highest = Version::V5.highest_played_layer();
+        let unplayable = error(&[one(60, Bank::Attack, highest + 1, short.clone())]);
         assert!(unplayable.contains("no velocity selects"), "{unplayable}");
         assert!(
-            unplayable.contains("30 is the largest a key ever sounds"),
+            unplayable.contains("40 is the largest a key of a 5.x library ever sounds"),
             "{unplayable}"
         );
         build(
             &Donor::Template(&library),
             &options,
-            &[one(60, Bank::Attack, HIGHEST_PLAYED_LAYER, short.clone())],
+            &[one(60, Bank::Attack, highest, short.clone())],
         )
         .expect("a key plays the bound itself");
         assert!(error(&[

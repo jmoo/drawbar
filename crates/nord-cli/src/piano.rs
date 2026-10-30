@@ -21,7 +21,9 @@ use std::path::{Path, PathBuf};
 use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
 use clap::{Args, ValueEnum};
 use nord_format::formats::npno::encode::{parse_stroke_name, Clash, LayerTag, Stem};
-use nord_format::formats::npno::{self, codec, encode, Bank, Change, Layers, Library, UNCOVERED};
+use nord_format::formats::npno::{
+    self, codec, encode, Bank, Change, Layers, Library, Version, UNCOVERED,
+};
 use nord_format::note;
 use nord_format::Entity;
 
@@ -167,10 +169,10 @@ pub struct BuildArgs {
     /// A directory of WAVs, one per stroke, named `<root>-b<bank>-l<layer>.wav`:
     /// `060-b0-l00.wav` is MIDI note 60, the attack bank, the loudest layer. Banks are
     /// 0 attack, 1 pedal resonance and 2 release. `l00`, `l01`, … count from the
-    /// loudest and are spread over the layer values 0..27 the instrument selects by.
-    /// Write `v12` in place of `l00` to set a layer's value directly; all layers of one
-    /// root and bank must use the same form. Files that are not WAVs are skipped, and
-    /// a WAV named any other way is refused.
+    /// loudest and are spread over the layer values the instrument selects by, 0..135
+    /// in format 6 and 0..27 in format 5. Write `v12` in place of `l00` to set a
+    /// layer's value directly; all layers of one root and bank must use the same form.
+    /// Files that are not WAVs are skipped, and a WAV named any other way is refused.
     ///
     /// A stroke holds whole blocks and every frame of its WAV, so it includes the
     /// silence that pads out the WAV's last block. A looped stroke ends with the block
@@ -180,9 +182,9 @@ pub struct BuildArgs {
     pub dir: PathBuf,
 
     /// A library to take everything the audio does not decide from: the decay
-    /// coefficients, per-note tables, playback parameters, stream version and the word
-    /// at the start of the body. Each new stroke inherits from the template's stroke of
-    /// the same bank and nearest root.
+    /// coefficients, per-note tables, playback parameters, format and the word at the
+    /// start of the body. Each new stroke inherits from the template's stroke of the
+    /// same bank and nearest root.
     ///
     /// Without a template, those fields follow fixed rules: no decay applied over the
     /// recordings, held loops fading as `--loop-fade` says, a fade at key-up, and the
@@ -191,6 +193,12 @@ pub struct BuildArgs {
     /// is held. Either way, each stroke is trimmed by its own layer value.
     #[arg(long, value_name = "FILE")]
     pub template: Option<PathBuf>,
+
+    /// The piano format to write. Format 6 states velocity on a finer scale, and format
+    /// 5 is for instruments that do not play format 6. A template's format decides
+    /// instead.
+    #[arg(long, value_enum, default_value_t = FormatName::Six, conflicts_with = "template")]
+    pub format: FormatName,
 
     /// The kind of instrument the library holds. It sets the damper limit and how the
     /// instrument files the library.
@@ -231,6 +239,24 @@ pub struct BuildArgs {
     /// Where to write the library.
     #[arg(short, long, value_name = "FILE")]
     pub out: PathBuf,
+}
+
+/// The piano formats a build writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum FormatName {
+    #[value(name = "5")]
+    Five,
+    #[value(name = "6")]
+    Six,
+}
+
+impl From<FormatName> for Version {
+    fn from(format: FormatName) -> Version {
+        match format {
+            FormatName::Five => Version::V5,
+            FormatName::Six => Version::V6,
+        }
+    }
 }
 
 /// The instruments a library can state it holds, at body `0x18`.
@@ -377,7 +403,8 @@ fn inspect_one(ui: &Ui, path: &Path, args: &InspectArgs) -> Result<(), String> {
         format!("{name} ({variant})")
     };
     ui.out(format!(
-        "  {title}  stream {:#06x}  {} channel(s)  {} bytes",
+        "  {title}  format {} (stream {:#06x})  {} channel(s)  {} bytes",
+        library.version().number(),
         library.stream_version(),
         library.channels(),
         bytes.len(),
@@ -1013,17 +1040,17 @@ fn stroke_files(dir: &Path) -> Result<Vec<StrokeFile>, String> {
     Ok(out)
 }
 
-/// The layer value each file's stroke states, in the order the files came in, as
-/// [`encode::layer_values`] reads their names.
+/// The layer value each file's stroke states in a `version` library, in the order the
+/// files came in, as [`encode::layer_values`] reads their names.
 ///
-/// A `v` name past [`encode::HIGHEST_PLAYED_LAYER`] is a stroke no velocity would
+/// A `v` name past [`Version::highest_played_layer`] is a stroke no velocity would
 /// reach, and is refused by the file that names it.
-fn layer_values(files: &[StrokeFile]) -> Result<Vec<u8>, String> {
+fn layer_values(files: &[StrokeFile], version: Version) -> Result<Vec<u8>, String> {
     let named: Vec<(u8, Bank, LayerTag)> = files
         .iter()
         .map(|file| (file.root, file.bank, file.layer))
         .collect();
-    let values = encode::layer_values(&named).map_err(|clash| {
+    let values = encode::layer_values(&named, version).map_err(|clash| {
         let what = format!("root {} {}", note::name(clash.root), clash.bank.name());
         match clash.how {
             Clash::BothForms => format!(
@@ -1033,14 +1060,14 @@ fn layer_values(files: &[StrokeFile]) -> Result<Vec<u8>, String> {
             Clash::Twice => format!("{what} names one of its layers twice"),
         }
     })?;
+    let highest = version.highest_played_layer();
     for (file, &value) in files.iter().zip(&values) {
-        if value > encode::HIGHEST_PLAYED_LAYER {
+        if value > highest {
             return Err(format!(
-                "{}: no velocity selects layer value {}; {} is the largest a key ever \
-                 sounds",
+                "{}: no velocity selects layer value {value}; {highest} is the largest a \
+                 key of a format {} library ever sounds",
                 file.path.display(),
-                value,
-                encode::HIGHEST_PLAYED_LAYER
+                version.number()
             ));
         }
     }
@@ -1075,6 +1102,7 @@ fn build_rules(args: &BuildArgs) -> Result<encode::Rules, String> {
         None => kind.loop_fade(),
     };
     Ok(encode::Rules {
+        version: args.format.into(),
         kind,
         gain,
         damper_top,
@@ -1095,6 +1123,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         Some(piano) => Some(piano.library().map_err(|e| e.to_string())?),
         None => None,
     };
+    let version = template.as_ref().map_or(rules.version, |t| t.version());
     let donor = match &template {
         Some(library) => encode::Donor::Template(library),
         None => encode::Donor::Rules(rules),
@@ -1105,7 +1134,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         "wav", "root", "bank", "value", "frames", "seconds"
     )));
     let files = stroke_files(&args.dir)?;
-    let values = layer_values(&files)?;
+    let values = layer_values(&files, version)?;
     let mut recordings = Vec::new();
     let mut clipped = 0usize;
     let mut resampled = 0usize;
@@ -1328,14 +1357,15 @@ mod tests {
     /// building a stroke nothing plays.
     #[test]
     fn a_named_layer_value_no_velocity_selects_is_refused() {
-        let highest = encode::HIGHEST_PLAYED_LAYER;
-        assert_eq!(
-            layer_values(&[wav(60, Bank::Attack, LayerTag::Value(highest))]).unwrap(),
-            [highest]
-        );
-        let refused = layer_values(&[wav(60, Bank::Attack, LayerTag::Value(255))]).unwrap_err();
-        assert!(refused.contains("no velocity selects"), "{refused}");
-        assert!(refused.contains(&highest.to_string()), "{refused}");
+        for version in Version::ALL {
+            let highest = version.highest_played_layer();
+            let named =
+                |value| layer_values(&[wav(60, Bank::Attack, LayerTag::Value(value))], version);
+            assert_eq!(named(highest).unwrap(), [highest]);
+            let refused = named(highest + 1).unwrap_err();
+            assert!(refused.contains("no velocity selects"), "{refused}");
+            assert!(refused.contains(&highest.to_string()), "{refused}");
+        }
     }
 
     #[test]
@@ -1344,14 +1374,17 @@ mod tests {
             wav(60, Bank::Attack, LayerTag::Index(0)),
             wav(60, Bank::Attack, LayerTag::Value(12)),
         ];
-        let refused = layer_values(&mixed).unwrap_err();
+        let refused = layer_values(&mixed, Version::V6).unwrap_err();
         assert!(refused.contains("C4 attack"), "{refused}");
 
         let twice = [
             wav(60, Bank::Attack, LayerTag::Index(0)),
             wav(60, Bank::Attack, LayerTag::Index(0)),
         ];
-        assert!(layer_values(&twice).is_err(), "a layer named twice");
+        assert!(
+            layer_values(&twice, Version::V6).is_err(),
+            "a layer named twice"
+        );
     }
 
     #[test]
