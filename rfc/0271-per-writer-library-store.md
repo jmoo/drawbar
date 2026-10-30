@@ -109,9 +109,11 @@ as stops one drawbar overwriting another's work.
   seconds. A read-only library holds unsaved edits in memory only, except one that is
   read-only because a change could not finish, which still keeps them, also when it opens
   read-only again.
-- **Older libraries are not migrated.** drawbar does not read what earlier versions kept in
-  `.drawbar/`: tags in `library.ron`, unsaved edits and rescued slot contents stay on disk,
-  unread, and opening such a library says so.
+- **An older library's tags come along once.** The first time drawbar opens a library an
+  earlier version kept, where it can write, it takes in the tags and origins of
+  `.drawbar/library.ron` for the files still there, and remembers in the library that it
+  did, so no other computer takes them in again. Unsaved edits and rescued slot contents
+  stay on disk, unread, and opening such a library says so.
 - **An action too large to keep as one step is refused whole**, before anything changes.
 
 ### What a contributor sees
