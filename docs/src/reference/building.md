@@ -14,36 +14,45 @@ nix build .#docs                  # this guide
 `nix run .#drawbar-web` serves on <http://127.0.0.1:8080/>. Set `DRAWBAR_PORT`
 for another port.
 
-## With Cargo
+## Checks
 
-`nix develop` opens a shell with the toolchain. Run Cargo from `crates/`, because
+`nix flake check` runs the formatting check, Clippy and rustdoc with warnings
+denied, and the tests of `scripts/bump.bash`. `nix build .#nord.all` builds every
+crate with its tests, the cross targets, the browser build and this guide. CI runs
+both. `nix fmt` formats everything. [Testing](testing.md) describes the suites,
+and [Contributing](contributing.md) the house rules.
+
+## Build by hand
+
+Cargo needs stable Rust, and on Linux the ALSA headers and `pkg-config`.
+`nix develop` opens a shell with all of it. Run Cargo from `crates/`, because
 `crates/.cargo/config.toml` carries a flag the wasm build needs, and Cargo finds
 it by walking up from the working directory.
 
 ```sh
-nix develop
 cd crates
 cargo run -p drawbar
 cargo run -p nord-cli -- --help
 cargo test --workspace
 ```
 
-## The browser build by hand
+### The browser build
 
-`nix build .#drawbar-web` does all of this in one step. By hand, from `crates/`:
+The browser build also needs the `wasm32-unknown-unknown` target and
+`wasm-bindgen-cli` at the `wasm-bindgen` version in `Cargo.lock`. `nix build
+.#drawbar-web` does all of this in one step. By hand, from `crates/`:
 
 ```sh
 cargo build -p drawbar --lib --target wasm32-unknown-unknown --release
-nix run --inputs-from .. nixpkgs#wasm-bindgen-cli -- \
-  --target web --out-dir drawbar/pkg \
+wasm-bindgen --target web --out-dir drawbar/pkg \
   target/wasm32-unknown-unknown/release/drawbar.wasm
 cd drawbar && python3 -m http.server 8000
 ```
 
 `--lib` is required. The crate also has a binary target of the same name, and
-if that one wins, the wasm module exports nothing. `wasm-bindgen-cli` must also
-match the `wasm-bindgen` version in `Cargo.lock`. `--inputs-from ..` takes it
-from the flake's pinned nixpkgs, which matches.
+if that one wins, the wasm module exports nothing. `nix run --inputs-from ..
+nixpkgs#wasm-bindgen-cli --` in place of `wasm-bindgen` takes the matching
+version from the flake's pinned nixpkgs.
 
 Serve over `http://localhost`, which counts as a secure context. WebUSB, the
 module import and the library's storage all fail from `file://`. The page loads
@@ -57,21 +66,12 @@ into the page. Built by hand it has neither, so the loading screen shows no
 version and measures the download against the server's `Content-Length`, or not
 at all when the server compresses it.
 
-## Checks
+## Checks by hand
 
-`nix flake check` runs the formatting check, Clippy and rustdoc with warnings
-denied, and the tests of `scripts/bump.bash`. `nix build .#nord.all` builds every
-crate with its tests, the cross targets, the browser build and this guide. CI runs
-both.
-`nix fmt` formats everything. [Testing](testing.md) describes the suites, and
-[Contributing](contributing.md) the house rules.
-
-## Checks without Nix
-
-The same checks run by hand with stable Rust (rustfmt and Clippy), taplo, shfmt,
-shellcheck and nixfmt. On Linux, building drawbar also needs the ALSA headers and
-`pkg-config`. CI uses the versions Nix pins, so a different version can still
-disagree. A pull request labeled `autofix` gets CI's formatting committed to it.
+The checks need taplo, shfmt, shellcheck and nixfmt beside the Rust toolchain,
+with rustfmt and Clippy. CI uses the versions Nix pins, so a different version
+can still disagree. A pull request labeled `autofix` gets CI's formatting
+committed to it.
 
 Format from the repository root. The file lists come from Git, so `git add` new
 files first.
