@@ -157,27 +157,12 @@ pub mod cmd {
     /// ⚠️ Omitting the direction word is refused `0x11` after any write since power-up.
     pub const NEXT_SLOT: u32 = 0x20;
 
-    /// Erases an entire partition.
-    ///
-    /// Reported by public documentation; not confirmed on hardware.
-    ///
-    /// ⚠️ It is left untested because the session's class selects the partition: in a
-    /// library session it would erase the whole piano or sample store, hundreds of
-    /// megabytes to restore from a backup. It is named so it can be recognized and
-    /// refused.
-    pub const ERASE_ALL: u32 = 0x24;
-
     /// Highest command the instrument has been seen to answer.
     ///
     /// ⚠️ The codes above this are unexplored but not empty: at least one reaches a
     /// destructive path, shows its own progress label, never replies, and needs a power
     /// cycle. A code far from the known range may still be implemented.
     pub const HIGHEST_ANSWERING: u32 = 0x3d;
-
-    /// Wedges the instrument: no reply, the session's close goes unanswered, and the
-    /// bulk endpoints stall until a power cycle. It is reported elsewhere as the read
-    /// half of [`NOTIFY_ENABLE`], but that is not what it does here.
-    pub const NOTIFY_READ_WEDGE: u32 = 0x2a;
 
     /// Unsolicited device → host notification. No request pairs with it, so it arrives
     /// in place of whatever reply the host reads next. A front-panel STORE queues one
@@ -188,10 +173,6 @@ pub mod cmd {
     /// Unexplained: what it announces. It is absent from the capture corpus, and a
     /// front-panel STORE is the only trigger observed.
     pub const CHANGED: u32 = 0x2c;
-
-    /// Enable or disable change notifications for a class: `class, on`. The reported
-    /// read half is [`NOTIFY_READ_WEDGE`].
-    pub const NOTIFY_ENABLE: u32 = 0x2d;
 }
 
 /// The UI/session service (service 6, subsystem 1): the transaction's outer handshake,
