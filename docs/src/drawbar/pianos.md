@@ -65,6 +65,11 @@ with **Template** it fades as the template's does, or as pianos of the template'
 kind do when the template itself never loops. Without a loop, a stroke plays
 to its end. Release strokes cannot loop.
 
+A release stroke plays at the level the note has fallen to when the key comes
+up, so a release recorded at full level suits a note let go at once and is
+heard softer after a long hold. A key let go where its attack recording is
+silent plays no release.
+
 [What is supported](../getting-started/support.md) says which of these edits
 have been played on an instrument.
 

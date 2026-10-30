@@ -91,7 +91,8 @@ use super::{
     DAMPER_TOP_AT, DECAYS, DIRECTORY_AT, FINE_TUNE_AT, FORMAT, GAIN_AT, KEY_MAP_AT, KIND_AT,
     LADDER_UNITY, MARKS, NOTES, RECORD, REC_BANK, REC_BLOCKS, REC_DECAY, REC_DECAYS, REC_FRAMES,
     REC_ID, REC_LAYER, REC_MARKS, REC_MARK_BLOCK, REC_NOTE_OFF, REC_SEEDS, REC_START,
-    REC_THRESHOLD, REC_TRIM, REC_WINDOW, SEEDS, UNCOVERED, VERSION_AT, VERSION_ECHO_AT,
+    REC_THRESHOLD, REC_TRIM, REC_WINDOW, RELEASE_LEVEL_AT, SEEDS, UNCOVERED, VERSION_AT,
+    VERSION_ECHO_AT,
 };
 use crate::cbin::Header;
 use crate::error::{try_with_capacity, try_zeroed, Error, ParseError};
@@ -520,7 +521,10 @@ pub fn build(
     check_layers(recordings, version)?;
     prefix[FINE_TUNE_AT..FINE_TUNE_AT + NOTES].fill(0);
     let roots: BTreeSet<u8> = recordings.iter().map(|r| r.root).collect();
-    prefix[KEY_MAP_AT..KEY_MAP_AT + NOTES].copy_from_slice(&key_map(&roots));
+    let map = key_map(&roots);
+    prefix[KEY_MAP_AT..KEY_MAP_AT + NOTES].copy_from_slice(&map);
+    prefix[RELEASE_LEVEL_AT..RELEASE_LEVEL_AT + NOTES]
+        .copy_from_slice(&release_levels(&map, recordings));
 
     let mut library = Library {
         header,
@@ -668,15 +672,35 @@ const KIND_TRAILER: [u8; 3] = [0, 0, 2];
 
 /// The per-note tables, [`NOTES`] bytes each, at neutral values: no retune at
 /// [`FINE_TUNE_AT`], and for the rest the value a library that has been played holds.
-/// Sweeping any of them moved nothing measurable. Confirmed on hardware.
-const PER_NOTE_TABLES: [(usize, u8); 6] = [
+/// Sweeping any of them moved nothing measurable. Confirmed on hardware. [`build`]
+/// writes the release level at [`RELEASE_LEVEL_AT`] itself.
+const PER_NOTE_TABLES: [(usize, u8); 5] = [
     (0x10c, 0),
     (FINE_TUNE_AT, 0),
     (0x20c, 57),
     (0x28c, 0),
-    (0x30c, 0),
     (0x38c, 0),
 ];
+
+/// The release level a key states when its root has a release stroke
+/// ([`Library::release_level`]): inside the range vendor libraries hold, and loud enough
+/// that a 5.x release sounds.
+const RELEASE_LEVEL: u8 = 42;
+
+/// The release level of each key that `map` routes: [`RELEASE_LEVEL`] where its root
+/// records a release stroke, as vendor libraries state it, and 0 elsewhere. A
+/// template's table belongs to its own roots, so a build states this whatever the donor.
+fn release_levels(map: &[u8; NOTES], recordings: &[Recording]) -> [u8; NOTES] {
+    let released: BTreeSet<u8> = recordings
+        .iter()
+        .filter(|r| r.bank == Bank::Release)
+        .map(|r| r.root)
+        .collect();
+    map.map(|root| match released.contains(&root) {
+        true => RELEASE_LEVEL,
+        false => 0,
+    })
+}
 
 /// The playback parameters, zero but for the fields [`rules_prefix`] writes into them.
 const PARAMETERS: std::ops::Range<usize> = 0x40c..0x60f;
@@ -2278,6 +2302,40 @@ mod tests {
         );
         let piano = built.to_piano().unwrap();
         assert_eq!(piano.library().unwrap().version(), Version::V6);
+    }
+
+    /// A 5.x key plays no release stroke while its release level is 0, so every key whose
+    /// root records a release states one, from rules or from a template whose own table
+    /// covers other keys.
+    #[test]
+    fn every_key_whose_root_has_a_release_states_a_release_level() {
+        let short = tone(6_000, 300.0, 1);
+        let recordings = [
+            one(48, Bank::Attack, 0, short.clone()),
+            one(60, Bank::Attack, 0, short.clone()),
+            one(60, Bank::Release, 0, short),
+        ];
+        let rules = Donor::Rules(Rules::new(Version::V5, Kind::Grand));
+        let built = build(&rules, &Options::new("Keys"), &recordings).unwrap();
+        let levels = |library: &Library<'_>| {
+            [40, 48, 49, 50, 60, 61, 62, 100].map(|key| library.release_level(key).unwrap())
+        };
+        assert_eq!(
+            levels(&built),
+            [0, 0, 0, RELEASE_LEVEL, RELEASE_LEVEL, RELEASE_LEVEL, 0, 0]
+        );
+
+        let mut template = built.without_audio();
+        for key in 0..NOTES as u8 {
+            template.set_release_level(key, 7).unwrap();
+        }
+        let again = build(
+            &Donor::Template(&template),
+            &Options::new("Keys"),
+            &recordings,
+        )
+        .unwrap();
+        assert_eq!(levels(&again), levels(&built));
     }
 
     #[test]
