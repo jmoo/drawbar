@@ -71,9 +71,9 @@ pub const V4_FROM_VERSION: u32 = 400;
 /// Which section chain a body's sections form, and the shapes that follow from it.
 ///
 /// The narrow chain has two schemas, and the content version does not separate them:
-/// it tracks the library release, and releases on both sides of the change carry a
-/// spread of numbers. The `map` section's own version selects the schema, and the
-/// other section versions agree with it on every specimen.
+/// specimens on both sides of the change carry a spread of numbers. The `map` section's
+/// own version selects the schema, and the other section versions agree with it on every
+/// specimen.
 ///
 /// Inferred from specimens; not confirmed on hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,10 +135,8 @@ impl Chain {
 
 /// A body read by generation: v2 as [`Sample`], v3 and v4 as [`SampleV3`].
 ///
-/// ⚠️ v2 content includes version 8 (the original Sample Library) as well as 200
-/// (Sample Library 2.0), so the gate is "below 300", not a match on `2xx`. Inferred
-/// from specimens; not confirmed on hardware. The number tracks the library release,
-/// not the codec. Reported by public documentation; not confirmed on hardware.
+/// ⚠️ v2 content includes version 8 as well as 200, so the gate is "below 300", not a
+/// match on `2xx`. Inferred from specimens; not confirmed on hardware.
 #[derive(Debug)]
 pub enum AnyBody {
     V2(Sample),
