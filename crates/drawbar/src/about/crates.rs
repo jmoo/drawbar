@@ -437,7 +437,7 @@ third-party/chromium/LICENSE.
             Holder {
                 notice: "Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>",
                 crates: &[
-                    "rustls 0.23.45",
+                    "rustls 0.23.46",
                     "rustls-native-certs 0.8.4",
                 ],
             },
@@ -1488,7 +1488,7 @@ pub(super) const LOCKED: &[(&str, &str)] = &[
     ("rustc_version", "0.4.1"),
     ("rustix", "0.38.44"),
     ("rustix", "1.1.4"),
-    ("rustls", "0.23.45"),
+    ("rustls", "0.23.46"),
     ("rustls-native-certs", "0.8.4"),
     ("rustls-pki-types", "1.15.1"),
     ("rustls-webpki", "0.103.15"),
