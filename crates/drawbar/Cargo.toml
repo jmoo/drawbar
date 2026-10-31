@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 version = "0.10.0"
 
+# The browser suite the Nix build runs headless in Chromium and Firefox.
+[package.metadata.nix]
+browserTests = ["web"]
+
 [lib]
 # `cdylib` is what wasm-bindgen consumes; `rlib` is what the native binary links.
 crate-type = ["cdylib", "rlib"]

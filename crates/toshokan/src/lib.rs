@@ -105,7 +105,7 @@
 //! period for a folder other programs write (`rescan`). The Browsers section of
 //! `SPEC.md` lists what each browser can do.
 //!
-//! The browser suites run headless with `nix build .#toshokan-web` on Linux.
+//! The browser suites run headless with `nix build .#nord.browser-tests` on Linux.
 //! Elsewhere, from `crates/` in the development shell, with a WebDriver and its
 //! browser installed:
 //!

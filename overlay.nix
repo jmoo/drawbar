@@ -49,10 +49,10 @@ let
       src = workspace;
       filter =
         path: type:
-        !hasInfix "/nord-cli/checks" path
-        && (
+        (
           crane.filterCargoSources path type
           || hasSuffix ".script" path
+          || hasInfix "/nord-cli/checks/" path
           # The About box's test compares its copy against this.
           || path == toString (workspace + "/LICENSE")
           # The committed specimens and replay scripts, whatever their extensions.
@@ -116,6 +116,34 @@ let
       }
       // builtins.removeAttrs args [ "crate" ]
     )
+  );
+
+  testFeatures = concatMap (name: map (feature: "${name}/${feature}") (testFeaturesFor name)) (
+    attrNames manifests
+  );
+
+  testArgs =
+    commonArgs
+    // audioArgs
+    // {
+      CARGO_PROFILE = "release-tests";
+      cargoExtraArgs = "--locked --workspace ${featureArgs testFeatures}";
+      pname = "workspace-tests";
+      version = "0";
+    };
+
+  testArtifacts = crane.buildDepsOnly testArgs;
+
+  tests = crane.mkCargoDerivation (
+    testArgs
+    // {
+      NORD_TEST_FEATURES = concatStringsSep "," testFeatures;
+      buildPhaseCargoCommand = "bash ${./scripts/test.bash}";
+      cargoArtifacts = testArtifacts;
+      doInstallCargoArtifacts = false;
+      installPhaseCommand = ''touch "$out"'';
+      nativeBuildInputs = (testArgs.nativeBuildInputs or [ ]) ++ [ final.jq ];
+    }
   );
 
   # ⚠️ winit, glutin and xkbcommon `dlopen` these: builds succeed without them, then
@@ -224,19 +252,12 @@ let
     linux-aarch64.crossPkgs = final.pkgsCross.aarch64-multiplatform;
   };
 
-  emulators =
-    optionalAttrs final.stdenv.hostPlatform.isLinux {
-      windows = {
-        cmd = "wine";
-        package = final.wine64;
-      };
-    }
-    // optionalAttrs (final.stdenv.hostPlatform.system == "x86_64-linux") {
-      linux-aarch64 = {
-        cmd = "qemu-aarch64";
-        package = final.qemu;
-      };
+  emulators = optionalAttrs (final.stdenv.hostPlatform.system == "x86_64-linux") {
+    linux-aarch64 = {
+      cmd = "qemu-aarch64";
+      package = final.qemu;
     };
+  };
 
   # Where cargo puts the artifacts, and what BUILD_INFO records.
   tripleOf = spec: spec.triple or spec.crossPkgs.stdenv.hostPlatform.rust.rustcTarget;
@@ -480,87 +501,59 @@ let
       }
     );
 
-  # A crate's browser suites, run headless by wasm-bindgen's test runner in Chromium
-  # and Firefox. Linux only: a macOS build user has no window server, and Firefox there
-  # fails to start a session.
-  # ⚠️ The runner ships with wasm-bindgen-cli and must match the crates' wasm-bindgen pin.
   browserSuites =
-    {
-      cargoExtraArgs,
-      pname,
-      tests,
-      version,
-    }:
-    let
-      browsers = {
-        Chromium = "CHROMEDRIVER=${final.lib.getExe final.chromedriver}";
-        Firefox = "GECKODRIVER=${final.lib.getExe final.geckodriver}";
-      };
-      webdriver = final.writeText "webdriver.json" (
-        builtins.toJSON {
-          "goog:chromeOptions" = {
-            # Chromium's own sandbox cannot start inside the build sandbox.
-            args = [
-              "--disable-dev-shm-usage"
-              "--no-sandbox"
-            ];
-            binary = final.lib.getExe final.chromium;
+    final.lib.mapAttrsToList
+      (
+        name: manifest:
+        let
+          suites = manifest.metadata.nix.browserTests or [ ];
+          args = commonArgs // {
+            CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
+            CARGO_PROFILE = "release-tests";
+            cargoExtraArgs = "--locked -p ${name} ${featureArgs (testFeaturesFor name)} ${
+              escapeShellArgs (
+                concatMap (suite: [
+                  "--test"
+                  suite
+                ]) suites
+              )
+            }";
+            nativeBuildInputs = [ final.lld ];
+            pname = "${name}-browser-tests";
+            inherit (manifest) version;
           };
-          "moz:firefoxOptions".binary = final.lib.getExe final.firefox;
-        }
-      );
-      args = commonArgs // {
-        CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
-        cargoExtraArgs = "--locked ${cargoExtraArgs}";
-        # ⚠️ nixpkgs' rustc links wasm with the system `lld` and bundles none.
-        nativeBuildInputs = [ final.lld ];
-        inherit pname version;
-      };
-      suites = tests: concatStringsSep " " (map (test: "--test ${test}") tests);
-    in
-    crane.mkCargoDerivation (
-      args
-      // {
-        CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER = "wasm-bindgen-test-runner";
-        WASM_BINDGEN_TEST_TIMEOUT = "300";
-        WASM_BINDGEN_TEST_WEBDRIVER_JSON = webdriver;
-        buildPhaseCargoCommand = ''
-          export HOME="$TMPDIR/home"
-          mkdir -p "$HOME"
-          ${concatStringsSep "\n" (
-            mapAttrsToList (name: driver: ''
-              echo "${pname} in ${name}"
-              env ${driver} cargo test $cargoExtraArgs ${suites tests}
-            '') browsers
-          )}
-        '';
-        cargoArtifacts = crane.buildDepsOnly args;
-        doInstallCargoArtifacts = false;
-        installPhaseCommand = ''touch "$out"'';
-        meta.description = "${pname}: browser suites in headless browsers";
-        nativeBuildInputs = args.nativeBuildInputs ++ [ final.wasm-bindgen-cli ];
-      }
-    );
-
-  toshokan-web = browserSuites {
-    cargoExtraArgs = "-p toshokan --features web";
-    pname = "toshokan-web";
-    tests = [
-      "backends"
-      "effects"
-      "hints"
-      "web"
-    ];
-    inherit (manifests.toshokan) version;
-  };
-
-  # drawbar's library in the browser, kept by its worker.
-  drawbar-web-tests = browserSuites {
-    cargoExtraArgs = "-p drawbar";
-    pname = "drawbar-web-tests";
-    tests = [ "web" ];
-    inherit (manifests.drawbar) version;
-  };
+        in
+        crane.mkCargoDerivation (
+          args
+          // {
+            CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER = "wasm-bindgen-test-runner";
+            WASM_BINDGEN_TEST_TIMEOUT = "300";
+            WASM_BINDGEN_TEST_WEBDRIVER_JSON = final.writeText "webdriver.json" (
+              builtins.toJSON {
+                "goog:chromeOptions" = {
+                  args = [
+                    "--disable-dev-shm-usage"
+                    "--no-sandbox"
+                  ];
+                  binary = final.lib.getExe final.chromium;
+                };
+                "moz:firefoxOptions".binary = final.lib.getExe final.firefox;
+              }
+            );
+            buildPhaseCargoCommand = ''
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              CHROMEDRIVER=${final.lib.getExe final.chromedriver} cargo test --profile release-tests $cargoExtraArgs
+              GECKODRIVER=${final.lib.getExe final.geckodriver} cargo test --profile release-tests $cargoExtraArgs
+            '';
+            cargoArtifacts = crane.buildDepsOnly args;
+            doInstallCargoArtifacts = false;
+            installPhaseCommand = ''touch "$out"'';
+            nativeBuildInputs = args.nativeBuildInputs ++ [ final.wasm-bindgen-cli ];
+          }
+        )
+      )
+      (final.lib.filterAttrs (_: manifest: (manifest.metadata.nix.browserTests or [ ]) != [ ]) manifests);
 
   # The power-loss workloads and checker in a page whose runs a driver kills, in
   # Chromium and Firefox; Linux only, as the other browser suites.
@@ -839,9 +832,9 @@ in
   nord =
     crates
     // crossed
-    # Not in `all`: it starts browsers, and only on Linux.
+    # Not in `all`: they start browsers, and only on Linux.
     // optionalAttrs final.stdenv.hostPlatform.isLinux {
-      inherit drawbar-web-tests toshokan-web;
+      browser-tests = final.linkFarmFromDrvs "browser-tests" browserSuites;
       toshokan-browser-crash = toshokanBrowserCrash;
     }
     // mapAttrs' (name: nameValuePair "${name}-corpus") committed
@@ -912,7 +905,12 @@ in
 
       # `site` stays out of `all`: it only rearranges outputs `all` already
       # builds, and the Pages deploy reaches it through scripts/site.bash.
-      inherit docs site;
+      inherit docs site tests;
+
+      # Each crate's shipping build on its own features; `tests` runs the suites.
+      packages = final.linkFarm "packages" (
+        mapAttrs (_: crate: crate.overrideAttrs { doCheck = false; }) crates
+      );
 
       # `nix run .#toshokan-browser-crash -- --stride 1`: the whole crash sweep,
       # with WebKit on macOS.

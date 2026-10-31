@@ -103,12 +103,13 @@ wasm-bindgen's test runner runs them headless; on Linux, Nix runs both in
 Chromium and Firefox:
 
 ```sh
-nix build .#drawbar-web-tests .#toshokan-web
+nix build .#nord.browser-tests
 ```
 
-CI also runs them in Edge on Windows and in Safari on macOS whenever toshokan or
-drawbar's library changes. Safari cannot pick a folder, so its run skips drawbar's
-picked-folder test.
+Each crate declares its browser suites as `browserTests` in its
+`[package.metadata.nix]`, and CI's web job runs them. Edge and Safari run them by
+hand, with `MSEDGEDRIVER` or `SAFARIDRIVER` in place of `CHROMEDRIVER` below.
+Safari cannot pick a folder, so it skips drawbar's picked-folder test.
 
 Elsewhere, from `crates/` in `nix develop`, point the runner at a browser's driver:
 
@@ -128,8 +129,14 @@ on macOS. `crates/toshokan/spec/README.md` describes the cases.
 
 ## Everything at once
 
-`nix flake check` and `nix build .#nord.all` run what CI runs. See
-[Building from source](building.md).
+`nix flake check` and `nix build .#nord.tests .#nord.packages .#site` run the
+public CI gates locally. On Linux, add `.#nord.browser-tests` for declared browser
+suites. See [Building from source](building.md).
+
+From `crates/`, `nix develop -c bash ../scripts/test.bash` runs the same native
+suite without a sandbox. It reads each crate's `testFeatures` from its manifest.
+The `release-tests` profile keeps optimization enabled and omits full link-time
+optimization; shipped packages keep their shipping profiles.
 
 `nix build .#nord.all-corpus` runs every suite against the pinned private corpus,
 and `.#nord.<crate>-corpus` runs one crate's. `.#nord.all-corpus-full` uses the

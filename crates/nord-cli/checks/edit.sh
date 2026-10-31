@@ -26,8 +26,6 @@ run program edit --set center_panel.gain=64 -o base.ne5p >/dev/null 2>err.txt ||
   cat err.txt
   exit 1
 }
-# ⚠️ Under Wine, piping straight to grep can miss output that is there. Capture
-# to a file first; the cause is unknown, and the file is reliable.
 run verify base.ne5p >verified.txt 2>err.txt || {
   echo "a written program did not round-trip:"
   cat verified.txt err.txt
@@ -67,8 +65,7 @@ grep -q 'transpose: -5  (on)' decoded.txt || {
   exit 1
 }
 
-# Output to a pipe must carry no ANSI escapes, so Wine and Linux runs compare
-# only the decode.
+# Redirected output carries ANSI escapes only with --color=always.
 run program edit base.ne5p --set center_panel.gain=1 --dry-run >plain.txt 2>&1
 run --color=always program edit base.ne5p --set center_panel.gain=1 --dry-run \
   >colored.txt 2>&1

@@ -233,9 +233,16 @@ Before a change is done:
   corpus, when the change touches decoded layout or protocol evidence;
   `.#nord.<crate>-corpus` selects one crate.
 
-CI runs each crate with its declared `testFeatures`, rejects anything `nix fmt`
-would change, and treats Clippy and rustdoc warnings as failures. The `autofix`
-PR label runs `nix fmt` on the branch and pushes a `style: nix fmt` commit when
+CI runs the workspace with each crate's declared `testFeatures` on native Linux,
+Windows and macOS runners, and builds each crate on its own features on Linux and
+macOS. The web job
+builds the production bundle and guide, and runs the declared browser suites in
+Chromium and Firefox. The check job rejects anything `nix fmt` would change and
+treats Clippy and rustdoc warnings as failures.
+The required `build` check collects the native, web and corpus results; release
+and deployment wait for it and `check`. Cross builds are local checks.
+
+The `autofix` PR label runs `nix fmt` on the branch and pushes a `style: nix fmt` commit when
 it changes anything; it reruns on pushes while the label is on. The public suite
 must compile and pass without private corpus access. `tests/corpus` discovers the
 committed fixtures, plus the corpus when enabled, by content, and applies sidecar
@@ -243,9 +250,7 @@ committed fixtures, plus the corpus when enabled, by content, and applies sideca
 every file of a kind runs once per such file, and a claim about one file lives in
 its sidecar.
 
-Each crate's Windows build runs its suite under Wine. When toshokan changes, the
-`windows` workflow also runs toshokan's suite on a hosted Windows runner. It is
-the one check outside Nix, so it pins the Rust that nixpkgs pins by version.
+Each crate's Windows cross build runs its suite under Wine, locally.
 
 The CI corpus job runs the committed tier for in-repository pull requests and
 gates publishing. It reads `jmoo/nord-corpus` through the read-only

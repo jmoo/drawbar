@@ -1,0 +1,37 @@
+name: Nix
+description: Install Nix and restore a job's store; save only public outputs.
+inputs:
+  cache:
+    description: Cache family
+    required: true
+  save:
+    description: Save the store after the job
+    default: "true"
+  store-size:
+    description: Largest store to save
+    default: 4G
+runs:
+  using: composite
+  steps:
+    - uses: nixbuild/nix-quick-install-action@v35
+      with:
+        nix_conf: |
+          keep-env-derivations = true
+          keep-outputs = true
+          max-jobs = 2
+          cores = 2
+    - if: inputs.save == 'true'
+      uses: nix-community/cache-nix-action@v7
+      with:
+        primary-key: nix-${{ inputs.cache }}-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix', 'crates/Cargo.lock', 'crates/**/Cargo.toml') }}
+        restore-prefixes-first-match: nix-${{ inputs.cache }}-${{ runner.os }}-
+        gc-max-store-size: ${{ inputs.store-size }}
+        purge: true
+        purge-prefixes: nix-${{ inputs.cache }}-${{ runner.os }}-
+        purge-created: 0
+        purge-primary-key: never
+    - if: inputs.save != 'true'
+      uses: nix-community/cache-nix-action/restore@v7
+      with:
+        primary-key: nix-${{ inputs.cache }}-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix', 'crates/Cargo.lock', 'crates/**/Cargo.toml') }}
+        restore-prefixes-first-match: nix-${{ inputs.cache }}-${{ runner.os }}-

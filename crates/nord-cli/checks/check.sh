@@ -21,13 +21,7 @@ scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 cd "$scratch"
 
-# Emulators need a writable HOME, and Wine refuses a prefix it does not own, so
-# both point into the scratch directory. A native binary ignores them.
 export HOME=$PWD/home
-export WINEPREFIX=$HOME/.wine
-export WINEDEBUG=-all
-# The Nix sandbox has no network, so keep wineboot from fetching Gecko and Mono.
-export WINEDLLOVERRIDES="mscoree,mshtml="
 mkdir -p "$HOME"
 
 name=$(basename "$bin")
@@ -39,8 +33,8 @@ run --help >help.txt 2>err.txt || {
   exit 1
 }
 cat help.txt
-grep -q "Usage: $name" help.txt || {
-  echo "unexpected output: wanted 'Usage: $name'"
+grep -Eq '^Usage: nord(\.exe)? ' help.txt || {
+  echo "unexpected output: wanted nord usage"
   exit 1
 }
 
