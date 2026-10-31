@@ -59,7 +59,15 @@ fn beside_store() -> Option<PathBuf> {
 /// ⚠️ Two drawbars running at once on one machine share it. Each writes as a writer of
 /// its own, but the identities its scans read and what it let go of are kept in one file
 /// each, and the one that writes last keeps its own.
+///
+/// In tests it is beside the library, as [`crate::testing::Temp::local`] puts it, so no
+/// test writes in drawbar's own data.
 pub fn local_root(root: &Path) -> PathBuf {
+    if cfg!(test) {
+        let mut beside = root.as_os_str().to_owned();
+        beside.push(".local");
+        return PathBuf::from(beside);
+    }
     let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let hash = blake3::hash(root.as_os_str().as_encoded_bytes());
     let name: String = hash.as_bytes()[..16]
