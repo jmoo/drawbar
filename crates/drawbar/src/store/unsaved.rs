@@ -18,7 +18,7 @@ use std::io;
 use serde::{Deserialize, Serialize};
 use toshokan::asynch::Fs;
 use toshokan::io::{Kind, Root};
-use toshokan::{EntryHash, Identity, RelPath};
+use toshokan::{Identity, RelPath};
 
 use super::{storage, Key, Slot};
 
@@ -300,30 +300,6 @@ impl Store {
 /// The newest of `found` that reads, by the clock it was kept at.
 pub fn newest(found: Vec<Result<Unsaved, String>>) -> Option<Unsaved> {
     found.into_iter().flatten().max_by_key(|unsaved| unsaved.at)
-}
-
-/// What the user is told of the unsaved edits an earlier drawbar kept.
-pub const EARLIER: &str = "This drawbar does not read the unsaved edits an earlier version kept \
-     for this library, so they are not shown.";
-
-/// Whether the local root holds unsaved edits an earlier drawbar kept, in a writer's
-/// `drafts/`. They are never read.
-pub async fn earlier<F: Fs>(fs: &F) -> io::Result<bool> {
-    let local = match storage::list(fs, Root::Local, &RelPath::ROOT).await {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
-        local => local?,
-    };
-    let writers = local
-        .into_iter()
-        .filter(|(name, meta)| meta.kind == Kind::Directory && name.parse::<EntryHash>().is_ok());
-    for (name, _) in writers {
-        let drafts = RelPath::new(&format!("{name}/drafts")).expect("two components");
-        let meta = storage::meta(fs, Root::Local, &drafts).await?;
-        if meta.is_some_and(|meta| meta.kind == Kind::Directory) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 #[cfg(test)]

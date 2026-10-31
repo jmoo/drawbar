@@ -519,13 +519,6 @@ impl<F: Fs> Keeper<F> {
         };
         self.told_read_only = writable.is_err();
         let view = library.view();
-        let earlier = unsaved::earlier(library.fs()).await;
-        let earlier = earlier.unwrap_or_else(|e| {
-            trouble.push(format!(
-                "looking for unsaved edits an earlier drawbar kept: {e}"
-            ));
-            false
-        });
         self.library = Some(library);
         // After settling, which may need what the trash holds.
         if writable.is_ok() {
@@ -542,7 +535,6 @@ impl<F: Fs> Keeper<F> {
             opening_copy,
             viewed,
             drafts,
-            earlier,
             ignored: opened.ignored.len(),
             trouble,
         })

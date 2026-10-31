@@ -285,8 +285,6 @@ pub struct Store {
     taking_in: Option<TakingIn>,
     /// Whether the library opened holding a copy that stopped partway as it was opened.
     opening_copy: bool,
-    /// Whether opening found unsaved edits an earlier drawbar kept, until taken.
-    earlier: bool,
 }
 
 impl Store {
@@ -366,7 +364,6 @@ impl Store {
             sent_take_in: false,
             taking_in: None,
             opening_copy: false,
-            earlier: false,
             left: Vec::new(),
         }
     }
@@ -1866,12 +1863,10 @@ impl Store {
             opening_copy,
             viewed,
             drafts,
-            earlier,
             ignored,
             trouble,
         } = opened;
         self.opening_copy = opening_copy;
-        self.earlier = earlier;
         for why in trouble {
             log.error(format!("opening the library: {why}"));
         }
@@ -2813,24 +2808,6 @@ impl Store {
             "drawbar could not bring the sounds an earlier version kept into the library: \
              {why}. They stay where they were, and drawbar tries again next time."
         ));
-    }
-
-    /// Whether opening found unsaved edits an earlier drawbar kept in this library's
-    /// local root, once.
-    pub fn take_earlier(&mut self) -> bool {
-        std::mem::take(&mut self.earlier)
-    }
-
-    /// The name the app keeps what it has told of this library under, among others'.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn library_key(&self) -> String {
-        self.backend.root().display().to_string()
-    }
-
-    /// The name the app keeps what it has told of this library under, among others'.
-    #[cfg(target_arch = "wasm32")]
-    pub fn library_key(&self) -> String {
-        self.backend.root().local().to_string()
     }
 
     /// A write to the instrument has left a slot's former occupant on this computer:

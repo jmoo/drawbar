@@ -134,7 +134,6 @@ pub use exec::{opens, MOST_BYTES};
 pub use ids::Key;
 pub use keys::identity_of_bytes;
 pub use mirror::{Pass, Store};
-pub use unsaved::EARLIER as EARLIER_UNSAVED;
 
 use std::sync::Arc;
 
@@ -993,9 +992,6 @@ pub struct Opened {
     pub viewed: Viewed,
     /// The unsaved edits of assets an earlier session kept, or why one does not read.
     pub drafts: Vec<Result<Kept, String>>,
-    /// Whether this install holds unsaved edits an earlier drawbar kept where this one
-    /// does not read them, the first time it opens the library.
-    pub earlier: bool,
     /// How many pending records of other writers opening could not read.
     pub ignored: usize,
     /// What opening tried to tidy and could not: finishing a change a crash or

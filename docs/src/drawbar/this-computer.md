@@ -253,8 +253,6 @@ bring back any you deleted.
   library next opens. If it can no longer be finished, because a file it was
   moving is gone, drawbar asks whether to roll it back or leave it as is, and
   Undo no longer reaches the changes before it.
-- **An earlier drawbar.** Unsaved edits an earlier drawbar kept on this
-  computer are not read, and the activity log says so once.
 - **A folder that stays.** Where a folder moves one file at a time, as in the
   browser, a folder that still holds a file drawbar does not list, such as one
   whose name starts with a dot, stays where it was, and the activity log names
