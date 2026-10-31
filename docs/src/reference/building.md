@@ -22,8 +22,8 @@ denied, and the tests of `scripts/bump.bash` and the telemetry collector.
 `nix build .#nord.tests` runs the workspace tests and CLI checks together, using
 optimized code without full link-time optimization. `nix build .#nord.packages`
 builds each crate's shipping package on its own features, without its tests. CI
-runs these on Linux, Windows and macOS, and builds the production browser bundle
-and this guide with `nix build .#site`. In-repository pull requests also run the private corpus tests.
+runs both on Linux and macOS, runs the tests and CLI checks on Windows, and builds
+the production browser bundle and this guide with `nix build .#site`. In-repository pull requests also run the private corpus tests.
 
 On Linux, `nix build .#nord.browser-tests` runs each crate's declared browser
 suites in headless Chromium and Firefox. Declare their Cargo test names in
