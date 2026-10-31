@@ -289,28 +289,18 @@ cause:
 
 ## Power loss
 
-The crash harness checks toshokan against the file system it models. Two NixOS
-VM tests check the native backend against ext4, XFS, Btrfs and exFAT, on x86_64
-Linux with KVM:
-
-```sh
-nix build .#toshokan-power-loss-smoke  # crashes a VM mid-workload, three times
-nix build .#toshokan-power-loss        # replays every flush, on each file system
-nix build .#toshokan-power-loss.ext4   # on one
-```
-
-The replay logs each workload's writes with dm-log-writes, then rebuilds the
-disk as it stood at every flush and at sets of the writes between two flushes,
-and checks each state after the file system's own recovery. One VM per file
-system runs every workload at once, each on its own slice of the disks, and a
-state that keeps the same writes as one already checked, with the same steps
-acknowledged, counts that check. An exFAT state that
-`fsck.exfat` finds corrupt is checked but counted apart. With every directory
-sync skipped, only exFAT's replay fails; ext4, XFS and Btrfs keep the
-directories' changes through the file syncs that follow them. A write is replayed
-whole, never torn; the crash harness covers torn writes.
-[examples/power_loss.rs](../examples/power_loss.rs) holds the workloads and the
-checker. Neither test covers APFS, NTFS or a browser's storage.
+The crash harness checks toshokan against the file system it models. Its fault
+model, torn and zero-filled tails, renames done by copy and names made durable
+early, was checked against ext4, XFS, Btrfs and exFAT by replaying the native backend in NixOS
+VMs: each workload's writes were logged with dm-log-writes, and the disk was
+rebuilt as it stood at every flush, at sampled sets of the writes between two
+flushes and with each single write left out, then checked after the file system's
+own recovery. No state lost or damaged an acknowledged write; an exFAT state that
+`fsck.exfat` found corrupt was checked but counted apart. With every directory
+sync skipped, only exFAT's replay failed; ext4, XFS and Btrfs kept the directories' changes through the file syncs that
+followed them. The replay needs KVM on x86_64 Linux and is kept on the
+`harness/power-loss-vm` branch, to run again when the order of toshokan's writes and
+syncs changes. It did not cover APFS or NTFS.
 
 A browser's storage is checked by killing the browser instead.
 [power-loss/browser](../power-loss/browser) runs each workload in a page's worker

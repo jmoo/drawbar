@@ -1,10 +1,5 @@
-//! The library generator, request counts and counting allocator that the
-//! `scale` example and the no-growth test share.
-
-#![allow(
-    dead_code,
-    reason = "the scale example uses all of it, the no-growth test part"
-)]
+//! The library generator, request counts and counting allocator the no-growth
+//! test measures with.
 
 use std::alloc::{GlobalAlloc, Layout as Alloc, System};
 use std::cell::RefCell;
@@ -16,7 +11,7 @@ use toshokan::blocking::Backend;
 use toshokan::compaction::{snapshot, Found};
 use toshokan::io::Capabilities;
 use toshokan::library::COMPACT_AFTER;
-use toshokan::log::{Displaced, Entry, EntryKind, FileFact, Genesis, Logged, Op, Own, Ref};
+use toshokan::log::{Entry, EntryKind, FileFact, Genesis, Logged, Op, Own, Ref};
 use toshokan::snapshot::Snapshot;
 use toshokan::{
     EntityId, EntryHash, Hlc, Identity, Io, IoResult, Layout, Nonce, Raw, RelPath, Reply, Root,
@@ -63,65 +58,9 @@ pub static ALLOCATOR: Counting = Counting;
 pub struct IoStats(pub BTreeMap<(&'static str, Root), (u64, u64)>);
 
 impl IoStats {
-    pub fn total(&self) -> u64 {
-        self.0.values().map(|(n, _)| n).sum()
-    }
-
     pub fn bytes(&self, kinds: &[&str]) -> u64 {
         let named = self.0.iter().filter(|((kind, _), _)| kinds.contains(kind));
         named.map(|(_, (_, bytes))| bytes).sum()
-    }
-
-    pub fn local_bytes(&self) -> u64 {
-        let local = self.0.iter().filter(|((_, root), _)| *root == Root::Local);
-        local.map(|(_, (_, bytes))| bytes).sum()
-    }
-
-    /// `Kind count` per kind, roots summed, with bytes where a kind moves any.
-    pub fn shown(&self) -> String {
-        let mut by_kind: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
-        for ((kind, _), (n, bytes)) in &self.0 {
-            let sum = by_kind.entry(kind).or_default();
-            sum.0 += n;
-            sum.1 += bytes;
-        }
-        let order = [
-            "List",
-            "Stat",
-            "ListStat",
-            "Read",
-            "ReadMany",
-            "Create",
-            "Append",
-            "Write",
-            "Rename",
-            "Remove",
-            "RemoveDir",
-            "MakeDir",
-            "Sync",
-            "Lock",
-            "Unlock",
-        ];
-        order
-            .iter()
-            .filter_map(|kind| {
-                let (n, bytes) = by_kind.get(kind)?;
-                Some(match (*kind, bytes) {
-                    (_, 0) | ("List" | "ListStat", _) => format!("{kind} {n}"),
-                    _ => format!("{kind} {n} ({})", size(*bytes)),
-                })
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-}
-
-pub fn size(bytes: u64) -> String {
-    match bytes {
-        b if b >= 1 << 30 => format!("{:.2} GB", b as f64 / (1u64 << 30) as f64),
-        b if b >= 1 << 20 => format!("{:.1} MB", b as f64 / (1u64 << 20) as f64),
-        b if b >= 1 << 10 => format!("{:.1} kB", b as f64 / 1024.0),
-        b => format!("{b} B"),
     }
 }
 
@@ -611,36 +550,6 @@ impl Gen {
                 },
             );
             update(&mut self.entities[e], hash, &tag);
-        }
-    }
-
-    /// `count` items in writer `w`'s trash, logged as displaced a hundred to an
-    /// entry, each with a file of 64 bytes in the trash.
-    pub fn trash(&mut self, w: usize, count: usize) {
-        let id = self.writers[w].id;
-        for chunk in (0..count).collect::<Vec<_>>().chunks(100) {
-            let mut displaced = Vec::new();
-            for &i in chunk {
-                let item = Nonce::from_u128(self.rng.id());
-                let bytes = vec![i as u8; 64];
-                self.put(&self.layout.trash(id, item), bytes);
-                displaced.push(Displaced {
-                    item,
-                    from: RelPath::new(&format!("gone/{i}.bin")).unwrap(),
-                    identity: Identity::from_u128(i as u128),
-                    len: 64,
-                });
-            }
-            self.push(
-                w,
-                Logged {
-                    label: "Save".into(),
-                    ops: Vec::new(),
-                    displaced,
-                    forks: Vec::new(),
-                    record: None,
-                },
-            );
         }
     }
 }

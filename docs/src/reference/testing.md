@@ -120,9 +120,6 @@ CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
 Safari runs them in a window, with `SAFARIDRIVER=/usr/bin/safaridriver`, once
 `sudo safaridriver --enable` has allowed remote automation.
 
-`--test bench` times the browser's library at the size `DRAWBAR_BENCH_FILES`
-names, and runs only when named.
-
 `nix build .#toshokan-browser-crash` kills toshokan's library partway through its
 power-loss workloads in Chromium and Firefox on Linux, and fills the origin's
 quota, and checks that nothing acknowledged is lost or damaged.
@@ -139,12 +136,12 @@ and `.#nord.<crate>-corpus` runs one crate's. `.#nord.all-corpus-full` uses the
 corpus's R2 tier and needs a seeded store or R2 credentials. `.#nord.corpus` and
 `.#nord.corpus-full` are the corpus trees themselves.
 
-A change to toshokan also needs its value-level retention sweep and its
-power-loss replay, which CI does not run. `scripts/evidence.bash` runs all of
-it at once and prints each part's wall time: the sweep, every Nix build and
-check, each crate's tests among them, and on x86_64 Linux the replay. TLC's model check,
-`nix build .#nord.toshokan-spec`, runs on its own. `--fast` runs toshokan's own
-suite and Clippy, and the replay on ext4, for every change in between.
+A change to toshokan also needs its value-level retention sweep and its browser
+crash sweep, which CI does not run. `scripts/evidence.bash` runs all of it at once
+and prints each part's wall time: the sweep, every Nix build and check, each
+crate's tests among them, and on Linux the browser suites and crash sweep. TLC's
+model check, `nix build .#nord.toshokan-spec`, runs on its own. `--fast` runs
+toshokan's own suite and Clippy, for every change in between.
 
 Tests that run long build with `--profile release-tests`, which is `release`
 without link-time optimization:

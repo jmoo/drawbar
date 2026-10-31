@@ -60,11 +60,6 @@ syn = { version = "2", default-features = false }
 # nord-format's `bundle` already builds it.
 zip = { version = "9", default-features = false, features = ["deflate"] }
 
-# The browser benchmark, run only when named.
-[[test]]
-name = "bench"
-test = false
-
 # The browser suite, run by wasm-bindgen-cli's test runner.
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"

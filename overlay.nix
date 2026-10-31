@@ -478,10 +478,8 @@ let
   # and Firefox. Linux only: a macOS build user has no window server, and Firefox there
   # fails to start a session.
   # ⚠️ The runner ships with wasm-bindgen-cli and must match the crates' wasm-bindgen pin.
-  # `built` are suites only compiled, so a suite run by hand cannot rot.
   browserSuites =
     {
-      built ? [ ],
       cargoExtraArgs,
       pname,
       tests,
@@ -523,7 +521,6 @@ let
         buildPhaseCargoCommand = ''
           export HOME="$TMPDIR/home"
           mkdir -p "$HOME"
-          ${optionalString (built != [ ]) "cargo test $cargoExtraArgs ${suites built} --no-run"}
           ${concatStringsSep "\n" (
             mapAttrsToList (name: driver: ''
               echo "${pname} in ${name}"
@@ -540,7 +537,6 @@ let
     );
 
   toshokan-web = browserSuites {
-    built = [ "bench" ];
     cargoExtraArgs = "-p toshokan --features web";
     pname = "toshokan-web";
     tests = [
@@ -554,7 +550,6 @@ let
 
   # drawbar's library in the browser, kept by its worker.
   drawbar-web-tests = browserSuites {
-    built = [ "bench" ];
     cargoExtraArgs = "-p drawbar";
     pname = "drawbar-web-tests";
     tests = [ "web" ];
@@ -588,22 +583,6 @@ let
           nativeBuildInputs = args.nativeBuildInputs ++ [ final.wasm-bindgen-cli ];
         }
       );
-  };
-
-  # The power-loss harness's workloads and checker, and the VM tests that crash
-  # and replay real file systems under them. x86_64 Linux only: they need KVM.
-  toshokanPowerLoss = final.callPackage ./crates/toshokan/power-loss {
-    power-loss = crane.buildPackage (
-      commonArgs
-      // {
-        inherit cargoArtifacts;
-        cargoExtraArgs = "--locked -p toshokan --example power_loss";
-        doCheck = false;
-        installPhaseCommand = ''install -D target/release/examples/power_loss "$out/bin/power_loss"'';
-        pname = "toshokan-power-loss";
-        inherit (manifests.toshokan) version;
-      }
-    );
   };
 
   # `docs/book` is mdBook's own output directory, ignored by git; keeping it out
@@ -808,13 +787,6 @@ in
     // optionalAttrs final.stdenv.hostPlatform.isLinux {
       inherit drawbar-web-tests toshokan-web;
       toshokan-browser-crash = toshokanBrowserCrash;
-    }
-    # Not in `all`: each boots VMs, and replaying takes long.
-    // optionalAttrs (final.stdenv.hostPlatform.system == "x86_64-linux") {
-      toshokan-power-loss =
-        (final.linkFarm "toshokan-power-loss" toshokanPowerLoss.replay).overrideAttrs
-          { passthru = toshokanPowerLoss.replay; };
-      toshokan-power-loss-smoke = toshokanPowerLoss.smoke;
     }
     // mapAttrs' (name: nameValuePair "${name}-corpus") committed
     // mapAttrs' (name: nameValuePair "${name}-corpus-full") full

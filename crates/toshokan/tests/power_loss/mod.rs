@@ -1,10 +1,10 @@
 //! The power-loss workloads, their model and the checks a stopped run must pass,
-//! on any [`Place`]: the native file system the `power_loss` example drives, or
-//! the in-memory disk the fault sweep drives.
+//! on any [`Place`]: the origin private file system the `browser_crash` example
+//! drives, or the in-memory disk the fault sweep drives.
 
 #![allow(
     dead_code,
-    reason = "the power_loss example and the fault sweep each use their own part"
+    reason = "the browser_crash example and the fault sweep each use their own part"
 )]
 
 use std::cell::RefCell;
@@ -1157,7 +1157,6 @@ pub fn check<P: Place>(
         start: opened.start,
         settled: opened.settled.len(),
         orphans: opened.orphaned.len(),
-        unreadable: opened.unreadable.len(),
     })
 }
 
@@ -1211,7 +1210,6 @@ pub struct Checked {
     pub start: Start,
     pub settled: usize,
     pub orphans: usize,
-    pub unreadable: usize,
 }
 
 /// An entry an acknowledged step committed, by its writer, number and hash:

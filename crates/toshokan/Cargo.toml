@@ -4,9 +4,8 @@ categories = ["data-structures", "filesystem", "wasm"]
 description = "Keep what a file cannot say about itself beside the file, in a folder that syncs"
 edition.workspace = true
 rust-version.workspace = true
-# The power-loss VM harness, the TLA+ model and the browser benchmark's driver run
-# from a checkout.
-exclude = ["power-loss/", "scripts/", "spec/"]
+# The browser crash sweep and the TLA+ model run from a checkout.
+exclude = ["power-loss/", "spec/"]
 keywords = ["metadata", "offline-first", "sync", "synced-folder", "tags"]
 license.workspace = true
 repository.workspace = true
@@ -84,11 +83,6 @@ tempfile = "3"
 [[example]]
 name = "browser_crash"
 crate-type = ["cdylib"]
-
-# The browser benchmark, run only when named.
-[[test]]
-name = "bench"
-test = false
 
 # The browser suites, run by wasm-bindgen-cli's test runner, and the worker that
 # answers the blocking suites.

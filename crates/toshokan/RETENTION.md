@@ -486,13 +486,7 @@ with entries otherwise.
 `tests/no_growth.rs`, in the default suite, checks this for ten entities at
 10,000 and 100,000 entries: the folder, what open reads and keeps, and the
 requests of open, commit and refresh stay the same, but for the certificates and
-the record pairs the entries between add, and a digit per number. The scale
-example compares the same at full size, by hand:
-
-```text
-cargo run --release --example scale -- --entities 2000 --entries 200000 --writers 3 --tags 5
-cargo run --release --example scale -- --entities 2000 --entries 2000000 --writers 3 --tags 5
-```
+the record pairs the entries between add, and a digit per number.
 
 ## An old folder
 

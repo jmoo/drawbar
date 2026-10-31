@@ -33,9 +33,8 @@ out="$(realpath "$out")"
 system="$(nix eval --raw --impure --expr builtins.currentSystem)"
 export CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo/crates/target}"
 
-# Peak resident memory on an 8-core, 31 GB host: a power-loss VM 1.4 GB, a
-# cargo build at -j 8 2.3 GB per rustc, the sweep 230 MB. TLC, when it runs, keeps
-# 10 GB.
+# Peak resident memory on an 8-core, 31 GB host: a cargo build at -j 8 2.3 GB per
+# rustc, the sweep 230 MB. TLC, when it runs, keeps 10 GB.
 if [[ -r /proc/meminfo ]]; then
   mem_gb=$(($(grep MemTotal /proc/meminfo | grep -o '[0-9]*') >> 20))
 else
@@ -79,20 +78,18 @@ sweep_binary() {
   (cd "$repo/crates" && realpath "$built")
 }
 
-# The browser suites run on Linux, and the power-loss VMs need x86_64 Linux.
+# The browser suites run on Linux.
 linux=$([[ $system == *-linux ]] && echo 1 || true)
-linux_x86=$([[ $system == x86_64-linux ]] && echo 1 || true)
 started=$(date +%s)
 case $tier in
 fast)
   part toshokan toshokan
-  [[ -n $linux_x86 ]] && part power-loss nix_build "$repo#toshokan-power-loss.ext4"
   ;;
 full)
   mapfile -t checks < <(nix eval --raw "$repo#checks.$system" --apply \
     'checks: builtins.concatStringsSep "\n" (builtins.filter (name: name != "toshokan-spec") (builtins.attrNames checks))')
   part nix nix_build "${checks[@]/#/$repo#checks.$system.}" "$repo#nord.all" \
-    ${linux:+"$repo#drawbar-web-tests" "$repo#toshokan-web" "$repo#toshokan-browser-crash"} ${linux_x86:+"$repo#toshokan-power-loss"}
+    ${linux:+"$repo#drawbar-web-tests" "$repo#toshokan-web" "$repo#toshokan-browser-crash"}
   sweep=$(sweep_binary) || {
     wait
     exit 1
