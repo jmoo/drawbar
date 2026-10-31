@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -112,7 +112,7 @@ jobs:
             or (.key == "corpus" and .value.result == "skipped"))'
 
   release:
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    if: github.repository == 'jmoo/drawbar' && github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
     needs: [check, build]
     runs-on: ubuntu-latest
     permissions:
@@ -141,7 +141,7 @@ jobs:
   # wasm toolchain, so this job keeps a cache of its own rather than restoring
   # the build job's.
   pages:
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    if: github.repository == 'jmoo/drawbar' && github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
     needs: [release, telemetry]
     runs-on: ubuntu-latest
     permissions:
@@ -173,7 +173,7 @@ jobs:
 
   # Pages waits on this, so no app that reports is published before its collector.
   telemetry:
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    if: github.repository == 'jmoo/drawbar' && github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
     needs: [check, build]
     runs-on: ubuntu-latest
     concurrency:
