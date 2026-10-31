@@ -116,6 +116,12 @@ CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
 `--test bench` times the browser's library at the size `DRAWBAR_BENCH_FILES`
 names, and runs only when named.
 
+`nix build .#toshokan-browser-crash` kills toshokan's library partway through its
+power-loss workloads in Chromium and Firefox on Linux, and fills the origin's
+quota, and checks that nothing acknowledged is lost or damaged.
+`nix run .#toshokan-browser-crash -- --stride 1` runs every case, and adds WebKit
+on macOS. `crates/toshokan/spec/README.md` describes the cases.
+
 ## Everything at once
 
 `nix flake check` and `nix build .#nord.all` run what CI runs. See
