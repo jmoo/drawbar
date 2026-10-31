@@ -703,14 +703,6 @@ impl Entry {
         &self.kind
     }
 
-    /// An intent's label.
-    pub fn intent(&self) -> Option<&str> {
-        match &self.kind {
-            EntryKind::Intent(logged) => Some(&logged.label),
-            _ => None,
-        }
-    }
-
     /// The line's JSON, as it was read.
     pub fn json(&self) -> Cow<'_, str> {
         match &self.text {
