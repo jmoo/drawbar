@@ -13,11 +13,14 @@ This model follows the bounded retention of [RETENTION.md](../RETENTION.md):
 snapshots that certify the files their chain was written to instead of listing
 every folded hash, and forks shown as runs instead of merged.
 
-To run one config by hand, `nix shell nixpkgs#tlaplus18`, then
-`tlc -workers 8 -lncheck final -config Portable.cfg Portable.tla` in this
-directory. On an otherwise idle eight-core machine, `Deep` takes 20 to 25
-minutes, `LivenessDeep` and `Sync` 10 to 12 each, `PortableDeep` under 10, and
-every other config a few minutes.
+[models.nix](models.nix) holds the models TLC checks: each one's scenario, the
+constants it changes from a baseline, what it checks, and the build that runs
+it. To run one by hand, `nix build .#nord.toshokan-spec-configs`, which writes
+`Portable.tla` and every model's config to `result`, copy those to a writable
+directory, and there run `tlc -workers 8 -lncheck final -config Portable.cfg
+Portable.tla` under `nix shell nixpkgs#tlaplus18`. On an otherwise idle
+eight-core machine, `Deep` takes 20 to 25 minutes, `LivenessDeep` and `Sync` 10
+to 12 each, `PortableDeep` under 10, and every other model a few minutes.
 
 ## The protocol
 
@@ -72,20 +75,20 @@ own directory with two successors, whose last entry is no longer in the folder,
 or that has lost its local root, continues under a new writer id and never writes
 its old directory again.
 
-The protocol needs these rules beyond that. Each is a constant, and a config
+The protocol needs these rules beyond that. Each is a constant, and a model
 that drops it shows the failure it prevents:
 
 | Rule | Constant | Without it |
 | --- | --- | --- |
-| A snapshot certifies the lines it folds of every segment its chain was written to, and a writer deletes only what a snapshot certifies. | `Certify` | [`Uncertified.cfg`](Uncertified.cfg): a writer cannot delete a segment below its snapshot's anchor, and a reader shows that segment's folded lines as a run. |
-| A snapshot carries forward the certificates of the snapshots on its chain. | `Carry` | [`Uncarried.cfg`](Uncarried.cfg): a segment deleted two compactions ago arrives late, and a reader shows its folded lines as a run. |
-| A reader tells a gap from a run by the entry's number. | `Numbered` | [`Unnumbered.cfg`](Unnumbered.cfg): an entry whose predecessor has not arrived is shown as a run, then merged once it arrives. |
-| A tip that certifies an entry's predecessor, but not the entry, marks a fork. | `CertForks` | [`Anchors.cfg`](Anchors.cfg): once the original has moved two entries past a fork and compacted, a reader that still sees the original's deleted segment finds the fork, and one that does not merges the original's branch. |
-| A reader never merges what a dismissal names, and shows an entry after one as a run. | `Quarantine` | [`Unquarantined.cfg`](Unquarantined.cfg): a reader that never saw a fork merges the branch a dismissal it holds names. |
-| No two histories give a segment the same name: a segment's name is random. | `UniqueNames` | [`Names.cfg`](Names.cfg): the original and the clone each start a segment under the next counter name. Sync keeps both, one as a conflicted copy, and the original's deletion of its own segment by name removes the clone's. |
-| A writer deletes only segments that end with a seal marker, which the process that closed the segment wrote. The segment open when a process crashed, or when its local root was copied, has none and is never deleted. | `SealedOnly` | [`Sealed.cfg`](Sealed.cfg): the clone compacts and deletes the segment the original still has open, and the original's next entry goes with it. |
-| A writer deletes only segments every entry of which a snapshot in its directory certifies. | `FoldedOnly` | [`Folded.cfg`](Folded.cfg): the original seals a segment after the fork, and the clone compacts and deletes it, though no snapshot folds the original's entry. |
-| Before each write, a writer confirms that the folder holds its last entry, and before deleting a superseded file, that it holds the snapshot superseding it. A writer whose last entry is gone takes a new id. | `CheckFirst` | [`Unchecked.cfg`](Unchecked.cfg): a restore takes the writer's last entry, and the writer appends after it. |
+| A snapshot certifies the lines it folds of every segment its chain was written to, and a writer deletes only what a snapshot certifies. | `Certify` | `Uncertified`: a writer cannot delete a segment below its snapshot's anchor, and a reader shows that segment's folded lines as a run. |
+| A snapshot carries forward the certificates of the snapshots on its chain. | `Carry` | `Uncarried`: a segment deleted two compactions ago arrives late, and a reader shows its folded lines as a run. |
+| A reader tells a gap from a run by the entry's number. | `Numbered` | `Unnumbered`: an entry whose predecessor has not arrived is shown as a run, then merged once it arrives. |
+| A tip that certifies an entry's predecessor, but not the entry, marks a fork. | `CertForks` | `Anchors`: once the original has moved two entries past a fork and compacted, a reader that still sees the original's deleted segment finds the fork, and one that does not merges the original's branch. |
+| A reader never merges what a dismissal names, and shows an entry after one as a run. | `Quarantine` | `Unquarantined`: a reader that never saw a fork merges the branch a dismissal it holds names. |
+| No two histories give a segment the same name: a segment's name is random. | `UniqueNames` | `Names`: the original and the clone each start a segment under the next counter name. Sync keeps both, one as a conflicted copy, and the original's deletion of its own segment by name removes the clone's. |
+| A writer deletes only segments that end with a seal marker, which the process that closed the segment wrote. The segment open when a process crashed, or when its local root was copied, has none and is never deleted. | `SealedOnly` | `Sealed`: the clone compacts and deletes the segment the original still has open, and the original's next entry goes with it. |
+| A writer deletes only segments every entry of which a snapshot in its directory certifies. | `FoldedOnly` | `Folded`: the original seals a segment after the fork, and the clone compacts and deletes it, though no snapshot folds the original's entry. |
+| Before each write, a writer confirms that the folder holds its last entry, and before deleting a superseded file, that it holds the snapshot superseding it. A writer whose last entry is gone takes a new id. | `CheckFirst` | `Unchecked`: a restore takes the writer's last entry, and the writer appends after it. |
 
 Snapshots and pending records are named at random too. The model gives every
 file a unique name except segments under `UniqueNames = FALSE`.
@@ -127,10 +130,10 @@ reads. `DeliverAll(r)` constrains only `vis`, so TLC checks fairness without
 evaluating `ENABLED` or a read at every state and step. The equivalence needs
 every step that changes `vis` to read, as `Show` does.
 
-The deep configs with a clone set `SYMMETRY Symmetric`, so TLC explores one of
+The deep models with a clone set `symmetry`, so TLC explores one of
 each pair of states that differ only by swapping the two instances. Only `Init`
 names `First`, so `Next` and every safety property treat the instances alike and
-the reduction is sound. It is not sound for liveness, and no liveness config
+the reduction is sound. It is not sound for liveness, and no liveness model
 uses it.
 
 `Convergence` holds wherever `DeliveredConverges` and `DeliveredSettles` do, as
@@ -139,7 +142,7 @@ step but a delivery spends a bounded budget: entries, files, writer ids, clones,
 lost local roots, effects, restores, dropped versions, sync faults, a pending
 deletion, an open segment or a spent record. A delivery that spends no sync
 fault never shrinks a file the folder keeps. So only deliveries remain after
-some point, and fairness then delivers every file. The liveness configs check
+some point, and fairness then delivers every file. The liveness models check
 `Convergence` itself, and so catch a change that breaks this: a step that
 repeats without spending a budget, a free way to hide a kept file, or a fairness
 that no longer forces delivery.
@@ -157,33 +160,10 @@ version has taken a line it had read. A delivered deletion or a sync fault can
 take entries out of view, or turn a run into a gap, until the files that
 replace them arrive.
 
-| Config | Scenario | Run by |
-| --- | --- | --- |
-| `Portable` | a clone, crashes, compaction | `toshokan-spec` |
-| `Recovery` | two effects, a lost local root | `toshokan-spec` |
-| `Liveness` | `Convergence` with a clone, a lost local root, an effect and one sync fault | `toshokan-spec` |
-| `LivenessRestore` | `Convergence` with a restored folder | `toshokan-spec` |
-| `RestoreDir` | a restored folder or directory | `toshokan-spec` |
-| `RestoreWide` | a restored folder or directory, four files | `toshokan-spec` |
-| `Resurface` | a deleted segment arriving after later compactions | `toshokan-spec` |
-| `Drop` | a sync client keeping an earlier version of a segment | `toshokan-spec` |
-| `ResumeMid` | a clone resumed mid-segment, appending to its own copy of it | `toshokan-spec-deep` |
-| `Names`, `Sealed`, `Folded`, `Unchecked`, `Uncertified`, `Uncarried`, `Unnumbered`, `Unquarantined` | expected violations | `toshokan-spec` |
-| `Anchors` | expected violation, four entries | `toshokan-spec` |
-| `PortableDeep` | `Portable` with five files | `toshokan-spec-deep` |
-| `Dismiss` | `Portable` with four entries and four files: a clone and dismissals | `toshokan-spec-deep` |
-| `Branches` | a clone, six entries and six files: both branches compacting past each other | by hand, by simulation |
-| `Deep` | a clone, effects and a lost local root together | `toshokan-spec-deep` |
-| `Restore` | a restored folder, two effects | `toshokan-spec-deep` |
-| `RestoreFork` | a restored folder or directory, a clone | `toshokan-spec-deep` |
-| `Sync` | two sync faults: torn, hidden or resurrected files | `toshokan-spec-deep` |
-| `Faults` | `Liveness` with four files, every safety property | `toshokan-spec-deep` |
-| `LivenessDeep` | `Convergence` at the bounds of `Faults` | `toshokan-spec-deep` |
-
-A config whose first line reads `\* Violates <Property>: …` must fail with that
-violation; every other config must pass. Every bound is a budget: a config
-reaches every state of one with the same rules and no larger bounds, so neither
-set holds a config another in it includes.
+A model that names the property it `violates` must fail with that violation;
+every other must pass. Every bound is a budget: a model reaches every state of
+one with the same rules and no larger bounds, so neither suite holds a model
+another in it includes.
 
 `Branches` is too large to explore whole. Run it by random simulation:
 `tlc -simulate -depth 40 -workers 8 -config Branches.cfg Portable.tla`.

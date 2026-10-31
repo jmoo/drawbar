@@ -1,9 +1,13 @@
 final: prev:
 let
   inherit (final.lib)
+    all
     attrNames
+    attrValues
+    boolToString
     cleanSource
     cleanSourceWith
+    concatLines
     concatMap
     concatMapAttrs
     concatMapStringsSep
@@ -12,11 +16,13 @@ let
     elem
     escapeShellArgs
     filter
+    filterAttrs
     genAttrs
     hasInfix
     hasPrefix
     hasSuffix
     importTOML
+    isBool
     listToAttrs
     makeLibraryPath
     makeOverridable
@@ -662,41 +668,91 @@ let
       ''
   ) { web = drawbar-web; };
 
-  # TLC over toshokan's portable-root spec, one run per config. A config whose
-  # first line reads `\* Violates <Property>: …` must report that violation; any
-  # other must pass.
+  toshokanModels = import ./crates/toshokan/spec/models.nix;
+
+  # A model's TLC config: the baseline's constants under its own, and its
+  # checks, or only the property it violates.
+  toshokanConfig =
+    model:
+    let
+      inherit (toshokanModels) baseline checks;
+      checked =
+        if model ? violates then
+          mapAttrs (_: filter (name: name == model.violates)) checks.safety
+        else
+          checks.${model.checks};
+      section = keyword: lines: optionals (lines != [ ]) ([ keyword ] ++ map (line: "  ${line}") lines);
+      tla = value: if isBool value then toUpper (boolToString value) else toString value;
+    in
+    concatLines (
+      [ "SPECIFICATION Spec" ]
+      ++ section "CONSTANTS" (
+        mapAttrsToList (name: value: "${name} = ${tla value}") (baseline // model.constants)
+      )
+      ++ section "INVARIANTS" checked.invariants
+      ++ section "PROPERTIES" checked.properties
+      ++ optional (model.symmetry or false) "SYMMETRY Symmetric"
+      ++ [ "CHECK_DEADLOCK FALSE" ]
+    );
+
+  # Portable.tla beside every model's config.
+  toshokanSpecConfigs =
+    assert all (
+      model:
+      elem model.suite [
+        null
+        "toshokan-spec"
+        "toshokan-spec-deep"
+      ]
+    ) (attrValues toshokanModels.models);
+    final.linkFarm "toshokan-spec-configs" (
+      [
+        {
+          name = "Portable.tla";
+          path = ./crates/toshokan/spec/Portable.tla;
+        }
+      ]
+      ++ mapAttrsToList (name: model: {
+        name = "${name}.cfg";
+        path = final.writeText "${name}.cfg" (toshokanConfig model);
+      }) toshokanModels.models
+    );
+
+  # TLC over every model of one suite. A model that violates a property must
+  # report that violation; any other must pass.
   toshokanSpec =
-    name: configs:
-    final.runCommand name
+    suite:
+    final.runCommand suite
       {
         nativeBuildInputs = [ final.tlaplus18 ];
-        src = cleanSourceWith {
-          src = ./crates/toshokan/spec;
-          filter = path: _: hasSuffix ".tla" path || hasSuffix ".cfg" path;
-        };
+        src = toshokanSpecConfigs;
       }
       ''
         cp "$src"/* .
         workers=''${NIX_BUILD_CORES:-0}
         [ "$workers" -gt 0 ] && [ "$workers" -le 8 ] || workers=8
-        for config in ${escapeShellArgs configs}; do
-          violated=$(sed -n 's/^\\\* Violates \([A-Za-z]*\):.*/\1/p' "$config.cfg")
+        check_model() {
           status=0
-          tlc -workers "$workers" -lncheck final -cleanup -config "$config.cfg" Portable.tla \
-            > "$config.log" 2>&1 || status=$?
-          if [ -z "$violated" ]; then
-            expected="No error has been found"
-          else
-            expected="$violated is violated"
-          fi
-          if ! grep -q "$expected" "$config.log"; then
-            cat "$config.log" >&2
-            echo "$config: expected \"$expected\", TLC exited $status" >&2
+          tlc -workers "$workers" -lncheck final -cleanup -config "$1.cfg" Portable.tla \
+            > "$1.log" 2>&1 || status=$?
+          if ! grep -q "$2" "$1.log"; then
+            cat "$1.log" >&2
+            echo "$1: expected \"$2\", TLC exited $status" >&2
             exit 1
           fi
-          echo "$config: $expected"
-          grep -E 'distinct states found|depth of|Finished in' "$config.log" | tail -n 3
-        done
+          echo "$1: $2"
+          grep -E 'distinct states found|depth of|Finished in' "$1.log" | tail -n 3
+        }
+        ${concatLines (
+          mapAttrsToList (
+            name: model:
+            escapeShellArgs [
+              "check_model"
+              name
+              (if model ? violates then "${model.violates} is violated" else "No error has been found")
+            ]
+          ) (filterAttrs (_: model: model.suite == suite) toshokanModels.models)
+        )}
         touch "$out"
       '';
 
@@ -838,37 +894,10 @@ in
       );
 
       # The portable-root protocol, model-checked. `nix flake check` runs the
-      # small configs.
-      toshokan-spec = toshokanSpec "toshokan-spec" [
-        "Portable"
-        "Recovery"
-        "Liveness"
-        "LivenessRestore"
-        "RestoreDir"
-        "RestoreWide"
-        "Resurface"
-        "Drop"
-        "Names"
-        "Sealed"
-        "Folded"
-        "Unchecked"
-        "Uncertified"
-        "Uncarried"
-        "Unnumbered"
-        "Unquarantined"
-        "Anchors"
-      ];
-      toshokan-spec-deep = toshokanSpec "toshokan-spec-deep" [
-        "PortableDeep"
-        "Dismiss"
-        "Deep"
-        "Restore"
-        "RestoreFork"
-        "ResumeMid"
-        "Sync"
-        "Faults"
-        "LivenessDeep"
-      ];
+      # small suite; `toshokan-spec-configs` holds every model's config.
+      toshokan-spec = toshokanSpec "toshokan-spec";
+      toshokan-spec-configs = toshokanSpecConfigs;
+      toshokan-spec-deep = toshokanSpec "toshokan-spec-deep";
 
       # The corpus assemblies themselves.
       inherit corpus;

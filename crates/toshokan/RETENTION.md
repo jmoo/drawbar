@@ -501,9 +501,9 @@ which older builds kept, are ignored, as are old `head.json` files.
 certificates, dismissals, restores of the folder and of one directory, and
 dropped versions, over an abstract merge (a reader's state is the set of entries
 it merged, derived from the files it sees). See [spec/README.md](spec/README.md)
-for the rules, properties and configs.
+for the rules, properties and models.
 
-Its rules are constants, so a config can drop one and show what it prevents:
+Its rules are constants, so a model can drop one and show what it prevents:
 
 | Without | What goes wrong |
 | --- | --- |
@@ -525,7 +525,7 @@ entry only by showing or dismissing it, and a run stays shown until dismissed; a
 writer retires on a fork only when an entry of its directory has two
 successors; and every reader converges under fair delivery.
 
-The fast and deep sets are listed in [spec/README.md](spec/README.md).
+[spec/models.nix](spec/models.nix) gives each model its suite, fast or deep.
 
 **Values.** The model merges entries, not values. References, deletes that kill
 fields, contradicted references, forgotten bases and the display of runs are

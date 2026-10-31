@@ -973,8 +973,8 @@ fn compaction_deletes_the_sealed_segments_of_earlier_processes() {
     assert_eq!(held(&view), written.iter().copied().collect());
 }
 
-// Sealed.cfg: without the marker the clone deletes the segment the original
-// still has open, and the original's next entry goes with it.
+// The spec's Sealed model: without the marker the clone deletes the segment the
+// original still has open, and the original's next entry goes with it.
 #[test]
 fn compaction_leaves_a_segment_another_process_has_open() {
     let mut original = Instance::open(machine(), 1);
@@ -989,8 +989,8 @@ fn compaction_leaves_a_segment_another_process_has_open() {
     assert_eq!(view.writers[&id].forks.len(), 1);
 }
 
-// Folded.cfg: a clone that compacted would delete a segment the original sealed
-// after the fork, though no snapshot folds the original's entry.
+// The spec's Folded model: a clone that compacted would delete a segment the
+// original sealed after the fork, though no snapshot folds the original's entry.
 #[test]
 fn a_clone_leaves_a_sealed_segment_holding_an_entry_no_snapshot_folds() {
     let mut original = Instance::open(machine(), 1);
