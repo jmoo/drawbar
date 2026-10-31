@@ -48,6 +48,12 @@
               type = "app";
             };
 
+            apps.toshokan-browser-crash = {
+              meta.description = "kill toshokan's library mid-change in browsers and check what is left";
+              program = pkgs.lib.getExe pkgs.nord.toshokan-browser-crash-sweep;
+              type = "app";
+            };
+
             # Rust tests run in the package builds: `nix build .#nord.all`.
             checks = {
               bump =
@@ -118,7 +124,7 @@
                 inherit (pkgs.nord) docs site;
               }
               // pkgs.lib.optionalAttrs (pkgs.nord ? toshokan-web) {
-                inherit (pkgs.nord) drawbar-web-tests toshokan-web;
+                inherit (pkgs.nord) drawbar-web-tests toshokan-browser-crash toshokan-web;
               }
               // pkgs.lib.optionalAttrs (pkgs.nord ? toshokan-power-loss) {
                 inherit (pkgs.nord) toshokan-power-loss toshokan-power-loss-smoke;

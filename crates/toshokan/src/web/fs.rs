@@ -465,11 +465,7 @@ impl Tree {
                     .and_then(|size| write_access(&access, at.unwrap_or(size), bytes));
                 access.close();
                 match written {
-                    Ok(n) if n == bytes.len() as f64 => Ok(()),
-                    Ok(n) => Err(IoError::Other(format!(
-                        "wrote {n} of {} bytes",
-                        bytes.len()
-                    ))),
+                    Ok(n) => whole(n, bytes.len()),
                     Err(error) => Err(failure(&error, IoError::IsDirectory)),
                 }
             }
@@ -687,6 +683,16 @@ fn position(offset: u64) -> Result<f64, IoError> {
     }
 }
 
+/// What a sync access handle's write of `len` bytes that wrote `n` means.
+// Firefox meets the origin's quota by writing fewer bytes than asked, where the
+// standard throws `QuotaExceededError`, as Chromium does. Measured.
+fn whole(n: f64, len: usize) -> Result<(), IoError> {
+    match n == len as f64 {
+        true => Ok(()),
+        false => Err(IoError::NoSpace),
+    }
+}
+
 async fn open_access(file: &FileSystemFileHandle) -> Result<FileSystemSyncAccessHandle, IoError> {
     let access = wait(file.create_sync_access_handle()).await;
     Ok(access
@@ -821,5 +827,17 @@ impl Locks {
             .await
             .map(drop)
             .map_err(|error| IoError::Other(describe(&error)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_write_cut_short_is_out_of_space() {
+        assert_eq!(whole(5.0, 5), Ok(()));
+        assert_eq!(whole(0.0, 131_072), Err(IoError::NoSpace));
+        assert_eq!(whole(4096.0, 131_072), Err(IoError::NoSpace));
     }
 }

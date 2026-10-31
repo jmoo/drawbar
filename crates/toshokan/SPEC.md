@@ -1137,7 +1137,9 @@ directory of the origin private file system.
   directory returns at once, and a name made or removed is only as durable as
   that database keeps it; that it survives the machine stopping is not
   confirmed. Chromium cannot rename a directory there, so no browser declares
-  `rename_dir`.
+  `rename_dir`. A write the origin's quota refuses fails with `NoSpace`:
+  Chromium throws `QuotaExceededError`, and Firefox writes fewer bytes than it
+  was given.
 - **Picked folder.** Only Chromium-based browsers can open one. Files are read
   through `getFile()` and written through writable streams, which write a copy
   and put it in place at `close()`: that is the moment a write lands, and

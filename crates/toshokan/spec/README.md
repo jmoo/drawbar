@@ -311,3 +311,26 @@ directories' changes through the file syncs that follow them. A write is replaye
 whole, never torn; the crash harness covers torn writes.
 [examples/power_loss.rs](../examples/power_loss.rs) holds the workloads and the
 checker. Neither test covers APFS, NTFS or a browser's storage.
+
+A browser's storage is checked by killing the browser instead.
+[power-loss/browser](../power-loss/browser) runs each workload in a page's worker
+on the origin private file system, stops it at one of its mutating requests,
+before the request is sent or while the browser performs it, and kills it there:
+the worker terminated, the browser quit, the process running the page killed, or
+every process of the browser killed. A new page then checks what is left with the
+same checker. The quota case shrinks the origin's quota until an import is
+refused, and checks that the refusal is `NoSpace`, that the same import is
+refused again, that it succeeds once there is room, and that a kill after it
+loses nothing.
+
+```sh
+nix build .#toshokan-browser-crash             # every 5th request, 4 quotas, Chromium and Firefox
+nix run .#toshokan-browser-crash -- --stride 1 # every request
+nix run .#toshokan-browser-crash -- --quota 28 # 28 quotas
+```
+
+The browser's processes die, but the machine does not, so the operating system
+keeps every write they made. Picked folders need a user's gesture and are not
+covered. WebKit runs only on macOS, where `nix run` includes it: WebKitGTK and
+WPE refuse sync access handles. The quota case runs in Chromium, which takes a
+quota through the DevTools protocol, and in Firefox, under a fixed storage limit.

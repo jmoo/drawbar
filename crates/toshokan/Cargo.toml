@@ -80,6 +80,11 @@ windows-sys = { version = "0.61", features = [
 pollster = "0.4"
 tempfile = "3"
 
+# The page power-loss/browser kills mid-workload; empty but on wasm with `web`.
+[[example]]
+name = "browser_crash"
+crate-type = ["cdylib"]
+
 # The browser benchmark, run only when named.
 [[test]]
 name = "bench"

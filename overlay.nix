@@ -561,6 +561,35 @@ let
     inherit (manifests.drawbar) version;
   };
 
+  # The power-loss workloads and checker in a page whose runs a driver kills, in
+  # Chromium and Firefox; Linux only, as the other browser suites.
+  toshokanBrowserCrash = final.callPackage ./crates/toshokan/power-loss/browser {
+    wasm =
+      let
+        args = commonArgs // {
+          CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
+          cargoExtraArgs = "--locked -p toshokan --features web";
+          # ⚠️ nixpkgs' rustc links wasm with the system `lld` and bundles none.
+          nativeBuildInputs = [ final.lld ];
+          pname = "toshokan-browser-crash";
+          inherit (manifests.toshokan) version;
+        };
+      in
+      crane.mkCargoDerivation (
+        args
+        // {
+          buildPhaseCargoCommand = "cargo build --release $cargoExtraArgs --example browser_crash";
+          cargoArtifacts = crane.buildDepsOnly args;
+          doInstallCargoArtifacts = false;
+          installPhaseCommand = ''
+            wasm-bindgen --target web --no-typescript --out-dir "$out" \
+              target/wasm32-unknown-unknown/release/examples/browser_crash.wasm
+          '';
+          nativeBuildInputs = args.nativeBuildInputs ++ [ final.wasm-bindgen-cli ];
+        }
+      );
+  };
+
   # The power-loss harness's workloads and checker, and the VM tests that crash
   # and replay real file systems under them. x86_64 Linux only: they need KVM.
   toshokanPowerLoss = final.callPackage ./crates/toshokan/power-loss {
@@ -776,7 +805,10 @@ in
     crates
     // crossed
     # Not in `all`: it starts browsers, and only on Linux.
-    // optionalAttrs final.stdenv.hostPlatform.isLinux { inherit drawbar-web-tests toshokan-web; }
+    // optionalAttrs final.stdenv.hostPlatform.isLinux {
+      inherit drawbar-web-tests toshokan-web;
+      toshokan-browser-crash = toshokanBrowserCrash;
+    }
     # Not in `all`: each boots VMs, and replaying takes long.
     // optionalAttrs (final.stdenv.hostPlatform.system == "x86_64-linux") {
       toshokan-power-loss =
@@ -880,6 +912,10 @@ in
       # `site` stays out of `all`: it only rearranges outputs `all` already
       # builds, and the Pages deploy reaches it through scripts/site.bash.
       inherit docs site;
+
+      # `nix run .#toshokan-browser-crash -- --stride 1`: the whole crash sweep,
+      # with WebKit on macOS.
+      toshokan-browser-crash-sweep = toshokanBrowserCrash.sweep;
 
       # `nix run .#drawbar-web`: serve the site on loopback and open it, so the
       # guide the app links to is there under /docs.
