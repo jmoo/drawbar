@@ -6465,6 +6465,25 @@ fn an_unsaved_edit_a_crash_left_unkept_is_put_back_over_its_file() {
     assert!(last.bytes(pad) == edit, "kept as any unsaved edit is");
 }
 
+/// A file the take-in made that something outside drawbar changed before its unsaved
+/// edit was kept asks, as for any edit whose file changed since, rather than putting the
+/// edit back as though nothing had.
+#[test]
+fn an_unsaved_edit_a_crash_left_unkept_over_a_file_changed_since_asks() {
+    let root = Temp::new();
+    let (list, program, ..) = gig_list();
+    let mut first = Session::open(&root);
+    let placed = first.take_in(&list);
+    drop(first);
+    fs::write(root.at("Gig/Pad.ne5p"), with_gain(&program, "99")).unwrap();
+
+    let list = gig_list_again(Some(placed));
+    let mut again = Session::open(&root);
+    again.take_in(&list);
+    let (title, _) = again.bench.browser.asking().expect("a question");
+    assert_eq!(title, "“Pad.ne5p” changed on disk");
+}
+
 #[test]
 fn a_draft_that_fails_keeps_the_list_until_one_lands() {
     let root = Temp::new();

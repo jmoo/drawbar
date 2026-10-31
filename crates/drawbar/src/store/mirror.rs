@@ -96,6 +96,15 @@ struct Record {
 
 use super::RESCUED;
 
+/// Whether an asset's file changed since the draft put back over it was made.
+#[derive(Clone, Copy)]
+enum Since {
+    Same,
+    Changed,
+    /// Changed unless the file, once read, holds the bytes of this hash.
+    Unless(blake3::Hash),
+}
+
 /// A view of a slot, as its unsaved edit is kept.
 struct SlotView {
     slot: super::Slot,
@@ -180,7 +189,7 @@ pub struct Store {
     /// The drafts an earlier session kept, each put back over its asset once its file is
     /// read: the key it is kept under, what it holds, whether its file changed since the
     /// draft was made, and the clock it was kept at.
-    restoring: BTreeMap<u64, (Key, Draft, bool, u64)>,
+    restoring: BTreeMap<u64, (Key, Draft, Since, u64)>,
     /// The keys of drafts put back under a key the asset no longer goes by, and of the
     /// older of two drafts of one asset, each let go of once this instance keeps the
     /// edit itself.
@@ -759,7 +768,10 @@ impl Store {
                 log.trouble("An unsaved edit drawbar kept could not be read.");
                 continue;
             };
-            let changed = !holds;
+            let changed = match holds {
+                true => Since::Same,
+                false => Since::Changed,
+            };
             // A file whose draft was kept by its path may have become an entity since.
             let at = |path: &LibPath| {
                 let mut listed = workspace.listed();
@@ -827,8 +839,15 @@ impl Store {
         if workspace.get(id).is_none_or(LocalEntity::unread) {
             return;
         }
-        let Some((key, draft, changed, _)) = self.restoring.remove(&id) else {
+        let Some((key, draft, since, _)) = self.restoring.remove(&id) else {
             return;
+        };
+        let changed = match since {
+            Since::Same => false,
+            Since::Changed => true,
+            Since::Unless(held) => workspace
+                .get(id)
+                .is_none_or(|entity| blake3::hash(entity.saved.bytes()) != held),
         };
         match draft {
             Draft::Bytes(bytes) => workspace.replace_bytes(id, bytes, log),
@@ -2837,7 +2856,8 @@ impl Store {
                 (_, Some((id, key))) => {
                     self.brought.insert(id);
                     let draft = Draft::Bytes(edit.clone());
-                    self.restoring.insert(id, (key, draft, false, 0));
+                    let since = Since::Unless(blake3::hash(&asset.saved));
+                    self.restoring.insert(id, (key, draft, since, 0));
                     workspace.hurry(id);
                     self.restore_draft(id, workspace, browser, log);
                 }
