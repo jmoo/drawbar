@@ -47,4 +47,7 @@ causes:
 - The browser lacks WebAssembly or WebGL2, which drawbar needs. Every current
   browser has both. If the page says WebGL isn't supported, turn on hardware
   acceleration in the browser's settings and restart the browser.
+- The browser is too old to keep drawbar's library, and the page says so before
+  downloading anything. drawbar runs in a recent Chrome, Edge, Firefox or Safari;
+  [What is supported](support.md#the-library-in-the-browser) has more.
 - An extension or a content blocker stopped drawbar. Allow this site and reload.

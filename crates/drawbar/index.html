@@ -239,6 +239,10 @@
         cursor: pointer;
       }
 
+      #retry[hidden] {
+        display: none;
+      }
+
       #retry {
         border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
         background: color-mix(in srgb, var(--accent) 16%, transparent);
@@ -510,7 +514,18 @@
           "drawbar arrived but could not start in this browser.",
         webgl:
           "Turn on hardware acceleration in the browser's settings, then restart the browser.",
+        browser:
+          "This browser cannot keep drawbar's library. drawbar runs in a recent Chrome, Edge, Firefox or Safari.",
       };
+
+      /* What drawbar's library needs of the browser, which every engine has had since
+         2022: without it nothing drawbar makes is kept. */
+      const NEEDS = [
+        ["WebAssembly", () => typeof WebAssembly === "object"],
+        ["workers", () => typeof Worker === "function"],
+        ["a private file system", () => typeof navigator.storage?.getDirectory === "function"],
+        ["Web Locks", () => typeof navigator.locks?.request === "function"],
+      ];
 
       let total = Number("@wasmBytes@");
       let received = 0;
@@ -619,7 +634,14 @@
         label.textContent = "drawbar could not start";
         figure.textContent = "";
         note.textContent = /WebGL/.test(said) ? NOTE.webgl : NOTE[step];
-        foot.textContent = [size(), said].filter(Boolean).join(" · ");
+        const fetched = step === "browser" ? "" : size();
+        foot.textContent = [fetched, said].filter(Boolean).join(" · ");
+        if (step === "browser") {
+          document.getElementById("retry").hidden = true;
+          const wrong = document.getElementById("wrong");
+          wrong.href = "docs/getting-started/support.html#the-library-in-the-browser";
+          wrong.lastElementChild.textContent = "Which browsers drawbar runs in";
+        }
       }
 
       /* A reload can be answered from a cache with this same page, which may name the
@@ -632,6 +654,11 @@
 
       let step = "download";
       try {
+        const lacking = NEEDS.filter(([, has]) => !has()).map(([what]) => what);
+        if (lacking.length) {
+          step = "browser";
+          throw new Error(`it has no ${lacking.join(", no ")}`);
+        }
         show("fetching");
         const { default: init, start } = await import("./pkg/drawbar.js");
         const response = await fetch(WASM);
@@ -672,7 +699,9 @@
         await start(document.getElementById("drawbar"));
         splash.remove();
       } catch (e) {
-        const failed = e instanceof WebAssembly.CompileError ? "start" : step;
+        const compiling =
+          typeof WebAssembly === "object" && e instanceof WebAssembly.CompileError;
+        const failed = compiling ? "start" : step;
         fail(failed, e);
         beacon(failed, e);
         throw e;
