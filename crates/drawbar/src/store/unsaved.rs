@@ -126,6 +126,9 @@ pub struct Store {
     /// The latest clock this instance kept or read an edit at.
     latest: u64,
     held: BTreeMap<String, Vec<Held>>,
+    /// The files of ended edits a removal failed to take, which [`Store::let_go_of_ended`]
+    /// removes again, so a failure brings no edit back.
+    ended: VecDeque<String>,
 }
 
 /// How many times a read starts again where a file listed was gone before it was read.
@@ -140,6 +143,7 @@ impl Store {
             clock,
             latest: 0,
             held: BTreeMap::new(),
+            ended: VecDeque::new(),
         }
     }
 
@@ -185,9 +189,18 @@ impl Store {
 
     /// Let go of every file of the edit of `of` this instance kept or read.
     pub async fn discard<F: Fs>(&mut self, fs: &F, of: &Of) -> io::Result<()> {
-        let tag = tag(of);
-        let held = self.held.remove(&tag).unwrap_or_default();
-        self.let_go(fs, &tag, held).await
+        let held = self.held.remove(&tag(of)).unwrap_or_default();
+        self.ended.extend(held.into_iter().map(|held| held.name));
+        self.let_go_of_ended(fs).await
+    }
+
+    /// Remove the files of ended edits that are still there.
+    pub async fn let_go_of_ended<F: Fs>(&mut self, fs: &F) -> io::Result<()> {
+        while let Some(name) = self.ended.front() {
+            storage::remove(fs, Root::Local, &file_at(name)).await?;
+            self.ended.pop_front();
+        }
+        Ok(())
     }
 
     /// Remove each of `files` of the edit `tag` names. Those a failure leaves are still
@@ -597,5 +610,51 @@ mod tests {
             Vec::<String>::new(),
             "let go of with the edit"
         );
+    }
+
+    /// A disk that refuses every removal.
+    struct Unremovable(MemDisk);
+
+    impl Fs for Unremovable {
+        fn capabilities(&self, root: Root) -> toshokan::io::Capabilities {
+            Fs::capabilities(&self.0, root)
+        }
+
+        async fn perform(&self, io: Io) -> toshokan::io::IoResult {
+            match io {
+                Io::Remove { .. } => Err(toshokan::IoError::Denied),
+                io => Fs::perform(&self.0, io).await,
+            }
+        }
+    }
+
+    #[test]
+    fn an_edit_whose_discard_failed_is_let_go_of_once_removing_works_again() {
+        let local = MemDisk::new();
+        let mut one = store(1, 10);
+        now(one.keep(&local, slot("A", 1), base(), b"reverted".to_vec())).unwrap();
+        let failing = Unremovable(local.process());
+        assert!(now(one.discard(&failing, &slot("A", 1))).is_err());
+        assert!(now(one.let_go_of_ended(&failing)).is_err());
+        assert_eq!(newest_of(&local, &slot("A", 1)).unwrap(), b"reverted");
+        now(one.let_go_of_ended(&local)).unwrap();
+        assert_eq!(
+            newest_of(&local, &slot("A", 1)),
+            None,
+            "{:?}",
+            names(&local)
+        );
+    }
+
+    #[test]
+    fn letting_go_of_an_ended_edit_spares_the_one_kept_after_it() {
+        let local = MemDisk::new();
+        let mut one = store(1, 10);
+        now(one.keep(&local, slot("A", 1), base(), b"reverted".to_vec())).unwrap();
+        assert!(now(one.discard(&Unremovable(local.process()), &slot("A", 1))).is_err());
+        now(one.keep(&local, slot("A", 1), base(), b"edited again".to_vec())).unwrap();
+        now(one.let_go_of_ended(&local)).unwrap();
+        assert_eq!(newest_of(&local, &slot("A", 1)).unwrap(), b"edited again");
+        assert_eq!(names(&local).len(), 1, "{:?}", names(&local));
     }
 }

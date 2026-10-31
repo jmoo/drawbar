@@ -894,3 +894,54 @@ async fn a_copy_saved_of_a_library_opens_into_an_empty_one() {
         .expect("the empty folder came with the copy");
     opened.close().await;
 }
+
+/// A copy is not opened into a library another tab of the browser holds open, and what
+/// that tab saves meanwhile stays.
+#[wasm_bindgen_test]
+async fn a_copy_is_not_opened_into_a_library_open_in_another_tab() {
+    wipe(&opfs().await).await;
+    let local = |name: &str| RelPath::new(&format!("local/{name}")).unwrap();
+    let in_folder = |name: &str| Folder::Private(RelPath::new(name).unwrap());
+    let saved = Worker::start(in_folder("Saved"), &local("saved"))
+        .await
+        .unwrap();
+    saved.run(Cmd::Open).await.unwrap();
+    saved.close().await;
+    let copy = drawbar::store::copy_of(&RelPath::new("Saved").unwrap())
+        .await
+        .unwrap();
+    let copy = web_sys::File::new_with_blob_sequence(&Array::of1(&copy), "copy.zip").unwrap();
+
+    let other = Worker::start(in_folder("Shared"), &local("shared"))
+        .await
+        .unwrap();
+    other.run(Cmd::Open).await.unwrap();
+    let opening = Worker::start(in_folder("Shared"), &local("shared"))
+        .await
+        .unwrap();
+    let refused = opening.run(Cmd::Restore(copy.clone())).await.unwrap();
+    assert!(
+        matches!(&refused[..], [Event::Restored(Err(why))] if why.contains("another tab")),
+        "{refused:?}"
+    );
+    let save = Intent::Save {
+        id: 1,
+        path: path("theirs.ne5p"),
+        bytes: b"theirs".to_vec(),
+        expect: Expect::Absent,
+        came: None,
+    };
+    committed(&other.run(Cmd::Intent(save)).await.unwrap());
+    other.close().await;
+    let shared = private_dir(&RelPath::new("Shared").unwrap()).await.unwrap();
+    JsFuture::from(shared.get_file_handle("theirs.ne5p"))
+        .await
+        .expect("what the other tab saved stays");
+
+    let refused = opening.run(Cmd::Restore(copy)).await.unwrap();
+    assert!(
+        matches!(&refused[..], [Event::Restored(Err(why))] if why.contains("already holds")),
+        "{refused:?}"
+    );
+    opening.close().await;
+}

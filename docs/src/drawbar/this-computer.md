@@ -41,8 +41,9 @@ library until the download finishes, or the copy may not be whole.
 To bring a copy back, choose **File ▸ Open a copy…** while the browser's library
 holds none of your files: after the browser deleted it, or in another browser.
 drawbar opens only a copy it saved, and only into a library with none of your
-files in it, so it never mixes a copy with files already there. If opening a copy
-stops partway, the library opens read-only until you open the copy again. A web
+files in it, so it never mixes a copy with files already there. Close drawbar in
+the browser's other tabs first. If opening a copy stops partway, the library opens
+read-only until you open the copy again. A web
 app added to the Dock or the Home Screen keeps storage of its own, apart from
 Safari's, so save a copy in Safari and open it in the web app. In Chrome and
 Edge you can also unzip the copy and open the folder with **File ▸ Open library

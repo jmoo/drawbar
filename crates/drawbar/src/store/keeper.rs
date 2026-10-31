@@ -83,6 +83,8 @@ pub struct Keeper<F> {
     looked_for_older: bool,
     /// Whether the library opened holding a copy that stopped partway as it was opened.
     opening_copy: bool,
+    /// The lock this window holds while it has the library open.
+    window: Option<RelPath>,
 }
 
 impl<F: Fs> Keeper<F> {
@@ -103,6 +105,7 @@ impl<F: Fs> Keeper<F> {
             told_unemptied: false,
             looked_for_older: false,
             opening_copy: false,
+            window: None,
         }
     }
 
@@ -114,6 +117,9 @@ impl<F: Fs> Keeper<F> {
 
     /// Run a command on the library, and answer it.
     pub async fn run(&mut self, cmd: Cmd, answer: &mut impl FnMut(Event)) {
+        if let Ok(fs) = storage_of(&self.library) {
+            let _ = self.unsaved.let_go_of_ended(fs).await;
+        }
         let changes = matches!(
             cmd,
             Cmd::Intent(_) | Cmd::Undo | Cmd::Redo | Cmd::Settle { .. }
@@ -455,6 +461,12 @@ impl<F: Fs> Keeper<F> {
     pub async fn close(&mut self) {
         self.session.clear();
         let _ = self.empty_trash().await;
+        if let Ok(fs) = storage_of(&self.library) {
+            let _ = self.unsaved.let_go_of_ended(fs).await;
+            if let Some(name) = self.window.take() {
+                let _ = fs.perform(toshokan::Io::Unlock { name }).await;
+            }
+        }
         let Some(library) = self.library.take() else {
             return;
         };
@@ -463,6 +475,7 @@ impl<F: Fs> Keeper<F> {
 
     async fn open(&mut self) -> Result<Opened, String> {
         let (fs, env) = self.unopened.take().ok_or("the library opened before")?;
+        self.window = super::copy::hold_window(&fs).await.unwrap_or_default();
         let (mut library, opened) = Library::open(fs, keys::layout(), &keys::schema(), env)
             .await
             .map_err(|e| told(&e))?;
@@ -2389,6 +2402,38 @@ mod tests {
         assert!(why.contains("damaged"), "{why}");
         assert!(to.names("").is_empty(), "{:?}", to.names(""));
         drop(saved);
+    }
+
+    /// A copy is not opened into a library another window holds open, even one that has
+    /// written nothing, and what that window saves meanwhile stays.
+    #[test]
+    fn a_copy_is_not_opened_into_a_library_another_window_has_open() {
+        let from = Temp::new();
+        fs::write(from.at("a.ne5p"), b"a").unwrap();
+        let (_saved, copy) = saved(&from);
+        let to = Temp::new();
+        let mut other = keeper(&to);
+        let answers = unopened(&to).run_one(Cmd::Restore(copy.clone()));
+        let [Event::Restored(Err(why))] = &answers[..] else {
+            panic!("{answers:?}")
+        };
+        assert!(why.contains("another tab or window"), "{why}");
+        other.run_one(Cmd::Intent(Intent::Save {
+            id: 1,
+            path: path("theirs.ne5p"),
+            bytes: b"theirs".to_vec(),
+            expect: Expect::Absent,
+            came: None,
+        }));
+        assert_eq!(to.read("theirs.ne5p"), b"theirs");
+        nord_usb::block_on(other.close());
+        drop(other);
+        let answers = unopened(&to).run_one(Cmd::Restore(copy));
+        let [Event::Restored(Err(why))] = &answers[..] else {
+            panic!("{answers:?}")
+        };
+        assert!(why.contains("already holds files"), "once it closes: {why}");
+        assert_eq!(to.read("theirs.ne5p"), b"theirs");
     }
 
     #[test]

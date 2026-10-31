@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 
 use nord_usb::FileSource;
 use toshokan::asynch::Fs;
-use toshokan::io::{Io, IoError, Kind, Root};
+use toshokan::io::{Io, IoError, Kind, Lock, Reply, Root};
 use toshokan::RelPath;
 
 use super::keys::{DIR, LOCAL};
@@ -32,6 +32,40 @@ pub const OPENING: &str = ".drawbar/opening-copy";
 #[cfg(any(target_arch = "wasm32", test))]
 pub fn copied(path: &str) -> bool {
     !own(path) && !path.ends_with(".crswap") && key(path) != key(OPENING)
+}
+
+/// How many windows of an install [`hold_window`] tells apart. A window past them holds
+/// none, and a copy opens beside it only once every other window has closed.
+const WINDOWS: usize = 16;
+
+/// The lock, in an install's own state, that a window holds the `n`th of.
+fn window(n: usize) -> RelPath {
+    RelPath::new(&format!("window-{n}.lock")).expect("one component")
+}
+
+/// Take one of the locks a window holds while it has the library open, by which a copy
+/// opens only into a library no other window has open. The browser lets a window's locks
+/// go when the window closes. ⚠️ A window takes it before it reads [`OPENING`], so a copy
+/// that makes [`OPENING`] stand and then finds no lock held writes alone.
+pub async fn hold_window<F: Fs>(fs: &F) -> Result<Option<RelPath>, IoError> {
+    for name in (0..WINDOWS).map(window) {
+        let lock = Io::Lock { name: name.clone() };
+        if let Reply::Lock(Lock::Acquired) = fs.perform(lock).await? {
+            return Ok(Some(name));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether another window has the library open, by the locks [`hold_window`] takes.
+async fn other_window<F: Fs>(fs: &F) -> Result<bool, IoError> {
+    for name in (0..WINDOWS).map(window) {
+        match fs.perform(Io::Lock { name: name.clone() }).await? {
+            Reply::Lock(Lock::Held) => return Ok(true),
+            _ => _ = fs.perform(Io::Unlock { name }).await?,
+        }
+    }
+    Ok(false)
 }
 
 /// Whether a copy was being opened into the library on `fs` when the opening stopped.
@@ -147,24 +181,45 @@ fn unlike(why: String) -> String {
 }
 
 /// Open the copy `from` into the library on `fs`, which must hold none of the user's
-/// files, and answer how many files it wrote. What the library held of drawbar's own,
-/// its history among it, is replaced, and an install's own state is kept. Every entry
-/// is written as it is, `.drawbar/library/` among them, so this runs before the
-/// library opens. [`OPENING`] stands while it writes: a copy that fails partway leaves
-/// the library empty, and one stopped partway leaves it read-only until a copy is
-/// opened again. drawbar's own files are not counted.
+/// files and be open in no other window, and answer how many files it wrote. What the
+/// library held of drawbar's own, its history among it, is replaced, and an install's
+/// own state is kept. Every entry is written as it is, `.drawbar/library/` among them,
+/// so this runs before the library opens. [`OPENING`] stands while it writes, so a
+/// window that opens the library meanwhile opens it read-only: a copy that fails
+/// partway leaves the library empty, and one stopped partway leaves it read-only until
+/// a copy is opened again. drawbar's own files are not counted.
 pub async fn restore<F: Fs>(fs: &F, from: &Outside) -> Result<usize, String> {
     let failed = |e: std::io::Error| e.to_string();
-    let resumed = opening(fs).await.map_err(failed)?;
-    if let Some(path) = first_file(fs).await.map_err(failed)?.filter(|_| !resumed) {
-        return Err(format!(
-            "the library in this browser already holds files, such as {path}, and a copy \
-             opens only into an empty one"
-        ));
-    }
     let mut source = super::outside_source(from).map_err(|e| e.to_string())?;
-    let entries = contents(&mut source).await?;
-    clear(fs).await.map_err(failed)?;
+    let resumed = opening(fs).await.map_err(failed)?;
+    if !resumed {
+        start_opening(fs).await?;
+    }
+    let entries = match ready_to_open(fs, &mut source, resumed).await {
+        Ok(entries) => entries,
+        Err(why) if resumed => return Err(why),
+        Err(why) => {
+            done_opening(fs).await.map_err(failed)?;
+            return Err(why);
+        }
+    };
+    let mut files = 0;
+    for restored in &entries {
+        if let Err(why) = write(fs, &mut source, restored).await {
+            clear(fs, Clearing::Written(&entries))
+                .await
+                .map_err(failed)?;
+            done_opening(fs).await.map_err(failed)?;
+            return Err(why);
+        }
+        files += usize::from(!restored.folder && !inside(restored.path.as_str(), DIR));
+    }
+    done_opening(fs).await.map_err(failed)?;
+    Ok(files)
+}
+
+/// Make [`OPENING`] stand.
+async fn start_opening<F: Fs>(fs: &F) -> Result<(), String> {
     let started = |e| format!("starting to open it: {}", storage::failed(e));
     let dir = Io::MakeDir {
         root: Root::Folder,
@@ -177,16 +232,42 @@ pub async fn restore<F: Fs>(fs: &F, from: &Outside) -> Result<usize, String> {
         bytes: Vec::new(),
     };
     fs.perform(mark).await.map_err(started)?;
-    let mut files = 0;
-    for restored in &entries {
-        if let Err(why) = write(fs, &mut source, restored).await {
-            clear(fs).await.map_err(failed)?;
-            return Err(why);
+    Ok(())
+}
+
+/// The copy's entries, once nothing but this opening writes in the library and nothing
+/// stands where they go: no other window holds the library, and the folder holds only
+/// drawbar's own files, or what an opening stopped partway left where `resumed`.
+async fn ready_to_open<F: Fs>(
+    fs: &F,
+    source: &mut impl FileSource,
+    resumed: bool,
+) -> Result<Vec<Restored>, String> {
+    let failed = |e: std::io::Error| e.to_string();
+    match other_window(fs).await {
+        Ok(false) => {}
+        Ok(true) => {
+            return Err(
+                "drawbar has the library open in another tab or window of this browser: \
+                 close it there, then open the copy"
+                    .to_string(),
+            )
         }
-        files += usize::from(!restored.folder && !inside(restored.path.as_str(), DIR));
+        Err(e) => return Err(format!("looking for other windows: {}", storage::failed(e))),
     }
-    done_opening(fs).await.map_err(failed)?;
-    Ok(files)
+    if let Some(path) = first_file(fs).await.map_err(failed)?.filter(|_| !resumed) {
+        return Err(format!(
+            "the library in this browser already holds files, such as {path}, and a copy \
+             opens only into an empty one"
+        ));
+    }
+    let entries = contents(source).await?;
+    let earlier = match resumed {
+        true => Clearing::All,
+        false => Clearing::Drawbars,
+    };
+    clear(fs, earlier).await.map_err(failed)?;
+    Ok(entries)
 }
 
 /// The first of the user's files in the folder, outside drawbar's own, if any.
@@ -207,9 +288,35 @@ async fn first_file<F: Fs>(fs: &F) -> std::io::Result<Option<RelPath>> {
     Ok(None)
 }
 
-/// Remove every file and folder of the folder but an install's own state, deepest
-/// first, then [`OPENING`], then `.drawbar` where nothing is left in it.
-async fn clear<F: Fs>(fs: &F) -> std::io::Result<()> {
+/// What [`clear`] removes, of the folder but an install's own state and [`OPENING`].
+enum Clearing<'a> {
+    /// Every file and folder: what an opening stopped partway left.
+    All,
+    /// drawbar's own files and folders, which a copy replaces.
+    Drawbars,
+    /// drawbar's own, and the files and folders of `entries` an opening wrote, a folder
+    /// only where it is left empty.
+    Written(&'a [Restored]),
+}
+
+/// Remove what `clearing` names, deepest first, but `.drawbar` itself.
+async fn clear<F: Fs>(fs: &F, clearing: Clearing<'_>) -> std::io::Result<()> {
+    let mut written = BTreeSet::new();
+    if let Clearing::Written(entries) = clearing {
+        for entry in entries {
+            let mut at = Some(entry.path.clone()).filter(|path| !path.is_root());
+            while let Some(path) = at {
+                at = path.parent().filter(|parent| !parent.is_root());
+                written.insert(key(path.as_str()));
+            }
+        }
+    }
+    let cleared = |path: &str| match clearing {
+        Clearing::All => true,
+        Clearing::Drawbars | Clearing::Written(_) => {
+            inside(path, DIR) || written.contains(&key(path))
+        }
+    };
     let mut found = Vec::new();
     let mut waiting = vec![RelPath::ROOT];
     while let Some(dir) = waiting.pop() {
@@ -217,20 +324,21 @@ async fn clear<F: Fs>(fs: &F) -> std::io::Result<()> {
             let Ok(path) = dir.join(&name) else {
                 continue;
             };
-            if own(path.as_str()) || key(path.as_str()) == key(OPENING) {
+            let text = path.as_str();
+            if own(text) || key(text) == key(OPENING) {
                 continue;
             }
             if meta.kind == Kind::Directory {
                 waiting.push(path.clone());
             }
-            found.push((path, meta.kind));
+            if cleared(text) && key(text) != key(DIR) {
+                found.push((path, meta.kind));
+            }
         }
     }
     for (path, kind) in found.into_iter().rev() {
         match kind {
             Kind::File => storage::remove(fs, Root::Folder, &path).await?,
-            // `.drawbar` holds [`OPENING`] until the rest is gone.
-            Kind::Directory if key(path.as_str()) == key(DIR) => {}
             Kind::Directory => {
                 let io = Io::RemoveDir {
                     root: Root::Folder,
@@ -238,12 +346,14 @@ async fn clear<F: Fs>(fs: &F) -> std::io::Result<()> {
                 };
                 match fs.perform(io).await {
                     Ok(_) | Err(IoError::NotFound) => {}
+                    // A folder the copy holds that holds a file it does not.
+                    Err(IoError::NotEmpty) if !matches!(clearing, Clearing::All) => {}
                     Err(e) => return Err(storage::failed(e)),
                 }
             }
         }
     }
-    done_opening(fs).await
+    Ok(())
 }
 
 /// Remove [`OPENING`], then `.drawbar` where nothing is left in it.
