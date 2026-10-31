@@ -109,11 +109,13 @@ as stops one drawbar overwriting another's work.
   seconds. A read-only library holds unsaved edits in memory only, except one that is
   read-only because a change could not finish, which still keeps them, also when it opens
   read-only again.
-- **An older library's tags come along once.** The first time drawbar opens a library an
-  earlier version kept, where it can write, it takes in the tags and origins of
-  `.drawbar/library.ron` for the files still there, and remembers in the library that it
-  did, so no other computer takes them in again. Unsaved edits and rescued slot contents
-  stay on disk, unread, and opening such a library says so.
+- **What drawbar.app kept comes along once.** drawbar 0.10, the release drawbar.app
+  serves, kept This computer in the browser's storage, not as files. The first time
+  drawbar opens a library it can write, it brings those sounds in as files, each folder
+  as a folder, with their tags, slot origins and unsaved edits, as one change Undo takes
+  back. It empties the old storage only once the library holds a hash of it, so a failure
+  keeps it for next time and nothing comes in twice. `.drawbar/library.ron` existed only
+  on `master` and never shipped, so nothing reads it.
 - **An action too large to keep as one step is refused whole**, before anything changes.
 
 ### What a contributor sees
