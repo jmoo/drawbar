@@ -230,9 +230,10 @@ Before a change is done:
   `.#nord.<crate>-corpus` selects one crate.
 
 CI runs the workspace with each crate's declared `testFeatures` on native Linux,
-Windows and macOS runners. The web job builds the production bundle and guide,
-and runs the declared browser suites in Chromium and Firefox. It rejects anything
-`nix fmt` would change and treats Clippy and rustdoc warnings as failures.
+Windows and macOS runners, and builds each crate on its own features. The web job
+builds the production bundle and guide, and runs the declared browser suites in
+Chromium and Firefox. The check job rejects anything `nix fmt` would change and
+treats Clippy and rustdoc warnings as failures.
 The required `build` check collects the native, web and corpus results; release
 and deployment wait for it and `check`. Cross builds are local checks.
 

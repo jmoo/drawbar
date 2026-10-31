@@ -94,10 +94,9 @@ the last test checks that every class holds what it held when the run started.
 
 ## Everything at once
 
-`nix flake check` and `nix build .#nord.tests .#site` run the public CI gates
-locally. On Linux, add `.#nord.browser-tests` for declared browser suites. CI also
-runs the workspace and CLI checks on native Windows and macOS runners. See
-[Building from source](building.md).
+`nix flake check` and `nix build .#nord.tests .#nord.packages .#site` run the
+public CI gates locally. On Linux, add `.#nord.browser-tests` for declared browser
+suites. See [Building from source](building.md).
 
 From `crates/`, `nix develop -c bash ../scripts/test.bash` runs the same native
 suite without a sandbox. It reads each crate's `testFeatures` from its manifest.
