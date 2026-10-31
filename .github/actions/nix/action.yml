@@ -7,6 +7,9 @@ inputs:
   save:
     description: Save the store after the job
     default: "true"
+  store-size:
+    description: Largest store to save
+    default: 4G
 runs:
   using: composite
   steps:
@@ -20,11 +23,9 @@ runs:
     - if: inputs.save == 'true'
       uses: nix-community/cache-nix-action@v7
       with:
-        primary-key: nix-${{ inputs.cache }}-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix', 'crates/Cargo.lock', 'crates/**/Cargo.toml') }}-${{ github.sha }}
-        restore-prefixes-first-match: |
-          nix-${{ inputs.cache }}-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix', 'crates/Cargo.lock', 'crates/**/Cargo.toml') }}-
-          nix-${{ inputs.cache }}-${{ runner.os }}-
-        gc-max-store-size: 4G
+        primary-key: nix-${{ inputs.cache }}-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix', 'crates/Cargo.lock', 'crates/**/Cargo.toml') }}
+        restore-prefixes-first-match: nix-${{ inputs.cache }}-${{ runner.os }}-
+        gc-max-store-size: ${{ inputs.store-size }}
         purge: true
         purge-prefixes: nix-${{ inputs.cache }}-${{ runner.os }}-
         purge-created: 0
@@ -32,7 +33,5 @@ runs:
     - if: inputs.save != 'true'
       uses: nix-community/cache-nix-action/restore@v7
       with:
-        primary-key: nix-${{ inputs.cache }}-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix', 'crates/Cargo.lock', 'crates/**/Cargo.toml') }}-${{ github.sha }}
-        restore-prefixes-first-match: |
-          nix-${{ inputs.cache }}-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix', 'crates/Cargo.lock', 'crates/**/Cargo.toml') }}-
-          nix-${{ inputs.cache }}-${{ runner.os }}-
+        primary-key: nix-${{ inputs.cache }}-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix', 'crates/Cargo.lock', 'crates/**/Cargo.toml') }}
+        restore-prefixes-first-match: nix-${{ inputs.cache }}-${{ runner.os }}-
