@@ -972,7 +972,7 @@ impl Library {
             return;
         };
         let mut reverses = self.reversing.take();
-        let mut intents: Vec<(&Entry, Logged)> = Vec::new();
+        let mut intents: Vec<(&Entry, &Logged)> = Vec::new();
         for entry in entries {
             if let EntryKind::Intent(logged) = entry.kind() {
                 intents.push((entry, logged));
@@ -981,7 +981,8 @@ impl Library {
         }
         for (entry, logged) in intents {
             let before = Before::of(&logged.ops, &self.folded);
-            self.history.push(entry, logged, reverses.take(), before);
+            self.history
+                .push(entry, logged.clone(), reverses.take(), before);
         }
         if let Some((path, stamp)) = written {
             self.reader.add(id, entries, &path, stamp);
@@ -1092,7 +1093,7 @@ impl Library {
                         record: Some(record),
                         ..
                     }) => {
-                        closed.insert((*writer, record));
+                        closed.insert((*writer, *record));
                     }
                     EntryKind::Settle(settle) => {
                         closed.insert((settle.writer, settle.record));
@@ -1424,7 +1425,7 @@ fn label(placed: &Placed) -> String {
     }
     let first = placed.merged.first().or(placed.runs.first());
     match first.map(|entry| entry.kind()) {
-        Some(EntryKind::Genesis(genesis)) => genesis.label,
+        Some(EntryKind::Genesis(genesis)) => genesis.label.clone(),
         _ => String::new(),
     }
 }
@@ -1445,7 +1446,7 @@ fn newer_entry(reader: &Reader, writer: WriterId) -> Option<EntryHash> {
     }
     let unknown = |entry: &&std::rc::Rc<Entry>| {
         let kind = entry.kind();
-        let op = contribution::ops(&kind)
+        let op = contribution::ops(kind)
             .iter()
             .any(|op| matches!(op, Op::Unknown(_)));
         op || matches!(kind, EntryKind::Unknown(_))
@@ -2000,8 +2001,7 @@ fn commit<'a>(
 
 /// What appending `entries`, an intent and what followed it, did.
 fn committed(entries: &[Entry], created: Vec<EntityId>, local: Local) -> Committed {
-    let kinds: Vec<EntryKind> = entries.iter().map(Entry::kind).collect();
-    let ops = kinds.iter().flat_map(|kind| match kind {
+    let ops = entries.iter().flat_map(|entry| match entry.kind() {
         EntryKind::Intent(Logged { ops, .. }) | EntryKind::Bind(Bound { ops }) => ops.as_slice(),
         EntryKind::Genesis(_) | EntryKind::Settle(_) | EntryKind::Unknown(_) => &[],
     });
@@ -2017,7 +2017,7 @@ fn committed(entries: &[Entry], created: Vec<EntityId>, local: Local) -> Committ
         Op::Tree { from, to } => Some((from.clone(), to.clone())),
         _ => None,
     });
-    let undoable = match kinds.first() {
+    let undoable = match entries.first().map(Entry::kind) {
         Some(EntryKind::Intent(logged)) => undo::joins(logged.ops.iter()),
         _ => false,
     };
@@ -2257,11 +2257,9 @@ fn tidy_staging(library: &mut Library) -> Fallible<'_, &mut Library> {
 /// The intent a pending record planned to log, without the file ops its steps
 /// decide. A record whose entry is not an intent logs its label alone.
 fn planned(record: &PendingRecord) -> Logged {
-    let decoded = Entry::decode(record.entry.clone())
-        .ok()
-        .map(|entry| entry.kind());
-    let mut logged = match decoded {
-        Some(EntryKind::Intent(logged)) => logged,
+    let decoded = Entry::decode(record.entry.clone()).ok();
+    let mut logged = match decoded.as_ref().map(Entry::kind) {
+        Some(EntryKind::Intent(logged)) => logged.clone(),
         _ => Logged {
             label: record.label.clone(),
             ops: Vec::new(),

@@ -73,7 +73,7 @@ fn every_line_decodes_to_members_this_build_knows_and_encodes_back_byte_for_byte
                 "{name}: unknown members in {shown}"
             );
             let kind = entry.kind();
-            let ops = match &kind {
+            let ops = match kind {
                 EntryKind::Unknown(_) => panic!("{name}: an unknown kind: {shown}"),
                 EntryKind::Intent(logged) => &logged.ops[..],
                 EntryKind::Bind(bound) => &bound.ops[..],
@@ -81,7 +81,7 @@ fn every_line_decodes_to_members_this_build_knows_and_encodes_back_byte_for_byte
             };
             let unknown = ops.iter().find(|op| matches!(op, Op::Unknown(_)));
             assert_eq!(unknown, None, "{name}: an unknown op in {shown}");
-            let written = Entry::encode(entry.prev(), entry.n(), entry.at(), kind).unwrap();
+            let written = Entry::encode(entry.prev(), entry.n(), entry.at(), kind.clone()).unwrap();
             assert_eq!(
                 String::from_utf8_lossy(&written.to_bytes()),
                 shown,

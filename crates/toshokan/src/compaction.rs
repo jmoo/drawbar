@@ -253,7 +253,7 @@ fn fold(
     };
     since.reverse();
     let label = match since.first().map(|entry| entry.kind()) {
-        Some(EntryKind::Genesis(genesis)) => genesis.label,
+        Some(EntryKind::Genesis(genesis)) => genesis.label.clone(),
         _ => String::new(),
     };
     let found = reader

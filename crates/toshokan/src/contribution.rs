@@ -347,7 +347,7 @@ impl Contribution {
                 self.extended.insert((entry.hash(), raw));
             }
         }
-        match &kind {
+        match kind {
             EntryKind::Genesis(_) => {}
             EntryKind::Settle(settle) => {
                 self.settled.insert((settle.writer, settle.record));
@@ -359,13 +359,13 @@ impl Contribution {
                 if let EntryKind::Intent(Logged {
                     record: Some(record),
                     ..
-                }) = &kind
+                }) = kind
                 {
                     self.settled.insert((writer, *record));
                 }
-                let known = forks(&kind);
+                let known = forks(kind);
                 let mut deleted = Vec::new();
-                for op in ops(&kind) {
+                for op in ops(kind) {
                     if let Op::Unknown(raw) = op {
                         self.unknown.insert((entry.hash(), raw.clone()));
                         continue;
@@ -384,7 +384,7 @@ impl Contribution {
                     from,
                     identity,
                     len,
-                } in displaced(&kind)
+                } in displaced(kind)
                 {
                     self.trash.insert(
                         *item,
@@ -1036,7 +1036,7 @@ mod tests {
     }
 
     #[test]
-    fn a_contribution_reads_back_as_written_in_json_and_packed() {
+    fn a_contribution_reads_back_as_written_in_json() {
         let fact = FileFact {
             path: RelPath::new("a.syx").unwrap(),
             identity: Identity::from_u128(3),

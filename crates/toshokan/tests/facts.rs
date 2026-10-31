@@ -605,7 +605,7 @@ fn undo_sets_a_field_back_and_redo_sets_it_again() {
 
     let undo = a.undo(3).unwrap();
     assert_eq!(name(&a, e), Field::Value("first".into()));
-    let EntryKind::Intent(logged) = &undo.kind() else {
+    let EntryKind::Intent(logged) = undo.kind() else {
         panic!();
     };
     assert_eq!(logged.label, "Rename");

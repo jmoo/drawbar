@@ -148,7 +148,6 @@ pub mod line;
 pub mod log;
 #[doc(hidden)]
 pub mod merge;
-mod pack;
 pub mod path;
 #[doc(hidden)]
 pub mod pending;

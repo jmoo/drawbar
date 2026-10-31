@@ -9,7 +9,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-use serde::de::{self, DeserializeOwned, MapAccess, Visitor};
+use serde::de::{self, DeserializeOwned};
 use serde::ser::{SerializeMap, SerializeTuple};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
@@ -18,15 +18,13 @@ use thiserror::Error as ThisError;
 
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
 use crate::line::{Line, LineError};
-use crate::pack::{bad_variant, pack_struct, In, Pack, Unpack, Unpacked};
 use crate::path::RelPath;
 use crate::schema::Raw;
 
 /// One verified, decoded line.
 ///
-/// Held packed, as an install keeps entries for itself: its kind in a binary
-/// encoding, and its JSON only when that is not what this build writes for the
-/// kind, so most entries hold no text.
+/// Its JSON is held only when that is not what this build writes for the kind,
+/// so most entries hold no text.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Entry {
     hash: EntryHash,
@@ -34,18 +32,10 @@ pub struct Entry {
     /// [`Entry::UNNUMBERED`] for a line with no readable `n`.
     n: u64,
     at: Hlc,
-    /// [`Flags`], the packed kind, then the JSON when [`Flags::TEXT`] says so.
-    body: Box<[u8]>,
-}
-
-/// The first byte of an entry's packed body.
-struct Flags;
-
-impl Flags {
-    /// The line holds a member, at any depth, that the kind leaves out.
-    const UNKNOWN_MEMBERS: u8 = 1;
-    /// The body ends with the line's JSON.
-    const TEXT: u8 = 2;
+    kind: EntryKind,
+    unknown_members: bool,
+    /// The line's JSON, when this build writes another for the kind.
+    text: Option<Box<str>>,
 }
 
 /// An entry another entry names: its writer, its number in that writer's chain,
@@ -513,327 +503,11 @@ fn intent(kind: &str, label: Option<String>, members: Members) -> Option<EntryKi
     }
 }
 
-/// An intent line holding exactly what this build writes of one: each member
-/// once, none it does not know at any depth, and no member written as its
-/// default, which this build would leave out. Its members are taken as they come,
-/// so it reads as [`Entry::decode`] reads it, without unknown members. Any other
-/// line fails, and takes the general path.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExactLine<'a> {
-    prev: EntryHash,
-    n: u64,
-    at: Hlc,
-    #[serde(borrow)]
-    kind: &'a str,
-    #[serde(default, deserialize_with = "not_null")]
-    label: Option<String>,
-    ops: Vec<ExactOp>,
-    #[serde(default, deserialize_with = "nonempty")]
-    displaced: Vec<ExactDisplaced>,
-    #[serde(default, deserialize_with = "nonempty")]
-    forks: Vec<Forked>,
-    #[serde(default, deserialize_with = "not_null")]
-    record: Option<Nonce>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExactDisplaced {
-    item: Nonce,
-    from: RelPath,
-    identity: Identity,
-    len: u64,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExactFact {
-    path: RelPath,
-    identity: Identity,
-    len: u64,
-    #[serde(default, deserialize_with = "not_null")]
-    modified: Option<u64>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExactRun {
-    writer: WriterId,
-    from: u64,
-    #[serde(default, deserialize_with = "not_null")]
-    first: Option<EntryHash>,
-    last: Own,
-    #[serde(default, deserialize_with = "not_null")]
-    tip: Option<Own>,
-}
-
-impl From<ExactRun> for Run {
-    fn from(run: ExactRun) -> Self {
-        let ExactRun {
-            writer,
-            from,
-            first,
-            last,
-            tip,
-        } = run;
-        Self {
-            writer,
-            from,
-            first,
-            last,
-            tip,
-        }
-    }
-}
-
-impl From<ExactFact> for FileFact {
-    fn from(fact: ExactFact) -> Self {
-        let ExactFact {
-            path,
-            identity,
-            len,
-            modified,
-        } = fact;
-        Self {
-            path,
-            identity,
-            len,
-            modified,
-        }
-    }
-}
-
-/// A list that is not empty: an empty one this build leaves out.
-fn nonempty<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
-    deserializer: D,
-) -> Result<Vec<T>, D::Error> {
-    let list = Vec::<T>::deserialize(deserializer)?;
-    match list.is_empty() {
-        true => Err(de::Error::custom("an empty list this build leaves out")),
-        false => Ok(list),
-    }
-}
-
 /// A member that is there and not `null`: a `null` this build leaves out.
 fn not_null<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
     deserializer: D,
 ) -> Result<Option<T>, D::Error> {
     T::deserialize(deserializer).map(Some)
-}
-
-impl ExactLine<'_> {
-    /// The line's `prev`, `n`, `at` and intent, when it is one this build would
-    /// write.
-    fn read(json: &str) -> Option<(EntryHash, u64, Hlc, EntryKind)> {
-        let line: ExactLine = serde_json::from_str(json).ok()?;
-        let displaced = line.displaced.into_iter().map(|displaced| Displaced {
-            item: displaced.item,
-            from: displaced.from,
-            identity: displaced.identity,
-            len: displaced.len,
-        });
-        let mut ops: Vec<Op> = line.ops.into_iter().map(|op| op.0).collect();
-        ops.shrink_to_fit();
-        let kind = intent(
-            line.kind,
-            line.label,
-            Members {
-                ops,
-                displaced: displaced.collect(),
-                forks: line.forks,
-                record: line.record,
-            },
-        )?;
-        Some((line.prev, line.n, line.at, kind))
-    }
-}
-
-/// An op as [`OpOut`] writes it: `op` first, then each member of its kind once,
-/// and none other.
-struct ExactOp(Op);
-
-impl<'de> Deserialize<'de> for ExactOp {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_map(ExactOpVisitor)
-    }
-}
-
-struct ExactOpVisitor;
-
-/// The members of one op, each read at most once.
-#[derive(Default)]
-struct OpMembers {
-    entity: Option<EntityId>,
-    key: Option<String>,
-    value: Option<Box<RawValue>>,
-    replaces: Option<Vec<Ref>>,
-    observed: Option<Vec<ExactObserved>>,
-    tags: Option<Vec<Ref>>,
-    file: Option<ExactFact>,
-    from: Option<RelPath>,
-    to: Option<RelPath>,
-    path: Option<RelPath>,
-    made: Option<bool>,
-    take: Option<ExactRun>,
-    runs: Option<Vec<ExactRun>>,
-}
-
-/// An observed write as [`ObservedOut`] writes it.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExactObserved {
-    #[serde(default, deserialize_with = "not_null")]
-    key: Option<String>,
-    #[serde(default)]
-    value: Option<Box<RawValue>>,
-    #[serde(default, deserialize_with = "not_null")]
-    file: Option<bool>,
-    at: Ref,
-}
-
-impl ExactObserved {
-    fn read(self) -> Option<Observed> {
-        let target = match (self.key, self.value, self.file) {
-            (Some(key), None, None) => Target::Register(key),
-            (Some(key), Some(value), None) => Target::Member(key, Raw::from(value)),
-            (None, None, Some(true)) => Target::File,
-            _ => return None,
-        };
-        Some(Observed {
-            target,
-            at: self.at,
-        })
-    }
-}
-
-/// Reads the next value into `slot`, refusing a second one.
-fn once<'de, A: MapAccess<'de>, T: Deserialize<'de>>(
-    map: &mut A,
-    slot: &mut Option<T>,
-) -> Result<(), A::Error> {
-    if slot.is_some() {
-        return Err(de::Error::custom("a member named twice"));
-    }
-    *slot = Some(map.next_value()?);
-    Ok(())
-}
-
-impl<'de> Visitor<'de> for ExactOpVisitor {
-    type Value = ExactOp;
-
-    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.write_str("an op as this build writes it")
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<ExactOp, A::Error> {
-        let missing = || de::Error::custom("a member missing");
-        if map.next_key::<&str>()? != Some("op") {
-            return Err(de::Error::custom("`op` is not first"));
-        }
-        let name: &str = map.next_value()?;
-        let mut m = OpMembers::default();
-        while let Some(member) = map.next_key::<&str>()? {
-            match (name, member) {
-                ("dismiss", "runs") => once(&mut map, &mut m.runs)?,
-                ("dismiss", _) => {
-                    return Err(de::Error::custom("a member this build does not write"))
-                }
-                (_, "entity") => once(&mut map, &mut m.entity)?,
-                ("write" | "add" | "remove", "key") => once(&mut map, &mut m.key)?,
-                ("write" | "add" | "remove", "value") => once(&mut map, &mut m.value)?,
-                ("create" | "delete" | "write" | "add" | "file" | "pin", "replaces") => {
-                    once(&mut map, &mut m.replaces)?
-                }
-                ("delete", "observed") => once(&mut map, &mut m.observed)?,
-                ("remove", "tags") => once(&mut map, &mut m.tags)?,
-                ("file" | "pin" | "path", "file") => once(&mut map, &mut m.file)?,
-                ("path" | "tree", "from") => once(&mut map, &mut m.from)?,
-                ("tree", "to") => once(&mut map, &mut m.to)?,
-                ("dir", "path") => once(&mut map, &mut m.path)?,
-                ("dir", "made") => once(&mut map, &mut m.made)?,
-                ("create" | "delete" | "write" | "add" | "remove" | "file" | "pin", "take") => {
-                    once(&mut map, &mut m.take)?
-                }
-                _ => return Err(de::Error::custom("a member this build does not write")),
-            }
-        }
-        let take = m.take.map(Run::from);
-        if name == "dismiss" {
-            let runs = m.runs.ok_or_else(missing)?;
-            return Ok(ExactOp(Op::Dismiss {
-                runs: runs.into_iter().map(Run::from).collect(),
-            }));
-        }
-        let value = m.value.map(Raw::from);
-        let file = m.file.map(FileFact::from);
-        match name {
-            "path" => return Ok(ExactOp(Op::Path { from: m.from, file })),
-            "tree" => {
-                let (from, to) = (m.from.ok_or_else(missing)?, m.to.ok_or_else(missing)?);
-                return Ok(ExactOp(Op::Tree { from, to }));
-            }
-            "dir" => {
-                let (path, made) = (m.path.ok_or_else(missing)?, m.made.ok_or_else(missing)?);
-                return Ok(ExactOp(Op::Dir { path, made }));
-            }
-            _ => {}
-        }
-        let entity = m.entity.ok_or_else(missing)?;
-        let op = match name {
-            "create" => Op::Create {
-                entity,
-                replaces: m.replaces.ok_or_else(missing)?,
-                take,
-            },
-            "delete" => Op::Delete {
-                entity,
-                replaces: m.replaces.ok_or_else(missing)?,
-                observed: m
-                    .observed
-                    .ok_or_else(missing)?
-                    .into_iter()
-                    .map(|observed| observed.read().ok_or_else(missing))
-                    .collect::<Result<_, _>>()?,
-                take,
-            },
-            "write" => Op::Write {
-                entity,
-                key: m.key.ok_or_else(missing)?,
-                value,
-                replaces: m.replaces.ok_or_else(missing)?,
-                take,
-            },
-            "add" => Op::Add {
-                entity,
-                key: m.key.ok_or_else(missing)?,
-                value: value.ok_or_else(missing)?,
-                replaces: m.replaces.ok_or_else(missing)?,
-                take,
-            },
-            "remove" => Op::Remove {
-                entity,
-                key: m.key.ok_or_else(missing)?,
-                value: value.ok_or_else(missing)?,
-                tags: m.tags.ok_or_else(missing)?,
-                take,
-            },
-            "file" => Op::File {
-                entity,
-                file,
-                replaces: m.replaces.ok_or_else(missing)?,
-                take,
-            },
-            "pin" => Op::Pin {
-                entity,
-                file: file.ok_or_else(missing)?,
-                replaces: m.replaces.ok_or_else(missing)?,
-                take,
-            },
-            _ => return Err(de::Error::custom("an op this build does not know")),
-        };
-        Ok(ExactOp(op))
-    }
 }
 
 /// An entry as this build writes its line's JSON: `prev`, `n`, `at`, then its
@@ -865,35 +539,25 @@ impl Entry {
     /// [`Entry::decode`] makes of a line, or anything a test needs.
     pub fn new(line: Line, n: u64, at: Hlc, kind: EntryKind, unknown_members: bool) -> Self {
         let canonical = !unknown_members && writes_as(line.prev(), n, at, &kind, line.json());
-        Self::assemble(line, n, at, &kind, unknown_members, canonical)
+        Self::assemble(line, n, at, kind, unknown_members, canonical)
     }
 
     fn assemble(
         line: Line,
         n: u64,
         at: Hlc,
-        kind: &EntryKind,
+        kind: EntryKind,
         unknown_members: bool,
         canonical: bool,
     ) -> Self {
-        let mut flags = 0;
-        if unknown_members {
-            flags |= Flags::UNKNOWN_MEMBERS;
-        }
-        if !canonical {
-            flags |= Flags::TEXT;
-        }
-        let mut body = vec![flags];
-        kind.pack(&mut body);
-        if !canonical {
-            line.json().pack(&mut body);
-        }
         Self {
             hash: line.hash(),
             prev: line.prev(),
             n,
             at,
-            body: body.into(),
+            kind,
+            unknown_members,
+            text: (!canonical).then(|| line.json().into()),
         }
     }
 
@@ -933,10 +597,6 @@ impl Entry {
     /// decoded as [`Entry::linked`] decodes it. An intent line is parsed once.
     pub fn parse(line: &[u8]) -> Result<Self, LineError> {
         let (json, hash) = crate::line::split(line)?;
-        if let Some((prev, n, at, kind)) = ExactLine::read(json) {
-            let line = Line::checked(prev, json.to_owned(), hash)?;
-            return Ok(Self::exact(line, n, at, kind));
-        }
         match IntentLine::read(json) {
             Some((prev, n, at, kind)) => {
                 let line = Line::checked(prev, json.to_owned(), hash)?;
@@ -949,10 +609,6 @@ impl Entry {
     /// A line this install verified before and kept as its JSON and hash. A
     /// damaged copy fails its hash and is refused.
     pub fn kept(json: String, hash: EntryHash) -> Result<Self, LineError> {
-        if let Some((prev, n, at, kind)) = ExactLine::read(&json) {
-            let line = Line::checked(prev, json, hash)?;
-            return Ok(Self::exact(line, n, at, kind));
-        }
         if let Some((prev, n, at, kind)) = IntentLine::read(&json) {
             let line = Line::checked(prev, json, hash)?;
             return Ok(Self::of(line, n, at, Some(kind)));
@@ -968,14 +624,8 @@ impl Entry {
         Self::decode(line.clone()).unwrap_or_else(|_| {
             let raw = Raw::new(line.json()).expect("a verified line holds JSON");
             let kind = EntryKind::Unknown(raw);
-            Self::assemble(line, Self::UNNUMBERED, Hlc::ZERO, &kind, false, false)
+            Self::assemble(line, Self::UNNUMBERED, Hlc::ZERO, kind, false, false)
         })
-    }
-
-    /// The entry of an intent line [`ExactLine`] read: it holds
-    /// no member the kind leaves out.
-    fn exact(line: Line, n: u64, at: Hlc, kind: EntryKind) -> Self {
-        Self::new(line, n, at, kind, false)
     }
 
     /// The entry of `line`, numbered `n` and read at `at`, as `known` when its
@@ -984,25 +634,22 @@ impl Entry {
         let json = line.json();
         let Some(kind) = known else {
             let raw = Raw::new(json).expect("a verified line holds a JSON object");
-            let kind = EntryKind::Unknown(raw);
-            let canonical = writes_as(line.prev(), n, at, &kind, json);
-            return Self::assemble(line, n, at, &kind, false, canonical);
+            return Self::new(line, n, at, EntryKind::Unknown(raw), false);
         };
-        let written = Written {
+        if writes_as(line.prev(), n, at, &kind, json) {
+            return Self::assemble(line, n, at, kind, false, true);
+        }
+        let written = serde_json::to_value(Written {
             prev: line.prev(),
             n,
             at,
             kind: &kind,
+        });
+        let unknown_members = match (serde_json::from_str(json), written) {
+            (Ok(read), Ok(written)) => holds_more(&read, &written),
+            _ => true,
         };
-        let (unknown_members, canonical) = match serde_json::to_string(&written) {
-            Ok(text) if text == json => (false, true),
-            Ok(_) => match (serde_json::from_str(json), serde_json::to_value(&written)) {
-                (Ok(read), Ok(written)) => (holds_more(&read, &written), false),
-                _ => (true, false),
-            },
-            Err(_) => (true, false),
-        };
-        Self::assemble(line, n, at, &kind, unknown_members, canonical)
+        Self::assemble(line, n, at, kind, unknown_members, false)
     }
 
     /// The entry logging `kind` numbered `n` at `at` after `prev`, as
@@ -1049,33 +696,27 @@ impl Entry {
     /// Whether the line holds a member, at any depth, that [`Entry::kind`]
     /// leaves out. Member order and spacing do not count.
     pub fn unknown_members(&self) -> bool {
-        self.body[0] & Flags::UNKNOWN_MEMBERS != 0
+        self.unknown_members
     }
 
-    /// The kind, unpacked.
-    pub fn kind(&self) -> EntryKind {
-        let mut input = In::new(&self.body[1..]);
-        EntryKind::unpack(&mut input).expect("an entry holds its packed kind")
+    pub fn kind(&self) -> &EntryKind {
+        &self.kind
     }
 
-    /// An intent's label, without unpacking its ops.
-    pub fn intent(&self) -> Option<String> {
-        let mut input = In::new(&self.body[1..]);
-        let label = match input.byte() {
-            Ok(INTENT) => String::unpack(&mut input),
-            _ => return None,
-        };
-        Some(label.expect("an entry holds its packed kind"))
+    /// An intent's label.
+    pub fn intent(&self) -> Option<&str> {
+        match &self.kind {
+            EntryKind::Intent(logged) => Some(&logged.label),
+            _ => None,
+        }
     }
 
     /// The line's JSON, as it was read.
     pub fn json(&self) -> Cow<'_, str> {
-        if self.body[0] & Flags::TEXT == 0 {
-            return Cow::Owned(Self::written(self.prev, self.n, self.at, &self.kind()));
+        match &self.text {
+            Some(text) => Cow::Borrowed(text),
+            None => Cow::Owned(Self::written(self.prev, self.n, self.at, &self.kind)),
         }
-        let mut input = In::new(&self.body[1..]);
-        EntryKind::unpack(&mut input).expect("an entry holds its packed kind");
-        Cow::Borrowed(input.str().expect("an entry holds its text"))
     }
 
     pub fn line(&self) -> Line {
@@ -1095,336 +736,9 @@ impl std::fmt::Debug for Entry {
             .field("prev", &self.prev)
             .field("n", &self.n)
             .field("at", &self.at)
-            .field("kind", &self.kind())
-            .field("unknown_members", &self.unknown_members())
+            .field("kind", &self.kind)
+            .field("unknown_members", &self.unknown_members)
             .finish()
-    }
-}
-
-/// The bytes naming each kind in a packed entry.
-const GENESIS: u8 = 0;
-const INTENT: u8 = 1;
-const SETTLE: u8 = 2;
-const BIND: u8 = 3;
-const UNKNOWN: u8 = 4;
-
-impl Pack for EntryKind {
-    fn pack(&self, out: &mut Vec<u8>) {
-        match self {
-            Self::Genesis(genesis) => {
-                out.push(GENESIS);
-                genesis.pack(out);
-            }
-            Self::Intent(logged) => {
-                out.push(INTENT);
-                logged.label.pack(out);
-                (&logged.displaced, &logged.ops).pack(out);
-                (&logged.forks, logged.record).pack(out);
-            }
-            Self::Settle(settle) => {
-                out.push(SETTLE);
-                (settle.writer, settle.record).pack(out);
-                settle.outcome.pack(out);
-            }
-            Self::Bind(bound) => {
-                out.push(BIND);
-                bound.ops.pack(out);
-            }
-            Self::Unknown(raw) => {
-                out.push(UNKNOWN);
-                raw.pack(out);
-            }
-        }
-    }
-}
-
-impl Unpack for EntryKind {
-    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
-        Ok(match input.byte()? {
-            GENESIS => Self::Genesis(Genesis::unpack(input)?),
-            INTENT => {
-                let label = Unpack::unpack(input)?;
-                let (displaced, ops) = Unpack::unpack(input)?;
-                let (forks, record) = Unpack::unpack(input)?;
-                Self::Intent(Logged {
-                    label,
-                    ops,
-                    displaced,
-                    forks,
-                    record,
-                })
-            }
-            SETTLE => {
-                let (writer, record) = Unpack::unpack(input)?;
-                Self::Settle(Settle {
-                    writer,
-                    record,
-                    outcome: Settlement::unpack(input)?,
-                })
-            }
-            BIND => Self::Bind(Bound {
-                ops: Unpack::unpack(input)?,
-            }),
-            UNKNOWN => Self::Unknown(Raw::unpack(input)?),
-            _ => return bad_variant(),
-        })
-    }
-}
-
-impl Pack for Settlement {
-    fn pack(&self, out: &mut Vec<u8>) {
-        out.push(match self {
-            Self::Finished => 0,
-            Self::RolledBack => 1,
-            Self::Dismissed => 2,
-        });
-    }
-}
-
-impl Unpack for Settlement {
-    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
-        match input.byte()? {
-            0 => Ok(Self::Finished),
-            1 => Ok(Self::RolledBack),
-            2 => Ok(Self::Dismissed),
-            _ => bad_variant(),
-        }
-    }
-}
-
-pack_struct!(Genesis { writer, label });
-pack_struct!(Displaced {
-    item,
-    from,
-    identity,
-    len
-});
-pack_struct!(FileFact {
-    path,
-    identity,
-    len,
-    modified
-});
-pack_struct!(Ref { writer, n, hash });
-pack_struct!(Own { n, hash });
-pack_struct!(Forked { writer, at });
-pack_struct!(Run {
-    writer,
-    from,
-    first,
-    last,
-    tip
-});
-pack_struct!(Observed { target, at });
-
-impl Pack for Target {
-    fn pack(&self, out: &mut Vec<u8>) {
-        match self {
-            Self::Register(key) => {
-                out.push(0);
-                key.pack(out);
-            }
-            Self::Member(key, value) => {
-                out.push(1);
-                (key, value).pack(out);
-            }
-            Self::File => out.push(2),
-        }
-    }
-}
-
-impl Unpack for Target {
-    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
-        Ok(match input.byte()? {
-            0 => Self::Register(Unpack::unpack(input)?),
-            1 => {
-                let (key, value) = Unpack::unpack(input)?;
-                Self::Member(key, value)
-            }
-            2 => Self::File,
-            _ => return bad_variant(),
-        })
-    }
-}
-
-impl Pack for Op {
-    fn pack(&self, out: &mut Vec<u8>) {
-        match self {
-            Self::Create {
-                entity,
-                replaces,
-                take,
-            } => {
-                out.push(0);
-                (entity, (replaces, take)).pack(out);
-            }
-            Self::Delete {
-                entity,
-                replaces,
-                observed,
-                take,
-            } => {
-                out.push(1);
-                ((entity, replaces), (observed, take)).pack(out);
-            }
-            Self::Write {
-                entity,
-                key,
-                value,
-                replaces,
-                take,
-            } => {
-                out.push(2);
-                ((entity, key), (value, (replaces, take))).pack(out);
-            }
-            Self::Add {
-                entity,
-                key,
-                value,
-                replaces,
-                take,
-            } => {
-                out.push(3);
-                ((entity, key), (value, (replaces, take))).pack(out);
-            }
-            Self::Remove {
-                entity,
-                key,
-                value,
-                tags,
-                take,
-            } => {
-                out.push(4);
-                ((entity, key), (value, (tags, take))).pack(out);
-            }
-            Self::File {
-                entity,
-                file,
-                replaces,
-                take,
-            } => {
-                out.push(5);
-                (entity, (file, (replaces, take))).pack(out);
-            }
-            Self::Pin {
-                entity,
-                file,
-                replaces,
-                take,
-            } => {
-                out.push(6);
-                (entity, (file, (replaces, take))).pack(out);
-            }
-            Self::Dismiss { runs } => {
-                out.push(7);
-                runs.pack(out);
-            }
-            Self::Unknown(raw) => {
-                out.push(8);
-                raw.pack(out);
-            }
-            Self::Path { from, file } => {
-                out.push(9);
-                (from, file).pack(out);
-            }
-            Self::Tree { from, to } => {
-                out.push(10);
-                (from, to).pack(out);
-            }
-            Self::Dir { path, made } => {
-                out.push(11);
-                (path, made).pack(out);
-            }
-        }
-    }
-}
-
-impl Unpack for Op {
-    fn unpack(input: &mut In<'_>) -> Unpacked<Self> {
-        Ok(match input.byte()? {
-            0 => {
-                let (entity, (replaces, take)) = Unpack::unpack(input)?;
-                Self::Create {
-                    entity,
-                    replaces,
-                    take,
-                }
-            }
-            1 => {
-                let ((entity, replaces), (observed, take)) = Unpack::unpack(input)?;
-                Self::Delete {
-                    entity,
-                    replaces,
-                    observed,
-                    take,
-                }
-            }
-            2 => {
-                let ((entity, key), (value, (replaces, take))) = Unpack::unpack(input)?;
-                Self::Write {
-                    entity,
-                    key,
-                    value,
-                    replaces,
-                    take,
-                }
-            }
-            3 => {
-                let ((entity, key), (value, (replaces, take))) = Unpack::unpack(input)?;
-                Self::Add {
-                    entity,
-                    key,
-                    value,
-                    replaces,
-                    take,
-                }
-            }
-            4 => {
-                let ((entity, key), (value, (tags, take))) = Unpack::unpack(input)?;
-                Self::Remove {
-                    entity,
-                    key,
-                    value,
-                    tags,
-                    take,
-                }
-            }
-            5 => {
-                let (entity, (file, (replaces, take))) = Unpack::unpack(input)?;
-                Self::File {
-                    entity,
-                    file,
-                    replaces,
-                    take,
-                }
-            }
-            6 => {
-                let (entity, (file, (replaces, take))) = Unpack::unpack(input)?;
-                Self::Pin {
-                    entity,
-                    file,
-                    replaces,
-                    take,
-                }
-            }
-            7 => Self::Dismiss {
-                runs: Unpack::unpack(input)?,
-            },
-            8 => Self::Unknown(Raw::unpack(input)?),
-            9 => {
-                let (from, file) = Unpack::unpack(input)?;
-                Self::Path { from, file }
-            }
-            10 => {
-                let (from, to) = Unpack::unpack(input)?;
-                Self::Tree { from, to }
-            }
-            11 => {
-                let (path, made) = Unpack::unpack(input)?;
-                Self::Dir { path, made }
-            }
-            _ => return bad_variant(),
-        })
     }
 }
 
@@ -2175,7 +1489,7 @@ mod tests {
                 _ => (hash(1), 2),
             };
             let entry = Entry::encode(prev, n, at(5), kind.clone()).unwrap();
-            assert_eq!(entry.kind(), kind);
+            assert_eq!(entry.kind(), &kind);
             assert_eq!((entry.prev(), entry.n()), (prev, n));
             let read = Entry::decode(Line::parse(&entry.to_bytes()).unwrap()).unwrap();
             assert_eq!(read, entry);
@@ -2349,7 +1663,7 @@ mod tests {
             prev = prev
         );
         let entry = Entry::decode(Line::seal(json.clone()).unwrap()).unwrap();
-        let EntryKind::Intent(logged) = &entry.kind() else {
+        let EntryKind::Intent(logged) = entry.kind() else {
             panic!("{:?}", entry.kind())
         };
         assert_eq!(
@@ -2365,8 +1679,8 @@ mod tests {
 
         let future = format!(r#"{{"prev":"{prev}","n":2,"at":[1,2],"kind":"merge","into":"y"}}"#);
         let entry = Entry::decode(Line::seal(future.clone()).unwrap()).unwrap();
-        assert_eq!(entry.kind(), EntryKind::Unknown(raw(&future)));
-        let again = Entry::encode(hash(9), 4, at(4), entry.kind()).unwrap();
+        assert_eq!(entry.kind(), &EntryKind::Unknown(raw(&future)));
+        let again = Entry::encode(hash(9), 4, at(4), entry.kind().clone()).unwrap();
         assert_eq!(
             again.json(),
             r#"{"prev":"00000000000000000000000000000009","n":4,"at":[4,0],"into":"y","kind":"merge"}"#
@@ -2416,14 +1730,14 @@ mod tests {
             format!(r#"{{"prev":"{prev}","n":1,"at":[1,0],"kind":7}}"#),
         ] {
             let entry = Entry::decode(Line::seal(json.clone()).unwrap()).unwrap();
-            assert_eq!(entry.kind(), EntryKind::Unknown(raw(&json)), "{json}");
+            assert_eq!(entry.kind(), &EntryKind::Unknown(raw(&json)), "{json}");
         }
         let zero = EntryHash::ZERO;
         let numbered = format!(
             r#"{{"prev":"{zero}","n":1,"at":[1,0],"kind":"genesis","writer":"{prev}","label":"L"}}"#
         );
         let entry = Entry::decode(Line::seal(numbered.clone()).unwrap()).unwrap();
-        assert_eq!(entry.kind(), EntryKind::Unknown(raw(&numbered)));
+        assert_eq!(entry.kind(), &EntryKind::Unknown(raw(&numbered)));
     }
 
     #[test]
@@ -2564,7 +1878,7 @@ mod tests {
             });
             let written = Entry::encode(hash(1), round as u64 + 1, at(round as u64), kind).unwrap();
             let json = written.json().into_owned();
-            assert!(ExactLine::read(&json).is_some(), "read in one pass: {json}");
+            assert!(!written.unknown_members(), "{json}");
             for text in std::iter::once(json.clone()).chain(variations(&json, &mut random)) {
                 let bytes = format!("{text}\t{}\n", EntryHash::of(hash(1), text.as_bytes()));
                 let once = Entry::parse(bytes.as_bytes());
@@ -2595,9 +1909,7 @@ mod tests {
         let read = Entry::decode(Line::seal(spaced.clone()).unwrap()).unwrap();
         assert_eq!(read.kind(), written.kind());
         assert_eq!(read.json(), spaced);
-        let text = |entry: &Entry| entry.body[0] & Flags::TEXT != 0;
-        assert!(!text(&written) && text(&read));
-        assert!(read.body.len() > written.body.len() + spaced.len());
+        assert_eq!((written.text.is_some(), read.text.is_some()), (false, true));
     }
 
     #[test]
@@ -2616,7 +1928,7 @@ mod tests {
                 hash(1)
             );
             let entry = Entry::decode(Line::seal(json).unwrap()).unwrap();
-            let EntryKind::Intent(logged) = &entry.kind() else {
+            let EntryKind::Intent(logged) = entry.kind() else {
                 panic!("{:?}", entry.kind())
             };
             assert_eq!(logged.ops, [Op::Unknown(raw(&op))], "{op}");

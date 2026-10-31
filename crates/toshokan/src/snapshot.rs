@@ -10,7 +10,6 @@ use thiserror::Error as ThisError;
 use crate::contribution::Contribution;
 use crate::ids::{EntryHash, Hlc, WriterId};
 use crate::log::Own;
-use crate::pack::{Bad, Unpacked};
 use crate::reader::MAX_FILE;
 use crate::schema::Raw;
 
@@ -155,13 +154,11 @@ impl Snapshot {
             state: member("state", &state)?,
             unknown: members,
         };
-        snapshot
-            .check()
-            .map_err(|Bad(reason)| refuse(reason.into()))?;
+        snapshot.check().map_err(|reason| refuse(reason.into()))?;
         Ok(snapshot)
     }
 
-    fn check(&self) -> Unpacked<()> {
+    fn check(&self) -> Result<(), &'static str> {
         let backwards = self
             .certified
             .segments
@@ -170,8 +167,8 @@ impl Snapshot {
         let past = self.certified.named().any(|own| own.n > self.head.n);
         match (backwards, past) {
             (false, false) => Ok(()),
-            (true, _) => Err(Bad("a certificate whose last line comes before its first")),
-            (_, true) => Err(Bad("a certificate past the head")),
+            (true, _) => Err("a certificate whose last line comes before its first"),
+            (_, true) => Err("a certificate past the head"),
         }
     }
 

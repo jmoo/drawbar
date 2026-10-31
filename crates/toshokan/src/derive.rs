@@ -580,7 +580,7 @@ pub fn derive(seen: &BTreeMap<WriterId, Seen<'_>>) -> Derived {
             if w.beyond(entry.n()) {
                 continue;
             }
-            for op in contribution::ops(&entry.kind()) {
+            for op in contribution::ops(entry.kind()) {
                 runs_dismissed.extend(contribution::said(op).dismissals);
             }
         }
@@ -750,7 +750,7 @@ pub fn derive(seen: &BTreeMap<WriterId, Seen<'_>>) -> Derived {
         for entry in entries {
             let kind = entry.kind();
             let own = entry.own();
-            let saids: Vec<Said> = contribution::ops(&kind)
+            let saids: Vec<Said> = contribution::ops(kind)
                 .iter()
                 .map(contribution::said)
                 .collect();
@@ -893,7 +893,7 @@ fn items(
             }
         }
         for entry in merged.get(&w.writer).into_iter().flatten() {
-            for op in contribution::ops(&entry.kind()) {
+            for op in contribution::ops(entry.kind()) {
                 for write in contribution::said(op).writes {
                     own.insert((write.field, entry.n()));
                 }
@@ -1011,7 +1011,7 @@ fn items(
             group.run.last = entry.own();
             group.entries += 1;
             group.span = widen(group.span, entry.at());
-            for op in contribution::ops(&entry.kind()) {
+            for op in contribution::ops(entry.kind()) {
                 for write in contribution::said(op).writes {
                     if kind == ItemKind::Unplaced && known_since(&write.field, entry.n()) {
                         continue;
@@ -1105,7 +1105,7 @@ pub fn extend(derived: &mut Derived, writer: WriterId, entries: &[Rc<Entry>]) ->
             None => entry.prev() == EntryHash::ZERO && entry.n() == 0 && placed.tips.is_empty(),
         };
         let kind = entry.kind();
-        let ops = contribution::ops(&kind);
+        let ops = contribution::ops(kind);
         let dismisses = ops.iter().any(|op| matches!(op, Op::Dismiss { .. }));
         let unshown = ops.iter().any(|op| {
             let said = contribution::said(op);
@@ -1127,7 +1127,7 @@ pub fn extend(derived: &mut Derived, writer: WriterId, entries: &[Rc<Entry>]) ->
     for entry in entries {
         let own = entry.own();
         let mut deleted = Vec::new();
-        for op in contribution::ops(&entry.kind()) {
+        for op in contribution::ops(entry.kind()) {
             let said = contribution::said(op);
             for (field, target) in &said.refs {
                 let exact = forks

@@ -2018,7 +2018,7 @@ fn logged_ops(folder: &MemDisk, view: &View, committed: &Committed) -> Vec<Op> {
         .iter()
         .find(|entry| entry.hash() == committed.intent);
     match entry.map(Entry::kind) {
-        Some(EntryKind::Intent(logged)) => logged.ops,
+        Some(EntryKind::Intent(logged)) => logged.ops.clone(),
         kind => panic!("{kind:?}"),
     }
 }
@@ -3635,7 +3635,7 @@ fn a_commit_pins_any_number_of_moves_in_entries_within_the_line_limit() {
     let binds = binds(&folder, writer);
     let pinned: usize = binds
         .iter()
-        .map(|entry| match &entry.kind() {
+        .map(|entry| match entry.kind() {
             EntryKind::Bind(bound) => bound.ops.len(),
             kind => panic!("{kind:?}"),
         })
@@ -6020,14 +6020,14 @@ fn a_settlement_that_stops_partway_leaves_the_record_open_until_settled_again<F:
                 let settles = entries
                     .iter()
                     .filter(
-                        |e| matches!(&e.kind(), EntryKind::Settle(s) if s.record == orphan.record),
+                        |e| matches!(e.kind(), EntryKind::Settle(s) if s.record == orphan.record),
                     )
                     .count();
                 let saved = toshokan::Raw::of(&"saved").unwrap();
                 let adds = entries
                     .iter()
                     .filter_map(|e| match e.kind() {
-                        EntryKind::Intent(logged) => Some(logged.ops),
+                        EntryKind::Intent(logged) => Some(&logged.ops),
                         _ => None,
                     })
                     .flatten()

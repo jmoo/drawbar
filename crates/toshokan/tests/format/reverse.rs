@@ -168,7 +168,8 @@ fn known_ops_holding_members_this_build_does_not_know_merge_and_survive_compacti
 #[test]
 fn a_delete_whose_observed_write_holds_a_member_this_build_does_not_know_is_an_unknown_op() {
     let lines = newer_lines("novel-member-in-observed", W);
-    let EntryKind::Intent(logged) = Entry::parse(&lines[0]).unwrap().kind() else {
+    let entry = Entry::parse(&lines[0]).unwrap();
+    let EntryKind::Intent(logged) = entry.kind() else {
         panic!("not an intent");
     };
     assert!(matches!(logged.ops[..], [Op::Unknown(_)]), "{logged:?}");
