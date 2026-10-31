@@ -143,7 +143,12 @@ impl Native {
         }
     }
 
-    fn list(&self, root: Root, dir: &RelPath) -> Result<Vec<DirEntry>, IoError> {
+    /// The files and directories in `dir`, by name, each with its entry.
+    fn entries(
+        &self,
+        root: Root,
+        dir: &RelPath,
+    ) -> Result<Vec<(String, Kind, fs::DirEntry)>, IoError> {
         let mut entries = Vec::new();
         for entry in fs::read_dir(self.full(root, dir)?).map_err(io_error)? {
             let entry = entry.map_err(io_error)?;
@@ -157,20 +162,29 @@ impl Native {
                 .file_name()
                 .into_string()
                 .map_err(|_| IoError::Other("a name is not valid UTF-8".into()))?;
-            entries.push(DirEntry { name, kind });
+            entries.push((name, kind, entry));
         }
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(entries)
     }
 
+    fn list(&self, root: Root, dir: &RelPath) -> Result<Vec<DirEntry>, IoError> {
+        let entries = self.entries(root, dir)?.into_iter();
+        Ok(entries
+            .map(|(name, kind, _)| DirEntry { name, kind })
+            .collect())
+    }
+
+    /// Each entry's metadata from its listing, so Windows, whose listing carries it,
+    /// opens no file. ⚠️ There, the size and time of a file another program holds open
+    /// can lag until it closes the file.
     fn list_stat(&self, root: Root, dir: &RelPath) -> Result<Vec<(String, Meta)>, IoError> {
         let mut found = Vec::new();
-        for entry in self.list(root, dir)? {
-            let path = dir
-                .join(&entry.name)
-                .map_err(|error| IoError::Other(error.to_string()))?;
-            if let Some(meta) = self.stat(root, &path)? {
-                found.push((entry.name, meta));
+        for (name, _, entry) in self.entries(root, dir)? {
+            match entry.metadata() {
+                Ok(metadata) => found.push((name, convert(&metadata)?)),
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(io_error(error)),
             }
         }
         Ok(found)
