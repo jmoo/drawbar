@@ -506,18 +506,18 @@ let
       (
         name: manifest:
         let
-          suites = manifest.metadata.nix.browserTests or [ ];
+          # ⚠️ Only the suites' own build names them: the dependency build compiles
+          # stand-in sources, which hold no test target.
+          suites = escapeShellArgs (
+            concatMap (suite: [
+              "--test"
+              suite
+            ]) (manifest.metadata.nix.browserTests or [ ])
+          );
           args = commonArgs // {
             CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
             CARGO_PROFILE = "release-tests";
-            cargoExtraArgs = "--locked -p ${name} ${featureArgs (testFeaturesFor name)} ${
-              escapeShellArgs (
-                concatMap (suite: [
-                  "--test"
-                  suite
-                ]) suites
-              )
-            }";
+            cargoExtraArgs = "--locked -p ${name} ${featureArgs (testFeaturesFor name)}";
             nativeBuildInputs = [ final.lld ];
             pname = "${name}-browser-tests";
             inherit (manifest) version;
@@ -543,8 +543,8 @@ let
             buildPhaseCargoCommand = ''
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
-              CHROMEDRIVER=${final.lib.getExe final.chromedriver} cargo test --profile release-tests $cargoExtraArgs
-              GECKODRIVER=${final.lib.getExe final.geckodriver} cargo test --profile release-tests $cargoExtraArgs
+              CHROMEDRIVER=${final.lib.getExe final.chromedriver} cargo test --profile release-tests $cargoExtraArgs ${suites}
+              GECKODRIVER=${final.lib.getExe final.geckodriver} cargo test --profile release-tests $cargoExtraArgs ${suites}
             '';
             cargoArtifacts = crane.buildDepsOnly args;
             doInstallCargoArtifacts = false;
