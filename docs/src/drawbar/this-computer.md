@@ -25,10 +25,25 @@ kept on this computer, in drawbar's own data, never in the library folder.
 
 In the browser, your library is kept in the browser's own storage for
 drawbar.app, which no other site or app can see. It keeps your files, tags and
-unsaved edits from one visit to the next, but clearing the site's data in the
-browser deletes them, so export what you want to keep elsewhere. **Help ▸ About
-drawbar** shows how much space it takes, and whether the browser has promised to
-keep it; see [Help and About](help.md).
+unsaved edits from one visit to the next, but the browser can delete it, as
+[What is supported](../getting-started/support.md#the-library-in-the-browser)
+explains, and clearing the site's data deletes it too. drawbar says so once each
+visit, and hovering **This computer** shows what may delete it. **Help ▸ About
+drawbar** shows how much space it takes; see [Help and About](help.md).
+
+## Keeping a copy in the browser
+
+**File ▸ Save a copy of the library** downloads the whole library as one ZIP
+file, named for the day, such as `drawbar library 2026-10-30.zip`. It holds your
+files, folders and tags. Unsaved edits stay in the browser.
+
+To bring a copy back, choose **File ▸ Open a copy…** while the browser's library
+is empty: after the browser deleted it, or in another browser. drawbar opens
+only a copy it saved, and only into an empty library, so it never mixes a copy
+with files already there. A web app in the Dock or on the Home Screen keeps
+storage of its own, apart from Safari's, so save a copy in Safari and open it in
+the web app. In Chrome and Edge you can also unzip the copy and open the folder
+with **File ▸ Open library folder…**.
 
 ## Opening another folder
 
@@ -222,9 +237,12 @@ bring back any you deleted.
   moving is gone, drawbar asks whether to roll it back or leave it as is, and
   Undo no longer reaches the changes before it.
 - **An older drawbar.** A drawbar from before this version keeps its own tags,
-  unsaved edits and rescued slot contents in the `.drawbar` folder. This version
-  says so once and leaves them where they are, and an older drawbar that opens
-  this library sees its files without the tags this version keeps.
+  unsaved edits and rescued slot contents in the `.drawbar` folder. The first
+  time this version opens such a library where it can write, it takes in the
+  tags and where each file came from, once, and the activity log says for how
+  many files. It leaves the unsaved edits and rescued slot contents where they
+  are, and says so once. An older drawbar that opens this library sees its files
+  without the tags this version keeps.
   Unsaved edits an earlier drawbar kept on this computer are not read either, and
   the activity log says so once.
 - **A folder that stays.** Where a folder moves one file at a time, as in the

@@ -26,6 +26,7 @@
 //! the [`crate::workspace::Workspace`] into intents, and projects the library's view
 //! onto the workspace and the browser's tags.
 
+mod copy;
 mod counted;
 mod diff;
 #[cfg(any(target_arch = "wasm32", test))]
@@ -46,6 +47,7 @@ mod native;
 mod storage;
 mod unsaved;
 pub(crate) mod wire;
+mod zip;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{default_root, local_root, openable, sync_dir, Backend};
 
@@ -54,7 +56,7 @@ mod web;
 #[cfg(target_arch = "wasm32")]
 mod worker;
 #[cfg(target_arch = "wasm32")]
-pub use web::{default_root, permission, Backend, Picked, Root};
+pub use web::{copy_of, default_root, permission, Backend, Picked, Risk, Root};
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web::{remove_private, settle};
 #[cfg(target_arch = "wasm32")]
@@ -606,6 +608,10 @@ pub enum Cmd {
         files: Vec<(u64, LibPath, Option<Fingerprint>)>,
         room: u64,
     },
+    /// Open this copy of a library, as File ▸ Save a copy of the library saves one, into
+    /// the library, which must hold no files and must not have opened yet. Answered by
+    /// [`Event::Restored`].
+    Restore(#[serde(with = "wire::outside")] Outside),
 }
 
 impl Cmd {
@@ -621,7 +627,7 @@ impl Cmd {
             | Cmd::DiscardSlot(_)
             | Cmd::ReadSlot(_)
             | Cmd::Read { .. } => false,
-            Cmd::Intent(_) | Cmd::Undo | Cmd::Redo | Cmd::Settle { .. } => true,
+            Cmd::Intent(_) | Cmd::Undo | Cmd::Redo | Cmd::Settle { .. } | Cmd::Restore(_) => true,
         }
     }
 }
@@ -1113,6 +1119,14 @@ pub enum Event {
     Unemptied(String),
     /// This session's undo history began again, and reaches none of the changes before.
     Restarted,
+    /// How many files' tags and origins an older drawbar's index gave the library, or
+    /// why it gave none.
+    TookIn(Result<usize, String>),
+    /// How many of the library's files [`Cmd::Restore`] wrote, or why it wrote none.
+    Restored(Result<usize, String>),
+    /// The name a copy of the library was saved under and how many of the library's files
+    /// it holds, or why none was saved.
+    Copied(Result<(String, usize), String>),
     /// The edit [`Cmd::ReadSlot`] found kept of a slot's view, with the hash of the
     /// slot's bytes it was made over, or why it could not be read.
     SlotKept {
@@ -1135,6 +1149,9 @@ impl Event {
             Event::Moved { result: Err(_), .. } => one("move"),
             Event::Failed(_) => one("write"),
             Event::Unemptied(_) => one("trash"),
+            Event::TookIn(Err(_)) => one("take-in"),
+            Event::Restored(Err(_)) => one("restore"),
+            Event::Copied(Err(_)) => one("copy"),
             Event::Unkept(_)
             | Event::Drafted { kept: Err(_), .. }
             | Event::SlotDrafted { kept: Err(_), .. }
@@ -1154,6 +1171,9 @@ impl Event {
             | Event::SlotKept { kept: Ok(_), .. }
             | Event::Trimmed(_)
             | Event::Restarted
+            | Event::TookIn(Ok(_))
+            | Event::Restored(Ok(_))
+            | Event::Copied(Ok(_))
             | Event::Scanned(Ok(_))
             | Event::Committed { result: Ok(_), .. }
             | Event::Moved { result: Ok(()), .. } => Default::default(),

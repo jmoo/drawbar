@@ -24,6 +24,8 @@ cargo install drawbar
 - Unpack a Nord Sound Manager bundle into a folder, or export sounds from either
   side, with the pianos and samples they play, as one.
 - Keep a text note beside the sounds for the set list and the cues.
+- In any browser, save a copy of the library as one ZIP file, and open it again
+  in another browser or after the browser cleared its storage.
 - On the desktop, or in a browser that can open a folder, open any folder as the
   library, such as a Sample Editor project. Nothing in it changes until you
   change something, and you can undo what you change while it is open.

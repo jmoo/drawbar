@@ -158,6 +158,38 @@ the writer (see Writers). A file in the local root that is replaced, such as
 `<name>` is removed and `<name>.next` renamed to it. A reader takes `<name>`, or
 `<name>.next` when `<name>` is missing.
 
+## Compatibility
+
+`writers.2` is version 2 of this format. Builds of different versions read and
+write one library at once, as computers that sync a folder do, and an open page
+keeps running the build it loaded. Within version 2:
+
+1. **Frozen.** The line form and the seal marker; an entry's `prev`, `n`, `at`
+   and `kind`; ids as 32 hex digits; every array form (clock readings, `Ref`,
+   `Own`, `Forked`, certificates, `settled` pairs, `unknown` pairs, the rows of
+   `identities.json`); the names of every file and directory in Layout; the lock
+   names; and the limits on a line, a record and a file. Frozen too, since a
+   reader refuses what it does not know in them: the members of each record of a
+   snapshot's `state`, of an observed write, and of `head.json`, which is written
+   over in place and so keeps one length.
+2. **Additive.** Anywhere else, a new object member may appear. It is optional,
+   changes nothing about the members beside it, and a reader that does not know
+   it keeps it where Merging and Snapshots keep what they do not know. Data a
+   newer build adds to a snapshot's records goes in a new member of `state`.
+3. **New meaning is a new name.** A change of meaning, a required member, or a
+   new way to close a pending record is a new `kind`, `op`, `step` or `moves`
+   value; `outcome` keeps its three values, and only an `intent` naming the record
+   or a `settle` closes one. A reader keeps such an entry unknown, opens
+   read-only when its own writer's history holds an unknown kind or op, never
+   finishes a record it cannot decode, and never deletes a file it cannot read.
+4. **App values are the app's.** A value a reader cannot decode is shown
+   unreadable, kept and merged as any other.
+5. **Anything else is a new layout.** A library whose root holds `writers.<k>`
+   for a `k` past 2 opens read-only.
+6. **Fixtures hold it.** Every state under `tests/fixtures` reads to its oracle in
+   every later build, and every fixture of a newer version behaves as its README
+   says.
+
 ## Identifiers and clocks
 
 Every identifier is 128 bits written as 32 hexadecimal digits.

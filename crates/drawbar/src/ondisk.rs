@@ -33,7 +33,7 @@ pub use web::repaint_with;
 #[cfg(target_arch = "wasm32")]
 use web::Source;
 #[cfg(target_arch = "wasm32")]
-pub(crate) use web::{slice, Sliced};
+pub(crate) use web::{slice, sliced, Sliced};
 
 /// Where each stroke or zone's audio sits in the file.
 #[derive(Debug)]

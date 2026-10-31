@@ -4056,7 +4056,13 @@ pub(crate) fn hand_over(name: &str, blob: &web_sys::Blob) -> Result<(), wasm_bin
     anchor.set_href(&url);
     anchor.set_download(name);
     anchor.click();
-    web_sys::Url::revoke_object_url(&url)?;
+    // ⚠️ A browser may read the URL after the click returns, so it is let go of later.
+    let revoke = wasm_bindgen::closure::Closure::once_into_js(move || {
+        let _ = web_sys::Url::revoke_object_url(&url);
+    });
+    web_sys::window()
+        .ok_or_else(|| JsValue::from_str("no window"))?
+        .set_timeout_with_callback_and_timeout_and_arguments_0(revoke.unchecked_ref(), 60_000)?;
     Ok(())
 }
 

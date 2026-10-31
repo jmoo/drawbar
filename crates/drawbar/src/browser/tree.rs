@@ -1040,12 +1040,15 @@ impl Browser {
         // can have started from.
         self.drop_zone(ui, &drawn.response, Onto::Computer, acts);
         let triangle = on_triangle(&drawn);
-        let response = match (&place.note, place.label.is_empty()) {
-            (_, true) => drawn.response,
-            (None, false) => drawn.response.on_hover_text(&place.label),
-            (Some(note), false) => drawn
-                .response
-                .on_hover_text(format!("{}\n{note}", place.label)),
+        let said: Vec<&str> = [Some(&place.label), Some(&place.kept), place.note.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .filter(|line| !line.is_empty())
+            .collect();
+        let response = match said.is_empty() {
+            true => drawn.response,
+            false => drawn.response.on_hover_text(said.join("\n")),
         };
         if response.clicked() {
             match triangle {

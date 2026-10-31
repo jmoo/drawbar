@@ -39,6 +39,12 @@ pub enum Command {
     /// Switch to the recent library at this place in [`crate::folders::Folders::libraries`].
     Recent(usize),
     RevealLibrary,
+    /// Download a copy of the library, where it is in the browser.
+    #[cfg(target_arch = "wasm32")]
+    SaveCopy,
+    /// Open a copy of a library into the browser's own, while it holds no files.
+    #[cfg(target_arch = "wasm32")]
+    OpenCopy,
     Save,
     Revert,
     Export,
@@ -124,6 +130,10 @@ pub fn label(command: Command) -> &'static str {
         Command::Reconnect => "Reconnect library",
         Command::Recent(_) => "Recent library",
         Command::RevealLibrary => "Show the library folder",
+        #[cfg(target_arch = "wasm32")]
+        Command::SaveCopy => SAVE_COPY,
+        #[cfg(target_arch = "wasm32")]
+        Command::OpenCopy => "Open a copy…",
         Command::Save => "Save",
         Command::Revert => "Revert to saved",
         Command::Export => "Export…",
@@ -225,6 +235,10 @@ pub fn menus(platform: Platform) -> Vec<Menu> {
         Do(C::PickLibrary),
         Entry::Recent,
         Do(C::RevealLibrary),
+    ]);
+    #[cfg(target_arch = "wasm32")]
+    file.extend([Do(C::SaveCopy), Do(C::OpenCopy)]);
+    file.extend([
         Rule,
         Do(C::Save),
         Do(C::Revert),
@@ -450,6 +464,9 @@ const KEYED: [Command; 17] = [
 
 pub const OPEN_LIBRARY: &str = "Open library folder…";
 
+/// The item that downloads a copy of the library.
+pub const SAVE_COPY: &str = "Save a copy of the library";
+
 /// The title of [`Entry::Recent`]'s submenu.
 pub const RECENT: &str = "Open recent library";
 
@@ -537,6 +554,13 @@ impl DrawbarApp {
             Command::RevealLibrary => {
                 let place = self.browser.folders.place.as_ref();
                 place.and_then(|at| at.reveal.as_ref()).map(|_| plain)?
+            }
+            #[cfg(target_arch = "wasm32")]
+            Command::SaveCopy => self.store.as_ref().map(|_| plain)?,
+            #[cfg(target_arch = "wasm32")]
+            Command::OpenCopy => {
+                let store = self.store.as_ref()?;
+                (*store.root() == crate::store::Root::Private).then_some(plain)?
             }
             Command::AllFiles => check(self.browser.folders.all_files),
             Command::ReportProblem | Command::SendFeedback | Command::Privacy => plain,
@@ -669,6 +693,15 @@ impl DrawbarApp {
                     ctx.open_url(egui::OpenUrl::new_tab(url));
                 }
             }
+            #[cfg(target_arch = "wasm32")]
+            Command::SaveCopy => {
+                if let Some(store) = &mut self.store {
+                    self.log.say("Saving a copy of the library…");
+                    store.save_copy();
+                }
+            }
+            #[cfg(target_arch = "wasm32")]
+            Command::OpenCopy => self.open_copy(ctx),
             Command::AllFiles => {
                 let folders = &mut self.browser.folders;
                 folders.all_files = !folders.all_files;

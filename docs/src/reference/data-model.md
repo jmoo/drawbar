@@ -63,7 +63,9 @@ something to say, so a library of untouched files keeps nothing about them.
 toshokan binds each entity to its file by path. Where the file moved, it finds
 the file by its identity: a BLAKE3 hash of its length and bytes. A Nord file's
 identity reads only its header and its checksum, so a large piano library costs
-a small read. [Binding](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#binding)
+a small read. Which extensions read that way is fixed with the format, since a
+change would make every tagged file of that kind look changed outside drawbar: a
+Nord format added since is read whole. [Binding](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#binding)
 has the rules.
 
 The hidden folder is made at the first change, so a folder opened and looked at
@@ -175,8 +177,11 @@ a new one goes on, and Undo starts again.
 drawbar asks only once the change has stood unmoved for five seconds, since a
 drawbar in a browser tab may still be making it.
 
-A library opens read-only when its folder cannot be written, or when this
-writer's log holds entries a newer build wrote. It turns read-only until it is
+A library opens read-only when its folder cannot be written, when this writer's
+log holds an entry of a kind or with an operation a newer build added, or when
+the folder holds a newer layout of the hidden folder beside this one. What may
+change between versions without that, and what may not, is in
+[Compatibility](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#compatibility). It turns read-only until it is
 opened again when a change it began cannot be finished, as when another program
 put a file where the change puts one; opening it again tries once more. Another
 drawbar on the folder never makes it read-only. Changes in a read-only library
@@ -253,6 +258,16 @@ Other differences:
 - The first write asks the browser to keep the storage
   (`navigator.storage.persist()`). Where the browser gives the page no storage,
   the library lasts until the tab closes.
+- **Save a copy of the library** is a ZIP of stored entries: every file of the
+  folder, `.drawbar/library/` among them, but not `.drawbar/local/` or Chromium's
+  `.crswap` files. The page reads each file once for its CRC-32 while no command
+  of its tab runs, then hands the browser a Blob of the headers and the files'
+  snapshots; drawbar's own files go in as read, since toshokan appends to its
+  logs in place. **Open a copy…** runs in the worker before the library opens:
+  it refuses unless the folder holds no file outside `.drawbar/local/`, reads
+  the archive by position, writes each entry as it is, and takes back what it
+  wrote if any entry fails. The library then opens as a new writer over the
+  copied history, as it would over a restored backup.
 
 [Browsers](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#browsers)
 has what each browser can do.

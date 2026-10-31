@@ -97,8 +97,12 @@ impl Root {
             Root::Private => "private".to_string(),
             Root::Picked(picked) => format!("picked-{}", picked.id),
         };
-        RelPath::new(&format!("{}/local/{name}", super::keys::DIR))
-            .expect("a local root's path is a library path")
+        RelPath::new(&format!(
+            "{}/{}/{name}",
+            super::keys::DIR,
+            super::keys::LOCAL
+        ))
+        .expect("a local root's path is a library path")
     }
 
     /// The folder as toshokan's storage takes it.
@@ -110,15 +114,59 @@ impl Root {
     }
 }
 
+/// What may delete the browser's own library.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Risk {
+    /// The browser deletes a site's storage after seven days without a visit.
+    Unvisited,
+    /// The browser may clear its storage when space runs low, as it has not promised to
+    /// keep it.
+    Pressure,
+}
+
+/// Whether this browser deletes a site's storage after seven days without a visit, as
+/// Safari and other WebKit browsers do outside a web app in the Dock or on the Home
+/// Screen.
+// Reported by public documentation; not confirmed on hardware.
+fn deletes_unvisited() -> bool {
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    let agent = window.navigator().user_agent().unwrap_or_default();
+    let webkit = agent.contains("AppleWebKit")
+        && !["Chrome", "Chromium", "Android"]
+            .iter()
+            .any(|other| agent.contains(other));
+    let standalone = field(&window, "matchMedia")
+        .and_then(|query| query.dyn_into::<Function>().ok())
+        .and_then(|query| {
+            query
+                .call1(&window, &"(display-mode: standalone)".into())
+                .ok()
+        })
+        .and_then(|list| field(&list, "matches")?.as_bool())
+        .unwrap_or(false);
+    let home = field(&window.navigator(), "standalone").and_then(|on| on.as_bool());
+    webkit && !standalone && home != Some(true)
+}
+
 /// The library in the browser's own storage, which needs no one to find it.
 pub fn default_root() -> Option<Root> {
     Some(Root::Private)
 }
 
-/// Commands queued for the task that runs them.
+/// What the task that runs the library does, in the order it was asked.
+enum Job {
+    Run(Cmd),
+    /// Save a copy of the library, which the page does itself between commands, so no
+    /// command of this tab writes while it reads the files.
+    SaveCopy,
+}
+
+/// Jobs queued for the task that runs them.
 #[derive(Default)]
 struct Inbox {
-    cmds: VecDeque<Cmd>,
+    jobs: VecDeque<Job>,
     /// Resolves the promise the task waits on while the queue is empty.
     wake: Option<Function>,
     /// No command follows those queued; the task ends once they have run.
@@ -229,18 +277,33 @@ impl Backend {
         None
     }
 
+    /// What may delete the library, where it is the browser's own: `None` for a picked
+    /// folder, and until the browser says whether it keeps its storage.
+    pub fn risk(&self) -> Option<Risk> {
+        if self.root != Root::Private {
+            return None;
+        }
+        if deletes_unvisited() {
+            return Some(Risk::Unvisited);
+        }
+        (self.room.borrow().kept == Some(false)).then_some(Risk::Pressure)
+    }
+
     /// How much of the browser's storage drawbar takes, and whether it is kept. For a
     /// picked folder, which is not the browser's to keep, that is what drawbar keeps of
     /// it here: drafts and slot edits.
     pub fn room(&self) -> String {
+        let risk = self.risk();
         let room = self.room.borrow();
         let used = room
             .used
             .map(|(used, quota)| format!("{} of {} used", size(used), size(quota)));
-        let kept = room.kept.map(|kept| match kept {
-            true => "kept",
-            false => "may be cleared when space runs low",
-        });
+        let kept = match (risk, room.kept) {
+            (Some(Risk::Unvisited), _) => Some("deleted after seven days without a visit"),
+            (_, Some(true)) => Some("kept"),
+            (_, Some(false)) => Some("may be cleared when space runs low"),
+            (_, None) => None,
+        };
         let said = [used.as_deref(), kept].into_iter().flatten();
         let said = said.collect::<Vec<_>>().join(", ");
         match &self.root {
@@ -254,8 +317,15 @@ impl Backend {
     pub fn send(&mut self, cmd: Cmd) {
         let mut inbox = self.inbox.borrow_mut();
         inbox.writing += usize::from(cmd.writes());
-        inbox.cmds.push_back(cmd);
+        inbox.jobs.push_back(Job::Run(cmd));
         drop(inbox);
+        Inbox::wake(&self.inbox);
+    }
+
+    /// Save a copy of the library as a ZIP the browser downloads, once the commands sent
+    /// before have run. Answered by [`Event::Copied`].
+    pub fn save_copy(&mut self) {
+        self.inbox.borrow_mut().jobs.push_back(Job::SaveCopy);
         Inbox::wake(&self.inbox);
     }
 
@@ -380,9 +450,9 @@ async fn drive(
         let _ = hints.watch(&root.kept()).await;
     }
     loop {
-        let cmd = match &mut hints {
+        let job = match &mut hints {
             Some(hints) => match either(next(&inbox), hints.next()).await {
-                Either::Left(cmd) => cmd,
+                Either::Left(job) => job,
                 Either::Right(hint) => {
                     heard.borrow_mut().hints.push_back(hint);
                     ctx.request_repaint();
@@ -391,8 +461,18 @@ async fn drive(
             },
             None => next(&inbox).await,
         };
-        let Some(cmd) = cmd else {
-            break;
+        let cmd = match job {
+            None => break,
+            Some(Job::Run(cmd)) => cmd,
+            Some(Job::SaveCopy) => {
+                let copied = match &folder {
+                    Ok(folder) => save_copy(folder).await,
+                    Err(why) => Err(why.clone()),
+                };
+                heard.borrow_mut().events.push_back(Event::Copied(copied));
+                ctx.request_repaint();
+                continue;
+            }
         };
         let writes = cmd.writes();
         if let Ok(folder) = &folder {
@@ -490,14 +570,14 @@ fn moved(answers: &[Event]) -> Vec<(LibPath, LibPath)> {
         .collect()
 }
 
-/// The next command, waiting for one while there is none, or `None` once the backend
-/// is finished and none is left.
-async fn next(inbox: &Rc<RefCell<Inbox>>) -> Option<Cmd> {
+/// The next job, waiting for one while there is none, or `None` once the backend is
+/// finished and none is left.
+async fn next(inbox: &Rc<RefCell<Inbox>>) -> Option<Job> {
     loop {
         {
             let mut held = inbox.borrow_mut();
-            if let Some(cmd) = held.cmds.pop_front() {
-                return Some(cmd);
+            if let Some(job) = held.jobs.pop_front() {
+                return Some(job);
             }
             if held.closed {
                 return None;
@@ -579,6 +659,148 @@ async fn entries(dir: &FileSystemDirectoryHandle) -> io::Result<Vec<(String, Fil
             found.push((name, handle));
         }
     }
+}
+
+/// The most bytes of one of drawbar's own files a copy of the library holds as it read
+/// them, rather than as the browser's snapshot of the file.
+const HELD: u64 = 16 << 20;
+
+/// Save a copy of the library in `folder` as a ZIP the browser downloads, and answer the
+/// name it is saved under and how many of the library's files it holds.
+async fn save_copy(folder: &Folder) -> Result<(String, usize), String> {
+    let (blob, files) = copy_blob(folder).await?;
+    let today = js_sys::Date::new_0();
+    let name = super::copy::file_name(
+        today.get_full_year(),
+        today.get_month() + 1,
+        today.get_date(),
+    );
+    crate::workspace::hand_over(&name, &blob).map_err(|e| describe(&e))?;
+    Ok((name, files))
+}
+
+/// A copy of the library in the directory `dir` of the private file system, as File ▸
+/// Save a copy of the library saves one, without the download.
+#[doc(hidden)]
+pub async fn copy_of(dir: &RelPath) -> Result<web_sys::Blob, String> {
+    let root = toshokan::web::private_dir(dir)
+        .await
+        .map_err(|e| e.to_string())?;
+    let folder = Folder {
+        root,
+        dirs: RefCell::default(),
+        resting: RefCell::default(),
+    };
+    Ok(copy_blob(&folder).await?.0)
+}
+
+/// A copy of the library in `folder`, as a ZIP, and how many of the library's files it
+/// holds. Each file is read once for its CRC-32. The archive is a Blob of the headers and
+/// the browser's snapshots of the files, so no file is held in this tab.
+///
+/// ⚠️ toshokan appends to its logs in place, after which a snapshot taken before no longer
+/// reads, so drawbar's own files go in as they were read.
+async fn copy_blob(folder: &Folder) -> Result<(web_sys::Blob, usize), String> {
+    use super::zip::{self, Piece};
+
+    let found = tree(&folder.root)
+        .await
+        .map_err(|e| format!("listing the library: {e}"))?;
+    let mut entries = Vec::with_capacity(found.len());
+    let mut data = Vec::with_capacity(found.len());
+    let mut buffer = vec![0; CHUNK];
+    for (path, found) in found {
+        let Some(file) = found else {
+            entries.push(zip::Entry {
+                name: format!("{path}/"),
+                len: 0,
+                crc: 0,
+                modified: None,
+            });
+            data.push(js_sys::Array::new());
+            continue;
+        };
+        let len = file.size() as u64;
+        let held = super::names::inside(&path, super::keys::DIR) && len <= HELD;
+        let parts = js_sys::Array::new();
+        let mut crc = nord_format::crc::Crc32Stream::new();
+        let mut at = 0;
+        while at < len {
+            let end = len.min(at + CHUNK as u64);
+            let read = crate::ondisk::sliced(&file, at..end)
+                .await
+                .map_err(|e| format!("reading {path}: {e}"))?;
+            let bytes = &mut buffer[..(end - at) as usize];
+            read.copy_to(bytes);
+            crc.update(bytes);
+            if held {
+                parts.push(&read);
+            }
+            at = end;
+        }
+        if !held {
+            parts.push(&file);
+        }
+        let modified = file.last_modified();
+        let zone = js_sys::Date::new(&modified.into()).get_timezone_offset() * 60_000.0;
+        let modified = modified - zone;
+        entries.push(zip::Entry {
+            name: path,
+            len,
+            crc: crc.value(),
+            modified: (modified.is_finite() && modified >= 0.0).then_some(modified as u64),
+        });
+        data.push(parts);
+    }
+    let pieces = zip::layout(&entries).ok_or("it is too large for one archive")?;
+    let parts = js_sys::Array::new();
+    for piece in pieces {
+        match piece {
+            Piece::Bytes(bytes) => {
+                parts.push(&js_sys::Uint8Array::from(&bytes[..]));
+            }
+            Piece::Data(at) => data[at].for_each(&mut |part, _, _| {
+                parts.push(&part);
+            }),
+        }
+    }
+    let options = web_sys::BlobPropertyBag::new();
+    options.set_type("application/zip");
+    let blob = web_sys::Blob::new_with_blob_sequence_and_options(&parts, &options)
+        .map_err(|e| describe(&e))?;
+    let own = |name: &str| super::names::inside(name, super::keys::DIR);
+    let files = entries
+        .iter()
+        .filter(|entry| !entry.name.ends_with('/') && !own(&entry.name));
+    Ok((blob, files.count()))
+}
+
+/// What a copy of the library under `root` holds, with a snapshot of each file: see
+/// [`super::copy::arranged`].
+async fn tree(root: &FileSystemDirectoryHandle) -> io::Result<Vec<(String, Option<File>)>> {
+    let mut found = Vec::new();
+    let mut waiting = vec![(root.clone(), String::new())];
+    while let Some((dir, at)) = waiting.pop() {
+        for (name, handle) in entries(&dir).await? {
+            let path = match at.is_empty() {
+                true => name,
+                false => format!("{at}/{name}"),
+            };
+            if !super::copy::copied(&path) {
+                continue;
+            }
+            match handle.kind() {
+                FileSystemHandleKind::File => {
+                    found.push((path, Some(snapshot(handle.unchecked_ref()).await?)));
+                }
+                _ => {
+                    waiting.push((handle.clone().unchecked_into(), path.clone()));
+                    found.push((path, None));
+                }
+            }
+        }
+    }
+    Ok(super::copy::arranged(found))
 }
 
 /// Delete the file at `path` of the browser's private storage, after this returns.

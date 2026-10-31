@@ -782,3 +782,30 @@ pub(crate) fn holds<'a>(layout: &Layout, writer: WriterId, head: Own) -> Flow<'a
         })
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    /// `head.json` is written over in place, so a shorter record would leave the end of
+    /// a longer one behind it.
+    #[test]
+    fn every_live_head_record_has_one_length_and_the_retired_one_is_longer() {
+        let len = |n: u128, retired| {
+            let record = HeadRecord {
+                writer: WriterId::from_u128(n),
+                head: EntryHash::from_u128(n),
+                retired,
+            };
+            serde_json::to_vec(&record).unwrap().len()
+        };
+        let live: BTreeSet<usize> = [0, 1, 0x1234, u128::MAX]
+            .into_iter()
+            .map(|n| len(n, false))
+            .collect();
+        assert_eq!(live.len(), 1, "{live:?}");
+        assert!(len(0, true) > len(0, false));
+    }
+}

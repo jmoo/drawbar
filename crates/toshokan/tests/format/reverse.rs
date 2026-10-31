@@ -412,8 +412,9 @@ fn identities_rows_with_an_element_this_build_does_not_know_are_ignored_and_read
 }
 
 #[test]
-fn a_later_layouts_writers_directory_is_not_read() {
-    let expected = oracle("local", "view.oracle.json");
+fn a_later_layouts_writers_directory_opens_the_library_read_only() {
+    let mut expected = oracle("local", "view.oracle.json");
+    expected["mode"] = "read-only: a newer version keeps this library in writers.3".into();
     let machine = load_case("local", "writers-3");
     assert_facts("writers-3", &expected, &facts(&machine));
 }

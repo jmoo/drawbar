@@ -105,7 +105,8 @@ pub async fn remove<F: Fs>(fs: &F, root: Root, path: &RelPath) -> io::Result<()>
     }
 }
 
-async fn sync<F: Fs>(fs: &F, root: Root, path: &RelPath) -> io::Result<()> {
+/// Make what was written at `path` durable, where the storage can.
+pub async fn sync<F: Fs>(fs: &F, root: Root, path: &RelPath) -> io::Result<()> {
     if !fs.capabilities(root).fsync {
         return Ok(());
     }

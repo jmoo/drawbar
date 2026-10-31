@@ -3,9 +3,9 @@
 ## In the browser
 
 Open [drawbar.app](https://drawbar.app/). Nothing to install. Your library is
-kept in the browser's storage for the site until you clear it; [Your
-files](../drawbar/this-computer.md#where-your-library-lives) says where it lives
-and how to open a folder on your computer instead.
+kept in the browser's storage for the site, which the browser can delete; [Your
+files](../drawbar/this-computer.md#where-your-library-lives) says how to keep a
+copy, and how to open a folder on your computer instead.
 
 Only Chrome and Edge can connect to an instrument. Files work in any browser.
 Which browsers can play the key maps from a MIDI controller is on

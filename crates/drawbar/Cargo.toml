@@ -56,6 +56,9 @@ nord-format = { path = "../nord-format", version = "0.8.0", features = [
 # Read drawbar's own source, to find every character its text needs a glyph for.
 proc-macro2 = { version = "1", features = ["span-locations"] }
 syn = { version = "2", default-features = false }
+# An independent reader and writer for the copies of a library drawbar saves and opens.
+# nord-format's `bundle` already builds it.
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 # The browser benchmark, run only when named.
 [[test]]

@@ -6407,6 +6407,96 @@ fn an_older_drawbars_files_are_found_at_each_open_and_left_alone() {
     assert_eq!(root.read(".drawbar/tmp/rescued-1.ne5p"), b"slot");
 }
 
+/// The tags and origins an older drawbar's index kept are taken into the library once,
+/// for the files still there: a tag taken off afterwards stays off, and another
+/// install of drawbar does not take them in again.
+#[test]
+fn an_older_drawbars_tags_and_origins_are_taken_in_once() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    fs::write(root.at("Pad.ne5p"), with_gain(&program, "12")).unwrap();
+    fs::create_dir_all(root.at(".drawbar")).unwrap();
+    // Version 1, in the shape the drawbar before the store wrote it.
+    let index = r#"(
+    version: 1,
+    next_id: 4,
+    tags: {
+        1: "Live",
+        2: "Unworn",
+    },
+    assets: {
+        1: (
+            path: Some("Grand.ne5p"),
+            tags: [
+                1,
+            ],
+            origin: Device(
+                class: 4,
+                bank: 1,
+                slot: 7,
+            ),
+        ),
+        2: (
+            path: Some("Pad.ne5p"),
+            tags: [
+                1,
+            ],
+        ),
+        3: (
+            path: Some("Gone.ne5p"),
+            tags: [
+                1,
+            ],
+        ),
+    },
+)"#;
+    fs::write(root.at(".drawbar/library.ron"), index).unwrap();
+
+    let mut session = Session::listed(&root);
+    session.settle();
+    let (grand, pad) = (session.named("Grand.ne5p"), session.named("Pad.ne5p"));
+    assert_eq!(session.tag_names(), ["Live", "Unworn"]);
+    assert_eq!(session.worn(grand), ["Live"]);
+    assert_eq!(session.worn(pad), ["Live"]);
+    let at = Location { bank: 1, slot: 7 };
+    let origin = &session.bench.workspace.get(grand).unwrap().origin;
+    assert!(
+        matches!(origin, Origin::Device { class: ObjectClass::Program, at: held } if *held == at),
+        "the slot it came off"
+    );
+    assert_eq!(
+        session.said("took in the tags and origins an older drawbar kept for 2 files"),
+        1
+    );
+    assert_eq!(
+        session.store.take_older(),
+        [],
+        "the index is not told of as unread"
+    );
+    let tag = session.bench.browser.tags.all()[0].id;
+    session.bench.act(vec![crate::browser::Act::Untag {
+        ids: vec![pad],
+        tag,
+    }]);
+    session.decided();
+    session.close();
+
+    let again = Session::listed(&root);
+    assert!(
+        again.worn(again.named("Pad.ne5p")).is_empty(),
+        "taken in once"
+    );
+    again.close();
+    let elsewhere = Temp::new();
+    let other = Session::elsewhere(&root, &elsewhere);
+    assert!(
+        other.worn(other.named("Pad.ne5p")).is_empty(),
+        "by one install"
+    );
+    assert_eq!(other.said("took in the tags"), 0);
+}
+
 /// A dismissal is final: undo after it takes back the change before it, and the run
 /// stays dismissed.
 #[test]

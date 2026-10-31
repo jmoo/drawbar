@@ -58,6 +58,8 @@ pub struct Where {
     pub name: Option<String>,
     /// Where it is, as the user would look for it.
     pub label: String,
+    /// What the browser keeps of it, and what may delete it. Empty on the desktop.
+    pub kept: String,
     /// A URL that shows the folder in the system's file manager.
     pub reveal: Option<String>,
     /// What state it is in, when that is not simply open.

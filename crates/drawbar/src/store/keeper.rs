@@ -15,9 +15,9 @@ use toshokan::io::{IoError, Kind, Range, Root};
 use toshokan::log::Settlement;
 use toshokan::plan::FactChange;
 use toshokan::report::{Item, ItemChange, ItemKind, Mode, Refreshed, Rekey, Start, What};
-use toshokan::{EntryHash, Env, Error, Expect, Nonce, RelPath, View};
+use toshokan::{EntryHash, Env, Error, Expect, Field, Nonce, RelPath, View};
 
-use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES};
+use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES, TAKEN_IN};
 use super::shown::Change;
 use super::storage::{self, CHUNK};
 use super::unsaved::{self, Base, Of};
@@ -79,6 +79,8 @@ pub struct Keeper<F> {
     writer: Option<toshokan::WriterId>,
     /// Whether the app was told the trash could not be emptied.
     told_unemptied: bool,
+    /// Whether this session looked for an older drawbar's index to take in.
+    looked_for_older: bool,
 }
 
 impl<F: Fs> Keeper<F> {
@@ -97,6 +99,7 @@ impl<F: Fs> Keeper<F> {
             told_read_only: false,
             writer: None,
             told_unemptied: false,
+            looked_for_older: false,
         }
     }
 
@@ -126,7 +129,7 @@ impl<F: Fs> Keeper<F> {
                 answer(Event::Opened(opened));
             }
             Cmd::Rescan | Cmd::Refresh => {
-                let scanned = self.scanned(matches!(cmd, Cmd::Rescan)).await;
+                let scanned = self.scanned(matches!(cmd, Cmd::Rescan), answer).await;
                 // A history that forked is said with the scan's answer.
                 let forked = scanned.as_ref().is_ok_and(|viewed| viewed.retired);
                 if self.restarted() && !forked {
@@ -194,6 +197,13 @@ impl<F: Fs> Keeper<F> {
                 answer(Event::SlotKept { slot, kept });
             }
             Cmd::Read { .. } => unreachable!("the backend reads files itself"),
+            Cmd::Restore(from) => {
+                let restored = match &self.unopened {
+                    Some((fs, _)) => super::copy::restore(fs, &from).await,
+                    None => Err("the library was already open".to_string()),
+                };
+                answer(Event::Restored(restored));
+            }
         }
     }
 
@@ -486,7 +496,10 @@ impl<F: Fs> Keeper<F> {
                 Err(Unwritable::Unfinished(read_only(why)))
             }
             Mode::ReadOnly(
-                why @ (Why::NewerOwnHistory { .. } | Why::FolderNotWritable | Why::ClockExhausted),
+                why @ (Why::NewerOwnHistory { .. }
+                | Why::NewerLayout { .. }
+                | Why::FolderNotWritable
+                | Why::ClockExhausted),
             ) => Err(Unwritable::ReadOnly(read_only(why))),
         };
         self.told_read_only = writable.is_err();
@@ -522,7 +535,11 @@ impl<F: Fs> Keeper<F> {
 
     /// Read what other writers logged since, and scan every file where `whole`, or else
     /// only the files their entries moved.
-    async fn scanned(&mut self, whole: bool) -> Result<Viewed, String> {
+    async fn scanned(
+        &mut self,
+        whole: bool,
+        answer: &mut impl FnMut(Event),
+    ) -> Result<Viewed, String> {
         let library = self.library.as_mut().ok_or("the library is not open")?;
         let refreshed = match whole {
             true => library.rescan().await,
@@ -552,6 +569,12 @@ impl<F: Fs> Keeper<F> {
                     orphan.ours = false;
                     refreshed.orphaned.push(orphan);
                 }
+            }
+        }
+        // Once a scan has listed every file, as taking in binds them.
+        if whole && !std::mem::replace(&mut self.looked_for_older, true) {
+            if let Some(took) = take_in_older(library).await {
+                answer(Event::TookIn(took));
             }
         }
         Ok(viewed(library, &mut self.shown, refreshed, unfinishable))
@@ -813,6 +836,77 @@ async fn facts<'a, F: Fs + 'a>(
     let view = library.view();
     let built = build(library.intent(label), &view)?;
     built.commit().await.map_err(|e| told(&e))
+}
+
+/// Take into a writable `library`, once, the tags and origins an older drawbar's index
+/// kept for the files it lists, and the tags it made: how many files took any, or why
+/// none did. `None` where there is none to take in.
+async fn take_in_older<F: Fs>(library: &mut Library<F>) -> Option<Result<usize, String>> {
+    if !matches!(library.mode(), Mode::Writable) {
+        return None;
+    }
+    let index = match super::older::index(library.fs()).await {
+        Ok(index) => index?,
+        Err(e) => return Some(Err(format!("reading an older drawbar's index: {e}"))),
+    };
+    if !library.view().find(TAKEN_IN, &index.hash).is_empty() {
+        return None;
+    }
+    let mut took = 0;
+    let committed = facts(library, "Take in older tags", |mut built, view| {
+        for (path, (tags, came)) in &index.files {
+            let Ok(at) = RelPath::new(path) else {
+                continue;
+            };
+            if let Some(entity) = view.at(&at) {
+                let id = entity.id();
+                for tag in tags {
+                    built = built.add(id, TAGS, tag.clone());
+                }
+                if let (Some(came), Field::Unset) = (came, entity.get(ORIGIN)) {
+                    built = built.set(id, ORIGIN, *came);
+                }
+            } else if let Some(listed) = view.listed(&at) {
+                let expect = Expect::Listed {
+                    len: listed.len,
+                    modified: listed.modified,
+                };
+                built = built
+                    .create(|e| {
+                        e.adopt(&at, expect);
+                        for tag in tags {
+                            e.add(TAGS, tag.clone());
+                        }
+                        if let Some(came) = came {
+                            e.set(ORIGIN, *came);
+                        }
+                    })
+                    .0;
+            } else {
+                continue;
+            }
+            took += 1;
+        }
+        let names = index.tags.iter().cloned();
+        let list = view.with(TAG_NAMES).into_iter().min();
+        Ok(match list {
+            Some(list) => names
+                .fold(built, |built, name| built.add(list, TAG_NAMES, name))
+                .add(list, TAKEN_IN, index.hash.clone()),
+            None => {
+                built
+                    .create(|list| {
+                        for name in names {
+                            list.add(TAG_NAMES, name);
+                        }
+                        list.add(TAKEN_IN, index.hash.clone());
+                    })
+                    .0
+            }
+        })
+    })
+    .await;
+    Some(committed.map(|_| took))
 }
 
 /// Add the tag `name` to the library's list of tags.
@@ -1861,6 +1955,9 @@ fn read_only(why: &Why) -> String {
         Why::NewerOwnHistory { .. } => {
             "a newer drawbar changed it from this computer; update drawbar to change it".to_string()
         }
+        Why::NewerLayout { .. } => {
+            "a newer drawbar keeps it in a newer way; update drawbar to change it".to_string()
+        }
         Why::FolderNotWritable => "the library folder cannot be written".to_string(),
         Why::ClockExhausted => {
             "this computer's clock reads a time drawbar cannot record".to_string()
@@ -2187,6 +2284,103 @@ mod tests {
         let view = keeper.library.as_ref().unwrap().view();
         let file = view.entity(entity).unwrap().file().unwrap();
         assert_eq!(file.state, toshokan::FileState::InSync);
+    }
+
+    /// The keeper of the library in `root`, not opened yet.
+    fn unopened(root: &Temp) -> Keeper {
+        native::keeper(
+            &root.0,
+            &root.local(),
+            Arc::default(),
+            Box::new(SystemClock),
+        )
+    }
+
+    /// A copy of the library in `from`, as File ▸ Save a copy of the library saves it,
+    /// in a folder of its own.
+    fn saved(from: &Temp) -> (Temp, std::path::PathBuf) {
+        let saved = Temp::new();
+        fs::write(saved.at("copy.zip"), super::super::copy::saved(&from.0)).unwrap();
+        let at = saved.at("copy.zip");
+        (saved, at)
+    }
+
+    #[test]
+    fn a_copy_opened_into_an_empty_library_brings_its_files_and_their_tags() {
+        let from = Temp::new();
+        fs::create_dir(from.at("Set")).unwrap();
+        fs::write(from.at("Set/Grand.ne5p"), b"grand").unwrap();
+        let mut keeper = keeper(&from);
+        keeper.run_one(Cmd::Intent(Intent::Tag {
+            files: vec![Key::File(path("Set/Grand.ne5p"))],
+            name: "Live".into(),
+            make: false,
+        }));
+        nord_usb::block_on(keeper.close());
+        let (_saved, copy) = saved(&from);
+
+        let to = Temp::new();
+        let mut keeper = unopened(&to);
+        let restored = keeper.run_one(Cmd::Restore(copy));
+        assert!(
+            matches!(restored[..], [Event::Restored(Ok(1))]),
+            "{restored:?}"
+        );
+        let opened = keeper.run_one(Cmd::Open);
+        assert!(matches!(opened[..], [Event::Opened(Ok(_))]), "{opened:?}");
+        keeper.run_one(Cmd::Rescan);
+        assert_eq!(to.read("Set/Grand.ne5p"), b"grand");
+        let view = keeper.library.as_ref().unwrap().view();
+        let entity = view.entities()[0].id();
+        let worn = view.entity(entity).unwrap().members(TAGS).values;
+        assert_eq!(worn.into_iter().collect::<Vec<_>>(), ["Live"]);
+    }
+
+    #[test]
+    fn a_copy_is_not_opened_into_a_library_that_holds_files() {
+        let from = Temp::new();
+        fs::write(from.at("a.ne5p"), b"a").unwrap();
+        let (_saved, copy) = saved(&from);
+        let to = Temp::new();
+        fs::write(to.at("b.ne5p"), b"b").unwrap();
+        let answers = unopened(&to).run_one(Cmd::Restore(copy));
+        let [Event::Restored(Err(why))] = &answers[..] else {
+            panic!("{answers:?}")
+        };
+        assert!(why.contains("already holds files"), "{why}");
+        assert_eq!(to.names(""), ["b.ne5p"]);
+    }
+
+    #[test]
+    fn a_damaged_copy_takes_back_what_it_wrote() {
+        let from = Temp::new();
+        fs::write(from.at("a.ne5p"), b"first").unwrap();
+        fs::write(from.at("b.ne5p"), b"second").unwrap();
+        let (saved, copy) = saved(&from);
+        let mut bytes = fs::read(&copy).unwrap();
+        let at = bytes.windows(6).position(|run| run == b"second").unwrap();
+        bytes[at] ^= 1;
+        fs::write(&copy, bytes).unwrap();
+        let to = Temp::new();
+        let answers = unopened(&to).run_one(Cmd::Restore(copy));
+        let [Event::Restored(Err(why))] = &answers[..] else {
+            panic!("{answers:?}")
+        };
+        assert!(why.contains("damaged"), "{why}");
+        assert!(to.names("").is_empty(), "{:?}", to.names(""));
+        drop(saved);
+    }
+
+    #[test]
+    fn a_copy_is_not_opened_into_a_library_already_open() {
+        let from = Temp::new();
+        let (_saved, copy) = saved(&from);
+        let to = Temp::new();
+        let answers = keeper(&to).run_one(Cmd::Restore(copy));
+        assert!(
+            matches!(&answers[..], [Event::Restored(Err(_))]),
+            "{answers:?}"
+        );
     }
 
     /// A scan leaves out every name that starts with a dot, as drawbar never lists one:
