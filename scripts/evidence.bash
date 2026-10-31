@@ -92,7 +92,7 @@ full)
   mapfile -t checks < <(nix eval --raw "$repo#checks.$system" --apply \
     'checks: builtins.concatStringsSep "\n" (builtins.filter (name: name != "toshokan-spec") (builtins.attrNames checks))')
   part nix nix_build "${checks[@]/#/$repo#checks.$system.}" "$repo#nord.all" \
-    ${linux:+"$repo#drawbar-web-tests" "$repo#toshokan-web"} ${linux_x86:+"$repo#toshokan-power-loss"}
+    ${linux:+"$repo#drawbar-web-tests" "$repo#toshokan-web" "$repo#toshokan-browser-crash"} ${linux_x86:+"$repo#toshokan-power-loss"}
   sweep=$(sweep_binary) || {
     wait
     exit 1
