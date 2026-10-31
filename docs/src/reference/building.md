@@ -18,11 +18,23 @@ layout of `nix build .#site`, with the app taken from the latest `drawbar-v*` ta
 ## Checks
 
 `nix flake check` runs the formatting check, Clippy and rustdoc with warnings
-denied, and the tests of `scripts/bump.bash`. `nix build .#nord.all` builds every
-crate with its tests, the cross targets, the browser build and this guide. CI runs
-both. `nix build .#<crate>` builds and tests one crate. `nix fmt` formats
-everything. [Testing](testing.md) describes the suites, and
-[Contributing](contributing.md) the house rules.
+denied, and the tests of `scripts/bump.bash` and the telemetry collector.
+`nix build .#nord.tests` runs the workspace tests and CLI checks together, using
+optimized code without full link-time optimization. `nix build .#nord.packages`
+builds each crate's shipping package on its own features, without its tests. CI
+runs both on Linux and macOS, runs the tests and CLI checks on Windows, and builds
+the production browser bundle and this guide with `nix build .#site`. In-repository pull requests also run the private corpus tests.
+
+On Linux, `nix build .#nord.browser-tests` runs each crate's declared browser
+suites in headless Chromium and Firefox. Declare their Cargo test names in
+`package.metadata.nix.browserTests`; `testFeatures` supplies their features.
+A crate without browser suites needs no declaration.
+
+`nix build .#<crate>` builds and tests one crate with the shipping profile.
+`nix build .#nord.all` adds every cross target, the browser bundle and this guide.
+Cross targets remain available for local checks. `nix fmt` formats everything.
+[Testing](testing.md) describes the suites, and [Contributing](contributing.md)
+the house rules.
 
 ## Generated files
 

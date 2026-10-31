@@ -94,8 +94,14 @@ the last test checks that every class holds what it held when the run started.
 
 ## Everything at once
 
-`nix flake check` and `nix build .#nord.all` run what CI runs. See
-[Building from source](building.md).
+`nix flake check` and `nix build .#nord.tests .#nord.packages .#site` run the
+public CI gates locally. On Linux, add `.#nord.browser-tests` for declared browser
+suites. See [Building from source](building.md).
+
+From `crates/`, `nix develop -c bash ../scripts/test.bash` runs the same native
+suite without a sandbox. It reads each crate's `testFeatures` from its manifest.
+The `release-tests` profile keeps optimization enabled and omits full link-time
+optimization; shipped packages keep their shipping profiles.
 
 `nix build .#nord.all-corpus` runs every suite against the pinned private corpus,
 and `.#nord.<crate>-corpus` runs one crate's. `.#nord.all-corpus-full` uses the

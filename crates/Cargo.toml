@@ -20,6 +20,10 @@ repository = "https://github.com/jmoo/drawbar"
 lto = true
 strip = true
 
+[profile.release-tests]
+inherits = "release"
+lto = false
+
 # The size-optimized profile for the wasm package.
 [profile.web]
 codegen-units = 1

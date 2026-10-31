@@ -64,6 +64,14 @@
                     touch "$out"
                   '';
               clippy = pkgs.nord.clippy;
+              # CI's Windows job installs its compiler through rustup.
+              rustc-pin = pkgs.runCommand "check-rustc-pin" { } ''
+                grep -q '^ *RUST_VERSION: ${pkgs.rustc.version}$' ${./.github/workflows/ci.yml} || {
+                  echo "ci.yml's RUST_VERSION differs from nixpkgs' rustc ${pkgs.rustc.version}" >&2
+                  exit 1
+                }
+                touch "$out"
+              '';
               rustdoc = pkgs.nord.rustdoc;
               telemetry =
                 pkgs.runCommand "check-telemetry"
