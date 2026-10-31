@@ -34,8 +34,8 @@ pub fn copied(path: &str) -> bool {
     !own(path) && !path.ends_with(".crswap") && key(path) != key(OPENING)
 }
 
-/// How many windows of an install [`hold_window`] tells apart. A window past them holds
-/// none, and a copy opens beside it only once every other window has closed.
+/// How many windows of an install may have one library open, each holding a lock of
+/// its own that [`hold_window`] takes.
 const WINDOWS: usize = 16;
 
 /// The lock, in an install's own state, that a window holds the `n`th of.
@@ -44,17 +44,26 @@ fn window(n: usize) -> RelPath {
 }
 
 /// Take one of the locks a window holds while it has the library open, by which a copy
-/// opens only into a library no other window has open. The browser lets a window's locks
-/// go when the window closes. ⚠️ A window takes it before it reads [`OPENING`], so a copy
+/// opens only into a library no other window has open, or say why none was taken: every
+/// one is held, or a lock failed. The browser lets a window's locks go when the window
+/// closes. ⚠️ A window takes it before it reads [`OPENING`] or writes anything, so a copy
 /// that makes [`OPENING`] stand and then finds no lock held writes alone.
-pub async fn hold_window<F: Fs>(fs: &F) -> Result<Option<RelPath>, IoError> {
+pub async fn hold_window<F: Fs>(fs: &F) -> Result<RelPath, String> {
     for name in (0..WINDOWS).map(window) {
         let lock = Io::Lock { name: name.clone() };
-        if let Reply::Lock(Lock::Acquired) = fs.perform(lock).await? {
-            return Ok(Some(name));
+        match fs.perform(lock).await {
+            Ok(Reply::Lock(Lock::Acquired)) => return Ok(name),
+            Ok(_) => {}
+            Err(e) => {
+                let why = storage::failed(e);
+                return Err(format!("taking this window's hold on the library: {why}"));
+            }
         }
     }
-    Ok(None)
+    Err(format!(
+        "drawbar has the library open in {WINDOWS} tabs or windows already: close one, \
+         then open the library again"
+    ))
 }
 
 /// Whether another window has the library open, by the locks [`hold_window`] takes.
@@ -538,6 +547,29 @@ pub(super) fn saved(folder: &std::path::Path) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each window of an install holds a lock of its own while it has the library open,
+    /// and one past them all opens nothing until another lets its lock go.
+    #[test]
+    fn a_window_past_every_lock_held_is_refused_until_one_is_let_go() {
+        let disk = toshokan::MemDisk::new();
+        let windows: Vec<toshokan::MemDisk> = (0..WINDOWS).map(|_| disk.process()).collect();
+        let held: BTreeSet<RelPath> = windows
+            .iter()
+            .map(|window| nord_usb::block_on(hold_window(window)).expect("a lock"))
+            .collect();
+        assert_eq!(held.len(), WINDOWS, "each window holds its own");
+        let last = disk.process();
+        let why = nord_usb::block_on(hold_window(&last)).expect_err("every lock is held");
+        assert!(why.contains("16 tabs or windows"), "{why}");
+        let freed = window(3);
+        windows[3]
+            .perform(Io::Unlock {
+                name: freed.clone(),
+            })
+            .unwrap();
+        assert_eq!(nord_usb::block_on(hold_window(&last)), Ok(freed));
+    }
 
     fn stored(name: &str, at: u64, len: u64) -> Stored {
         Stored {

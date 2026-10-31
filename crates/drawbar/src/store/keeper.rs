@@ -469,7 +469,7 @@ impl<F: Fs> Keeper<F> {
 
     async fn open(&mut self) -> Result<Opened, String> {
         let (fs, env) = self.unopened.take().ok_or("the library opened before")?;
-        self.window = super::copy::hold_window(&fs).await.unwrap_or_default();
+        self.window = Some(super::copy::hold_window(&fs).await?);
         let (mut library, opened) = Library::open(fs, keys::layout(), &keys::schema(), env)
             .await
             .map_err(|e| told(&e))?;
@@ -2348,6 +2348,95 @@ mod tests {
         };
         assert!(why.contains("already holds files"), "once it closes: {why}");
         assert_eq!(to.read("theirs.ne5p"), b"theirs");
+    }
+
+    /// A save of `name`, as an asset new to the library.
+    fn new_file(name: &str) -> Cmd {
+        Cmd::Intent(Intent::Save {
+            id: 1,
+            path: path(name),
+            bytes: name.as_bytes().to_vec(),
+            expect: Expect::Absent,
+            came: None,
+        })
+    }
+
+    /// Every window holds a lock of its own: one past them all is refused before it
+    /// writes anything, and opens once another closes. The windows holding one write
+    /// side by side.
+    #[test]
+    fn a_window_past_every_lock_held_does_not_open_the_library() {
+        let root = Temp::new();
+        let mut windows: Vec<Keeper> = (0..16).map(|_| keeper(&root)).collect();
+        for (at, window) in windows.iter_mut().take(2).enumerate() {
+            let answers = window.run_one(new_file(&format!("{at}.ne5p")));
+            assert!(
+                answers
+                    .iter()
+                    .any(|event| matches!(event, Event::Saved { result: Ok(_), .. })),
+                "{answers:?}"
+            );
+        }
+        let names = root.names("");
+        let mut last = native::keeper(
+            &root.0,
+            &root.local(),
+            Arc::default(),
+            Box::new(SystemClock),
+        );
+        let answers = last.run_one(Cmd::Open);
+        let [Event::Opened(Err(why))] = &answers[..] else {
+            panic!("{answers:?}")
+        };
+        assert!(why.contains("16 tabs or windows"), "{why}");
+        assert_eq!(root.names(""), names, "nothing written");
+
+        let mut closed = windows.pop().unwrap();
+        nord_usb::block_on(closed.close());
+        let mut next = keeper(&root);
+        let answers = next.run_one(new_file("next.ne5p"));
+        assert!(
+            answers
+                .iter()
+                .any(|event| matches!(event, Event::Saved { result: Ok(_), .. })),
+            "{answers:?}"
+        );
+    }
+
+    /// Storage whose locks fail.
+    struct Unlockable(Counted<Blocking>);
+
+    impl Fs for Unlockable {
+        fn capabilities(&self, root: Root) -> toshokan::io::Capabilities {
+            self.0.capabilities(root)
+        }
+
+        async fn perform(&self, io: toshokan::Io) -> toshokan::io::IoResult {
+            match io {
+                toshokan::Io::Lock { .. } => Err(IoError::Other("no locks here".into())),
+                io => self.0.perform(io).await,
+            }
+        }
+    }
+
+    #[test]
+    fn a_window_whose_lock_fails_does_not_open_the_library() {
+        let root = Temp::new();
+        let mut native = native::keeper(
+            &root.0,
+            &root.local(),
+            Arc::default(),
+            Box::new(SystemClock),
+        );
+        let (fs, env) = native.unopened.take().unwrap();
+        let mut keeper = super::Keeper::new(Unlockable(fs), env);
+        let mut answers = Vec::new();
+        nord_usb::block_on(keeper.run(Cmd::Open, &mut |event| answers.push(event)));
+        let [Event::Opened(Err(why))] = &answers[..] else {
+            panic!("{answers:?}")
+        };
+        assert!(why.contains("no locks here"), "{why}");
+        assert!(root.names("").is_empty(), "nothing written");
     }
 
     #[test]

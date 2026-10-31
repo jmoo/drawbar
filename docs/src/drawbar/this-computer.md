@@ -258,6 +258,8 @@ bring back any you deleted.
   browser, a folder that still holds a file drawbar does not list, such as one
   whose name starts with a dot, stays where it was, and the activity log names
   it.
+- **Too many tabs.** One library opens in at most 16 tabs or windows at once. The
+  next one does not open it and says so; close one, then open the library again.
 - **Not answering.** If the library shows no sign of life for a minute, drawbar
   asks whether to close and reopen it. Edits made since drawbar last kept them
   are lost, and drawbar names them. If the library stops altogether, drawbar
