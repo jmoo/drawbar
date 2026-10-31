@@ -63,29 +63,28 @@ jobs:
         with:
           tool: wasm-bindgen@0.2.121
       - if: matrix.browser == 'Edge'
-        run: |
-          echo "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner" >>"$GITHUB_ENV"
-          echo "MSEDGEDRIVER=$EdgeWebDriver/msedgedriver.exe" >>"$GITHUB_ENV"
+        run: echo "MSEDGEDRIVER=$EdgeWebDriver/msedgedriver.exe" >>"$GITHUB_ENV"
       - if: matrix.browser == 'Safari'
         run: |
           sudo safaridriver --enable
           echo "SAFARIDRIVER=/usr/bin/safaridriver" >>"$GITHUB_ENV"
-          # ⚠️ On hosted runners safaridriver sometimes drops a session asked for
-          # just after the last suite's, with "Peer disconnected"; the suite then
-          # never starts, so it is asked for again.
-          cat >"$RUNNER_TEMP/safari-runner" <<'EOF'
-          #!/bin/bash
+      # ⚠️ On hosted runners a driver sometimes fails before a suite starts:
+      # msedgedriver cannot bind its port, or safaridriver drops a session asked for
+      # just after the last suite's with "Peer disconnected". The suite is asked for
+      # again.
+      - run: |
+          cat >"$RUNNER_TEMP/runner" <<'EOF'
           for _ in 1 2 3; do
             wasm-bindgen-test-runner "$@" 2>&1 | tee "$RUNNER_TEMP/suite.log"
             status=${PIPESTATUS[0]}
-            grep -q "Error: io: Peer disconnected" "$RUNNER_TEMP/suite.log" || exit "$status"
-            echo "safaridriver dropped the session; asking again" >&2
+            grep -qE "Error: (io: Peer disconnected|driver failed to bind port during startup)" \
+              "$RUNNER_TEMP/suite.log" || exit "$status"
+            echo "the driver failed before the suite started; asking again" >&2
             sleep 5
           done
           exit "$status"
           EOF
-          chmod +x "$RUNNER_TEMP/safari-runner"
-          echo "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=$RUNNER_TEMP/safari-runner" >>"$GITHUB_ENV"
+          echo "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=bash $RUNNER_TEMP/runner" >>"$GITHUB_ENV"
       - name: toshokan
         run: >-
           cargo +1.97.1 test --locked --no-fail-fast --profile release-tests

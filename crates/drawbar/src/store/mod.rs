@@ -539,7 +539,7 @@ pub struct Kept {
 }
 
 /// A slot of one instrument, which an unsaved edit of its view is kept by: the class's
-/// code ([`keys::class_code`]) and the bank and slot from zero, as the wire numbers them.
+/// code in the library and the bank and slot from zero, as the wire numbers them.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct Slot {
     /// What tells the instrument from others: its serial number, or its product name
