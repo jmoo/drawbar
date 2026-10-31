@@ -17,8 +17,8 @@ pub const TAGS: Set<String> = Set::new("tags");
 /// a list at once each keep one, and the tags are all their names together.
 pub const TAG_NAMES: Set<String> = Set::new("tag names");
 
-/// The indexes older drawbars kept in the folder, `.drawbar/library.ron`, whose tags and
-/// origins the library took in, by the BLAKE3 of their bytes: each is taken in once.
+/// The lists of This computer that older drawbars kept in eframe's store, which the
+/// library took in, by [`super::older::List::hash`]: each is taken in once.
 pub const TAKEN_IN: Set<String> = Set::new("taken in");
 
 /// Where an asset came from, where its file cannot say: made new in drawbar, copied off
@@ -174,8 +174,7 @@ pub fn identity_of_bytes(path: &LibPath, bytes: &[u8]) -> Option<Identity> {
     Some(Contents.of_bytes(&path, bytes))
 }
 
-/// The directory at the library's root that holds what is drawbar's own. An older
-/// build's index stays there, unread.
+/// The directory at the library's root that holds what is drawbar's own.
 pub const DIR: &str = ".drawbar";
 
 /// The directory of [`DIR`] that holds each install's own state, in a browser's own

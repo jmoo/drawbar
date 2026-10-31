@@ -112,6 +112,25 @@ the worker that writes the file loads from the bundle the page loaded, so after
 drawbar.app is deployed again, a send that would replace an occupant can be
 refused until the page is reloaded.
 
+## The list an earlier version kept
+
+drawbar 0.10 and earlier kept This computer in eframe's store, under
+`drawbar.this_computer`, `drawbar.folders` and `drawbar.tags`: each asset's name,
+origin and bytes, base64-encoded, and the folders and tags by asset id
+(`store/older.rs`). At the first open of a library that may be written, once its
+files are listed and no change of drawbar's own waits to be finished, drawbar
+takes that list in as one intent: a directory for each folder, a new file for
+each asset holding its saved bytes, its tags and its slot origin, and the tag
+names. A file name is free in its folder and takes the extension its bytes call
+for; bytes that do not decode are written as they are. An unsaved edit is held
+over its new file and kept as any unsaved edit is.
+
+The same intent adds the BLAKE3 hash of the three keys' text to the library's
+`taken in` set. drawbar empties the keys only once the library holds that hash,
+so a crash between the two takes nothing in twice, and a change that fails leaves
+the keys for the next launch. A key whose version line this build does not know
+leaves the whole list unread.
+
 ## How a change works
 
 Every change the user makes to the files or the facts is an intent. An intent is

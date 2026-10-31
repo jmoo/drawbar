@@ -15,7 +15,7 @@
 //! ```
 //!
 //! Opening writes nothing in the folder: `.drawbar/library/` is made at the first fact
-//! said. An older build's `library.ron` beside it is neither read nor written.
+//! said.
 //!
 //! The app talks to a backend in [`Cmd`]s and hears back in [`Event`]s, in order, and
 //! never waits for one: the desktop runs them on a thread, and a browser's storage
@@ -38,7 +38,7 @@ mod keeper;
 mod keys;
 mod mirror;
 pub mod names;
-mod older;
+pub mod older;
 mod refusing;
 pub mod shown;
 
@@ -134,7 +134,6 @@ pub use exec::{opens, MOST_BYTES};
 pub use ids::Key;
 pub use keys::identity_of_bytes;
 pub use mirror::{Pass, Store};
-pub use older::{notice as older_notice, Older};
 pub use unsaved::EARLIER as EARLIER_UNSAVED;
 
 use std::sync::Arc;
@@ -724,14 +723,26 @@ pub enum Intent {
     /// The changes of one gesture, in order, as one change: each is answered as it
     /// would be alone, and those that did not land answer how they failed.
     Batch(Vec<Intent>),
+    /// Add these tags to the library's list of tags, and remember that the library took
+    /// in the list an older drawbar kept, by its [`older::List::hash`]: the part of the
+    /// batch that takes that list in, which names it.
+    TakeIn { tags: Vec<String>, hash: String },
 }
 
-/// The part of a batch that names the gesture: the folder it made or removed, around
-/// which the rest moves, or else its first.
+/// The part of a batch that names the gesture: the take-in of an older drawbar's list,
+/// or the folder it made or removed, around which the rest moves, or else its first.
 fn gesture(parts: &[Intent]) -> Option<&Intent> {
+    let taking = |part: &&Intent| matches!(part, Intent::TakeIn { .. });
     let folder = |part: &&Intent| matches!(part, Intent::MakeDir { .. } | Intent::RemoveDir { .. });
-    parts.iter().find(folder).or(parts.first())
+    let named = parts
+        .iter()
+        .find(taking)
+        .or_else(|| parts.iter().find(folder));
+    named.or(parts.first())
 }
+
+/// What the Edit menu calls the take-in of the list an older drawbar kept.
+pub const TAKE_IN: &str = "Bring in kept sounds";
 
 /// One rename of an [`Intent::Move`]: the file at `from`, which holds what `expect`
 /// says, to `to`.
@@ -775,9 +786,10 @@ impl Intent {
             | Intent::MakeDir { path }
             | Intent::RemoveDir { path }
             | Intent::MoveFolder { from: path, .. } => named(path),
-            Intent::Forget { .. } | Intent::Take { .. } | Intent::Dismiss { .. } => {
-                self.label().to_string()
-            }
+            Intent::Forget { .. }
+            | Intent::Take { .. }
+            | Intent::Dismiss { .. }
+            | Intent::TakeIn { .. } => self.label().to_string(),
         }
     }
 
@@ -814,6 +826,7 @@ impl Intent {
             Intent::MakeDir { .. } => "New folder",
             Intent::RemoveDir { .. } => "Remove folder",
             Intent::Batch(parts) => gesture(parts).map_or("Change", Intent::label),
+            Intent::TakeIn { .. } => TAKE_IN,
         }
     }
 
@@ -985,8 +998,6 @@ pub struct Opened {
     pub earlier: bool,
     /// How many pending records of other writers opening could not read.
     pub ignored: usize,
-    /// What an older drawbar kept in the folder.
-    pub older: Vec<older::Older>,
     /// What opening tried to tidy and could not: finishing a change a crash or
     /// another window left, or emptying the trash.
     pub trouble: Vec<String>,
@@ -1122,9 +1133,6 @@ pub enum Event {
     Unemptied(String),
     /// This session's undo history began again, and reaches none of the changes before.
     Restarted,
-    /// How many files' tags and origins an older drawbar's index gave the library, or
-    /// why it gave none.
-    TookIn(Result<usize, String>),
     /// How many of the library's files [`Cmd::Restore`] wrote, or why it wrote none.
     Restored(Result<usize, String>),
     /// The name a copy of the library was saved under and how many of the library's files
@@ -1152,7 +1160,6 @@ impl Event {
             Event::Moved { result: Err(_), .. } => one("move"),
             Event::Failed(_) => one("write"),
             Event::Unemptied(_) => one("trash"),
-            Event::TookIn(Err(_)) => one("take-in"),
             Event::Restored(Err(_)) => one("restore"),
             Event::Copied(Err(_)) => one("copy"),
             Event::Unkept(_)
@@ -1174,7 +1181,6 @@ impl Event {
             | Event::SlotKept { kept: Ok(_), .. }
             | Event::Trimmed(_)
             | Event::Restarted
-            | Event::TookIn(Ok(_))
             | Event::Restored(Ok(_))
             | Event::Copied(Ok(_))
             | Event::Scanned(Ok(_))
@@ -1231,29 +1237,6 @@ const REWRITE: Codes = Codes {
     room: "rewrite-room",
     io: "rewrite-io",
 };
-
-/// The keys of eframe's store that held the library before it was a folder. Nothing
-/// reads them.
-const LEFT_BEHIND: [&str; 3] = ["drawbar.this_computer", "drawbar.folders", "drawbar.tags"];
-
-/// Whether eframe's store still holds a library kept the old way.
-pub fn left_behind(storage: &dyn eframe::Storage) -> bool {
-    LEFT_BEHIND
-        .iter()
-        .any(|key| storage.get_string(key).is_some_and(|held| !held.is_empty()))
-}
-
-/// Empty the keys that held a library kept the old way.
-///
-/// ⚠️ eframe's store has no remove, and on the desktop it writes back whatever it holds
-/// in memory, so a key is emptied rather than left alone.
-pub fn leave_behind(storage: &mut dyn eframe::Storage) {
-    for key in LEFT_BEHIND {
-        if storage.get_string(key).is_some_and(|held| !held.is_empty()) {
-            storage.set_string(key, String::new());
-        }
-    }
-}
 
 // The tests run the desktop's backend over folders on disk.
 #[cfg(all(test, not(target_arch = "wasm32")))]

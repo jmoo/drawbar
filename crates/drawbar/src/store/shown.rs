@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use toshokan::{EntityId, FileState, RelPath, View};
 
-use super::keys::{Came, ORIGIN, TAGS, TAG_NAMES};
+use super::keys::{Came, ORIGIN, TAGS, TAG_NAMES, TAKEN_IN};
 use super::{Key, LibPath, Stat};
 
 #[derive(Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
@@ -26,6 +26,8 @@ pub struct Shown {
     pub worn: BTreeMap<EntityId, BTreeSet<String>>,
     /// The library's list of tags.
     pub names: BTreeSet<String>,
+    /// The lists older drawbars kept that the library took in, by their hashes.
+    pub taken: BTreeSet<String>,
 }
 
 /// What one key shows.
@@ -44,11 +46,12 @@ pub enum Change {
     /// Everything, as the library opens, once the app lost an answer, or where most
     /// of what it shows changed.
     Whole(Shown),
-    /// What each key the view's changes reach shows now, and the list of tags where it
-    /// changed.
+    /// What each key the view's changes reach shows now, and the list of tags and the
+    /// lists taken in where they changed.
     Keys {
         keys: Vec<(Key, Showing)>,
         names: Option<BTreeSet<String>>,
+        taken: Option<BTreeSet<String>>,
     },
 }
 
@@ -57,7 +60,8 @@ impl Shown {
     /// every path that is no [`LibPath`].
     pub fn of(view: &View) -> Shown {
         let mut shown = Shown {
-            names: names(view),
+            names: values(view, TAG_NAMES),
+            taken: values(view, TAKEN_IN),
             ..Shown::default()
         };
         for entity in view.entities() {
@@ -83,9 +87,12 @@ impl Shown {
                 *self = shown;
                 None
             }
-            Change::Keys { keys, names } => {
+            Change::Keys { keys, names, taken } => {
                 if let Some(names) = names {
                     self.names = names;
+                }
+                if let Some(taken) = taken {
+                    self.taken = taken;
                 }
                 let mut reached = BTreeSet::new();
                 for (key, showing) in keys {
@@ -223,15 +230,18 @@ impl Change {
         if keys.len() > MOST_KEYS && 2 * keys.len() > shown() {
             return Change::Whole(Shown::of(view));
         }
-        let now = names(view);
-        let names = (now != self::names(before)).then_some(now);
+        let changed = |key| {
+            let now = values(view, key);
+            (now != values(before, key)).then_some(now)
+        };
         let keys = keys.into_iter().map(|key| {
             let showing = Showing::of(view, &key);
             (key, showing)
         });
         Change::Keys {
             keys: keys.collect(),
-            names,
+            names: changed(TAG_NAMES),
+            taken: changed(TAKEN_IN),
         }
     }
 }
@@ -239,10 +249,10 @@ impl Change {
 /// The most keys a change names before it may be sent whole.
 const MOST_KEYS: usize = 1024;
 
-/// The library's list of tags.
-fn names(view: &View) -> BTreeSet<String> {
-    let listed = view.values(TAG_NAMES).values.into_iter();
-    listed.map(|(name, _)| name).collect()
+/// Every value of the set `key` on any entity.
+fn values(view: &View, key: toshokan::Set<String>) -> BTreeSet<String> {
+    let listed = view.values(key).values.into_iter();
+    listed.map(|(value, _)| value).collect()
 }
 
 /// `path` as drawbar shows it: none with a name that starts with a dot.

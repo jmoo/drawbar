@@ -4,9 +4,7 @@
 instrument. Each one is a file. On the desktop, the files are in a folder you
 can see.
 
-> **drawbar is alpha.** Keep your own backups of anything that matters. This
-> version starts with an empty library and does not bring over what an earlier
-> version kept.
+> **drawbar is alpha.** Keep your own backups of anything that matters.
 
 ## Where your library lives
 
@@ -89,6 +87,21 @@ still shows up, and the activity log says what went wrong.
 
 **New** makes a fresh sound, note or folder. A fresh Stage program has every
 control at zero; it is not a factory sound.
+
+## Sounds an earlier version kept
+
+drawbar 0.10 and earlier kept This computer in the browser's storage, or in
+drawbar's settings on the desktop, rather than as files. The first time this
+version opens a library it can change, it brings those sounds in as files. Each
+folder becomes a folder at the top of the library, and each sound a file in its
+folder, named after it, with its tags and the slot it came from. A name already
+taken gets a number. A sound with an edit you had not saved comes back with that
+edit, still unsaved. The activity log says how many sounds came in.
+
+It is one change, so Undo takes it all back. Once the sounds are in the library,
+drawbar lets go of the old list, so after an Undo they are gone. If the change
+fails, drawbar says why, keeps the old list, and tries again the next time it
+starts.
 
 ## Saving
 
@@ -240,15 +253,8 @@ bring back any you deleted.
   library next opens. If it can no longer be finished, because a file it was
   moving is gone, drawbar asks whether to roll it back or leave it as is, and
   Undo no longer reaches the changes before it.
-- **An older drawbar.** A drawbar from before this version keeps its own tags,
-  unsaved edits and rescued slot contents in the `.drawbar` folder. The first
-  time this version opens such a library where it can write, it takes in the
-  tags and where each file came from, once, and the activity log says for how
-  many files. It leaves the unsaved edits and rescued slot contents where they
-  are, and says so once. An older drawbar that opens this library sees its files
-  without the tags this version keeps.
-  Unsaved edits an earlier drawbar kept on this computer are not read either, and
-  the activity log says so once.
+- **An earlier drawbar.** Unsaved edits an earlier drawbar kept on this
+  computer are not read, and the activity log says so once.
 - **A folder that stays.** Where a folder moves one file at a time, as in the
   browser, a folder that still holds a file drawbar does not list, such as one
   whose name starts with a dot, stays where it was, and the activity log names

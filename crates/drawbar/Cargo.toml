@@ -35,6 +35,8 @@ nord-format = { path = "../nord-format", version = "0.8.0", features = [
 # `file-handle-inner`: a picked file is copied into the library from its path, or from
 # the browser's `File`, never read whole first.
 rfd = { version = "0.15", features = ["file-handle-inner"] }
+# The list drawbar 0.10 kept in eframe's store, read once. ron already builds it.
+base64 = "0.22"
 # Drafts of edits, and the derived cache. eframe's `persistence` already builds both.
 ron = "0.10"
 serde = { version = "1", features = ["derive", "rc"] }

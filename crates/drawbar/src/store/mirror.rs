@@ -19,8 +19,9 @@ use super::ids::Ids;
 use super::keys::{Came, TAGS, TAG_NAMES};
 use super::shown::Shown;
 use super::{
-    names, Backend, Cmd, CopyOf, Event, Failure, Fingerprint, Found, Holds, Intent, Key, LibPath,
-    Moving, Opened, Rescue, Source, Stat, Unwritable, Viewed, Waiting, MOST_BYTES,
+    names, older, Backend, Cmd, CopyOf, Event, Failure, Fingerprint, Found, Holds, Intent, Key,
+    LibPath, Moving, Opened, Rescue, Source, Stat, Unwritable, Viewed, Waiting, MOST_BYTES,
+    TAKE_IN,
 };
 use crate::browser::{Browser, Rescuing};
 use crate::folders::{Folders, Op, Where};
@@ -28,7 +29,7 @@ use crate::log::Log;
 use crate::queue::Queue;
 use crate::tags::Asked;
 use crate::workspace::{
-    precious, Content, FileAsk, Leaving, LocalEntity, Origin, Saved, Workspace,
+    library_filename, precious, Content, FileAsk, Leaving, LocalEntity, Origin, Saved, Workspace,
 };
 
 /// How far opening has got.
@@ -114,6 +115,16 @@ struct Batch {
     /// The take of the asks they came in.
     take: u64,
     parts: Vec<Intent>,
+}
+
+/// The take-in of the list an older drawbar kept, sent and not answered: the assets it
+/// brings, what the user is told once it lands, and the answers of its parts that did
+/// not land, held until its change answers, with the first reason among them.
+struct TakingIn {
+    ids: BTreeSet<u64>,
+    said: String,
+    held: Vec<Event>,
+    why: Option<String>,
 }
 
 /// How many files one background [`Cmd::Read`] asks for at most, and how many of
@@ -268,8 +279,10 @@ pub struct Store {
     /// The folders that keep the slots' former occupants are to be looked in: the
     /// library has been listed, or a write has left one since.
     rescues_due: bool,
-    /// What an older drawbar kept in the folder, as opening found it, until taken.
-    older: Vec<super::Older>,
+    /// Whether this session sent the take-in of the list an older drawbar kept.
+    sent_take_in: bool,
+    /// That take-in, until its change answers.
+    taking_in: Option<TakingIn>,
     /// Whether the library opened holding a copy that stopped partway as it was opened.
     opening_copy: bool,
     /// Whether opening found unsaved edits an earlier drawbar kept, until taken.
@@ -350,7 +363,8 @@ impl Store {
             shelf: None,
             shelved: BTreeMap::new(),
             rescues_due: false,
-            older: Vec::new(),
+            sent_take_in: false,
+            taking_in: None,
             opening_copy: false,
             earlier: false,
             left: Vec::new(),
@@ -1374,8 +1388,8 @@ impl Store {
         }
     }
 
-    /// Fold in one answer, in its turn. Returns whether a send held by
-    /// [`Store::hold_send`] may now go ahead.
+    /// Fold in one answer, in its turn, or hold it for the take-in in flight. Returns
+    /// whether a send held by [`Store::hold_send`] may now go ahead.
     fn react(
         &mut self,
         event: Event,
@@ -1387,6 +1401,41 @@ impl Store {
         for kind in event.faults() {
             crate::telemetry::fault("library", kind);
         }
+        match self.hold(event) {
+            Some(event) => self.fold(event, workspace, browser, queue, log),
+            None => false,
+        }
+    }
+
+    /// Hold `event` where it says a part of the take-in in flight did not land, as only
+    /// the take-in's own answer says what that means.
+    fn hold(&mut self, event: Event) -> Option<Event> {
+        let Some(taking) = self.taking_in.as_mut() else {
+            return Some(event);
+        };
+        let why = match &event {
+            Event::Saved {
+                id,
+                result: Err(failure),
+                ..
+            } if taking.ids.contains(id) => failure.to_string(),
+            Event::Failed(why) => why.clone(),
+            _ => return Some(event),
+        };
+        taking.why.get_or_insert(why);
+        taking.held.push(event);
+        None
+    }
+
+    /// Fold in one answer.
+    fn fold(
+        &mut self,
+        event: Event,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        queue: &Queue,
+        log: &mut Log,
+    ) -> bool {
         match event {
             Event::Opened(Ok(opened)) => self.begin(opened, workspace, browser, queue, log),
             Event::Opened(Err(why)) => {
@@ -1425,6 +1474,7 @@ impl Store {
                 result,
             } => {
                 self.committing = self.committing.saturating_sub(1);
+                let landed = made.is_some();
                 let step = self.answering.pop_front();
                 self.history.waited(finished, waiting, step.as_ref());
                 let forgotten = match (&step, forgot) {
@@ -1435,6 +1485,19 @@ impl Store {
                     self.history.took(step, entry);
                 }
                 let told = std::mem::take(&mut self.turned_read_only);
+                // A take-in that failed partway lands once its change is finished.
+                let refused = match self.taking_in.take_if(|_| label == TAKE_IN) {
+                    Some(taking) if landed || waiting == Waiting::This => {
+                        self.follow_take_in(taking, landed, workspace, browser, queue, log);
+                        false
+                    }
+                    Some(taking) => {
+                        let why = result.as_ref().err().cloned();
+                        self.not_taken_in(taking, why, workspace, log);
+                        true
+                    }
+                    None => false,
+                };
                 match result {
                     Ok(viewed) => {
                         self.viewed(viewed, workspace, browser, queue, log);
@@ -1442,6 +1505,7 @@ impl Store {
                     Err(why) => {
                         match forgotten {
                             Some(forgotten) => log.trouble(format!("{forgotten}: {why}.")),
+                            None if refused => {}
                             None if told => log.error(format!("{label}: {why}")),
                             None => {
                                 log.error(format!("{label}: {why}"));
@@ -1459,6 +1523,10 @@ impl Store {
             Event::Unheard { label } => {
                 self.committing = self.committing.saturating_sub(1);
                 self.answering.pop_front();
+                // The look below finds whether it landed, as it finds each of its files.
+                if let Some(taking) = self.taking_in.take_if(|_| label == TAKE_IN) {
+                    self.follow_take_in(taking, false, workspace, browser, queue, log);
+                }
                 // Whether the library took a step is not known, so the Edit menu offers
                 // none it holds until the next one it hears of.
                 self.history = History::default();
@@ -1546,19 +1614,6 @@ impl Store {
                 );
                 // What the record it gave up left unfinished is the user's to settle.
                 self.refresh();
-            }
-            Event::TookIn(Ok(files)) => log.say(match files {
-                1 => "drawbar took in the tags and origin an older drawbar kept for 1 file."
-                    .to_string(),
-                n => format!(
-                    "drawbar took in the tags and origins an older drawbar kept for {n} files."
-                ),
-            }),
-            Event::TookIn(Err(why)) => {
-                log.error(format!("taking in an older drawbar's tags: {why}"));
-                log.trouble(format!(
-                    "drawbar could not take in the tags an older drawbar kept: {why}."
-                ));
             }
             Event::Restored(Ok(files)) => log.say(match files {
                 1 => "drawbar opened the copy of the library, which holds 1 file.".to_string(),
@@ -1813,12 +1868,10 @@ impl Store {
             drafts,
             earlier,
             ignored,
-            older,
             trouble,
         } = opened;
         self.opening_copy = opening_copy;
         self.earlier = earlier;
-        self.older = older;
         for why in trouble {
             log.error(format!("opening the library: {why}"));
         }
@@ -2620,15 +2673,146 @@ impl Store {
         found
     }
 
-    /// What an older drawbar kept in the folder, as opening found it, once.
     /// Whether the library opened holding a copy that stopped partway as it was opened,
     /// which a copy opened again may replace.
     pub fn opening_copy(&self) -> bool {
         self.opening_copy
     }
 
-    pub fn take_older(&mut self) -> Vec<super::Older> {
-        std::mem::take(&mut self.older)
+    /// Whether the library took in the list an older drawbar kept whose
+    /// [`older::List::hash`] is `hash`.
+    pub fn has_taken_in(&self, hash: &str) -> bool {
+        let shown = self.shown.as_ref();
+        shown.is_some_and(|shown| shown.taken.contains(hash))
+    }
+
+    /// Take the list an older drawbar kept into the library as one change, which Undo
+    /// takes back, once a session: once a scan has listed every file, while the library
+    /// may be written and no change of drawbar's own waits to be finished. Each folder is
+    /// a new one in the library's top level, and each asset a file in its folder, both
+    /// under names nothing beside them has, the asset's with the extension its bytes call
+    /// for. An unsaved edit stays unsaved over the file.
+    pub fn take_in(
+        &mut self,
+        list: &older::List,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        log: &mut Log,
+    ) {
+        // Nothing else is in flight whose failures the take-in would hold.
+        let idle = !self.scanning && self.committing == 0 && self.finishing.is_empty();
+        let ready = self.open() && self.listed && idle;
+        if !ready || list.is_empty() || self.sent_take_in || self.has_taken_in(&list.hash) {
+            return;
+        }
+        self.sent_take_in = true;
+        self.send_batch();
+        self.part(Intent::TakeIn {
+            tags: list.tags.iter().cloned().collect(),
+            hash: list.hash.clone(),
+        });
+        let root = LibPath::root();
+        let mut dirs = Vec::new();
+        for folder in &list.folders {
+            let name = browser
+                .folders
+                .free(&root, &names::portable(folder), workspace);
+            let path = root.join(&name);
+            browser.folders.add(path.clone());
+            self.part(Intent::MakeDir { path: path.clone() });
+            dirs.push(path);
+        }
+        let mut worn: BTreeMap<&str, Vec<Key>> = BTreeMap::new();
+        let mut ids = BTreeSet::new();
+        for asset in &list.assets {
+            let id = workspace.next_id();
+            let origin = asset
+                .came
+                .map_or_else(|| Origin::File(asset.name.clone()), Came::origin);
+            let saved = Saved {
+                id,
+                name: asset.name.clone(),
+                path: None,
+                origin,
+                content: Content::whole(asset.saved.clone()),
+                unsaved: asset.unsaved.clone(),
+            };
+            workspace.restore(vec![saved], None, log);
+            let Some(entity) = workspace.get(id) else {
+                continue;
+            };
+            let dir = asset.folder.and_then(|at| dirs.get(at)).unwrap_or(&root);
+            let name = browser
+                .folders
+                .free(dir, &library_filename(entity), workspace);
+            let path = dir.join(&name);
+            workspace.follow(id, path.clone());
+            self.save(id, workspace, &[]);
+            for tag in &asset.tags {
+                worn.entry(tag).or_default().push(Key::File(path.clone()));
+            }
+            ids.insert(id);
+        }
+        for (name, files) in worn {
+            let name = name.to_string();
+            self.part(Intent::Tag {
+                files,
+                name,
+                make: false,
+            });
+        }
+        let said = list.said();
+        self.taking_in = Some(TakingIn {
+            ids,
+            said,
+            held: Vec::new(),
+            why: None,
+        });
+        self.send_batch();
+    }
+
+    /// Follow a take-in that wrote what it brings, or may have: each part that did not
+    /// land is answered as it would be alone, and the user is told where it `landed`.
+    fn follow_take_in(
+        &mut self,
+        taking: TakingIn,
+        landed: bool,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        queue: &Queue,
+        log: &mut Log,
+    ) {
+        for event in taking.held {
+            self.fold(event, workspace, browser, queue, log);
+        }
+        if landed {
+            log.say(taking.said);
+        }
+    }
+
+    /// Let go of what the take-in that wrote nothing brought, and say why: `why`, or the
+    /// first reason its parts gave. The list stays where it was kept, for the next
+    /// session to take in.
+    fn not_taken_in(
+        &mut self,
+        taking: TakingIn,
+        why: Option<String>,
+        workspace: &mut Workspace,
+        log: &mut Log,
+    ) {
+        for id in taking.ids {
+            self.records.remove(&id);
+            workspace.forget(id);
+        }
+        self.rescan();
+        let why = why
+            .or(taking.why)
+            .unwrap_or_else(|| "it made nothing".to_string());
+        log.error(format!("{TAKE_IN}: {why}"));
+        log.trouble(format!(
+            "drawbar could not bring the sounds an earlier version kept into the library: \
+             {why}. They stay where they were, and drawbar tries again next time."
+        ));
     }
 
     /// Whether opening found unsaved edits an earlier drawbar kept in this library's

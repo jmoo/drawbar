@@ -487,6 +487,11 @@ impl Folders {
         }
     }
 
+    /// Show the folder at `path`, which a change the store sends itself makes.
+    pub(crate) fn add(&mut self, path: LibPath) -> u64 {
+        self.insert(path)
+    }
+
     fn made(&mut self, path: LibPath) -> u64 {
         // A folder removed and made again in one sync must not be removed after.
         self.ops.retain(|op| *op != Op::RemoveDir(path.clone()));

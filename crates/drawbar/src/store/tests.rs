@@ -6378,123 +6378,239 @@ fn a_draft_stays_while_its_save_is_in_flight() {
     assert!(again.bytes(id) == edited, "the edit is back");
 }
 
-/// What an older drawbar kept in a folder, tags, unsaved edits and rescued slot contents,
-/// is found at every open, named with where it is, and left as it is. Whether the user
-/// has been told is the app's to remember.
-#[test]
-fn an_older_drawbars_files_are_found_at_each_open_and_left_alone() {
-    let root = Temp::new();
-    fs::create_dir_all(root.at(".drawbar/working")).unwrap();
-    fs::create_dir_all(root.at(".drawbar/tmp")).unwrap();
-    fs::write(root.at(".drawbar/library.ron"), b"(tags: [])").unwrap();
-    fs::write(root.at(".drawbar/working/1-1"), b"edit").unwrap();
-    fs::write(root.at(".drawbar/tmp/rescued-1.ne5p"), b"slot").unwrap();
-    let mut first = Session::open(&root);
-    let older = first.store.take_older();
-    assert_eq!(older, [Older::Tags, Older::Edits, Older::Rescues]);
-    assert_eq!(
-        crate::store::older_notice(&older),
-        "An older drawbar kept tags in .drawbar/library.ron, unsaved edits in \
-         .drawbar/working and rescued slot contents in .drawbar/tmp in this folder. This \
-         drawbar does not read them, and leaves them where they are."
-    );
-    assert_eq!(first.store.take_older(), [], "taken once");
-    first.close();
-    let mut again = Session::open(&root);
-    assert_eq!(again.store.take_older(), older, "found again");
-    assert_eq!(root.read(".drawbar/library.ron"), b"(tags: [])");
-    assert_eq!(root.read(".drawbar/working/1-1"), b"edit");
-    assert_eq!(root.read(".drawbar/tmp/rescued-1.ne5p"), b"slot");
+/// eframe's store holding the texts drawbar 0.10 kept its list of This computer under:
+/// its assets, its folders and its tags.
+fn kept_before(assets: &str, folders: &str, tags: &str) -> crate::testing::Fake {
+    let mut storage = crate::testing::Fake::default();
+    for (key, text) in [
+        ("drawbar.this_computer", assets),
+        ("drawbar.folders", folders),
+        ("drawbar.tags", tags),
+    ] {
+        eframe::Storage::set_string(&mut storage, key, text.to_string());
+    }
+    storage
 }
 
-/// The tags and origins an older drawbar's index kept are taken into the library once,
-/// for the files still there: a tag taken off afterwards stays off, and another
-/// install of drawbar does not take them in again.
+/// The list `storage` holds.
+fn older_list(storage: &crate::testing::Fake) -> older::List {
+    match older::found(storage) {
+        older::Found::List(list) => list,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A list as drawbar 0.10's `store::save`, `folders.rs` and `tags.rs` wrote it: a program
+/// off slot 2:8 named Grand, two assets named Pad in the folder Gig, one with an unsaved
+/// edit, an empty folder, and a tag nothing wears.
+fn gig_list() -> (older::List, Vec<u8>, Vec<u8>, Vec<u8>) {
+    use base64::prelude::{Engine as _, BASE64_STANDARD};
+
+    let program = Fresh::Program.bytes().unwrap();
+    let (soft, edit) = (with_gain(&program, "12"), with_gain(&program, "40"));
+    let b64 = |bytes: &[u8]| BASE64_STANDARD.encode(bytes);
+    let assets = format!(
+        "drawbar 2\n4\n\
+         1\tdevice:4:1:7\tGrand\t{program}\n\
+         2\tfresh\tPad\t{soft}\t{edit}\n\
+         3\tfile:Pad.ne5p\tPad\t{program}\n",
+        program = b64(&program),
+        soft = b64(&soft),
+        edit = b64(&edit),
+    );
+    let storage = kept_before(
+        &assets,
+        "drawbar folders 1\nf\t1\tGig\nf\t2\tEmpty\nm\t2\t1\nm\t3\t1\n",
+        "drawbar tags 1\nt\t1\tLive\nt\t2\tSoft\nt\t3\tUnworn\nm\t1\t1\nm\t2\t1\nm\t2\t2\n",
+    );
+    (older_list(&storage), program, soft, edit)
+}
+
+impl Session {
+    /// Take `list` in, as a frame does, and wait until the library has answered.
+    fn take_in(&mut self, list: &older::List) {
+        let Bench {
+            workspace,
+            browser,
+            log,
+            ..
+        } = &mut self.bench;
+        self.store.take_in(list, workspace, browser, log);
+        self.decided();
+    }
+}
+
+/// The library already holds a file named Grand and a folder named Gig, so what comes in
+/// is numbered past them, and the two assets named Pad past each other.
 #[test]
-fn an_older_drawbars_tags_and_origins_are_taken_in_once() {
+fn the_list_an_older_drawbar_kept_comes_in_as_files_with_their_folders_tags_and_origins() {
     let root = Temp::new();
     let program = Fresh::Program.bytes().unwrap();
     fs::write(root.at("Grand.ne5p"), &program).unwrap();
-    fs::write(root.at("Pad.ne5p"), with_gain(&program, "12")).unwrap();
-    fs::create_dir_all(root.at(".drawbar")).unwrap();
-    // Version 1, in the shape the drawbar before the store wrote it.
-    let index = r#"(
-    version: 1,
-    next_id: 4,
-    tags: {
-        1: "Live",
-        2: "Unworn",
-    },
-    assets: {
-        1: (
-            path: Some("Grand.ne5p"),
-            tags: [
-                1,
-            ],
-            origin: Device(
-                class: 4,
-                bank: 1,
-                slot: 7,
-            ),
-        ),
-        2: (
-            path: Some("Pad.ne5p"),
-            tags: [
-                1,
-            ],
-        ),
-        3: (
-            path: Some("Gone.ne5p"),
-            tags: [
-                1,
-            ],
-        ),
-    },
-)"#;
-    fs::write(root.at(".drawbar/library.ron"), index).unwrap();
+    fs::create_dir(root.at("Gig")).unwrap();
+    let (list, program, soft, edit) = gig_list();
+    let mut session = Session::open(&root);
+    session.take_in(&list);
 
-    let mut session = Session::listed(&root);
-    session.settle();
-    let (grand, pad) = (session.named("Grand.ne5p"), session.named("Pad.ne5p"));
-    assert_eq!(session.tag_names(), ["Live", "Unworn"]);
+    assert_eq!(
+        root.names(""),
+        [
+            ".drawbar",
+            "Empty",
+            "Gig",
+            "Gig 2",
+            "Grand 2.ne5p",
+            "Grand.ne5p"
+        ]
+    );
+    assert_eq!(root.names("Gig 2"), ["Pad 2.ne5p", "Pad.ne5p"]);
+    assert_eq!(root.read("Grand 2.ne5p"), program);
+    assert_eq!(root.read("Gig 2/Pad.ne5p"), soft, "the saved bytes");
+    assert_eq!(root.read("Gig 2/Pad 2.ne5p"), program);
+    let (grand, pad) = (session.named("Grand 2.ne5p"), session.named("Pad.ne5p"));
     assert_eq!(session.worn(grand), ["Live"]);
-    assert_eq!(session.worn(pad), ["Live"]);
+    assert_eq!(session.worn(pad), ["Live", "Soft"]);
+    assert_eq!(session.tag_names(), ["Live", "Soft", "Unworn"]);
     let at = Location { bank: 1, slot: 7 };
     let origin = &session.bench.workspace.get(grand).unwrap().origin;
     assert!(
         matches!(origin, Origin::Device { class: ObjectClass::Program, at: held } if *held == at),
         "the slot it came off"
     );
+    assert!(session.bench.workspace.get(pad).unwrap().is_unsaved());
+    assert!(session.bytes(pad) == edit, "the edit is held over the file");
     assert_eq!(
-        session.said("took in the tags and origins an older drawbar kept for 2 files"),
+        session.said(
+            "drawbar brought 3 sounds an earlier version kept into the library, with their \
+             tags and folders."
+        ),
         1
     );
+    assert!(session.store.has_taken_in(&list.hash));
     assert_eq!(
-        session.store.take_older(),
-        [],
-        "the index is not told of as unread"
+        session.store.undo_label().as_deref(),
+        Some("Undo Bring in kept sounds")
     );
-    let tag = session.bench.browser.tags.all()[0].id;
-    session.bench.act(vec![crate::browser::Act::Untag {
-        ids: vec![pad],
-        tag,
-    }]);
-    session.decided();
     session.close();
 
-    let again = Session::listed(&root);
+    let again = Session::open(&root);
+    let pad = again.named("Pad.ne5p");
+    assert!(again.bench.workspace.get(pad).unwrap().is_unsaved());
     assert!(
-        again.worn(again.named("Pad.ne5p")).is_empty(),
-        "taken in once"
+        again.bytes(pad) == edit,
+        "the edit is kept as any unsaved edit is"
     );
+    assert_eq!(again.worn(pad), ["Live", "Soft"]);
+}
+
+/// Bytes that do not decode come in as they are, as drawbar keeps any file it does not
+/// read: `AAEC` is the base64 of 00 01 02.
+#[test]
+fn bytes_that_do_not_decode_come_in_byte_for_byte() {
+    let root = Temp::new();
+    let storage = kept_before(
+        "drawbar 2\n3\n1\tfresh\tBroken.ne5p\tAAEC\n2\tfresh\tJunk\tAAEC\n",
+        "",
+        "",
+    );
+    let mut session = Session::open(&root);
+    session.take_in(&older_list(&storage));
+    assert_eq!(root.read("Broken.ne5p"), [0, 1, 2]);
+    assert_eq!(root.read("Junk.bin"), [0, 1, 2]);
+}
+
+#[test]
+fn one_undo_takes_the_whole_take_in_back() {
+    let root = Temp::new();
+    let (list, ..) = gig_list();
+    let mut session = Session::open(&root);
+    session.take_in(&list);
+    session.undo();
+    session.settle();
+
+    assert_eq!(root.names(""), [".drawbar"]);
+    assert!(session.tag_names().is_empty());
+    assert!(!session.store.has_taken_in(&list.hash));
+    // As for any file that goes, an asset holding an unsaved edit or a slot's contents
+    // stays, shown missing, until it is saved again or let go of.
+    let missing: Vec<&str> = session
+        .bench
+        .workspace
+        .listed()
+        .filter(|entity| session.bench.browser.folders.missing.contains(&entity.id))
+        .map(|entity| entity.name.as_str())
+        .collect();
+    assert_eq!(missing, ["Grand.ne5p", "Pad.ne5p"]);
+    assert_eq!(session.bench.workspace.listed().count(), 2);
+}
+
+/// A crash after the take-in landed and before the keys were emptied leaves the list:
+/// the library remembers it, here and in another install, and takes it in once.
+#[test]
+fn a_list_the_library_took_in_is_not_taken_in_again() {
+    let root = Temp::new();
+    let (list, ..) = gig_list();
+    let mut first = Session::open(&root);
+    first.take_in(&list);
+    first.close();
+    let names = root.names("");
+
+    let mut again = Session::open(&root);
+    assert!(again.store.has_taken_in(&list.hash));
+    again.take_in(&list);
+    assert_eq!(root.names(""), names);
+    assert_eq!(again.said("drawbar brought"), 0);
     again.close();
     let elsewhere = Temp::new();
     let other = Session::elsewhere(&root, &elsewhere);
-    assert!(
-        other.worn(other.named("Pad.ne5p")).is_empty(),
-        "by one install"
+    assert!(other.store.has_taken_in(&list.hash), "by any install");
+}
+
+#[test]
+fn a_take_in_that_writes_nothing_leaves_the_list_for_the_next_session() {
+    let root = Temp::new();
+    let (list, ..) = gig_list();
+    let mut session = Session::open(&root);
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Write { path, .. } if path.as_str().contains("/tmp/")),
+    ));
+    session.take_in(&list);
+    session.settle();
+
+    assert_eq!(root.names(""), [".drawbar"], "nothing was written");
+    assert!(!session.store.has_taken_in(&list.hash));
+    assert_eq!(session.bench.workspace.listed().count(), 0);
+    assert!(session.bench.browser.folders.all().is_empty());
+    assert_eq!(
+        session.said("drawbar could not bring the sounds an earlier version kept"),
+        1
     );
-    assert_eq!(other.said("took in the tags"), 0);
+    assert_eq!(
+        session.said("did not change as asked"),
+        0,
+        "said once, for the whole"
+    );
+    assert_eq!(session.said("was not saved"), 0, "said once, for the whole");
+    session.take_in(&list);
+    assert_eq!(root.names(""), [".drawbar"], "tried once a session");
+    session.close();
+
+    let mut next = Session::open(&root);
+    next.take_in(&list);
+    assert!(next.store.has_taken_in(&list.hash));
+    assert_eq!(root.names(""), [".drawbar", "Empty", "Gig", "Grand.ne5p"]);
+}
+
+#[test]
+fn a_read_only_library_takes_nothing_in() {
+    let (list, ..) = gig_list();
+    let (root, _) = newer_drawbar_wrote();
+    let mut session = Session::open(&root);
+    assert!(session.store.read_only().is_some());
+    let names = root.names("");
+    session.take_in(&list);
+    assert_eq!(root.names(""), names);
+    assert!(!session.store.has_taken_in(&list.hash));
 }
 
 /// A dismissal is final: undo after it takes back the change before it, and the run

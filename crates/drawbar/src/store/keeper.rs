@@ -15,7 +15,7 @@ use toshokan::io::{IoError, Kind, Range, Root};
 use toshokan::log::Settlement;
 use toshokan::plan::FactChange;
 use toshokan::report::{Item, ItemChange, ItemKind, Mode, Refreshed, Rekey, Start, What};
-use toshokan::{EntryHash, Env, Error, Expect, Field, Nonce, RelPath, View};
+use toshokan::{EntryHash, Env, Error, Expect, Nonce, RelPath, Set, View};
 
 use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES, TAKEN_IN};
 use super::shown::Change;
@@ -79,10 +79,6 @@ pub struct Keeper<F> {
     writer: Option<toshokan::WriterId>,
     /// Whether the app was told the trash could not be emptied.
     told_unemptied: bool,
-    /// Whether this session looked for an older drawbar's index to take in.
-    looked_for_older: bool,
-    /// Whether the library opened holding a copy that stopped partway as it was opened.
-    opening_copy: bool,
     /// The lock this window holds while it has the library open.
     window: Option<RelPath>,
 }
@@ -103,8 +99,6 @@ impl<F: Fs> Keeper<F> {
             told_read_only: false,
             writer: None,
             told_unemptied: false,
-            looked_for_older: false,
-            opening_copy: false,
             window: None,
         }
     }
@@ -138,7 +132,7 @@ impl<F: Fs> Keeper<F> {
                 answer(Event::Opened(opened));
             }
             Cmd::Rescan | Cmd::Refresh => {
-                let scanned = self.scanned(matches!(cmd, Cmd::Rescan), answer).await;
+                let scanned = self.scanned(matches!(cmd, Cmd::Rescan)).await;
                 // A history that forked is said with the scan's answer.
                 let forked = scanned.as_ref().is_ok_and(|viewed| viewed.retired);
                 if self.restarted() && !forked {
@@ -485,7 +479,6 @@ impl<F: Fs> Keeper<F> {
             trouble.push(format!("looking for a copy being opened: {e}"));
             false
         });
-        self.opening_copy = opening_copy;
         if opened.mode == Mode::Writable && !opening_copy {
             let finishing = |e: Error| format!("finishing a change: {}", told(&e));
             let settled = library.settle_interrupted().await;
@@ -497,11 +490,6 @@ impl<F: Fs> Keeper<F> {
                 trouble.extend(settled.err().map(finishing));
             }
         }
-        let older = super::older::found(library.fs()).await;
-        let older = older.unwrap_or_else(|e| {
-            trouble.push(format!("looking for an older drawbar's files: {e}"));
-            Vec::new()
-        });
         let viewed = Viewed {
             retired: matches!(
                 opened.start,
@@ -556,18 +544,13 @@ impl<F: Fs> Keeper<F> {
             drafts,
             earlier,
             ignored: opened.ignored.len(),
-            older,
             trouble,
         })
     }
 
     /// Read what other writers logged since, and scan every file where `whole`, or else
     /// only the files their entries moved.
-    async fn scanned(
-        &mut self,
-        whole: bool,
-        answer: &mut impl FnMut(Event),
-    ) -> Result<Viewed, String> {
+    async fn scanned(&mut self, whole: bool) -> Result<Viewed, String> {
         let library = self.library.as_mut().ok_or("the library is not open")?;
         let refreshed = match whole {
             true => library.rescan().await,
@@ -597,17 +580,6 @@ impl<F: Fs> Keeper<F> {
                     orphan.ours = false;
                     refreshed.orphaned.push(orphan);
                 }
-            }
-        }
-        // Once a scan has listed every file, as taking in binds them, and not while this
-        // session's own change waits: its commit would finish that unheard.
-        let ready = whole
-            && !self.opening_copy
-            && matches!(library.mode(), Mode::Writable)
-            && library.finishing().is_empty();
-        if ready && !std::mem::replace(&mut self.looked_for_older, true) {
-            if let Some(took) = take_in_older(library).await {
-                answer(Event::TookIn(took));
             }
         }
         Ok(viewed(library, &mut self.shown, refreshed, unfinishable))
@@ -871,85 +843,28 @@ async fn facts<'a, F: Fs + 'a>(
     built.commit().await.map_err(|e| told(&e))
 }
 
-/// Take into a writable `library`, once, the tags and origins an older drawbar's index
-/// kept for the files it lists, and the tags it made: how many files took any, or why
-/// none did. `None` where there is none to take in.
-async fn take_in_older<F: Fs>(library: &mut Library<F>) -> Option<Result<usize, String>> {
-    if !matches!(library.mode(), Mode::Writable) {
-        return None;
-    }
-    let index = match super::older::index(library.fs()).await {
-        Ok(index) => index?,
-        Err(e) => return Some(Err(format!("reading an older drawbar's index: {e}"))),
-    };
-    if !library.view().find(TAKEN_IN, &index.hash).is_empty() {
-        return None;
-    }
-    let mut took = 0;
-    let committed = facts(library, "Take in older tags", |mut built, view| {
-        for (path, (tags, came)) in &index.files {
-            let Ok(at) = RelPath::new(path) else {
-                continue;
-            };
-            if let Some(entity) = view.at(&at) {
-                let id = entity.id();
-                for tag in tags {
-                    built = built.add(id, TAGS, tag.clone());
-                }
-                if let (Some(came), Field::Unset) = (came, entity.get(ORIGIN)) {
-                    built = built.set(id, ORIGIN, *came);
-                }
-            } else if let Some(listed) = view.listed(&at) {
-                let expect = Expect::Listed {
-                    len: listed.len,
-                    modified: listed.modified,
-                };
-                built = built
-                    .create(|e| {
-                        e.adopt(&at, expect);
-                        for tag in tags {
-                            e.add(TAGS, tag.clone());
-                        }
-                        if let Some(came) = came {
-                            e.set(ORIGIN, *came);
-                        }
-                    })
-                    .0;
-            } else {
-                continue;
-            }
-            took += 1;
-        }
-        let names = index.tags.iter().cloned();
-        let list = view.with(TAG_NAMES).into_iter().min();
-        Ok(match list {
-            Some(list) => names
-                .fold(built, |built, name| built.add(list, TAG_NAMES, name))
-                .add(list, TAKEN_IN, index.hash.clone()),
-            None => {
-                built
-                    .create(|list| {
-                        for name in names {
-                            list.add(TAG_NAMES, name);
-                        }
-                        list.add(TAKEN_IN, index.hash.clone());
-                    })
-                    .0
-            }
-        })
-    })
-    .await;
-    Some(committed.map(|_| took))
-}
-
 /// Add the tag `name` to the library's list of tags.
 fn list_tag<'l, F: Fs + 'l>(built: Built<'l, F>, view: &View, name: String) -> Built<'l, F> {
+    on_list(built, view, vec![(TAG_NAMES, name)])
+}
+
+/// Add each value to its set on the library's list of tags: the list the view holds, or
+/// a new one.
+fn on_list<'l, F: Fs + 'l>(
+    built: Built<'l, F>,
+    view: &View,
+    values: Vec<(Set<String>, String)>,
+) -> Built<'l, F> {
     match view.with(TAG_NAMES).into_iter().min() {
-        Some(list) => built.add(list, TAG_NAMES, name),
+        Some(list) => values
+            .into_iter()
+            .fold(built, |built, (key, value)| built.add(list, key, value)),
         None => {
             built
                 .create(|list| {
-                    list.add(TAG_NAMES, name);
+                    for (key, value) in values {
+                        list.add(key, value);
+                    }
                 })
                 .0
         }
@@ -1519,6 +1434,13 @@ impl<'l, F: Fs + 'l> Parting<'l, '_, F> {
                 });
                 let doing = Answering::Quiet(format!("tagging with “{name}”"));
                 self.owe(None, doing);
+                Ok(())
+            }
+            Intent::TakeIn { tags, hash } => {
+                let names = tags.into_iter().map(|name| (TAG_NAMES, name));
+                let values = names.chain([(TAKEN_IN, hash)]).collect();
+                self.built = Some(on_list(self.take(), self.view, values));
+                self.owe(None, Answering::Quiet(super::TAKE_IN.to_lowercase()));
                 Ok(())
             }
             other => Err(Box::new(Event::Failed(format!(
