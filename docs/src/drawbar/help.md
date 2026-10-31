@@ -32,7 +32,9 @@ guide, the releases and the issue tracker.
 
 **This build** lists what you are running: the version and target, the browser
 and whether it offers WebUSB when drawbar runs in one, the connected instrument,
-and how many files this computer holds. **Copy diagnostics** puts those lines and
+and how many files this computer holds. In the browser it also shows how much of
+the browser's storage the library takes, and whether the browser has promised to
+keep it or deletes it after seven days of use without a visit. **Copy diagnostics** puts those lines and
 the activity log's last 200 entries on the clipboard. Paste them into a bug
 report so it says what you were running.
 

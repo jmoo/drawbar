@@ -2,7 +2,7 @@
 name = "drawbar"
 description = "Your Nord's sounds, in a window: browse, edit and send programs, samples and pianos, in the browser or on the desktop"
 edition.workspace = true
-rust-version = "1.89"
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 version = "0.10.0"
@@ -35,9 +35,17 @@ nord-format = { path = "../nord-format", version = "0.8.0", features = [
 # `file-handle-inner`: a picked file is copied into the library from its path, or from
 # the browser's `File`, never read whole first.
 rfd = { version = "0.15", features = ["file-handle-inner"] }
-# The library's index. eframe's `persistence` already builds both.
+# Drafts of edits, and the derived cache. eframe's `persistence` already builds both.
 ron = "0.10"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
+# The messages between the page and the browser library's worker. toshokan builds it.
+serde_json = "1"
+# The library's facts, beside its files.
+toshokan = { path = "../toshokan", version = "0.1.0" }
+# A file's identity, and the name of a library's local root. toshokan builds it.
+blake3 = { version = "1", features = ["serde"] }
+# Names compared as macOS and Windows compare them: in one normalization form.
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 # `synthetic` lays out a piano library from a description: the piano editor's tests
@@ -48,6 +56,13 @@ nord-format = { path = "../nord-format", version = "0.8.0", features = [
 # Read drawbar's own source, to find every character its text needs a glyph for.
 proc-macro2 = { version = "1", features = ["span-locations"] }
 syn = { version = "2", default-features = false }
+# An independent reader and writer for the copies of a library drawbar saves and opens.
+# nord-format's `bundle` already builds it.
+zip = { version = "9", default-features = false, features = ["deflate"] }
+
+# The browser suite, run by wasm-bindgen-cli's test runner.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # MIDI input only. drawbar opens no output port.
@@ -73,8 +88,19 @@ ureq = { version = "3.4", default-features = false, features = [
 url = "2"
 
 [target.'cfg(unix)'.dependencies]
+# The local time zone's offset, for the dates drawbar shows. eframe and toshokan
+# already build it.
+libc = "0.2"
 # The open-file limit, raised at start. Linux builds already ship it, through eframe.
 rustix = { version = "1", features = ["fs", "process"] }
+
+# The local time zone's offset, for the dates drawbar shows. toshokan already builds it.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Time",
+] }
 
 # The native menu bar, and the title bar the traffic lights sit in. macOS only:
 # elsewhere the menus and window buttons are drawn in the window.
@@ -92,6 +118,8 @@ raw-window-handle = "0.6"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
+# The library's storage in the browser, which the library's worker performs.
+toshokan = { path = "../toshokan", version = "0.1.0", features = ["web"] }
 # Exact: `wasm-bindgen-cli` must match this version, and the Nix build takes the CLI
 # nixpkgs ships, so this pin follows nixpkgs (see overlay.nix).
 wasm-bindgen = "=0.2.121"
@@ -110,6 +138,7 @@ web-sys = { version = "0.3", features = [
   "BlobPropertyBag",
   "Crypto",
   "DataTransfer",
+  "DedicatedWorkerGlobalScope",
   "DirectoryPickerOptions",
   "Document",
   "DomRect",
@@ -167,6 +196,8 @@ web-sys = { version = "0.3", features = [
   "UsbDeviceRequestOptions",
   "Window",
   "Worker",
+  "WorkerOptions",
+  "WorkerType",
   "WritableStream",
 ] }
 nord-usb = { path = "../nord-usb", version = "0.8.0", default-features = false, features = [

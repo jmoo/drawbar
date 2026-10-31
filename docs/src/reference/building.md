@@ -70,11 +70,10 @@ nixpkgs#wasm-bindgen-cli --` in place of `wasm-bindgen` takes the matching
 version from the flake's pinned nixpkgs.
 
 Serve over `http://localhost`, which counts as a secure context. WebUSB, the
-module import and the library's storage all fail from `file://`. The page loads
-`library-writer.js`, the worker that writes the library, from beside itself;
-serving `crates/drawbar` serves it too. This plain server has no guide beside the
-app, so Help ▸ User guide finds nothing there. `nix run .#drawbar-web` serves
-both.
+module import and the library's storage all fail from `file://`. The worker that
+keeps the library runs the page's own module, so nothing else is served for it.
+This plain server has no guide beside the app, so Help ▸ User guide finds
+nothing there. `nix run .#drawbar-web` serves both.
 
 `nix build .#drawbar-web` also writes the version and the module's byte count
 into the page. Built by hand it has neither, so the loading screen shows no

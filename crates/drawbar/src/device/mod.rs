@@ -245,13 +245,6 @@ fn words(verbs: (&str, &str, &str), what: String) -> Words {
     }
 }
 
-/// The library whose open offers a slot's former occupant kept in a file. In the
-/// browser that file is in drawbar's own storage, whatever folder is open.
-#[cfg(not(target_arch = "wasm32"))]
-const OFFERED: &str = "the library";
-#[cfg(target_arch = "wasm32")]
-const OFFERED: &str = "drawbar's own library in this browser";
-
 const READING: (&str, &str, &str) = ("Reading", "Read", "read");
 const COPYING: (&str, &str, &str) = ("Copying", "Copied", "copy");
 
@@ -602,6 +595,14 @@ pub struct DeviceState {
     /// by class and slot. Cleared with [`DeviceState::named`].
     needs: HashMap<(ObjectClass, u32, u32), Vec<nord_format::bundle::Key>>,
     pub detail: Detail,
+}
+
+impl DeviceCard {
+    /// What tells this instrument from others: its serial number, or its product name
+    /// where it reports none.
+    pub fn instrument(&self) -> String {
+        self.serial.clone().unwrap_or_else(|| self.product.clone())
+    }
 }
 
 impl DeviceState {
@@ -1248,6 +1249,9 @@ pub struct Device {
     /// Whether a command failed, a copied slot was empty, or the instrument went, since
     /// the last [`Device::take_failed`].
     failed: bool,
+    /// The slots whose former occupants writes left on this computer since the last
+    /// [`Device::take_kept`].
+    kept: Vec<Location>,
     /// Counts what the instrument has reported and the links that moved since.
     revision: u64,
 }
@@ -1287,6 +1291,7 @@ impl Device {
             fetched: Vec::new(),
             gathered: None,
             failed: false,
+            kept: Vec::new(),
             revision: 0,
         }
     }
@@ -1340,10 +1345,18 @@ impl Device {
     }
 
     /// Keep the occupant of a slot a write replaces, when it is too large to hold, in
-    /// `dir`: the open library's `.drawbar/tmp/`, or `None` where the library cannot be
-    /// written, for a `rescued` folder of drawbar's own data.
+    /// `dir`: this install's own state for the open library, or `None` where the library
+    /// cannot be written, for a `rescued` folder of drawbar's own data.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn keep_occupants_in(&self, dir: Option<std::path::PathBuf>) {
+        self.link.scratch().keep_in(dir);
+    }
+
+    /// Keep the occupant of a slot a write replaces in `dir` of the browser's storage:
+    /// the open library's own state for this install, or with `None`, the browser's
+    /// library's.
+    #[cfg(target_arch = "wasm32")]
+    pub fn keep_occupants_in(&self, dir: Option<toshokan::RelPath>) {
         self.link.scratch().keep_in(dir);
     }
 
@@ -1361,6 +1374,11 @@ impl Device {
     /// Whether anything failed since the last call, once.
     pub fn take_failed(&mut self) -> bool {
         std::mem::take(&mut self.failed)
+    }
+
+    /// The slots whose former occupants writes left on this computer since the last call.
+    pub fn take_kept(&mut self) -> Vec<Location> {
+        std::mem::take(&mut self.kept)
     }
 
     /// The slots the last gather found, with its request, once.
@@ -1880,11 +1898,7 @@ impl Device {
                         "{} may have lost what it held; its bytes are kept at {place}",
                         shown(at)
                     ));
-                    log.trouble(format!(
-                        "{} may be empty. What was in it is kept at {place}, and drawbar \
-                         offers it the next time {OFFERED} opens.",
-                        shown(at)
-                    ));
+                    self.kept.push(at);
                 }
                 DeviceEvent::Summed {
                     class,

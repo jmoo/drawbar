@@ -401,14 +401,12 @@ impl Pill<'_> {
 }
 
 /// What the status line says while the library is being read, if it is: how many files
-/// its listing has found, then how many are still to be decoded.
-fn reading(place: Option<&crate::folders::Where>, unread: usize) -> Option<String> {
-    let said = match (place.and_then(|at| at.listing), unread) {
-        (Some(1), _) => "1 file".to_string(),
-        (Some(files), _) => format!("{files} files"),
-        (None, 0) => return None,
-        (None, 1) => "1 file to go".to_string(),
-        (None, unread) => format!("{unread} files to go"),
+/// are still to be decoded.
+fn reading(unread: usize) -> Option<String> {
+    let said = match unread {
+        0 => return None,
+        1 => "1 file to go".to_string(),
+        unread => format!("{unread} files to go"),
     };
     Some(format!("Reading the library… {said}"))
 }
@@ -1213,8 +1211,7 @@ impl DrawbarApp {
     /// The newest sentence, or what the instrument is doing, then the count of problems.
     fn said(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         let visuals = ui.visuals().clone();
-        let place = self.browser.folders.place.as_ref();
-        let reading = reading(place, self.workspace.reading());
+        let reading = reading(self.workspace.reading());
         let (glyph, tint_, text) = match (&self.device.state.in_flight, reading) {
             (Some(words), _) => (None, visuals.text_color(), words.doing.clone()),
             (None, Some(reading)) => (None, visuals.text_color(), reading),
@@ -2683,6 +2680,54 @@ mod tests {
         assert_eq!(picked(&app), 0, "with nothing open, Escape lets go");
     }
 
+    /// What an older drawbar kept in a library is told once per library: the next session
+    /// over the same library, which app.ron says was told, says nothing, and another
+    /// library is told of its own.
+    #[test]
+    fn an_older_drawbars_files_are_told_once_per_library() {
+        let older = || {
+            let root = crate::testing::Temp::new();
+            std::fs::create_dir_all(root.at(".drawbar")).unwrap();
+            std::fs::write(root.at(".drawbar/library.ron"), b"(tags: [])").unwrap();
+            root
+        };
+        let told = |root: &crate::testing::Temp, store: &mut Fake| -> usize {
+            let ctx = egui::Context::default();
+            let library = crate::store::Store::start(crate::testing::backend(&ctx, root));
+            let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
+            cc.storage = Some(&*store);
+            let mut app = DrawbarApp::with_library(&cc, Some(library));
+            let mut frame = eframe::Frame::_new_kittest();
+            let started = std::time::Instant::now();
+            let opened = |app: &DrawbarApp| app.store.as_ref().is_some_and(|s| !s.listing());
+            while !opened(&app) || started.elapsed() < std::time::Duration::from_millis(50) {
+                assert!(
+                    started.elapsed() < std::time::Duration::from_secs(10),
+                    "opened"
+                );
+                testing::run(&ctx, testing::screen(SCREEN, Vec::new()), |ctx| {
+                    app.update(ctx, &mut frame)
+                });
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            app.save(store);
+            let said = app
+                .log
+                .iter()
+                .filter(|entry| entry.text.starts_with("An older drawbar"));
+            said.count()
+        };
+        let mut store = Fake::default();
+        let (first, second) = (older(), older());
+        assert_eq!(told(&first, &mut store), 1, "told at the first open");
+        assert_eq!(told(&first, &mut store), 0, "and not again");
+        assert_eq!(
+            told(&second, &mut store),
+            1,
+            "another library is told of its own"
+        );
+    }
+
     /// What was hidden comes back hidden in the next session's window.
     #[test]
     fn the_panels_come_back_where_the_last_session_left_them() {
@@ -2859,8 +2904,8 @@ mod tests {
         assert!(!detail.contains("TypeError"), "{detail}");
     }
 
-    /// Tag ▸ New tag… in a row's menu puts a new tag on that row and opens the tag's name
-    /// for typing where it can be seen, though the tags are below the fold.
+    /// Tag ▸ New tag… in a row's menu asks to put a new tag on that row and opens the tag's
+    /// name for typing where it can be seen, though the tags are below the fold.
     #[test]
     fn a_new_tag_from_a_rows_menu_tags_the_row_and_is_named_in_view() {
         use crate::workspace::Fresh;
@@ -2914,8 +2959,13 @@ mod tests {
             panic!("one tag was made: {:?}", tags.all().len());
         };
         assert_eq!(made.name, "Sunday");
-        assert!(tags.worn(named).contains(&made.id), "the row wears it");
-        assert_eq!(tags.count(made.id), 1, "and nothing else does");
+        use crate::tags::Asked;
+        let asked = app.browser.take_tag_asks();
+        let [Asked::Tag { assets, name, make }] = asked.as_slice() else {
+            panic!("the row is tagged and the tag named in one change: {asked:?}");
+        };
+        assert_eq!(assets, &[named], "the row alone");
+        assert_eq!((name.as_str(), make), ("Sunday", &true));
     }
 
     /// A question raised outside the browser is asked with the browser hidden.

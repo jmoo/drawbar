@@ -3,12 +3,9 @@
 //! Every test works in its own directory under the system's temp folder, never in the
 //! default library.
 
-use std::collections::BTreeMap;
 use std::fs;
 
-use super::diff::{match_files, Known};
-use super::exec::{working_name, MOST_BYTES};
-use super::sidecar::{self, Read};
+use super::exec::MOST_BYTES;
 use super::*;
 use crate::browser::Kind;
 use crate::testing::{Bench, Temp};
@@ -34,51 +31,27 @@ impl Session {
         Session::within(root, MOST_BYTES)
     }
 
+    /// [`Session::open`], with this install's own state for the library at `local`.
+    fn open_at(root: &Temp, local: &std::path::Path) -> Session {
+        let bench = Bench::new();
+        let backend = Backend::start(&bench.ctx, root.0.clone(), local.to_path_buf());
+        let mut session = Session {
+            store: Store::start(backend),
+            bench,
+        };
+        session.opened();
+        session.read_all();
+        session
+    }
+
     /// [`Session::listed`], holding at most `budget` bytes whole.
     fn within(root: &Temp, budget: u64) -> Session {
         let bench = Bench::new();
-        let mut store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
+        let mut store = Store::start(crate::testing::backend(&bench.ctx, root));
         store.budget(budget);
         let mut session = Session { store, bench };
         session.opened();
         session
-    }
-
-    /// Open the library and fold in the first part of its listing only, so the rest is
-    /// still to come.
-    fn opening(root: &Temp) -> Session {
-        let bench = Bench::new();
-        let store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
-        let mut session = Session { store, bench };
-        assert!(session.next(), "opening answered");
-        assert!(session.next(), "the first part answered");
-        assert!(session.store.listing());
-        session
-    }
-
-    /// Fold in the rest of the open's listing, and any rescan or check in flight.
-    fn listed_whole(&mut self) {
-        while self.store.listing() || self.store.scanning() {
-            assert!(self.next(), "the listing answered");
-        }
-    }
-
-    /// Run frames of the store until `done` says so.
-    fn until(&mut self, done: impl Fn(&Session) -> bool) {
-        loop {
-            let Bench {
-                workspace,
-                browser,
-                queue,
-                log,
-                ..
-            } = &mut self.bench;
-            self.store.poll(workspace, browser, queue, log);
-            if done(self) {
-                return;
-            }
-            assert!(self.next(), "the backend answered");
-        }
     }
 
     /// Ask for every file not read yet, and wait until each is read and decoded, and
@@ -153,6 +126,30 @@ impl Session {
         while self.store.listing() || self.store.scanning() {
             assert!(self.next(), "the listing answered");
         }
+        self.look_for_rescues();
+    }
+
+    /// Take in the rescues left, as a frame does while the instrument is idle.
+    fn look_for_rescues(&mut self) {
+        let Bench {
+            workspace,
+            browser,
+            log,
+            ..
+        } = &mut self.bench;
+        self.store.look_for_rescues(workspace, browser, log);
+    }
+
+    /// Fold in what the library answered, as a frame does.
+    fn poll(&mut self) {
+        let Bench {
+            workspace,
+            browser,
+            queue,
+            log,
+            ..
+        } = &mut self.bench;
+        self.store.poll(workspace, browser, queue, log);
     }
 
     fn next(&mut self) -> bool {
@@ -174,52 +171,32 @@ impl Session {
         }
     }
 
-    /// A pass on the autosave cadence: the files, the working copies and the index.
-    fn autosave(&mut self) {
-        let Bench {
-            workspace,
-            browser,
-            queue,
-            ..
-        } = &mut self.bench;
-        self.store.sync(workspace, browser, queue, Pass::Full);
-    }
-
     /// Rename a folder, and send the change without waiting for it.
     fn rename_folder(&mut self, id: u64, name: &str) {
         let name = name.into();
         self.bench
             .act(vec![crate::browser::Act::RenameFolder { id, name }]);
         let Bench {
-            workspace,
-            browser,
-            queue,
-            ..
+            workspace, browser, ..
         } = &mut self.bench;
-        self.store.sync(workspace, browser, queue, Pass::Files);
+        self.store.sync(workspace, browser, Pass::Files);
     }
 
     /// Write everything, and wait until the disk has it.
     fn sync(&mut self) {
         let Bench {
-            workspace,
-            browser,
-            queue,
-            ..
+            workspace, browser, ..
         } = &mut self.bench;
-        assert!(self.store.sync(workspace, browser, queue, Pass::Last));
+        assert!(self.store.sync(workspace, browser, Pass::Last));
         self.settle();
     }
 
     /// Whether the library may be let go without waiting, as a browser asks each frame.
     fn settled(&mut self) -> bool {
         let Bench {
-            workspace,
-            browser,
-            queue,
-            ..
+            workspace, browser, ..
         } = &mut self.bench;
-        self.store.settled(workspace, browser, queue)
+        self.store.settled(workspace, browser)
     }
 
     /// The window loses focus and gets it back.
@@ -241,6 +218,86 @@ impl Session {
             ..
         } = &mut self.bench;
         self.store.close(workspace, browser, queue, log);
+    }
+
+    /// Put the tag `name` on `ids` as the browser does, making it where no tag has that
+    /// name, and wait until the library has committed it.
+    fn tag(&mut self, ids: &[u64], name: &str) -> u64 {
+        let tags = &mut self.bench.browser.tags;
+        let known = tags
+            .all()
+            .iter()
+            .find(|tag| tag.name == name)
+            .map(|tag| tag.id);
+        let tag = known.unwrap_or_else(|| tags.make(name).expect("a new tag"));
+        let ids = ids.to_vec();
+        self.bench.act(vec![crate::browser::Act::Tag { ids, tag }]);
+        self.decided();
+        tag
+    }
+
+    /// Send the files the workspace needs written and the changes to the facts asked for,
+    /// and wait until the library has committed each.
+    fn decided(&mut self) {
+        loop {
+            let Bench {
+                workspace,
+                browser,
+                queue,
+                log,
+                ..
+            } = &mut self.bench;
+            self.store.sync(workspace, browser, Pass::Files);
+            self.store.poll(workspace, browser, queue, log);
+            if !self.store.deciding() {
+                return;
+            }
+            assert!(self.next(), "the library answered");
+        }
+    }
+
+    /// The names of the tags `id` wears, sorted.
+    fn worn(&self, id: u64) -> Vec<String> {
+        let tags = &self.bench.browser.tags;
+        let worn = tags.worn(id).iter().filter_map(|tag| tags.name_of(*tag));
+        let mut worn: Vec<String> = worn.map(str::to_string).collect();
+        worn.sort();
+        worn
+    }
+
+    /// Undo this session's last change to the facts, and wait until it is committed.
+    fn undo(&mut self) {
+        self.store.undo();
+        self.decided();
+    }
+
+    /// Redo the change to the facts undone last, and wait until it is committed.
+    fn redo(&mut self) {
+        self.store.redo();
+        self.decided();
+    }
+
+    /// Read what other drawbars wrote to the library since.
+    fn refresh(&mut self) {
+        self.store.refresh();
+        while self.store.scanning() {
+            assert!(self.next(), "the refresh answered");
+        }
+    }
+
+    /// Rename the tag `from` to `to` as the browser does, and wait until it is committed.
+    fn rename_tag(&mut self, from: &str, to: &str) {
+        let tags = &self.bench.browser.tags;
+        let id = tags
+            .all()
+            .iter()
+            .find(|tag| tag.name == from)
+            .expect(from)
+            .id;
+        let name = to.to_string();
+        self.bench
+            .act(vec![crate::browser::Act::RenameTag { id, name }]);
+        self.decided();
     }
 
     fn create(&mut self) -> u64 {
@@ -316,299 +373,27 @@ fn with_gain(bytes: &[u8], gain: &str) -> Vec<u8> {
 }
 
 #[test]
-fn a_new_asset_is_a_file_that_comes_back_with_its_id_and_tags() {
+fn a_new_asset_is_a_file_that_comes_back_with_its_tags() {
     let root = Temp::new();
     let mut first = Session::open(&root);
     let id = first.create();
-    let tag = first.bench.browser.tags.make("Sunday").unwrap();
-    first.bench.browser.tags.set(id, tag, true);
+    first.tag(&[id], "Sunday");
     let bytes = first.bytes(id);
     first.close();
     assert_eq!(root.read("untitled.ne5p"), bytes, "the file is the asset");
 
     let second = Session::open(&root);
-    let entity = second.bench.workspace.get(id).expect("the same id");
-    assert_eq!(entity.name, "untitled.ne5p");
+    let id = second.named("untitled.ne5p");
+    let entity = second.bench.workspace.get(id).expect("the asset");
     assert_eq!(entity.bytes, bytes);
     assert!(!entity.is_unsaved());
-    assert!(second.bench.browser.tags.worn(id).contains(&tag));
-    assert_eq!(second.bench.browser.tags.name_of(tag), Some("Sunday"));
-}
-
-/// A program kept under a name drawbar does not open is held through its index row, and
-/// counts toward neither the badge nor the status line.
-#[test]
-fn the_badge_and_the_status_count_the_same_files() {
-    let root = Temp::new();
-    let program = Fresh::Program.bytes().unwrap();
-    for name in ["Grand", "Organ.ne5p"] {
-        fs::write(root.at(name), &program).unwrap();
-    }
-    let mut index = Sidecar {
-        next_id: 2,
-        tags: [(7, "Sunday".to_string())].into(),
-        ..Sidecar::default()
-    };
-    let origin = Origin::File("Grand".into());
-    let row = Row::of(LibPath::parse("Grand"), "", None, [7].into(), &origin, None);
-    index.assets.insert(1, row);
-    fs::create_dir(root.at(".drawbar")).unwrap();
-    fs::write(root.at(exec::INDEX), sidecar::write(&index).unwrap()).unwrap();
-
-    let session = Session::open(&root);
-    assert_eq!(session.bench.workspace.listed().count(), 2, "both are held");
-    let badge = session
-        .bench
-        .browser
-        .folders
-        .count(None, &session.bench.workspace);
-    assert_eq!(badge, 1);
-    assert_eq!(
-        session.bench.log.status().1,
-        "1 file on this computer.",
-        "the status line counts what the badge counts"
-    );
-}
-
-/// The tree lists a folder's files by name, whether or not the index holds a row for one.
-#[test]
-fn a_file_with_an_index_row_sorts_by_name() {
-    let root = Temp::new();
-    let program = Fresh::Program.bytes().unwrap();
-    for name in ["Bass.ne5p", "Keys.ne5p", "Pad.ne5p"] {
-        fs::write(root.at(name), &program).unwrap();
-    }
-    let mut first = Session::open(&root);
-    let keys = first.named("Keys.ne5p");
-    let tag = first.bench.browser.tags.make("Sunday").unwrap();
-    first.bench.browser.tags.set(keys, tag, true);
-    first.close();
-    assert_eq!(rows(&root).len(), 1, "only the tagged file has a row");
-
-    let second = Session::open(&root);
-    let Bench {
-        browser, workspace, ..
-    } = &second.bench;
-    let names: Vec<&str> = browser
-        .folders
-        .members(None, workspace)
+    let tags = &second.bench.browser.tags;
+    let worn: Vec<&str> = tags
+        .worn(id)
         .iter()
-        .map(|entity| entity.name.as_str())
+        .filter_map(|tag| tags.name_of(*tag))
         .collect();
-    assert_eq!(names, ["Bass.ne5p", "Keys.ne5p", "Pad.ne5p"]);
-}
-
-#[test]
-fn an_unsaved_edit_survives_a_restart_and_the_file_stays_as_last_saved() {
-    let root = Temp::new();
-    let mut first = Session::open(&root);
-    let id = first.create();
-    first.sync();
-    let saved = first.bytes(id);
-    let edited = with_gain(&saved, "96");
-    first
-        .bench
-        .workspace
-        .replace_bytes(id, edited.clone(), &mut first.bench.log);
-    first.close();
-    assert_eq!(root.read("untitled.ne5p"), saved, "nothing was saved");
-    assert_eq!(root.names(".drawbar/working").len(), 1, "one working copy");
-
-    let mut second = Session::open(&root);
-    let entity = second.bench.workspace.get(id).expect("the same id");
-    assert_eq!(entity.bytes, edited, "the edit");
-    assert_eq!(*entity.saved.bytes(), saved, "and what it is an edit of");
-    assert!(entity.is_unsaved());
-
-    second.bench.workspace.mark_saved(id);
-    second.sync();
-    assert_eq!(
-        root.read("untitled.ne5p"),
-        edited,
-        "the save wrote the file in place"
-    );
-    second.sync();
-    assert!(
-        root.names(".drawbar/working").is_empty(),
-        "the working copy goes once the save has landed"
-    );
-}
-
-/// A launch writes no new generation of an unsaved edit nothing has changed since it was
-/// kept, whether its file is there or went missing: a large piano would otherwise cost
-/// its size again at every launch.
-#[test]
-fn an_unchanged_working_copy_is_not_rewritten_at_launch() {
-    let root = Temp::new();
-    let mut first = Session::open(&root);
-    let kept = first.create();
-    let gone = first.create();
-    first.sync();
-    for id in [kept, gone] {
-        let edited = with_gain(&first.bytes(id), "96");
-        let log = &mut first.bench.log;
-        first.bench.workspace.replace_bytes(id, edited, log);
-    }
-    first.close();
-    let path = rows(&root)[&gone].path.clone().expect("a file");
-    fs::remove_file(root.at(path.as_str())).unwrap();
-    let working = root.names(".drawbar/working");
-    assert_eq!(working.len(), 2, "{working:?}");
-
-    for launch in 0..2 {
-        let mut session = Session::open(&root);
-        assert!(session.bench.browser.folders.missing.contains(&gone));
-        session.autosave();
-        session.close();
-        assert_eq!(root.names(".drawbar/working"), working, "launch {launch}");
-    }
-}
-
-/// An edit that comes back to the bytes its working copy holds writes no new generation.
-#[test]
-fn an_edit_back_to_what_its_working_copy_holds_writes_no_new_one() {
-    let root = Temp::new();
-    let mut session = Session::open(&root);
-    let id = session.create();
-    session.sync();
-    let saved = session.bytes(id);
-    let edited = with_gain(&saved, "96");
-    for bytes in [&edited, &with_gain(&saved, "12"), &edited] {
-        let log = &mut session.bench.log;
-        session
-            .bench
-            .workspace
-            .replace_bytes(id, bytes.clone(), log);
-        if *bytes == edited {
-            session.autosave();
-        }
-    }
-    session.close();
-    assert_eq!(root.names(".drawbar/working"), [working_name(id, 1)]);
-}
-
-/// Saving an edit whose working copy holds exactly what the save writes moves that copy
-/// into place, over the file or where the file went missing, so the save takes no room of
-/// its own: the file is the copy's own data on disk.
-#[cfg(unix)]
-#[test]
-fn saving_an_unchanged_working_copy_promotes_it() {
-    use std::os::unix::fs::MetadataExt;
-
-    let root = Temp::new();
-    let mut first = Session::open(&root);
-    let kept = first.create();
-    let gone = first.create();
-    first.sync();
-    for id in [kept, gone] {
-        let edited = with_gain(&first.bytes(id), "96");
-        let log = &mut first.bench.log;
-        first.bench.workspace.replace_bytes(id, edited, log);
-    }
-    first.close();
-    let paths = |id| rows(&root)[&id].path.clone().expect("a file").to_string();
-    let (kept_at, gone_at) = (paths(kept), paths(gone));
-    fs::remove_file(root.at(&gone_at)).unwrap();
-    let inode = |path: &str| fs::metadata(root.at(path)).unwrap().ino();
-    let copies = |id| {
-        let copy = rows(&root)[&id].working.expect("a working copy");
-        format!(".drawbar/working/{}", working_name(id, copy.generation))
-    };
-    let copied = [
-        (kept_at, inode(&copies(kept))),
-        (gone_at, inode(&copies(gone))),
-    ];
-
-    let mut second = Session::open(&root);
-    let edits = [kept, gone].map(|id| second.bytes(id));
-    for id in [kept, gone] {
-        second.bench.workspace.mark_saved(id);
-    }
-    second.sync();
-    second.sync();
-    for ((path, copy), bytes) in copied.iter().zip(edits) {
-        assert_eq!(root.read(path), bytes, "{path} holds the edit");
-        assert_eq!(inode(path), *copy, "{path} is its working copy, moved");
-    }
-    assert_eq!(root.names(".drawbar/working"), [""; 0]);
-}
-
-/// A working copy that does not read is the only copy of its edit, so the library opens
-/// read-only rather than drop it, and the edit comes back once the copy reads again.
-#[cfg(unix)]
-#[test]
-fn an_unsaved_edit_that_does_not_read_is_left_for_the_next_open() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let root = Temp::new();
-    let mut first = Session::open(&root);
-    let id = first.create();
-    first.sync();
-    let edited = with_gain(&first.bytes(id), "96");
-    let log = &mut first.bench.log;
-    first.bench.workspace.replace_bytes(id, edited.clone(), log);
-    first.close();
-    let working = root.names(".drawbar/working");
-    assert_eq!(working.len(), 1, "{working:?}");
-    let copy = root.at(&format!(".drawbar/working/{}", working[0]));
-    fs::set_permissions(&copy, fs::Permissions::from_mode(0o000)).unwrap();
-    if fs::read(&copy).is_ok() {
-        // Permissions do not bind this user.
-        return;
-    }
-
-    let second = Session::open(&root);
-    let why = second.store.read_only().expect("read-only");
-    assert!(why.contains("could not be read"), "{why}");
-    second.close();
-    assert_eq!(root.names(".drawbar/working"), working, "the copy is left");
-
-    fs::set_permissions(&copy, fs::Permissions::from_mode(0o644)).unwrap();
-    let third = Session::open(&root);
-    assert_eq!(third.store.read_only(), None);
-    let entity = third.bench.workspace.get(id).expect("the same id");
-    assert_eq!(entity.bytes, edited, "the edit came back");
-    assert!(entity.is_unsaved());
-}
-
-/// A library let go with no last pass, as a closing browser tab lets it go, loses an
-/// edit until a pass has kept it and the disk has it, a commit that answers nothing
-/// included. A tab asks to stay open for as long as it would.
-#[test]
-fn a_library_is_losing_an_edit_until_its_working_copy_has_landed() {
-    let root = Temp::new();
-    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-    let mut session = Session::open(&root);
-    assert!(
-        !session
-            .store
-            .losing(&session.bench.workspace, &session.bench.browser),
-        "listed"
-    );
-    let id = session.only();
-    let edited = with_gain(&session.bytes(id), "96");
-    let Bench { workspace, log, .. } = &mut session.bench;
-    workspace.replace_bytes(id, edited, log);
-    assert!(
-        session
-            .store
-            .losing(&session.bench.workspace, &session.bench.browser),
-        "edited"
-    );
-    session.autosave();
-
-    let started = std::time::Instant::now();
-    while session
-        .store
-        .losing(&session.bench.workspace, &session.bench.browser)
-    {
-        assert!(started.elapsed().as_secs() < 10, "the disk never caught up");
-        std::thread::yield_now();
-    }
-    assert!(
-        rows(&root)[&id].working.is_some(),
-        "the edit is on disk once nothing would be lost"
-    );
+    assert_eq!(worn, ["Sunday"]);
 }
 
 /// Reading loses nothing: a library listed, rescanned or read lazily, with no edit, never
@@ -617,15 +402,14 @@ fn a_library_is_losing_an_edit_until_its_working_copy_has_landed() {
 fn a_library_only_read_is_never_losing() {
     let root = Temp::new();
     programs(&root, 300);
-    let mut session = Session::opening(&root);
+    let mut session = Session::listed(&root);
     let losing = |session: &Session| {
         let Bench {
             workspace, browser, ..
         } = &session.bench;
         session.store.losing(workspace, browser)
     };
-    assert!(!losing(&session), "while listing");
-    session.listed_whole();
+    assert!(!losing(&session), "once listed");
 
     session.store.rescan();
     assert!(!losing(&session), "while rescanning");
@@ -663,190 +447,6 @@ fn a_library_only_read_is_never_losing() {
     assert!(losing(&session), "an unsaved edit");
 }
 
-/// ⚠️ Working copies are found only through the index. One gone missing, deleted or lost
-/// to a sync, leaves copies no index names, which a sweep would take for leftovers: the
-/// library opens read-only and leaves them, and the edit comes back with the index.
-#[test]
-fn unsaved_edits_whose_index_is_missing_are_left_for_it() {
-    let root = Temp::new();
-    let mut first = Session::open(&root);
-    let id = first.create();
-    first.sync();
-    let edited = with_gain(&first.bytes(id), "96");
-    let log = &mut first.bench.log;
-    first.bench.workspace.replace_bytes(id, edited.clone(), log);
-    first.close();
-    let working = root.names(".drawbar/working");
-    assert_eq!(working.len(), 1, "{working:?}");
-    let index = root.read(".drawbar/library.ron");
-    fs::remove_file(root.at(".drawbar/library.ron")).unwrap();
-
-    let second = Session::open(&root);
-    let why = second.store.read_only().expect("read-only");
-    assert!(why.contains("index is missing"), "{why}");
-    second.close();
-    assert_eq!(root.names(".drawbar/working"), working, "the copy is left");
-
-    fs::write(root.at(".drawbar/library.ron"), index).unwrap();
-    let third = Session::open(&root);
-    assert_eq!(third.store.read_only(), None);
-    let entity = third.bench.workspace.get(id).expect("the same id");
-    assert_eq!(entity.bytes, edited, "the edit came back");
-    assert!(entity.is_unsaved());
-}
-
-/// ⚠️ With no index, a working-copy folder that cannot be listed may still hold edits:
-/// the library opens read-only rather than taking it for empty.
-#[cfg(unix)]
-#[test]
-fn a_library_without_its_index_whose_working_copies_cannot_be_listed_stays_read_only() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let root = Temp::new();
-    let first = Session::open(&root);
-    first.close();
-    fs::remove_file(root.at(".drawbar/library.ron")).ok();
-    let working = root.at(".drawbar/working");
-    fs::create_dir_all(&working).unwrap();
-    fs::write(working.join("1-1"), b"an unsaved edit").unwrap();
-    fs::set_permissions(&working, fs::Permissions::from_mode(0o300)).unwrap();
-    if fs::read_dir(&working).is_ok() {
-        // Permissions do not bind this user, so the folder cannot be made unlistable.
-        fs::set_permissions(&working, fs::Permissions::from_mode(0o755)).unwrap();
-        return;
-    }
-
-    let second = Session::open(&root);
-    let why = second.store.read_only().map(str::to_string);
-    second.close();
-    fs::set_permissions(&working, fs::Permissions::from_mode(0o755)).unwrap();
-    let why = why.expect("read-only");
-    assert!(why.contains("could not be read"), "{why}");
-    assert_eq!(root.names(".drawbar/working"), ["1-1"], "the copy is left");
-}
-
-/// A library whose index is missing asks about the working copies it keeps, since in the
-/// browser nothing else can reach them. Opening it without them, confirmed, deletes them,
-/// and the library opens for writing.
-#[test]
-fn a_library_without_its_index_opens_without_its_edits_when_asked() {
-    let root = Temp::new();
-    let mut first = Session::open(&root);
-    let id = first.create();
-    first.sync();
-    let edited = with_gain(&first.bytes(id), "96");
-    let log = &mut first.bench.log;
-    first.bench.workspace.replace_bytes(id, edited, log);
-    first.close();
-    fs::remove_file(root.at(".drawbar/library.ron")).unwrap();
-
-    let mut second = Session::open(&root);
-    assert!(second.store.read_only().is_some());
-    let (_, answers) = second.bench.browser.asking().expect("a question");
-    assert_eq!(answers, ["Keep read-only", "Open without them…"]);
-    let acts = second.bench.browser.answer("Open without them…");
-    second.bench.act(acts);
-    let (title, _) = second.bench.browser.asking().expect("asked again");
-    assert_eq!(title, "Delete 1 unsaved edit?");
-    let acts = second.bench.browser.answer("Delete");
-    assert!(
-        matches!(
-            acts[..],
-            [crate::browser::Act::DropUnindexed {
-                copies: 1,
-                confirmed: true
-            }]
-        ),
-        "{acts:?}"
-    );
-    second.store.drop_unindexed();
-    second.close();
-    assert_eq!(
-        root.names(".drawbar/working"),
-        [""; 0],
-        "the copies are gone"
-    );
-
-    let third = Session::open(&root);
-    assert_eq!(third.store.read_only(), None);
-}
-
-/// An index that does not parse opens the library read-only, says so without the
-/// parser's words, and offers to set it aside. Set aside, it is kept under a new name,
-/// the library opens for writing without it, and the working copies it named are never
-/// swept or written over.
-#[test]
-fn a_damaged_index_can_be_set_aside_and_its_copies_survive() {
-    let root = Temp::new();
-    let mut first = Session::open(&root);
-    let id = first.create();
-    first.sync();
-    let edited = with_gain(&first.bytes(id), "96");
-    let log = &mut first.bench.log;
-    first.bench.workspace.replace_bytes(id, edited.clone(), log);
-    first.close();
-    let kept = root.names(".drawbar/working");
-    assert_eq!(kept.len(), 1, "{kept:?}");
-    let damaged = b"(version: 1, next_id: 2, ass";
-    fs::write(root.at(exec::INDEX), damaged).unwrap();
-
-    let mut second = Session::open(&root);
-    let why = second.store.read_only().expect("read-only").to_string();
-    assert!(why.contains("damaged"), "{why}");
-    assert!(!why.contains("Expected") && !why.contains("Probe"), "{why}");
-    let (title, answers) = second.bench.browser.asking().expect("a question");
-    assert_eq!(title, "This library's index is damaged");
-    assert_eq!(
-        answers,
-        ["Keep read-only", "Set it aside and open without it…"]
-    );
-    let acts = second
-        .bench
-        .browser
-        .answer("Set it aside and open without it…");
-    second.bench.act(acts);
-    let (title, _) = second.bench.browser.asking().expect("asked again");
-    assert_eq!(title, "Open the library without its index?");
-    let acts = second.bench.browser.answer("Open without it");
-    assert!(
-        matches!(
-            acts[..],
-            [crate::browser::Act::SetAside { confirmed: true }]
-        ),
-        "{acts:?}"
-    );
-    second.store.set_aside();
-    second.close();
-    assert_eq!(
-        root.names(".drawbar"),
-        ["library.ron.damaged-1", "lock", "tmp", "working"]
-    );
-    assert_eq!(root.read(".drawbar/library.ron.damaged-1"), damaged);
-
-    let mut third = Session::open(&root);
-    assert_eq!(third.store.read_only(), None);
-    assert_eq!(third.bench.browser.asking(), None, "nothing to ask");
-    let again = third.only();
-    let other = with_gain(&third.bytes(again), "12");
-    let log = &mut third.bench.log;
-    third.bench.workspace.replace_bytes(again, other, log);
-    third.close();
-    let working = root.names(".drawbar/working");
-    assert_eq!(working.len(), 2, "{working:?}");
-    assert!(working.contains(&kept[0]), "{working:?}");
-    assert_eq!(
-        root.read(&format!(".drawbar/working/{}", kept[0])),
-        edited,
-        "the kept copy is not written over"
-    );
-
-    Session::open(&root).close();
-    assert!(
-        root.names(".drawbar/working").contains(&kept[0]),
-        "an open with an index does not sweep it either"
-    );
-}
-
 /// ⚠️ A save sent before the file's first write answered would carry no fingerprint to
 /// check, and be refused as a write over someone else's file.
 #[test]
@@ -857,16 +457,15 @@ fn a_save_made_while_the_first_write_is_in_flight_lands_after_it() {
     let Bench {
         workspace,
         browser,
-        queue,
         log,
         ..
     } = &mut session.bench;
-    assert!(session.store.sync(workspace, browser, queue, Pass::Files));
+    assert!(session.store.sync(workspace, browser, Pass::Files));
     let edited = with_gain(&workspace.get(id).unwrap().bytes, "96");
     workspace.replace_bytes(id, edited.clone(), log);
     workspace.mark_saved(id);
     assert!(
-        !session.store.sync(workspace, browser, queue, Pass::Files),
+        !session.store.sync(workspace, browser, Pass::Files),
         "the save waits"
     );
     session.close();
@@ -877,7 +476,7 @@ fn a_save_made_while_the_first_write_is_in_flight_lands_after_it() {
 /// is settled, after one last pass whose answers nothing reads. That pass sends no save,
 /// so the index it writes holds what each save answered.
 #[test]
-fn a_settled_library_let_go_without_waiting_keeps_its_save_and_its_edit() {
+fn a_settled_library_let_go_without_waiting_keeps_its_save() {
     let root = Temp::new();
     let mut session = Session::open(&root);
     let id = session.create();
@@ -896,27 +495,21 @@ fn a_settled_library_let_go_without_waiting_keeps_its_save_and_its_edit() {
         assert!(session.next(), "the save answered");
     }
     let Bench {
-        workspace,
-        browser,
-        queue,
-        ..
+        workspace, browser, ..
     } = &mut session.bench;
     assert!(
-        session.store.sync(workspace, browser, queue, Pass::Last),
+        session.store.sync(workspace, browser, Pass::Last),
         "nothing waits"
     );
     drop(session);
     assert_eq!(root.read("untitled.ne5p"), saved, "the save landed");
 
     let again = Session::open(&root);
-    let entity = again.bench.workspace.get(id).expect("the same id");
-    assert_eq!(entity.bytes, edited, "the edit came back");
-    assert!(entity.is_unsaved());
     assert_eq!(again.bench.browser.asking(), None, "nothing to ask");
 }
 
-/// Quitting right after a save writes the index only once the save has answered, so the
-/// next run knows the file as the save left it, not as changed outside drawbar.
+/// Quitting right after a save waits for it to land, so the next run finds the file as
+/// the save left it.
 #[test]
 fn quitting_right_after_a_save_leaves_no_conflict_for_the_next_run() {
     let root = Temp::new();
@@ -934,76 +527,12 @@ fn quitting_right_after_a_save_leaves_no_conflict_for_the_next_run() {
 
     let second = Session::open(&root);
     assert_eq!(second.bench.browser.asking(), None, "nothing to ask");
-    let entity = second.bench.workspace.get(id).expect("the same id");
+    let entity = second
+        .bench
+        .workspace
+        .get(second.only())
+        .expect("the asset");
     assert_eq!(*entity.saved.bytes(), saved, "the file as saved");
-    assert_eq!(entity.bytes, edited, "and the edit over it");
-}
-
-/// ⚠️ A save lands before the index that drops its working copy. A crash in between
-/// leaves a copy of an edit older than the save, and the next open must take the file
-/// as saved rather than offer the older edit back over it.
-#[test]
-fn a_crash_right_after_a_save_brings_back_the_save_and_not_an_older_edit() {
-    let root = Temp::new();
-    let mut session = Session::open(&root);
-    let id = session.create();
-    session.sync();
-    let older = with_gain(&session.bytes(id), "96");
-    let saved = with_gain(&older, "12");
-    let Bench { workspace, log, .. } = &mut session.bench;
-    workspace.replace_bytes(id, older.clone(), log);
-    session.autosave();
-    session.settle();
-    assert_eq!(
-        rows(&root)[&id].working.map(|copy| copy.keeps),
-        Some(Keeps::Bytes),
-        "the older edit is kept as a working copy"
-    );
-    let Bench { workspace, log, .. } = &mut session.bench;
-    workspace.replace_bytes(id, saved.clone(), log);
-    workspace.mark_saved(id);
-    while !session.settled() {
-        assert!(session.next(), "the save answered");
-    }
-    drop(session);
-    assert_eq!(root.read("untitled.ne5p"), saved, "the save landed");
-
-    let again = Session::open(&root);
-    assert_eq!(again.bench.browser.asking(), None, "nothing to ask");
-    let entity = again.bench.workspace.get(id).expect("the same id");
-    assert_eq!(entity.bytes, saved, "the save, not the older edit");
-    assert!(!entity.is_unsaved());
-}
-
-/// A working copy kept while a save waited for the one before it holds edits newer than
-/// that save, and is never written over by it: after a crash, the newer edit comes back.
-#[test]
-fn a_save_never_writes_over_a_working_copy_newer_than_itself() {
-    let root = Temp::new();
-    let mut session = Session::open(&root);
-    let id = session.create();
-    session.sync();
-    let first = with_gain(&session.bytes(id), "96");
-    let second = with_gain(&first, "12");
-    let newer = with_gain(&second, "40");
-    let Bench { workspace, log, .. } = &mut session.bench;
-    workspace.replace_bytes(id, first, log);
-    workspace.mark_saved(id);
-    assert!(!session.settled(), "the first save is in flight");
-    let Bench { workspace, log, .. } = &mut session.bench;
-    workspace.replace_bytes(id, second.clone(), log);
-    workspace.mark_saved(id);
-    workspace.replace_bytes(id, newer.clone(), log);
-    session.autosave();
-    while !session.settled() {
-        assert!(session.next(), "the saves answered");
-    }
-    drop(session);
-    assert_eq!(root.read("untitled.ne5p"), second, "the second save landed");
-
-    let again = Session::open(&root);
-    let entity = again.bench.workspace.get(id).expect("the same id");
-    assert_eq!(entity.bytes, newer, "the newer edit came back");
 }
 
 #[test]
@@ -1011,15 +540,13 @@ fn a_file_renamed_outside_keeps_its_id_and_tags() {
     let root = Temp::new();
     let mut session = Session::open(&root);
     let id = session.create();
-    let tag = session.bench.browser.tags.make("Sunday").unwrap();
-    session.bench.browser.tags.set(id, tag, true);
-    session.sync();
+    session.tag(&[id], "Sunday");
 
     fs::rename(root.at("untitled.ne5p"), root.at("Grand.ne5p")).unwrap();
     session.refocus();
     assert_eq!(session.path(id).as_deref(), Some("Grand.ne5p"));
     assert_eq!(session.bench.workspace.get(id).unwrap().name, "Grand.ne5p");
-    assert!(session.bench.browser.tags.worn(id).contains(&tag));
+    assert_eq!(session.worn(id), ["Sunday"]);
     assert_eq!(
         session.bench.workspace.listed().count(),
         1,
@@ -1031,9 +558,9 @@ fn a_file_renamed_outside_keeps_its_id_and_tags() {
     fs::create_dir(root.at("Pianos")).unwrap();
     fs::rename(root.at("Grand.ne5p"), root.at("Pianos/Grand.ne5p")).unwrap();
     let again = Session::open(&root);
+    let id = again.only();
     assert_eq!(again.path(id).as_deref(), Some("Pianos/Grand.ne5p"));
-    assert!(again.bench.browser.tags.worn(id).contains(&tag));
-    assert_eq!(again.bench.workspace.listed().count(), 1);
+    assert_eq!(again.worn(id), ["Sunday"]);
 }
 
 /// A browser can hear the user leave and come back between two frames, as when a frame
@@ -1067,8 +594,7 @@ fn coming_back_to_a_picked_folder_rescans_it() {
     assert_eq!(names, ["Grand.ne5p"]);
 }
 
-/// A file with a tag that nothing has read is read in the background once the library is
-/// listed, and the index keeps its CRC, so the file keeps its tag through a rename outside
+/// A file with a tag that nothing has read keeps its tag through a rename outside
 /// drawbar, while drawbar runs and while it does not.
 #[test]
 fn a_tagged_file_never_read_keeps_its_tag_through_a_rename_outside() {
@@ -1076,60 +602,22 @@ fn a_tagged_file_never_read_keeps_its_tag_through_a_rename_outside() {
     fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
     let mut first = Session::listed(&root);
     let id = first.only();
-    let tag = first.bench.browser.tags.make("Sunday").unwrap();
-    first.bench.browser.tags.set(id, tag, true);
+    first.tag(&[id], "Sunday");
     first.close();
 
     let mut second = Session::listed(&root);
-    second.answer_reads();
-    let Bench { workspace, log, .. } = &mut second.bench;
-    workspace.settle_files(log);
-    second.autosave();
-    second.settle();
+    let id = second.only();
     fs::rename(root.at("Grand.ne5p"), root.at("Piano.ne5p")).unwrap();
     second.refocus();
     assert_eq!(second.path(id).as_deref(), Some("Piano.ne5p"));
-    assert!(second.bench.browser.tags.worn(id).contains(&tag));
+    assert_eq!(second.worn(id), ["Sunday"]);
     second.close();
 
     fs::rename(root.at("Piano.ne5p"), root.at("Grand.ne5p")).unwrap();
     let third = Session::listed(&root);
+    let id = third.only();
     assert_eq!(third.path(id).as_deref(), Some("Grand.ne5p"));
-    assert!(third.bench.browser.tags.worn(id).contains(&tag));
-    assert_eq!(third.bench.workspace.listed().count(), 1, "not a new asset");
-}
-
-/// A file at a new path shows as soon as the listing finds it, though it may be a file
-/// the index names, moved. Once the listing is done and its contents match, it is that
-/// file: one asset, under the index's id, with its tags.
-#[test]
-fn a_file_renamed_while_drawbar_was_away_shows_at_once_and_becomes_its_asset() {
-    let root = Temp::new();
-    let mut first = Session::open(&root);
-    let id = first.create();
-    let tag = first.bench.browser.tags.make("Sunday").unwrap();
-    first.bench.browser.tags.set(id, tag, true);
-    first.sync();
-    first.close();
-    fs::rename(root.at("untitled.ne5p"), root.at("Grand.ne5p")).unwrap();
-
-    let mut second = Session::opening(&root);
-    let shown = loop {
-        let mut listed = second.bench.workspace.listed();
-        if let Some(found) = listed.find(|entity| entity.name == "Grand.ne5p") {
-            break found.id;
-        }
-        drop(listed);
-        assert!(second.next(), "the listing answered");
-    };
-    assert!(second.store.listing(), "shown before the listing is done");
-    assert_ne!(shown, id, "as a file of its own, until then");
-    second.listed_whole();
-    assert_eq!(second.only(), id);
-    assert_eq!(second.path(id).as_deref(), Some("Grand.ne5p"));
-    assert!(second.bench.browser.tags.worn(id).contains(&tag));
-    assert!(second.bench.browser.tags.worn(shown).is_empty());
-    assert_eq!(second.said("deleted outside drawbar"), 0);
+    assert_eq!(third.worn(id), ["Sunday"]);
 }
 
 /// A file written again elsewhere, its time new and its length the same, is the asset
@@ -1139,16 +627,14 @@ fn a_file_copied_to_a_new_path_and_deleted_is_matched_by_its_contents() {
     let root = Temp::new();
     let mut session = Session::open(&root);
     let id = session.create();
-    let tag = session.bench.browser.tags.make("Sunday").unwrap();
-    session.bench.browser.tags.set(id, tag, true);
-    session.sync();
+    session.tag(&[id], "Sunday");
 
     let bytes = root.read("untitled.ne5p");
     fs::remove_file(root.at("untitled.ne5p")).unwrap();
     fs::write(root.at("Grand.ne5p"), &bytes).unwrap();
     session.refocus();
     assert_eq!(session.path(id).as_deref(), Some("Grand.ne5p"));
-    assert!(session.bench.browser.tags.worn(id).contains(&tag));
+    assert_eq!(session.worn(id), ["Sunday"]);
     assert_eq!(session.bench.workspace.listed().count(), 1);
 }
 
@@ -1315,56 +801,17 @@ fn a_save_over_a_file_changed_since_it_was_read_is_refused() {
     assert!(entity.is_unsaved());
 }
 
-#[test]
-fn leftovers_of_interrupted_writes_are_swept_and_the_last_index_reads() {
-    let root = Temp::new();
-    let mut first = Session::open(&root);
-    let made = first.create();
-    let bytes = first.bytes(made);
-    first.close();
-    let index = root.read(exec::INDEX);
-
-    // What a crash leaves: an index and a save written halfway to their temporaries,
-    // and a working copy the index never came to name.
-    fs::write(
-        root.at(".drawbar/tmp/library.ron"),
-        &index[..index.len() / 2],
-    )
-    .unwrap();
-    fs::write(
-        root.at(".untitled.ne5p.drawbar-tmp"),
-        &bytes[..bytes.len() / 2],
-    )
-    .unwrap();
-    fs::write(root.at(".drawbar/working/99-7"), b"half an edit").unwrap();
-
-    let second = Session::open(&root);
-    assert!(root.names(".drawbar/tmp").is_empty());
-    assert!(root.names(".drawbar/working").is_empty());
-    assert_eq!(root.names(""), [".drawbar", "untitled.ne5p"]);
-    assert_eq!(second.said("removed 3 leftovers"), 1);
-    assert_eq!(second.bytes(second.only()), bytes, "the asset is whole");
-    assert_eq!(
-        root.read(exec::INDEX),
-        index,
-        "the index is the last one written"
-    );
-}
-
-/// A slot's occupant kept for a write that never finished is the slot's only copy, so
-/// the sweep of `tmp/` leaves it.
-#[test]
-fn a_kept_occupant_is_not_swept() {
-    let root = Temp::new();
-    let mut first = Session::open(&root);
-    first.create();
-    first.close();
-    fs::write(root.at(".drawbar/tmp/nord-rescued-1-1.npno"), a_rescue()).unwrap();
-    fs::write(root.at(".drawbar/tmp/library.ron"), b"half an index").unwrap();
-
-    let second = Session::open(&root);
-    assert_eq!(root.names(exec::TMP), ["nord-rescued-1-1.npno"]);
-    assert_eq!(second.said("removed 1 leftovers"), 1);
+/// `count` programs in three folders of `root`.
+fn programs(root: &Temp, count: usize) {
+    let program = Fresh::Program.bytes().unwrap();
+    let dirs = ["Live", "Studio", "Studio/Old"];
+    for dir in dirs {
+        fs::create_dir(root.at(dir)).unwrap();
+    }
+    for n in 0..count {
+        let path = format!("{}/{n:05}.ne5p", dirs[n % dirs.len()]);
+        fs::write(root.at(&path), &program).unwrap();
+    }
 }
 
 /// A whole file a write to the instrument could have left: a small piano's container.
@@ -1373,13 +820,30 @@ fn a_rescue() -> Vec<u8> {
     nord_usb::envelope::wrap("npno", at, 0, b"a piano").unwrap()
 }
 
+/// Where an interrupted write to the instrument leaves a slot's former occupant while the
+/// library in `root` is open: this install's own folder for it.
+fn rescued(root: &Temp) -> std::path::PathBuf {
+    root.local().join("rescued")
+}
+
+/// The names in the folder at `dir`, sorted.
+fn names_at(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
 /// A library drawbar has written, with a slot's former occupant an interrupted write
-/// left in its `tmp/`.
+/// left in this install's folder for it.
 fn with_rescue(root: &Temp) {
     let mut first = Session::open(root);
     first.create();
     first.close();
-    fs::write(root.at(".drawbar/tmp/nord-rescued-1-4.npno"), a_rescue()).unwrap();
+    fs::create_dir_all(rescued(root)).unwrap();
+    fs::write(rescued(root).join("nord-rescued-1-4.npno"), a_rescue()).unwrap();
 }
 
 impl Session {
@@ -1390,56 +854,40 @@ impl Session {
             let crate::browser::Act::Rescue(rescue, what) = act else {
                 panic!("{act:?} is not a rescue's act")
             };
-            let Bench {
-                workspace,
-                browser,
-                log,
-                ..
-            } = &mut self.bench;
-            self.store.rescue(rescue, what, workspace, browser, log);
+            let Bench { browser, log, .. } = &mut self.bench;
+            self.store.rescue(rescue, what, browser, log);
         }
         self.sync();
     }
 }
 
-/// A leftover rescue is offered once the library has opened, with every choice.
-#[test]
-fn a_rescue_left_in_tmp_is_offered_on_open() {
-    let root = Temp::new();
-    with_rescue(&root);
-
-    let second = Session::open(&root);
-    let (title, answers) = second.bench.browser.asking().expect("a question is asked");
-    assert!(title.contains("nord-rescued-1-4.npno"), "{title}");
-    assert_eq!(
-        answers,
-        ["Later", "Show the file", "Discard…", "Keep in library"]
-    );
-}
-
 /// A rescue still being written when drawbar stopped is never the slot's only copy, since
-/// the slot is not touched until it is whole. It is not offered, and is deleted, in the
-/// library and in drawbar's own data alike.
+/// the slot is not touched until it is whole. It is deleted, in this install's folder and
+/// in drawbar's own data alike, and nothing of it reaches the library.
 #[test]
-fn a_partial_rescue_file_is_never_offered() {
+fn a_rescue_cut_short_by_a_crash_is_deleted_and_never_reaches_the_library() {
     let (root, shelf) = (Temp::new(), Temp::new());
     let mut first = Session::open(&root);
     first.create();
     first.close();
     let partial = "nord-rescued-1-4.npno.partial";
-    fs::write(root.at(&format!("{}/{partial}", exec::TMP)), a_rescue()).unwrap();
+    fs::create_dir_all(rescued(&root)).unwrap();
+    fs::write(rescued(&root).join(partial), a_rescue()).unwrap();
     fs::write(shelf.at(partial), a_rescue()).unwrap();
     let bench = Bench::new();
-    let store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
+    let store = Store::start(crate::testing::backend(&bench.ctx, &root));
     let mut session = Session {
         store: store.shelving(Some(shelf.0.clone())),
         bench,
     };
     session.opened();
 
+    session.sync();
     assert_eq!(session.bench.browser.asking(), None, "nothing is offered");
-    assert_eq!(root.names(exec::TMP), Vec::<String>::new());
+    assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
     assert_eq!(shelf.names(""), Vec::<String>::new());
+    let rescued = |name: &String| name.starts_with("nord-rescued");
+    assert!(!root.names("").iter().any(rescued), "{:?}", root.names(""));
 }
 
 /// A rescue file that does not read, such as one an older drawbar left half written, is
@@ -1452,7 +900,8 @@ fn a_rescue_file_that_does_not_decode_is_reported_not_offered() {
     first.close();
     let mut half = a_rescue();
     half[..8].fill(0);
-    fs::write(root.at(".drawbar/tmp/nord-rescued-1-4.npno"), half).unwrap();
+    fs::create_dir_all(rescued(&root)).unwrap();
+    fs::write(rescued(&root).join("nord-rescued-1-4.npno"), half).unwrap();
 
     let mut second = Session::open(&root);
     let (title, answers) = second.bench.browser.asking().expect("a question is asked");
@@ -1460,102 +909,187 @@ fn a_rescue_file_that_does_not_decode_is_reported_not_offered() {
     assert!(title.contains("does not read"), "{title}");
     assert_eq!(answers, ["Later", "Show the file", "Discard"]);
     second.choose("Discard");
-    assert_eq!(root.names(exec::TMP), Vec::<String>::new());
+    assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
 }
 
-/// A library whose folder for temporary files is a link offers the device no place in
-/// it for a rescue, so a rescue never lands outside the library.
-#[cfg(unix)]
+/// A rescue a write left goes into the library's top level once the library opens, as an
+/// asset like any other, an entity that says which slot it came off, and is deleted where
+/// it was. The copy is one change, which undo takes back and redo makes again, and the
+/// next open finds nothing more to take in.
 #[test]
-fn a_linked_folder_for_temporaries_is_no_place_for_a_rescue() {
-    let root = Temp::new();
-    let outside = Temp::new();
-    fs::write(root.at("a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-    let session = Session::listed(&root);
-    assert!(session.store.tmp().is_some(), "a plain library has one");
-
-    fs::create_dir_all(root.at(".drawbar")).unwrap();
-    let _ = fs::remove_dir_all(root.at(exec::TMP));
-    std::os::unix::fs::symlink(outside.at(""), root.at(exec::TMP)).unwrap();
-    assert_eq!(session.store.tmp(), None);
-}
-
-/// Keep in library moves a rescue into the library's top level, where it is an asset
-/// like any other.
-#[test]
-fn a_rescue_kept_moves_into_the_library_as_an_asset() {
+fn a_rescue_left_goes_into_the_library_once_with_its_slot_as_origin() {
     let root = Temp::new();
     with_rescue(&root);
 
     let mut second = Session::open(&root);
-    second.choose("Keep in library");
-    assert_eq!(root.names(exec::TMP), Vec::<String>::new());
+    second.sync();
+    assert_eq!(second.bench.browser.asking(), None, "nothing is asked");
+    assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
     assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue());
-    let names: Vec<&str> = second
-        .bench
-        .workspace
-        .listed()
-        .map(|entity| entity.name.as_str())
-        .collect();
-    assert!(names.contains(&"nord-rescued-1-4.npno"), "{names:?}");
+
+    second.undo();
+    assert!(!root.at("nord-rescued-1-4.npno").exists(), "undone");
+    second.redo();
+    assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue(), "redone");
+    second.close();
 
     let third = Session::open(&root);
-    assert_eq!(
-        third.bench.browser.asking(),
-        None,
-        "nothing is left to offer"
+    let rescues: Vec<String> = root
+        .names("")
+        .into_iter()
+        .filter(|name| name.starts_with("nord-rescued"))
+        .collect();
+    assert_eq!(rescues, ["nord-rescued-1-4.npno"], "taken in once");
+    let kept = third.named("nord-rescued-1-4.npno");
+    let origin = &third.bench.workspace.get(kept).unwrap().origin;
+    assert!(
+        matches!(origin, Origin::Rescued { at } if *at == Location::from_user(1, 4)),
+        "{}",
+        origin.label()
+    );
+    assert!(
+        matches!(third.store.key(kept), Some(Key::Entity(_))),
+        "an entity says where it came from"
     );
 }
 
-/// Discard asks first, and deletes the rescue only once that is answered.
+/// A rescue a write leaves while the library is open goes into it once the instrument is
+/// idle, once however often drawbar looks again before its copy lands.
 #[test]
-fn a_rescue_discarded_is_deleted_once_confirmed() {
+fn a_rescue_a_write_leaves_goes_into_the_open_library_once() {
     let root = Temp::new();
-    with_rescue(&root);
+    let mut session = Session::open(&root);
+    fs::create_dir_all(rescued(&root)).unwrap();
+    fs::write(rescued(&root).join("nord-rescued-2-3.npno"), a_rescue()).unwrap();
+    for _ in 0..2 {
+        session.store.rescue_due();
+        session.look_for_rescues();
+    }
+    session.sync();
+    session.store.rescue_due();
+    session.look_for_rescues();
+    session.sync();
 
-    let mut second = Session::open(&root);
-    second.choose("Discard…");
-    let (title, _) = second.bench.browser.asking().expect("asked again");
-    assert_eq!(title, "Discard “nord-rescued-1-4.npno”?");
-    assert_eq!(root.names(exec::TMP), ["nord-rescued-1-4.npno"]);
-    second.choose("Discard");
-    assert_eq!(root.names(exec::TMP), Vec::<String>::new());
-    assert!(!root
+    assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
+    let rescues: Vec<String> = root
         .names("")
-        .contains(&"nord-rescued-1-4.npno".to_string()));
+        .into_iter()
+        .filter(|name| name.starts_with("nord-rescued"))
+        .collect();
+    assert_eq!(rescues, ["nord-rescued-2-3.npno"]);
+    let kept = session.named("nord-rescued-2-3.npno");
+    let origin = &session.bench.workspace.get(kept).unwrap().origin;
+    assert!(
+        matches!(origin, Origin::Rescued { at } if *at == Location::from_user(2, 3)),
+        "{}",
+        origin.label()
+    );
 }
 
-/// A rescue in drawbar's own data, where no library could take it, is offered with the
-/// library's own, and Keep in library copies it in and deletes it there; Discard deletes
-/// it.
+/// A library that cannot be written leaves a rescue where it is and asks about it: it may
+/// be shown or discarded, or left for the next open of a library that can take it.
 #[test]
-fn a_rescue_in_drawbars_own_data_is_kept_or_discarded() {
+fn a_rescue_a_read_only_library_cannot_take_stays_and_is_offered() {
+    let (root, later) = newer_drawbar_wrote();
+    fs::create_dir_all(rescued(&root)).unwrap();
+    fs::write(rescued(&root).join("nord-rescued-1-4.npno"), a_rescue()).unwrap();
+    let mut second = Session::open(&root);
+    assert!(second.store.read_only().is_some(), "opened read-only");
+    let (title, answers) = second.bench.browser.asking().expect("a question is asked");
+    assert_eq!(
+        title,
+        "A write to the instrument left “nord-rescued-1-4.npno”"
+    );
+    assert_eq!(answers, ["Later", "Show the file", "Discard"]);
+    second.choose("Discard");
+    let (title, _) = second.bench.browser.asking().expect("asked again");
+    assert_eq!(title, "Discard “nord-rescued-1-4.npno”?");
+    second.choose("Later");
+    assert_eq!(names_at(&rescued(&root)), ["nord-rescued-1-4.npno"]);
+    second.close();
+    fs::remove_file(later).unwrap();
+
+    let mut third = Session::open(&root);
+    third.sync();
+    assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
+    assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue());
+}
+
+/// A rescue's name says the slot it came off.
+#[test]
+fn a_rescue_names_the_slot_it_came_off() {
+    let slot = |name: &str| Rescue::slot_of(name);
+    assert_eq!(
+        slot("nord-rescued-3-12.ne5p"),
+        Some(Location::from_user(3, 12))
+    );
+    assert_eq!(
+        slot("nord-rescued-1-4 2.npno"),
+        Some(Location::from_user(1, 4))
+    );
+    assert_eq!(slot("nord-rescued-0-4.npno"), None);
+    assert_eq!(slot("Grand.npno"), None);
+}
+
+/// A copy fetched off a slot keeps saying which slot once drawbar opens the library
+/// again.
+#[test]
+fn a_copy_off_a_slot_still_says_which_once_reopened() {
+    let (root, fetched) = (Temp::new(), Temp::new());
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(fetched.at("Grand.ne5p"), &program).unwrap();
+    let mut first = Session::open(&root);
+    let at = Location::from_user(2, 7);
+    let origin = Origin::Device {
+        class: ObjectClass::Program,
+        at,
+    };
+    let len = program.len() as u64;
+    let to = LibPath::root().join("Grand.ne5p");
+    first
+        .bench
+        .workspace
+        .arrive_fetched(to, origin, fetched.at("Grand.ne5p"), len);
+    first.sync();
+    first.close();
+
+    let second = Session::open(&root);
+    let origin = &second.bench.workspace.get(second.only()).unwrap().origin;
+    assert!(
+        matches!(origin, Origin::Device { class: ObjectClass::Program, at: held } if *held == at),
+        "{}",
+        origin.label()
+    );
+}
+
+/// Every rescue left, in this install's folder for the library and in drawbar's own data
+/// where no library could take one, goes into the library that opens.
+#[test]
+fn every_rescue_left_goes_into_the_library_that_opens() {
     let (root, shelf) = (Temp::new(), Temp::new());
-    for name in ["nord-rescued-1-4.npno", "nord-rescued-2-1.nsmp"] {
-        fs::write(shelf.at(name), a_rescue()).unwrap();
-    }
+    fs::create_dir_all(rescued(&root)).unwrap();
+    fs::write(rescued(&root).join("nord-rescued-1-4.npno"), a_rescue()).unwrap();
+    fs::write(rescued(&root).join("nord-rescued-1-4 2.npno"), a_rescue()).unwrap();
+    fs::write(shelf.at("nord-rescued-2-1.nsmp"), a_rescue()).unwrap();
     let bench = Bench::new();
-    let store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
+    let store = Store::start(crate::testing::backend(&bench.ctx, &root));
     let mut session = Session {
         store: store.shelving(Some(shelf.0.clone())),
         bench,
     };
     session.opened();
+    session.sync();
 
-    let (title, _) = session.bench.browser.asking().expect("asked");
-    assert!(title.contains("nord-rescued-1-4.npno"), "{title}");
-    session.choose("Keep in library");
-    assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue());
-    assert_eq!(shelf.names(""), ["nord-rescued-2-1.nsmp"]);
-
-    let (title, _) = session.bench.browser.asking().expect("asked");
-    assert!(title.contains("nord-rescued-2-1.nsmp"), "{title}");
-    session.choose("Discard…");
-    session.choose("Discard");
+    assert_eq!(session.bench.browser.asking(), None, "nothing is asked");
+    assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
     assert_eq!(shelf.names(""), Vec::<String>::new());
-    assert!(!root
-        .names("")
-        .contains(&"nord-rescued-2-1.nsmp".to_string()));
+    for name in [
+        "nord-rescued-1-4.npno",
+        "nord-rescued-1-4 2.npno",
+        "nord-rescued-2-1.nsmp",
+    ] {
+        assert_eq!(root.read(name), a_rescue(), "{name}");
+    }
 }
 
 /// Rows in view are read a batch at a time, and an asset opened meanwhile goes in the next
@@ -1600,33 +1134,26 @@ fn an_asset_opened_while_rows_are_read_is_read_before_the_rest_of_them() {
     );
 }
 
+/// A save the folder refuses, which nothing may be added to or taken from, leaves the
+/// file as it was and the edit unsaved.
+#[cfg(unix)]
 #[test]
-fn a_write_that_fails_leaves_the_file_and_the_index_as_they_were() {
+fn a_write_that_fails_leaves_the_file_as_it_was() {
+    use std::os::unix::fs::PermissionsExt;
+
     let root = Temp::new();
     let mut session = Session::open(&root);
     let id = session.create();
     session.sync();
-    let (index, file) = (root.read(exec::INDEX), root.read("untitled.ne5p"));
-
-    // The index's temporary cannot be made where a file stands in for its folder.
-    fs::remove_dir_all(root.at(".drawbar/tmp")).unwrap();
-    fs::write(root.at(".drawbar/tmp"), b"not a folder").unwrap();
-    let tag = session.bench.browser.tags.make("Sunday").unwrap();
-    session.bench.browser.tags.set(id, tag, true);
-    session.sync();
-    assert_eq!(root.read(exec::INDEX), index, "the index was not touched");
-    assert_eq!(
-        session.said("did not change as asked: keeping the library's index"),
-        1
-    );
-
-    // Nor can a save's temporary, where a folder has its name.
-    fs::create_dir(root.at(".untitled.ne5p.drawbar-tmp")).unwrap();
+    let file = root.read("untitled.ne5p");
+    let mode = |mode| fs::set_permissions(&root.0, fs::Permissions::from_mode(mode)).unwrap();
+    mode(0o555);
     let edited = with_gain(&file, "96");
     let log = &mut session.bench.log;
     session.bench.workspace.replace_bytes(id, edited, log);
     session.bench.workspace.mark_saved(id);
     session.sync();
+    mode(0o755);
     assert_eq!(root.read("untitled.ne5p"), file, "the file was not touched");
     assert!(
         session.bench.workspace.get(id).unwrap().is_unsaved(),
@@ -1635,71 +1162,244 @@ fn a_write_that_fails_leaves_the_file_and_the_index_as_they_were() {
     assert_eq!(session.said("was not saved"), 1);
 }
 
-/// A commit that fails the same way at every retry is logged once, and logged again
-/// where it fails after one has landed.
+/// A save whose file could not be put in place, with another change after it and a
+/// restart, leaves the file holding its old bytes or its new ones, never nothing.
 #[test]
-fn a_failure_every_retry_repeats_is_logged_once() {
+fn a_save_whose_file_could_not_be_put_in_place_leaves_a_file_through_a_restart() {
     let root = Temp::new();
     let mut session = Session::open(&root);
     let id = session.create();
     session.sync();
-    let tmp = root.at(".drawbar/tmp");
-    let block = || {
-        fs::remove_dir_all(&tmp).unwrap();
-        fs::write(&tmp, b"not a folder").unwrap();
-    };
-    let unblock = || {
-        fs::remove_file(&tmp).unwrap();
-        fs::create_dir(&tmp).unwrap();
-    };
-    let failed = "did not change as asked: keeping the library's index";
-
-    let tag = session.bench.browser.tags.make("Sunday").unwrap();
-    block();
-    session.bench.browser.tags.set(id, tag, true);
-    for _ in 0..3 {
-        session.sync();
-    }
-    assert_eq!(session.said(failed), 1, "logged once");
-
-    unblock();
+    let old = root.read("untitled.ne5p");
+    let new = with_gain(&old, "96");
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "untitled.ne5p"),
+    ));
+    let log = &mut session.bench.log;
+    session.bench.workspace.replace_bytes(id, new.clone(), log);
+    session.bench.workspace.mark_saved(id);
     session.sync();
-    assert_eq!(session.said(failed), 1, "the retry landed");
+    assert_eq!(session.said("was not saved"), 1, "the save failed");
+    assert_eq!(
+        session.said("is missing"),
+        0,
+        "the file waits for the save to finish"
+    );
+    session.make_tag("Sunday");
+    assert_eq!(session.said("Finished saving “untitled.ne5p”."), 1);
+    session.settle();
+    assert_eq!(session.said("changed on disk"), 0);
+    let held = session.bench.workspace.get(id).expect("the asset");
+    assert!(!held.is_unsaved(), "the edit is what the file holds");
+    session.close();
 
-    block();
-    session.bench.browser.tags.set(id, tag, false);
-    session.sync();
-    assert_eq!(session.said(failed), 2, "logged again after a landing");
+    let again = Session::open(&root);
+    let held = fs::read(root.at("untitled.ne5p")).ok();
+    assert!(
+        held.as_ref() == Some(&old) || held.as_ref() == Some(&new),
+        "the file holds {:?} bytes",
+        held.map(|bytes| bytes.len())
+    );
+    let entity = again.bench.workspace.get(again.only()).expect("the asset");
+    assert_eq!(
+        Some(entity.saved.bytes().to_vec()),
+        held,
+        "the asset is its file"
+    );
 }
 
-/// A working copy that cannot be written at any retry is logged once, though each
-/// retry writes it under a new name, and the line names the file.
+/// A save that cannot be finished, as when another program put a file where it goes,
+/// leaves the library read-only, saying what to move, until it is opened again.
 #[test]
-fn a_working_copy_that_fails_at_every_retry_is_logged_once() {
+fn a_save_that_cannot_be_finished_leaves_the_library_read_only_until_it_opens_again() {
     let root = Temp::new();
     let mut session = Session::open(&root);
     let id = session.create();
     session.sync();
-    fs::remove_dir_all(root.at(".drawbar/tmp")).unwrap();
-    fs::write(root.at(".drawbar/tmp"), b"not a folder").unwrap();
-    let edited = with_gain(&session.bytes(id), "96");
+    let new = with_gain(&root.read("untitled.ne5p"), "96");
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "untitled.ne5p"),
+    ));
     let log = &mut session.bench.log;
-    session.bench.workspace.replace_bytes(id, edited, log);
-    for _ in 0..3 {
-        session.sync();
-    }
-    let failed: Vec<&str> = session
-        .bench
-        .log
-        .iter()
-        .map(|entry| entry.text.as_str())
-        .filter(|text| text.contains("did not change as asked"))
-        .collect();
-    assert_eq!(failed.len(), 1, "{failed:?}");
+    session.bench.workspace.replace_bytes(id, new.clone(), log);
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    fs::write(root.at("untitled.ne5p"), b"theirs").unwrap();
+    session.make_tag("Sunday");
+    let why = session.store.read_only().unwrap_or_default().to_string();
     assert!(
-        failed[0].contains("writing .drawbar/working/"),
-        "{failed:?}"
+        why.contains("in the way") && why.contains("untitled.ne5p"),
+        "read-only: {why:?}"
     );
+    assert_eq!(session.said("read-only now"), 1);
+    let later = with_gain(&new, "12");
+    let log = &mut session.bench.log;
+    session
+        .bench
+        .workspace
+        .replace_bytes(id, later.clone(), log);
+    session.close();
+
+    fs::rename(root.at("untitled.ne5p"), root.local().join("theirs")).unwrap();
+    let again = Session::open(&root);
+    assert_eq!(again.store.read_only(), None);
+    assert_eq!(root.read("untitled.ne5p"), new, "the save is finished");
+    let entity = again.bench.workspace.get(again.only()).expect("the asset");
+    assert_eq!(
+        *entity.bytes, later,
+        "the edit made while read-only was kept"
+    );
+}
+
+/// A save the next change finishes joins Undo, before that change, and keeps what its
+/// undo needs.
+#[test]
+fn a_save_the_next_change_finishes_can_be_undone_after_it() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let old = root.read("untitled.ne5p");
+    let new = with_gain(&old, "96");
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "untitled.ne5p"),
+    ));
+    let log = &mut session.bench.log;
+    session.bench.workspace.replace_bytes(id, new.clone(), log);
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    session.make_tag("Sunday");
+    assert_eq!(root.read("untitled.ne5p"), new, "the save is finished");
+    session.undo();
+    assert!(session.tag_names().is_empty(), "the tag is undone");
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo Save “untitled.ne5p”")
+    );
+    session.undo();
+    assert_eq!(root.read("untitled.ne5p"), old, "the save is undone");
+}
+
+/// An undo the next change finishes leaves Undo at the step before the one it undid.
+#[test]
+fn an_undo_the_next_change_finishes_leaves_undo_at_the_step_before() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let old = root.read("untitled.ne5p");
+    let log = &mut session.bench.log;
+    session
+        .bench
+        .workspace
+        .replace_bytes(id, with_gain(&old, "96"), log);
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "untitled.ne5p"),
+    ));
+    session.undo();
+    session.make_tag("Sunday");
+    assert_eq!(root.read("untitled.ne5p"), old, "the undo is finished");
+    session.undo();
+    assert!(session.tag_names().is_empty(), "the tag is undone");
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo New “untitled.ne5p”")
+    );
+}
+
+/// A library a change of drawbar's own left read-only still keeps unsaved edits when it
+/// opens read-only again.
+#[test]
+fn a_library_reopened_while_a_change_still_cannot_be_finished_keeps_edits() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let old = root.read("untitled.ne5p");
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "b.ne5p"),
+    ));
+    let rename = crate::browser::Act::RenameLocal {
+        id,
+        name: "b.ne5p".into(),
+    };
+    session.bench.act(vec![rename]);
+    session.sync();
+    fs::write(root.at("b.ne5p"), with_gain(&old, "96")).unwrap();
+    session.make_tag("Sunday");
+    assert!(
+        session.store.read_only().is_some(),
+        "the move cannot finish"
+    );
+    session.close();
+
+    let mut again = Session::open(&root);
+    assert!(
+        again.store.read_only().is_some(),
+        "the move still cannot finish"
+    );
+    let id = again.named("untitled.ne5p");
+    let edit = with_gain(&old, "12");
+    let log = &mut again.bench.log;
+    again.bench.workspace.replace_bytes(id, edit.clone(), log);
+    again.close();
+
+    fs::remove_file(root.at("b.ne5p")).unwrap();
+    let last = Session::open(&root);
+    assert_eq!(last.store.read_only(), None);
+    let entity = last.bench.workspace.get(last.only()).expect("the asset");
+    assert_eq!(
+        *entity.bytes, edit,
+        "the edit made after opening read-only again was kept"
+    );
+}
+
+/// A copy of a library whose hidden folder holds, in this install's own log, a change a
+/// newer drawbar wrote, and the segment of the log that holds it.
+fn newer_drawbar_wrote() -> (Temp, std::path::PathBuf) {
+    use toshokan::log::{Entry, EntryKind};
+
+    let running = Temp::new();
+    let mut first = Session::open(&running);
+    first.make_tag("Sunday");
+    // A copy taken while it runs, before closing folds its log into a snapshot.
+    let root = Temp::new();
+    copy_tree(&running.0, &root.0);
+    copy_tree(&running.local(), &root.local());
+    let writers = fs::read_dir(root.at(".drawbar/library/writers.2")).unwrap();
+    let writer = writers.map(|entry| entry.unwrap().path()).next().unwrap();
+    let segment = fs::read_dir(&writer)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|file| file.extension().is_some_and(|ext| ext == "txt"))
+        .expect("a segment of the writer's log");
+    let held = fs::read(&segment).unwrap();
+    let lines = held.split_inclusive(|byte| *byte == b'\n');
+    let head = lines.filter_map(|line| Entry::parse(line).ok()).next_back();
+    let head = head.expect("an entry");
+    // A later build logs after this one, in a segment of its own.
+    let future = toshokan::Raw::new(r#"{"kind":"from a later build"}"#).unwrap();
+    let entry = Entry::encode(
+        head.hash(),
+        head.n() + 1,
+        head.at(),
+        EntryKind::Unknown(future),
+    )
+    .unwrap();
+    fs::write(writer.join("later.txt"), entry.to_bytes()).unwrap();
+    (root, writer.join("later.txt"))
+}
+
+/// A library whose hidden folder holds, in this install's own log, a change a newer
+/// drawbar wrote opens read-only: this build would write past what it cannot read.
+#[test]
+fn a_library_a_newer_drawbar_wrote_opens_read_only() {
+    let (root, _) = newer_drawbar_wrote();
+    let second = Session::open(&root);
+    let why = second.store.read_only().unwrap_or_default();
+    assert!(why.contains("update drawbar"), "opened read-only: {why:?}");
 }
 
 /// A delete that fails the same way twice is logged twice: only a commit's retries are
@@ -1722,235 +1422,6 @@ fn a_delete_that_fails_again_is_logged_again() {
         session.sync();
         assert_eq!(session.said(failed), nth);
     }
-}
-
-/// After a write fails, every working copy is written again under a new name, and the
-/// ones they replace go.
-#[test]
-fn working_copies_written_again_after_a_failure_replace_the_old_ones() {
-    let root = Temp::new();
-    let mut session = Session::open(&root);
-    let id = session.create();
-    session.sync();
-    let edited = with_gain(&session.bytes(id), "96");
-    let log = &mut session.bench.log;
-    session.bench.workspace.replace_bytes(id, edited, log);
-    session.sync();
-    let before = root.names(".drawbar/working");
-    assert_eq!(before.len(), 1, "{before:?}");
-
-    fs::remove_dir_all(root.at(".drawbar/tmp")).unwrap();
-    fs::write(root.at(".drawbar/tmp"), b"not a folder").unwrap();
-    let tag = session.bench.browser.tags.make("Sunday").unwrap();
-    session.bench.browser.tags.set(id, tag, true);
-    session.sync();
-    assert_eq!(session.said("did not change as asked"), 1);
-
-    fs::remove_file(root.at(".drawbar/tmp")).unwrap();
-    fs::create_dir(root.at(".drawbar/tmp")).unwrap();
-    session.sync();
-    let after = root.names(".drawbar/working");
-    assert_eq!(after.len(), 1, "{after:?}");
-    assert_ne!(after, before, "written again under a new name");
-}
-
-#[test]
-fn an_index_from_a_newer_drawbar_opens_read_only_and_is_never_written() {
-    let root = Temp::new();
-    fs::create_dir(root.at(".drawbar")).unwrap();
-    let future = "(version: 99, next_id: 3, something_new: [1, 2])";
-    fs::write(root.at(exec::INDEX), future).unwrap();
-    fs::create_dir(root.at(exec::TMP)).unwrap();
-    fs::write(root.at(".drawbar/tmp/theirs"), b"in flight").unwrap();
-    let program = Fresh::Program.bytes().unwrap();
-    fs::write(root.at("Grand.ne5p"), &program).unwrap();
-
-    let mut session = Session::open(&root);
-    let why = session.store.read_only().expect("read-only");
-    assert!(why.contains("newer drawbar"), "{why}");
-    let names: Vec<&str> = session
-        .bench
-        .workspace
-        .listed()
-        .map(|entity| entity.name.as_str())
-        .collect();
-    assert_eq!(names, ["Grand.ne5p"], "the files still show");
-
-    session.create();
-    session.close();
-    assert_eq!(root.read(exec::INDEX), future.as_bytes());
-    assert_eq!(
-        root.names(""),
-        [".drawbar", "Grand.ne5p"],
-        "nothing was added"
-    );
-    assert_eq!(
-        root.names(".drawbar"),
-        ["library.ron", "lock", "tmp"],
-        "nothing but the lock"
-    );
-    assert_eq!(root.names(exec::TMP), ["theirs"], "nothing swept");
-}
-
-/// A drawbar that opens a library read-only, here for an index it must not read, holds
-/// no lock, so a drawbar that may write the library still can.
-#[test]
-fn a_library_opened_read_only_leaves_its_lock_to_a_drawbar_that_may_write_it() {
-    let root = Temp::new();
-    let mut first = Session::open(&root);
-    first.create();
-    first.close();
-    let index = root.read(exec::INDEX);
-    fs::write(root.at(exec::INDEX), "(version: 99, next_id: 3)").unwrap();
-    let reading = Session::open(&root);
-    assert!(reading.store.read_only().is_some());
-
-    fs::write(root.at(exec::INDEX), index).unwrap();
-    let writing = Session::open(&root);
-    assert_eq!(writing.store.read_only(), None);
-    drop(reading);
-}
-
-/// A read-only library holds each change in memory only, so a tab on it asks before it
-/// closes, as it does for an unsaved edit. Reading it, and changes made outside it, do
-/// not.
-#[test]
-fn leaving_with_held_changes_asks_first() {
-    use crate::browser::Act;
-
-    let root = Temp::new();
-    fs::create_dir(root.at(".drawbar")).unwrap();
-    fs::write(root.at(exec::INDEX), "(version: 99)").unwrap();
-    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-    let frame = |session: &mut Session| session.until(|_| true);
-    let losing = |session: &Session| {
-        let Bench {
-            workspace, browser, ..
-        } = &session.bench;
-        session.store.losing(workspace, browser)
-    };
-    type Change = fn(&mut Session, u64);
-    let changes: [(&str, Change); 5] = [
-        ("a deletion", |session, id| {
-            session.bench.act(vec![Act::Remove(id)])
-        }),
-        ("a save", |session, id| {
-            let edited = with_gain(&session.bytes(id), "96");
-            let Bench { workspace, log, .. } = &mut session.bench;
-            workspace.replace_bytes(id, edited, log);
-            session.bench.act(vec![Act::SaveDoc(id)]);
-            assert!(!session.bench.workspace.get(id).unwrap().is_unsaved());
-        }),
-        ("a rename", |session, id| {
-            let name = "Organ".to_string();
-            session.bench.act(vec![Act::RenameLocal { id, name }]);
-        }),
-        ("a tag", |session, id| {
-            let tag = session.bench.browser.tags.make("Sunday").unwrap();
-            session.bench.act(vec![Act::Tag { ids: vec![id], tag }]);
-        }),
-        ("a new folder", |session, _| {
-            session.bench.act(vec![Act::NewFolder])
-        }),
-    ];
-    for (change, make) in changes {
-        let mut session = Session::open(&root);
-        assert!(session.store.read_only().is_some());
-        frame(&mut session);
-        fs::write(root.at("Outside.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-        session.refocus();
-        frame(&mut session);
-        assert!(!losing(&session), "{change}: nothing is held before it");
-
-        let id = session.named("Grand.ne5p");
-        make(&mut session, id);
-        assert!(losing(&session), "{change}: held in the frame that made it");
-        frame(&mut session);
-        session.refocus();
-        assert!(losing(&session), "{change}: still held");
-        fs::remove_file(root.at("Outside.ne5p")).unwrap();
-    }
-    assert_eq!(
-        root.read(exec::INDEX),
-        b"(version: 99)",
-        "nothing was written"
-    );
-}
-
-#[test]
-fn a_second_drawbar_on_one_library_only_reads_it() {
-    let root = Temp::new();
-    let mut first = Session::open(&root);
-    first.create();
-    first.sync();
-    let second = Session::open(&root);
-    assert_eq!(first.store.read_only(), None);
-    let why = second.store.read_only().expect("read-only");
-    assert!(why.contains("another drawbar"), "{why}");
-}
-
-/// An index another writer changed since this drawbar read or wrote it, here to one of
-/// the same length, is never written over: the commit writes nothing, not even its
-/// working copies, and the library turns read-only and says why.
-#[test]
-fn a_commit_over_an_index_changed_by_another_writer_stops() {
-    let root = Temp::new();
-    let mut session = Session::open(&root);
-    let id = session.create();
-    let tag = session.bench.browser.tags.make("Sunday").unwrap();
-    session.bench.browser.tags.set(id, tag, true);
-    session.sync();
-    let ours = String::from_utf8(root.read(exec::INDEX)).unwrap();
-    let theirs = ours.replace("Sunday", "Monday");
-    assert_eq!(theirs.len(), ours.len());
-    fs::write(root.at(exec::INDEX), &theirs).unwrap();
-
-    let edited = with_gain(&session.bytes(id), "96");
-    let Bench { workspace, log, .. } = &mut session.bench;
-    workspace.replace_bytes(id, edited, log);
-    session.bench.browser.tags.make("Later").unwrap();
-    let Bench {
-        workspace,
-        browser,
-        queue,
-        ..
-    } = &mut session.bench;
-    session.store.sync(workspace, browser, queue, Pass::Full);
-    session.until(|session| session.store.read_only().is_some());
-    let why = session.store.read_only().unwrap();
-    assert!(why.contains("another drawbar changed"), "{why}");
-    assert_eq!(root.read(exec::INDEX), theirs.as_bytes());
-    assert_eq!(root.names(".drawbar/working"), [""; 0], "nothing written");
-}
-
-/// Two drawbars can open a folder neither has written, since opening takes no lock. The
-/// first to write takes it, and the other finds out at its own first write.
-#[test]
-fn a_drawbar_that_writes_second_to_a_new_library_turns_read_only() {
-    let root = Temp::new();
-    let mut first = Session::open(&root);
-    let mut second = Session::open(&root);
-    let mine = first.create();
-    first.sync();
-
-    let theirs = second.create();
-    let Bench {
-        workspace,
-        browser,
-        queue,
-        ..
-    } = &mut second.bench;
-    second.store.sync(workspace, browser, queue, Pass::Last);
-    assert!(second.next(), "the write answered");
-    let why = second.store.read_only().expect("read-only");
-    assert!(why.contains("another drawbar"), "{why}");
-    assert!(
-        second.bench.workspace.get(theirs).unwrap().is_unsaved(),
-        "its new file counts as unsaved"
-    );
-    assert_eq!(second.said("read-only now"), 1);
-    assert_eq!(root.names(""), [".drawbar", "untitled.ne5p"]);
-    assert_eq!(root.read("untitled.ne5p"), first.bytes(mine));
 }
 
 /// Opening a folder, looking around and rescanning writes nothing: `.drawbar/` appears
@@ -1978,116 +1449,18 @@ fn a_folder_opened_is_left_as_it_was_until_something_changes() {
         .next()
         .expect("the file")
         .id;
-    let tag = session.bench.browser.tags.make("Sunday").unwrap();
-    session.bench.browser.tags.set(id, tag, true);
+    session.tag(&[id], "Sunday");
     session.close();
     assert_eq!(root.names(""), [".drawbar", "Grand.ne5p"]);
     assert_eq!(root.read("Grand.ne5p"), program, "the file is untouched");
 
     let again = Session::open(&root);
-    assert!(again.bench.browser.tags.worn(id).contains(&tag));
-}
-
-/// Whether a folder can be written is found out by the first write, so opening one
-/// writes nothing to find out.
-#[cfg(unix)]
-#[test]
-fn a_folder_drawbar_cannot_write_turns_read_only_at_the_first_write_and_says_why() {
-    use std::os::unix::fs::PermissionsExt;
-
-    /// Gives the folder back its write permission, so it can be removed.
-    struct Writable<'a>(&'a Temp);
-    impl Drop for Writable<'_> {
-        fn drop(&mut self) {
-            let _ = fs::set_permissions(&self.0 .0, fs::Permissions::from_mode(0o755));
-        }
-    }
-
-    let root = Temp::new();
-    let program = Fresh::Program.bytes().unwrap();
-    fs::write(root.at("Grand.ne5p"), &program).unwrap();
-    fs::set_permissions(&root.0, fs::Permissions::from_mode(0o555)).unwrap();
-    let _writable = Writable(&root);
-    if fs::write(root.at("written"), b"").is_ok() {
-        // Permissions do not bind this user.
-        return;
-    }
-
-    let mut session = Session::open(&root);
-    assert_eq!(
-        session.bench.workspace.listed().count(),
-        1,
-        "it still shows"
-    );
-    let id = session.create();
-    let Bench {
-        workspace,
-        browser,
-        queue,
-        ..
-    } = &mut session.bench;
-    session.store.sync(workspace, browser, queue, Pass::Last);
-    assert!(session.next(), "the write answered");
-    let why = session.store.read_only().expect("read-only");
-    assert!(why.contains("cannot write here"), "{why}");
-    assert_eq!(session.said("read-only now"), 1);
-    assert!(
-        session.bench.workspace.get(id).unwrap().is_unsaved(),
-        "its new file counts as unsaved"
-    );
-    session.close();
-    assert_eq!(root.names(""), ["Grand.ne5p"]);
-}
-
-/// A folder that lists its names but refuses a look at the files in it: every file there
-/// is shown unread, and the rest of the library opens.
-#[cfg(unix)]
-#[test]
-fn a_file_that_cannot_be_looked_at_is_shown_unread_and_the_library_opens() {
-    use std::os::unix::fs::PermissionsExt;
-
-    /// Gives the folder back its permissions, so it can be removed.
-    struct Searchable(std::path::PathBuf);
-    impl Drop for Searchable {
-        fn drop(&mut self) {
-            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
-        }
-    }
-
-    let root = Temp::new();
-    let program = Fresh::Program.bytes().unwrap();
-    fs::write(root.at("Grand.ne5p"), &program).unwrap();
-    fs::create_dir(root.at("Cello")).unwrap();
-    fs::write(root.at("Cello/c3.ne5p"), with_gain(&program, "12")).unwrap();
-    fs::set_permissions(root.at("Cello"), fs::Permissions::from_mode(0o444)).unwrap();
-    let _searchable = Searchable(root.at("Cello"));
-    if fs::metadata(root.at("Cello/c3.ne5p")).is_ok() {
-        // Permissions do not bind this user.
-        return;
-    }
-
-    let session = Session::open(&root);
-    assert_eq!(session.store.read_only(), None);
-    let names: Vec<&str> = session
-        .bench
-        .workspace
-        .listed()
-        .map(|entity| entity.name.as_str())
-        .collect();
-    assert_eq!(names, ["Grand.ne5p"]);
-    let unread: Vec<&str> = session
-        .bench
-        .browser
-        .folders
-        .unread
-        .iter()
-        .map(|(path, _)| path.as_str())
-        .collect();
-    assert_eq!(unread, ["Cello/c3.ne5p"]);
+    assert_eq!(again.worn(again.only()), ["Sunday"]);
 }
 
 /// A rescan that finds several changes made outside drawbar says each in the log and all
-/// of them in the status line; one delete or move is said by its own line.
+/// of them in the status line; one delete or move is said by its own line. Only a file
+/// the library says something about is followed through a move.
 #[test]
 fn a_rescan_reports_what_changed() {
     let root = Temp::new();
@@ -2095,7 +1468,10 @@ fn a_rescan_reports_what_changed() {
     for (name, gain) in [("Bass.ne5p", "10"), ("Keys.ne5p", "20"), ("Pad.ne5p", "30")] {
         fs::write(root.at(name), with_gain(&program, gain)).unwrap();
     }
-    Session::open(&root).close();
+    let mut first = Session::open(&root);
+    let keys = first.named("Keys.ne5p");
+    first.tag(&[keys], "Sunday");
+    first.close();
     let mut session = Session::open(&root);
     fs::write(root.at("Lead.ne5p"), with_gain(&program, "40")).unwrap();
     fs::remove_file(root.at("Bass.ne5p")).unwrap();
@@ -2130,13 +1506,12 @@ fn an_asset_deleted_while_its_file_is_written_goes_without_coming_back() {
     let Bench {
         workspace,
         browser,
-        queue,
         log,
         ..
     } = &mut session.bench;
-    assert!(session.store.sync(workspace, browser, queue, Pass::Files));
+    assert!(session.store.sync(workspace, browser, Pass::Files));
     workspace.remove(id, log);
-    session.store.sync(workspace, browser, queue, Pass::Files);
+    session.store.sync(workspace, browser, Pass::Files);
     session.store.rescan();
     while session.store.scanning() {
         assert!(session.next(), "the write and the rescan answered");
@@ -2150,57 +1525,12 @@ fn an_asset_deleted_while_its_file_is_written_goes_without_coming_back() {
     assert_eq!(root.names(""), [".drawbar"], "the file is gone");
 }
 
-/// A row of the index whose path passes through a folder that is a link reads as
-/// missing: the file the link reaches outside the library is never taken for it, and
-/// nothing is written there.
-#[cfg(unix)]
-#[test]
-fn a_row_through_a_linked_folder_is_missing_and_never_followed() {
-    let (root, outside) = (Temp::new(), Temp::new());
-    let mut first = Session::open(&root);
-    let id = first.create();
-    let tag = first.bench.browser.tags.make("Sunday").unwrap();
-    first.bench.browser.tags.set(id, tag, true);
-    first.sync();
-    first.close();
-    let bytes = root.read("untitled.ne5p");
-    fs::rename(root.at("untitled.ne5p"), outside.at("untitled.ne5p")).unwrap();
-    std::os::unix::fs::symlink(&outside.0, root.at("Linked")).unwrap();
-    let index = String::from_utf8(root.read(exec::INDEX)).unwrap();
-    let edited = index.replace("\"untitled.ne5p\"", "\"Linked/untitled.ne5p\"");
-    assert_ne!(edited, index, "the index names the file");
-    fs::write(root.at(exec::INDEX), edited).unwrap();
-
-    let mut second = Session::open(&root);
-    let lost: Vec<String> = second
-        .bench
-        .browser
-        .folders
-        .lost()
-        .iter()
-        .filter_map(|lost| Some(lost.row.path.as_ref()?.to_string()))
-        .collect();
-    assert_eq!(lost, ["Linked/untitled.ne5p"], "the row is missing");
-    assert_eq!(
-        second.bench.workspace.listed().count(),
-        0,
-        "nothing was read"
-    );
-    second.sync();
-    second.close();
-
-    assert_eq!(outside.names(""), ["untitled.ne5p"]);
-    assert_eq!(outside.read("untitled.ne5p"), bytes);
-}
-
 #[test]
 fn a_file_deleted_outside_goes_unless_it_holds_what_the_file_did_not() {
     let root = Temp::new();
     let mut session = Session::open(&root);
     let (tagged, plain) = (session.create(), session.create());
-    let tag = session.bench.browser.tags.make("Sunday").unwrap();
-    session.bench.browser.tags.set(tagged, tag, true);
-    session.sync();
+    session.tag(&[tagged], "Sunday");
     for name in ["untitled.ne5p", "untitled 2.ne5p"] {
         fs::remove_file(root.at(name)).unwrap();
     }
@@ -2223,68 +1553,22 @@ fn a_file_deleted_outside_goes_unless_it_holds_what_the_file_did_not() {
     );
 
     let again = Session::open(&root);
-    let lost: Vec<u64> = again
+    let lost: Vec<(u64, String)> = again
         .bench
         .browser
         .folders
         .lost()
         .iter()
-        .map(|lost| lost.id)
+        .map(|lost| (lost.id, lost.path.to_string()))
         .collect();
-    assert_eq!(lost, [tagged], "a row for what only the index had");
-    assert!(again.bench.browser.tags.worn(tagged).contains(&tag));
-}
-
-/// A folder where the index says a file is, is not taken for that file: it is listed as
-/// a folder, and the row, which held a tag, is kept as lost.
-#[test]
-fn a_folder_at_the_path_of_an_indexed_file_is_not_that_file() {
-    let root = Temp::new();
-    let mut first = Session::open(&root);
-    let id = first.create();
-    let tag = first.bench.browser.tags.make("Sunday").unwrap();
-    first.bench.browser.tags.set(id, tag, true);
-    first.close();
-    fs::remove_file(root.at("untitled.ne5p")).unwrap();
-    fs::create_dir(root.at("untitled.ne5p")).unwrap();
-
-    let session = Session::listed(&root);
-    assert_eq!(session.bench.workspace.listed().count(), 0, "no asset");
-    let folders = &session.bench.browser.folders;
-    assert!(folders
-        .id_of(&LibPath::parse("untitled.ne5p").unwrap())
-        .is_some());
-    let lost: Vec<u64> = folders.lost().iter().map(|lost| lost.id).collect();
-    assert_eq!(lost, [id]);
-}
-
-#[test]
-fn a_view_holding_an_edit_comes_back_as_a_file() {
-    let root = Temp::new();
-    let mut first = Session::open(&root);
-    let at = Location { bank: 6, slot: 3 };
-    let Bench { workspace, log, .. } = &mut first.bench;
-    let id = workspace.view(
-        "Africa Split.ne5p".into(),
-        Origin::Device {
-            class: ObjectClass::Program,
-            at,
-        },
-        Fresh::Program.bytes().unwrap(),
-        log,
+    let [(id, path)] = lost.as_slice() else {
+        panic!("one asset is lost: {lost:?}");
+    };
+    assert_eq!(
+        path, "untitled.ne5p",
+        "the tagged file, kept by the library"
     );
-    let edited = with_gain(&workspace.get(id).unwrap().bytes, "96");
-    workspace.replace_bytes(id, edited.clone(), log);
-    first.close();
-    assert_eq!(root.names(""), [".drawbar"], "a view has no file");
-
-    let mut second = Session::open(&root);
-    let entity = second.bench.workspace.get(id).expect("kept");
-    assert!(entity.kept);
-    assert_eq!(entity.bytes, edited);
-    assert_eq!(entity.origin.slot(), Some((ObjectClass::Program, at)));
-    second.sync();
-    assert_eq!(root.read("Africa Split.ne5p"), edited);
+    assert_eq!(again.worn(*id), ["Sunday"]);
 }
 
 #[test]
@@ -2365,19 +1649,6 @@ fn a_disk_holding_both_spellings_shows_both_and_renames_neither() {
 }
 
 #[test]
-fn a_path_from_the_index_cannot_leave_the_library() {
-    for bad in ["..", "a/../b", "/etc", "a//b", "a\\b", "./a", "a/"] {
-        assert_eq!(LibPath::parse(bad), None, "{bad:?}");
-    }
-    let row: Result<Row, _> = ron::from_str(r#"(path: Some("../outside.ne5p"))"#);
-    assert!(row.is_err(), "{row:?}");
-    assert_eq!(
-        LibPath::parse("Cello/c3.wav").map(|path| path.parent()),
-        LibPath::parse("Cello")
-    );
-}
-
-#[test]
 fn a_move_carries_the_folder_and_what_is_in_it_and_nothing_beside_it() {
     let path = |text| LibPath::parse(text).unwrap();
     let (from, to) = (path("Cello"), path("Strings/Cello"));
@@ -2390,232 +1661,18 @@ fn a_move_carries_the_folder_and_what_is_in_it_and_nothing_beside_it() {
     assert_eq!(path("c3.wav").moved(&from, &to), None);
 }
 
-#[test]
-fn the_index_reads_back_what_was_written_and_a_newer_one_is_known_as_that() {
-    let mut index = Sidecar::default();
-    index.tags.insert(4, "Sunday".into());
-    index.assets.insert(
-        9,
-        Row {
-            path: LibPath::parse("Pianos/Grand.npno"),
-            name: "Grand.npno".into(),
-            fingerprint: Some(Fingerprint {
-                len: 10,
-                modified: Some(7),
-                crc: Some(0xdead_beef),
-            }),
-            tags: [4].into(),
-            origin: Stored::Device {
-                class: 1,
-                bank: 0,
-                slot: 2,
-            },
-            working: Some(Working {
-                generation: 3,
-                keeps: Keeps::Edit,
-            }),
-        },
-    );
-    let unread = Row {
-        path: LibPath::parse("c3.ne5p"),
-        name: "c3.ne5p".into(),
-        fingerprint: Some(Fingerprint {
-            len: 3,
-            modified: None,
-            crc: None,
-        }),
-        tags: [4].into(),
-        origin: Stored::Fresh,
-        working: None,
-    };
-    index.assets.insert(10, unread);
-    let text = sidecar::write(&index).unwrap();
-    assert_eq!(sidecar::read(&text), Read::Known(index));
-
-    assert_eq!(sidecar::read("(version: 2, assets: 7)"), Read::Newer(2));
-    assert_eq!(sidecar::read("not an index"), Read::Unreadable);
-}
-
-/// The slot an asset came off is written with the class numbers the index has always
-/// written, whatever the attached instrument numbers its partitions.
-#[test]
-fn an_indexed_slot_keeps_its_class_by_the_indexs_own_numbers() {
-    let text = r#"(version: 1, next_id: 2, assets: {1: (name: "a", origin: Device(class: 4, bank: 6, slot: 12))})"#;
-    let Read::Known(index) = sidecar::read(text) else {
-        panic!("{text}");
-    };
-    let at = Location { bank: 6, slot: 12 };
-    let origin = Origin::Device {
-        class: ObjectClass::Program,
-        at,
-    };
-    assert!(matches!(
-        index.assets[&1].origin(),
-        Origin::Device { class: ObjectClass::Program, at: read } if read == at
-    ));
-    assert_eq!(
-        sidecar::Stored::from(&origin),
-        sidecar::Stored::Device {
-            class: 4,
-            bank: 6,
-            slot: 12
-        }
-    );
-    let unnamed = Origin::Device {
-        class: ObjectClass::Unknown(4),
-        at,
-    };
-    assert_eq!(
-        sidecar::Stored::from(&unnamed),
-        sidecar::Stored::Implied,
-        "a partition this build cannot name means nothing on another instrument"
-    );
-    for preset in [
-        ObjectClass::OrganPreset,
-        ObjectClass::PianoPreset,
-        ObjectClass::SynthPreset,
-    ] {
-        let origin = Origin::Device { class: preset, at };
-        assert_eq!(sidecar::Stored::from(&origin), sidecar::Stored::Implied);
-    }
-}
-
-/// An older index wrote a class it had no number for as its partition index, so a number
-/// past the index's own reads back as that partition, never as a class added since.
-#[test]
-fn an_older_indexs_partition_number_stays_a_partition() {
-    let text = r#"(version: 1, next_id: 2, assets: {1: (name: "a", origin: Device(class: 10, bank: 0, slot: 0))})"#;
-    let Read::Known(index) = sidecar::read(text) else {
-        panic!("{text}");
-    };
-    assert!(matches!(
-        index.assets[&1].origin(),
-        Origin::Device {
-            class: ObjectClass::Unknown(10),
-            ..
-        }
-    ));
-}
-
-/// A field or a kind this build does not know, at any depth, is what a newer drawbar that
-/// kept the version wrote, and never taken for a damaged index.
-#[test]
-fn an_index_holding_what_this_build_does_not_know_is_known_as_that() {
-    for text in [
-        "(version: 1, next_id: 2, colors: {})",
-        r#"(version: 1, next_id: 2, assets: {1: (path: Some("a.ne5p"), color: 3)})"#,
-        r#"(version: 1, next_id: 2, assets: {1: (path: Some("a.ne5p"), fingerprint: Some((len: 1, modified: None, crc: None, sha: 0)))})"#,
-        "(version: 1, next_id: 2, assets: {1: (name: \"a\", origin: Shared(4))})",
-        "(version: 1, next_id: 2, assets: {1: (name: \"a\", origin: Rescued(bank: 0, slot: 1, page: 2))})",
-        "(version: 1, next_id: 2, assets: {1: (name: \"a\", working: Some((generation: 1, keeps: Bytes, at: 0)))})",
-    ] {
-        assert_eq!(sidecar::read(text), Read::Unknown, "{text}");
-    }
-}
-
-/// An index a newer drawbar wrote under this build's version, holding a field this one
-/// does not know, opens the library read-only, and the field survives.
-#[test]
-fn an_index_with_an_unknown_field_opens_read_only() {
-    let root = Temp::new();
-    fs::create_dir(root.at(".drawbar")).unwrap();
-    let theirs = "(version: 1, next_id: 3, colors: {1: \"red\"})";
-    fs::write(root.at(exec::INDEX), theirs).unwrap();
-    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-
-    let mut session = Session::open(&root);
-    let why = session.store.read_only().expect("read-only");
-    assert!(why.contains("newer drawbar"), "{why}");
-    let id = session.only();
-    let tag = session.bench.browser.tags.make("Sunday").unwrap();
-    session.bench.browser.tags.set(id, tag, true);
-    session.create();
-    session.close();
-    assert_eq!(root.read(exec::INDEX), theirs.as_bytes());
-}
-
 /// An asset made with New keeps saying so once its file is written and drawbar opens
-/// the library again; one opened from its file says it came from that file.
+/// the library again.
 #[test]
 fn a_new_asset_with_a_file_is_still_new_after_a_restart() {
     let root = Temp::new();
     let mut first = Session::open(&root);
-    let id = first.create();
-    let tag = first.bench.browser.tags.make("Sunday").unwrap();
-    first.bench.browser.tags.set(id, tag, true);
-    first.sync();
+    first.create();
     first.close();
 
     let second = Session::open(&root);
     let origin = &second.bench.workspace.get(second.only()).unwrap().origin;
     assert!(matches!(origin, Origin::Fresh), "{}", origin.label());
-
-    let row = |origin: &Origin, path: Option<&str>| {
-        let row = Row::of(
-            path.and_then(LibPath::parse),
-            "c3.ne5p",
-            None,
-            [1].into(),
-            origin,
-            None,
-        );
-        let mut index = Sidecar::default();
-        index.assets.insert(1, row);
-        let Read::Known(read) = sidecar::read(&sidecar::write(&index).unwrap()) else {
-            panic!("the index reads back")
-        };
-        read.assets[&1].origin().label()
-    };
-    let file = Origin::File("c3.ne5p".into());
-    assert_eq!(row(&file, Some("Keys/c3.ne5p")), "Opened from c3.ne5p");
-    assert_eq!(row(&file, None), "Opened from c3.ne5p");
-    assert_eq!(row(&Origin::Fresh, Some("c3.ne5p")), Origin::Fresh.label());
-    assert_eq!(row(&Origin::Fresh, None), Origin::Fresh.label());
-}
-
-#[test]
-fn a_file_at_a_new_path_is_an_asset_moved_only_when_one_matches_one() {
-    let found = |path: &str, bytes: &[u8]| Found {
-        path: LibPath::parse(path).unwrap(),
-        stat: Stat {
-            len: bytes.len() as u64,
-            modified: Some(1),
-        },
-        bytes: Some(bytes.to_vec()),
-        file: None,
-        crc: Some(nord_format::crc::crc32(bytes)),
-    };
-    let known = |path: &str, bytes: &[u8]| Known {
-        path: LibPath::parse(path).unwrap(),
-        fingerprint: Some(Fingerprint::of(
-            Stat {
-                len: bytes.len() as u64,
-                modified: Some(0),
-            },
-            bytes,
-        )),
-    };
-    let known = BTreeMap::from([
-        (1, known("a.ne5p", b"one")),
-        (2, known("b.ne5p", b"two")),
-        (3, known("c.ne5p", b"two")),
-    ]);
-    let matched = match_files(
-        &known,
-        vec![found("moved.ne5p", b"one"), found("copy.ne5p", b"two")],
-    );
-    let renamed: Vec<(u64, &str)> = matched
-        .renamed
-        .iter()
-        .map(|(id, found)| (*id, found.path.as_str()))
-        .collect();
-    assert_eq!(renamed, [(1, "moved.ne5p")]);
-    assert_eq!(
-        matched.vanished,
-        [2, 3],
-        "two could have moved, so neither did"
-    );
-    assert_eq!(matched.arrived.len(), 1);
 }
 
 #[test]
@@ -2659,65 +1716,6 @@ fn only_files_drawbar_opens_are_read_and_the_rest_are_listed_by_name() {
     assert_eq!(others, ["Cello/notes.pdf", "cover.jpg"], "no hidden file");
     assert!(session.bench.browser.folders.unread.is_empty());
     session.close();
-}
-
-/// A file drawbar holds stays held whatever its name: it made it, or was given it.
-#[test]
-fn a_held_file_of_a_kind_drawbar_does_not_open_stays_held() {
-    let root = Temp::new();
-    let mut first = Session::open(&root);
-    let Bench { workspace, log, .. } = &mut first.bench;
-    let id = workspace.ingest("scan.pdf".into(), Origin::Fresh, b"%PDF".to_vec(), log);
-    workspace.place(id, LibPath::root().join("scan.pdf"));
-    first.close();
-
-    let second = Session::open(&root);
-    assert!(second.bench.workspace.get(id).is_some(), "the same asset");
-    assert!(second.bench.browser.folders.others.is_empty());
-}
-
-/// A library past ten thousand entries is listed whole, however deep its files are, and
-/// a file drawbar holds keeps its id and tags wherever it is.
-#[test]
-fn a_large_tree_is_listed_whole() {
-    let root = Temp::new();
-    let program = Fresh::Program.bytes().unwrap();
-    for dir in ["a", "b", "c", "c/d"] {
-        fs::create_dir(root.at(dir)).unwrap();
-    }
-    fs::write(root.at("top.ne5p"), &program).unwrap();
-    fs::write(root.at("c/d/kept.ne5p"), with_gain(&program, "12")).unwrap();
-    let mut first = Session::open(&root);
-    let kept = first
-        .bench
-        .workspace
-        .listed()
-        .find(|entity| entity.name == "kept.ne5p")
-        .expect("found while the tree is small")
-        .id;
-    let tag = first.bench.browser.tags.make("Sunday").unwrap();
-    first.bench.browser.tags.set(kept, tag, true);
-    first.close();
-
-    const PAST: usize = 10_001;
-    for n in 0..PAST {
-        fs::write(root.at(&format!("a/{n:05}.jpg")), b"").unwrap();
-    }
-    fs::write(root.at("b/deep.ne5p"), &program).unwrap();
-    let session = Session::open(&root);
-    let folders = &session.bench.browser.folders;
-    assert!(folders.unwalked.is_empty(), "{:?}", folders.unwalked);
-    assert_eq!(folders.others.len(), PAST);
-    let mut names: Vec<&str> = session
-        .bench
-        .workspace
-        .listed()
-        .map(|entity| entity.name.as_str())
-        .collect();
-    names.sort();
-    assert_eq!(names, ["deep.ne5p", "kept.ne5p", "top.ne5p"]);
-    assert!(session.bench.browser.tags.worn(kept).contains(&tag));
-    assert_eq!(session.said("not listed"), 0);
 }
 
 /// After an open's listing nothing is read: each file is an asset under its name, of the
@@ -2826,265 +1824,6 @@ fn search_kinds_and_counts_work_on_files_not_read_yet() {
     assert_eq!(workspace.reading(), 0, "nothing is being read");
 }
 
-/// A row of the index that holds a working copy comes back at open with its edit over
-/// its file, which is read for it. A row without one is read only once something asks.
-#[test]
-fn an_indexed_row_with_a_working_copy_is_restored_at_open() {
-    let root = Temp::new();
-    let mut first = Session::open(&root);
-    let (edited, other) = (first.create(), first.create());
-    first.sync();
-    let saved = first.bytes(edited);
-    let mine = with_gain(&saved, "96");
-    let log = &mut first.bench.log;
-    first
-        .bench
-        .workspace
-        .replace_bytes(edited, mine.clone(), log);
-    let other = first.path(other).unwrap();
-    first.close();
-
-    let second = Session::listed(&root);
-    let entity = second.bench.workspace.get(edited).expect("under its id");
-    assert!(!entity.unread());
-    assert_eq!(entity.bytes, mine);
-    assert_eq!(*entity.saved.bytes(), saved, "what its file holds");
-    assert!(entity.is_unsaved());
-    let other = second.bench.workspace.get(second.named(&other)).unwrap();
-    assert!(other.unread());
-}
-
-/// A file changed after it is listed and before it is read is read as it is then, and
-/// is nobody's edit. A save over it is refused only where it changes after that read.
-#[test]
-fn a_file_is_checked_against_what_was_read_and_not_what_was_listed() {
-    let root = Temp::new();
-    let program = Fresh::Program.bytes().unwrap();
-    fs::write(root.at("Grand.ne5p"), &program).unwrap();
-    let mut session = Session::listed(&root);
-    let id = session.named("Grand.ne5p");
-    let theirs = with_gain(&program, "12");
-    fs::write(root.at("Grand.ne5p"), &theirs).unwrap();
-    session.read_all();
-    let entity = session.bench.workspace.get(id).unwrap();
-    assert_eq!(entity.bytes, theirs);
-    assert!(!entity.is_unsaved());
-
-    let again = with_gain(&program, "64");
-    fs::write(root.at("Grand.ne5p"), &again).unwrap();
-    let mine = with_gain(&program, "96");
-    let log = &mut session.bench.log;
-    session.bench.workspace.replace_bytes(id, mine, log);
-    session.bench.workspace.mark_saved(id);
-    session.sync();
-    assert_eq!(root.read("Grand.ne5p"), again, "not written over");
-    assert_eq!(session.said("was not saved, because it changed on disk"), 1);
-}
-
-/// A folder renamed while the library is still being listed is renamed on disk at once.
-/// Everything under it goes with it: the rows of the index, with their tags and their
-/// unsaved edits, and the files the listing had still to bring back. Writes go meanwhile,
-/// and a file saved while the listing is in flight is not listed twice.
-#[test]
-fn a_folder_renamed_while_the_library_is_listed_takes_everything_under_it() {
-    let root = Temp::new();
-    let program = Fresh::Program.bytes().unwrap();
-    fs::create_dir_all(root.at("Gig/Deep")).unwrap();
-    fs::write(root.at("Gig/Grand.ne5p"), &program).unwrap();
-    fs::write(root.at("Gig/Deep/Pad.ne5p"), with_gain(&program, "12")).unwrap();
-    let mut first = Session::open(&root);
-    let grand = first.named("Grand.ne5p");
-    let tag = first.bench.browser.tags.make("Sunday").unwrap();
-    first.bench.browser.tags.set(grand, tag, true);
-    let mine = with_gain(&program, "96");
-    let log = &mut first.bench.log;
-    first
-        .bench
-        .workspace
-        .replace_bytes(grand, mine.clone(), log);
-    first.close();
-    fs::write(root.at("Gig/Deep/New.ne5p"), with_gain(&program, "64")).unwrap();
-
-    let mut second = Session::opening(&root);
-    let folders = &second.bench.browser.folders;
-    let gig = folders.id_of(&LibPath::parse("Gig").unwrap());
-    let gig = gig.expect("the folder of a row of the index");
-    let rename = crate::browser::Act::RenameFolder {
-        id: gig,
-        name: "Set".into(),
-    };
-    second
-        .bench
-        .act(vec![rename, crate::browser::Act::NewFolder]);
-    let new = LibPath::parse("New folder").unwrap();
-    let folder = second.bench.browser.folders.id_of(&new);
-    let made = second.create();
-    let Bench {
-        workspace,
-        browser,
-        queue,
-        ..
-    } = &mut second.bench;
-    assert!(
-        second.store.sync(workspace, browser, queue, Pass::Files),
-        "nothing waits for the listing"
-    );
-    second.listed_whole();
-    assert_eq!(second.bench.browser.folders.id_of(&new), folder, "it stays");
-    let set = LibPath::parse("Set").unwrap();
-    assert_eq!(second.bench.browser.folders.id_of(&set), Some(gig));
-    second.sync();
-    let mut paths: Vec<String> = second
-        .bench
-        .workspace
-        .listed()
-        .filter_map(|entity| Some(entity.path.as_ref()?.to_string()))
-        .collect();
-    paths.sort();
-    assert_eq!(
-        paths,
-        [
-            "Set/Deep/New.ne5p",
-            "Set/Deep/Pad.ne5p",
-            "Set/Grand.ne5p",
-            "untitled.ne5p"
-        ]
-    );
-    assert_eq!(second.path(made).as_deref(), Some("untitled.ne5p"));
-    assert_eq!(
-        root.names(""),
-        [".drawbar", "New folder", "Set", "untitled.ne5p"]
-    );
-    assert_eq!(root.names("Set/Deep"), ["New.ne5p", "Pad.ne5p"]);
-    let entity = second.bench.workspace.get(grand).unwrap();
-    assert_eq!(entity.bytes, mine);
-    assert!(entity.is_unsaved());
-    assert!(second.bench.browser.tags.worn(grand).contains(&tag));
-    second.close();
-
-    let third = Session::listed(&root);
-    assert_eq!(third.path(grand).as_deref(), Some("Set/Grand.ne5p"));
-    assert!(third.bench.browser.tags.worn(grand).contains(&tag));
-    let entity = third.bench.workspace.get(grand).unwrap();
-    assert_eq!(entity.bytes, mine, "its edit came back");
-    assert!(entity.is_unsaved());
-}
-
-/// An asset made while the library is still being listed takes an id of its own, and
-/// every file the listing brings back still comes back, the files the index names and
-/// the ones it does not.
-#[test]
-fn an_asset_made_while_the_library_is_listed_shares_no_id_with_a_file() {
-    let root = Temp::new();
-    let mut first = Session::open(&root);
-    let indexed = first.create();
-    let tag = first.bench.browser.tags.make("Sunday").unwrap();
-    first.bench.browser.tags.set(indexed, tag, true);
-    first.close();
-    fs::write(root.at("Other.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-
-    let bench = Bench::new();
-    let store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
-    let mut second = Session { store, bench };
-    assert!(second.next(), "opening answered");
-    let before = second.create();
-    assert!(second.next(), "the rows of the index answered");
-    let after = second.create();
-    second.listed_whole();
-
-    let workspace = &second.bench.workspace;
-    let mut names: Vec<&str> = workspace.listed().map(|e| e.name.as_str()).collect();
-    names.sort();
-    assert_eq!(
-        names,
-        [
-            "Other.ne5p",
-            "untitled.ne5p",
-            "untitled.ne5p",
-            "untitled.ne5p"
-        ]
-    );
-    let file = workspace
-        .listed()
-        .find(|entity| {
-            entity
-                .path
-                .as_ref()
-                .is_some_and(|at| at.as_str() == "untitled.ne5p")
-        })
-        .expect("the file the index names");
-    assert!(second.bench.browser.tags.worn(file.id).contains(&tag));
-    for made in [before, after] {
-        assert_eq!(second.path(made), None, "not placed yet");
-    }
-}
-
-/// A folder rename the disk refuses while the library is still being listed leaves
-/// everything where the disk has it: the files listed before the refusal and after it
-/// keep their ids and tags under the old name, and nothing reads as deleted or new.
-#[test]
-fn a_folder_rename_refused_while_the_library_is_listed_leaves_everything_where_it_was() {
-    const FILES: usize = 300;
-    let root = Temp::new();
-    fs::create_dir(root.at("Gig")).unwrap();
-    for n in 0..FILES {
-        fs::write(root.at(&format!("Gig/{n:03}.ne5p")), vec![0xa5; 10 + n]).unwrap();
-    }
-    let mut session = Session::opening(&root);
-    let gig = LibPath::parse("Gig").unwrap();
-    let folder = session.bench.browser.folders.id_of(&gig).expect("listed");
-    let listed: Vec<u64> = session.bench.workspace.listed().map(|e| e.id).collect();
-    assert!(
-        !listed.is_empty() && listed.len() < FILES,
-        "{} listed",
-        listed.len()
-    );
-    let tag = session.bench.browser.tags.make("Sunday").unwrap();
-    session.bench.browser.tags.set(listed[0], tag, true);
-    // A folder the listing has not shown takes the name first.
-    fs::create_dir(root.at("Set")).unwrap();
-    let rename = crate::browser::Act::RenameFolder {
-        id: folder,
-        name: "Set".into(),
-    };
-    session.bench.act(vec![rename]);
-    let Bench {
-        workspace,
-        browser,
-        queue,
-        ..
-    } = &mut session.bench;
-    session.store.sync(workspace, browser, queue, Pass::Files);
-    session.listed_whole();
-    session.settle();
-
-    let workspace = &session.bench.workspace;
-    let mut paths: Vec<String> = workspace
-        .listed()
-        .filter_map(|entity| Some(entity.path.as_ref()?.to_string()))
-        .collect();
-    paths.sort();
-    let expected: Vec<String> = (0..FILES).map(|n| format!("Gig/{n:03}.ne5p")).collect();
-    assert_eq!(paths, expected);
-    for &id in &listed {
-        let entity = workspace.get(id).expect("the same id");
-        assert!(
-            entity.path.as_ref().unwrap().is_in(&gig),
-            "{:?}",
-            entity.path
-        );
-    }
-    assert!(session.bench.browser.tags.worn(listed[0]).contains(&tag));
-    assert_eq!(session.bench.browser.folders.id_of(&gig), Some(folder));
-    assert_eq!(session.said("deleted outside drawbar"), 0);
-    assert_eq!(session.said("appeared in the library folder"), 0);
-    assert_eq!(root.names("Gig").len(), FILES);
-    assert_eq!(
-        session.said("did not change as asked: moving Gig to Set"),
-        1
-    );
-}
-
 /// A library of one folder, `Gig`, holding one tagged file nothing has read, and the
 /// folder's id.
 fn gig() -> (Temp, Session, u64, u64) {
@@ -3092,8 +1831,8 @@ fn gig() -> (Temp, Session, u64, u64) {
     fs::create_dir(root.at("Gig")).unwrap();
     fs::write(root.at("Gig/a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
     let mut session = Session::listed(&root);
-    let tag = session.bench.browser.tags.make("Sunday").unwrap();
-    session.bench.browser.tags.set(session.only(), tag, true);
+    let id = session.only();
+    let tag = session.tag(&[id], "Sunday");
     let gig = LibPath::parse("Gig").unwrap();
     let folder = session.bench.browser.folders.id_of(&gig).expect("listed");
     (root, session, folder, tag)
@@ -3157,10 +1896,7 @@ fn a_file_moved_into_a_folder_whose_rename_is_unanswered_waits_for_it() {
     fs::write(root.at("Set/theirs.pdf"), b"theirs").unwrap();
     session.rename_folder(folder, "Set");
     let Bench {
-        workspace,
-        browser,
-        queue,
-        ..
+        workspace, browser, ..
     } = &mut session.bench;
     browser.folders.file(workspace, id, Some(folder));
     assert_eq!(
@@ -3168,7 +1904,7 @@ fn a_file_moved_into_a_folder_whose_rename_is_unanswered_waits_for_it() {
         LibPath::parse("Set/f.ne5p")
     );
     assert!(
-        !session.store.sync(workspace, browser, queue, Pass::Files),
+        !session.store.sync(workspace, browser, Pass::Files),
         "the move waits"
     );
     session.settle();
@@ -3191,12 +1927,9 @@ fn a_folder_renamed_while_a_file_in_it_is_renamed_waits_for_it() {
         .workspace
         .place(id, LibPath::parse("Gig/b.ne5p").unwrap());
     let Bench {
-        workspace,
-        browser,
-        queue,
-        ..
+        workspace, browser, ..
     } = &mut session.bench;
-    session.store.sync(workspace, browser, queue, Pass::Files);
+    session.store.sync(workspace, browser, Pass::Files);
     session.rename_folder(folder, "Set");
     session.settle();
     session.sync();
@@ -3206,111 +1939,6 @@ fn a_folder_renamed_while_a_file_in_it_is_renamed_waits_for_it() {
     assert_eq!(session.path(id).as_deref(), Some("Set/a.ne5p"));
     assert!(session.bench.browser.tags.worn(id).contains(&tag));
     assert_eq!(session.said("did not change as asked"), 1);
-}
-
-/// Parts of a listing that arrive while a rename of their folder waits are shown where
-/// that rename puts them. When it lands, nothing is moved back, and nothing fails.
-#[test]
-fn a_listing_inside_a_folder_whose_rename_waits_lands_with_it() {
-    const FILES: usize = 300;
-    let root = Temp::new();
-    fs::create_dir(root.at("Gig")).unwrap();
-    for n in 0..FILES {
-        fs::write(root.at(&format!("Gig/{n:03}.ne5p")), vec![0xa5; 10 + n]).unwrap();
-    }
-    let mut session = Session::opening(&root);
-    let gig = LibPath::parse("Gig").unwrap();
-    let folder = session.bench.browser.folders.id_of(&gig).expect("listed");
-    assert!(
-        session.bench.workspace.listed().count() < FILES,
-        "more to come"
-    );
-    // A file's rename in the folder holds the folder's rename until it answers.
-    let first = session.named("000.ne5p");
-    let renamed = LibPath::parse("Gig/first.ne5p").unwrap();
-    session.bench.workspace.place(first, renamed);
-    let Bench {
-        workspace,
-        browser,
-        queue,
-        ..
-    } = &mut session.bench;
-    session.store.sync(workspace, browser, queue, Pass::Files);
-    session.rename_folder(folder, "Sets");
-    session.listed_whole();
-    session.sync();
-
-    assert_eq!(session.said("did not change as asked"), 0);
-    assert_eq!(root.names(""), [".drawbar", "Sets"]);
-    assert_eq!(root.names("Sets").len(), FILES);
-    let workspace = &session.bench.workspace;
-    assert_eq!(workspace.listed().count(), FILES);
-    let sets = LibPath::parse("Sets").unwrap();
-    assert!(workspace
-        .listed()
-        .all(|entity| entity.path.as_ref().is_some_and(|at| at.is_in(&sets))));
-    assert_eq!(session.path(first).as_deref(), Some("Sets/first.ne5p"));
-    let folders = &session.bench.browser.folders;
-    assert_eq!(folders.id_of(&gig), None);
-    assert_eq!(folders.id_of(&sets), Some(folder));
-}
-
-/// A folder removed while the library is still being listed waits until everything in
-/// it has been listed, and then the usual rules apply: it goes, and what was in it moves
-/// up, unless it holds a file drawbar does not.
-#[test]
-fn a_folder_removed_while_the_library_is_listed_is_listed_first() {
-    let program = Fresh::Program.bytes().unwrap();
-    for stranger in [false, true] {
-        let root = Temp::new();
-        fs::create_dir_all(root.at("Old/Inner")).unwrap();
-        fs::write(root.at("top.ne5p"), &program).unwrap();
-        fs::write(root.at("Old/a.ne5p"), &program).unwrap();
-        fs::write(root.at("Old/Inner/b.ne5p"), &program).unwrap();
-        if stranger {
-            fs::write(root.at("Old/Inner/scan.pdf"), b"").unwrap();
-        }
-        let mut session = Session::opening(&root);
-        let old = LibPath::parse("Old").unwrap();
-        let id = session.bench.browser.folders.id_of(&old).expect("listed");
-        session
-            .bench
-            .act(vec![crate::browser::Act::RemoveFolder(id)]);
-        assert!(
-            session.bench.browser.folders.id_of(&old).is_some(),
-            "not before it is listed"
-        );
-        session.until(|session| session.bench.browser.folders.listed_whole(&old));
-        session.bench.act(Vec::new());
-        session.listed_whole();
-        session.sync();
-        match stranger {
-            false => {
-                assert_eq!(root.names(""), [".drawbar", "Inner", "a.ne5p", "top.ne5p"]);
-                assert_eq!(root.names("Inner"), ["b.ne5p"]);
-            }
-            true => {
-                assert_eq!(root.names(""), ["Old", "top.ne5p"]);
-                assert_eq!(session.said("holds files drawbar does not hold"), 1);
-            }
-        }
-    }
-}
-
-/// A send held while the library is still being listed is let go once the files read so
-/// far are looked at again, without a rescan of the whole tree.
-#[test]
-fn a_send_held_while_the_library_is_listed_goes_once_what_was_read_is_checked() {
-    let root = Temp::new();
-    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-    let mut session = Session::opening(&root);
-    assert!(session.store.hold_send(), "the send waits");
-    assert!(session.store.scanning());
-    while session.store.holds_send() {
-        assert!(session.next(), "the check answered");
-    }
-    assert_eq!(session.said("nothing was sent"), 0);
-    session.listed_whole();
 }
 
 /// An act on a file not read yet waits for it to be read, and decodes it before it runs.
@@ -3334,70 +1962,6 @@ fn acting_on_a_file_not_read_yet_reads_and_decodes_it_first() {
     assert_eq!(Kind::of(entity), Kind::Program);
     assert!(matches!(entity.verify(), VerifyState::Ok));
     assert_eq!(entity.bytes, program);
-}
-
-/// A library let go before its listing has all come back keeps, in its index, the rows
-/// no listed file had claimed yet.
-#[test]
-fn a_library_let_go_while_it_is_listed_keeps_what_its_index_held() {
-    let root = Temp::new();
-    let mut first = Session::open(&root);
-    let id = first.create();
-    let tag = first.bench.browser.tags.make("Sunday").unwrap();
-    first.bench.browser.tags.set(id, tag, true);
-    first.close();
-
-    let bench = Bench::new();
-    let store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
-    let mut second = Session { store, bench };
-    assert!(second.next(), "opening answered");
-    assert!(second.store.listing(), "its listing has not come back");
-    second.close();
-
-    let third = Session::open(&root);
-    assert!(third.bench.browser.tags.worn(id).contains(&tag));
-    assert_eq!(third.path(id).as_deref(), Some("untitled.ne5p"));
-}
-
-/// A row the open gives a new id keeps its unsaved edit through a quit before the
-/// listing is complete, whether a listed file had claimed the row by then or not.
-#[test]
-fn an_edit_under_a_new_id_survives_a_quit_while_the_library_is_listed() {
-    for claimed in [false, true] {
-        let root = Temp::new();
-        let mut first = Session::open(&root);
-        let id = first.create();
-        first.sync();
-        let edited = with_gain(&first.bytes(id), "96");
-        let log = &mut first.bench.log;
-        first.bench.workspace.replace_bytes(id, edited.clone(), log);
-        first.close();
-
-        // Ids a library open before gave out, as when switching from one to another.
-        let mut bench = Bench::new();
-        for _ in 0..3 {
-            let Bench { workspace, log, .. } = &mut bench;
-            workspace.view("seen".into(), Origin::Fresh, b"a view".to_vec(), log);
-        }
-        assert!(bench.workspace.next_id() > id, "the row takes a new id");
-        let store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
-        let mut second = Session { store, bench };
-        assert!(second.next(), "opening answered");
-        if claimed {
-            assert!(second.next(), "the rows of the index answered");
-            assert_eq!(second.bytes(second.only()), edited);
-        }
-        assert!(second.store.listing(), "its listing has not all come back");
-        second.close();
-
-        let third = Session::open(&root);
-        let entity = third.bench.workspace.get(third.only()).unwrap();
-        assert_eq!(
-            entity.bytes, edited,
-            "the edit came back (claimed: {claimed})"
-        );
-        assert!(entity.is_unsaved());
-    }
 }
 
 /// Everything drawbar holds whole is in memory, so it reads only so much of one library.
@@ -3605,9 +2169,9 @@ fn reads_waiting_for_room_look_for_it_once_a_frame() {
     );
 }
 
-/// Once the library is listed, each file the index tracks, here by a tag, is read and
+/// Once the library is listed, each file the library tracks, here by a tag, is read and
 /// decoded in the background, so it can match its slot before anything shows it. A file
-/// the index does not track waits until something needs it.
+/// the library does not track waits until something needs it.
 #[test]
 fn after_open_a_tracked_file_is_read_without_being_asked() {
     let root = Temp::new();
@@ -3615,12 +2179,12 @@ fn after_open_a_tracked_file_is_read_without_being_asked() {
     fs::write(root.at("Tagged.ne5p"), with_gain(&program, "12")).unwrap();
     fs::write(root.at("Plain.ne5p"), with_gain(&program, "24")).unwrap();
     let mut first = Session::listed(&root);
-    let tag = first.bench.browser.tags.make("Sunday").unwrap();
     let tagged = first.named("Tagged.ne5p");
-    first.bench.browser.tags.set(tagged, tag, true);
+    first.tag(&[tagged], "Sunday");
     first.close();
 
     let mut second = Session::listed(&root);
+    let tagged = second.named("Tagged.ne5p");
     second.answer_reads();
     let Bench { workspace, log, .. } = &mut second.bench;
     workspace.settle_files(log);
@@ -3632,7 +2196,7 @@ fn after_open_a_tracked_file_is_read_without_being_asked() {
     assert!(second.bench.workspace.get(plain).unwrap().unread());
 }
 
-/// Past the budget, files the index does not track go before those it tracks, whenever
+/// Past the budget, files the library does not track go before those it tracks, whenever
 /// they were needed. A read in the background lets go of no tracked file: one with no
 /// room is left unread, as if never asked for, until something needs it.
 #[test]
@@ -3649,11 +2213,8 @@ fn untracked_files_go_before_tracked_ones_at_the_budget() {
         .unwrap();
     }
     let mut first = Session::listed(&root);
-    let tag = first.bench.browser.tags.make("Sunday").unwrap();
-    for name in &names[..3] {
-        let id = first.named(name);
-        first.bench.browser.tags.set(id, tag, true);
-    }
+    let tracked: Vec<u64> = names[..3].iter().map(|name| first.named(name)).collect();
+    first.tag(&tracked, "Sunday");
     first.close();
 
     let mut second = Session::within(&root, 2 * len + 1);
@@ -3714,52 +2275,32 @@ fn a_clean_asset_holds_its_bytes_once() {
     assert_eq!(session.bench.workspace.get(id).unwrap().bytes, program);
 }
 
-/// An id this session has given out already, here to views read before the library
-/// opened, is not given to an asset of the library. The asset takes a new one, and its
-/// unsaved edit moves to a working copy under it.
-#[test]
-fn an_asset_under_an_id_already_given_out_takes_a_new_one_with_its_edit() {
-    let root = Temp::new();
-    let mut first = Session::open(&root);
-    let id = first.create();
-    first.sync();
-    let edited = with_gain(&first.bytes(id), "96");
-    let log = &mut first.bench.log;
-    first.bench.workspace.replace_bytes(id, edited.clone(), log);
-    first.close();
-
-    let mut bench = Bench::new();
-    for _ in 0..3 {
-        let Bench { workspace, log, .. } = &mut bench;
-        workspace.view("seen".into(), Origin::Fresh, b"a view".to_vec(), log);
-    }
-    let floor = bench.workspace.next_id();
-    let store = Store::start(Backend::start(&bench.ctx, root.0.clone()));
-    let mut second = Session { store, bench };
-    second.opened();
-    let back = second
-        .bench
-        .workspace
-        .listed()
-        .next()
-        .expect("the asset")
-        .id;
-    assert!(back >= floor, "{back} is new");
-    assert_eq!(second.bytes(back), edited);
-    second.sync();
-    let working = root.names(".drawbar/working");
-    assert_eq!(working.len(), 1, "{working:?}");
-    assert!(working[0].starts_with(&format!("{back}-")), "{working:?}");
-    second.close();
-
-    let third = Session::open(&root);
-    let entity = third.bench.workspace.get(back).expect("under its new id");
-    assert_eq!(entity.bytes, edited);
-    assert!(entity.is_unsaved());
-}
-
 /// A piano library the size a vendor ships: three strokes, each of the most blocks a
 /// stroke record can state, about 200 MB in all.
+/// A row drawn for a resting piano reads its index and nothing more: its checksum waits
+/// until it is opened, which reads it through.
+#[test]
+fn a_drawn_row_of_a_resting_piano_is_not_read_through_until_it_is_opened() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.npno"), large_piano()).unwrap();
+    let mut session = Session::listed(&root);
+    let id = session.only();
+    session.bench.workspace.in_view([id]);
+    session.answer_reads();
+    session.bench.workspace.settle_files(&mut session.bench.log);
+    let entity = session.bench.workspace.get(id).unwrap();
+    let file = entity.rests().expect("rests in its file").clone();
+    assert_eq!(entity.verify().badge(), "not checked");
+    assert_eq!(file.take_reads(), [], "read past its index");
+    assert_eq!(file.take_checks(), 0, "read through for its checksum");
+
+    session.bench.workspace.hurry(id);
+    session.bench.workspace.settle_files(&mut session.bench.log);
+    let entity = session.bench.workspace.get(id).unwrap();
+    assert_eq!(entity.verify().badge(), "ok");
+    assert_eq!(file.take_checks(), 1, "opening reads it through");
+}
+
 fn large_piano() -> Vec<u8> {
     use nord_format::formats::npno::synthetic::{take, Build};
     use nord_format::formats::npno::Bank;
@@ -3853,35 +2394,7 @@ fn a_corrupted_piano_opens_and_then_shows_it_failed_verification() {
     assert_eq!(Kind::of(entity), Kind::Other);
 }
 
-/// The cache file a session that remembers keeps, under the shelf's folder.
-const CACHE: &str = "library-cache.ron";
-
 impl Session {
-    /// [`Session::listed`], remembering what was read in `shelf`, as the app keeps it in
-    /// its own data between sessions.
-    fn remembering(root: &Temp, shelf: &Temp) -> Session {
-        Session::kept_at(root, shelf.at(CACHE))
-    }
-
-    /// [`Session::remembering`] in the cache file `file`.
-    fn kept_at(root: &Temp, file: std::path::PathBuf) -> Session {
-        let bench = Bench::new();
-        let cache = Cache::at(&bench.ctx, file, &root.0);
-        let backend = Backend::start(&bench.ctx, root.0.clone());
-        let store = Store::start(backend).remembering(cache);
-        let mut session = Session { store, bench };
-        session.opened();
-        let Bench {
-            workspace,
-            browser,
-            log,
-            ..
-        } = &mut session.bench;
-        session.store.recall_kept(workspace, browser, log);
-        session.answer_reads();
-        session
-    }
-
     /// How many files have been asked of the library to read, in the background or for
     /// something that needs them.
     fn reads(&self) -> usize {
@@ -3889,384 +2402,13 @@ impl Session {
     }
 }
 
-/// Give a file the modification time `seconds` after the epoch.
-fn touch(path: &std::path::Path, seconds: u64) {
-    let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
-    fs::File::options()
-        .write(true)
-        .open(path)
-        .and_then(|file| file.set_modified(time))
-        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-}
-
-/// An Electro 5 program filed under a Stage 3 set list's extension, so what its name says
-/// and what a read of it found cannot be mistaken for each other.
-fn misnamed() -> (String, Vec<u8>) {
-    let name = format!("Gig.{}", nord_format::formats::ns3::song::FORMAT);
-    (name, with_gain(&Fresh::Program.bytes().unwrap(), "12"))
-}
-
-/// A file read in one session draws in the next as it did once read, without being read:
-/// its kind and family are what it holds, and it matches, or differs from, the slot that
-/// reports its checksum.
-#[test]
-fn a_file_read_once_draws_as_read_next_time_without_being_read() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    let (name, bytes) = misnamed();
-    fs::write(root.at(&name), &bytes).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    first.read_all();
-    let read = first.bench.workspace.get(first.named(&name)).unwrap();
-    assert_eq!(Kind::of(read), Kind::Program);
-    let crc32 = read.saved.crc32().expect("a program is a container");
-    let families = first.bench.workspace.families_present();
-    first.close();
-
-    let mut second = Session::remembering(&root, &shelf);
-    let id = second.named(&name);
-    let entity = second.bench.workspace.get(id).unwrap();
-    assert!(entity.unread(), "its bytes are not held");
-    assert!(entity.bytes.is_empty() && entity.entity.is_none());
-    assert_eq!(
-        Kind::of(entity),
-        Kind::Program,
-        "not the set list its name says"
-    );
-    assert_eq!(entity.tag(), "ne5p");
-    assert_eq!(
-        entity.verify().note(),
-        None,
-        "it does not say it is being read"
-    );
-    assert_eq!(second.bench.workspace.families_present(), families);
-    assert_eq!(entity.saved.crc32(), Some(crc32));
-
-    let Bench {
-        workspace,
-        device,
-        queue,
-        browser,
-        ..
-    } = &mut second.bench;
-    let row = |workspace: &crate::workspace::Workspace, device: &crate::device::Device| {
-        let item = crate::browser::Item::Local(id);
-        let row = crate::library::row_of(item, workspace, &device.state, queue, &browser.tags);
-        row.expect("a row").where_
-    };
-    device.pretend_bodies(ObjectClass::Program, 1, &[Some(("Gig", crc32))]);
-    device.relink(workspace);
-    let slot = (ObjectClass::Program, Location::from_user(1, 1));
-    assert_eq!(workspace.get(id).unwrap().link, Some(slot));
-    assert_eq!(
-        row(workspace, device),
-        crate::library::Where::Both(Some(true))
-    );
-    device.pretend_bodies(ObjectClass::Program, 1, &[Some(("Gig", crc32 ^ 1))]);
-    device.relink(workspace);
-    assert_eq!(
-        row(workspace, device),
-        crate::library::Where::Both(Some(false))
-    );
-    assert_eq!(second.reads(), 0, "nothing was read");
-}
-
-/// A row in view draws what was read of its file before, and is not read for it, even
-/// where it came into view before the cache said what it remembers. Something that needs
-/// it whole reads it.
-#[test]
-fn a_remembered_row_in_view_is_read_only_when_something_needs_it_whole() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    let program = Fresh::Program.bytes().unwrap();
-    fs::write(root.at("Grand.ne5p"), &program).unwrap();
-    fs::write(root.at("Other.ne5p"), with_gain(&program, "12")).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    let grand = first.named("Grand.ne5p");
-    first.read(&[grand]);
-    first.close();
-
-    let bench = Bench::new();
-    let cache = Cache::at(&bench.ctx, shelf.at(CACHE), &root.0);
-    let store = Store::start(Backend::start(&bench.ctx, root.0.clone())).remembering(cache);
-    let mut second = Session { store, bench };
-    second.opened();
-    let (grand, other) = (second.named("Grand.ne5p"), second.named("Other.ne5p"));
-    second.bench.workspace.in_view([grand, other]);
-    let Bench {
-        workspace,
-        browser,
-        queue,
-        log,
-        ..
-    } = &mut second.bench;
-    second.store.ask(workspace, browser, queue, log);
-    assert_eq!(
-        second.store.asked_files, 0,
-        "reads wait for what the cache remembers"
-    );
-    second.store.recall_kept(workspace, browser, log);
-    second.answer_reads();
-    assert_eq!(second.reads(), 1, "only the one nothing is remembered of");
-    assert!(second.bench.workspace.get(grand).unwrap().unread());
-
-    second.read(&[grand]);
-    assert_eq!(second.reads(), 2);
-    let entity = second.bench.workspace.get(grand).unwrap();
-    assert!(!entity.unread());
-    assert_eq!(entity.bytes, program);
-}
-
-/// What the cache remembers may arrive before the library has answered its open, and
-/// still stands for the files the listing then finds.
-#[test]
-fn what_is_remembered_stands_when_it_arrives_before_the_listing() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    first.read_all();
-    first.close();
-
-    let bench = Bench::new();
-    let cache = Cache::at(&bench.ctx, shelf.at(CACHE), &root.0);
-    let store = Store::start(Backend::start(&bench.ctx, root.0.clone())).remembering(cache);
-    let mut second = Session { store, bench };
-    let Bench {
-        workspace,
-        browser,
-        log,
-        ..
-    } = &mut second.bench;
-    second.store.recall_kept(workspace, browser, log);
-    second.opened();
-    let entity = second.bench.workspace.get(second.only()).unwrap();
-    assert!(entity.unread() && !entity.reading(), "remembered");
-    assert_eq!(second.store.cache().entries().len(), 1, "and still kept");
-}
-
-/// What was read of a file stands only while its length and time are the ones it was
-/// read at. Once either moves, the file draws by its name until it is read again.
-#[test]
-fn a_file_whose_length_or_time_moved_is_read_again() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    let program = Fresh::Program.bytes().unwrap();
-    fs::write(root.at("Touched.ne5p"), &program).unwrap();
-    fs::write(root.at("Longer.ne5p"), &program).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    first.read_all();
-    first.close();
-
-    fs::write(root.at("Touched.ne5p"), with_gain(&program, "96")).unwrap();
-    touch(&root.at("Touched.ne5p"), 1_000_000);
-    let mut longer = program.clone();
-    longer.push(0);
-    fs::write(root.at("Longer.ne5p"), &longer).unwrap();
-    let mut second = Session::remembering(&root, &shelf);
-    let ids = ["Touched.ne5p", "Longer.ne5p"].map(|name| second.named(name));
-    for id in ids {
-        let entity = second.bench.workspace.get(id).unwrap();
-        assert!(entity.reading(), "{}", entity.name);
-        assert_eq!(entity.verify().note(), Some("reading…"));
-        assert_eq!(entity.saved.crc32(), None);
-    }
-    assert_eq!(second.reads(), 0);
-
-    second.read(&ids);
-    assert_eq!(second.reads(), 2);
-    let touched = second.bench.workspace.get(ids[0]).unwrap();
-    assert_eq!(touched.bytes, with_gain(&program, "96"));
-}
-
-/// A cache file that does not read, or that another version wrote, is taken as empty:
-/// nothing is remembered, nothing is said about it beyond the log's detail, and the next
-/// session writes it again.
-#[test]
-fn a_cache_that_does_not_read_or_is_another_version_is_taken_as_empty() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    first.read_all();
-    first.close();
-    let written = fs::read_to_string(shelf.at(CACHE)).unwrap();
-    let version = format!("version:{}", super::cache::VERSION);
-    assert!(written.contains(&version), "{written}");
-    let newer = written.replace(&version, "version:4096");
-
-    for kept in ["not a cache at all".to_string(), newer] {
-        fs::write(shelf.at(CACHE), &kept).unwrap();
-        let mut second = Session::remembering(&root, &shelf);
-        let entity = second.bench.workspace.get(second.only()).unwrap();
-        assert!(entity.reading(), "nothing is remembered from {kept:?}");
-        let loud = second.bench.log.iter().filter(|entry| {
-            entry.level != crate::log::Level::Info && entry.text.contains("read before")
-        });
-        assert_eq!(loud.count(), 0);
-        second.read_all();
-        second.close();
-        let third = Session::remembering(&root, &shelf);
-        let entity = third.bench.workspace.get(third.only()).unwrap();
-        assert!(!entity.reading(), "written again over {kept:?}");
-        third.close();
-    }
-}
-
-/// A file renamed or moved with its folder inside drawbar is remembered at its new path.
-#[test]
-fn a_rename_inside_drawbar_keeps_what_was_read() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    fs::create_dir(root.at("Sets")).unwrap();
-    let program = Fresh::Program.bytes().unwrap();
-    fs::write(root.at("Sets/Grand.ne5p"), &program).unwrap();
-    fs::write(root.at("Sets/Pad.ne5p"), with_gain(&program, "12")).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    first.read_all();
-    let grand = first.named("Grand.ne5p");
-    let name = "Upright".to_string();
-    first
-        .bench
-        .act(vec![crate::browser::Act::RenameLocal { id: grand, name }]);
-    first.sync();
-    let sets = first
-        .bench
-        .browser
-        .folders
-        .id_of(&LibPath::parse("Sets").unwrap())
-        .unwrap();
-    first.rename_folder(sets, "Gigs");
-    first.sync();
-    first.close();
-    assert_eq!(root.names("Gigs"), ["Pad.ne5p", "Upright.ne5p"]);
-
-    let second = Session::remembering(&root, &shelf);
-    for name in ["Upright.ne5p", "Pad.ne5p"] {
-        let entity = second.bench.workspace.get(second.named(name)).unwrap();
-        assert!(entity.unread() && !entity.reading(), "{name} is remembered");
-    }
-    assert_eq!(second.reads(), 0);
-}
-
-/// A file renamed outside drawbar, and recognized by its contents as the asset it was,
-/// is remembered at its new path.
-#[test]
-fn a_rename_outside_recognized_by_contents_keeps_what_was_read() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    let id = first.only();
-    let tag = first.bench.browser.tags.make("Sunday").unwrap();
-    first.bench.browser.tags.set(id, tag, true);
-    first.read_all();
-    first.close();
-    fs::rename(root.at("Grand.ne5p"), root.at("Upright.ne5p")).unwrap();
-
-    let second = Session::remembering(&root, &shelf);
-    let entity = second.bench.workspace.get(id).expect("the same asset");
-    assert_eq!(entity.name, "Upright.ne5p");
-    assert!(
-        entity.unread() && !entity.reading(),
-        "remembered at its new path"
-    );
-    assert_eq!(second.reads(), 0);
-}
-
-/// A file rewritten under the same length and time is remembered as it was, but a
-/// read takes it as it is: the index then holds its true CRC, the cache its new summary,
-/// and a stranger holding its old contents is not taken for it moved.
-#[test]
-fn a_read_corrects_what_a_file_rewritten_under_its_old_stat_was_remembered_as() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    let program = Fresh::Program.bytes().unwrap();
-    let (old, new) = (with_gain(&program, "12"), with_gain(&program, "96"));
-    assert_eq!(old.len(), new.len());
-    fs::write(root.at("Grand.ne5p"), &old).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    let id = first.only();
-    let tag = first.bench.browser.tags.make("Sunday").unwrap();
-    first.bench.browser.tags.set(id, tag, true);
-    first.read_all();
-    let was = first.bench.workspace.get(id).unwrap().saved.crc32();
-    first.close();
-
-    let at = fs::metadata(root.at("Grand.ne5p"))
-        .unwrap()
-        .modified()
-        .unwrap();
-    fs::write(root.at("Grand.ne5p"), &new).unwrap();
-    fs::File::options()
-        .write(true)
-        .open(root.at("Grand.ne5p"))
-        .and_then(|file| file.set_modified(at))
-        .unwrap();
-    let mut second = Session::remembering(&root, &shelf);
-    assert_eq!(second.bench.workspace.get(id).unwrap().saved.crc32(), was);
-    second.read(&[id]);
-    let now = second.bench.workspace.get(id).unwrap().saved.crc32();
-    assert_ne!(now, was);
-    second.close();
-    let index = fs::read_to_string(root.at(".drawbar/library.ron")).unwrap();
-    let Read::Known(index) = sidecar::read(&index) else {
-        panic!("the index reads: {index}");
-    };
-    let print = index.assets[&id].fingerprint.expect("a fingerprint");
-    assert_eq!(
-        print.crc,
-        Some(nord_format::crc::crc32(&new)),
-        "the true CRC"
-    );
-
-    let third = Session::remembering(&root, &shelf);
-    assert_eq!(third.bench.workspace.get(id).unwrap().saved.crc32(), now);
-    third.close();
-    fs::remove_file(root.at("Grand.ne5p")).unwrap();
-    fs::write(root.at("Copy.ne5p"), &old).unwrap();
-    let fourth = Session::remembering(&root, &shelf);
-    let copy = fourth.named("Copy.ne5p");
-    assert_ne!(copy, id, "the old contents are not this asset moved");
-    assert!(fourth.bench.browser.tags.worn(copy).is_empty());
-}
-
-/// Two libraries keep their entries apart in one cache file, even for files of one path,
-/// length and time.
-#[test]
-fn two_libraries_share_no_entries() {
-    let (a, b, shelf) = (Temp::new(), Temp::new(), Temp::new());
-    let program = Fresh::Program.bytes().unwrap();
-    fs::write(a.at("Grand.ne5p"), with_gain(&program, "12")).unwrap();
-    fs::write(b.at("Grand.ne5p"), with_gain(&program, "24")).unwrap();
-    for root in [&a, &b] {
-        touch(&root.at("Grand.ne5p"), 1_000_000);
-    }
-    let mut first = Session::remembering(&a, &shelf);
-    first.read_all();
-    let crc32 = first
-        .bench
-        .workspace
-        .get(first.only())
-        .unwrap()
-        .saved
-        .crc32();
-    first.close();
-
-    let mut other = Session::remembering(&b, &shelf);
-    let entity = other.bench.workspace.get(other.only()).unwrap();
-    assert!(
-        entity.reading(),
-        "the other library's file is not this one's"
-    );
-    other.read_all();
-    other.close();
-
-    let again = Session::remembering(&a, &shelf);
-    let entity = again.bench.workspace.get(again.only()).unwrap();
-    assert!(!entity.reading(), "the first library kept its own");
-    assert_eq!(entity.saved.crc32(), crc32);
-}
-
-/// Which projects name a WAV is answered from what was read of them, this session or
-/// before, without reading them again. A project never read is said to be unknown.
+/// Which projects name a WAV is answered from what was read of them this session,
+/// without reading them again. A project not read yet is said to be unknown.
 #[test]
 fn the_projects_naming_a_wav_are_answered_from_what_was_read() {
     use nord_format::formats::nsmpproj::{NewZone, Project};
 
-    let (root, shelf) = (Temp::new(), Temp::new());
+    let root = Temp::new();
     fs::create_dir_all(root.at("Marimba/audio")).unwrap();
     let zone = NewZone {
         path: "audio/c4.wav".into(),
@@ -4280,53 +2422,83 @@ fn the_projects_naming_a_wav_are_answered_from_what_was_read() {
     fs::write(root.at("Marimba/audio/c4.wav"), crate::testing::wav_bytes()).unwrap();
     let wav = LibPath::parse("Marimba/audio/c4.wav").unwrap();
 
-    let mut first = Session::remembering(&root, &shelf);
-    let id = first.named("Marimba.nsmpproj");
-    let naming = first.bench.workspace.projects_naming(&wav);
+    let mut session = Session::listed(&root);
+    let id = session.named("Marimba.nsmpproj");
+    let naming = session.bench.workspace.projects_naming(&wav);
     assert_eq!(
         (naming.by, naming.unknown),
         (vec![], vec![id]),
         "not read yet"
     );
-    first.read_all();
-    let naming = first.bench.workspace.projects_naming(&wav);
+    session.read_all();
+    let naming = session.bench.workspace.projects_naming(&wav);
     assert_eq!(naming.by, [id], "read this session");
-    first.close();
-
-    let second = Session::remembering(&root, &shelf);
-    let id = second.named("Marimba.nsmpproj");
-    let workspace = &second.bench.workspace;
-    let naming = workspace.projects_naming(&wav);
-    assert_eq!((naming.by, naming.unknown), (vec![id], vec![]));
     let elsewhere = LibPath::parse("audio/c4.wav").unwrap();
-    assert!(workspace.projects_naming(&elsewhere).by.is_empty());
-    assert_eq!(second.reads(), 0);
+    assert!(session
+        .bench
+        .workspace
+        .projects_naming(&elsewhere)
+        .by
+        .is_empty());
 }
 
-/// Nothing of the cache is written into the library: a library opened, read and closed
-/// holds only its own files, and a cache whose place would be inside the library is kept
-/// in memory only.
+/// A reopen knows nothing of what the last session read: every file is unread, a row is
+/// read only once it is drawn, and closing kept no summary anywhere, in the library or in
+/// this install's own state for it.
 #[test]
-fn the_cache_is_never_written_inside_the_library() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    first.read_all();
+fn a_reopen_reads_summaries_only_for_drawn_rows_and_nothing_was_kept() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    fs::write(root.at("Upright.ne5p"), with_gain(&program, "12")).unwrap();
+    let local = |root: &Temp| -> Vec<String> {
+        let mut found = Vec::new();
+        let mut dirs = vec![root.local()];
+        while let Some(dir) = dirs.pop() {
+            for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+                match entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    true => dirs.push(entry.path()),
+                    false => found.push(entry.file_name().to_string_lossy().into_owned()),
+                }
+            }
+        }
+        found.sort();
+        found
+    };
+    let first = Session::open(&root);
+    let before = local(&root);
     first.close();
-    assert_eq!(root.names(""), ["Grand.ne5p"]);
-    assert!(shelf.at(CACHE).is_file());
-
-    let inside = root.at("Support/drawbar").join(CACHE);
-    let mut second = Session::kept_at(&root, inside.clone());
-    second.read_all();
-    second.close();
+    assert_eq!(root.names(""), ["Grand.ne5p", "Upright.ne5p"]);
+    let after = local(&root);
     assert!(
-        !root.at("Support").exists(),
-        "nothing was made in the library"
+        after
+            .iter()
+            .all(|name| before.contains(name) || !name.contains("cache")),
+        "{after:?}"
     );
-    let third = Session::kept_at(&root, inside);
-    let entity = third.bench.workspace.get(third.only()).unwrap();
-    assert!(entity.reading(), "it was kept for that session only");
+
+    let mut second = Session::listed(&root);
+    let rows: Vec<u64> = second
+        .bench
+        .workspace
+        .listed()
+        .map(|entity| entity.id)
+        .collect();
+    for id in &rows {
+        let entity = second.bench.workspace.get(*id).unwrap();
+        assert!(
+            entity.unread() && entity.reading(),
+            "{}: nothing known",
+            entity.name
+        );
+    }
+    assert_eq!(second.reads(), 0, "nothing is read before a row is drawn");
+    let grand = second.named("Grand.ne5p");
+    second.bench.workspace.in_view([grand]);
+    second.answer_reads();
+    assert_eq!(second.reads(), 1, "the drawn row is read");
+    let upright = second.named("Upright.ne5p");
+    assert!(second.bench.workspace.get(upright).unwrap().unread());
 }
 
 /// A file from outside is copied into the folder it was dropped on, and left where it
@@ -4641,8 +2813,7 @@ fn a_file_from_outside_onto_a_taken_name_asks_and_overwrite_copies_over() {
     fs::write(outside.at("Grand.ne5p"), &theirs).unwrap();
     let mut session = Session::open(&root);
     let grand = session.only();
-    let tag = session.bench.browser.tags.make("Sunday").unwrap();
-    session.bench.browser.tags.set(grand, tag, true);
+    session.tag(&[grand], "Sunday");
     let take = || crate::browser::Act::Take {
         from: outside.at("Grand.ne5p"),
         dir: LibPath::root(),
@@ -4669,109 +2840,7 @@ fn a_file_from_outside_onto_a_taken_name_asks_and_overwrite_copies_over() {
         theirs,
         "the same asset holds the copy"
     );
-    assert!(session.bench.browser.tags.worn(grand).contains(&tag));
-}
-
-/// A file from outside a library that turns read-only at the copy is held in memory
-/// instead, as a file kept nowhere yet, and nothing lands in the library.
-#[test]
-fn a_file_from_outside_a_library_that_cannot_take_it_is_held_in_memory() {
-    let (root, outside) = (Temp::new(), Temp::new());
-    let program = Fresh::Program.bytes().unwrap();
-    fs::write(outside.at("Grand.ne5p"), &program).unwrap();
-    let mut first = Session::open(&root);
-    let mut second = Session::open(&root);
-    first.create();
-    first.sync();
-
-    second.bench.act(vec![crate::browser::Act::Take {
-        from: outside.at("Grand.ne5p"),
-        dir: LibPath::root(),
-        name: "Grand.ne5p".into(),
-    }]);
-    let Bench {
-        workspace,
-        browser,
-        queue,
-        ..
-    } = &mut second.bench;
-    second.store.sync(workspace, browser, queue, Pass::Last);
-    while second.store.read_only().is_none() {
-        assert!(second.next(), "the copy answered");
-    }
-    assert!(!root.at("Grand.ne5p").exists());
-    let opened = loop {
-        let opened = second.bench.workspace.poll(&mut second.bench.log);
-        if !opened.is_empty() {
-            break opened;
-        }
-        std::thread::yield_now();
-    };
-    assert_eq!(opened, [("Grand.ne5p".to_string(), program)]);
-}
-
-/// The default library is a folder of drawbar's own data, and the cache sits in that
-/// data beside it, not inside it, so the cache is kept between sessions.
-#[test]
-fn the_cache_beside_a_library_in_the_same_data_is_kept() {
-    let data = Temp::new();
-    fs::create_dir_all(data.at("library")).unwrap();
-    let root = Temp(data.at("library"));
-    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-    let mut first = Session::kept_at(&root, data.at(CACHE));
-    first.read_all();
-    first.close();
-    assert!(data.at(CACHE).is_file());
-    assert_eq!(root.names(""), ["Grand.ne5p"]);
-
-    let second = Session::kept_at(&root, data.at(CACHE));
-    let entity = second.bench.workspace.get(second.only()).unwrap();
-    assert!(entity.unread() && !entity.reading(), "remembered");
-}
-
-/// A tracked file whose summary is remembered is not read in the background: what it is
-/// and the slot it matches are known without it.
-#[test]
-fn a_remembered_tracked_file_is_not_read_in_the_background() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    fs::write(root.at("Tagged.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    let tagged = first.only();
-    let tag = first.bench.browser.tags.make("Sunday").unwrap();
-    first.bench.browser.tags.set(tagged, tag, true);
-    first.read_all();
-    first.close();
-
-    let second = Session::remembering(&root, &shelf);
-    let entity = second.bench.workspace.get(tagged).unwrap();
-    assert!(second.bench.browser.tags.worn(tagged).contains(&tag));
-    assert!(entity.unread() && !entity.reading());
-    assert!(entity.saved.crc32().is_some(), "it can match its slot");
-    assert_eq!(second.reads(), 0, "not read in the background");
-}
-
-/// The cache keeps only what a whole listing of the library finds: a file deleted
-/// between sessions is forgotten.
-#[test]
-fn a_file_gone_from_the_library_is_forgotten() {
-    let (root, shelf) = (Temp::new(), Temp::new());
-    let program = Fresh::Program.bytes().unwrap();
-    fs::write(root.at("Kept.ne5p"), &program).unwrap();
-    fs::write(root.at("Gone.ne5p"), with_gain(&program, "12")).unwrap();
-    let mut first = Session::remembering(&root, &shelf);
-    first.read_all();
-    first.close();
-    fs::remove_file(root.at("Gone.ne5p")).unwrap();
-
-    let second = Session::remembering(&root, &shelf);
-    let paths: Vec<&str> = second
-        .store
-        .cache()
-        .entries()
-        .keys()
-        .map(LibPath::as_str)
-        .collect();
-    assert_eq!(paths, ["Kept.ne5p"]);
+    assert_eq!(session.worn(grand), ["Sunday"]);
 }
 
 /// A library holding a three-zone sample instrument, opened, with the instrument resting
@@ -4864,11 +2933,7 @@ fn a_resting_sample_changed_in_place_before_its_save_is_not_saved_over() {
     assert!(workspace.get(id).unwrap().is_unsaved());
     assert!(workspace.edit_of(id).is_some() && !workspace.saving_edit(id));
     assert_eq!(session.said("was not saved"), 1);
-    assert_eq!(
-        root.names(""),
-        [".drawbar", "Zoned.nsmp"],
-        "no copy is left"
-    );
+    assert_eq!(root.names(""), ["Zoned.nsmp"], "no copy is left");
 }
 
 /// A plan over a piano library resting in its file is saved by laying the library out
@@ -5003,7 +3068,8 @@ fn keep_both_writes_a_resting_samples_edit_beside_its_file() {
 }
 
 /// A sample instrument resting in its file, renamed onto a taken name and overwriting
-/// what is there, is copied over that file, which keeps its asset; its own file goes.
+/// what is there, is copied over that file, which keeps its asset; its own file goes in
+/// the same change, which one undo takes back.
 #[test]
 fn a_resting_sample_renamed_over_another_is_copied_over_its_file() {
     let root = Temp::new();
@@ -5016,8 +3082,7 @@ fn a_resting_sample_renamed_over_another_is_copied_over_its_file() {
     let (kept, moved) = (session.named("Kept.nsmp"), session.named("Moved.nsmp"));
     let workspace = &session.bench.workspace;
     let file = workspace.get(moved).unwrap().rests().unwrap().clone();
-    let tag = session.bench.browser.tags.make("Sunday").unwrap();
-    session.bench.browser.tags.set(kept, tag, true);
+    session.tag(&[kept], "Sunday");
 
     session.bench.act(vec![crate::browser::Act::RenameLocal {
         id: moved,
@@ -5026,7 +3091,6 @@ fn a_resting_sample_renamed_over_another_is_copied_over_its_file() {
     let acts = session.bench.browser.answer("Overwrite");
     session.bench.act(acts);
     session.sync();
-    assert!(root.at("Moved.nsmp").exists(), "kept until the copy lands");
     session.let_go();
     session.sync();
 
@@ -5037,9 +3101,17 @@ fn a_resting_sample_renamed_over_another_is_copied_over_its_file() {
         "the file it came from is gone"
     );
     assert!(session.bench.workspace.get(moved).is_none());
-    assert!(session.bench.browser.tags.worn(kept).contains(&tag));
+    assert_eq!(session.worn(kept), ["Sunday"]);
     let entity = session.bench.workspace.get(kept).unwrap();
     assert!(entity.rests().is_some() && entity.held_whole() == 0);
+
+    session.undo();
+    session.settle();
+    assert!(
+        root.read("Kept.nsmp") == theirs,
+        "one undo puts back what was there"
+    );
+    assert!(root.read("Moved.nsmp") == ours, "and the file it came from");
 }
 
 /// A copy over another file that does not land leaves the asset it was moved from, and
@@ -5490,356 +3562,7 @@ fn a_piano_plan_their_file_already_holds_is_let_go_without_asking() {
     assert!(session.bench.browser.asking().is_none(), "nothing to ask");
 }
 
-/// A library holding a three-zone sample instrument and a piano library, each resting in
-/// its file, with an unsaved edit held of each, and the ids and edits.
-fn edited_pair(root: &Temp) -> (Session, [(u64, crate::rewrite::Edit); 2]) {
-    let sample = crate::testing::zoned_sample(nord_format::formats::nsmp::codec::Layout::V2, 92);
-    fs::write(root.at("Zoned.nsmp"), sample).unwrap();
-    fs::write(root.at("Grand.npno"), piano_rooted(&[48, 60, 72], 4)).unwrap();
-    let mut session = Session::listed(root);
-    session.ask_all();
-    let sets = vec![("name".to_string(), "Vibes".to_string())];
-    let plan = crate::document::piano::Plan::trimmed("Trimmed", 60, 0);
-    let edits = [
-        (
-            session.named("Zoned.nsmp"),
-            crate::rewrite::Edit::Sample(sets),
-        ),
-        (
-            session.named("Grand.npno"),
-            crate::rewrite::Edit::Piano(plan),
-        ),
-    ];
-    for (id, edit) in &edits {
-        let workspace = &mut session.bench.workspace;
-        workspace.hold_edit(*id, Some(edit.clone()));
-        assert!(workspace.edit_of(*id).is_some(), "the edit applies");
-    }
-    (session, edits)
-}
-
-impl Session {
-    /// Whether each of these assets holds this edit, unsaved, made over the file it rests
-    /// in.
-    fn holds(&self, edits: &[(u64, crate::rewrite::Edit)]) {
-        for (id, edit) in edits {
-            let workspace = &self.bench.workspace;
-            let entity = workspace.get(*id).expect("the same id");
-            assert_eq!(workspace.edit(*id), Some(edit), "{}", entity.name);
-            let (over, _) = workspace.edit_of(*id).expect("it applies");
-            assert!(entity
-                .rests()
-                .is_some_and(|file| std::sync::Arc::ptr_eq(file, over)));
-            assert!(entity.is_unsaved(), "{} is unsaved", entity.name);
-        }
-    }
-}
-
-/// The working copies the library's index names, by asset id.
-fn copies(root: &Temp) -> BTreeMap<u64, Working> {
-    let text = String::from_utf8_lossy(&root.read(".drawbar/library.ron")).into_owned();
-    let Read::Known(index) = sidecar::read(&text) else {
-        panic!("the index reads")
-    };
-    index
-        .assets
-        .into_iter()
-        .filter_map(|(id, row)| Some((id, row.working?)))
-        .collect()
-}
-
-/// An unsaved edit of a sample instrument and an unsaved piano plan, each over the file
-/// it rests in, are kept across a quit as working copies of the edits themselves, and
-/// come back unsaved, over the files as they were, without a question. Nothing is
-/// asked of opening another library either.
-#[test]
-fn an_unsaved_sample_edit_and_piano_plan_come_back_unsaved_after_a_quit() {
-    let root = Temp::new();
-    let (session, edits) = edited_pair(&root);
-    let files = (root.read("Zoned.nsmp"), root.read("Grand.npno"));
-    assert_eq!(session.store.unkept(&session.bench.workspace), [""; 0]);
-    session.close();
-
-    let kinds: Vec<Keeps> = copies(&root).values().map(|copy| copy.keeps).collect();
-    assert_eq!(kinds, [Keeps::Edit, Keeps::Edit]);
-    let mut second = Session::listed(&root);
-    second.holds(&edits);
-    assert!(second.bench.browser.asking().is_none(), "nothing changed");
-    let words = second.document(edits[0].0);
-    assert!(words.iter().any(|word| word == "Vibes"), "{words:?}");
-    assert!(root.read("Zoned.nsmp") == files.0 && root.read("Grand.npno") == files.1);
-
-    for (id, _) in &edits {
-        assert!(second.bench.workspace.save_edit(*id));
-    }
-    let names: Vec<String> = edits
-        .iter()
-        .map(|(id, _)| second.path(*id).unwrap())
-        .collect();
-    second.sync();
-    second.close();
-    let third = Session::listed(&root);
-    assert!(copies(&root).is_empty(), "the saves needed no copy");
-    assert!(root.names(".drawbar/working").is_empty());
-    for name in &names {
-        let id = third.named(name);
-        assert!(!third.bench.workspace.get(id).unwrap().is_unsaved());
-    }
-}
-
-/// Edits kept across a quit over files saved over outside drawbar meanwhile are made
-/// again over the files as they are now, and drawbar asks whose to keep. Keeping mine
-/// saves each over theirs.
-#[test]
-fn edits_kept_across_a_quit_are_made_again_over_their_files_changed_meanwhile() {
-    let root = Temp::new();
-    let (session, edits) = edited_pair(&root);
-    session.close();
-    let theirs = (
-        crate::testing::zoned_sample(nord_format::formats::nsmp::codec::Layout::V2, 184),
-        piano_rooted(&[48, 60, 72], 5),
-    );
-    fs::write(root.at("Zoned.nsmp"), &theirs.0).unwrap();
-    fs::write(root.at("Grand.npno"), &theirs.1).unwrap();
-
-    let mut second = Session::listed(&root);
-
-    second.holds(&edits);
-    assert_eq!(
-        second.said("changed on disk while drawbar held an unsaved edit"),
-        2
-    );
-    let (title, answers) = second.bench.browser.asking().expect("a question");
-    assert!(title.ends_with("changed on disk"), "{title}");
-    assert_eq!(answers, ["Keep mine", "Keep both", "Take theirs"]);
-
-    for (id, _) in &edits {
-        assert!(second.bench.workspace.save_edit(*id));
-    }
-    second.sync();
-    let [(_, crate::rewrite::Edit::Sample(sets)), (_, crate::rewrite::Edit::Piano(plan))] = &edits
-    else {
-        panic!("a sample's sets and a piano's plan")
-    };
-    let sample = crate::document::sample::apply(&theirs.0, sets).unwrap();
-    assert!(
-        root.read("Zoned.nsmp") == sample,
-        "their sample under my edit"
-    );
-    let piano = crate::document::piano::rebuild(&theirs.1, plan).unwrap();
-    assert!(
-        root.read("Grand.npno") == piano,
-        "their piano under my plan"
-    );
-}
-
-/// A plan kept across a quit that does not apply to its file as it is now is kept as it
-/// was, unsaved, and drawbar asks whose to keep. Its copy stays for the next run.
-#[test]
-fn a_plan_kept_across_a_quit_that_no_longer_applies_is_kept_and_asked_about() {
-    let root = Temp::new();
-    let (session, edits) = edited_pair(&root);
-    session.close();
-    fs::write(root.at("Grand.npno"), piano_rooted(&[60], 4)).unwrap();
-
-    let second = Session::listed(&root);
-    let (id, plan) = &edits[1];
-    let workspace = &second.bench.workspace;
-    assert_eq!(workspace.edit(*id), Some(plan), "kept as it was");
-    assert!(workspace.unapplied(*id).is_some());
-    assert!(workspace.get(*id).unwrap().is_unsaved());
-    let (title, _) = second.bench.browser.asking().expect("a question");
-    assert_eq!(title, "“Grand.npno” changed on disk");
-    second.close();
-
-    let third = Session::listed(&root);
-    assert_eq!(
-        third.bench.workspace.edit(*id),
-        Some(plan),
-        "and kept again"
-    );
-    assert_eq!(copies(&root).len(), 2);
-}
-
-/// An edit's working copy is written before the index that names it, and the copy it
-/// replaces is dropped after, so a quit between those writes leaves the old index with
-/// the old copy or the new index with the new one. The next open takes the edit the
-/// index names and sweeps the other copy.
-#[test]
-fn a_quit_between_an_edit_copy_and_its_index_keeps_the_edit_the_index_names() {
-    let root = Temp::new();
-    let (mut session, id, _) = resting_sample(&root);
-    let named =
-        |name: &str| crate::rewrite::Edit::Sample(vec![("name".to_string(), name.to_string())]);
-    session.bench.workspace.hold_edit(id, Some(named("Vibes")));
-    session.autosave();
-    session.settle();
-    let index = |root: &Temp| root.read(".drawbar/library.ron");
-    let copy = |root: &Temp| {
-        let names = root.names(".drawbar/working");
-        let [name] = names.as_slice() else {
-            panic!("one copy: {names:?}")
-        };
-        (name.clone(), root.read(&format!(".drawbar/working/{name}")))
-    };
-    let (old_index, old_copy) = (index(&root), copy(&root));
-    session.bench.workspace.hold_edit(id, Some(named("Bells")));
-    session.close();
-    let (new_index, new_copy) = (index(&root), copy(&root));
-    assert_ne!(old_copy.0, new_copy.0, "a new generation");
-
-    let crash = |index: &[u8], kept: &str| {
-        fs::write(root.at(".drawbar/library.ron"), index).unwrap();
-        for (name, bytes) in [&old_copy, &new_copy] {
-            fs::write(root.at(&format!(".drawbar/working/{name}")), bytes).unwrap();
-        }
-        let session = Session::listed(&root);
-        assert_eq!(session.bench.workspace.edit(id), Some(&named(kept)));
-        assert!(session.bench.workspace.get(id).unwrap().is_unsaved());
-        assert_eq!(
-            root.names(".drawbar/working").len(),
-            1,
-            "the other is swept"
-        );
-        session.close();
-    };
-    crash(&old_index, "Vibes");
-    crash(&new_index, "Bells");
-}
-
-/// ⚠️ An edit's save lands before the index that drops its working copy. A crash in
-/// between leaves a copy of an older edit over the saved file, and the next open must take
-/// the file as saved rather than offer the older edit back over it.
-#[test]
-fn a_crash_right_after_an_edit_is_saved_brings_back_the_save_and_not_an_older_edit() {
-    let root = Temp::new();
-    let (mut session, id, bytes) = resting_sample(&root);
-    let named =
-        |name: &str| crate::rewrite::Edit::Sample(vec![("name".to_string(), name.to_string())]);
-    session.bench.workspace.hold_edit(id, Some(named("Vibes")));
-    session.autosave();
-    session.settle();
-    assert_eq!(
-        copies(&root)[&id].keeps,
-        Keeps::Edit,
-        "the older edit is kept"
-    );
-    session.rename_resting(id, "Bells");
-    while !session.settled() {
-        assert!(session.next(), "the save answered");
-    }
-    drop(session);
-    let saved = crate::document::sample::apply(&bytes, &[("name".into(), "Bells".into())]);
-    assert!(root.read("Zoned.nsmp") == saved.unwrap(), "the save landed");
-
-    let again = Session::listed(&root);
-    assert_eq!(again.bench.browser.asking(), None, "nothing to ask");
-    let workspace = &again.bench.workspace;
-    assert_eq!(workspace.edit(id), None, "the save, not the older edit");
-    assert!(!workspace.get(id).unwrap().is_unsaved());
-}
-
-/// A working copy of an edit that this build does not read is never taken for no edit:
-/// the library opens read-only and leaves the copy for a build that reads it.
-#[test]
-fn an_edit_copy_of_another_version_leaves_the_library_read_only() {
-    let root = Temp::new();
-    let (session, _) = edited_pair(&root);
-    session.close();
-    let names = root.names(".drawbar/working");
-    let at = root.at(&format!(".drawbar/working/{}", names[0]));
-    let text = String::from_utf8(fs::read(&at).unwrap()).unwrap();
-    let newer = text.replacen("version: 1", "version: 2", 1);
-    assert_ne!(newer, text);
-    fs::write(&at, &newer).unwrap();
-
-    let second = Session::listed(&root);
-    let why = second.store.read_only().expect("read-only");
-    assert!(why.contains("could not be read"), "{why}");
-    second.close();
-    assert_eq!(fs::read(&at).unwrap(), newer.as_bytes(), "the copy is left");
-}
-
-/// A library whose `Gigs/Cello` holds a tagged program, opened and closed, then left as
-/// a case-only rename interrupted after its first step leaves it: the folder under the
-/// name it moved through.
-fn stranded(root: &Temp) -> (u64, u64) {
-    fs::create_dir_all(root.at("Gigs/Cello")).unwrap();
-    fs::write(
-        root.at("Gigs/Cello/Grand.ne5p"),
-        Fresh::Program.bytes().unwrap(),
-    )
-    .unwrap();
-    let mut first = Session::open(root);
-    let grand = first.only();
-    let tag = first.bench.browser.tags.make("Sunday").unwrap();
-    first.bench.browser.tags.set(grand, tag, true);
-    first.autosave();
-    first.close();
-    fs::rename(root.at("Gigs/Cello"), root.at("Gigs/cello.1.drawbar-move")).unwrap();
-    (grand, tag)
-}
-
-/// A folder an interrupted rename left under the name it moved through is put back at
-/// open under the spelling the index's rows use, once, and its rows and tags match it.
-#[test]
-fn a_folder_left_mid_rename_is_put_back_where_its_rows_say() {
-    let root = Temp::new();
-    let (grand, tag) = stranded(&root);
-
-    let second = Session::open(&root);
-    assert_eq!(root.names("Gigs"), ["Cello"]);
-    assert_eq!(root.names("Gigs/Cello"), ["Grand.ne5p"]);
-    assert_eq!(second.path(grand).as_deref(), Some("Gigs/Cello/Grand.ne5p"));
-    assert!(second.bench.browser.tags.worn(grand).contains(&tag));
-    assert_eq!(second.said("interrupted rename"), 0);
-}
-
-/// Where another folder already has its name, a folder left mid-rename stays where it
-/// is, and the log says so once.
-#[test]
-fn a_folder_left_mid_rename_beside_one_of_its_name_stays_and_is_named() {
-    let root = Temp::new();
-    stranded(&root);
-    fs::create_dir_all(root.at("Gigs/CELLO")).unwrap();
-
-    let second = Session::open(&root);
-    let mut held = root.names("Gigs");
-    held.sort_by_key(|name| name.to_lowercase());
-    assert_eq!(held, ["CELLO", "cello.1.drawbar-move"]);
-    assert_eq!(root.names("Gigs/cello.1.drawbar-move"), ["Grand.ne5p"]);
-    assert_eq!(second.said("interrupted rename"), 1);
-}
-
-/// A file an interrupted case-only rename left under the name it moved through is put
-/// back at open: under its row's spelling, keeping its tag, and, with no row, under its
-/// own name at the top level.
-#[test]
-fn a_file_left_mid_rename_is_put_back() {
-    let root = Temp::new();
-    fs::create_dir_all(root.at("Gigs")).unwrap();
-    let program = Fresh::Program.bytes().unwrap();
-    fs::write(root.at("Gigs/Grand.ne5p"), &program).unwrap();
-    let mut first = Session::open(&root);
-    let grand = first.only();
-    let tag = first.bench.browser.tags.make("Sunday").unwrap();
-    first.bench.browser.tags.set(grand, tag, true);
-    first.autosave();
-    first.close();
-    fs::rename(
-        root.at("Gigs/Grand.ne5p"),
-        root.at("Gigs/grand.ne5p.1.drawbar-move"),
-    )
-    .unwrap();
-    fs::write(root.at("solo.ne5p.1.drawbar-move"), &program).unwrap();
-
-    let second = Session::open(&root);
-    assert_eq!(root.names("Gigs"), ["Grand.ne5p"]);
-    assert!(root.names("").contains(&"solo.ne5p".to_string()));
-    assert_eq!(second.path(grand).as_deref(), Some("Gigs/Grand.ne5p"));
-    assert!(second.bench.browser.tags.worn(grand).contains(&tag));
-    assert_eq!(second.said("interrupted rename"), 0);
-}
+impl Session {}
 
 #[test]
 fn the_demo_sounds_land_as_files_in_their_folder_and_are_not_filed_twice() {
@@ -5871,7 +3594,10 @@ fn the_demo_sounds_land_as_files_in_their_folder_and_are_not_filed_twice() {
         "unread, each might be a demo"
     );
     second.read_all();
-    assert_eq!(demo::unsure(&published(), &second.bench.workspace), []);
+    assert_eq!(
+        demo::unsure(&published(), &second.bench.workspace),
+        Vec::<u64>::new()
+    );
     let Bench {
         workspace,
         browser,
@@ -5884,237 +3610,6 @@ fn the_demo_sounds_land_as_files_in_their_folder_and_are_not_filed_twice() {
     );
     second.close();
     assert_eq!(root.names(FOLDER), names);
-}
-
-/// The rows the library's index holds.
-fn rows(root: &Temp) -> BTreeMap<u64, Row> {
-    let text = String::from_utf8(root.read(exec::INDEX)).unwrap();
-    match sidecar::read(&text) {
-        Read::Known(index) => index.assets,
-        other => panic!("{other:?}"),
-    }
-}
-
-/// `count` programs, spread over a few folders.
-fn programs(root: &Temp, count: usize) {
-    let program = Fresh::Program.bytes().unwrap();
-    let dirs = ["Live", "Studio", "Studio/Old"];
-    for dir in dirs {
-        fs::create_dir(root.at(dir)).unwrap();
-    }
-    for n in 0..count {
-        let path = format!("{}/{n:05}.ne5p", dirs[n % dirs.len()]);
-        fs::write(root.at(&path), &program).unwrap();
-    }
-}
-
-#[test]
-fn the_index_holds_a_row_only_while_a_file_carries_what_it_cannot_say() {
-    let root = Temp::new();
-    programs(&root, 300);
-    fs::create_dir(root.at(".drawbar")).unwrap();
-    let mut first = Session::listed(&root);
-    first.autosave();
-    first.settle();
-    assert_eq!(
-        rows(&root),
-        BTreeMap::new(),
-        "a file says all there is of it"
-    );
-
-    let id = first.named("00042.ne5p");
-    let tag = first.bench.browser.tags.make("Sunday").unwrap();
-    first.bench.browser.tags.set(id, tag, true);
-    first.autosave();
-    first.settle();
-    let held = rows(&root);
-    assert_eq!(held.keys().collect::<Vec<_>>(), [&id], "{held:?}");
-    let row = &held[&id];
-    assert_eq!(row.path, LibPath::parse("Live/00042.ne5p"));
-    assert_eq!(row.tags, [tag].into());
-    first.close();
-
-    let mut second = Session::listed(&root);
-    assert!(
-        second.bench.browser.tags.worn(id).contains(&tag),
-        "under its id"
-    );
-    second.bench.browser.tags.set(id, tag, false);
-    second.close();
-    assert_eq!(rows(&root), BTreeMap::new(), "untagged, the row goes");
-}
-
-#[test]
-fn an_unsaved_edit_holds_a_row_until_it_is_saved() {
-    let root = Temp::new();
-    programs(&root, 3);
-    let mut session = Session::open(&root);
-    let id = session.named("00001.ne5p");
-    let edited = with_gain(&session.bytes(id), "96");
-    let log = &mut session.bench.log;
-    session
-        .bench
-        .workspace
-        .replace_bytes(id, edited.clone(), log);
-    session.autosave();
-    session.settle();
-    let held = rows(&root);
-    assert_eq!(held.keys().collect::<Vec<_>>(), [&id], "{held:?}");
-    let copy = held[&id].working.expect("its working copy");
-    assert_eq!(copy.keeps, Keeps::Bytes);
-    let name = working_name(id, copy.generation);
-    assert_eq!(root.read(&format!(".drawbar/working/{name}")), edited);
-
-    session.bench.workspace.mark_saved(id);
-    session.sync();
-    session.autosave();
-    session.settle();
-    assert_eq!(rows(&root), BTreeMap::new(), "saved, the row goes");
-    assert!(root.names(".drawbar/working").is_empty());
-    assert_eq!(root.read("Studio/00001.ne5p"), edited);
-}
-
-#[test]
-fn an_asset_off_a_slot_holds_a_row_naming_the_slot() {
-    let root = Temp::new();
-    let mut first = Session::open(&root);
-    let at = Location { bank: 2, slot: 5 };
-    let origin = Origin::Device {
-        class: ObjectClass::Program,
-        at,
-    };
-    let Bench { workspace, log, .. } = &mut first.bench;
-    let bytes = Fresh::Program.bytes().unwrap();
-    let id = workspace.ingest("Africa Split.ne5p".into(), origin, bytes, log);
-    workspace.place(id, LibPath::root().join("Africa Split.ne5p"));
-    first.close();
-    let held = rows(&root);
-    assert_eq!(held.keys().collect::<Vec<_>>(), [&id], "{held:?}");
-    assert_eq!(held[&id].working, None);
-
-    let second = Session::listed(&root);
-    let entity = second.bench.workspace.get(id).expect("under its id");
-    assert_eq!(entity.origin.slot(), Some((ObjectClass::Program, at)));
-}
-
-/// A file's own name is not written as where it came from, and its row reads back as
-/// coming from that file wherever it has moved.
-#[test]
-fn a_row_writes_no_name_or_origin_its_path_gives() {
-    let path = LibPath::parse("Live/Grand.ne5p");
-    let row = Row::of(
-        path.clone(),
-        "Grand.ne5p",
-        None,
-        [3].into(),
-        &Origin::File("Grand.ne5p".into()),
-        None,
-    );
-    let mut index = Sidecar::default();
-    index.assets.insert(1, row.clone());
-    let text = sidecar::write(&index).unwrap();
-    assert!(!text.contains("name") && !text.contains("origin"), "{text}");
-    assert_eq!(sidecar::read(&text), Read::Known(index));
-    assert_eq!(row.origin().label(), "Opened from Grand.ne5p");
-    let moved = Row {
-        path: LibPath::parse("Pianos/Upright.ne5p"),
-        ..row
-    };
-    assert_eq!(moved.origin().label(), "Opened from Upright.ne5p");
-
-    let view = Row::of(None, "Seen", None, [].into(), &Origin::Fresh, None);
-    assert_eq!(view.name, "Seen", "a row with no path keeps its name");
-}
-
-/// An index that names every file, as one written before it held only what files cannot
-/// say, still opens, and the next write keeps only that.
-#[test]
-fn an_index_naming_every_file_reads_and_shrinks_at_the_next_write() {
-    let root = Temp::new();
-    let program = Fresh::Program.bytes().unwrap();
-    fs::create_dir_all(root.at(".drawbar")).unwrap();
-    fs::create_dir(root.at("Live")).unwrap();
-    for name in ["Bells.ne5p", "Live/Grand.ne5p", "Live/Organ.ne5p"] {
-        fs::write(root.at(name), &program).unwrap();
-    }
-    let len = program.len();
-    let row = |id: u64, path: &str, tags: &str| {
-        let leaf = path.rsplit('/').next().unwrap();
-        format!(
-            "{id}: (path: Some({path:?}), name: {leaf:?}, fingerprint: \
-             Some((len: {len}, modified: None, crc: None)), tags: [{tags}], \
-             origin: File({leaf:?}), working: None),"
-        )
-    };
-    let index = format!(
-        "(version: 1, next_id: 4, next_generation: 1, tags: {{7: \"Sunday\"}}, \
-         assets: {{{}{}{}}})",
-        row(1, "Bells.ne5p", ""),
-        row(2, "Live/Grand.ne5p", "7"),
-        row(3, "Live/Organ.ne5p", ""),
-    );
-    fs::write(root.at(exec::INDEX), &index).unwrap();
-    assert_eq!(rows(&root).len(), 3, "the old index reads");
-
-    let mut session = Session::listed(&root);
-    assert_eq!(session.bench.workspace.listed().count(), 3);
-    let grand = session.named("Grand.ne5p");
-    assert_eq!(grand, 2, "a row keeps its id");
-    let tag = *session.bench.browser.tags.worn(grand).first().unwrap();
-    assert_eq!(session.bench.browser.tags.name_of(tag), Some("Sunday"));
-    let origin = session.bench.workspace.get(1).unwrap().origin.label();
-    assert_eq!(origin, "Opened from Bells.ne5p");
-    session.autosave();
-    session.settle();
-    let held = rows(&root);
-    assert_eq!(held.keys().collect::<Vec<_>>(), [&grand], "{held:?}");
-}
-
-/// A save over a file that has no row, known only from this session's listing and read,
-/// is refused where the file changed outside since.
-#[test]
-fn a_save_over_a_file_the_index_does_not_name_is_refused_where_it_changed() {
-    let root = Temp::new();
-    programs(&root, 2);
-    let mut first = Session::listed(&root);
-    let tagged = first.named("00000.ne5p");
-    let tag = first.bench.browser.tags.make("Sunday").unwrap();
-    first.bench.browser.tags.set(tagged, tag, true);
-    first.close();
-
-    let mut second = Session::listed(&root);
-    let id = second.named("00001.ne5p");
-    assert!(!rows(&root).contains_key(&id), "no row names it");
-    second.read(&[id]);
-    let program = second.bytes(id);
-    let theirs = with_gain(&program, "12");
-    fs::write(root.at("Studio/00001.ne5p"), &theirs).unwrap();
-    let log = &mut second.bench.log;
-    second
-        .bench
-        .workspace
-        .replace_bytes(id, with_gain(&program, "96"), log);
-    second.bench.workspace.mark_saved(id);
-    second.sync();
-    assert_eq!(root.read("Studio/00001.ne5p"), theirs, "theirs stands");
-    assert_eq!(second.said("was not saved, because it changed on disk"), 1);
-}
-
-#[test]
-fn a_large_library_with_a_few_tags_keeps_a_small_index() {
-    let root = Temp::new();
-    programs(&root, 10_000);
-    let mut session = Session::listed(&root);
-    assert_eq!(session.bench.workspace.listed().count(), 10_000);
-    let tag = session.bench.browser.tags.make("Sunday").unwrap();
-    for name in ["00007.ne5p", "05000.ne5p", "09999.ne5p"] {
-        let id = session.named(name);
-        session.bench.browser.tags.set(id, tag, true);
-    }
-    session.close();
-    assert_eq!(rows(&root).len(), 3);
-    let size = fs::metadata(root.at(exec::INDEX)).unwrap().len();
-    assert!(size < 2048, "the index is {size} bytes");
 }
 
 #[test]
@@ -6136,8 +3631,2997 @@ fn a_failed_answer_counts_each_step_and_how_it_failed_once() {
     let moved = Event::Moved {
         from: path.clone(),
         to: path,
-        result: Err("taken".into()),
+        result: Err(Failure::Io("taken".into())),
     };
     assert_eq!(moved.faults(), ["move"].into());
-    assert!(Event::Fingerprinted(Vec::new()).faults().is_empty());
+    let refused = Event::Committed {
+        made: None,
+        undoable: false,
+        forgot: false,
+        finished: None,
+        waiting: Waiting::Nothing,
+        label: "Tag".into(),
+        result: Err("read-only".into()),
+    };
+    assert_eq!(refused.faults(), ["intent"].into());
+}
+
+/// A library of real files, as the user leaves them: two programs, a sample instrument's
+/// WAV and a file drawbar does not open.
+fn mixed(root: &Temp) {
+    let program = Fresh::Program.bytes().unwrap();
+    fs::create_dir(root.at("Live")).unwrap();
+    fs::write(root.at("Live/Grand.ne5p"), with_gain(&program, "12")).unwrap();
+    fs::write(root.at("Live/Organ.ne5p"), with_gain(&program, "24")).unwrap();
+    fs::write(root.at("Strings.ne5p"), with_gain(&program, "36")).unwrap();
+    fs::write(root.at("cello.wav"), crate::testing::wav_bytes()).unwrap();
+    fs::write(root.at("Live/set list.pdf"), b"%PDF").unwrap();
+}
+
+/// What each asset of a session wears, by name, leaving out the untagged.
+fn tagged(session: &Session) -> Vec<(String, Vec<String>)> {
+    let mut tagged: Vec<(String, Vec<String>)> = session
+        .bench
+        .workspace
+        .listed()
+        .map(|entity| (entity.name.clone(), session.worn(entity.id)))
+        .filter(|(_, worn)| !worn.is_empty())
+        .collect();
+    tagged.sort();
+    tagged
+}
+
+fn wears(name: &str, tags: &[&str]) -> (String, Vec<String>) {
+    let tags = tags.iter().map(|tag| tag.to_string()).collect();
+    (name.to_string(), tags)
+}
+
+/// The whole of what the library keeps on toshokan, through the browser's acts: a folder
+/// of real files opens as a library, a tag and a tag's rename are each one change, they
+/// come back from the folder at the next open, another drawbar's change shows at a
+/// refresh and says whose it was, and an undo takes back this session's last change alone.
+#[test]
+fn tags_are_kept_by_the_library_shared_by_writers_and_undone_one_change_at_a_time() {
+    let root = Temp::new();
+    mixed(&root);
+    let mut first = Session::listed(&root);
+    let mut names: Vec<String> = first
+        .bench
+        .workspace
+        .listed()
+        .map(|entity| entity.path.as_ref().unwrap().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["Live/Grand.ne5p", "Live/Organ.ne5p", "Strings.ne5p"]
+    );
+    let others: Vec<&str> = first
+        .bench
+        .browser
+        .folders
+        .others
+        .iter()
+        .map(LibPath::as_str)
+        .collect();
+    assert_eq!(others, ["Live/set list.pdf", "cello.wav"], "listed by name");
+
+    let grand = first.named("Grand.ne5p");
+    let organ = first.named("Organ.ne5p");
+    first.tag(&[grand], "Sunday");
+    first.tag(&[organ], "Sunday");
+    first.rename_tag("Sunday", "Gig");
+    let both = vec![wears("Grand.ne5p", &["Gig"]), wears("Organ.ne5p", &["Gig"])];
+    assert_eq!(tagged(&first), both);
+    first.undo();
+    let renamed_back = vec![
+        wears("Grand.ne5p", &["Sunday"]),
+        wears("Organ.ne5p", &["Sunday"]),
+    ];
+    assert_eq!(tagged(&first), renamed_back, "the rename is one change");
+    first.redo();
+    assert_eq!(tagged(&first), both);
+    first.close();
+
+    let mut first = Session::listed(&root);
+    assert_eq!(tagged(&first), both, "read from the folder");
+    let strings = first.named("Strings.ne5p");
+    first.tag(&[strings], "Loud");
+
+    let mut second = Session::listed(&root);
+    let organ = second.named("Organ.ne5p");
+    second.tag(&[organ], "Ballad");
+    assert_eq!(first.said("changed the tags of"), 0, "not yet read");
+    first.refresh();
+    assert_eq!(
+        first.said("Another drawbar changed the tags of “Organ.ne5p”."),
+        1
+    );
+    let all = vec![
+        wears("Grand.ne5p", &["Gig"]),
+        wears("Organ.ne5p", &["Ballad", "Gig"]),
+        wears("Strings.ne5p", &["Loud"]),
+    ];
+    assert_eq!(tagged(&first), all);
+
+    first.undo();
+    let undone = vec![
+        wears("Grand.ne5p", &["Gig"]),
+        wears("Organ.ne5p", &["Ballad", "Gig"]),
+    ];
+    assert_eq!(
+        tagged(&first),
+        undone,
+        "this session's last change, not theirs"
+    );
+    first.redo();
+    assert_eq!(tagged(&first), all);
+    first.close();
+    second.close();
+    let again = Session::listed(&root);
+    assert_eq!(
+        tagged(&again),
+        all,
+        "both writers' changes, from the folder"
+    );
+}
+
+/// A file nothing is said about is no entity, and keeps its id when the library makes it
+/// one to tag it, and again when an undo lets that entity go.
+#[test]
+fn a_file_keeps_its_id_as_it_becomes_an_entity_and_stops_being_one() {
+    let root = Temp::new();
+    mixed(&root);
+    let mut session = Session::listed(&root);
+    let grand = session.named("Grand.ne5p");
+    assert_eq!(
+        session.store.key(grand),
+        Some(Key::File(LibPath::parse("Live/Grand.ne5p").unwrap()))
+    );
+    session.tag(&[grand], "Sunday");
+    assert!(
+        matches!(session.store.key(grand), Some(Key::Entity(_))),
+        "an entity once tagged"
+    );
+    assert_eq!(session.named("Grand.ne5p"), grand);
+    session.undo();
+    assert_eq!(
+        session.store.key(grand),
+        Some(Key::File(LibPath::parse("Live/Grand.ne5p").unwrap())),
+        "a file again"
+    );
+    assert_eq!(session.named("Grand.ne5p"), grand, "the same asset");
+    assert_eq!(session.bench.workspace.listed().count(), 3);
+    assert!(session.worn(grand).is_empty());
+}
+
+/// Untagging an asset takes its tag off it alone; a tag nothing wears any more leaves
+/// the list once the library says so.
+#[test]
+fn a_tag_taken_off_its_last_asset_leaves_the_list() {
+    let root = Temp::new();
+    mixed(&root);
+    let mut session = Session::listed(&root);
+    let (grand, organ) = (session.named("Grand.ne5p"), session.named("Organ.ne5p"));
+    let tag = session.tag(&[grand, organ], "Sunday");
+    session.bench.act(vec![crate::browser::Act::Untag {
+        ids: vec![grand],
+        tag,
+    }]);
+    session.decided();
+    assert_eq!(tagged(&session), [wears("Organ.ne5p", &["Sunday"])]);
+    session.bench.act(vec![crate::browser::Act::RemoveTag(tag)]);
+    session.decided();
+    assert!(tagged(&session).is_empty());
+    assert!(session.bench.browser.tags.all().is_empty());
+}
+
+/// Each change to a file is one undo step: undoing a delete, a rename, a save and the
+/// file's making puts the folder back as it was before each, and the asset follows its
+/// file without a word about changes outside drawbar.
+#[test]
+fn a_file_made_saved_renamed_and_deleted_is_undone_a_step_at_a_time() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let made = root.read("untitled.ne5p");
+    let saved = with_gain(&made, "96");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(id, saved.clone(), log);
+    workspace.mark_saved(id);
+    session.sync();
+    let renamed = LibPath::root().join("Renamed.ne5p");
+    session.bench.workspace.place(id, renamed);
+    session.sync();
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.remove(id, log);
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar"]);
+
+    session.undo();
+    session.refocus();
+    assert_eq!(root.read("Renamed.ne5p"), saved, "the delete is undone");
+    let back = session.only();
+    session.undo();
+    session.refocus();
+    assert_eq!(root.names(""), [".drawbar", "untitled.ne5p"]);
+    assert_eq!(
+        session.path(back).as_deref(),
+        Some("untitled.ne5p"),
+        "the asset follows its file back"
+    );
+    session.undo();
+    session.refocus();
+    session.read_all();
+    assert_eq!(root.read("untitled.ne5p"), made, "the save is undone");
+    assert_eq!(session.bytes(back), made);
+    session.undo();
+    session.refocus();
+    assert_eq!(root.names(""), [".drawbar"], "the making is undone");
+    assert_eq!(session.bench.workspace.listed().count(), 0);
+    for outside in ["outside drawbar", "changed on disk", "appeared"] {
+        assert_eq!(session.said(outside), 0, "{outside}");
+    }
+}
+
+impl Session {
+    /// The names of the library's tags, sorted.
+    fn tag_names(&self) -> Vec<String> {
+        let tags = self.bench.browser.tags.all().iter();
+        let mut names: Vec<String> = tags.map(|tag| tag.name.clone()).collect();
+        names.sort();
+        names
+    }
+
+    /// Make a tag that nothing wears, as New tag… does with nothing picked, and wait
+    /// until the library has committed it.
+    fn make_tag(&mut self, name: &str) {
+        self.bench.browser.tags.make(name).expect("a new tag");
+        self.decided();
+    }
+
+    /// Remove the tag `name` as the browser does, and wait until it is committed.
+    fn remove_tag(&mut self, name: &str) {
+        let tags = &self.bench.browser.tags;
+        let id = tags
+            .all()
+            .iter()
+            .find(|tag| tag.name == name)
+            .expect(name)
+            .id;
+        self.bench.act(vec![crate::browser::Act::RemoveTag(id)]);
+        self.decided();
+    }
+}
+
+/// A tag that nothing wears is kept by the library as a tag that wears: made, renamed
+/// and removed, it is there or gone once drawbar opens the library again, and another
+/// drawbar sees it at a refresh.
+#[test]
+fn a_tag_nothing_wears_is_kept_until_it_is_removed() {
+    let root = Temp::new();
+    let mut first = Session::listed(&root);
+    first.make_tag("Spare");
+    first.make_tag("Wedding");
+    first.rename_tag("Wedding", "Gig");
+    let mut second = Session::listed(&root);
+    assert_eq!(second.tag_names(), ["Gig", "Spare"], "read from the folder");
+    first.remove_tag("Spare");
+    first.close();
+
+    second.refresh();
+    assert_eq!(second.tag_names(), ["Gig"], "another drawbar's removal");
+    second.close();
+    let third = Session::listed(&root);
+    assert_eq!(third.tag_names(), ["Gig"]);
+}
+
+impl Session {
+    /// Edit the asset `id` held whole, leaving the edit unsaved.
+    fn edit(&mut self, id: u64, gain: &str) -> Vec<u8> {
+        let edited = with_gain(&self.bytes(id), gain);
+        let Bench { workspace, log, .. } = &mut self.bench;
+        workspace.replace_bytes(id, edited.clone(), log);
+        edited
+    }
+
+    /// Open a view of program slot `at` of `instrument`, holding `bytes`, as a double
+    /// click does, and let the store see it.
+    fn view_slot(&mut self, instrument: &str, at: Location, bytes: Vec<u8>) -> u64 {
+        self.store.attached(Some(instrument.to_string()));
+        let origin = Origin::Device {
+            class: ObjectClass::Program,
+            at,
+        };
+        let Bench { workspace, log, .. } = &mut self.bench;
+        let id = workspace.view("Grand".to_string(), origin, bytes, log);
+        self.autosave();
+        id
+    }
+
+    /// The autosave's pass, and every command it sent run through.
+    fn autosave(&mut self) {
+        let Bench {
+            workspace, browser, ..
+        } = &mut self.bench;
+        self.store.sync(workspace, browser, Pass::Full);
+        self.settle();
+    }
+}
+
+/// Copy the folder at `from` to `to`, as it is now.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        match entry.file_type().unwrap().is_dir() {
+            true => copy_tree(&entry.path(), &target),
+            false => _ = fs::copy(entry.path(), target).unwrap(),
+        }
+    }
+}
+
+/// An unsaved edit is kept as a draft, outside the library folder, and is there again,
+/// still unsaved, when drawbar opens the library after a quit.
+#[test]
+fn an_unsaved_edit_comes_back_after_a_quit() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.sync();
+    let file = root.read("untitled.ne5p");
+    let edited = first.edit(id, "96");
+    first.close();
+    assert_eq!(root.read("untitled.ne5p"), file, "the file is not written");
+
+    let second = Session::open(&root);
+    let id = second.only();
+    let entity = second.bench.workspace.get(id).unwrap();
+    assert!(entity.is_unsaved());
+    assert!(second.bytes(id) == edited);
+    assert_eq!(second.said("has the unsaved edit it had"), 1);
+    assert_eq!(second.said("appeared"), 0, "what was there is not news");
+}
+
+/// Opening a library and keeping an unsaved edit of one of its files writes nothing in
+/// its folder: the edit is kept in this install's own state.
+#[test]
+fn keeping_an_unsaved_edit_writes_nothing_in_the_folder() {
+    let root = Temp::new();
+    fs::write(root.at("a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut first = Session::open(&root);
+    let a = first.named("a.ne5p");
+    let edited = first.edit(a, "96");
+    first.autosave();
+    first.close();
+    assert_eq!(root.names(""), ["a.ne5p"], "nothing beside the file");
+
+    let again = Session::open(&root);
+    assert!(again.bytes(again.named("a.ne5p")) == edited);
+}
+
+/// Unsaved edits an earlier drawbar kept in a writer's own directory are found at every
+/// open, and neither read nor removed; nothing marks them told in the local root.
+/// Whether the user has been told is the app's to remember.
+#[test]
+fn unsaved_edits_an_earlier_drawbar_kept_are_found_at_each_open_and_left_alone() {
+    let root = Temp::new();
+    fs::write(root.at("a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let genesis = toshokan::EntryHash::from_u128(1).to_string();
+    let drafts = root.local().join(&genesis).join("drafts");
+    fs::create_dir_all(&drafts).unwrap();
+    fs::write(drafts.join("old.json"), b"{\"base\":\"00\"}\nedit").unwrap();
+    let mut first = Session::open(&root);
+    assert!(first.store.take_earlier());
+    assert!(!first.store.take_earlier(), "taken once");
+    assert!(!first
+        .bench
+        .workspace
+        .get(first.named("a.ne5p"))
+        .unwrap()
+        .is_unsaved());
+    first.close();
+    let mut again = Session::open(&root);
+    assert!(again.store.take_earlier(), "found again");
+    assert!(!root.local().join("notices").exists());
+    assert_eq!(
+        fs::read(drafts.join("old.json")).unwrap(),
+        b"{\"base\":\"00\"}\nedit"
+    );
+}
+
+/// A whole view sent mid-session, as when most of what is shown changed at once, keeps
+/// every asset shown before with its id, its tags and its unsaved edit, and adds the rest.
+#[test]
+fn a_whole_view_mid_session_keeps_what_was_shown_and_adds_the_rest() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.tag(&[id], "Live");
+    let edited = session.edit(id, "96");
+    fs::create_dir(root.at("Many")).unwrap();
+    for i in 0..1100 {
+        fs::write(root.at(&format!("Many/{i:04}.wav")), b"wave").unwrap();
+    }
+    session.settle();
+    let shown = session.store.shown().expect("shown");
+    let shown = (shown.files.len(), shown.others().len());
+    assert_eq!(shown, (1, 1100), "every file is shown once");
+    let entity = session
+        .bench
+        .workspace
+        .get(id)
+        .expect("the asset keeps its id");
+    assert!(entity.is_unsaved());
+    assert!(session.bytes(id) == edited);
+    assert_eq!(session.worn(id), ["Live"]);
+    assert_eq!(session.bench.browser.folders.others.len(), 1100);
+    assert_eq!(session.said("deleted outside drawbar"), 0);
+}
+
+/// A library that stops answering in the middle of a command is asked about once it has
+/// shown no life for a while, and letting it go names the edits it could not keep
+/// rather than waiting for it.
+#[test]
+fn a_library_that_stops_answering_is_asked_about_and_let_go() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.edit(id, "96");
+    session.store.patience(std::time::Duration::from_millis(50));
+    session.store.fault(Fault::Stall);
+    session.store.rescan();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    session.poll();
+    let (title, answers) = session.bench.browser.asking().expect("asked");
+    assert_eq!(title, "The library is not answering");
+    assert_eq!(answers, ["Keep waiting", "Close and reopen"]);
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        log,
+        ..
+    } = &mut session.bench;
+    session.store.close(workspace, browser, queue, log);
+    let said = session.said("could not be written, since the library stopped answering");
+    assert_eq!(said, 1, "the edit is named");
+}
+
+/// A library whose thread stops says so, and letting it go names the edits it could
+/// not keep.
+#[test]
+fn a_library_whose_thread_stops_says_so_and_is_let_go() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.edit(id, "96");
+    session.store.fault(Fault::Trap);
+    session.store.rescan();
+    for _ in 0..1000 {
+        if session.store.stopped().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(session.store.stopped().is_some(), "the thread stopped");
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        log,
+        ..
+    } = &mut session.bench;
+    session.store.close(workspace, browser, queue, log);
+    let said = session.said("could not be written, since the library stopped answering");
+    assert_eq!(said, 1, "the edit is named");
+}
+
+/// An unsaved edit waits out a first scan that failed, and comes back with the first
+/// that lists every file.
+#[cfg(unix)]
+#[test]
+fn an_unsaved_edit_waits_out_a_first_scan_that_failed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.sync();
+    let edited = first.edit(id, "96");
+    first.close();
+    // A file whose time moved has its identity read and kept, which a local root that
+    // cannot be written fails.
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+    let file = fs::File::options()
+        .write(true)
+        .open(root.at("untitled.ne5p"))
+        .unwrap();
+    file.set_modified(later).unwrap();
+    let mode = |mode| fs::set_permissions(root.local(), fs::Permissions::from_mode(mode));
+    mode(0o555).unwrap();
+
+    let mut second = Session::listed(&root);
+    mode(0o755).unwrap();
+    assert_eq!(
+        second.said("reading the library again"),
+        1,
+        "the first scan failed"
+    );
+    assert_eq!(
+        second.said("on this computer."),
+        0,
+        "no count of files unlisted"
+    );
+    second.settle();
+    second.read_all();
+    let id = second.only();
+    assert!(second.bench.workspace.get(id).unwrap().is_unsaved());
+    assert!(second.bytes(id) == edited);
+}
+
+/// The autosave keeps an unsaved edit as a draft, so a drawbar stopped without a quit
+/// finds it again, from the folder and this install's own state as it left them.
+#[test]
+fn an_unsaved_edit_the_autosave_kept_survives_a_crash() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.sync();
+    let edited = first.edit(id, "96");
+    first.autosave();
+    let crashed = Temp::new();
+    copy_tree(&root.0, &crashed.0);
+    copy_tree(&root.local(), &crashed.local());
+
+    let second = Session::open(&crashed);
+    let id = second.only();
+    assert!(second.bench.workspace.get(id).unwrap().is_unsaved());
+    assert!(second.bytes(id) == edited);
+}
+
+/// A draft over a file that changed outside drawbar since is shown over the file as it
+/// is now, and drawbar asks which to keep.
+#[test]
+fn an_unsaved_edit_over_a_file_changed_since_asks_which_to_keep() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.sync();
+    let file = root.read("untitled.ne5p");
+    let edited = first.edit(id, "96");
+    first.close();
+    fs::write(root.at("untitled.ne5p"), with_gain(&file, "12")).unwrap();
+
+    let second = Session::open(&root);
+    let id = second.only();
+    assert!(second.bytes(id) == edited, "the edit shows");
+    let (title, answers) = second.bench.browser.asking().expect("a question is asked");
+    assert_eq!(title, "“untitled.ne5p” changed on disk");
+    assert_eq!(answers, ["Keep mine", "Keep both", "Take theirs"]);
+}
+
+/// An unsaved edit of a slot's view is kept by the slot, outside the library folder,
+/// and is there again when the same instrument's slot is viewed after a quit.
+#[test]
+fn a_slot_views_unsaved_edit_comes_back_when_the_slot_is_viewed_again() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let at = Location::from_user(2, 7);
+    let mut first = Session::open(&root);
+    let id = first.view_slot("N1", at, program.clone());
+    let edited = first.edit(id, "96");
+    first.close();
+    assert_eq!(
+        root.names(""),
+        Vec::<String>::new(),
+        "nothing is written in the folder"
+    );
+
+    let mut second = Session::open(&root);
+    let other = second.view_slot("N2", at, program.clone());
+    assert!(second.bytes(other) == program, "another instrument's slot");
+    let elsewhere = second.view_slot("N1", Location::from_user(2, 8), program.clone());
+    assert!(second.bytes(elsewhere) == program, "another slot");
+    let id = second.view_slot("N1", at, program.clone());
+    assert!(second.bench.workspace.get(id).unwrap().is_unsaved());
+    assert!(second.bytes(id) == edited);
+    assert_eq!(second.said("has the unsaved edit it had"), 1);
+    assert_eq!(second.said("appeared"), 0, "what was there is not news");
+}
+
+/// The autosave keeps a slot view's unsaved edit, so a drawbar stopped without a quit
+/// finds it again.
+#[test]
+fn a_slot_views_unsaved_edit_the_autosave_kept_survives_a_crash() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let at = Location::from_user(1, 1);
+    let mut first = Session::open(&root);
+    let id = first.view_slot("N1", at, program.clone());
+    let edited = first.edit(id, "96");
+    first.autosave();
+    let crashed = Temp::new();
+    copy_tree(&root.0, &crashed.0);
+    copy_tree(&root.local(), &crashed.local());
+
+    let mut second = Session::open(&crashed);
+    let id = second.view_slot("N1", at, program);
+    assert!(second.bytes(id) == edited);
+}
+
+/// A slot view's edit this install's own state could not keep is kept by the next
+/// autosave once it can, and is there again after a quit.
+#[cfg(unix)]
+#[test]
+fn a_slot_views_edit_the_autosave_failed_to_keep_is_kept_by_the_next() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let at = Location::from_user(1, 1);
+    let mut first = Session::open(&root);
+    let id = first.view_slot("N1", at, program.clone());
+    first.edit(id, "96");
+    first.autosave();
+    let kept = root.local().join("unsaved");
+    let mode = |mode| fs::set_permissions(&kept, fs::Permissions::from_mode(mode));
+    mode(0o555).unwrap();
+    let edited = first.edit(id, "12");
+    first.autosave();
+    mode(0o755).unwrap();
+    assert_eq!(
+        first.said("could not be kept for later"),
+        1,
+        "the keep failed"
+    );
+    first.autosave();
+    first.close();
+
+    let mut second = Session::open(&root);
+    let id = second.view_slot("N1", at, program);
+    assert!(second.bytes(id) == edited, "the latest edit");
+}
+
+/// A slot view's edit kept loses nothing at a tab's close, and one whose keep has not
+/// landed does.
+#[test]
+fn a_slot_views_edit_whose_keep_has_not_landed_is_losing() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let mut session = Session::open(&root);
+    let id = session.view_slot("N1", Location::from_user(1, 1), program);
+    session.edit(id, "96");
+    session.autosave();
+    let Bench {
+        workspace, browser, ..
+    } = &session.bench;
+    assert!(!session.store.losing(workspace, browser), "once kept");
+
+    session.edit(id, "12");
+    session.store.fault(Fault::Stall);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Full);
+    let losing = session.store.losing(workspace, browser);
+    session.let_go_stalled();
+    assert!(losing, "while the keep of the next edit is stalled");
+}
+
+impl Session {
+    /// Close a library whose thread never finishes the command it took, once it is
+    /// asked about: a library not asked about would be waited for.
+    fn let_go_stalled(mut self) {
+        self.store.patience(std::time::Duration::ZERO);
+        for _ in 0..1000 {
+            self.poll();
+            if self.bench.browser.asking().is_some() {
+                return self.close();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("the stalled library was never asked about");
+    }
+
+    /// The autosave's pass, with nothing it sent answered yet.
+    fn autosave_unanswered(&mut self) {
+        let Bench {
+            workspace, browser, ..
+        } = &mut self.bench;
+        self.store.sync(workspace, browser, Pass::Full);
+    }
+}
+
+/// A slot view reverted while the keep of its edit is in flight lets go of that edit,
+/// so a drawbar stopped without a quit does not bring it back.
+#[test]
+fn a_slot_view_reverted_while_its_keep_is_in_flight_leaves_no_kept_edit() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let at = Location::from_user(1, 1);
+    let mut first = Session::open(&root);
+    let id = first.view_slot("N1", at, program.clone());
+    first.edit(id, "96");
+    first.autosave_unanswered();
+    let Bench { workspace, log, .. } = &mut first.bench;
+    workspace.revert(id, log);
+    first.autosave();
+    let crashed = Temp::new();
+    copy_tree(&root.0, &crashed.0);
+    copy_tree(&root.local(), &crashed.local());
+
+    let mut second = Session::open(&crashed);
+    let id = second.view_slot("N1", at, program);
+    assert!(!second.bench.workspace.get(id).unwrap().is_unsaved());
+    assert_eq!(second.said("has the unsaved edit it had"), 0);
+}
+
+/// The answer to an older keep, folded in after a newer edit, marks only the older
+/// edit kept: the newer one, whose own keep failed, is kept by the next autosave.
+#[test]
+fn an_older_keeps_answer_never_marks_a_newer_edit_kept() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let at = Location::from_user(1, 1);
+    let mut first = Session::open(&root);
+    let id = first.view_slot("N1", at, program.clone());
+    first.edit(id, "96");
+    first.store.fault(Fault::Next(Box::new(Fault::Unread)));
+    first.autosave_unanswered();
+    let newer = first.edit(id, "12");
+    first.autosave_unanswered();
+    first.settle();
+    let Bench {
+        workspace, browser, ..
+    } = &first.bench;
+    assert!(
+        first.store.losing(workspace, browser),
+        "the newer edit is not kept"
+    );
+    first.autosave();
+    let Bench {
+        workspace, browser, ..
+    } = &first.bench;
+    assert!(!first.store.losing(workspace, browser), "kept once resent");
+    first.close();
+
+    let mut second = Session::open(&root);
+    let id = second.view_slot("N1", at, program);
+    assert!(second.bytes(id) == newer);
+}
+
+/// A keep that fails at every autosave is said once, and again only once a keep has
+/// succeeded since.
+#[cfg(unix)]
+#[test]
+fn a_keep_that_keeps_failing_is_said_once_per_run_of_failures() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let mut session = Session::open(&root);
+    let id = session.view_slot("N1", Location::from_user(1, 1), program);
+    session.edit(id, "96");
+    session.autosave();
+    let kept = root.local().join("unsaved");
+    let mode = |mode| fs::set_permissions(&kept, fs::Permissions::from_mode(mode));
+    let failing = "could not be kept for later";
+    mode(0o555).unwrap();
+    session.edit(id, "12");
+    for _ in 0..3 {
+        session.autosave();
+    }
+    assert_eq!(session.said(failing), 1, "the first failure only");
+    mode(0o755).unwrap();
+    session.autosave();
+    mode(0o555).unwrap();
+    session.edit(id, "24");
+    session.autosave();
+    mode(0o755).unwrap();
+    assert_eq!(session.said(failing), 2, "again after a keep succeeded");
+}
+
+/// A slot view's kept edit, over a slot that holds something else since, is shown over
+/// the view, and drawbar asks which to keep.
+#[test]
+fn a_slot_views_unsaved_edit_over_a_slot_changed_since_asks_which_to_keep() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let at = Location::from_user(1, 1);
+    let mut first = Session::open(&root);
+    let id = first.view_slot("N1", at, program.clone());
+    let edited = first.edit(id, "96");
+    first.close();
+
+    let mut second = Session::open(&root);
+    let id = second.view_slot("N1", at, with_gain(&program, "12"));
+    assert!(second.bytes(id) == edited, "the edit shows");
+    let (title, answers) = second.bench.browser.asking().expect("a question is asked");
+    assert_eq!(title, "“Grand” changed on the instrument");
+    assert_eq!(answers, ["Keep mine", "Keep both", "Take theirs"]);
+}
+
+/// A slot view edited before the edit an earlier session kept of its slot is read
+/// asks which to keep, and nothing kept is lost without being asked.
+#[test]
+fn a_slot_view_edited_before_its_kept_edit_is_read_asks_which_to_keep() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let at = Location::from_user(1, 1);
+    let mut first = Session::open(&root);
+    let id = first.view_slot("N1", at, program.clone());
+    let earlier = first.edit(id, "96");
+    first.close();
+
+    let mut second = Session::open(&root);
+    second.store.attached(Some("N1".to_string()));
+    let origin = Origin::Device {
+        class: ObjectClass::Program,
+        at,
+    };
+    let Bench { workspace, log, .. } = &mut second.bench;
+    let id = workspace.view("Grand".to_string(), origin, program.clone(), log);
+    let mine = second.edit(id, "12");
+    second.autosave();
+    assert!(
+        second.bytes(id) == mine,
+        "nothing is put over the edit unasked"
+    );
+    let (title, answers) = second.bench.browser.asking().expect("a question is asked");
+    assert_eq!(title, "“Grand” has unsaved edits from before");
+    assert_eq!(answers, ["Keep mine", "Keep both", "Take theirs"]);
+    let acts = second.bench.browser.answer("Take theirs");
+    second.bench.act(acts);
+    assert!(second.bytes(id) == earlier, "the earlier edit");
+    assert!(second.bench.workspace.get(id).unwrap().is_unsaved());
+}
+
+/// A slot view whose edit was sent, or let go of, leaves no edit for the next view.
+#[test]
+fn a_slot_view_sent_leaves_no_kept_edit() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let at = Location::from_user(1, 1);
+    let mut first = Session::open(&root);
+    let id = first.view_slot("N1", at, program.clone());
+    let edited = first.edit(id, "96");
+    first.autosave();
+    first.bench.workspace.mark_saved(id);
+    first.autosave();
+    first.close();
+
+    let mut second = Session::open(&root);
+    let id = second.view_slot("N1", at, edited.clone());
+    assert!(!second.bench.workspace.get(id).unwrap().is_unsaved());
+    assert_eq!(second.said("has the unsaved edit it had"), 0);
+}
+
+/// Saving an edit lets its draft go: the next open finds the file as it was saved, and
+/// nothing unsaved.
+#[test]
+fn a_saved_edit_leaves_no_draft() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.sync();
+    let edited = first.edit(id, "96");
+    first.autosave();
+    first.bench.workspace.mark_saved(id);
+    first.sync();
+    first.autosave();
+    first.close();
+
+    let second = Session::open(&root);
+    let id = second.only();
+    assert!(!second.bench.workspace.get(id).unwrap().is_unsaved());
+    assert!(second.bytes(id) == edited);
+    assert_eq!(second.said("has the unsaved edit it had"), 0);
+}
+
+/// An edit held of a sample instrument resting in its file comes back as that edit,
+/// over the file, which is not read whole.
+#[test]
+fn an_edit_of_a_resting_sample_comes_back_as_an_edit() {
+    let root = Temp::new();
+    let (mut first, id, _) = resting_sample(&root);
+    let sets = vec![("name".to_string(), "Vibes".to_string())];
+    let edit = crate::rewrite::Edit::Sample(sets);
+    first.bench.workspace.hold_edit(id, Some(edit.clone()));
+    first.close();
+
+    let (second, id, _) = resting_sample_again(&root);
+    let workspace = &second.bench.workspace;
+    assert!(workspace.get(id).unwrap().rests().is_some());
+    assert_eq!(workspace.kept_edit(id).map(|(held, _)| held), Some(&edit));
+}
+
+/// The library `resting_sample` made, opened again.
+fn resting_sample_again(root: &Temp) -> (Session, u64, ()) {
+    let mut session = Session::listed(root);
+    session.ask_all();
+    let id = session.only();
+    (session, id, ())
+}
+
+/// A library past ten thousand entries is listed whole, however deep its files are, and
+/// a file drawbar holds keeps its tags wherever it is. A folder whose name starts with a
+/// dot is not listed at all.
+#[test]
+fn a_large_tree_is_listed_whole() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    for dir in ["a", "b", "c", "c/d", ".git"] {
+        fs::create_dir(root.at(dir)).unwrap();
+    }
+    fs::write(root.at("top.ne5p"), &program).unwrap();
+    fs::write(root.at("c/d/kept.ne5p"), with_gain(&program, "12")).unwrap();
+    fs::write(root.at(".git/hidden.ne5p"), &program).unwrap();
+    let mut first = Session::listed(&root);
+    let kept = first.named("kept.ne5p");
+    first.tag(&[kept], "Sunday");
+    first.close();
+
+    const PAST: usize = 10_001;
+    for n in 0..PAST {
+        fs::write(root.at(&format!("a/{n:05}.jpg")), b"").unwrap();
+    }
+    fs::write(root.at("b/deep.ne5p"), &program).unwrap();
+    let session = Session::listed(&root);
+    let folders = &session.bench.browser.folders;
+    assert!(folders.unwalked.is_empty(), "{:?}", folders.unwalked);
+    assert_eq!(folders.others.len(), PAST);
+    let mut names: Vec<&str> = session
+        .bench
+        .workspace
+        .listed()
+        .map(|entity| entity.name.as_str())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["deep.ne5p", "kept.ne5p", "top.ne5p"]);
+    assert_eq!(tagged(&session), [wears("kept.ne5p", &["Sunday"])]);
+    let dirs: Vec<&str> = folders.all().iter().map(|dir| dir.path.as_str()).collect();
+    assert_eq!(dirs, ["a", "b", "c", "c/d"]);
+}
+
+/// Many folders drawbar may not read are reported in one line that names the first few
+/// and counts the rest.
+#[cfg(unix)]
+#[test]
+fn many_folders_that_cannot_be_read_are_named_a_few_at_a_time() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Temp::new();
+    let locked = ["A", "B", "C", "D", "E"];
+    let mode = |mode| {
+        for dir in locked {
+            fs::set_permissions(root.at(dir), fs::Permissions::from_mode(mode)).unwrap();
+        }
+    };
+    for dir in locked {
+        fs::create_dir(root.at(dir)).unwrap();
+    }
+    mode(0o000);
+    let session = Session::listed(&root);
+    mode(0o755);
+    assert_eq!(
+        session.said("drawbar could not read “A”, “B”, “C” and 2 more, so"),
+        1
+    );
+}
+
+/// A folder drawbar may not read is reported and left out, and the rest of the library
+/// opens; once it can be read, a rescan lists what is in it.
+#[cfg(unix)]
+#[test]
+fn a_folder_that_cannot_be_read_is_reported_and_the_rest_opens() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::create_dir(root.at("Locked")).unwrap();
+    fs::write(root.at("Locked/inside.ne5p"), &program).unwrap();
+    fs::write(root.at("outside.ne5p"), &program).unwrap();
+    let mode = |mode| {
+        let locked = fs::Permissions::from_mode(mode);
+        fs::set_permissions(root.at("Locked"), locked).unwrap();
+    };
+    mode(0o000);
+    let mut session = Session::listed(&root);
+    mode(0o755);
+    let names = |session: &Session| {
+        let listed = session.bench.workspace.listed();
+        let mut names: Vec<String> = listed.map(|entity| entity.name.clone()).collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names(&session), ["outside.ne5p"]);
+    let unwalked: Vec<&str> = session
+        .bench
+        .browser
+        .folders
+        .unwalked
+        .iter()
+        .map(LibPath::as_str)
+        .collect();
+    assert_eq!(unwalked, ["Locked"]);
+    assert_eq!(session.said("drawbar could not read “Locked”"), 1);
+
+    session.refocus();
+    assert_eq!(names(&session), ["inside.ne5p", "outside.ne5p"]);
+    assert!(session.bench.browser.folders.unwalked.is_empty());
+}
+
+/// A tagged file deleted outside drawbar stays a lost row under one id, rescan after
+/// rescan, until the user forgets it; the row goes once the library has let it go.
+#[test]
+fn a_lost_row_keeps_its_id_until_it_is_forgotten() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.tag(&[id], "Sunday");
+    first.close();
+    fs::remove_file(root.at("untitled.ne5p")).unwrap();
+
+    let mut session = Session::listed(&root);
+    let lost = |session: &Session| -> Vec<u64> {
+        let lost = session.bench.browser.folders.lost().iter();
+        lost.map(|lost| lost.id).collect()
+    };
+    let [row] = lost(&session)[..] else {
+        panic!("one row is lost: {:?}", lost(&session));
+    };
+    session.refocus();
+    session.refocus();
+    assert_eq!(lost(&session), [row], "the same id");
+
+    session.bench.act(vec![crate::browser::Act::Forget(row)]);
+    assert_eq!(lost(&session), [row], "shown until the library lets it go");
+    session.decided();
+    assert_eq!(lost(&session), Vec::<u64>::new());
+    session.close();
+    let again = Session::listed(&root);
+    assert_eq!(lost(&again), Vec::<u64>::new());
+}
+
+/// A rename that changes only case, on a disk that ignores case, leaves one asset with its
+/// tags under the new name, rescan after rescan, and deleting it leaves nothing behind.
+/// A disk that tells case apart has nothing to show here.
+#[test]
+fn a_rename_of_case_alone_leaves_one_asset() {
+    let root = Temp::new();
+    fs::write(root.at("probe"), b"").unwrap();
+    if !root.at("PROBE").exists() {
+        return;
+    }
+    fs::remove_file(root.at("probe")).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.place_at(id, "c3.ne5p");
+    session.sync();
+    let untagged = session.create();
+    session.place_at(untagged, "d3.ne5p");
+    session.sync();
+    session.tag(&[id], "Sunday");
+    session.place_at(id, "C3.ne5p");
+    session.place_at(untagged, "D3.ne5p");
+    session.sync();
+    session.refocus();
+    session.refocus();
+
+    let mut names: Vec<String> = session
+        .bench
+        .workspace
+        .listed()
+        .map(|entity| entity.name.clone())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["C3.ne5p", "D3.ne5p"], "one asset each");
+    assert_eq!(root.names(""), [".drawbar", "C3.ne5p", "D3.ne5p"]);
+    assert_eq!(tagged(&session), [wears("C3.ne5p", &["Sunday"])]);
+    assert_eq!(session.said("outside drawbar"), 0);
+
+    for id in [id, untagged] {
+        let Bench { workspace, log, .. } = &mut session.bench;
+        workspace.remove(id, log);
+    }
+    session.sync();
+    session.refocus();
+    assert_eq!(root.names(""), [".drawbar"]);
+    assert_eq!(session.bench.workspace.listed().count(), 0);
+}
+
+impl Session {
+    /// Put the asset `id`'s file at `name` in the top level, as a rename does.
+    fn place_at(&mut self, id: u64, name: &str) {
+        let path = LibPath::root().join(name);
+        self.bench.workspace.place(id, path);
+    }
+}
+
+/// Each answer is taken in by what it changed, and what drawbar shows after it is what a
+/// fresh open of the library shows.
+#[test]
+fn each_answer_lists_what_the_whole_view_lists() {
+    let root = Temp::new();
+    fs::write(root.at("outside.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    fs::write(
+        root.at("gone.ne5p"),
+        with_gain(&Fresh::Program.bytes().unwrap(), "12"),
+    )
+    .unwrap();
+    fs::write(root.at("notes.pdf"), b"notes").unwrap();
+    let mut session = Session::open(&root);
+    let step = |session: &mut Session, what: &str| {
+        let fresh = Session::listed(&root);
+        assert_eq!(session.store.shown(), fresh.store.shown(), "after {what}");
+        fresh.close();
+    };
+    let id = session.create();
+    session.sync();
+    step(&mut session, "a save");
+    let outside = session.named("outside.ne5p");
+    session.tag(&[id, outside], "Sunday");
+    step(&mut session, "a tag");
+    session.place_at(id, "moved.ne5p");
+    session.sync();
+    step(&mut session, "a move");
+    session.undo();
+    step(&mut session, "an undo");
+    session.redo();
+    step(&mut session, "a redo");
+    let other = Temp::new();
+    let mut theirs = Session::elsewhere(&root, &other);
+    let moved = theirs.named("moved.ne5p");
+    theirs.tag(&[moved], "Theirs");
+    theirs.place_at(moved, "theirs.ne5p");
+    theirs.sync();
+    theirs.close();
+    session.refresh();
+    step(&mut session, "a refresh after another drawbar's changes");
+    fs::write(root.at("more.pdf"), b"more").unwrap();
+    fs::remove_file(root.at("gone.ne5p")).unwrap();
+    session.settle();
+    step(&mut session, "a rescan");
+    session.remove_tag("Sunday");
+    step(&mut session, "a tag removed");
+    let names = |session: &Session| {
+        let mut names: Vec<(String, Vec<String>)> = session
+            .bench
+            .workspace
+            .listed()
+            .map(|entity| {
+                (
+                    session.path(entity.id).unwrap_or_default(),
+                    session.worn(entity.id),
+                )
+            })
+            .collect();
+        names.sort();
+        names
+    };
+    let shown = names(&session);
+    let others = session.bench.browser.folders.others.clone();
+    session.close();
+    let fresh = Session::open(&root);
+    assert_eq!(names(&fresh), shown, "the assets and their tags");
+    assert_eq!(
+        fresh.bench.browser.folders.others, others,
+        "the files drawbar does not open"
+    );
+}
+
+/// A tagged file saved in drawbar and then moved outside it keeps its tags at its new
+/// name: the library knows it by what drawbar wrote.
+#[test]
+fn a_tagged_file_saved_then_moved_outside_keeps_its_tags() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.tag(&[id], "Sunday");
+    session.edit(id, "96");
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    fs::create_dir(root.at("Moved")).unwrap();
+    fs::rename(root.at("untitled.ne5p"), root.at("Moved/kept.ne5p")).unwrap();
+    session.refocus();
+
+    assert_eq!(session.path(id).as_deref(), Some("Moved/kept.ne5p"));
+    assert_eq!(tagged(&session), [wears("kept.ne5p", &["Sunday"])]);
+}
+
+/// A folder restored from a backup is shown as it is at the next read: what the backup
+/// does not hold is gone.
+#[test]
+fn a_folder_restored_from_a_backup_is_shown_as_it_is() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    first.create();
+    first.close();
+    let backup = Temp::new();
+    copy_tree(&root.0, &backup.0);
+
+    let mut second = Session::open(&root);
+    second.tag(&[second.only()], "Sunday");
+    second.close();
+    fs::remove_dir_all(&root.0).unwrap();
+    copy_tree(&backup.0, &root.0);
+
+    let mut third = Session::listed(&root);
+    assert_eq!(tagged(&third), Vec::<(String, Vec<String>)>::new());
+    third.settle();
+    assert_eq!(tagged(&third), Vec::<(String, Vec<String>)>::new());
+}
+
+/// A file another drawbar tagged since this one last looked is tagged again on the
+/// entity that one made, and is not made an entity a second time.
+#[test]
+fn a_file_tagged_by_another_drawbar_meanwhile_is_tagged_on_its_entity() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut first = Session::listed(&root);
+    let mut second = Session::listed(&root);
+    let grand = second.named("Grand.ne5p");
+    second.tag(&[grand], "Ballad");
+    let grand = first.named("Grand.ne5p");
+    first.tag(&[grand], "Sunday");
+
+    assert_eq!(tagged(&first), [wears("Grand.ne5p", &["Ballad", "Sunday"])]);
+    second.refresh();
+    assert_eq!(
+        tagged(&second),
+        [wears("Grand.ne5p", &["Ballad", "Sunday"])]
+    );
+}
+
+/// A tag asked for an asset whose file could not be written is not waited on forever:
+/// it is said not to reach that asset, and the tags asked after it go on.
+#[cfg(unix)]
+#[test]
+fn a_tag_on_an_asset_with_no_file_is_refused_and_the_next_goes_on() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let mode = |mode| fs::set_permissions(&root.0, fs::Permissions::from_mode(mode)).unwrap();
+    mode(0o555);
+    let homeless = session.create();
+    session.sync();
+    mode(0o755);
+    session.tag(&[homeless], "Sunday");
+    let grand = session.named("Grand.ne5p");
+    session.tag(&[grand], "Ballad");
+
+    assert!(!session.store.deciding(), "nothing waits");
+    assert_eq!(
+        session.said("“untitled.ne5p” has no file in the library, so “Sunday” was not put on it."),
+        1
+    );
+    assert_eq!(tagged(&session), [wears("Grand.ne5p", &["Ballad"])]);
+}
+
+/// Assets deleted together in one gesture are one change: one undo brings every file
+/// back. A deletion asked for later is a change of its own.
+#[test]
+fn a_selection_deleted_together_is_one_undo_step() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let ids = [session.create(), session.create(), session.create()];
+    session.sync();
+    let files = root.names("");
+    let acts = ids[..2].iter().map(|id| crate::browser::Act::Remove(*id));
+    session.bench.act(acts.collect());
+    session.sync();
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo Delete 2 files")
+    );
+    session.bench.act(vec![crate::browser::Act::Remove(ids[2])]);
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar"]);
+    session.undo();
+    session.undo();
+    assert_eq!(root.names(""), files, "two undos bring all three back");
+}
+
+/// The segments of drawbar's history in the library folder, each with what it holds.
+fn segments(root: &Temp) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    let writers = root.at(".drawbar/library/writers.2");
+    let dirs = fs::read_dir(writers)
+        .unwrap()
+        .map(|dir| dir.unwrap().path());
+    let files = dirs.flat_map(|dir| fs::read_dir(dir).unwrap().map(|file| file.unwrap().path()));
+    let segments = files.filter(|path| path.extension().is_some_and(|ext| ext == "txt"));
+    segments
+        .map(|path| (path.clone(), fs::read(path).unwrap()))
+        .collect()
+}
+
+#[test]
+fn an_older_copy_of_drawbars_history_restored_from_a_backup_keeps_nothing_apart() {
+    let root = Temp::new();
+    mixed(&root);
+    let mut session = Session::listed(&root);
+    let grand = session.named("Grand.ne5p");
+    let tag = session.tag(&[grand], "Gig");
+    let older = segments(&root);
+    session.bench.act(vec![crate::browser::Act::Untag {
+        ids: vec![grand],
+        tag,
+    }]);
+    session.decided();
+    session.close();
+    for (path, bytes) in older {
+        fs::write(path, bytes).unwrap();
+    }
+    let session = Session::listed(&root);
+    assert!(session.bench.browser.folders.kept.is_empty());
+    assert!(tagged(&session).is_empty());
+}
+
+#[test]
+fn a_library_this_computer_never_opened_opens_without_trouble() {
+    let root = Temp::new();
+    mixed(&root);
+    let session = Session::listed(&root);
+    let log = session.bench.log.iter();
+    let trouble: Vec<&str> = log
+        .filter(|entry| entry.level == crate::log::Level::Error)
+        .map(|entry| entry.text.as_str())
+        .collect();
+    assert!(trouble.is_empty(), "{trouble:?}");
+}
+
+#[test]
+fn an_undo_another_drawbar_refuses_is_let_go_of_for_the_change_before_it() {
+    let root = Temp::new();
+    mixed(&root);
+    let mut first = Session::listed(&root);
+    let grand = first.named("Grand.ne5p");
+    let organ = first.named("Organ.ne5p");
+    first.tag(&[grand], "Gig");
+    first.tag(&[organ], "Gig");
+    let elsewhere = Temp::new();
+    let mut second = Session::open_at(&root, &elsewhere.0);
+    let organ = second.named("Organ.ne5p");
+    let tags = second.bench.browser.tags.all();
+    let tag = tags
+        .iter()
+        .find(|tag| tag.name == "Gig")
+        .expect("the tag")
+        .id;
+    second.bench.act(vec![crate::browser::Act::Untag {
+        ids: vec![organ],
+        tag,
+    }]);
+    second.decided();
+    first.refresh();
+    let refused = first.store.undo_label().expect("a change to undo");
+    first.undo();
+    let change = refused.trim_start_matches("Undo ");
+    let told = format!("{change} cannot be undone: another drawbar has changed it since.");
+    assert_eq!(first.said(&told), 1);
+    assert_ne!(first.store.undo_label(), Some(refused));
+    first.undo();
+    assert!(tagged(&first).is_empty());
+}
+
+/// Assets moved together in one gesture are one change: one undo moves every file back.
+#[test]
+fn a_selection_moved_together_is_one_undo_step() {
+    let root = Temp::new();
+    fs::create_dir(root.at("Gig")).unwrap();
+    let mut session = Session::open(&root);
+    let ids = [session.create(), session.create()];
+    session.sync();
+    let top = root.names("");
+    let gig = LibPath::parse("Gig").unwrap();
+    let folder = session.bench.browser.folders.id_of(&gig).expect("listed");
+    let acts = ids.iter().map(|id| crate::browser::Act::File {
+        id: *id,
+        folder: Some(folder),
+    });
+    session.bench.act(acts.collect());
+    session.sync();
+    assert_eq!(root.names("Gig").len(), 2, "both moved");
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo Move 2 files")
+    );
+    session.undo();
+    session.settle();
+    assert_eq!(root.names("Gig"), Vec::<String>::new(), "both moved back");
+    assert_eq!(root.names(""), top, "beside the folder");
+}
+
+/// Files dropped together are one change: one undo takes every one back.
+#[test]
+fn files_dropped_together_are_one_undo_step() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let program = Fresh::Program.bytes().unwrap();
+    let dropped = ["a.ne5p", "b.ne5p"].map(|name| crate::browser::Act::Import {
+        name: name.into(),
+        bytes: program.clone(),
+    });
+    session.bench.act(dropped.into());
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "a.ne5p", "b.ne5p"]);
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo New 2 files")
+    );
+    session.undo();
+    assert_eq!(root.names(""), [".drawbar"], "both taken back");
+}
+
+/// A file renamed onto another's name and written over it is one change with the
+/// deletion of the file it came from: one undo puts both back.
+#[test]
+fn an_overwrite_and_the_file_it_came_from_are_one_undo_step() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let (ours, theirs) = (with_gain(&program, "96"), with_gain(&program, "12"));
+    fs::write(root.at("Kept.ne5p"), &theirs).unwrap();
+    fs::write(root.at("Moved.ne5p"), &ours).unwrap();
+    let mut session = Session::open(&root);
+    let moved = session.named("Moved.ne5p");
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id: moved,
+        name: "Kept.ne5p".into(),
+    }]);
+    let acts = session.bench.browser.answer("Overwrite");
+    session.bench.act(acts);
+    session.sync();
+    session.let_go();
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "Kept.ne5p"]);
+    assert!(root.read("Kept.ne5p") == ours);
+
+    session.undo();
+    session.settle();
+    assert!(root.read("Kept.ne5p") == theirs, "what was there");
+    assert!(root.read("Moved.ne5p") == ours, "and the file it came from");
+}
+
+/// A tag put on a view of a slot keeps the view on this computer and tags its new file
+/// in one change: one undo takes back both.
+#[test]
+fn a_tag_on_a_slot_view_is_one_undo_step() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let at = Location::from_user(1, 1);
+    let id = session.view_slot("N1", at, Fresh::Program.bytes().unwrap());
+    let tag = session.bench.browser.tags.make("Sunday").unwrap();
+    session
+        .bench
+        .act(vec![crate::browser::Act::Tag { ids: vec![id], tag }]);
+    session.sync();
+    session.decided();
+    assert_eq!(session.worn(id), ["Sunday"]);
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo New “Grand.ne5p”")
+    );
+    session.undo();
+    assert_eq!(
+        root.names(""),
+        [".drawbar"],
+        "the file and its tag are taken back"
+    );
+}
+
+/// A bundle unpacked into a new folder is one change: one undo takes back the folder
+/// and every file in it.
+#[test]
+fn a_bundle_unpacked_is_one_undo_step() {
+    let (root, outside) = (Temp::new(), Temp::new());
+    let program = Fresh::Program.bytes().unwrap();
+    let bundle = bundle_of(&[
+        ("Program/Bank 1/Grand.ne5p", &program),
+        ("Program/Bank 1/Upright.ne5p", &with_gain(&program, "12")),
+    ]);
+    fs::write(outside.at("Gig.ne5pbundle"), &bundle).unwrap();
+    let mut session = Session::open(&root);
+    session.bench.act(vec![crate::browser::Act::Take {
+        from: outside.at("Gig.ne5pbundle"),
+        dir: LibPath::root(),
+        name: "Gig.ne5pbundle".into(),
+    }]);
+    let unbundled = loop {
+        session.bench.workspace.poll(&mut session.bench.log);
+        let unbundled = session.bench.workspace.take_unbundled();
+        if !unbundled.is_empty() {
+            break unbundled;
+        }
+        std::thread::yield_now();
+    };
+    let unpack = unbundled.into_iter().map(crate::browser::Act::Unpack);
+    session.bench.act(unpack.collect());
+    session.sync();
+    assert_eq!(root.names("Gig"), ["Grand.ne5p", "Upright.ne5p"]);
+    session.undo();
+    session.settle();
+    assert_eq!(
+        root.names(""),
+        [".drawbar"],
+        "the folder and its files are taken back"
+    );
+}
+
+/// A new folder is a change of its own, which undo takes back.
+#[test]
+fn a_new_folder_is_undone() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    session.bench.act(vec![crate::browser::Act::NewFolder]);
+    session.sync();
+    let made = root.names("");
+    assert_eq!(made.len(), 2, "{made:?}");
+    session.undo();
+    session.settle();
+    assert_eq!(root.names(""), [".drawbar"], "the folder is gone");
+}
+
+/// Removing a folder that holds files and folders moves them up and removes it in one
+/// change: one undo puts everything back where it was, and one redo removes it again.
+#[test]
+fn removing_a_folder_with_folders_in_it_is_one_undo_step() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::create_dir_all(root.at("Gig/Set")).unwrap();
+    fs::write(root.at("Gig/a.ne5p"), &program).unwrap();
+    fs::write(root.at("Gig/Set/b.ne5p"), with_gain(&program, "12")).unwrap();
+    let mut session = Session::open(&root);
+    let gig = LibPath::parse("Gig").unwrap();
+    let folder = session.bench.browser.folders.id_of(&gig).expect("listed");
+    session
+        .bench
+        .act(vec![crate::browser::Act::RemoveFolder(folder)]);
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "Set", "a.ne5p"]);
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo Remove folder “Gig”"),
+        "named by the gesture"
+    );
+    session.undo();
+    session.settle();
+    assert_eq!(root.names(""), [".drawbar", "Gig"]);
+    assert_eq!(root.names("Gig"), ["Set", "a.ne5p"]);
+    assert_eq!(root.names("Gig/Set"), ["b.ne5p"]);
+    session.redo();
+    session.settle();
+    assert_eq!(
+        root.names(""),
+        [".drawbar", "Set", "a.ne5p"],
+        "removed again"
+    );
+    assert_eq!(root.names("Set"), ["b.ne5p"]);
+}
+
+/// A new tag made on a selection and named in its editor is one change: one undo takes
+/// it off every asset and out of the list.
+#[test]
+fn a_new_tag_named_on_a_selection_is_one_undo_step() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let ids = [session.create(), session.create()];
+    session.sync();
+    let before = session.store.undo_label();
+    session
+        .bench
+        .act(vec![crate::browser::Act::NewTag(ids.to_vec())]);
+    session.decided();
+    let tag = session.bench.browser.tags.all()[0].id;
+    session.bench.act(vec![crate::browser::Act::RenameTag {
+        id: tag,
+        name: "Sunday".into(),
+    }]);
+    session.decided();
+    assert_eq!(session.worn(ids[0]), ["Sunday"]);
+    assert_eq!(session.worn(ids[1]), ["Sunday"]);
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo New tag “Sunday”")
+    );
+    session.undo();
+    assert_eq!(session.worn(ids[0]), Vec::<String>::new());
+    assert_eq!(session.worn(ids[1]), Vec::<String>::new());
+    assert_eq!(session.tag_names(), Vec::<String>::new(), "out of the list");
+    assert_eq!(session.store.undo_label(), before, "one step");
+}
+
+/// Quitting while a new tag's name is still being typed keeps the tag, on the assets
+/// it was made on, under the name it had.
+#[test]
+fn a_new_tag_still_being_named_at_a_quit_is_kept() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session
+        .bench
+        .act(vec![crate::browser::Act::NewTag(vec![id])]);
+    session.decided();
+    session.close();
+
+    let again = Session::open(&root);
+    assert_eq!(again.worn(again.only()), ["New tag"]);
+}
+
+/// The Edit menu says what Undo takes back and Redo makes again: the change, and what it
+/// names. A change that failed is no step of either.
+#[test]
+fn undo_and_redo_say_what_they_take_back() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    assert_eq!(session.store.undo_label(), None);
+    let id = session.create();
+    session.sync();
+    session.tag(&[id], "Sunday");
+    session.place_at(id, "Grand.ne5p");
+    session.sync();
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo Rename “untitled.ne5p”")
+    );
+    session.undo();
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo New tag “Sunday”"),
+        "a tag made and put on is one change"
+    );
+    assert_eq!(
+        session.store.redo_label().as_deref(),
+        Some("Redo Rename “untitled.ne5p”")
+    );
+    session.redo();
+    assert_eq!(session.store.redo_label(), None);
+
+    fs::write(root.at("Grand.ne5p"), b"changed outside").unwrap();
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.remove(id, log);
+    session.sync();
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo Rename “untitled.ne5p”"),
+        "the refused delete is no step"
+    );
+}
+
+/// Undoing a folder's rename puts its files back under the old name and leaves no
+/// folder of the new one; a redo moves them back under it.
+#[test]
+fn a_folder_rename_undone_leaves_no_folder_behind() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::create_dir_all(root.at("Live/Deep")).unwrap();
+    fs::write(root.at("Live/a.ne5p"), &program).unwrap();
+    fs::write(root.at("Live/Deep/b.ne5p"), &program).unwrap();
+    let mut session = Session::open(&root);
+    let live = LibPath::root().join("Live");
+    let folder = session.bench.browser.folders.id_of(&live).unwrap();
+    session.rename_folder(folder, "Gig");
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "Gig"]);
+
+    session.undo();
+    assert_eq!(root.names(""), [".drawbar", "Live"], "no Gig is left");
+    assert_eq!(root.names("Live"), ["Deep", "a.ne5p"]);
+    let dirs: Vec<&str> = session
+        .bench
+        .browser
+        .folders
+        .all()
+        .iter()
+        .map(|dir| dir.path.as_str())
+        .collect();
+    assert_eq!(dirs, ["Live", "Live/Deep"]);
+
+    session.redo();
+    session.refocus();
+    assert_eq!(root.names(""), [".drawbar", "Gig"]);
+    assert_eq!(root.names("Gig/Deep"), ["b.ne5p"]);
+}
+
+/// An unsaved edit of a file in a folder renamed, and the rename undone, follows the
+/// file: the asset keeps its id, and the edit comes back at the file's name after a
+/// quit.
+#[test]
+fn an_unsaved_edit_follows_its_file_through_a_folder_rename_and_its_undo() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::create_dir_all(root.at("Live")).unwrap();
+    fs::write(root.at("Live/a.ne5p"), &program).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.named("a.ne5p");
+    let edited = session.edit(id, "96");
+    let live = LibPath::root().join("Live");
+    let folder = session.bench.browser.folders.id_of(&live).unwrap();
+    session.rename_folder(folder, "Gig");
+    session.sync();
+    session.autosave();
+    session.undo();
+    session.autosave();
+    assert_eq!(session.named("a.ne5p"), id, "the same asset");
+    assert_eq!(session.path(id).as_deref(), Some("Live/a.ne5p"));
+    session.close();
+
+    let again = Session::open(&root);
+    let id = again.named("a.ne5p");
+    assert_eq!(again.path(id).as_deref(), Some("Live/a.ne5p"));
+    assert!(again.bytes(id) == edited, "the edit came back");
+}
+
+/// Two windows that kept unsaved edits of one file: the newer comes back, and the
+/// older is let go, with a word.
+#[test]
+fn of_two_windows_edits_of_one_file_the_newer_comes_back() {
+    let root = Temp::new();
+    fs::write(root.at("a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut first = Session::open(&root);
+    let mut second = Session::open(&root);
+    let a = first.named("a.ne5p");
+    first.edit(a, "12");
+    first.close();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let a = second.named("a.ne5p");
+    let newer = second.edit(a, "24");
+    second.close();
+
+    let again = Session::open(&root);
+    let a = again.named("a.ne5p");
+    assert!(again.bytes(a) == newer, "the newer edit");
+    assert_eq!(
+        again.said("the newer is shown, and the older was let go"),
+        1
+    );
+    again.close();
+    let last = Session::open(&root);
+    assert_eq!(last.said("the older was let go"), 0, "the older is gone");
+    assert!(last.bytes(last.named("a.ne5p")) == newer);
+}
+
+/// Two windows of this install keep their unsaved edits of two files. Opened again with
+/// one window, both edits come back.
+#[test]
+fn both_windows_unsaved_edits_come_back_in_one() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("a.ne5p"), &program).unwrap();
+    fs::write(root.at("b.ne5p"), &program).unwrap();
+    let mut first = Session::open(&root);
+    let mut second = Session::open(&root);
+    let a = first.named("a.ne5p");
+    let edited_a = first.edit(a, "12");
+    let b = second.named("b.ne5p");
+    let edited_b = second.edit(b, "24");
+    first.close();
+    second.close();
+
+    let mut again = Session::open(&root);
+    let (a, b) = (again.named("a.ne5p"), again.named("b.ne5p"));
+    assert!(again.bytes(a) == edited_a, "the first window's edit");
+    assert!(again.bytes(b) == edited_b, "the second window's edit");
+    assert_eq!(again.said("has the unsaved edit it had"), 2);
+    again.autosave();
+    again.close();
+
+    let last = Session::open(&root);
+    let (a, b) = (last.named("a.ne5p"), last.named("b.ne5p"));
+    assert!(last.bytes(a) == edited_a && last.bytes(b) == edited_b);
+    assert_eq!(
+        last.said("has the unsaved edit it had"),
+        2,
+        "each edit is kept once, by the window that took it up"
+    );
+}
+
+/// toshokan's file system for a library, stopped as a crash stops it right after a
+/// rename `stops` names, and renaming folders whole only where `rename_dir` says.
+struct Crashing {
+    native: toshokan::blocking::Native,
+    stops: fn(&toshokan::Io) -> bool,
+    rename_dir: bool,
+    stopped: bool,
+}
+
+impl toshokan::blocking::Backend for Crashing {
+    fn capabilities(&self, root: toshokan::Root) -> toshokan::io::Capabilities {
+        let native = self.native.capabilities(root);
+        toshokan::io::Capabilities {
+            rename_dir: native.rename_dir && self.rename_dir,
+            ..native
+        }
+    }
+
+    fn perform(&mut self, io: toshokan::Io) -> toshokan::IoResult {
+        assert!(!self.stopped, "crashed");
+        let stops = (self.stops)(&io);
+        let done = self.native.perform(io);
+        self.stopped = stops;
+        done
+    }
+}
+
+/// Leave in `root` a save another install's drawbar stopped partway, and return the bytes
+/// it was saving.
+fn leave_unfinished_save(root: &Temp) -> Vec<u8> {
+    let elsewhere = Temp::new();
+    leave_unfinished_save_in(root, &elsewhere.0).0
+}
+
+/// Leave in `root` a save a drawbar keeping its own state in `local` stopped partway,
+/// and return the bytes it was saving, with that drawbar, which holds its writer until
+/// it is dropped.
+fn leave_unfinished_save_in(
+    root: &Temp,
+    local: &std::path::Path,
+) -> (Vec<u8>, toshokan::blocking::Library<Crashing>) {
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    let saved = with_gain(&program, "77");
+    let at = toshokan::RelPath::new("Grand.ne5p").unwrap();
+    let expect =
+        toshokan::Expect::Holds(keys::identity_of_bytes(&path("Grand.ne5p"), &program).unwrap());
+    let bytes = saved.clone();
+    fn into_trash(io: &toshokan::Io) -> bool {
+        matches!(io, toshokan::Io::Rename { to, .. } if to.as_str().contains("/trash/"))
+    }
+    let other = interrupted(root, local, (into_trash, true), |other| {
+        let _ = other.intent("Save").save_file(&at, bytes, expect).commit();
+    });
+    (saved, other)
+}
+
+/// Leave in `root` a rename of the folder “Bulk”, which holds `a.ne5p` and `b.ne5p`, to
+/// “Bulk2” that another install's drawbar, moving one file at a time as a browser does,
+/// stopped after the first.
+fn leave_unfinished_folder_rename(root: &Temp) {
+    let program = Fresh::Program.bytes().unwrap();
+    fs::create_dir(root.at("Bulk")).unwrap();
+    fs::write(root.at("Bulk/a.ne5p"), &program).unwrap();
+    fs::write(root.at("Bulk/b.ne5p"), &program).unwrap();
+    let elsewhere = Temp::new();
+    fn into_bulk2(io: &toshokan::Io) -> bool {
+        matches!(io, toshokan::Io::Rename { to, .. } if to.as_str().starts_with("Bulk2/"))
+    }
+    let (from, to) = (
+        toshokan::RelPath::new("Bulk").unwrap(),
+        toshokan::RelPath::new("Bulk2").unwrap(),
+    );
+    interrupted(root, &elsewhere.0, (into_bulk2, false), |other| {
+        let _ = other.intent("Rename").move_tree(&from, &to).commit();
+    });
+}
+
+/// Open the library in `root` as a drawbar keeping its own state in `local`, and make
+/// `change` there, which a crash stops right after a rename `stops` names. The drawbar
+/// renames folders whole where `rename_dir` says. Returns that drawbar, which holds its
+/// writer until it is dropped.
+fn interrupted(
+    root: &Temp,
+    local: &std::path::Path,
+    (stops, rename_dir): (fn(&toshokan::Io) -> bool, bool),
+    change: impl FnOnce(&mut toshokan::blocking::Library<Crashing>),
+) -> toshokan::blocking::Library<Crashing> {
+    use std::panic::AssertUnwindSafe;
+    use toshokan::blocking::{Library, Native};
+
+    let crashing = Crashing {
+        native: Native::new(&root.0, local),
+        stops,
+        rename_dir,
+        stopped: false,
+    };
+    let env = toshokan::Env {
+        clock: Box::new(toshokan::env::SystemClock),
+        random: Box::new(toshokan::env::OsRandom::new()),
+        identify: std::rc::Rc::new(keys::Contents),
+        names: Box::new(keys::Volume::probe(&root.0)),
+        label: "drawbar".into(),
+    };
+    let (mut other, _) = Library::open(crashing, keys::layout(), &keys::schema(), env).unwrap();
+    other.rescan().unwrap();
+    let stopped = std::panic::catch_unwind(AssertUnwindSafe(|| change(&mut other)));
+    assert!(stopped.is_err(), "the other drawbar stopped partway");
+    other
+}
+
+/// A change another window of this install left, which stopped after this one opened,
+/// is finished without asking at the next read, as one left before it opened is.
+#[test]
+fn a_change_a_window_left_after_this_one_opened_is_finished() {
+    let root = Temp::new();
+    let mut session = Session::listed(&root);
+    let (saved, window) = leave_unfinished_save_in(&root, &root.local());
+    drop(window);
+    session.settle();
+    session.poll();
+    assert!(session.bench.browser.asking().is_none(), "nothing is asked");
+    assert!(root.read("Grand.ne5p") == saved, "the save is finished");
+}
+
+/// A change a live window of this install is making is not asked about, and once that
+/// window stops, the next read finishes it.
+#[test]
+fn a_change_a_live_window_left_is_finished_once_the_window_stops() {
+    let root = Temp::new();
+    let (saved, window) = leave_unfinished_save_in(&root, &root.local());
+    let mut session = Session::listed(&root);
+    session.poll();
+    assert_eq!(session.said("is in progress in another drawbar window"), 1);
+    drop(window);
+    session.settle();
+    session.poll();
+    assert!(session.bench.browser.asking().is_none(), "nothing is asked");
+    assert!(root.read("Grand.ne5p") == saved, "the save is finished");
+}
+
+impl Session {
+    /// Let a minute pass, and read the library again where the store asks to.
+    fn a_minute_later(&mut self) {
+        self.at(60.0);
+    }
+
+    /// Let the clock reach `seconds`, and read the library again where the store asks
+    /// to.
+    fn at(&mut self, seconds: f64) {
+        let later = eframe::egui::RawInput {
+            time: Some(seconds),
+            ..Default::default()
+        };
+        crate::testing::run(&self.bench.ctx, later, |_| {});
+        self.poll();
+        while self.store.scanning() {
+            assert!(self.next(), "the library is read again");
+        }
+        self.poll();
+    }
+}
+
+/// A save another install's drawbar left unfinished, as on a computer that syncs the
+/// folder, is not settled behind the user's back: once it has stood a while, since that
+/// drawbar may be making it still, drawbar asks, and Finish completes it.
+#[test]
+fn a_change_another_install_left_unfinished_is_asked_about() {
+    let root = Temp::new();
+    let saved = leave_unfinished_save(&root);
+    let mut session = Session::listed(&root);
+    session.poll();
+    assert!(
+        session.bench.browser.asking().is_none(),
+        "nothing is asked while the change may be in progress"
+    );
+    session.a_minute_later();
+    let (title, answers) = session.bench.browser.asking().expect("a question is asked");
+    assert_eq!(title, "Another drawbar left “Save” unfinished");
+    assert_eq!(answers, ["Later", "Roll back", "Leave as is", "Finish"]);
+    for act in session.bench.browser.answer("Finish") {
+        let crate::browser::Act::Settle(orphan, how) = act else {
+            panic!("{act:?} settles nothing");
+        };
+        session.store.settle_unfinished(orphan, how);
+    }
+    session.decided();
+    assert!(root.read("Grand.ne5p") == saved, "the save is finished");
+}
+
+/// A save of drawbar's own that can no longer be finished, since its new bytes are gone,
+/// leaves the library writable: drawbar asks whether to roll it back or leave it, and
+/// Roll back puts the old bytes back.
+#[test]
+fn a_save_that_can_no_longer_be_finished_is_asked_about_and_rolls_back() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let old = root.read("untitled.ne5p");
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "untitled.ne5p"),
+    ));
+    let log = &mut session.bench.log;
+    session
+        .bench
+        .workspace
+        .replace_bytes(id, with_gain(&old, "96"), log);
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    let writers = root.at(".drawbar/library/writers.2");
+    let writer = fs::read_dir(&writers).unwrap().next().unwrap().unwrap();
+    for staged in fs::read_dir(writer.path().join("tmp")).unwrap() {
+        fs::remove_file(staged.unwrap().path()).unwrap();
+    }
+
+    session.make_tag("Sunday");
+    assert_eq!(
+        session.store.read_only(),
+        None,
+        "the library stays writable"
+    );
+    assert_eq!(session.tag_names(), ["Sunday"], "the next change is made");
+    assert_eq!(session.said("Undo no longer reaches"), 1);
+    session.settle();
+    assert_eq!(
+        session.said("Finished saving"),
+        0,
+        "the save was not finished"
+    );
+    assert!(
+        session.bench.workspace.get(id).unwrap().is_unsaved(),
+        "the edit is kept"
+    );
+    session.a_minute_later();
+    let (title, answers) = session.bench.browser.asking().expect("a question is asked");
+    assert_eq!(title, "drawbar could not finish “Save”");
+    assert_eq!(answers, ["Later", "Leave as is", "Roll back"]);
+    for act in session.bench.browser.answer("Roll back") {
+        let crate::browser::Act::Settle(orphan, how) = act else {
+            panic!("{act:?} settles nothing");
+        };
+        session.store.settle_unfinished(orphan, how);
+    }
+    session.decided();
+    assert_eq!(root.read("untitled.ne5p"), old, "the old bytes are back");
+}
+
+/// The same, where that save was the session's first change: drawbar still says Undo
+/// began again, and never that the save was finished.
+#[test]
+fn a_first_save_that_can_no_longer_be_finished_is_not_said_to_be_finished() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    let mut session = Session::listed(&root);
+    let id = session.named("Grand.ne5p");
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "Grand.ne5p"),
+    ));
+    let log = &mut session.bench.log;
+    session
+        .bench
+        .workspace
+        .replace_bytes(id, with_gain(&program, "96"), log);
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    let writers = root.at(".drawbar/library/writers.2");
+    let writer = fs::read_dir(&writers).unwrap().next().unwrap().unwrap();
+    for staged in fs::read_dir(writer.path().join("tmp")).unwrap() {
+        fs::remove_file(staged.unwrap().path()).unwrap();
+    }
+
+    session.make_tag("Sunday");
+    session.settle();
+    assert_eq!(session.said("Undo no longer reaches"), 1);
+    assert_eq!(
+        session.said("Finished saving"),
+        0,
+        "the save was not finished"
+    );
+    session.a_minute_later();
+    let (title, _) = session.bench.browser.asking().expect("a question is asked");
+    assert_eq!(title, "drawbar could not finish “Save”");
+}
+
+/// A folder's rename another drawbar left unfinished, finished or rolled back, moves its
+/// files as drawbar's own change: the log says nothing of files changed outside drawbar.
+#[test]
+fn settling_a_rename_another_drawbar_left_is_no_change_outside() {
+    for (how, at) in [("Finish", "Bulk2"), ("Roll back", "Bulk")] {
+        let root = Temp::new();
+        leave_unfinished_folder_rename(&root);
+        let mut session = Session::listed(&root);
+        session.a_minute_later();
+        let (title, _) = session.bench.browser.asking().expect("a question is asked");
+        assert_eq!(title, "Another drawbar left “Rename” unfinished");
+        for act in session.bench.browser.answer(how) {
+            let crate::browser::Act::Settle(orphan, how) = act else {
+                panic!("{act:?} settles nothing");
+            };
+            session.store.settle_unfinished(orphan, how);
+        }
+        session.decided();
+        session.settle();
+        assert_eq!(root.names(at), ["a.ne5p", "b.ne5p"], "{how}");
+        let said: Vec<&str> = session
+            .bench
+            .log
+            .iter()
+            .map(|entry| entry.text.as_str())
+            .collect();
+        assert_eq!(session.said("utside drawbar"), 0, "{how}: {said:?}");
+    }
+}
+
+/// A change whose paths keep moving between reads is being carried out still, however
+/// long it takes, and is asked about only once two reads a while apart find it still.
+#[test]
+fn a_change_whose_paths_move_is_asked_about_only_once_they_stand() {
+    let root = Temp::new();
+    leave_unfinished_save(&root);
+    let mut session = Session::listed(&root);
+    session.poll();
+    fs::write(root.at("Grand.ne5p"), b"more of the copy").unwrap();
+    session.a_minute_later();
+    assert!(session.bench.browser.asking().is_none(), "it moved");
+    session.at(120.0);
+    let (title, _) = session.bench.browser.asking().expect("it stood");
+    assert_eq!(title, "Another drawbar left “Save” unfinished");
+}
+
+/// A change another install's drawbar finishes before it has stood a while is never
+/// asked about: it was in progress.
+#[test]
+fn a_change_another_install_finishes_soon_is_not_asked_about() {
+    let root = Temp::new();
+    leave_unfinished_save(&root);
+    let mut session = Session::listed(&root);
+    session.poll();
+    let writers = root.at(".drawbar/library/writers.2");
+    for writer in fs::read_dir(writers).unwrap() {
+        let pending = writer.unwrap().path().join("pending");
+        for record in fs::read_dir(pending).into_iter().flatten() {
+            fs::remove_file(record.unwrap().path()).unwrap();
+        }
+    }
+    session.a_minute_later();
+    assert!(session.bench.browser.asking().is_none());
+}
+
+fn path(text: &str) -> LibPath {
+    LibPath::parse(text).unwrap()
+}
+
+/// A pending record of another writer that does not read is left alone, and said so
+/// once.
+#[test]
+fn a_record_that_does_not_read_is_left_alone_and_said_so() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    first.create();
+    first.close();
+    let writers = root.at(".drawbar/library/writers.2");
+    let other = writers.join("0123456789abcdef0123456789abcdef");
+    fs::create_dir_all(other.join("pending")).unwrap();
+    fs::write(
+        other.join("pending/fedcba9876543210fedcba9876543210.json"),
+        b"{\"not\":\"a record\"}",
+    )
+    .unwrap();
+
+    let second = Session::listed(&root);
+    assert_eq!(
+        second.said("drawbar left alone 1 unfinished change of other drawbars"),
+        1,
+        "{:?}",
+        second
+            .bench
+            .log
+            .iter()
+            .map(|entry| entry.text.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+impl Session {
+    /// Open the library as another install would, with its own state at `local`.
+    fn elsewhere(root: &Temp, local: &Temp) -> Session {
+        let bench = Bench::new();
+        let backend = Backend::start(&bench.ctx, root.0.clone(), local.0.clone());
+        let mut session = Session {
+            store: Store::start(backend),
+            bench,
+        };
+        session.opened();
+        session
+    }
+}
+
+/// An unsaved edit kept of a file by its path comes back though another drawbar made
+/// the file an entity since, and is kept by the entity from then on.
+#[test]
+fn an_edit_kept_by_path_comes_back_once_its_file_is_an_entity() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut first = Session::open(&root);
+    let grand = first.named("Grand.ne5p");
+    let edited = first.edit(grand, "12");
+    first.close();
+    let other = Temp::new();
+    let mut theirs = Session::elsewhere(&root, &other);
+    let grand = theirs.named("Grand.ne5p");
+    theirs.tag(&[grand], "Sunday");
+    theirs.close();
+
+    let mut again = Session::open(&root);
+    let grand = again.named("Grand.ne5p");
+    assert!(again.bytes(grand) == edited, "the edit is back");
+    assert_eq!(tagged(&again), [wears("Grand.ne5p", &["Sunday"])]);
+    again.autosave();
+    again.close();
+    let last = Session::open(&root);
+    let grand = last.named("Grand.ne5p");
+    assert!(last.bytes(grand) == edited);
+    assert_eq!(last.said("has the unsaved edit it had"), 1, "kept once");
+}
+
+/// A tagged file deleted outside drawbar and saved back from drawbar is its entity's
+/// file again: its tags stay with it.
+#[test]
+fn a_tagged_file_saved_back_keeps_its_tags() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let grand = session.named("Grand.ne5p");
+    session.tag(&[grand], "Sunday");
+    fs::remove_file(root.at("Grand.ne5p")).unwrap();
+    session.refocus();
+    assert!(session.bench.browser.folders.missing.contains(&grand));
+    session.edit(grand, "12");
+    session.bench.workspace.mark_saved(grand);
+    session.sync();
+    let listed: Vec<u64> = session
+        .bench
+        .workspace
+        .listed()
+        .map(|entity| entity.id)
+        .collect();
+    assert_eq!(listed, [grand], "one asset, and its file is back");
+    assert_eq!(tagged(&session), [wears("Grand.ne5p", &["Sunday"])]);
+    assert!(!session.bench.browser.folders.missing.contains(&grand));
+    session.close();
+
+    let again = Session::listed(&root);
+    assert_eq!(tagged(&again), [wears("Grand.ne5p", &["Sunday"])]);
+    assert!(
+        again.bench.browser.folders.lost().is_empty(),
+        "nothing is lost"
+    );
+}
+
+/// A save asked for behind a rename waits for the rename's answer: where the rename is
+/// refused, as onto a file holding the same bytes, the save writes the file where it
+/// still is, and the other file is left as it was.
+#[test]
+fn a_save_behind_a_refused_rename_writes_the_file_where_it_is() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("a.ne5p"), &program).unwrap();
+    fs::write(root.at("b.ne5p"), &program).unwrap();
+    let mut session = Session::open(&root);
+    let a = session.named("a.ne5p");
+    session.place_at(a, "b.ne5p");
+    let edited = session.edit(a, "12");
+    session.bench.workspace.mark_saved(a);
+    while !session.settled() {
+        assert!(session.next(), "the library answered");
+    }
+
+    assert!(
+        root.read("b.ne5p") == program,
+        "the other file is left as it was"
+    );
+    assert!(
+        root.read("a.ne5p") == edited,
+        "the save landed where the file is"
+    );
+}
+
+/// The library in `root` with an asset tagged “New”, open in two sessions that write as
+/// one writer, as a copied install does: the first tags it “Here”, the second “There”,
+/// and each has read what the other did. Each branch of the writer's history shows as
+/// changes kept apart. Returns the sessions, the asset's id in each, and the copy.
+fn forked(root: &Temp) -> (Session, Session, u64, u64, Temp) {
+    let mut first = Session::open(root);
+    let id = first.create();
+    first.sync();
+    first.tag(&[id], "New");
+    first.close();
+    let copy = Temp::new();
+    copy_tree(&root.local(), &copy.0);
+    let mut here = Session::open(root);
+    let mut there = Session::open_at(root, &copy.0);
+    let (at_here, at_there) = (here.only(), there.only());
+    here.tag(&[at_here], "Here");
+    there.tag(&[at_there], "There");
+    here.settle();
+    there.settle();
+    (here, there, at_here, at_there, copy)
+}
+
+impl Session {
+    /// The run kept apart that holds a change described as `said` says.
+    fn kept(&self, said: &str) -> crate::folders::Kept {
+        let kept = self.bench.browser.folders.kept.iter();
+        let mut found = kept.filter(|kept| kept.rows.iter().any(|row| row.said.contains(said)));
+        found
+            .next()
+            .cloned()
+            .unwrap_or_else(|| panic!("{said:?} in {:?}", self.bench.browser.folders.kept))
+    }
+
+    fn take_kept(&mut self, run: toshokan::log::Run, changes: Vec<KeptKey>) {
+        self.store.take_kept(run, changes);
+        self.decided();
+    }
+
+    /// Dismiss `run` as Kept apart does: asked first, then dismissed.
+    fn dismiss_kept(&mut self, run: toshokan::log::Run) {
+        self.bench.browser.ask_dismiss_kept(run);
+        let acts = self.bench.browser.answer("Discard");
+        assert!(
+            matches!(&acts[..], [crate::browser::Act::DismissKept(asked)] if **asked == run),
+            "{acts:?}"
+        );
+        self.store.dismiss_kept(run);
+        self.decided();
+    }
+}
+
+/// Two sessions writing as one writer fork its history: each branch shows as changes
+/// kept apart, merged into neither, and the log says so once.
+#[test]
+fn a_forked_writers_branches_show_as_changes_kept_apart() {
+    let root = Temp::new();
+    let (here, there, at_here, at_there, _copy) = forked(&root);
+    for (session, id) in [(&here, at_here), (&there, at_there)] {
+        let kept = &session.bench.browser.folders.kept;
+        assert_eq!(kept.len(), 2, "one per branch: {kept:?}");
+        assert!(kept.iter().all(|kept| kept.kind == KeptKind::Run));
+        assert_eq!(session.worn(id), ["New"], "neither branch is merged");
+        assert_eq!(session.said("kept apart from the library"), 1);
+    }
+    let kept = here.kept("gains the tag “Here”");
+    let mut said: Vec<&str> = kept.rows.iter().map(|row| row.said.as_str()).collect();
+    said.sort();
+    assert_eq!(said, ["“untitled” gains the tag “Here”"]);
+    let row = kept.rows.iter().find(|row| row.id.is_some()).unwrap();
+    assert_eq!(row.id, Some(at_here));
+    assert!(row.takes);
+    assert!(kept.title.starts_with("Another drawbar"), "{}", kept.title);
+}
+
+/// Taking one change kept apart makes it, as one change undo takes back.
+#[test]
+fn a_change_kept_apart_is_taken_and_undone() {
+    let root = Temp::new();
+    let (mut here, _there, at_here, _, _copy) = forked(&root);
+    let kept = here.kept("gains the tag “Here”");
+    let row = kept
+        .rows
+        .iter()
+        .find(|row| row.id == Some(at_here))
+        .unwrap();
+    here.take_kept(kept.run, vec![row.key.clone()]);
+    assert_eq!(here.worn(at_here), ["Here", "New"]);
+    here.undo();
+    assert_eq!(here.worn(at_here), ["New"], "undone");
+}
+
+/// Taking a change to an asset a branch made makes the asset, at its file, with it.
+#[test]
+fn a_change_to_an_asset_a_branch_made_is_taken_with_the_asset() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    first.create();
+    first.sync();
+    first.close();
+    let copy = Temp::new();
+    copy_tree(&root.local(), &copy.0);
+    let mut here = Session::open(&root);
+    let mut there = Session::open_at(&root, &copy.0);
+    here.tag(&[here.only()], "Here");
+    there.create();
+    there.sync();
+    here.settle();
+    let kept = here.kept("its origin becomes");
+    let row = kept
+        .rows
+        .iter()
+        .find(|row| row.said.contains("its origin becomes"));
+    here.take_kept(kept.run, vec![row.unwrap().key.clone()]);
+    assert_eq!(here.said("did not change as asked"), 0);
+    let left = here.bench.browser.folders.kept.iter();
+    let left = left.filter(|left| left.run == kept.run);
+    assert!(
+        left.flat_map(|left| &left.rows).next().is_none(),
+        "the asset is made at its file: {:?}",
+        here.bench.browser.folders.kept
+    );
+}
+
+/// Two copies of one install's data, each tagging `Live/Grand.ne5p` before either
+/// reads the other, then the one at `root` tagging it “Later”: each branch's change is
+/// kept apart, and the library has since recorded the file as an asset of its own.
+/// Returns that session, and the asset.
+fn forked_over_one_file(root: &Temp) -> (Session, u64) {
+    mixed(root);
+    let mut first = Session::open(root);
+    let organ = first.named("Organ.ne5p");
+    first.tag(&[organ], "New");
+    first.close();
+    let copy = Temp::new();
+    copy_tree(&root.local(), &copy.0);
+    let mut here = Session::open(root);
+    let mut there = Session::open_at(root, &copy.0);
+    here.tag(&[here.named("Grand.ne5p")], "Here");
+    there.tag(&[there.named("Grand.ne5p")], "There");
+    here.settle();
+    let grand = here.named("Grand.ne5p");
+    here.tag(&[grand], "Later");
+    (here, grand)
+}
+
+/// A branch's change to a file the library has since recorded as an asset of its own is
+/// listed and taken as a change to that asset, and once taken nothing of it is left.
+#[test]
+fn a_branchs_change_to_a_file_the_library_recorded_since_is_taken_onto_its_asset() {
+    let root = Temp::new();
+    let (mut here, grand) = forked_over_one_file(&root);
+    let theirs = here.kept("gains the tag “There”");
+    assert_eq!(
+        theirs
+            .rows
+            .iter()
+            .map(|row| row.said.as_str())
+            .collect::<Vec<_>>(),
+        ["“Grand” gains the tag “There”"]
+    );
+    here.take_kept(theirs.run, Vec::new());
+    assert_eq!(here.said("did not change as asked"), 0);
+    assert_eq!(here.worn(grand), ["Later", "There"]);
+    let mut left = here.bench.browser.folders.kept.iter();
+    let left = left.find(|left| left.run == theirs.run);
+    let left = left.expect("the run stays until it is dismissed");
+    assert_eq!(left.rows, Vec::new(), "nothing left to review");
+}
+
+/// A change to an asset that only a dismissed branch made is not listed, since nothing
+/// could take it; the tag it made still is.
+#[test]
+fn a_change_to_an_asset_only_a_dismissed_branch_made_is_not_listed() {
+    let root = Temp::new();
+    let (mut here, _) = forked_over_one_file(&root);
+    let theirs = here.kept("gains the tag “There”").run;
+    let ours = here.kept("gains the tag “Here”").run;
+    here.dismiss_kept(ours);
+    let mut left = here.bench.browser.folders.kept.iter();
+    let left = left.find(|left| left.run == theirs);
+    let left = left.expect("the run stays until it is dismissed");
+    let said: Vec<&str> = left.rows.iter().map(|row| row.said.as_str()).collect();
+    assert_eq!(said, ["Made the tag “There”"]);
+}
+
+/// Taking all of a run's changes makes each, and dismissing a run leaves it shown to no
+/// reader again.
+#[test]
+fn changes_kept_apart_are_taken_whole_or_dismissed_for_every_reader() {
+    let root = Temp::new();
+    let (mut here, mut there, at_here, at_there, _copy) = forked(&root);
+    let theirs = here.kept("gains the tag “There”");
+    here.take_kept(theirs.run, Vec::new());
+    assert_eq!(here.worn(at_here), ["New", "There"]);
+    let ours = here.kept("gains the tag “Here”");
+    here.dismiss_kept(ours.run);
+    assert!(
+        !here
+            .bench
+            .browser
+            .folders
+            .kept
+            .iter()
+            .any(|kept| kept.run == ours.run),
+        "dismissed"
+    );
+    there.settle();
+    assert!(
+        !there
+            .bench
+            .browser
+            .folders
+            .kept
+            .iter()
+            .any(|kept| kept.run == ours.run),
+        "dismissed for the other reader too"
+    );
+    assert_eq!(there.worn(at_there), ["New", "There"]);
+}
+
+/// What another drawbar logged after a part of its history the folder does not hold yet
+/// waits apart, to take or leave, and is merged once that part arrives.
+#[test]
+fn changes_after_history_a_sync_has_not_brought_wait_apart_until_it_does() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let other = Temp::new();
+    let mut theirs = Session::elsewhere(&root, &other);
+    let grand = theirs.named("Grand.ne5p");
+    theirs.tag(&[grand], "Sunday");
+    theirs.close();
+    let mut theirs = Session::elsewhere(&root, &other);
+    let grand = theirs.named("Grand.ne5p");
+    theirs.tag(&[grand], "Monday");
+    theirs.settle();
+    let writers = fs::read_dir(root.at(".drawbar/library/writers.2")).unwrap();
+    let writer = writers.map(|entry| entry.unwrap().path()).next().unwrap();
+    let snapshot = fs::read_dir(&writer)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|file| file.extension().is_some_and(|ext| ext == "json"))
+        .expect("the snapshot the first session left");
+    let held = Temp::new();
+    let away = held.0.join("snapshot.json");
+    fs::rename(&snapshot, &away).unwrap();
+
+    let mut ours = Session::listed(&root);
+    let kept = ours.kept("gains the tag “Monday”");
+    assert_eq!(kept.kind, KeptKind::Gap);
+    assert_eq!(crate::browser::kept::offers(kept.kind), (true, false));
+    assert_eq!(tagged(&ours), Vec::<(String, Vec<String>)>::new());
+
+    fs::rename(&away, &snapshot).unwrap();
+    ours.settle();
+    assert_eq!(ours.bench.browser.folders.kept, Vec::new(), "merged");
+    assert_eq!(tagged(&ours), [wears("Grand.ne5p", &["Monday", "Sunday"])]);
+}
+
+/// A run kept apart says how many changes it holds, and once its every change is taken
+/// it offers only to be dismissed.
+#[test]
+fn a_run_kept_apart_counts_its_changes_and_offers_dismissal_once_nothing_is_left() {
+    let root = Temp::new();
+    let (mut here, _there, _, _, _copy) = forked(&root);
+    let theirs = here.kept("gains the tag “There”");
+    assert!(
+        theirs
+            .title
+            .starts_with("Another drawbar made 1 change on a branch of its own"),
+        "{}",
+        theirs.title
+    );
+    here.take_kept(theirs.run, Vec::new());
+    let left = here
+        .bench
+        .browser
+        .folders
+        .kept
+        .iter()
+        .find(|kept| kept.run == theirs.run)
+        .cloned()
+        .expect("the run stays until it is dismissed");
+    assert_eq!(left.rows, Vec::new(), "nothing left to review");
+    assert_eq!(crate::browser::kept::offers(left.kind), (true, true));
+    here.dismiss_kept(left.run);
+    assert!(!here
+        .bench
+        .browser
+        .folders
+        .kept
+        .iter()
+        .any(|kept| kept.run == left.run));
+}
+
+/// A file a branch kept apart renamed is listed only while the asset's file is elsewhere,
+/// is taken as one change, and a take of it while the file is gone is refused, saying so
+/// in the user's words.
+#[test]
+fn a_file_a_branch_kept_apart_renamed_is_taken_where_the_folder_holds_it() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    let id = first.create();
+    first.sync();
+    first.close();
+    let copy = Temp::new();
+    copy_tree(&root.local(), &copy.0);
+    let mut here = Session::open(&root);
+    let mut there = Session::open_at(&root, &copy.0);
+    let (at_here, at_there) = (here.only(), there.only());
+    assert_eq!(at_here, id);
+    here.tag(&[at_here], "Here");
+    there.bench.act(vec![crate::browser::Act::RenameLocal {
+        id: at_there,
+        name: "Upright".to_string(),
+    }]);
+    there.sync();
+    there.settle();
+    here.settle();
+    let moves = |s: &Session| {
+        let kept = s.bench.browser.folders.kept.iter();
+        let mut rows = kept.flat_map(|kept| kept.rows.iter().map(move |row| (kept.run, row)));
+        rows.find(|(_, row)| row.said.contains(" is at ") || row.said.contains(" moves to "))
+            .map(|(run, row)| (run, row.key.clone(), row.said.clone()))
+    };
+    assert_eq!(
+        moves(&here),
+        None,
+        "the file is already where the branch put it"
+    );
+
+    let gone = Temp::new();
+    fs::rename(root.at("Upright.ne5p"), gone.0.join("Upright.ne5p")).unwrap();
+    here.settle();
+    let (run, key, said) = moves(&here).expect("the file the branch names");
+    assert_eq!(said, "“Upright” is at “Upright”");
+    here.take_kept(run, vec![key.clone()]);
+    assert_eq!(
+        here.said(
+            "did not change as asked: the file at Upright.ne5p cannot be taken: no file is there"
+        ),
+        1
+    );
+
+    fs::rename(gone.0.join("Upright.ne5p"), root.at("Upright.ne5p")).unwrap();
+    here.settle();
+    here.take_kept(run, vec![key]);
+    assert_eq!(moves(&here), None, "taken");
+    let ours = here.kept("gains the tag “Here”");
+    here.take_kept(ours.run, Vec::new());
+    assert_eq!(
+        here.worn(here.named("Upright.ne5p")),
+        ["Here"],
+        "the file is the entity's again"
+    );
+}
+
+/// Each session whose history another copy of the install's data also continued says,
+/// once, that it goes on with a history of its own.
+#[test]
+fn a_session_whose_history_forked_says_it_goes_on_with_its_own() {
+    let root = Temp::new();
+    let (mut here, mut there, _, _, _copy) = forked(&root);
+    for session in [&mut here, &mut there] {
+        session.settle();
+        assert_eq!(session.said("their histories split"), 1);
+    }
+}
+
+/// An unsaved edit an earlier session kept, of a file that goes before drawbar reads it,
+/// stays kept for when the file is back.
+#[test]
+fn an_edit_waiting_for_its_file_to_be_read_is_kept_when_the_file_goes() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut first = Session::open(&root);
+    let grand = first.named("Grand.ne5p");
+    let edited = first.edit(grand, "12");
+    first.autosave();
+    first.close();
+
+    let mut second = Session::listed(&root);
+    let away = Temp::new();
+    fs::rename(root.at("Grand.ne5p"), away.at("Grand.ne5p")).unwrap();
+    second.settle();
+    second.autosave();
+    assert_eq!(
+        second.said("The unsaved edit of “Grand.ne5p” is still kept"),
+        1
+    );
+    second.close();
+
+    fs::rename(away.at("Grand.ne5p"), root.at("Grand.ne5p")).unwrap();
+    let third = Session::open(&root);
+    let grand = third.named("Grand.ne5p");
+    assert!(third.bytes(grand) == edited, "the edit is back");
+}
+
+/// An unsaved edit sent to be kept behind a command the library's thread faults on is
+/// named as lost when the library is let go, since it was never kept.
+#[test]
+fn an_edit_sent_to_be_kept_behind_a_fault_is_named_as_lost() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.edit(id, "96");
+    session.store.fault(Fault::Trap);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Full);
+    for _ in 0..1000 {
+        if session.store.stopped().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(session.store.stopped().is_some(), "the thread stopped");
+    let Bench {
+        workspace,
+        browser,
+        queue,
+        log,
+        ..
+    } = &mut session.bench;
+    session.store.close(workspace, browser, queue, log);
+    let said = session.said("could not be written, since the library stopped answering");
+    assert_eq!(said, 1, "the edit is named");
+}
+
+/// An unsaved edit's draft stays while a save of it is in flight, so a save that fails
+/// leaves the edit kept for the next session whatever happens next.
+#[cfg(unix)]
+#[test]
+fn a_draft_stays_while_its_save_is_in_flight() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let edited = session.edit(id, "96");
+    session.autosave();
+    let mode = |mode| fs::set_permissions(&root.0, fs::Permissions::from_mode(mode)).unwrap();
+    mode(0o555);
+    session.bench.workspace.mark_saved(id);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Files);
+    session.store.sync(workspace, browser, Pass::Full);
+    session.settle();
+    mode(0o755);
+    assert!(session.bench.workspace.get(id).unwrap().is_unsaved());
+    let crashed = Temp::new();
+    copy_tree(&root.0, &crashed.0);
+    copy_tree(&root.local(), &crashed.local());
+
+    let again = Session::open(&crashed);
+    let id = again.only();
+    assert!(again.bytes(id) == edited, "the edit is back");
+}
+
+/// What an older drawbar kept in a folder, tags, unsaved edits and rescued slot contents,
+/// is found at every open, named with where it is, and left as it is. Whether the user
+/// has been told is the app's to remember.
+#[test]
+fn an_older_drawbars_files_are_found_at_each_open_and_left_alone() {
+    let root = Temp::new();
+    fs::create_dir_all(root.at(".drawbar/working")).unwrap();
+    fs::create_dir_all(root.at(".drawbar/tmp")).unwrap();
+    fs::write(root.at(".drawbar/library.ron"), b"(tags: [])").unwrap();
+    fs::write(root.at(".drawbar/working/1-1"), b"edit").unwrap();
+    fs::write(root.at(".drawbar/tmp/rescued-1.ne5p"), b"slot").unwrap();
+    let mut first = Session::open(&root);
+    let older = first.store.take_older();
+    assert_eq!(older, [Older::Tags, Older::Edits, Older::Rescues]);
+    assert_eq!(
+        crate::store::older_notice(&older),
+        "An older drawbar kept tags in .drawbar/library.ron, unsaved edits in \
+         .drawbar/working and rescued slot contents in .drawbar/tmp in this folder. This \
+         drawbar does not read them, and leaves them where they are."
+    );
+    assert_eq!(first.store.take_older(), [], "taken once");
+    first.close();
+    let mut again = Session::open(&root);
+    assert_eq!(again.store.take_older(), older, "found again");
+    assert_eq!(root.read(".drawbar/library.ron"), b"(tags: [])");
+    assert_eq!(root.read(".drawbar/working/1-1"), b"edit");
+    assert_eq!(root.read(".drawbar/tmp/rescued-1.ne5p"), b"slot");
+}
+
+/// The tags and origins an older drawbar's index kept are taken into the library once,
+/// for the files still there: a tag taken off afterwards stays off, and another
+/// install of drawbar does not take them in again.
+#[test]
+fn an_older_drawbars_tags_and_origins_are_taken_in_once() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Grand.ne5p"), &program).unwrap();
+    fs::write(root.at("Pad.ne5p"), with_gain(&program, "12")).unwrap();
+    fs::create_dir_all(root.at(".drawbar")).unwrap();
+    // Version 1, in the shape the drawbar before the store wrote it.
+    let index = r#"(
+    version: 1,
+    next_id: 4,
+    tags: {
+        1: "Live",
+        2: "Unworn",
+    },
+    assets: {
+        1: (
+            path: Some("Grand.ne5p"),
+            tags: [
+                1,
+            ],
+            origin: Device(
+                class: 4,
+                bank: 1,
+                slot: 7,
+            ),
+        ),
+        2: (
+            path: Some("Pad.ne5p"),
+            tags: [
+                1,
+            ],
+        ),
+        3: (
+            path: Some("Gone.ne5p"),
+            tags: [
+                1,
+            ],
+        ),
+    },
+)"#;
+    fs::write(root.at(".drawbar/library.ron"), index).unwrap();
+
+    let mut session = Session::listed(&root);
+    session.settle();
+    let (grand, pad) = (session.named("Grand.ne5p"), session.named("Pad.ne5p"));
+    assert_eq!(session.tag_names(), ["Live", "Unworn"]);
+    assert_eq!(session.worn(grand), ["Live"]);
+    assert_eq!(session.worn(pad), ["Live"]);
+    let at = Location { bank: 1, slot: 7 };
+    let origin = &session.bench.workspace.get(grand).unwrap().origin;
+    assert!(
+        matches!(origin, Origin::Device { class: ObjectClass::Program, at: held } if *held == at),
+        "the slot it came off"
+    );
+    assert_eq!(
+        session.said("took in the tags and origins an older drawbar kept for 2 files"),
+        1
+    );
+    assert_eq!(
+        session.store.take_older(),
+        [],
+        "the index is not told of as unread"
+    );
+    let tag = session.bench.browser.tags.all()[0].id;
+    session.bench.act(vec![crate::browser::Act::Untag {
+        ids: vec![pad],
+        tag,
+    }]);
+    session.decided();
+    session.close();
+
+    let again = Session::listed(&root);
+    assert!(
+        again.worn(again.named("Pad.ne5p")).is_empty(),
+        "taken in once"
+    );
+    again.close();
+    let elsewhere = Temp::new();
+    let other = Session::elsewhere(&root, &elsewhere);
+    assert!(
+        other.worn(other.named("Pad.ne5p")).is_empty(),
+        "by one install"
+    );
+    assert_eq!(other.said("took in the tags"), 0);
+}
+
+/// A dismissal is final: undo after it takes back the change before it, and the run
+/// stays dismissed.
+#[test]
+fn undo_after_a_dismissal_takes_back_the_change_before_it() {
+    let root = Temp::new();
+    let (mut here, _there, at_here, _, _copy) = forked(&root);
+    let theirs = here.kept("gains the tag “There”");
+    here.take_kept(theirs.run, Vec::new());
+    assert_eq!(here.worn(at_here), ["New", "There"]);
+    let ours = here.kept("gains the tag “Here”");
+    let taken = here.store.undo_label();
+    here.dismiss_kept(ours.run);
+    assert_eq!(
+        here.store.undo_label(),
+        taken,
+        "the Edit menu offers the take"
+    );
+    here.undo();
+    assert_eq!(here.worn(at_here), ["New"], "the take is undone");
+    let kept = &here.bench.browser.folders.kept;
+    assert!(
+        !kept.iter().any(|kept| kept.run == ours.run),
+        "still dismissed"
+    );
+}
+
+/// A change whose answers are lost leaves the Edit menu offering nothing it holds, so
+/// it never names a step the library may not have taken; the next change is offered,
+/// and undo takes it back.
+#[test]
+fn a_change_whose_answers_are_lost_leaves_undo_to_the_next_change() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.tag(&[id], "A");
+    assert!(session.store.undo_label().is_some());
+    session.store.fault(Fault::Unread);
+    session.tag(&[id], "B");
+    session.settle();
+    assert_eq!(
+        session.store.undo_label(),
+        None,
+        "no step it may not have taken"
+    );
+    session.tag(&[id], "C");
+    assert!(session
+        .store
+        .undo_label()
+        .is_some_and(|label| label.contains("“C”")));
+    session.undo();
+    assert_eq!(session.worn(id), ["A", "B"], "the last change is undone");
+}
+
+/// A move whose answers are lost is not said to have failed: a look at the folder finds
+/// the file where the move put it.
+#[test]
+fn a_move_whose_answers_are_lost_is_found_where_it_went() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let grand = session.named("Grand.ne5p");
+    session.store.fault(Fault::Unread);
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id: grand,
+        name: "Upright".to_string(),
+    }]);
+    session.sync();
+    session.settle();
+    assert_eq!(session.said("did not change as asked"), 0);
+    assert!(!root.at("Grand.ne5p").exists() && root.at("Upright.ne5p").exists());
+    session.named("Upright.ne5p");
+}
+
+/// A save that landed and whose answers are lost ends saved once the look finds the
+/// file holds it, with no question of which to keep.
+#[test]
+fn a_landed_save_whose_answers_are_lost_ends_saved_without_asking() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let edited = session.edit(id, "96");
+    session.store.fault(Fault::Unread);
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    session.settle();
+    assert!(root.read("untitled.ne5p") == edited, "the save landed");
+    assert!(!session.bench.workspace.get(id).unwrap().is_unsaved());
+    assert_eq!(
+        session.bench.browser.asking(),
+        None,
+        "nothing to choose between"
+    );
+    assert_eq!(session.said("was not saved"), 0);
+}
+
+/// An unsaved edit kept by its file's path, once the file becomes an entity, is kept
+/// under the entity before the draft under the path goes: a library that stops right
+/// after keeps it.
+#[test]
+fn an_edit_kept_under_a_new_key_is_kept_before_the_old_draft_goes() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let grand = session.named("Grand.ne5p");
+    let edited = session.edit(grand, "96");
+    session.autosave();
+    session.tag(&[grand], "Live");
+    session.store.fault(Fault::Next(Box::new(Fault::Trap)));
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Full);
+    for _ in 0..200 {
+        if session.store.stopped().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let crashed = Temp::new();
+    copy_tree(&root.0, &crashed.0);
+    copy_tree(&root.local(), &crashed.local());
+
+    let again = Session::open(&crashed);
+    let grand = again.named("Grand.ne5p");
+    assert!(again.bytes(grand) == edited, "the edit is back");
 }

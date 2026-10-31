@@ -56,10 +56,28 @@ impl Temp {
     }
 }
 
+/// The backend over the library in `root`, with this install's own state for it beside
+/// the library, as drawbar's own data is.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn backend(ctx: &egui::Context, root: &Temp) -> crate::store::Backend {
+    crate::store::Backend::start(ctx, root.0.clone(), root.local())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Temp {
+    /// This install's own state for the library in this folder: beside it, never in it.
+    pub fn local(&self) -> PathBuf {
+        let mut name = self.0.clone().into_os_string();
+        name.push(".local");
+        PathBuf::from(name)
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for Temp {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+        let _ = fs::remove_dir_all(self.local());
     }
 }
 
@@ -410,7 +428,7 @@ pub(crate) fn largest_allocation<T>(f: impl FnOnce() -> T) -> (T, usize) {
 /// device's worker thread as well as this one.
 ///
 /// ⚠️ Every thread of the test process counts, so tests running alongside count too.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(unix)]
 pub(crate) fn largest_allocation_anywhere<T>(f: impl FnOnce() -> T) -> (T, usize) {
     LARGEST_ANYWHERE.store(0, Ordering::SeqCst);
     EVERY_THREAD.store(true, Ordering::SeqCst);
@@ -429,9 +447,22 @@ pub(crate) fn on_disk(dir: &Temp, name: &str, bytes: &[u8]) -> Arc<crate::ondisk
     Arc::new(indexed.expect("a piano or sample instrument is indexed"))
 }
 
-/// An asset resting in `file`, restored as a library restores one, and its id.
+/// An asset resting in `file`, restored as a library restores one, and its id. Its check
+/// is asked for, as opening or sending it asks.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn rest(workspace: &mut Workspace, name: &str, file: Arc<crate::ondisk::OnDisk>) -> u64 {
+    let id = rest_unchecked(workspace, name, file);
+    workspace.check_soon(id);
+    id
+}
+
+/// [`rest`], with nothing asking for its check.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn rest_unchecked(
+    workspace: &mut Workspace,
+    name: &str,
+    file: Arc<crate::ondisk::OnDisk>,
+) -> u64 {
     let id = workspace.next_id();
     workspace.restore(
         vec![crate::workspace::Saved {

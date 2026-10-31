@@ -10,7 +10,7 @@ use crate::device::{
     Purpose,
 };
 use crate::filter::Narrow;
-use crate::folders::{Clash, Folders, Occupant};
+use crate::folders::{Clash, Occupant};
 use crate::log::Log;
 use crate::newproject::Making;
 use crate::queue::{enqueue, retarget, Occupancy, Queue, Queued};
@@ -87,7 +87,12 @@ pub enum Act {
     /// Keep an unsaved edit as a new asset beside its file, and take the file as it is on
     /// disk.
     KeepBoth(u64),
-    /// Let go of an index row whose file is gone, with the tags it kept.
+    /// Put bytes over an asset as an unsaved edit: an edit an earlier session kept.
+    Restore {
+        id: u64,
+        bytes: Vec<u8>,
+    },
+    /// Let go of an asset whose file is gone, with the tags the library kept for it.
     Forget(u64),
     NewFolder,
     NewFolderIn(u64),
@@ -235,22 +240,23 @@ pub enum Act {
     /// [`Act::OpenLibrary`], confirmed though the library open now loses what it cannot
     /// keep.
     OpenLibraryDiscarding(crate::store::Root),
+    /// Let go of the library open now, which does not answer, and open it again.
+    ReopenLibrary,
     /// Do this with a slot's former occupant an interrupted write left. The app runs
     /// it, not [`apply`], since it reaches the library's files.
     Rescue(crate::store::Rescue, Rescuing),
-    /// Delete the `copies` working copies a library with no index keeps, and open it
-    /// again without them: asked again first unless `confirmed`. The app runs the
-    /// confirmed one, not [`apply`], since it reaches the library's files.
-    DropUnindexed {
-        copies: usize,
-        confirmed: bool,
+    /// Settle a change another drawbar left unfinished.
+    Settle(toshokan::report::Orphan, toshokan::log::Settlement),
+    /// Show the changes the library keeps apart.
+    ShowKept,
+    /// Take each of `changes` the library keeps apart in `run`, or every one it can where
+    /// none is named, as one change.
+    TakeKept {
+        run: Box<toshokan::log::Run>,
+        changes: Vec<crate::store::KeptKey>,
     },
-    /// Set aside the index of a library that does not read it, and open it again without
-    /// it: asked again first unless `confirmed`. The app runs the confirmed one, not
-    /// [`apply`], since it reaches the library's files.
-    SetAside {
-        confirmed: bool,
-    },
+    /// Never show or merge the changes the library keeps apart in `run` again.
+    DismissKept(Box<toshokan::log::Run>),
     /// Nothing happened, and this is why.
     Refused(String),
 }
@@ -258,8 +264,6 @@ pub enum Act {
 /// What to do with a slot's former occupant an interrupted write left on this computer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Rescuing {
-    /// Move it into the library's top level as an asset.
-    Keep,
     /// Show its folder in the system's file manager, and ask again.
     Show,
     /// Ask before it is deleted.
@@ -290,9 +294,10 @@ impl Act {
     pub fn reads(&self) -> Vec<u64> {
         match self {
             Act::Open(item) => item.local().into_iter().collect(),
-            Act::Overwrite { id, .. } | Act::MoveAs { id, .. } | Act::File { id, .. } => {
-                vec![*id]
-            }
+            Act::Overwrite { id, .. }
+            | Act::MoveAs { id, .. }
+            | Act::File { id, .. }
+            | Act::Restore { id, .. } => vec![*id],
             Act::Keep(id)
             | Act::KeepBoth(id)
             | Act::Send { id, .. }
@@ -358,9 +363,12 @@ impl Act {
             | Act::PickLibrary
             | Act::OpenLibrary(_)
             | Act::OpenLibraryDiscarding(_)
+            | Act::ReopenLibrary
             | Act::Rescue(..)
-            | Act::DropUnindexed { .. }
-            | Act::SetAside { .. }
+            | Act::Settle(..)
+            | Act::ShowKept
+            | Act::TakeKept { .. }
+            | Act::DismissKept(_)
             | Act::Refused(_) => Vec::new(),
         }
     }
@@ -557,20 +565,15 @@ pub fn bulk(action: Bulk, checked: &[Item], state: &DeviceState) -> Vec<Act> {
 /// Whether an act may run now.
 enum Ready {
     Now,
-    /// An asset it reads is still being read, or a folder it removes still being listed.
+    /// An asset it reads is still being read.
     Later,
     /// An asset it reads could not be read, and this says so.
     Never(String),
 }
 
-/// Whether every asset `act` reads has been read, and everything in a folder it removes
-/// has been listed. One not read yet is asked for, and so is the listing of a folder, and
-/// the act waits for them.
-fn ready(act: &Act, workspace: &mut Workspace, folders: &mut Folders) -> Ready {
-    if let Some(dir) = removing(act, folders).filter(|dir| !folders.listed_whole(dir)) {
-        folders.walk(&dir);
-        return Ready::Later;
-    }
+/// Whether every asset `act` reads has been read. One not read yet is asked for, and the
+/// act waits for it.
+fn ready(act: &Act, workspace: &mut Workspace) -> Ready {
     let mut later = false;
     for id in act.reads() {
         let Some(entity) = workspace.get(id).filter(|entity| entity.unread()) else {
@@ -585,14 +588,6 @@ fn ready(act: &Act, workspace: &mut Workspace, folders: &mut Folders) -> Ready {
     match later {
         true => Ready::Later,
         false => Ready::Now,
-    }
-}
-
-/// The folder an act removes, if it removes one.
-fn removing(act: &Act, folders: &Folders) -> Option<LibPath> {
-    match act {
-        Act::RemoveFolder(id) => folders.path_of(*id).cloned(),
-        _ => None,
     }
 }
 
@@ -611,7 +606,7 @@ pub fn apply(
     let mut held = std::mem::take(&mut browser.held);
     held.extend(acts);
     for act in held {
-        match ready(&act, workspace, &mut browser.folders) {
+        match ready(&act, workspace) {
             Ready::Now => {}
             Ready::Later => {
                 browser.held.push(act);
@@ -647,6 +642,7 @@ pub fn apply(
             Act::ReadAgain(class) => device.read_class(class),
             Act::Keep(id) => workspace.keep(id, log),
             Act::Import { name, bytes } => import(browser, workspace, log, name, bytes),
+            Act::Restore { id, bytes } => workspace.replace_bytes(id, bytes, log),
             Act::Take { from, dir, name } => take(browser, workspace, log, from, dir, name),
             Act::Unpack(read) => unpack(browser, workspace, log, read),
             Act::TakeOver { id, from } => take_over(workspace, log, id, from),
@@ -664,10 +660,7 @@ pub fn apply(
                 None => log.say("That folder is gone, so nothing moved."),
             },
             Act::KeepBoth(id) => keep_both(browser, workspace, log, id),
-            Act::Forget(id) => {
-                browser.folders.forget(id);
-                browser.tags.forget(id);
-            }
+            Act::Forget(id) => browser.tags.forget(id),
             Act::NewFolder => new_folder(browser, workspace, None),
             Act::NewFolderIn(parent) => new_folder(browser, workspace, Some(parent)),
             Act::RemoveFolder(id) => remove_folder(browser, workspace, log, id),
@@ -683,16 +676,13 @@ pub fn apply(
                 put(browser, workspace, log, id, dir, name);
             }
             Act::Tag { ids, tag } => tag_all(browser, workspace, log, &ids, tag),
-            Act::Untag { ids, tag } => {
-                for id in ids {
-                    browser.tags.set(id, tag, false);
-                }
-            }
+            Act::Untag { ids, tag } => browser.tags.untag(&ids, tag),
             Act::NewTag(ids) => match browser.tags.make("New tag") {
                 // ⚠️ Edit the unique name chosen by `make`, not its generic seed: two
                 // tags with one name would show as one row twice.
                 Some(id) => {
                     tag_all(browser, workspace, log, &ids, id);
+                    browser.tags.name_new(id);
                     let name = browser.tags.name_of(id).unwrap_or_default().to_string();
                     browser.start_rename(Item::Tag(id), &name);
                     browser.reveal(Item::Tag(id), workspace);
@@ -814,20 +804,16 @@ pub fn apply(
                 .ctx()
                 .send_viewport_cmd(eframe::egui::ViewportCommand::Close),
             Act::Refused(why) => log.say(why),
-            Act::DropUnindexed {
-                copies,
-                confirmed: false,
-            } => browser.ask_drop_unindexed(copies),
-            Act::SetAside { confirmed: false } => browser.ask_set_aside(),
             // The app takes these before the browser's acts run.
             Act::PickLibrary
             | Act::OpenLibrary(_)
             | Act::OpenLibraryDiscarding(_)
+            | Act::ReopenLibrary
             | Act::Rescue(..)
-            | Act::DropUnindexed {
-                confirmed: true, ..
-            }
-            | Act::SetAside { confirmed: true } => {}
+            | Act::Settle(..)
+            | Act::TakeKept { .. }
+            | Act::DismissKept(_) => {}
+            Act::ShowKept => browser.show_kept = true,
         }
     }
 }
@@ -846,7 +832,6 @@ fn remove(
     queue.forget(id);
     // ⚠️ A removed row cannot close its rename state; a reused id would inherit it.
     browser.forget_rename(Item::Local(id));
-    browser.tags.forget(id);
     browser.folders.missing.remove(&id);
     if !browser.folders.read_only() {
         return workspace.remove(id, log);
@@ -1359,9 +1344,9 @@ fn remove_folder(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log
 
 /// Put a tag on every one of these assets.
 ///
-/// ⚠️ Membership is by workspace id, and a view's id does not survive the session: the
-/// store skips views and nothing lists them, so the tag would be lost with the tab. A
-/// view is kept first, as [`Act::Keep`] does, and the log says so.
+/// ⚠️ The library tags files, and a view has none: the tag would be lost with the tab. A
+/// view is kept first, as [`Act::Keep`] does, and the log says so; its tag is asked for
+/// once its file is written.
 fn tag_all(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, ids: &[u64], tag: u64) {
     let views: Vec<u64> = ids
         .iter()
@@ -1377,9 +1362,7 @@ fn tag_all(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, ids:
             n => format!("Kept copies of {n} views on this computer to preserve their tags."),
         });
     }
-    for id in ids {
-        browser.tags.set(*id, tag, true);
-    }
+    browser.tags.tag(ids, tag);
 }
 
 /// Drain the queue, one command per folder.
@@ -1391,6 +1374,14 @@ fn send_batch(queue: &mut Queue, workspace: &Workspace, device: &mut Device, log
     // ⚠️ The instrument attached now may not be the one each entry was queued against:
     // the queue survives a disconnection, so every entry is checked again.
     crate::queue::refit(workspace, &device.state, queue, log);
+    for held in will_write(queue) {
+        if workspace
+            .get(held.id)
+            .is_some_and(LocalEntity::awaits_check)
+        {
+            workspace.check_soon(held.id);
+        }
+    }
     // The whole batch is checked before the first delete-then-write.
     let batch = match grouped(queue, workspace) {
         Ok(batch) => batch,
@@ -1663,6 +1654,9 @@ fn save_doc(
             entity.name
         ));
     };
+    if entity.awaits_check() {
+        workspace.check_soon(id);
+    }
     // Refused before the write.
     let payload = match Payload::of(entity) {
         Ok(payload) => payload,
@@ -1711,8 +1705,11 @@ fn send(
     let Some(entity) = workspace.get(id) else {
         return;
     };
-    // Refused before anything is queued.
-    if let Err(e) = entity.sendable() {
+    // Refused before anything is queued. One whose check has not answered is queued,
+    // and its write waits for the check.
+    if entity.awaits_check() {
+        workspace.check_soon(id);
+    } else if let Err(e) = entity.sendable() {
         log.error(format!("{}: {e}", entity.name));
         log.trouble(format!(
             "“{}” is not a file the instrument takes.",
@@ -1817,6 +1814,44 @@ mod tests {
     /// A piano resting in its file is queued and batched without being read: the batch
     /// carries the file, and once it lands the asset stands on the slot with the
     /// checksum of the file, saved as the file, which nothing holds whole.
+    /// A resting piano nothing has checked is queued by a send, which asks for its check,
+    /// and nothing is written to the instrument until the check has passed.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_send_of_a_resting_piano_checks_it_before_anything_is_written() {
+        let mut bench = Bench::new();
+        let dir = crate::testing::Temp::new();
+        let file = crate::testing::on_disk(&dir, "Upright.npno", &crate::testing::piano(40));
+        let id = crate::testing::rest_unchecked(&mut bench.workspace, "Upright.npno", file.clone());
+        let verdict = |bench: &Bench| bench.workspace.get(id).unwrap().verify().badge();
+        assert_eq!(verdict(&bench), "not checked");
+
+        let class = ObjectClass::Piano;
+        let at = Location::from_user(1, 1);
+        bench.device.pretend_scanned(class, 1, &[""]);
+        bench.act(vec![Act::Send { id, class, at }]);
+        assert!(!bench.queue.is_empty(), "queued while its check runs");
+        bench.workspace.poll(&mut bench.log);
+        bench.act(vec![Act::SendAll]);
+        let batch = |bench: &Bench| {
+            bench
+                .device
+                .queued()
+                .iter()
+                .any(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }))
+        };
+        assert!(
+            !batch(&bench),
+            "nothing is written before the check answers"
+        );
+
+        bench.workspace.settle_files(&mut bench.log);
+        assert_eq!(verdict(&bench), "ok");
+        assert_eq!(file.take_checks(), 1, "the check read it through");
+        bench.act(vec![Act::SendAll]);
+        assert!(batch(&bench), "written once checked");
+    }
+
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn a_resting_piano_is_sent_from_its_file_and_stands_on_the_slot_it_landed_in() {
@@ -3054,6 +3089,25 @@ mod tests {
             !bench.browser.selection.holds(Item::Local(id)),
             "and the selection holds no removed row"
         );
+    }
+
+    /// A selected tag the library's view no longer names leaves the selection, so the
+    /// inspector does not go on describing a row nothing draws.
+    #[test]
+    fn a_selected_tag_the_library_drops_leaves_the_selection() {
+        let mut bench = Bench::new();
+        let named = std::collections::BTreeSet::from(["Gig".to_string()]);
+        bench.browser.tags.project(named, Default::default());
+        let tag = bench.browser.tags.all()[0].id;
+        bench.browser.selection.only(Item::Tag(tag));
+
+        bench
+            .browser
+            .tags
+            .project(Default::default(), Default::default());
+        bench.browser.forget_gone(&bench.workspace);
+
+        assert!(!bench.browser.selection.holds(Item::Tag(tag)));
     }
 
     /// Nothing may be written to a read-only library, so deleting or saving there only

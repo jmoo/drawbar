@@ -22,6 +22,14 @@ impl List {
             .map(|held| held.name.as_str())
     }
 
+    /// The id of the entry named `name`.
+    pub fn id_of(&self, name: &str) -> Option<u64> {
+        self.0
+            .iter()
+            .find(|held| held.name == name)
+            .map(|held| held.id)
+    }
+
     /// Whether the list holds this id. A membership naming an id it does not hold means
     /// nothing.
     pub fn holds(&self, id: u64) -> bool {
@@ -30,9 +38,8 @@ impl List {
 
     /// A new entry named `wanted`, or `wanted 2`, `wanted 3`, … if that name is taken.
     ///
-    /// ⚠️ `None` when the list holds [`u64::MAX`], which a stored grouping can name. Ids
-    /// only rise, so a removed id is never reused while a membership still refers to it,
-    /// and there is no id above the last.
+    /// ⚠️ `None` when the list holds [`u64::MAX`]. Ids only rise, so a removed id is never
+    /// reused while a membership still refers to it, and there is no id above the last.
     pub fn make(&mut self, wanted: &str) -> Option<u64> {
         let id = self
             .0
@@ -61,31 +68,11 @@ impl List {
     pub fn remove(&mut self, id: u64) {
         self.0.retain(|held| held.id != id);
     }
-
-    /// Restore one stored row.
-    ///
-    /// ⚠️ A second row for an id already in the list is refused. Memberships naming that
-    /// id mean the first row, and there is no way to choose between two names for one
-    /// thing.
-    pub fn restore(&mut self, id: u64, name: String) {
-        if !self.holds(id) {
-            self.0.push(Named { id, name });
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_list_holding_the_last_id_makes_nothing_more() {
-        let mut list = List::default();
-        list.restore(u64::MAX, "Sunday".into());
-        assert_eq!(list.make("Loud"), None);
-        assert_eq!(list.all().len(), 1, "nothing was added");
-        assert_eq!(list.name_of(u64::MAX), Some("Sunday"));
-    }
 
     #[test]
     fn a_new_one_gets_a_name_nothing_else_is_using() {
@@ -94,16 +81,5 @@ mod tests {
         assert_eq!(ids, [1, 2, 3]);
         let names: Vec<&str> = ids.iter().map(|id| list.name_of(*id).unwrap()).collect();
         assert_eq!(names, ["Sunday", "Sunday 2", "Sunday 3"]);
-    }
-
-    /// Two rows with one id give one thing two names. The first is kept, so loading
-    /// never silently renames it.
-    #[test]
-    fn a_second_row_for_an_id_already_read_is_refused() {
-        let mut list = List::default();
-        list.restore(1, "Sunday".into());
-        list.restore(1, "Monday".into());
-        assert_eq!(list.all().len(), 1);
-        assert_eq!(list.name_of(1), Some("Sunday"));
     }
 }

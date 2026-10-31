@@ -5,20 +5,27 @@ members = [
   "nord-cli",
   "nord-format",
   "nord-usb",
+  "toshokan",
 ]
 resolver = "2"
 
 [workspace.package]
 edition = "2021"
 license = "BSD-3-Clause"
-# `u64::is_multiple_of` and friends.
-rust-version = "1.88"
+# `File::try_lock`, which toshokan's writer lock takes.
+rust-version = "1.89"
 repository = "https://github.com/jmoo/drawbar"
 
 # Cargo profiles only take effect at the workspace root.
 [profile.release]
 lto = true
 strip = true
+
+# Release code for the long test suites, without the link-time optimization that
+# takes most of a cold build. Shipped builds use `release`.
+[profile.release-tests]
+inherits = "release"
+lto = false
 
 # The size-optimized profile for the wasm package.
 [profile.web]

@@ -98,6 +98,10 @@ pub struct Link {
 }
 
 impl Link {
+    pub fn scratch(&self) -> &Scratch {
+        &self.scratch
+    }
+
     pub fn new(ctx: egui::Context, events: Sender<DeviceEvent>, scratch: Scratch) -> Link {
         Link {
             emit: Emit::new(events, ctx),

@@ -25,6 +25,10 @@ use crate::zoom::Step;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     Open,
+    /// Take back this session's last change to the library.
+    Undo,
+    /// Make again the change undone last.
+    Redo,
     New(Fresh),
     FromWavs(Making),
     NewFolder,
@@ -35,6 +39,12 @@ pub enum Command {
     /// Switch to the recent library at this place in [`crate::folders::Folders::libraries`].
     Recent(usize),
     RevealLibrary,
+    /// Download a copy of the library, where it is in the browser.
+    #[cfg(target_arch = "wasm32")]
+    SaveCopy,
+    /// Open a copy of a library into the browser's own, while it holds no files.
+    #[cfg(target_arch = "wasm32")]
+    OpenCopy,
     Save,
     Revert,
     Export,
@@ -111,6 +121,8 @@ impl Offer {
 pub fn label(command: Command) -> &'static str {
     match command {
         Command::Open => "Open…",
+        Command::Undo => "Undo",
+        Command::Redo => "Redo",
         Command::New(kind) => kind.label(),
         Command::FromWavs(making) => making.item().0,
         Command::NewFolder => "New folder",
@@ -118,6 +130,10 @@ pub fn label(command: Command) -> &'static str {
         Command::Reconnect => "Reconnect library",
         Command::Recent(_) => "Recent library",
         Command::RevealLibrary => "Show the library folder",
+        #[cfg(target_arch = "wasm32")]
+        Command::SaveCopy => SAVE_COPY,
+        #[cfg(target_arch = "wasm32")]
+        Command::OpenCopy => OPEN_COPY,
         Command::Save => "Save",
         Command::Revert => "Revert to saved",
         Command::Export => "Export…",
@@ -219,6 +235,10 @@ pub fn menus(platform: Platform) -> Vec<Menu> {
         Do(C::PickLibrary),
         Entry::Recent,
         Do(C::RevealLibrary),
+    ]);
+    #[cfg(target_arch = "wasm32")]
+    file.extend([Do(C::SaveCopy), Do(C::OpenCopy)]);
+    file.extend([
         Rule,
         Do(C::Save),
         Do(C::Revert),
@@ -271,6 +291,10 @@ pub fn menus(platform: Platform) -> Vec<Menu> {
         Menu {
             title: "File",
             entries: file,
+        },
+        Menu {
+            title: "Edit",
+            entries: vec![Do(C::Undo), Do(C::Redo)],
         },
         Menu {
             title: "View",
@@ -357,6 +381,8 @@ pub fn shortcut(command: Command, platform: Platform, mac: bool) -> Option<egui:
     let command_and = |with, key| Shortcut::new(With::COMMAND.plus(with), key);
     Some(match command {
         Command::Open => Shortcut::new(With::COMMAND, Key::O),
+        Command::Undo => Shortcut::new(With::COMMAND, Key::Z),
+        Command::Redo => command_and(With::SHIFT, Key::Z),
         Command::Save => Shortcut::new(With::COMMAND, Key::S),
         Command::Export => command_and(With::SHIFT, Key::E),
         Command::CloseTab => tab_key(Key::W),
@@ -390,6 +416,11 @@ fn unwritten(command: Command, platform: Platform) -> Option<egui::KeyboardShort
         .then(|| egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Equals))
 }
 
+/// Whether a command undoes or redoes, which a field being typed in does for itself.
+pub(crate) fn undoes(command: Command) -> bool {
+    matches!(command, Command::Undo | Command::Redo)
+}
+
 /// The key that puts the cursor in the search box.
 pub fn search_key() -> egui::KeyboardShortcut {
     egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K)
@@ -411,8 +442,10 @@ pub fn key_text(command: Command, platform: Platform, mac: bool) -> Option<Strin
 /// document and lose its revert. A bound key is consumed whether or not its command is
 /// offered now, so it never falls through to a shorter one. In a browser, `index.html`
 /// also keeps each of these keys from the browser's own action.
-const KEYED: [Command; 15] = [
+const KEYED: [Command; 17] = [
     Command::ReviewQueue,
+    Command::Redo,
+    Command::Undo,
     Command::Export,
     Command::Browser,
     Command::Inspector,
@@ -430,6 +463,12 @@ const KEYED: [Command; 15] = [
 ];
 
 pub const OPEN_LIBRARY: &str = "Open library folder…";
+
+/// The item that downloads a copy of the library.
+pub const SAVE_COPY: &str = "Save a copy of the library";
+
+/// File ▸ Open a copy…, as messages name it.
+pub const OPEN_COPY: &str = "Open a copy…";
 
 /// The title of [`Entry::Recent`]'s submenu.
 pub const RECENT: &str = "Open recent library";
@@ -466,6 +505,7 @@ impl DrawbarApp {
         let mut offer = self.offer(command)?;
         let over = matches!(command, Command::Quit | Command::Zoom(_));
         offer.enabled &= over || !covered(ctx);
+        offer.enabled &= !(undoes(command) && ctx.wants_keyboard_input());
         Some(offer)
     }
 
@@ -518,6 +558,13 @@ impl DrawbarApp {
                 let place = self.browser.folders.place.as_ref();
                 place.and_then(|at| at.reveal.as_ref()).map(|_| plain)?
             }
+            #[cfg(target_arch = "wasm32")]
+            Command::SaveCopy => self.store.as_ref().map(|_| plain)?,
+            #[cfg(target_arch = "wasm32")]
+            Command::OpenCopy => {
+                let store = self.store.as_ref()?;
+                (*store.root() == crate::store::Root::Private).then_some(plain)?
+            }
             Command::AllFiles => check(self.browser.folders.all_files),
             Command::ReportProblem | Command::SendFeedback | Command::Privacy => plain,
             #[cfg(target_arch = "wasm32")]
@@ -538,6 +585,20 @@ impl DrawbarApp {
                     enabled: matches!(sharing, Sharing::On | Sharing::Off),
                     hint: Some(why),
                     ..check(sharing == Sharing::On)
+                }
+            }
+            Command::Undo | Command::Redo => {
+                let store = self.store.as_ref();
+                let label = match command {
+                    Command::Undo => store.and_then(crate::store::Store::undo_label),
+                    _ => store.and_then(crate::store::Store::redo_label),
+                };
+                match label {
+                    Some(label) => relabeled(label),
+                    None => Offer {
+                        enabled: false,
+                        ..plain
+                    },
                 }
             }
             Command::Save | Command::Export => active.map(|_| plain)?,
@@ -611,6 +672,8 @@ impl DrawbarApp {
         let active = self.tabs.active();
         match command {
             Command::Open => acts.push(Act::OpenFiles),
+            Command::Undo => self.store.iter_mut().for_each(crate::store::Store::undo),
+            Command::Redo => self.store.iter_mut().for_each(crate::store::Store::redo),
             Command::New(_) | Command::FromWavs(_) | Command::NewFolder => {
                 acts.extend(made(command))
             }
@@ -622,20 +685,26 @@ impl DrawbarApp {
                     .as_ref()
                     .map(|library| Act::OpenLibrary(library.root.clone())),
             ),
-            Command::Recent(at) => acts.extend(
-                self.browser
-                    .folders
-                    .libraries
-                    .get(at)
-                    .filter(|library| !library.open)
-                    .map(|library| Act::OpenLibrary(library.root.clone())),
-            ),
+            Command::Recent(at) => {
+                let folders = &self.browser.folders;
+                let chosen = folders.libraries.get(at);
+                acts.extend(chosen.and_then(|library| crate::browser::recent(folders, library)));
+            }
             Command::RevealLibrary => {
                 let place = self.browser.folders.place.as_ref();
                 if let Some(url) = place.and_then(|at| at.reveal.as_ref()) {
                     ctx.open_url(egui::OpenUrl::new_tab(url));
                 }
             }
+            #[cfg(target_arch = "wasm32")]
+            Command::SaveCopy => {
+                if let Some(store) = &mut self.store {
+                    self.log.say("Saving a copy of the library…");
+                    store.save_copy();
+                }
+            }
+            #[cfg(target_arch = "wasm32")]
+            Command::OpenCopy => self.open_copy(ctx),
             Command::AllFiles => {
                 let folders = &mut self.browser.folders;
                 folders.all_files = !folders.all_files;
@@ -716,6 +785,10 @@ impl DrawbarApp {
     ) {
         let (platform, mac) = (self.platform, crate::platform::mac_keyboard(ctx));
         for command in KEYED {
+            // ⚠️ A field being typed in takes its own undo keys.
+            if undoes(command) && ctx.wants_keyboard_input() {
+                continue;
+            }
             let mut keys = shortcut(command, platform, mac)
                 .into_iter()
                 .chain(unwritten(command, platform));

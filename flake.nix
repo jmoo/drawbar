@@ -48,6 +48,12 @@
               type = "app";
             };
 
+            apps.toshokan-browser-crash = {
+              meta.description = "kill toshokan's library mid-change in browsers and check what is left";
+              program = pkgs.lib.getExe pkgs.nord.toshokan-browser-crash-sweep;
+              type = "app";
+            };
+
             # Rust tests run in the package builds: `nix build .#nord.all`.
             checks = {
               bump =
@@ -82,31 +88,44 @@
                     node --test "$src/js/telemetry/test/check.test.js"
                     touch "$out"
                   '';
+              toshokan-spec = pkgs.nord.toshokan-spec;
             };
 
             devShells.default = pkgs.lib.crane.devShell {
               LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath pkgs.nord.guiLibs;
               RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
               inputsFrom = pkgs.lib.attrValues pkgs.nord.crates;
-              # scripts/* (see their `nix-deps` lines), `mdbook serve docs`, and the
-              # collector in js/telemetry (its tests, `wrangler dev`).
+              # scripts/* (see their `nix-deps` lines), `mdbook serve docs`, the
+              # collector in js/telemetry (its tests, `wrangler dev`), and toshokan's
+              # browser suites (geckodriver, lld, wasm-bindgen-cli).
               packages = with pkgs; [
                 cargo-about
                 curl
+                geckodriver
                 gh
                 jq
+                lld
                 mdbook
                 mdbook-mermaid
                 nodejs
                 (python3.withPackages (python: [ python.fonttools ]))
                 rust-analyzer
+                wasm-bindgen-cli
                 wrangler
               ];
             };
 
             legacyPackages = pkgs;
 
-            packages = pkgs.nord.crates // pkgs.nord.crossPackages // { inherit (pkgs.nord) docs site; };
+            packages =
+              pkgs.nord.crates
+              // pkgs.nord.crossPackages
+              // {
+                inherit (pkgs.nord) docs site;
+              }
+              // pkgs.lib.optionalAttrs (pkgs.nord ? toshokan-web) {
+                inherit (pkgs.nord) drawbar-web-tests toshokan-browser-crash toshokan-web;
+              };
 
             treefmt = {
               programs = {

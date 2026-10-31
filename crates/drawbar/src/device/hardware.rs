@@ -37,7 +37,7 @@ use super::{Connection, DeviceCmd};
 use crate::browser::{apply, Act};
 use crate::ondisk::OnDisk;
 use crate::queue::Diff;
-use crate::store::{Backend, Store};
+use crate::store::Store;
 use crate::strings::shown;
 use crate::testing::{largest_allocation_anywhere, Bench, Temp};
 
@@ -408,7 +408,7 @@ struct Sending {
     largest: usize,
     /// Every range of the asset's file the send read.
     reads: Vec<Range<u64>>,
-    /// The largest occupant backup seen in the library's `.drawbar/tmp`.
+    /// The largest occupant backup seen in this install's `rescued` folder for the library.
     backup: u64,
 }
 
@@ -437,7 +437,7 @@ impl Rig {
             place(&library, name, from);
         }
         let bench = Bench::new();
-        let store = Store::start(Backend::start(&bench.ctx, library.0.clone()));
+        let store = Store::start(crate::testing::backend(&bench.ctx, &library));
         let mut rig = Rig {
             library,
             store,
@@ -481,6 +481,9 @@ impl Rig {
         }
         let released = self.store.poll(workspace, browser, queue, log);
         device.poll(log, workspace, tabs, queue);
+        if !device.take_kept().is_empty() {
+            self.store.rescue_due();
+        }
         crate::queue::follow(workspace, device, queue, log);
         let mut acts = acts;
         if released {
@@ -603,7 +606,7 @@ impl Rig {
     }
 
     fn backups(&self) -> Vec<(String, u64)> {
-        let Ok(dir) = fs::read_dir(self.library.at(crate::store::TMP)) else {
+        let Some(Ok(dir)) = self.store.tmp().map(fs::read_dir) else {
             return Vec::new();
         };
         dir.filter_map(Result::ok)
@@ -674,6 +677,39 @@ impl Rig {
 
     fn logged(&self, text: &str) -> bool {
         self.bench.log.iter().any(|entry| entry.text.contains(text))
+    }
+
+    /// The same library opened again, as the next start of the app opens it, with the
+    /// instrument let go.
+    fn reopen(mut self) -> Rig {
+        self.release();
+        let library = std::mem::replace(&mut self.library, Temp::new());
+        drop(self);
+        let bench = Bench::new();
+        let store = Store::start(crate::testing::backend(&bench.ctx, &library));
+        let mut rig = Rig {
+            library,
+            store,
+            bench,
+        };
+        rig.until("the library opens", ATTACH_LIMIT, |rig| {
+            rig.store.takes_files() && !rig.store.listing()
+        });
+        rig
+    }
+
+    /// Take in the rescues writes left, as the app's frame does while the instrument is
+    /// idle, writing what that changed as its next frame does.
+    fn take_in_rescues(&mut self) {
+        let Bench {
+            workspace,
+            browser,
+            log,
+            ..
+        } = &mut self.bench;
+        self.store.look_for_rescues(workspace, browser, log);
+        self.store
+            .sync(workspace, browser, crate::store::Pass::Files);
     }
 }
 
@@ -818,7 +854,8 @@ fn s1_a_resting_piano_lands_in_an_empty_slot_streamed() {
 }
 
 /// Sending onto a slot that holds something keeps the occupant in a file under the
-/// library's `.drawbar/tmp` until the new object has landed, then removes it.
+/// `rescued` folder of this install's own state for the library until the new object has
+/// landed, then removes it.
 #[test]
 #[ignore = "writes to an attached instrument; see the module's documentation"]
 fn s2_a_replace_keeps_the_occupant_in_a_file_until_the_write_lands() {
@@ -862,7 +899,7 @@ fn s2_a_replace_keeps_the_occupant_in_a_file_until_the_write_lands() {
     );
     assert!(
         sending.backup >= file.len - HEADER as u64,
-        "the occupant waited in .drawbar/tmp: the largest file there was {} bytes",
+        "the occupant waited in its folder: the largest file there was {} bytes",
         sending.backup
     );
     assert_eq!(
@@ -1130,7 +1167,7 @@ fn s5_a_sample_round_trips_and_replaces_streamed() {
     assert_eq!(again.outcome, Ok(()), "{}", rig.bench.log.tail(30));
     assert!(
         again.backup >= file.len - HEADER as u64,
-        "the occupant waited in .drawbar/tmp: the largest file there was {} bytes",
+        "the occupant waited in its folder: the largest file there was {} bytes",
         again.backup
     );
     assert_eq!(
@@ -1300,13 +1337,10 @@ fn s7_a_program_on_the_instrument_exports_as_nord_cli_bundles_it() {
                 rig.frame(arriving);
             }
             let Bench {
-                workspace,
-                browser,
-                queue,
-                ..
+                workspace, browser, ..
             } = &mut rig.bench;
             rig.store
-                .sync(workspace, browser, queue, crate::store::Pass::Files);
+                .sync(workspace, browser, crate::store::Pass::Files);
             if let Some(ids) = rig.bench.workspace.bundle_ready() {
                 return ids;
             }
@@ -1365,6 +1399,127 @@ fn s7_a_program_on_the_instrument_exports_as_nord_cli_bundles_it() {
         (largest as u64) < u64::from(biggest),
         "an allocation of {largest} bytes held the {biggest}-byte member whole"
     );
+}
+
+/// A replace whose write fails and whose occupant cannot be put back leaves the occupant
+/// in this install's folder for the library, and once the instrument is idle it goes into
+/// the library as a file of its own, an entity that says which slot it came off, through a
+/// reopen. Putting it there is one change undo takes back and redo makes again.
+#[test]
+#[ignore = "writes to an attached instrument; see the module's documentation"]
+fn s8_an_occupant_that_cannot_be_put_back_goes_into_the_library() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if !attached() {
+        return;
+    }
+    let piano = run().source(
+        ObjectClass::Piano,
+        slot_from("DRAWBAR_HARDWARE_PIANO", "1:6"),
+    );
+    let other = run().source(
+        ObjectClass::Piano,
+        slot_from("DRAWBAR_HARDWARE_OTHER_PIANO", "6:3"),
+    );
+    let mut claims = Claims::default();
+    let mut rig = Rig::open(&[
+        ("drawbar-hw-piano.npno", &piano),
+        ("drawbar-hw-other.npno", &other),
+    ]);
+    rig.connect();
+    let class = ObjectClass::Piano;
+    let slot = rig.vacant(class, 0);
+    claims.take(class, slot);
+    let occupant = rig.asset("drawbar-hw-piano.npno");
+    send_into_vacant(&mut rig, occupant, class, slot);
+
+    let id = rig.asset("drawbar-hw-other.npno");
+    let file = rig.file(id);
+    let path = rig.library.at("drawbar-hw-other.npno");
+    let kept_in = rig.store.tmp().expect("the library is writable");
+    let mode = |mode| fs::Permissions::from_mode(mode);
+    let mut broken = false;
+    let sending = rig.send(
+        vec![
+            Act::Replace {
+                id,
+                class,
+                at: slot,
+            },
+            Act::SendAll,
+        ],
+        id,
+        &file,
+        |reads| {
+            if broken || sent(reads).is_none_or(|sent| sent < file.len / 4) {
+                return;
+            }
+            broken = true;
+            // The write fails at its checksum, and the occupant's file cannot be read
+            // back onto the slot.
+            let mut tail = fs::read(&path).expect("the file reads");
+            let at = tail.len() - (64 << 10);
+            tail[at..at + 4096]
+                .iter_mut()
+                .for_each(|byte| *byte ^= 0xff);
+            fs::write(&path, tail).expect("the tail is overwritten");
+            for entry in fs::read_dir(&kept_in)
+                .expect("the occupant is kept")
+                .flatten()
+            {
+                fs::set_permissions(entry.path(), mode(0o000)).expect("made unreadable");
+            }
+        },
+    );
+    report(
+        "replace whose occupant cannot be put back",
+        &sending,
+        file.len,
+    );
+    let why = sending.outcome.clone().expect_err("the send failed");
+    assert!(why.contains("kept at"), "the occupant was kept: {why}");
+    let rescues = rig.backups();
+    assert_eq!(rescues.len(), 1, "{rescues:?}");
+    let name = rescues[0].0.clone();
+    let rescue = kept_in.join(&name);
+    fs::set_permissions(&rescue, mode(0o644)).expect("readable again");
+    // As the app's next frame with the instrument idle does.
+    rig.take_in_rescues();
+    let landed = |rig: &Rig| {
+        rig.bench
+            .workspace
+            .listed()
+            .any(|entity| entity.name == name && entity.path.is_some())
+            && rig.library.at(&name).exists()
+            && !rescue.exists()
+    };
+    rig.until("the rescue lands in the library", SEND_LIMIT, landed);
+
+    rig.store.undo();
+    rig.until("the rescue's placement is undone", ATTACH_LIMIT, |rig| {
+        !rig.library.at(&name).exists()
+    });
+    rig.store.redo();
+    rig.until("the rescue's placement is redone", ATTACH_LIMIT, |rig| {
+        rig.library.at(&name).exists()
+    });
+
+    let rig = rig.reopen();
+    let kept = rig.asset(&name);
+    let origin = &rig.bench.workspace.get(kept).expect("listed").origin;
+    assert!(
+        matches!(origin, crate::workspace::Origin::Rescued { at } if *at == slot),
+        "{}",
+        origin.label()
+    );
+    assert!(
+        matches!(rig.store.key(kept), Some(crate::store::Key::Entity(_))),
+        "an entity says where it came from"
+    );
+    assert!(body_difference(&rig.library.at(&name), &piano).is_none());
+    assert_eq!(rig.backups(), [], "nothing is left to take in");
+    drop(rig);
+    assert_no_strays(class);
 }
 
 /// Every slot this run wrote is empty again, and each class holds what it held when the

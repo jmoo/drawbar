@@ -140,6 +140,8 @@ pub(super) enum Line {
         depth: usize,
     },
     State(State),
+    /// The changes the library keeps apart, while it keeps any.
+    Kept,
     Kind(Kind),
     Tag(u64),
     NewTag,
@@ -156,6 +158,7 @@ impl Line {
             Line::Computer
             | Line::Instrument
             | Line::State(_)
+            | Line::Kept
             | Line::Kind(_)
             | Line::Tag(_)
             | Line::NewTag => super::row::ROW,
@@ -198,6 +201,7 @@ impl Line {
             Line::Bank(class, bank) => egui::Id::new(("bank", class, bank)),
             Line::Slot { class, at, .. } => egui::Id::new(("slot", class, at.bank, at.slot)),
             Line::State(state) => egui::Id::new(("state", state.title())),
+            Line::Kept => egui::Id::new("kept apart"),
             Line::Kind(kind) => egui::Id::new(("kind", Kind::ALL.iter().position(|k| *k == kind))),
             Line::Tag(id) => egui::Id::new(("tag", id)),
             Line::NewTag => egui::Id::new("new tag"),
@@ -479,10 +483,10 @@ pub fn library_items(
         Picking::Absent => {}
     }
     if !folders.libraries.is_empty() {
-        menu::button(ui, "Open recent library", |ui| {
+        menu::button(ui, crate::menu::RECENT, |ui| {
             for library in &folders.libraries {
-                if marked(ui, &library.name, library.open) && !library.open {
-                    acts.push(Act::OpenLibrary(library.root.clone()));
+                if marked(ui, &library.name, library.open) {
+                    acts.extend(recent(folders, library));
                 }
             }
         });
@@ -493,6 +497,17 @@ pub fn library_items(
             ui.ctx().open_url(egui::OpenUrl::new_tab(url));
             ui.close();
         }
+    }
+}
+
+/// What choosing `library` among the recent libraries does: opens it, or opens the
+/// open one again where nothing may be written to it.
+pub(crate) fn recent(folders: &Folders, library: &crate::folders::Library) -> Option<Act> {
+    let read_only = folders.place.as_ref().is_some_and(|at| at.read_only);
+    match (library.open, read_only) {
+        (false, _) => Some(Act::OpenLibrary(library.root.clone())),
+        (true, true) => Some(Act::ReopenLibrary),
+        (true, false) => None,
     }
 }
 
@@ -766,6 +781,9 @@ impl Browser {
                     below.push(Line::State(state));
                 }
             }
+            if !self.folders.kept.is_empty() {
+                below.push(Line::Kept);
+            }
         }
         below.push(Line::End(Section::Places));
         let kinds = kinds_present(workspace, &device.state);
@@ -988,6 +1006,7 @@ impl Browser {
                 };
                 state_row(ui, state, count, filter, acts);
             }
+            Line::Kept => kept_row(ui, self.folders.kept.len(), acts),
             Line::Kind(kind) => self.kind_row(ui, kind, workspace, device, filter, acts),
             Line::Tag(id) => self.tag_row(ui, id, workspace, device, filter, acts),
             Line::NewTag => new_tag_row(ui, acts),
@@ -1021,12 +1040,15 @@ impl Browser {
         // can have started from.
         self.drop_zone(ui, &drawn.response, Onto::Computer, acts);
         let triangle = on_triangle(&drawn);
-        let response = match (&place.note, place.label.is_empty()) {
-            (_, true) => drawn.response,
-            (None, false) => drawn.response.on_hover_text(&place.label),
-            (Some(note), false) => drawn
-                .response
-                .on_hover_text(format!("{}\n{note}", place.label)),
+        let said: Vec<&str> = [Some(&place.label), Some(&place.kept), place.note.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .filter(|line| !line.is_empty())
+            .collect();
+        let response = match said.is_empty() {
+            true => drawn.response,
+            false => drawn.response.on_hover_text(said.join("\n")),
         };
         if response.clicked() {
             match triangle {
@@ -1185,16 +1207,13 @@ impl Browser {
             .count()
     }
 
-    /// An index row whose file is gone, for an asset this app does not hold. It keeps
-    /// something the file alone would not give back, until the user lets it go.
+    /// An asset whose file is gone, which this app does not hold. It keeps something the
+    /// file alone would not give back, until the user lets it go.
     fn lost_row(&mut self, ui: &mut egui::Ui, id: u64, acts: &mut Vec<Act>) {
         let Some(lost) = self.folders.lost().iter().find(|lost| lost.id == id) else {
             return;
         };
-        let name = match &lost.row.path {
-            Some(path) => path.to_string(),
-            None => lost.row.name.clone(),
-        };
+        let name = lost.path.to_string();
         let drawn = row(
             ui,
             false,
@@ -1914,6 +1933,27 @@ fn state_row(ui: &mut egui::Ui, state: State, count: usize, filter: &Filter, act
     );
     if drawn.response.on_hover_text(state.sentence()).clicked() {
         narrow(acts, asked);
+    }
+}
+
+/// What the Kept apart row says on hover.
+const KEPT: &str = "Changes kept apart from the library: take them or dismiss them";
+
+fn kept_row(ui: &mut egui::Ui, runs: usize, acts: &mut Vec<Act>) {
+    let drawn = row(
+        ui,
+        false,
+        &Cells {
+            indent: indent(0, false),
+            glyph: Some(Glyph::FolderGit2),
+            name: "Kept apart",
+            dot: Some((crate::app::warn(ui.visuals()), KEPT)),
+            count: Some(runs.to_string()),
+            ..Cells::default()
+        },
+    );
+    if drawn.response.on_hover_text(KEPT).clicked() {
+        acts.push(Act::ShowKept);
     }
 }
 

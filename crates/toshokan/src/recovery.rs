@@ -1,0 +1,705 @@
+//! Recovery of interrupted effects, after a crash and after loss of the local root.
+//!
+//! Opening assesses and writes nothing in the folder. This writer's own records
+//! are settled before its next write: the steps resume where they stopped, and
+//! the intent's entry is appended with what they did, and the record is removed.
+//! One whose entry the log already holds is spent, and is removed before the next
+//! write or at close. A record of a writer this install does not write as
+//! is reported as possibly still in progress elsewhere, and settled only with the
+//! user's consent, by this writer and in its own log; only its owner ever removes
+//! it. Settling twice equals settling once.
+//!
+//! A record is closed by an entry that names it, in its writer's log or in a
+//! settlement; a record no entry names is open.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
+
+use crate::derive::Placed;
+use crate::effects::{
+    self, Applied, Cut, EffectPlan, EffectStep, FileEnd, Moves, Progress, Staged,
+};
+use crate::env::{Env, Identify};
+use crate::error::{Refusal, Result};
+use crate::flow::{self, each, fold, Fallible};
+use crate::ids::{Nonce, WriterId};
+use crate::io::{Capabilities, Capability, IoError, Kind, Root, Task};
+use crate::layout::Layout;
+use crate::log::{Own, Settlement};
+use crate::path::RelPath;
+use crate::pending::{self, PendingRecord, Records, MAX_RECORD};
+use crate::report::{Orphan, Outcome, PartialReport};
+
+/// What recovery needs of a writer's placed history.
+pub trait Chain {
+    /// Whether the entry `at` is placed or folded.
+    fn holds(&self, at: Own) -> bool;
+}
+
+/// A tip folds every entry its head descends from, which it certifies by
+/// number: an entry numbered below a tip's head is taken as folded even where
+/// no certificate names its hash.
+impl Chain for Placed {
+    fn holds(&self, at: Own) -> bool {
+        Placed::holds(self, at.hash) || self.tips.iter().any(|tip| tip.head.n > at.n)
+    }
+}
+
+/// What opening found to recover.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Recovery {
+    /// This writer's open records, with how each will be settled.
+    pub own: Vec<Settling>,
+    /// This writer's records closed by an entry in its log, left to remove.
+    pub spent: Vec<(Nonce, PendingRecord)>,
+    pub orphaned: Vec<Orphan>,
+    /// Records ignored as unreadable, unchained or unconfined.
+    pub ignored: Vec<RelPath>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Settling {
+    pub record: Nonce,
+    pub pending: PendingRecord,
+    /// How settling will end if nothing else changes the folder first.
+    pub outcome: Outcome,
+}
+
+/// Reads every writer's pending records and sorts them. `own` is this writer and
+/// the head its local root recorded; `settled` the records some writer settled.
+/// Every other writer's open records are orphans: after the local root is lost,
+/// an install cannot tell its former writer's records from a live writer's.
+/// Requests only [`crate::Io::List`], [`crate::Io::Stat`] and [`crate::Io::Read`].
+///
+/// [`read`], [`classify`] and [`predict`] in turn, for a caller that cannot lend
+/// `logs` while the reads run.
+pub fn assess<'a, C: Chain>(
+    layout: &'a Layout,
+    own: Option<WriterId>,
+    logs: &'a BTreeMap<WriterId, C>,
+    settled: &'a BTreeSet<(WriterId, Nonce)>,
+    capabilities: Capabilities,
+) -> Task<'a, Result<Recovery>> {
+    flow::run(read(layout, logs.keys().copied().collect()))
+        .and_then(move |found| {
+            let (recovery, open) = classify(layout, own, logs, settled, found);
+            flow::run(predict(layout, recovery, open, capabilities))
+        })
+        .task()
+}
+
+/// Every pending record of each of `writers`.
+pub fn read(
+    layout: &Layout,
+    writers: Vec<WriterId>,
+) -> Task<'static, Result<Vec<(WriterId, Records)>>> {
+    let layout = layout.clone();
+    fold(writers.into_iter(), Vec::new(), move |mut all, writer| {
+        flow::run(pending::read_all(&layout, writer)).map_ok(move |found| {
+            all.push((writer, found));
+            all
+        })
+    })
+    .task()
+}
+
+/// Sorts what [`read`] found by where each record stands. Returns this writer's
+/// open records apart, for [`predict`].
+pub fn classify<C: Chain>(
+    layout: &Layout,
+    own: Option<WriterId>,
+    logs: &BTreeMap<WriterId, C>,
+    settled: &BTreeSet<(WriterId, Nonce)>,
+    found: Vec<(WriterId, Records)>,
+) -> (Recovery, Vec<(Nonce, PendingRecord)>) {
+    let mut recovery = Recovery::default();
+    let mut open = Vec::new();
+    for (writer, found) in found {
+        recovery.ignored.extend(found.unreadable);
+        let Some(chain) = logs.get(&writer) else {
+            continue;
+        };
+        for (name, record) in found.records {
+            match standing(layout, own, chain, settled, name, &record) {
+                Standing::Ignored => recovery.ignored.push(layout.pending(writer, name)),
+                Standing::Closed => {}
+                Standing::Spent => recovery.spent.push((name, record)),
+                Standing::Open => open.push((name, record)),
+                Standing::Orphan => recovery.orphaned.push(Orphan {
+                    ours: false,
+                    live: false,
+                    progress: 0,
+                    writer,
+                    record: name,
+                    label: record.label.clone(),
+                    paths: record.paths(),
+                }),
+            }
+        }
+    }
+    (recovery, open)
+}
+
+/// Adds this writer's `open` records to `recovery`, each with how settling it
+/// will end, in a folder that can do what `capabilities` says.
+pub fn predict(
+    layout: &Layout,
+    recovery: Recovery,
+    open: Vec<(Nonce, PendingRecord)>,
+    capabilities: Capabilities,
+) -> Task<'static, Result<Recovery>> {
+    let layout = layout.clone();
+    fold(
+        open.into_iter(),
+        recovery,
+        move |mut recovery, (name, record)| {
+            let layout = layout.clone();
+            effects::observe(&layout, name, &record).map_ok(move |seen| {
+                let progress = effects::progress(&layout, &record, &seen, capabilities.fsync);
+                let outcome = effects::predict(&layout, name, &record, &seen, &progress);
+                recovery.own.push(Settling {
+                    record: name,
+                    pending: record,
+                    outcome,
+                });
+                recovery
+            })
+        },
+    )
+    .task()
+}
+
+/// Where a record stands for a reader writing as `own`.
+enum Standing {
+    /// Unconfined, or not chained to its writer's log.
+    Ignored,
+    /// Another writer's, closed by an entry naming it, waiting for its writer to
+    /// remove it.
+    Closed,
+    /// This writer's, closed by an entry naming it.
+    Spent,
+    /// This writer's, which no entry names.
+    Open,
+    /// Another writer's, open.
+    Orphan,
+}
+
+fn standing(
+    layout: &Layout,
+    own: Option<WriterId>,
+    chain: &impl Chain,
+    settled: &BTreeSet<(WriterId, Nonce)>,
+    name: Nonce,
+    record: &PendingRecord,
+) -> Standing {
+    if !record.is_confined(layout) || !chain.holds(record.after()) {
+        return Standing::Ignored;
+    }
+    let named = settled.contains(&(record.writer, name));
+    match (own == Some(record.writer), named) {
+        (true, true) => Standing::Spent,
+        (true, false) => Standing::Open,
+        (false, true) => Standing::Closed,
+        (false, false) => Standing::Orphan,
+    }
+}
+
+/// Resumes this writer's open record `name` where its steps stopped, in a folder
+/// that can do what `capabilities` says, after removing a source the last done
+/// step left beside its destination and the start of a copy the next step left,
+/// and setting aside in the trash any other copy cut short there. The caller then
+/// appends the record's entry with what [`Applied`] says, after which
+/// [`effects::finish`] may remove the record. Where what a remaining step moves is
+/// gone, it does nothing and says so.
+pub fn settle(
+    layout: &Layout,
+    name: Nonce,
+    record: Rc<PendingRecord>,
+    identify: Rc<dyn Identify>,
+    capabilities: Capabilities,
+) -> Task<'static, Result<Resumed>> {
+    let layout = layout.clone();
+    effects::observe(&layout, name, &record)
+        .and_then(move |seen| {
+            let progress = effects::progress(&layout, &record, &seen, capabilities.fsync);
+            let outcome = effects::predict(&layout, name, &record, &seen, &progress);
+            if let Outcome::Partial(PartialReport {
+                error: IoError::NotFound,
+                ..
+            }) = outcome
+            {
+                return flow::ok(Resumed::Gone);
+            }
+            let Progress {
+                done,
+                leftover,
+                partial,
+            } = progress;
+            let (start, aside): (Vec<Cut>, Vec<Cut>) =
+                partial.into_iter().partition(|cut| cut.start);
+            let stale = leftover
+                .into_iter()
+                .chain(start.into_iter().map(|cut| cut.path));
+            let set_aside = {
+                let (layout, record) = (layout.clone(), Rc::clone(&record));
+                move |()| {
+                    each(aside.into_iter(), move |cut| {
+                        let at = Aside {
+                            record: name,
+                            step: done,
+                            writer: record.writer,
+                        };
+                        set_aside(layout.clone(), at, cut.path, record.moves, 0)
+                    })
+                }
+            };
+            each(stale, |path| flow::remove(Root::Folder, &path))
+                .and_then(set_aside)
+                .and_then(move |()| {
+                    flow::run(effects::apply(&layout, name, record, done, identify))
+                })
+                .map_ok(Resumed::Applied)
+        })
+        .task()
+}
+
+/// How resuming a record of this writer's own went.
+pub enum Resumed {
+    /// Its remaining steps were carried out, as this says.
+    Applied(Applied),
+    /// What a remaining step moves is gone, so none was taken.
+    Gone,
+}
+
+/// The step of a record whose cut-short copy is set aside.
+#[derive(Clone, Copy)]
+struct Aside {
+    writer: WriterId,
+    record: Nonce,
+    step: usize,
+}
+
+impl Aside {
+    /// The name of the `n`th file set aside from this step in the trash: derived,
+    /// so that settling again finds the names used before, and named by no entry,
+    /// so that emptying the trash never removes it.
+    fn item(self, n: u32) -> Nonce {
+        let named = format!("aside {} {} {} {n}", self.writer, self.record, self.step);
+        let hash = blake3::hash(named.as_bytes());
+        let mut first = [0; 16];
+        first.copy_from_slice(&hash.as_bytes()[..16]);
+        Nonce::from_u128(u128::from_be_bytes(first))
+    }
+}
+
+/// Moves `path` to the first trash item of `at` from the `n`th on that is free,
+/// so that nothing set aside before is replaced.
+fn set_aside<'a>(
+    layout: Layout,
+    at: Aside,
+    path: RelPath,
+    moves: Moves,
+    n: u32,
+) -> Fallible<'a, ()> {
+    let item = layout.trash(at.writer, at.item(n));
+    flow::stat(Root::Folder, &item).and_then(move |found| match found {
+        Some(_) => set_aside(layout, at, path, moves, n + 1),
+        None => effects::relocate(moves, &path, &item),
+    })
+}
+
+/// Removes every file in this writer's staging, once no record of its is open
+/// to place one: what a run cut short before its record was written left behind.
+pub fn tidy(layout: &Layout, writer: WriterId) -> Task<'static, Result<()>> {
+    let dir = layout.tmp_dir(writer);
+    flow::list(Root::Folder, &dir)
+        .and_then(move |entries| {
+            let stale = entries.into_iter().filter(|entry| entry.kind == Kind::File);
+            each(stale, move |entry| {
+                flow::remove(
+                    Root::Folder,
+                    &dir.join(&entry.name)
+                        .expect("a listed name is one component"),
+                )
+            })
+        })
+        .task()
+}
+
+/// Removes those of `ignored` that are records of this writer cut short before
+/// their bytes landed, and returns them. A record whose moves copy is created in
+/// place and synced before any of its steps runs, so a crash before then leaves
+/// it empty or, in a folder that syncs, whose `capabilities` declare `fsync`,
+/// started or zeroed ([`pending::cut_short`]); no version writes such a record.
+/// Any other record that does not decode stays, and so does one longer than
+/// [`MAX_RECORD`].
+pub fn remove_empty(
+    layout: &Layout,
+    writer: WriterId,
+    ignored: &[RelPath],
+    capabilities: Capabilities,
+) -> Task<'static, Result<Vec<RelPath>>> {
+    let dir = layout.pending_dir(writer);
+    let records = ignored.iter().filter(|path| {
+        let name = path.name().and_then(|name| name.strip_suffix(".json"));
+        path.parent().as_ref() == Some(&dir) && name.is_some_and(|n| n.parse::<Nonce>().is_ok())
+    });
+    let records: Vec<RelPath> = records.cloned().collect();
+    let cut_short = move |bytes: &[u8]| match capabilities.fsync {
+        true => pending::cut_short(bytes),
+        false => bytes.is_empty(),
+    };
+    fold(records.into_iter(), Vec::new(), move |mut removed, path| {
+        flow::stat(Root::Folder, &path)
+            .and_then({
+                let path = path.clone();
+                move |meta| match meta {
+                    Some(meta) if meta.kind == Kind::File && meta.len <= MAX_RECORD => {
+                        flow::read_file(Root::Folder, &path, MAX_RECORD)
+                    }
+                    _ => flow::ok(None),
+                }
+            })
+            .and_then(
+                move |bytes| match bytes.is_some_and(|bytes| cut_short(&bytes)) {
+                    true => flow::remove(Root::Folder, &path).map_ok(move |()| {
+                        removed.push(path);
+                        removed
+                    }),
+                    false => flow::ok(removed),
+                },
+            )
+    })
+    .task()
+}
+
+/// What the folder shows of the paths another writer's record `name`, `record`,
+/// names, and of its markers, hashed. A writer carrying the effect out moves it.
+/// Reads no file.
+pub(crate) fn glance<'a>(
+    layout: &Layout,
+    name: Nonce,
+    record: &PendingRecord,
+) -> Fallible<'a, u64> {
+    use std::hash::{Hash, Hasher};
+
+    let writer = record.writer;
+    let mut paths = BTreeSet::new();
+    for step in &record.steps {
+        if let EffectStep::Place { staged, .. } = step {
+            paths.insert(layout.trash(writer, *staged));
+        }
+        if let Some((from, to)) = step.ends(layout, writer) {
+            paths.insert(from);
+            paths.insert(to);
+        }
+    }
+    let marked = match record.moves {
+        Moves::Rename => flow::ok(Vec::new()),
+        Moves::Copy => flow::list(Root::Folder, &layout.pending_dir(writer)).map_ok(move |found| {
+            let marked = found
+                .into_iter()
+                .filter(|entry| pending::marker(&entry.name).is_some_and(|(of, _)| of == name));
+            marked.map(|entry| entry.name).collect()
+        }),
+    };
+    marked.and_then(move |marked| {
+        fold(paths.into_iter(), Vec::new(), |mut seen, path| {
+            flow::stat(Root::Folder, &path).map_ok(move |meta| {
+                seen.push((path, meta.map(|meta| (meta.len, meta.modified))));
+                seen
+            })
+        })
+        .map_ok(move |seen| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (marked, seen).hash(&mut hasher);
+            hasher.finish()
+        })
+    })
+}
+
+/// How far another writer's record got, as [`orphan_plan`] needs it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Reached {
+    progress: Progress,
+    /// The record's paths the folder holds, once what resuming removes is gone.
+    present: BTreeSet<RelPath>,
+    /// The library paths its steps name that are directories.
+    directories: BTreeSet<RelPath>,
+}
+
+/// How far another writer's record `name`, `theirs`, got, for [`orphan_plan`].
+pub fn progress(
+    layout: &Layout,
+    name: Nonce,
+    theirs: &PendingRecord,
+    capabilities: Capabilities,
+) -> Task<'static, Result<Reached>> {
+    let layout = layout.clone();
+    let theirs = theirs.clone();
+    effects::observe(&layout, name, &theirs)
+        .map_ok(move |seen| {
+            let progress = effects::reached(&layout, &theirs, &seen, capabilities.fsync);
+            let directories = theirs
+                .steps
+                .iter()
+                .flat_map(EffectStep::library_paths)
+                .filter(|path| seen.is_directory(path))
+                .cloned()
+                .collect();
+            Reached {
+                present: seen.present_after(&progress),
+                progress,
+                directories,
+            }
+        })
+        .task()
+}
+
+/// The effects that settle another writer's record `theirs` as `how`, from how
+/// far it got, carried out by this writer like an intent's, in a folder that can
+/// do what `capabilities` says. Nothing is written in the other writer's
+/// directory: its staged and trashed bytes are copied, and library files the
+/// settlement displaces go to this writer's trash, the start of a copy their next
+/// step left included. Finishing skips moving to the trash a path that holds
+/// nothing. Dismissing changes no file. Finishing or rolling back a step that
+/// renames a directory is refused where `capabilities` cannot rename one.
+///
+/// Planned again after a settlement stopped partway, it plans what remains. The
+/// caller commits the plan, then, once its effects complete, appends a
+/// [`crate::log::Settle`] entry.
+pub fn orphan_plan(
+    layout: &Layout,
+    theirs: &PendingRecord,
+    reached: &Reached,
+    how: Settlement,
+    capabilities: Capabilities,
+    env: &mut Env,
+) -> std::result::Result<EffectPlan, Refusal> {
+    let moves = Moves::of(capabilities);
+    Orphaned {
+        layout,
+        theirs,
+        present: reached.present.clone(),
+        directories: &reached.directories,
+        rename_dir: capabilities.rename_dir && moves.renames(),
+        plan: EffectPlan {
+            moves,
+            ..EffectPlan::new(env.nonce())
+        },
+        env,
+        relayed: BTreeMap::new(),
+    }
+    .plan(&reached.progress, how)
+}
+
+struct Orphaned<'a> {
+    layout: &'a Layout,
+    theirs: &'a PendingRecord,
+    /// The record's paths the folder will hold once the steps planned so far ran.
+    present: BTreeSet<RelPath>,
+    directories: &'a BTreeSet<RelPath>,
+    rename_dir: bool,
+    plan: EffectPlan,
+    env: &'a mut Env,
+    /// The items of their trash a step finished here put in this writer's trash
+    /// instead, by theirs.
+    relayed: BTreeMap<Nonce, Nonce>,
+}
+
+impl Orphaned<'_> {
+    fn plan(
+        mut self,
+        progress: &Progress,
+        how: Settlement,
+    ) -> std::result::Result<EffectPlan, Refusal> {
+        if how == Settlement::Dismissed {
+            return Ok(self.plan);
+        }
+        let partial = progress.partial.iter().map(|cut| &cut.path);
+        for stale in progress.leftover.iter().chain(partial) {
+            if self.layout.check_library_path(stale).is_ok() {
+                self.trash(stale);
+            }
+        }
+        let steps = &self.theirs.steps;
+        match how {
+            Settlement::Finished => {
+                for step in &steps[progress.done..] {
+                    self.finish(step)?;
+                }
+                let done_after = self.plan.steps.len();
+                self.plan.files = self
+                    .theirs
+                    .files
+                    .iter()
+                    .map(|end| FileEnd {
+                        done_after,
+                        ..end.clone()
+                    })
+                    .collect();
+            }
+            Settlement::RolledBack => {
+                for step in steps[..progress.done].iter().rev() {
+                    self.undo(step)?;
+                }
+            }
+            Settlement::Dismissed => {}
+        }
+        Ok(self.plan)
+    }
+
+    fn finish(&mut self, step: &EffectStep) -> std::result::Result<(), Refusal> {
+        let writer = self.theirs.writer;
+        match step {
+            EffectStep::ToTrash { path, .. } if !self.present.contains(path) => {}
+            EffectStep::ToTrash { path, item } => {
+                let ours = self.trash(path);
+                self.relayed.insert(*item, ours);
+            }
+            EffectStep::Place { staged, path } => {
+                return self.copy(self.layout.staged(writer, *staged, path), path)
+            }
+            // A way-point through the trash this settlement began is taken up from
+            // this writer's trash, where it put it.
+            EffectStep::FromTrash { item, path } => match self.relayed.get(item) {
+                Some(&ours) => {
+                    self.present.insert(path.clone());
+                    self.plan.steps.push(EffectStep::FromTrash {
+                        item: ours,
+                        path: path.clone(),
+                    });
+                }
+                None => return self.copy(self.layout.trash(writer, *item), path),
+            },
+            EffectStep::Rename { from, to } => return self.rename(from, to),
+            EffectStep::MakeDir { .. } | EffectStep::RemoveDir { .. } => {
+                self.plan.steps.push(step.clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn undo(&mut self, step: &EffectStep) -> std::result::Result<(), Refusal> {
+        let writer = self.theirs.writer;
+        match step {
+            EffectStep::ToTrash { path, item } => {
+                return self.copy(self.layout.trash(writer, *item), path)
+            }
+            EffectStep::Place { path, .. } | EffectStep::FromTrash { path, .. } => {
+                if self.present.contains(path) {
+                    self.trash(path);
+                }
+            }
+            EffectStep::Rename { from, to } => return self.rename(to, from),
+            EffectStep::MakeDir { .. } => {}
+            EffectStep::RemoveDir { path } => self
+                .plan
+                .steps
+                .push(EffectStep::MakeDir { path: path.clone() }),
+        }
+        Ok(())
+    }
+
+    fn rename(&mut self, from: &RelPath, to: &RelPath) -> std::result::Result<(), Refusal> {
+        if self.directories.contains(from) && !self.rename_dir {
+            return Err(Refusal::Unsupported(Capability::RenameDir));
+        }
+        if !self.present.remove(from) {
+            return Err(Refusal::Gone(to.clone()));
+        }
+        self.present.insert(to.clone());
+        self.plan.steps.push(EffectStep::Rename {
+            from: from.clone(),
+            to: to.clone(),
+        });
+        Ok(())
+    }
+
+    fn trash(&mut self, path: &RelPath) -> Nonce {
+        self.present.remove(path);
+        let item = self.env.nonce();
+        self.plan.steps.push(EffectStep::ToTrash {
+            path: path.clone(),
+            item,
+        });
+        item
+    }
+
+    fn copy(&mut self, source: RelPath, path: &RelPath) -> std::result::Result<(), Refusal> {
+        if !self.present.contains(&source) {
+            return Err(Refusal::Gone(path.clone()));
+        }
+        self.present.insert(path.clone());
+        let staged = self.env.nonce();
+        self.plan.place(staged, Staged::Copy(source), path.clone());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::blocking::run;
+    use crate::disk::MemDisk;
+    use crate::io::Io;
+
+    /// Removes what [`remove_empty`] takes of records holding `made`, numbered
+    /// from 1, in a folder that can do what `capabilities` says, and returns their
+    /// numbers.
+    fn removed(made: &[Vec<u8>], capabilities: Capabilities) -> Vec<u128> {
+        let layout = Layout::new(".t").unwrap();
+        let writer = WriterId::from_u128(7);
+        let mut disk = MemDisk::new();
+        let record = |n: usize| layout.pending(writer, Nonce::from_u128(n as u128 + 1));
+        disk.perform(Io::MakeDir {
+            root: Root::Folder,
+            path: layout.pending_dir(writer),
+        })
+        .unwrap();
+        for (n, bytes) in made.iter().enumerate() {
+            let create = Io::Create {
+                root: Root::Folder,
+                path: record(n),
+                bytes: bytes.clone(),
+            };
+            disk.perform(create).unwrap();
+        }
+        let ignored: Vec<RelPath> = (0..made.len()).map(record).collect();
+        let removed = run(
+            &mut disk,
+            remove_empty(&layout, writer, &ignored, capabilities),
+        );
+        let names = removed.unwrap().into_iter().map(|path| {
+            let name = path.name().unwrap().strip_suffix(".json").unwrap();
+            name.parse::<Nonce>().unwrap().to_u128()
+        });
+        names.collect()
+    }
+
+    fn made() -> Vec<Vec<u8>> {
+        let mut long = b"{\"writer\":\"".to_vec();
+        long.resize(usize::try_from(MAX_RECORD).unwrap() + 1, b'x');
+        vec![
+            b"".to_vec(),
+            vec![0; 40],
+            b"{\"writer\":".to_vec(),
+            b"{\"from\":\"a newer version\"}".to_vec(),
+            long,
+        ]
+    }
+
+    #[test]
+    fn a_record_cut_short_is_removed_and_any_other_unreadable_one_stays() {
+        assert_eq!(removed(&made(), Capabilities::ALL), [1, 2, 3]);
+    }
+
+    #[test]
+    fn where_nothing_syncs_only_an_empty_record_is_cut_short() {
+        let unsynced = Capabilities {
+            fsync: false,
+            ..Capabilities::ALL
+        };
+        assert_eq!(removed(&made(), unsynced), [1]);
+    }
+}
