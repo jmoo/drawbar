@@ -36,6 +36,8 @@ The [user guide](docs/src/introduction.md) covers both. Developers will find the
 file formats, the USB protocol and
 [how to build from source](docs/src/reference/building.md) in its Reference
 section, and the house rules in [CONTRIBUTING.md](CONTRIBUTING.md).
+CI checks the native workspace on Linux, Windows and macOS, and builds the
+production browser bundle and guide.
 
 ## Community
 

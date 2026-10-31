@@ -38,20 +38,9 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           token: ${{ steps.token.outputs.token }}
-      - uses: nixbuild/nix-quick-install-action@v35
+      - uses: ./.github/actions/nix
         with:
-          nix_conf: |
-            keep-env-derivations = true
-            keep-outputs = true
-      - uses: nix-community/cache-nix-action@v7
-        with:
-          primary-key: nix-autofix-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix') }}
-          restore-prefixes-first-match: nix-autofix-${{ runner.os }}-
-          gc-max-store-size-linux: 4G
-          purge: true
-          purge-prefixes: nix-autofix-${{ runner.os }}-
-          purge-created: 0
-          purge-primary-key: never
+          cache: autofix
       - run: nix fmt
       - name: commit and push
         run: |

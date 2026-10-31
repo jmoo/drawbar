@@ -42,10 +42,10 @@ let
       src = workspace;
       filter =
         path: type:
-        !hasInfix "/nord-cli/checks" path
-        && (
+        (
           crane.filterCargoSources path type
           || hasSuffix ".script" path
+          || hasInfix "/nord-cli/checks/" path
           # The About box's test compares its copy against this.
           || path == toString (workspace + "/LICENSE")
           # The committed specimens and replay scripts, whatever their extensions.
@@ -109,6 +109,33 @@ let
       }
       // builtins.removeAttrs args [ "crate" ]
     )
+  );
+
+  testFeatures = concatMap (name: map (feature: "${name}/${feature}") (testFeaturesFor name)) (
+    attrNames manifests
+  );
+
+  testArgs =
+    commonArgs
+    // audioArgs
+    // {
+      CARGO_PROFILE = "release-tests";
+      cargoExtraArgs = "--locked --workspace ${featureArgs testFeatures}";
+      pname = "workspace-tests";
+      version = "0";
+    };
+
+  testArtifacts = crane.buildDepsOnly testArgs;
+
+  tests = crane.mkCargoDerivation (
+    testArgs
+    // {
+      buildPhaseCargoCommand = "bash ${./scripts/test.bash}";
+      cargoArtifacts = testArtifacts;
+      doInstallCargoArtifacts = false;
+      installPhaseCommand = ''touch "$out"'';
+      nativeBuildInputs = (testArgs.nativeBuildInputs or [ ]) ++ [ final.jq ];
+    }
   );
 
   # ⚠️ winit, glutin and xkbcommon `dlopen` these: builds succeed without them, then
@@ -205,19 +232,12 @@ let
     linux-aarch64.crossPkgs = final.pkgsCross.aarch64-multiplatform;
   };
 
-  emulators =
-    optionalAttrs final.stdenv.hostPlatform.isLinux {
-      windows = {
-        cmd = "wine";
-        package = final.wine64;
-      };
-    }
-    // optionalAttrs (final.stdenv.hostPlatform.system == "x86_64-linux") {
-      linux-aarch64 = {
-        cmd = "qemu-aarch64";
-        package = final.qemu;
-      };
+  emulators = optionalAttrs (final.stdenv.hostPlatform.system == "x86_64-linux") {
+    linux-aarch64 = {
+      cmd = "qemu-aarch64";
+      package = final.qemu;
     };
+  };
 
   # Where cargo puts the artifacts, and what BUILD_INFO records.
   tripleOf = spec: spec.triple or spec.crossPkgs.stdenv.hostPlatform.rust.rustcTarget;
@@ -455,6 +475,60 @@ let
       }
     );
 
+  browserSuites =
+    final.lib.mapAttrsToList
+      (
+        name: manifest:
+        let
+          suites = manifest.metadata.nix.browserTests or [ ];
+          args = commonArgs // {
+            CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
+            CARGO_PROFILE = "release-tests";
+            cargoExtraArgs = "--locked -p ${name} ${featureArgs (testFeaturesFor name)} ${
+              escapeShellArgs (
+                concatMap (suite: [
+                  "--test"
+                  suite
+                ]) suites
+              )
+            }";
+            nativeBuildInputs = [ final.lld ];
+            pname = "${name}-browser-tests";
+            inherit (manifest) version;
+          };
+        in
+        crane.mkCargoDerivation (
+          args
+          // {
+            CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER = "wasm-bindgen-test-runner";
+            WASM_BINDGEN_TEST_TIMEOUT = "300";
+            WASM_BINDGEN_TEST_WEBDRIVER_JSON = final.writeText "webdriver.json" (
+              builtins.toJSON {
+                "goog:chromeOptions" = {
+                  args = [
+                    "--disable-dev-shm-usage"
+                    "--no-sandbox"
+                  ];
+                  binary = final.lib.getExe final.chromium;
+                };
+                "moz:firefoxOptions".binary = final.lib.getExe final.firefox;
+              }
+            );
+            buildPhaseCargoCommand = ''
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+              CHROMEDRIVER=${final.lib.getExe final.chromedriver} cargo test --profile release-tests $cargoExtraArgs
+              GECKODRIVER=${final.lib.getExe final.geckodriver} cargo test --profile release-tests $cargoExtraArgs
+            '';
+            cargoArtifacts = crane.buildDepsOnly args;
+            doInstallCargoArtifacts = false;
+            installPhaseCommand = ''touch "$out"'';
+            nativeBuildInputs = args.nativeBuildInputs ++ [ final.wasm-bindgen-cli ];
+          }
+        )
+      )
+      (final.lib.filterAttrs (_: manifest: (manifest.metadata.nix.browserTests or [ ]) != [ ]) manifests);
+
   # `docs/book` is mdBook's own output directory, ignored by git; keeping it out
   # of the source means a local `mdbook build` cannot change this derivation.
   docs = final.stdenvNoCC.mkDerivation {
@@ -594,7 +668,9 @@ let
   committed = genAttrs corpusCrates (
     name:
     final.nord.crates.${name}.override {
+      CARGO_PROFILE = "release-tests";
       NORD_CORPUS_ROOT = "${corpus}";
+      cargoArtifacts = testArtifacts;
       cargoTestExtraArgs = featureArgs (testFeaturesFor name ++ [ "corpus" ]);
       pname = "${name}-corpus";
     }
@@ -615,6 +691,9 @@ in
   nord =
     crates
     // crossed
+    // optionalAttrs final.stdenv.hostPlatform.isLinux {
+      browser-tests = final.linkFarmFromDrvs "browser-tests" browserSuites;
+    }
     // mapAttrs' (name: nameValuePair "${name}-corpus") committed
     // mapAttrs' (name: nameValuePair "${name}-corpus-full") full
     // {
@@ -677,7 +756,7 @@ in
 
       # `site` stays out of `all`: it only rearranges outputs `all` already
       # builds, and the Pages deploy reaches it through scripts/site.bash.
-      inherit docs site;
+      inherit docs site tests;
 
       # `nix run .#drawbar-web`: serve the site on loopback and open it, so the
       # guide the app links to is there under /docs.
