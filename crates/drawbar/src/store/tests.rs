@@ -6397,17 +6397,115 @@ fn gig_list() -> (older::List, Vec<u8>, Vec<u8>, Vec<u8>) {
 }
 
 impl Session {
-    /// Take `list` in, as a frame does, and wait until the library has answered.
-    fn take_in(&mut self, list: &older::List) {
+    /// Take `list` in, as a frame does, and wait until the library has answered. Returns
+    /// where the take-in said it puts each asset that came with an unsaved edit.
+    fn take_in(&mut self, list: &older::List) -> Vec<(usize, LibPath)> {
         let Bench {
             workspace,
             browser,
             log,
             ..
         } = &mut self.bench;
-        self.store.take_in(list, workspace, browser, log);
+        let mut kept = Vec::new();
+        self.store.take_in(list, workspace, browser, log, |placed| {
+            kept = placed.to_vec()
+        });
         self.decided();
+        kept
     }
+
+    /// Whether `list` is the library's to keep now, so its keys may go.
+    fn handed_over(&self, list: &older::List) -> bool {
+        self.store.handed_over(&list.hash, &self.bench.workspace)
+    }
+}
+
+/// [`gig_list`] as a restart finds it, with the record its take-in kept, if any.
+fn gig_list_again(placed: Option<Vec<(usize, LibPath)>>) -> older::List {
+    let (list, ..) = gig_list();
+    older::List {
+        placed: placed.map(|placed| placed.into_iter().collect()),
+        ..list
+    }
+}
+
+/// A session that ends after the take-in lands and before it keeps its unsaved edit
+/// leaves the list; the next puts the edit back over the file the take-in made, and
+/// lets the list go once it keeps the edit.
+#[test]
+fn an_unsaved_edit_a_crash_left_unkept_is_put_back_over_its_file() {
+    let root = Temp::new();
+    let (list, _, soft, edit) = gig_list();
+    let mut first = Session::open(&root);
+    let placed = first.take_in(&list);
+    assert_eq!(placed, [(1, LibPath::parse("Gig/Pad.ne5p").unwrap())]);
+    assert!(first.store.has_taken_in(&list.hash));
+    assert!(!first.handed_over(&list), "its edit is not kept yet");
+    drop(first);
+
+    let list = gig_list_again(Some(placed));
+    let mut again = Session::open(&root);
+    again.take_in(&list);
+    assert_eq!(
+        root.names("Gig"),
+        ["Pad 2.ne5p", "Pad.ne5p"],
+        "nothing made again"
+    );
+    assert_eq!(root.read("Gig/Pad.ne5p"), soft);
+    let pad = again.named("Pad.ne5p");
+    assert!(again.bench.workspace.get(pad).unwrap().is_unsaved());
+    assert!(again.bytes(pad) == edit, "the edit is back over its file");
+    assert!(!again.handed_over(&list), "not until the edit is kept");
+    again.sync();
+    assert!(again.handed_over(&list));
+    drop(again);
+
+    let last = Session::open(&root);
+    let pad = last.named("Pad.ne5p");
+    assert!(last.bytes(pad) == edit, "kept as any unsaved edit is");
+}
+
+#[test]
+fn a_draft_that_fails_keeps_the_list_until_one_lands() {
+    let root = Temp::new();
+    let (list, ..) = gig_list();
+    let mut session = Session::open(&root);
+    session.take_in(&list);
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Create { path, .. } if path.as_str().starts_with("unsaved/")),
+    ));
+    session.sync();
+    assert!(
+        session.said("could not be kept for later") > 0,
+        "the draft failed"
+    );
+    assert!(!session.handed_over(&list));
+    session.sync();
+    assert!(session.handed_over(&list));
+}
+
+/// Without the record of where the take-in put it, an unsaved edit is brought in as a
+/// file of its own rather than lost.
+#[test]
+fn an_unsaved_edit_whose_file_is_not_known_comes_in_as_a_file_of_its_own() {
+    let root = Temp::new();
+    let (list, _, soft, edit) = gig_list();
+    let mut first = Session::open(&root);
+    first.take_in(&list);
+    drop(first);
+
+    let list = gig_list_again(None);
+    let mut again = Session::open(&root);
+    again.take_in(&list);
+    again.sync();
+    assert_eq!(root.names("Gig"), ["Pad 2.ne5p", "Pad 3.ne5p", "Pad.ne5p"]);
+    assert_eq!(root.read("Gig/Pad.ne5p"), soft);
+    assert_eq!(root.read("Gig/Pad 3.ne5p"), edit);
+    assert_eq!(
+        again.said("its unsaved edit is a file of its own, “Pad 3.ne5p”"),
+        1
+    );
+    assert!(again.handed_over(&list));
 }
 
 /// The library already holds a file named Grand and a folder named Gig, so what comes in

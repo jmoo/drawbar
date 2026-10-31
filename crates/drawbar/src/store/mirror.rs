@@ -279,10 +279,14 @@ pub struct Store {
     /// The folders that keep the slots' former occupants are to be looked in: the
     /// library has been listed, or a write has left one since.
     rescues_due: bool,
-    /// Whether this session sent the take-in of the list an older drawbar kept.
-    sent_take_in: bool,
+    /// Whether this session took up the list an older drawbar kept: sent its take-in, or
+    /// put back what a take-in left.
+    took_up: bool,
     /// That take-in, until its change answers.
     taking_in: Option<TakingIn>,
+    /// The assets the list brought this session, which the list is let go only once
+    /// each holds durably: [`Store::handed_over`].
+    brought: BTreeSet<u64>,
     /// Whether the library opened holding a copy that stopped partway as it was opened.
     opening_copy: bool,
 }
@@ -361,8 +365,9 @@ impl Store {
             shelf: None,
             shelved: BTreeMap::new(),
             rescues_due: false,
-            sent_take_in: false,
+            took_up: false,
             taking_in: None,
+            brought: BTreeSet::new(),
             opening_copy: false,
             left: Vec::new(),
         }
@@ -2681,26 +2686,53 @@ impl Store {
         shown.is_some_and(|shown| shown.taken.contains(hash))
     }
 
+    /// Whether the list of hash `hash` is the library's to keep now: it took the list in,
+    /// this session took the list up, and each asset the list brought this session is
+    /// written, with its unsaved edit kept where it holds one, or is gone.
+    pub fn handed_over(&self, hash: &str, workspace: &Workspace) -> bool {
+        let kept = |id: &u64| {
+            let Some(entity) = workspace.get(*id) else {
+                return true;
+            };
+            let record = self.records.get(id);
+            let written =
+                record.is_some_and(|record| record.fingerprint.is_some() && !record.saving);
+            let restored = !self.restoring.contains_key(id);
+            written && restored && (!entity.is_unsaved() || self.drafted.contains_key(id))
+        };
+        self.took_up && self.has_taken_in(hash) && self.brought.iter().all(kept)
+    }
+
     /// Take the list an older drawbar kept into the library as one change, which Undo
     /// takes back, once a session: once a scan has listed every file, while the library
     /// may be written and no change of drawbar's own waits to be finished. Each folder is
     /// a new one in the library's top level, and each asset a file in its folder, both
     /// under names nothing beside them has, the asset's with the extension its bytes call
-    /// for. An unsaved edit stays unsaved over the file.
+    /// for. An unsaved edit stays unsaved over the file. `keep` is given, before the
+    /// change is sent, where each asset that came with an unsaved edit goes, by its place
+    /// in the list.
+    ///
+    /// Where the library took the list in already, nothing else is written: each unsaved
+    /// edit is put back over the file the take-in gave it, as the list's record names it,
+    /// or else brought in as a file of its own beside where it went.
     pub fn take_in(
         &mut self,
         list: &older::List,
         workspace: &mut Workspace,
         browser: &mut Browser,
         log: &mut Log,
+        keep: impl FnOnce(&[(usize, LibPath)]),
     ) {
         // Nothing else is in flight whose failures the take-in would hold.
         let idle = !self.scanning && self.committing == 0 && self.finishing.is_empty();
         let ready = self.open() && self.listed && idle;
-        if !ready || list.is_empty() || self.sent_take_in || self.has_taken_in(&list.hash) {
+        if !ready || list.is_empty() || self.took_up {
             return;
         }
-        self.sent_take_in = true;
+        self.took_up = true;
+        if self.has_taken_in(&list.hash) {
+            return self.put_back(list, workspace, browser, log);
+        }
         self.send_batch();
         self.part(Intent::TakeIn {
             tags: list.tags.iter().cloned().collect(),
@@ -2719,7 +2751,8 @@ impl Store {
         }
         let mut worn: BTreeMap<&str, Vec<Key>> = BTreeMap::new();
         let mut ids = BTreeSet::new();
-        for asset in &list.assets {
+        let mut placed = Vec::new();
+        for (at, asset) in list.assets.iter().enumerate() {
             let id = workspace.next_id();
             let origin = asset
                 .came
@@ -2746,6 +2779,9 @@ impl Store {
             for tag in &asset.tags {
                 worn.entry(tag).or_default().push(Key::File(path.clone()));
             }
+            if asset.unsaved.is_some() {
+                placed.push((at, path));
+            }
             ids.insert(id);
         }
         for (name, files) in worn {
@@ -2757,13 +2793,109 @@ impl Store {
             });
         }
         let said = list.said();
+        self.brought.extend(&ids);
         self.taking_in = Some(TakingIn {
             ids,
             said,
             held: Vec::new(),
             why: None,
         });
+        keep(&placed);
         self.send_batch();
+    }
+
+    /// Put back each unsaved edit of the list the library took in, which the session
+    /// that took it in may have ended before keeping: over the file the take-in gave it,
+    /// where the list's record says which that is and the library holds it, and as a
+    /// file of its own beside where it went otherwise. An edit kept since is left as it
+    /// is.
+    fn put_back(
+        &mut self,
+        list: &older::List,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        log: &mut Log,
+    ) {
+        for (at, asset) in list.assets.iter().enumerate() {
+            let Some(edit) = &asset.unsaved else {
+                continue;
+            };
+            let placed = list.placed.as_ref().and_then(|placed| placed.get(&at));
+            let held = placed.and_then(|path| {
+                let mut listed = workspace.listed();
+                listed
+                    .find(|entity| entity.path.as_ref() == Some(path))
+                    .map(|entity| entity.id)
+            });
+            let edited = |id: &u64| {
+                let unsaved = workspace.get(*id).is_some_and(LocalEntity::is_unsaved);
+                self.restoring.contains_key(id) || unsaved
+            };
+            let key = held.and_then(|id| Some((id, self.ids.key(id)?.clone())));
+            match (held, key) {
+                (Some(id), _) if edited(&id) => _ = self.brought.insert(id),
+                (_, Some((id, key))) => {
+                    self.brought.insert(id);
+                    let draft = Draft::Bytes(edit.clone());
+                    self.restoring.insert(id, (key, draft, false, 0));
+                    workspace.hurry(id);
+                    self.restore_draft(id, workspace, browser, log);
+                }
+                _ => self.bring_edit(list, at, placed, workspace, browser, log),
+            }
+        }
+    }
+
+    /// Bring in the unsaved edit of the asset at `at` in `list`, whose file the take-in
+    /// gave it is not known or gone, as a file of its own: in the folder that file was
+    /// in, where the library holds it, and otherwise in the top level.
+    fn bring_edit(
+        &mut self,
+        list: &older::List,
+        at: usize,
+        placed: Option<&LibPath>,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+        log: &mut Log,
+    ) {
+        let asset = &list.assets[at];
+        let Some(edit) = &asset.unsaved else {
+            return;
+        };
+        let root = LibPath::root();
+        let named = || {
+            let folder = list.folders.get(asset.folder?)?;
+            Some(root.join(&names::portable(folder)))
+        };
+        let dir = placed.map(LibPath::parent).or_else(named);
+        let dir = dir
+            .filter(|dir| browser.folders.id_of(dir).is_some())
+            .unwrap_or(root);
+        let id = workspace.next_id();
+        let saved = Saved {
+            id,
+            name: asset.name.clone(),
+            path: None,
+            origin: asset
+                .came
+                .map_or_else(|| Origin::File(asset.name.clone()), Came::origin),
+            content: Content::whole(edit.clone()),
+            unsaved: None,
+        };
+        workspace.restore(vec![saved], None, log);
+        let Some(entity) = workspace.get(id) else {
+            return;
+        };
+        let name = browser
+            .folders
+            .free(&dir, &library_filename(entity), workspace);
+        workspace.place(id, dir.join(&name));
+        self.brought.insert(id);
+        log.say(format!(
+            "drawbar could not find the file “{}” was brought in as, so its unsaved edit \
+             is a file of its own, “{name}”.",
+            asset.name
+        ));
     }
 
     /// Follow a take-in that wrote what it brings, or may have: each part that did not

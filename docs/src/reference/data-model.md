@@ -126,10 +126,14 @@ for; bytes that do not decode are written as they are. An unsaved edit is held
 over its new file and kept as any unsaved edit is.
 
 The same intent adds the BLAKE3 hash of the three keys' text to the library's
-`taken in` set. drawbar empties the keys only once the library holds that hash,
-so a crash between the two takes nothing in twice, and a change that fails leaves
-the keys for the next launch. A key whose version line this build does not know
-leaves the whole list unread.
+`taken in` set. Before it is sent, drawbar records in `drawbar.taking_in` the hash
+and the path it gives each asset that has an unsaved edit. It empties the keys
+and the record only once the library holds the hash and each of those edits is
+kept, or saved or reverted since. A change that fails leaves the keys for the next
+launch. A launch that finds the hash in the library takes nothing in again: it
+puts each unsaved edit back over the file the record names, and where the record
+or the file is gone, it writes the edit as a new file beside where it went. A key
+whose version line this build does not know leaves the whole list unread.
 
 ## How a change works
 

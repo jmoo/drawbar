@@ -98,10 +98,11 @@ folder, named after it, with its tags and the slot it came from. A name already
 taken gets a number. A sound with an edit you had not saved comes back with that
 edit, still unsaved. The activity log says how many sounds came in.
 
-It is one change, so Undo takes it all back. Once the sounds are in the library,
-drawbar lets go of the old list, so after an Undo they are gone. If the change
-fails, drawbar says why, keeps the old list, and tries again the next time it
-starts.
+It is one change, so Undo takes it all back. Once the sounds are in the library
+and their unsaved edits are kept, drawbar lets go of the old list, so after an
+Undo they are gone. If drawbar stops before then, it puts the unsaved edits back
+the next time it starts. If the change fails, drawbar says why, keeps the old
+list, and tries again the next time it starts.
 
 ## Saving
 

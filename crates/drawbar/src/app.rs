@@ -775,14 +775,15 @@ impl DrawbarApp {
         self.switch_library(ctx, root);
     }
 
-    /// Empty the keys the list an older drawbar kept is under, once the library took the
-    /// list in, or at once where the list holds nothing to take in.
+    /// Empty the keys the list an older drawbar kept is under, once the library holds
+    /// the list durably, or at once where the list holds nothing to take in.
     fn let_older_go(&mut self, storage: &mut dyn eframe::Storage) {
         let Some(list) = &self.older else {
             return;
         };
         let store = self.store.as_ref();
-        if list.is_empty() || store.is_some_and(|store| store.has_taken_in(&list.hash)) {
+        let kept = |store: &Store| store.handed_over(&list.hash, &self.workspace);
+        if list.is_empty() || store.is_some_and(kept) {
             crate::store::older::empty(storage);
             self.older = None;
         }
@@ -1047,6 +1048,7 @@ impl eframe::App for DrawbarApp {
             let locals = picked.items().filter_map(browser::Item::local);
             self.workspace.select(locals.take(crate::inspector::MANY));
         }
+        let mut storage = frame.storage_mut();
         let released = match &mut self.store {
             Some(store) => {
                 #[cfg(target_arch = "wasm32")]
@@ -1063,14 +1065,22 @@ impl eframe::App for DrawbarApp {
                 let left = store.take_left().into_iter();
                 arrived.extend(left.map(browser::Act::Remove));
                 if let Some(list) = &self.older {
-                    store.take_in(list, &mut self.workspace, &mut self.browser, &mut self.log);
+                    // Kept first, so a session that ends before the edits are kept leaves
+                    // the next where to put them back.
+                    let keep = |placed: &[_]| {
+                        if let Some(storage) = storage.as_deref_mut() {
+                            crate::store::older::keep_placed(storage, &list.hash, placed);
+                        }
+                    };
+                    let (workspace, browser) = (&mut self.workspace, &mut self.browser);
+                    store.take_in(list, workspace, browser, &mut self.log, keep);
                 }
                 released
             }
             None => false,
         };
         self.let_lost_library_go(ctx);
-        if let Some(storage) = frame.storage_mut() {
+        if let Some(storage) = storage {
             self.let_older_go(storage);
         }
         self.device.poll(
@@ -1727,6 +1737,52 @@ mod tests {
         app.let_older_go(&mut again);
         assert_eq!(held(&again, "drawbar.this_computer"), "");
         assert_eq!(root.names(""), [".drawbar", "Grand.ne5p"], "taken in once");
+    }
+
+    /// A sound that came with an unsaved edit holds the list until its edit is kept as
+    /// any unsaved edit is, which the next save does.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_older_drawbars_list_stays_until_its_unsaved_edits_are_kept() {
+        use base64::prelude::{Engine as _, BASE64_STANDARD};
+        use eframe::App as _;
+
+        let root = crate::testing::Temp::new();
+        let program = crate::workspace::Fresh::Program.bytes().unwrap();
+        let edited = crate::fields::apply(&program, &[("center_panel.gain".into(), "40".into())])
+            .unwrap()
+            .1;
+        let assets = format!(
+            "drawbar 2\n2\n1\tfresh\tGrand\t{}\t{}\n",
+            BASE64_STANDARD.encode(&program),
+            BASE64_STANDARD.encode(&edited)
+        );
+        let mut storage = kept_before();
+        eframe::Storage::set_string(&mut storage, "drawbar.this_computer", assets.clone());
+        let (ctx, mut app) = kept_over(&storage, &root);
+        // No full pass, which keeps unsaved edits, runs until the save below.
+        app.synced_at = f64::INFINITY;
+        let hash = app.older.as_ref().expect("the list").hash.clone();
+        let taken = |app: &DrawbarApp| {
+            let store = app.store.as_ref();
+            store.is_some_and(|store| store.has_taken_in(&hash))
+        };
+        until(&ctx, &mut app, taken);
+        app.let_older_go(&mut storage);
+        assert_eq!(
+            held(&storage, "drawbar.this_computer"),
+            assets,
+            "the edit is not kept"
+        );
+
+        app.save(&mut crate::testing::Fake::default());
+        let kept = |app: &DrawbarApp| {
+            let store = app.store.as_ref();
+            store.is_some_and(|store| store.handed_over(&hash, &app.workspace))
+        };
+        until(&ctx, &mut app, kept);
+        app.let_older_go(&mut storage);
+        assert_eq!(held(&storage, "drawbar.this_computer"), "");
     }
 
     #[cfg(not(target_arch = "wasm32"))]

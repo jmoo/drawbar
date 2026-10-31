@@ -9,9 +9,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use base64::prelude::{Engine as _, BASE64_STANDARD};
 
 use super::keys::Came;
+use super::LibPath;
 
 /// The keys the list was kept under: its assets, its folders and its tags.
 const KEYS: [&str; 3] = ["drawbar.this_computer", "drawbar.folders", "drawbar.tags"];
+
+/// The key of the record a take-in writes before it is sent: the list's hash, then a
+/// line for each asset that came with an unsaved edit, its place in the list and the
+/// library path its file was given, tab-separated.
+const HANDOFF: &str = "drawbar.taking_in";
 
 /// How many fields an asset's line holds, which is all its version decides.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -56,6 +62,9 @@ pub struct List {
     pub tags: BTreeSet<String>,
     /// How many lines did not read.
     pub unreadable: usize,
+    /// Where a take-in of this list put the file of each asset that came with an unsaved
+    /// edit, by its place in [`List::assets`], where the record of one is kept.
+    pub placed: Option<BTreeMap<usize, LibPath>>,
 }
 
 /// One asset of the list.
@@ -147,8 +156,11 @@ pub fn found(storage: &dyn eframe::Storage) -> Found {
             ..asset
         }
     });
+    let hash = hash.finalize().to_hex().to_string();
+    let record = storage.get_string(HANDOFF).unwrap_or_default();
     Found::List(List {
-        hash: hash.finalize().to_hex().to_string(),
+        placed: placed(&record, &hash),
+        hash,
         assets: assets.collect(),
         folders: folders.named.into_iter().map(|(_, name)| name).collect(),
         tags: tags.named.into_iter().map(|(_, name)| name).collect(),
@@ -156,12 +168,37 @@ pub fn found(storage: &dyn eframe::Storage) -> Found {
     })
 }
 
-/// Empty the keys the list was kept under.
+/// Where the take-in of the list of hash `hash` put each file, as `record` says. A line
+/// that does not read names no file.
+fn placed(record: &str, hash: &str) -> Option<BTreeMap<usize, LibPath>> {
+    let mut lines = record.lines();
+    if lines.next() != Some(hash) {
+        return None;
+    }
+    let read = lines.filter_map(|line| {
+        let (at, path) = line.split_once('\t')?;
+        Some((at.parse().ok()?, LibPath::parse(path)?))
+    });
+    Some(read.collect())
+}
+
+/// Keep, before the take-in of the list of hash `hash` is sent, where it puts the file
+/// of each asset that came with an unsaved edit.
+pub fn keep_placed(storage: &mut dyn eframe::Storage, hash: &str, placed: &[(usize, LibPath)]) {
+    let mut record = format!("{hash}\n");
+    for (at, path) in placed {
+        record.push_str(&format!("{at}\t{path}\n"));
+    }
+    storage.set_string(HANDOFF, record);
+    storage.flush();
+}
+
+/// Empty the keys the list was kept under, and the record of its take-in.
 ///
 /// ⚠️ eframe's store has no remove, and on the desktop it writes back whatever it holds
 /// in memory, so a key is emptied rather than left alone.
 pub fn empty(storage: &mut dyn eframe::Storage) {
-    for key in KEYS {
+    for key in KEYS.into_iter().chain([HANDOFF]) {
         if storage.get_string(key).is_some_and(|held| !held.is_empty()) {
             storage.set_string(key, String::new());
         }
@@ -481,11 +518,34 @@ mod tests {
     }
 
     #[test]
+    fn the_record_of_a_take_in_is_read_for_its_own_list_alone() {
+        let keys = ["drawbar 2\n1\n", "drawbar folders 1\n", "drawbar tags 1\n"];
+        let mut storage = stored(keys);
+        assert_eq!(list(keys).placed, None, "no record kept");
+        let hash = list(keys).hash;
+        let pad = LibPath::parse("Gig 2/Pad.ne5p").unwrap();
+        keep_placed(&mut storage, &hash, &[(1, pad.clone())]);
+        let Found::List(read) = found(&storage) else {
+            panic!("a list");
+        };
+        assert_eq!(read.placed, Some(BTreeMap::from([(1, pad)])));
+        assert_eq!(read.hash, hash, "the record is no part of the list");
+        keep_placed(&mut storage, "another list", &[]);
+        let Found::List(read) = found(&storage) else {
+            panic!("a list");
+        };
+        assert_eq!(read.placed, None, "another list's record");
+    }
+
+    #[test]
     fn emptying_the_keys_leaves_every_other_key() {
         let mut storage = stored(["drawbar 2\n1\n", "drawbar folders 1\n", ""]);
         eframe::Storage::set_string(&mut storage, "drawbar.theme", "dark".into());
+        keep_placed(&mut storage, "a list", &[]);
         empty(&mut storage);
         assert_eq!(found(&storage), Found::Nothing);
+        let record = eframe::Storage::get_string(&storage, HANDOFF);
+        assert_eq!(record.as_deref(), Some(""), "the record goes with the keys");
         let theme = eframe::Storage::get_string(&storage, "drawbar.theme");
         assert_eq!(theme.as_deref(), Some("dark"));
     }
