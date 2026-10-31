@@ -1,14 +1,11 @@
-//! Value-level checks of the retention design in `RETENTION.md`.
+//! Value-level checks of toshokan under the retention design in `RETENTION.md`.
 //!
 //! Histories of three writers and a clone write one entity's existence, one
 //! register and set members, compact at every point, and dismiss runs. Every
 //! folder they leave, and every restore and dropped version of it, is read by
-//! readers along every delivery order, and compared with [`oracle::Oracle`], which
-//! knows every entry and never compacts. A reader holds nothing between reads: it
-//! derives what it shows from the files it sees.
-//!
-//! A design is checked through [`Design`]: [`spec::Spec`] states `RETENTION.md`'s rules
-//! over what a reader can see, and [`real::Real`] is toshokan.
+//! toshokan ([`real::Real`]) along every delivery order, and compared with
+//! [`oracle::Oracle`], which knows every entry and never compacts. A reader holds
+//! nothing between reads: it derives what it shows from the files it sees.
 
 #![allow(dead_code, reason = "each test binary uses its own part")]
 
@@ -18,10 +15,9 @@ pub mod check;
 pub mod history;
 pub mod oracle;
 pub mod real;
-pub mod spec;
 pub mod world;
 
-use world::{Dir, Dismissal, File, Hash, Seen, Shown, World};
+use world::{Dir, File, Hash, Seen, Shown, World};
 
 /// What a writer has when it compacts.
 pub struct Compaction<'a, S> {
@@ -38,7 +34,7 @@ pub struct Compaction<'a, S> {
     pub recorded: &'a BTreeSet<usize>,
 }
 
-/// What a reader sees. A design reads only the lines of the segments in `seen`
+/// What a reader sees. toshokan reads only the lines of the segments in `seen`
 /// and the snapshots in `seen`; [`oracle::Oracle`] alone looks further into
 /// `world`.
 pub struct Reading<'a, S> {
@@ -58,7 +54,7 @@ pub struct Bound {
     pub drops: usize,
 }
 
-/// A design under test.
+/// How toshokan, or the oracle, makes and reads a history's folder.
 pub trait Design {
     /// What a compaction writes.
     type Snapshot: Clone + std::fmt::Debug;
@@ -67,28 +63,6 @@ pub trait Design {
 
     /// What a reader shows of what it sees.
     fn read(&self, r: &Reading<'_, Self::Snapshot>) -> Shown;
-
-    /// The entries the files `r` sees hold, by the oracle's knowledge; used only
-    /// to state properties.
-    fn holds(&self, r: &Reading<'_, Self::Snapshot>) -> BTreeSet<Hash>;
-
-    /// The last entry a snapshot folds.
-    fn head(&self, world: &World, s: &Self::Snapshot) -> Hash;
-
-    /// The own writes of the tips among the snapshots `seen` shows: those no
-    /// other one there certifies.
-    fn tip_writes(
-        &self,
-        world: &World,
-        files: &[File<Self::Snapshot>],
-        seen: &[Seen],
-    ) -> BTreeSet<Hash>;
-
-    /// The runs a snapshot's dismissals name.
-    fn dismissals(&self, world: &World, s: &Self::Snapshot) -> Vec<Dismissal>;
-
-    /// Whether a snapshot is within P9's bound.
-    fn bounded(&self, s: &Self::Snapshot, bound: Bound) -> bool;
 
     /// Whether a snapshot's certificates name `entry`.
     fn names(&self, world: &World, s: &Self::Snapshot, entry: Hash) -> bool;

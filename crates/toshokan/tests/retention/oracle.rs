@@ -10,10 +10,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::world::{
-    change, latest, show, Body, Dir, Dismissal, Entry, Field, File, Hash, Item, ItemKind, Live,
-    Seen, Shown, Val, World, Write,
+    change, latest, show, Body, Dir, Dismissal, Entry, Field, Hash, Item, ItemKind, Live, Shown,
+    Val, World, Write,
 };
-use super::{Bound, Compaction, Design, Reading};
+use super::{Compaction, Design, Reading};
 
 /// How an oracle places a set of entries.
 #[derive(Clone, Debug, Default)]
@@ -251,20 +251,19 @@ pub struct Folds {
     pub head: Hash,
 }
 
-/// The entries the files a reader sees hold, the snapshots' whole chains included.
-pub fn holds<S>(
-    world: &World,
-    reading: &Reading<'_, S>,
-    head: impl Fn(&S) -> Hash,
-) -> BTreeSet<Hash> {
-    let mut held = BTreeSet::new();
-    for seen in reading.seen {
-        match &reading.files[seen.file].body {
-            Body::Segment(lines) => held.extend(lines.iter().take(seen.lines)),
-            Body::Snapshot(s) => held.extend(world.chain(head(s))),
+impl Oracle {
+    /// The entries the files a reader sees hold, the snapshots' whole chains
+    /// included.
+    pub fn holds(&self, r: &Reading<'_, Folds>) -> BTreeSet<Hash> {
+        let mut held = BTreeSet::new();
+        for seen in r.seen {
+            match &r.files[seen.file].body {
+                Body::Segment(lines) => held.extend(lines.iter().take(seen.lines)),
+                Body::Snapshot(s) => held.extend(r.world.chain(s.head)),
+            }
         }
+        held
     }
-    held
 }
 
 impl Design for Oracle {
@@ -278,28 +277,7 @@ impl Design for Oracle {
     }
 
     fn read(&self, r: &Reading<'_, Folds>) -> Shown {
-        let visible = holds(r.world, r, |s| s.head);
-        shown(r.world, &place(r.world, &visible))
-    }
-
-    fn holds(&self, r: &Reading<'_, Folds>) -> BTreeSet<Hash> {
-        holds(r.world, r, |s| s.head)
-    }
-
-    fn head(&self, _: &World, s: &Folds) -> Hash {
-        s.head
-    }
-
-    fn tip_writes(&self, _: &World, _: &[File<Folds>], _: &[Seen]) -> BTreeSet<Hash> {
-        BTreeSet::new()
-    }
-
-    fn dismissals(&self, _: &World, _: &Folds) -> Vec<Dismissal> {
-        Vec::new()
-    }
-
-    fn bounded(&self, _: &Folds, _: Bound) -> bool {
-        true
+        shown(r.world, &place(r.world, &self.holds(r)))
     }
 
     fn names(&self, _: &World, _: &Folds, _: Hash) -> bool {

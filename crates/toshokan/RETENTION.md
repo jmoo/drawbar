@@ -529,13 +529,14 @@ successors; and every reader converges under fair delivery.
 
 **Values.** The model merges entries, not values. References, deletes that kill
 fields, contradicted references, forgotten bases and the display of runs are
-checked by `tests/retention`, against an oracle that holds every entry ever
-written, never compacts and merges by exact hash. Histories of up to three
+checked by `tests/retention`, which runs toshokan's encoding, compaction and
+derivation against an oracle that holds every entry ever written, never
+compacts and merges by exact hash. Histories of up to three
 writers and a clone, which may resume mid-segment, write two entities'
 existence, two registers and two set members, delete and revive, dismiss and
 take runs, and compact after any entry, or after a sync client dropped the open
-segment's newest line. Each writer writes from what the design under test shows
-it of the folder. Every folder they leave is read at rest, along every delivery
+segment's newest line. Each writer writes from what toshokan shows it of the
+folder. Every folder they leave is read at rest, along every delivery
 order up to a cap (with deleted files delivered early, late or never), with
 conflicted copies, at every subset of its files, after a restore of the folder
 or of one directory to every earlier state, and after every dropped version of a
@@ -554,11 +555,7 @@ reports contradicted, or the field is a forgotten basis. A missing value fails
 unless an item of its writer shows it on that field, or shows that field as a
 forgotten basis while no tip holds the write that carried it.
 
-The design under test is a `Design` implementation that sees only what a reader
-sees, with switches that drop the rules for branch references, the union of
-tips, own writes and dismissals; with each switch off, a test must find a
-violation. The same checks run against toshokan. `tests/retention_slice.rs`, in
-the default suite, runs a bounded slice; `tests/retention_sweep.rs` runs the
-rest by name.
+`tests/retention_slice.rs`, in the default suite, runs a bounded slice;
+`tests/retention_sweep.rs` runs the rest by name.
 
 Nothing in this design depends on clocks.

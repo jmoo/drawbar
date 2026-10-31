@@ -135,10 +135,6 @@ impl World {
         chain.reverse();
         chain
     }
-
-    pub fn ancestors_or_self(&self, hash: Hash) -> BTreeSet<Hash> {
-        self.chain(hash).into_iter().collect()
-    }
 }
 
 /// What a file holds: a segment's lines, or a snapshot of design `S`.

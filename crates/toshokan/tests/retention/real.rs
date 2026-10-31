@@ -15,7 +15,6 @@ use toshokan::report;
 use toshokan::snapshot::Snapshot;
 use toshokan::{EntityId, EntryHash, Hlc, Raw, WriterId};
 
-use super::oracle;
 use super::world::{
     show, Body, Dir, Dismissal, Entry, Field, File, Hash, Item, ItemKind, Kind, Live, Ref, Seen,
     Shown, Val, World, Write,
@@ -483,16 +482,26 @@ impl Design for Real {
         shown(r.world, &lines, &derived(r, &lines))
     }
 
-    fn holds(&self, r: &Reading<'_, Snapshot>) -> BTreeSet<Hash> {
-        let lines = Lines::of(r.world);
-        oracle::holds(r.world, r, |s: &Snapshot| lines.back[&s.head.hash])
+    fn names(&self, world: &World, s: &Snapshot, entry: Hash) -> bool {
+        let hash = Lines::of(world).entries[entry as usize].hash();
+        s.certified.named().any(|named| named.hash == hash)
     }
+}
 
-    fn head(&self, world: &World, s: &Snapshot) -> Hash {
+impl Real {
+    /// The last entry a snapshot folds.
+    pub fn head(&self, world: &World, s: &Snapshot) -> Hash {
         Lines::of(world).back[&s.head.hash]
     }
 
-    fn tip_writes(&self, world: &World, files: &[File<Snapshot>], seen: &[Seen]) -> BTreeSet<Hash> {
+    /// The own writes of the tips among the snapshots `seen` shows: those no
+    /// other one there certifies.
+    pub fn tip_writes(
+        &self,
+        world: &World,
+        files: &[File<Snapshot>],
+        seen: &[Seen],
+    ) -> BTreeSet<Hash> {
         let lines = Lines::of(world);
         let snapshots: Vec<&Snapshot> = seen
             .iter()
@@ -511,7 +520,8 @@ impl Design for Real {
             .collect()
     }
 
-    fn dismissals(&self, world: &World, s: &Snapshot) -> Vec<Dismissal> {
+    /// The runs a snapshot's dismissals name.
+    pub fn dismissals(&self, world: &World, s: &Snapshot) -> Vec<Dismissal> {
         let lines = Lines::of(world);
         s.state
             .dismissals
@@ -520,17 +530,13 @@ impl Design for Real {
             .collect()
     }
 
-    fn bounded(&self, s: &Snapshot, b: Bound) -> bool {
+    /// Whether a snapshot is within P9's bound.
+    pub fn bounded(&self, s: &Snapshot, b: Bound) -> bool {
         let state = &s.state;
         state.own.len() <= b.fields
             && state.refs.len() <= 2 * b.fields * (b.writers - 1)
             && state.takes.len() <= b.fields * (b.writers - 1)
             && s.certified.segments.len() <= b.segments
             && s.certified.hashes.len() <= state.dismissals.len() + b.drops
-    }
-
-    fn names(&self, world: &World, s: &Snapshot, entry: Hash) -> bool {
-        let hash = Lines::of(world).entries[entry as usize].hash();
-        s.certified.named().any(|named| named.hash == hash)
     }
 }
