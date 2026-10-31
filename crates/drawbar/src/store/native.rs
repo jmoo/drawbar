@@ -60,7 +60,7 @@ fn beside_store() -> Option<PathBuf> {
 /// its own, but the identities its scans read and what it let go of are kept in one file
 /// each, and the one that writes last keeps its own.
 ///
-/// In tests it is beside the library, as [`crate::testing::Temp::local`] puts it, so no
+/// In tests it is beside the library, as the tests' own libraries keep it, so no
 /// test writes in drawbar's own data.
 pub fn local_root(root: &Path) -> PathBuf {
     if cfg!(test) {
