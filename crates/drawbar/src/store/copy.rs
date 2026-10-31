@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 
 use nord_usb::FileSource;
 use toshokan::asynch::Fs;
-use toshokan::io::{Io, Kind, Root};
+use toshokan::io::{Io, IoError, Kind, Root};
 use toshokan::RelPath;
 
 use super::keys::{DIR, LOCAL};
@@ -22,12 +22,25 @@ use super::Outside;
 /// The most entries a copy opened may hold.
 const MOST_ENTRIES: u64 = 1_000_000;
 /// The most bytes a copy's directory may take.
-const MOST_DIRECTORY: u64 = 256 << 20;
+const MOST_DIRECTORY: u64 = 64 << 20;
+
+/// The file that stands while a copy is being opened. A library that holds it opens
+/// read-only, and the next copy opened into it first removes what the last one left.
+pub const OPENING: &str = ".drawbar/opening-copy";
 
 /// Whether the file or folder at `path` of a library's folder goes in a copy of it.
 #[cfg(any(target_arch = "wasm32", test))]
 pub fn copied(path: &str) -> bool {
-    !own(path) && !path.ends_with(".crswap")
+    !own(path) && !path.ends_with(".crswap") && key(path) != key(OPENING)
+}
+
+/// Whether a copy was being opened into the library on `fs` when the opening stopped.
+pub async fn opening<F: Fs>(fs: &F) -> std::io::Result<bool> {
+    Ok(storage::stat(fs, &opening_path()).await?.is_some())
+}
+
+fn opening_path() -> RelPath {
+    RelPath::new(OPENING).expect("a library path")
 }
 
 /// Whether `path` is an install's own state, or holds it.
@@ -90,6 +103,9 @@ pub fn restorable(mut entries: Vec<Stored>, directory: u64) -> Result<Vec<Restor
         if own(text) {
             return Err(unlike(format!("it holds {DIR}/{LOCAL}")));
         }
+        if key(text) == key(OPENING) {
+            return Err(unlike(format!("it holds {OPENING}")));
+        }
         if !seen.insert(text.to_string()) {
             return Err(unlike(format!("it holds {text} twice")));
         }
@@ -130,12 +146,17 @@ fn unlike(why: String) -> String {
     format!("it is not a copy of a library drawbar saved: {why}")
 }
 
-/// Open the copy `from` into the library on `fs`, which must hold no file but an
-/// install's own state, and answer how many files it wrote. Every entry is written as
-/// it is, `.drawbar/library/` among them, so this runs before the library opens. A copy
-/// that fails partway takes back what it wrote. drawbar's own files are not counted.
+/// Open the copy `from` into the library on `fs`, which must hold none of the user's
+/// files, and answer how many files it wrote. What the library held of drawbar's own,
+/// its history among it, is replaced, and an install's own state is kept. Every entry
+/// is written as it is, `.drawbar/library/` among them, so this runs before the
+/// library opens. [`OPENING`] stands while it writes: a copy that fails partway leaves
+/// the library empty, and one stopped partway leaves it read-only until a copy is
+/// opened again. drawbar's own files are not counted.
 pub async fn restore<F: Fs>(fs: &F, from: &Outside) -> Result<usize, String> {
-    if let Some(path) = first_file(fs).await.map_err(|e| e.to_string())? {
+    let failed = |e: std::io::Error| e.to_string();
+    let resumed = opening(fs).await.map_err(failed)?;
+    if let Some(path) = first_file(fs).await.map_err(failed)?.filter(|_| !resumed) {
         return Err(format!(
             "the library in this browser already holds files, such as {path}, and a copy \
              opens only into an empty one"
@@ -143,21 +164,32 @@ pub async fn restore<F: Fs>(fs: &F, from: &Outside) -> Result<usize, String> {
     }
     let mut source = super::outside_source(from).map_err(|e| e.to_string())?;
     let entries = contents(&mut source).await?;
-    let mut written = Vec::new();
+    clear(fs).await.map_err(failed)?;
+    let started = |e| format!("starting to open it: {}", storage::failed(e));
+    let dir = Io::MakeDir {
+        root: Root::Folder,
+        path: RelPath::new(DIR).expect("a library path"),
+    };
+    fs.perform(dir).await.map_err(started)?;
+    let mark = Io::Create {
+        root: Root::Folder,
+        path: opening_path(),
+        bytes: Vec::new(),
+    };
+    fs.perform(mark).await.map_err(started)?;
     let mut files = 0;
     for restored in &entries {
-        if let Err(why) = write(fs, &mut source, restored, &mut written).await {
-            for path in written.iter().rev() {
-                let _ = storage::remove(fs, Root::Folder, path).await;
-            }
+        if let Err(why) = write(fs, &mut source, restored).await {
+            clear(fs).await.map_err(failed)?;
             return Err(why);
         }
         files += usize::from(!restored.folder && !inside(restored.path.as_str(), DIR));
     }
+    done_opening(fs).await.map_err(failed)?;
     Ok(files)
 }
 
-/// The first file of the folder that is not an install's own state, if any.
+/// The first of the user's files in the folder, outside drawbar's own, if any.
 async fn first_file<F: Fs>(fs: &F) -> std::io::Result<Option<RelPath>> {
     let mut waiting = vec![RelPath::ROOT];
     while let Some(dir) = waiting.pop() {
@@ -166,13 +198,65 @@ async fn first_file<F: Fs>(fs: &F) -> std::io::Result<Option<RelPath>> {
                 continue;
             };
             match meta.kind {
-                _ if own(path.as_str()) => {}
+                _ if key(path.as_str()) == key(DIR) => {}
                 Kind::File => return Ok(Some(path)),
                 Kind::Directory => waiting.push(path),
             }
         }
     }
     Ok(None)
+}
+
+/// Remove every file and folder of the folder but an install's own state, deepest
+/// first, then [`OPENING`], then `.drawbar` where nothing is left in it.
+async fn clear<F: Fs>(fs: &F) -> std::io::Result<()> {
+    let mut found = Vec::new();
+    let mut waiting = vec![RelPath::ROOT];
+    while let Some(dir) = waiting.pop() {
+        for (name, meta) in storage::list(fs, Root::Folder, &dir).await? {
+            let Ok(path) = dir.join(&name) else {
+                continue;
+            };
+            if own(path.as_str()) || key(path.as_str()) == key(OPENING) {
+                continue;
+            }
+            if meta.kind == Kind::Directory {
+                waiting.push(path.clone());
+            }
+            found.push((path, meta.kind));
+        }
+    }
+    for (path, kind) in found.into_iter().rev() {
+        match kind {
+            Kind::File => storage::remove(fs, Root::Folder, &path).await?,
+            // `.drawbar` holds [`OPENING`] until the rest is gone.
+            Kind::Directory if key(path.as_str()) == key(DIR) => {}
+            Kind::Directory => {
+                let io = Io::RemoveDir {
+                    root: Root::Folder,
+                    path,
+                };
+                match fs.perform(io).await {
+                    Ok(_) | Err(IoError::NotFound) => {}
+                    Err(e) => return Err(storage::failed(e)),
+                }
+            }
+        }
+    }
+    done_opening(fs).await
+}
+
+/// Remove [`OPENING`], then `.drawbar` where nothing is left in it.
+async fn done_opening<F: Fs>(fs: &F) -> std::io::Result<()> {
+    storage::remove(fs, Root::Folder, &opening_path()).await?;
+    let dir = Io::RemoveDir {
+        root: Root::Folder,
+        path: RelPath::new(DIR).expect("a library path"),
+    };
+    match fs.perform(dir).await {
+        Ok(_) | Err(IoError::NotFound | IoError::NotEmpty) => Ok(()),
+        Err(e) => Err(storage::failed(e)),
+    }
 }
 
 /// The entries of the archive `source` holds, as a copy drawbar saved lays them out.
@@ -212,12 +296,11 @@ async fn read(source: &mut impl FileSource, at: u64, len: u64) -> Result<Vec<u8>
     }
 }
 
-/// Write `restored` into the folder from `source`, adding each file made to `written`.
+/// Write `restored` into the folder from `source`.
 async fn write<F: Fs>(
     fs: &F,
     source: &mut impl FileSource,
     restored: &Restored,
-    written: &mut Vec<RelPath>,
 ) -> Result<(), String> {
     let Restored {
         path,
@@ -270,9 +353,6 @@ async fn write<F: Fs>(
             },
         };
         fs.perform(io).await.map_err(failed)?;
-        if at == 0 {
-            written.push(path.clone());
-        }
         at += len;
         if at == entry.len {
             break;

@@ -117,16 +117,15 @@ impl Root {
 /// What may delete the browser's own library.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Risk {
-    /// The browser deletes a site's storage after seven days without a visit.
+    /// The browser deletes a site's storage after seven days of use without a visit.
     Unvisited,
     /// The browser may clear its storage when space runs low, as it has not promised to
     /// keep it.
     Pressure,
 }
 
-/// Whether this browser deletes a site's storage after seven days without a visit, as
-/// Safari and other WebKit browsers do outside a web app in the Dock or on the Home
-/// Screen.
+/// Whether this browser deletes a site's storage after seven days of use without a
+/// visit, as Safari and other WebKit browsers do outside a web app.
 // Reported by public documentation; not confirmed on hardware.
 fn deletes_unvisited() -> bool {
     let Some(window) = web_sys::window() else {
@@ -299,7 +298,7 @@ impl Backend {
             .used
             .map(|(used, quota)| format!("{} of {} used", size(used), size(quota)));
         let kept = match (risk, room.kept) {
-            (Some(Risk::Unvisited), _) => Some("deleted after seven days without a visit"),
+            (Some(Risk::Unvisited), _) => Some("deleted after seven days of use without a visit"),
             (_, Some(true)) => Some("kept"),
             (_, Some(false)) => Some("may be cleared when space runs low"),
             (_, None) => None,

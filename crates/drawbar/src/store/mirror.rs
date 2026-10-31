@@ -270,6 +270,8 @@ pub struct Store {
     rescues_due: bool,
     /// What an older drawbar kept in the folder, as opening found it, until taken.
     older: Vec<super::Older>,
+    /// Whether the library opened holding a copy that stopped partway as it was opened.
+    opening_copy: bool,
     /// Whether opening found unsaved edits an earlier drawbar kept, until taken.
     earlier: bool,
 }
@@ -349,6 +351,7 @@ impl Store {
             shelved: BTreeMap::new(),
             rescues_due: false,
             older: Vec::new(),
+            opening_copy: false,
             earlier: false,
             left: Vec::new(),
         }
@@ -1565,10 +1568,15 @@ impl Store {
                 log.error(format!("opening a copy of the library: {why}"));
                 log.trouble(format!("The copy was not opened: {why}."));
             }
-            Event::Copied(Ok((name, files))) => log.say(match files {
-                1 => format!("Saved a copy of the library as {name}, with 1 file."),
-                n => format!("Saved a copy of the library as {name}, with {n} files."),
-            }),
+            Event::Copied(Ok((name, files))) => log.say(format!(
+                "The browser is saving a copy of the library as {name}, with {}. Change \
+                 nothing in the library until its download finishes, or the copy may not \
+                 be whole.",
+                match files {
+                    1 => "1 file".to_string(),
+                    n => format!("{n} files"),
+                }
+            )),
             Event::Copied(Err(why)) => {
                 log.error(format!("saving a copy of the library: {why}"));
                 log.trouble(format!("No copy of the library was saved: {why}."));
@@ -1800,6 +1808,7 @@ impl Store {
     ) {
         let Opened {
             writable,
+            opening_copy,
             viewed,
             drafts,
             earlier,
@@ -1807,6 +1816,7 @@ impl Store {
             older,
             trouble,
         } = opened;
+        self.opening_copy = opening_copy;
         self.earlier = earlier;
         self.older = older;
         for why in trouble {
@@ -2611,6 +2621,12 @@ impl Store {
     }
 
     /// What an older drawbar kept in the folder, as opening found it, once.
+    /// Whether the library opened holding a copy that stopped partway as it was opened,
+    /// which a copy opened again may replace.
+    pub fn opening_copy(&self) -> bool {
+        self.opening_copy
+    }
+
     pub fn take_older(&mut self) -> Vec<super::Older> {
         std::mem::take(&mut self.older)
     }

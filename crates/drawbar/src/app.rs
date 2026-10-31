@@ -910,7 +910,8 @@ impl DrawbarApp {
     /// files.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn open_copy(&mut self, ctx: &egui::Context) {
-        if self.browser.folders.count(None, &self.workspace) > 0 {
+        let resumed = self.store.as_ref().is_some_and(Store::opening_copy);
+        if self.browser.folders.count(None, &self.workspace) > 0 && !resumed {
             self.log.say(
                 "A copy opens only into an empty library, and the library in this browser \
                  holds files.",
@@ -944,8 +945,8 @@ impl DrawbarApp {
         self.told_risk = true;
         let what = match risk {
             Risk::Unvisited => {
-                "This browser deletes it after seven days without a visit, unless drawbar \
-                 is added to the Dock or the Home Screen."
+                "This browser deletes it once it has been used for seven days without a \
+                 visit to drawbar."
             }
             Risk::Pressure => "This browser may clear it when space runs low.",
         };

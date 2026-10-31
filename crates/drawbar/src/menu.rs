@@ -133,7 +133,7 @@ pub fn label(command: Command) -> &'static str {
         #[cfg(target_arch = "wasm32")]
         Command::SaveCopy => SAVE_COPY,
         #[cfg(target_arch = "wasm32")]
-        Command::OpenCopy => "Open a copy…",
+        Command::OpenCopy => OPEN_COPY,
         Command::Save => "Save",
         Command::Revert => "Revert to saved",
         Command::Export => "Export…",
@@ -466,6 +466,9 @@ pub const OPEN_LIBRARY: &str = "Open library folder…";
 
 /// The item that downloads a copy of the library.
 pub const SAVE_COPY: &str = "Save a copy of the library";
+
+/// File ▸ Open a copy…, as messages name it.
+pub const OPEN_COPY: &str = "Open a copy…";
 
 /// The title of [`Entry::Recent`]'s submenu.
 pub const RECENT: &str = "Open recent library";

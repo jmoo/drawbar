@@ -168,10 +168,10 @@ keeps running the build it loaded. Within version 2:
    and `kind`; ids as 32 hex digits; every array form (clock readings, `Ref`,
    `Own`, `Forked`, certificates, `settled` pairs, `unknown` pairs, the rows of
    `identities.json`); the names of every file and directory in Layout; the lock
-   names; and the limits on a line, a record and a file. Frozen too, since a
-   reader refuses what it does not know in them: the members of each record of a
-   snapshot's `state`, of an observed write, and of `head.json`, which is written
-   over in place and so keeps one length.
+   names; and the limits on a line, a record and a file. Frozen too: the members
+   of each record of a snapshot's `state` and of an observed write, since a reader
+   refuses what it does not know in them, and of `head.json`, which is written over
+   in place, so a reader drops what it does not know there.
 2. **Additive.** Anywhere else, a new object member may appear. It is optional,
    changes nothing about the members beside it, and a reader that does not know
    it keeps it where Merging and Snapshots keep what they do not know. Data a

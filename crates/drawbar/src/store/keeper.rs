@@ -81,6 +81,8 @@ pub struct Keeper<F> {
     told_unemptied: bool,
     /// Whether this session looked for an older drawbar's index to take in.
     looked_for_older: bool,
+    /// Whether the library opened holding a copy that stopped partway as it was opened.
+    opening_copy: bool,
 }
 
 impl<F: Fs> Keeper<F> {
@@ -100,6 +102,7 @@ impl<F: Fs> Keeper<F> {
             writer: None,
             told_unemptied: false,
             looked_for_older: false,
+            opening_copy: false,
         }
     }
 
@@ -464,7 +467,13 @@ impl<F: Fs> Keeper<F> {
             .await
             .map_err(|e| told(&e))?;
         let mut trouble = Vec::new();
-        if opened.mode == Mode::Writable {
+        let opening_copy = super::copy::opening(library.fs()).await;
+        let opening_copy = opening_copy.unwrap_or_else(|e| {
+            trouble.push(format!("looking for a copy being opened: {e}"));
+            false
+        });
+        self.opening_copy = opening_copy;
+        if opened.mode == Mode::Writable && !opening_copy {
             let finishing = |e: Error| format!("finishing a change: {}", told(&e));
             let settled = library.settle_interrupted().await;
             let failed = settled.err().filter(|e| !matches!(e, Error::ReadOnly(_)));
@@ -491,6 +500,11 @@ impl<F: Fs> Keeper<F> {
             ..committed_view(&library, &mut self.shown, Vec::new())
         };
         let writable = match library.mode() {
+            Mode::Writable if opening_copy => Err(Unwritable::ReadOnly(format!(
+                "a copy was being opened into it when drawbar stopped; open the copy again \
+                 with File ▸ {}",
+                crate::menu::OPEN_COPY
+            ))),
             Mode::Writable => Ok(()),
             Mode::ReadOnly(why @ Why::Unfinished { .. }) => {
                 Err(Unwritable::Unfinished(read_only(why)))
@@ -524,6 +538,7 @@ impl<F: Fs> Keeper<F> {
         });
         Ok(Opened {
             writable,
+            opening_copy,
             viewed,
             drafts,
             earlier,
@@ -571,8 +586,13 @@ impl<F: Fs> Keeper<F> {
                 }
             }
         }
-        // Once a scan has listed every file, as taking in binds them.
-        if whole && !std::mem::replace(&mut self.looked_for_older, true) {
+        // Once a scan has listed every file, as taking in binds them, and not while this
+        // session's own change waits: its commit would finish that unheard.
+        let ready = whole
+            && !self.opening_copy
+            && matches!(library.mode(), Mode::Writable)
+            && library.finishing().is_empty();
+        if ready && !std::mem::replace(&mut self.looked_for_older, true) {
             if let Some(took) = take_in_older(library).await {
                 answer(Event::TookIn(took));
             }
@@ -2381,6 +2401,54 @@ mod tests {
             matches!(&answers[..], [Event::Restored(Err(_))]),
             "{answers:?}"
         );
+    }
+
+    /// A library whose files are all gone holds only its history, which a copy replaces.
+    #[test]
+    fn a_copy_opens_over_the_history_of_a_library_whose_files_are_gone() {
+        let from = Temp::new();
+        fs::write(from.at("a.ne5p"), b"first").unwrap();
+        let (_saved, copy) = saved(&from);
+        let to = Temp::new();
+        let old = to.at(".drawbar/library/writers.2/old");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("segment.txt"), b"history").unwrap();
+        let answers = unopened(&to).run_one(Cmd::Restore(copy));
+        assert!(
+            matches!(answers[..], [Event::Restored(Ok(1))]),
+            "{answers:?}"
+        );
+        assert_eq!(to.read("a.ne5p"), b"first");
+        assert!(!old.exists(), "the old history is replaced");
+    }
+
+    /// A copy whose opening stopped partway leaves the library read-only, saying to open
+    /// it again, and opening it again takes away what the first left.
+    #[test]
+    fn a_copy_stopped_partway_leaves_the_library_read_only_until_it_is_opened_again() {
+        let from = Temp::new();
+        fs::write(from.at("a.ne5p"), b"first").unwrap();
+        let (_saved, copy) = saved(&from);
+        let to = Temp::new();
+        fs::create_dir_all(to.at(".drawbar")).unwrap();
+        fs::write(to.at(super::super::copy::OPENING), b"").unwrap();
+        fs::write(to.at("half.ne5p"), b"ha").unwrap();
+        let opened = unopened(&to).run_one(Cmd::Open);
+        let [Event::Opened(Ok(opened))] = &opened[..] else {
+            panic!("{opened:?}")
+        };
+        assert!(opened.opening_copy);
+        assert!(
+            matches!(&opened.writable, Err(Unwritable::ReadOnly(why)) if why.contains(crate::menu::OPEN_COPY)),
+            "{:?}",
+            opened.writable
+        );
+        let answers = unopened(&to).run_one(Cmd::Restore(copy));
+        assert!(
+            matches!(answers[..], [Event::Restored(Ok(1))]),
+            "{answers:?}"
+        );
+        assert_eq!(to.names(""), ["a.ne5p"], "the first opening's file is gone");
     }
 
     /// A scan leaves out every name that starts with a dot, as drawbar never lists one:

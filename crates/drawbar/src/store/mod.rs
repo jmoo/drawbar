@@ -972,6 +972,9 @@ pub enum Unwritable {
 pub struct Opened {
     /// `Err` with the reason when nothing may be written here. The library still opens.
     pub writable: Result<(), Unwritable>,
+    /// Whether a copy was being opened into the library when the opening stopped, so
+    /// another copy may be opened over what it left.
+    pub opening_copy: bool,
     /// What the library kept of its view, which lists no file until a
     /// [`Cmd::Rescan`] has scanned every one.
     pub viewed: Viewed,
