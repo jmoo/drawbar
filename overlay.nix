@@ -130,6 +130,7 @@ let
   tests = crane.mkCargoDerivation (
     testArgs
     // {
+      NORD_TEST_FEATURES = concatStringsSep "," testFeatures;
       buildPhaseCargoCommand = "bash ${./scripts/test.bash}";
       cargoArtifacts = testArtifacts;
       doInstallCargoArtifacts = false;
@@ -668,9 +669,7 @@ let
   committed = genAttrs corpusCrates (
     name:
     final.nord.crates.${name}.override {
-      CARGO_PROFILE = "release-tests";
       NORD_CORPUS_ROOT = "${corpus}";
-      cargoArtifacts = testArtifacts;
       cargoTestExtraArgs = featureArgs (testFeaturesFor name ++ [ "corpus" ]);
       pname = "${name}-corpus";
     }
@@ -757,6 +756,11 @@ in
       # `site` stays out of `all`: it only rearranges outputs `all` already
       # builds, and the Pages deploy reaches it through scripts/site.bash.
       inherit docs site tests;
+
+      # Each crate's shipping build on its own features; `tests` runs the suites.
+      packages = final.linkFarm "packages" (
+        mapAttrs (_: crate: crate.overrideAttrs { doCheck = false; }) crates
+      );
 
       # `nix run .#drawbar-web`: serve the site on loopback and open it, so the
       # guide the app links to is there under /docs.

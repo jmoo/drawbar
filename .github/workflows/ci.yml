@@ -38,15 +38,18 @@ jobs:
         uses: ./.github/actions/nix
         with:
           cache: native
+          store-size: 8G
       - if: runner.os != 'Windows'
-        run: nix build .#nord.tests --print-build-logs
-      # Keep in step with the rustc version in flake.lock's nixpkgs.
+        run: nix build .#nord.tests .#nord.packages --print-build-logs
+      # `nix flake check` holds this to the rustc in flake.lock's nixpkgs.
       - if: runner.os == 'Windows'
         shell: bash
         working-directory: crates
+        env:
+          RUST_VERSION: 1.97.1
         run: |
-          rustup toolchain install 1.97.1 --profile minimal --no-self-update
-          rustup override set 1.97.1
+          rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
+          rustup override set "$RUST_VERSION"
       - if: runner.os == 'Windows'
         uses: Swatinem/rust-cache@v2
         with:
@@ -138,8 +141,7 @@ jobs:
   # After release, so a tag created in the same run is the one published.
   #
   # The app is built through the tag's flake, which pins its own nixpkgs and
-  # wasm toolchain, so this job keeps a cache of its own rather than restoring
-  # the build job's.
+  # wasm toolchain, so this job keeps a cache of its own.
   pages:
     if: github.repository == 'jmoo/drawbar' && github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
     needs: [release, telemetry]
