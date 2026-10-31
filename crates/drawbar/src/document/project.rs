@@ -16,18 +16,23 @@ use std::ops::RangeInclusive;
 
 use eframe::egui;
 use nord_format::formats::nsmpproj::{
-    PathError, Project, VelocityDefaults, HIGHEST_NOTE, LOWEST_NOTE, MAX_VELOCITY,
+    build, PathError, Project, VelocityDefaults, HIGHEST_NOTE, LOWEST_NOTE, MAX_VELOCITY,
 };
 use nord_format::note;
 use nord_format::Entity;
 
 use super::capability::{Fact, Offset, Stands, State as Cap};
 use super::controls::{self, Sets};
+use super::header::{Click, Loud, Tone};
 use super::keys;
 use super::sample::{self, note_picker, MapAct, MapZone, RowSpec, Sounds, State, VelocityAsk};
 use super::table::PAD;
 use crate::app;
+use crate::builds::{self, Wav};
+use crate::icon::Glyph;
 use crate::midi::Played;
+use crate::store::LibPath;
+use crate::workspace::{LocalEntity, Workspace};
 
 fn project(entity: &Entity) -> Option<&Project> {
     match entity {
@@ -695,10 +700,111 @@ pub fn offsets(snapshot: &Snapshot) -> Vec<Offset> {
     ]
 }
 
+/// Where an open project's WAVs are in the library, looked for again only when the
+/// project's bytes or its place change, or the library's assets do.
+#[derive(Default)]
+pub struct Located {
+    held: Option<(Seen, Found)>,
+}
+
+/// Each audio file a zone of the project plays, by its stored path, with where its WAV
+/// is, or why its audio files do not read.
+pub type Found = Result<Vec<(String, Wav)>, String>;
+
+/// What [`Located`] was taken against: the project's stamp and path, and the
+/// workspace's [`revision`](Workspace::revision) and [`layout`](Workspace::layout),
+/// which move when an asset is listed, read, renamed or removed.
+type Seen = (u64, Option<LibPath>, u64, u64);
+
+impl Located {
+    pub fn of(&mut self, entity: &LocalEntity, workspace: &Workspace) -> &Found {
+        let seen = (
+            entity.stamp,
+            entity.path.clone(),
+            workspace.revision(),
+            workspace.layout(),
+        );
+        let held = match self.held.take() {
+            Some((held, found)) if held == seen => (held, found),
+            _ => {
+                let files = match entity.entity.as_deref().and_then(project) {
+                    Some(project) => build::played(project).map_err(|e| e.to_string()),
+                    None => Err("it does not decode".to_string()),
+                };
+                let dir = builds::dir_of(entity);
+                let wavs = builds::wav_assets(workspace);
+                let found = files.map(|files| builds::locate_all(&dir, &files, &wavs));
+                (seen, found)
+            }
+        };
+        &self.held.insert(held).1
+    }
+}
+
+/// What a project's loud action is called.
+pub const BUILD: &str = "Build → .nsmp";
+
+/// The header's loud action for a project: its build, ready once the library lists
+/// every WAV it plays.
+pub fn loud(entity: &LocalEntity, found: &Found, building: bool) -> Loud {
+    let build = Loud {
+        label: BUILD.to_string(),
+        short: "Build".to_string(),
+        glyph: Glyph::Hammer,
+        tone: Tone::Blocked,
+        hint: String::new(),
+        click: Click::Nothing,
+    };
+    if building {
+        return Loud {
+            label: "Building…".to_string(),
+            short: "Building…".to_string(),
+            tone: Tone::Idle,
+            hint: "the instrument opens in a tab once it is built".to_string(),
+            ..build
+        };
+    }
+    let wavs = match found {
+        Ok(wavs) => wavs,
+        Err(why) => {
+            return Loud {
+                hint: format!("its audio files do not read: {why}"),
+                ..build
+            }
+        }
+    };
+    let unresolved = builds::unresolved(wavs);
+    if unresolved.is_empty() {
+        let lands = builds::dir_of(entity).join(&builds::instrument_name(&entity.name));
+        return Loud {
+            tone: Tone::Ready,
+            hint: format!(
+                "writes a {} instrument to {lands}, numbered if that name is taken",
+                builds::LAYOUT.generation()
+            ),
+            click: Click::Build,
+            ..build
+        };
+    }
+    let count = unresolved.len();
+    let wavs = match count {
+        1 => "WAV",
+        _ => "WAVs",
+    };
+    Loud {
+        label: format!("{count} {wavs} missing"),
+        short: format!("{count} missing"),
+        glyph: Glyph::CircleAlert,
+        hint: unresolved.join("\n"),
+        ..build
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testing::{self, context, Word};
+    use crate::workspace::Origin;
     use nord_format::formats::nsmpproj::NewZone;
 
     fn project_bytes() -> Vec<u8> {
@@ -719,6 +825,184 @@ mod tests {
             .collect();
         let project = Project::new("Marimba", &zones, 0).unwrap();
         nord_format::to_bytes(&Entity::SampleProject(project)).unwrap()
+    }
+
+    /// The header's loud action for a project at `Marimba/Marimba.nsmpproj` whose zones
+    /// play `stored`, in a library holding WAVs at `wavs`.
+    fn loud_over(stored: &[&str], wavs: &[&str], building: bool) -> Loud {
+        let zones: Vec<NewZone> = stored
+            .iter()
+            .zip(48..)
+            .map(|(path, root_key)| NewZone {
+                path: path.to_string(),
+                sample_rate: 44100,
+                frames: 44100,
+                root_key,
+            })
+            .collect();
+        loud_of(Project::new("Marimba", &zones, 0).unwrap(), wavs, building)
+    }
+
+    /// The header's loud action for `project` at `Marimba/Marimba.nsmpproj`, in a library
+    /// holding WAVs at `wavs`.
+    fn loud_of(project: Project, wavs: &[&str], building: bool) -> Loud {
+        let bytes = nord_format::to_bytes(&Entity::SampleProject(project)).unwrap();
+        let mut log = crate::log::Log::default();
+        let mut workspace = crate::workspace::Workspace::new(context());
+        let origin = crate::workspace::Origin::File("Marimba.nsmpproj".into());
+        let id = workspace.ingest("Marimba.nsmpproj".into(), origin, bytes, &mut log);
+        workspace.place(id, LibPath::parse("Marimba/Marimba.nsmpproj").unwrap());
+        workspace.read_now([id], &mut log);
+        for at in wavs {
+            let at = LibPath::parse(at).unwrap();
+            let bytes = crate::testing::wav_bytes();
+            let wav = workspace.ingest(at.leaf().into(), Origin::Fresh, bytes, &mut log);
+            workspace.place(wav, at);
+        }
+        let entity = workspace.get(id).unwrap();
+        loud(entity, Located::default().of(entity, &workspace), building)
+    }
+
+    #[test]
+    fn a_project_made_from_picked_wavs_offers_its_build_at_once() {
+        use crate::newproject::{Draft, Making};
+
+        let mut workspace = Workspace::new(context());
+        let mut folders = crate::folders::Folders::default();
+        let mut log = crate::log::Log::default();
+        let picked = vec![
+            ("Marimba-C3.wav".to_string(), crate::testing::wav_bytes()),
+            ("Marimba-C4.wav".to_string(), crate::testing::wav_bytes()),
+        ];
+        let draft = Draft::plan(Making::Project, picked).unwrap();
+        let id = draft.make(&mut workspace, &mut folders, &mut log).unwrap();
+        let entity = workspace.get(id).unwrap();
+        let held = loud(entity, Located::default().of(entity, &workspace), false);
+        assert_eq!(
+            (held.label.as_str(), held.tone, held.click),
+            (BUILD, Tone::Ready, Click::Build),
+            "{}",
+            held.hint
+        );
+    }
+
+    #[test]
+    fn a_wav_renamed_or_removed_is_looked_for_again() {
+        let project = Project::new(
+            "Marimba",
+            &[NewZone {
+                path: "c3.wav".into(),
+                sample_rate: 44100,
+                frames: 44100,
+                root_key: 48,
+            }],
+            0,
+        )
+        .unwrap();
+        let bytes = nord_format::to_bytes(&Entity::SampleProject(project)).unwrap();
+        let mut log = crate::log::Log::default();
+        let mut workspace = Workspace::new(context());
+        let id = workspace.ingest("Marimba.nsmpproj".into(), Origin::Fresh, bytes, &mut log);
+        workspace.place(id, LibPath::parse("Marimba/Marimba.nsmpproj").unwrap());
+        let wav = workspace.ingest(
+            "c3.wav".into(),
+            Origin::Fresh,
+            crate::testing::wav_bytes(),
+            &mut log,
+        );
+        let mut located = Located::default();
+        let tone = |located: &mut Located, workspace: &Workspace| {
+            let entity = workspace.get(id).unwrap();
+            loud(entity, located.of(entity, workspace), false).tone
+        };
+        assert_eq!(tone(&mut located, &workspace), Tone::Blocked, "not placed");
+        workspace.place(wav, LibPath::parse("Marimba/c3.wav").unwrap());
+        assert_eq!(tone(&mut located, &workspace), Tone::Ready, "placed");
+        workspace.place(wav, LibPath::parse("Marimba/c4.wav").unwrap());
+        assert_eq!(tone(&mut located, &workspace), Tone::Blocked, "renamed");
+        workspace.place(wav, LibPath::parse("Marimba/c3.wav").unwrap());
+        assert_eq!(tone(&mut located, &workspace), Tone::Ready);
+        workspace.remove(wav, &mut log);
+        assert_eq!(tone(&mut located, &workspace), Tone::Blocked, "removed");
+    }
+
+    #[test]
+    fn a_wav_no_zone_plays_need_not_be_listed() {
+        let project = Project::new(
+            "Marimba",
+            &[48, 72].map(|root_key| NewZone {
+                path: format!("{root_key}.wav"),
+                sample_rate: 44100,
+                frames: 44100,
+                root_key,
+            }),
+            0,
+        )
+        .unwrap();
+        let files = project.audio_files().unwrap();
+        let id = |path: &str| files.iter().find(|f| f.path == path).unwrap().id;
+        let text = project.render().replace(
+            &format!("m_fileID = {}\n", id("72.wav")),
+            &format!("m_fileID = {}\n", id("48.wav")),
+        );
+        let held = loud_of(Project::parse(&text).unwrap(), &["Marimba/48.wav"], false);
+        assert_eq!(
+            (held.tone, held.click),
+            (Tone::Ready, Click::Build),
+            "{}",
+            held.hint
+        );
+    }
+
+    #[test]
+    fn a_project_whose_wavs_are_all_listed_offers_its_build() {
+        let others = ["Marimba/c3.wav", "Shared/c4.wav"];
+        let held = loud_over(&["c3.wav", "../Shared/c4.wav"], &others, false);
+        assert_eq!(
+            (held.label.as_str(), held.tone, held.click),
+            (BUILD, Tone::Ready, Click::Build)
+        );
+        assert_eq!(held.glyph, Glyph::Hammer);
+        assert!(held.hint.contains("v2"), "{}", held.hint);
+        assert!(held.hint.contains("Marimba/Marimba.nsmp"), "{}", held.hint);
+    }
+
+    #[test]
+    fn a_project_missing_two_wavs_says_so_and_names_them() {
+        let held = loud_over(&["c3.wav", "c4.wav", "c5.wav"], &["Marimba/c4.wav"], false);
+        assert_eq!(held.label, "2 WAVs missing");
+        assert_eq!((held.tone, held.click), (Tone::Blocked, Click::Nothing));
+        assert_eq!(held.hint, "c3.wav: missing\nc5.wav: missing");
+    }
+
+    #[test]
+    fn a_wav_outside_the_library_counts_as_missing() {
+        let held = loud_over(
+            &["../../c3.wav", "c4.wav"],
+            &["c3.wav", "Marimba/c4.wav"],
+            false,
+        );
+        assert_eq!(held.label, "1 WAV missing");
+        assert_eq!(held.click, Click::Nothing);
+        assert_eq!(held.hint, "../../c3.wav: outside the library");
+    }
+
+    #[test]
+    fn a_wav_two_listed_files_could_be_is_refused_naming_both() {
+        let held = loud_over(&["C3.WAV"], &["Marimba/C3.wav", "Marimba/c3.wav"], false);
+        assert_eq!(held.label, "1 WAV missing");
+        assert_eq!(held.click, Click::Nothing);
+        assert_eq!(
+            held.hint,
+            "C3.WAV: ambiguous between Marimba/C3.wav and Marimba/c3.wav"
+        );
+    }
+
+    #[test]
+    fn a_project_building_offers_nothing_until_it_is_built() {
+        let held = loud_over(&["c3.wav"], &["Marimba/c3.wav"], true);
+        assert_eq!(held.label, "Building…");
+        assert_eq!((held.tone, held.click), (Tone::Idle, Click::Nothing));
     }
 
     fn read_back(bytes: &[u8]) -> Snapshot {

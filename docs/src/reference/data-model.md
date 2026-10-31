@@ -324,10 +324,12 @@ nothing but the files under working copies (`store/exec.rs`).
    entries left out (`exec::MOST_ENTRIES`). A folder past that, or one that
    cannot be read, is reported as not all listed.
 
-A file's kind is decided by its extension alone: `store::opens` matches it,
-ignoring case, against the formats `nord-format` names by extension
-(`formats::by_extension`) and drawbar's notes (`browser::tagged`). Any other file is listed by name only, as one of the
-folder's `others`, and shown with **Show all files**.
+A listed file's kind is decided by its extension alone: `store::opens` matches
+it, ignoring case, against the formats `nord-format` names by extension
+(`formats::by_extension`), drawbar's notes and WAVs (`browser::tagged`). Any
+other file is listed by name only, as one of the folder's `others`, and shown
+with **Show all files**. Once read, bytes that decode as no format but hold a
+RIFF/WAVE container are a WAV whatever the file is called.
 
 ### Lazy reads
 
@@ -1119,5 +1121,13 @@ written, the records of picked folders no longer on it are deleted
 `Workspace::projects_naming(&LibPath)` answers with `Naming { by, unknown }`:
 the projects whose WAV list, from their decode or their summary, names that
 file, and the projects with neither, which may. A project names a WAV relative
-to its own folder, and a path that is absolute or leaves the library names
-nothing (`summary::resolve`).
+to its own folder, as `nord-format`'s `nsmpproj::build::AudioPath` reads it, and
+a path that is absolute or leaves the library names nothing (`summary::resolve`).
+
+A build looks for the files its zones play (`nsmpproj::build::played`) among
+the listed WAV assets (`builds::wav_assets`): the exact path first, then the
+one path with the same `names::key`, refusing two (`builds::locate`). It
+hurries those not read yet, as an act's reads are, and encodes their bytes as
+the assets hold them, unsaved edits included, on a `work::Job`
+(`builds::Builds`). A WAV that could not be read, or is gone by then, stops the
+build with its path.

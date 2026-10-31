@@ -471,6 +471,7 @@ impl Rig {
             device,
             tabs,
             queue,
+            builds,
             log,
         } = &mut self.bench;
         log.tick(ctx);
@@ -492,7 +493,9 @@ impl Rig {
         if !released && sending && self.store.hold_send() {
             acts.retain(|act| !matches!(act, Act::SendAll));
         }
-        apply(browser, shell, acts, workspace, device, tabs, queue, log);
+        apply(
+            browser, shell, acts, workspace, device, tabs, queue, builds, log,
+        );
         device.keep_occupants_in(self.store.tmp());
         device.pump();
     }

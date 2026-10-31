@@ -17,8 +17,9 @@ cargo install drawbar
 - Drop Nord files in, or connect an instrument and read what it holds.
 - Edit a program on a panel laid out like the instrument's, or any field in a
   table.
-- Trim a piano library until it fits, build a sample instrument from WAVs, and
-  listen to either from the screen or a MIDI controller before you send it.
+- Trim a piano library until it fits, build a sample instrument from WAVs or a
+  Sample Editor project, and listen to either from the screen or a MIDI
+  controller before you send it.
 - Queue your changes and send them in one go, with a review of what each one
   replaces.
 - Unpack a Nord Sound Manager bundle into a folder, or export sounds from either
