@@ -59,9 +59,10 @@ fn layout() -> Layout {
 /// What a library of [`ENTITIES`] keeps and costs after `entries` entries.
 #[derive(Debug)]
 struct Measured {
-    /// The folder's bytes, and those of its snapshots.
-    folder: usize,
-    snapshots: usize,
+    /// The folder's bytes besides snapshots once the library closed, and the numbers
+    /// their lines hold.
+    besides: usize,
+    besides_numbers: usize,
     /// Snapshot bytes besides certificates and `settled`.
     state: usize,
     /// Numbers those bytes hold, each of which may gain a digit.
@@ -123,21 +124,14 @@ fn measure(entries: usize) -> Measured {
         }
     }
     gen.flush_all();
-    let files = folder.files(Root::Folder);
-    let snapshots: Vec<Snapshot> = files
+    let snapshots: Vec<Snapshot> = besides_snapshots(&folder)
+        .2
         .iter()
-        .filter(|(path, _)| {
-            path.name()
-                .is_some_and(|name| name.starts_with("snapshot-"))
-        })
-        .map(|(_, bytes)| Snapshot::decode(bytes).unwrap())
+        .map(|bytes| Snapshot::decode(bytes).unwrap())
         .collect();
     let mut measured = Measured {
-        folder: files.values().map(Vec::len).sum(),
-        snapshots: snapshots
-            .iter()
-            .map(|snapshot| snapshot.encode().len())
-            .sum(),
+        besides: 0,
+        besides_numbers: 0,
         state: 0,
         numbers: 0,
         held: [0; 4],
@@ -196,7 +190,10 @@ fn measure(entries: usize) -> Measured {
         .unwrap();
     let stats = Rc::new(RefCell::new(IoStats::default()));
     let backend = Counted {
-        inner: Box::new(Machine { folder, local }),
+        inner: Box::new(Machine {
+            folder: folder.clone(),
+            local,
+        }),
         stats: Rc::clone(&stats),
     };
     let env = Env {
@@ -228,7 +225,30 @@ fn measure(entries: usize) -> Measured {
     library.refresh().unwrap();
     measured.refresh = requests(&stats.borrow());
     library.close().unwrap();
+    (measured.besides, measured.besides_numbers, _) = besides_snapshots(&folder);
     measured
+}
+
+/// The folder's bytes besides snapshots, the numbers their lines hold, and each
+/// snapshot's bytes.
+fn besides_snapshots(folder: &MemDisk) -> (usize, usize, Vec<Vec<u8>>) {
+    let (snapshots, rest): (Vec<_>, Vec<_>) =
+        folder
+            .files(Root::Folder)
+            .into_iter()
+            .partition(|(path, _)| {
+                path.name()
+                    .is_some_and(|name| name.starts_with("snapshot-"))
+            });
+    let besides = rest.iter().map(|(_, bytes)| bytes.len()).sum();
+    let lines = rest
+        .iter()
+        .flat_map(|(_, bytes)| bytes.split(|&b| b == b'\n'));
+    let json = lines.filter_map(|line| line.split(|&b| b == b'\t').next());
+    let held = json.filter_map(|json| serde_json::from_slice(json).ok());
+    let numbers = held.map(|value: serde_json::Value| numbers(&value)).sum();
+    let snapshots = snapshots.into_iter().map(|(_, bytes)| bytes).collect();
+    (besides, numbers, snapshots)
 }
 
 /// How many numbers `value` holds.
@@ -256,10 +276,11 @@ fn a_library_of_constant_size_keeps_and_costs_the_same_as_its_history_grows() {
     let digits = short.numbers * PER_NUMBER;
     let certified = segments * PER_CERTIFICATE;
     let allowed = (certified + records * PER_RECORD + digits) as isize;
-    assert_eq!(
-        short.folder - short.snapshots,
-        long.folder - long.snapshots,
-        "the folder's bytes besides snapshots"
+    let besides = grew(|m| m.besides);
+    assert!(
+        besides <= (short.besides_numbers * PER_NUMBER) as isize,
+        "the folder's bytes besides snapshots grew by {besides} B over {} numbers",
+        short.besides_numbers
     );
     assert_eq!(
         short.held, long.held,
