@@ -161,7 +161,7 @@ impl Writer {
             .last()
             .map_or((EntryHash::ZERO, 0), |last| (last.hash(), last.n() + 1));
         let before = match &kind {
-            EntryKind::Intent(logged) => Before::of(&logged.ops, &self.folded),
+            EntryKind::Intent(logged) => Before::of(&logged.ops, &self.folded, &[]),
             _ => Before::default(),
         };
         let logged = match &kind {

@@ -50,7 +50,7 @@ pub struct Before {
     /// replaced, `None` for a clear or for none.
     pub registers: BTreeMap<(EntityId, String), Option<Raw>>,
     /// Per entity whose file the intent wrote, the latest file of the writes it
-    /// replaced.
+    /// replaced, or where the binding found that file moved.
     pub files: BTreeMap<EntityId, Option<FileFact>>,
     /// Per entity the intent deleted, the changes that give it back the values
     /// the delete ended: each register's latest value, each member and where its
@@ -59,8 +59,10 @@ pub struct Before {
 }
 
 impl Before {
-    /// What `ops` replace in `folded`, the state they were committed over.
-    pub fn of(ops: &[Op], folded: &Folded) -> Self {
+    /// What `ops` replace in `folded`, the state they were committed over, with
+    /// each file where `moved`, the pins of the moves the binding found then,
+    /// says it was.
+    pub fn of(ops: &[Op], folded: &Folded, moved: &[Op]) -> Self {
         fn latest<V: Clone>(writes: Vec<Write<Option<V>>>, replaces: &[Ref]) -> Option<V> {
             let replaced = writes
                 .into_iter()
@@ -85,10 +87,12 @@ impl Before {
                     entity, replaces, ..
                 } => {
                     let file = latest(folded.file_writes(*entity), replaces);
-                    before.files.insert(*entity, file);
+                    before.files.insert(*entity, found(moved, *entity).or(file));
                 }
                 Op::Delete { entity, .. } => {
-                    before.revived.insert(*entity, values(folded, *entity));
+                    before
+                        .revived
+                        .insert(*entity, values(folded, moved, *entity));
                 }
                 _ => {}
             }
@@ -97,13 +101,26 @@ impl Before {
     }
 }
 
+/// Where the pin of `entity` among `moved` says its file is.
+fn found(moved: &[Op], entity: EntityId) -> Option<FileFact> {
+    moved.iter().find_map(|op| match op {
+        Op::Pin {
+            entity: pinned,
+            file,
+            ..
+        } if *pinned == entity => Some(file.clone()),
+        _ => None,
+    })
+}
+
 /// The changes that write `entity`'s register values, members and file as
-/// `folded` shows them.
-fn values(folded: &Folded, entity: EntityId) -> Vec<FactChange> {
+/// `folded` shows them, its file where `moved` says it is.
+fn values(folded: &Folded, moved: &[Op], entity: EntityId) -> Vec<FactChange> {
     let mut changes = Vec::new();
     let files = folded.file_writes(entity).into_iter();
     let file = files.max_by_key(|write| (write.at, write.by, write.entry));
-    if let Some(file) = file.and_then(|write| write.value) {
+    let file = file.and_then(|write| write.value);
+    if let Some(file) = found(moved, entity).or(file) {
         changes.push(FactChange::File { entity, file });
     }
     for key in folded.registers(entity) {

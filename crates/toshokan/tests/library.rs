@@ -598,6 +598,8 @@ through_both!(
     a_copy_has_no_entity_until_one_is_said,
     a_move_keeps_its_tags_and_is_pinned_by_the_next_commit,
     undoing_a_delete_binds_the_file_moved_while_deleted,
+    undoing_a_delete_puts_a_file_moved_outside_back_where_it_was,
+    undoing_a_rename_puts_a_file_moved_outside_back_where_it_was,
     an_undo_is_committed_when_its_identity_read_fails,
     a_rename_is_committed_when_its_rescan_fails_and_binds_nothing_stale,
     a_settlement_is_committed_when_its_rescan_fails,
@@ -2748,6 +2750,71 @@ fn undoing_a_delete_binds_the_file_moved_while_deleted<F: Facade>() {
         }),
         "{:?}",
         committed.changes
+    );
+}
+
+/// Opens a library holding `song.npno` as an entity, then moves it to
+/// `moved/song.npno` outside the app, which the rescan finds.
+fn moved_outside<F: Facade>(folder: &MemDisk, clock: &TestClock) -> (F, EntityId) {
+    let (mut a, _) = F::open(Probe::new(&machine(folder)), env("a", 1, clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    folder
+        .perform(Io::MakeDir {
+            root: Root::Folder,
+            path: path("moved"),
+        })
+        .unwrap();
+    move_outside(folder, "song.npno", "moved/song.npno");
+    a.rescan().unwrap();
+    (a, song)
+}
+
+fn undoing_a_delete_puts_a_file_moved_outside_back_where_it_was<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, song) = moved_outside::<F>(&folder, &clock);
+    a.commit("Delete", |i| {
+        i.trash(song, Expect::Holds(identity(b"song"))).delete(song)
+    })
+    .unwrap();
+    assert_eq!(read(&folder, "moved/song.npno"), None);
+    a.undo().unwrap();
+    assert_eq!(
+        read(&folder, "moved/song.npno").as_deref(),
+        Some(&b"song"[..])
+    );
+    let file = a.view().entity(song).unwrap().file().unwrap();
+    assert_eq!(
+        (file.path, file.state),
+        (path("moved/song.npno"), FileState::InSync)
+    );
+    a.redo().unwrap();
+    assert_eq!(read(&folder, "moved/song.npno"), None);
+    assert!(a.view().entity(song).is_none());
+}
+
+fn undoing_a_rename_puts_a_file_moved_outside_back_where_it_was<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, song) = moved_outside::<F>(&folder, &clock);
+    a.commit("Rename", |i| {
+        i.rename(
+            song,
+            &path("moved/renamed.npno"),
+            Expect::Holds(identity(b"song")),
+        )
+    })
+    .unwrap();
+    a.undo().unwrap();
+    assert_eq!(
+        read(&folder, "moved/song.npno").as_deref(),
+        Some(&b"song"[..])
+    );
+    assert_eq!(read(&folder, "song.npno"), None);
+    let file = a.view().entity(song).unwrap().file().unwrap();
+    assert_eq!(
+        (file.path, file.state),
+        (path("moved/song.npno"), FileState::InSync)
     );
 }
 

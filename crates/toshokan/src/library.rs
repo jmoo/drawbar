@@ -979,8 +979,9 @@ impl Library {
             }
             self.clock = self.clock.observe(entry.at());
         }
+        self.bind_facts();
         for (entry, logged) in intents {
-            let before = Before::of(&logged.ops, &self.folded);
+            let before = Before::of(&logged.ops, &self.folded, &self.pins);
             self.history
                 .push(entry, logged.clone(), reverses.take(), before);
         }
