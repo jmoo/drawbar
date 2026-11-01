@@ -172,3 +172,30 @@ fn a_reference_made_after_seeing_a_fork_survives_compaction() {
     );
     replay(bounds, DEPTH, &acts);
 }
+
+/// A branch that wrote on after the user dismissed its compacted tip is a new
+/// item to a reader that no longer sees the other branch, never merged.
+#[test]
+fn an_entry_after_a_dismissed_tip_is_not_merged_where_the_fork_is_not_seen() {
+    let acts = [
+        "x creates",
+        "y Set(0, 0, A)",
+        "y is cloned",
+        "y' Add(0, 0), compacts",
+        "y Set(0, 0, B)",
+        "x after reading Dismiss",
+        "y' Set(0, 0, B)",
+    ];
+    let bounds = Bounds::new(
+        2,
+        true,
+        5,
+        &[
+            Act::Set(0, 0, A),
+            Act::Set(0, 0, B),
+            Act::Add(0, 0),
+            Act::Dismiss,
+        ],
+    );
+    replay(bounds, DEPTH, &acts);
+}

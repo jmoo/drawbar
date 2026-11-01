@@ -436,6 +436,15 @@ impl Dismissals {
         })
     }
 
+    /// The lowest number of tip `tip` of `w` the merge leaves out: above `w`'s
+    /// lowest fork point, or named by a dismissal or after one on its chain.
+    /// `None` when it merges the whole tip.
+    fn apart_in_tip(&self, w: &Writer, tip: &Snapshot) -> Option<u64> {
+        let forked = w.lowest.and_then(|fork| fork.checked_add(1));
+        let dismissed = self.in_tip(w.writer, tip).map(|run| run.from).min();
+        forked.into_iter().chain(dismissed).min()
+    }
+
     /// The first number from `from` on that no dismissal names in tip `tip`;
     /// `None` when they name every one.
     fn after_in_tip(&self, writer: WriterId, tip: &Snapshot, from: u64) -> Option<u64> {
@@ -623,9 +632,15 @@ pub fn derive(seen: &BTreeMap<WriterId, Seen<'_>>) -> Derived {
     let mut beside = Beside::default();
     for w in classified.values() {
         let covered = dismissals.covered(w);
+        let dismissed_heads: BTreeSet<EntryHash> = w
+            .tips
+            .iter()
+            .filter(|tip| dismissals.in_tip(w.writer, tip).next().is_some())
+            .map(|tip| tip.head.hash)
+            .collect();
         let mut memo = HashMap::default();
         let through = |hash: EntryHash| w.candidates.contains(&hash) && w.known.contains_key(&hash);
-        let hit = |hash: EntryHash| covered.contains(&hash);
+        let hit = |hash: EntryHash| covered.contains(&hash) || dismissed_heads.contains(&hash);
         let after: BTreeSet<EntryHash> = w
             .candidates
             .iter()
@@ -705,12 +720,12 @@ pub fn derive(seen: &BTreeMap<WriterId, Seen<'_>>) -> Derived {
                 misnumbered: w.misnumbered.iter().copied().collect(),
             },
         );
-        let ok = |n: u64| !w.beyond(n);
         for tip in &w.tips {
             let state = &tip.state;
-            let dismissed = |n: u64| dismissals.cover_tip(w.writer, tip, n);
+            let apart = dismissals.apart_in_tip(w, tip);
+            let ok = |n: u64| apart.is_none_or(|apart| n < apart);
             for (field, held) in &state.own {
-                if ok(held.at.n) && !dismissed(held.at.n) {
+                if ok(held.at.n) {
                     candidates.push(Candidate {
                         at: held.at.of(w.writer),
                         stamp: held.stamp,
@@ -720,7 +735,7 @@ pub fn derive(seen: &BTreeMap<WriterId, Seen<'_>>) -> Derived {
                 }
             }
             for ((field, _, _), reference) in &state.refs {
-                if ok(reference.own.n) && !dismissed(reference.own.n) {
+                if ok(reference.own.n) {
                     kills.reference(
                         field.clone(),
                         reference.target,
@@ -729,12 +744,12 @@ pub fn derive(seen: &BTreeMap<WriterId, Seen<'_>>) -> Derived {
                 }
             }
             for ((field, target), taken) in &state.takes {
-                if ok(taken.own.n) && !dismissed(taken.own.n) {
+                if ok(taken.own.n) {
                     kills.take(field.clone(), *target, taken.below);
                 }
             }
             for (field, own) in &state.killed {
-                if ok(own.n) && !dismissed(own.n) {
+                if ok(own.n) {
                     kills
                         .deletes
                         .entry((w.writer, field.entity()))
@@ -886,8 +901,9 @@ fn items(
     let merged_own: BTreeSet<(FieldKey, u64)> = {
         let mut own = BTreeSet::new();
         for tip in &w.tips {
+            let apart = dismissals.apart_in_tip(w, tip);
             for (field, held) in &tip.state.own {
-                if !beyond_f(held.at.n) && !dismissals.cover_tip(w.writer, tip, held.at.n) {
+                if apart.is_none_or(|apart| held.at.n < apart) {
                     own.insert((field.clone(), held.at.n));
                 }
             }
@@ -908,9 +924,16 @@ fn items(
     let known_since =
         |field: &FieldKey, n: u64| merged_own.iter().any(|(f, at)| f == field && *at >= n);
     let taken = |field: &FieldKey| kills.takes.contains_key(&(field.clone(), w.writer));
-    // A tip's own write the merge leaves out, above the fork point or dismissed,
-    // that replaced an own write the merge does not hold: a forgotten basis.
+    // A tip's own write the merge leaves out, above the fork point, dismissed
+    // or after a dismissed one, that replaced an own write the merge does not
+    // hold: a forgotten basis.
     for tip in &w.tips {
+        let Some(from) = dismissals
+            .apart_in_tip(w, tip)
+            .filter(|from| *from <= tip.head.n)
+        else {
+            continue;
+        };
         let forced: BTreeMap<FieldKey, (Ref, Hlc, Value)> = tip
             .state
             .own
@@ -918,7 +941,7 @@ fn items(
             .filter(|(field, held)| {
                 let pre_fork = highest_fork.is_none_or(|fork| held.first <= fork);
                 let replaced_own = held.first < held.at.n && (!beyond_f(held.at.n) || pre_fork);
-                (beyond_f(held.at.n) || dismissals.cover_tip(w.writer, tip, held.at.n))
+                held.at.n >= from
                     && replaced_own
                     && !known_before(field, held.at.n)
                     && !taken(field)
@@ -930,15 +953,12 @@ fn items(
                 )
             })
             .collect();
-        if !beyond_f(tip.head.n) && forced.is_empty() {
-            continue;
-        }
         let mut own: Vec<(FieldKey, Ref, Hlc, Value)> = tip
             .state
             .own
             .iter()
             .filter(|(_, held)| {
-                beyond_f(held.at.n) && !dismissals.cover_tip(w.writer, tip, held.at.n)
+                held.at.n >= from && !dismissals.cover_tip(w.writer, tip, held.at.n)
             })
             .map(|(field, held)| {
                 (
@@ -950,7 +970,6 @@ fn items(
             })
             .collect();
         own.sort_by_key(|(_, at, _, _)| at.n);
-        let from = w.lowest.map_or(0, |fork| fork + 1);
         let first = dismissals.after_in_tip(w.writer, tip, from);
         let above = first.and_then(|first| tip.head.n.checked_sub(first));
         let entries = above.map_or(0, |above| above.saturating_add(1));
@@ -1458,6 +1477,99 @@ mod tests {
                 assert!(steps <= 4 * n, "{case}: {steps} steps for {n} entries");
             }
         }
+    }
+
+    /// Another writer's dismissal of the tip run of `W` from `from` to `head`.
+    fn tip_dismissal(from: u64, head: Own) -> Vec<Rc<Entry>> {
+        let run = Run {
+            writer: W,
+            from,
+            first: None,
+            last: head,
+            tip: Some(head),
+        };
+        vec![entry(
+            None,
+            vec![Op::Dismiss { runs: vec![run] }],
+            "dismiss",
+        )]
+    }
+
+    #[test]
+    fn a_dismissed_tip_seen_without_its_fork_is_kept_apart_from_where_the_dismissal_starts() {
+        let entries = chain(W, &["a", "b"]);
+        let tip = folded(&entries);
+        let after = entry(
+            Some(&entries[1]),
+            vec![set("c", vec![entries[1].own().of(W)])],
+            "c",
+        );
+        let dismissal = tip_dismissal(1, tip.head);
+        let next = [Rc::clone(&after)];
+        let derived = derived(vec![
+            (
+                W,
+                Seen {
+                    segments: vec![lines(&next, false)],
+                    snapshots: vec![Rc::clone(&tip)],
+                },
+            ),
+            (
+                X,
+                Seen {
+                    segments: vec![lines(&dismissal, false)],
+                    snapshots: vec![],
+                },
+            ),
+        ]);
+        let placed = &derived.writers[&W];
+        assert_eq!(placed.merged, [], "an entry after a dismissed tip");
+        assert_eq!(placed.runs, [after]);
+        let tip_item = derived.items[&W]
+            .iter()
+            .find(|item| item.run.tip.is_some())
+            .expect("the tip's forgotten basis is shown");
+        assert_eq!(tip_item.run.from, 1, "{tip_item:?}");
+    }
+
+    #[test]
+    fn tips_that_part_at_the_highest_number_are_read_without_overflow() {
+        let entries = chain(W, &["a"]);
+        let tip = |head: u128| {
+            let mut tip = (*folded(&entries)).clone();
+            let field = FieldKey::Register(E, "k".into());
+            let held = tip.state.own.get_mut(&field).expect("a write of k");
+            held.at = Own {
+                n: u64::MAX,
+                hash: EntryHash::from_u128(0xc),
+            };
+            tip.head = Own {
+                n: u64::MAX,
+                hash: EntryHash::from_u128(head),
+            };
+            Rc::new(tip)
+        };
+        let dismissed = tip(0xa);
+        let dismissal = tip_dismissal(u64::MAX, dismissed.head);
+        let derived = derived(vec![
+            (
+                W,
+                Seen {
+                    segments: vec![],
+                    snapshots: vec![dismissed, tip(0xb)],
+                },
+            ),
+            (
+                X,
+                Seen {
+                    segments: vec![lines(&dismissal, false)],
+                    snapshots: vec![],
+                },
+            ),
+        ]);
+        assert_eq!(derived.writers[&W].fork, Some(u64::MAX));
+        let froms: Vec<u64> = derived.items[&W].iter().map(|item| item.run.from).collect();
+        assert_eq!(froms, [u64::MAX], "the dismissed tip's forgotten basis");
     }
 
     #[test]

@@ -298,7 +298,10 @@ dismissal by a tip's head also covers the writes numbered up to that head in any
 later tip that certifies it. No reader shows or merges what a dismissal names,
 ever, even if it later stops seeing the fork: a tip's references and own delete
 made by a dismissed entry do not apply either. An entry after a dismissed one is
-a new item, never placed. A dismissal never covers what the user has not seen. A
+a new item, never placed, whether or not the reader sees the fork: so are a
+tip's writes after a dismissed entry on its chain, and the entries after that
+tip's head. A tip's run starts at the first of its entries the merge leaves out.
+A dismissal never covers what the user has not seen. A
 tip matches a dismissal by the hash of its last entry where the tip names it. A
 tip that compacted past a line-run's last entry inside one segment names it
 nowhere, and two branches of one instance resumed twice can share that segment's

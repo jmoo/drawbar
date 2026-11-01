@@ -608,7 +608,10 @@ Per writer, from the files it reads, a reader derives:
   neither branch is merged.
 - **Gaps**: entries whose predecessor may still come, held back.
 - Entries a dismissal names, which no reader merges or shows; an entry after
-  one is a run.
+  one is a run, and so are a tip's writes after one on its chain and the
+  entries after that tip's head. A tip's run starts at the first of its entries
+  the merge leaves out: above the lowest fork point, or from the first a
+  dismissal names on its chain.
 
 What the merge leaves out is shown as **items**: each run, gap and file's
 unplaced lines, with the net change it would make
