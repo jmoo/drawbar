@@ -1,0 +1,38 @@
+{
+  "mode": "writable",
+  "start": "resumed 37e9671c45376d5dccf635ee9e9e2fa4",
+  "writers": { "cc8b043bffce0a321f2a1aa46a997f38": "local", "37e9671c45376d5dccf635ee9e9e2fa4": "local" },
+  "entities": {
+    "118e846ea93bc949992ffac69a7acd4c": {
+      "tags": ["after"],
+      "file": { "path": "gone.syx", "state": "missing", "bytes": null }
+    }
+  },
+  "unbound": ["other.syx"],
+  "items": [
+    {
+      "kind": "run",
+      "run": { "writer": "cc8b043bffce0a321f2a1aa46a997f38", "from": 2, "first": "216610d1fbce3f8a69d435512827b85a", "last": [2, "216610d1fbce3f8a69d435512827b85a"] },
+      "by": "local",
+      "entries": 1,
+      "changes": ["118e846ea93bc949992ffac69a7acd4c tags"]
+    },
+    {
+      "kind": "run",
+      "run": { "writer": "cc8b043bffce0a321f2a1aa46a997f38", "from": 2, "first": "701a65eef928ee0e63dc70e9921a49d2", "last": [2, "701a65eef928ee0e63dc70e9921a49d2"] },
+      "by": "local",
+      "entries": 1,
+      "changes": ["118e846ea93bc949992ffac69a7acd4c tags"]
+    }
+
+  ],
+  "forks": [{ "writer": "cc8b043bffce0a321f2a1aa46a997f38", "at": 1 }],
+  "gaps": [],
+  "orphans": [],
+  "ignored": [],
+  "unreadable": [],
+  "settled": [["cc8b043bffce0a321f2a1aa46a997f38", "1b9ec6ebbda972819ebeb27d522a4e8b"]],
+  "trash": [],
+  "unknown": 0,
+  "extended": 0
+}

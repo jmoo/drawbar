@@ -1,0 +1,1668 @@
+//! File effects without atomic replace.
+//!
+//! Nothing in a user path is overwritten or deleted in place. A save fills a
+//! staged file in `tmp/` from the app's content, which the driver writes, and
+//! syncs it; every precondition is checked; a pending record
+//! is written; displaced bytes are renamed into this writer's trash and the staged
+//! file into place; the intent's entry is appended; the pending record is removed.
+//! Each user path holds its old bytes, nothing or its new bytes, and while it holds
+//! nothing a pending record names it. A source is never removed before its
+//! destination is durable. Where the folder cannot rename files, each move copies
+//! and then removes its source ([`Moves::Copy`]); a user path being copied to may
+//! also hold the start of its new bytes, while a pending record names it.
+//!
+//! A commit runs [`resolve`], [`prepare`], [`apply`], the writer's append, then
+//! [`finish`]. Recovery resumes [`apply`] where an interrupted run stopped.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
+use std::rc::Rc;
+
+use serde::{Deserialize, Serialize};
+
+use crate::binding::Bindings;
+use crate::env::{Env, Identify};
+use crate::error::{Invalid, Mismatch, Refusal, Result};
+use crate::flow::{self, each, fold, ok, Fallible, Flow, Held};
+use crate::ids::{EntityId, Nonce, WriterId};
+use crate::io::{Capabilities, Io, IoError, Kind, Meta, Root, Task};
+use crate::layout::Layout;
+use crate::log::{Displaced, FileFact, Ref};
+use crate::path::RelPath;
+use crate::pending::{self, PendingRecord};
+use crate::plan::{Content, Expect, FileChange};
+use crate::report::{Outcome, PartialReport};
+use crate::view::FileState;
+
+/// One step of an intent's file effects, as its pending record lists it. Paths
+/// are library paths; items and staged files are this writer's.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(tag = "step", rename_all = "snake_case")]
+pub enum EffectStep {
+    /// Moves the file at `path` into this writer's trash as `item`.
+    ToTrash {
+        path: RelPath,
+        item: Nonce,
+    },
+    /// Moves the staged file `staged` to `path`.
+    Place {
+        staged: Nonce,
+        path: RelPath,
+    },
+    Rename {
+        from: RelPath,
+        to: RelPath,
+    },
+    /// Moves trash item `item` back to `path`.
+    FromTrash {
+        item: Nonce,
+        path: RelPath,
+    },
+    MakeDir {
+        path: RelPath,
+    },
+    /// Removes a directory a move emptied. A directory that is not empty, or not
+    /// there, is left as it is.
+    RemoveDir {
+        path: RelPath,
+    },
+}
+
+impl EffectStep {
+    /// The library path the step changes; for a rename, its destination.
+    pub fn path(&self) -> &RelPath {
+        match self {
+            Self::ToTrash { path, .. }
+            | Self::Place { path, .. }
+            | Self::Rename { to: path, .. }
+            | Self::FromTrash { path, .. }
+            | Self::MakeDir { path }
+            | Self::RemoveDir { path } => path,
+        }
+    }
+
+    /// The library path the step takes a file or a directory from, where it takes
+    /// one.
+    pub fn taken(&self) -> Option<&RelPath> {
+        match self {
+            Self::ToTrash { path, .. } | Self::RemoveDir { path } => Some(path),
+            Self::Rename { from, .. } => Some(from),
+            Self::Place { .. } | Self::FromTrash { .. } | Self::MakeDir { .. } => None,
+        }
+    }
+
+    /// The library path the step puts a file or a directory at, where it puts one.
+    pub fn put(&self) -> Option<&RelPath> {
+        match self {
+            Self::Place { path, .. }
+            | Self::FromTrash { path, .. }
+            | Self::MakeDir { path }
+            | Self::Rename { to: path, .. } => Some(path),
+            Self::ToTrash { .. } | Self::RemoveDir { .. } => None,
+        }
+    }
+
+    /// Every library path the step names.
+    pub fn library_paths(&self) -> Vec<&RelPath> {
+        match self {
+            Self::Rename { from, to } => vec![from, to],
+            _ => vec![self.path()],
+        }
+    }
+
+    /// Where the step moves a file from and to, in the folder; `None` for a
+    /// directory step.
+    pub(crate) fn ends(&self, layout: &Layout, writer: WriterId) -> Option<(RelPath, RelPath)> {
+        match self {
+            Self::ToTrash { path, item } => Some((path.clone(), layout.trash(writer, *item))),
+            Self::Place { staged, path } => {
+                Some((layout.staged(writer, *staged, path), path.clone()))
+            }
+            Self::Rename { from, to } => Some((from.clone(), to.clone())),
+            Self::FromTrash { item, path } => Some((layout.trash(writer, *item), path.clone())),
+            Self::MakeDir { .. } | Self::RemoveDir { .. } => None,
+        }
+    }
+}
+
+/// How an intent's steps move files: chosen from the folder's capabilities and kept
+/// in its pending record, so that whoever resumes the steps moves them the same way.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Moves {
+    /// Each move is one rename.
+    #[default]
+    Rename,
+    /// Each move copies its source and then removes it, after a marker in the
+    /// pending directory says the step started.
+    Copy,
+}
+
+impl Moves {
+    pub fn of(capabilities: Capabilities) -> Self {
+        match capabilities.rename_file {
+            true => Self::Rename,
+            false => Self::Copy,
+        }
+    }
+
+    pub fn renames(&self) -> bool {
+        *self == Self::Rename
+    }
+}
+
+/// What an intent requires at a library path before anything is written.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Precondition {
+    pub path: RelPath,
+    pub expect: Expect,
+    /// Only an entry of exactly this name counts: the path is a rename's
+    /// destination that the volume may take for its source's name, and finding
+    /// the source there is no clash.
+    pub spelled: bool,
+}
+
+/// What a staged file is filled from.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Staged {
+    /// The app's content, which the driver writes.
+    Content(Content),
+    /// A copy of the file at this path in the folder, made a chunk at a time.
+    Copy(RelPath),
+}
+
+/// Where an entity's file is once the first `done_after` steps are done: at
+/// `path`, or nowhere.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct FileEnd {
+    pub entity: EntityId,
+    pub path: Option<RelPath>,
+    pub done_after: usize,
+    /// The file is given to the entity as it is, and logged as a `pin` op, which
+    /// undo leaves alone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pin: bool,
+    /// The writes of the entity's file register its op replaces, as the writer
+    /// that carries the effects out knew them when it wrote the record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replaces: Vec<Ref>,
+}
+
+/// Where a file no entity is bound to is once the first `done_after` steps are
+/// done, and where it was: at `path`, or nowhere.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct UnboundEnd {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<RelPath>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<RelPath>,
+    pub done_after: usize,
+}
+
+/// The directory `path` made, where `made`, or removed once the first
+/// `done_after` steps are done.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct DirEnd {
+    pub path: RelPath,
+    pub made: bool,
+    pub done_after: usize,
+}
+
+/// A tree moved from `from` to `to` once the first `done_after` steps are done.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct TreeEnd {
+    pub from: RelPath,
+    pub to: RelPath,
+    pub done_after: usize,
+}
+
+/// The file effects of one intent, resolved against the bindings.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct EffectPlan {
+    /// The name of the pending record.
+    pub record: Nonce,
+    pub checks: Vec<Precondition>,
+    /// Staged before anything else: each staged file's name, the path a step
+    /// places it at, and what fills it.
+    pub staged: Vec<(Nonce, RelPath, Staged)>,
+    pub steps: Vec<EffectStep>,
+    pub files: Vec<FileEnd>,
+    pub unbound: Vec<UnboundEnd>,
+    pub trees: Vec<TreeEnd>,
+    pub dirs: Vec<DirEnd>,
+    pub moves: Moves,
+}
+
+impl EffectPlan {
+    /// No effects yet, under the record name `record`, moving files by renames.
+    pub fn new(record: Nonce) -> Self {
+        Self {
+            record,
+            checks: Vec::new(),
+            staged: Vec::new(),
+            steps: Vec::new(),
+            files: Vec::new(),
+            unbound: Vec::new(),
+            trees: Vec::new(),
+            dirs: Vec::new(),
+            moves: Moves::Rename,
+        }
+    }
+
+    /// Whether the intent has no file effects at all.
+    pub fn is_empty(&self) -> bool {
+        self.steps.is_empty()
+            && self.checks.is_empty()
+            && self.files.is_empty()
+            && self.unbound.is_empty()
+    }
+
+    /// Whether the effects change the folder, and so need a pending record.
+    pub fn moves_files(&self) -> bool {
+        !self.steps.is_empty()
+    }
+
+    /// Stages a file named `staged`, filled from `fill`, and adds the step that
+    /// places it at `path`.
+    pub(crate) fn place(&mut self, staged: Nonce, fill: Staged, path: RelPath) {
+        self.staged.push((staged, path.clone(), fill));
+        self.steps.push(EffectStep::Place { staged, path });
+    }
+}
+
+/// What a run of the steps did, as the folder shows it afterwards.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Applied {
+    /// Bytes now in this writer's trash because of the intent: what its steps
+    /// displaced.
+    pub displaced: Vec<Displaced>,
+    /// What each entity's file register should say, for the effects that are done.
+    pub files: Vec<(EntityId, Option<FileFact>)>,
+    /// Each file no entity is bound to that the effects done moved: where it was,
+    /// and where it is and what it holds.
+    pub unbound: Vec<(Option<RelPath>, Option<FileFact>)>,
+    /// Each tree the effects done moved, from and to.
+    pub trees: Vec<(RelPath, RelPath)>,
+    /// Each directory the effects done made, or removed, as the folder shows it.
+    pub dirs: Vec<(RelPath, bool)>,
+    /// Each directory a step done was to remove that the folder still holds, as
+    /// a file the plan did not know of keeps one.
+    pub left: Vec<RelPath>,
+}
+
+/// Resolves `changes` into checks and steps. `bindings` says where existing
+/// entities' files are. Moves copy where `capabilities` declares no file renames,
+/// and directory renames are used only where it declares them too. Two changes
+/// that touch one path, compared by `env`'s names, are refused, as is a directory
+/// made at or under a path a step puts something at.
+///
+/// A tree moved by per-file renames moves the files `bindings` knows of; a
+/// directory left behind holding anything else stays.
+pub fn resolve(
+    changes: &[FileChange],
+    bindings: &Bindings,
+    layout: &Layout,
+    capabilities: Capabilities,
+    env: &mut Env,
+) -> std::result::Result<EffectPlan, Refusal> {
+    let mut resolver = Resolver {
+        plan: EffectPlan {
+            moves: Moves::of(capabilities),
+            ..EffectPlan::new(env.nonce())
+        },
+        touched: Vec::new(),
+        removed: Vec::new(),
+        claimed: BTreeSet::new(),
+        layout,
+        bindings,
+    };
+    for change in changes {
+        resolver.change(change, capabilities, env)?;
+    }
+    let put: Vec<&RelPath> = resolver
+        .plan
+        .steps
+        .iter()
+        .filter_map(EffectStep::put)
+        .collect();
+    for path in &resolver.removed {
+        if put.iter().any(|put| put.starts_with(path) && *put != path) {
+            return Err(invalid(Invalid::NotEmpty(path.clone())));
+        }
+    }
+    let key = |path: &RelPath| env.names.key(path.as_str());
+    let steps = &resolver.plan.steps;
+    let moved: Vec<String> = steps
+        .iter()
+        .filter(|step| !matches!(step, EffectStep::MakeDir { .. }))
+        .filter_map(EffectStep::put)
+        .map(key)
+        .collect();
+    for step in steps {
+        let EffectStep::MakeDir { path } = step else {
+            continue;
+        };
+        if moved.iter().any(|put| within(&key(path), put)) {
+            return Err(invalid(Invalid::Overlapping(path.clone())));
+        }
+    }
+    Ok(resolver.plan)
+}
+
+struct Resolver<'r> {
+    plan: EffectPlan,
+    /// The key under the volume's names of each path an effect touches.
+    touched: Vec<String>,
+    /// Each directory a [`FileChange::RemoveDir`] removes, which no step of the intent
+    /// may put anything in, before or after.
+    removed: Vec<RelPath>,
+    claimed: BTreeSet<EntityId>,
+    layout: &'r Layout,
+    bindings: &'r Bindings,
+}
+
+/// The directories at and under `dir` that hold `files`, and `dir`, deepest first:
+/// those a move of every one of `files` out of `dir` leaves to remove.
+fn emptied(files: &[&RelPath], dir: &RelPath) -> Vec<RelPath> {
+    let mut dirs: Vec<RelPath> = files
+        .iter()
+        .flat_map(|path| std::iter::successors(path.parent(), RelPath::parent))
+        .filter(|parent| parent.starts_with(dir))
+        .chain([dir.clone()])
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    dirs.sort_by_key(|parent| std::cmp::Reverse(parent.components().count()));
+    dirs
+}
+
+/// Whether the volume, by `env`'s names, takes the two paths for one.
+fn one_name(env: &Env, a: &RelPath, b: &RelPath) -> bool {
+    a != b && env.names.key(a.as_str()) == env.names.key(b.as_str())
+}
+
+/// Whether the path keyed `path` is at or under the one keyed `dir`.
+fn within(path: &str, dir: &str) -> bool {
+    dir.is_empty()
+        || path
+            .strip_prefix(dir)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+fn invalid(invalid: Invalid) -> Refusal {
+    Refusal::Invalid(invalid)
+}
+
+impl Resolver<'_> {
+    fn change(
+        &mut self,
+        change: &FileChange,
+        capabilities: Capabilities,
+        env: &mut Env,
+    ) -> std::result::Result<(), Refusal> {
+        match change {
+            FileChange::Save {
+                entity,
+                path,
+                content,
+                expect,
+            } => {
+                let entity = *entity;
+                let path = self.library(path)?;
+                self.claim(entity, &path, env)?;
+                self.check(&path, *expect);
+                if expect.present() {
+                    self.step(EffectStep::ToTrash {
+                        path: path.clone(),
+                        item: env.nonce(),
+                    });
+                }
+                let staged = env.nonce();
+                self.plan
+                    .place(staged, Staged::Content(*content), path.clone());
+                self.end(entity, Some(path));
+            }
+            FileChange::Trash { entity, expect } => {
+                let path = self.current(*entity)?;
+                self.claim(*entity, &path, env)?;
+                self.check(&path, *expect);
+                self.step(EffectStep::ToTrash {
+                    path,
+                    item: env.nonce(),
+                });
+                self.end(*entity, None);
+            }
+            FileChange::Rename { entity, to, expect } => {
+                let from = self.current(*entity)?;
+                let to = self.library(to)?;
+                self.claim(*entity, &from, env)?;
+                self.touch_destination(&from, &to, env)?;
+                self.check(&from, *expect);
+                self.rename(&from, &to, env)?;
+                self.end(*entity, Some(to));
+            }
+            FileChange::MoveTree { from, to } => {
+                self.move_tree_whole(from, to, capabilities, env)?
+            }
+            // A directory change touches no path, so one intent may make a directory
+            // and move files into it, or move them out and remove it.
+            FileChange::MakeDir { path } => {
+                let path = self.library(path)?;
+                self.check(&path, Expect::Absent);
+                self.step(EffectStep::MakeDir { path: path.clone() });
+                self.end_dir(path, true);
+            }
+            FileChange::RemoveDir { path } => {
+                let path = self.library(path)?;
+                let known = self.bindings.bound.values();
+                let known = known.filter(|file| file.state != FileState::Missing);
+                let unbound = self.bindings.unbound.range(path.clone()..);
+                let unbound = unbound.take_while(|file| file.as_str().starts_with(path.as_str()));
+                let steps = &self.plan.steps;
+                let taken: Vec<&RelPath> = steps.iter().filter_map(EffectStep::taken).collect();
+                let moved = |file: &RelPath| taken.iter().any(|at| file.starts_with(at));
+                let staying = |file: &&RelPath| file.starts_with(&path) && !moved(file);
+                let held = known
+                    .map(|file| &file.path)
+                    .chain(unbound)
+                    .any(|file| staying(&file));
+                if held {
+                    return Err(invalid(Invalid::NotEmpty(path)));
+                }
+                self.removed.push(path.clone());
+                self.step(EffectStep::RemoveDir { path: path.clone() });
+                self.end_dir(path, false);
+            }
+            FileChange::MoveBack { from, to, held } => {
+                for (path, expect) in held {
+                    self.check(path, *expect);
+                }
+                self.move_tree_whole(from, to, capabilities, env)?;
+            }
+            FileChange::Adopt {
+                entity,
+                path,
+                expect,
+            } => {
+                let entity = *entity;
+                let path = self.library(path)?;
+                self.claim(entity, &path, env)?;
+                self.check(&path, *expect);
+                self.plan.files.push(FileEnd {
+                    entity,
+                    path: Some(path),
+                    done_after: 0,
+                    pin: true,
+                    replaces: Vec::new(),
+                });
+            }
+            FileChange::Restore {
+                entity,
+                item,
+                to,
+                expect,
+            } => {
+                let to = self.library(to)?;
+                self.claim(*entity, &to, env)?;
+                self.check(&to, *expect);
+                if expect.present() {
+                    self.step(EffectStep::ToTrash {
+                        path: to.clone(),
+                        item: env.nonce(),
+                    });
+                }
+                self.step(EffectStep::FromTrash {
+                    item: *item,
+                    path: to.clone(),
+                });
+                self.end(*entity, Some(to));
+            }
+            FileChange::SaveFile {
+                path,
+                content,
+                expect,
+            } => {
+                let path = self.unbound(path, env)?;
+                self.check(&path, *expect);
+                if expect.present() {
+                    self.step(EffectStep::ToTrash {
+                        path: path.clone(),
+                        item: env.nonce(),
+                    });
+                }
+                let staged = env.nonce();
+                self.plan
+                    .place(staged, Staged::Content(*content), path.clone());
+                let from = expect.present().then(|| path.clone());
+                self.end_unbound(from, Some(path));
+            }
+            FileChange::RenameFile { from, to, expect } => {
+                let from = self.unbound(from, env)?;
+                let to = self.library(to)?;
+                self.touch_destination(&from, &to, env)?;
+                self.check(&from, *expect);
+                self.rename(&from, &to, env)?;
+                self.end_unbound(Some(from), Some(to));
+            }
+            FileChange::TrashFile { path, expect } => {
+                let path = self.unbound(path, env)?;
+                self.check(&path, *expect);
+                self.step(EffectStep::ToTrash {
+                    path: path.clone(),
+                    item: env.nonce(),
+                });
+                self.end_unbound(Some(path), None);
+            }
+            FileChange::RestoreFile { item, to, expect } => {
+                let to = self.unbound(to, env)?;
+                self.check(&to, *expect);
+                if expect.present() {
+                    self.step(EffectStep::ToTrash {
+                        path: to.clone(),
+                        item: env.nonce(),
+                    });
+                }
+                self.step(EffectStep::FromTrash {
+                    item: *item,
+                    path: to.clone(),
+                });
+                let from = expect.present().then(|| to.clone());
+                self.end_unbound(from, Some(to));
+            }
+        }
+        Ok(())
+    }
+
+    fn move_tree_whole(
+        &mut self,
+        from: &RelPath,
+        to: &RelPath,
+        capabilities: Capabilities,
+        env: &mut Env,
+    ) -> std::result::Result<(), Refusal> {
+        let (from, to) = (self.library(from)?, self.library(to)?);
+        self.touch(&from, env)?;
+        self.touch_destination(&from, &to, env)?;
+        let rename_dir = capabilities.rename_dir && self.plan.moves.renames();
+        match rename_dir && one_name(env, &from, &to) {
+            true => self.move_tree_aside(&from, &to, env)?,
+            false => {
+                self.check(&to, Expect::Absent);
+                self.move_tree(&from, &to, rename_dir)?;
+            }
+        }
+        self.end_tree(from, to);
+        Ok(())
+    }
+
+    fn move_tree(
+        &mut self,
+        from: &RelPath,
+        to: &RelPath,
+        rename_dir: bool,
+    ) -> std::result::Result<(), Refusal> {
+        let bound: BTreeMap<&RelPath, EntityId> = self
+            .bindings
+            .bound
+            .iter()
+            .filter(|(_, file)| file.state != FileState::Missing)
+            .map(|(entity, file)| (&file.path, *entity))
+            .collect();
+        let unbound = self.bindings.unbound.range(from.clone()..);
+        let unbound = unbound.take_while(|path| path.as_str().starts_with(from.as_str()));
+        let files: BTreeSet<&RelPath> = bound
+            .keys()
+            .copied()
+            .chain(unbound)
+            .filter(|path| path.starts_with(from))
+            .collect();
+        for &entity in bound
+            .iter()
+            .filter(|(path, _)| files.contains(*path))
+            .map(|(_, e)| e)
+        {
+            if !self.claimed.insert(entity) {
+                return Err(invalid(Invalid::Overlapping(from.clone())));
+            }
+        }
+        match files.contains(from) {
+            true => self.check(from, Expect::File),
+            false => self.check(from, Expect::Directory),
+        }
+        if !rename_dir {
+            for path in files.iter().filter(|path| **path != from) {
+                self.check(path, Expect::File);
+            }
+        }
+        let rebased = |path: &RelPath| path.rebase(from, to).expect("the file is under the tree");
+        if rename_dir {
+            self.step(EffectStep::Rename {
+                from: from.clone(),
+                to: to.clone(),
+            });
+        }
+        for path in &files {
+            if !rename_dir {
+                self.step(EffectStep::Rename {
+                    from: (*path).clone(),
+                    to: rebased(path),
+                });
+            }
+            // A file no entity is bound to has no facts: the tree's own end says where
+            // it went.
+            if let Some(&entity) = bound.get(path) {
+                self.end(entity, Some(rebased(path)));
+            }
+        }
+        if !rename_dir && !files.contains(from) {
+            let files: Vec<&RelPath> = files.iter().copied().collect();
+            for path in emptied(&files, from) {
+                self.step(EffectStep::RemoveDir { path: path.clone() });
+                self.end_dir(path, false);
+            }
+        }
+        Ok(())
+    }
+
+    /// Renames the file `from` to `to`, where nothing is. Where the volume may take
+    /// the two for one name, as a change of case alone on a volume that ignores
+    /// case, the file itself may be found at `to`: only an entry of exactly that
+    /// name clashes, and the file moves through a free name beside it, so that no
+    /// step finds its source and its destination one file.
+    fn rename(
+        &mut self,
+        from: &RelPath,
+        to: &RelPath,
+        env: &mut Env,
+    ) -> std::result::Result<(), Refusal> {
+        if !one_name(env, from, to) {
+            self.check(to, Expect::Absent);
+            self.step(EffectStep::Rename {
+                from: from.clone(),
+                to: to.clone(),
+            });
+            return Ok(());
+        }
+        self.spelled(to);
+        self.through_trash(from, to, env);
+        Ok(())
+    }
+
+    /// Moves `from` to `to` by way of this writer's trash, which every reader and
+    /// recovery admits, so that no step's source and destination are one file.
+    fn through_trash(&mut self, from: &RelPath, to: &RelPath, env: &mut Env) {
+        let item = env.nonce();
+        self.step(EffectStep::ToTrash {
+            path: from.clone(),
+            item,
+        });
+        self.step(EffectStep::FromTrash {
+            item,
+            path: to.clone(),
+        });
+    }
+
+    /// [`Resolver::move_tree`] by moving the directory by way of this writer's trash,
+    /// where the volume takes `from` and `to` for one name.
+    fn move_tree_aside(
+        &mut self,
+        from: &RelPath,
+        to: &RelPath,
+        env: &mut Env,
+    ) -> std::result::Result<(), Refusal> {
+        self.spelled(to);
+        let (ends, unbound, steps) = (
+            self.plan.files.len(),
+            self.plan.unbound.len(),
+            self.plan.steps.len(),
+        );
+        self.move_tree(from, to, true)?;
+        self.plan.steps.truncate(steps);
+        self.through_trash(from, to, env);
+        let done_after = self.plan.steps.len();
+        for end in &mut self.plan.files[ends..] {
+            end.done_after = done_after;
+        }
+        for end in &mut self.plan.unbound[unbound..] {
+            end.done_after = done_after;
+        }
+        Ok(())
+    }
+
+    /// Checks nothing is at `to` under exactly its name.
+    fn spelled(&mut self, to: &RelPath) {
+        self.plan.checks.push(Precondition {
+            path: to.clone(),
+            expect: Expect::Absent,
+            spelled: true,
+        });
+    }
+
+    /// Takes `path` for one effect on a file no entity is bound to: refused where
+    /// an entity's file is, by the volume's names.
+    fn unbound(&mut self, path: &RelPath, env: &Env) -> std::result::Result<RelPath, Refusal> {
+        let path = self.library(path)?;
+        let key = env.names.key(path.as_str());
+        let bound = self.bindings.bound.values();
+        if let Some(file) = bound.into_iter().find(|file| {
+            file.state != FileState::Missing && env.names.key(file.path.as_str()) == key
+        }) {
+            return Err(invalid(Invalid::Bound(file.path.clone())));
+        }
+        self.touch(&path, env)?;
+        Ok(path)
+    }
+
+    fn library(&self, path: &RelPath) -> std::result::Result<RelPath, Refusal> {
+        match self.layout.check_library_path(path) {
+            Ok(()) => Ok(path.clone()),
+            Err(_) => Err(invalid(Invalid::ReservedPath(path.clone()))),
+        }
+    }
+
+    /// Refuses a path one effect of the intent already touches, or contains, by
+    /// the volume's names.
+    fn touch(&mut self, path: &RelPath, env: &Env) -> std::result::Result<(), Refusal> {
+        let key = env.names.key(path.as_str());
+        let mut touched = self.touched.iter();
+        if touched.any(|other| within(other, &key) || within(&key, other)) {
+            return Err(invalid(Invalid::Overlapping(path.clone())));
+        }
+        self.touched.push(key);
+        Ok(())
+    }
+
+    /// Touches `to`, where a move from `from` puts something, unless the volume
+    /// takes the two for one name: `from` is touched then.
+    fn touch_destination(
+        &mut self,
+        from: &RelPath,
+        to: &RelPath,
+        env: &Env,
+    ) -> std::result::Result<(), Refusal> {
+        match one_name(env, from, to) {
+            true => Ok(()),
+            false => self.touch(to, env),
+        }
+    }
+
+    /// Takes the entity's file for one effect, and the path it touches.
+    fn claim(
+        &mut self,
+        entity: EntityId,
+        path: &RelPath,
+        env: &Env,
+    ) -> std::result::Result<(), Refusal> {
+        self.touch(path, env)?;
+        match self.claimed.insert(entity) {
+            true => Ok(()),
+            false => Err(invalid(Invalid::Overlapping(path.clone()))),
+        }
+    }
+
+    fn current(&self, entity: EntityId) -> std::result::Result<RelPath, Refusal> {
+        match self.bindings.bound.get(&entity) {
+            Some(file) if file.state != FileState::Missing => Ok(file.path.clone()),
+            _ => Err(invalid(Invalid::NoFile(entity))),
+        }
+    }
+
+    fn check(&mut self, path: &RelPath, expect: Expect) {
+        self.plan.checks.push(Precondition {
+            path: path.clone(),
+            expect,
+            spelled: false,
+        });
+    }
+
+    fn step(&mut self, step: EffectStep) {
+        self.plan.steps.push(step);
+    }
+
+    fn end_dir(&mut self, path: RelPath, made: bool) {
+        let done_after = self.plan.steps.len();
+        self.plan.dirs.push(DirEnd {
+            path,
+            made,
+            done_after,
+        });
+    }
+
+    fn end_tree(&mut self, from: RelPath, to: RelPath) {
+        let done_after = self.plan.steps.len();
+        self.plan.trees.push(TreeEnd {
+            from,
+            to,
+            done_after,
+        });
+    }
+
+    fn end_unbound(&mut self, from: Option<RelPath>, path: Option<RelPath>) {
+        let done_after = self.plan.steps.len();
+        self.plan.unbound.push(UnboundEnd {
+            from,
+            path,
+            done_after,
+        });
+    }
+
+    fn end(&mut self, entity: EntityId, path: Option<RelPath>) {
+        let done_after = self.plan.steps.len();
+        self.plan.files.push(FileEnd {
+            entity,
+            path,
+            done_after,
+            pin: false,
+            replaces: Vec::new(),
+        });
+    }
+}
+
+/// Stages and syncs the plan's files, checks every precondition, then writes
+/// `record` as the plan's pending record, whole or not at all. A record longer
+/// than a reader reads is refused before anything is written, and a failed
+/// precondition removes what was staged and refuses; nothing in a user path has
+/// changed. A plan that moves no file only checks.
+pub fn prepare(
+    layout: &Layout,
+    plan: Rc<EffectPlan>,
+    record: Rc<PendingRecord>,
+    identify: Rc<dyn Identify>,
+) -> Task<'static, Result<std::result::Result<(), Refusal>>> {
+    if plan.is_empty() {
+        return Task::ready(Ok(Ok(())));
+    }
+    let layout = layout.clone();
+    let writer = record.writer;
+    if !plan.moves_files() {
+        return refusal(&layout, writer, &plan, &identify)
+            .map_ok(|refused| refused.map_or(Ok(()), Err))
+            .task();
+    }
+    let bytes = record.encode();
+    if bytes.len() as u64 > pending::MAX_RECORD {
+        return Task::ready(Ok(Err(Refusal::Invalid(Invalid::TooLong))));
+    }
+    let moves = record.moves;
+    stage(&layout, writer, Rc::clone(&plan))
+        .and_then({
+            let (layout, plan) = (layout.clone(), Rc::clone(&plan));
+            move |()| refusal(&layout, writer, &plan, &identify)
+        })
+        .and_then(move |refused| match refused {
+            Some(refusal) => {
+                let staged: Vec<RelPath> = plan
+                    .staged
+                    .iter()
+                    .map(|(name, to, _)| layout.staged(writer, *name, to))
+                    .collect();
+                each(staged.into_iter(), |path| flow::remove(Root::Folder, &path))
+                    .map_ok(|()| Err(refusal))
+            }
+            None => write_record(&layout, writer, plan.record, moves, bytes).map_ok(|()| Ok(())),
+        })
+        .task()
+}
+
+/// The refusal [`prepare`] would give, found without writing anything.
+pub fn check(
+    layout: &Layout,
+    writer: WriterId,
+    plan: &EffectPlan,
+    identify: &Rc<dyn Identify>,
+) -> Task<'static, Result<Option<Refusal>>> {
+    refusal(layout, writer, plan, identify).task()
+}
+
+/// Writes the record's `bytes` whole: staged and synced first, then renamed into
+/// place, so a crash never leaves part of one. A record that moves by copying is
+/// created in place, and a crash can leave it empty where a create makes a file's
+/// name before its bytes land: [`crate::recovery::remove_empty`] removes it.
+fn write_record<'a>(
+    layout: &Layout,
+    writer: WriterId,
+    name: Nonce,
+    moves: Moves,
+    bytes: Vec<u8>,
+) -> Fallible<'a, ()> {
+    let path = layout.pending(writer, name);
+    let staged = layout.staged(writer, name, &path);
+    if moves == Moves::Copy {
+        let dir = layout.pending_dir(writer);
+        return flow::ensure_dir(Root::Folder, &dir)
+            .and_then({
+                let path = path.clone();
+                move |()| {
+                    flow::act(Io::Create {
+                        root: Root::Folder,
+                        path,
+                        bytes,
+                    })
+                }
+            })
+            .and_then(move |()| flow::sync(Root::Folder, &path))
+            .and_then(move |()| flow::sync(Root::Folder, &dir));
+    }
+    flow::ensure_dir(Root::Folder, &layout.tmp_dir(writer))
+        .and_then({
+            let staged = staged.clone();
+            move |()| {
+                let created = flow::act(Io::Create {
+                    root: Root::Folder,
+                    path: staged.clone(),
+                    bytes,
+                });
+                created.and_then(move |()| flow::sync(Root::Folder, &staged))
+            }
+        })
+        .and_then(move |()| flow::rename(Root::Folder, &staged, &path))
+}
+
+fn stage<'a>(layout: &Layout, writer: WriterId, plan: Rc<EffectPlan>) -> Fallible<'a, ()> {
+    if plan.staged.is_empty() {
+        return ok(());
+    }
+    let layout = layout.clone();
+    let dir = layout.tmp_dir(writer);
+    let synced = dir.clone();
+    flow::ensure_dir(Root::Folder, &dir)
+        .and_then(move |()| {
+            each(0..plan.staged.len(), move |i| {
+                let (name, to, staged) = &plan.staged[i];
+                let path = layout.staged(writer, *name, to);
+                let filled = match staged {
+                    Staged::Content(content) => flow::act(Io::Create {
+                        root: Root::Folder,
+                        path: path.clone(),
+                        bytes: Vec::new(),
+                    })
+                    .and_then({
+                        let (path, content) = (path.clone(), *content);
+                        move |()| fill(path, content)
+                    }),
+                    Staged::Copy(source) => flow::copy(Root::Folder, source, &path).map_ok(|_| ()),
+                };
+                filled.and_then(move |()| flow::sync(Root::Folder, &path))
+            })
+        })
+        .and_then(move |()| flow::sync(Root::Folder, &synced))
+}
+
+/// Fills the staged file at `path` from `content`. A fill that fails removes
+/// what it wrote, which also ends a stream it left open.
+fn fill<'a>(path: RelPath, content: Content) -> Fallible<'a, ()> {
+    let io = Io::Fill {
+        root: Root::Folder,
+        path: path.clone(),
+        content,
+    };
+    flow::act(io).then(move |filled| match filled {
+        Ok(()) => ok(()),
+        Err(error) => {
+            flow::remove_if_present(Root::Folder, path).then(move |_| Flow::Done(Err(error)))
+        }
+    })
+}
+
+/// The first precondition that does not hold, or a trash item a step needs that
+/// is gone.
+fn refusal<'a>(
+    layout: &Layout,
+    writer: WriterId,
+    plan: &EffectPlan,
+    identify: &Rc<dyn Identify>,
+) -> Fallible<'a, Option<Refusal>> {
+    let identify = Rc::clone(identify);
+    let checks = plan.checks.clone();
+    let trees: BTreeSet<RelPath> = plan.trees.iter().map(|tree| tree.from.clone()).collect();
+    let paths: Vec<(RelPath, bool)> = checks
+        .iter()
+        .map(|check| (check.path.clone(), check.spelled))
+        .collect();
+    let stated = fold(
+        paths.into_iter(),
+        Vec::new(),
+        |mut metas, (path, spelled)| {
+            flow::stat(Root::Folder, &path).and_then(move |meta| {
+                if !spelled || meta.is_none() {
+                    metas.push(meta);
+                    return ok(metas);
+                }
+                flow::spelled(Root::Folder, path).map_ok(move |exactly| {
+                    metas.push(meta.filter(|_| exactly));
+                    metas
+                })
+            })
+        },
+    );
+    let checked = stated.and_then(move |metas| {
+        let identified = |check: &Precondition, meta: &Option<Meta>| match meta {
+            Some(meta) if meta.kind == Kind::File => {
+                matches!(check.expect, Expect::Absent | Expect::Holds(_))
+            }
+            _ => false,
+        };
+        let files = checks
+            .iter()
+            .zip(&metas)
+            .filter(|(check, meta)| identified(check, meta))
+            .filter_map(|(check, meta)| Some((check.path.clone(), meta.as_ref()?.len)));
+        flow::identities(Root::Folder, files.collect(), &identify).map_ok(move |identities| {
+            let mut identities = identities.into_iter();
+            checks.into_iter().zip(metas).find_map(|(check, meta)| {
+                let tree = check.expect == Expect::Directory && trees.contains(&check.path);
+                if meta.is_some_and(|meta| meta.kind == Kind::Directory) && !tree {
+                    return Some(Refusal::Directory(check.path));
+                }
+                let found = match identified(&check, &meta) {
+                    true => identities.next().expect("an identity for each file"),
+                    false => None,
+                };
+                let holds = match (check.expect, meta, found) {
+                    (Expect::Absent, None, _) => true,
+                    (Expect::Holds(expected), _, Some(found)) => expected == found,
+                    (Expect::Listed { len, modified }, Some(meta), _) => {
+                        (meta.len, meta.modified) == (len, modified)
+                    }
+                    (Expect::File, Some(_), _) => true,
+                    (Expect::Directory, Some(meta), _) => meta.kind == Kind::Directory,
+                    _ => false,
+                };
+                (!holds).then(|| {
+                    Refusal::Changed(Box::new(Mismatch {
+                        path: check.path,
+                        expected: check.expect,
+                        found,
+                    }))
+                })
+            })
+        })
+    });
+    let trashed: BTreeSet<Nonce> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            EffectStep::ToTrash { item, .. } => Some(*item),
+            _ => None,
+        })
+        .collect();
+    let items: Vec<RelPath> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            EffectStep::FromTrash { item, .. } if !trashed.contains(item) => {
+                Some(layout.trash(writer, *item))
+            }
+            _ => None,
+        })
+        .collect();
+    checked.and_then(move |refused| {
+        fold(items.into_iter(), refused, |refused, item| match refused {
+            Some(refused) => ok(Some(refused)),
+            None => flow::stat(Root::Folder, &item)
+                .map_ok(|meta| meta.is_none().then_some(Refusal::Emptied)),
+        })
+    })
+}
+
+/// Carries out `record`'s steps from `start`, each destination durable before its
+/// source is gone, then reports what the folder shows. A step that fails stops the
+/// run with its error, and the record stays open to settle. The pending record
+/// `name` stays until [`finish`].
+pub fn apply(
+    layout: &Layout,
+    name: Nonce,
+    record: Rc<PendingRecord>,
+    start: usize,
+    identify: Rc<dyn Identify>,
+) -> Task<'static, Result<Applied>> {
+    let layout = layout.clone();
+    let runs = runs(&record.steps, start, record.moves);
+    let running = (layout.clone(), Rc::clone(&record));
+    each(runs.into_iter(), move |run| {
+        run_steps(&running.0, name, &running.1, run)
+    })
+    .and_then(move |()| account(layout, record, identify))
+    .task()
+}
+
+/// The steps from `start` in runs carried out together: consecutive `place`
+/// steps into one directory where moves rename, and every other step alone.
+fn runs(steps: &[EffectStep], start: usize, moves: Moves) -> Vec<Range<usize>> {
+    let mut runs: Vec<Range<usize>> = Vec::new();
+    for i in start..steps.len() {
+        match runs.last_mut() {
+            Some(run) if moves.renames() && placed_together(&steps[run.start], &steps[i]) => {
+                run.end = i + 1
+            }
+            _ => runs.push(i..i + 1),
+        }
+    }
+    runs
+}
+
+// ⚠️ A crash between a run's two syncs can leave each move's source beside its
+// destination, and recovery removes only the last one's. Only a staged file is
+// harmless left behind, so only `place` steps run together.
+fn placed_together(first: &EffectStep, next: &EffectStep) -> bool {
+    match (first, next) {
+        (EffectStep::Place { path: a, .. }, EffectStep::Place { path: b, .. }) => {
+            a.parent() == b.parent()
+        }
+        _ => false,
+    }
+}
+
+fn run_steps<'a>(
+    layout: &Layout,
+    name: Nonce,
+    record: &PendingRecord,
+    run: Range<usize>,
+) -> Fallible<'a, ()> {
+    let writer = record.writer;
+    match &record.steps[run.clone()] {
+        [step] => run_step(layout, name, record, run.start, step),
+        places => {
+            let moves = places.iter().filter_map(|step| step.ends(layout, writer));
+            flow::rename_all(Root::Folder, moves.collect())
+        }
+    }
+}
+
+fn run_step<'a>(
+    layout: &Layout,
+    name: Nonce,
+    record: &PendingRecord,
+    index: usize,
+    step: &EffectStep,
+) -> Fallible<'a, ()> {
+    let writer = record.writer;
+    let moved = match (step, step.ends(layout, writer)) {
+        (_, Some((from, to))) if record.moves == Moves::Copy => mark(layout, writer, name, index)
+            .and_then(move |()| flow::copy_move(Root::Folder, &from, &to)),
+        (_, Some((from, to))) => flow::rename(Root::Folder, &from, &to),
+        (EffectStep::MakeDir { path }, None) => flow::ensure_dir(Root::Folder, path),
+        (EffectStep::RemoveDir { path }, None) => {
+            let io = Io::RemoveDir {
+                root: Root::Folder,
+                path: path.clone(),
+            };
+            let parent = path.clone();
+            flow::attempt(io.clone()).then(move |result| match result {
+                Ok(_) => flow::sync_parent(Root::Folder, &parent),
+                Err(IoError::NotEmpty | IoError::NotFound | IoError::NotDirectory) => ok(()),
+                Err(error) => Flow::Done(Err(io.failed(error))),
+            })
+        }
+        (_, None) => unreachable!("only directory steps have no ends"),
+    };
+    // A file gone before it could go to the trash leaves nothing to keep.
+    match step {
+        EffectStep::ToTrash { path, .. } => {
+            let path = path.clone();
+            moved.then(move |moved| match moved {
+                Err(
+                    failed @ crate::Error::Io {
+                        error: IoError::NotFound,
+                        ..
+                    },
+                ) => flow::stat(Root::Folder, &path).then(move |held| match held {
+                    Ok(None) => ok(()),
+                    _ => Flow::Done(Err(failed)),
+                }),
+                moved => Flow::Done(moved),
+            })
+        }
+        _ => moved,
+    }
+}
+
+/// Makes the marker of step `step` of the record `name` durable: the steps before
+/// it are done, and its copy may have started.
+fn mark<'a>(layout: &Layout, writer: WriterId, name: Nonce, step: usize) -> Fallible<'a, ()> {
+    let io = Io::Create {
+        root: Root::Folder,
+        path: layout.marker(writer, name, step),
+        bytes: Vec::new(),
+    };
+    let dir = layout.pending_dir(writer);
+    flow::attempt(io.clone()).then(move |result| match result {
+        Ok(_) | Err(IoError::AlreadyExists) => flow::sync(Root::Folder, &dir),
+        Err(error) => Flow::Done(Err(io.failed(error))),
+    })
+}
+
+/// Moves this writer's own `from` to `to` as `moves` says, with no marker.
+pub(crate) fn relocate<'a>(moves: Moves, from: &RelPath, to: &RelPath) -> Fallible<'a, ()> {
+    match moves {
+        Moves::Rename => flow::rename(Root::Folder, from, to),
+        Moves::Copy => flow::copy_move(Root::Folder, from, to),
+    }
+}
+
+/// What the steps did, every one of them done.
+fn account<'a>(
+    layout: Layout,
+    record: Rc<PendingRecord>,
+    identify: Rc<dyn Identify>,
+) -> Fallible<'a, Applied> {
+    let writer = record.writer;
+    let items: Vec<(Nonce, RelPath)> = record
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            EffectStep::ToTrash { path, item } => Some((*item, path.clone())),
+            _ => None,
+        })
+        .collect();
+    let ends = record.files.clone();
+    let unbound = record.unbound.clone();
+    let trees: Vec<(RelPath, RelPath)> = record
+        .trees
+        .iter()
+        .map(|end| (end.from.clone(), end.to.clone()))
+        .collect();
+    let dirs = record.dirs.clone();
+    let paths = items.iter().map(|(item, _)| layout.trash(writer, *item));
+    flow::observe_all(Root::Folder, paths.collect(), &identify)
+        .map_ok(move |seen| {
+            let seen = items.into_iter().zip(seen);
+            let displaced = seen.filter_map(|((item, from), seen)| {
+                let seen = seen?;
+                Some(Displaced {
+                    item,
+                    from,
+                    identity: seen.identity,
+                    len: seen.len,
+                })
+            });
+            displaced.collect::<Vec<Displaced>>()
+        })
+        .and_then(move |displaced| {
+            // A directory a step made or removed is logged as the folder shows it.
+            fold(
+                dirs.into_iter(),
+                (Vec::new(), Vec::new()),
+                |(mut shown, mut left), end| {
+                    flow::stat(Root::Folder, &end.path).map_ok(move |meta| {
+                        let there = meta.is_some_and(|meta| meta.kind == Kind::Directory);
+                        match (there == end.made, there) {
+                            (true, _) => shown.push((end.path, end.made)),
+                            (false, true) => left.push(end.path),
+                            (false, false) => {}
+                        }
+                        (shown, left)
+                    })
+                },
+            )
+            .map_ok(move |(dirs, left)| (displaced, dirs, left))
+        })
+        .and_then(move |(displaced, dirs, left)| {
+            let paths = ends.iter().map(|end| end.path.clone());
+            let paths = paths.chain(unbound.iter().map(|end| end.path.clone()));
+            let paths = paths.flatten();
+            flow::observe_all(Root::Folder, paths.collect(), &identify).map_ok(move |seen| {
+                let mut seen = seen.into_iter();
+                let files = ends.into_iter().filter_map(|end| {
+                    let Some(path) = end.path else {
+                        return Some((end.entity, None));
+                    };
+                    let seen = seen.next().expect("an observation for each path")?;
+                    let fact = FileFact {
+                        path,
+                        identity: seen.identity,
+                        len: seen.len,
+                        modified: seen.modified,
+                    };
+                    Some((end.entity, Some(fact)))
+                });
+                let files = files.collect();
+                let unbound = unbound.into_iter().filter_map(|end| {
+                    let Some(path) = end.path else {
+                        return Some((end.from, None));
+                    };
+                    let seen = seen.next().expect("an observation for each path")?;
+                    let fact = FileFact {
+                        path,
+                        identity: seen.identity,
+                        len: seen.len,
+                        modified: seen.modified,
+                    };
+                    Some((end.from, Some(fact)))
+                });
+                Applied {
+                    displaced,
+                    files,
+                    unbound: unbound.collect(),
+                    trees,
+                    dirs,
+                    left,
+                }
+            })
+        })
+}
+
+/// Removes the pending record `name` once the intent's entry is durable, after its
+/// markers. A record already gone is success.
+pub fn finish(layout: &Layout, name: Nonce, record: &PendingRecord) -> Task<'static, Result<()>> {
+    let path = layout.pending(record.writer, name);
+    let dir = layout.pending_dir(record.writer);
+    let unmarked = match record.moves {
+        Moves::Rename => ok(()),
+        Moves::Copy => flow::list(Root::Folder, &dir).and_then(move |entries| {
+            let marks: Vec<RelPath> = entries
+                .iter()
+                .filter(|entry| pending::marker(&entry.name).is_some_and(|(of, _)| of == name))
+                .map(|entry| {
+                    dir.join(&entry.name)
+                        .expect("a listed name is one component")
+                })
+                .collect();
+            match marks.is_empty() {
+                true => ok(()),
+                false => each(marks.into_iter(), |path| {
+                    flow::remove_if_present(Root::Folder, path)
+                })
+                .and_then(move |()| flow::sync(Root::Folder, &dir)),
+            }
+        }),
+    };
+    unmarked
+        .and_then(move |()| flow::remove(Root::Folder, &path))
+        .task()
+}
+
+/// Which of a record's paths the folder holds, the length of each that is a file,
+/// what each step's destination holds of its source's bytes where both are there,
+/// and the last step of a record that copies whose marker is there.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub(crate) struct Observation {
+    present: BTreeSet<RelPath>,
+    directories: BTreeSet<RelPath>,
+    lens: BTreeMap<RelPath, u64>,
+    held: BTreeMap<(RelPath, RelPath), Held>,
+    started: Option<usize>,
+}
+
+impl Observation {
+    /// Whether `path`, one of the record's paths, is a directory.
+    pub(crate) fn is_directory(&self, path: &RelPath) -> bool {
+        self.directories.contains(path)
+    }
+
+    /// The record's paths the folder holds once resuming from `progress` removed
+    /// the source the last done step left and the copy the next one cut short.
+    pub(crate) fn present_after(&self, progress: &Progress) -> BTreeSet<RelPath> {
+        let mut present = self.present.clone();
+        let partial = progress.partial.iter().map(|cut| &cut.path);
+        for removed in progress.leftover.iter().chain(partial) {
+            present.remove(removed);
+        }
+        present
+    }
+}
+
+/// How far a record's steps got: the first `done`; a source the last of them
+/// left behind beside its destination with the same bytes; and the destination of
+/// the next, a copy of which was cut short.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Progress {
+    pub done: usize,
+    pub leftover: Option<RelPath>,
+    pub partial: Option<Cut>,
+}
+
+/// The destination of a step that copies, which holds a copy cut short.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Cut {
+    pub path: RelPath,
+    /// Whether it holds the start of its source's bytes and nothing else; if not,
+    /// a crash zeroed or tore what was not yet synced, or another program put the
+    /// file there since.
+    pub start: bool,
+}
+
+impl Progress {
+    fn upto(done: usize) -> Self {
+        Self {
+            done,
+            leftover: None,
+            partial: None,
+        }
+    }
+}
+
+/// Reads what [`progress`] needs of the record `name`. Requests only [`Io::List`],
+/// [`Io::Stat`] and [`Io::Read`].
+pub(crate) fn observe<'a>(
+    layout: &Layout,
+    name: Nonce,
+    record: &PendingRecord,
+) -> Fallible<'a, Observation> {
+    let writer = record.writer;
+    let moves: BTreeSet<usize> = (0..record.steps.len())
+        .filter(|&i| record.steps[i].ends(layout, writer).is_some())
+        .collect();
+    let started = match record.moves {
+        Moves::Rename => ok(None),
+        Moves::Copy => flow::list(Root::Folder, &layout.pending_dir(writer)).map_ok(move |found| {
+            let marked = found
+                .iter()
+                .filter_map(|entry| pending::marker(&entry.name));
+            marked
+                .filter(|&(of, step)| of == name && moves.contains(&step))
+                .map(|(_, step)| step)
+                .max()
+        }),
+    };
+    let mut paths = BTreeSet::new();
+    let mut pairs = Vec::new();
+    for step in &record.steps {
+        if let EffectStep::Place { staged, .. } = step {
+            paths.insert(layout.trash(writer, *staged));
+        }
+        if let Some((from, to)) = step.ends(layout, writer) {
+            paths.insert(from.clone());
+            paths.insert(to.clone());
+            pairs.push((from, to));
+        }
+    }
+    started.and_then(move |started| {
+        let found = (
+            BTreeSet::new(),
+            BTreeSet::new(),
+            BTreeMap::new(),
+            flow::Listings::default(),
+        );
+        fold(
+            paths.into_iter(),
+            found,
+            |(mut present, mut directories, mut lens, listings), path| {
+                flow::stat(Root::Folder, &path).and_then(move |meta| {
+                    let Some(meta) = meta else {
+                        return ok((present, directories, lens, listings));
+                    };
+                    // ⚠️ A volume that ignores case finds a path by another spelling,
+                    // as the destination of a change of case finds its source.
+                    flow::spelled_in(Root::Folder, path.clone(), listings).map_ok(
+                        move |(exactly, listings)| {
+                            if exactly {
+                                match meta.kind {
+                                    Kind::Directory => drop(directories.insert(path.clone())),
+                                    Kind::File => drop(lens.insert(path.clone(), meta.len)),
+                                }
+                                present.insert(path);
+                            }
+                            (present, directories, lens, listings)
+                        },
+                    )
+                })
+            },
+        )
+        .and_then(move |(present, directories, lens, _)| {
+            let both: Vec<(RelPath, RelPath)> = pairs
+                .into_iter()
+                .filter(|(from, to)| present.contains(from) && present.contains(to))
+                .collect();
+            fold(both.into_iter(), BTreeMap::new(), |mut held, (from, to)| {
+                flow::held(Root::Folder, &from, &to).map_ok(move |found| {
+                    held.insert((from, to), found);
+                    held
+                })
+            })
+            .map_ok(move |held| Observation {
+                present,
+                directories,
+                lens,
+                held,
+                started,
+            })
+        })
+    })
+}
+
+/// How far this writer's record's steps got. Steps run in order, each finished
+/// before the next starts. Directory steps are idempotent and do not count.
+/// `synced` is whether the folder declares [`Capabilities::fsync`].
+pub(crate) fn progress(
+    layout: &Layout,
+    record: &PendingRecord,
+    seen: &Observation,
+    synced: bool,
+) -> Progress {
+    match record.moves {
+        Moves::Rename => scanned(layout, record, seen),
+        Moves::Copy => copied(layout, record, seen, synced),
+    }
+}
+
+/// How far another writer's record's steps got, as the folder shows them, which
+/// settlements may since have carried further or partly reversed, unless the
+/// marked step of a record that copies left the start of a copy past where the
+/// folder shows them.
+pub(crate) fn reached(
+    layout: &Layout,
+    record: &PendingRecord,
+    seen: &Observation,
+    synced: bool,
+) -> Progress {
+    let shown = scanned(layout, record, seen);
+    let marked = match record.moves {
+        Moves::Rename => return shown,
+        Moves::Copy => copied(layout, record, seen, synced),
+    };
+    match marked.partial {
+        Some(_) if marked.done >= shown.done => marked,
+        _ => shown,
+    }
+}
+
+/// How far steps got as the folder shows them: the last step that shows done ends
+/// the done prefix.
+fn scanned(layout: &Layout, record: &PendingRecord, seen: &Observation) -> Progress {
+    let writer = record.writer;
+    let has = |path: &RelPath| seen.present.contains(path);
+    for (i, step) in record.steps.iter().enumerate().rev() {
+        let Some((from, to)) = step.ends(layout, writer) else {
+            continue;
+        };
+        let equal = seen.held.get(&(from.clone(), to.clone())) == Some(&Held::All);
+        // A renamed trash item's name is new, so its presence is proof; a staged
+        // file's absence is, unless it was swept into the trash instead.
+        let done = match step {
+            EffectStep::ToTrash { .. } if record.moves.renames() => has(&to),
+            EffectStep::Place { staged, .. } => {
+                has(&to) && (equal || !has(&from) && !has(&layout.trash(writer, *staged)))
+            }
+            _ => has(&to) && (equal || !has(&from)),
+        };
+        if done {
+            return Progress {
+                leftover: (has(&from) && equal).then_some(from),
+                ..Progress::upto(i + 1)
+            };
+        }
+    }
+    Progress::upto(0)
+}
+
+/// How far copies got. A step's marker is made once every step before it is done,
+/// and its source is removed only once its destination holds all of the source's
+/// bytes, so the last marked step is the one in progress. Contents alone cannot
+/// tell which step that is, since a later step may put bytes back where an earlier
+/// one copied them from. The marked step's destination, which its create refused
+/// to find already there, is a copy cut short while it holds the start of its
+/// source's bytes or, in a folder that syncs, where a crash zeroes or tears bytes
+/// not yet synced, anything no longer than them.
+fn copied(layout: &Layout, record: &PendingRecord, seen: &Observation, synced: bool) -> Progress {
+    let Some(i) = seen.started else {
+        return Progress::upto(0);
+    };
+    let step = &record.steps[i];
+    let (from, to) = step
+        .ends(layout, record.writer)
+        .expect("only moves are marked");
+    let has = |path: &RelPath| seen.present.contains(path);
+    let swept = match step {
+        EffectStep::Place { staged, .. } => has(&layout.trash(record.writer, *staged)),
+        _ => false,
+    };
+    let held = seen.held.get(&(from.clone(), to.clone()));
+    let lens = seen.lens.get(&to).zip(seen.lens.get(&from));
+    let torn = synced && lens.is_some_and(|(copied, whole)| copied <= whole);
+    let cut = |start| Progress {
+        partial: Some(Cut {
+            path: to.clone(),
+            start,
+        }),
+        ..Progress::upto(i)
+    };
+    match (has(&from), has(&to), held) {
+        (false, true, _) if !swept => Progress::upto(i + 1),
+        (true, true, Some(Held::All)) => Progress {
+            leftover: Some(from),
+            ..Progress::upto(i + 1)
+        },
+        (true, true, Some(Held::Start)) => cut(true),
+        (true, true, _) if torn => cut(false),
+        _ => Progress::upto(i),
+    }
+}
+
+/// How resuming from `progress` will end, if nothing else changes the folder.
+pub(crate) fn predict(
+    layout: &Layout,
+    name: Nonce,
+    record: &PendingRecord,
+    seen: &Observation,
+    progress: &Progress,
+) -> Outcome {
+    let mut present = seen.present_after(progress);
+    for (i, step) in record.steps.iter().enumerate().skip(progress.done) {
+        let Some((from, to)) = step.ends(layout, record.writer) else {
+            continue;
+        };
+        let error = match (present.contains(&from), present.contains(&to)) {
+            (false, _) if matches!(step, EffectStep::ToTrash { .. }) => continue,
+            (false, _) => IoError::NotFound,
+            (true, true) => IoError::AlreadyExists,
+            (true, false) => {
+                present.remove(&from);
+                present.insert(to);
+                continue;
+            }
+        };
+        return Outcome::Partial(PartialReport {
+            applied: i,
+            stopped: step.path().clone(),
+            error,
+            record: Some(name),
+            taken: record.steps[..i]
+                .iter()
+                .filter_map(EffectStep::taken)
+                .cloned()
+                .collect(),
+        });
+    }
+    Outcome::Complete
+}

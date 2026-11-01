@@ -254,7 +254,8 @@ async fn slice_into(file: &web_sys::File, offset: u64, buf: &mut [u8]) -> io::Re
     Ok(())
 }
 
-async fn sliced(file: &web_sys::File, range: Range<u64>) -> io::Result<Uint8Array> {
+/// The bytes at `range` of `file`, as the browser read them.
+pub(crate) async fn sliced(file: &web_sys::File, range: Range<u64>) -> io::Result<Uint8Array> {
     let failed = |e| io::Error::other(crate::js::describe(&e));
     let blob = file
         .slice_with_f64_and_f64(range.start as f64, range.end as f64)

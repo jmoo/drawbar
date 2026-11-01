@@ -1,0 +1,1172 @@
+//! File effects on every backend: what a committed intent leaves in the folder,
+//! and that a refused one leaves nothing.
+
+mod common;
+
+use std::cell::Cell;
+use std::collections::BTreeMap;
+use std::rc::Rc;
+
+use common::{
+    bound, commit, copying, entry, env, files, identify, identity, layout, path, put, Driven, Fill,
+    HEAD, WRITER,
+};
+use toshokan::blocking::{self, Backend};
+use toshokan::crash::Streams;
+use toshokan::effects::{self, EffectStep, Moves};
+use toshokan::error::{Invalid, Mismatch};
+use toshokan::io::{Capabilities, IoError, Range, CHUNK};
+use toshokan::log::{Displaced, FileFact};
+use toshokan::pending::PendingRecord;
+use toshokan::plan::{Content, Expect, FileChange, Piece, Splice};
+use toshokan::recovery;
+use toshokan::{
+    EntityId, Error, Io, IoResult, MemDisk, Nonce, Operation, Refusal, RelPath, Root, Step,
+};
+
+const E: EntityId = EntityId::from_u128(0xe);
+
+/// The folder's files outside toshokan's root, and the contents of this writer's
+/// trash, staging and pending records.
+fn sorted(d: &mut impl Driven) -> Folder {
+    let mut folder = Folder::default();
+    let writer = layout().writer(WRITER);
+    for (path, bytes) in files(d, Root::Folder) {
+        let place = |dir: &str| path.starts_with(&writer.join(dir).unwrap());
+        match () {
+            () if place("trash") => folder.trash.push(bytes),
+            () if place("tmp") => folder.staged.push(bytes),
+            () if place("pending") => folder.pending += 1,
+            () if layout().owns(&path) => {}
+            () => {
+                folder.user.insert(path, bytes);
+            }
+        }
+    }
+    folder.trash.sort();
+    folder
+}
+
+#[derive(Default, Debug, PartialEq)]
+struct Folder {
+    user: BTreeMap<RelPath, Vec<u8>>,
+    trash: Vec<Vec<u8>>,
+    staged: Vec<Vec<u8>>,
+    pending: usize,
+}
+
+fn user(entries: &[(&str, &[u8])]) -> BTreeMap<RelPath, Vec<u8>> {
+    entries.iter().map(|(p, b)| (path(p), b.to_vec())).collect()
+}
+
+fn fact(text: &str, bytes: &[u8], applied: &[(EntityId, Option<FileFact>)]) -> FileFact {
+    let fact = applied[0].1.clone().expect("the entity has a file");
+    assert_eq!(
+        (fact.path.as_str(), fact.identity, fact.len),
+        (text, identity(bytes), bytes.len() as u64)
+    );
+    fact
+}
+
+fn kept(offset: u64, len: u64) -> Piece {
+    Piece::Kept(Range { offset, len })
+}
+
+/// A save of `E` over the file at `at`, which holds `old`, from the first content.
+fn save_over(at: &str, old: &[u8]) -> FileChange {
+    FileChange::Save {
+        entity: E,
+        path: path(at),
+        content: Content(0),
+        expect: Expect::Holds(identity(old)),
+    }
+}
+
+mod suite {
+    use super::*;
+
+    pub fn a_save_places_new_bytes_and_moves_the_old_into_the_trash(d: &mut impl Driven) {
+        put(d, &[("a.syx", b"old bytes")]);
+        let save = FileChange::Save {
+            entity: E,
+            path: path("a.syx"),
+            content: Content(0),
+            expect: Expect::Holds(identity(b"old bytes")),
+        };
+        let new = vec![Fill::Bytes(b"new bytes".to_vec())];
+        let applied = commit(d, &[save], new, &bound(&[]), &mut env(1)).unwrap();
+        fact("a.syx", b"new bytes", &applied.files);
+        let [Displaced {
+            from,
+            identity: displaced,
+            len,
+            ..
+        }] = &applied.displaced[..]
+        else {
+            panic!("{:?}", applied.displaced);
+        };
+        assert_eq!(
+            (from.as_str(), *displaced, *len),
+            ("a.syx", identity(b"old bytes"), 9)
+        );
+        assert_eq!(
+            sorted(d),
+            Folder {
+                user: user(&[("a.syx", b"new bytes")]),
+                trash: vec![b"old bytes".to_vec()],
+                ..Folder::default()
+            }
+        );
+    }
+
+    pub fn a_save_where_nothing_is_makes_its_directories(d: &mut impl Driven) {
+        let save = FileChange::Save {
+            entity: E,
+            path: path("x/y/new.syx"),
+            content: Content(0),
+            expect: Expect::Absent,
+        };
+        let new = vec![Fill::Bytes(b"new".to_vec())];
+        let applied = commit(d, &[save], new, &bound(&[]), &mut env(1)).unwrap();
+        fact("x/y/new.syx", b"new", &applied.files);
+        assert!(applied.displaced.is_empty());
+        assert_eq!(sorted(d).user, user(&[("x/y/new.syx", b"new")]));
+    }
+
+    pub fn a_failed_precondition_refuses_and_leaves_nothing_behind(d: &mut impl Driven) {
+        put(d, &[("a.syx", b"theirs")]);
+        for expect in [Expect::Absent, Expect::Holds(identity(b"mine"))] {
+            let save = FileChange::Save {
+                entity: E,
+                path: path("a.syx"),
+                content: Content(0),
+                expect,
+            };
+            let new = vec![Fill::Bytes(b"new".to_vec())];
+            let refused = commit(d, &[save], new, &bound(&[]), &mut env(1)).unwrap_err();
+            let expected = Refusal::Changed(Box::new(Mismatch {
+                path: path("a.syx"),
+                expected: expect,
+                found: Some(identity(b"theirs")),
+            }));
+            assert_eq!(refused, expected);
+            assert_eq!(
+                sorted(d),
+                Folder {
+                    user: user(&[("a.syx", b"theirs")]),
+                    ..Folder::default()
+                }
+            );
+        }
+    }
+
+    pub fn trashing_then_restoring_brings_the_same_bytes_back(d: &mut impl Driven) {
+        put(d, &[("d/a.syx", b"bytes")]);
+        let trash = FileChange::Trash {
+            entity: E,
+            expect: Expect::Holds(identity(b"bytes")),
+        };
+        let bindings = bound(&[(E, "d/a.syx")]);
+        let applied = commit(d, &[trash], vec![], &bindings, &mut env(1)).unwrap();
+        assert_eq!(applied.files, [(E, None)]);
+        let item = applied.displaced[0].item;
+        assert_eq!(sorted(d).user, user(&[]));
+        let restore = FileChange::Restore {
+            entity: E,
+            item,
+            to: path("d/a.syx"),
+            expect: Expect::Absent,
+        };
+        let applied = commit(d, &[restore], vec![], &bound(&[]), &mut env(2)).unwrap();
+        fact("d/a.syx", b"bytes", &applied.files);
+        assert_eq!(sorted(d).user, user(&[("d/a.syx", b"bytes")]));
+        let gone = FileChange::Restore {
+            entity: E,
+            item,
+            to: path("elsewhere"),
+            expect: Expect::Absent,
+        };
+        assert_eq!(
+            commit(d, &[gone], vec![], &bound(&[]), &mut env(3)).unwrap_err(),
+            Refusal::Emptied
+        );
+    }
+
+    pub fn a_rename_is_refused_over_an_existing_file(d: &mut impl Driven) {
+        put(d, &[("a", b"a"), ("b", b"b")]);
+        let rename = |to: &str| FileChange::Rename {
+            entity: E,
+            to: path(to),
+            expect: Expect::Holds(identity(b"a")),
+        };
+        let bindings = bound(&[(E, "a")]);
+        let refused = commit(d, &[rename("b")], vec![], &bindings, &mut env(1)).unwrap_err();
+        assert!(
+            matches!(&refused, Refusal::Changed(m) if m.path == path("b")),
+            "{refused:?}"
+        );
+        let applied = commit(d, &[rename("c/a")], vec![], &bindings, &mut env(2)).unwrap();
+        fact("c/a", b"a", &applied.files);
+        assert_eq!(sorted(d).user, user(&[("b", b"b"), ("c/a", b"a")]));
+    }
+
+    pub fn a_save_spliced_from_the_file_it_replaces_copies_its_kept_ranges(d: &mut impl Driven) {
+        put(d, &[("a.syx", b"old bytes")]);
+        let splice = Splice {
+            from: path("a.syx"),
+            pieces: vec![kept(0, 4), Piece::Bytes(b"new ".to_vec()), kept(4, 5)],
+        };
+        let applied = commit(
+            d,
+            &[save_over("a.syx", b"old bytes")],
+            vec![Fill::Splice(splice)],
+            &bound(&[]),
+            &mut env(1),
+        )
+        .unwrap();
+        fact("a.syx", b"old new bytes", &applied.files);
+        assert_eq!(
+            sorted(d),
+            Folder {
+                user: user(&[("a.syx", b"old new bytes")]),
+                trash: vec![b"old bytes".to_vec()],
+                ..Folder::default()
+            }
+        );
+    }
+
+    pub fn a_splice_past_the_end_of_its_source_fails_before_any_user_path_changes(
+        d: &mut impl Driven,
+    ) {
+        put(d, &[("a.syx", b"short")]);
+        let splice = Splice {
+            from: path("a.syx"),
+            pieces: vec![kept(0, 6)],
+        };
+        let failed = common::prepare(
+            d,
+            WRITER,
+            &[save_over("a.syx", b"short")],
+            vec![Fill::Splice(splice)],
+            &bound(&[]),
+            &mut env(1),
+        );
+        assert!(
+            matches!(
+                failed,
+                Err(Error::Io {
+                    error: IoError::SpliceRange,
+                    ..
+                })
+            ),
+            "{:?}",
+            failed.map(|run| run.map(|_| ()))
+        );
+        let folder = sorted(d);
+        assert_eq!(
+            (folder.user, folder.pending),
+            (user(&[("a.syx", b"short")]), 0)
+        );
+    }
+
+    pub fn a_splice_keeping_more_than_any_file_holds_fails_at_its_first_read(d: &mut impl Driven) {
+        put(d, &[("a.syx", b"short")]);
+        let splice = Splice {
+            from: path("a.syx"),
+            pieces: vec![kept(0, u64::MAX / 2)],
+        };
+        let failed = common::prepare(
+            d,
+            WRITER,
+            &[save_over("a.syx", b"short")],
+            vec![Fill::Splice(splice)],
+            &bound(&[]),
+            &mut env(1),
+        );
+        assert!(
+            matches!(
+                failed,
+                Err(Error::Io {
+                    error: IoError::SpliceRange,
+                    ..
+                })
+            ),
+            "{:?}",
+            failed.map(|run| run.map(|_| ()))
+        );
+        assert_eq!(sorted(d).user, user(&[("a.syx", b"short")]));
+    }
+
+    pub fn a_tree_moves_with_every_file_in_it(d: &mut impl Driven) {
+        put(d, &[("x/y/1", b"1"), ("x/2", b"2"), ("xx", b"3")]);
+        let mut bindings = bound(&[(E, "x/y/1")]);
+        bindings.unbound = [path("x/2"), path("xx")].into();
+        let tree = FileChange::MoveTree {
+            from: path("x"),
+            to: path("z/x"),
+        };
+        let applied = commit(d, &[tree], vec![], &bindings, &mut env(1)).unwrap();
+        fact("z/x/y/1", b"1", &applied.files);
+        assert_eq!(
+            sorted(d).user,
+            user(&[("xx", b"3"), ("z/x/2", b"2"), ("z/x/y/1", b"1")])
+        );
+    }
+}
+
+/// Runs each behavior of the suite on every backend, then where the folder cannot
+/// rename, through both drivers.
+macro_rules! everywhere {
+    ($suite:ident: $($behavior:ident),* $(,)?) => {
+        for_every_backend!($suite: $($behavior),*);
+        mod blocking_copying {
+            $(#[test] fn $behavior() { super::$suite::$behavior(&mut $crate::common::BlockingMem($crate::common::copying())); })*
+        }
+        mod async_copying {
+            $(#[test] fn $behavior() { super::$suite::$behavior(&mut $crate::common::AsyncMem($crate::common::copying())); })*
+        }
+    };
+}
+
+everywhere!(suite:
+    a_save_places_new_bytes_and_moves_the_old_into_the_trash,
+    a_save_spliced_from_the_file_it_replaces_copies_its_kept_ranges,
+    a_splice_past_the_end_of_its_source_fails_before_any_user_path_changes,
+    a_splice_keeping_more_than_any_file_holds_fails_at_its_first_read,
+    a_save_where_nothing_is_makes_its_directories,
+    a_failed_precondition_refuses_and_leaves_nothing_behind,
+    trashing_then_restoring_brings_the_same_bytes_back,
+    a_rename_is_refused_over_an_existing_file,
+    a_tree_moves_with_every_file_in_it,
+);
+
+/// A backend that keeps each request it is asked, and refuses every create at
+/// `refused`, as a backend might.
+struct Refusing {
+    disk: MemDisk,
+    refused: Option<RelPath>,
+    asked: Vec<Io>,
+}
+
+impl Refusing {
+    fn new(disk: MemDisk, refused: Option<&str>) -> Self {
+        Self {
+            disk,
+            refused: refused.map(path),
+            asked: Vec::new(),
+        }
+    }
+}
+
+impl Backend for Refusing {
+    fn capabilities(&self, root: Root) -> Capabilities {
+        self.disk.capabilities(root)
+    }
+
+    fn perform(&mut self, io: Io) -> IoResult {
+        self.asked.push(io.clone());
+        match &io {
+            Io::Create { path, .. } if Some(path) == self.refused.as_ref() => {
+                Err(IoError::Other("refused by the test".into()))
+            }
+            _ => self.disk.perform(io),
+        }
+    }
+}
+
+/// Stages, journals and carries out `changes` on `backend`, saving `saved`.
+fn run_effects(
+    backend: &mut Refusing,
+    changes: &[FileChange],
+    saved: &[u8],
+    bindings: &toshokan::binding::Bindings,
+) -> Result<(Rc<PendingRecord>, effects::Applied), Error> {
+    let caps = backend.capabilities(Root::Folder);
+    let plan = Rc::new(effects::resolve(changes, bindings, &layout(), caps, &mut env(1)).unwrap());
+    let record = Rc::new(PendingRecord::new(WRITER, "Save", entry(HEAD), &plan));
+    let prepare = effects::prepare(&layout(), Rc::clone(&plan), Rc::clone(&record), identify());
+    let sources: Vec<Box<dyn blocking::Source<Refusing>>> = vec![Box::new(saved.to_vec())];
+    blocking::run_with(backend, sources, prepare)?.unwrap();
+    let apply = effects::apply(&layout(), plan.record, Rc::clone(&record), 0, identify());
+    let applied = blocking::run(backend, apply)?;
+    Ok((record, applied))
+}
+
+#[test]
+fn where_the_folder_cannot_rename_every_move_copies_and_then_removes_its_source() {
+    let mut backend = Refusing::new(copying(), None);
+    let d = &mut common::BlockingMem(backend.disk.clone());
+    put(d, &[("a", b"old"), ("b", b"other")]);
+    let changes = [
+        save_over("a", b"old"),
+        FileChange::Rename {
+            entity: EntityId::from_u128(2),
+            to: path("c/b"),
+            expect: Expect::Holds(identity(b"other")),
+        },
+    ];
+    let bindings = bound(&[(EntityId::from_u128(2), "b")]);
+    let (record, _) = run_effects(&mut backend, &changes, b"new", &bindings).unwrap();
+    assert_eq!(record.moves, Moves::Copy);
+    let renames: Vec<&Io> = backend
+        .asked
+        .iter()
+        .filter(|io| io.root() == Root::Folder && matches!(io, Io::Rename { .. }))
+        .collect();
+    assert_eq!(renames, Vec::<&Io>::new());
+    let name = effects_record(&backend);
+    let created: Vec<&RelPath> = backend
+        .asked
+        .iter()
+        .filter_map(|io| match io {
+            Io::Create { path, .. } => Some(path),
+            _ => None,
+        })
+        .collect();
+    for step in 0..3 {
+        let marker = layout().marker(WRITER, name, step);
+        assert!(
+            created.contains(&&marker),
+            "step {step} is marked: {created:?}"
+        );
+    }
+    let folder = sorted(d);
+    assert_eq!(
+        (folder.user, folder.trash, folder.pending),
+        (
+            user(&[("a", b"new"), ("c/b", b"other")]),
+            vec![b"old".to_vec()],
+            4
+        ),
+        "every move made, the record and a marker per move left to remove"
+    );
+    d.run(effects::finish(&layout(), name, &record)).unwrap();
+    assert_eq!(sorted(d).pending, 0, "the record and its markers removed");
+}
+
+/// The name of the record the run on `backend` wrote.
+fn effects_record(backend: &Refusing) -> Nonce {
+    let dir = layout().pending_dir(WRITER);
+    backend
+        .asked
+        .iter()
+        .find_map(|io| match io {
+            Io::Create { path, .. } if path.parent() == Some(dir.clone()) => path
+                .name()
+                .and_then(|name| name.strip_suffix(".json"))
+                .and_then(|name| name.parse().ok()),
+            _ => None,
+        })
+        .expect("a record was written")
+}
+
+#[test]
+fn where_moves_copy_a_long_file_moves_a_chunk_at_a_time() {
+    let disk = copying();
+    let long: Vec<u8> = (0..2 * CHUNK + 3).map(|i| (i % 251) as u8).collect();
+    put(&mut common::BlockingMem(disk.clone()), &[("a", &long)]);
+    let mut backend = Measuring {
+        disk: disk.clone(),
+        largest: 0,
+    };
+    let rename = FileChange::Rename {
+        entity: E,
+        to: path("b"),
+        expect: Expect::Holds(identity(&long)),
+    };
+    let plan = Rc::new(
+        effects::resolve(
+            &[rename],
+            &bound(&[(E, "a")]),
+            &layout(),
+            common::COPYING,
+            &mut env(1),
+        )
+        .unwrap(),
+    );
+    let record = Rc::new(PendingRecord::new(WRITER, "Rename", entry(HEAD), &plan));
+    let prepare = effects::prepare(&layout(), Rc::clone(&plan), Rc::clone(&record), identify());
+    blocking::run(&mut backend, prepare).unwrap().unwrap();
+    let apply = effects::apply(&layout(), plan.record, record, 0, identify());
+    blocking::run(&mut backend, apply).unwrap();
+    assert_eq!(backend.largest as u64, CHUNK);
+    let d = &mut common::BlockingMem(disk);
+    assert_eq!(sorted(d).user, user(&[("b", &long)]));
+}
+
+/// A backend that appends to the file at `changed` once, as soon as it is read.
+struct Appending {
+    disk: MemDisk,
+    changed: RelPath,
+    appended: bool,
+}
+
+impl Backend for Appending {
+    fn capabilities(&self, root: Root) -> Capabilities {
+        self.disk.capabilities(root)
+    }
+
+    fn perform(&mut self, io: Io) -> IoResult {
+        let read = matches!(&io, Io::Read { path, .. } if *path == self.changed);
+        let result = self.disk.perform(io);
+        if read && !self.appended {
+            self.appended = true;
+            let append = Io::Append {
+                root: Root::Folder,
+                path: self.changed.clone(),
+                bytes: b"appended".to_vec(),
+            };
+            self.disk.perform(append).unwrap();
+        }
+        result
+    }
+}
+
+#[test]
+fn where_moves_copy_a_source_appended_to_while_it_is_copied_stays_until_settling_moves_it_whole() {
+    let disk = copying();
+    let long: Vec<u8> = (0..2 * CHUNK + 3).map(|i| (i % 251) as u8).collect();
+    let d = &mut common::BlockingMem(disk.clone());
+    put(d, &[("a", &long)]);
+    let rename = FileChange::Rename {
+        entity: E,
+        to: path("b"),
+        expect: Expect::Holds(identity(&long)),
+    };
+    let caps = common::COPYING;
+    let plan = Rc::new(
+        effects::resolve(&[rename], &bound(&[(E, "a")]), &layout(), caps, &mut env(1)).unwrap(),
+    );
+    let record = Rc::new(PendingRecord::new(WRITER, "Rename", entry(HEAD), &plan));
+    let prepare = effects::prepare(&layout(), Rc::clone(&plan), Rc::clone(&record), identify());
+    d.run(prepare).unwrap().unwrap();
+    let mut appending = Appending {
+        disk: disk.clone(),
+        changed: path("a"),
+        appended: false,
+    };
+    let apply = effects::apply(&layout(), plan.record, Rc::clone(&record), 0, identify());
+    let applied = blocking::run(&mut appending, apply);
+    assert!(appending.appended && applied.is_err(), "{applied:?}");
+    let grown = [&long[..], b"appended"].concat();
+    let folder = sorted(d);
+    assert_eq!(
+        (folder.user, folder.trash, folder.pending > 0),
+        (user(&[("a", &grown)]), vec![], true),
+        "the source keeps every byte, its copy is gone and the record stays open"
+    );
+
+    let pending = d
+        .run(toshokan::pending::read_one(&layout(), WRITER, plan.record))
+        .unwrap()
+        .unwrap();
+    let settled = d.run(recovery::settle(
+        &layout(),
+        plan.record,
+        Rc::new(pending),
+        identify(),
+        caps,
+    ));
+    let Ok(recovery::Resumed::Applied(applied)) = settled else {
+        panic!("settling did not carry the move out");
+    };
+    fact("b", &grown, &applied.files);
+    assert_eq!(sorted(d).user, user(&[("b", &grown)]));
+}
+
+#[test]
+fn a_copy_cut_short_where_another_program_then_made_a_file_leaves_that_file() {
+    let save = FileChange::Save {
+        entity: E,
+        path: path("d/n"),
+        content: Content(0),
+        expect: Expect::Absent,
+    };
+    let mut counting = Refusing::new(copying(), None);
+    run_effects(
+        &mut counting,
+        std::slice::from_ref(&save),
+        b"mine",
+        &bound(&[]),
+    )
+    .unwrap();
+    let mutations: Vec<&Io> = counting.asked.iter().filter(|io| io.mutates()).collect();
+    let marked = mutations
+        .iter()
+        .position(|io| matches!(io, Io::Create { path, .. } if pending_marker(path)))
+        .expect("the place is marked");
+
+    let disk = copying();
+    disk.crash_after(marked as u64 + 1);
+    let mut crashing = Refusing::new(disk.clone(), None);
+    assert!(run_effects(
+        &mut crashing,
+        std::slice::from_ref(&save),
+        b"mine",
+        &bound(&[])
+    )
+    .is_err());
+    let disk = disk.restart();
+    put(
+        &mut common::BlockingMem(disk.clone()),
+        &[("d/n", b"theirs")],
+    );
+    let d = &mut common::BlockingMem(disk.clone());
+    let record = effects_record(&crashing);
+    let pending = d
+        .run(toshokan::pending::read_one(&layout(), WRITER, record))
+        .unwrap()
+        .unwrap();
+    let settled = d.run(recovery::settle(
+        &layout(),
+        record,
+        Rc::new(pending),
+        identify(),
+        Capabilities::ALL,
+    ));
+    assert!(
+        matches!(
+            &settled,
+            Err(Error::Io {
+                error: IoError::AlreadyExists,
+                ..
+            })
+        ),
+        "{:?}",
+        settled.err()
+    );
+    let folder = sorted(d);
+    assert_eq!(
+        (folder.user, folder.staged),
+        (user(&[("d/n", b"theirs")]), vec![b"mine".to_vec()])
+    );
+}
+
+fn pending_marker(path: &RelPath) -> bool {
+    path.parent() == Some(layout().pending_dir(WRITER))
+        && path.name().is_some_and(|name| !name.ends_with(".json"))
+}
+
+#[test]
+fn without_directory_renames_a_tree_moves_file_by_file_and_removes_its_directories() {
+    let caps = Capabilities {
+        rename_dir: false,
+        ..Capabilities::ALL
+    };
+    let d = &mut common::BlockingMem(MemDisk::with_capabilities(caps, caps));
+    put(d, &[("x/y/1", b"1"), ("x/2", b"2")]);
+    let mut bindings = bound(&[(E, "x/y/1")]);
+    bindings.unbound = [path("x/2")].into();
+    let tree = FileChange::MoveTree {
+        from: path("x"),
+        to: path("z"),
+    };
+    let plan = effects::resolve(
+        std::slice::from_ref(&tree),
+        &bindings,
+        &layout(),
+        caps,
+        &mut env(1),
+    )
+    .unwrap();
+    let rename = |from: &str, to: &str| EffectStep::Rename {
+        from: path(from),
+        to: path(to),
+    };
+    let remove = |dir: &str| EffectStep::RemoveDir { path: path(dir) };
+    assert_eq!(
+        plan.steps,
+        [
+            rename("x/2", "z/2"),
+            rename("x/y/1", "z/y/1"),
+            remove("x/y"),
+            remove("x")
+        ]
+    );
+    commit(d, &[tree], vec![], &bindings, &mut env(1)).unwrap();
+    assert_eq!(sorted(d).user, user(&[("z/2", b"2"), ("z/y/1", b"1")]));
+    assert!(!d.0.directories(Root::Folder).contains(&path("x")));
+}
+
+#[test]
+fn a_tree_move_whose_source_is_gone_is_refused_before_anything_is_written() {
+    type Case<'a> = (
+        &'a str,
+        Capabilities,
+        &'a [&'a str],
+        &'a [(&'a str, &'a [u8])],
+        Option<&'a str>,
+    );
+    let file_by_file = Capabilities {
+        rename_dir: false,
+        ..Capabilities::ALL
+    };
+    let remove = |d: &mut common::BlockingMem, gone: &[&str]| {
+        for at in gone {
+            let io = match *at {
+                "a" | "a/s" => Io::RemoveDir {
+                    root: Root::Folder,
+                    path: path(at),
+                },
+                _ => Io::Remove {
+                    root: Root::Folder,
+                    path: path(at),
+                },
+            };
+            d.ok(io);
+        }
+    };
+    let whole = ["a/s/2", "a/s", "a/1", "a"];
+    let away: &[(&str, &[u8])] = &[("c/1", b"1"), ("c/s/2", b"2")];
+    let cases: [Case; 7] = [
+        ("moved away", Capabilities::ALL, &whole, away, Some("a")),
+        ("moved away", file_by_file, &whole, away, Some("a")),
+        ("moved away", common::COPYING, &whole, away, Some("a")),
+        ("deleted", Capabilities::ALL, &whole, &[], Some("a")),
+        ("deleted", file_by_file, &whole, &[], Some("a")),
+        ("one file deleted", Capabilities::ALL, &["a/s/2"], &[], None),
+        (
+            "one file deleted",
+            file_by_file,
+            &["a/s/2"],
+            &[],
+            Some("a/s/2"),
+        ),
+    ];
+    for (case, caps, gone, moved, refused) in cases {
+        let d = &mut common::BlockingMem(MemDisk::with_capabilities(caps, Capabilities::ALL));
+        put(d, &[("a/1", b"1"), ("a/s/2", b"2")]);
+        let mut bindings = bound(&[(E, "a/1")]);
+        bindings.unbound = [path("a/s/2")].into();
+        remove(d, gone);
+        put(d, moved);
+        let before = sorted(d);
+        let tree = FileChange::MoveTree {
+            from: path("a"),
+            to: path("b"),
+        };
+        let prepared = common::prepare(d, WRITER, &[tree], vec![], &bindings, &mut env(1)).unwrap();
+        match (prepared, refused) {
+            (Err(Refusal::Changed(mismatch)), Some(at)) => {
+                assert_eq!(
+                    (mismatch.path, mismatch.found),
+                    (path(at), None),
+                    "{case}, {caps:?}"
+                );
+                assert_eq!(sorted(d), before, "{case}, {caps:?}: nothing is written");
+            }
+            (Ok(_), None) => {}
+            (prepared, _) => panic!("{case}, {caps:?}: {:?}", prepared.err()),
+        }
+    }
+}
+
+#[test]
+fn an_intent_is_refused_for_overlapping_or_reserved_paths() {
+    let bindings = bound(&[(E, "a"), (EntityId::from_u128(2), "x/f")]);
+    let save = |text: &str, entity: u128| FileChange::Save {
+        entity: EntityId::from_u128(entity),
+        path: path(text),
+        content: Content(0),
+        expect: Expect::Absent,
+    };
+    let tree = FileChange::MoveTree {
+        from: path("x"),
+        to: path("y"),
+    };
+    let refusals = [
+        (
+            vec![save(".t/writers/w", 1)],
+            Invalid::ReservedPath(path(".t/writers/w")),
+        ),
+        (
+            vec![save("b", 1), save("b", 3)],
+            Invalid::Overlapping(path("b")),
+        ),
+        (
+            vec![save("b", 1), save("c", 1)],
+            Invalid::Overlapping(path("c")),
+        ),
+        (
+            vec![tree.clone(), save("y/z", 1)],
+            Invalid::Overlapping(path("y/z")),
+        ),
+        (vec![save("q", 2), tree], Invalid::Overlapping(path("x"))),
+        (
+            vec![FileChange::Trash {
+                entity: EntityId::from_u128(9),
+                expect: Expect::Absent,
+            }],
+            Invalid::NoFile(EntityId::from_u128(9)),
+        ),
+    ];
+    for (changes, invalid) in refusals {
+        let resolved = effects::resolve(
+            &changes,
+            &bindings,
+            &layout(),
+            Capabilities::ALL,
+            &mut env(1),
+        );
+        assert_eq!(resolved, Err(Refusal::Invalid(invalid)), "{changes:?}");
+    }
+}
+
+/// Names as a volume that ignores case takes them.
+struct Folding;
+
+impl toshokan::Names for Folding {
+    fn key(&self, path: &str) -> String {
+        path.to_lowercase()
+    }
+}
+
+#[test]
+fn where_names_fold_case_paths_that_differ_only_in_case_overlap() {
+    let (one, two) = (EntityId::from_u128(1), EntityId::from_u128(2));
+    let bindings = bound(&[(one, "A/Bass.nlp"), (two, "B/bass.nlp"), (E, "x.syx")]);
+    let rename = |entity, to: &str| FileChange::Rename {
+        entity,
+        to: path(to),
+        expect: Expect::Absent,
+    };
+    let tree = |from: &str, to: &str| FileChange::MoveTree {
+        from: path(from),
+        to: path(to),
+    };
+    let make_dir = FileChange::MakeDir { path: path("p") };
+    let refusals = [
+        (
+            vec![rename(one, "C/Bass.nlp"), rename(two, "C/bass.nlp")],
+            Invalid::Overlapping(path("C/bass.nlp")),
+        ),
+        (
+            vec![tree("Organ", "organ/Sub")],
+            Invalid::Overlapping(path("organ/Sub")),
+        ),
+        (
+            vec![FileChange::SaveFile {
+                path: path("X.syx"),
+                content: Content(0),
+                expect: Expect::Absent,
+            }],
+            Invalid::Bound(path("x.syx")),
+        ),
+        (
+            vec![FileChange::TrashFile {
+                path: path("X.syx"),
+                expect: Expect::Absent,
+            }],
+            Invalid::Bound(path("x.syx")),
+        ),
+        (
+            vec![make_dir.clone(), rename(one, "P")],
+            Invalid::Overlapping(path("p")),
+        ),
+        (
+            vec![rename(one, "P"), make_dir.clone()],
+            Invalid::Overlapping(path("p")),
+        ),
+        (
+            vec![make_dir.clone(), tree("Organ", "P")],
+            Invalid::Overlapping(path("p")),
+        ),
+    ];
+    let folding = || toshokan::Env {
+        names: Box::new(Folding),
+        ..env(1)
+    };
+    for (changes, invalid) in refusals {
+        let resolved = effects::resolve(
+            &changes,
+            &bindings,
+            &layout(),
+            Capabilities::ALL,
+            &mut folding(),
+        );
+        assert_eq!(resolved, Err(Refusal::Invalid(invalid)), "{changes:?}");
+    }
+    let allowed = [
+        (vec![rename(one, "A/bass.nlp")], Capabilities::ALL),
+        (vec![rename(one, "A/bass.nlp")], common::COPYING),
+        (vec![tree("Organ", "organ")], Capabilities::ALL),
+        (vec![tree("Organ", "organ")], common::COPYING),
+        (
+            vec![make_dir.clone(), rename(one, "P/Bass.nlp")],
+            Capabilities::ALL,
+        ),
+        (vec![make_dir, tree("Organ", "P")], common::COPYING),
+    ];
+    for (changes, caps) in allowed {
+        let resolved = effects::resolve(&changes, &bindings, &layout(), caps, &mut folding());
+        assert!(resolved.is_ok(), "{changes:?}, {caps:?}: {resolved:?}");
+    }
+}
+
+#[test]
+fn a_restore_over_a_file_trashes_it_first() {
+    let restore = FileChange::Restore {
+        entity: E,
+        item: Nonce::from_u128(5),
+        to: path("a"),
+        expect: Expect::Holds(identity(b"now")),
+    };
+    let plan = effects::resolve(
+        &[restore],
+        &bound(&[]),
+        &layout(),
+        Capabilities::ALL,
+        &mut env(1),
+    )
+    .unwrap();
+    assert!(matches!(
+        &plan.steps[..],
+        [EffectStep::ToTrash { path: p, .. }, EffectStep::FromTrash { item, path: q }]
+            if *p == path("a") && *q == path("a") && *item == Nonce::from_u128(5)
+    ));
+}
+
+/// The largest bytes one request carries: those an operation asks for, or those
+/// a backend is asked to write.
+fn carried(io: &Io) -> usize {
+    match io {
+        Io::Create { bytes, .. } | Io::Append { bytes, .. } | Io::Write { bytes, .. } => {
+            bytes.len()
+        }
+        _ => 0,
+    }
+}
+
+/// An operation whose requests are measured as it makes them.
+struct Measured<O> {
+    operation: O,
+    largest: Rc<Cell<usize>>,
+}
+
+impl<O: Operation> Operation for Measured<O> {
+    type Output = O::Output;
+
+    fn resume(&mut self, result: Option<IoResult>) -> Step<O::Output> {
+        let step = self.operation.resume(result);
+        if let Step::Io(io) = &step {
+            self.largest.set(self.largest.get().max(carried(io)));
+        }
+        step
+    }
+}
+
+/// A disk that measures the writes it is asked for.
+struct Measuring {
+    disk: MemDisk,
+    largest: usize,
+}
+
+impl Backend for Measuring {
+    fn capabilities(&self, root: Root) -> Capabilities {
+        self.disk.capabilities(root)
+    }
+
+    fn perform(&mut self, io: Io) -> IoResult {
+        self.largest = self.largest.max(carried(&io));
+        self.disk.perform(io)
+    }
+}
+
+#[test]
+fn a_saved_file_streams_into_staging_without_passing_through_the_core() {
+    let disk = MemDisk::new();
+    let big: Vec<u8> = (0..3 * CHUNK + 7).map(|i| (i % 251) as u8).collect();
+    put(
+        &mut common::BlockingMem(disk.clone()),
+        &[("big.npno", &big)],
+    );
+    let splice = Splice {
+        from: path("big.npno"),
+        pieces: vec![kept(0, big.len() as u64), Piece::Bytes(b"!".to_vec())],
+    };
+    let plan = Rc::new(
+        effects::resolve(
+            &[save_over("big.npno", &big)],
+            &bound(&[]),
+            &layout(),
+            Capabilities::ALL,
+            &mut env(1),
+        )
+        .unwrap(),
+    );
+    let record = Rc::new(PendingRecord::new(WRITER, "Save", entry(HEAD), &plan));
+    let mut backend = Measuring {
+        disk: disk.clone(),
+        largest: 0,
+    };
+    let largest = Rc::new(Cell::new(0));
+    let core = Measured {
+        operation: effects::prepare(&layout(), Rc::clone(&plan), record, identify()),
+        largest: Rc::clone(&largest),
+    };
+    let sources: Vec<Box<dyn blocking::Source<Measuring>>> = vec![Box::new(splice)];
+    blocking::run_with(&mut backend, sources, core)
+        .unwrap()
+        .unwrap();
+    let largest = largest.get();
+    assert!(largest < 4096, "the core asked to write {largest} bytes");
+    assert_eq!(
+        backend.largest as u64, CHUNK,
+        "the driver writes a chunk at a time"
+    );
+    let mut expected = big;
+    expected.push(b'!');
+    let staged = disk
+        .files(Root::Folder)
+        .into_iter()
+        .find(|(p, _)| p.starts_with(&layout().tmp_dir(WRITER)))
+        .map(|(_, bytes)| bytes);
+    assert!(staged == Some(expected), "the staged file holds the splice");
+}
+
+#[test]
+fn a_staged_file_carries_the_extension_of_the_file_it_becomes() {
+    let d = &mut common::Recorded::new(MemDisk::new());
+    put(d, &[("d/a.syx", b"old")]);
+    let save = |at: &str, content: usize, expect: Expect| FileChange::Save {
+        entity: EntityId::from_u128(content as u128 + 1),
+        path: path(at),
+        content: Content(content),
+        expect,
+    };
+    let changes = [
+        save("d/a.syx", 0, Expect::Holds(identity(b"old"))),
+        save("b", 1, Expect::Absent),
+    ];
+    let contents = vec![Fill::Bytes(b"new".to_vec()), Fill::Bytes(b"b".to_vec())];
+    d.take();
+    commit(d, &changes, contents, &bound(&[]), &mut env(1)).unwrap();
+    let tmp = layout().tmp_dir(WRITER);
+    let mut created: Vec<(String, String)> = d
+        .take()
+        .into_iter()
+        .filter_map(|io| match io {
+            Io::Create { path, .. } if path.parent() == Some(tmp.clone()) => {
+                let name = path.name().unwrap();
+                let (_, extension) = name.split_once('.').unwrap_or((name, ""));
+                Some((extension.to_owned(), name.to_owned()))
+            }
+            _ => None,
+        })
+        .collect();
+    created.sort();
+    let extensions: Vec<&str> = created.iter().map(|(e, _)| e.as_str()).collect();
+    assert_eq!(extensions, ["", "json", "syx"], "{created:?}");
+}
+
+#[test]
+fn a_fill_that_fails_leaves_no_writes_for_a_later_request_to_land() {
+    let disk = MemDisk::new();
+    put(
+        &mut common::BlockingMem(disk.clone()),
+        &[("a.syx", b"short")],
+    );
+    disk.set_capacity(Root::Folder, Some(5));
+    let splice = Splice {
+        from: path("a.syx"),
+        pieces: vec![Piece::Bytes(b"new ".to_vec()), kept(0, 6)],
+    };
+    let plan = effects::resolve(
+        &[save_over("a.syx", b"short")],
+        &bound(&[]),
+        &layout(),
+        Capabilities::ALL,
+        &mut env(1),
+    )
+    .unwrap();
+    let plan = Rc::new(plan);
+    let record = Rc::new(PendingRecord::new(WRITER, "Save", entry(HEAD), &plan));
+    let streams = &mut Streams::new(disk.clone());
+    let prepare = effects::prepare(&layout(), plan, record, identify());
+    let sources: Vec<Box<dyn blocking::Source<Streams>>> = vec![Box::new(splice)];
+    let failed = blocking::run_with(streams, sources, prepare);
+    assert!(
+        matches!(
+            failed,
+            Err(Error::Io {
+                error: IoError::SpliceRange,
+                ..
+            })
+        ),
+        "{failed:?}"
+    );
+    let listed = streams.perform(Io::List {
+        root: Root::Folder,
+        dir: RelPath::ROOT,
+    });
+    assert!(listed.is_ok(), "{listed:?}");
+}
+
+/// A folder another program writes in: once the pending record of an intent is
+/// written, after its preconditions are checked, it makes a file at `at`.
+struct Intruder {
+    disk: MemDisk,
+    at: RelPath,
+}
+
+impl Backend for Intruder {
+    fn capabilities(&self, root: Root) -> Capabilities {
+        self.disk.capabilities(root)
+    }
+
+    fn perform(&mut self, io: Io) -> IoResult {
+        let journaled =
+            matches!(&io, Io::Rename { to, .. } if to.starts_with(&layout().pending_dir(WRITER)));
+        let result = self.disk.perform(io);
+        if journaled {
+            put(
+                &mut common::BlockingMem(self.disk.clone()),
+                &[(self.at.as_str(), b"theirs")],
+            );
+        }
+        result
+    }
+}
+
+#[test]
+fn where_renames_may_replace_a_file_made_at_a_destination_after_the_checks_is_kept() {
+    let racy = Capabilities {
+        no_replace: false,
+        ..Capabilities::ALL
+    };
+    let disk = MemDisk::with_capabilities(racy, Capabilities::ALL);
+    let save = FileChange::Save {
+        entity: E,
+        path: path("d/n"),
+        content: Content(0),
+        expect: Expect::Absent,
+    };
+    let plan =
+        Rc::new(effects::resolve(&[save], &bound(&[]), &layout(), racy, &mut env(1)).unwrap());
+    let record = Rc::new(PendingRecord::new(WRITER, "Save", entry(HEAD), &plan));
+    let mut intruder = Intruder {
+        disk: disk.clone(),
+        at: path("d/n"),
+    };
+    let prepare = effects::prepare(&layout(), Rc::clone(&plan), Rc::clone(&record), identify());
+    let sources: Vec<Box<dyn blocking::Source<Intruder>>> = vec![Box::new(b"mine".to_vec())];
+    blocking::run_with(&mut intruder, sources, prepare)
+        .unwrap()
+        .unwrap();
+    let apply = effects::apply(&layout(), plan.record, record, 0, identify());
+    let applied = blocking::run(&mut intruder, apply);
+    assert!(
+        matches!(
+            &applied,
+            Err(Error::Io {
+                error: IoError::AlreadyExists,
+                ..
+            })
+        ),
+        "{:?}",
+        applied.err()
+    );
+    let d = &mut common::BlockingMem(disk);
+    assert_eq!(sorted(d).user, user(&[("d/n", b"theirs")]));
+    assert_eq!(sorted(d).staged, [b"mine".to_vec()]);
+}

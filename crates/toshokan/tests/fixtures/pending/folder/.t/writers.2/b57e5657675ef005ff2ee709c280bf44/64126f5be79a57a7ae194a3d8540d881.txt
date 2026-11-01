@@ -1,0 +1,1 @@
+{"prev":"00000000000000000000000000000000","n":0,"at":[3000,0],"kind":"genesis","writer":"b57e5657675ef005ff2ee709c280bf44","label":"open"}	f895e3e4f32c257e76eabda734adbfc7

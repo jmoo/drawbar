@@ -73,8 +73,8 @@ instrument, and no test needs hardware. A separate suite in
 attached instrument: a library over a temporary folder, the browser's acts, the
 queue, and the device worker over USB. It sends piano libraries and sample
 instruments from the files they rest in, replaces an occupied slot, changes a file
-on disk while it is being sent, and checks that memory stays bounded by the transfer
-chunk.
+on disk while it is being sent, keeps in the library an occupant it could not put
+back, and checks that memory stays bounded by the transfer chunk.
 
 The tests write to the instrument, so they are ignored and do nothing unless
 `DRAWBAR_HARDWARE=1`. Close drawbar and Nord Sound Manager first, so the interface
@@ -92,6 +92,42 @@ path. The sources are slots on the instrument: `DRAWBAR_HARDWARE_PIANO` and
 writes only to the last vacant slots of bank 1 and deletes only names it gave, and
 the last test checks that every class holds what it held when the run started.
 
+## In the browser
+
+`crates/drawbar/tests/web.rs` runs the browser's library through its worker: in
+the private file system and in a folder of it opened as a picked folder is, with
+two installs of one library and two tabs of one install, and with a worker that
+faults, stalls or loses an answer.
+`crates/toshokan/tests/web.rs` and its neighbors run toshokan's browser storage.
+wasm-bindgen's test runner runs them headless; on Linux, Nix runs both in
+Chromium and Firefox:
+
+```sh
+nix build .#nord.browser-tests
+```
+
+Each crate declares its browser suites as `browserTests` in its
+`[package.metadata.nix]`, and CI's web job runs them. When toshokan or drawbar's
+library changes, an optional `safari` job runs them in Safari on macOS too; Safari
+cannot pick a folder, so it skips drawbar's picked-folder test. Edge runs them by
+hand, with `MSEDGEDRIVER` in place of `CHROMEDRIVER` below.
+
+Elsewhere, from `crates/` in `nix develop`, point the runner at a browser's driver:
+
+```sh
+CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
+  CHROMEDRIVER=chromedriver cargo test -p drawbar --target wasm32-unknown-unknown --test web
+```
+
+Safari runs them in a window, with `SAFARIDRIVER=/usr/bin/safaridriver`, once
+`sudo safaridriver --enable` has allowed remote automation.
+
+`nix build .#toshokan-browser-crash` kills toshokan's library partway through its
+power-loss workloads in Chromium and Firefox on Linux, and fills the origin's
+quota, and checks that nothing acknowledged is lost or damaged.
+`nix run .#toshokan-browser-crash -- --stride 1` runs every case, and adds WebKit
+on macOS. `crates/toshokan/spec/README.md` describes the cases.
+
 ## Everything at once
 
 `nix flake check` and `nix build .#nord.tests .#nord.packages .#site` run the
@@ -107,3 +143,18 @@ optimization; shipped packages keep their shipping profiles.
 and `.#nord.<crate>-corpus` runs one crate's. `.#nord.all-corpus-full` uses the
 corpus's R2 tier and needs a seeded store or R2 credentials. `.#nord.corpus` and
 `.#nord.corpus-full` are the corpus trees themselves.
+
+A change to toshokan also needs its value-level retention sweep and its browser
+crash sweep, which CI does not run. `scripts/evidence.bash` runs all of it at once
+and prints each part's wall time: the sweep, every Nix build and check, each
+crate's tests among them, and on Linux the browser suites and crash sweep. TLC's
+model check, `nix build .#nord.toshokan-spec`, runs on its own. `--fast` runs
+toshokan's own suite and Clippy, for every change in between.
+
+Tests that run long build with `--profile release-tests`, which is `release`
+without link-time optimization:
+
+```sh
+cargo test --workspace --profile release-tests
+cargo test -p toshokan --profile release-tests --test retention_sweep -- --ignored
+```

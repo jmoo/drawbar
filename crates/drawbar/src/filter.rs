@@ -120,6 +120,13 @@ impl Filter {
         self.tags.remove(&tag);
     }
 
+    /// Narrow by the tag `into` where the filter narrowed by `tag`, which merged into it.
+    pub fn merge_tag(&mut self, tag: u64, into: u64) {
+        if self.tags.remove(&tag) {
+            self.tags.insert(into);
+        }
+    }
+
     /// ⚠️ Drop a kind that is no longer present anywhere. Its tree row is gone too, so if
     /// an instrument disconnects while the library is filtered to its folders, the table
     /// would otherwise stay empty with no way to clear the filter.
@@ -220,5 +227,16 @@ mod tests {
         filter.forget_tag(1);
         assert!(!filter.on(Narrow::Tag(1)));
         assert!(filter.on(Narrow::Tag(2)));
+    }
+
+    #[test]
+    fn a_tag_merged_into_another_narrows_by_that_one() {
+        let mut filter = Filter::default();
+        filter.narrow(Narrow::Tag(1));
+        filter.merge_tag(1, 2);
+        assert!(!filter.on(Narrow::Tag(1)));
+        assert!(filter.on(Narrow::Tag(2)));
+        filter.merge_tag(3, 4);
+        assert!(!filter.on(Narrow::Tag(4)), "3 did not narrow");
     }
 }

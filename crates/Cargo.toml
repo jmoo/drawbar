@@ -5,6 +5,7 @@ members = [
   "nord-cli",
   "nord-format",
   "nord-usb",
+  "toshokan",
 ]
 resolver = "2"
 
@@ -20,6 +21,8 @@ repository = "https://github.com/jmoo/drawbar"
 lto = true
 strip = true
 
+# Release code for the long test suites, without the link-time optimization that
+# takes most of a cold build. Shipped builds use `release`.
 [profile.release-tests]
 inherits = "release"
 lto = false

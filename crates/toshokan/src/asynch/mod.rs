@@ -1,0 +1,780 @@
+//! The async driver: runs the core's operations on an [`Fs`] in a loop. Futures
+//! carry no `Send` bound, so a single-threaded browser backend can implement it.
+
+use std::collections::BTreeSet;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::{Context, Poll, Wake, Waker};
+
+use crate::disk::MemDisk;
+use crate::env::Env;
+use crate::error::Result;
+use crate::ids::{EntityId, EntryHash, Nonce, WriterId};
+use crate::intent::{Driver, Intent};
+use crate::io::{Capabilities, Io, IoError, IoResult, Meta, Operation, Range, Reply, Root, Step};
+use crate::layout::Layout;
+use crate::library;
+use crate::log::Settlement;
+use crate::path::RelPath;
+use crate::plan::{Splice, Splicing};
+use crate::report::{
+    Committed, Compacted, Emptied, HistoryItem, Mode, Opened, Orphan, Refreshed, TrashItem,
+    WriterInfo,
+};
+use crate::schema::Schema;
+use crate::view::View;
+
+/// Storage that performs requests asynchronously, the batched ones included;
+/// storage that has no batched form answers those with [`fan_out`].
+#[allow(async_fn_in_trait)]
+pub trait Fs {
+    fn capabilities(&self, root: Root) -> Capabilities;
+
+    async fn perform(&self, io: Io) -> IoResult;
+
+    /// Told, as a library opens, its root in the folder: only toshokan writes
+    /// there, and removes or renames no directory, so storage may keep the
+    /// directories it finds there for later requests.
+    fn own(&self, _root: &RelPath) {}
+}
+
+/// Answers `io` with `perform`, which takes only single requests:
+/// [`Io::ListStat`] as an [`Io::List`] and then an [`Io::Stat`] of every name,
+/// those issued together, and [`Io::ReadMany`] as its reads, issued together.
+pub async fn fan_out<P, F>(io: Io, perform: P) -> IoResult
+where
+    P: Fn(Io) -> F,
+    F: Future<Output = IoResult>,
+{
+    let wrong = || IoError::Other("the backend gave the wrong reply".into());
+    match io {
+        Io::ListStat { root, dir } => {
+            let listed = perform(Io::List {
+                root,
+                dir: dir.clone(),
+            });
+            let Reply::Listed(entries) = listed.await? else {
+                return Err(wrong());
+            };
+            let paths = entries.iter().map(|entry| dir.join(&entry.name));
+            let paths: Vec<RelPath> = paths
+                .collect::<Result<_>>()
+                .map_err(|error| IoError::Other(error.to_string()))?;
+            let stats = join(
+                paths
+                    .into_iter()
+                    .map(|path| perform(Io::Stat { root, path })),
+            );
+            let mut found = Vec::new();
+            for (entry, stat) in entries.into_iter().zip(stats.await) {
+                match stat? {
+                    Reply::Stat(Some(meta)) => found.push((entry.name, meta)),
+                    Reply::Stat(None) => {}
+                    _ => return Err(wrong()),
+                }
+            }
+            Ok(Reply::ListedStat(found))
+        }
+        Io::ReadMany { root, reads } => {
+            let reads = reads
+                .into_iter()
+                .map(|(path, range)| perform(Io::Read { root, path, range }));
+            let read = join(reads).await.into_iter().map(|result| match result? {
+                Reply::Bytes(bytes) => Ok(bytes),
+                _ => Err(wrong()),
+            });
+            Ok(Reply::ReadMany(read.collect()))
+        }
+        io => perform(io).await,
+    }
+}
+
+/// Every future's output, in order, the futures polled together. A future is polled
+/// once at the start and again only when its waker fires, so `n` futures that finish
+/// one at a time take `2n` polls.
+pub(crate) async fn join<T>(futures: impl Iterator<Item = impl Future<Output = T>>) -> Vec<T> {
+    let mut running: Vec<_> = futures.map(Box::pin).collect();
+    let mut outputs: Vec<Option<T>> = running.iter().map(|_| None).collect();
+    let woken = Arc::new(Woken::all(running.len()));
+    let wakers: Vec<Waker> = (0..running.len())
+        .map(|index| {
+            let woken = Arc::clone(&woken);
+            Waker::from(Arc::new(Member { index, woken }))
+        })
+        .collect();
+    let mut left = running.len();
+    std::future::poll_fn(|context| {
+        woken.wake_on(context.waker());
+        for index in woken.take() {
+            if outputs[index].is_some() {
+                continue;
+            }
+            let mut own = Context::from_waker(&wakers[index]);
+            if let Poll::Ready(value) = running[index].as_mut().poll(&mut own) {
+                outputs[index] = Some(value);
+                left -= 1;
+            }
+        }
+        match left {
+            0 => Poll::Ready(
+                outputs
+                    .iter_mut()
+                    .map(|output| output.take().expect("every future is ready"))
+                    .collect(),
+            ),
+            _ => Poll::Pending,
+        }
+    })
+    .await
+}
+
+/// The members of a [`join`] woken since it last polled them, and the waker of the
+/// task that polls the join.
+struct Woken(Mutex<Queued>);
+
+struct Queued {
+    order: Vec<usize>,
+    /// Whether each member is in `order`, so a member woken twice is polled once.
+    flagged: Vec<bool>,
+    task: Option<Waker>,
+}
+
+impl Woken {
+    fn all(n: usize) -> Self {
+        Self(Mutex::new(Queued {
+            order: (0..n).collect(),
+            flagged: vec![true; n],
+            task: None,
+        }))
+    }
+
+    fn wake_on(&self, waker: &Waker) {
+        let mut queued = lock(&self.0);
+        if !queued
+            .task
+            .as_ref()
+            .is_some_and(|known| known.will_wake(waker))
+        {
+            queued.task = Some(waker.clone());
+        }
+    }
+
+    /// The members woken, in the order they woke, unqueued. A member that wakes
+    /// while they are polled waits for the next poll, which its wake asks for.
+    fn take(&self) -> Vec<usize> {
+        let mut queued = lock(&self.0);
+        let order = std::mem::take(&mut queued.order);
+        for &index in &order {
+            queued.flagged[index] = false;
+        }
+        order
+    }
+
+    /// Queues member `index` and wakes the task, unless the member is queued already.
+    /// The task's waker runs once the lock is let go: a foreign waker may do anything,
+    /// polling this join included.
+    fn wake(&self, index: usize) {
+        let task = {
+            let mut queued = lock(&self.0);
+            if std::mem::replace(&mut queued.flagged[index], true) {
+                return;
+            }
+            queued.order.push(index);
+            queued.task.clone()
+        };
+        if let Some(task) = task {
+            task.wake();
+        }
+    }
+}
+
+/// The waker of one member of a [`join`].
+struct Member {
+    index: usize,
+    woken: Arc<Woken>,
+}
+
+impl Wake for Member {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.woken.wake(self.index);
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl Fs for MemDisk {
+    fn capabilities(&self, root: Root) -> Capabilities {
+        MemDisk::capabilities(self, root)
+    }
+
+    async fn perform(&self, io: Io) -> IoResult {
+        MemDisk::perform(self, io)
+    }
+}
+
+/// A future a [`Source`] returns.
+pub type Filling<'s> = Pin<Box<dyn Future<Output = std::result::Result<(), IoError>> + 's>>;
+
+/// What a saved file is filled from: the app writes it into this writer's staging
+/// through [`Staging`], a chunk at a time, as the commit runs.
+pub trait Source<F> {
+    fn fill<'s>(self: Box<Self>, staging: Staging<'s, F>) -> Filling<'s>
+    where
+        Self: 's;
+}
+
+impl<F: Fs> Source<F> for Vec<u8> {
+    fn fill<'s>(self: Box<Self>, staging: Staging<'s, F>) -> Filling<'s>
+    where
+        Self: 's,
+    {
+        Box::pin(async move { staging.write(0, *self).await })
+    }
+}
+
+impl<F: Fs> Source<F> for Splice {
+    fn fill<'s>(self: Box<Self>, staging: Staging<'s, F>) -> Filling<'s>
+    where
+        Self: 's,
+    {
+        Box::pin(async move {
+            let from = self.from.clone();
+            for step in self.steps() {
+                match step? {
+                    Splicing::Write { at, bytes } => staging.write(at, bytes).await?,
+                    Splicing::Copy { at, range } => {
+                        let bytes = staging.read(&from, range).await?;
+                        if bytes.len() as u64 != range.len {
+                            return Err(IoError::SpliceRange);
+                        }
+                        staging.write(at, bytes).await?;
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+/// The staged file a [`Source`] fills, and the folder it may read.
+pub struct Staging<'s, F> {
+    fs: &'s F,
+    root: Root,
+    path: RelPath,
+}
+
+impl<F: Fs> Staging<'_, F> {
+    /// Writes `bytes` at `offset` of the staged file.
+    pub async fn write(&self, offset: u64, bytes: Vec<u8>) -> std::result::Result<(), IoError> {
+        let write = Io::Write {
+            root: self.root,
+            path: self.path.clone(),
+            offset,
+            bytes,
+        };
+        self.fs.perform(write).await.map(drop)
+    }
+
+    /// Reads `range` of the file at `path` in the folder, such as the one being
+    /// rewritten.
+    pub async fn read(
+        &self,
+        path: &RelPath,
+        range: Range,
+    ) -> std::result::Result<Vec<u8>, IoError> {
+        let read = Io::Read {
+            root: self.root,
+            path: path.clone(),
+            range,
+        };
+        match self.fs.perform(read).await? {
+            Reply::Bytes(bytes) => Ok(bytes),
+            _ => Err(IoError::Other("the backend gave the wrong reply".into())),
+        }
+    }
+
+    /// What is at `path` in the folder now, such as the file a copy read, which may
+    /// have changed while it was read.
+    pub async fn stat(&self, path: &RelPath) -> std::result::Result<Option<Meta>, IoError> {
+        let stat = Io::Stat {
+            root: self.root,
+            path: path.clone(),
+        };
+        match self.fs.perform(stat).await? {
+            Reply::Stat(meta) => Ok(meta),
+            _ => Err(IoError::Other("the backend gave the wrong reply".into())),
+        }
+    }
+}
+
+/// Runs `operation` to completion.
+pub async fn run<O: Operation, F: Fs>(fs: &F, operation: O) -> O::Output {
+    run_with(fs, Vec::new(), operation).await
+}
+
+/// Runs `operation` to completion, filling the `n`th [`crate::plan::Content`] it
+/// asks for from `sources[n]`.
+pub async fn run_with<'s, O: Operation, F: Fs>(
+    fs: &F,
+    sources: Vec<Box<dyn Source<F> + 's>>,
+    mut operation: O,
+) -> O::Output {
+    let mut sources: Vec<_> = sources.into_iter().map(Some).collect();
+    let mut result = None;
+    loop {
+        let io = match operation.resume(result.take()) {
+            Step::Done(output) => return output,
+            Step::Io(io) => io,
+        };
+        result = Some(match io {
+            Io::Fill {
+                root,
+                path,
+                content,
+            } => match sources.get_mut(content.0).and_then(Option::take) {
+                Some(source) => source
+                    .fill(Staging { fs, root, path })
+                    .await
+                    .map(|()| Reply::Done),
+                None => Err(IoError::Other(format!("no content {}", content.0))),
+            },
+            Io::Sync { root, .. } if !fs.capabilities(root).fsync => Ok(Reply::Done),
+            io => fs.perform(io).await,
+        });
+    }
+}
+
+/// A library open as one writer, on an async backend.
+pub struct Library<F> {
+    fs: F,
+    core: library::Library,
+}
+
+impl<F: Fs> Library<F> {
+    pub async fn open(fs: F, layout: Layout, schema: &Schema, env: Env) -> Result<(Self, Opened)> {
+        fs.own(layout.root());
+        let capabilities = fs.capabilities(Root::Folder);
+        let open = library::Library::open(layout, schema.clone(), env, capabilities);
+        let (core, opened) = run(&fs, open).await?;
+        Ok((Self { fs, core }, opened))
+    }
+
+    pub fn fs(&self) -> &F {
+        &self.fs
+    }
+
+    pub fn view(&self) -> View {
+        self.core.view()
+    }
+
+    #[doc(hidden)]
+    pub fn refolded(&self) -> crate::merge::Folded {
+        self.core.refolded()
+    }
+
+    #[doc(hidden)]
+    pub fn rebound(&mut self) -> [(crate::binding::Bindings, Vec<crate::log::Op>); 2] {
+        self.core.rebound()
+    }
+
+    pub fn history(&self) -> &[HistoryItem] {
+        self.core.history()
+    }
+
+    /// The entry of this session's latest intent, undo or redo, as one that finishes
+    /// a change left unfinished logs it.
+    pub fn last_logged(&self) -> Option<EntryHash> {
+        self.core.last_logged()
+    }
+
+    /// The writer this instance writes as: none before its first write, and none
+    /// once it stopped writing as one, until it writes again as another.
+    pub fn writer_id(&self) -> Option<WriterId> {
+        self.core.writer_id()
+    }
+
+    /// Whether the library may be written now, and why not.
+    pub fn mode(&self) -> &Mode {
+        self.core.mode()
+    }
+
+    /// The library paths a change of this writer's own still names while it waits
+    /// to be finished by the next write or the next open.
+    pub fn finishing(&self) -> Vec<RelPath> {
+        self.core.finishing()
+    }
+
+    /// An intent to build and commit. Its saves take bytes, or any [`Source`]
+    /// boxed, such as a [`Splice`].
+    pub fn intent(&mut self, label: &str) -> Intent<&mut Self> {
+        Intent::new(self, label)
+    }
+
+    pub async fn undo(&mut self) -> Result<Committed> {
+        run(&self.fs, self.core.undo()).await
+    }
+
+    pub async fn redo(&mut self) -> Result<Committed> {
+        run(&self.fs, self.core.redo()).await
+    }
+
+    /// As [`crate::library::Library::forget_undo`].
+    pub fn forget_undo(&mut self) {
+        self.core.forget_undo();
+    }
+
+    /// As [`crate::library::Library::forget_redo`].
+    pub fn forget_redo(&mut self) {
+        self.core.forget_redo();
+    }
+
+    pub async fn settle(&mut self, orphan: Orphan, how: Settlement) -> Result<Committed> {
+        run(&self.fs, self.core.settle(orphan, how)).await
+    }
+
+    /// Reads other writers' new entries, and scans only the files their facts
+    /// moved.
+    pub async fn refresh(&mut self) -> Result<Refreshed> {
+        run(&self.fs, self.core.refresh()).await
+    }
+
+    /// Refreshes and scans every library file, for what changed outside. Dropping
+    /// the future stops the scan; the next rescan goes on where it stopped.
+    pub async fn rescan(&mut self) -> Result<Refreshed> {
+        run(&self.fs, self.core.rescan()).await
+    }
+
+    /// Refreshes and scans the library files at `paths` and under them, such as
+    /// those a watcher saw change.
+    pub async fn rescan_paths(&mut self, paths: Vec<RelPath>) -> Result<Refreshed> {
+        run(&self.fs, self.core.rescan_paths(paths)).await
+    }
+
+    pub async fn settle_interrupted(&mut self) -> Result<()> {
+        run(&self.fs, self.core.settle_interrupted()).await
+    }
+
+    pub async fn others(&mut self) -> Result<Vec<WriterInfo>> {
+        run(&self.fs, self.core.others()).await
+    }
+
+    pub async fn trash(&mut self) -> Result<Vec<TrashItem>> {
+        run(&self.fs, self.core.trash()).await
+    }
+
+    pub async fn empty_trash(&mut self, kept: BTreeSet<Nonce>) -> Result<Emptied> {
+        run(&self.fs, self.core.empty_trash(kept)).await
+    }
+
+    /// Compacts now, as tests and harnesses drive it; a writer compacts by itself.
+    #[doc(hidden)]
+    pub async fn compact(&mut self) -> Result<Compacted> {
+        run(&self.fs, self.core.compact()).await
+    }
+
+    /// Closes the library cleanly and returns the backend.
+    pub async fn close(mut self) -> Result<F> {
+        run(&self.fs, self.core.close()).await?;
+        Ok(self.fs)
+    }
+}
+
+impl<'l, F: Fs + 'l> Driver for &'l mut Library<F> {
+    type Source = Box<dyn Source<F> + 'l>;
+
+    fn bytes(bytes: Vec<u8>) -> Self::Source {
+        Box::new(bytes)
+    }
+
+    fn entity_id(&mut self) -> EntityId {
+        self.core.entity_id()
+    }
+}
+
+impl<'l, F: Fs + 'l> Intent<&'l mut Library<F>> {
+    /// Commits the intent. One whose file effects fail logs nothing and fails; the
+    /// next write finishes them first.
+    pub async fn commit(self) -> Result<Committed> {
+        let (library, plan, sources) = self.into_parts();
+        run_with(&library.fs, sources, library.core.commit(plan)).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::{Cell, RefCell};
+
+    use super::*;
+
+    /// Ready on its second poll.
+    struct Later(bool);
+
+    impl Future for Later {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
+            if self.0 {
+                return Poll::Ready(());
+            }
+            self.0 = true;
+            context.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+
+    /// Futures that are each ready once its gate opens, and the polls they took.
+    struct Gates {
+        open: RefCell<Vec<bool>>,
+        wakers: RefCell<Vec<Option<Waker>>>,
+        polls: Cell<usize>,
+    }
+
+    impl Gates {
+        fn new(n: usize) -> Self {
+            Self {
+                open: RefCell::new(vec![false; n]),
+                wakers: RefCell::new(vec![None; n]),
+                polls: Cell::new(0),
+            }
+        }
+
+        fn gated(&self, index: usize) -> impl Future<Output = usize> + '_ {
+            std::future::poll_fn(move |context| {
+                self.polls.set(self.polls.get() + 1);
+                if self.open.borrow()[index] {
+                    return Poll::Ready(index);
+                }
+                self.wakers.borrow_mut()[index] = Some(context.waker().clone());
+                Poll::Pending
+            })
+        }
+
+        /// Wakes the future of gate `index` `times` times, its gate opened first where
+        /// `open`.
+        fn wake(&self, index: usize, open: bool, times: usize) {
+            self.open.borrow_mut()[index] |= open;
+            let waker = self.wakers.borrow_mut()[index].take();
+            let waker = waker.expect("a waiting future left its waker");
+            for _ in 0..times {
+                waker.wake_by_ref();
+            }
+        }
+
+        /// `join`'s output, its gates opened in `order`, each waking only its own
+        /// future. Before each gate opens, a poll of the join with nothing woken must
+        /// poll no future, and the gate's wake must wake the join's task once.
+        fn drive<T>(&self, join: impl Future<Output = T>, order: impl Iterator<Item = usize>) -> T {
+            let mut task = Task::new(join);
+            assert!(task.poll().is_pending());
+            for index in order {
+                let polls = self.polls.get();
+                assert!(task.poll().is_pending());
+                assert_eq!(
+                    self.polls.get(),
+                    polls,
+                    "a poll with nothing woken polled a future"
+                );
+                let wakes = task.wakes();
+                self.wake(index, true, 1);
+                assert_eq!(
+                    task.wakes(),
+                    wakes + 1,
+                    "opening gate {index} woke the task once"
+                );
+                if let Poll::Ready(output) = task.poll() {
+                    return output;
+                }
+            }
+            panic!("the join still waits with every gate open");
+        }
+    }
+
+    /// A future polled by hand, with a waker that counts its wakes.
+    struct Task<'f, T> {
+        future: Pin<Box<dyn Future<Output = T> + 'f>>,
+        wakes: Arc<Wakes>,
+    }
+
+    #[derive(Default)]
+    struct Wakes(std::sync::atomic::AtomicUsize);
+
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    impl<'f, T> Task<'f, T> {
+        fn new(future: impl Future<Output = T> + 'f) -> Self {
+            Self {
+                future: Box::pin(future),
+                wakes: Arc::default(),
+            }
+        }
+
+        fn poll(&mut self) -> Poll<T> {
+            let waker = Waker::from(Arc::clone(&self.wakes));
+            self.future.as_mut().poll(&mut Context::from_waker(&waker))
+        }
+
+        fn wakes(&self) -> usize {
+            self.wakes.0.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    #[test]
+    fn a_join_polls_only_the_futures_that_woke() {
+        let n = 1000;
+        let gates = Gates::new(n);
+        let joined = join((0..n).map(|index| gates.gated(index)));
+        assert_eq!(gates.drive(joined, 0..n), (0..n).collect::<Vec<_>>());
+        assert_eq!(
+            gates.polls.get(),
+            2 * n,
+            "each future polled at its start and its wake"
+        );
+    }
+
+    #[test]
+    fn a_future_woken_twice_before_the_join_polls_is_polled_once() {
+        let gates = Gates::new(2);
+        let mut task = Task::new(join((0..2).map(|index| gates.gated(index))));
+        assert!(task.poll().is_pending());
+        let (polls, wakes) = (gates.polls.get(), task.wakes());
+        gates.wake(0, false, 2);
+        assert_eq!(task.wakes(), wakes + 1, "the two wakes woke the task once");
+        assert!(task.poll().is_pending());
+        assert_eq!(
+            gates.polls.get(),
+            polls + 1,
+            "the future woken twice is polled once"
+        );
+        gates.wake(0, true, 1);
+        gates.wake(1, true, 1);
+        assert_eq!(task.poll(), Poll::Ready(vec![0, 1]));
+    }
+
+    #[test]
+    fn a_join_answers_in_its_futures_order_whatever_order_they_finish_in() {
+        let gates = &Gates::new(5);
+        let failing = |index| async move {
+            match gates.gated(index).await {
+                odd if odd % 2 == 1 => Err(format!("failed {odd}")),
+                even => Ok(even),
+            }
+        };
+        let joined = join((0..5).map(failing));
+        let answered = gates.drive(joined, (0..5).rev());
+        let failed = |index: usize| format!("failed {index}");
+        let expected = [Ok(0), Err(failed(1)), Ok(2), Err(failed(3)), Ok(4)];
+        assert_eq!(answered, expected);
+        let first = answered
+            .into_iter()
+            .collect::<std::result::Result<Vec<_>, _>>();
+        assert_eq!(
+            first,
+            Err(failed(1)),
+            "the first failure in order, though 3 failed first"
+        );
+    }
+
+    #[test]
+    fn a_source_reads_and_stats_the_folder_as_it_is_now() {
+        let disk = MemDisk::new();
+        let at = RelPath::new("a").unwrap();
+        let put = |bytes: &[u8]| {
+            let _ = disk.perform(Io::Remove {
+                root: Root::Folder,
+                path: at.clone(),
+            });
+            disk.perform(Io::Create {
+                root: Root::Folder,
+                path: at.clone(),
+                bytes: bytes.to_vec(),
+            })
+            .unwrap();
+        };
+        put(b"one");
+        let staging = Staging {
+            fs: &disk,
+            root: Root::Folder,
+            path: RelPath::new("staged").unwrap(),
+        };
+        let range = Range { offset: 0, len: 3 };
+        assert_eq!(
+            pollster::block_on(staging.read(&at, range)).unwrap(),
+            b"one"
+        );
+        put(b"three");
+        let meta = pollster::block_on(staging.stat(&at)).unwrap();
+        assert_eq!(meta.map(|meta| meta.len), Some(5));
+        let gone = RelPath::new("gone").unwrap();
+        assert_eq!(pollster::block_on(staging.stat(&gone)).unwrap(), None);
+    }
+
+    #[test]
+    fn a_batch_storage_cannot_take_is_issued_as_single_requests_together() {
+        let disk = MemDisk::new();
+        for name in ["d", "d/a", "d/b", "d/c"] {
+            let path = RelPath::new(name).unwrap();
+            let io = match name {
+                "d" => Io::MakeDir {
+                    root: Root::Folder,
+                    path,
+                },
+                _ => Io::Create {
+                    root: Root::Folder,
+                    path,
+                    bytes: name.as_bytes().to_vec(),
+                },
+            };
+            disk.perform(io).unwrap();
+        }
+        let (running, most) = (Cell::new(0), Cell::new(0));
+        let single = |io: Io| {
+            let (disk, running, most) = (&disk, &running, &most);
+            async move {
+                running.set(running.get() + 1);
+                most.set(most.get().max(running.get()));
+                Later(false).await;
+                running.set(running.get() - 1);
+                disk.perform(io)
+            }
+        };
+        let dir = RelPath::new("d").unwrap();
+        let listed = Io::ListStat {
+            root: Root::Folder,
+            dir: dir.clone(),
+        };
+        let answered = pollster::block_on(fan_out(listed.clone(), single));
+        assert_eq!(answered, disk.perform(listed));
+        assert_eq!(most.get(), 3, "the three stats are in flight together");
+        let reads = Io::ReadMany {
+            root: Root::Folder,
+            reads: ["d/a", "d/none", "d/c"]
+                .map(|name| (RelPath::new(name).unwrap(), Range { offset: 2, len: 9 }))
+                .into(),
+        };
+        let answered = pollster::block_on(fan_out(reads.clone(), single));
+        assert_eq!(answered, disk.perform(reads));
+        assert_eq!(
+            answered,
+            Ok(Reply::ReadMany(vec![
+                Ok(b"a".to_vec()),
+                Err(IoError::NotFound),
+                Ok(b"c".to_vec())
+            ]))
+        );
+    }
+}

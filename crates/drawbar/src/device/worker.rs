@@ -400,6 +400,20 @@ async fn execute<T: Transport>(
     }
 }
 
+/// Why a slot's occupant could not be kept on this computer, and what to do about it.
+fn unkeepable(e: &std::io::Error) -> String {
+    match e
+        .get_ref()
+        .is_some_and(|e| e.is::<crate::store::Outdated>())
+    {
+        true => format!(
+            "{e}. Reload the page to replace what a slot holds; sending to an empty slot \
+             still works"
+        ),
+        false => format!("there was nowhere on this computer to keep it: {e}"),
+    }
+}
+
 /// Read the occupant `info` describes into a new file from `scratch`, a transfer chunk
 /// at a time, close it, check it whole, and only then give it its name as a rescue, so
 /// it is on disk before anything is deleted. A read that fails leaves no file behind.
@@ -413,7 +427,7 @@ async fn back_up<T: Transport>(
     let mut kept = scratch
         .create(&envelope::rescue_name_for(at, &info.format))
         .await
-        .map_err(|e| format!("there was nowhere on this computer to keep it: {e}"))?;
+        .map_err(|e| unkeepable(&e))?;
     let read: Result<(), Error> = async {
         let received = op::read_into(s, at, &mut kept).await?;
         kept.close().await?;
@@ -456,10 +470,12 @@ async fn discard(backup: Option<Kept>, emit: &Emit) {
     }
 }
 
-/// Leave a backup where it is when the slot may have lost what it held: the next open
-/// offers it. Returns where it is, in words for the failure.
-fn rescue(at: Location, backup: Kept, emit: &Emit) -> String {
+/// Leave a backup where it is when the slot may have lost what it held, for the app to
+/// put in the library. Returns where it is, in words for the failure.
+async fn rescue(at: Location, backup: Kept, emit: &Emit) -> String {
     let place = backup.place();
+    // A lock a failed request leaves held ends with the rescue worker.
+    let _ = backup.leave().await;
     emit.send(DeviceEvent::Kept {
         at,
         place: place.clone(),
@@ -557,7 +573,7 @@ async fn put<T: Transport>(
                 (false, Some(backup)) => format!(
                     "{} may have been deleted: {cause}; {}",
                     shown(at),
-                    rescue(at, backup, emit)
+                    rescue(at, backup, emit).await
                 ),
                 (true, backup) => {
                     discard(backup, emit).await;
@@ -640,7 +656,7 @@ async fn put_back<T: Transport>(
             format!(
                 "{why} (restoring failed as well: {restore}); {}, and {}.",
                 aftermath(class, at),
-                rescue(at, backup, emit)
+                rescue(at, backup, emit).await
             )
         }
     }
@@ -1319,6 +1335,23 @@ fn entity_name(info: &ProgramInfo) -> String {
 mod tests {
     use super::*;
 
+    /// ⚠️ A page whose drawbar.app was updated cannot start the worker that keeps a
+    /// slot's occupant, and only reloading lets it replace one again.
+    #[test]
+    fn an_occupant_an_updated_page_cannot_keep_says_to_reload() {
+        let why = unkeepable(&std::io::Error::other(crate::store::Outdated));
+        assert_eq!(
+            why,
+            "drawbar.app was updated since this page was loaded. Reload the page to replace \
+             what a slot holds; sending to an empty slot still works"
+        );
+        let why = unkeepable(&std::io::Error::other("the disk is full"));
+        assert_eq!(
+            why,
+            "there was nowhere on this computer to keep it: the disk is full"
+        );
+    }
+
     #[test]
     fn a_nameless_slot_still_gets_a_label() {
         let named = |name: &str| {
@@ -1480,6 +1513,7 @@ mod wire_tests {
         }
 
         /// Removes `dir` when it hears the first read, so nothing in it can be synced.
+        #[cfg(unix)]
         fn pulling(mut self, dir: &crate::testing::Temp) -> Puppet {
             self.pulled = Some(dir.0.clone());
             self
@@ -2089,8 +2123,8 @@ mod wire_tests {
     }
 
     /// A write that fails and cannot be put back is still one failure, and the occupant
-    /// it displaced is kept in one place only: the file it was read into, which the next
-    /// open offers. Nothing hands it on a second time.
+    /// it displaced is kept in one place only: the file it was read into, which goes into
+    /// the library. Nothing hands it on a second time.
     #[test]
     fn an_occupant_that_cannot_be_restored_is_kept_once() {
         let at = Location { bank: 0, slot: 3 };

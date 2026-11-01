@@ -1,14 +1,15 @@
-//! Where the occupant of a slot waits while a write replaces it: a file under the
-//! library's `.drawbar/tmp/` on the desktop, or a `rescued` folder of drawbar's own data
-//! where the library cannot take one, and `.drawbar/tmp/` of the browser's private
-//! storage in the browser.
+//! Where the occupant of a slot waits while a write replaces it: a file in the `rescued`
+//! folder of this install's own state for the open library, on the desktop and in the
+//! browser's storage alike, or of drawbar's own data where no library can take one.
 //!
 //! A file is named as the rescue it becomes if the write and its restore both fail
 //! ([`nord_usb::envelope::rescue_name_for`]). It is written under a
-//! [partial](nord_usb::envelope::PARTIAL) name, which the library's sweep of `tmp/`
-//! removes, and takes its own only once [`Kept::finish`] is called on it whole. The sweep
-//! leaves those names alone, since one an interrupted write left behind is the slot's
-//! only copy, and the next open offers each to the user ([`crate::store::Rescue`]).
+//! [partial](nord_usb::envelope::PARTIAL) name, which the next open deletes, and takes its
+//! own only once [`Kept::finish`] is called on it whole. One an interrupted write left
+//! behind may be the slot's only copy, and goes into the library
+//! ([`crate::store::Store::look_for_rescues`]). In the browser every tab keeps its files
+//! in one folder, so a tab holds a lock on each file's name until it lets the file go,
+//! and no other tab deletes or takes in the file meanwhile.
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;

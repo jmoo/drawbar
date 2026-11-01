@@ -51,7 +51,8 @@ level.
 
 Tags label sounds without moving them, and a sound can have several. **Tag ▸ New
 tag…** in a row's menu tags the selected sounds. Click a tag in the inspector to
-put it on, or take it off, everything selected. Removing a tag deletes no sounds.
+put it on, or take it off, everything selected. Renaming a tag to the name of
+another merges the two. Removing a tag deletes no sounds.
 
 ## MIDI controllers
 

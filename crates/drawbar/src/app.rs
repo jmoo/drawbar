@@ -6,7 +6,7 @@
 use eframe::egui;
 
 use crate::browser::{self, Browser};
-use crate::device::Device;
+use crate::device::{Device, DeviceCard};
 use crate::document::Document;
 use crate::keyboard::Keyboard;
 use crate::library::Library;
@@ -15,6 +15,7 @@ use crate::midi::{Midi, Played};
 use crate::platform::Platform;
 use crate::queue::Queue;
 use crate::shell::{Dock, Shell};
+use crate::store::older::Found;
 use crate::store::{Pass, Store};
 use crate::tabs::{Spot, Tabs};
 use crate::workspace::Workspace;
@@ -198,12 +199,19 @@ pub struct DrawbarApp {
     /// user agreed to lose what the open one cannot keep.
     #[cfg(target_arch = "wasm32")]
     waiting: Option<(crate::store::Root, bool)>,
-    /// eframe's store still holds a library kept the old way, to empty at the first
-    /// frame that can write it.
-    leaving: bool,
-    /// The list's revision when the index was last written.
+    /// A copy of a library to open into the browser's own once the open library has no
+    /// answer outstanding.
+    #[cfg(target_arch = "wasm32")]
+    restoring: Option<crate::store::Outside>,
+    /// Whether this session told the user what may delete the browser's own library.
+    #[cfg(target_arch = "wasm32")]
+    told_risk: bool,
+    /// The list of This computer an older drawbar kept in eframe's store, until a
+    /// library takes it in.
+    older: Option<crate::store::older::List>,
+    /// The list's revision at the last full pass.
     synced: u64,
-    /// When the index was last written, in egui time.
+    /// When the last full pass ran, in egui time.
     synced_at: f64,
     /// The selection's revision when its first assets were last asked for.
     picked: Option<u64>,
@@ -270,7 +278,9 @@ impl DrawbarApp {
         // egui's own keys step by a tenth and reset to 100%, off the steps drawbar offers.
         cc.egui_ctx
             .options_mut(|options| options.zoom_with_keyboard = false);
-        let leaving = cc.storage.is_some_and(crate::store::left_behind);
+        let older = cc
+            .storage
+            .map_or(Found::Nothing, crate::store::older::found);
         let mut app = DrawbarApp {
             workspace: Workspace::new(cc.egui_ctx.clone()),
             device: Device::new(cc.egui_ctx.clone()),
@@ -305,7 +315,11 @@ impl DrawbarApp {
             libraries: crate::libraries::Libraries::default(),
             #[cfg(target_arch = "wasm32")]
             waiting: None,
-            leaving,
+            #[cfg(target_arch = "wasm32")]
+            restoring: None,
+            #[cfg(target_arch = "wasm32")]
+            told_risk: false,
+            older: None,
             synced: 0,
             synced_at: 0.0,
             picked: None,
@@ -319,6 +333,17 @@ impl DrawbarApp {
                 storage.get_string(crate::folders::ALL_FILES_KEY).as_deref() == Some("true");
             #[cfg(not(target_arch = "wasm32"))]
             app.midi.restore(storage, &cc.egui_ctx);
+        }
+        match older {
+            Found::Nothing => {}
+            Found::Unknown => app.log.trouble(crate::store::older::UNKNOWN),
+            Found::List(list) => {
+                if list.unreadable > 0 {
+                    app.log
+                        .trouble(crate::store::older::unreadable(list.unreadable));
+                }
+                app.older = Some(list);
+            }
         }
         #[cfg(not(target_arch = "wasm32"))]
         app.opened();
@@ -538,11 +563,11 @@ impl DrawbarApp {
     }
 
     /// Bring the library level with the list from the frame that changed it; an idle
-    /// egui window may not repaint. Files are written at once, and the working copies
-    /// and the index at most every few seconds, because dragging changes the list every
+    /// egui window may not repaint. Files are written at once, and what was read is
+    /// summarized at most every few seconds, because dragging changes the list every
     /// frame.
     fn keep_up(&mut self, ctx: &egui::Context) {
-        /// The least time between writes of the index, in seconds.
+        /// The least time between full passes, in seconds.
         const EVERY: f64 = 2.0;
 
         let Some(store) = &mut self.store else {
@@ -556,7 +581,7 @@ impl DrawbarApp {
             true => Pass::Full,
             false => Pass::Files,
         };
-        let synced = store.sync(&mut self.workspace, &mut self.browser, &self.queue, pass);
+        let synced = store.sync(&mut self.workspace, &mut self.browser, pass);
         // A full pass that could not finish, as during a rescan, waits out the cadence too,
         // since each one summarizes every asset.
         if pass == Pass::Full {
@@ -566,7 +591,7 @@ impl DrawbarApp {
             self.synced = self.workspace.revision();
             return;
         }
-        // Nothing else may request a frame, and the index is still to be written.
+        // Nothing else may request a frame, and a full pass is still to run.
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
     }
 }
@@ -578,8 +603,14 @@ fn library(ctx: &egui::Context, root: crate::store::Root) -> Store {
     let name = crate::libraries::name(&root, crate::store::default_root().as_deref());
     #[cfg(target_arch = "wasm32")]
     let name = root.name();
-    let cache = crate::store::Cache::open(ctx, &root);
-    let store = Store::start(crate::store::Backend::start(ctx, root)).remembering(cache);
+    #[cfg(not(target_arch = "wasm32"))]
+    let backend = {
+        let local = crate::store::local_root(&root);
+        crate::store::Backend::start(ctx, root, local)
+    };
+    #[cfg(target_arch = "wasm32")]
+    let backend = crate::store::Backend::start(ctx, root);
+    let store = Store::start(backend);
     #[cfg(not(target_arch = "wasm32"))]
     let store = store.shelving(crate::device::shelf());
     match name {
@@ -610,6 +641,8 @@ impl DrawbarApp {
                 browser::Act::OpenLibrary(root) => self.libraries.allow(ctx, root),
                 #[cfg(target_arch = "wasm32")]
                 browser::Act::OpenLibraryDiscarding(root) => self.waiting = Some((root, true)),
+                browser::Act::ReopenLibrary => self.reopen_library(ctx, false),
+                browser::Act::ReopenLibraryDiscarding => self.reopen_library(ctx, true),
                 act => rest.push(act),
             }
         }
@@ -617,24 +650,31 @@ impl DrawbarApp {
     }
 
     /// Run what the user chose to do with the slots' former occupants interrupted writes
-    /// left, and with the working copies of a library that lost its index, and pass the
-    /// rest on.
+    /// left, and pass the rest on.
     fn rescue(&mut self, ctx: &egui::Context, acts: Vec<browser::Act>) -> Vec<browser::Act> {
         let mut rest = Vec::new();
         for act in acts {
-            match act {
-                browser::Act::DropUnindexed {
-                    confirmed: true, ..
-                } => {
-                    self.reopen(ctx, Store::drop_unindexed);
+            let act = match (act, self.store.as_mut()) {
+                (browser::Act::Settle(orphan, how), Some(store)) => {
+                    store.settle_unfinished(orphan, how);
                     continue;
                 }
-                browser::Act::SetAside { confirmed: true } => {
-                    self.reopen(ctx, Store::set_aside);
+                (browser::Act::TakeKept { run, changes }, Some(store)) => {
+                    store.take_kept(*run, changes);
                     continue;
                 }
-                _ => {}
-            }
+                (browser::Act::DismissKept(run), Some(store)) => {
+                    store.dismiss_kept(*run);
+                    continue;
+                }
+                (
+                    browser::Act::Settle(..)
+                    | browser::Act::TakeKept { .. }
+                    | browser::Act::DismissKept(_),
+                    None,
+                ) => continue,
+                (act, _) => act,
+            };
             let browser::Act::Rescue(rescue, what) = act else {
                 rest.push(act);
                 continue;
@@ -642,13 +682,7 @@ impl DrawbarApp {
             let Some(store) = self.store.as_mut() else {
                 continue;
             };
-            let shown = store.rescue(
-                rescue,
-                what,
-                &mut self.workspace,
-                &mut self.browser,
-                &mut self.log,
-            );
+            let shown = store.rescue(rescue, what, &mut self.browser, &mut self.log);
             if let Some(url) = shown {
                 ctx.open_url(egui::OpenUrl::new_tab(url));
             }
@@ -656,23 +690,11 @@ impl DrawbarApp {
         rest
     }
 
-    /// Send `fix` to the open library, which opened read-only, and open it again. The
-    /// open library runs what `fix` sent before it lets go.
-    fn reopen(&mut self, ctx: &egui::Context, fix: fn(&mut Store)) {
-        let Some(store) = self.store.as_mut() else {
-            return;
-        };
-        fix(store);
-        let root = store.root().to_owned();
-        self.switch_library(ctx, root);
-    }
-
     /// Open the library at `root` in place of the one open now.
     ///
-    /// The open library is written first, its unsaved edits as working copies in its own
-    /// `.drawbar/`, where they come back when it is opened again. Its assets then leave
-    /// the window; the views of slots stay. Where the open library cannot keep something
-    /// unsaved, it asks first unless `discard` says the user already agreed to lose it.
+    /// The open library is written first. Its assets then leave the window; the views of
+    /// slots stay. Where the open library cannot keep something unsaved, it asks first
+    /// unless `discard` says the user already agreed to lose it.
     ///
     /// ⚠️ On the desktop it waits for the library's saves in flight to land, as quitting
     /// does. The browser cannot wait, so there it is called once [`Store::settled`].
@@ -708,6 +730,14 @@ impl DrawbarApp {
 
     /// Let the open library go and open the one at `root`, which may be the same one.
     fn switch_library(&mut self, ctx: &egui::Context, root: crate::store::Root) {
+        self.let_library_go();
+        self.store = Some(library(ctx, root));
+        self.opened();
+        self.synced = self.workspace.revision();
+    }
+
+    /// Let the open library go, and its assets leave the window.
+    fn let_library_go(&mut self) {
         if let Some(store) = self.store.take() {
             store.hand_over(
                 &mut self.workspace,
@@ -732,9 +762,88 @@ impl DrawbarApp {
         }
         self.browser.leave_library();
         self.tabs.prune(&self.workspace);
-        self.store = Some(library(ctx, root));
-        self.opened();
-        self.synced = self.workspace.revision();
+    }
+
+    /// Let go of the library open now and open it again, asking first, as
+    /// [`DrawbarApp::open_library`] does, unless `discard` says the user already agreed
+    /// to lose what it cannot keep.
+    fn reopen_library(&mut self, ctx: &egui::Context, discard: bool) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        let unkept = store.unkept(&self.workspace);
+        if !discard && !unkept.is_empty() {
+            self.browser.ask_reopen(&unkept);
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let root = store.root().to_path_buf();
+        #[cfg(target_arch = "wasm32")]
+        let root = store.root().clone();
+        self.switch_library(ctx, root);
+    }
+
+    /// Let go of the list an older drawbar kept, leaving its keys as they are, once the
+    /// library holds it durably, or at once where it holds nothing to take in.
+    fn let_older_go(&mut self, storage: &mut dyn eframe::Storage) {
+        let Some(list) = &self.older else {
+            return;
+        };
+        let store = self.store.as_ref();
+        let kept = |store: &Store| store.handed_over(&list.hash, &self.workspace);
+        if list.is_empty() || store.is_some_and(kept) {
+            crate::store::older::let_go(storage, &list.hash);
+            self.older = None;
+        }
+    }
+
+    /// Let go of a library drawbar can no longer reach: one whose thread or worker
+    /// stopped, so that opening it again starts a fresh one, or in the browser a picked
+    /// folder the browser no longer lets it into, which the private library stands in
+    /// for until reconnected.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))]
+    fn let_lost_library_go(&mut self, ctx: &egui::Context) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        match store.stopped() {
+            Some(why) => {
+                self.log.trouble(format!(
+                    "The library was closed, since {why}. Open it again from File ▸ {}.",
+                    crate::menu::RECENT
+                ));
+                self.let_library_go();
+                self.opened();
+            }
+            #[cfg(target_arch = "wasm32")]
+            None => self.let_denied_library_go(ctx),
+            #[cfg(not(target_arch = "wasm32"))]
+            None => {}
+        }
+    }
+
+    /// Let go of a picked folder the browser no longer lets the page into.
+    #[cfg(target_arch = "wasm32")]
+    fn let_denied_library_go(&mut self, ctx: &egui::Context) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        if !store.denied() {
+            return;
+        }
+        let root = store.root().clone();
+        let name = root.name().unwrap_or_default();
+        self.log.trouble(format!(
+            "This browser no longer lets drawbar into {name}, so it was closed. Choose \
+             File ▸ Reconnect {name} to open it again. Until then the library is {}.",
+            crate::libraries::THIS_COMPUTER
+        ));
+        self.switch_library(ctx, crate::store::Root::Private);
+        self.browser.folders.reconnect = Some(crate::folders::Library {
+            root,
+            name,
+            open: false,
+        });
     }
 
     /// Put the library just opened first among the recent ones.
@@ -752,8 +861,8 @@ impl DrawbarApp {
     #[cfg(target_arch = "wasm32")]
     fn opened(&mut self) {
         let open = self.store.as_ref().map(|store| store.root().clone());
-        if let Some(notice) = open.as_ref().and_then(|open| self.libraries.opened(open)) {
-            self.log.say(notice);
+        if let Some(open) = &open {
+            self.libraries.opened(open);
         }
         self.browser.folders.libraries = self.libraries.offered(open.as_ref());
     }
@@ -791,19 +900,84 @@ impl DrawbarApp {
                     }
                 }
                 Heard::Open(root) => self.waiting = Some((root, false)),
+                Heard::Copy(from) => self.restoring = Some(from),
                 Heard::Trouble(why) => self.log.trouble(why),
             }
         }
-        if self.waiting.is_none() {
+        if self.waiting.is_none() && self.restoring.is_none() {
             return;
         }
         let settled = match &mut self.store {
-            Some(store) => store.settled(&mut self.workspace, &mut self.browser, &self.queue),
+            Some(store) => store.settled(&mut self.workspace, &mut self.browser),
             None => true,
         };
-        if let Some((root, discard)) = self.waiting.take_if(|_| settled) {
+        if !settled {
+            return;
+        }
+        if let Some(from) = self.restoring.take() {
+            self.restore_library(ctx, from);
+        }
+        if let Some((root, discard)) = self.waiting.take() {
             self.open_library(ctx, root, discard);
         }
+    }
+
+    /// Pick a copy of a library to open into the browser's own, which must hold no
+    /// files.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn open_copy(&mut self, ctx: &egui::Context) {
+        let resumed = self.store.as_ref().is_some_and(Store::opening_copy);
+        if self.browser.folders.count(None, &self.workspace) > 0 && !resumed {
+            self.log.say(
+                "A copy opens only into an empty library, and the library in this browser \
+                 holds files.",
+            );
+            return;
+        }
+        self.libraries.pick_copy(ctx);
+    }
+
+    /// Let the library go, and open the copy `from` into the browser's own library,
+    /// which then opens.
+    #[cfg(target_arch = "wasm32")]
+    fn restore_library(&mut self, ctx: &egui::Context, from: crate::store::Outside) {
+        self.let_library_go();
+        let backend = crate::store::Backend::start(ctx, crate::store::Root::Private);
+        self.store = Some(Store::restore(backend, from));
+        self.opened();
+        self.synced = self.workspace.revision();
+    }
+
+    /// Tell the user once a session what may delete the library, where it is the
+    /// browser's own and something may.
+    #[cfg(target_arch = "wasm32")]
+    fn tell_risk(&mut self) {
+        use crate::store::Risk;
+
+        let risk = self.store.as_ref().and_then(Store::risk);
+        let Some(risk) = risk.filter(|_| !self.told_risk) else {
+            return;
+        };
+        self.told_risk = true;
+        let what = match risk {
+            Risk::Unvisited => {
+                "This browser deletes it once it has been used for seven days without a \
+                 visit to drawbar."
+            }
+            Risk::Pressure => "This browser may clear it when space runs low.",
+        };
+        let elsewhere = match crate::libraries::picking() {
+            crate::libraries::Picking::On => format!(
+                " File ▸ {} keeps it in a folder on this computer instead.",
+                crate::menu::OPEN_LIBRARY
+            ),
+            _ => String::new(),
+        };
+        self.log.say(format!(
+            "The library is kept only in this browser's storage. {what} Keep a copy with \
+             File ▸ {}.{elsewhere}",
+            crate::menu::SAVE_COPY
+        ));
     }
 }
 
@@ -817,12 +991,7 @@ impl eframe::App for DrawbarApp {
     /// save.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         if let Some(store) = &mut self.store {
-            if store.sync(
-                &mut self.workspace,
-                &mut self.browser,
-                &self.queue,
-                Pass::Full,
-            ) {
+            if store.sync(&mut self.workspace, &mut self.browser, Pass::Full) {
                 self.synced = self.workspace.revision();
             }
         }
@@ -887,6 +1056,7 @@ impl eframe::App for DrawbarApp {
             let locals = picked.items().filter_map(browser::Item::local);
             self.workspace.select(locals.take(crate::inspector::MANY));
         }
+        let mut storage = frame.storage_mut();
         let released = match &mut self.store {
             Some(store) => {
                 #[cfg(target_arch = "wasm32")]
@@ -902,15 +1072,31 @@ impl eframe::App for DrawbarApp {
                 );
                 let left = store.take_left().into_iter();
                 arrived.extend(left.map(browser::Act::Remove));
+                if let Some(list) = self.older.as_mut() {
+                    // Kept first, so a session that ends before the edits are kept leaves
+                    // the next where to put them back.
+                    let mut kept = None;
+                    let keep = |placed: &[_]| {
+                        if let Some(storage) = storage.as_deref_mut() {
+                            crate::store::older::keep_placed(storage, &list.hash, placed);
+                        }
+                        kept = Some(placed.iter().cloned().collect());
+                    };
+                    let (workspace, browser) = (&mut self.workspace, &mut self.browser);
+                    store.take_in(list, workspace, browser, &mut self.log, keep);
+                    // A put-back this session, where another window took the list in
+                    // first, reads the record as it is now.
+                    if let Some(kept) = kept {
+                        list.placed = Some(kept);
+                    }
+                }
                 released
             }
             None => false,
         };
-        if self.leaving {
-            if let Some(storage) = frame.storage_mut() {
-                crate::store::leave_behind(storage);
-                self.leaving = false;
-            }
+        self.let_lost_library_go(ctx);
+        if let Some(storage) = storage {
+            self.let_older_go(storage);
         }
         self.device.poll(
             &mut self.log,
@@ -918,6 +1104,27 @@ impl eframe::App for DrawbarApp {
             &mut self.tabs,
             &mut self.queue,
         );
+        let kept = self.device.take_kept();
+        match &mut self.store {
+            Some(store) => {
+                store.attached(self.device.state.card().map(DeviceCard::instrument));
+                if !kept.is_empty() {
+                    store.rescue_due();
+                }
+                if self.device.state.in_flight.is_none() {
+                    store.look_for_rescues(&mut self.workspace, &mut self.browser, &mut self.log);
+                }
+            }
+            None => {
+                for at in kept {
+                    self.log.trouble(format!(
+                        "{} may be empty. What was in it is kept on this computer, and goes \
+                         into the library drawbar opens next.",
+                        crate::strings::shown(at)
+                    ));
+                }
+            }
+        }
         // An edit to an asset with a waiting entry changes what that write would do; the
         // queue diffs it again against the occupant it already read.
         crate::queue::follow(
@@ -961,7 +1168,10 @@ impl eframe::App for DrawbarApp {
         #[cfg(not(target_arch = "wasm32"))]
         arrived.extend(self.picker.picked().map(browser::Act::OpenLibrary));
         #[cfg(target_arch = "wasm32")]
-        self.follow_libraries(ctx);
+        {
+            self.follow_libraries(ctx);
+            self.tell_risk();
+        }
         if released {
             arrived.push(browser::Act::SendAll);
         }
@@ -1044,7 +1254,6 @@ impl eframe::App for DrawbarApp {
             &mut self.queue,
             &mut self.log,
         );
-        #[cfg(not(target_arch = "wasm32"))]
         self.device
             .keep_occupants_in(self.store.as_ref().and_then(Store::tmp));
         // Last, so a command the user just requested takes the protocol's single slot
@@ -1441,10 +1650,183 @@ mod tests {
     use super::*;
     use crate::workspace::Origin;
 
-    /// A library kept the old way is not read. Its keys are emptied at the first frame,
-    /// and preferences beside them stay.
+    /// eframe's store holding a list as drawbar 0.10 kept it, one program saved under the
+    /// name Grand, beside a preference.
+    fn kept_before() -> crate::testing::Fake {
+        use base64::prelude::{Engine as _, BASE64_STANDARD};
+
+        let program = crate::workspace::Fresh::Program.bytes().unwrap();
+        let assets = format!(
+            "drawbar 1\n2\n1\tfresh\tGrand\t{}\n",
+            BASE64_STANDARD.encode(program)
+        );
+        let mut storage = crate::testing::Fake::default();
+        for (key, text) in [
+            ("drawbar.this_computer", assets.as_str()),
+            ("drawbar.folders", "drawbar folders 1\n"),
+            ("drawbar.tags", "drawbar tags 1\n"),
+            (ThemeChoice::KEY, "dark"),
+        ] {
+            eframe::Storage::set_string(&mut storage, key, text.to_string());
+        }
+        storage
+    }
+
+    fn held(storage: &crate::testing::Fake, key: &str) -> String {
+        eframe::Storage::get_string(storage, key).unwrap_or_default()
+    }
+
+    /// The app over the library in `root`, with what `storage` holds.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn kept_over(
+        storage: &crate::testing::Fake,
+        root: &crate::testing::Temp,
+    ) -> (egui::Context, DrawbarApp) {
+        let ctx = egui::Context::default();
+        let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        cc.storage = Some(storage);
+        let backend = crate::testing::backend(&ctx, root);
+        let app = DrawbarApp::with_library(&cc, Some(Store::start(backend)));
+        (ctx, app)
+    }
+
+    /// Run frames until `done`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn until(ctx: &egui::Context, app: &mut DrawbarApp, done: impl Fn(&DrawbarApp) -> bool) {
+        for _ in 0..500 {
+            frame(ctx, app);
+            if done(app) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("it never happened");
+    }
+
+    /// The list is let go of only once the library holds it, its keys left as they were,
+    /// and a list the library holds already, as after a crash before it was let go of, is
+    /// let go of without being taken in again.
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn a_library_left_behind_is_emptied_quietly() {
+    fn an_older_drawbars_list_is_let_go_of_once_the_library_took_it_in() {
+        use eframe::App as _;
+
+        let root = crate::testing::Temp::new();
+        let mut storage = kept_before();
+        let assets = held(&storage, "drawbar.this_computer");
+        let (ctx, mut app) = kept_over(&storage, &root);
+        let hash = app.older.as_ref().expect("the list").hash.clone();
+        app.let_older_go(&mut storage);
+        assert_eq!(
+            held(&storage, "drawbar.this_computer"),
+            assets,
+            "kept until it lands"
+        );
+
+        let taken = |app: &DrawbarApp| {
+            app.store
+                .as_ref()
+                .is_some_and(|store| store.has_taken_in(&hash))
+        };
+        until(&ctx, &mut app, taken);
+        app.let_older_go(&mut storage);
+        assert_eq!(crate::store::older::found(&storage), Found::Nothing);
+        assert_eq!(
+            held(&storage, "drawbar.this_computer"),
+            assets,
+            "left for an earlier drawbar"
+        );
+        assert_eq!(
+            held(&storage, ThemeChoice::KEY),
+            "dark",
+            "a preference stays"
+        );
+        assert_eq!(root.names(""), [".drawbar", "Grand.ne5p"]);
+        app.on_exit(None);
+
+        let again = kept_before();
+        let (ctx, mut app) = kept_over(&again, &root);
+        let mut again = again;
+        let idle = |app: &DrawbarApp| {
+            let store = app.store.as_ref();
+            store.is_some_and(|store| !store.listing() && !store.deciding())
+        };
+        until(&ctx, &mut app, idle);
+        app.let_older_go(&mut again);
+        assert_eq!(crate::store::older::found(&again), Found::Nothing);
+        assert_eq!(root.names(""), [".drawbar", "Grand.ne5p"], "taken in once");
+    }
+
+    /// A sound that came with an unsaved edit holds the list until its edit is kept as
+    /// any unsaved edit is, which the next save does.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_older_drawbars_list_stays_until_its_unsaved_edits_are_kept() {
+        use base64::prelude::{Engine as _, BASE64_STANDARD};
+        use eframe::App as _;
+
+        let root = crate::testing::Temp::new();
+        let program = crate::workspace::Fresh::Program.bytes().unwrap();
+        let edited = crate::fields::apply(&program, &[("center_panel.gain".into(), "40".into())])
+            .unwrap()
+            .1;
+        let assets = format!(
+            "drawbar 2\n2\n1\tfresh\tGrand\t{}\t{}\n",
+            BASE64_STANDARD.encode(&program),
+            BASE64_STANDARD.encode(&edited)
+        );
+        let mut storage = kept_before();
+        eframe::Storage::set_string(&mut storage, "drawbar.this_computer", assets.clone());
+        let (ctx, mut app) = kept_over(&storage, &root);
+        // No full pass, which keeps unsaved edits, runs until the save below.
+        app.synced_at = f64::INFINITY;
+        let hash = app.older.as_ref().expect("the list").hash.clone();
+        let taken = |app: &DrawbarApp| {
+            let store = app.store.as_ref();
+            store.is_some_and(|store| store.has_taken_in(&hash))
+        };
+        until(&ctx, &mut app, taken);
+        app.let_older_go(&mut storage);
+        assert_eq!(
+            held(&storage, "drawbar.this_computer"),
+            assets,
+            "the edit is not kept"
+        );
+
+        app.save(&mut crate::testing::Fake::default());
+        let kept = |app: &DrawbarApp| {
+            let store = app.store.as_ref();
+            store.is_some_and(|store| store.handed_over(&hash, &app.workspace))
+        };
+        until(&ctx, &mut app, kept);
+        app.let_older_go(&mut storage);
+        assert_eq!(crate::store::older::found(&storage), Found::Nothing);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_older_drawbars_list_the_library_did_not_take_in_stays_for_the_next_launch() {
+        let root = crate::testing::Temp::new();
+        let mut storage = kept_before();
+        let assets = held(&storage, "drawbar.this_computer");
+        let (ctx, mut app) = kept_over(&storage, &root);
+        let store = app.store.as_ref().expect("a library");
+        store.fault(crate::store::Fault::Refuse(
+            |io| matches!(io, toshokan::Io::Write { path, .. } if path.as_str().contains("/tmp/")),
+        ));
+        let failed = |app: &DrawbarApp| {
+            app.log
+                .iter()
+                .any(|entry| entry.text.contains("could not bring"))
+        };
+        until(&ctx, &mut app, failed);
+        app.let_older_go(&mut storage);
+        assert_eq!(held(&storage, "drawbar.this_computer"), assets);
+        assert_eq!(root.names(""), [".drawbar"]);
+    }
+
+    #[test]
+    fn an_older_drawbars_list_with_nothing_in_it_is_let_go_of_at_once() {
         let mut storage = crate::testing::Fake::default();
         eframe::Storage::set_string(
             &mut storage,
@@ -1452,23 +1834,28 @@ mod tests {
             "drawbar 2\n9\n".into(),
         );
         eframe::Storage::set_string(&mut storage, "drawbar.tags", "drawbar tags 1\n".into());
-        eframe::Storage::set_string(&mut storage, ThemeChoice::KEY, "dark".into());
+        let mut app = open(&storage);
+        app.let_older_go(&mut storage);
+        assert_eq!(crate::store::older::found(&storage), Found::Nothing);
+        assert_eq!(held(&storage, "drawbar.tags"), "drawbar tags 1\n");
+    }
 
-        let first = open(&storage);
-        assert!(first.leaving);
-        crate::store::leave_behind(&mut storage);
-        for key in ["drawbar.this_computer", "drawbar.tags"] {
-            let held = eframe::Storage::get_string(&storage, key);
-            assert_eq!(held.as_deref(), Some(""), "{key}");
-        }
-        assert_eq!(
-            eframe::Storage::get_string(&storage, ThemeChoice::KEY).as_deref(),
-            Some("dark"),
-            "a preference stays"
+    #[test]
+    fn an_older_drawbars_list_this_build_cannot_read_is_left_and_said_once() {
+        let mut storage = crate::testing::Fake::default();
+        eframe::Storage::set_string(
+            &mut storage,
+            "drawbar.this_computer",
+            "drawbar 3\n9\n".into(),
         );
-
-        let second = open(&storage);
-        assert!(!second.leaving, "emptied keys are not left behind again");
+        let mut app = open(&storage);
+        app.let_older_go(&mut storage);
+        assert_eq!(held(&storage, "drawbar.this_computer"), "drawbar 3\n9\n");
+        let said = app
+            .log
+            .iter()
+            .filter(|entry| entry.text == crate::store::older::UNKNOWN);
+        assert_eq!(said.count(), 1);
     }
 
     /// The app over a library in `root`, once it has opened.
@@ -1476,7 +1863,7 @@ mod tests {
     fn opened_over(root: &crate::testing::Temp) -> (egui::Context, DrawbarApp) {
         let ctx = egui::Context::default();
         let cc = eframe::CreationContext::_new_kittest(ctx.clone());
-        let backend = crate::store::Backend::start(&ctx, root.0.clone());
+        let backend = crate::testing::backend(&ctx, root);
         let mut app = DrawbarApp::with_library(&cc, Some(Store::start(backend)));
         for _ in 0..500 {
             frame(&ctx, &mut app);
@@ -1506,8 +1893,52 @@ mod tests {
         );
     }
 
-    /// End to end through the app's own frames: New makes a file, quitting writes the
-    /// index, and the next run finds the asset where it was left.
+    /// The browser build's ⌘Z undoes the last change to the library, and ⇧⌘Z redoes it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_web_builds_undo_and_redo_keys_reach_the_library() {
+        use eframe::App as _;
+
+        let root = crate::testing::Temp::new();
+        let (ctx, mut app) = opened_over(&root);
+        app.platform = crate::platform::Platform::Web;
+        app.browser.tags.make("Live").expect("a new tag");
+        let until = |app: &mut DrawbarApp, keys: Vec<egui::Event>, done: fn(&Store) -> bool| {
+            let mut window = eframe::Frame::_new_kittest();
+            let input = crate::testing::screen(egui::vec2(1280.0, 720.0), keys);
+            crate::testing::run(&ctx, input, |ctx| app.update(ctx, &mut window));
+            for _ in 0..500 {
+                if app.store.as_ref().is_some_and(done) {
+                    return true;
+                }
+                frame(&ctx, app);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            false
+        };
+        let undoable = |store: &Store| store.undo_label().is_some();
+        let redoable = |store: &Store| store.redo_label().is_some();
+        assert!(until(&mut app, Vec::new(), undoable), "the tag is made");
+        let key = |modifiers| egui::Event::Key {
+            key: egui::Key::Z,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        let command = egui::Modifiers::COMMAND;
+        assert!(until(&mut app, vec![key(command)], redoable), "⌘Z undid it");
+        let shift = command.plus(egui::Modifiers::SHIFT);
+        assert!(
+            until(&mut app, vec![key(shift)], |store| store
+                .redo_label()
+                .is_none()),
+            "⇧⌘Z redid it"
+        );
+    }
+
+    /// End to end through the app's own frames: New makes a file, and the next run finds
+    /// the asset where it was left.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn what_is_made_in_one_run_is_a_file_the_next_run_opens() {
@@ -1525,7 +1956,6 @@ mod tests {
         app.save(&mut crate::testing::Fake::default());
         app.on_exit(None);
         assert_eq!(root.read("untitled.ne5p"), bytes);
-        assert!(root.at(".drawbar/library.ron").is_file());
 
         let (_, again) = opened_over(&root);
         let names: Vec<&str> = again
@@ -1564,82 +1994,24 @@ mod tests {
         assert_eq!(app.log.status().1, "No files on this computer.");
     }
 
-    /// Switching writes the library open until then, its unsaved edit as a working copy
-    /// in its own sidecar, and opening it again brings the edit back. A view of a slot
-    /// stays in the window and leaves nothing in the library it was open over.
+    /// A library keeps no unsaved edit once another opens in its place, so leaving it
+    /// asks first, and only a yes lets the edit go.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn switching_libraries_keeps_each_ones_unsaved_edits_in_its_own_folder() {
+    fn leaving_a_library_asks_before_its_unsaved_edits_are_lost() {
         let (first, second) = (crate::testing::Temp::new(), crate::testing::Temp::new());
         let (ctx, mut app) = opened_over(&first);
         let id = app
             .workspace
             .create(crate::workspace::Fresh::Program, &mut app.log)
             .unwrap();
-        frame(&ctx, &mut app);
-        let saved = app.workspace.get(id).unwrap().bytes.to_vec();
-        let edit = |bytes: &[u8]| {
-            crate::fields::apply(bytes, &[("center_panel.gain".into(), "96".into())])
-                .unwrap()
-                .1
-        };
-        let edited = edit(&saved);
-        app.workspace
-            .replace_bytes(id, edited.clone(), &mut app.log);
-        let at = nord_usb::Location { bank: 6, slot: 3 };
-        let view = app.workspace.view(
-            "Africa Split.ne5p".into(),
-            Origin::Device {
-                class: nord_usb::ObjectClass::Program,
-                at,
-            },
-            saved.clone(),
-            &mut app.log,
-        );
-        app.workspace
-            .replace_bytes(view, edited.clone(), &mut app.log);
-        app.tabs.open(view);
-
-        app.open_library(&ctx, second.0.clone(), false);
-        until_open(&ctx, &mut app);
-        assert_eq!(
-            first.read("untitled.ne5p"),
-            saved,
-            "the file is as last saved"
-        );
-        assert_eq!(
-            first.names(".drawbar/working").len(),
-            1,
-            "the asset's edit, not the view's"
-        );
-        assert!(app.workspace.get(id).is_none(), "it left with its library");
-        assert!(app.workspace.get(view).is_some(), "the view stays");
-        assert_eq!(app.workspace.listed().count(), 0);
-        let libraries = &app.browser.folders.libraries;
-        assert_eq!(libraries[0].root, second.0, "most recent first");
-        assert!(libraries[0].open);
-
-        app.open_library(&ctx, first.0.clone(), false);
-        until_open(&ctx, &mut app);
-        let back = app.workspace.listed().next().expect("the asset is back");
-        assert_eq!(back.bytes, edited, "with its edit");
-        assert!(back.is_unsaved());
-        assert!(back.id > view, "under an id this session has not given out");
-    }
-
-    /// A library nothing may be written to cannot keep what is unsaved in it, so leaving
-    /// it asks first, and only a yes lets the edit go.
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn leaving_a_read_only_library_asks_before_its_unsaved_edits_are_lost() {
-        let (first, second) = (crate::testing::Temp::new(), crate::testing::Temp::new());
-        std::fs::create_dir(first.at(".drawbar")).unwrap();
-        std::fs::write(first.at(".drawbar/library.ron"), "(version: 99)").unwrap();
-        let (ctx, mut app) = opened_over(&first);
-        let id = app
-            .workspace
-            .create(crate::workspace::Fresh::Program, &mut app.log)
-            .unwrap();
+        let edited = crate::fields::apply(
+            &app.workspace.get(id).unwrap().bytes,
+            &[("center_panel.gain".into(), "96".into())],
+        )
+        .unwrap()
+        .1;
+        app.workspace.replace_bytes(id, edited, &mut app.log);
 
         app.open_library(&ctx, second.0.clone(), false);
         let (title, answers) = app.browser.asking().expect("a question");
@@ -1655,6 +2027,39 @@ mod tests {
         let open = app.store.as_ref().map(|store| store.root().to_path_buf());
         assert_eq!(open, Some(second.0.clone()));
         assert!(app.workspace.get(id).is_none(), "discarded, as agreed");
+    }
+
+    /// Opening the library again, as File ▸ Open recent library does for one that opened
+    /// read-only, asks first as leaving it does, and only a yes lets the edit go.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn reopening_a_library_asks_before_its_unsaved_edits_are_lost() {
+        let root = crate::testing::Temp::new();
+        let (ctx, mut app) = opened_over(&root);
+        let id = app
+            .workspace
+            .create(crate::workspace::Fresh::Program, &mut app.log)
+            .unwrap();
+        let edited = crate::fields::apply(
+            &app.workspace.get(id).unwrap().bytes,
+            &[("center_panel.gain".into(), "96".into())],
+        )
+        .unwrap()
+        .1;
+        app.workspace.replace_bytes(id, edited, &mut app.log);
+        let unsaved = |app: &DrawbarApp| app.workspace.listed().any(|entity| entity.is_unsaved());
+
+        let reopen = vec![browser::Act::ReopenLibrary];
+        assert!(app.switch_libraries(&ctx, reopen).is_empty());
+        let (title, answers) = app.browser.asking().expect("a question");
+        assert_eq!(title, "Discard what this library cannot keep?");
+        assert_eq!(answers, ["Cancel", "Discard"]);
+        assert!(unsaved(&app), "nothing left yet");
+
+        let acts = app.browser.answer("Discard");
+        assert!(app.switch_libraries(&ctx, acts).is_empty());
+        until_open(&ctx, &mut app);
+        assert!(!unsaved(&app), "discarded, as agreed");
     }
 
     fn open(storage: &dyn eframe::Storage) -> DrawbarApp {

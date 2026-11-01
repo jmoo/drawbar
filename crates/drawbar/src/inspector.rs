@@ -356,6 +356,7 @@ fn selection(
         return;
     }
     tags(ui, &shown.locals, &shown.wearing, acts);
+    kept_apart(ui, &shown.locals, browser, acts);
     if let Some((slot, deps)) = answered(browser, device) {
         dependencies(ui, slot, deps);
     }
@@ -704,6 +705,26 @@ fn needed(ui: &mut egui::Ui, class: ObjectClass, named: Option<&str>, id: u32) {
     });
 }
 
+/// A note that a change to something picked is kept apart, opening Kept apart.
+fn kept_apart(ui: &mut egui::Ui, picked: &[u64], browser: &Browser, acts: &mut Vec<Act>) {
+    let kept = &browser.folders.kept;
+    if !picked
+        .iter()
+        .any(|&id| kept.iter().any(|run| run.touches(id)))
+    {
+        return;
+    }
+    card(ui, Head::fixed(Glyph::FolderGit2, "Kept apart"), |ui| {
+        ui.add(
+            egui::Label::new("A change to what is selected is kept apart from the library.").wrap(),
+        );
+        ui.add_space(GAP);
+        if tonal_button(ui, None, "Show kept apart").clicked() {
+            acts.push(Act::ShowKept);
+        }
+    });
+}
+
 /// The selection's tags, as chips: solid when every picked asset has the tag and hollow
 /// when only some do. Clicking a solid chip removes its tag from all of them; clicking a
 /// hollow one adds it to all.
@@ -834,6 +855,7 @@ fn faint(ui: &mut egui::Ui, said: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tags::Asked;
     use crate::testing::{self, context, Bench};
     use crate::workspace::Fresh;
     use nord_usb::wire::{Dependency, Status};
@@ -1487,6 +1509,11 @@ mod tests {
 
         bench.act(vec![Act::NewTag(Vec::new())]);
         let tag = bench.browser.tags().all()[0].id;
+        bench.act(vec![Act::RenameTag {
+            id: tag,
+            name: "Sunday".into(),
+        }]);
+        let name = bench.browser.tags().name_of(tag).unwrap().to_string();
         assert!(
             !bench.browser.tags().on_all(&ids, tag),
             "hollow to begin with"
@@ -1496,18 +1523,22 @@ mod tests {
             ids: ids.clone(),
             tag,
         }]);
-        assert!(
-            bench.browser.tags().on_all(&ids, tag),
-            "a hollow one goes on all"
-        );
-
         bench.act(vec![Act::Untag {
             ids: ids.clone(),
             tag,
         }]);
-        assert!(
-            !bench.browser.tags().on_all(&ids, tag),
-            "a solid one comes off"
+        let assets = ids.clone();
+        assert_eq!(
+            bench.browser.take_tag_asks(),
+            [
+                Asked::Tag {
+                    assets: assets.clone(),
+                    name: name.clone(),
+                    make: true
+                },
+                Asked::Untag { assets, name }
+            ],
+            "on all, then off all"
         );
     }
 }

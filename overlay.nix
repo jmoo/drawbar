@@ -1,9 +1,13 @@
 final: prev:
 let
   inherit (final.lib)
+    all
     attrNames
+    attrValues
+    boolToString
     cleanSource
     cleanSourceWith
+    concatLines
     concatMap
     concatMapAttrs
     concatMapStringsSep
@@ -12,16 +16,19 @@ let
     elem
     escapeShellArgs
     filter
+    filterAttrs
     genAttrs
     hasInfix
     hasPrefix
     hasSuffix
     importTOML
+    isBool
     listToAttrs
     makeLibraryPath
     makeOverridable
     mapAttrs
     mapAttrs'
+    mapAttrsToList
     nameValuePair
     optional
     optionalAttrs
@@ -209,6 +216,18 @@ let
     windows = {
       crossPkgs = final.pkgsCross.mingwW64;
       libs = [ final.pkgsCross.mingwW64.windows.pthreads ];
+    }
+    // optionalAttrs (emulators ? windows) {
+      # Wine runs the suite, so code only Windows compiles runs as well.
+      testRunner = {
+        # ⚠️ Wine ends each line with CR LF, and a build log keeps only what follows
+        # a line's last CR, so each line would show empty.
+        cmd = "${final.writeShellScript "wine-tests" ''
+          set -o pipefail
+          WINEDEBUG=fixme-all,warn-all,trace-all ${emulators.windows.package}/bin/wine "$@" 2>&1 | tr -d '\r'
+        ''}";
+        packages = [ ];
+      };
     };
 
     wasip1 = {
@@ -268,13 +287,19 @@ let
         "AR_${triple}" = "${cc.bintools.bintools}/bin/${cc.targetPrefix}ar";
       }
     )
-    // optionalAttrs (spec ? libs) {
-      # Put static libs on rustc's path directly; the cc wrapper can miss rustc's own
-      # `-l:` requests.
-      "CARGO_TARGET_${envTriple (tripleOf spec)}_RUSTFLAGS" = concatMapStringsSep " " (
-        l: "-L native=${l}/lib"
-      ) spec.libs;
-    }
+    // optionalAttrs (spec ? libs) (
+      let
+        paths = concatMapStringsSep " " (l: "-L native=${l}/lib") spec.libs;
+      in
+      {
+        # Put static libs on rustc's path directly; the cc wrapper can miss rustc's own
+        # `-l:` requests.
+        "CARGO_TARGET_${envTriple (tripleOf spec)}_RUSTFLAGS" = paths;
+        # rustdoc links doctests without the target's RUSTFLAGS; a cross build's
+        # doctests are all the target's.
+        RUSTDOCFLAGS = paths;
+      }
+    )
     // optionalAttrs (spec ? testRunner) {
       # cargo hands each test binary to this runner, which is what lets a foreign
       # target's tests run here.
@@ -373,12 +398,14 @@ let
       pkg;
 
   # Cross-build applications to exercise their whole dependency stack. `nord-usb`
-  # also keeps wasip1 because its own suite executes there in a wasm VM.
+  # also keeps wasip1 because its own suite executes there in a wasm VM, and
+  # `toshokan` builds for Windows because its Windows renames compile only there.
   crateTargets = {
     # A CLI has no use on WASI.
     nord-cli = filter (t: t != "wasip1") (attrNames targets);
     nord-usb = [ "wasip1" ];
     drawbar = [ "windows" ];
+    toshokan = [ "windows" ];
   };
 
   # Native rustc supplies bare wasm32; wasm-bindgen pairs drawbar/WebUSB with the page.
@@ -439,8 +466,6 @@ let
           cp ${./crates/drawbar/favicon.svg} "$out/favicon.svg"
           # The demo sounds the welcome sheet fetches, beside the app that reads them.
           cp -r --no-preserve=mode ${./crates/nord-format/tests/fixtures/demo} "$out/demo"
-          # The worker that writes the library; the app asks for it beside the page.
-          cp ${./crates/drawbar/library-writer.js} "$out/library-writer.js"
 
           if grep -qF drawbar_bg.wasm "$out/pkg/$js"; then
             echo "an unhashed asset name survived the rewrite" >&2
@@ -481,18 +506,18 @@ let
       (
         name: manifest:
         let
-          suites = manifest.metadata.nix.browserTests or [ ];
+          # ⚠️ Only the suites' own build names them: the dependency build compiles
+          # stand-in sources, which hold no test target.
+          suites = escapeShellArgs (
+            concatMap (suite: [
+              "--test"
+              suite
+            ]) (manifest.metadata.nix.browserTests or [ ])
+          );
           args = commonArgs // {
             CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
             CARGO_PROFILE = "release-tests";
-            cargoExtraArgs = "--locked -p ${name} ${featureArgs (testFeaturesFor name)} ${
-              escapeShellArgs (
-                concatMap (suite: [
-                  "--test"
-                  suite
-                ]) suites
-              )
-            }";
+            cargoExtraArgs = "--locked -p ${name} ${featureArgs (testFeaturesFor name)}";
             nativeBuildInputs = [ final.lld ];
             pname = "${name}-browser-tests";
             inherit (manifest) version;
@@ -518,8 +543,8 @@ let
             buildPhaseCargoCommand = ''
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
-              CHROMEDRIVER=${final.lib.getExe final.chromedriver} cargo test --profile release-tests $cargoExtraArgs
-              GECKODRIVER=${final.lib.getExe final.geckodriver} cargo test --profile release-tests $cargoExtraArgs
+              CHROMEDRIVER=${final.lib.getExe final.chromedriver} cargo test --profile release-tests $cargoExtraArgs ${suites}
+              GECKODRIVER=${final.lib.getExe final.geckodriver} cargo test --profile release-tests $cargoExtraArgs ${suites}
             '';
             cargoArtifacts = crane.buildDepsOnly args;
             doInstallCargoArtifacts = false;
@@ -529,6 +554,35 @@ let
         )
       )
       (final.lib.filterAttrs (_: manifest: (manifest.metadata.nix.browserTests or [ ]) != [ ]) manifests);
+
+  # The power-loss workloads and checker in a page whose runs a driver kills, in
+  # Chromium and Firefox; Linux only, as the other browser suites.
+  toshokanBrowserCrash = final.callPackage ./crates/toshokan/power-loss/browser {
+    wasm =
+      let
+        args = commonArgs // {
+          CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
+          cargoExtraArgs = "--locked -p toshokan --features web";
+          # ⚠️ nixpkgs' rustc links wasm with the system `lld` and bundles none.
+          nativeBuildInputs = [ final.lld ];
+          pname = "toshokan-browser-crash";
+          inherit (manifests.toshokan) version;
+        };
+      in
+      crane.mkCargoDerivation (
+        args
+        // {
+          buildPhaseCargoCommand = "cargo build --release $cargoExtraArgs --example browser_crash";
+          cargoArtifacts = crane.buildDepsOnly args;
+          doInstallCargoArtifacts = false;
+          installPhaseCommand = ''
+            wasm-bindgen --target web --no-typescript --out-dir "$out" \
+              target/wasm32-unknown-unknown/release/examples/browser_crash.wasm
+          '';
+          nativeBuildInputs = args.nativeBuildInputs ++ [ final.wasm-bindgen-cli ];
+        }
+      );
+  };
 
   # `docs/book` is mdBook's own output directory, ignored by git; keeping it out
   # of the source means a local `mdbook build` cannot change this derivation.
@@ -606,6 +660,94 @@ let
         ''}
       ''
   ) { web = drawbar-web; };
+
+  toshokanModels = import ./crates/toshokan/spec/models.nix;
+
+  # A model's TLC config: the baseline's constants under its own, and its
+  # checks, or only the property it violates.
+  toshokanConfig =
+    model:
+    let
+      inherit (toshokanModels) baseline checks;
+      checked =
+        if model ? violates then
+          mapAttrs (_: filter (name: name == model.violates)) checks.safety
+        else
+          checks.${model.checks};
+      section = keyword: lines: optionals (lines != [ ]) ([ keyword ] ++ map (line: "  ${line}") lines);
+      tla = value: if isBool value then toUpper (boolToString value) else toString value;
+    in
+    concatLines (
+      [ "SPECIFICATION Spec" ]
+      ++ section "CONSTANTS" (
+        mapAttrsToList (name: value: "${name} = ${tla value}") (baseline // model.constants)
+      )
+      ++ section "INVARIANTS" checked.invariants
+      ++ section "PROPERTIES" checked.properties
+      ++ optional (model.symmetry or false) "SYMMETRY Symmetric"
+      ++ [ "CHECK_DEADLOCK FALSE" ]
+    );
+
+  # Portable.tla beside every model's config.
+  toshokanSpecConfigs =
+    assert all (
+      model:
+      elem model.suite [
+        null
+        "toshokan-spec"
+        "toshokan-spec-deep"
+      ]
+    ) (attrValues toshokanModels.models);
+    final.linkFarm "toshokan-spec-configs" (
+      [
+        {
+          name = "Portable.tla";
+          path = ./crates/toshokan/spec/Portable.tla;
+        }
+      ]
+      ++ mapAttrsToList (name: model: {
+        name = "${name}.cfg";
+        path = final.writeText "${name}.cfg" (toshokanConfig model);
+      }) toshokanModels.models
+    );
+
+  # TLC over every model of one suite. A model that violates a property must
+  # report that violation; any other must pass.
+  toshokanSpec =
+    suite:
+    final.runCommand suite
+      {
+        nativeBuildInputs = [ final.tlaplus18 ];
+        src = toshokanSpecConfigs;
+      }
+      ''
+        cp "$src"/* .
+        workers=''${NIX_BUILD_CORES:-0}
+        [ "$workers" -gt 0 ] && [ "$workers" -le 8 ] || workers=8
+        check_model() {
+          status=0
+          tlc -workers "$workers" -lncheck final -cleanup -config "$1.cfg" Portable.tla \
+            > "$1.log" 2>&1 || status=$?
+          if ! grep -q "$2" "$1.log"; then
+            cat "$1.log" >&2
+            echo "$1: expected \"$2\", TLC exited $status" >&2
+            exit 1
+          fi
+          echo "$1: $2"
+          grep -E 'distinct states found|depth of|Finished in' "$1.log" | tail -n 3
+        }
+        ${concatLines (
+          mapAttrsToList (
+            name: model:
+            escapeShellArgs [
+              "check_model"
+              name
+              (if model ? violates then "${model.violates} is violated" else "No error has been found")
+            ]
+          ) (filterAttrs (_: model: model.suite == suite) toshokanModels.models)
+        )}
+        touch "$out"
+      '';
 
   # Expose each host-supported `<crate>-<target>` package in one set, alongside
   # the host-independent web bundle.
@@ -690,8 +832,10 @@ in
   nord =
     crates
     // crossed
+    # Not in `all`: they start browsers, and only on Linux.
     // optionalAttrs final.stdenv.hostPlatform.isLinux {
       browser-tests = final.linkFarmFromDrvs "browser-tests" browserSuites;
+      toshokan-browser-crash = toshokanBrowserCrash;
     }
     // mapAttrs' (name: nameValuePair "${name}-corpus") committed
     // mapAttrs' (name: nameValuePair "${name}-corpus-full") full
@@ -742,6 +886,12 @@ in
         }
       );
 
+      # The portable-root protocol, model-checked. `nix flake check` runs the
+      # small suite; `toshokan-spec-configs` holds every model's config.
+      toshokan-spec = toshokanSpec "toshokan-spec";
+      toshokan-spec-configs = toshokanSpecConfigs;
+      toshokan-spec-deep = toshokanSpec "toshokan-spec-deep";
+
       # The corpus assemblies themselves.
       inherit corpus;
       corpus-full = corpusFull;
@@ -761,6 +911,10 @@ in
       packages = final.linkFarm "packages" (
         mapAttrs (_: crate: crate.overrideAttrs { doCheck = false; }) crates
       );
+
+      # `nix run .#toshokan-browser-crash -- --stride 1`: the whole crash sweep,
+      # with WebKit on macOS.
+      toshokan-browser-crash-sweep = toshokanBrowserCrash.sweep;
 
       # `nix run .#drawbar-web`: serve the site on loopback and open it, so the
       # guide the app links to is there under /docs.
