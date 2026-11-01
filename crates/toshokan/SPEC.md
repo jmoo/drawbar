@@ -120,11 +120,7 @@ Each install keeps, per library, a local root of its own that is never synced:
 | `identities.json`     | Identities the install's scans read                          |
 
 toshokan reads and writes nothing else there, so the app may keep files of its
-own beside these, under names that are not a genesis hash. A `drafts/`
-directory, `lock` or `retired` file an earlier version left in a writer's
-directory is neither read nor removed. A writer such a `retired` file marked is
-claimed again, and retires again where its history still forks or the folder
-still lacks its last entry.
+own beside these, under names that are not a genesis hash.
 
 `<genesis>` is the hash of the writer's genesis entry. The directory is created
 only after that entry is durable in the folder, so the directories of the local
