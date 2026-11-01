@@ -301,6 +301,7 @@ impl Walk {
             self.listed.remove(&path);
         }
         self.queue.remove(&dir);
+        self.unlistable.remove(&dir);
         let unlisted: Vec<RelPath> = dirs
             .into_iter()
             .filter(|sub| !self.listed.contains_key(sub))
@@ -1587,6 +1588,26 @@ mod tests {
             (Some(remembered), Vec::new()),
             "same length and time"
         );
+    }
+
+    #[test]
+    fn a_directory_listed_after_a_failed_listing_is_not_reported_unlisted() {
+        let layout = Layout::new(".t").unwrap();
+        let directory = Meta {
+            kind: Kind::Directory,
+            len: 0,
+            modified: None,
+        };
+        let mut walk = Walk::default();
+        let root = || vec![("d".to_string(), directory)];
+        walk.listed(&layout, RelPath::ROOT, root());
+        walk.unlistable(path("d"));
+        walk.forget(&[path("d/a")]);
+        walk.listed(&layout, RelPath::ROOT, root());
+        assert_eq!(walk.next(), Some(path("d")), "listed again with its parent");
+        walk.listed(&layout, path("d"), Vec::new());
+        assert_eq!(walk.next(), None);
+        assert_eq!(walk.unlisted(), Vec::<RelPath>::new());
     }
 
     #[test]
