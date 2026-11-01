@@ -354,9 +354,11 @@ fn a_forked_history_is_never_written_again() {
     assert_eq!(view.writers[&id].forks.len(), 1);
 
     let dir = layout().writer(id);
-    let before: BTreeMap<_, _> = original.machine.folder.files(Root::Folder);
-    for (seed, instance) in [(3, original), (4, clone)] {
-        let mut reopened = Instance::open(instance.close(), seed);
+    let folder = original.machine.folder.clone();
+    let machines = [(3, original.close()), (4, clone.close())];
+    let before = machine_folder_after(&folder.files(Root::Folder), &dir);
+    for (seed, machine) in machines {
+        let mut reopened = Instance::open(machine, seed);
         assert_eq!(
             reopened.start,
             Start::Rekeyed {
@@ -369,14 +371,8 @@ fn a_forked_history_is_never_written_again() {
         let again = Instance::open(reopened.close(), seed + 10);
         assert_ne!(again.start, Start::Resumed(id));
     }
-    let folder = machine_folder_after(&before, &dir);
-    assert_eq!(
-        folder,
-        before
-            .into_iter()
-            .filter(|(p, _)| p.starts_with(&dir))
-            .collect()
-    );
+    let after = machine_folder_after(&folder.files(Root::Folder), &dir);
+    assert_eq!(after, before, "the forked writer's directory changed");
 }
 
 fn machine_folder_after(
