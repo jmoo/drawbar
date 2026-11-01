@@ -189,6 +189,8 @@ pub struct ScanReport {
     pub changed: Vec<EntityId>,
     /// Entities whose file is gone and which several files could be: bound to none.
     pub ambiguous: Vec<Ambiguous>,
+    /// Entities whose file facts hold a file another entity's hold too: bound to none.
+    pub joined: Vec<Joined>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -202,6 +204,15 @@ pub struct Moved {
 pub struct Ambiguous {
     pub entity: EntityId,
     pub candidates: Vec<RelPath>,
+}
+
+/// An entity whose file facts hold the file bound to `into`, the lowest of the
+/// entities whose facts hold it, as when two writers each adopted the file before
+/// seeing the other's.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct Joined {
+    pub entity: EntityId,
+    pub into: EntityId,
 }
 
 /// Where a file no entity is bound to was before a commit and is after it: `from`

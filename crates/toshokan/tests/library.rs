@@ -22,8 +22,8 @@ use toshokan::log::{Entry, EntryKind, FileFact, Genesis, Logged, Op, Run, Settle
 use toshokan::plan::FactChange;
 use toshokan::reader::MAX_FILE;
 use toshokan::report::{
-    By, Change, Committed, Compacted, Emptied, HistoryItem, Item, ItemKind, Opened, PathChange,
-    Presence, Refreshed, Rekey, Start, TrashItem, What, WriterInfo,
+    By, Change, Committed, Compacted, Emptied, HistoryItem, Item, ItemKind, Joined, Opened,
+    PathChange, Presence, Refreshed, Rekey, Start, TrashItem, What, WriterInfo,
 };
 use toshokan::simulator::Machine;
 use toshokan::snapshot::Snapshot;
@@ -596,6 +596,7 @@ through_both!(
     the_first_undo_after_a_crash_undoes_the_settled_intent,
     undoing_a_save_restores_the_displaced_bytes,
     a_copy_has_no_entity_until_one_is_said,
+    a_file_two_writers_adopted_unseen_is_the_lower_entitys,
     a_move_keeps_its_tags_and_is_pinned_by_the_next_commit,
     undoing_a_delete_binds_the_file_moved_while_deleted,
     undoing_a_delete_puts_a_file_moved_outside_back_where_it_was,
@@ -2609,6 +2610,68 @@ fn undoing_a_save_restores_the_displaced_bytes<F: Facade>() {
         "another writer saved since"
     );
     assert_eq!(read(&folder, "song.npno").unwrap(), b"three");
+}
+
+const NOTES: &str = "Set/notes.txt";
+
+/// Two writers, `a` and `b`, that each made an entity of [`NOTES`] before seeing the
+/// other's: `a` tagged it `Live` and `b` `Studio`, each with its origin. Returns them
+/// with the entities they made.
+fn adopted_by_both<F: Facade>(
+    folder: &MemDisk,
+    clock: &TestClock,
+    origins: [Option<&str>; 2],
+) -> (F, F, [EntityId; 2]) {
+    put(folder, NOTES, b"notes");
+    let open = |label, seed| {
+        let (mut writer, _) =
+            F::open(Probe::new(&machine(folder)), env(label, seed, clock)).unwrap();
+        writer.rescan().unwrap();
+        writer
+    };
+    let (mut a, mut b) = (open("a", 1), open("b", 2));
+    fn adopt<F: Facade>(writer: &mut F, name: &str, origin: Option<&str>) -> EntityId {
+        let committed = writer.commit("Tag", |i| {
+            let (i, _) = i.create(|e| {
+                e.adopt(&path(NOTES), Expect::Holds(identity(b"notes")))
+                    .add(TAGS, tag(name));
+                if let Some(origin) = origin {
+                    e.set(ORIGIN, origin.to_owned());
+                }
+            });
+            i
+        });
+        committed.unwrap().created[0]
+    }
+    let made = [
+        adopt(&mut a, "Live", origins[0]),
+        adopt(&mut b, "Studio", origins[1]),
+    ];
+    (a, b, made)
+}
+
+fn a_file_two_writers_adopted_unseen_is_the_lower_entitys<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, mut b, made) = adopted_by_both::<F>(&folder, &clock, [None, None]);
+    let (low, high) = (made[0].min(made[1]), made[0].max(made[1]));
+    let joined = Joined {
+        entity: high,
+        into: low,
+    };
+    for writer in [&mut a, &mut b] {
+        let scan = writer.refresh().unwrap().scan;
+        assert_eq!(
+            (scan.joined, scan.departed, scan.ambiguous),
+            (vec![joined], vec![], vec![])
+        );
+        let view = writer.view();
+        assert_eq!(view.at(&path(NOTES)).map(|e| e.id()), Some(low));
+        assert_eq!(view.joined(), [joined]);
+        let high = view.entity(high).unwrap();
+        assert_eq!(high.file(), None, "neither bound nor missing");
+        assert_eq!(high.members(TAGS).values.len(), 1, "its tag is kept");
+    }
 }
 
 fn a_copy_has_no_entity_until_one_is_said<F: Facade>() {

@@ -7,7 +7,7 @@ use crate::binding::{Bindings, Scanned};
 use crate::ids::EntityId;
 use crate::merge::{side_by_side, Folded, Paired};
 use crate::path::RelPath;
-use crate::report::{Fork, Gap, Item, WriterInfo};
+use crate::report::{Fork, Gap, Item, Joined, WriterInfo};
 use crate::schema::{Field, Key, KeyKind, Keyed, Members, Raw, Register, Set, Value, Written};
 
 /// The library as one reader sees it. Cheap to clone; never changes; can be sent
@@ -252,6 +252,13 @@ impl View {
         self.parts().bindings.unbound.iter()
     }
 
+    /// The entities whose file facts hold the file bound to another, by id. Each
+    /// is bound to no file, and is not missing, until an intent joins it into
+    /// that one.
+    pub fn joined(&self) -> &[Joined] {
+        &self.parts().bindings.report.joined
+    }
+
     /// Whether the library file at `path` is one no entity is bound to.
     pub fn is_unbound(&self, path: &RelPath) -> bool {
         self.parts().bindings.unbound.contains(path)
@@ -277,6 +284,13 @@ impl View {
                 &was.bindings.bound,
             )));
             files.extend(bound.symmetric_difference(unbound).cloned());
+            let joined = |parts: &'_ Parts| -> BTreeSet<Joined> {
+                parts.bindings.report.joined.iter().copied().collect()
+            };
+            let (joined, was_joined) = (joined(now), joined(was));
+            for Joined { entity, into } in joined.symmetric_difference(&was_joined) {
+                entities.extend([*entity, *into]);
+            }
         }
         match (&now.listing, &was.listing) {
             (Some(listing), Some(listed)) if Arc::ptr_eq(listing, listed) => {}
@@ -367,10 +381,17 @@ impl EntityView<'_> {
     }
 
     /// Where the view binds the entity's file; [`FileState::Missing`] at the
-    /// logged path when no binding was derived for it.
+    /// logged path when no binding was derived for it, and `None` where it has no
+    /// file fact or is one of [`View::joined`].
     pub fn file(&self) -> Option<FileRef> {
-        if let Some(bound) = self.view.parts().bindings.bound.get(&self.id) {
+        let bindings = &self.view.parts().bindings;
+        if let Some(bound) = bindings.bound.get(&self.id) {
             return Some(bound.clone());
+        }
+        let joined = &bindings.report.joined;
+        let joined = joined.binary_search_by_key(&self.id, |joined| joined.entity);
+        if joined.is_ok() {
+            return None;
         }
         Some(FileRef {
             path: self.view.parts().folded.logged_path(self.id)?.clone(),

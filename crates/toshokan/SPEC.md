@@ -711,8 +711,14 @@ their identities:
 2. An entity whose file fact names a path a file is at is bound to it: in sync
    when the file holds the fact's identity (or, without one, its length and
    time), else changed outside. Paths compare under the volume's rules for case
-   and Unicode normalization. When several entities name one file, the one whose
-   identity it holds gets it.
+   and Unicode normalization. When several entities name one file, the lowest
+   by id of those whose facts it holds gets it, in sync, and the others whose
+   facts it holds are **joined** into that one, so readers of the same facts pick
+   the same entity: two writers can each adopt one file before either sees the
+   other's entity. A joined entity is bound to no file and is not missing; the
+   scan reports it with the entity it joined, and a view shows it without a file.
+   The others naming the file, or all when it holds no one's facts, go on to
+   step 3.
 3. An entity whose path holds nothing is bound to the one unbound file holding
    its identity: a move. With no such file it is missing; with several, or when
    one file could be several entities', nothing is bound and the candidates are

@@ -5,7 +5,9 @@
 //! gone, a file holding its identity is a move; while the path still holds it, such
 //! a file is only a file no entity is bound to. When several files could be the
 //! one, or one file could be several entities', nothing is bound and it is
-//! reported. Scans never write; every commit pins the moves this writer found.
+//! reported. A file the facts of several entities hold at its path is the lowest
+//! one's, and the others are joined into it. Scans never write; every commit pins
+//! the moves this writer found.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
@@ -18,7 +20,7 @@ use crate::io::{Kind, Meta, Root, Task};
 use crate::layout::Layout;
 use crate::log::{FileFact, Op, Ref};
 use crate::path::RelPath;
-use crate::report::{Ambiguous, Moved, ScanReport};
+use crate::report::{Ambiguous, Joined, Moved, ScanReport};
 use crate::view::{FileRef, FileState};
 
 /// A surviving write of an entity's file register that says where its file is.
@@ -50,7 +52,8 @@ pub struct Scan {
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Bindings {
-    /// Every entity with a file fact, with where its file is.
+    /// Every entity with a file fact, with where its file is, but those
+    /// [`ScanReport::joined`] names.
     pub bound: BTreeMap<EntityId, FileRef>,
     /// Library files no entity is bound to. Shared between the bindings a change
     /// makes of one another, so a change copies only what it touches.
@@ -746,6 +749,7 @@ impl Progress {
         report.departed.sort();
         report.moved.sort_by_key(|moved| moved.entity);
         report.ambiguous.sort_by_key(|ambiguous| ambiguous.entity);
+        report.joined.sort();
         (bindings, pins)
     }
 
@@ -798,9 +802,10 @@ impl Progress {
         }
     }
 
-    /// Several entities naming one file: the one whose identity it holds, if only
-    /// one does, has it. The others, or all when that does not decide, are bound
-    /// by identity like entities whose path is gone.
+    /// Entities naming one file: the lowest whose fact it holds has it, and the
+    /// others whose facts it holds are joined into that one. The rest, or all when
+    /// several name it and it holds none's, are bound by identity like entities
+    /// whose path is gone.
     fn claim(
         &mut self,
         facts: &Facts,
@@ -809,22 +814,24 @@ impl Progress {
         claimants: Vec<(EntityId, usize)>,
     ) {
         let file = &scan.files[&path];
-        let held = |(entity, index): &(EntityId, usize)| holds(&facts[entity][*index].value, file);
-        let holders: Vec<EntityId> = claimants
-            .iter()
-            .filter(|claimant| held(claimant))
-            .map(|(entity, _)| *entity)
-            .collect();
-        let (entity, state) = match (claimants.as_slice(), holders.as_slice()) {
-            ([only], _) if held(only) => (only.0, FileState::InSync),
-            ([only], _) => (only.0, FileState::ChangedOutside),
-            (_, [holder]) => (*holder, FileState::InSync),
-            _ => {
-                self.departed.extend(claimants);
+        let (holders, others): (Vec<_>, Vec<_>) = claimants
+            .into_iter()
+            .partition(|(entity, index)| holds(&facts[entity][*index].value, file));
+        let (entity, state) = match (holders.iter().min(), others.as_slice()) {
+            (Some(&(lowest, _)), _) => (lowest, FileState::InSync),
+            (None, [(only, _)]) => (*only, FileState::ChangedOutside),
+            (None, _) => {
+                self.departed.extend(others);
                 return;
             }
         };
-        let others = claimants.into_iter().filter(|(other, _)| *other != entity);
+        let joined = holders.into_iter().filter(|(holder, _)| *holder != entity);
+        let joined = joined.map(|(holder, _)| Joined {
+            entity: holder,
+            into: entity,
+        });
+        self.bindings.report.joined.extend(joined);
+        let others = others.into_iter().filter(|(other, _)| *other != entity);
         self.departed.extend(others);
         self.taken.insert(path.clone());
         self.bound.insert(entity, FileRef { path, state });
@@ -1332,8 +1339,19 @@ mod tests {
                     }
                 }
             }
+            for Joined { entity, into } in &bindings.report.joined {
+                let file = &bindings.bound[into];
+                let fact = &facts[entity][0].value;
+                assert!(into < entity, "{shown}: {entity} joined a higher id");
+                assert_eq!(
+                    (&fact.path, file.state),
+                    (&file.path, FileState::InSync),
+                    "{shown}: {entity} joined {into}"
+                );
+                assert!(holds(fact, &scan.files[&file.path]), "{shown}: {entity}");
+            }
             assert_eq!(
-                bindings.bound.len(),
+                bindings.bound.len() + bindings.report.joined.len(),
                 facts.len(),
                 "{shown}: an entity is unaccounted for"
             );
@@ -1350,15 +1368,18 @@ mod tests {
             let by_path = |b: &Bindings,
                            rename: &dyn Fn(&EntityId) -> EntityId|
              -> BTreeMap<EntityId, FileRef> {
+                let joined = b.report.joined.iter();
+                let joined = joined.map(|joined| (&joined.entity, &b.bound[&joined.into]));
                 b.bound
                     .iter()
+                    .chain(joined)
                     .map(|(id, f)| (rename(id), f.clone()))
                     .collect()
             };
             assert_eq!(
                 by_path(&bind(&swapped, &scan, &ExactNames), &swap),
                 by_path(&bindings, &|id| *id),
-                "{shown}: binding depends on entity ids"
+                "{shown}: binding depends on entity ids but for which of those a file joins"
             );
         }
     }
@@ -1446,7 +1467,7 @@ mod tests {
     }
 
     #[test]
-    fn an_exact_name_wins_over_a_folded_one_and_two_claims_bind_neither() {
+    fn an_exact_name_wins_over_a_folded_one_and_two_spellings_holding_it_join() {
         let e = EntityId::from_u128(1);
         let facts = one("A");
         let scan = scanned(&[("A", 0), ("a", 0)], &facts);
@@ -1461,14 +1482,53 @@ mod tests {
             vec![written(fact("A", 0), 2)].into(),
         );
         let bindings = bind(&both, &scanned(&[("a", 0)], &both), &Folding);
-        assert!(
-            bindings
-                .bound
-                .values()
-                .all(|f| f.state == FileState::Missing),
-            "{bindings:?}"
-        );
-        assert_eq!(bindings.report.ambiguous.len(), 2);
+        assert_eq!(bindings.bound[&e].path, path("a"), "{bindings:?}");
+        let joined = Joined {
+            entity: EntityId::from_u128(2),
+            into: e,
+        };
+        assert_eq!(bindings.report.joined, [joined]);
+        assert_eq!(bindings.report.ambiguous, []);
+    }
+
+    #[test]
+    fn entities_whose_facts_hold_one_file_bind_it_to_the_lowest_whatever_holds_which() {
+        let [low, high, other] = [1, 2, 3].map(EntityId::from_u128);
+        let mut by_stat = fact("a", 0);
+        by_stat.modified = Some(1);
+        for (first, second) in [(fact("a", 0), by_stat.clone()), (by_stat, fact("a", 0))] {
+            let facts = Facts::from([
+                (low, vec![written(first.clone(), 1)].into()),
+                (high, vec![written(second.clone(), 2)].into()),
+                (other, vec![written(fact("a", 1), 3)].into()),
+            ]);
+            let mut scan = scanned(&[("a", 0)], &facts);
+            let shown = format!("{first:?} {second:?}");
+            let bindings = bind(&facts, &scan, &ExactNames);
+            let in_sync = FileRef {
+                path: path("a"),
+                state: FileState::InSync,
+            };
+            assert_eq!(bindings.bound.get(&low), Some(&in_sync), "{shown}");
+            assert_eq!(bindings.bound.get(&high), None, "{shown}");
+            let joined = Joined {
+                entity: high,
+                into: low,
+            };
+            assert_eq!(bindings.report.joined, [joined], "{shown}");
+            assert_eq!(bindings.report.departed, [other], "{shown}");
+            assert_eq!(bindings.report.ambiguous, [], "{shown}");
+
+            scan.files.get_mut(&path("a")).unwrap().identity = None;
+            let by_stat = bind(&facts, &scan, &ExactNames);
+            let (holder, not) = match first.modified {
+                Some(1) => (low, high),
+                _ => (high, low),
+            };
+            assert_eq!(by_stat.bound.get(&holder), Some(&in_sync), "{shown}");
+            assert_eq!(by_stat.report.departed, [not, other], "{shown}");
+            assert_eq!(by_stat.report.joined, [], "{shown}");
+        }
     }
 
     #[test]
