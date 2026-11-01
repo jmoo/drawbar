@@ -240,7 +240,9 @@ builds the production bundle and guide, and runs the declared browser suites in
 Chromium and Firefox. The check job rejects anything `nix fmt` would change and
 treats Clippy and rustdoc warnings as failures.
 The required `build` check collects the native, web and corpus results; release
-and deployment wait for it and `check`. Cross builds are local checks.
+and deployment wait for it and `check`. Cross builds are local checks. An optional
+`safari` workflow runs the browser suites in Safari when toshokan or drawbar's
+library changes; `nix flake check` holds its Rust and wasm-bindgen pins.
 
 The `autofix` PR label runs `nix fmt` on the branch and pushes a `style: nix fmt` commit when
 it changes anything; it reruns on pushes while the label is on. The public suite

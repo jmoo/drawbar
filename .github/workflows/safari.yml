@@ -1,0 +1,86 @@
+# The browser suites in Safari on a hosted macOS runner, which Nix cannot drive. The
+# web job in ci.yml runs them in Chromium and Firefox on every push. Not part of the
+# required `build` check.
+#
+# Outside Nix: rustup installs the Rust that nixpkgs pins, and the runner is the
+# wasm-bindgen-cli that matches Cargo.lock; `nix flake check` holds both pins. It runs
+# only when toshokan, drawbar's library, the lock file or this workflow changes.
+name: safari
+
+on:
+  pull_request:
+    paths:
+      - crates/toshokan/**
+      - crates/drawbar/src/store/**
+      - crates/drawbar/tests/web.rs
+      - crates/Cargo.lock
+      - .github/workflows/safari.yml
+  push:
+    branches: [master]
+    paths:
+      - crates/toshokan/**
+      - crates/drawbar/src/store/**
+      - crates/drawbar/tests/web.rs
+      - crates/Cargo.lock
+      - .github/workflows/safari.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: safari-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_VERSION: 1.97.1
+  WASM_BINDGEN_TEST_TIMEOUT: "300"
+
+jobs:
+  safari:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+        working-directory: crates
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install "$RUST_VERSION" --profile minimal --target wasm32-unknown-unknown --no-self-update
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.121
+      # ⚠️ On hosted runners safaridriver sometimes drops a session asked for just
+      # after the last suite's, with "Peer disconnected", before the suite starts. The
+      # suite is asked for again.
+      - run: |
+          sudo safaridriver --enable
+          cat >"$RUNNER_TEMP/runner" <<'EOF'
+          for _ in 1 2 3; do
+            wasm-bindgen-test-runner "$@" 2>&1 | tee "$RUNNER_TEMP/suite.log"
+            status=${PIPESTATUS[0]}
+            grep -q "Error: io: Peer disconnected" "$RUNNER_TEMP/suite.log" || exit "$status"
+            echo "safaridriver dropped the session before the suite started; asking again" >&2
+            sleep 5
+          done
+          exit "$status"
+          EOF
+          {
+            echo "SAFARIDRIVER=/usr/bin/safaridriver"
+            echo "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=bash $RUNNER_TEMP/runner"
+          } >>"$GITHUB_ENV"
+      - name: toshokan
+        run: >-
+          cargo +"$RUST_VERSION" test --locked --no-fail-fast --profile release-tests
+          --target wasm32-unknown-unknown -p toshokan --features web
+          --test backends --test effects --test hints --test web
+      # Safari cannot pick a folder, and WebKit cannot send a directory handle to a
+      # worker, so drawbar's test of a picked folder cannot start there.
+      - name: drawbar
+        if: ${{ !cancelled() }}
+        run: >-
+          cargo +"$RUST_VERSION" test --locked --no-fail-fast --profile release-tests
+          --target wasm32-unknown-unknown -p drawbar --test web
+          -- --skip the_whole_workflow_runs_in_a_picked_folder

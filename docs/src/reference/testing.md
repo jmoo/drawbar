@@ -107,9 +107,10 @@ nix build .#nord.browser-tests
 ```
 
 Each crate declares its browser suites as `browserTests` in its
-`[package.metadata.nix]`, and CI's web job runs them. Edge and Safari run them by
-hand, with `MSEDGEDRIVER` or `SAFARIDRIVER` in place of `CHROMEDRIVER` below.
-Safari cannot pick a folder, so it skips drawbar's picked-folder test.
+`[package.metadata.nix]`, and CI's web job runs them. When toshokan or drawbar's
+library changes, an optional `safari` job runs them in Safari on macOS too; Safari
+cannot pick a folder, so it skips drawbar's picked-folder test. Edge runs them by
+hand, with `MSEDGEDRIVER` in place of `CHROMEDRIVER` below.
 
 Elsewhere, from `crates/` in `nix develop`, point the runner at a browser's driver:
 
