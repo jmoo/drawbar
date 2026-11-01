@@ -926,7 +926,7 @@ fn stage<'a>(layout: &Layout, writer: WriterId, plan: Rc<EffectPlan>) -> Fallibl
                         let (path, content) = (path.clone(), *content);
                         move |()| fill(path, content)
                     }),
-                    Staged::Copy(source) => flow::copy(Root::Folder, source, &path),
+                    Staged::Copy(source) => flow::copy(Root::Folder, source, &path).map_ok(|_| ()),
                 };
                 filled.and_then(move |()| flow::sync(Root::Folder, &path))
             })

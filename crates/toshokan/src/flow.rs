@@ -567,20 +567,22 @@ pub(crate) fn read_all<'a>(root: Root, path: &RelPath, max: u64) -> Fallible<'a,
     })
 }
 
-/// Copies the file `from` to a new file `to`, a chunk at a time. Something at
-/// `to` refuses it. A source that shrinks while it is copied fails the copy, and so
-/// does a copy whose length is not the source's once written, as where a backend
-/// lands writes later and then fails to. A copy that fails once `to` is made
-/// removes it.
-pub(crate) fn copy<'a>(root: Root, from: &RelPath, to: &RelPath) -> Fallible<'a, ()> {
+/// Copies the file `from` to a new file `to`, a chunk at a time, and gives the
+/// source as it was copied. Something at `to` refuses it. A source that changes
+/// while it is copied fails the copy, and so does a copy whose length is not the
+/// source's once written, as where a backend lands writes later and then fails
+/// to. A copy that fails once `to` is made removes it.
+pub(crate) fn copy<'a>(root: Root, from: &RelPath, to: &RelPath) -> Fallible<'a, Meta> {
     let (from, to) = (from.clone(), to.clone());
     stat(root, &from).and_then(move |meta| {
-        let len = match meta {
-            Some(Meta {
-                kind: Kind::File,
-                len,
-                ..
-            }) => len,
+        let (source, len) = match meta {
+            Some(
+                source @ Meta {
+                    kind: Kind::File,
+                    len,
+                    ..
+                },
+            ) => (source, len),
             found => {
                 let error = match found {
                     None => IoError::NotFound,
@@ -600,6 +602,7 @@ pub(crate) fn copy<'a>(root: Root, from: &RelPath, to: &RelPath) -> Fallible<'a,
         });
         let made = to.clone();
         let written = to.clone();
+        let copied_from = from.clone();
         created.and_then(move |()| {
             each(chunks(len).into_iter(), move |range| {
                 let to = to.clone();
@@ -634,18 +637,32 @@ pub(crate) fn copy<'a>(root: Root, from: &RelPath, to: &RelPath) -> Fallible<'a,
                     })),
                 })
             })
+            .and_then(move |()| unchanged(root, copied_from, source))
             .then(move |copied| match copied {
-                Ok(()) => ok(()),
+                Ok(()) => ok(source),
                 Err(error) => remove_if_present(root, made).then(move |_| Flow::Done(Err(error))),
             })
         })
     })
 }
 
+/// Fails unless the file at `path` is still as `was` says.
+fn unchanged<'a>(root: Root, path: RelPath, was: Meta) -> Fallible<'a, ()> {
+    stat(root, &path).and_then(move |now| match now == Some(was) {
+        true => ok(()),
+        false => Flow::Done(Err(Error::Io {
+            root,
+            path,
+            error: IoError::Other("the file changed while it was copied".into()),
+        })),
+    })
+}
+
 /// Moves the file `from` to `to`, where nothing is, without a rename: copies it a
 /// chunk at a time, syncs the copy and then its directory, and only then removes
 /// `from` and syncs its directory. Until then `to` may hold the start of `from`'s
-/// bytes.
+/// bytes. A source that changed since the copy began stays, and its copy is
+/// removed.
 pub(crate) fn copy_move<'a>(root: Root, from: &RelPath, to: &RelPath) -> Fallible<'a, ()> {
     let (from, to) = (from.clone(), to.clone());
     let dir = to.parent().unwrap_or_default();
@@ -654,8 +671,21 @@ pub(crate) fn copy_move<'a>(root: Root, from: &RelPath, to: &RelPath) -> Fallibl
             let (from, to) = (from.clone(), to.clone());
             move |()| copy(root, &from, &to)
         })
-        .and_then(move |()| sync(root, &to))
-        .and_then(move |()| sync(root, &dir))
+        .and_then({
+            let to = to.clone();
+            move |source| {
+                sync(root, &to).and_then(move |()| sync(root, &dir).map_ok(move |()| source))
+            }
+        })
+        .and_then({
+            let from = from.clone();
+            move |source| {
+                unchanged(root, from, source).then(move |checked| match checked {
+                    Ok(()) => ok(()),
+                    Err(error) => remove(root, &to).then(move |_| Flow::Done(Err(error))),
+                })
+            }
+        })
         .and_then(move |()| remove(root, &from))
 }
 
@@ -1134,6 +1164,73 @@ mod tests {
         )
         .unwrap();
         assert_eq!(disk.files(Root::Folder)[&path("b")], vec![7; 10]);
+    }
+
+    #[test]
+    fn a_move_by_copy_keeps_a_source_that_changes_while_it_is_copied() {
+        let long: Vec<u8> = (0..2 * CHUNK + 5).map(|i| i as u8).collect();
+        let first_read = Io::Read {
+            root: Root::Folder,
+            path: path("d/a"),
+            range: Range {
+                offset: 0,
+                len: CHUNK,
+            },
+        };
+        let synced = Io::Sync {
+            root: Root::Folder,
+            path: path("e"),
+        };
+        let append = Io::Append {
+            root: Root::Folder,
+            path: path("d/a"),
+            bytes: b"more".to_vec(),
+        };
+        let rewrite = Io::Write {
+            root: Root::Folder,
+            path: path("d/a"),
+            offset: 0,
+            bytes: vec![0xff; 4],
+        };
+        let cases = [
+            ("appended as it is read", first_read.clone(), append.clone()),
+            ("rewritten in place as it is read", first_read, rewrite),
+            ("appended while the copy is synced", synced, append),
+        ];
+        for (case, when, change) in cases {
+            let disk = MemDisk::new();
+            run(&disk, ensure_dir(Root::Folder, &path("d"))).unwrap();
+            let create = Io::Create {
+                root: Root::Folder,
+                path: path("d/a"),
+                bytes: long.clone(),
+            };
+            run(&disk, act(create)).unwrap();
+            let mut task = run_in_place(copy_move(Root::Folder, &path("d/a"), &path("e/b")).task());
+            let (mut result, mut meddled) = (None, false);
+            let moved = loop {
+                match task.resume(result.take()) {
+                    Step::Io(io) => {
+                        let now = !meddled && io == when;
+                        result = Some(disk.perform(io));
+                        if now {
+                            disk.perform(change.clone()).unwrap();
+                            meddled = true;
+                        }
+                    }
+                    Step::Done(moved) => break moved,
+                }
+            };
+            assert!(meddled, "{case}: the source was never changed");
+            assert!(moved.is_err(), "{case}: the move succeeded");
+            let files = disk.files(Root::Folder);
+            assert_eq!(
+                files.keys().collect::<Vec<_>>(),
+                [&path("d/a")],
+                "{case}: the source stays and its copy is removed"
+            );
+            assert_ne!(files[&path("d/a")], long, "{case}");
+        }
     }
 
     #[test]

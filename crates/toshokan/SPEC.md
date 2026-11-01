@@ -860,8 +860,11 @@ A writer carries out an intent's steps in this order:
    is the step's index, and syncs `pending/`. It then creates the destination,
    refused when something is there, copies the source into it a chunk at a time,
    checks that it holds the source's length, syncs it and its directory, and
-   only then removes the source and syncs the source's directory. A copy that
-   fails removes what it wrote. Each step runs alone.
+   only then removes the source and syncs the source's directory. Once the copy
+   is written, and again just before the source is removed, the source must have
+   the length and modification time it had when the copy began; otherwise the
+   source stays, the copy is removed, and the step fails. A copy that fails
+   removes what it wrote. Each step runs alone.
 5. Append the intent's entry.
 6. Remove the pending record, after its markers, once the entry is durable. Its
    entry is logged, so a record a crash or a failed removal leaves is spent: no

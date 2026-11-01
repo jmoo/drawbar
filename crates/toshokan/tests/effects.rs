@@ -494,6 +494,86 @@ fn where_moves_copy_a_long_file_moves_a_chunk_at_a_time() {
     assert_eq!(sorted(d).user, user(&[("b", &long)]));
 }
 
+/// A backend that appends to the file at `changed` once, as soon as it is read.
+struct Appending {
+    disk: MemDisk,
+    changed: RelPath,
+    appended: bool,
+}
+
+impl Backend for Appending {
+    fn capabilities(&self, root: Root) -> Capabilities {
+        self.disk.capabilities(root)
+    }
+
+    fn perform(&mut self, io: Io) -> IoResult {
+        let read = matches!(&io, Io::Read { path, .. } if *path == self.changed);
+        let result = self.disk.perform(io);
+        if read && !self.appended {
+            self.appended = true;
+            let append = Io::Append {
+                root: Root::Folder,
+                path: self.changed.clone(),
+                bytes: b"appended".to_vec(),
+            };
+            self.disk.perform(append).unwrap();
+        }
+        result
+    }
+}
+
+#[test]
+fn where_moves_copy_a_source_appended_to_while_it_is_copied_stays_until_settling_moves_it_whole() {
+    let disk = copying();
+    let long: Vec<u8> = (0..2 * CHUNK + 3).map(|i| (i % 251) as u8).collect();
+    let d = &mut common::BlockingMem(disk.clone());
+    put(d, &[("a", &long)]);
+    let rename = FileChange::Rename {
+        entity: E,
+        to: path("b"),
+        expect: Expect::Holds(identity(&long)),
+    };
+    let caps = common::COPYING;
+    let plan = Rc::new(
+        effects::resolve(&[rename], &bound(&[(E, "a")]), &layout(), caps, &mut env(1)).unwrap(),
+    );
+    let record = Rc::new(PendingRecord::new(WRITER, "Rename", entry(HEAD), &plan));
+    let prepare = effects::prepare(&layout(), Rc::clone(&plan), Rc::clone(&record), identify());
+    d.run(prepare).unwrap().unwrap();
+    let mut appending = Appending {
+        disk: disk.clone(),
+        changed: path("a"),
+        appended: false,
+    };
+    let apply = effects::apply(&layout(), plan.record, Rc::clone(&record), 0, identify());
+    let applied = blocking::run(&mut appending, apply);
+    assert!(appending.appended && applied.is_err(), "{applied:?}");
+    let grown = [&long[..], b"appended"].concat();
+    let folder = sorted(d);
+    assert_eq!(
+        (folder.user, folder.trash, folder.pending > 0),
+        (user(&[("a", &grown)]), vec![], true),
+        "the source keeps every byte, its copy is gone and the record stays open"
+    );
+
+    let pending = d
+        .run(toshokan::pending::read_one(&layout(), WRITER, plan.record))
+        .unwrap()
+        .unwrap();
+    let settled = d.run(recovery::settle(
+        &layout(),
+        plan.record,
+        Rc::new(pending),
+        identify(),
+        caps,
+    ));
+    let Ok(recovery::Resumed::Applied(applied)) = settled else {
+        panic!("settling did not carry the move out");
+    };
+    fact("b", &grown, &applied.files);
+    assert_eq!(sorted(d).user, user(&[("b", &grown)]));
+}
+
 #[test]
 fn a_copy_cut_short_where_another_program_then_made_a_file_leaves_that_file() {
     let save = FileChange::Save {
