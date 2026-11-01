@@ -38,12 +38,13 @@ pub struct Writer {
     failed: Option<Failed>,
 }
 
-/// A write whose request failed: the file it went to, and the length that file
-/// has if the write landed whole. One cut short leaves a torn line, no entry.
+/// A write whose request or sync failed: the file it went to, and the length
+/// that file has once the write's first entry landed. One cut short of that
+/// leaves a torn line, no entry.
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct Failed {
     path: RelPath,
-    whole: u64,
+    landed: u64,
 }
 
 /// A file known to hold a writer's head while its length and last bytes are
@@ -260,12 +261,10 @@ impl Writer {
     /// takes the entries into its reader, then calls [`Writer::record`].
     ///
     /// Refuses, appending nothing, an entry too long for a line, and fails with
-    /// [`Error::Rekey`] when the folder no longer holds this writer's head. A
-    /// failed append leaves the segment, so a torn line is never followed.
-    ///
-    /// ⚠️ A failure syncing the entries comes after they reached the folder: the
-    /// writer has moved on to them, and its next append confirms the folder still
-    /// holds them.
+    /// [`Error::Rekey`] when the folder no longer holds this writer's head, or
+    /// holds an entry of an append that failed, which then stands. An append
+    /// whose write or sync failed leaves the segment, so a torn line is never
+    /// followed and no entry follows one that may not be durable.
     pub fn append(
         self,
         kinds: Vec<(Hlc, EntryKind)>,
@@ -386,7 +385,7 @@ impl Writer {
         };
         let (id, held) = (self.id, self.confirm_held());
         flow::stat(Root::Folder, &failed.path).and_then(move |meta| {
-            match meta.is_some_and(|meta| meta.len >= failed.whole) {
+            match meta.is_some_and(|meta| meta.len >= failed.landed) {
                 true => Flow::Done(Err(Error::Rekey {
                     writer: id,
                     why: Rekey::Landed,
@@ -481,28 +480,32 @@ impl Writer {
             }
         };
         let start = open.map_or(0, |open| open.len);
-        flow::act(request).then(move |landed| {
-            if let Err(error) = landed {
-                self.leave();
-                let whole = start + len;
-                self.failed = Some(Failed { path, whole });
-                return Flow::Done((self, Err(error)));
-            }
-            self.failed = None;
-            self.open = Some(OpenSegment {
-                name: segment,
-                len: start + len,
-            });
-            self.head = entries.last().expect("at least one entry").own();
-            self.held_by(path, start + len, line::ending(self.head.hash));
-            sync_all(Root::Folder, synced).then(move |result| match result {
-                Err(error) => {
+        let first = entries
+            .first()
+            .expect("at least one entry")
+            .to_bytes()
+            .len() as u64;
+        let failed = Failed {
+            path: path.clone(),
+            landed: start + first,
+        };
+        flow::act(request)
+            .and_then(move |()| sync_all(Root::Folder, synced))
+            .then(move |written| {
+                if let Err(error) = written {
                     self.leave();
-                    Flow::Done((self, Err(error)))
+                    self.failed = Some(failed);
+                    return Flow::Done((self, Err(error)));
                 }
-                Ok(()) => Flow::Done((self, Ok(entries))),
+                self.failed = None;
+                self.open = Some(OpenSegment {
+                    name: segment,
+                    len: start + len,
+                });
+                self.head = entries.last().expect("at least one entry").own();
+                self.held_by(path, start + len, line::ending(self.head.hash));
+                Flow::Done((self, Ok(entries)))
             })
-        })
     }
 }
 

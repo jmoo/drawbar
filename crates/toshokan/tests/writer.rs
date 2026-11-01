@@ -12,11 +12,15 @@ use toshokan::disk::Tail;
 use toshokan::io::Capabilities;
 use toshokan::layout::{Layout, SEGMENT_EXTENSION};
 use toshokan::line::{ending, seal_marker, Line, ENDING};
+use toshokan::log::{Entry, EntryKind, Logged};
 use toshokan::reader::Reader;
 use toshokan::report::{Rekey, Start};
 use toshokan::simulator::Machine;
 use toshokan::writer::{Claimed, Writer, SEGMENT_BOUND};
-use toshokan::{EntryHash, Error, Hlc, Io, MemDisk, Refusal, Root, SegmentName, WriterId};
+use toshokan::{
+    EntryHash, Error, Hlc, Io, IoError, IoResult, MemDisk, Refusal, Reply, Root, SegmentName,
+    WriterId,
+};
 
 fn segments(machine: &Machine, writer: WriterId) -> usize {
     files_under(&machine.folder, &layout().writer(writer))
@@ -805,66 +809,112 @@ fn compacting_after_a_crash_in_the_deletions_finishes_them() {
     assert!(finished > 0, "some crash leaves deletions to finish");
 }
 
-/// A disk whose next sync fails once `fail` is set.
-struct FailingSync {
-    disk: MemDisk,
-    fail: bool,
+/// How a [`Failing`] disk fails the next write of a segment.
+#[derive(Clone, Copy, Debug)]
+enum Failure {
+    /// The bytes land, and the sync after them fails.
+    Sync,
+    /// The first line lands with half of the rest, and the write fails for want
+    /// of space, as a browser's private file system can.
+    Short,
 }
 
-impl toshokan::blocking::Backend for FailingSync {
-    fn capabilities(&self, root: Root) -> toshokan::io::Capabilities {
+struct Failing {
+    disk: MemDisk,
+    next: Option<Failure>,
+}
+
+impl toshokan::blocking::Backend for Failing {
+    fn capabilities(&self, root: Root) -> Capabilities {
         self.disk.capabilities(root)
     }
 
-    fn perform(&mut self, io: toshokan::Io) -> toshokan::IoResult {
-        if self.fail && matches!(io, toshokan::Io::Sync { .. }) {
-            self.fail = false;
-            return Err(toshokan::IoError::Other("sync failed".into()));
-        }
-        self.disk.perform(io)
+    fn perform(&mut self, io: Io) -> IoResult {
+        let short = |bytes: Vec<u8>| {
+            let line = bytes.iter().position(|&b| b == b'\n').expect("a line") + 1;
+            bytes[..line + (bytes.len() - line) / 2].to_vec()
+        };
+        let landed = match (self.next, io) {
+            (Some(Failure::Sync), Io::Sync { .. }) => Ok(Reply::Done),
+            (Some(Failure::Short), Io::Append { root, path, bytes }) => {
+                let bytes = short(bytes);
+                self.disk.perform(Io::Append { root, path, bytes })
+            }
+            (Some(Failure::Short), Io::Create { root, path, bytes }) => {
+                let bytes = short(bytes);
+                self.disk.perform(Io::Create { root, path, bytes })
+            }
+            (_, io) => return self.disk.perform(io),
+        };
+        self.next = None;
+        landed.and(Err(IoError::NoSpace))
     }
 }
 
-#[test]
-fn entries_that_reached_the_folder_before_a_failure_are_followed_not_forked() {
-    let intent = || {
-        toshokan::log::EntryKind::Intent(toshokan::log::Logged {
-            label: "x".into(),
-            ops: Vec::new(),
-            displaced: Vec::new(),
-            forks: Vec::new(),
-            record: None,
-        })
-    };
+fn intent() -> EntryKind {
+    EntryKind::Intent(Logged {
+        label: "x".into(),
+        ops: Vec::new(),
+        displaced: Vec::new(),
+        forks: Vec::new(),
+        record: None,
+    })
+}
+
+/// Fails an append of two entries as `failure` says, then appends again: the
+/// writer stops, and the entries the folder holds stand.
+fn appends_after(failure: Failure) {
     for open in [false, true] {
-        let mut backend = FailingSync {
+        let mut backend = Failing {
             disk: MemDisk::new(),
-            fail: false,
+            next: None,
         };
         let mut writer = create(&mut backend.disk).unwrap();
         if !open {
             writer.leave();
         }
-        backend.fail = true;
+        let first = Entry::encode(writer.head().hash, 1, Hlc::ZERO, intent()).unwrap();
+        let second = Entry::encode(first.hash(), 2, Hlc::ZERO, intent()).unwrap();
+        let landed = match failure {
+            Failure::Sync => second.hash(),
+            Failure::Short => first.hash(),
+        };
+        backend.next = Some(failure);
+        let kinds = vec![(Hlc::ZERO, intent()), (Hlc::ZERO, intent())];
         let (writer, failed) = run(
             &mut backend,
-            writer.append(vec![(Hlc::ZERO, intent())], SegmentName::from_u128(9)),
+            writer.append(kinds, SegmentName::from_u128(9)),
         );
-        assert!(failed.is_err());
-        let (writer, last) = run(
+        assert!(failed.is_err(), "open {open}");
+        let (writer, next) = run(
             &mut backend,
             writer.append(vec![(Hlc::ZERO, intent())], SegmentName::from_u128(10)),
         );
-        let last = last.unwrap();
+        assert!(
+            matches!(
+                next,
+                Err(Error::Rekey {
+                    why: Rekey::Landed,
+                    ..
+                })
+            ),
+            "open {open}: {next:?}"
+        );
         let view = fresh(&backend.disk);
         let log = &view.writers[&writer.id()];
-        assert_eq!(log.heads(), [last[0].hash()], "open {open}");
+        assert_eq!(log.heads(), [landed], "open {open}");
         assert!(log.forks.is_empty(), "open {open}");
-        assert_eq!(
-            log.chain_to(last[0].hash()).map(|chain| chain.len()),
-            Some(3)
-        );
     }
+}
+
+#[test]
+fn a_writer_whose_sync_failed_stops_and_the_entries_it_wrote_stand() {
+    appends_after(Failure::Sync);
+}
+
+#[test]
+fn a_write_cut_short_after_a_whole_line_stops_the_writer_and_the_line_stands() {
+    appends_after(Failure::Short);
 }
 
 fn segment_paths(machine: &Machine, writer: WriterId) -> Vec<toshokan::RelPath> {
