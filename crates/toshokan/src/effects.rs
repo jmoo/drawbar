@@ -625,6 +625,15 @@ impl Resolver<'_> {
                 return Err(invalid(Invalid::Overlapping(from.clone())));
             }
         }
+        match files.contains(from) {
+            true => self.check(from, Expect::File),
+            false => self.check(from, Expect::Directory),
+        }
+        if !rename_dir {
+            for path in files.iter().filter(|path| **path != from) {
+                self.check(path, Expect::File);
+            }
+        }
         let rebased = |path: &RelPath| path.rebase(from, to).expect("the file is under the tree");
         if rename_dir {
             self.step(EffectStep::Rename {
@@ -1005,6 +1014,7 @@ fn refusal<'a>(
 ) -> Fallible<'a, Option<Refusal>> {
     let identify = Rc::clone(identify);
     let checks = plan.checks.clone();
+    let trees: BTreeSet<RelPath> = plan.trees.iter().map(|tree| tree.from.clone()).collect();
     let paths: Vec<(RelPath, bool)> = checks
         .iter()
         .map(|check| (check.path.clone(), check.spelled))
@@ -1027,7 +1037,9 @@ fn refusal<'a>(
     );
     let checked = stated.and_then(move |metas| {
         let identified = |check: &Precondition, meta: &Option<Meta>| match meta {
-            Some(meta) if meta.kind == Kind::File => !matches!(check.expect, Expect::Listed { .. }),
+            Some(meta) if meta.kind == Kind::File => {
+                matches!(check.expect, Expect::Absent | Expect::Holds(_))
+            }
             _ => false,
         };
         let files = checks
@@ -1038,7 +1050,8 @@ fn refusal<'a>(
         flow::identities(Root::Folder, files.collect(), &identify).map_ok(move |identities| {
             let mut identities = identities.into_iter();
             checks.into_iter().zip(metas).find_map(|(check, meta)| {
-                if meta.is_some_and(|meta| meta.kind == Kind::Directory) {
+                let tree = check.expect == Expect::Directory && trees.contains(&check.path);
+                if meta.is_some_and(|meta| meta.kind == Kind::Directory) && !tree {
                     return Some(Refusal::Directory(check.path));
                 }
                 let found = match identified(&check, &meta) {
@@ -1051,6 +1064,8 @@ fn refusal<'a>(
                     (Expect::Listed { len, modified }, Some(meta), _) => {
                         (meta.len, meta.modified) == (len, modified)
                     }
+                    (Expect::File, Some(_), _) => true,
+                    (Expect::Directory, Some(meta), _) => meta.kind == Kind::Directory,
                     _ => false,
                 };
                 (!holds).then(|| {

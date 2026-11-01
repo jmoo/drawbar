@@ -689,6 +689,79 @@ fn without_directory_renames_a_tree_moves_file_by_file_and_removes_its_directori
 }
 
 #[test]
+fn a_tree_move_whose_source_is_gone_is_refused_before_anything_is_written() {
+    type Case<'a> = (
+        &'a str,
+        Capabilities,
+        &'a [&'a str],
+        &'a [(&'a str, &'a [u8])],
+        Option<&'a str>,
+    );
+    let file_by_file = Capabilities {
+        rename_dir: false,
+        ..Capabilities::ALL
+    };
+    let remove = |d: &mut common::BlockingMem, gone: &[&str]| {
+        for at in gone {
+            let io = match *at {
+                "a" | "a/s" => Io::RemoveDir {
+                    root: Root::Folder,
+                    path: path(at),
+                },
+                _ => Io::Remove {
+                    root: Root::Folder,
+                    path: path(at),
+                },
+            };
+            d.ok(io);
+        }
+    };
+    let whole = ["a/s/2", "a/s", "a/1", "a"];
+    let away: &[(&str, &[u8])] = &[("c/1", b"1"), ("c/s/2", b"2")];
+    let cases: [Case; 7] = [
+        ("moved away", Capabilities::ALL, &whole, away, Some("a")),
+        ("moved away", file_by_file, &whole, away, Some("a")),
+        ("moved away", common::COPYING, &whole, away, Some("a")),
+        ("deleted", Capabilities::ALL, &whole, &[], Some("a")),
+        ("deleted", file_by_file, &whole, &[], Some("a")),
+        ("one file deleted", Capabilities::ALL, &["a/s/2"], &[], None),
+        (
+            "one file deleted",
+            file_by_file,
+            &["a/s/2"],
+            &[],
+            Some("a/s/2"),
+        ),
+    ];
+    for (case, caps, gone, moved, refused) in cases {
+        let d = &mut common::BlockingMem(MemDisk::with_capabilities(caps, Capabilities::ALL));
+        put(d, &[("a/1", b"1"), ("a/s/2", b"2")]);
+        let mut bindings = bound(&[(E, "a/1")]);
+        bindings.unbound = [path("a/s/2")].into();
+        remove(d, gone);
+        put(d, moved);
+        let before = sorted(d);
+        let tree = FileChange::MoveTree {
+            from: path("a"),
+            to: path("b"),
+        };
+        let prepared = common::prepare(d, WRITER, &[tree], vec![], &bindings, &mut env(1)).unwrap();
+        match (prepared, refused) {
+            (Err(Refusal::Changed(mismatch)), Some(at)) => {
+                assert_eq!(
+                    (mismatch.path, mismatch.found),
+                    (path(at), None),
+                    "{case}, {caps:?}"
+                );
+                assert_eq!(sorted(d), before, "{case}, {caps:?}: nothing is written");
+            }
+            (Ok(_), None) => {}
+            (prepared, _) => panic!("{case}, {caps:?}: {:?}", prepared.err()),
+        }
+    }
+}
+
+#[test]
 fn an_intent_is_refused_for_overlapping_or_reserved_paths() {
     let bindings = bound(&[(E, "a"), (EntityId::from_u128(2), "x/f")]);
     let save = |text: &str, entity: u128| FileChange::Save {

@@ -629,6 +629,7 @@ through_both!(
     a_tree_moved_with_files_no_entity_is_bound_to_is_moved_back_by_undo,
     a_tree_move_is_undone_by_one_rename_where_directories_rename,
     a_tree_move_is_not_undone_once_an_entitys_file_it_moved_changed,
+    a_tree_move_from_a_folder_moved_since_the_last_scan_is_refused_and_writing_goes_on,
     a_file_no_entity_is_bound_to_goes_back_with_its_tree_as_it_is,
     files_rescanned_together_list_their_directory_once,
     a_view_says_what_changed_since_the_view_before,
@@ -4055,6 +4056,37 @@ fn a_tree_move_is_not_undone_once_an_entitys_file_it_moved_changed<F: Facade>() 
         ["new/a.wav", "new/song.npno"],
         "nothing moved back"
     );
+}
+
+fn a_tree_move_from_a_folder_moved_since_the_last_scan_is_refused_and_writing_goes_on<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    put(&folder, "old/a.wav", b"a");
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    let song = create(&mut a, "old/song.npno", b"song");
+    for (at, bytes) in [("old/a.wav", &b"a"[..]), ("old/song.npno", b"song")] {
+        let gone = Io::Remove {
+            root: Root::Folder,
+            path: path(at),
+        };
+        folder.perform(gone).unwrap();
+        put(&folder, &at.replace("old", "elsewhere"), bytes);
+    }
+    let gone = Io::RemoveDir {
+        root: Root::Folder,
+        path: path("old"),
+    };
+    folder.perform(gone).unwrap();
+    let refused = a.commit("Move", |i| i.move_tree(&path("old"), &path("new")));
+    assert!(
+        matches!(refused, Err(Error::Refused(Refusal::Changed(_)))),
+        "{refused:?}"
+    );
+    assert_eq!(pending_files(&folder), [], "no record is left open");
+    a.commit("Tag", |i| i.add(song, TAGS, tag("x")))
+        .expect("the writer goes on writing");
+    assert_eq!(a.view().writers().len(), 1, "no writer is retired");
 }
 
 fn a_file_no_entity_is_bound_to_goes_back_with_its_tree_as_it_is<F: Facade>() {

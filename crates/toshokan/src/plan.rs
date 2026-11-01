@@ -25,6 +25,11 @@ pub enum Expect {
     /// A file of this length and modification time is there, as a scan listed it:
     /// for a file the app has not read, whose identity it does not know.
     Listed { len: u64, modified: Option<u64> },
+    /// A file is there, whatever it holds.
+    File,
+    /// A directory is there, whatever it holds: held only where a tree move
+    /// starts, and refused as any directory is elsewhere.
+    Directory,
 }
 
 impl Expect {

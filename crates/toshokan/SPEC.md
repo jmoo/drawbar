@@ -783,12 +783,14 @@ with where it was: `from` alone for a file trashed, `file` alone for a file
 made, both for a file renamed or saved over. A commit reports each `path` op it
 logged, an undo's and a redo's included.
 
-A tree move logs a `tree` op, and a `file` op for each entity whose file it
-moves; the files under it no entity is bound to have no facts, and it logs no
-`path` op for them. A commit reports each tree it moved, and each directory
-it was to remove that the folder still holds: moving file by file, it moves
-only the files the last scan listed, and a file put there since keeps its
-directory. Undo moves the tree back
+A tree move is refused unless what it moves is still there: a directory at its
+source, or a file where the last scan listed one, and, moving file by file, a
+file at each path under it the last scan listed. A tree move logs a `tree` op,
+and a `file` op for each entity whose file it moves; the files under it no
+entity is bound to have no facts, and it logs no `path` op for them. A commit
+reports each tree it moved, and each directory it was to remove that the
+folder still holds: moving file by file, it moves only the files the last scan
+listed, and a file put there since keeps its directory. Undo moves the tree back
 as a tree move of its own, with a precondition on the identity of each entity's
 file the move carried, in place of renaming each file back: a single `rename`
 where directories rename, file by file elsewhere, which then removes each
@@ -847,7 +849,8 @@ A writer carries out an intent's steps in this order:
    fails is removed.
 2. Check every precondition: a path holds nothing, a file whose identity is the
    one the app expects, or, for a file the app has not read, a file of the length
-   and modification time a scan listed; a directory satisfies none. An identity
+   and modification time a scan listed, or any file; a directory satisfies none
+   but the one a tree move starts from. An identity
    is read at the check, never taken from a scan. Check that every
    trash item a step restores is there, unless an earlier step of the intent
    puts it there. On failure, remove the staged files and
