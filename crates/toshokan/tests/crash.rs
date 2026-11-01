@@ -476,13 +476,13 @@ fn recover(disk: &MemDisk) -> Result<Vec<Outcome>, Error> {
     for (name, record) in &found.spent {
         d.run(effects::finish(&layout, *name, record))?;
     }
-    d.run(recovery::tidy(&layout, WRITER))?;
     d.run(recovery::remove_empty(
         &layout,
         WRITER,
         &found.ignored,
         capabilities,
     ))?;
+    d.run(recovery::tidy(&layout, WRITER))?;
     Ok(outcomes)
 }
 

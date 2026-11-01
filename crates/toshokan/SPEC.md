@@ -950,12 +950,16 @@ volume that ignores case finds the destination of a change of case by its
 source's name. When
 the last done step's source still holds the same bytes as its destination, the
 source is removed. The remaining steps are carried out, the planned entry is
-appended with what the steps did, and the record is removed. Then every file in
-its `tmp/` that no open record places is removed, and so is every
-`pending/<nonce>.json` opening ignored that is a record created in place and cut
-short before its bytes landed, before any of its steps ran: one that is empty
-or, in a folder that syncs, one of at most 16 MiB that holds a zero byte or is
-the start of a JSON value. Any other record that does not decode stays.
+appended with what the steps did, and the record is removed. A record is
+settled while it reads as the writer found or wrote it, whatever members it has
+that the writer does not know; one the folder does not hold, or holds cut short,
+never landed and is dropped. Then every `pending/<nonce>.json` opening or
+settling found that is a record created in place and cut short before its bytes
+landed, before any of its steps ran, is removed: one that is empty or, in a
+folder that syncs, one of at most 16 MiB that holds a zero byte or is the start
+of a JSON value. Any other record that does not decode stays, and while one
+stays nothing in `tmp/` is removed, since it may place any of it. Otherwise
+every file in `tmp/` that no record in `pending/` places is removed.
 
 A record whose remaining steps move something the folder no longer holds, so
 that no retry could carry them out, is not resumed: the writer stops writing, as

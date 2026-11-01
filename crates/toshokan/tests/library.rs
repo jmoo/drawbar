@@ -671,6 +671,8 @@ through_both!(
     an_own_effect_whose_source_is_gone_is_left_to_settle_with_consent,
     an_own_save_whose_staged_bytes_are_gone_rolls_back_to_the_old_bytes,
     an_own_save_over_a_file_deleted_since_is_finished,
+    staged_files_stay_while_an_own_record_does_not_read,
+    an_own_record_with_a_member_this_build_does_not_know_is_settled,
     a_newer_layout_beside_this_one_opens_the_library_read_only,
     a_settlement_that_stops_partway_leaves_the_record_open_until_settled_again,
     a_folder_whose_renames_may_replace_is_written,
@@ -5968,6 +5970,80 @@ fn an_own_save_whose_staged_bytes_are_gone_rolls_back_to_the_old_bytes<F: Facade
         read(&folder, "song.npno").as_deref(),
         Some(b"song".as_slice()),
         "the old bytes are back"
+    );
+}
+
+fn staged_files_stay_while_an_own_record_does_not_read<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    let writers = layout().writers();
+    let real = folder
+        .files(Root::Folder)
+        .into_keys()
+        .find(|p| p.starts_with(&writers))
+        .unwrap();
+    let own = real.as_str().split('/').nth(2).unwrap().to_owned();
+    let at = |name: &str| format!(".t/writers.2/{own}/{name}");
+    let newer = format!(
+        r#"{{"writer":"{own}","entry":{{}},"label":"Save","steps":[{{"step":"clone","staged":"{}","path":"song.npno"}}],"files":[]}}"#,
+        "0".repeat(31) + "b"
+    );
+    put(
+        &folder,
+        &at(&format!("pending/{}a.json", "0".repeat(31))),
+        newer.as_bytes(),
+    );
+    let staged = at(&format!("tmp/{}b.npno", "0".repeat(31)));
+    put(&folder, &staged, b"saved");
+    a.commit("Tag", |i| i.add(song, TAGS, tag("next"))).unwrap();
+    assert_eq!(
+        read(&folder, &staged).as_deref(),
+        Some(&b"saved"[..]),
+        "a record this build cannot read may place it"
+    );
+}
+
+fn an_own_record_with_a_member_this_build_does_not_know_is_settled<F: Facade>() {
+    let one_disk = |disk: &MemDisk| Machine {
+        folder: disk.clone(),
+        local: disk.clone(),
+    };
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&one_disk(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    refuse(&probe, Some("song.npno"));
+    let saved = a.commit("Save", |i| {
+        i.save(
+            song,
+            &path("song.npno"),
+            b"saved".to_vec(),
+            Expect::Holds(identity(b"song")),
+        )
+    });
+    assert!(saved.is_err(), "{saved:?}");
+    drop(a);
+    let folder = folder.restart();
+    let records = pending_files(&folder).into_iter();
+    let [record] = &records
+        .filter(|at| at.as_str().ends_with(".json"))
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("one record");
+    };
+    let bytes = read(&folder, record.as_str()).unwrap();
+    let newer = [&br#"{"newer":true,"#[..], &bytes[1..]].concat();
+    put(&folder, record.as_str(), &newer);
+
+    let (mut a, _) = F::open(Probe::new(&one_disk(&folder)), env("a", 2, &clock)).unwrap();
+    a.commit("Tag", |i| i.add(song, TAGS, tag("next"))).unwrap();
+    assert_eq!(
+        read(&folder, "song.npno").as_deref(),
+        Some(&b"saved"[..]),
+        "the save is finished"
     );
 }
 

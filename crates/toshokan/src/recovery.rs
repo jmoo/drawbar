@@ -308,19 +308,34 @@ fn set_aside<'a>(
     })
 }
 
-/// Removes every file in this writer's staging, once no record of its is open
-/// to place one: what a run cut short before its record was written left behind.
+/// Removes every file in this writer's staging that no record in its `pending/`
+/// places: what a run cut short before its record was written left behind. While
+/// a record of the writer does not read, removes nothing, since it may place any.
 pub fn tidy(layout: &Layout, writer: WriterId) -> Task<'static, Result<()>> {
-    let dir = layout.tmp_dir(writer);
-    flow::list(Root::Folder, &dir)
-        .and_then(move |entries| {
-            let stale = entries.into_iter().filter(|entry| entry.kind == Kind::File);
-            each(stale, move |entry| {
-                flow::remove(
-                    Root::Folder,
-                    &dir.join(&entry.name)
-                        .expect("a listed name is one component"),
-                )
+    let layout = layout.clone();
+    flow::run(pending::read_all(&layout, writer))
+        .and_then(move |found| {
+            if !found.unreadable.is_empty() {
+                return flow::ok(());
+            }
+            let steps = found.records.iter().flat_map(|(_, record)| &record.steps);
+            let placed: BTreeSet<RelPath> = steps
+                .filter_map(|step| match step {
+                    EffectStep::Place { staged, path } => {
+                        Some(layout.staged(writer, *staged, path))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let dir = layout.tmp_dir(writer);
+            flow::list(Root::Folder, &dir).and_then(move |entries| {
+                let files = entries.into_iter().filter(|entry| entry.kind == Kind::File);
+                let files = files.map(move |entry| {
+                    dir.join(&entry.name)
+                        .expect("a listed name is one component")
+                });
+                let stale = files.filter(move |path| !placed.contains(path));
+                each(stale, |path| flow::remove(Root::Folder, &path))
             })
         })
         .task()

@@ -2105,10 +2105,10 @@ fn settle_own(library: &mut Library) -> Fallible<'_, &mut Library> {
     })
 }
 
-/// Settles `settling` when the folder holds its record whole. One the folder does
-/// not hold, or holds cut short, never landed and journaled nothing, so it is
-/// dropped and its staging and any part of it left to tidy; one the folder cannot
-/// be asked about fails this write, to try again.
+/// Settles `settling` when the folder holds a record that reads as it. One the
+/// folder does not hold, or holds cut short, never landed and journaled nothing,
+/// so it is dropped and its staging and any part of it left to tidy; one the
+/// folder cannot be asked about fails this write, to try again.
 fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Library> {
     // A record before it stopped this writer writing, which made it an orphan.
     if library.writer.is_none() {
@@ -2117,15 +2117,18 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
     let path = library
         .layout
         .pending(settling.pending.writer, settling.record);
-    let whole = settling.pending.encode();
-    flow::read_file(Root::Folder, &path, pending::MAX_RECORD).and_then(move |held| match held {
-        Some(bytes) if bytes == whole => resume(library, settling),
-        _ => {
-            library
-                .unsettled
-                .retain(|open| open.record != settling.record);
-            ok(library)
+    flow::read_file(Root::Folder, &path, pending::MAX_RECORD).and_then(move |held| {
+        let read = held.as_deref().map(PendingRecord::decode);
+        if matches!(&read, Some(Ok(record)) if *record == settling.pending) {
+            return resume(library, settling);
         }
+        if matches!(read, Some(Err(_))) && !library.ignored.contains(&path) {
+            library.ignored.push(path);
+        }
+        library
+            .unsettled
+            .retain(|open| open.record != settling.record);
+        ok(library)
     })
 }
 
@@ -2230,8 +2233,8 @@ fn remove_spent(library: &mut Library) -> Flow<'_, (&mut Library, Result<()>)> {
     .then(|folded| Flow::Done(folded.expect("removing a record fails nothing else")))
 }
 
-/// Removes what a run cut short before its steps left: staged files no record
-/// places, and this writer's empty records. Runs once settling has left no
+/// Removes what a run cut short before its steps left: this writer's empty
+/// records, then staged files no record places. Runs once settling has left no
 /// record open.
 fn tidy_staging(library: &mut Library) -> Fallible<'_, &mut Library> {
     let Some(writer) = library.writer.as_ref().map(Writer::id) else {
@@ -2240,19 +2243,16 @@ fn tidy_staging(library: &mut Library) -> Fallible<'_, &mut Library> {
     let layout = library.layout.clone();
     let ignored = library.ignored.clone();
     let capabilities = library.capabilities;
-    flow::run(recovery::tidy(&layout, writer))
-        .and_then(move |()| {
-            flow::run(recovery::remove_empty(
-                &layout,
-                writer,
-                &ignored,
-                capabilities,
-            ))
-        })
-        .map_ok(move |removed| {
-            library.ignored.retain(|path| !removed.contains(path));
-            library
-        })
+    flow::run(recovery::remove_empty(
+        &layout,
+        writer,
+        &ignored,
+        capabilities,
+    ))
+    .and_then(move |removed| {
+        library.ignored.retain(|path| !removed.contains(path));
+        flow::run(recovery::tidy(&layout, writer)).map_ok(move |()| library)
+    })
 }
 
 /// The intent a pending record planned to log, without the file ops its steps
