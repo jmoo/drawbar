@@ -5873,16 +5873,12 @@ impl Session {
     }
 }
 
-/// Two drawbars that each tag a file nothing was said about, before either sees the
-/// other's tag, show the file wearing both tags once each reads the other's, and show
-/// no sound as missing or lost.
-#[test]
-fn a_file_two_drawbars_tag_unseen_wears_both_tags_once_each_reads_the_other() {
-    let root = Temp::new();
+/// Two drawbars on `root`, the second with its own state at `local`, that each tagged
+/// Grand.ne5p before either saw the other's tag, as while a sync is paused.
+fn tagged_unseen(root: &Temp, local: &Temp) -> (Session, Session) {
     fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-    let other = Temp::new();
-    let mut here = Session::listed(&root);
-    let mut there = Session::elsewhere(&root, &other);
+    let mut here = Session::listed(root);
+    let mut there = Session::elsewhere(root, local);
     let grand = here.named("Grand.ne5p");
     here.tag(&[grand], "Live");
     let writers = root.at(".drawbar/library/writers.2");
@@ -5898,6 +5894,17 @@ fn a_file_two_drawbars_tag_unseen_wears_both_tags_once_each_reads_the_other() {
     let grand = there.named("Grand.ne5p");
     there.tag(&[grand], "Studio");
     fs::rename(&away, &ours).unwrap();
+    (here, there)
+}
+
+/// Two drawbars that each tag a file nothing was said about, before either sees the
+/// other's tag, show the file wearing both tags once each reads the other's, and show
+/// no sound as missing or lost.
+#[test]
+fn a_file_two_drawbars_tag_unseen_wears_both_tags_once_each_reads_the_other() {
+    let root = Temp::new();
+    let other = Temp::new();
+    let (mut here, mut there) = tagged_unseen(&root, &other);
 
     here.refresh();
     there.refresh();
@@ -5907,6 +5914,21 @@ fn a_file_two_drawbars_tag_unseen_wears_both_tags_once_each_reads_the_other() {
         assert!(folders.missing.is_empty(), "{:?}", folders.missing);
         assert!(folders.lost().is_empty());
     }
+}
+
+/// The drawbar that joins the entities two drawbars made of one file says so in the
+/// activity log, naming the file, and the other, which only reads the join, does not.
+#[test]
+fn the_drawbar_that_joins_the_tags_of_one_file_logs_it() {
+    let root = Temp::new();
+    let other = Temp::new();
+    let (mut here, mut there) = tagged_unseen(&root, &other);
+
+    here.refresh();
+    there.refresh();
+    let line = "“Grand.ne5p”: joined the tags of entity";
+    assert_eq!(here.said(line), 1, "the drawbar that joined them");
+    assert_eq!(there.said(line), 0, "the drawbar that read the join");
 }
 
 /// A file gone outside drawbar whose contents two files now hold is said once, however

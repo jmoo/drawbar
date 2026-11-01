@@ -209,7 +209,7 @@ pub struct Ambiguous {
 /// An entity whose file facts hold the file bound to `into`, the lowest of the
 /// entities whose facts hold it, as when two writers each adopted the file before
 /// seeing the other's. [`crate::intent::Intent::join`] gives `into` what it holds.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct Joined {
     pub entity: EntityId,
     pub into: EntityId,

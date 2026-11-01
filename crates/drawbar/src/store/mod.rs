@@ -1034,6 +1034,8 @@ pub struct Viewed {
     /// Where each file was that the answer's scan newly found several files could each
     /// be, with those files.
     pub ambiguous: Vec<(LibPath, Vec<LibPath>)>,
+    /// Each file whose entities the answer's own change joined, with the entities.
+    pub joined: Vec<(LibPath, toshokan::report::Joined)>,
 }
 
 /// A fault a test makes the library's thread or worker show.

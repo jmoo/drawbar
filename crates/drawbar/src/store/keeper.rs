@@ -610,15 +610,22 @@ impl<F: Fs> Keeper<F> {
             false => None,
         };
         let view = library.view();
-        match joined {
-            Some(Ok(committed)) => refreshed.changes.extend(committed.changes),
-            Some(Err(e)) => answer_some(answer, self.unjoined(told(&e))),
-            None => {}
-        }
+        let joined = match joined {
+            Some(Ok(committed)) => {
+                refreshed.changes.extend(committed.changes);
+                joined_files(&refreshed.scan.joined, &view)
+            }
+            Some(Err(e)) => {
+                answer_some(answer, self.unjoined(told(&e)));
+                Vec::new()
+            }
+            None => Vec::new(),
+        };
         let ambiguous = self.ambiguous(&refreshed.scan, &view);
         let library = self.library.as_ref().ok_or("the library is not open")?;
         Ok(Viewed {
             ambiguous,
+            joined,
             ..viewed(library, &mut self.shown, refreshed, unfinishable)
         })
     }
@@ -816,6 +823,15 @@ async fn join<F: Fs>(
         built.join(joined.entity, joined.into)
     });
     built.commit().await
+}
+
+/// Where the file of each entity `joined` into another is in `view`, with the entities.
+fn joined_files(joined: &[Joined], view: &View) -> Vec<(LibPath, Joined)> {
+    let files = joined.iter().filter_map(|joined| {
+        let path = view.entity(joined.into)?.file()?.path;
+        Some((LibPath::parse(path.as_str())?, *joined))
+    });
+    files.collect()
 }
 
 /// What `committed` moved, for the app to follow without a word: each tree, then each
@@ -1843,6 +1859,7 @@ fn committed_view<F: Fs>(
         left: Vec::new(),
         finishing: shown_paths(&library.finishing()),
         ambiguous: Vec::new(),
+        joined: Vec::new(),
     }
 }
 
@@ -2188,6 +2205,7 @@ fn viewed<F: Fs>(
         left: Vec::new(),
         finishing: shown_paths(&library.finishing()),
         ambiguous: Vec::new(),
+        joined: Vec::new(),
     }
 }
 

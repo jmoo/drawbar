@@ -2141,6 +2141,7 @@ impl Store {
             left,
             finishing,
             ambiguous,
+            joined,
         } = viewed;
         self.finishing = finishing.into_iter().collect();
         if let (Some(standing), Phase::Open) = (unfinished, &self.phase) {
@@ -2217,6 +2218,12 @@ impl Store {
                     crate::strings::quoted_some(several, 3)
                 ),
             });
+        }
+        for (file, joined) in &joined {
+            log.info(format!(
+                "“{file}”: joined the tags of entity {} into entity {}",
+                joined.entity, joined.into
+            ));
         }
         self.keep_apart(kept, workspace, browser, log);
         if !first {
