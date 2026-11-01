@@ -149,7 +149,10 @@ the library opened, and the trash keeps only what they need, at most 1 GiB. Past
 that, the oldest goes first, and the activity log says which change Undo no
 longer reaches. Quitting empties the trash. What a crash left there goes when
 the library next opens, once drawbar has finished any change the crash
-interrupted.
+interrupted. Once drawbar goes on with a history of its own, as after its data
+was copied to a second computer, it never empties the trash of the history it
+left: that stays in the library folder, under `.drawbar/library/writers.2`, until
+you remove it by hand.
 
 **Export…** saves a copy somewhere else. Rename with F2. If a name is taken,
 drawbar asks whether to **Overwrite** the file there or **Keep both**.

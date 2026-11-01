@@ -14,8 +14,10 @@ use toshokan::error::{Refusal, Why};
 use toshokan::io::{IoError, Kind, Range, Root};
 use toshokan::log::Settlement;
 use toshokan::plan::FactChange;
-use toshokan::report::{Item, ItemChange, ItemKind, Mode, Refreshed, Rekey, Start, What};
-use toshokan::{EntryHash, Env, Error, Expect, Nonce, RelPath, Set, View};
+use toshokan::report::{
+    Item, ItemChange, ItemKind, Mode, Refreshed, Rekey, Start, TrashItem, What,
+};
+use toshokan::{EntryHash, Env, Error, Expect, Nonce, RelPath, Set, View, WriterId};
 
 use super::keys::{self, Came, ORIGIN, TAGS, TAG_NAMES, TAKEN_IN};
 use super::shown::Change;
@@ -335,23 +337,9 @@ impl<F: Fs> Keeper<F> {
     /// toshokan also keeps what an unsettled change may still move.
     async fn empty_trash(&mut self) -> Option<Event> {
         let library = self.library.as_mut()?;
+        let writer = library.writer_id()?;
         let held = library.trash().await.ok()?;
-        let mut room = self.trash;
-        let reached = held
-            .iter()
-            .rev()
-            .filter(|item| self.session.contains(&item.by));
-        let kept: BTreeSet<Nonce> = reached
-            .take_while(|item| {
-                let fits = item.len <= room;
-                room = room.saturating_sub(item.len);
-                fits
-            })
-            .map(|item| item.item)
-            .collect();
-        if held.iter().all(|item| kept.contains(&item.item)) {
-            return None;
-        }
+        let kept = keeping(&held, writer, |by| self.session.contains(by), self.trash)?;
         let emptied = match library.empty_trash(kept).await {
             Ok(emptied) => emptied,
             Err(e) => return self.unemptied(told(&e)),
@@ -1796,6 +1784,32 @@ fn field_onto(change: &FactChange, to: toshokan::EntityId) -> Option<FactChange>
     })
 }
 
+/// What of `writer`'s trash to keep, where emptying it would remove anything: the items
+/// `reached` says this session's undo needs, newest first within `room` bytes. The items
+/// of another writer of this install stay as they are, since only a writer empties its
+/// own trash.
+fn keeping(
+    held: &[TrashItem],
+    writer: WriterId,
+    reached: impl Fn(&EntryHash) -> bool,
+    room: u64,
+) -> Option<BTreeSet<Nonce>> {
+    let held: Vec<&TrashItem> = held.iter().filter(|item| item.writer == writer).collect();
+    let mut room = room;
+    let kept: BTreeSet<Nonce> = held
+        .iter()
+        .rev()
+        .filter(|item| reached(&item.by))
+        .take_while(|item| {
+            let fits = item.len <= room;
+            room = room.saturating_sub(item.len);
+            fits
+        })
+        .map(|item| item.item)
+        .collect();
+    (!held.iter().all(|item| kept.contains(&item.item))).then_some(kept)
+}
+
 /// Whether making `change` would leave the field it changes as `view` shows it.
 fn changes_nothing(change: &FactChange, view: &View) -> bool {
     let folded = view.folded();
@@ -2564,6 +2578,35 @@ mod tests {
         nord_usb::block_on(second.close());
         let mut third = keeper(&root);
         assert_eq!(trash(&mut third), [], "the closed session's undo needed it");
+    }
+
+    /// Only this writer's trash is emptied: what an earlier writer of this install left
+    /// stays, and alone it leaves nothing to empty.
+    #[test]
+    fn the_trash_of_an_earlier_writer_is_neither_emptied_nor_counted() {
+        let item = |writer, n, len| TrashItem {
+            writer: WriterId::from_u128(writer),
+            item: Nonce::from_u128(n),
+            len,
+            from: RelPath::new("c3.ne5p").unwrap(),
+            at: toshokan::Hlc {
+                wall_ms: n as u64,
+                counter: 0,
+            },
+            by: EntryHash::from_u128(n),
+        };
+        let reached = |_: &EntryHash| true;
+        let (earlier, own) = (0xe, 0xa);
+        let held = [item(own, 1, 4), item(earlier, 2, 4)];
+        assert_eq!(keeping(&held, WriterId::from_u128(own), reached, 4), None);
+
+        let held = [item(own, 1, 4), item(own, 2, 4), item(earlier, 3, 4)];
+        let kept = keeping(&held, WriterId::from_u128(own), reached, 4);
+        assert_eq!(
+            kept,
+            Some(BTreeSet::from([Nonce::from_u128(2)])),
+            "the newest"
+        );
     }
 
     /// A file another program leaves among drawbar's records keeps nothing in the trash,
