@@ -699,11 +699,10 @@ impl<F: Fs> Keeper<F> {
         let folders = moved_folders(&intent);
         if !folders.is_empty() && !library.fs().capabilities(Root::Folder).rename_dir {
             let paths = folders.iter().filter_map(relative).collect();
-            looked = library
-                .rescan_paths(paths)
-                .await
-                .map_err(|e| told(&e))?
-                .changes;
+            match library.rescan_paths(paths).await {
+                Ok(rescanned) => looked = rescanned.changes,
+                Err(e) => return Err(not_made(intent, told(&e), answer)),
+            }
         }
         let changes = match intent {
             Intent::Tag { files, name, make } => {
@@ -854,6 +853,17 @@ fn shown_paths(paths: &[RelPath]) -> Vec<LibPath> {
         .iter()
         .filter_map(|path| LibPath::parse(path.as_str()));
     shown.collect()
+}
+
+/// Answer each change to a file in `intent`, which nothing was tried of, as failed for
+/// `why`, and return `why` for the change's own answer.
+fn not_made(intent: Intent, why: String, answer: &mut impl FnMut(Event)) -> String {
+    let answers = super::refusing::refused(&Cmd::Intent(intent)).answers(&why, true);
+    let parts = answers.into_iter();
+    parts
+        .filter(|event| !matches!(event, Event::Committed { .. }))
+        .for_each(answer);
+    why
 }
 
 /// The folders `intent` moves, its parts' included.
@@ -2661,6 +2671,76 @@ mod tests {
                 io => self.0.perform(io).await,
             }
         }
+    }
+
+    /// Storage that renames no folder whole, and whose listings of the library folder
+    /// fail once `failing` is set.
+    struct Unlisted(Counted<Blocking>, Rc<std::cell::Cell<bool>>);
+
+    impl Fs for Unlisted {
+        fn capabilities(&self, root: Root) -> toshokan::io::Capabilities {
+            toshokan::io::Capabilities {
+                rename_dir: false,
+                ..self.0.capabilities(root)
+            }
+        }
+
+        async fn perform(&self, io: toshokan::Io) -> toshokan::io::IoResult {
+            match io {
+                toshokan::Io::List {
+                    root: Root::Folder, ..
+                }
+                | toshokan::Io::ListStat {
+                    root: Root::Folder, ..
+                } if self.1.get() => Err(IoError::Other("no listings here".into())),
+                io => self.0.perform(io).await,
+            }
+        }
+    }
+
+    /// Where folders move file by file, a folder move whose look at the folder fails
+    /// still answers the move, so the app does not wait on it.
+    #[test]
+    fn a_folder_move_whose_look_first_fails_is_answered_as_failed() {
+        let root = Temp::new();
+        fs::create_dir(root.at("Bulk")).unwrap();
+        fs::write(root.at("Bulk/a.ne5p"), b"a").unwrap();
+        let mut native = native::keeper(
+            &root.0,
+            &root.local(),
+            Arc::default(),
+            Box::new(SystemClock),
+        );
+        let (fs, env) = native.unopened.take().unwrap();
+        let failing = Rc::new(std::cell::Cell::new(false));
+        let mut keeper = super::Keeper::new(Unlisted(fs, Rc::clone(&failing)), env);
+        let mut answers = Vec::new();
+        let mut run = |keeper: &mut super::Keeper<Unlisted>, cmd| {
+            nord_usb::block_on(keeper.run(cmd, &mut |event| answers.push(event)));
+        };
+        run(&mut keeper, Cmd::Open);
+        run(&mut keeper, Cmd::Rescan);
+        failing.set(true);
+        run(
+            &mut keeper,
+            Cmd::Intent(Intent::MoveFolder {
+                from: path("Bulk"),
+                to: path("Bulk2"),
+            }),
+        );
+        let moved = answers.iter().filter(|event| {
+            matches!(event, Event::Moved { from, result: Err(_), .. } if *from == path("Bulk"))
+        });
+        assert_eq!(moved.count(), 1, "{answers:?}");
+        let committed = answers
+            .iter()
+            .filter(|event| matches!(event, Event::Committed { result: Err(_), .. }));
+        assert_eq!(
+            committed.count(),
+            1,
+            "one answer for the change: {answers:?}"
+        );
+        assert!(root.at("Bulk/a.ne5p").exists(), "nothing moved");
     }
 
     /// Where the library folder never makes a change durable, the library turns
