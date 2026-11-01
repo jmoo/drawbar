@@ -5909,6 +5909,28 @@ fn a_file_two_drawbars_tag_unseen_wears_both_tags_once_each_reads_the_other() {
     }
 }
 
+/// A file gone outside drawbar whose contents two files now hold is said once, however
+/// often the library is looked at again.
+#[test]
+fn a_file_two_files_could_each_be_is_told_once() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let grand = session.named("Grand.ne5p");
+    session.tag(&[grand], "Gig");
+    fs::copy(root.at("Grand.ne5p"), root.at("Left.ne5p")).unwrap();
+    fs::rename(root.at("Grand.ne5p"), root.at("Right.ne5p")).unwrap();
+    session.settle();
+    session.settle();
+    assert_eq!(
+        session.said(
+            "drawbar cannot tell which of “Left.ne5p” and “Right.ne5p” is the file that was \
+             at “Grand.ne5p”"
+        ),
+        1
+    );
+}
+
 /// An unsaved edit kept of a file by its path comes back though another drawbar made
 /// the file an entity since, and is kept by the entity from then on.
 #[test]

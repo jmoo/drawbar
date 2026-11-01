@@ -1031,6 +1031,9 @@ pub struct Viewed {
     pub left: Vec<LibPath>,
     /// The paths a change of drawbar's own names that its next change finishes.
     pub finishing: Vec<LibPath>,
+    /// Where each file was that the answer's scan newly found several files could each
+    /// be, with those files.
+    pub ambiguous: Vec<(LibPath, Vec<LibPath>)>,
 }
 
 /// A fault a test makes the library's thread or worker show.

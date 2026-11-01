@@ -236,6 +236,9 @@ moved outside drawbar is followed by its identity, and the asset keeps its tags
 and its origin. A file with no entity is known by its path alone, so its rename
 reads as one file gone and another arrived, with nothing lost.
 
+Where several files could each be an entity's moved file, or one file several
+entities', none is bound, and drawbar says so once in the activity log.
+
 A file that is gone, and that no new file matches, leaves the list if it held
 nothing precious. One with tags, an unsaved edit, a slot it came off or a place
 in the send queue stays, marked missing, and saving it writes the file anew.

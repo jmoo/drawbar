@@ -2140,6 +2140,7 @@ impl Store {
             retired,
             left,
             finishing,
+            ambiguous,
         } = viewed;
         self.finishing = finishing.into_iter().collect();
         if let (Some(standing), Phase::Open) = (unfinished, &self.phase) {
@@ -2203,6 +2204,19 @@ impl Store {
                     _ => "they hold",
                 },
             ));
+        }
+        for (was, candidates) in &ambiguous {
+            log.trouble(match candidates.as_slice() {
+                [one] => format!(
+                    "drawbar cannot tell whether “{one}” is the file that was at “{was}”, so \
+                     it does not give “{one}” that file's tags."
+                ),
+                several => format!(
+                    "drawbar cannot tell which of {} is the file that was at “{was}”, so it \
+                     gives none of them that file's tags.",
+                    crate::strings::quoted_some(several, 3)
+                ),
+            });
         }
         self.keep_apart(kept, workspace, browser, log);
         if !first {

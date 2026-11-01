@@ -282,6 +282,11 @@ bring back any you deleted.
   edits, or came from your keyboard. Save it to bring the file back, or delete
   it. After a restart, a missing file with tags shows as lost, with its tags,
   until you let it go.
+- **Two files that could each be one.** A tagged file was moved or copied
+  outside drawbar, and now two files hold what it held, neither where it was.
+  drawbar cannot tell which is the file, so it gives neither the tags, keeps
+  them with the missing file, and says so once in the activity log. Move the
+  right one back, or delete the other, and drawbar finds it.
 - **A write to the instrument left a file.** If drawbar stopped, or could not
   put the old sound back, while it replaced a sound on your keyboard, the sound
   that was there may now be only on this computer. drawbar puts it in the

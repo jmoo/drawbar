@@ -15,7 +15,7 @@ use toshokan::io::{Io, IoError, Kind, Lock, Range, Reply, Root};
 use toshokan::log::Settlement;
 use toshokan::plan::FactChange;
 use toshokan::report::{
-    Item, ItemChange, ItemKind, Joined, Mode, Refreshed, Rekey, Start, TrashItem, What,
+    Item, ItemChange, ItemKind, Joined, Mode, Refreshed, Rekey, ScanReport, Start, TrashItem, What,
 };
 use toshokan::{EntryHash, Env, Error, Expect, Nonce, RelPath, Set, View, WriterId};
 
@@ -84,6 +84,9 @@ pub struct Keeper<F> {
     /// Whether the app was told the entities two drawbars made of one file could not
     /// be joined.
     told_unjoined: bool,
+    /// The entities whose file the app was told could be any of several, as the last
+    /// scan found them.
+    told_ambiguous: BTreeSet<toshokan::EntityId>,
     /// The lock this window holds while it has the library open.
     window: Option<RelPath>,
 }
@@ -105,6 +108,7 @@ impl<F: Fs> Keeper<F> {
             writer: None,
             told_unemptied: false,
             told_unjoined: false,
+            told_ambiguous: BTreeSet::new(),
             window: None,
         }
     }
@@ -319,6 +323,21 @@ impl<F: Fs> Keeper<F> {
         (!told).then_some(Event::Unjoined(why))
     }
 
+    /// The files `scan` found could each be the file of an entity whose file is gone,
+    /// for those not told since the scan before: where that file was, and the files.
+    fn ambiguous(&mut self, scan: &ScanReport, view: &View) -> Vec<(LibPath, Vec<LibPath>)> {
+        let told = std::mem::take(&mut self.told_ambiguous);
+        self.told_ambiguous = scan.ambiguous.iter().map(|found| found.entity).collect();
+        let new = scan.ambiguous.iter();
+        let new = new.filter(|found| !told.contains(&found.entity));
+        let new = new.filter_map(|found| {
+            let was = view.entity(found.entity)?.file()?.path;
+            let candidates = found.candidates.iter();
+            let candidates = candidates.filter_map(|path| LibPath::parse(path.as_str()));
+            Some((LibPath::parse(was.as_str())?, candidates.collect()))
+        });
+        new.collect()
+    }
 
     /// Say that this session's undo history began again, where the library stopped
     /// writing as the writer it wrote as.
@@ -589,13 +608,18 @@ impl<F: Fs> Keeper<F> {
             true => Some(join(library, &refreshed.scan.joined).await),
             false => None,
         };
+        let view = library.view();
         match joined {
             Some(Ok(committed)) => refreshed.changes.extend(committed.changes),
             Some(Err(e)) => answer_some(answer, self.unjoined(told(&e))),
             None => {}
         }
+        let ambiguous = self.ambiguous(&refreshed.scan, &view);
         let library = self.library.as_ref().ok_or("the library is not open")?;
-        Ok(viewed(library, &mut self.shown, refreshed, unfinishable))
+        Ok(Viewed {
+            ambiguous,
+            ..viewed(library, &mut self.shown, refreshed, unfinishable)
+        })
     }
 
     /// Undo, or redo where `again`, and the view after it, with the files no entity is
@@ -1817,6 +1841,7 @@ fn committed_view<F: Fs>(
         retired: false,
         left: Vec::new(),
         finishing: shown_paths(&library.finishing()),
+        ambiguous: Vec::new(),
     }
 }
 
@@ -2158,6 +2183,7 @@ fn viewed<F: Fs>(
         retired: refreshed.retired.is_some(),
         left: Vec::new(),
         finishing: shown_paths(&library.finishing()),
+        ambiguous: Vec::new(),
     }
 }
 
