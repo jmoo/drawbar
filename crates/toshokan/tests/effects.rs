@@ -739,6 +739,97 @@ fn an_intent_is_refused_for_overlapping_or_reserved_paths() {
     }
 }
 
+/// Names as a volume that ignores case takes them.
+struct Folding;
+
+impl toshokan::Names for Folding {
+    fn key(&self, path: &str) -> String {
+        path.to_lowercase()
+    }
+}
+
+#[test]
+fn where_names_fold_case_paths_that_differ_only_in_case_overlap() {
+    let (one, two) = (EntityId::from_u128(1), EntityId::from_u128(2));
+    let bindings = bound(&[(one, "A/Bass.nlp"), (two, "B/bass.nlp"), (E, "x.syx")]);
+    let rename = |entity, to: &str| FileChange::Rename {
+        entity,
+        to: path(to),
+        expect: Expect::Absent,
+    };
+    let tree = |from: &str, to: &str| FileChange::MoveTree {
+        from: path(from),
+        to: path(to),
+    };
+    let make_dir = FileChange::MakeDir { path: path("p") };
+    let refusals = [
+        (
+            vec![rename(one, "C/Bass.nlp"), rename(two, "C/bass.nlp")],
+            Invalid::Overlapping(path("C/bass.nlp")),
+        ),
+        (
+            vec![tree("Organ", "organ/Sub")],
+            Invalid::Overlapping(path("organ/Sub")),
+        ),
+        (
+            vec![FileChange::SaveFile {
+                path: path("X.syx"),
+                content: Content(0),
+                expect: Expect::Absent,
+            }],
+            Invalid::Bound(path("x.syx")),
+        ),
+        (
+            vec![FileChange::TrashFile {
+                path: path("X.syx"),
+                expect: Expect::Absent,
+            }],
+            Invalid::Bound(path("x.syx")),
+        ),
+        (
+            vec![make_dir.clone(), rename(one, "P")],
+            Invalid::Overlapping(path("p")),
+        ),
+        (
+            vec![rename(one, "P"), make_dir.clone()],
+            Invalid::Overlapping(path("p")),
+        ),
+        (
+            vec![make_dir.clone(), tree("Organ", "P")],
+            Invalid::Overlapping(path("p")),
+        ),
+    ];
+    let folding = || toshokan::Env {
+        names: Box::new(Folding),
+        ..env(1)
+    };
+    for (changes, invalid) in refusals {
+        let resolved = effects::resolve(
+            &changes,
+            &bindings,
+            &layout(),
+            Capabilities::ALL,
+            &mut folding(),
+        );
+        assert_eq!(resolved, Err(Refusal::Invalid(invalid)), "{changes:?}");
+    }
+    let allowed = [
+        (vec![rename(one, "A/bass.nlp")], Capabilities::ALL),
+        (vec![rename(one, "A/bass.nlp")], common::COPYING),
+        (vec![tree("Organ", "organ")], Capabilities::ALL),
+        (vec![tree("Organ", "organ")], common::COPYING),
+        (
+            vec![make_dir.clone(), rename(one, "P/Bass.nlp")],
+            Capabilities::ALL,
+        ),
+        (vec![make_dir, tree("Organ", "P")], common::COPYING),
+    ];
+    for (changes, caps) in allowed {
+        let resolved = effects::resolve(&changes, &bindings, &layout(), caps, &mut folding());
+        assert!(resolved.is_ok(), "{changes:?}, {caps:?}: {resolved:?}");
+    }
+}
+
 #[test]
 fn a_restore_over_a_file_trashes_it_first() {
     let restore = FileChange::Restore {

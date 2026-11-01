@@ -292,7 +292,9 @@ pub struct Applied {
 
 /// Resolves `changes` into checks and steps. `bindings` says where existing
 /// entities' files are. Moves copy where `capabilities` declares no file renames,
-/// and directory renames are used only where it declares them too.
+/// and directory renames are used only where it declares them too. Two changes
+/// that touch one path, compared by `env`'s names, are refused, as is a directory
+/// made at or under a path a step puts something at.
 ///
 /// A tree moved by per-file renames moves the files `bindings` knows of; a
 /// directory left behind holding anything else stays.
@@ -328,12 +330,29 @@ pub fn resolve(
             return Err(invalid(Invalid::NotEmpty(path.clone())));
         }
     }
+    let key = |path: &RelPath| env.names.key(path.as_str());
+    let steps = &resolver.plan.steps;
+    let moved: Vec<String> = steps
+        .iter()
+        .filter(|step| !matches!(step, EffectStep::MakeDir { .. }))
+        .filter_map(EffectStep::put)
+        .map(key)
+        .collect();
+    for step in steps {
+        let EffectStep::MakeDir { path } = step else {
+            continue;
+        };
+        if moved.iter().any(|put| within(&key(path), put)) {
+            return Err(invalid(Invalid::Overlapping(path.clone())));
+        }
+    }
     Ok(resolver.plan)
 }
 
 struct Resolver<'r> {
     plan: EffectPlan,
-    touched: Vec<RelPath>,
+    /// The key under the volume's names of each path an effect touches.
+    touched: Vec<String>,
     /// Each directory a [`FileChange::RemoveDir`] removes, which no step of the intent
     /// may put anything in, before or after.
     removed: Vec<RelPath>,
@@ -362,6 +381,14 @@ fn one_name(env: &Env, a: &RelPath, b: &RelPath) -> bool {
     a != b && env.names.key(a.as_str()) == env.names.key(b.as_str())
 }
 
+/// Whether the path keyed `path` is at or under the one keyed `dir`.
+fn within(path: &str, dir: &str) -> bool {
+    dir.is_empty()
+        || path
+            .strip_prefix(dir)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
 fn invalid(invalid: Invalid) -> Refusal {
     Refusal::Invalid(invalid)
 }
@@ -382,7 +409,7 @@ impl Resolver<'_> {
             } => {
                 let entity = *entity;
                 let path = self.library(path)?;
-                self.claim(entity, &path)?;
+                self.claim(entity, &path, env)?;
                 self.check(&path, *expect);
                 if expect.present() {
                     self.step(EffectStep::ToTrash {
@@ -397,7 +424,7 @@ impl Resolver<'_> {
             }
             FileChange::Trash { entity, expect } => {
                 let path = self.current(*entity)?;
-                self.claim(*entity, &path)?;
+                self.claim(*entity, &path, env)?;
                 self.check(&path, *expect);
                 self.step(EffectStep::ToTrash {
                     path,
@@ -408,8 +435,8 @@ impl Resolver<'_> {
             FileChange::Rename { entity, to, expect } => {
                 let from = self.current(*entity)?;
                 let to = self.library(to)?;
-                self.claim(*entity, &from)?;
-                self.touch(&to)?;
+                self.claim(*entity, &from, env)?;
+                self.touch_destination(&from, &to, env)?;
                 self.check(&from, *expect);
                 self.rename(&from, &to, env)?;
                 self.end(*entity, Some(to));
@@ -459,7 +486,7 @@ impl Resolver<'_> {
             } => {
                 let entity = *entity;
                 let path = self.library(path)?;
-                self.claim(entity, &path)?;
+                self.claim(entity, &path, env)?;
                 self.check(&path, *expect);
                 self.plan.files.push(FileEnd {
                     entity,
@@ -476,7 +503,7 @@ impl Resolver<'_> {
                 expect,
             } => {
                 let to = self.library(to)?;
-                self.claim(*entity, &to)?;
+                self.claim(*entity, &to, env)?;
                 self.check(&to, *expect);
                 if expect.present() {
                     self.step(EffectStep::ToTrash {
@@ -495,7 +522,7 @@ impl Resolver<'_> {
                 content,
                 expect,
             } => {
-                let path = self.unbound(path)?;
+                let path = self.unbound(path, env)?;
                 self.check(&path, *expect);
                 if expect.present() {
                     self.step(EffectStep::ToTrash {
@@ -510,15 +537,15 @@ impl Resolver<'_> {
                 self.end_unbound(from, Some(path));
             }
             FileChange::RenameFile { from, to, expect } => {
-                let from = self.unbound(from)?;
+                let from = self.unbound(from, env)?;
                 let to = self.library(to)?;
-                self.touch(&to)?;
+                self.touch_destination(&from, &to, env)?;
                 self.check(&from, *expect);
                 self.rename(&from, &to, env)?;
                 self.end_unbound(Some(from), Some(to));
             }
             FileChange::TrashFile { path, expect } => {
-                let path = self.unbound(path)?;
+                let path = self.unbound(path, env)?;
                 self.check(&path, *expect);
                 self.step(EffectStep::ToTrash {
                     path: path.clone(),
@@ -527,7 +554,7 @@ impl Resolver<'_> {
                 self.end_unbound(Some(path), None);
             }
             FileChange::RestoreFile { item, to, expect } => {
-                let to = self.unbound(to)?;
+                let to = self.unbound(to, env)?;
                 self.check(&to, *expect);
                 if expect.present() {
                     self.step(EffectStep::ToTrash {
@@ -554,8 +581,8 @@ impl Resolver<'_> {
         env: &mut Env,
     ) -> std::result::Result<(), Refusal> {
         let (from, to) = (self.library(from)?, self.library(to)?);
-        self.touch(&from)?;
-        self.touch(&to)?;
+        self.touch(&from, env)?;
+        self.touch_destination(&from, &to, env)?;
         let rename_dir = capabilities.rename_dir && self.plan.moves.renames();
         match rename_dir && one_name(env, &from, &to) {
             true => self.move_tree_aside(&from, &to, env)?,
@@ -703,17 +730,17 @@ impl Resolver<'_> {
     }
 
     /// Takes `path` for one effect on a file no entity is bound to: refused where
-    /// an entity's file is.
-    fn unbound(&mut self, path: &RelPath) -> std::result::Result<RelPath, Refusal> {
+    /// an entity's file is, by the volume's names.
+    fn unbound(&mut self, path: &RelPath, env: &Env) -> std::result::Result<RelPath, Refusal> {
         let path = self.library(path)?;
+        let key = env.names.key(path.as_str());
         let bound = self.bindings.bound.values();
-        if let Some(file) = bound
-            .into_iter()
-            .find(|file| file.path == path && file.state != FileState::Missing)
-        {
+        if let Some(file) = bound.into_iter().find(|file| {
+            file.state != FileState::Missing && env.names.key(file.path.as_str()) == key
+        }) {
             return Err(invalid(Invalid::Bound(file.path.clone())));
         }
-        self.touch(&path)?;
+        self.touch(&path, env)?;
         Ok(path)
     }
 
@@ -724,22 +751,40 @@ impl Resolver<'_> {
         }
     }
 
-    /// Refuses a path one effect of the intent already touches, or contains.
-    fn touch(&mut self, path: &RelPath) -> std::result::Result<(), Refusal> {
-        if self
-            .touched
-            .iter()
-            .any(|other| other.starts_with(path) || path.starts_with(other))
-        {
+    /// Refuses a path one effect of the intent already touches, or contains, by
+    /// the volume's names.
+    fn touch(&mut self, path: &RelPath, env: &Env) -> std::result::Result<(), Refusal> {
+        let key = env.names.key(path.as_str());
+        let mut touched = self.touched.iter();
+        if touched.any(|other| within(other, &key) || within(&key, other)) {
             return Err(invalid(Invalid::Overlapping(path.clone())));
         }
-        self.touched.push(path.clone());
+        self.touched.push(key);
         Ok(())
     }
 
+    /// Touches `to`, where a move from `from` puts something, unless the volume
+    /// takes the two for one name: `from` is touched then.
+    fn touch_destination(
+        &mut self,
+        from: &RelPath,
+        to: &RelPath,
+        env: &Env,
+    ) -> std::result::Result<(), Refusal> {
+        match one_name(env, from, to) {
+            true => Ok(()),
+            false => self.touch(to, env),
+        }
+    }
+
     /// Takes the entity's file for one effect, and the path it touches.
-    fn claim(&mut self, entity: EntityId, path: &RelPath) -> std::result::Result<(), Refusal> {
-        self.touch(path)?;
+    fn claim(
+        &mut self,
+        entity: EntityId,
+        path: &RelPath,
+        env: &Env,
+    ) -> std::result::Result<(), Refusal> {
+        self.touch(path, env)?;
         match self.claimed.insert(entity) {
             true => Ok(()),
             false => Err(invalid(Invalid::Overlapping(path.clone()))),

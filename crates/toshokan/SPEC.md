@@ -751,12 +751,19 @@ so one intent can create entities that name each other.
 A commit whose file effects fail logs nothing and fails, leaving its record
 open (see File effects and pending records).
 
+No two file changes of one intent touch one path, or a path and one under it,
+paths compared under the volume's rules for case and Unicode normalization;
+such an intent is refused before anything is written. A move touches its source,
+and its destination unless the volume takes the two for one name.
+
 An intent may make a directory where nothing is, and remove one that holds no
 file the library knows but those its earlier changes move out; anything else in
 it keeps it, and the removal is then not logged. Neither touches a path, so one
 intent can make a directory and move files into it, or move them out and remove
-it. Each logs a `dir` op as the folder shows it afterwards. When settling one of this writer's unfinished
-effects at step 4 fails, the commit fails before its own intent is tried.
+it; a directory made where another of its changes puts something, or under such
+a path, refuses it. Each logs a `dir` op as the folder shows it afterwards. When
+settling one of this writer's unfinished effects at step 4 fails, the commit
+fails before its own intent is tried.
 
 Otherwise a commit whose entries are durable succeeds, whatever fails after
 them, and says which parts of the instance's own state lag it: `head.json` not
@@ -770,11 +777,11 @@ its identity, no step, and a `pin` op giving the entity the file as it is.
 
 An intent may save, rename or trash a library file no entity is bound to, by its
 path, without making it an entity: a file nothing is said about stays without
-one. Each is refused where an entity's file is. The intent logs a `path` op for
-each such file as the folder shows it afterwards, with where it was: `from` alone
-for a file trashed, `file` alone for a file made, both for a file renamed or
-saved over. A commit reports each `path` op it logged, an undo's and a redo's
-included.
+one. Each is refused where an entity's file is, under the volume's rules. The
+intent logs a `path` op for each such file as the folder shows it afterwards,
+with where it was: `from` alone for a file trashed, `file` alone for a file
+made, both for a file renamed or saved over. A commit reports each `path` op it
+logged, an undo's and a redo's included.
 
 A tree move logs a `tree` op, and a `file` op for each entity whose file it
 moves; the files under it no entity is bound to have no facts, and it logs no
