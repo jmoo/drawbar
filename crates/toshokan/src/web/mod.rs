@@ -24,7 +24,7 @@ use crate::env::{Clock, Random};
 use crate::io::IoError;
 use crate::path::RelPath;
 
-pub use fs::Executor;
+pub use fs::{Executor, Locks};
 pub use hints::{Hint, Hints};
 
 /// Where a library's folder is.

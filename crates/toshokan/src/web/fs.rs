@@ -815,9 +815,10 @@ async fn close(stream: FileSystemWritableFileStream) -> Result<(), IoError> {
         .map_err(|error| failure(&error, IoError::IsDirectory))
 }
 
-/// Web Locks held by this worker, so by this process: the browser releases them
-/// when the worker ends.
-struct Locks {
+/// Web Locks held by this page or worker, so by this process: the browser
+/// releases them when it ends. An [`Executor`] takes [`Io::Lock`]s as the `Locks`
+/// of its local root, so a page may test the same names beside it.
+pub struct Locks {
     /// `navigator.locks`, called by name: web-sys binds it only with unstable APIs.
     manager: JsValue,
     /// Names this install's locks apart from another local root's.
@@ -828,7 +829,9 @@ struct Locks {
 }
 
 impl Locks {
-    fn new(local: &RelPath) -> Result<Self, IoError> {
+    /// The locks of the local root `local`, refused where the browser has no
+    /// Web Locks.
+    pub fn new(local: &RelPath) -> Result<Self, IoError> {
         let manager = field(&navigator(), "locks")
             .ok_or_else(|| IoError::Other("this browser has no Web Locks".into()))?;
         Ok(Self {
@@ -838,7 +841,8 @@ impl Locks {
         })
     }
 
-    async fn lock(&self, name: &RelPath) -> Result<Lock, IoError> {
+    /// Takes the lock `name` unless another process holds it.
+    pub async fn lock(&self, name: &RelPath) -> Result<Lock, IoError> {
         if self.held.borrow().contains_key(name) {
             return Ok(Lock::Acquired);
         }
@@ -881,7 +885,7 @@ impl Locks {
 
     /// Lets the lock `name` go, and returns once the browser has, so that
     /// another process asking next finds it free.
-    async fn unlock(&self, name: &RelPath) -> Result<(), IoError> {
+    pub async fn unlock(&self, name: &RelPath) -> Result<(), IoError> {
         let Some((release, requested)) = self.held.borrow_mut().remove(name) else {
             return Ok(());
         };
