@@ -690,7 +690,11 @@ pub fn apply(
                 }
                 None => log.trouble("The tag list is full, so there is no new tag."),
             },
-            Act::RenameTag { id, name } => browser.tags.rename(id, name),
+            Act::RenameTag { id, name } => {
+                if let Some(into) = browser.tags.rename(id, name) {
+                    shell.filter.merge_tag(id, into);
+                }
+            }
             Act::RemoveTag(id) => {
                 // ⚠️ A removed row cannot close its rename state; a reused id would inherit it.
                 browser.forget_rename(Item::Tag(id));

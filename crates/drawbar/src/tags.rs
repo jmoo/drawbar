@@ -115,16 +115,20 @@ impl Tags {
     }
 
     /// Rename a tag here, and ask the library to rename it on every asset that wears it.
-    /// A new tag whose name is being chosen is asked for under this name instead.
-    pub(crate) fn rename(&mut self, id: u64, name: String) {
-        let Some(from) = self.list.name_of(id).map(str::to_string) else {
-            return;
-        };
+    /// A new tag whose name is being chosen is asked for under this name instead. A name
+    /// another tag has merges this tag into that one, as the library does: the id of that
+    /// tag, which now stands for both.
+    pub(crate) fn rename(&mut self, id: u64, name: String) -> Option<u64> {
+        let from = self.list.name_of(id)?.to_string();
         if from == name {
-            return;
+            return None;
         }
         self.revision += 1;
-        self.list.rename(id, name.clone());
+        let into = self.list.id_of(&name);
+        match into {
+            Some(into) => self.merge(id, into),
+            None => self.list.rename(id, name.clone()),
+        }
         if let Some((_, at)) = self.naming.filter(|(naming, _)| *naming == id) {
             self.naming = None;
             for asked in &mut self.asked[at..] {
@@ -135,10 +139,22 @@ impl Tags {
                     _ => {}
                 }
             }
-            return;
+            return into;
         }
         self.pending.push((from.clone(), Some(name.clone())));
         self.asked.push(Asked::Rename { from, to: name });
+        into
+    }
+
+    /// Let the tag `into` stand for the tag `id` too, on every asset that wears it.
+    fn merge(&mut self, id: u64, into: u64) {
+        for worn in self.of.values_mut() {
+            if worn.remove(&id) {
+                worn.insert(into);
+            }
+        }
+        self.list.remove(id);
+        self.unworn.remove(&id);
     }
 
     /// Remove a tag from the list, and ask the library to take it off every asset. Their
@@ -322,6 +338,48 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[test]
+    fn a_rename_to_another_tags_name_shows_one_tag_worn_by_the_assets_of_both() {
+        let mut tags = Tags::default();
+        let live = tags.make("Live").unwrap();
+        let studio = tags.make("Studio").unwrap();
+        let worn = || BTreeMap::from([(7, names(&["Live"])), (8, names(&["Studio"]))]);
+        tags.project(names(&["Live", "Studio"]), worn());
+        tags.take_asked();
+        assert_eq!(tags.rename(live, "Studio".into()), Some(studio));
+        assert_eq!(
+            tags.take_asked(),
+            [Asked::Rename {
+                from: "Live".into(),
+                to: "Studio".into()
+            }]
+        );
+        tags.project(names(&["Live", "Studio"]), worn());
+        assert_eq!(tags.all().len(), 1, "a view from before it");
+        assert_eq!(tags.count(studio), 2);
+        assert_eq!(tags.name_of(live), None);
+    }
+
+    #[test]
+    fn a_new_tag_named_as_another_puts_that_one_on() {
+        let mut tags = Tags::default();
+        let studio = tags.make("Studio").unwrap();
+        tags.take_asked();
+        let fresh = tags.make("New tag").unwrap();
+        tags.tag(&[7], fresh);
+        tags.name_new(fresh);
+        assert_eq!(tags.rename(fresh, "Studio".into()), Some(studio));
+        assert_eq!(
+            tags.take_asked(),
+            [Asked::Tag {
+                assets: vec![7],
+                name: "Studio".into(),
+                make: true
+            }]
+        );
+        assert_eq!(tags.all().len(), 1);
     }
 
     #[test]

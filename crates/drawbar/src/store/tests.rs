@@ -3917,6 +3917,34 @@ fn a_tag_nothing_wears_is_kept_until_it_is_removed() {
     assert_eq!(third.tag_names(), ["Gig"]);
 }
 
+/// Renaming a tag to the name of another merges the two, here as in the library: one
+/// row, worn by the assets of both, which a removal then takes off them all.
+#[test]
+fn renaming_a_tag_to_another_tags_name_merges_them() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let ids = [session.create(), session.create()];
+    session.sync();
+    session.tag(&[ids[0]], "Live");
+    session.tag(&[ids[1]], "Studio");
+    session.rename_tag("Live", "Studio");
+    assert_eq!(session.tag_names(), ["Studio"], "one row");
+    let studio = session.bench.browser.tags.all()[0].id;
+    assert_eq!(session.bench.browser.tags.count(studio), 2);
+    assert_eq!(session.worn(ids[0]), ["Studio"]);
+    assert_eq!(session.worn(ids[1]), ["Studio"]);
+
+    session.undo();
+    assert_eq!(session.tag_names(), ["Live", "Studio"], "undone");
+    assert_eq!(session.worn(ids[0]), ["Live"]);
+    assert_eq!(session.worn(ids[1]), ["Studio"]);
+    session.redo();
+    session.remove_tag("Studio");
+    assert_eq!(session.tag_names(), Vec::<String>::new());
+    assert_eq!(session.worn(ids[0]), Vec::<String>::new());
+    assert_eq!(session.worn(ids[1]), Vec::<String>::new());
+}
+
 impl Session {
     /// Edit the asset `id` held whole, leaving the edit unsaved.
     fn edit(&mut self, id: u64, gain: &str) -> Vec<u8> {
