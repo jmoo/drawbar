@@ -66,9 +66,10 @@ pub async fn hold_window<F: Fs>(fs: &F) -> Result<RelPath, String> {
     ))
 }
 
-/// Whether another window has the library open, by the locks [`hold_window`] takes.
-async fn other_window<F: Fs>(fs: &F) -> Result<bool, IoError> {
-    for name in (0..WINDOWS).map(window) {
+/// Whether a window but the one holding `ours` has the library open, by the locks
+/// [`hold_window`] takes.
+async fn other_window<F: Fs>(fs: &F, ours: &RelPath) -> Result<bool, IoError> {
+    for name in (0..WINDOWS).map(window).filter(|name| name != ours) {
         match fs.perform(Io::Lock { name: name.clone() }).await? {
             Reply::Lock(Lock::Held) => return Ok(true),
             _ => _ = fs.perform(Io::Unlock { name }).await?,
@@ -196,15 +197,24 @@ fn unlike(why: String) -> String {
 /// so this runs before the library opens. [`OPENING`] stands while it writes, so a
 /// window that opens the library meanwhile opens it read-only: a copy that fails
 /// partway leaves the library empty, and one stopped partway leaves it read-only until
-/// a copy is opened again. drawbar's own files are not counted.
+/// a copy is opened again. drawbar's own files are not counted. It holds a window's lock
+/// while it runs, so a copy another window opens meanwhile is refused.
 pub async fn restore<F: Fs>(fs: &F, from: &Outside) -> Result<usize, String> {
+    let ours = hold_window(fs).await?;
+    let restored = restoring(fs, from, &ours).await;
+    let _ = fs.perform(Io::Unlock { name: ours }).await;
+    restored
+}
+
+/// [`restore`], holding the window lock `ours`.
+async fn restoring<F: Fs>(fs: &F, from: &Outside, ours: &RelPath) -> Result<usize, String> {
     let failed = |e: std::io::Error| e.to_string();
     let mut source = super::outside_source(from).map_err(|e| e.to_string())?;
     let resumed = opening(fs).await.map_err(failed)?;
     if !resumed {
         start_opening(fs).await?;
     }
-    let entries = match ready_to_open(fs, &mut source, resumed).await {
+    let entries = match ready_to_open(fs, &mut source, resumed, ours).await {
         Ok(entries) => entries,
         Err(why) if resumed => return Err(why),
         Err(why) => {
@@ -251,9 +261,10 @@ async fn ready_to_open<F: Fs>(
     fs: &F,
     source: &mut impl FileSource,
     resumed: bool,
+    ours: &RelPath,
 ) -> Result<Vec<Restored>, String> {
     let failed = |e: std::io::Error| e.to_string();
-    match other_window(fs).await {
+    match other_window(fs, ours).await {
         Ok(false) => {}
         Ok(true) => {
             return Err(

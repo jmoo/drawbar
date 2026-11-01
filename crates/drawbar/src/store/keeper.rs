@@ -2540,6 +2540,57 @@ mod tests {
         assert_eq!(to.read("theirs.ne5p"), b"theirs");
     }
 
+    /// Storage that, as the copy opened through it writes its first file, opens `other`'s
+    /// copy into the same library from another window, and keeps how that went.
+    struct Racing {
+        fs: Counted<Blocking>,
+        other: std::cell::RefCell<Option<(Counted<Blocking>, std::path::PathBuf)>>,
+        raced: std::cell::RefCell<Option<Result<usize, String>>>,
+    }
+
+    impl Fs for Racing {
+        fn capabilities(&self, root: Root) -> toshokan::io::Capabilities {
+            self.fs.capabilities(root)
+        }
+
+        async fn perform(&self, io: toshokan::Io) -> toshokan::io::IoResult {
+            let entry = matches!(&io, toshokan::Io::Create { path, .. }
+                if path.as_str() != super::super::copy::OPENING);
+            let other = entry.then(|| self.other.borrow_mut().take()).flatten();
+            if let Some((other, copy)) = other {
+                let raced = super::super::copy::restore(&other, &copy).await;
+                *self.raced.borrow_mut() = Some(raced);
+            }
+            self.fs.perform(io).await
+        }
+    }
+
+    /// A copy opened while another window opens one into the same library is refused,
+    /// and the first opens alone.
+    #[test]
+    fn a_copy_is_not_opened_while_another_window_opens_one() {
+        let from = Temp::new();
+        fs::write(from.at("a.ne5p"), b"a").unwrap();
+        let (_saved, copy) = saved(&from);
+        let other = Temp::new();
+        fs::write(other.at("b.ne5p"), b"b").unwrap();
+        let (_other_saved, other_copy) = saved(&other);
+        let to = Temp::new();
+        let (fs, _) = unopened(&to).unopened.take().unwrap();
+        let (second, _) = unopened(&to).unopened.take().unwrap();
+        let racing = Racing {
+            fs,
+            other: std::cell::RefCell::new(Some((second, other_copy))),
+            raced: std::cell::RefCell::default(),
+        };
+        let restored = nord_usb::block_on(super::super::copy::restore(&racing, &copy));
+        assert_eq!(restored, Ok(1));
+        let raced = racing.raced.take().expect("the second copy was tried");
+        let why = raced.expect_err("the second copy is refused");
+        assert!(why.contains("another tab or window"), "{why}");
+        assert!(!to.at("b.ne5p").exists(), "the second copy wrote nothing");
+    }
+
     /// A save of `name`, as an asset new to the library.
     fn new_file(name: &str) -> Cmd {
         Cmd::Intent(Intent::Save {
