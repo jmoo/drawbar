@@ -3885,7 +3885,8 @@ fn identities_a_failed_write_lost_are_kept_by_the_next_scan<F: Facade>() {
     create(&mut a, "song.npno", b"song");
     move_outside(&folder, "song.npno", "tune.npno");
     fail(&probe, local_writes(&["identities.json.next"]));
-    assert!(a.rescan().is_err(), "the identities cannot be kept");
+    a.rescan()
+        .expect("identities the local root cannot keep fail no scan");
     heal(&probe);
     a.rescan().unwrap();
     let kept = local_file(&here, "identities.json").expect("kept by the next scan");

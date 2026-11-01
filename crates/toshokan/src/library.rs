@@ -1833,7 +1833,7 @@ fn walked<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
             known.unlisted = unlisted;
             known.behind.remove(&Lag::Scan);
             known.rebind(scan);
-            remember(library, read).then(|(library, kept)| Flow::Done(kept.map(|()| library)))
+            remember(library, read)
         })
 }
 
@@ -1848,20 +1848,19 @@ fn listing(scan: &Scan) -> Arc<BTreeMap<RelPath, Listed>> {
 }
 
 /// Keeps in the local root the identities [`Library::remembering`] gives, so a
-/// later open need not read them again. Returns the library with how it went.
-fn remember<'a, L: BorrowMut<Library> + 'a>(
-    library: L,
-    read: Vec<RelPath>,
-) -> Flow<'a, (L, Result<()>)> {
+/// later open need not read them again. Where that fails, the next scan keeps
+/// them: they are derived, and another instance of the install may be replacing
+/// them at once.
+fn remember<'a, L: BorrowMut<Library> + 'a>(library: L, read: Vec<RelPath>) -> Fallible<'a, L> {
     let Some(remembered) = library.borrow().remembering(read) else {
-        return Flow::Done((library, Ok(())));
+        return ok(library);
     };
     let bytes = remembered.identities();
     let mut library = library;
     library.borrow_mut().remembered = remembered;
     flow::replace(Root::Local, Layout::identities(), bytes).then(move |kept| {
         library.borrow_mut().unkept = kept.is_err();
-        Flow::Done((library, kept))
+        ok(library)
     })
 }
 
@@ -1908,7 +1907,7 @@ fn rebind_logged<'a>(
         identified.then(move |scanned| match scanned {
             Ok((scan, read)) => {
                 library.rebind(scan);
-                remember(library, read).then(|(library, _)| ok(library))
+                remember(library, read)
             }
             Err(error) => unscanned(library, unsure, error),
         })
