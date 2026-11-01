@@ -246,8 +246,10 @@ bring back any you deleted.
 ## If something goes wrong
 
 - **Read-only.** drawbar cannot write the library folder, a newer drawbar has
-  written its hidden folder, or drawbar could not finish a change, as when
-  another program put a file where a save was going. Hover the library's name
+  written its hidden folder, drawbar could not finish a change, as when
+  another program put a file where a save was going, or the library folder does
+  not make sure a change is kept, as on some network and USB drives: move such a
+  library to a folder on a local disk. Hover the library's name
   for the reason and what to do, then choose the library in **File ▸ Open recent
   library** to open it again. Unsaved edits are still kept, but new sounds,
   moves and deletions in a read-only library are held in memory only, and are

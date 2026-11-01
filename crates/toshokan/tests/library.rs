@@ -619,6 +619,7 @@ through_both!(
     an_append_whose_reply_was_lost_stands_and_the_next_write_takes_a_new_writer,
     a_new_segment_whose_reply_was_lost_stands_and_the_next_write_takes_a_new_writer,
     writers_that_retire_over_lost_writes_leave_their_trash_empty,
+    a_folder_that_never_syncs_a_directory_turns_read_only_after_one_new_writer,
     a_spent_record_is_reported_only_where_its_entry_has_not_arrived,
     a_settled_record_is_removed_and_logged_once,
     identities_a_failed_write_lost_are_kept_by_the_next_scan,
@@ -3529,6 +3530,43 @@ fn writers_that_retire_over_lost_writes_leave_their_trash_empty<F: Facade>() {
         a.close().unwrap();
     }
     assert_eq!(retired.len(), SESSIONS as usize);
+}
+
+/// Where the folder never makes a directory durable, the writer whose new segment
+/// could not be synced retires, and the writer that takes over cannot be made
+/// durable either: the library turns read-only rather than start a writer at every
+/// commit.
+fn a_folder_that_never_syncs_a_directory_turns_read_only_after_one_new_writer<F: Facade>() {
+    if !FOLDER.get().fsync {
+        return;
+    }
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    a.close().unwrap();
+    let writers = || {
+        let dirs = folder.directories(Root::Folder).into_iter();
+        dirs.filter(|dir| dir.parent() == Some(layout().writers()))
+            .count()
+    };
+    let probe = Probe::new(&here);
+    let (mut a, _) = F::open(probe.clone(), env("a", 2, &clock)).unwrap();
+    let dirs = folder.clone();
+    fail(&probe, move |io| {
+        let directory = dirs.directories(Root::Folder).contains(io.path());
+        matches!(io, Io::Sync { .. }) && io.root() == Root::Folder && directory
+    });
+    let mut results = Vec::new();
+    for n in 0..8 {
+        results.push(a.commit("Tag", |i| i.add(song, TAGS, n.to_string())));
+    }
+    assert_eq!(writers(), 2, "one new writer: {results:?}");
+    assert!(
+        matches!(results.last(), Some(Err(Error::ReadOnly(Why::NotDurable)))),
+        "{results:?}"
+    );
 }
 
 fn a_copied_move_whose_source_removal_fails_is_finished_by_the_next_write<F: Facade>() {

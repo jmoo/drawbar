@@ -236,8 +236,9 @@ fn steps<L: Lib<Machine>>(
         retired = writer.is_some() && library.writer_id() != writer;
         match wrote {
             Ok(_) => {}
-            // Only a settle the second fault failed may leave the session read-only.
-            Err(Error::ReadOnly(Why::Unfinished { .. })) if faulted => {}
+            // Only a second fault may leave the session read-only: one that failed a
+            // settle, or a write of the writer that took over from one that landed.
+            Err(Error::ReadOnly(Why::Unfinished { .. } | Why::NotDurable)) if faulted => {}
             Err(e) => return Err(format!("the next write: {e}")),
         }
         library.close().map_err(|e| format!("closing: {e}"))?;

@@ -62,6 +62,11 @@ pub enum Why {
     /// reading there is.
     #[error("this writer's clock is exhausted")]
     ClockExhausted,
+    /// A write the folder reported failed reached it all the same, so the writer
+    /// stopped, and a write of the writer that took over failed too: every commit
+    /// would start another writer. Opening the library again lets it write.
+    #[error("the folder does not make writes durable")]
+    NotDurable,
     /// A change this writer began stopped where the folder refused the rest at
     /// `path`. It stays open, and opening the library again tries the rest again.
     #[error("{label:?} could not be finished: {path}: {error}")]

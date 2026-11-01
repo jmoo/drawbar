@@ -554,11 +554,14 @@ entry's line, and only then reads files whole. If no file holds it, the writer
 writes nothing and stops: a new writer takes over from the next write. A writer
 whose write failed, or whose sync of it failed, checks the file it wrote before
 anything else of its next write is carried out; if the first entry of the write
-landed whole, it stops in the same way, and the entries that landed stand. After
-the append is synced it stats the segment and writes `head.json`, before the
-commit returns. An append that fails leaves the segment without a seal marker
-and appends nothing more to it, so nothing follows a torn line or an entry that
-may not be durable.
+landed whole, it stops in the same way, and the entries that landed stand. Once
+one writer of an instance stopped so, a failed write of a writer that took over,
+its creation included, turns the library read-only until it opens again
+(`Why::NotDurable`): on a folder that makes no write durable, each commit would
+otherwise start another writer. After the append is synced it stats the segment
+and writes `head.json`, before the commit returns. An append that fails leaves
+the segment without a seal marker and appends nothing more to it, so nothing
+follows a torn line or an entry that may not be durable.
 
 The entries are then durable, and the commit succeeds whatever fails after them
 (see Intents). A `head.json` that cannot be written lags: the instance writes it

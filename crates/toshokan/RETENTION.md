@@ -375,7 +375,10 @@ Neither is something the protocol does.
 A writer continues only if its recorded head is its tip or placed after it, and
 the snapshot's `genesis` is its genesis; otherwise it retires. A writer that
 retires while its instance runs, other than over a fork, empties its trash
-first, so retiring again and again strands no trash.
+first, so retiring again and again strands no trash. After one such retirement
+over a write that landed though it was reported failed, a failed write of the
+next writer turns the library read-only rather than retire it too, so a folder
+that makes no write durable retires at most one writer per open.
 
 An open pending record's `prev` is its writer's last entry, so it is always held.
 A record whose `prev` is followed, or numbered below a tip's head, is spent or

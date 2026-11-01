@@ -56,6 +56,10 @@ pub struct Library {
     reader: Reader,
     /// `None` until the first write, and again after this writer had to stop.
     writer: Option<Writer>,
+    /// Whether a writer of this instance stopped as a write the folder reported
+    /// failed reached it all the same: a failed write of a later one turns the
+    /// library read-only, as every commit would otherwise start another writer.
+    landed: bool,
     /// The latest clock reading seen or written.
     clock: Hlc,
     /// This writer's interrupted effects, settled before its next write is planned.
@@ -242,6 +246,7 @@ impl Library {
             mode: Mode::Writable,
             reader,
             writer,
+            landed: false,
             clock: Hlc::ZERO,
             unsettled: Vec::new(),
             snapshot_too_long: false,
@@ -1113,6 +1118,16 @@ impl Library {
         let own = self.writer.as_ref().map(Writer::id)?;
         let placed = self.reader.derived().writers.get(&own)?;
         placed.fork.map(|_| own)
+    }
+
+    /// `error`, or, where a writer of this instance stopped as a write landed and
+    /// `error` is a failed write of a later one, why the library is now read-only.
+    fn failed_write(&mut self, error: Error) -> Error {
+        if !self.landed || !matches!(error, Error::Io { .. }) {
+            return error;
+        }
+        self.mode = Mode::ReadOnly(Why::NotDurable);
+        Error::ReadOnly(Why::NotDurable)
     }
 
     /// Binds again where the facts or the scan changed since the last binding.
@@ -2074,12 +2089,13 @@ fn ensure_writer<'a>(
         };
         let segment = library.env.segment_name();
         let create = Writer::create(library.layout.clone(), id, segment, label, at);
-        flow::run(create).and_then(move |writer| {
-            writer.stamp().then(move |written| {
+        flow::run(create).then(move |created| match created {
+            Ok(writer) => writer.stamp().then(move |written| {
                 library.writer = Some(writer);
                 library.absorb_own(&[genesis], written);
                 ok(library)
-            })
+            }),
+            Err(error) => Flow::Done(Err(library.failed_write(error))),
         })
     })
 }
@@ -2214,6 +2230,7 @@ fn stop_writing(library: &mut Library, why: Option<Rekey>) -> Flow<'_, (&mut Lib
     };
     library.history = History::default();
     library.behind.remove(&Lag::Head);
+    library.landed |= why == Some(Rekey::Landed);
     let emptied = match why == Some(Rekey::Forked) || library.writable().is_err() {
         true => Flow::Done(library),
         false => empty_retiring(library, writer.id()),
@@ -2406,7 +2423,10 @@ fn appending<'a>(
             }
             Err(error @ Error::Rekey { why, .. }) => stop_writing(library, Some(why))
                 .then(move |(library, stopped)| Flow::Done((library, stopped.and(Err(error))))),
-            Err(error) => Flow::Done((library, Err(error))),
+            Err(error) => {
+                let failed = library.failed_write(error);
+                Flow::Done((library, Err(failed)))
+            }
         }
     })
 }

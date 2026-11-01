@@ -217,7 +217,10 @@ the folder holds a newer layout of the hidden folder beside this one. What may
 change between versions without that, and what may not, is in
 [Compatibility](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#compatibility). It turns read-only until it is
 opened again when a change it began cannot be finished, as when another program
-put a file where the change puts one; opening it again tries once more. Another
+put a file where the change puts one; opening it again tries once more. It also
+turns read-only until it is opened again when its folder keeps failing to make a
+write durable: once a write reported as failed landed all the same, and the
+writer that took over failed to write too. Another
 drawbar on the folder never makes it read-only. Changes in a read-only library
 are held in memory only, except unsaved edits after a change could not be
 finished, which this install's own state still keeps.

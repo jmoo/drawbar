@@ -533,7 +533,8 @@ impl<F: Fs> Keeper<F> {
                 why @ (Why::NewerOwnHistory { .. }
                 | Why::NewerLayout { .. }
                 | Why::FolderNotWritable
-                | Why::ClockExhausted),
+                | Why::ClockExhausted
+                | Why::NotDurable),
             ) => Err(Unwritable::ReadOnly(read_only(why))),
         };
         self.told_read_only = writable.is_err();
@@ -2066,6 +2067,9 @@ fn read_only(why: &Why) -> String {
         Why::ClockExhausted => {
             "this computer's clock reads a time drawbar cannot record".to_string()
         }
+        Why::NotDurable => "the library folder cannot make sure a change is kept; move the \
+                            library to a folder on a local disk to change it"
+            .to_string(),
         Why::Unfinished { label, path, error } => unfinished(label, path, error),
     }
 }
@@ -2621,6 +2625,68 @@ mod tests {
                 io => self.0.perform(io).await,
             }
         }
+    }
+
+    /// Storage whose syncs in the library folder fail once `failing` is set.
+    struct Unsynced(Counted<Blocking>, Rc<std::cell::Cell<bool>>);
+
+    impl Fs for Unsynced {
+        fn capabilities(&self, root: Root) -> toshokan::io::Capabilities {
+            self.0.capabilities(root)
+        }
+
+        async fn perform(&self, io: toshokan::Io) -> toshokan::io::IoResult {
+            match io {
+                toshokan::Io::Sync {
+                    root: Root::Folder, ..
+                } if self.1.get() => Err(IoError::Other("no syncs here".into())),
+                io => self.0.perform(io).await,
+            }
+        }
+    }
+
+    /// Where the library folder never makes a change durable, the library turns
+    /// read-only once a second history of drawbar's fails, and says to move it.
+    #[test]
+    fn a_folder_that_keeps_no_change_turns_read_only_and_says_to_move_the_library() {
+        let root = Temp::new();
+        fs::write(root.at("Grand.ne5p"), b"grand").unwrap();
+        let mut native = native::keeper(
+            &root.0,
+            &root.local(),
+            Arc::default(),
+            Box::new(SystemClock),
+        );
+        let (fs, env) = native.unopened.take().unwrap();
+        let failing = Rc::new(std::cell::Cell::new(false));
+        let mut keeper = super::Keeper::new(Unsynced(fs, Rc::clone(&failing)), env);
+        let mut answers = Vec::new();
+        let mut run = |keeper: &mut super::Keeper<Unsynced>, cmd| {
+            nord_usb::block_on(keeper.run(cmd, &mut |event| answers.push(event)));
+        };
+        let tag = |name: &str| {
+            Cmd::Intent(Intent::Tag {
+                files: vec![Key::File(path("Grand.ne5p"))],
+                name: name.into(),
+                make: true,
+            })
+        };
+        run(&mut keeper, Cmd::Open);
+        run(&mut keeper, Cmd::Rescan);
+        run(&mut keeper, tag("Sunday"));
+        failing.set(true);
+        for n in 0..4 {
+            run(&mut keeper, tag(&format!("Monday {n}")));
+        }
+        let told: Vec<&String> = answers
+            .iter()
+            .filter_map(|event| match event {
+                Event::ReadOnly(why) => Some(why),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(told.len(), 1, "{answers:?}");
+        assert!(told[0].contains("move the library to a folder on a local disk"));
     }
 
     #[test]
