@@ -138,54 +138,80 @@ impl Executor {
 
     /// Takes `root`, toshokan's root in the folder, whose directories are never
     /// removed or renamed: their handles are kept from request to request.
-    pub fn own(&self, root: &str) {
-        if let Ok(root) = RelPath::new(root) {
-            *self.folder.kept.borrow_mut() = Some(root);
-            self.folder.found.borrow_mut().clear();
-        }
+    pub fn own(&self, root: &RelPath) {
+        *self.folder.kept.borrow_mut() = Some(root.clone());
+        self.folder.found.borrow_mut().clear();
     }
 
     pub async fn perform(&self, io: Io) -> IoResult {
         let tree = self.tree(io.root());
-        let result = self.request(io).await;
-        // A kept handle to a directory removed from outside fails each request
-        // through it; the next request finds the path again.
+        let result = match self.land(&io).await {
+            Ok(()) => self.attempt(tree, &io).await,
+            Err(error) => Err(error),
+        };
+        // A kept handle may fail otherwise than as not found; the next request
+        // finds the path again.
         if let Err(IoError::Other(_)) = result {
             tree.found.borrow_mut().clear();
         }
         result
     }
 
-    async fn request(&self, io: Io) -> IoResult {
-        let open = self.filling.take();
-        match open {
+    /// Lands the stream filling a file unless `io` keeps it open.
+    async fn land(&self, io: &Io) -> Result<(), IoError> {
+        match self.filling.take() {
             Some(filling) if io.keeps_open(filling.root, &filling.path) => {
                 *self.filling.borrow_mut() = Some(filling);
+                Ok(())
             }
-            Some(filling) => land(filling).await?,
-            None => {}
+            Some(filling) => land(filling).await,
+            None => Ok(()),
         }
+    }
+
+    /// Performs `io`, and once more from the top directory when it found
+    /// nothing through a kept handle: a directory removed from outside, even one
+    /// made again since, holds nothing through its old handle.
+    async fn attempt(&self, tree: &Tree, io: &Io) -> IoResult {
+        let kept = tree.through_found(io) && !self.continues_filling(io);
+        let result = self.request(io).await;
+        if !kept || !found_nothing(&result) {
+            return result;
+        }
+        tree.found.borrow_mut().clear();
+        self.request(io).await
+    }
+
+    /// Whether `io` writes on through the stream already filling its file, which
+    /// another attempt would not see.
+    fn continues_filling(&self, io: &Io) -> bool {
+        let filling = self.filling.borrow();
+        let open = filling.as_ref();
+        matches!(io, Io::Write { .. }) && open.is_some_and(|f| io.keeps_open(f.root, &f.path))
+    }
+
+    async fn request(&self, io: &Io) -> IoResult {
         let done = |()| Reply::Done;
         match io {
-            Io::List { root, dir } => self.tree(root).list(&dir).await.map(Reply::Listed),
-            Io::Stat { root, path } => self.tree(root).stat(&path).await.map(Reply::Stat),
+            Io::List { root, dir } => self.tree(*root).list(dir).await.map(Reply::Listed),
+            Io::Stat { root, path } => self.tree(*root).stat(path).await.map(Reply::Stat),
             Io::ListStat { root, dir } => {
-                let listed = self.tree(root).list_stat(&dir).await;
+                let listed = self.tree(*root).list_stat(dir).await;
                 listed.map(Reply::ListedStat)
             }
             Io::Read { root, path, range } => {
-                self.tree(root).read(&path, range).await.map(Reply::Bytes)
+                self.tree(*root).read(path, *range).await.map(Reply::Bytes)
             }
             Io::ReadMany { root, reads } => {
-                let read = self.tree(root).read_many(&reads).await;
+                let read = self.tree(*root).read_many(reads).await;
                 Ok(Reply::ReadMany(read))
             }
             Io::Create { root, path, bytes } => {
-                self.tree(root).create(&path, &bytes).await.map(done)
+                self.tree(*root).create(path, bytes).await.map(done)
             }
             Io::Append { root, path, bytes } => {
-                let tree = self.tree(root);
-                tree.write(&tree.file(&path).await?, None, &bytes)
+                let tree = self.tree(*root);
+                tree.write(&tree.file(path).await?, None, bytes)
                     .await
                     .map(done)
             }
@@ -194,14 +220,17 @@ impl Executor {
                 path,
                 offset,
                 bytes,
-            } => self.write(root, path, offset, &bytes).await.map(done),
-            Io::Rename { root, from, to } => self.tree(root).rename(&from, &to).await.map(done),
-            Io::Remove { root, path } => self.tree(root).remove(&path).await.map(done),
-            Io::RemoveDir { root, path } => self.tree(root).remove_dir(&path).await.map(done),
-            Io::MakeDir { root, path } => self.tree(root).make_dir(&path).await.map(done),
-            Io::Sync { root, path } => self.tree(root).sync(&path).await.map(done),
-            Io::Lock { name } => self.locks.lock(&name).await.map(Reply::Lock),
-            Io::Unlock { name } => self.locks.unlock(&name).await.map(|()| Reply::Done),
+            } => self
+                .write(*root, path.clone(), *offset, bytes)
+                .await
+                .map(done),
+            Io::Rename { root, from, to } => self.tree(*root).rename(from, to).await.map(done),
+            Io::Remove { root, path } => self.tree(*root).remove(path).await.map(done),
+            Io::RemoveDir { root, path } => self.tree(*root).remove_dir(path).await.map(done),
+            Io::MakeDir { root, path } => self.tree(*root).make_dir(path).await.map(done),
+            Io::Sync { root, path } => self.tree(*root).sync(path).await.map(done),
+            Io::Lock { name } => self.locks.lock(name).await.map(Reply::Lock),
+            Io::Unlock { name } => self.locks.unlock(name).await.map(|()| Reply::Done),
             Io::Fill { .. } => Err(IoError::Other(FILLED_BY_DRIVERS.into())),
         }
     }
@@ -246,6 +275,19 @@ impl Fs for Executor {
     async fn perform(&self, io: Io) -> IoResult {
         Executor::perform(self, io).await
     }
+
+    fn own(&self, root: &RelPath) {
+        Executor::own(self, root);
+    }
+}
+
+/// Whether `result` says something was not there.
+fn found_nothing(result: &IoResult) -> bool {
+    match result {
+        Err(IoError::NotFound) | Ok(Reply::Stat(None)) => true,
+        Ok(Reply::ReadMany(reads)) => reads.contains(&Err(IoError::NotFound)),
+        _ => false,
+    }
 }
 
 impl Tree {
@@ -265,29 +307,37 @@ impl Tree {
         kept.as_ref().is_some_and(|kept| path.starts_with(kept))
     }
 
+    /// Whether a request for `io` may start from a kept handle.
+    fn through_found(&self, io: &Io) -> bool {
+        let found = self.found.borrow();
+        let through = |path: &RelPath| {
+            std::iter::successors(Some(path.clone()), RelPath::parent)
+                .any(|dir| found.contains_key(&dir))
+        };
+        match io {
+            Io::Rename { from, to, .. } => through(from) || through(to),
+            Io::ReadMany { reads, .. } => reads.iter().any(|(path, _)| through(path)),
+            _ => through(io.path()),
+        }
+    }
+
     /// The directory at `path`, found from the nearest directory kept above it.
     async fn dir(&self, path: &RelPath) -> Result<Dir, IoError> {
         self.walk(path, None).await
     }
 
     /// The directory at `path`, each directory on the way made where missing
-    /// when `make` says so.
+    /// when `make` says so. Making starts from the top directory, since a kept
+    /// handle to a directory removed from outside makes nothing under it.
     async fn walk(
         &self,
         path: &RelPath,
         make: Option<&FileSystemGetDirectoryOptions>,
     ) -> Result<Dir, IoError> {
         let names: Vec<&str> = path.components().collect();
-        let mut at = names.len();
-        let mut dir = loop {
-            let above = RelPath::new(&names[..at].join("/")).unwrap_or_default();
-            if let Some(found) = self.found.borrow().get(&above) {
-                break found.clone();
-            }
-            if at == 0 {
-                break self.top.clone();
-            }
-            at -= 1;
+        let (at, mut dir) = match make {
+            Some(_) => (0, self.top.clone()),
+            None => self.nearest(&names),
         };
         let mut walked = RelPath::new(&names[..at].join("/")).unwrap_or_default();
         for name in &names[at..] {
@@ -307,6 +357,19 @@ impl Tree {
             }
         }
         Ok(dir)
+    }
+
+    /// The nearest directory kept at or above the one `names` lead to, and how
+    /// many of `names` lead to it.
+    fn nearest(&self, names: &[&str]) -> (usize, Dir) {
+        let found = self.found.borrow();
+        for at in (1..=names.len()).rev() {
+            let above = RelPath::new(&names[..at].join("/")).unwrap_or_default();
+            if let Some(dir) = found.get(&above) {
+                return (at, dir.clone());
+            }
+        }
+        (0, self.top.clone())
     }
 
     /// The directory `path` would live in, and its name there.

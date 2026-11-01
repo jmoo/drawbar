@@ -352,3 +352,80 @@ async fn a_refresh_reads_no_library_file_and_a_rescan_reads_them_all() {
         [path("copy.npno")]
     );
 }
+
+async fn act(fs: &Executor, io: Io) -> Reply {
+    fs.perform(io).await.unwrap()
+}
+
+#[wasm_bindgen_test]
+async fn a_directory_removed_and_made_again_outside_is_found_again() {
+    use toshokan::asynch::Fs;
+    let place = Place::new(Kind::Private);
+    let at = |install: &str| path(&format!("{}/{install}", place.run));
+    let kept = Executor::new(place.folder().await, &at("one"))
+        .await
+        .unwrap();
+    let outside = Executor::new(place.folder().await, &at("two"))
+        .await
+        .unwrap();
+    Fs::own(&kept, &path(".t"));
+    let make = |dir: &str| Io::MakeDir {
+        root: Root::Folder,
+        path: path(dir),
+    };
+    let create = |file: &str| Io::Create {
+        root: Root::Folder,
+        path: path(file),
+        bytes: b"x".to_vec(),
+    };
+    let stat = |file: &str| Io::Stat {
+        root: Root::Folder,
+        path: path(file),
+    };
+    act(&kept, make(".t/w/d")).await;
+    act(&kept, create(".t/w/d/a")).await;
+    assert!(matches!(
+        act(&kept, stat(".t/w/d/a")).await,
+        Reply::Stat(Some(_))
+    ));
+    for io in [
+        Io::Remove {
+            root: Root::Folder,
+            path: path(".t/w/d/a"),
+        },
+        Io::RemoveDir {
+            root: Root::Folder,
+            path: path(".t/w/d"),
+        },
+        make(".t/w/d"),
+        create(".t/w/d/b"),
+    ] {
+        act(&outside, io).await;
+    }
+    assert!(
+        matches!(act(&kept, stat(".t/w/d/b")).await, Reply::Stat(Some(_))),
+        "a file made outside under the directory made again"
+    );
+    act(
+        &outside,
+        Io::Remove {
+            root: Root::Folder,
+            path: path(".t/w/d/b"),
+        },
+    )
+    .await;
+    act(
+        &outside,
+        Io::RemoveDir {
+            root: Root::Folder,
+            path: path(".t/w/d"),
+        },
+    )
+    .await;
+    act(&kept, make(".t/w/d")).await;
+    act(&kept, create(".t/w/d/c")).await;
+    assert!(
+        matches!(act(&outside, stat(".t/w/d/c")).await, Reply::Stat(Some(_))),
+        "a file made in the directory made again after its removal"
+    );
+}
