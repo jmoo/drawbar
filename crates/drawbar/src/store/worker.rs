@@ -279,8 +279,10 @@ impl Worker {
             _hear: hear,
             _fail: fail,
         };
-        posted.map_err(js)?;
-        let ready = JsFuture::from(started).await;
+        let ready = match posted {
+            Ok(()) => JsFuture::from(started).await,
+            Err(error) => Err(error),
+        };
         let _ = Url::revoke_object_url(&url);
         let ready = ready.map_err(js)?;
         match (field(&ready, "failed"), field(&ready, "outdated")) {

@@ -393,9 +393,15 @@ async fn contents(source: &mut impl FileSource) -> Result<Vec<Restored>, String>
             zip::end64(&record).map_err(refused)?
         }
     };
-    if directory.count > MOST_ENTRIES || directory.len > MOST_DIRECTORY {
+    if directory.count > MOST_ENTRIES {
         return Err(format!(
             "it holds more than the {MOST_ENTRIES} files drawbar opens from a copy"
+        ));
+    }
+    if directory.len > MOST_DIRECTORY {
+        return Err(format!(
+            "its list of files is longer than the {} MiB drawbar reads from a copy",
+            MOST_DIRECTORY >> 20
         ));
     }
     let listed = read(source, directory.offset, directory.len).await?;
@@ -711,5 +717,25 @@ mod tests {
         let refused = refused(Unread::Compressed);
         assert!(refused.contains("compressed"), "{refused}");
         assert!(refused.contains(crate::menu::OPEN_LIBRARY), "{refused}");
+    }
+
+    /// An end of central directory record, as the ZIP format lays it out, naming one
+    /// entry in a directory `len` bytes long at offset 0.
+    fn end_of_one(len: u32) -> Vec<u8> {
+        let mut end = 0x0605_4b50_u32.to_le_bytes().to_vec();
+        for half in [0_u16, 0, 1, 1] {
+            end.extend(half.to_le_bytes());
+        }
+        end.extend(len.to_le_bytes());
+        end.extend([0; 6]);
+        end
+    }
+
+    #[test]
+    fn a_copy_with_too_long_a_list_of_files_is_refused_for_its_length() {
+        let len = u32::try_from(MOST_DIRECTORY + 1).unwrap();
+        let archive = end_of_one(len);
+        let refused = nord_usb::block_on(contents(&mut &archive[..])).unwrap_err();
+        assert!(refused.contains("list of files is longer"), "{refused}");
     }
 }
