@@ -639,8 +639,6 @@ change nothing; a gap only while it would change something, and unplaced lines
 while they would and no dismissal names them exactly. An unplaced line's write
 to a field its writer's merged history writes at the line's number or above
 changes nothing: that history already decided the field.
-A gap holding only
-`more` entries is not shown: their intent, which names them, has not arrived.
 
 A writer forks when two instances write as it: a copied local root, a virtual
 machine resumed twice, a restored backup of a local root. Each fork point is
