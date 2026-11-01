@@ -3,7 +3,8 @@ name = "toshokan"
 categories = ["data-structures", "filesystem", "wasm"]
 description = "Keep what a file cannot say about itself beside the file, in a folder that syncs"
 edition.workspace = true
-rust-version.workspace = true
+# `File::try_lock`, which the writer lock takes.
+rust-version = "1.89"
 # The browser crash sweep and the TLA+ model run from a checkout.
 exclude = ["power-loss/", "spec/"]
 keywords = ["metadata", "offline-first", "sync", "synced-folder", "tags"]
