@@ -40,9 +40,9 @@ pub struct History {
     kept: BTreeMap<EntryHash, (Logged, Before)>,
     /// The entry of the latest intent, undo or redo.
     last: Option<EntryHash>,
-    /// The intents that joined entities, whose writes undo takes for another
-    /// writer's: they hold what the joined entity held.
-    joins: BTreeSet<EntryHash>,
+    /// The final intents, whose writes undo takes for another writer's: a join
+    /// holds what the joined entity held, a settlement what another writer did.
+    finals: BTreeSet<EntryHash>,
 }
 
 /// How an intent being committed enters this session's history.
@@ -53,8 +53,8 @@ pub enum Entering {
     Step,
     /// As the undo or redo of this entry.
     Reversing(EntryHash),
-    /// Not at all: it only joins entities.
-    Joining,
+    /// Not at all: it only joins entities, or settles another writer's record.
+    Final,
 }
 
 impl Entering {
@@ -63,7 +63,7 @@ impl Entering {
         let only_joins = plan.created.is_empty() && plan.facts.is_empty() && plan.files.is_empty();
         match plan.reverses {
             Some(entry) => Entering::Reversing(entry),
-            None if only_joins && !plan.joins.is_empty() => Entering::Joining,
+            None if only_joins && !plan.joins.is_empty() => Entering::Final,
             None => Entering::Step,
         }
     }
@@ -193,11 +193,11 @@ impl History {
     /// what `before` says it replaced. An intent reversing the latest done intent
     /// is its undo; one reversing the latest undo is a redo, which the next undo
     /// reverses. Any other intent starts a new item and ends every redo. An intent
-    /// that only dismisses runs or only joins entities is final, and is no item.
+    /// that only dismisses runs, or enters as [`Entering::Final`], is no item.
     pub fn push(&mut self, entry: &Entry, logged: Logged, entering: Entering, before: Before) {
         let reverses = match entering {
-            Entering::Joining => {
-                self.joins.insert(entry.hash());
+            Entering::Final => {
+                self.finals.insert(entry.hash());
                 return;
             }
             Entering::Step => None,
@@ -285,7 +285,7 @@ impl History {
         let (logged, before) = self.kept.get(latest).ok_or(Refusal::Nothing)?;
         let reversing = Reversing {
             writer,
-            joins: &self.joins,
+            finals: &self.finals,
             folded,
             before,
             displaced: &logged.displaced,
@@ -436,7 +436,7 @@ fn carried(
 
 struct Reversing<'a> {
     writer: WriterId,
-    joins: &'a BTreeSet<EntryHash>,
+    finals: &'a BTreeSet<EntryHash>,
     folded: &'a Folded,
     before: &'a Before,
     displaced: &'a [Displaced],
@@ -450,9 +450,9 @@ fn changed<V>(write: &Write<V>) -> Refusal {
 }
 
 impl Reversing<'_> {
-    /// Whether another writer made `write`, or this one made it joining an entity.
+    /// Whether another writer made `write`, or this one made it in a final intent.
     fn foreign<V>(&self, write: &Write<V>) -> bool {
-        write.by != self.writer || self.joins.contains(&write.entry)
+        write.by != self.writer || self.finals.contains(&write.entry)
     }
 
     /// Refuses unless every surviving existence write of `entity` is as `left`.

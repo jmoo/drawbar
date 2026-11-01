@@ -1073,8 +1073,9 @@ it ends when the instance closes. Each intent is kept with what it replaced, as
 the merged state showed it when it committed, and with where the binding found
 each file it changed or whose entity it deleted, so a file moved outside the app
 that no commit had pinned yet goes back where it was moved to. An intent that only
-dismisses runs or joins entities is final: it is not kept and leaves redo as it was,
-so an undo after it reverses the intent before it.
+dismisses runs or joins entities, or settles another writer's record, is final: it
+is not kept and leaves redo as it was, so an undo after it reverses the intent
+before it. Undo takes what a join or a settlement wrote for another writer's.
 
 - A register write is reversed by writing back the latest value it replaced,
   another writer's included; a clear where there was none.

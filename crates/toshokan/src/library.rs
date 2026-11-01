@@ -478,7 +478,8 @@ impl Library {
     /// effect open to settle again, and this writer's own record of them to settle
     /// at its next write. Finishing
     /// or rolling back a directory rename this folder cannot make is refused with
-    /// [`crate::Refusal::Unsupported`]; dismissing it is not.
+    /// [`crate::Refusal::Unsupported`]; dismissing it is not. A settlement is no
+    /// step of undo, and undo takes what it wrote for the other writer's.
     pub fn settle(&mut self, orphan: Orphan, how: Settlement) -> Task<'_, Result<Committed>> {
         if let Err(error) = self.writable() {
             return Task::ready(Err(error));
@@ -2018,7 +2019,7 @@ fn commit<'a>(
                 library,
                 Committed {
                     left: ended.left,
-                    undoable: committed.undoable && entering != Entering::Joining,
+                    undoable: committed.undoable && entering != Entering::Final,
                     ..committed
                 },
             ))
@@ -2783,7 +2784,7 @@ fn settle_orphan(
                     transact(
                         library,
                         logged,
-                        Entering::Step,
+                        Entering::Final,
                         effects,
                         Some(closing),
                         Vec::new(),
@@ -2794,7 +2795,10 @@ fn settle_orphan(
         )
         .and_then(move |(library, entries)| {
             library.show();
-            let committed = committed(&entries, Vec::new(), library.local());
+            let committed = Committed {
+                undoable: false,
+                ..committed(&entries, Vec::new(), library.local())
+            };
             library
                 .orphaned
                 .retain(|o| (o.writer, o.record) != (orphan.writer, orphan.record));

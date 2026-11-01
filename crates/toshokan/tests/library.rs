@@ -661,6 +661,7 @@ through_both!(
     a_folder_another_left_in_its_trash_is_rolled_back_by_another,
     a_refresh_reports_another_installs_unfinished_change_as_it_stands,
     a_settlement_after_a_refused_undo_is_no_undo_of_it,
+    settling_another_writers_change_is_no_step_of_undo,
     a_scan_of_every_file_reports_the_directories_it_listed,
     a_directory_made_and_filled_in_one_change_is_undone_in_one,
     directories_made_and_removed_around_tree_moves_undo_and_redo,
@@ -5075,6 +5076,30 @@ fn a_settlement_after_a_refused_undo_is_no_undo_of_it<F: Facade>() {
         "nothing to redo: {redone:?}"
     );
     assert_eq!(read(&folder, "b.wav").as_deref(), Some(b"a".as_slice()));
+}
+
+fn settling_another_writers_change_is_no_step_of_undo<F: Facade>() {
+    for how in [Settlement::Finished, Settlement::RolledBack] {
+        let folder = disk();
+        let clock = TestClock::at(1_000);
+        let (mut ours, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+        create(&mut ours, "song.npno", b"one");
+        let orphan = a_rename_left_by_another(&folder, &clock, &mut ours);
+        let settled = ours.settle(orphan, how).unwrap();
+        assert!(!settled.undoable, "{how:?}");
+        ours.undo().unwrap();
+        let history: Vec<(String, bool)> = ours
+            .history()
+            .into_iter()
+            .map(|item| (item.label, item.undone))
+            .collect();
+        assert_eq!(history, [("Import".into(), true)], "{how:?}");
+        assert_eq!(
+            read(&folder, "song.npno"),
+            None,
+            "{how:?}: the import is undone"
+        );
+    }
 }
 
 fn a_directory_made_and_filled_in_one_change_is_undone_in_one<F: Facade>() {
