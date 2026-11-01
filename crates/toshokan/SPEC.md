@@ -1036,7 +1036,8 @@ where it holds the start of the source's bytes, which the source still holds.
 An open record of any other writer may belong to a live writer elsewhere, or to
 this install's own writer from before its local root was lost; a reader cannot
 tell them apart. It reports the record, and settles it only when the user asks,
-as an intent of its own: to finish, it carries out the remaining steps, skipping
+or, for a record that is `ours` (see Layout), when the app asks without asking
+the user, as an intent of its own: to finish, it carries out the remaining steps, skipping
 a `to_trash` whose path holds nothing, and logs the facts the record planned and
 its file ops with the record's `replaces`; to
 roll back, it reverses the done ones, skipping a file it would trash that is not
