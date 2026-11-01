@@ -20,6 +20,15 @@ name = "drawbar"
 name = "drawbar"
 path = "src/main.rs"
 
+# A headless probe of a library folder, for checking that synced copies converge. The
+# app never enables it.
+[[example]]
+name = "sync_probe"
+required-features = ["sync-probe"]
+
+[features]
+sync-probe = []
+
 [dependencies]
 # glow (WebGL2 / OpenGL) makes a smaller wasm module than the default wgpu backend,
 # and every browser with WebUSB has WebGL2.
