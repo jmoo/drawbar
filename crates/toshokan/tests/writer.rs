@@ -817,6 +817,8 @@ enum Failure {
     /// The first line lands with half of the rest, and the write fails for want
     /// of space, as a browser's private file system can.
     Short,
+    /// Half of the first line lands, and the write fails for want of space.
+    Torn,
 }
 
 struct Failing {
@@ -830,18 +832,28 @@ impl toshokan::blocking::Backend for Failing {
     }
 
     fn perform(&mut self, io: Io) -> IoResult {
-        let short = |bytes: Vec<u8>| {
+        let cut = |failure, bytes: Vec<u8>| {
             let line = bytes.iter().position(|&b| b == b'\n').expect("a line") + 1;
-            bytes[..line + (bytes.len() - line) / 2].to_vec()
+            let len = match failure {
+                Failure::Torn => line / 2,
+                Failure::Short | Failure::Sync => line + (bytes.len() - line) / 2,
+            };
+            bytes[..len].to_vec()
         };
         let landed = match (self.next, io) {
             (Some(Failure::Sync), Io::Sync { .. }) => Ok(Reply::Done),
-            (Some(Failure::Short), Io::Append { root, path, bytes }) => {
-                let bytes = short(bytes);
+            (
+                Some(failure @ (Failure::Short | Failure::Torn)),
+                Io::Append { root, path, bytes },
+            ) => {
+                let bytes = cut(failure, bytes);
                 self.disk.perform(Io::Append { root, path, bytes })
             }
-            (Some(Failure::Short), Io::Create { root, path, bytes }) => {
-                let bytes = short(bytes);
+            (
+                Some(failure @ (Failure::Short | Failure::Torn)),
+                Io::Create { root, path, bytes },
+            ) => {
+                let bytes = cut(failure, bytes);
                 self.disk.perform(Io::Create { root, path, bytes })
             }
             (_, io) => return self.disk.perform(io),
@@ -878,6 +890,7 @@ fn appends_after(failure: Failure) {
         let landed = match failure {
             Failure::Sync => second.hash(),
             Failure::Short => first.hash(),
+            Failure::Torn => unreachable!("a torn first line lands no entry"),
         };
         backend.next = Some(failure);
         let kinds = vec![(Hlc::ZERO, intent()), (Hlc::ZERO, intent())];
@@ -915,6 +928,38 @@ fn a_writer_whose_sync_failed_stops_and_the_entries_it_wrote_stand() {
 #[test]
 fn a_write_cut_short_after_a_whole_line_stops_the_writer_and_the_line_stands() {
     appends_after(Failure::Short);
+}
+
+#[test]
+fn a_write_torn_inside_its_first_line_is_left_behind_and_the_chain_continues_past_it() {
+    for open in [false, true] {
+        let mut backend = Failing {
+            disk: MemDisk::new(),
+            next: None,
+        };
+        let mut writer = create(&mut backend.disk).unwrap();
+        if !open {
+            writer.leave();
+        }
+        let head = writer.head().hash;
+        backend.next = Some(Failure::Torn);
+        let one = || vec![(Hlc::ZERO, intent())];
+        let (writer, failed) = run(
+            &mut backend,
+            writer.append(one(), SegmentName::from_u128(9)),
+        );
+        assert!(failed.is_err(), "open {open}");
+        let (writer, next) = run(
+            &mut backend,
+            writer.append(one(), SegmentName::from_u128(10)),
+        );
+        let next = next.unwrap_or_else(|error| panic!("open {open}: {error}"))[0].hash();
+        let view = fresh(&backend.disk);
+        let log = &view.writers[&writer.id()];
+        assert_eq!(log.heads(), [next], "open {open}");
+        assert_eq!(log.predecessor(next), Some(head), "open {open}");
+        assert!(log.forks.is_empty(), "open {open}");
+    }
 }
 
 fn segment_paths(machine: &Machine, writer: WriterId) -> Vec<toshokan::RelPath> {
