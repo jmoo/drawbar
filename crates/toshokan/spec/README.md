@@ -6,7 +6,7 @@ layer that delivers each file to each reader independently and in any order.
 
 ```sh
 nix build .#nord.toshokan-spec       # small bounds, a few minutes; `nix flake check` runs it
-nix build .#nord.toshokan-spec-deep  # larger bounds, about 70 minutes on eight cores
+nix build .#nord.toshokan-spec-deep  # larger bounds, much longer
 ```
 
 This model follows the bounded retention of [RETENTION.md](../RETENTION.md):
@@ -18,9 +18,7 @@ constants it changes from a baseline, what it checks, and the build that runs
 it. To run one by hand, `nix build .#nord.toshokan-spec-configs`, which writes
 `Portable.tla` and every model's config to `result`, copy those to a writable
 directory, and there run `tlc -workers 8 -lncheck final -config Portable.cfg
-Portable.tla` under `nix shell nixpkgs#tlaplus18`. On an otherwise idle
-eight-core machine, `Deep` takes 20 to 25 minutes, `LivenessDeep` and `Sync` 10
-to 12 each, `PortableDeep` under 10, and every other model a few minutes.
+Portable.tla` under `nix shell nixpkgs#tlaplus18`.
 
 ## The protocol
 
@@ -102,6 +100,7 @@ roughly in order.
 
 | Property | Meaning |
 | --- | --- |
+| `AnchorsCertified` | Under `Certify`, a snapshot certifies its own anchor, and under `Carry` also the anchor of each earlier snapshot of its directory on its chain that the folder holds. |
 | `ChainOrder` | A reader never merges an entry without its predecessor. |
 | `NothingIgnored` | Every entry a reader sees is merged, held back and reported, shown as a run, or dismissed. A reader names no file, so this holds by construction. |
 | `ShownApart` | A reader never both merges and shows an entry. |
@@ -223,10 +222,10 @@ code compares contents where it would otherwise trust a length:
 - Just before deleting a segment, compaction confirms that it still has the
   length it read and ends with its seal marker (`tests/writer.rs`).
 
-What the model abstracts away is checked in Rust: the merge by
-`tests/facts.rs`, which compares every arrival order, split and compaction of
-bounded histories; file effects by `tests/crash.rs`; binding by the bounded
-search in `src/binding.rs`.
+What the model abstracts away is checked in Rust: the merge by `tests/facts.rs`
+and by `tests/retention`, which compares toshokan's merge of bounded histories,
+delivered in many orders and compacted, with an oracle's; file effects by
+`tests/crash.rs`; binding by the bounded search in `src/binding.rs`.
 
 ## What is abstracted away
 
