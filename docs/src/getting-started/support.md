@@ -48,8 +48,7 @@ can also open a folder on your computer as the library, and Brave can once
 `brave://flags/#file-system-access-api` is turned on. Outside Chrome, moving a
 file in that folder copies it, which takes longer for a large one. Firefox and
 Safari cannot open a folder. drawbar's tests run the library in Chromium and
-Firefox on every change, in Safari when the library changes, and in Edge before a
-release.
+Firefox on every change, and in Safari when the library changes.
 
 ## MIDI controllers
 
