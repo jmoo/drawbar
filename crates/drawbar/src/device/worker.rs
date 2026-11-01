@@ -472,8 +472,10 @@ async fn discard(backup: Option<Kept>, emit: &Emit) {
 
 /// Leave a backup where it is when the slot may have lost what it held, for the app to
 /// put in the library. Returns where it is, in words for the failure.
-fn rescue(at: Location, backup: Kept, emit: &Emit) -> String {
+async fn rescue(at: Location, backup: Kept, emit: &Emit) -> String {
     let place = backup.place();
+    // A lock a failed request leaves held ends with the rescue worker.
+    let _ = backup.leave().await;
     emit.send(DeviceEvent::Kept {
         at,
         place: place.clone(),
@@ -571,7 +573,7 @@ async fn put<T: Transport>(
                 (false, Some(backup)) => format!(
                     "{} may have been deleted: {cause}; {}",
                     shown(at),
-                    rescue(at, backup, emit)
+                    rescue(at, backup, emit).await
                 ),
                 (true, backup) => {
                     discard(backup, emit).await;
@@ -654,7 +656,7 @@ async fn put_back<T: Transport>(
             format!(
                 "{why} (restoring failed as well: {restore}); {}, and {}.",
                 aftermath(class, at),
-                rescue(at, backup, emit)
+                rescue(at, backup, emit).await
             )
         }
     }

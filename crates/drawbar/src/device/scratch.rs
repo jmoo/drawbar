@@ -7,7 +7,9 @@
 //! [partial](nord_usb::envelope::PARTIAL) name, which the next open deletes, and takes its
 //! own only once [`Kept::finish`] is called on it whole. One an interrupted write left
 //! behind may be the slot's only copy, and goes into the library
-//! ([`crate::store::Store::look_for_rescues`]).
+//! ([`crate::store::Store::look_for_rescues`]). In the browser every tab keeps its files
+//! in one folder, so a tab holds a lock on each file's name until it lets the file go,
+//! and no other tab deletes or takes in the file meanwhile.
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;

@@ -34,7 +34,7 @@ use web_sys::{
 };
 
 use serde::{Deserialize, Serialize};
-use toshokan::io::{Io, Reply, Root};
+use toshokan::io::{Io, Lock, Reply, Root};
 use toshokan::web::{CryptoRandom, DateClock, Executor, Folder};
 use toshokan::RelPath;
 
@@ -100,7 +100,8 @@ impl Role {
 
 /// One request of a worker started by [`Worker::rescues`], on the file of this name in
 /// its directory. [`Worker::rescue`] answers [`RescueIo::Free`] with whether no file has
-/// the name, and the others with `true` once done.
+/// the name, [`RescueIo::Lock`] with whether no other tab holds the name's lock, and the
+/// others with `true` once done.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum RescueIo {
     Free(String),
@@ -119,6 +120,10 @@ pub enum RescueIo {
         to: String,
     },
     Remove(String),
+    /// Hold the name's lock until [`RescueIo::Unlock`] or the worker ends, unless
+    /// another tab holds it: see [`toshokan::web::Locks`].
+    Lock(String),
+    Unlock(String),
 }
 
 /// Why [`Worker::run`] gives no answers to a command.
@@ -515,9 +520,12 @@ async fn rescue(fs: &Executor, io: RescueIo) -> Result<bool, String> {
             root,
             path: at(&name)?,
         },
+        RescueIo::Lock(name) => Io::Lock { name: at(&name)? },
+        RescueIo::Unlock(name) => Io::Unlock { name: at(&name)? },
     };
     match fs.perform(io).await.map_err(|e| e.to_string())? {
         Reply::Stat(found) => Ok(found.is_none()),
+        Reply::Lock(lock) => Ok(lock == Lock::Acquired),
         _ => Ok(true),
     }
 }

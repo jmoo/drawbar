@@ -55,23 +55,29 @@ impl Scratch {
     }
 
     /// A new file to be named `name`, never over one already there, under its partial
-    /// name until [`Kept::finish`].
+    /// name until [`Kept::finish`]. Every tab writes in one folder, so each holds the
+    /// lock of the name it gives a file until it lets the file go.
     pub async fn create(&self, name: &str) -> io::Result<Kept> {
         let dir = self.dir();
         let writer = self.writer(&dir).await?;
         for attempt in 0..NAMES {
             let named = numbered(name, attempt);
-            let leaf = partial(&named);
-            if !free(&writer, &named).await? || !free(&writer, &leaf).await? {
+            if !ask(&writer, RescueIo::Lock(named.clone())).await? {
                 continue;
             }
-            ask(&writer, RescueIo::Create(leaf.clone())).await?;
-            return Ok(Kept {
-                writer,
-                dir,
-                leaf,
+            let kept = Kept {
+                writer: writer.clone(),
+                dir: dir.clone(),
+                leaf: partial(&named),
                 named,
-            });
+                locked: true,
+            };
+            if !free(&writer, &kept.named).await? || !free(&writer, &kept.leaf).await? {
+                kept.leave().await?;
+                continue;
+            }
+            ask(&writer, RescueIo::Create(kept.leaf.clone())).await?;
+            return Ok(kept);
         }
         Err(all_taken(name))
     }
@@ -100,8 +106,11 @@ pub struct Kept {
     dir: RelPath,
     /// Its partial name until [`Kept::finish`], then its own.
     leaf: String,
-    /// The name [`Kept::finish`] gives it.
+    /// The name [`Kept::finish`] gives it, and of the lock that keeps another tab from
+    /// deleting or taking in the file.
     named: String,
+    /// Whether the lock is held.
+    locked: bool,
 }
 
 impl Kept {
@@ -147,9 +156,28 @@ impl Kept {
 
     /// Delete the file.
     pub async fn remove(self) -> io::Result<()> {
-        ask(&self.writer, RescueIo::Remove(self.leaf))
-            .await
-            .map(drop)
+        let removed = ask(&self.writer, RescueIo::Remove(self.leaf.clone())).await;
+        let left = self.leave().await;
+        removed.and(left).map(drop)
+    }
+
+    /// Leave the file where it is, for any tab to take in.
+    pub async fn leave(mut self) -> io::Result<()> {
+        self.locked = false;
+        let unlock = RescueIo::Unlock(self.named.clone());
+        ask(&self.writer, unlock).await.map(drop)
+    }
+}
+
+impl Drop for Kept {
+    fn drop(&mut self) {
+        if !self.locked {
+            return;
+        }
+        let (writer, unlock) = (self.writer.clone(), RescueIo::Unlock(self.named.clone()));
+        wasm_bindgen_futures::spawn_local(async move {
+            let _ = writer.rescue(unlock).await;
+        });
     }
 }
 

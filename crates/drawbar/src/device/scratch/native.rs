@@ -135,6 +135,11 @@ impl Kept {
         drop(self.file);
         std::fs::remove_file(&self.path)
     }
+
+    /// Leave the file where it is, for the library to take in.
+    pub async fn leave(self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 impl FileSink for Kept {

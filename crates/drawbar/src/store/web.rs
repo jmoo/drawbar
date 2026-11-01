@@ -606,11 +606,16 @@ async fn either<A: Future, B: Future>(a: A, b: B) -> Either<A::Output, B::Output
 
 /// The slots' former occupants kept in the `rescued` folder of the local root at
 /// `local`, by name. One still partial is never a slot's only copy, and is deleted.
+/// Every tab shares the folder, so a file whose name's lock another tab holds, as it
+/// writes the file, is let be.
 async fn rescues(local: &RelPath) -> Vec<Rescue> {
     let Ok(at) = local.join(super::RESCUED) else {
         return Vec::new();
     };
     let Ok(dir) = toshokan::web::private_dir(&at).await else {
+        return Vec::new();
+    };
+    let Ok(locks) = toshokan::web::Locks::new(&at) else {
         return Vec::new();
     };
     let mut found = Vec::new();
@@ -620,24 +625,43 @@ async fn rescues(local: &RelPath) -> Vec<Rescue> {
         {
             continue;
         }
-        if !nord_usb::envelope::is_rescue(&name) {
-            let _ = JsFuture::from(dir.remove_entry(&name)).await;
-            continue;
-        }
-        let Ok(file) = snapshot(handle.unchecked_ref()).await else {
+        let named = name
+            .strip_suffix(nord_usb::envelope::PARTIAL)
+            .unwrap_or(&name);
+        let Ok(lock) = RelPath::new(named) else {
             continue;
         };
-        let source = Ok(crate::ondisk::Sliced::new(file.clone()));
-        found.push(Rescue {
-            slot: Rescue::slot_of(&name),
-            at: format!("{at}/{name}").into(),
-            broken: super::unwhole(source).await,
-            file,
-            name,
-        });
+        if locks.lock(&lock).await != Ok(toshokan::io::Lock::Acquired) {
+            continue;
+        }
+        found.extend(rescue(&at, &dir, name, &handle).await);
+        let _ = locks.unlock(&lock).await;
     }
     found.sort_by(|a, b| a.name.cmp(&b.name));
     found
+}
+
+/// The rescue `handle` is, called `name` in `dir` at `at`, or `None` once one still
+/// partial is deleted or one does not read.
+async fn rescue(
+    at: &RelPath,
+    dir: &FileSystemDirectoryHandle,
+    name: String,
+    handle: &FileSystemHandle,
+) -> Option<Rescue> {
+    if !nord_usb::envelope::is_rescue(&name) {
+        let _ = JsFuture::from(dir.remove_entry(&name)).await;
+        return None;
+    }
+    let file = snapshot(handle.unchecked_ref()).await.ok()?;
+    let source = Ok(crate::ondisk::Sliced::new(file.clone()));
+    Some(Rescue {
+        slot: Rescue::slot_of(&name),
+        at: format!("{at}/{name}").into(),
+        broken: super::unwhole(source).await,
+        file,
+        name,
+    })
 }
 
 /// The entries of a folder.

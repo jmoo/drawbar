@@ -635,6 +635,64 @@ async fn a_rescue_written_through_a_worker_is_found_at_the_next_look_and_a_parti
     tab.close().await;
 }
 
+/// Rescues another tab is still writing, under its partial name or its own, are neither
+/// deleted nor offered until that tab lets them go.
+#[wasm_bindgen_test]
+async fn a_rescue_another_tab_is_writing_is_let_be_until_it_lets_go() {
+    wipe(&opfs().await).await;
+    let dir = Root::Private.local().join(RESCUED).unwrap();
+    let writer = Worker::rescues(&dir).await.unwrap();
+    let ask = async |io| writer.rescue(io).await.unwrap();
+    let (writing, sending, left) = (
+        "nord-rescued-1-1.npno",
+        "nord-rescued-1-2.npno",
+        "nord-rescued-1-3.npno",
+    );
+    let partial = format!("{writing}.partial");
+    for held in [writing, sending] {
+        assert!(
+            ask(RescueIo::Lock(held.into())).await,
+            "no tab holds {held}"
+        );
+    }
+    for name in [partial.as_str(), sending, left] {
+        ask(RescueIo::Create(name.into())).await;
+        let bytes = b"the slot's sound".to_vec();
+        ask(RescueIo::Write {
+            name: name.into(),
+            offset: 0,
+            bytes,
+        })
+        .await;
+    }
+
+    let (mut tab, opened) = Tab::open(Root::Private).await;
+    assert!(matches!(opened, Event::Opened(Ok(_))), "{opened:?}");
+    let look = async |tab: &mut Tab| {
+        tab.backend.look_for_rescues();
+        for _ in 0..10_000 {
+            let offered = tab.backend.rescued();
+            if !offered.is_empty() {
+                return offered.into_iter().map(|r| r.name).collect::<Vec<_>>();
+            }
+            sleep(1).await;
+        }
+        Vec::new()
+    };
+    assert_eq!(look(&mut tab).await, [left]);
+    let held = toshokan::web::private_dir(&dir).await.unwrap();
+    let kept = JsFuture::from(held.get_file_handle(&partial)).await;
+    assert!(kept.is_ok(), "the partial rescue being written is kept");
+
+    for held in [writing, sending] {
+        ask(RescueIo::Unlock(held.into())).await;
+    }
+    assert_eq!(look(&mut tab).await, [sending, left]);
+    let gone = JsFuture::from(held.get_file_handle(&partial)).await;
+    assert!(gone.is_err(), "a partial rescue no tab writes is deleted");
+    tab.close().await;
+}
+
 /// A worker that keeps rescues, started where the page's bundle is gone, as once
 /// drawbar.app is updated, says drawbar.app was updated.
 #[wasm_bindgen_test]
