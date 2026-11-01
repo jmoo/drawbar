@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -117,6 +117,9 @@ pub struct Backend {
     signs: Arc<Signs>,
     /// Whether a command is running, and since when.
     life: Arc<Life>,
+    /// Set once the library is let go without waiting for its thread, which then runs
+    /// nothing more it was sent, and leaves the trash as it is.
+    abandoned: Arc<AtomicBool>,
     /// How many requests the storage had answered when [`Backend::waiting`] last looked,
     /// and when.
     seen: std::cell::Cell<(usize, std::time::Instant)>,
@@ -152,6 +155,8 @@ impl Backend {
         let counted = signs.clone();
         let life = Arc::new(Life::default());
         let living = life.clone();
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let let_go = abandoned.clone();
         #[cfg(test)]
         let fault = Arc::new(std::sync::Mutex::new(None));
         #[cfg(test)]
@@ -167,6 +172,9 @@ impl Backend {
                 #[cfg(test)]
                 let mut unread = None;
                 while let Ok(cmd) = commands.recv() {
+                    if let_go.load(Ordering::Acquire) {
+                        break;
+                    }
                     living.run(true);
                     #[cfg(test)]
                     let fault = faults.lock().expect("never poisoned").take();
@@ -175,9 +183,11 @@ impl Backend {
                         Some(super::Fault::Trap) => {
                             panic!("the library's thread was made to fault")
                         }
-                        Some(super::Fault::Stall) => loop {
-                            std::thread::park();
-                        },
+                        Some(super::Fault::Stall) => {
+                            while !let_go.load(Ordering::Acquire) {
+                                std::thread::park();
+                            }
+                        }
                         Some(super::Fault::Unread) => {
                             unread = Some(super::refusing::refused(&cmd));
                         }
@@ -207,7 +217,9 @@ impl Backend {
                     ran.fetch_sub(usize::from(wrote), Ordering::Release);
                     living.run(false);
                 }
-                keeper.close().await;
+                if !let_go.load(Ordering::Acquire) {
+                    keeper.close().await;
+                }
             });
         });
         Backend {
@@ -219,6 +231,7 @@ impl Backend {
             unrun,
             signs,
             life,
+            abandoned,
             seen: std::cell::Cell::new((0, std::time::Instant::now())),
             #[cfg(test)]
             fault,
@@ -258,6 +271,7 @@ impl Backend {
     /// Let the library go without waiting for its thread, which stopped or does not
     /// answer.
     pub fn abandon(&mut self) {
+        self.abandoned.store(true, Ordering::Release);
         self.tx = None;
         self.worker = None;
     }
@@ -497,6 +511,35 @@ mod tests {
         Disk {
             root: root.0.clone(),
         }
+    }
+
+    /// The library in `root`, open, whose thread stalls on the next command it takes.
+    fn stalling(root: &Temp) -> Backend {
+        let mut backend = Backend::start(&egui::Context::default(), root.0.clone(), root.local());
+        backend.send(Cmd::Open);
+        let opened = backend.recv();
+        assert!(matches!(opened, Some(Event::Opened(Ok(_)))), "{opened:?}");
+        backend.fault(super::super::Fault::Stall);
+        backend
+    }
+
+    /// A library let go while its thread stalls runs nothing queued behind the stalled
+    /// command once the stall ends, as the next session may already write it.
+    #[test]
+    fn an_abandoned_library_runs_nothing_queued_once_its_stall_ends() {
+        let root = Temp::new();
+        let mut backend = stalling(&root);
+        backend.send(Cmd::Rescan);
+        let queued = LibPath::parse("Queued").unwrap();
+        backend.send(Cmd::Intent(super::super::Intent::MakeDir { path: queued }));
+        while backend.waiting().is_none() {
+            std::thread::yield_now();
+        }
+        let thread = backend.worker.as_ref().unwrap().thread().clone();
+        backend.abandon();
+        thread.unpark();
+        while backend.rx.recv().is_ok() {}
+        assert!(!root.at("Queued").exists(), "the queued folder was made");
     }
 
     #[cfg(unix)]
