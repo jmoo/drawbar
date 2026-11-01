@@ -252,7 +252,8 @@ committed fixtures, plus the corpus when enabled, by content, and applies sideca
 every file of a kind runs once per such file, and a claim about one file lives in
 its sidecar.
 
-Each crate's Windows cross build runs its suite under Wine, locally.
+CI runs the suites on Windows itself. A crate's Windows cross build,
+`nix build .#<crate>-windows`, only compiles it.
 
 The CI corpus job runs the committed tier for in-repository pull requests and
 gates publishing. It reads `jmoo/nord-corpus` through the read-only
