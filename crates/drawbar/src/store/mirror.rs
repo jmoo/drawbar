@@ -4423,7 +4423,7 @@ fn kept_rows(
             }
         };
         Some(crate::folders::KeptRow {
-            key: (change.entity, change.what.clone()),
+            key: (change.entity, change.what.clone(), change.takes.clone()),
             id: asset.map(|asset| asset.id),
             said,
             takes: change.takes.is_some(),

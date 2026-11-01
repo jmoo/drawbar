@@ -6004,6 +6004,29 @@ fn a_change_kept_apart_is_taken_and_undone() {
     assert_eq!(here.worn(at_here), ["New"], "undone");
 }
 
+/// Taking one tag a branch put on an asset leaves the other tag it put on kept apart.
+#[test]
+fn taking_one_tag_kept_apart_takes_no_other_tag_on_that_asset() {
+    let root = Temp::new();
+    let mut first = Session::open(&root);
+    first.create();
+    first.sync();
+    first.close();
+    let copy = Temp::new();
+    copy_tree(&root.local(), &copy.0);
+    let mut here = Session::open(&root);
+    let mut there = Session::open_at(&root, &copy.0);
+    let (at_here, at_there) = (here.only(), there.only());
+    here.tag(&[at_here], "Here");
+    there.tag(&[at_there], "Live");
+    there.tag(&[at_there], "Gig");
+    here.settle();
+    let kept = here.kept("gains the tag “Live”");
+    let row = kept.rows.iter().find(|row| row.said.contains("“Live”"));
+    here.take_kept(kept.run, vec![row.unwrap().key.clone()]);
+    assert_eq!(here.worn(at_here), ["Live"], "neither branch is merged");
+}
+
 /// Taking a change to an asset a branch made makes the asset, at its file, with it.
 #[test]
 fn a_change_to_an_asset_a_branch_made_is_taken_with_the_asset() {

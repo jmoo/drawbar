@@ -1820,7 +1820,8 @@ fn taking(listed: &[Listed], named: &[KeptKey]) -> Vec<(FactChange, bool)> {
         .iter()
         .filter(|listed| {
             let change = &listed.change;
-            named.is_empty() || named.contains(&(change.entity, change.what.clone()))
+            let does = change.change.as_ref().map(super::KeptDo::of);
+            named.is_empty() || named.contains(&(change.entity, change.what.clone(), does))
         })
         .collect();
     let gained = |tag: &toshokan::Raw| {

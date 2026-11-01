@@ -878,7 +878,7 @@ pub enum KeptKind {
 }
 
 /// What a change kept apart does to its field.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum KeptDo {
     Gain(String),
     Lose(String),
@@ -908,8 +908,9 @@ impl KeptDo {
     }
 }
 
-/// Which change of a [`KeptApart`] an [`Intent::Take`] takes.
-pub type KeptKey = (EntityId, toshokan::report::What);
+/// Which change of a [`KeptApart`] an [`Intent::Take`] takes: the part of the entity it
+/// changes, and what it does there, so each tag a run puts on one asset is its own.
+pub type KeptKey = (EntityId, toshokan::report::What, Option<KeptDo>);
 
 /// One change a [`KeptApart`] would make.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]

@@ -249,12 +249,13 @@ mod tests {
         assert_eq!(back, kept);
         let take = Cmd::Intent(Intent::Take {
             run,
-            changes: vec![(entity, what)],
+            changes: vec![(entity, what.clone(), Some(KeptDo::Gain("Live".to_string())))],
         });
         let back: Cmd = decode(encode(&take).unwrap()).unwrap();
         assert!(
             matches!(&back, Cmd::Intent(Intent::Take { run: taken, changes })
-                if *taken == run && changes.len() == 1),
+                if *taken == run
+                    && changes[..] == [(entity, what, Some(KeptDo::Gain("Live".to_string())))]),
             "{back:?}"
         );
     }
