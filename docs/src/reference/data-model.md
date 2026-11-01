@@ -82,11 +82,14 @@ Every other file stays as it was.
 ## What this install keeps
 
 What only this install needs is kept in drawbar's own data, never in the
-library. It holds toshokan's local root, which names the writers this install
-owns and remembers the identities its scans read. It also holds the unsaved
-edits, and `rescued/` for a slot's former occupant. Losing it loses the unsaved
-edits and any rescued occupant not yet taken into the library. The next change
-then writes as a new writer.
+library, in a folder for each library. On the desktop that folder is named by a
+hash of the library's path, so a library moved or renamed gets a new one. In the
+browser it is named by the id drawbar gives a picked folder, which a folder
+picked again keeps only while it is on the recent list. It holds toshokan's local
+root, which names the writers this install owns and remembers the identities its
+scans read. It also holds the unsaved edits, and `rescued/` for a slot's former
+occupant. Losing it loses the unsaved edits and any rescued occupant not yet taken
+into the library. The next change then writes as a new writer.
 
 drawbar keeps each unsaved edit every few seconds and at exit, so a crash loses
 only the edits made since the last keep. An asset's edit is kept with the
@@ -96,7 +99,7 @@ of a piano or sample instrument resting in its file is kept as the edit itself,
 and made again over the file at the next open. Each keep is a new file that
 never changes, and the latest keep of an edit wins, so the windows and tabs of
 one install share edits without locks (`store/unsaved.rs`). A library that
-cannot be written keeps no unsaved edits, and says so when it opens.
+cannot be written keeps its unsaved edits the same way.
 
 Before a write to the instrument replaces a slot's occupant, drawbar reads the
 occupant into `rescued/` and puts it back if the write fails

@@ -53,8 +53,8 @@ On the desktop, **File ▸ Open library folder…** opens any folder as your
 library: a Sample Editor project, a sample pack, a folder on a shared drive.
 **File ▸ Open recent library** switches back. drawbar opens the last library
 again when it starts, and changes nothing in a folder until you change something
-there. Unsaved edits stay with their library and come back when you open it
-again.
+there. Unsaved edits come back when you open the library again from the same
+place. A library you moved or renamed opens without them.
 
 In the browser, browsers that can open a folder on your computer offer **File ▸
 Open library folder…** too ([What is supported](../getting-started/support.md)
@@ -62,7 +62,9 @@ lists them). The browser asks whether drawbar may change the folder. It forgets
 that answer when drawbar.app closes, unless you allowed it on every visit, so the
 next visit starts with the browser's own library, and **File ▸ Reconnect**
 *folder* asks again. If you take the permission back while the folder is open,
-drawbar closes it the same way.
+drawbar closes it the same way. A folder's unsaved edits come back while it is
+on **File ▸ Open recent library**; picked again after it left that list, it
+opens without them.
 
 The library folder can live in Dropbox, OneDrive or iCloud Drive, or on a
 network share, and syncing just works: a copy that is out of date, changes that

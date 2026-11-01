@@ -973,7 +973,7 @@ pub enum Waiting {
 /// Why nothing may be written to a library as it opened.
 #[derive(PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Unwritable {
-    /// For this reason, so every edit stays in memory.
+    /// For this reason. Unsaved edits are still kept.
     ReadOnly(String),
     /// A change of drawbar's own still cannot be finished, for this reason. Unsaved
     /// edits are still kept.
