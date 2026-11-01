@@ -553,11 +553,12 @@ length and last 34 bytes, then at every file whose last 34 bytes end that
 entry's line, and only then reads files whole. If no file holds it, the writer
 writes nothing and stops: a new writer takes over from the next write. A writer
 whose write failed, or whose sync of it failed, checks the file it wrote before
-writing again; if the first entry of the write landed whole, it stops in the
-same way, and the entries that landed stand. After the append is synced it stats
-the segment and writes `head.json`, before the commit returns. An append that
-fails leaves the segment without a seal marker and appends nothing more to it,
-so nothing follows a torn line or an entry that may not be durable.
+anything else of its next write is carried out; if the first entry of the write
+landed whole, it stops in the same way, and the entries that landed stand. After
+the append is synced it stats the segment and writes `head.json`, before the
+commit returns. An append that fails leaves the segment without a seal marker
+and appends nothing more to it, so nothing follows a torn line or an entry that
+may not be durable.
 
 The entries are then durable, and the commit succeeds whatever fails after them
 (see Intents). A `head.json` that cannot be written lags: the instance writes it
@@ -1107,6 +1108,17 @@ trash once; an item whose removal a crash undid is removed by the next emptying.
 
 Emptying a trash is the only way bytes leave the folder.
 
+A writer that stops while its instance runs, other than over a fork of its
+history, empties its trash before it retires, since stopping ends this session's
+undo: it reads its directory again, removes its records an entry closed, as one
+whose write landed though it was reported failed, and then every item no record
+of the writer still in the folder names. Its open records become orphans and
+keep what they name. A writer whose history forked keeps its trash, since
+another instance may still write as it. Where the folder cannot be written, the
+writer retires without emptying; where emptying fails, or a record that does not
+read holds it, the writer retires all the same, and the instance reports why
+(`Lag::Trash`).
+
 An instance lists the trash of every writer whose directory its local root
 holds: its writer's and those of the writers it retired. A retired writer's
 items stay where they are, since no instance writes as that writer again; undo
@@ -1121,9 +1133,12 @@ segment ends at each close of a process that appended, each compaction and each
 MiB, and a pair in `settled`, about 70 bytes, per commit that moved files and
 per settlement (see [RETENTION.md](RETENTION.md)); the segments written since;
 one segment per process that crashed or was copied; trash items until the writer
-empties them; a spent pending record until the writer's next write or close; and
-the pending records of a writer that will never run again, settled or not. The
-local root keeps one directory per writer the install has used.
+empties them, which a writer that stops while its instance runs does as it
+retires, other than over a fork; a spent pending record until the writer's next
+write or close; and the pending records of a writer that will never run again,
+settled or not, with the trash items they name. A writer retired over a fork, or
+as an instance opened, keeps its trash. The local root keeps one directory per
+writer the install has used.
 
 ## Backends
 

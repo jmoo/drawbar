@@ -373,7 +373,9 @@ Neither is something the protocol does.
 ## 8. Writers, pending records and undo
 
 A writer continues only if its recorded head is its tip or placed after it, and
-the snapshot's `genesis` is its genesis; otherwise it retires.
+the snapshot's `genesis` is its genesis; otherwise it retires. A writer that
+retires while its instance runs, other than over a fork, empties its trash
+first, so retiring again and again strands no trash.
 
 An open pending record's `prev` is its writer's last entry, so it is always held.
 A record whose `prev` is followed, or numbered below a tip's head, is spent or
@@ -488,7 +490,9 @@ steady state is about 6 MB of memory and 4 MB of folder, plus:
 - per pending record the writer closed, ~70 B: one per commit that moved files
   and per settlement;
 - per retired writer, its final contribution and the references others keep to
-  it, at most what it wrote.
+  it, at most what it wrote, and the trash items its open records name; one that
+  retired over a fork, or as an instance opened, also keeps the rest of its
+  trash.
 
 These grow with deletions, segments, commits that moved files and writers, not
 with entries otherwise.

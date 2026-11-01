@@ -551,7 +551,8 @@ impl Library {
                 keep_local(self, false)
                     .then(move |(library, kept)| match (kept, retired) {
                         (Err(error), _) => Flow::Done(Err(error)),
-                        (Ok(()), Some(_)) => library.stop_writing().map_ok(move |()| library),
+                        (Ok(()), Some(_)) => stop_writing(library, Some(Rekey::Forked))
+                            .then(|(library, stopped)| Flow::Done(stopped.map(|()| library))),
                         (Ok(()), None) => ok(library),
                     })
                     .and_then(move |library| scan_for(library, scope, moved))
@@ -1114,22 +1115,6 @@ impl Library {
         placed.fork.map(|_| own)
     }
 
-    /// Stops writing as this writer: it leaves the pool, and the next commit
-    /// creates a new one. Its open interrupted effects become orphans, settled
-    /// only with consent, and its spent records stay in the folder.
-    fn stop_writing<'a>(&mut self) -> Fallible<'a, ()> {
-        let Some(writer) = self.writer.take() else {
-            return ok(());
-        };
-        self.history = History::default();
-        self.behind.remove(&Lag::Head);
-        self.spent.clear();
-        for settling in std::mem::take(&mut self.unsettled) {
-            self.orphan(settling.record, &settling.pending, true);
-        }
-        flow::run(writer::retire_writer(writer.genesis()))
-    }
-
     /// Binds again where the facts or the scan changed since the last binding.
     fn bind_facts(&mut self) {
         if self.bind_due {
@@ -1535,12 +1520,12 @@ fn compacted(library: &mut Library) -> Flow<'_, (&mut Library, Result<Compacted>
         flow::run(compaction).then(move |(writer, compacted)| {
             library.writer = Some(writer);
             match compacted {
-                Err(error @ Error::Rekey { .. }) => {
+                Err(error @ Error::Rekey { why, .. }) => {
                     library.take_derived();
                     library.show();
-                    library
-                        .stop_writing()
-                        .then(move |stopped| Flow::Done((library, stopped.and(Err(error)))))
+                    stop_writing(library, Some(why)).then(move |(library, stopped)| {
+                        Flow::Done((library, stopped.and(Err(error))))
+                    })
                 }
                 Err(error) => {
                     let too_long = matches!(error, Error::Refused(Refusal::SnapshotTooLong));
@@ -1562,9 +1547,9 @@ fn compacted(library: &mut Library) -> Flow<'_, (&mut Library, Result<Compacted>
                         writer,
                         why: Rekey::Forked,
                     };
-                    library
-                        .stop_writing()
-                        .then(move |stopped| Flow::Done((library, stopped.and(Err(forked)))))
+                    stop_writing(library, Some(Rekey::Forked)).then(move |(library, stopped)| {
+                        Flow::Done((library, stopped.and(Err(forked))))
+                    })
                 }),
             }
         })
@@ -1946,15 +1931,18 @@ fn newer_layout(entries: &[DirEntry]) -> Option<String> {
         .map(|entry| entry.name.clone())
 }
 
-/// A spent record that cannot be removed fails the write.
+/// A spent record that cannot be removed fails the write, and so does a failed
+/// write of this writer's that landed, which stops it.
 fn settle_first(library: &mut Library) -> Fallible<'_, &mut Library> {
-    remove_spent(library).then(
-        |(library, removed)| match (removed, library.unsettled.is_empty()) {
-            (Err(error), _) => Flow::Done(Err(error)),
-            (Ok(()), true) => ok(library),
-            (Ok(()), false) => settle_own(library),
-        },
-    )
+    stop_if_landed(library).and_then(|library| {
+        remove_spent(library).then(|(library, removed)| {
+            match (removed, library.unsettled.is_empty()) {
+                (Err(error), _) => Flow::Done(Err(error)),
+                (Ok(()), true) => ok(library),
+                (Ok(()), false) => settle_own(library),
+            }
+        })
+    })
 }
 
 /// Commits `resolved` once this writer's interrupted effects are settled: creates
@@ -2153,7 +2141,8 @@ fn resume(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Librar
     );
     flow::run(settled).then(move |settled| match settled {
         Ok(Resumed::Applied(applied)) => log_resumed(library, name, record, applied),
-        Ok(Resumed::Gone) => library.stop_writing().map_ok(move |()| library),
+        Ok(Resumed::Gone) => stop_writing(library, None)
+            .then(|(library, stopped)| Flow::Done(stopped.map(|()| library))),
         Err(Error::Io { path, error, .. }) => {
             let why = Why::Unfinished { label, path, error };
             library.mode = Mode::ReadOnly(why.clone());
@@ -2212,6 +2201,99 @@ fn remove_record<'a>(
     library.unsettled.retain(|settling| settling.record != name);
     library.spent.push((name, record.clone()));
     remove_spent(library).then(|(library, _)| Flow::Done(library))
+}
+
+/// Stops writing as this writer: it leaves the pool, and the next commit creates a
+/// new one. Unless `why` is a fork, after which another instance may still write
+/// as it, its trash is emptied first (see [`empty_retiring`]). Its open interrupted
+/// effects become orphans, settled only with consent, and spent records left in
+/// the folder stay there. `why` is `None` where its own effect cannot be finished.
+fn stop_writing(library: &mut Library, why: Option<Rekey>) -> Flow<'_, (&mut Library, Result<()>)> {
+    let Some(writer) = library.writer.take() else {
+        return Flow::Done((library, Ok(())));
+    };
+    library.history = History::default();
+    library.behind.remove(&Lag::Head);
+    let emptied = match why == Some(Rekey::Forked) || library.writable().is_err() {
+        true => Flow::Done(library),
+        false => empty_retiring(library, writer.id()),
+    };
+    emptied.then(move |library| {
+        library.spent.clear();
+        for settling in std::mem::take(&mut library.unsettled) {
+            library.orphan(settling.record, &settling.pending, true);
+        }
+        flow::run(writer::retire_writer(writer.genesis()))
+            .then(move |retired| Flow::Done((library, retired)))
+    })
+}
+
+/// Empties the trash of `writer`, which this instance stops writing as, once its
+/// directory is read again: its records an entry closed, as one that landed though
+/// its write failed, are removed, and then every item no record still in the folder
+/// names. No undo reaches them, as stopping ends the history. Where that fails,
+/// [`Lag::Trash`] says why.
+fn empty_retiring(library: &mut Library, writer: WriterId) -> Flow<'_, &mut Library> {
+    flow::run(library.reader.list_writer(writer)).then(move |listing| {
+        let listing = match listing {
+            Ok(listing) => listing,
+            Err(error) => {
+                library.behind.insert(Lag::Trash, error.to_string());
+                return Flow::Done(library);
+            }
+        };
+        let report = library.reader.absorb(listing);
+        library.absorb_read(&report);
+        library.unshown |= report.anything_new();
+        let closed = library.closed_records();
+        let (spent, open): (Vec<Settling>, Vec<Settling>) = std::mem::take(&mut library.unsettled)
+            .into_iter()
+            .partition(|settling| closed.contains(&(writer, settling.record)));
+        library.unsettled = open;
+        let spent = spent
+            .into_iter()
+            .map(|settling| (settling.record, settling.pending));
+        library.spent.extend(spent);
+        remove_spent(library).then(move |(library, removed)| {
+            let layout = library.layout.clone();
+            let listed = trash::list(&layout, writer, library.folded.trash(writer));
+            flow::run(listed)
+                .and_then(move |items| {
+                    flow::run(trash::empty(&layout, writer, items, BTreeSet::new()))
+                })
+                .then(move |emptied| {
+                    let held = emptied.map(|emptied| emptied.held.first().cloned());
+                    let failed = match (removed, held) {
+                        (Err(error), _) | (_, Err(error)) => Some(error.to_string()),
+                        (Ok(()), Ok(Some(record))) => Some(format!("{record} does not read")),
+                        (Ok(()), Ok(None)) => None,
+                    };
+                    if let Some(failed) = failed {
+                        library.behind.insert(Lag::Trash, failed);
+                    }
+                    Flow::Done(library)
+                })
+        })
+    })
+}
+
+/// Stops this writer, before anything of the next write is carried out, where the
+/// folder holds the first entry of its last failed write.
+fn stop_if_landed(library: &mut Library) -> Fallible<'_, &mut Library> {
+    let Some(writer) = &library.writer else {
+        return ok(library);
+    };
+    let id = writer.id();
+    writer.landed().and_then(move |landed| match landed {
+        false => ok(library),
+        true => stop_writing(library, Some(Rekey::Landed)).then(move |(_, stopped)| {
+            let landed = Error::Rekey {
+                writer: id,
+                why: Rekey::Landed,
+            };
+            Flow::Done(stopped.and(Err(landed)))
+        }),
+    })
 }
 
 /// Removes this writer's records its entries closed that are still in the
@@ -2322,10 +2404,8 @@ fn appending<'a>(
                         .then(move |library| Flow::Done((library, Ok(entries))))
                 })
             }
-            Err(error @ Error::Rekey { .. }) => {
-                let stopped = library.stop_writing();
-                stopped.then(move |stopped| Flow::Done((library, stopped.and(Err(error)))))
-            }
+            Err(error @ Error::Rekey { why, .. }) => stop_writing(library, Some(why))
+                .then(move |(library, stopped)| Flow::Done((library, stopped.and(Err(error))))),
             Err(error) => Flow::Done((library, Err(error))),
         }
     })

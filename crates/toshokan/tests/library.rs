@@ -618,6 +618,7 @@ through_both!(
     a_copied_move_whose_source_removal_fails_is_finished_by_the_next_write,
     an_append_whose_reply_was_lost_stands_and_the_next_write_takes_a_new_writer,
     a_new_segment_whose_reply_was_lost_stands_and_the_next_write_takes_a_new_writer,
+    writers_that_retire_over_lost_writes_leave_their_trash_empty,
     a_spent_record_is_reported_only_where_its_entry_has_not_arrived,
     a_settled_record_is_removed_and_logged_once,
     identities_a_failed_write_lost_are_kept_by_the_next_scan,
@@ -3366,7 +3367,7 @@ fn a_lost_segment_write_stands<F: Facade>(fresh: bool) {
     let song = create(&mut a, "song.npno", b"song");
     if fresh {
         a.close().unwrap();
-        a = F::open(probe.clone(), env("a", 1, &clock)).unwrap().0;
+        a = F::open(probe.clone(), env("a", 2, &clock)).unwrap().0;
     }
     let once = Cell::new(true);
     unanswered(&probe, move |io| {
@@ -3422,6 +3423,112 @@ fn a_lost_segment_write_stands<F: Facade>(fresh: bool) {
         ["landed", "new", "next"],
         "a refresh shows the landed entry"
     );
+}
+
+/// Picks a write of a segment's lines, whether it starts the segment or appends.
+fn segment_write(io: &Io) -> bool {
+    let write = matches!(io, Io::Create { .. } | Io::Append { .. });
+    write && io.root() == Root::Folder && io.path().as_str().ends_with(SEGMENT_EXTENSION)
+}
+
+/// Picks a sync of a segment.
+fn segment_sync(io: &Io) -> bool {
+    let sync = matches!(io, Io::Sync { .. });
+    sync && io.root() == Root::Folder && io.path().as_str().ends_with(SEGMENT_EXTENSION)
+}
+
+/// The bytes in each writer's trash in `folder`, by the writer's directory name.
+fn trash_bytes(folder: &MemDisk) -> BTreeMap<String, usize> {
+    let mut by_writer = BTreeMap::new();
+    for (at, bytes) in folder.files(Root::Folder) {
+        let Some(rest) = at.strip_prefix(&layout().writers()) else {
+            continue;
+        };
+        if let [writer, "trash", _] = rest.split('/').collect::<Vec<_>>()[..] {
+            *by_writer.entry(writer.to_owned()).or_default() += bytes.len();
+        }
+    }
+    by_writer
+}
+
+/// Session after session, a save or a tag whose segment write loses its reply, or
+/// whose sync fails, lands all the same, and the next save retires the writer
+/// before it moves a file. A writer empties its trash as it retires, so the trash
+/// holds only what the session's latest writer displaced, however many writers
+/// retired before it.
+fn writers_that_retire_over_lost_writes_leave_their_trash_empty<F: Facade>() {
+    const SESSIONS: u64 = 6;
+    const SAVES: usize = 3;
+    const LEN: usize = 8;
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", &[b'0'; LEN]);
+    a.close().unwrap();
+    let reading = folder.clone();
+    let mut saved = 0;
+    let mut save = move |a: &mut F| {
+        saved += 1;
+        let was = read(&reading, "song.npno").unwrap();
+        a.commit("Save", |i| {
+            i.save(
+                song,
+                &path("song.npno"),
+                format!("{saved:0LEN$}").into_bytes(),
+                Expect::Holds(identity(&was)),
+            )
+        })
+    };
+    let mut retired = BTreeSet::new();
+    for session in 0..SESSIONS {
+        let probe = Probe::new(&here);
+        let (mut a, _) = F::open(probe.clone(), env("a", 10 + session, &clock)).unwrap();
+        for _ in 0..SAVES {
+            save(&mut a).unwrap();
+        }
+        match session % 2 == 1 && FOLDER.get().fsync {
+            true => fail(&probe, segment_sync),
+            false => unanswered(&probe, segment_write),
+        }
+        let lost = match session / 2 % 2 {
+            0 => save(&mut a),
+            _ => a.commit("Tag", |i| i.add(song, TAGS, session.to_string())),
+        };
+        heal(&probe);
+        assert!(lost.is_err(), "session {session}: {lost:?}");
+        match save(&mut a) {
+            Err(Error::Rekey {
+                writer,
+                why: Rekey::Landed,
+            }) => retired.insert(writer.to_string()),
+            stopped => panic!("session {session}: {stopped:?}"),
+        };
+        for _ in 0..SAVES {
+            save(&mut a).unwrap();
+        }
+        let held = trash_bytes(&folder);
+        let stranded: Vec<_> = held
+            .iter()
+            .filter(|(writer, bytes)| retired.contains(*writer) && **bytes > 0)
+            .collect();
+        assert_eq!(stranded, [] as [(&String, &usize); 0], "session {session}");
+        let total: usize = held.values().sum();
+        assert!(
+            total <= SAVES * LEN,
+            "session {session}: the trash holds {total} B: {held:?}"
+        );
+        let listed = a.trash().unwrap();
+        let this = a.others().unwrap();
+        let this = this.iter().find(|w| w.here == Presence::This).unwrap();
+        assert!(
+            listed.iter().all(|item| item.writer == this.writer),
+            "session {session}: {listed:?}"
+        );
+        a.empty_trash(BTreeSet::new()).unwrap();
+        a.close().unwrap();
+    }
+    assert_eq!(retired.len(), SESSIONS as usize);
 }
 
 fn a_copied_move_whose_source_removal_fails_is_finished_by_the_next_write<F: Facade>() {

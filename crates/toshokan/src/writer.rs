@@ -380,19 +380,25 @@ impl Writer {
     /// Where to append, once the folder is confirmed to hold this writer's head
     /// and not to hold what its last failed write would have added.
     fn confirm<'a>(&self) -> Flow<'a, Result<Confirmed>> {
-        let Some(failed) = self.failed.clone() else {
-            return self.confirm_held();
-        };
         let (id, held) = (self.id, self.confirm_held());
-        flow::stat(Root::Folder, &failed.path).and_then(move |meta| {
-            match meta.is_some_and(|meta| meta.len >= failed.landed) {
-                true => Flow::Done(Err(Error::Rekey {
-                    writer: id,
-                    why: Rekey::Landed,
-                })),
-                false => held,
-            }
+        self.landed().and_then(move |landed| match landed {
+            true => Flow::Done(Err(Error::Rekey {
+                writer: id,
+                why: Rekey::Landed,
+            })),
+            false => held,
         })
+    }
+
+    /// Whether the folder holds the first entry of this writer's last failed write
+    /// whole, which then stands, so that the writer cannot append again. Asks
+    /// nothing when no write failed.
+    pub(crate) fn landed<'a>(&self) -> Fallible<'a, bool> {
+        let Some(failed) = self.failed.clone() else {
+            return flow::ok(false);
+        };
+        flow::stat(Root::Folder, &failed.path)
+            .map_ok(move |meta| meta.is_some_and(|meta| meta.len >= failed.landed))
     }
 
     /// Where to append, once the folder is confirmed to hold this writer's head.

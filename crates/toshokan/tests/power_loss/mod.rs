@@ -621,6 +621,7 @@ pub trait Lib<B>: Sized {
     fn empty_trash(&mut self) -> toshokan::Result<Emptied>;
     fn settle(&mut self, orphan: Orphan) -> toshokan::Result<Committed>;
     fn finishing(&self) -> Vec<RelPath>;
+    fn writer_id(&self) -> Option<WriterId>;
     fn close(self) -> toshokan::Result<()>;
 }
 
@@ -660,6 +661,9 @@ impl<B: Backend> Lib<B> for Library<Faulty<B>> {
     }
     fn finishing(&self) -> Vec<RelPath> {
         Library::finishing(self)
+    }
+    fn writer_id(&self) -> Option<WriterId> {
+        Library::writer_id(self)
     }
     fn close(self) -> toshokan::Result<()> {
         Library::close(self).map(|_| ())
@@ -707,6 +711,9 @@ impl<B: asynch::Fs> Lib<B> for Async<B> {
     }
     fn finishing(&self) -> Vec<RelPath> {
         self.0.finishing()
+    }
+    fn writer_id(&self) -> Option<WriterId> {
+        self.0.writer_id()
     }
     fn close(self) -> toshokan::Result<()> {
         pollster::block_on(self.0.close()).map(|_| ())
@@ -948,6 +955,9 @@ pub struct Crash<'w, 'p, P> {
     /// The models recovery may reach: after the last step that returned, and
     /// after the one in flight.
     pub candidates: [usize; 2],
+    /// Whether a writer retired as the run went on, emptying its trash: only the
+    /// bytes both candidates hold must stay.
+    pub retired: bool,
 }
 
 impl<P: Place> Crash<'_, '_, P> {
@@ -979,7 +989,15 @@ impl<P: Place> Crash<'_, '_, P> {
 
     fn kept_in(&self, tree: &BTreeMap<String, Vec<u8>>, what: &str) -> Result<(), String> {
         let present: BTreeSet<&Vec<u8>> = tree.values().collect();
-        let kept = kept(self.workload, &self.models, self.candidates[0]);
+        let [before, after] = self.candidates.map(|i| &self.models[i].files);
+        let kept = match self.retired {
+            false => kept(self.workload, &self.models, self.candidates[0]),
+            true => before
+                .values()
+                .filter(|bytes| after.values().any(|held| held == *bytes))
+                .cloned()
+                .collect(),
+        };
         match kept.iter().find(|bytes| !present.contains(bytes)) {
             Some(bytes) => Err(format!("{:?} {what}", String::from_utf8_lossy(bytes))),
             None => Ok(()),
@@ -1107,12 +1125,13 @@ impl<P: Place> Crash<'_, '_, P> {
 }
 
 /// Checks what a stopped run left in `place` once `acked` steps of `workload`
-/// returned, committing `entries`.
+/// returned, committing `entries`, and a writer `retired` or not.
 pub fn check<P: Place>(
     workload: &Workload,
     place: &P,
     acked: usize,
     entries: &[Acked],
+    retired: bool,
 ) -> Result<Checked, String> {
     let models = models(workload);
     let last = models.len() - 1;
@@ -1129,6 +1148,7 @@ pub fn check<P: Place>(
         place,
         models,
         candidates: [reached, (reached + 1).min(last)],
+        retired,
     };
     let raw = place.tree()?;
     crash.before_recovery(&raw)?;

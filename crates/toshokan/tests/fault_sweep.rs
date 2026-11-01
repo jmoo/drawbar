@@ -194,8 +194,10 @@ fn steps<L: Lib<Machine>>(
     }
     let seen = runner.arms.borrow_mut().seen.take().unwrap_or_default();
     let mut settling = Vec::new();
+    let mut retired = false;
     if let (Some(mut library), Then::Writes(second)) = (runner.library.take(), then) {
         let finishing = !library.finishing().is_empty();
+        let writer = library.writer_id();
         {
             let mut arms = runner.arms.borrow_mut();
             (arms.fault, arms.counted, arms.seen) = (second, 0, Some(Vec::new()));
@@ -231,6 +233,7 @@ fn steps<L: Lib<Machine>>(
             }
             wrote = probe();
         }
+        retired = writer.is_some() && library.writer_id() != writer;
         match wrote {
             Ok(_) => {}
             // Only a settle the second fault failed may leave the session read-only.
@@ -246,18 +249,21 @@ fn steps<L: Lib<Machine>>(
         seen,
         settling,
         failed,
+        retired,
     })
 }
 
 /// What a run did: how many steps returned, the entries they committed, the
 /// requests its steps made, those of the write after a failure that settled what
-/// it left, and the error of the step that failed.
+/// it left, the error of the step that failed, and whether a write after it
+/// retired the writer.
 struct Ran {
     done: usize,
     acked: Vec<Acked>,
     seen: Vec<power_loss::Seen>,
     settling: Vec<power_loss::Seen>,
     failed: Option<String>,
+    retired: bool,
 }
 
 /// Faults each request of `workload`'s steps in turn with each fault that can
@@ -299,7 +305,7 @@ fn sweep<L: Lib<Machine>>(
                         mutating.map(|(at, _)| Then::Writes(Some((at as u64, Fault::Fails))));
                     thens.extend(second);
                     let step = ran.failed.unwrap_or_default();
-                    let checked = check(workload, &place, ran.done, &ran.acked);
+                    let checked = check(workload, &place, ran.done, &ran.acked, ran.retired);
                     checked
                         .map(|_| ())
                         .map_err(|e| format!("{e}\n    after the step failed: {step}"))

@@ -255,12 +255,13 @@ pub struct Committed {
 pub enum Local {
     Current,
     /// Each part that lags, with the failure that left it behind. The next commit,
-    /// refresh or close records the head again; a refresh scans again.
+    /// refresh or close records the head again; a refresh scans again; a trash not
+    /// emptied stays as it is.
     Behind(BTreeMap<Lag, String>),
 }
 
-/// A part of this instance's state that can lag a commit whose entries are
-/// durable.
+/// A part of this instance's state, or of what it leaves in the folder, that can
+/// lag a commit whose entries are durable.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Lag {
     /// `head.json` names an earlier entry, or a failed write tore it. Reopening
@@ -270,6 +271,10 @@ pub enum Lag {
     /// The scan after the commit failed. The entities whose files its effects
     /// touched are [`crate::FileState::Unscanned`] until a scan of every file.
     Scan,
+    /// The trash of a writer this instance stopped writing as was not emptied, so
+    /// its items stay in the folder, where no instance empties them;
+    /// [`crate::library::Library::trash`] lists them.
+    Trash,
 }
 
 /// How settling an interrupted effect will end: all made, or stopped partway.
