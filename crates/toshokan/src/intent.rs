@@ -23,6 +23,7 @@ use crate::log::{Observed, Op, Ref, Run};
 use crate::merge::{Folded, Write};
 use crate::path::RelPath;
 use crate::plan::{Content, Expect, FactChange, FileChange, Plan};
+use crate::report::Joined;
 use crate::schema::{KeyKind, Raw, Register, Schema, Set, Value};
 
 /// The library an intent is built for and committed through: a driver's.
@@ -141,6 +142,16 @@ impl<L: Driver> Intent<L> {
     /// file stays where it is unless the intent also trashes it.
     pub fn delete(mut self, entity: EntityId) -> Self {
         self.plan.facts.push((FactChange::Delete { entity }, None));
+        self
+    }
+
+    /// Gives `into` each member of each set `entity` holds that `into` does not,
+    /// and `entity`'s shown value of each register `into` holds no value of, then
+    /// deletes `entity`. Refused unless both are shown and differ. An intent that
+    /// only joins entities is no step of undo, which takes its writes for another
+    /// writer's.
+    pub fn join(mut self, entity: EntityId, into: EntityId) -> Self {
+        self.plan.joins.push(Joined { entity, into });
         self
     }
 
@@ -387,18 +398,22 @@ fn encode<T: Value>(invalid: &mut Option<Invalid>, key: &str, value: &T) -> Opti
 
 /// The ops that log `plan`'s facts against what this writer has observed in
 /// `folded`: a create for each entity it creates, then each fact change in order,
-/// then a dismissal of the runs `plan` dismisses. A write replaces every live
-/// write of its register, an add or remove every live write of its member, and a
-/// delete observes every live field write of its entity. Each fact change taken
-/// from an item names its run.
+/// then each join, then a dismissal of the runs `plan` dismisses. A write replaces
+/// every live write of its register, an add or remove every live write of its
+/// member, and a delete observes every live field write of its entity. Each fact
+/// change taken from an item names its run.
 ///
-/// Refuses a key the schema does not declare with the change's kind, and a change
-/// to an entity that is neither shown, created nor revived by the plan. Of several
+/// Refuses a key the schema does not declare with the change's kind, a change
+/// to an entity that is neither shown, created nor revived by the plan, and a
+/// join of an entity not shown, into one not shown or into itself. Of several
 /// changes to one register of one entity, or to one entity's existence, the last
 /// is logged. A plan that changes nothing is refused unless it reverses an entry
 /// or dismisses a run.
 pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Invalid> {
-    let nothing = plan.created.is_empty() && plan.facts.is_empty() && plan.files.is_empty();
+    let nothing = plan.created.is_empty()
+        && plan.facts.is_empty()
+        && plan.files.is_empty()
+        && plan.joins.is_empty();
     if nothing && plan.reverses.is_none() && plan.dismiss.is_empty() {
         return Err(Invalid::Empty);
     }
@@ -488,21 +503,7 @@ pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Inv
                 if !folded.present(*entity) && !revived.contains(entity) {
                     return Err(Invalid::NoEntity(*entity));
                 }
-                Op::Delete {
-                    entity: *entity,
-                    replaces: existence(folded, *entity),
-                    observed: folded
-                        .live_writes(*entity)
-                        .into_iter()
-                        .filter_map(|(field, write)| {
-                            Some(Observed {
-                                target: field.target()?,
-                                at: write.named(),
-                            })
-                        })
-                        .collect(),
-                    take,
-                }
+                delete(folded, *entity, take)
             }
             FactChange::Revive { entity } => {
                 let replaces = existence(folded, *entity);
@@ -528,12 +529,73 @@ pub fn ops(plan: &Plan, folded: &Folded, schema: &Schema) -> Result<Vec<Op>, Inv
         };
         ops.push(op);
     }
+    for joined in &plan.joins {
+        ops.extend(join(folded, schema, *joined)?);
+    }
     if !plan.dismiss.is_empty() {
         ops.push(Op::Dismiss {
             runs: plan.dismiss.clone(),
         });
     }
     Ok(ops)
+}
+
+/// The ops that give `joined.into` what `joined.entity` holds and it does not:
+/// each member of each set, and the shown value of each register it holds no
+/// value of. Then the delete of `joined.entity`.
+fn join(folded: &Folded, schema: &Schema, joined: Joined) -> Result<Vec<Op>, Invalid> {
+    let Joined { entity, into } = joined;
+    if entity == into {
+        return Err(Invalid::JoinedIntoItself(entity));
+    }
+    if let Some(absent) = [entity, into].into_iter().find(|e| !folded.present(*e)) {
+        return Err(Invalid::NoEntity(absent));
+    }
+    let mut ops = Vec::new();
+    for key in schema.keys() {
+        let name = key.name;
+        match key.kind {
+            KeyKind::Set => {
+                let held = folded.members(into, name);
+                let lacking = folded.members(entity, name).into_iter();
+                let lacking = lacking.filter(|member| held.binary_search(member).is_err());
+                ops.extend(lacking.map(|value| Op::Add {
+                    replaces: member_writes(folded, into, name, &value),
+                    entity: into,
+                    key: name.to_owned(),
+                    value,
+                    take: None,
+                }));
+            }
+            KeyKind::Register => {
+                let shown = folded.register(entity, name).pop();
+                let unset = folded.register(into, name).is_empty();
+                if let (Some(shown), true) = (shown, unset) {
+                    let value = Some(&shown.value);
+                    ops.push(register_write(folded, into, name.to_owned(), value, None));
+                }
+            }
+        }
+    }
+    ops.push(delete(folded, entity, None));
+    Ok(ops)
+}
+
+/// A delete of `entity` observing every live field write of it.
+fn delete(folded: &Folded, entity: EntityId, take: Option<Run>) -> Op {
+    let observed = folded.live_writes(entity).into_iter();
+    let observed = observed.filter_map(|(field, write)| {
+        Some(Observed {
+            target: field.target()?,
+            at: write.named(),
+        })
+    });
+    Op::Delete {
+        entity,
+        replaces: existence(folded, entity),
+        observed: observed.collect(),
+        take,
+    }
 }
 
 /// Whether a later change in `rest` writes the same register, or the same

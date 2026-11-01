@@ -2055,9 +2055,9 @@ fn refused(refusal: &Refusal) -> String {
         Refusal::Invalid(Invalid::Overlapping(path)) => {
             format!("two parts of the change are at “{path}”")
         }
-        Refusal::Invalid(Invalid::UndeclaredKey(_) | Invalid::Unencodable { .. }) => {
-            FAULT.to_string()
-        }
+        Refusal::Invalid(
+            Invalid::UndeclaredKey(_) | Invalid::Unencodable { .. } | Invalid::JoinedIntoItself(_),
+        ) => FAULT.to_string(),
     }
 }
 

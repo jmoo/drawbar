@@ -135,6 +135,8 @@ pub enum Invalid {
     NotEmpty(RelPath),
     #[error("the intent changes nothing")]
     Empty,
+    #[error("{0} cannot be joined into itself")]
+    JoinedIntoItself(EntityId),
     #[error("the intent is too long to log as one entry")]
     TooLong,
     /// A file change taken from an item names a file the entity cannot be bound

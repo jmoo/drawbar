@@ -13,7 +13,7 @@ use toshokan::log::{Displaced, Entry, EntryKind, FileFact, Logged, Op, Ref};
 use toshokan::merge::{Folded, Write};
 use toshokan::plan::{Expect, FileChange, Plan};
 use toshokan::snapshot::{Certified, Snapshot};
-use toshokan::undo::{Before, History};
+use toshokan::undo::{Before, Entering, History};
 use toshokan::view::{Conflicted, Parts, View};
 use toshokan::{
     EntityId, EntryHash, Field, Hlc, Identity, Invalid, Nonce, Random, Raw, Refusal, Register,
@@ -153,8 +153,8 @@ impl Writer {
     }
 
     /// Appends `kind` to its chain, keeping an intent in its history with what
-    /// it replaced and the entry it reverses.
-    fn log(&mut self, now: u64, kind: EntryKind, reverses: Option<EntryHash>) -> Entry {
+    /// it replaced, as `entering` says.
+    fn log(&mut self, now: u64, kind: EntryKind, entering: Entering) -> Entry {
         self.clock = self.clock.tick(now).unwrap();
         let (prev, n) = self
             .own
@@ -170,7 +170,7 @@ impl Writer {
         };
         let entry = Entry::encode(prev, n, self.clock, kind).unwrap();
         if let Some(logged) = logged {
-            self.history.push(&entry, logged, reverses, before);
+            self.history.push(&entry, logged, entering, before);
         }
         self.own.push(entry.clone());
         self.receive(self.id, &entry);
@@ -185,11 +185,12 @@ impl Writer {
             forks: Vec::new(),
             record: None,
         };
-        self.log(now, EntryKind::Intent(logged), None)
+        self.log(now, EntryKind::Intent(logged), Entering::Step)
     }
 
     fn commit(&mut self, plan: Plan, now: u64) -> Result<Entry, Invalid> {
         let ops = ops(&plan, &self.folded, &schema())?;
+        let entering = Entering::of(&plan);
         let logged = Logged {
             label: plan.label,
             ops,
@@ -197,7 +198,7 @@ impl Writer {
             forks: Vec::new(),
             record: None,
         };
-        Ok(self.log(now, EntryKind::Intent(logged), plan.reverses))
+        Ok(self.log(now, EntryKind::Intent(logged), entering))
     }
 
     fn receive(&mut self, writer: WriterId, entry: &Entry) {
@@ -905,7 +906,7 @@ fn unknown_kinds_ops_keys_and_values_are_kept_through_merges_and_snapshots() {
         }
         let unreadable = Raw::new(&value).unwrap();
 
-        let kind = a.log(2, EntryKind::Unknown(unknown_kind.clone()), None);
+        let kind = a.log(2, EntryKind::Unknown(unknown_kind.clone()), Entering::Step);
         let replaces = a
             .folded
             .register_writes(e, "name")

@@ -597,6 +597,8 @@ through_both!(
     undoing_a_save_restores_the_displaced_bytes,
     a_copy_has_no_entity_until_one_is_said,
     a_file_two_writers_adopted_unseen_is_the_lower_entitys,
+    a_join_gives_the_lower_entity_what_both_held_and_no_undo_takes_it_back,
+    writers_joining_one_entity_at_once_converge,
     a_move_keeps_its_tags_and_is_pinned_by_the_next_commit,
     undoing_a_delete_binds_the_file_moved_while_deleted,
     undoing_a_delete_puts_a_file_moved_outside_back_where_it_was,
@@ -2672,6 +2674,76 @@ fn a_file_two_writers_adopted_unseen_is_the_lower_entitys<F: Facade>() {
         assert_eq!(high.file(), None, "neither bound nor missing");
         assert_eq!(high.members(TAGS).values.len(), 1, "its tag is kept");
     }
+}
+
+fn a_join_gives_the_lower_entity_what_both_held_and_no_undo_takes_it_back<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, mut b, made) = adopted_by_both::<F>(&folder, &clock, [Some("a"), Some("b")]);
+    a.refresh().unwrap();
+    let [joined] = a.view().joined().try_into().unwrap();
+    let history = a.history();
+    let committed = a
+        .commit("Join", |i| i.join(joined.entity, joined.into))
+        .unwrap();
+    assert!(!committed.undoable);
+    assert_eq!(a.history(), history, "no step of undo");
+    b.refresh().unwrap();
+    let origin = match joined.into == made[0] {
+        true => "a",
+        false => "b",
+    };
+    for writer in [&a, &b] {
+        let view = writer.view();
+        let into = view.at(&path(NOTES)).unwrap();
+        assert_eq!(into.id(), joined.into);
+        assert_eq!(into.members(TAGS).values, ["Live", "Studio"]);
+        assert_eq!(into.get(ORIGIN), Field::Value(origin.to_owned()), "its own");
+        assert!(view.entity(joined.entity).is_none());
+        assert_eq!((view.joined(), view.conflicts()), (&[][..], vec![]));
+    }
+    for writer in [&mut a, &mut b] {
+        let undone = writer.undo();
+        assert!(
+            matches!(undone, Err(Error::Refused(Refusal::ChangedSince { .. }))),
+            "{undone:?}"
+        );
+        let view = writer.view();
+        let into = view.at(&path(NOTES)).unwrap();
+        assert_eq!(into.members(TAGS).values, ["Live", "Studio"]);
+    }
+}
+
+fn writers_joining_one_entity_at_once_converge<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, mut b, _) = adopted_by_both::<F>(&folder, &clock, [Some("a"), None]);
+    a.refresh().unwrap();
+    b.refresh().unwrap();
+    for writer in [&mut a, &mut b] {
+        let [joined] = writer.view().joined().try_into().unwrap();
+        writer
+            .commit("Join", |i| i.join(joined.entity, joined.into))
+            .unwrap();
+    }
+    a.refresh().unwrap();
+    b.refresh().unwrap();
+    assert_eq!(facts(&a.view()), facts(&b.view()));
+    let view = a.view();
+    let [(_, (origin, tags, file))] = facts(&view)
+        .into_iter()
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    assert_eq!(
+        (origin.as_deref(), &tags[..], file),
+        (
+            Some("a"),
+            &["Live".to_owned(), "Studio".to_owned()][..],
+            Some((path(NOTES), FileState::InSync))
+        )
+    );
+    assert_eq!((view.joined(), view.conflicts()), (&[][..], vec![]));
 }
 
 fn a_copy_has_no_entity_until_one_is_said<F: Facade>() {

@@ -49,6 +49,11 @@
 //! the files a watcher saw change. Each reports what changed and, once every file
 //! was scanned, the files that arrived, moved or changed outside the app.
 //!
+//! Two writers can each make an entity of one file before either sees the other's.
+//! The file is then the lowest entity's, and the scan reports each other one as
+//! joined into it, shown without a file; an app commits `Intent::join` to give the
+//! lowest what each holds and delete the rest.
+//!
 //! `Layout::new(".app")` keeps the library's own files in `.app/`.
 //! `Layout::within(".app", "library")` keeps them in `.app/library/` and leaves all
 //! of `.app/` out of scans, for an app with other files of its own there, and
@@ -67,7 +72,8 @@
 //! (`retired`) or a refused compaction reports. A reader keeps nothing between
 //! opens: what it shows is what the files in the folder say, so facts a restore of
 //! the folder took go at the next read. Undo reaches the intents of the session but
-//! those that only dismiss, and `Committed::undoable` says which a commit is. A
+//! those that only dismiss or only join, and `Committed::undoable` says which a
+//! commit is. A
 //! view never changes, so an app can hand it to other threads. A field read from a
 //! view is a value, a conflict between writers, or unreadable, so an app cannot
 //! show half a conflict by accident.

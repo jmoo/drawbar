@@ -208,7 +208,7 @@ pub struct Ambiguous {
 
 /// An entity whose file facts hold the file bound to `into`, the lowest of the
 /// entities whose facts hold it, as when two writers each adopted the file before
-/// seeing the other's.
+/// seeing the other's. [`crate::intent::Intent::join`] gives `into` what it holds.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Joined {
     pub entity: EntityId,
@@ -242,8 +242,8 @@ pub struct Committed {
     /// file it did not know of keeps, where moving a tree moves its files one
     /// by one.
     pub left: Vec<RelPath>,
-    /// Whether it joined this instance's undo history, as every intent does but
-    /// one that only dismisses runs.
+    /// Whether it is a step of this instance's undo history, as every intent is
+    /// but one that only dismisses runs or only joins entities.
     pub undoable: bool,
     /// Whether this instance's own state caught up with the commit.
     pub local: Local,

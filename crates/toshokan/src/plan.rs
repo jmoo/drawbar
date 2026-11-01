@@ -8,6 +8,7 @@ use crate::ids::{EntityId, EntryHash, Identity, Nonce};
 use crate::io::{IoError, Range, CHUNK};
 use crate::log::{FileFact, Run};
 use crate::path::RelPath;
+use crate::report::Joined;
 use crate::schema::Raw;
 
 /// The `n`th content an intent saves. The driver holds the content and fills the
@@ -55,6 +56,8 @@ pub struct Plan {
     pub reverses: Option<EntryHash>,
     /// Items the user dismissed: no reader merges or shows them again.
     pub dismiss: Vec<Run>,
+    /// Entities to join into others, after the fact changes.
+    pub joins: Vec<Joined>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

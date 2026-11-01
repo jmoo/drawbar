@@ -40,6 +40,33 @@ pub struct History {
     kept: BTreeMap<EntryHash, (Logged, Before)>,
     /// The entry of the latest intent, undo or redo.
     last: Option<EntryHash>,
+    /// The intents that joined entities, whose writes undo takes for another
+    /// writer's: they hold what the joined entity held.
+    joins: BTreeSet<EntryHash>,
+}
+
+/// How an intent being committed enters this session's history.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Entering {
+    /// As a step of its own, which ends every redo.
+    #[default]
+    Step,
+    /// As the undo or redo of this entry.
+    Reversing(EntryHash),
+    /// Not at all: it only joins entities.
+    Joining,
+}
+
+impl Entering {
+    /// How committing `plan` enters the history.
+    pub fn of(plan: &Plan) -> Self {
+        let only_joins = plan.created.is_empty() && plan.facts.is_empty() && plan.files.is_empty();
+        match plan.reverses {
+            Some(entry) => Entering::Reversing(entry),
+            None if only_joins && !plan.joins.is_empty() => Entering::Joining,
+            None => Entering::Step,
+        }
+    }
 }
 
 /// What an intent replaced, as reversing it needs: the state it was committed
@@ -154,9 +181,9 @@ fn values(folded: &Folded, moved: &[Op], entity: EntityId) -> Vec<FactChange> {
     changes
 }
 
-/// Whether an intent whose ops are `ops` joins the history: every intent does
-/// but one that only dismisses runs.
-pub fn joins<'a>(ops: impl IntoIterator<Item = &'a Op>) -> bool {
+/// Whether an intent whose ops are `ops` may be a step of the history: one that
+/// only dismisses runs is not.
+pub fn is_step<'a>(ops: impl IntoIterator<Item = &'a Op>) -> bool {
     let mut ops = ops.into_iter().peekable();
     ops.peek().is_none() || !ops.all(|op| matches!(op, Op::Dismiss { .. }))
 }
@@ -166,15 +193,17 @@ impl History {
     /// what `before` says it replaced. An intent reversing the latest done intent
     /// is its undo; one reversing the latest undo is a redo, which the next undo
     /// reverses. Any other intent starts a new item and ends every redo. An intent
-    /// that only dismisses runs is final, and joins no item.
-    pub fn push(
-        &mut self,
-        entry: &Entry,
-        logged: Logged,
-        reverses: Option<EntryHash>,
-        before: Before,
-    ) {
-        if !joins(&logged.ops) {
+    /// that only dismisses runs or only joins entities is final, and is no item.
+    pub fn push(&mut self, entry: &Entry, logged: Logged, entering: Entering, before: Before) {
+        let reverses = match entering {
+            Entering::Joining => {
+                self.joins.insert(entry.hash());
+                return;
+            }
+            Entering::Step => None,
+            Entering::Reversing(reverses) => Some(reverses),
+        };
+        if !is_step(&logged.ops) {
             return;
         }
         let label = logged.label.clone();
@@ -254,25 +283,21 @@ impl History {
     ) -> Result<Plan, Refusal> {
         let latest = stack.last().ok_or(Refusal::Nothing)?;
         let (logged, before) = self.kept.get(latest).ok_or(Refusal::Nothing)?;
-        reverse(*latest, logged, before, writer, folded)
+        let reversing = Reversing {
+            writer,
+            joins: &self.joins,
+            folded,
+            before,
+            displaced: &logged.displaced,
+        };
+        reverse(*latest, logged, &reversing)
     }
 }
 
-/// The plan that compensates `intent`, one of `writer`'s intents, which logged
-/// `logged` over what `before` says it replaced.
-pub fn reverse(
-    intent: EntryHash,
-    logged: &Logged,
-    before: &Before,
-    writer: WriterId,
-    folded: &Folded,
-) -> Result<Plan, Refusal> {
-    let reversing = Reversing {
-        writer,
-        folded,
-        before,
-        displaced: &logged.displaced,
-    };
+/// The plan that compensates `intent`, one of the reversing writer's intents,
+/// which logged `logged`.
+fn reverse(intent: EntryHash, logged: &Logged, reversing: &Reversing) -> Result<Plan, Refusal> {
+    let before = reversing.before;
     let recreated: BTreeSet<EntityId> = logged
         .ops
         .iter()
@@ -411,6 +436,7 @@ fn carried(
 
 struct Reversing<'a> {
     writer: WriterId,
+    joins: &'a BTreeSet<EntryHash>,
     folded: &'a Folded,
     before: &'a Before,
     displaced: &'a [Displaced],
@@ -424,6 +450,11 @@ fn changed<V>(write: &Write<V>) -> Refusal {
 }
 
 impl Reversing<'_> {
+    /// Whether another writer made `write`, or this one made it joining an entity.
+    fn foreign<V>(&self, write: &Write<V>) -> bool {
+        write.by != self.writer || self.joins.contains(&write.entry)
+    }
+
     /// Refuses unless every surviving existence write of `entity` is as `left`.
     fn existence(&self, entity: EntityId, left: Exists) -> Result<(), Refusal> {
         let survivors = self.folded.existence(entity);
@@ -433,10 +464,10 @@ impl Reversing<'_> {
         }
     }
 
-    /// Refuses when another writer's field write on `entity` is live.
+    /// Refuses when a [`Reversing::foreign`] field write on `entity` is live.
     fn only_own_writes(&self, entity: EntityId) -> Result<(), Refusal> {
         let live = self.folded.live_writes(entity);
-        match live.iter().rev().find(|(_, write)| write.by != self.writer) {
+        match live.iter().rev().find(|(_, write)| self.foreign(write)) {
             Some((_, write)) => Err(changed(write)),
             None => Ok(()),
         }
@@ -488,7 +519,7 @@ impl Reversing<'_> {
     fn add(&self, entity: EntityId, key: &str, value: &Raw) -> Result<Option<FactChange>, Refusal> {
         self.shown(entity)?;
         let tags = self.folded.tags(entity, key, value);
-        if let Some(tag) = tags.iter().rev().find(|tag| tag.by != self.writer) {
+        if let Some(tag) = tags.iter().rev().find(|tag| self.foreign(tag)) {
             return Err(changed(tag));
         }
         if !tags.iter().any(|tag| tag.value) {
@@ -505,7 +536,7 @@ impl Reversing<'_> {
     fn remove(&self, entity: EntityId, key: &str, value: &Raw) -> Result<FactChange, Refusal> {
         self.shown(entity)?;
         let tags = self.folded.tags(entity, key, value);
-        if let Some(tag) = tags.iter().rev().find(|tag| tag.by != self.writer) {
+        if let Some(tag) = tags.iter().rev().find(|tag| self.foreign(tag)) {
             return Err(changed(tag));
         }
         Ok(FactChange::Add {

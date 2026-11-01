@@ -716,9 +716,9 @@ their identities:
    facts it holds are **joined** into that one, so readers of the same facts pick
    the same entity: two writers can each adopt one file before either sees the
    other's entity. A joined entity is bound to no file and is not missing; the
-   scan reports it with the entity it joined, and a view shows it without a file.
-   The others naming the file, or all when it holds no one's facts, go on to
-   step 3.
+   scan reports it with the entity it joined, and a view shows it without a file
+   until an intent joins it (see Intents). The others naming the file, or all when
+   it holds no one's facts, go on to step 3.
 3. An entity whose path holds nothing is bound to the one unbound file holding
    its identity: a move. With no such file it is missing; with several, or when
    one file could be several entities', nothing is bound and the candidates are
@@ -789,6 +789,17 @@ same way.
 
 An intent may also adopt a library file no entity is bound to: a precondition on
 its identity, no step, and a `pin` op giving the entity the file as it is.
+
+An intent may join one entity into another, as the app does for each entity a
+scan reports joined. It logs an `add` to the other of each member of each set
+the one holds and the other does not, a `write` to the other of each register
+the one holds a value of and the other holds none of, the one's shown value
+where its writes conflict, and then the one's `delete`. A register both hold a
+value of keeps the other's. Two writers joining the same entity converge: an
+add of a member already held and a second delete of one entity change nothing
+shown. The delete observes only the writes its writer saw, so a change to the
+joined entity another writer made without seeing the join is a deletion
+conflict. An intent that only joins entities is final (see Undo and redo).
 
 An intent may save, rename or trash a library file no entity is bound to, by its
 path, without making it an entity: a file nothing is said about stays without
@@ -1048,8 +1059,9 @@ while the instance has committed nothing else since. Undo history is not logged:
 it ends when the instance closes. Each intent is kept with what it replaced, as
 the merged state showed it when it committed, and with where the binding found
 each file it changed or whose entity it deleted, so a file moved outside the app
-that no commit had pinned yet goes back where it was moved to. An intent that only dismisses runs
-is final: it is not kept, so an undo after it reverses the intent before it.
+that no commit had pinned yet goes back where it was moved to. An intent that only
+dismisses runs or joins entities is final: it is not kept and leaves redo as it was,
+so an undo after it reverses the intent before it.
 
 - A register write is reversed by writing back the latest value it replaced,
   another writer's included; a clear where there was none.

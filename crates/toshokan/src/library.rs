@@ -42,7 +42,7 @@ use crate::report::{
 };
 use crate::schema::Schema;
 use crate::trash;
-use crate::undo::{self, Before, History};
+use crate::undo::{self, Before, Entering, History};
 use crate::view::{FileRef, FileState, Listed, Parts, View};
 use crate::writer::{self, Claimed, Writer};
 
@@ -107,8 +107,8 @@ pub struct Library {
     pins: Vec<Op>,
     presence: BTreeMap<WriterId, Presence>,
     history: History,
-    /// The entry the intent being committed undoes or redoes.
-    reversing: Option<EntryHash>,
+    /// How the intent being committed enters the history.
+    entering: Entering,
     view: View,
     /// Whether a read folded in something the view does not show yet.
     unshown: bool,
@@ -122,7 +122,7 @@ struct Resolved {
     created: Vec<EntityId>,
     facts: Vec<Op>,
     effects: Rc<EffectPlan>,
-    reverses: Option<EntryHash>,
+    entering: Entering,
 }
 
 impl Library {
@@ -265,7 +265,7 @@ impl Library {
             pins: Vec::new(),
             presence: BTreeMap::new(),
             history: History::default(),
-            reversing: None,
+            entering: Entering::Step,
             unshown: false,
             view: View::new(Parts {
                 folded: Folded::default(),
@@ -791,6 +791,7 @@ impl Library {
             )?;
         }
         let facts = intent::ops(&plan, &self.folded, &self.schema).map_err(refused)?;
+        let entering = Entering::of(&plan);
         let revived: BTreeSet<EntityId> = plan
             .facts
             .iter()
@@ -824,7 +825,7 @@ impl Library {
             created: plan.created,
             facts,
             effects: Rc::new(effects),
-            reverses: plan.reverses,
+            entering,
         })
     }
 
@@ -971,7 +972,7 @@ impl Library {
         let Some(id) = self.writer.as_ref().map(Writer::id) else {
             return;
         };
-        let mut reverses = self.reversing.take();
+        let mut entering = std::mem::take(&mut self.entering);
         let mut intents: Vec<(&Entry, &Logged)> = Vec::new();
         for entry in entries {
             if let EntryKind::Intent(logged) = entry.kind() {
@@ -982,8 +983,8 @@ impl Library {
         self.bind_facts();
         for (entry, logged) in intents {
             let before = Before::of(&logged.ops, &self.folded, &self.pins);
-            self.history
-                .push(entry, logged.clone(), reverses.take(), before);
+            let entering = std::mem::take(&mut entering);
+            self.history.push(entry, logged.clone(), entering, before);
         }
         if let Some((path, stamp)) = written {
             self.reader.add(id, entries, &path, stamp);
@@ -1968,7 +1969,7 @@ fn commit<'a>(
         created,
         facts,
         effects,
-        reverses,
+        entering,
     } = resolved;
     ensure_writer(library, &effects)
         .and_then(tidy_staging)
@@ -1983,17 +1984,18 @@ fn commit<'a>(
                 displaced: Vec::new(),
                 record: None,
             };
-            library.reversing = reverses;
+            library.entering = entering;
             let effects = library.with_replaces(effects);
             transact(library, logged, effects, None, pins.collect())
         })
         .and_then(move |(library, entries, ended)| {
-            library.reversing = None;
+            library.entering = Entering::Step;
             let committed = committed(&entries, created, library.local());
             ok((
                 library,
                 Committed {
                     left: ended.left,
+                    undoable: committed.undoable && entering != Entering::Joining,
                     ..committed
                 },
             ))
@@ -2019,7 +2021,7 @@ fn committed(entries: &[Entry], created: Vec<EntityId>, local: Local) -> Committ
         _ => None,
     });
     let undoable = match entries.first().map(Entry::kind) {
-        Some(EntryKind::Intent(logged)) => undo::joins(logged.ops.iter()),
+        Some(EntryKind::Intent(logged)) => undo::is_step(logged.ops.iter()),
         _ => false,
     };
     Committed {
