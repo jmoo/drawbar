@@ -756,7 +756,9 @@ A commit:
    says, or found bound to another entity, refuses the intent.
 2. Turns the file changes into the steps below and their preconditions.
 3. If the instance has no writer yet, checks the preconditions without writing
-   and only then creates its writer, so a refused first intent leaves nothing.
+   and only then creates its writer, so a first intent a precondition refuses
+   leaves nothing. One refused as too long leaves the writer's genesis entry, and
+   the instance goes on writing as that writer.
 4. Settles this writer's own unfinished effects (see Recovery).
 5. Carries out the file effects under a pending record, then appends the intent
    with a `file` op for each entity's file as the folder shows it afterwards,

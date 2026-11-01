@@ -2079,7 +2079,7 @@ fn genesis_of(placed: &derive::Placed) -> Option<EntryHash> {
 
 /// Creates this instance's writer when it has none. Its genesis entry is the
 /// first thing it writes in the folder, so the effects' preconditions are checked
-/// first: a refused intent leaves nothing behind.
+/// first: an intent they refuse leaves nothing behind.
 fn ensure_writer<'a>(
     library: &'a mut Library,
     effects: &EffectPlan,
