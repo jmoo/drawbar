@@ -703,8 +703,7 @@ pub fn apply(
                 // ⚠️ A removed row cannot close its rename state; a reused id would inherit it.
                 browser.forget_rename(Item::Tag(id));
                 browser.tags.remove(id);
-                // ⚠️ A removed tag must also stop filtering the library.
-                shell.filter.forget_tag(id);
+                shell.filter.keep_tags(&browser.tags);
             }
             Act::SendChecked(ids) => queue_all(workspace, device, queue, log, &ids),
             Act::Open(Item::Folder(_) | Item::Tag(_)) => {}

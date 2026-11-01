@@ -757,10 +757,8 @@ impl DrawbarApp {
                 "{unqueued} waiting to be sent left the queue with the library they are in."
             ));
         }
-        for tag in self.browser.tags.all() {
-            self.shell.filter.forget_tag(tag.id);
-        }
         self.browser.leave_library();
+        self.shell.filter.keep_tags(&self.browser.tags);
         self.tabs.prune(&self.workspace);
     }
 
@@ -1070,6 +1068,7 @@ impl eframe::App for DrawbarApp {
                     &self.queue,
                     &mut self.log,
                 );
+                self.shell.filter.keep_tags(&self.browser.tags);
                 let left = store.take_left().into_iter();
                 arrived.extend(left.map(browser::Act::Remove));
                 if let Some(list) = self.older.as_mut() {
