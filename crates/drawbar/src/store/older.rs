@@ -1,6 +1,7 @@
 //! The list of This computer that drawbar 0.10 and earlier kept in eframe's string
 //! store, local storage in a browser and `app.ron` on the desktop, which a library takes
-//! in once ([`super::Store::take_in`]). Each key held a version line and then one line
+//! in once ([`super::Store::take_in`]) and then leaves where it was, so that an earlier
+//! drawbar run again still finds it. Each key held a version line and then one line
 //! per row, tab-separated, as that build's `store.rs`, `named.rs`, `folders.rs` and
 //! `tags.rs` wrote them.
 
@@ -18,6 +19,9 @@ const KEYS: [&str; 3] = ["drawbar.this_computer", "drawbar.folders", "drawbar.ta
 /// line for each asset that came with an unsaved edit, its place in the list and the
 /// library path its file was given, tab-separated.
 const HANDOFF: &str = "drawbar.taking_in";
+
+/// The key of the hash of the list a library took in, which is not read again.
+const TAKEN: &str = "drawbar.taken_in";
 
 /// How many fields an asset's line holds, which is all its version decides.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -157,6 +161,9 @@ pub fn found(storage: &dyn eframe::Storage) -> Found {
         }
     });
     let hash = hash.finalize().to_hex().to_string();
+    if storage.get_string(TAKEN).as_deref() == Some(hash.as_str()) {
+        return Found::Nothing;
+    }
     let record = storage.get_string(HANDOFF).unwrap_or_default();
     Found::List(List {
         placed: placed(&record, &hash),
@@ -193,15 +200,19 @@ pub fn keep_placed(storage: &mut dyn eframe::Storage, hash: &str, placed: &[(usi
     storage.flush();
 }
 
-/// Empty the keys the list was kept under, and the record of its take-in.
+/// Remember that a library took in the list of hash `hash`, which is then not read
+/// again while its keys hold what they did, and let go of the record of its take-in.
+/// The keys stay as they are.
 ///
 /// ⚠️ eframe's store has no remove, and on the desktop it writes back whatever it holds
-/// in memory, so a key is emptied rather than left alone.
-pub fn empty(storage: &mut dyn eframe::Storage) {
-    for key in KEYS.into_iter().chain([HANDOFF]) {
-        if storage.get_string(key).is_some_and(|held| !held.is_empty()) {
-            storage.set_string(key, String::new());
-        }
+/// in memory, so the record is emptied rather than left alone.
+pub fn let_go(storage: &mut dyn eframe::Storage, hash: &str) {
+    storage.set_string(TAKEN, hash.to_string());
+    if storage
+        .get_string(HANDOFF)
+        .is_some_and(|held| !held.is_empty())
+    {
+        storage.set_string(HANDOFF, String::new());
     }
 }
 
@@ -538,15 +549,30 @@ mod tests {
     }
 
     #[test]
-    fn emptying_the_keys_leaves_every_other_key() {
-        let mut storage = stored(["drawbar 2\n1\n", "drawbar folders 1\n", ""]);
-        eframe::Storage::set_string(&mut storage, "drawbar.theme", "dark".into());
-        keep_placed(&mut storage, "a list", &[]);
-        empty(&mut storage);
+    fn a_list_let_go_of_stays_and_is_not_read_again_until_it_changes() {
+        let kept = "drawbar 2\n1\n";
+        let mut storage = stored([kept, "drawbar folders 1\n", ""]);
+        let Found::List(list) = found(&storage) else {
+            panic!("a list");
+        };
+        keep_placed(&mut storage, &list.hash, &[]);
+        let_go(&mut storage, &list.hash);
         assert_eq!(found(&storage), Found::Nothing);
-        let record = eframe::Storage::get_string(&storage, HANDOFF);
-        assert_eq!(record.as_deref(), Some(""), "the record goes with the keys");
-        let theme = eframe::Storage::get_string(&storage, "drawbar.theme");
-        assert_eq!(theme.as_deref(), Some("dark"));
+        let held = |key| eframe::Storage::get_string(&storage, key);
+        assert_eq!(
+            held("drawbar.this_computer").as_deref(),
+            Some(kept),
+            "it stays"
+        );
+        assert_eq!(held(HANDOFF).as_deref(), Some(""), "the record goes");
+        eframe::Storage::set_string(
+            &mut storage,
+            "drawbar.this_computer",
+            "drawbar 2\n2\n".into(),
+        );
+        assert!(
+            matches!(found(&storage), Found::List(_)),
+            "a list an earlier drawbar changed since is read again"
+        );
     }
 }

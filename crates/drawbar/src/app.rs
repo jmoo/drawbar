@@ -775,8 +775,8 @@ impl DrawbarApp {
         self.switch_library(ctx, root);
     }
 
-    /// Empty the keys the list an older drawbar kept is under, once the library holds
-    /// the list durably, or at once where the list holds nothing to take in.
+    /// Let go of the list an older drawbar kept, leaving its keys as they are, once the
+    /// library holds it durably, or at once where it holds nothing to take in.
     fn let_older_go(&mut self, storage: &mut dyn eframe::Storage) {
         let Some(list) = &self.older else {
             return;
@@ -784,7 +784,7 @@ impl DrawbarApp {
         let store = self.store.as_ref();
         let kept = |store: &Store| store.handed_over(&list.hash, &self.workspace);
         if list.is_empty() || store.is_some_and(kept) {
-            crate::store::older::empty(storage);
+            crate::store::older::let_go(storage, &list.hash);
             self.older = None;
         }
     }
@@ -1688,12 +1688,12 @@ mod tests {
         panic!("it never happened");
     }
 
-    /// The list is emptied from eframe's store only once the library holds it, and a list
-    /// the library holds already, as after a crash before the keys were emptied, is
-    /// emptied without being taken in again.
+    /// The list is let go of only once the library holds it, its keys left as they were,
+    /// and a list the library holds already, as after a crash before it was let go of, is
+    /// let go of without being taken in again.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn an_older_drawbars_list_is_emptied_once_the_library_took_it_in() {
+    fn an_older_drawbars_list_is_let_go_of_once_the_library_took_it_in() {
         use eframe::App as _;
 
         let root = crate::testing::Temp::new();
@@ -1715,9 +1715,12 @@ mod tests {
         };
         until(&ctx, &mut app, taken);
         app.let_older_go(&mut storage);
-        for key in ["drawbar.this_computer", "drawbar.folders", "drawbar.tags"] {
-            assert_eq!(held(&storage, key), "", "{key}");
-        }
+        assert_eq!(crate::store::older::found(&storage), Found::Nothing);
+        assert_eq!(
+            held(&storage, "drawbar.this_computer"),
+            assets,
+            "left for an earlier drawbar"
+        );
         assert_eq!(
             held(&storage, ThemeChoice::KEY),
             "dark",
@@ -1735,7 +1738,7 @@ mod tests {
         };
         until(&ctx, &mut app, idle);
         app.let_older_go(&mut again);
-        assert_eq!(held(&again, "drawbar.this_computer"), "");
+        assert_eq!(crate::store::older::found(&again), Found::Nothing);
         assert_eq!(root.names(""), [".drawbar", "Grand.ne5p"], "taken in once");
     }
 
@@ -1782,7 +1785,7 @@ mod tests {
         };
         until(&ctx, &mut app, kept);
         app.let_older_go(&mut storage);
-        assert_eq!(held(&storage, "drawbar.this_computer"), "");
+        assert_eq!(crate::store::older::found(&storage), Found::Nothing);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1808,7 +1811,7 @@ mod tests {
     }
 
     #[test]
-    fn an_older_drawbars_list_with_nothing_in_it_is_emptied_at_once() {
+    fn an_older_drawbars_list_with_nothing_in_it_is_let_go_of_at_once() {
         let mut storage = crate::testing::Fake::default();
         eframe::Storage::set_string(
             &mut storage,
@@ -1818,8 +1821,8 @@ mod tests {
         eframe::Storage::set_string(&mut storage, "drawbar.tags", "drawbar tags 1\n".into());
         let mut app = open(&storage);
         app.let_older_go(&mut storage);
-        assert_eq!(held(&storage, "drawbar.this_computer"), "");
-        assert_eq!(held(&storage, "drawbar.tags"), "");
+        assert_eq!(crate::store::older::found(&storage), Found::Nothing);
+        assert_eq!(held(&storage, "drawbar.tags"), "drawbar tags 1\n");
     }
 
     #[test]
