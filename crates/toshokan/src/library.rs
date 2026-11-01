@@ -23,7 +23,7 @@ use crate::error::{Error, Invalid, Refusal, Result, Why};
 use crate::flow::{self, fold, ok, Fallible, Flow};
 use crate::ids::{EntityId, EntryHash, Hlc, Identity, Nonce, WriterId};
 use crate::intent;
-use crate::io::{Capabilities, DirEntry, Io, Kind, Lock, Root, Task};
+use crate::io::{Capabilities, DirEntry, Io, IoError, Kind, Lock, Root, Task};
 use crate::layout::{Layout, WRITERS};
 use crate::log::{
     Bound, Displaced, Entry, EntryKind, FileFact, Forked, Genesis, Logged, Op, Ref, Settle,
@@ -57,8 +57,9 @@ pub struct Library {
     /// `None` until the first write, and again after this writer had to stop.
     writer: Option<Writer>,
     /// Whether a writer of this instance stopped as a write the folder reported
-    /// failed reached it all the same: a failed write of a later one turns the
-    /// library read-only, as every commit would otherwise start another writer.
+    /// failed reached it all the same, or failed to be made and may have left its
+    /// directory: a failed write of a later one turns the library read-only, as
+    /// every commit would otherwise start another writer.
     landed: bool,
     /// The latest clock reading seen or written.
     clock: Hlc,
@@ -1122,8 +1123,9 @@ impl Library {
 
     /// `error`, or, where a writer of this instance stopped as a write landed and
     /// `error` is a failed write of a later one, why the library is now read-only.
+    /// A full folder is said as such: it keeps writes once there is room.
     fn failed_write(&mut self, error: Error) -> Error {
-        if !self.landed || !matches!(error, Error::Io { .. }) {
+        if !self.landed || !unsure(&error) {
             return error;
         }
         self.mode = Mode::ReadOnly(Why::NotDurable);
@@ -2095,7 +2097,11 @@ fn ensure_writer<'a>(
                 library.absorb_own(&[genesis], written);
                 ok(library)
             }),
-            Err(error) => Flow::Done(Err(library.failed_write(error))),
+            Err(error) => {
+                let failed = library.failed_write(error);
+                library.landed |= unsure(&failed);
+                Flow::Done(Err(failed))
+            }
         })
     })
 }
@@ -2217,6 +2223,12 @@ fn remove_record<'a>(
     library.unsettled.retain(|settling| settling.record != name);
     library.spent.push((name, record.clone()));
     remove_spent(library).then(|(library, _)| Flow::Done(library))
+}
+
+/// Whether `error` failed a write the folder may have carried out in part, as a
+/// full folder does not.
+fn unsure(error: &Error) -> bool {
+    matches!(error, Error::Io { error, .. } if *error != IoError::NoSpace)
 }
 
 /// Stops writing as this writer: it leaves the pool, and the next commit creates a

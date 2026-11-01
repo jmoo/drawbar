@@ -87,6 +87,8 @@ struct Seen {
     blind: bool,
     /// Requests this picks fail.
     failing: Option<Box<Picks>>,
+    /// Writes in the folder fail as a full volume's do.
+    full: bool,
     /// Requests this picks are carried out, and then fail, as a reply a backend
     /// loses.
     unanswered: Option<Box<Picks>>,
@@ -261,6 +263,9 @@ impl Probe {
         }
         if seen.failing.as_ref().is_some_and(|failing| failing(io)) {
             return Err(toshokan::IoError::Other("failed by the test".into()));
+        }
+        if seen.full && io.root() == Root::Folder && io.mutates() {
+            return Err(toshokan::IoError::NoSpace);
         }
         match (io, &seen.refused) {
             (Io::Rename { to, .. } | Io::Create { path: to, .. }, Some(refused))
@@ -620,6 +625,8 @@ through_both!(
     a_new_segment_whose_reply_was_lost_stands_and_the_next_write_takes_a_new_writer,
     writers_that_retire_over_lost_writes_leave_their_trash_empty,
     a_folder_that_never_syncs_a_directory_turns_read_only_after_one_new_writer,
+    a_new_library_whose_folder_never_syncs_a_directory_leaves_at_most_two_writers,
+    a_full_folder_after_a_writer_stopped_is_said_as_full,
     a_spent_record_is_reported_only_where_its_entry_has_not_arrived,
     a_settled_record_is_removed_and_logged_once,
     identities_a_failed_write_lost_are_kept_by_the_next_scan,
@@ -3566,6 +3573,79 @@ fn a_folder_that_never_syncs_a_directory_turns_read_only_after_one_new_writer<F:
     assert!(
         matches!(results.last(), Some(Err(Error::ReadOnly(Why::NotDurable)))),
         "{results:?}"
+    );
+}
+
+/// A folder that never syncs a directory from the first write: a writer whose
+/// making failed may leave its directory, so the next failure turns the library
+/// read-only rather than leave another at every commit.
+fn a_new_library_whose_folder_never_syncs_a_directory_leaves_at_most_two_writers<F: Facade>() {
+    if !FOLDER.get().fsync {
+        return;
+    }
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let probe = Probe::new(&here);
+    let dirs = folder.clone();
+    fail(&probe, move |io| {
+        let directory = dirs.directories(Root::Folder).contains(io.path());
+        matches!(io, Io::Sync { .. }) && io.root() == Root::Folder && directory
+    });
+    let (mut a, _) = F::open(probe, env("a", 1, &clock)).unwrap();
+    let mut results = Vec::new();
+    for n in 0..8 {
+        results.push(a.commit("Make", |i| {
+            let (i, _) = i.create(|e| {
+                e.add(TAGS, n.to_string());
+            });
+            i
+        }));
+    }
+    let dirs = folder.directories(Root::Folder).into_iter();
+    let writers = dirs.filter(|dir| dir.parent() == Some(layout().writers()));
+    assert!(writers.count() <= 2, "{results:?}");
+    assert!(
+        matches!(results.last(), Some(Err(Error::ReadOnly(Why::NotDurable)))),
+        "{results:?}"
+    );
+}
+
+/// A full folder is no folder that keeps no write: after a writer stopped over a
+/// write that landed, running out of space is said as that.
+fn a_full_folder_after_a_writer_stopped_is_said_as_full<F: Facade>() {
+    if !FOLDER.get().fsync {
+        return;
+    }
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    a.close().unwrap();
+    let probe = Probe::new(&here);
+    let (mut a, _) = F::open(probe.clone(), env("a", 2, &clock)).unwrap();
+    let dirs = folder.clone();
+    let once = Cell::new(true);
+    fail(&probe, move |io| {
+        let directory = dirs.directories(Root::Folder).contains(io.path());
+        let sync = matches!(io, Io::Sync { .. }) && io.root() == Root::Folder && directory;
+        sync && once.replace(false)
+    });
+    let _ = a.commit("Tag", |i| i.add(song, TAGS, "Live".to_string()));
+    let _ = a.commit("Tag", |i| i.add(song, TAGS, "Gig".to_string()));
+    heal(&probe);
+    probe.seen.borrow_mut().full = true;
+    let full = a.commit("Tag", |i| i.add(song, TAGS, "Studio".to_string()));
+    assert!(
+        matches!(
+            full,
+            Err(Error::Io {
+                error: IoError::NoSpace,
+                ..
+            })
+        ),
+        "{full:?}"
     );
 }
 
