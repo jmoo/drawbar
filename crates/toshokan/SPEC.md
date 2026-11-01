@@ -711,9 +711,10 @@ their identities:
    has no entity until an intent says something about it.
 
 Every commit pins the moves this writer holds that its facts do not say yet: each
-file in sync at another path, as a `pin` op in a `bind` entry. A new
-modification time alone is not logged; it only spares a scan reading an
-identity. Conflicted file registers, changed files and missing ones are left for
+file in sync at another path, as a `pin` op in a `bind` entry. A path the
+volume takes for the logged one, under its rules for case and Unicode
+normalization, is not another. A new modification time alone is not logged; it
+only spares a scan reading an identity. Conflicted file registers, changed files and missing ones are left for
 the user. A scan writes nothing in the folder.
 
 ## Intents

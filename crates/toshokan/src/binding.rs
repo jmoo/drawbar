@@ -190,7 +190,7 @@ fn bound(facts: &Facts, scan: &Scan, names: &dyn Names) -> Progress {
     progress.reported();
     let Progress { bound, pins, .. } = &mut progress;
     for (entity, file) in &*bound {
-        pins.extend(pin(facts, scan, *entity, file));
+        pins.extend(pin(facts, scan, names, *entity, file));
     }
     progress
 }
@@ -645,18 +645,24 @@ pub fn bind(facts: &Facts, scan: &Scan, names: &dyn Names) -> Bindings {
 }
 
 /// File-register writes for the moves `facts` do not already say: a file found in
-/// sync at another path. A new modification time alone is not pinned; it only
+/// sync at a path the volume does not take for the logged one. A new modification time alone is not pinned; it only
 /// saves reading an identity. Conflicted registers, changed files and missing
 /// ones are left for the user.
-pub fn pins(facts: &Facts, bindings: &Bindings, scan: &Scan) -> Vec<Op> {
+pub fn pins(facts: &Facts, bindings: &Bindings, scan: &Scan, names: &dyn Names) -> Vec<Op> {
     let mut ops = Vec::new();
     for (&entity, file) in &bindings.bound {
-        ops.extend(pin(facts, scan, entity, file));
+        ops.extend(pin(facts, scan, names, entity, file));
     }
     ops
 }
 
-fn pin(facts: &Facts, scan: &Scan, entity: EntityId, file: &FileRef) -> Option<Op> {
+fn pin(
+    facts: &Facts,
+    scan: &Scan,
+    names: &dyn Names,
+    entity: EntityId,
+    file: &FileRef,
+) -> Option<Op> {
     let ([written], FileState::InSync) = (
         facts.get(&entity).map_or(&[][..], |written| &written[..]),
         file.state,
@@ -664,7 +670,7 @@ fn pin(facts: &Facts, scan: &Scan, entity: EntityId, file: &FileRef) -> Option<O
         return None;
     };
     let found = scan.files.get(&file.path)?;
-    if file.path == written.value.path {
+    if names.key(file.path.as_str()) == names.key(written.value.path.as_str()) {
         return None;
     }
     let pinned = FileFact {
@@ -1420,11 +1426,20 @@ mod tests {
                 folded.report.moved.is_empty(),
                 "{logged:?} is the same name"
             );
+            assert!(
+                pins(&facts, &folded, &scan, &Folding).is_empty(),
+                "{logged:?} is pinned under the spelling found"
+            );
             let exact = bind(&facts, &scan, &ExactNames);
             assert_eq!(
                 exact.report.moved.len(),
                 1,
                 "{logged:?} differs byte for byte"
+            );
+            assert_eq!(
+                pins(&facts, &exact, &scan, &ExactNames).len(),
+                1,
+                "{logged:?} moved on an exact-name volume"
             );
         }
     }
@@ -1469,7 +1484,13 @@ mod tests {
         assert_eq!(both.report.ambiguous[0].candidates, [path("a"), path("b")]);
         let scan = scanned(&[("b", 0)], &facts);
         assert!(
-            pins(&facts, &bind(&facts, &scan, &ExactNames), &scan).is_empty(),
+            pins(
+                &facts,
+                &bind(&facts, &scan, &ExactNames),
+                &scan,
+                &ExactNames
+            )
+            .is_empty(),
             "the user resolves it"
         );
     }
@@ -1480,7 +1501,12 @@ mod tests {
         let facts = one("a");
         let pins_for = |files: &[(&str, usize)]| {
             let scan = scanned(files, &facts);
-            pins(&facts, &bind(&facts, &scan, &ExactNames), &scan)
+            pins(
+                &facts,
+                &bind(&facts, &scan, &ExactNames),
+                &scan,
+                &ExactNames,
+            )
         };
         let [Op::Pin {
             entity,
@@ -1501,7 +1527,13 @@ mod tests {
         let mut in_sync = one("a");
         in_sync.get_mut(&e).unwrap()[0].value.modified = Some(1);
         let scan = scanned(&[("a", 0)], &in_sync);
-        assert!(pins(&in_sync, &bind(&in_sync, &scan, &ExactNames), &scan).is_empty());
+        assert!(pins(
+            &in_sync,
+            &bind(&in_sync, &scan, &ExactNames),
+            &scan,
+            &ExactNames
+        )
+        .is_empty());
     }
 
     #[test]
