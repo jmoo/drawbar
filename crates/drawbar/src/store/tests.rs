@@ -6704,6 +6704,37 @@ fn a_list_the_library_took_in_is_not_taken_in_again() {
     assert!(other.store.has_taken_in(&list.hash), "by any install");
 }
 
+/// Two windows of one install that each listed the library before either took the list
+/// in bring it in once: the second finds it taken in and puts the unsaved edit back over
+/// the file the first made.
+#[test]
+fn two_windows_take_the_list_in_once() {
+    let root = Temp::new();
+    let (list, _, soft, edit) = gig_list();
+    let mut first = Session::open(&root);
+    let mut second = Session::open(&root);
+    first.take_in(&list);
+    let placed = second.take_in(&list);
+    second.settle();
+
+    assert_eq!(root.names(""), [".drawbar", "Empty", "Gig", "Grand.ne5p"]);
+    assert_eq!(second.said("drawbar brought"), 0);
+    assert_eq!(second.said("could not bring"), 0, "no failure");
+    assert!(second.store.has_taken_in(&list.hash));
+    second.take_in(&gig_list_again(Some(placed)));
+    second.read_all();
+    assert_eq!(
+        root.names("Gig"),
+        ["Pad 2.ne5p", "Pad.ne5p"],
+        "no file of its own"
+    );
+    assert_eq!(root.read("Gig/Pad.ne5p"), soft);
+    let pad = second.named("Pad.ne5p");
+    assert!(second.bytes(pad) == edit, "the edit is back over its file");
+    second.sync();
+    assert!(second.handed_over(&list));
+}
+
 #[test]
 fn a_take_in_that_writes_nothing_leaves_the_list_for_the_next_session() {
     let root = Temp::new();

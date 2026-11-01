@@ -134,6 +134,8 @@ struct TakingIn {
     said: String,
     held: Vec<Event>,
     why: Option<String>,
+    /// Whether it was not tried, as another window takes the list in or took it in.
+    elsewhere: bool,
 }
 
 /// How many files one background [`Cmd::Read`] asks for at most, and how many of
@@ -1508,6 +1510,11 @@ impl Store {
                 let told = std::mem::take(&mut self.turned_read_only);
                 // A take-in that failed partway lands once its change is finished.
                 let refused = match self.taking_in.take_if(|_| label == TAKE_IN) {
+                    Some(taking) if taking.elsewhere => {
+                        self.let_taking_go(taking.ids, workspace);
+                        self.took_up = false;
+                        true
+                    }
                     Some(taking) if landed || waiting == Waiting::This => {
                         self.follow_take_in(taking, landed, workspace, browser, queue, log);
                         false
@@ -1539,6 +1546,11 @@ impl Store {
                             self.shown = Some(shown);
                         }
                     }
+                }
+            }
+            Event::TakenInElsewhere => {
+                if let Some(taking) = self.taking_in.as_mut() {
+                    taking.elsewhere = true;
                 }
             }
             Event::Unheard { label } => {
@@ -2733,7 +2745,8 @@ impl Store {
     ///
     /// Where the library took the list in already, nothing else is written: each unsaved
     /// edit is put back over the file the take-in gave it, as the list's record names it,
-    /// or else brought in as a file of its own beside where it went.
+    /// or else brought in as a file of its own beside where it went. A take-in another
+    /// window of this install makes first is found so, once the library is read again.
     pub fn take_in(
         &mut self,
         list: &older::List,
@@ -2818,6 +2831,7 @@ impl Store {
             said,
             held: Vec::new(),
             why: None,
+            elsewhere: false,
         });
         keep(&placed);
         self.send_batch();
@@ -2937,6 +2951,15 @@ impl Store {
         }
     }
 
+    /// Let go of what a take-in that wrote nothing brought, and look at the library again.
+    fn let_taking_go(&mut self, ids: BTreeSet<u64>, workspace: &mut Workspace) {
+        for id in ids {
+            self.records.remove(&id);
+            workspace.forget(id);
+        }
+        self.rescan();
+    }
+
     /// Let go of what the take-in that wrote nothing brought, and say why: `why`, or the
     /// first reason its parts gave. The list stays where it was kept, for the next
     /// session to take in.
@@ -2947,14 +2970,10 @@ impl Store {
         workspace: &mut Workspace,
         log: &mut Log,
     ) {
-        for id in taking.ids {
-            self.records.remove(&id);
-            workspace.forget(id);
-        }
-        self.rescan();
         let why = why
             .or(taking.why)
             .unwrap_or_else(|| "it made nothing".to_string());
+        self.let_taking_go(taking.ids, workspace);
         log.error(format!("{TAKE_IN}: {why}"));
         log.trouble(format!(
             "drawbar could not bring the sounds an earlier version kept into the library: \

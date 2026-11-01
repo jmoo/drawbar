@@ -1079,6 +1079,10 @@ pub enum Event {
     Unheard {
         label: String,
     },
+    /// The take-in of the list an older drawbar kept was not tried: another window of
+    /// this install is taking it in, or the library took it in already. Answered before
+    /// the take-in's [`Event::Committed`].
+    TakenInElsewhere,
     /// The trash grew past what it holds in a session, and its oldest items went: the
     /// entries whose undo needed them.
     Trimmed(Vec<toshokan::EntryHash>),
@@ -1178,6 +1182,7 @@ impl Event {
             | Event::SlotKept { kept: Ok(_), .. }
             | Event::Trimmed(_)
             | Event::Restarted
+            | Event::TakenInElsewhere
             | Event::Restored(Ok(_))
             | Event::Copied(Ok(_))
             | Event::Scanned(Ok(_))

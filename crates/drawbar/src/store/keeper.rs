@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use toshokan::asynch::{Filling as Filled, Fs, Library, Source as Filler, Staging};
 use toshokan::error::{Refusal, Why};
-use toshokan::io::{IoError, Kind, Range, Root};
+use toshokan::io::{Io, IoError, Kind, Lock, Range, Reply, Root};
 use toshokan::log::Settlement;
 use toshokan::plan::FactChange;
 use toshokan::report::{
@@ -726,8 +726,8 @@ impl<F: Fs> Keeper<F> {
                 let dismissed = facts(library, label, |built, _| Ok(built.dismiss(run)));
                 Some(dismissed.await?)
             }
-            Intent::Batch(parts) => batch(library, label, parts, answer).await,
-            part => batch(library, label, vec![part], answer).await,
+            Intent::Batch(parts) => gathered(library, label, parts, &mut looked, answer).await?,
+            part => gathered(library, label, vec![part], &mut looked, answer).await?,
         };
         let intent = changes
             .as_ref()
@@ -1105,6 +1105,74 @@ async fn batch<F: Fs>(
             .map(|(_, part)| part)
             .collect();
     }
+}
+
+/// Commit the parts of one change, as [`take_in`] does where one takes in the list an
+/// older drawbar kept, adding to `looked` what reading the library first found.
+async fn gathered<F: Fs>(
+    library: &mut Library<F>,
+    label: &str,
+    parts: Vec<Intent>,
+    looked: &mut Vec<toshokan::report::Change>,
+    answer: &mut impl FnMut(Event),
+) -> Result<Option<toshokan::Committed>, String> {
+    let hash = parts.iter().find_map(|part| match part {
+        Intent::TakeIn { hash, .. } => Some(hash.clone()),
+        _ => None,
+    });
+    match hash {
+        Some(hash) => take_in(library, label, parts, hash, looked, answer).await,
+        None => Ok(batch(library, label, parts, answer).await),
+    }
+}
+
+/// The lock, in an install's own state, that a window holds while it takes in the list
+/// an older drawbar kept, which is the install's, so that one window takes it in.
+fn taking_in() -> RelPath {
+    RelPath::new("taking-in.lock").expect("one component")
+}
+
+/// Commit the `parts` of the take-in of the list of hash `hash` holding [`taking_in`],
+/// after reading what other writers logged since, which goes in `looked`. Where another
+/// window holds the lock, or the library took the list in already, nothing is tried, and
+/// [`Event::TakenInElsewhere`] says so.
+async fn take_in<F: Fs>(
+    library: &mut Library<F>,
+    label: &str,
+    parts: Vec<Intent>,
+    hash: String,
+    looked: &mut Vec<toshokan::report::Change>,
+    answer: &mut impl FnMut(Event),
+) -> Result<Option<toshokan::Committed>, String> {
+    let lock = Io::Lock { name: taking_in() };
+    match library.fs().perform(lock).await {
+        Ok(Reply::Lock(Lock::Acquired)) => {}
+        Ok(_) => {
+            answer(Event::TakenInElsewhere);
+            return Ok(None);
+        }
+        Err(e) => {
+            let why = storage::failed(e);
+            return Err(format!(
+                "taking this window's hold on bringing in kept sounds: {why}"
+            ));
+        }
+    }
+    let committed = match library.refresh().await {
+        Err(e) => Err(told(&e)),
+        Ok(refreshed) => {
+            looked.extend(refreshed.changes);
+            match library.view().find(TAKEN_IN, &hash).is_empty() {
+                true => Ok(batch(library, label, parts, answer).await),
+                false => {
+                    answer(Event::TakenInElsewhere);
+                    Ok(None)
+                }
+            }
+        }
+    };
+    let _ = library.fs().perform(Io::Unlock { name: taking_in() }).await;
+    committed
 }
 
 /// One try at a batch: what each part is owed, and how the commit went.
@@ -2416,6 +2484,52 @@ mod tests {
                 .any(|event| matches!(event, Event::Saved { result: Ok(_), .. })),
             "{answers:?}"
         );
+    }
+
+    /// One window of an install takes in the list an older drawbar kept: another tries
+    /// nothing while the first holds the take-in lock, nor once the library holds the list,
+    /// though it has not read the library since.
+    #[test]
+    fn a_take_in_another_window_makes_or_made_is_not_tried() {
+        let root = Temp::new();
+        let take_in = || {
+            Cmd::Intent(Intent::Batch(vec![
+                Intent::TakeIn {
+                    tags: Vec::new(),
+                    hash: "list".to_string(),
+                },
+                Intent::MakeDir { path: path("Gig") },
+            ]))
+        };
+        let elsewhere = |answers: &[Event]| {
+            let committed = answers.iter().any(|event| {
+                matches!(
+                    event,
+                    Event::Committed {
+                        made: None,
+                        result: Ok(_),
+                        ..
+                    }
+                )
+            });
+            matches!(answers.first(), Some(Event::TakenInElsewhere)) && committed
+        };
+        let mut first = keeper(&root);
+        let mut second = keeper(&root);
+        fn fs(keeper: &Keeper) -> &Counted<Blocking> {
+            keeper.library.as_ref().unwrap().fs()
+        }
+        let held = nord_usb::block_on(fs(&first).perform(Io::Lock { name: taking_in() }));
+        assert_eq!(held, Ok(Reply::Lock(Lock::Acquired)));
+        let answers = second.run_one(take_in());
+        assert!(elsewhere(&answers), "while the lock is held: {answers:?}");
+        assert!(!root.names("").contains(&"Gig".to_string()), "nothing made");
+
+        nord_usb::block_on(fs(&first).perform(Io::Unlock { name: taking_in() })).unwrap();
+        first.run_one(take_in());
+        assert!(root.names("").contains(&"Gig".to_string()), "taken in");
+        let answers = second.run_one(take_in());
+        assert!(elsewhere(&answers), "once taken in: {answers:?}");
     }
 
     /// Storage whose locks fail.
