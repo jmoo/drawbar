@@ -193,6 +193,15 @@ window comes back into focus, before a send to the instrument, and after a
 failure that may mean the folder changed. A tab tells the library's other tabs
 of each change it commits, and they read it at once.
 
+Two drawbars can each make an entity of one file before either sees the other's,
+as when both tag it while a sync is paused. Once both logs are read, the file is
+the entity's with the lower id, and the other is joined into it
+([Binding](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#binding)).
+A drawbar that can write commits one change joining each such entity: the
+lower one gains the tags and the origin it lacks, and the other is deleted. That
+change is no step of Undo. A read-only drawbar writes nothing and shows the
+tags of both on the file.
+
 A change another drawbar left unfinished is settled. One this install left,
 after a crash or in a window since closed, is finished without asking. One
 another install left is asked about: finish it, roll it back, or leave it. One

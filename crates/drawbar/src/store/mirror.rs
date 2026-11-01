@@ -1675,6 +1675,14 @@ impl Store {
                 log.error(format!("emptying the trash: {why}"));
                 log.trouble(format!("drawbar's trash could not be emptied: {why}."));
             }
+            Event::Unjoined(why) => {
+                log.error(format!("joining the tags of one file: {why}"));
+                log.trouble(format!(
+                    "Two drawbars each tagged a file before either saw the other's tags, \
+                     and drawbar could not bring their tags together in the library: {why}. \
+                     It shows them together all the same."
+                ));
+            }
             Event::ReadOnly(why) if self.open() => {
                 log.trouble(format!(
                     "This computer's library is read-only now: {why}. Unsaved edits are \

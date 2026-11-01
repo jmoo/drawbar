@@ -175,11 +175,24 @@ impl Showing {
         let Some(shown) = view.entity(entity) else {
             return showing;
         };
+        // Until a change joins it into the file's entity, that entity shows its tags.
+        if view.joined().iter().any(|joined| joined.entity == entity) {
+            return showing;
+        }
         showing.came = toshokan::Field::shown(&shown.get(ORIGIN)).copied();
-        let worn = shown.members(TAGS);
-        let tagged = !worn.values.is_empty() || !worn.unreadable.is_empty();
-        if !worn.values.is_empty() {
-            showing.worn = Some(worn.values.into_iter().collect());
+        let joined = view.joined().iter().filter(|joined| joined.into == entity);
+        let joined = joined.filter_map(|joined| view.entity(joined.entity));
+        let (mut worn, mut unreadable) = (BTreeSet::new(), false);
+        for members in std::iter::once(shown)
+            .chain(joined)
+            .map(|e| e.members(TAGS))
+        {
+            unreadable |= !members.unreadable.is_empty();
+            worn.extend(members.values);
+        }
+        let tagged = !worn.is_empty() || unreadable;
+        if !worn.is_empty() {
+            showing.worn = Some(worn);
         }
         let Some(file) = shown.file() else {
             return showing;
@@ -218,6 +231,9 @@ impl Change {
         };
         let changed = view.changed_since(before);
         let mut keys: BTreeSet<Key> = changed.entities.iter().copied().map(Key::Entity).collect();
+        let joined = view.joined().iter().chain(before.joined());
+        let joined = joined.filter(|joined| changed.entities.contains(&joined.entity));
+        keys.extend(joined.map(|joined| Key::Entity(joined.into)));
         for path in &changed.files {
             if let Some(entity) = view.at(path).map(|entity| entity.id()) {
                 keys.insert(Key::Entity(entity));
@@ -260,4 +276,70 @@ fn visible(path: &RelPath) -> Option<LibPath> {
     let path = LibPath::parse(path.as_str())?;
     let hidden = path.components().any(|name| name.starts_with('.'));
     (!hidden).then_some(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use toshokan::blocking::Library;
+    use toshokan::env::{ExactNames, SeededRandom, TestClock};
+    use toshokan::simulator::Machine;
+    use toshokan::{Expect, Io, MemDisk, Root};
+
+    use super::*;
+    use crate::store::keys;
+
+    /// Until a change joins them, the file two drawbars each tagged before either saw the
+    /// other's tag shows the tags of both, and the entity joined into its own shows nothing.
+    #[test]
+    fn a_file_two_entities_hold_shows_the_tags_of_both_until_they_are_joined() {
+        let folder = MemDisk::new();
+        let at = RelPath::new("Grand.ne5p").unwrap();
+        let bytes = b"grand".to_vec();
+        let path = at.clone();
+        let made = Io::Create {
+            root: Root::Folder,
+            path,
+            bytes,
+        };
+        folder.perform(made).unwrap();
+        let clock = TestClock::at(1_000);
+        let open = |seed| {
+            let random = Box::new(SeededRandom::new(seed));
+            let env =
+                super::super::keeper::env(Box::new(clock.clone()), random, Box::new(ExactNames));
+            let machine = Machine {
+                folder: folder.clone(),
+                local: MemDisk::new(),
+            };
+            let (mut library, _) =
+                Library::open(machine, keys::layout(), &keys::schema(), env).unwrap();
+            library.rescan().unwrap();
+            library
+        };
+        let (mut here, mut there) = (open(1), open(2));
+        for (library, tag) in [(&mut here, "Live"), (&mut there, "Studio")] {
+            let listed = library.view().listed(&at).unwrap();
+            let expect = Expect::Listed {
+                len: listed.len,
+                modified: listed.modified,
+            };
+            let intent = library.intent("Tag").create(|e| {
+                e.adopt(&at, expect).add(TAGS, tag.to_string());
+            });
+            intent.0.commit().unwrap();
+        }
+        here.refresh().unwrap();
+        let view = here.view();
+        let [joined] = view.joined() else {
+            panic!("one entity joined: {:?}", view.joined());
+        };
+        let shown = Shown::of(&view);
+        let both = BTreeSet::from(["Live".to_string(), "Studio".to_string()]);
+        assert_eq!(shown.worn.get(&joined.into), Some(&both));
+        assert_eq!(shown.worn.get(&joined.entity), None);
+        assert_eq!(shown.lost, BTreeMap::new());
+        let file = LibPath::parse("Grand.ne5p").unwrap();
+        let files: Vec<&LibPath> = shown.files.values().map(|(path, _)| path).collect();
+        assert_eq!(files, [&file]);
+    }
 }

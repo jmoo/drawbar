@@ -5873,6 +5873,42 @@ impl Session {
     }
 }
 
+/// Two drawbars that each tag a file nothing was said about, before either sees the
+/// other's tag, show the file wearing both tags once each reads the other's, and show
+/// no sound as missing or lost.
+#[test]
+fn a_file_two_drawbars_tag_unseen_wears_both_tags_once_each_reads_the_other() {
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let other = Temp::new();
+    let mut here = Session::listed(&root);
+    let mut there = Session::elsewhere(&root, &other);
+    let grand = here.named("Grand.ne5p");
+    here.tag(&[grand], "Live");
+    let writers = root.at(".drawbar/library/writers.2");
+    let ours = fs::read_dir(&writers)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let held = Temp::new();
+    let away = held.at("writer");
+    fs::rename(&ours, &away).unwrap();
+    let grand = there.named("Grand.ne5p");
+    there.tag(&[grand], "Studio");
+    fs::rename(&away, &ours).unwrap();
+
+    here.refresh();
+    there.refresh();
+    for session in [&here, &there] {
+        assert_eq!(tagged(session), [wears("Grand.ne5p", &["Live", "Studio"])]);
+        let folders = &session.bench.browser.folders;
+        assert!(folders.missing.is_empty(), "{:?}", folders.missing);
+        assert!(folders.lost().is_empty());
+    }
+}
+
 /// An unsaved edit kept of a file by its path comes back though another drawbar made
 /// the file an entity since, and is kept by the entity from then on.
 #[test]

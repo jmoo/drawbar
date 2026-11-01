@@ -15,7 +15,7 @@ use toshokan::io::{Io, IoError, Kind, Lock, Range, Reply, Root};
 use toshokan::log::Settlement;
 use toshokan::plan::FactChange;
 use toshokan::report::{
-    Item, ItemChange, ItemKind, Mode, Refreshed, Rekey, Start, TrashItem, What,
+    Item, ItemChange, ItemKind, Joined, Mode, Refreshed, Rekey, Start, TrashItem, What,
 };
 use toshokan::{EntryHash, Env, Error, Expect, Nonce, RelPath, Set, View, WriterId};
 
@@ -81,6 +81,9 @@ pub struct Keeper<F> {
     writer: Option<toshokan::WriterId>,
     /// Whether the app was told the trash could not be emptied.
     told_unemptied: bool,
+    /// Whether the app was told the entities two drawbars made of one file could not
+    /// be joined.
+    told_unjoined: bool,
     /// The lock this window holds while it has the library open.
     window: Option<RelPath>,
 }
@@ -101,6 +104,7 @@ impl<F: Fs> Keeper<F> {
             told_read_only: false,
             writer: None,
             told_unemptied: false,
+            told_unjoined: false,
             window: None,
         }
     }
@@ -134,7 +138,7 @@ impl<F: Fs> Keeper<F> {
                 answer(Event::Opened(opened));
             }
             Cmd::Rescan | Cmd::Refresh => {
-                let scanned = self.scanned(matches!(cmd, Cmd::Rescan)).await;
+                let scanned = self.scanned(matches!(cmd, Cmd::Rescan), answer).await;
                 // A history that forked is said with the scan's answer.
                 let forked = scanned.as_ref().is_ok_and(|viewed| viewed.retired);
                 if self.restarted() && !forked {
@@ -307,6 +311,14 @@ impl<F: Fs> Keeper<F> {
         let told = std::mem::replace(&mut self.told_unemptied, true);
         (!told).then_some(Event::Unemptied(why))
     }
+
+    /// Say once a session why entities two drawbars made of one file could not be
+    /// joined.
+    fn unjoined(&mut self, why: String) -> Option<Event> {
+        let told = std::mem::replace(&mut self.told_unjoined, true);
+        (!told).then_some(Event::Unjoined(why))
+    }
+
 
     /// Say that this session's undo history began again, where the library stopped
     /// writing as the writer it wrote as.
@@ -529,8 +541,14 @@ impl<F: Fs> Keeper<F> {
     }
 
     /// Read what other writers logged since, and scan every file where `whole`, or else
-    /// only the files their entries moved.
-    async fn scanned(&mut self, whole: bool) -> Result<Viewed, String> {
+    /// only the files their entries moved. Where the library may be written, join each
+    /// entity the scan found joined into the one its file is bound to.
+    async fn scanned(
+        &mut self,
+        whole: bool,
+        answer: &mut impl FnMut(Event),
+    ) -> Result<Viewed, String> {
+        let writable = !self.told_read_only;
         let library = self.library.as_mut().ok_or("the library is not open")?;
         let refreshed = match whole {
             true => library.rescan().await,
@@ -562,6 +580,21 @@ impl<F: Fs> Keeper<F> {
                 }
             }
         }
+        // Not while this session's own change waits: committing would finish it unheard.
+        let joining = writable
+            && *library.mode() == Mode::Writable
+            && library.finishing().is_empty()
+            && !refreshed.scan.joined.is_empty();
+        let joined = match joining {
+            true => Some(join(library, &refreshed.scan.joined).await),
+            false => None,
+        };
+        match joined {
+            Some(Ok(committed)) => refreshed.changes.extend(committed.changes),
+            Some(Err(e)) => answer_some(answer, self.unjoined(told(&e))),
+            None => {}
+        }
+        let library = self.library.as_ref().ok_or("the library is not open")?;
         Ok(viewed(library, &mut self.shown, refreshed, unfinishable))
     }
 
@@ -643,8 +676,8 @@ impl<F: Fs> Keeper<F> {
         let changes = match intent {
             Intent::Tag { files, name, make } => {
                 // ⚠️ A file another drawbar made an entity of since the last refresh would
-                // be adopted twice, as two entities in conflict. Reading what others wrote
-                // first leaves that only to one that adopts it in the moment between.
+                // be adopted twice, as two entities the next scan joins. Reading what others
+                // wrote first leaves that only to one that adopts it in the moment between.
                 let mut changes = Vec::new();
                 if files.iter().any(|key| matches!(key, Key::File(_))) {
                     changes = library.refresh().await.map_err(|e| told(&e))?.changes;
@@ -742,6 +775,22 @@ impl<F: Fs> Keeper<F> {
         };
         Ok((intent, viewed))
     }
+}
+
+/// What another drawbar's history shows as the change that joins entities.
+const JOIN: &str = "Join tags of one file";
+
+/// Join each of `joined` into the entity its file is bound to, as one change: two
+/// drawbars each made an entity of the file before either saw the other's.
+async fn join<F: Fs>(
+    library: &mut Library<F>,
+    joined: &[Joined],
+) -> Result<toshokan::Committed, Error> {
+    let intent = library.intent(JOIN);
+    let built = joined.iter().fold(intent, |built, joined| {
+        built.join(joined.entity, joined.into)
+    });
+    built.commit().await
 }
 
 /// What `committed` moved, for the app to follow without a word: each tree, then each

@@ -1132,6 +1132,9 @@ pub enum Event {
     Unkept(String),
     /// The trash could not be emptied, so it keeps what it holds: why.
     Unemptied(String),
+    /// The entities two drawbars each made of one file could not be joined: why. The
+    /// file shows the tags of each all the same.
+    Unjoined(String),
     /// This session's undo history began again, and reaches none of the changes before.
     Restarted,
     /// How many of the library's files [`Cmd::Restore`] wrote, or why it wrote none.
@@ -1161,6 +1164,7 @@ impl Event {
             Event::Moved { result: Err(_), .. } => one("move"),
             Event::Failed(_) => one("write"),
             Event::Unemptied(_) => one("trash"),
+            Event::Unjoined(_) => one("join"),
             Event::Restored(Err(_)) => one("restore"),
             Event::Copied(Err(_)) => one("copy"),
             Event::Unkept(_)
