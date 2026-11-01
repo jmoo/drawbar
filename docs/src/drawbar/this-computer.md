@@ -279,8 +279,10 @@ bring back any you deleted.
   next one does not open it and says so; close one, then open the library again.
 - **Not answering.** If the library shows no sign of life for a minute, drawbar
   asks whether to close and reopen it. Edits made since drawbar last kept them
-  are lost, and drawbar names them. If the library stops altogether, drawbar
-  closes it and says so; **File ▸ Open recent library** opens it again.
+  are lost, and drawbar names them. A library you leave meanwhile, by opening
+  another or quitting, is closed after that minute without asking, and those
+  edits are lost too. If the library stops altogether, drawbar closes it and
+  says so; **File ▸ Open recent library** opens it again.
 - **Restored from a backup.** When the library folder no longer holds changes
   drawbar showed before, as after a restore from a backup, drawbar shows the
   folder as it is the next time it looks. While a sync is still bringing the

@@ -79,6 +79,10 @@ pub fn local_root(root: &Path) -> PathBuf {
     data.join(LIBRARIES).join(name)
 }
 
+/// How long a library let go may run a command without a sign of life before it is
+/// abandoned, as long as the store waits before asking whether to reopen one.
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The folder of drawbar's own data that holds [`local_root`]s.
 const LIBRARIES: &str = "libraries";
 
@@ -120,6 +124,8 @@ pub struct Backend {
     /// Set once the library is let go without waiting for its thread, which then runs
     /// nothing more it was sent, and leaves the trash as it is.
     abandoned: Arc<AtomicBool>,
+    /// How long [`Backend::finish`] waits for a command without a sign of life.
+    patience: std::time::Duration,
     /// How many requests the storage had answered when [`Backend::waiting`] last looked,
     /// and when.
     seen: std::cell::Cell<(usize, std::time::Instant)>,
@@ -218,6 +224,7 @@ impl Backend {
                     living.run(false);
                 }
                 if !let_go.load(Ordering::Acquire) {
+                    living.run(true);
                     keeper.close().await;
                 }
             });
@@ -232,6 +239,7 @@ impl Backend {
             signs,
             life,
             abandoned,
+            patience: PATIENCE,
             seen: std::cell::Cell::new((0, std::time::Instant::now())),
             #[cfg(test)]
             fault,
@@ -243,6 +251,12 @@ impl Backend {
     #[cfg(test)]
     pub fn fault(&self, fault: super::Fault) {
         *self.fault.lock().expect("never poisoned") = Some(fault);
+    }
+
+    /// Wait `patience` for a command to show life before [`Backend::finish`] abandons it.
+    #[cfg(test)]
+    fn patience(&mut self, patience: std::time::Duration) {
+        self.patience = patience;
     }
 
     /// Why the library's thread stopped, once it has without being let go: it answers
@@ -326,12 +340,20 @@ impl Backend {
             .ok()
     }
 
-    /// Run every command already sent, then let the library go.
+    /// Run every command already sent, then let the library go, or abandon it once a
+    /// command goes `PATIENCE` without a sign of life.
     pub fn finish(&mut self) {
         self.tx = None;
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
+        while !worker.is_finished() {
+            if self.waiting() >= Some(self.patience) {
+                return self.abandon();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        let _ = worker.join();
     }
 }
 
@@ -540,6 +562,24 @@ mod tests {
         thread.unpark();
         while backend.rx.recv().is_ok() {}
         assert!(!root.at("Queued").exists(), "the queued folder was made");
+    }
+
+    /// Letting go of a library whose command never finishes waits only as long as the
+    /// command goes without a sign of life.
+    #[test]
+    fn letting_go_of_a_stalled_library_does_not_wait_for_it_forever() {
+        let root = Temp::new();
+        let mut backend = stalling(&root);
+        backend.patience(std::time::Duration::ZERO);
+        backend.send(Cmd::Rescan);
+        while backend.waiting().is_none() {
+            std::thread::yield_now();
+        }
+        backend.finish();
+        assert!(
+            backend.abandoned.load(Ordering::Acquire),
+            "it was abandoned"
+        );
     }
 
     #[cfg(unix)]

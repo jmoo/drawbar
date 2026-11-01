@@ -6,7 +6,8 @@
 //! toshokan over the browser's storage and every command but a read. The page reads the
 //! files itself, from the folder's handles, so a file's bytes cross to the worker only to
 //! be written. Commands run one at a time, in the order they were sent. A library let go
-//! runs the commands it was sent before it lets go, and the next library opens only then.
+//! runs the commands it was sent before it lets go, and the next library opens only then,
+//! or once one of those commands goes [`PATIENCE`] without a sign of life.
 //!
 //! Tabs of one library tell each other of their commits, and each refreshes when it hears
 //! of one. A picked folder is also looked at again when the tab comes back into view, as
@@ -224,6 +225,22 @@ struct Heard {
     fault: Option<super::Fault>,
 }
 
+impl Heard {
+    /// As [`Backend::waiting`].
+    fn waiting(&mut self) -> Option<std::time::Duration> {
+        let now = js_sys::Date::now();
+        let running = self.running?;
+        let answered = self.signs.as_ref().map_or(0, |signs| signs.get().1);
+        self.seen = match self.seen {
+            (_, at) if at < running => (answered, running),
+            (before, _) if before != answered => (answered, now),
+            seen => seen,
+        };
+        let waited = (now - self.seen.1).max(0.0) / 1000.0;
+        Some(std::time::Duration::from_secs_f64(waited))
+    }
+}
+
 pub struct Backend {
     root: Root,
     inbox: Rc<RefCell<Inbox>>,
@@ -374,17 +391,7 @@ impl Backend {
     /// How long the command running now has gone without a sign of life: no answer, and
     /// no file found. `None` while none runs.
     pub fn waiting(&self) -> Option<std::time::Duration> {
-        let now = js_sys::Date::now();
-        let mut heard = self.heard.borrow_mut();
-        let running = heard.running?;
-        let answered = heard.signs.as_ref().map_or(0, |signs| signs.get().1);
-        heard.seen = match heard.seen {
-            (_, at) if at < running => (answered, running),
-            (before, _) if before != answered => (answered, now),
-            seen => seen,
-        };
-        let waited = (now - heard.seen.1).max(0.0) / 1000.0;
-        Some(std::time::Duration::from_secs_f64(waited))
+        self.heard.borrow_mut().waiting()
     }
 
     /// Let the library go without waiting for its worker, which stopped or does not
@@ -415,10 +422,15 @@ impl Backend {
     }
 
     /// Run every command already sent, then let the library go. The page cannot wait,
-    /// so they run after this returns, and nothing hears their answers.
+    /// so they run after this returns, and nothing hears their answers. A command that
+    /// goes `PATIENCE` without a sign of life meanwhile ends the worker, so the next
+    /// library opens.
     pub fn finish(&mut self) {
-        self.inbox.borrow_mut().closed = true;
+        let closed = std::mem::replace(&mut self.inbox.borrow_mut().closed, true);
         Inbox::wake(&self.inbox);
+        if !closed {
+            spawn_local(ending(Rc::downgrade(&self.heard)));
+        }
     }
 }
 
@@ -535,8 +547,44 @@ async fn drive(
         ctx.request_repaint();
     }
     if let Ok(worker) = &worker {
+        heard.borrow_mut().running = Some(js_sys::Date::now());
         worker.close().await;
+        heard.borrow_mut().running = None;
     }
+}
+
+/// How long a library let go may run a command without a sign of life before its worker
+/// is ended, as long as the store waits before asking whether to reopen one.
+const PATIENCE: Duration = Duration::from_secs(60);
+
+/// End the worker of a library let go, whose `heard` lasts until it has run its last
+/// command, once a command goes [`PATIENCE`] without a sign of life.
+async fn ending(heard: std::rc::Weak<RefCell<Heard>>) {
+    const LOOK_EVERY_MS: i32 = 1_000;
+    loop {
+        let _ = JsFuture::from(after(LOOK_EVERY_MS)).await;
+        let Some(heard) = heard.upgrade() else {
+            return;
+        };
+        if heard.borrow_mut().waiting() >= Some(PATIENCE) {
+            let worker = heard.borrow_mut().worker.take();
+            if let Some(worker) = worker {
+                worker.abandon();
+            }
+            return;
+        }
+    }
+}
+
+/// A promise that settles after `ms` milliseconds.
+fn after(ms: i32) -> Promise {
+    Promise::new(&mut |resolve, _| {
+        let global = js_sys::global();
+        let set = field(&global, "setTimeout").map(|set| set.unchecked_into::<Function>());
+        if let Some(set) = set {
+            let _ = set.call2(&global, &resolve, &ms.into());
+        }
+    })
 }
 
 /// Every file and folder `answers` say moved, from and to, in order.
@@ -865,14 +913,7 @@ async fn measuring(room: std::rc::Weak<RefCell<Room>>, ctx: egui::Context) {
         measure(&held).await;
         drop(held);
         ctx.request_repaint();
-        let waited = Promise::new(&mut |resolve, _| {
-            let global = js_sys::global();
-            let set = field(&global, "setTimeout").map(|set| set.unchecked_into::<Function>());
-            if let Some(set) = set {
-                let _ = set.call2(&global, &resolve, &MEASURE_EVERY_MS.into());
-            }
-        });
-        let _ = JsFuture::from(waited).await;
+        let _ = JsFuture::from(after(MEASURE_EVERY_MS)).await;
     }
 }
 
