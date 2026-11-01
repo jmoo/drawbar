@@ -39,6 +39,25 @@ into. It does not store your IP address, and it keeps no logs.
 Rows are kept for three months. Totals made from them, such as visits per month, may be
 kept longer; they describe everyone, not anyone.
 
+## What stays in your browser
+
+drawbar.app keeps your library in your browser, and sends none of it anywhere:
+
+- The origin private file system holds the browser's own library: your sounds,
+  their tags and folders, and the record of each change. It also holds the unsaved
+  edits of every library you open, including a folder on your computer.
+- An IndexedDB database named `drawbar` holds the folders on your computer you
+  opened lately, as handles the browser gives drawbar. Unless you allowed a
+  folder on every visit, the browser asks you again before drawbar can open it.
+- Local storage holds drawbar's settings, and the sounds drawbar 0.10 and
+  earlier kept under `drawbar.this_computer`, `drawbar.folders` and
+  `drawbar.tags`. `drawbar.taking_in` and `drawbar.taken_in` record that a
+  library took those sounds in: their hash, and the file names given to sounds
+  that had unsaved edits.
+
+[Where your library lives](drawbar/this-computer.md#where-your-library-lives)
+says what can delete it.
+
 ## Reports you send
 
 **Help ▸ Report a problem** and **Help ▸ Send feedback** send what you write, and
