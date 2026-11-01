@@ -940,8 +940,9 @@ A pending record is a JSON object:
 {"writer":"<w>","entry":<entry>,"label":"Save","steps":[<step>,…],"files":[{"entity":"<e>","path":"a/b.syx","done_after":2}]}
 ```
 
-`entry` is the intent's entry as planned, without its `file` ops and
-`displaced`, whose `prev` is the writer's head when the record was written.
+`entry` is the intent's entry as planned, without its `file`, `path`, `tree`
+and `dir` ops and `displaced`, whose `prev` is the writer's head when the record
+was written.
 `"moves":"copy"`, omitted otherwise, says the steps move files by copying.
 `files` says where each entity's file is once the first `done_after` steps are
 done; a `path` of `null` is no file. `"pin":true` marks a file the intent adopts
@@ -949,7 +950,13 @@ as it is, logged as a `pin` op rather than a `file` op. `replaces`, omitted when
 empty, holds the references the entity's `file` or `pin` op replaces: the writes
 of its file register the intent's writer knew of when it planned it. A record
 without `replaces` replaces nothing, so its file ops stand beside every write of
-the register they change. A reader reads at most 16 MiB of a record.
+the register they change. `unbound`, `trees` and `dirs`, each omitted when empty,
+say the same of what no entity owns, for the `path`, `tree` and `dir` ops:
+`unbound` holds `{"from":…,"path":…,"done_after":n}` for a file no entity is
+bound to, with `from` or `path` omitted for no file; `trees` holds
+`{"from":…,"to":…,"done_after":n}` for a tree moved whole; and `dirs` holds
+`{"path":…,"made":true,"done_after":n}` for a directory made, or removed where
+`made` is `false`. A reader reads at most 16 MiB of a record.
 
 ### Recovery
 
