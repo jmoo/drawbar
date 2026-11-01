@@ -1382,13 +1382,20 @@ fn send_batch(queue: &mut Queue, workspace: &Workspace, device: &mut Device, log
     // ⚠️ The instrument attached now may not be the one each entry was queued against:
     // the queue survives a disconnection, so every entry is checked again.
     crate::queue::refit(workspace, &device.state, queue, log);
+    let mut checking = None;
     for held in will_write(queue) {
-        if workspace
+        let entity = workspace
             .get(held.id)
-            .is_some_and(LocalEntity::awaits_check)
-        {
+            .filter(|entity| entity.awaits_check());
+        if let Some(entity) = entity {
             workspace.check_soon(held.id);
+            checking.get_or_insert_with(|| entity.name.clone());
         }
+    }
+    if let Some(name) = checking {
+        return log.trouble(format!(
+            "Nothing was sent: “{name}” is still being checked. Send again once it is."
+        ));
     }
     // The whole batch is checked before the first delete-then-write.
     let batch = match grouped(queue, workspace) {
@@ -1714,7 +1721,8 @@ fn send(
         return;
     };
     // Refused before anything is queued. One whose check has not answered is queued,
-    // and its write waits for the check.
+    // and asked to be checked, and a send of the queue before the check passes sends
+    // nothing.
     if entity.awaits_check() {
         workspace.check_soon(id);
     } else if let Err(e) = entity.sendable() {
@@ -1819,11 +1827,9 @@ mod tests {
         assert!(!bench.workspace.get(id).unwrap().is_unsaved());
     }
 
-    /// A piano resting in its file is queued and batched without being read: the batch
-    /// carries the file, and once it lands the asset stands on the slot with the
-    /// checksum of the file, saved as the file, which nothing holds whole.
-    /// A resting piano nothing has checked is queued by a send, which asks for its check,
-    /// and nothing is written to the instrument until the check has passed.
+    /// A resting piano nothing has checked is queued by a send, which asks for its check.
+    /// A send of the queue before the check has passed writes nothing and says why, and
+    /// one after it writes the piano.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn a_send_of_a_resting_piano_checks_it_before_anything_is_written() {
@@ -1852,6 +1858,10 @@ mod tests {
             !batch(&bench),
             "nothing is written before the check answers"
         );
+        assert_eq!(
+            bench.log.status().1,
+            "Nothing was sent: “Upright.npno” is still being checked. Send again once it is."
+        );
 
         bench.workspace.settle_files(&mut bench.log);
         assert_eq!(verdict(&bench), "ok");
@@ -1860,6 +1870,9 @@ mod tests {
         assert!(batch(&bench), "written once checked");
     }
 
+    /// A piano resting in its file is queued and batched without being read: the batch
+    /// carries the file, and once it lands the asset stands on the slot with the
+    /// checksum of the file, saved as the file, which nothing holds whole.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn a_resting_piano_is_sent_from_its_file_and_stands_on_the_slot_it_landed_in() {
