@@ -714,13 +714,13 @@ impl Library {
             .task()
     }
 
-    /// Compacts the writer of a writable library, records its head if that lags,
-    /// removes the records its entries closed that are still in the folder, seals
-    /// the open segment and releases the writer's lock, then lets go of what the
-    /// library holds: nothing is left to view, and the library only drops. A
-    /// record it cannot remove stays for the next instance to find, and that
-    /// failure is returned once the library is closed. A library dropped without
-    /// closing leaves its segment open, as a crash does.
+    /// Compacts the writer of a writable library, tries again to record its head
+    /// if that lags, removes the records its entries closed that are still in the
+    /// folder, seals the open segment and releases the writer's lock, then lets go
+    /// of what the library holds: nothing is left to view, and the library only
+    /// drops. A record it cannot remove stays for the next instance to find, and
+    /// that failure is returned once the library is closed. A library dropped
+    /// without closing leaves its segment open, as a crash does.
     pub fn close(&mut self) -> Task<'_, Result<()>> {
         let Some(writer) = self.writer.take() else {
             self.dismantle();
@@ -729,10 +729,9 @@ impl Library {
         self.writer = Some(writer);
         compact_due(self, true)
             .then(|library| keep_local(library, false))
-            .then(|(library, kept)| match (kept, library.writable()) {
-                (Err(error), _) => Flow::Done(Err(error)),
-                (Ok(()), Ok(())) => remove_spent(library).then(flow::ok),
-                (Ok(()), Err(_)) => ok((library, Ok(()))),
+            .then(|(library, _)| match library.writable() {
+                Ok(()) => remove_spent(library).then(flow::ok),
+                Err(_) => ok((library, Ok(()))),
             })
             .and_then(|(library, removed)| match library.writer.take() {
                 Some(writer) => flow::run(writer.close()).map_ok(move |()| (library, removed)),

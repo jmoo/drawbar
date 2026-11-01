@@ -619,6 +619,7 @@ through_both!(
     a_commit_whose_compaction_retires_its_writer_leaves_the_record_in_place,
     a_record_whose_removal_fails_is_removed_before_the_next_write,
     closing_removes_a_record_whose_removal_failed,
+    closing_while_the_head_cannot_be_recorded_lets_the_writer_go,
     a_record_a_crash_left_spent_is_not_settled_again_and_goes_at_the_next_write,
     a_record_whose_writing_seems_to_fail_is_settled_before_the_next_write,
     a_record_that_never_landed_is_not_carried_out_by_the_next_write,
@@ -3404,6 +3405,29 @@ fn a_record_whose_removal_fails_is_removed_before_the_next_write<F: Facade>() {
     assert!(pending_files(&folder).contains(&record));
     a.commit("Tag", |i| i.add(song, TAGS, tag("x"))).unwrap();
     assert_eq!(pending_files(&folder), []);
+}
+
+fn closing_while_the_head_cannot_be_recorded_lets_the_writer_go<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let probe = Probe::new(&here);
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    let writer = label_of(&a.view(), "a");
+    fail(&probe, local_writes(&["head.json", "head.json.next"]));
+    a.commit("Tag", |i| i.add(song, TAGS, tag("x"))).unwrap();
+    a.close().expect("a lagging head fails no close");
+    let (again, opened) = F::open(Probe::new(&here), env("a", 2, &clock)).unwrap();
+    assert!(
+        matches!(
+            opened.start,
+            Start::Resumed(old) | Start::Rekeyed { old, .. } if old == writer
+        ),
+        "the next instance takes up the closed writer: {:?}",
+        opened.start
+    );
+    assert_eq!(tags(&again.view(), song), ["new", "x"]);
 }
 
 fn closing_removes_a_record_whose_removal_failed<F: Facade>() {
