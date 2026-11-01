@@ -642,6 +642,8 @@ through_both!(
     an_effect_a_live_window_left_open_is_reported_live,
     an_effect_a_window_left_is_the_installs_once_the_window_closes,
     a_change_of_case_another_install_did_not_start_is_finished_by_another,
+    a_folder_another_left_in_its_trash_is_finished_by_another,
+    a_folder_another_left_in_its_trash_is_rolled_back_by_another,
     a_refresh_reports_another_installs_unfinished_change_as_it_stands,
     a_scan_of_every_file_reports_the_directories_it_listed,
     a_directory_made_and_filled_in_one_change_is_undone_in_one,
@@ -4434,6 +4436,77 @@ fn a_change_of_case_another_install_did_not_start_is_finished_by_another<F: Faca
         .map(|(path, bytes)| format!("{path:?} {}", String::from_utf8_lossy(&bytes)))
         .collect();
     assert_eq!(files, [r#"RelPath("kick.wav") kick"#]);
+}
+
+/// Leaves the folder `Organ` in another install's trash, as a crash between the
+/// two steps of a change of its case to `organ` does, and opens this install.
+fn a_folder_left_in_anothers_trash<F: Facade>(
+    folder: &MemDisk,
+    clock: &TestClock,
+) -> (F, toshokan::report::Orphan) {
+    put(folder, "Organ/b/c.wav", b"c");
+    let probe = Probe::new(&machine(folder));
+    let folding = |label, seed| Env {
+        names: Box::new(Folding),
+        ..env(label, seed, clock)
+    };
+    let (mut theirs, _) = F::open(probe.clone(), folding("a", 1)).unwrap();
+    theirs.rescan().unwrap();
+    create(&mut theirs, "Organ/song.npno", b"song");
+    let second_step = |io: &Io| matches!(io, Io::Rename { to, .. } if to.as_str() == "organ");
+    let logging = |io: &Io| io.root() == Root::Folder && io.path().as_str().ends_with(".txt");
+    fail(&probe, move |io| {
+        io.mutates() && (second_step(io) || logging(io))
+    });
+    let stopped = theirs.commit("Rename", |i| i.move_tree(&path("Organ"), &path("organ")));
+    heal(&probe);
+    assert!(stopped.is_err(), "{stopped:?}");
+    assert_eq!(library_files(folder).len(), 0, "the folder is in the trash");
+    drop(theirs);
+    let (ours, opened) = F::open(Probe::new(&machine(folder)), folding("b", 2)).unwrap();
+    let [orphan] = opened.orphaned.as_slice() else {
+        panic!("one orphan: {:?}", opened.orphaned);
+    };
+    (ours, orphan.clone())
+}
+
+fn a_folder_another_left_in_its_trash_is_finished_by_another<F: Facade>() {
+    let folder = MemDisk::with_capabilities(Capabilities::ALL, Capabilities::ALL);
+    let clock = TestClock::at(1_000);
+    let (mut ours, orphan) = a_folder_left_in_anothers_trash::<F>(&folder, &clock);
+    ours.settle(orphan, Settlement::Finished).unwrap();
+    let files = library_files(&folder).into_keys();
+    assert_eq!(
+        files.map(|at| at.as_str().to_owned()).collect::<Vec<_>>(),
+        ["organ/b/c.wav", "organ/song.npno"]
+    );
+    let trashed = folder.files(Root::Folder).into_iter();
+    let trashed = trashed.filter(|(at, bytes)| at.as_str().contains("/trash/") && bytes == b"c");
+    assert_eq!(
+        trashed.count(),
+        1,
+        "their trash keeps what was copied out of it"
+    );
+    ours.rescan().unwrap();
+    let view = ours.view();
+    let song = view.entities().into_iter().next().unwrap();
+    let file = song.file().unwrap();
+    assert_eq!(
+        (file.path, file.state),
+        (path("organ/song.npno"), FileState::InSync)
+    );
+}
+
+fn a_folder_another_left_in_its_trash_is_rolled_back_by_another<F: Facade>() {
+    let folder = MemDisk::with_capabilities(Capabilities::ALL, Capabilities::ALL);
+    let clock = TestClock::at(1_000);
+    let (mut ours, orphan) = a_folder_left_in_anothers_trash::<F>(&folder, &clock);
+    ours.settle(orphan, Settlement::RolledBack).unwrap();
+    let files = library_files(&folder).into_keys();
+    assert_eq!(
+        files.map(|at| at.as_str().to_owned()).collect::<Vec<_>>(),
+        ["Organ/b/c.wav", "Organ/song.npno"]
+    );
 }
 
 fn a_scan_of_every_file_reports_the_directories_it_listed<F: Facade>() {

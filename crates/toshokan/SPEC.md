@@ -1010,7 +1010,8 @@ copy cut short, as above, at the destination of the record's last marked step
 makes that step the one in progress and goes to the settler's trash first, as
 does a library path the last done step left beside its destination. It
 copies files out of the other writer's `tmp/` and `trash/` rather than moving
-them, and moves a library file it displaces into its own trash. A `from_trash`
+them, a directory there file by file, making each directory under it, and moves
+a library file it displaces into its own trash. A `from_trash`
 of an item a `to_trash` it carried out itself put aside takes the file from its
 own trash, where that step put it. Once its steps
 are done, it appends a `settle` entry naming the writer and record, after which

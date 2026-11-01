@@ -441,6 +441,9 @@ pub struct Reached {
     present: BTreeSet<RelPath>,
     /// The library paths its steps name that are directories.
     directories: BTreeSet<RelPath>,
+    /// What each item of its trash a step names that is a directory holds: every
+    /// directory and file under it, at its path in the folder.
+    trashed: BTreeMap<RelPath, Vec<(RelPath, Kind)>>,
 }
 
 /// How far another writer's record `name`, `theirs`, got, for [`orphan_plan`].
@@ -453,22 +456,58 @@ pub fn progress(
     let layout = layout.clone();
     let theirs = theirs.clone();
     effects::observe(&layout, name, &theirs)
-        .map_ok(move |seen| {
-            let progress = effects::reached(&layout, &theirs, &seen, capabilities.fsync);
-            let directories = theirs
-                .steps
-                .iter()
-                .flat_map(EffectStep::library_paths)
-                .filter(|path| seen.is_directory(path))
-                .cloned()
-                .collect();
-            Reached {
-                present: seen.present_after(&progress),
-                progress,
-                directories,
-            }
+        .and_then(move |seen| {
+            let items = theirs.steps.iter().filter_map(|step| match step {
+                EffectStep::ToTrash { item, .. } | EffectStep::FromTrash { item, .. } => {
+                    Some(layout.trash(theirs.writer, *item))
+                }
+                _ => None,
+            });
+            let items: BTreeSet<RelPath> = items.filter(|item| seen.is_directory(item)).collect();
+            fold(items.into_iter(), BTreeMap::new(), |mut trashed, item| {
+                under(item.clone()).map_ok(move |held| {
+                    trashed.insert(item, held);
+                    trashed
+                })
+            })
+            .map_ok(move |trashed| {
+                let progress = effects::reached(&layout, &theirs, &seen, capabilities.fsync);
+                let directories = theirs
+                    .steps
+                    .iter()
+                    .flat_map(EffectStep::library_paths)
+                    .filter(|path| seen.is_directory(path))
+                    .cloned()
+                    .collect();
+                Reached {
+                    present: seen.present_after(&progress),
+                    progress,
+                    directories,
+                    trashed,
+                }
+            })
         })
         .task()
+}
+
+/// Every directory and file under the directory `dir`, at its path in the
+/// folder, each directory before what it holds.
+fn under<'a>(dir: RelPath) -> Fallible<'a, Vec<(RelPath, Kind)>> {
+    flow::list(Root::Folder, &dir).and_then(move |entries| {
+        fold(entries.into_iter(), Vec::new(), move |mut found, entry| {
+            let path = dir
+                .join(&entry.name)
+                .expect("a listed name is one component");
+            found.push((path.clone(), entry.kind));
+            match entry.kind {
+                Kind::Directory => under(path).map_ok(move |held| {
+                    found.extend(held);
+                    found
+                }),
+                Kind::File => flow::ok(found),
+            }
+        })
+    })
 }
 
 /// The effects that settle another writer's record `theirs` as `how`, from how
@@ -497,6 +536,7 @@ pub fn orphan_plan(
         theirs,
         present: reached.present.clone(),
         directories: &reached.directories,
+        trashed: &reached.trashed,
         rename_dir: capabilities.rename_dir && moves.renames(),
         plan: EffectPlan {
             moves,
@@ -514,6 +554,7 @@ struct Orphaned<'a> {
     /// The record's paths the folder will hold once the steps planned so far ran.
     present: BTreeSet<RelPath>,
     directories: &'a BTreeSet<RelPath>,
+    trashed: &'a BTreeMap<RelPath, Vec<(RelPath, Kind)>>,
     rename_dir: bool,
     plan: EffectPlan,
     env: &'a mut Env,
@@ -641,13 +682,35 @@ impl Orphaned<'_> {
         item
     }
 
+    /// Copies `source` to `path`: a file whole, a directory of their trash file by
+    /// file, making each directory it holds. What under it is no library path, as
+    /// a name the layout hides, stays in their trash.
     fn copy(&mut self, source: RelPath, path: &RelPath) -> std::result::Result<(), Refusal> {
         if !self.present.contains(&source) {
             return Err(Refusal::Gone(path.clone()));
         }
         self.present.insert(path.clone());
-        let staged = self.env.nonce();
-        self.plan.place(staged, Staged::Copy(source), path.clone());
+        let Some(held) = self.trashed.get(&source) else {
+            let staged = self.env.nonce();
+            self.plan.place(staged, Staged::Copy(source), path.clone());
+            return Ok(());
+        };
+        self.plan
+            .steps
+            .push(EffectStep::MakeDir { path: path.clone() });
+        for (at, kind) in held {
+            let to = at.rebase(&source, path).expect("listed under the item");
+            if self.layout.check_library_path(&to).is_err() {
+                continue;
+            }
+            match kind {
+                Kind::Directory => self.plan.steps.push(EffectStep::MakeDir { path: to }),
+                Kind::File => {
+                    let staged = self.env.nonce();
+                    self.plan.place(staged, Staged::Copy(at.clone()), to);
+                }
+            }
+        }
         Ok(())
     }
 }
