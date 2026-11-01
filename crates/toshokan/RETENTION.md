@@ -116,11 +116,12 @@ never merging them silently.
   that writer its writer knows of, and the latest above it: the target the
   writer's entries replaced or removed, and its own entry that did, carried
   forward across its own later writes. A delete is a reference on every field it
-  observed: each write it observed is a target on that write's field. -
-  **Takes.** Per field and other writer, the latest take of a run of that
-  writer: its own entry and the run's first number. - **Own deletes.** Per own
-  field write it holds, the first own delete above it, `[n, hash]`: that delete
-  kills the write, and every earlier own write of the entity.
+  observed: each write it observed is a target on that write's field.
+- **Takes.** Per field and other writer, the latest take of a run of that
+  writer: its own entry and the run's first number.
+- **Own deletes.** Per own field write it holds, the first own delete of its
+  entity at or above it, `[n, hash]`: that delete kills the write, and every
+  earlier own write of the entity.
 
 Plus trash items not yet emptied, settlements, dismissals, and its own unknown
 and extended entries. Nothing is dropped for being dead, and references are never
@@ -138,7 +139,7 @@ writer's contribution holds it and nothing kills it:
   writes numbered below it on that field. A reader that held an older own write
   and receives a newer tip therefore drops it at once.
 - **Own deletes.** An own delete a contribution holds kills that writer's own
-  field writes of the entity numbered below it.
+  field writes of the entity numbered at or below it.
 - **References.** A reference `[own n, own hash, y, n, hash]` kills, on its
   field, every write of `y` numbered below `n` and the one numbered `n` with
   that hash. One numbered `n` with another hash is on another branch, and is not
@@ -297,20 +298,21 @@ run added or removed; existence shows an entity the run created or deleted.
 **Choosing.** Keep current, or take the run's change, per field or for the whole
 run. The choice commits one intent: each change taken becomes an ordinary op
 against the current state that also names the run in `take`, and a `dismiss` op
-names the run as `[writer, first hash, last hash]`, or a tip run by its head. A
-dismissal by a tip's head also covers the writes numbered up to that head in any
-later tip that certifies it. No reader shows or merges what a dismissal names,
-ever, even if it later stops seeing the fork: a tip's references and own delete
-made by a dismissed entry do not apply either. An entry after a dismissed one is
-a new item, never placed, whether or not the reader sees the fork: so are a
-tip's writes after a dismissed entry on its chain, and the entries after that
-tip's head. A tip's run starts at the first of its entries the merge leaves out.
-A dismissal never covers what the user has not seen. A
-tip matches a dismissal by the hash of its last entry where the tip names it. A
-tip that compacted past a line-run's last entry inside one segment names it
-nowhere, and two branches of one instance resumed twice can share that segment's
-first line, so nothing tells such a tip's branch: it is shown again as an item,
-to dismiss again, rather than hidden on a guess.
+names the run by its writer, the number and hash of its first entry and those of
+its last, or a tip run by the tip's head and its first entry's number alone
+(SPEC.md gives the form). A dismissal by a tip's head also covers the writes
+numbered up to that head in any later tip that certifies it. No reader shows or
+merges what a dismissal names, ever, even if it later stops seeing the fork: a
+tip's references and own delete made by a dismissed entry do not apply either.
+An entry after a dismissed one is a new item, never placed, whether or not the
+reader sees the fork: so are a tip's writes after a dismissed entry on its
+chain, and the entries after that tip's head. A tip's run starts at the first of
+its entries the merge leaves out. A dismissal never covers what the user has not
+seen. A tip matches a dismissal by the hash of its last entry where the tip
+names it. A tip that compacted past a line-run's last entry inside one segment
+names it nowhere, and two branches of one instance resumed twice can share that
+segment's first line, so nothing tells such a tip's branch: it is shown again as
+an item, to dismiss again, rather than hidden on a guess.
 
 A branch that keeps writing until its instance sees the fork produces a new item
 with each sync.
@@ -380,10 +382,14 @@ over a write that landed though it was reported failed, a failed write of the
 next writer turns the library read-only rather than retire it too, so a folder
 that makes no write durable retires at most one writer per open.
 
-An open pending record's `prev` is its writer's last entry, so it is always held.
-A record whose `prev` is followed, or numbered below a tip's head, is spent or
-closed, unless `prev` is a run, on a branch the tip's number says nothing of.
-One whose `prev` is neither held nor in a run is ignored and reported.
+A pending record counts only where the reader holds its `prev`, its writer's
+head when it was written: a tip names it or its number is below a tip's head, or
+it is merged, in a run or in a gap. One whose `prev` is not held, or that names
+a path outside the library, is ignored and reported. A record that counts is
+closed once an entry names it, the intent it journals or a settlement, wherever
+that entry lies: merged, folded into a tip's `settled`, in a run or gap, or
+dismissed. Until then it is open: its own writer finishes it, and to any other
+it is an orphan.
 
 The undo stack lives in memory and holds this session's intents only. Each item
 keeps what reversing it needs: the values its writes replaced, the tags its
@@ -445,9 +451,9 @@ removes named, its file effects. It ends at close.
 - A step by one branch of a forked writer changes no merged value, except on a
   field shown as a forgotten basis.
 - A replaced value or removed member never comes back without a conflict, also
-  while sync is in flight: references are never dropped, a write a reference
-  covers stays dead, and a reference the files contradict shows what it
-  replaced only beside the current value.
+  while sync is in flight, but as Not kept says of a fork its writer did not
+  know of: a write a reference covers stays dead, and a reference the files
+  contradict shows what it replaced only beside the current value.
 - Chain order, single-writer directories, no bytes leaving the folder except by
   emptying a trash, total recovery, opening writing nothing.
 
@@ -465,6 +471,10 @@ removes named, its file effects. It ends at close.
 - A copy of a segment that diverged and stops short, unsealed, hides its write
   to a field the other copy wrote at a higher number; a copy one line longer is
   a run, and shows it.
+- A writer that replaced two writes of another writer to a field before it saw
+  a fork of that writer keeps a reference only to the later one. Once it
+  compacts, a reader that finds the fork between the two shows the earlier
+  write's value again.
 
 ## Expected size
 
@@ -483,7 +493,7 @@ Steady state, for the schema the harness writes:
 References exist only where one writer replaced another's write: at most
 (writers − 1) per field, and in practice far fewer.
 
-For 2,000 entities, 3 writers and a compaction threshold of 1,024 entries, the
+For 2,000 entities, 3 writers and a compaction threshold of 512 entries, the
 steady state is about 6 MB of memory and 4 MB of folder, plus:
 
 - per deleted entity, ~150 B;
