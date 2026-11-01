@@ -118,8 +118,8 @@ open; if the slot changed since, drawbar asks which to keep. drawbar also keeps
 edits every few seconds, so after a crash you may lose the last few seconds. In
 the browser, closing the tab before drawbar has kept your latest edit makes the
 browser ask whether to leave. Stay a moment, and the edit is kept. A read-only
-library keeps no unsaved edits, unless a change drawbar could not finish made it
-read-only.
+library keeps unsaved edits too, since drawbar keeps them on this computer and
+never in the library folder.
 
 Unsaved edits belong to this computer's copy of drawbar, not to one window. A
 window or tab that opens the library shows the edits kept for it, including
@@ -245,9 +245,10 @@ bring back any you deleted.
   written its hidden folder, or drawbar could not finish a change, as when
   another program put a file where a save was going. Hover the library's name
   for the reason and what to do, then choose the library in **File ▸ Open recent
-  library** to open it again. Changes you make in a read-only library are held
-  in memory only, and are lost when you quit; after a change drawbar could not
-  finish, unsaved edits are still kept.
+  library** to open it again. Unsaved edits are still kept, but new sounds,
+  moves and deletions in a read-only library are held in memory only, and are
+  lost when you quit. If opening it again would lose a sound or an edit, drawbar
+  asks first.
 - **A change left unfinished.** If drawbar on another computer, or in a browser
   on this one, stopped in the middle of changing files in a shared library,
   drawbar asks once the change has stood for a few seconds: **Finish** completes

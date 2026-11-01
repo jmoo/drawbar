@@ -491,17 +491,19 @@ impl Store {
         read_only && (browser.folders.changed() || !self.asks.is_empty())
     }
 
-    /// The names of the assets that letting this library go would lose: where nothing
-    /// may be written here, each unsaved edit and each asset never written to a file, and
-    /// otherwise each unsaved edit of a file drawbar has not read, which no draft can be
-    /// made over. A library open for writing writes the rest, and keeps their edits as
-    /// drafts, at its last pass.
+    /// The names of the assets that letting this library go would lose: each unsaved edit
+    /// of a file drawbar has not read, which no draft can be made over, and where nothing
+    /// may be written here, each asset never written to a file. A library open for
+    /// writing writes the rest at its last pass, and an open library keeps the edits as
+    /// drafts in this install's own state; one that did not open keeps nothing.
     pub fn unkept(&self, workspace: &Workspace) -> Vec<String> {
-        let open = self.open();
+        let (open, opened) = (self.open(), self.opened());
         let unheld = self.unheld(workspace);
         let lost = unheld.filter(|entity| {
             let undrafted = entity.is_unsaved() && self.base(entity.id).is_none();
-            !open || undrafted
+            let record = self.records.get(&entity.id);
+            let written = record.is_some_and(|record| record.fingerprint.is_some());
+            !opened || undrafted || (!open && !written)
         });
         lost.map(|entity| entity.name.clone()).collect()
     }
@@ -516,7 +518,7 @@ impl Store {
     /// Keep each unsaved edit as a draft where it changed since it was last kept, and let
     /// go of the drafts of assets saved, gone or known by another key since.
     fn keep_drafts(&mut self, workspace: &Workspace) {
-        if !matches!(self.phase, Phase::Open | Phase::Unfinished(_)) {
+        if !self.opened() {
             return;
         }
         for (id, kept) in std::mem::take(&mut self.drafted) {
@@ -1918,8 +1920,8 @@ impl Store {
             Ok(()) => Phase::Open,
             Err(Unwritable::ReadOnly(why)) => {
                 log.trouble(format!(
-                    "This computer's library opened read-only: {why}. Edits stay in memory \
-                     until you quit."
+                    "This computer's library opened read-only: {why}. Unsaved edits are \
+                     still kept."
                 ));
                 Phase::ReadOnly(why)
             }

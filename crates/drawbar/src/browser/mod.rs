@@ -872,16 +872,25 @@ impl Browser {
     /// Ask before another library opens in place of one that cannot keep the assets
     /// named in `unkept`: their unsaved edits, or what nothing may be written for.
     pub(crate) fn ask_leave(&mut self, unkept: &[String], root: crate::store::Root) {
+        let said = "Opening another library discards what is unsaved in the one open now";
+        self.ask_unkept(unkept, said, Act::OpenLibraryDiscarding(root));
+    }
+
+    /// Ask before the library open now opens again, where it cannot keep the assets named
+    /// in `unkept`.
+    pub(crate) fn ask_reopen(&mut self, unkept: &[String]) {
+        let said = "Opening the library again discards what is unsaved in it";
+        self.ask_unkept(unkept, said, Act::ReopenLibraryDiscarding);
+    }
+
+    fn ask_unkept(&mut self, unkept: &[String], said: &str, act: Act) {
         const SHOWN: usize = 5;
         let names = crate::strings::quoted_some(unkept, SHOWN);
         self.raise(Ask::new(
             "Discard what this library cannot keep?".to_string(),
-            Some(format!(
-                "Opening another library discards what is unsaved in the one open now: {}.",
-                names
-            )),
+            Some(format!("{said}: {names}.")),
             Verb::Discard,
-            vec![Act::OpenLibraryDiscarding(root)],
+            vec![act],
         ));
     }
 
@@ -896,7 +905,7 @@ impl Browser {
                     .to_string(),
             ),
             Verb::Reopen,
-            vec![Act::ReopenLibrary],
+            vec![Act::ReopenLibraryDiscarding],
         );
         ask.cancel = "Keep waiting";
         self.raise(ask);

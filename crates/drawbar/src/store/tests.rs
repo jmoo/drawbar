@@ -1402,6 +1402,28 @@ fn a_library_a_newer_drawbar_wrote_opens_read_only() {
     assert!(why.contains("update drawbar"), "opened read-only: {why:?}");
 }
 
+/// A library that opens read-only keeps unsaved edits, which live in this install's own
+/// state and never in its folder, and leaving it loses only what it cannot keep.
+#[test]
+fn a_library_that_opens_read_only_keeps_unsaved_edits() {
+    let (root, _) = newer_drawbar_wrote();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    assert!(session.store.read_only().is_some());
+    let grand = session.named("Grand.ne5p");
+    let edit = session.edit(grand, "12");
+    let new = session.create();
+    let name = session.bench.workspace.get(new).unwrap().name.clone();
+    let unkept = session.store.unkept(&session.bench.workspace);
+    assert_eq!(unkept, [name], "only what was never written");
+    session.close();
+
+    let again = Session::open(&root);
+    assert!(again.store.read_only().is_some());
+    let grand = again.named("Grand.ne5p");
+    assert!(again.bytes(grand) == edit, "the edit is kept");
+}
+
 /// A delete that fails the same way twice is logged twice: only a commit's retries are
 /// quiet.
 #[test]

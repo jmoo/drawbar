@@ -641,7 +641,8 @@ impl DrawbarApp {
                 browser::Act::OpenLibrary(root) => self.libraries.allow(ctx, root),
                 #[cfg(target_arch = "wasm32")]
                 browser::Act::OpenLibraryDiscarding(root) => self.waiting = Some((root, true)),
-                browser::Act::ReopenLibrary => self.reopen_library(ctx),
+                browser::Act::ReopenLibrary => self.reopen_library(ctx, false),
+                browser::Act::ReopenLibraryDiscarding => self.reopen_library(ctx, true),
                 act => rest.push(act),
             }
         }
@@ -763,11 +764,18 @@ impl DrawbarApp {
         self.tabs.prune(&self.workspace);
     }
 
-    /// Let go of the library open now, which does not answer, and open it again.
-    fn reopen_library(&mut self, ctx: &egui::Context) {
+    /// Let go of the library open now and open it again, asking first, as
+    /// [`DrawbarApp::open_library`] does, unless `discard` says the user already agreed
+    /// to lose what it cannot keep.
+    fn reopen_library(&mut self, ctx: &egui::Context, discard: bool) {
         let Some(store) = &self.store else {
             return;
         };
+        let unkept = store.unkept(&self.workspace);
+        if !discard && !unkept.is_empty() {
+            self.browser.ask_reopen(&unkept);
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         let root = store.root().to_path_buf();
         #[cfg(target_arch = "wasm32")]
@@ -2019,6 +2027,39 @@ mod tests {
         let open = app.store.as_ref().map(|store| store.root().to_path_buf());
         assert_eq!(open, Some(second.0.clone()));
         assert!(app.workspace.get(id).is_none(), "discarded, as agreed");
+    }
+
+    /// Opening the library again, as File ▸ Open recent library does for one that opened
+    /// read-only, asks first as leaving it does, and only a yes lets the edit go.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn reopening_a_library_asks_before_its_unsaved_edits_are_lost() {
+        let root = crate::testing::Temp::new();
+        let (ctx, mut app) = opened_over(&root);
+        let id = app
+            .workspace
+            .create(crate::workspace::Fresh::Program, &mut app.log)
+            .unwrap();
+        let edited = crate::fields::apply(
+            &app.workspace.get(id).unwrap().bytes,
+            &[("center_panel.gain".into(), "96".into())],
+        )
+        .unwrap()
+        .1;
+        app.workspace.replace_bytes(id, edited, &mut app.log);
+        let unsaved = |app: &DrawbarApp| app.workspace.listed().any(|entity| entity.is_unsaved());
+
+        let reopen = vec![browser::Act::ReopenLibrary];
+        assert!(app.switch_libraries(&ctx, reopen).is_empty());
+        let (title, answers) = app.browser.asking().expect("a question");
+        assert_eq!(title, "Discard what this library cannot keep?");
+        assert_eq!(answers, ["Cancel", "Discard"]);
+        assert!(unsaved(&app), "nothing left yet");
+
+        let acts = app.browser.answer("Discard");
+        assert!(app.switch_libraries(&ctx, acts).is_empty());
+        until_open(&ctx, &mut app);
+        assert!(!unsaved(&app), "discarded, as agreed");
     }
 
     fn open(storage: &dyn eframe::Storage) -> DrawbarApp {
