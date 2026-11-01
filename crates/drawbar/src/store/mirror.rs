@@ -954,6 +954,10 @@ impl Store {
                 Phase::Failed(why) => Some(format!("not opened: {why}")),
             },
             read_only: matches!(self.phase, Phase::ReadOnly(_) | Phase::Unfinished(_)),
+            reopens: matches!(
+                self.phase,
+                Phase::ReadOnly(_) | Phase::Unfinished(_) | Phase::Failed(_)
+            ),
             opening: self.listing(),
         }
     }

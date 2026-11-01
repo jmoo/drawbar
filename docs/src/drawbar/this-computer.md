@@ -258,6 +258,9 @@ bring back any you deleted.
   moves and deletions in a read-only library are held in memory only, and are
   lost when you quit. If opening it again would lose a sound or an edit, drawbar
   asks first.
+- **Not opened.** If a library cannot be opened, hover its name for the reason,
+  then choose it in **File ▸ Open recent library** to try again. Nothing you
+  make meanwhile is kept.
 - **A change left unfinished.** If drawbar on another computer, or in a browser
   on this one, stopped in the middle of changing files in a shared library,
   drawbar asks once the change has stood for a few seconds: **Finish** completes

@@ -501,10 +501,10 @@ pub fn library_items(
 }
 
 /// What choosing `library` among the recent libraries does: opens it, or opens the
-/// open one again where nothing may be written to it.
+/// open one again where it opened read-only or did not open.
 pub(crate) fn recent(folders: &Folders, library: &crate::folders::Library) -> Option<Act> {
-    let read_only = folders.place.as_ref().is_some_and(|at| at.read_only);
-    match (library.open, read_only) {
+    let reopens = folders.place.as_ref().is_some_and(|at| at.reopens);
+    match (library.open, reopens) {
         (false, _) => Some(Act::OpenLibrary(library.root.clone())),
         (true, true) => Some(Act::ReopenLibrary),
         (true, false) => None,

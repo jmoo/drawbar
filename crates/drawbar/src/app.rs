@@ -2061,6 +2061,32 @@ mod tests {
         assert!(!unsaved(&app), "discarded, as agreed");
     }
 
+    /// A library that did not open is opened again from File ▸ Open recent library, as
+    /// one that opened read-only is.
+    #[cfg(unix)]
+    #[test]
+    fn a_library_that_did_not_open_opens_again_from_the_recent_libraries() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = crate::testing::Temp::new();
+        let mode = |mode| std::fs::set_permissions(&root.0, std::fs::Permissions::from_mode(mode));
+        mode(0o000).unwrap();
+        let (ctx, mut app) = opened_over(&root);
+        mode(0o755).unwrap();
+        let note = |app: &DrawbarApp| app.browser.folders.place.as_ref()?.note.clone();
+        assert!(note(&app).is_some_and(|note| note.starts_with("not opened")));
+
+        let folders = &app.browser.folders;
+        let open = folders.libraries.iter().find(|library| library.open);
+        let reopen = browser::recent(folders, open.expect("the open library"));
+        assert_eq!(reopen, Some(browser::Act::ReopenLibrary));
+        assert!(app
+            .switch_libraries(&ctx, reopen.into_iter().collect())
+            .is_empty());
+        until_open(&ctx, &mut app);
+        assert_eq!(note(&app), None, "open");
+    }
+
     fn open(storage: &dyn eframe::Storage) -> DrawbarApp {
         let mut cc = eframe::CreationContext::_new_kittest(egui::Context::default());
         cc.storage = Some(storage);

@@ -66,6 +66,8 @@ pub struct Where {
     pub note: Option<String>,
     /// Nothing may be written to it, so a change to it is held in memory only.
     pub read_only: bool,
+    /// Opening it again may let it be written: it opened read-only or did not open.
+    pub reopens: bool,
     /// It is still being read.
     pub opening: bool,
 }
