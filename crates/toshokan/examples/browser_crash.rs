@@ -353,7 +353,8 @@ pub async fn crash_check(start: JsValue) {
         .map(|entry| entry.as_string().unwrap_or_default().parse())
         .collect();
     let acked = get(&start, "acked").as_f64().unwrap_or(0.0) as usize;
-    let checked = workload.and_then(|workload| check(&workload, &place, acked, &entries?));
+    // A killed run stops at its first failure, so no writer of it retired.
+    let checked = workload.and_then(|workload| check(&workload, &place, acked, &entries?, false));
     match checked {
         Ok(checked) => post(&[(
             "checked",
