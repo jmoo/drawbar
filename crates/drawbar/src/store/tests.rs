@@ -5255,6 +5255,34 @@ fn a_new_tag_still_being_named_at_a_quit_is_kept() {
     assert_eq!(again.worn(again.only()), ["New tag"]);
 }
 
+/// Every tag asked for before a quit is put on, one after another, a tag on a file
+/// still to be written once it is.
+#[test]
+fn every_tag_asked_for_before_a_quit_is_put_on() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    for name in ["A.ne5p", "B.ne5p"] {
+        fs::write(root.at(name), &program).unwrap();
+    }
+    let mut session = Session::open(&root);
+    let (a, b, new) = (
+        session.named("A.ne5p"),
+        session.named("B.ne5p"),
+        session.create(),
+    );
+    let tags = &mut session.bench.browser.tags;
+    let made = ["Live", "Soft", "Late"].map(|name| tags.make(name).expect("a new tag"));
+    let asked = [(a, made[0]), (new, made[1]), (b, made[2])];
+    let acts = asked.map(|(id, tag)| crate::browser::Act::Tag { ids: vec![id], tag });
+    session.bench.act(acts.into());
+    session.close();
+
+    let again = Session::open(&root);
+    assert_eq!(again.worn(again.named("A.ne5p")), ["Live"]);
+    assert_eq!(again.worn(again.named("untitled.ne5p")), ["Soft"]);
+    assert_eq!(again.worn(again.named("B.ne5p")), ["Late"]);
+}
+
 /// The Edit menu says what Undo takes back and Redo makes again: the change, and what it
 /// names. A change that failed is no step of either.
 #[test]

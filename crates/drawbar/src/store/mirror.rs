@@ -1819,8 +1819,8 @@ impl Store {
         self.backend.finish();
     }
 
-    /// Wait for every save and rename in flight to answer, and fold the answers in.
-    /// `false` when one did not come.
+    /// Wait for every save and rename in flight to answer, and fold the answers in, sending
+    /// each tag asked for as the one before it answers. `false` when one did not come.
     fn answered(
         &mut self,
         workspace: &mut Workspace,
@@ -1836,6 +1836,7 @@ impl Store {
                 Some(Event::Scanned(_)) => self.scanning = false,
                 Some(event) => {
                     self.react(event, workspace, browser, queue, log);
+                    self.ask_tags(workspace, browser, log);
                 }
             }
         }
