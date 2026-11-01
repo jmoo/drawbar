@@ -555,11 +555,10 @@ impl Library {
                 self.unshown |= report.anything_new();
                 let retired = self.forked();
                 keep_local(self, false)
-                    .then(move |(library, kept)| match (kept, retired) {
-                        (Err(error), _) => Flow::Done(Err(error)),
-                        (Ok(()), Some(_)) => stop_writing(library, Some(Rekey::Forked))
+                    .then(move |(library, _)| match retired {
+                        Some(_) => stop_writing(library, Some(Rekey::Forked))
                             .then(|(library, stopped)| Flow::Done(stopped.map(|()| library))),
-                        (Ok(()), None) => ok(library),
+                        None => ok(library),
                     })
                     .and_then(move |library| scan_for(library, scope, moved))
                     .map_ok(move |library| (library, retired))

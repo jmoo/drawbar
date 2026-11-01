@@ -613,6 +613,7 @@ through_both!(
     a_settlement_is_committed_when_its_rescan_fails,
     a_failed_rescan_after_a_rename_binds_no_copy_in_its_place,
     a_commit_whose_head_cannot_be_recorded_is_kept_and_continued,
+    a_refresh_while_the_head_cannot_be_recorded_shows_other_writers_changes,
     a_commit_removes_its_record_once_its_entries_are_durable,
     a_commit_whose_compaction_retires_its_writer_leaves_the_record_in_place,
     a_record_whose_removal_fails_is_removed_before_the_next_write,
@@ -3246,6 +3247,22 @@ fn a_commit_whose_head_cannot_be_recorded_is_kept_and_continued<F: Facade>() {
             .contains(&tagged.intent.to_string()),
         "a refresh records the head"
     );
+}
+
+fn a_refresh_while_the_head_cannot_be_recorded_shows_other_writers_changes<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    fail(&probe, local_writes(&["head.json", "head.json.next"]));
+    let tagged = a.commit("Tag", |i| i.add(song, TAGS, tag("x"))).unwrap();
+    assert_eq!(behind(&tagged), [Lag::Head]);
+    let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+    b.commit("Tag", |i| i.add(song, TAGS, tag("y"))).unwrap();
+    a.refresh().expect("a lagging head fails no refresh");
+    assert_eq!(tags(&a.view(), song), ["new", "x", "y"]);
+    a.rescan().expect("a lagging head fails no rescan");
 }
 
 /// Every file in a writer's `pending/`: records, and markers where moves copy.
