@@ -924,6 +924,13 @@ fn a_rescue_left_goes_into_the_library_once_with_its_slot_as_origin() {
     let mut second = Session::open(&root);
     second.sync();
     assert_eq!(second.bench.browser.asking(), None, "nothing is asked");
+    assert_eq!(
+        second.said(
+            "may be empty after a write to it failed: what it held goes into the library as \
+             “nord-rescued-1-4.npno”."
+        ),
+        1
+    );
     assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
     assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue());
 

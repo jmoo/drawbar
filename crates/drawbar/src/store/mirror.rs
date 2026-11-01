@@ -3116,7 +3116,8 @@ impl Store {
         let origin = match rescue.slot {
             Some(at) => {
                 log.say(format!(
-                    "{} may be empty after a write to it failed: what it held goes into the                      library as “{free}”.",
+                    "{} may be empty after a write to it failed: what it held goes into the \
+                     library as “{free}”.",
                     crate::strings::shown(at)
                 ));
                 Origin::Rescued { at }
