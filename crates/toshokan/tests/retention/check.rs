@@ -212,7 +212,9 @@ fn agree(
                     .get(&field.entity)
                     .is_some_and(|e| e.deletion_conflict)
             };
-            let explained = forked || (faulted.is_some() && real.contradicted.contains(&field));
+            // After a fork, a value beside a clear or a remove shows alone.
+            let explained = (forked && !o.is_empty())
+                || (faulted.is_some() && real.contradicted.contains(&field));
             if !forced && !(beside && explained) {
                 return Err(format!(
                     "{field:?}: oracle {o:?}, toshokan {s:?}; an extra value with no conflict"

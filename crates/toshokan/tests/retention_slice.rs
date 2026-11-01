@@ -144,3 +144,31 @@ fn a_hole_a_dropped_version_left_below_a_clones_line_is_read_as_its_chain_says()
         replay(bounds, DEPTH, &acts);
     }
 }
+
+/// A writer that replaced a branch's write before it saw the fork, then cleared
+/// the pre-fork write that showed beside its value, keeps both references when
+/// it compacts: the cleared value does not come back.
+#[test]
+fn a_reference_made_after_seeing_a_fork_survives_compaction() {
+    let acts = [
+        "x creates",
+        "y Set(0, 0, A)",
+        "y is cloned",
+        "y' Add(0, 0)",
+        "y Set(0, 0, B)",
+        "x after reading Set(0, 0, A)",
+        "x after reading Clear(0, 0), compacts",
+    ];
+    let bounds = Bounds::new(
+        2,
+        true,
+        5,
+        &[
+            Act::Set(0, 0, A),
+            Act::Set(0, 0, B),
+            Act::Add(0, 0),
+            Act::Clear(0, 0),
+        ],
+    );
+    replay(bounds, DEPTH, &acts);
+}

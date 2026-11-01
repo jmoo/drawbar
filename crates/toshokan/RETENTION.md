@@ -109,7 +109,7 @@ never merging them silently.
   the number of its first.
 - **References.** Per register and per set member, and for each other writer,
   the latest `[own n, own hash, writer, n, hash]` at or below the fork point of
-  that writer its own entry knew of, and the latest above it: the target the
+  that writer its writer knows of, and the latest above it: the target the
   writer's entries replaced or removed, and its own entry that did, carried
   forward across its own later writes. A delete is a reference on every field it
   observed: each write it observed is a target on that write's field. -
@@ -152,12 +152,15 @@ Killing below `n` is sound because `y`'s write `n` replaced every earlier write 
 writer are ever merged (section 4), so every merged write of `y` lies on one
 chain.
 
-Because references are kept per other writer, one made before a fork its writer
-had not seen can be overwritten by a later one made after it. Such a reference
-no longer applies, and the write it killed comes back beside the writer's value
-as a conflict: shown, never lost. A writer that has seen the fork keeps one
-reference on each side of it, so a take, which names both the merged write and
-the run's, keeps both.
+References are kept per other writer and side of a fork point. A reference made
+before its writer saw a fork, to a write above it, moves above it when the
+writer next makes a reference to that writer on that field, so a later one below
+the fork does not overwrite it. Above a fork point, a reference to one branch
+can be overwritten by a later one to the other. Such a reference no longer
+applies, and the write it killed is shown in its run, or, to a reader that does
+not see the fork, beside the writer's value as a conflict: shown, never lost. A
+writer that has seen the fork keeps one reference on each side of it, so a take,
+which names both the merged write and the run's, keeps both.
 
 | Type | A contribution keeps | An arriving write or add is |
 | --- | --- | --- |

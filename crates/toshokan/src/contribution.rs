@@ -6,7 +6,7 @@
 //! A field is one register, one member of a set, an entity's existence or its
 //! file. A contribution keeps, per field, the latest own write with the number of
 //! its first; per field and other writer, the latest reference at or below the
-//! fork point of that writer its entry knew of and the latest above it; per own
+//! fork point of that writer it knows of and the latest above it; per own
 //! field write, the first own delete above it; per field and other writer, the
 //! latest take of a run; and its dismissals, trash, settlements and the entries
 //! and ops this build does not know.
@@ -152,7 +152,8 @@ pub struct Trashed {
 pub struct Contribution {
     pub own: BTreeMap<FieldKey, Held>,
     /// By field, other writer, and whether the target lies above the fork point
-    /// of its writer that the own entry knew of.
+    /// of its writer that the own entry, or a later one with a reference on that
+    /// field to that writer, knew of.
     pub refs: BTreeMap<(FieldKey, WriterId, bool), Reference>,
     /// Per own field write, the first own delete of its entity in its entry or
     /// after.
@@ -329,14 +330,6 @@ pub fn forks(kind: &EntryKind) -> &[Forked] {
     }
 }
 
-/// Of two references, the one a contribution keeps: the later target, then the
-/// later own entry.
-fn later(slot: &mut Option<Reference>, reference: Reference) {
-    if slot.is_none_or(|kept| (reference.target.n, reference.own.n) > (kept.target.n, kept.own.n)) {
-        *slot = Some(reference);
-    }
-}
-
 impl Contribution {
     /// Folds `writer`'s own `entry`, the successor of every entry folded before.
     pub fn fold(&mut self, writer: WriterId, entry: &Entry) {
@@ -431,13 +424,21 @@ impl Contribution {
             if target.writer == writer {
                 continue;
             }
-            let above = known
-                .iter()
-                .any(|fork| fork.writer == target.writer && target.n > fork.at);
-            let key = (field, target.writer, above);
-            let mut slot = self.refs.get(&key).copied();
-            later(&mut slot, Reference { own, target });
-            self.refs.insert(key, slot.expect("set above"));
+            let above = |n: u64| {
+                known
+                    .iter()
+                    .any(|fork| fork.writer == target.writer && n > fork.at)
+            };
+            // A reference made before its writer knew of a fork may target a
+            // write above it: once the fork is known, it belongs above.
+            let below = (field.clone(), target.writer, false);
+            if let Some(kept) = self.refs.get(&below).copied() {
+                if above(kept.target.n) {
+                    self.refs.remove(&below);
+                    self.keep(field.clone(), true, kept);
+                }
+            }
+            self.keep(field, above(target.n), Reference { own, target });
         }
         for (field, run) in said.takes {
             if run.writer != writer {
@@ -451,6 +452,17 @@ impl Contribution {
             }
         }
         said.deletes
+    }
+
+    /// Keeps `reference` on `field`, on the side of the fork point `above`
+    /// names, in place of the one kept there when it names a later target, or
+    /// that target from a later own entry.
+    fn keep(&mut self, field: FieldKey, above: bool, reference: Reference) {
+        let key = (field, reference.target.writer, above);
+        let kept = self.refs.entry(key).or_insert(reference);
+        if (reference.target.n, reference.own.n) > (kept.target.n, kept.own.n) {
+            *kept = reference;
+        }
     }
 
     /// The fields of `entity` the contribution holds anything of.
@@ -1001,6 +1013,31 @@ mod tests {
         let above = contribution.refs[&(field, THEM, true)];
         assert_eq!((below.target, below.own), (them(2), entries[2].own()));
         assert_eq!((above.target, above.own), (them(4), entries[2].own()));
+    }
+
+    #[test]
+    fn a_reference_made_before_a_fork_was_known_moves_above_it_beside_a_later_one() {
+        let write = |replaces: Vec<Ref>| Op::Write {
+            entity: E,
+            key: "k".into(),
+            value: None,
+            replaces,
+            take: None,
+        };
+        let fork = Forked {
+            writer: THEM,
+            at: 2,
+        };
+        let entries = chain(vec![
+            (write(vec![them(3)]), vec![]),
+            (write(vec![them(1)]), vec![fork]),
+        ]);
+        let contribution = folded(&entries);
+        let field = FieldKey::Register(E, "k".into());
+        let below = contribution.refs[&(field.clone(), THEM, false)];
+        let above = contribution.refs[&(field, THEM, true)];
+        assert_eq!((below.target, below.own), (them(1), entries[2].own()));
+        assert_eq!((above.target, above.own), (them(3), entries[1].own()));
     }
 
     #[test]

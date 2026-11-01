@@ -469,8 +469,10 @@ for the file register.
   its value: `set` a register's value or a file write's file, `off` for a
   delete, a set's remove, a clear or a file write of no file, `pin` for a `pin`.
 - `refs`: per field and other writer, the latest reference at or below the fork
-  point of that writer its entry knew of, and, with `above`, the latest above
-  it, each with its own entry.
+  point of that writer its writer knows of, and, with `above`, the latest above
+  it, each with its own entry. A reference made before its writer knew of a
+  fork, to a write above it, moves above it at the writer's next reference on
+  that field to that writer.
 - `killed`: per own write held, the first own delete of its entity at or after
   it.
 - `takes`: per field and other writer, the latest take of a run of that writer,
