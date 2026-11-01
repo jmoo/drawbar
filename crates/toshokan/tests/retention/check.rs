@@ -8,9 +8,9 @@
 //! name the head of every snapshot of its directory on its chain. P11: after a restore,
 //! a dropped version, or a compacted segment back shorter and unsealed, the folder
 //! wins, and nothing the oracle shows is missing from both toshokan's merge and
-//! its items of the writer that wrote it. Six divergences are counted rather than failed: a conflict the oracle
-//! resolves, after a fork; an extra value beside the oracle's after a fault, on a
-//! field toshokan reports contradicted; a value the oracle shows after a fault
+//! its items of the writer that wrote it. Five divergences are counted rather than
+//! failed: an extra value beside the oracle's after a fault, on a field toshokan
+//! reports contradicted; a value the oracle shows after a fault
 //! that a held line's chain replaced, through an entry the fault took; a merged
 //! value toshokan shows only in an item, as a forgotten basis, because a fork
 //! lies inside a segment, or because a fault left a file it cannot place; a
@@ -35,8 +35,6 @@ use toshokan::snapshot::Snapshot;
 pub struct Tally {
     pub histories: AtomicUsize,
     pub reads: AtomicUsize,
-    /// Fields where toshokan shows a conflict the oracle does not.
-    pub conflicts: AtomicUsize,
     /// Fields where the oracle merges a value toshokan shows only in a run: a
     /// forgotten basis, or a fork point it cannot locate exactly.
     pub collapsed: AtomicUsize,
@@ -64,10 +62,9 @@ impl Tally {
     pub fn report(&self) -> String {
         let n = |c: &AtomicUsize| c.load(Ordering::Relaxed);
         format!(
-            "{} histories, {} reads; {} fields shown as a conflict the oracle resolves, {} fields whose merged value shows only in an item, {} fields after a fault where a reference to a lost write no longer covers an earlier one, {} fields after a fault whose oracle value a held line's chain replaced, {} faulted readings with unplaced lines, {} readings after a segment came back shorter that show a merged value as a run",
+            "{} histories, {} reads; {} fields whose merged value shows only in an item, {} fields after a fault where a reference to a lost write no longer covers an earlier one, {} fields after a fault whose oracle value a held line's chain replaced, {} faulted readings with unplaced lines, {} readings after a segment came back shorter that show a merged value as a run",
             n(&self.histories),
             n(&self.reads),
-            n(&self.conflicts),
             n(&self.collapsed),
             n(&self.contradicted),
             n(&self.chained),
@@ -134,12 +131,11 @@ fn read(world: &World, files: &[File<Snapshot>], seen: &[Seen]) -> Shown {
 
 /// Compares what toshokan shows with what the oracle shows, counting the
 /// documented divergences: a value missing where toshokan shows it in a run;
-/// and an extra value beside the oracle's, after a fork, or after a fault on a
-/// field toshokan reports contradicted, or on a field it shows as a
-/// forgotten basis.
+/// and an extra value beside the oracle's after a fault on a field toshokan
+/// reports contradicted, or on a field it shows as a forgotten basis. A
+/// conflict the oracle resolves fails.
 fn agree(
     world: &World,
-    held: &BTreeSet<Hash>,
     tips: &BTreeSet<Hash>,
     oracle: &Shown,
     real: &Shown,
@@ -152,8 +148,6 @@ fn agree(
     let with_existence = |shown: &Shown| with_existence(world, shown);
     let (ov, sv) = (with_existence(oracle), with_existence(real));
     let chained = faulted.map(with_existence);
-    let forks = oracle::place(world, held).forks;
-    let forked = !forks.is_empty();
     let fields: BTreeSet<Field> = ov.keys().chain(sv.keys()).copied().collect();
     let mut divergent: BTreeSet<Field> = BTreeSet::new();
     for field in fields {
@@ -212,18 +206,17 @@ fn agree(
                     .get(&field.entity)
                     .is_some_and(|e| e.deletion_conflict)
             };
-            // After a fork, a value beside a clear or a remove shows alone.
-            let explained = (forked && !o.is_empty())
-                || (faulted.is_some() && real.contradicted.contains(&field));
-            if !forced && !(beside && explained) {
-                return Err(format!(
-                    "{field:?}: oracle {o:?}, toshokan {s:?}; an extra value with no conflict"
-                ));
+            let contradicted = faulted.is_some() && real.contradicted.contains(&field);
+            if !forced && !(beside && contradicted) {
+                let what = if beside {
+                    "a conflict the oracle resolves"
+                } else {
+                    "an extra value with no conflict"
+                };
+                return Err(format!("{field:?}: oracle {o:?}, toshokan {s:?}; {what}"));
             }
             let counter = if forced {
                 &tally.collapsed
-            } else if forked {
-                &tally.conflicts
             } else {
                 &tally.contradicted
             };
@@ -504,11 +497,10 @@ impl<'a> Checker<'a> {
         self.sizes();
         let mut rest_shown = None;
         for seen in rests(&self.real.files) {
-            let (s, held) = self.fresh(&seen);
+            let (s, _) = self.fresh(&seen);
             let o = Oracle.read(&self.oracle_reading(&seen));
             if let Err(e) = agree(
                 self.world(),
-                &held,
                 &Real.tip_writes(self.world(), &self.real.files, &seen),
                 &o,
                 &s,
@@ -555,7 +547,6 @@ impl<'a> Checker<'a> {
         let s = read(self.world(), &real_files, &seen);
         if let Err(e) = agree(
             self.world(),
-            &Oracle.holds(&ro),
             &Real.tip_writes(self.world(), &real_files, &seen),
             &o,
             &s,
@@ -848,7 +839,6 @@ impl<'a> Checker<'a> {
             let chained = oracle::shown_within(world, &oracle::place(world, &implied), Some(&held));
             if let Err(e) = agree(
                 world,
-                &held,
                 &Real.tip_writes(world, &real_files, &seen),
                 &o,
                 &after,

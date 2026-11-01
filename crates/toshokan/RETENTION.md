@@ -564,11 +564,11 @@ never shows alone again along a reader's deliveries, unless what replaced it was
 dismissed or lies beyond a fork, or the field carries an item or a contradiction
 report; a branch's step changes no merged value outside a forgotten basis; no
 reader merges what a dismissal names; a contribution stays within one own write
-and one reference per field and writer; and after a fault, the folder wins, but
-for a value that a line the folder holds replaced on its own chain, through the
-entry the fault took. An extra value fails unless the oracle's
-value shows beside it, after a fork or, after a fault, on a field the reader
-reports contradicted, or the field is a forgotten basis. A missing value fails
+per field and two references per field and other writer; and after a fault, the
+folder wins, but for a value that a line the folder holds replaced on its own
+chain, through the entry the fault took. An extra value fails unless the
+oracle's value shows beside it after a fault, on a field the reader reports
+contradicted, or the field is a forgotten basis. A missing value fails
 unless an item of its writer shows it on that field, or shows that field as a
 forgotten basis while no tip holds the write that carried it.
 
