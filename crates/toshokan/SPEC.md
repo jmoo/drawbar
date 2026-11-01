@@ -684,7 +684,9 @@ their identities:
    a file fact the commit wrote whose file is not at its path: that file may be
    the entity's, moved. A refresh scans again only the paths named by the file facts
    the entries it read changed, before and after, and the paths those entities
-   were bound to, with the same identity reads. Such a path is found only under
+   were bound to, with the same identity reads. Until a scan lists such a path,
+   as when the refresh stops first, no file there is bound or pinned, and the
+   next refresh scans it. Such a path is found only under
    the spelling its directories list, since a volume that ignores case finds a
    file by any spelling of its name. A rescan, which the app asks for
    once a library opens and when something outside may have changed the folder,

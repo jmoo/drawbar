@@ -610,6 +610,7 @@ through_both!(
     undoing_a_rename_puts_a_file_moved_outside_back_where_it_was,
     an_undo_is_committed_when_its_identity_read_fails,
     a_rename_is_committed_when_its_rescan_fails_and_binds_nothing_stale,
+    a_move_read_by_a_rescan_that_failed_is_not_pinned_back_by_the_next_commit,
     a_settlement_is_committed_when_its_rescan_fails,
     a_failed_rescan_after_a_rename_binds_no_copy_in_its_place,
     a_commit_whose_head_cannot_be_recorded_is_kept_and_continued,
@@ -3049,6 +3050,45 @@ fn a_rename_is_committed_when_its_rescan_fails_and_binds_nothing_stale<F: Facade
     a.refresh().unwrap();
     let file = a.view().entity(song).unwrap().file().unwrap();
     assert_eq!((file.path, file.state), (path("b.npno"), FileState::InSync));
+}
+
+fn a_move_read_by_a_rescan_that_failed_is_not_pinned_back_by_the_next_commit<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    create(&mut a, "tune.npno", b"tune");
+    a.rescan().unwrap();
+    let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+    b.rescan().unwrap();
+    let moved = Expect::Holds(identity(b"song"));
+    b.commit("Move", |i| i.rename(song, &path("shelf/song.npno"), moved))
+        .unwrap();
+    move_outside(&folder, "tune.npno", "tune2.npno");
+    fail(&probe, |io| {
+        matches!(io, Io::ReadMany { .. }) && !layout().owns(io.path())
+    });
+    assert!(a.rescan().is_err(), "the moved tune cannot be identified");
+    heal(&probe);
+    let committed = a.commit("Tag", |i| i.add(song, TAGS, tag("x"))).unwrap();
+    assert!(
+        !committed
+            .changes
+            .iter()
+            .any(|change| change.what == What::File),
+        "no move back is pinned: {:?}",
+        committed.changes
+    );
+    a.refresh().unwrap();
+    let file = a.view().entity(song).unwrap().file().unwrap();
+    assert_eq!(
+        (file.path, file.state),
+        (path("shelf/song.npno"), FileState::InSync)
+    );
+    let (c, _) = F::open(Probe::new(&machine(&folder)), env("c", 3, &clock)).unwrap();
+    let file = c.view().entity(song).unwrap().file().unwrap();
+    assert_eq!(file.path, path("shelf/song.npno"), "the log holds the move");
 }
 
 fn a_settlement_is_committed_when_its_rescan_fails<F: Facade>() {

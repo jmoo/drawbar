@@ -9,7 +9,7 @@
 //! that owns what it reads, and its result is folded into the library afterwards,
 //! so no task borrows the library while it runs.
 
-use std::borrow::BorrowMut;
+use std::borrow::{BorrowMut, Cow};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -102,6 +102,8 @@ pub struct Library {
     unkept: bool,
     /// What a failed scan left unknown, until a scan of every file succeeds.
     unscanned: Unscanned,
+    /// The paths whose file facts a read changed, unknown until a scan lists them.
+    unrelisted: BTreeSet<RelPath>,
     /// A scan of every file that stopped before it finished, to go on with.
     walking: Option<Walk>,
     /// Bound from `facts`, `scan` and `unscanned` unless a binding is due.
@@ -265,6 +267,7 @@ impl Library {
             remembered,
             unkept: false,
             unscanned: Unscanned::default(),
+            unrelisted: BTreeSet::new(),
             walking: None,
             bindings: Arc::default(),
             bind_due: false,
@@ -517,9 +520,10 @@ impl Library {
     /// attributed to its writer, or to nobody for outside changes, and what the
     /// folder no longer holds. A sealed segment or snapshot read before is taken
     /// by its name. Of the library's files it scans again only those at the paths
-    /// whose file facts the entries changed, unless no scan of every file has
-    /// finished since the library opened or since a scan failed: then it scans
-    /// every file. Writes nothing in the folder.
+    /// whose file facts the entries changed, or that entries read before changed
+    /// and no scan listed since, unless no scan of every file has finished since
+    /// the library opened or since a scan failed: then it scans every file. Writes
+    /// nothing in the folder.
     pub fn refresh(&mut self) -> Task<'_, Result<Refreshed>> {
         self.look(Look::Logs)
     }
@@ -551,7 +555,7 @@ impl Library {
         flow::run(listed)
             .and_then(move |listing| {
                 let report = self.reader.absorb(listing);
-                let moved = self.absorb_read(&report);
+                self.absorb_read(&report);
                 self.unshown |= report.anything_new();
                 let retired = self.forked();
                 keep_local(self, false)
@@ -560,7 +564,7 @@ impl Library {
                             .then(|(library, stopped)| Flow::Done(stopped.map(|()| library))),
                         None => ok(library),
                     })
-                    .and_then(move |library| scan_for(library, scope, moved))
+                    .and_then(move |library| scan_for(library, scope))
                     .map_ok(move |library| (library, retired))
             })
             .and_then(|(library, retired)| {
@@ -751,6 +755,7 @@ impl Library {
         self.reader.shed();
         self.facts = Facts::default();
         self.scan = Scan::default();
+        self.unrelisted.clear();
         self.bind_due = false;
         self.bindings = Arc::default();
         self.history = History::default();
@@ -1008,16 +1013,17 @@ impl Library {
         self.refile(changed.into_iter())
     }
 
-    /// Takes in what a read derived. Returns the library paths the changed file
-    /// facts name, and those where the entities they changed were bound.
-    fn absorb_read(&mut self, report: &ReadReport) -> Vec<RelPath> {
+    /// Takes in what a read derived. The library paths the changed file facts
+    /// name, and those where the entities they changed were bound, are unknown
+    /// until a scan lists them.
+    fn absorb_read(&mut self, report: &ReadReport) {
         if !report.anything_new() {
             self.follow(Vec::new());
-            return Vec::new();
+            return;
         }
         let moved = self.take_derived();
+        self.unrelisted.extend(moved);
         self.follow(self.reader.readings().collect());
-        moved
     }
 
     /// The fork points this writer knows of the writers whose writes `ops` name.
@@ -1138,10 +1144,22 @@ impl Library {
         }
     }
 
-    /// Binds every fact to the scan.
+    /// Binds every fact to the scan, blind to what it does not know.
     fn bind_everything(&mut self) {
         let names = &*self.env.names;
-        let (bindings, pins) = binding::bind_known(&self.facts, &self.scan, names, &self.unscanned);
+        let unknown = match self.unrelisted.is_empty() {
+            true => Cow::Borrowed(&self.unscanned),
+            false => Cow::Owned(Unscanned {
+                paths: self
+                    .unscanned
+                    .paths
+                    .union(&self.unrelisted)
+                    .cloned()
+                    .collect(),
+                entities: self.unscanned.entities.clone(),
+            }),
+        };
+        let (bindings, pins) = binding::bind_known(&self.facts, &self.scan, names, &unknown);
         self.pins = pins;
         self.bindings = Arc::new(bindings);
         self.bind_due = false;
@@ -1746,21 +1764,18 @@ fn unlock_idle<'a>(genesis: EntryHash) -> Fallible<'a, ()> {
 
 /// What a refresh scans of the library's files.
 enum Look {
-    /// The paths whose file facts the entries it read changed.
+    /// The paths whose file facts the entries read changed, since a scan listed them.
     Logs,
     /// Those, and these paths.
     Paths(Vec<RelPath>),
     Everything,
 }
 
-/// Scans what `scope` asks of the library's files, given `moved`, the paths whose
-/// file facts the read changed, and binds. Everything is scanned while a failed
-/// scan left something unknown.
-fn scan_for<'a>(
-    library: &'a mut Library,
-    scope: Look,
-    mut moved: Vec<RelPath>,
-) -> Fallible<'a, &'a mut Library> {
+/// Scans what `scope` asks of the library's files, with the paths whose file facts
+/// reads changed, and binds. Everything is scanned while a failed scan left
+/// something unknown.
+fn scan_for(library: &mut Library, scope: Look) -> Fallible<'_, &mut Library> {
+    let mut moved: Vec<RelPath> = library.unrelisted.iter().cloned().collect();
     if let Some(walking) = library.walking.as_mut() {
         walking.forget(&moved);
     }
@@ -1832,6 +1847,8 @@ fn walked<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
             }
             known.unlisted = unlisted;
             known.behind.remove(&Lag::Scan);
+            known.bind_due |= !known.unrelisted.is_empty();
+            known.unrelisted.clear();
             known.rebind(scan);
             remember(library, read)
         })
@@ -1904,12 +1921,17 @@ fn rebind_logged<'a>(
             }
             Err(error) => Flow::Done(Err(error)),
         };
-        identified.then(move |scanned| match scanned {
-            Ok((scan, read)) => {
-                library.rebind(scan);
-                remember(library, read)
+        identified.then(move |scanned| {
+            for path in &unsure {
+                library.bind_due |= library.unrelisted.remove(path);
             }
-            Err(error) => unscanned(library, unsure, error),
+            match scanned {
+                Ok((scan, read)) => {
+                    library.rebind(scan);
+                    remember(library, read)
+                }
+                Err(error) => unscanned(library, unsure, error),
+            }
         })
     })
 }
