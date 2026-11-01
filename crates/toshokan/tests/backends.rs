@@ -659,3 +659,30 @@ fn a_native_root_reaches_nothing_through_a_linked_directory() {
     assert_eq!(std::fs::read(outside.path().join("x")).unwrap(), b"outside");
     assert_eq!(std::fs::read(folder.path().join("a")).unwrap(), b"inside");
 }
+
+// Apple file systems refuse a name that is not valid UTF-8.
+#[cfg(all(unix, not(target_vendor = "apple")))]
+#[test]
+fn a_native_listing_leaves_out_a_name_that_is_not_utf8() {
+    use std::os::unix::ffi::OsStrExt;
+    use toshokan::blocking::{Backend, Native};
+
+    let (folder, local) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let unnamed = std::ffi::OsStr::from_bytes(b"a\xff");
+    std::fs::write(folder.path().join(unnamed), b"a").unwrap();
+    std::fs::write(folder.path().join("b"), b"b").unwrap();
+    let mut native = Native::new(folder.path(), local.path());
+    let listed = native.perform(Io::List {
+        root: Root::Folder,
+        dir: RelPath::ROOT,
+    });
+    assert_eq!(listed, Ok(listing(&[("b", Kind::File)])));
+    let Ok(Reply::ListedStat(stated)) = native.perform(Io::ListStat {
+        root: Root::Folder,
+        dir: RelPath::ROOT,
+    }) else {
+        panic!("the folder lists with metadata");
+    };
+    let names: Vec<&str> = stated.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, ["b"]);
+}

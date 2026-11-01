@@ -691,8 +691,9 @@ their identities:
    A directory it cannot list is left out, as is every directory it has not
    reached once it has listed 1,000,000 entries: what is under them is unknown,
    as after a failed scan, and the scan reports them. A layout that hides leaves
-   out every name that starts with a dot. A view lists no file until a scan of
-   every file has run.
+   out every name that starts with a dot. Every listing leaves out symbolic
+   links, special files and names that are not valid UTF-8. A view lists no
+   file until a scan of every file has run.
    One that stops before every directory is listed binds nothing; the next goes
    on where it stopped, listing again each directory holding a path a commit or
    refresh scanned meanwhile, and each directory at or under such a path. A

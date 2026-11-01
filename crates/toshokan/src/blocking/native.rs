@@ -143,7 +143,8 @@ impl Native {
         }
     }
 
-    /// The files and directories in `dir`, by name, each with its entry.
+    /// The files and directories in `dir` whose names are valid UTF-8, by name,
+    /// each with its entry.
     fn entries(
         &self,
         root: Root,
@@ -158,10 +159,9 @@ impl Native {
                 (_, true) => Kind::Directory,
                 _ => continue,
             };
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| IoError::Other("a name is not valid UTF-8".into()))?;
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
             entries.push((name, kind, entry));
         }
         entries.sort_by(|a, b| a.0.cmp(&b.0));
