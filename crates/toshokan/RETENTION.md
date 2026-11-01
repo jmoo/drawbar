@@ -554,7 +554,8 @@ existence, two registers and two set members, delete and revive, dismiss and
 take runs, and compact after any entry, or after a sync client dropped the open
 segment's newest line. Each writer writes from what toshokan shows it of the
 folder. Every folder they leave is read at rest, along every delivery
-order up to a cap (with deleted files delivered early, late or never), with
+order or, past a cap, a spread of them (with deleted files delivered early,
+late or never), with
 conflicted copies, at every subset of its files, after a restore of the folder
 or of one directory to every earlier state, and after every dropped version of a
 segment. A reader holds nothing between reads.

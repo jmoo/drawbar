@@ -390,27 +390,29 @@ fn no_silent_return(world: &World, states: &[&(Shown, BTreeSet<Hash>)]) -> Resul
     Ok(())
 }
 
-/// Delivery orders of `n` files: every one up to `cap`, then a spread of them.
-fn orders(n: usize, cap: usize) -> Vec<Vec<usize>> {
-    let mut all = Vec::new();
-    let mut order: Vec<usize> = (0..n).collect();
-    permute(&mut order, 0, &mut all, cap);
-    all
+/// Delivery orders of `n` files: every one, or `cap` of them spread evenly over
+/// all of them, so that past the cap each file still comes first in some.
+pub fn orders(n: usize, cap: usize) -> Vec<Vec<usize>> {
+    let all = (1..=n as u128)
+        .try_fold(1u128, u128::checked_mul)
+        .expect("at most 34 files");
+    let count = all.min(cap as u128);
+    let stride = all / count.max(1);
+    (0..count).map(|i| order(n, i * stride, all)).collect()
 }
 
-fn permute(order: &mut Vec<usize>, k: usize, out: &mut Vec<Vec<usize>>, cap: usize) {
-    if out.len() >= cap {
-        return;
-    }
-    if k == order.len() {
-        out.push(order.clone());
-        return;
-    }
-    for i in k..order.len() {
-        order.swap(k, i);
-        permute(order, k + 1, out, cap);
-        order.swap(k, i);
-    }
+/// The `index`th of the `all` orders of `n` files, in lexicographic order.
+fn order(n: usize, mut index: u128, mut all: u128) -> Vec<usize> {
+    let mut left: Vec<usize> = (0..n).collect();
+    (1..=n as u128)
+        .rev()
+        .map(|k| {
+            all /= k;
+            let i = index / all;
+            index %= all;
+            left.remove(i as usize)
+        })
+        .collect()
 }
 
 pub struct Checker<'a> {

@@ -3,7 +3,9 @@
 
 mod retention;
 
-use retention::check::{replay, sweep, Depth};
+use std::collections::BTreeSet;
+
+use retention::check::{orders, replay, sweep, Depth};
 use retention::history::{Act, Bounds};
 use retention::world::Val::{A, B};
 
@@ -16,6 +18,17 @@ const DEPTH: Depth = Depth {
 fn run(bounds: Bounds) {
     let tally = sweep(bounds, DEPTH);
     eprintln!("{}", tally.report());
+}
+
+#[test]
+fn delivery_orders_past_the_cap_are_distinct_and_start_with_every_file() {
+    let spread = orders(7, 720);
+    assert_eq!(spread.len(), 720);
+    let distinct: BTreeSet<&Vec<usize>> = spread.iter().collect();
+    assert_eq!(distinct.len(), 720, "repeated orders");
+    let firsts: BTreeSet<usize> = spread.iter().map(|order| order[0]).collect();
+    assert_eq!(firsts, (0..7).collect(), "files that come first");
+    assert_eq!(orders(3, 720).len(), 6, "every order of three files");
 }
 
 #[test]
