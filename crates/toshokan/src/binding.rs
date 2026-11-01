@@ -646,9 +646,9 @@ pub fn bind(facts: &Facts, scan: &Scan, names: &dyn Names) -> Bindings {
 }
 
 /// File-register writes for the moves `facts` do not already say: a file found in
-/// sync at a path the volume does not take for the logged one. A new modification time alone is not pinned; it only
-/// saves reading an identity. Conflicted registers, changed files and missing
-/// ones are left for the user.
+/// sync at a path the volume does not take for the logged one. A new modification
+/// time alone is not pinned; it only saves reading an identity. Conflicted
+/// registers, changed files and missing ones are left for the user.
 pub fn pins(facts: &Facts, bindings: &Bindings, scan: &Scan, names: &dyn Names) -> Vec<Op> {
     let mut ops = Vec::new();
     for (&entity, file) in &bindings.bound {
