@@ -114,7 +114,8 @@ pub struct Library {
     pins: Vec<Op>,
     presence: BTreeMap<WriterId, Presence>,
     history: History,
-    /// How the intent being committed enters the history.
+    /// How the intent last begun enters the history, whether logged as it
+    /// commits or once the next write settles its record.
     entering: Entering,
     view: View,
     /// Whether a read folded in something the view does not show yet.
@@ -2008,12 +2009,10 @@ fn commit<'a>(
                 displaced: Vec::new(),
                 record: None,
             };
-            library.entering = entering;
             let effects = library.with_replaces(effects);
-            transact(library, logged, effects, None, pins.collect())
+            transact(library, logged, entering, effects, None, pins.collect())
         })
         .and_then(move |(library, entries, ended)| {
-            library.entering = Entering::Step;
             let committed = committed(&entries, created, library.local());
             ok((
                 library,
@@ -2536,18 +2535,20 @@ struct Ended {
     left: Vec<RelPath>,
 }
 
-/// Logs `logged`, carrying out `effects` under a pending record when there are
-/// any, closed by `closing` and followed by `bind` entries pinning `pins`. Returns
-/// the entries, the intent's first, and how the effects ended. A run that fails
-/// or is interrupted leaves the record for the next write to settle, and logs
-/// nothing.
+/// Logs `logged`, which enters the history as `entering` says, carrying out
+/// `effects` under a pending record when there are any, closed by `closing` and
+/// followed by `bind` entries pinning `pins`. Returns the entries, the intent's
+/// first, and how the effects ended. A run that fails or is interrupted leaves
+/// the record for the next write to settle, as `entering` says, and logs nothing.
 fn transact<'a>(
     library: &'a mut Library,
     logged: Logged,
+    entering: Entering,
     effects: Rc<EffectPlan>,
     closing: Option<Closing>,
     pins: Vec<Op>,
 ) -> Fallible<'a, (&'a mut Library, Vec<Entry>, Ended)> {
+    library.entering = entering;
     if effects.is_empty() {
         let mut kinds = closed(logged, closing);
         kinds.extend(bound(pins));
@@ -2779,8 +2780,15 @@ fn settle_orphan(
                         record: None,
                     };
                     let closing = Closing { facts, settle };
-                    transact(library, logged, effects, Some(closing), Vec::new())
-                        .map_ok(|(library, entries, _)| (library, entries))
+                    transact(
+                        library,
+                        logged,
+                        Entering::Step,
+                        effects,
+                        Some(closing),
+                        Vec::new(),
+                    )
+                    .map_ok(|(library, entries, _)| (library, entries))
                 }
             },
         )

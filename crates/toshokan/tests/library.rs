@@ -660,6 +660,7 @@ through_both!(
     a_folder_another_left_in_its_trash_is_finished_by_another,
     a_folder_another_left_in_its_trash_is_rolled_back_by_another,
     a_refresh_reports_another_installs_unfinished_change_as_it_stands,
+    a_settlement_after_a_refused_undo_is_no_undo_of_it,
     a_scan_of_every_file_reports_the_directories_it_listed,
     a_directory_made_and_filled_in_one_change_is_undone_in_one,
     directories_made_and_removed_around_tree_moves_undo_and_redo,
@@ -5013,6 +5014,67 @@ fn a_refresh_reports_another_installs_unfinished_change_as_it_stands<F: Facade>(
         [],
         "none once it is settled"
     );
+}
+
+/// Leaves another install's change, which renames `a.wav` to `b.wav` and sets an
+/// origin, made but unlogged in `folder`, and returns the orphan `ours` then finds.
+fn a_rename_left_by_another<F: Facade>(
+    folder: &MemDisk,
+    clock: &TestClock,
+    ours: &mut F,
+) -> toshokan::report::Orphan {
+    put(folder, "a.wav", b"a");
+    let probe = Probe::new(&machine(folder));
+    let (mut theirs, _) = F::open(probe.clone(), env("a", 1, clock)).unwrap();
+    theirs.rescan().unwrap();
+    let tagged = theirs
+        .commit("Tag", |i| i.create(|e| _ = e.add(TAGS, tag("x"))).0)
+        .unwrap();
+    let logging = |io: &Io| io.root() == Root::Folder && io.path().as_str().ends_with(".txt");
+    fail(&probe, move |io| io.mutates() && logging(io));
+    let stopped = theirs.commit("Rename", |i| {
+        i.rename_file(
+            &path("a.wav"),
+            &path("b.wav"),
+            Expect::Holds(identity(b"a")),
+        )
+        .set(tagged.created[0], ORIGIN, "renamed".into())
+    });
+    heal(&probe);
+    assert!(stopped.is_err(), "{stopped:?}");
+    drop(theirs);
+    let mut orphaned = ours.refresh().unwrap().orphaned;
+    assert_eq!(orphaned.len(), 1, "{orphaned:?}");
+    orphaned.remove(0)
+}
+
+fn a_settlement_after_a_refused_undo_is_no_undo_of_it<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut ours, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+    let song = create(&mut ours, "song.npno", b"one");
+    ours.commit("Save", |i| {
+        i.save(
+            song,
+            &path("song.npno"),
+            b"two".to_vec(),
+            Expect::Holds(identity(b"one")),
+        )
+    })
+    .unwrap();
+    put(&folder, "song.npno", b"outside");
+    let refused = ours.undo();
+    assert!(matches!(refused, Err(Error::Refused(_))), "{refused:?}");
+    let orphan = a_rename_left_by_another(&folder, &clock, &mut ours);
+    ours.settle(orphan, Settlement::Finished).unwrap();
+    let save = ours.history().into_iter().find(|item| item.label == "Save");
+    assert_eq!(save.map(|item| item.undone), Some(false), "the save stands");
+    let redone = ours.redo();
+    assert!(
+        matches!(redone, Err(Error::Refused(Refusal::Nothing))),
+        "nothing to redo: {redone:?}"
+    );
+    assert_eq!(read(&folder, "b.wav").as_deref(), Some(b"a".as_slice()));
 }
 
 fn a_directory_made_and_filled_in_one_change_is_undone_in_one<F: Facade>() {
