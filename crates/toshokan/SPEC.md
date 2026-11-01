@@ -371,6 +371,8 @@ A reader merges what each writer still contributes: its tip snapshots' state
 and the entries it places after them (see Reading). The merge is a function of
 those, so readers holding the same files and memories show the same, whatever
 order the files arrived in. Every write is named by its writer, number and hash.
+An entry's ops apply in order, so where two of them write one field, the later
+is the entry's write.
 
 Keys are declared by the app as registers or sets, each under a name. A key's
 values are the app's JSON. A field is an entity's existence, one of its

@@ -817,10 +817,13 @@ pub fn derive(seen: &BTreeMap<WriterId, Seen<'_>>) -> Derived {
             .or_insert(candidate.at.n);
         *slot = (*slot).max(candidate.at.n);
     }
-    let mut seen_writes: BTreeSet<(EntryHash, FieldKey)> = BTreeSet::new();
-    let live: Vec<Live> = candidates
+    // An entry's ops apply in order, so its last write to a field is its write.
+    let writes: BTreeMap<(EntryHash, FieldKey), Candidate> = candidates
         .into_iter()
-        .filter(|candidate| seen_writes.insert((candidate.at.hash, candidate.field.clone())))
+        .map(|candidate| ((candidate.at.hash, candidate.field.clone()), candidate))
+        .collect();
+    let live: Vec<Live> = writes
+        .into_values()
         .filter(|candidate| {
             let Candidate { at, field, .. } = candidate;
             let own_later = latest_own[&(at.writer, field.clone())] > at.n;
@@ -1798,6 +1801,46 @@ mod tests {
         )]);
         assert!(derived.folded.members(E, "s").is_empty());
         assert!(!derived.folded.present(E));
+    }
+
+    #[test]
+    fn an_entry_writing_one_field_twice_merges_its_last_write_afresh_and_one_by_one() {
+        let member = Raw::of(&"x").unwrap();
+        let add = Op::Add {
+            entity: E,
+            key: "tags".into(),
+            value: member.clone(),
+            replaces: vec![],
+            take: None,
+        };
+        let remove = Op::Remove {
+            entity: E,
+            key: "tags".into(),
+            value: member.clone(),
+            tags: vec![],
+            take: None,
+        };
+        let first = chain(W, &["a"]);
+        let both = entry(Some(&first[0]), vec![add, remove], "both");
+        let all = [Rc::clone(&first[0]), Rc::clone(&both)];
+        let seen = |entries: &[Rc<Entry>]| {
+            derived(vec![(
+                W,
+                Seen {
+                    segments: vec![lines(entries, false)],
+                    snapshots: vec![],
+                },
+            )])
+        };
+        let afresh = seen(&all);
+        let added = |derived: &Derived| {
+            let tags = derived.folded.tags(E, "tags", &member);
+            tags.iter().any(|write| write.value)
+        };
+        assert!(!added(&afresh), "the remove follows the add");
+        let mut incremental = seen(&first);
+        assert!(extend(&mut incremental, W, &[both]));
+        assert_eq!(incremental.folded, afresh.folded);
     }
 
     #[test]
