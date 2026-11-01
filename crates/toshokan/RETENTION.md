@@ -58,7 +58,11 @@ file holding one reaches a reader, under any name, the reader skips it:
 The by-hash rule is what makes certification complete; segment certificates only
 keep it small. Its writer knows segments from its own last snapshot, from the
 files it read or wrote since, and from the files in its directory now. A segment
-it does not know of costs hashes, not correctness.
+it does not know of costs hashes, not correctness. A file that ends before a
+certificate of its previous snapshot with its first line reaches gets no
+certificate of its own: it may be a dropped version of that segment, whose lines
+past the first the writer cannot name, and a shorter certificate would make
+them a fork in every longer copy.
 
 Certificates are kept forever, and they are one of the two parts of a snapshot
 that grow with use. A file sync brings back, from a backup or a device that was

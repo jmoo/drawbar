@@ -1616,6 +1616,44 @@ mod tests {
     }
 
     #[test]
+    fn a_compaction_beside_a_dropped_version_of_a_certified_segment_finds_no_fork() {
+        let entries = chain(W, &["a", "b", "c", "d"]);
+        let previous = folded(&entries);
+        let next = [entry(
+            Some(&entries[3]),
+            vec![set("e", vec![entries[3].own().of(W)])],
+            "e",
+        )];
+        for kept in 1..entries.len() {
+            let dropped = &entries[..kept];
+            let found = [Found::Lines(dropped), Found::Lines(&next)];
+            let tip = snapshot(
+                W,
+                entries[0].hash(),
+                "w".into(),
+                Some(&previous),
+                &next,
+                found,
+            );
+            let tip = Rc::new(tip.unwrap());
+            for copy in 1..entries.len() {
+                let derived = derived(vec![(
+                    W,
+                    Seen {
+                        segments: vec![lines(&entries[..copy], false)],
+                        snapshots: vec![Rc::clone(&tip)],
+                    },
+                )]);
+                let placed = &derived.writers[&W];
+                let case = format!("compacted beside {kept} lines, read beside {copy}");
+                assert_eq!(placed.fork, None, "{case}: {:?}", placed.forks);
+                assert_eq!(placed.unplaced, entries[1..copy], "{case}");
+                assert_eq!(values(&derived), ["e"], "{case}");
+            }
+        }
+    }
+
+    #[test]
     fn an_unplaced_write_shows_only_where_no_tip_keeps_it_merged() {
         let write = |key: &str, value: &str, replaces: Vec<Ref>| Op::Write {
             entity: E,

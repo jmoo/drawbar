@@ -499,7 +499,9 @@ when it next confirms the entry. Otherwise it folds the entries after its
 previous snapshot's head into that snapshot's state, certifies every segment of
 its directory by the part of it on its chain, the snapshots of its directory on
 its chain by their certificates, and every other entry it folds by hash, and
-writes the snapshot. A snapshot longer than a reader reads (see Reading) is
+writes the snapshot. A segment file that ends before a certificate of the
+previous snapshot with its first line reaches, as a dropped version does, gets
+no certificate of its own. A snapshot longer than a reader reads (see Reading) is
 refused before anything is written, so the log it would fold stays, and the
 instance compacts no more on its own until it opens again. Where the folder
 renames files, it writes it to `tmp/` under its nonce, syncs it, renames it into

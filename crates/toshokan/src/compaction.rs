@@ -357,7 +357,10 @@ pub fn snapshot<'a>(
 }
 
 /// How many of a segment's first lines `snapshot`, or `added`, certifies: those
-/// a segment certificate of it covers, and those after them it names.
+/// a segment certificate of it covers, and those after them it names. None of
+/// a file that ends before a certificate with its first line reaches: it may be
+/// a dropped version of that segment, whose lines past the first may be on
+/// the chain unnamed, and a certificate ending inside it would make them a fork.
 fn certified_prefix(
     lines: &[Rc<Entry>],
     snapshot: Option<&Snapshot>,
@@ -366,14 +369,21 @@ fn certified_prefix(
     let Some(first) = lines.first() else {
         return 0;
     };
-    let matched = snapshot
+    let certs: Vec<(u64, EntryHash)> = snapshot
         .into_iter()
-        .flat_map(|snapshot| &snapshot.certified.segments);
-    let mut on = matched
+        .flat_map(|snapshot| &snapshot.certified.segments)
         .filter(|cert| cert.first.hash == first.hash())
-        .filter_map(|cert| {
-            let at = usize::try_from(cert.last.n.checked_sub(cert.first.n)?).ok()?;
-            (lines.get(at)?.hash() == cert.last.hash).then_some(at + 1)
+        .filter_map(|cert| Some((cert.last.n.checked_sub(cert.first.n)?, cert.last.hash)))
+        .collect();
+    let past = |at: u64| usize::try_from(at).map_or(true, |at| at >= lines.len());
+    if certs.iter().any(|(at, _)| past(*at)) {
+        return 0;
+    }
+    let mut on = certs
+        .iter()
+        .filter_map(|(at, last)| {
+            let at = usize::try_from(*at).ok()?;
+            (lines.get(at)?.hash() == *last).then_some(at + 1)
         })
         .max()
         .unwrap_or(0);
