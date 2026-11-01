@@ -818,12 +818,11 @@ pub fn derive(seen: &BTreeMap<WriterId, Seen<'_>>) -> Derived {
         *slot = (*slot).max(candidate.at.n);
     }
     // An entry's ops apply in order, so its last write to a field is its write.
-    let writes: BTreeMap<(EntryHash, FieldKey), Candidate> = candidates
+    let mut written: BTreeSet<(EntryHash, FieldKey)> = BTreeSet::new();
+    candidates.reverse();
+    let live: Vec<Live> = candidates
         .into_iter()
-        .map(|candidate| ((candidate.at.hash, candidate.field.clone()), candidate))
-        .collect();
-    let live: Vec<Live> = writes
-        .into_values()
+        .filter(|candidate| written.insert((candidate.at.hash, candidate.field.clone())))
         .filter(|candidate| {
             let Candidate { at, field, .. } = candidate;
             let own_later = latest_own[&(at.writer, field.clone())] > at.n;
