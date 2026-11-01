@@ -263,9 +263,9 @@ An entry is an object whose first members are:
 
 followed by the members of its kind. A genesis entry is numbered 0, and every
 other entry its predecessor's number plus one. A reader ignores members it does
-not know, at any depth, and keeps the line and the whole entry (see Merging), so
-they survive. An entry of another kind, without `kind`, or whose members do not
-decode, is kept and merged as unknown; so is a line whose JSON has no readable
+not know, at any depth but an observed write's (see Compatibility), and keeps the
+line and the whole entry (see Merging), so they survive. An entry of another kind,
+without `kind`, or whose members do not decode, is kept and merged as unknown; so is a line whose JSON has no readable
 `n` or `at`, which still links the chain but is never placed.
 
 An entry names another as `["<writer>",<n>,"<hash>"]`, and one of its own
@@ -316,8 +316,9 @@ is the app's JSON, kept byte for byte; `"value":null` writes `null`. A `file` is
 `{"path","identity","len"}` with an optional `modified`, the backend's
 modification time, compared only for equality. Each member of `displaced` is
 `{"item","from","identity","len"}`: the trash item's nonce, the library path the
-bytes left, their identity and length. An op of another name, or missing a
-member, is kept and unknown.
+bytes left, their identity and length. An op of another name, missing a member,
+or with an observed write holding a member the reader does not know, is kept and
+unknown.
 
 A run, which `take` and `runs` name, is `{"writer","from","first"?,"last","tip"?}`:
 the writer's entries numbered from `from` to `last` on `last`'s chain, the first
