@@ -4,14 +4,23 @@
 #
 # Outside Nix: rustup installs the Rust that nixpkgs pins, and the runner is the
 # wasm-bindgen-cli that matches Cargo.lock; `nix flake check` holds both pins. It runs
-# only when toshokan, drawbar's library, the lock file or this workflow changes.
+# only when toshokan, drawbar's library or the browser code it runs on, the lock file
+# or this workflow changes.
 name: safari
 
 on:
   pull_request:
     paths:
       - crates/toshokan/**
+      - crates/drawbar/Cargo.toml
+      - crates/drawbar/src/idb.rs
+      - crates/drawbar/src/js.rs
+      - crates/drawbar/src/libraries/web.rs
+      - crates/drawbar/src/ondisk.rs
+      - crates/drawbar/src/ondisk/**
+      - crates/drawbar/src/room.rs
       - crates/drawbar/src/store/**
+      - crates/drawbar/src/workspace.rs
       - crates/drawbar/tests/web.rs
       - crates/Cargo.lock
       - .github/workflows/safari.yml
@@ -19,7 +28,15 @@ on:
     branches: [master]
     paths:
       - crates/toshokan/**
+      - crates/drawbar/Cargo.toml
+      - crates/drawbar/src/idb.rs
+      - crates/drawbar/src/js.rs
+      - crates/drawbar/src/libraries/web.rs
+      - crates/drawbar/src/ondisk.rs
+      - crates/drawbar/src/ondisk/**
+      - crates/drawbar/src/room.rs
       - crates/drawbar/src/store/**
+      - crates/drawbar/src/workspace.rs
       - crates/drawbar/tests/web.rs
       - crates/Cargo.lock
       - .github/workflows/safari.yml
@@ -29,7 +46,7 @@ permissions:
 
 concurrency:
   group: safari-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   RUST_VERSION: 1.97.1
@@ -62,6 +79,7 @@ jobs:
             wasm-bindgen-test-runner "$@" 2>&1 | tee "$RUNNER_TEMP/suite.log"
             status=${PIPESTATUS[0]}
             grep -q "Error: io: Peer disconnected" "$RUNNER_TEMP/suite.log" || exit "$status"
+            grep -Eq "^running [0-9]+ tests?" "$RUNNER_TEMP/suite.log" && exit "$status"
             echo "safaridriver dropped the session before the suite started; asking again" >&2
             sleep 5
           done
