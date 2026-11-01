@@ -19,6 +19,9 @@ version = "0.1.0"
 browserTests = ["backends", "effects", "hints", "web"]
 testFeatures = ["web"]
 
+[package.metadata.docs.rs]
+features = ["web"]
+
 [features]
 # The browser backends: a dedicated worker over the origin private file system or
 # a folder the user picked.
