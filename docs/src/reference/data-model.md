@@ -105,8 +105,8 @@ Before a write to the instrument replaces a slot's occupant, drawbar reads the
 occupant into `rescued/` and puts it back if the write fails
 ([Writing over a slot](usb-protocol.md#writing-over-a-slot)). A file still there
 once the instrument is idle, or at the next open, may be the slot's only copy.
-drawbar copies it into the library under the slot's name, as one change undo
-can take back, and then deletes it. While the library cannot be written, the
+drawbar copies it into the library under the slot's name, as a change undo does
+not take back, since the copy is then the only one, and deletes it. While the library cannot be written, the
 file stays where it is, and drawbar asks about it.
 
 A rescued occupant survives a power cut only where drawbar can sync its folder

@@ -696,6 +696,7 @@ impl<F: Fs> Keeper<F> {
         // ⚠️ Where folders do not rename, one moves file by file as the last scan found
         // it: a look at it first takes along what came into it since.
         let mut looked = Vec::new();
+        let rescue = takes_in_rescue(&intent);
         let folders = moved_folders(&intent);
         if !folders.is_empty() && !library.fs().capabilities(Root::Folder).rename_dir {
             let paths = folders.iter().filter_map(relative).collect();
@@ -793,9 +794,14 @@ impl<F: Fs> Keeper<F> {
             Intent::Batch(parts) => gathered(library, label, parts, &mut looked, answer).await?,
             part => gathered(library, label, vec![part], &mut looked, answer).await?,
         };
+        // ⚠️ Undoing a rescue's copy trashes the slot's former occupant, whose only other
+        // copy is gone, and the trash empties at close.
+        if rescue && changes.as_ref().is_some_and(|committed| committed.undoable) {
+            library.forget_undo();
+        }
         let intent = changes
             .as_ref()
-            .map(|committed| (committed.intent, committed.undoable));
+            .map(|committed| (committed.intent, committed.undoable && !rescue));
         let left = changes
             .as_ref()
             .map(|committed| shown_paths(&committed.left));
@@ -864,6 +870,18 @@ fn not_made(intent: Intent, why: String, answer: &mut impl FnMut(Event)) -> Stri
         .filter(|event| !matches!(event, Event::Committed { .. }))
         .for_each(answer);
     why
+}
+
+/// Whether `intent`, or a part of it, copies a slot's former occupant into the library.
+fn takes_in_rescue(intent: &Intent) -> bool {
+    match intent {
+        Intent::Import {
+            came: Some(Came::Rescued { .. }),
+            ..
+        } => true,
+        Intent::Batch(parts) => parts.iter().any(takes_in_rescue),
+        _ => false,
+    }
 }
 
 /// The folders `intent` moves, its parts' included.

@@ -914,8 +914,7 @@ fn a_rescue_file_that_does_not_decode_is_reported_not_offered() {
 
 /// A rescue a write left goes into the library's top level once the library opens, as an
 /// asset like any other, an entity that says which slot it came off, and is deleted where
-/// it was. The copy is one change, which undo takes back and redo makes again, and the
-/// next open finds nothing more to take in.
+/// it was. The next open finds nothing more to take in.
 #[test]
 fn a_rescue_left_goes_into_the_library_once_with_its_slot_as_origin() {
     let root = Temp::new();
@@ -933,11 +932,6 @@ fn a_rescue_left_goes_into_the_library_once_with_its_slot_as_origin() {
     );
     assert_eq!(names_at(&rescued(&root)), Vec::<String>::new());
     assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue());
-
-    second.undo();
-    assert!(!root.at("nord-rescued-1-4.npno").exists(), "undone");
-    second.redo();
-    assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue(), "redone");
     second.close();
 
     let third = Session::open(&root);
@@ -7111,4 +7105,23 @@ fn an_edit_kept_under_a_new_key_is_kept_before_the_old_draft_goes() {
     let again = Session::open(&crashed);
     let grand = again.named("Grand.ne5p");
     assert!(again.bytes(grand) == edited, "the edit is back");
+}
+
+/// A slot's former occupant taken into the library is no step Undo takes back: the copy
+/// in the library is its only one, so an undo and a close leave it there.
+#[test]
+fn a_rescue_taken_in_survives_an_undo_and_a_close() {
+    let root = Temp::new();
+    with_rescue(&root);
+    let mut session = Session::open(&root);
+    session.sync();
+    assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue());
+    assert_eq!(session.store.undo_label(), None, "Undo offers no rescue");
+    session.undo();
+    session.close();
+    assert_eq!(
+        root.read("nord-rescued-1-4.npno"),
+        a_rescue(),
+        "the rescue stays in the library"
+    );
 }
