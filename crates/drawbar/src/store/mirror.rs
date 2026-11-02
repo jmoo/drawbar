@@ -3417,18 +3417,18 @@ impl Store {
     ///
     /// ⚠️ An asset whose file is missing, or was never written, has nothing to rewrite, and
     /// its save is refused here.
-    fn send_edits(&mut self, workspace: &mut Workspace, waiting: &[(LibPath, LibPath)]) {
+    fn send_edits(&mut self, workspace: &mut Workspace, held: &[(LibPath, LibPath)]) {
         for id in workspace.edits_to_save() {
             let record = self.records.get_mut(&id);
-            let held = record.and_then(|record| {
+            let file = record.and_then(|record| {
                 let (path, expect) = (record.path.clone()?, record.fingerprint?);
                 (!record.missing).then_some((record, path, expect))
             });
-            let Some((record, path, expect)) = held else {
+            let Some((record, path, expect)) = file else {
                 workspace.edit_not_saved(id);
                 continue;
             };
-            if record.saving || unsettled(waiting, &path) {
+            if record.saving || unsettled(self.moving.iter().chain(held), &path) {
                 continue;
             }
             let Some((from, edit)) = workspace.send_edit(id) else {
@@ -3594,9 +3594,9 @@ impl Store {
         }
         crate::folders::place_new(workspace, &browser.folders);
         self.take_asks(workspace);
-        let mut done = self.arrivals(workspace, &self.waiting(&held_moves));
+        let mut done = self.arrivals(workspace, &held_moves);
         done &= self.carry_out(workspace, &held_moves);
-        self.send_edits(workspace, &self.waiting(&held_moves));
+        self.send_edits(workspace, &held_moves);
         for op in removals {
             self.tree_op(op);
         }
@@ -3718,7 +3718,7 @@ impl Store {
 
     /// Send the copy each arriving asset waits on. Returns `false` where one waits for a
     /// save or a rename to answer first.
-    fn arrivals(&mut self, workspace: &Workspace, waiting: &[(LibPath, LibPath)]) -> bool {
+    fn arrivals(&mut self, workspace: &Workspace, held: &[(LibPath, LibPath)]) -> bool {
         let mut done = true;
         let arriving: Vec<(u64, CopyOf)> = workspace
             .arrivals()
@@ -3733,24 +3733,21 @@ impl Store {
             };
             let record = self.records.get(&id);
             let at = record.and_then(|record| record.path.as_ref());
-            let held = [Some(&path), at].into_iter().flatten();
-            if held.into_iter().any(|at| unsettled(waiting, at)) {
+            let ends = [Some(&path), at].into_iter().flatten();
+            if ends
+                .into_iter()
+                .any(|at| unsettled(self.moving.iter().chain(held), at))
+            {
                 done = false;
                 continue;
             }
-            let sent = self.import(entity, &path, &from, waiting);
+            let sent = self.import(entity, &path, &from, held);
             if sent {
                 self.delete_with(id, workspace);
             }
             done &= sent;
         }
         done
-    }
-
-    /// The renames not answered yet, and the folder changes `held` back, each from and
-    /// to: what a change to a file under either waits for.
-    fn waiting(&self, held: &[(LibPath, LibPath)]) -> Vec<(LibPath, LibPath)> {
-        self.moving.iter().chain(held).cloned().collect()
     }
 
     /// Carry out the changes to files asked for, in order. One that waits for an answer
@@ -3762,13 +3759,10 @@ impl Store {
                 self.send_batch();
                 self.batch.take = take;
             }
-            // ⚠️ Taken afresh for each: a rename sent just before must answer before a
-            // change to what it moves goes out.
-            let waiting = self.waiting(held);
             carried = match ask {
-                FileAsk::Save(id) => self.save(id, workspace, &waiting),
-                FileAsk::Move { id, .. } => self.relocate(id, workspace, &waiting),
-                FileAsk::Delete { id, path } => self.delete(id, &path, workspace, &waiting),
+                FileAsk::Save(id) => self.save(id, workspace, held),
+                FileAsk::Move { id, .. } => self.relocate(id, workspace, held),
+                FileAsk::Delete { id, path } => self.delete(id, &path, workspace, held),
             };
             if !carried {
                 break;
@@ -3849,7 +3843,7 @@ impl Store {
     /// Write an asset's file with what it was saved as: a new file where it has none, and
     /// nothing where the file holds it already. `false` while a write over the file waits
     /// for the one before it.
-    fn save(&mut self, id: u64, workspace: &Workspace, waiting: &[(LibPath, LibPath)]) -> bool {
+    fn save(&mut self, id: u64, workspace: &Workspace, held: &[(LibPath, LibPath)]) -> bool {
         let Some(entity) = workspace.get(id).filter(|entity| entity.kept) else {
             return true;
         };
@@ -3886,7 +3880,7 @@ impl Store {
             return false;
         }
         let at = record.path.clone().unwrap_or(path);
-        if unsettled(waiting, &at) {
+        if unsettled(self.moving.iter().chain(held), &at) {
             return false;
         }
         // A baseline resting in its file is what the file holds, and needs no write.
@@ -3947,7 +3941,7 @@ impl Store {
 
     /// Move an asset's file to where the asset is now. `false` while a write over the file
     /// or a rename it is under waits for its answer.
-    fn relocate(&mut self, id: u64, workspace: &Workspace, waiting: &[(LibPath, LibPath)]) -> bool {
+    fn relocate(&mut self, id: u64, workspace: &Workspace, held: &[(LibPath, LibPath)]) -> bool {
         let to = workspace.get(id).and_then(|entity| entity.path.clone());
         let (Some(to), Some(record)) = (to, self.records.get_mut(&id)) else {
             return true;
@@ -3958,7 +3952,8 @@ impl Store {
         let Some(at) = record.path.clone().filter(|at| *at != to) else {
             return true;
         };
-        if unsettled(waiting, &at) || unsettled(waiting, &to) {
+        let waiting = || self.moving.iter().chain(held);
+        if unsettled(waiting(), &at) || unsettled(waiting(), &to) {
             return false;
         }
         record.path = Some(to.clone());
@@ -3966,7 +3961,9 @@ impl Store {
         let (Some(expect), false) = (expect, record.missing) else {
             return true;
         };
-        self.ids.moved(&at, &to);
+        if let Some(file) = self.ids.id(&Key::File(at.clone())) {
+            self.ids.insert(file, Key::File(to.clone()));
+        }
         self.moving.push((at.clone(), to.clone()));
         self.part(Intent::Move {
             moves: vec![Moving {
@@ -3986,7 +3983,7 @@ impl Store {
         id: u64,
         path: &LibPath,
         workspace: &Workspace,
-        waiting: &[(LibPath, LibPath)],
+        held: &[(LibPath, LibPath)],
     ) -> bool {
         if workspace.get(id).is_some() {
             return true;
@@ -3997,7 +3994,8 @@ impl Store {
         // ⚠️ A file a copy is still to be made of waits until the copy answers: a copy
         // that fails has nothing else to make it from.
         let at = record.path.as_ref().unwrap_or(path);
-        if record.saving || workspace.copies_of(id).next().is_some() || unsettled(waiting, at) {
+        let waits = unsettled(self.moving.iter().chain(held), at);
+        if record.saving || workspace.copies_of(id).next().is_some() || waits {
             return false;
         }
         let Some(record) = self.records.remove(&id) else {
@@ -4028,7 +4026,7 @@ impl Store {
         entity: &LocalEntity,
         path: &LibPath,
         from: &CopyOf,
-        waiting: &[(LibPath, LibPath)],
+        held: &[(LibPath, LibPath)],
     ) -> bool {
         let from = match from {
             CopyOf::Outside(file) => Source::Outside(file.clone()),
@@ -4038,7 +4036,9 @@ impl Store {
                 let found =
                     source.and_then(|source| Some((source.path.clone()?, source.fingerprint?)));
                 match (found, from) {
-                    (Some((at, _)), _) if unsettled(waiting, &at) => return false,
+                    (Some((at, _)), _) if unsettled(self.moving.iter().chain(held), &at) => {
+                        return false;
+                    }
                     (Some((at, print)), CopyOf::Edited(_, pieces)) => {
                         Source::Edited(at, print, pieces.clone())
                     }
@@ -4252,9 +4252,9 @@ fn held(workspace: &Workspace) -> u64 {
 }
 
 /// Whether `path` is in, is, or holds either side of one of these renames.
-fn unsettled(moving: &[(LibPath, LibPath)], path: &LibPath) -> bool {
+fn unsettled<'a>(moving: impl IntoIterator<Item = &'a (LibPath, LibPath)>, path: &LibPath) -> bool {
     moving
-        .iter()
+        .into_iter()
         .any(|(from, to)| path.is_in(from) || from.is_in(path) || path.is_in(to) || to.is_in(path))
 }
 
