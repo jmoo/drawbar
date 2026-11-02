@@ -305,6 +305,36 @@ pub fn said(op: &Op) -> Said {
     said
 }
 
+/// The fields of `entity` in `own` but its existence. [`FieldKey`] orders by
+/// variant before entity, so each variant's fields of `entity` are adjacent.
+fn written(
+    own: &BTreeMap<FieldKey, Held>,
+    entity: EntityId,
+) -> impl Iterator<Item = (&FieldKey, &Held)> {
+    let of = move |(field, _): &(&FieldKey, &Held)| field.entity() == entity;
+    let registers = own
+        .range(FieldKey::Register(entity, name(""))..)
+        .take_while(move |(field, _)| matches!(field, FieldKey::Register(e, _) if *e == entity));
+    // No raw value sorts first, so the members are walked both ways from a key
+    // that sorts among them.
+    let probe = own
+        .range(..FieldKey::File(EntityId::from_u128(0)))
+        .next_back()
+        .and_then(|(field, _)| match field {
+            FieldKey::Member(_, key, raw) => {
+                Some(FieldKey::Member(entity, key.clone(), raw.clone()))
+            }
+            _ => None,
+        });
+    let members = probe.into_iter().flat_map(move |probe| {
+        let below = own.range(..probe.clone()).rev().take_while(of);
+        below.chain(own.range(probe..).take_while(of))
+    });
+    let members = members.filter(|(field, _)| matches!(field, FieldKey::Member(..)));
+    let file = own.get_key_value(&FieldKey::File(entity));
+    registers.chain(members).chain(file)
+}
+
 /// The ops of `kind`, for the kinds that have them.
 pub fn ops(kind: &EntryKind) -> &[Op] {
     match kind {
@@ -366,8 +396,8 @@ impl Contribution {
                     deleted.extend(self.fold_op(writer, own, entry.at(), known, op));
                 }
                 for entity in deleted {
-                    for (field, held) in &self.own {
-                        if field.entity() == entity && !field.is_exist() && held.at.n <= own.n {
+                    for (field, held) in written(&self.own, entity) {
+                        if held.at.n <= own.n {
                             self.killed.entry(field.clone()).or_insert(own);
                         }
                     }
@@ -1070,6 +1100,59 @@ mod tests {
             contribution.killed[&FieldKey::Register(E, "b".into())],
             entries[4].own()
         );
+    }
+
+    #[test]
+    fn an_own_delete_kills_every_other_field_of_its_entity_and_none_of_its_neighbors() {
+        let entities = [E.to_u128() - 1, E.to_u128(), E.to_u128() + 1].map(EntityId::from_u128);
+        let mut ops = Vec::new();
+        for entity in entities {
+            ops.push(Op::Create {
+                entity,
+                replaces: vec![],
+                take: None,
+            });
+            for key in ["", "k"] {
+                ops.push(Op::Write {
+                    entity,
+                    key: key.into(),
+                    value: Some(raw("1")),
+                    replaces: vec![],
+                    take: None,
+                });
+                for value in ["\" \"", "0", "[]"] {
+                    ops.push(Op::Add {
+                        entity,
+                        key: key.into(),
+                        value: raw(value),
+                        replaces: vec![],
+                        take: None,
+                    });
+                }
+            }
+            ops.push(Op::File {
+                entity,
+                file: None,
+                replaces: vec![],
+                take: None,
+            });
+        }
+        ops.push(Op::Delete {
+            entity: E,
+            replaces: vec![],
+            observed: vec![],
+            take: None,
+        });
+        let entries = chain(ops.into_iter().map(|op| (op, vec![])).collect());
+        let contribution = folded(&entries);
+        let expected: Vec<&FieldKey> = contribution
+            .own
+            .keys()
+            .filter(|field| field.entity() == E && !field.is_exist())
+            .collect();
+        assert_eq!(expected.len(), 9, "{expected:?}");
+        let killed: Vec<&FieldKey> = contribution.killed.keys().collect();
+        assert_eq!(killed, expected);
     }
 
     #[test]
