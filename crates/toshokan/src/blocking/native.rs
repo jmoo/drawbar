@@ -380,13 +380,11 @@ fn flush(path: &Path, kind: Kind) -> io::Result<()> {
     let file = File::open(path)?;
     let flushed = file.sync_all();
     // `sync_all` asks Apple systems for a full sync, which SMB, AFP and WebDAV
-    // volumes refuse while taking a plain one. Reported by public documentation; not
-    // confirmed on hardware.
+    // volumes refuse, under more than one error, while taking a plain one; as SQLite
+    // does, any failure of it falls back to a plain one. Reported by public
+    // documentation; not confirmed on hardware.
     #[cfg(target_vendor = "apple")]
-    let flushed = flushed.or_else(|error| match refused(&error) {
-        true => rustix::fs::fsync(&file).map_err(io::Error::from),
-        false => Err(error),
-    });
+    let flushed = flushed.or_else(|_| rustix::fs::fsync(&file).map_err(io::Error::from));
     match flushed {
         // A volume that cannot sync a directory keeps its names as durably as it
         // keeps them. Reported by public documentation; not confirmed on hardware.
@@ -395,7 +393,8 @@ fn flush(path: &Path, kind: Kind) -> io::Result<()> {
     }
 }
 
-/// Whether `error` says the volume cannot make that sync, rather than that it failed.
+/// Whether `error` says the volume cannot sync a directory, rather than that the
+/// sync failed.
 #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
 fn refused(error: &io::Error) -> bool {
     use rustix::io::Errno;
@@ -1061,7 +1060,7 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
     #[test]
-    fn a_sync_the_volume_cannot_make_is_told_from_one_that_failed() {
+    fn a_directory_sync_the_volume_cannot_make_is_told_from_one_that_failed() {
         use rustix::io::Errno;
         for errno in [Errno::INVAL, Errno::NOTSUP, Errno::BADF] {
             assert!(refused(&errno.into()), "{errno:?}");

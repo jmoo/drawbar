@@ -1190,8 +1190,8 @@ effects). On Windows it syncs a file through a handle that may write and a
 directory through one opened for backup semantics, and its renames return once
 they are on the disk. Where a volume refuses to flush a directory, a file's flush
 and a rename written through still flush its log through every earlier change of
-names. On Apple systems it asks for a full sync, and takes a plain one where a
-network volume refuses it. On Linux and Apple systems, a volume that cannot sync
+names. On Apple systems it asks for a full sync, and takes a plain one where that
+fails, as on network volumes that refuse it. On Linux and Apple systems, a volume that cannot sync
 a directory has each sync of one taken as done. A request another program holds the file of for a moment, as antivirus
 does after a write, is tried again for about half a second, and a file's sync
 for about five seconds, since its bytes have landed.
