@@ -171,8 +171,11 @@ impl Backend {
         let refusing = signs.clone();
         let clock = Box::new(SystemClock);
         let worker = std::thread::spawn(move || {
-            // toshokan's library stays on the thread that opened it.
+            // toshokan's library stays on the thread that opened it. A look at the folder
+            // that hangs is a command that shows no life.
+            living.run(true);
             let mut keeper = keeper(&folder, &kept, counted, clock);
+            living.run(false);
             nord_usb::block_on(async {
                 let mut landed = Vec::new();
                 #[cfg(test)]
