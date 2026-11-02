@@ -504,7 +504,7 @@ impl Store {
         let (open, opened) = (self.open(), self.opened());
         let unheld = self.unheld(workspace);
         let lost = unheld.filter(|entity| {
-            let undrafted = entity.is_unsaved() && self.base(entity.id).is_none();
+            let undrafted = self.unsaved(entity) && self.base(entity.id).is_none();
             let record = self.records.get(&entity.id);
             let written = record.is_some_and(|record| record.fingerprint.is_some());
             !opened || undrafted || (!open && !written)
@@ -526,7 +526,7 @@ impl Store {
             return;
         }
         for (id, kept) in std::mem::take(&mut self.drafted) {
-            let unsaved = workspace.get(id).is_some_and(LocalEntity::is_unsaved);
+            let unsaved = workspace.get(id).is_some_and(|entity| self.unsaved(entity));
             let saving = self.records.get(&id).is_some_and(|record| record.saving);
             match (unsaved || saving, self.ids.key(id) == Some(&kept.0)) {
                 (true, true) => _ = self.drafted.insert(id, kept),
@@ -537,7 +537,6 @@ impl Store {
             }
         }
         let held = |id: &u64| workspace.get(*id).is_some();
-        let unsaved = |id: &u64| workspace.get(*id).is_some_and(LocalEntity::is_unsaved);
         let gone: Vec<u64> = self
             .restoring
             .keys()
@@ -549,6 +548,11 @@ impl Store {
                 self.send(Cmd::Discard(kept));
             }
         }
+        let unsaved = |id: &u64| {
+            workspace
+                .get(*id)
+                .is_some_and(|entity| self.unsaved(entity))
+        };
         let saving = |id: &u64| self.records.get(id).is_some_and(|record| record.saving);
         let settled: Vec<u64> = self
             .superseded
@@ -561,7 +565,11 @@ impl Store {
                 self.send(Cmd::Discard(kept));
             }
         }
-        for entity in workspace.listed().filter(|entity| entity.is_unsaved()) {
+        let unsaved: Vec<&LocalEntity> = workspace
+            .listed()
+            .filter(|entity| self.unsaved(entity))
+            .collect();
+        for entity in unsaved {
             let (Some(key), Some(base)) = (self.ids.key(entity.id).cloned(), self.base(entity.id))
             else {
                 continue;
@@ -886,8 +894,15 @@ impl Store {
         workspace.listed().filter(|entity| {
             let record = self.records.get(&entity.id);
             let written = record.is_some_and(|record| record.fingerprint.is_some());
-            !written || entity.is_unsaved()
+            !written || self.unsaved(entity)
         })
+    }
+
+    /// Whether an asset holds an edit its file does not: one unsaved, or one saved where
+    /// nothing may be written, which only memory holds.
+    fn unsaved(&self, entity: &LocalEntity) -> bool {
+        let held = |(ask, _): &(FileAsk, u64)| *ask == FileAsk::Save(entity.id);
+        entity.is_unsaved() || (!self.open() && self.asks.iter().any(held))
     }
 
     /// Where the library is, as the user would look for it.
@@ -3512,12 +3527,12 @@ impl Store {
     pub fn sync(&mut self, workspace: &mut Workspace, browser: &mut Browser, pass: Pass) -> bool {
         // A tag asked for with the files it waits on can go in their change.
         self.asked.extend(browser.take_tag_asks());
+        self.take_asks(workspace);
         if pass != Pass::Files {
             self.learn_crcs(workspace);
             self.keep_drafts(workspace);
         }
         self.keep_slot_edits(workspace, pass != Pass::Files);
-        self.take_asks(workspace);
         if !self.open() {
             return true;
         }

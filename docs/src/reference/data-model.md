@@ -225,8 +225,8 @@ turns read-only until it is opened again when its folder keeps failing to make a
 write durable: once a write reported as failed landed all the same, and the
 writer that took over failed to write too. Another
 drawbar on the folder never makes it read-only. Changes in a read-only library
-are held in memory only, except unsaved edits after a change could not be
-finished, which this install's own state still keeps.
+are held in memory only, except edits, unsaved or saved there, which this
+install's own state keeps as unsaved edits.
 
 A reader keeps nothing between opens: what it shows comes from the files in the
 folder. After a restore from a backup, facts no file holds now are gone at the

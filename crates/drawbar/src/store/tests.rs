@@ -1425,6 +1425,30 @@ fn a_library_that_opens_read_only_keeps_unsaved_edits() {
     assert!(again.bytes(grand) == edit, "the edit is kept");
 }
 
+/// A save where nothing may be written is held in memory only, so the edit it saved is
+/// kept as a draft and comes back unsaved when the library opens again.
+#[test]
+fn a_save_in_a_read_only_library_keeps_its_edit_for_the_next_open() {
+    let (root, _) = newer_drawbar_wrote();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    assert!(session.store.read_only().is_some());
+    let grand = session.named("Grand.ne5p");
+    session.edit(grand, "12");
+    session.autosave();
+    let saved = session.edit(grand, "34");
+    session.bench.workspace.mark_saved(grand);
+    session.autosave();
+    let unkept = session.store.unkept(&session.bench.workspace);
+    assert_eq!(unkept, Vec::<String>::new(), "the saved edit is kept");
+    session.close();
+
+    let again = Session::open(&root);
+    let grand = again.named("Grand.ne5p");
+    assert!(again.bytes(grand) == saved, "the saved edit is kept");
+    assert!(again.bench.workspace.get(grand).unwrap().is_unsaved());
+}
+
 /// A delete that fails the same way twice is logged twice: only a commit's retries are
 /// quiet.
 #[test]
