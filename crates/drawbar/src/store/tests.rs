@@ -4143,11 +4143,11 @@ fn a_library_whose_thread_stops_says_so_and_is_let_go() {
     assert_eq!(said, 1, "the edit is named");
 }
 
-/// An unsaved edit waits out a first scan that failed, and comes back with the first
-/// that lists every file.
+/// An unsaved edit comes back at open though the local root cannot keep the identities
+/// the first scan read: the scan goes on without them.
 #[cfg(unix)]
 #[test]
-fn an_unsaved_edit_waits_out_a_first_scan_that_failed() {
+fn an_unsaved_edit_comes_back_though_the_identities_read_cannot_be_kept() {
     use std::os::unix::fs::PermissionsExt;
 
     let root = Temp::new();
@@ -4171,15 +4171,9 @@ fn an_unsaved_edit_waits_out_a_first_scan_that_failed() {
     mode(0o755).unwrap();
     assert_eq!(
         second.said("reading the library again"),
-        1,
-        "the first scan failed"
-    );
-    assert_eq!(
-        second.said("on this computer."),
         0,
-        "no count of files unlisted"
+        "the scan went on"
     );
-    second.settle();
     second.read_all();
     let id = second.only();
     assert!(second.bench.workspace.get(id).unwrap().is_unsaved());
