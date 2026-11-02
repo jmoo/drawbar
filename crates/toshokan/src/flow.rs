@@ -252,17 +252,10 @@ const MANY: u64 = 64 * CHUNK;
 /// from its worker at once.
 const PIECE: u64 = 16 * CHUNK;
 
-/// The bytes of each of `reads`, in order; `None` where no file is there. The
-/// reads go in as few [`Io::ReadMany`] requests as [`MANY`] allows.
-pub(crate) fn read_many<'a>(
-    root: Root,
-    reads: Vec<(RelPath, Range)>,
-) -> Fallible<'a, Vec<Option<Vec<u8>>>> {
-    read_each(root, reads).and_then(|read| Flow::Done(read.into_iter().collect()))
-}
-
-/// As [`read_many`], with the error of each read that failed in its place.
-fn read_each<'a>(
+/// The bytes of each of `reads`, in order; `None` where no file is there, and the
+/// error of each read that failed in its place. The reads go in as few
+/// [`Io::ReadMany`] requests as [`MANY`] allows.
+pub(crate) fn read_each<'a>(
     root: Root,
     reads: Vec<(RelPath, Range)>,
 ) -> Fallible<'a, Vec<Result<Option<Vec<u8>>>>> {

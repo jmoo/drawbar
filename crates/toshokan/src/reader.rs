@@ -13,7 +13,7 @@ use std::rc::Rc;
 
 use crate::derive::{self, Derived, Seen, SeenSegment};
 use crate::error::Result;
-use crate::flow::{self, Flow};
+use crate::flow::{self, Fallible, Flow, Unread};
 use crate::ids::{EntryHash, Hlc, WriterId};
 use crate::io::{Kind, Meta, Range, Root, Task};
 use crate::layout::{is_swap_file, Layout};
@@ -110,8 +110,8 @@ pub struct ReadReport {
     pub forks: Vec<Fork>,
     /// Every gap as of this read.
     pub gaps: Vec<Gap>,
-    /// Files whose readable part ended early, or that are neither segment nor
-    /// snapshot.
+    /// Files whose readable part ended early, that are neither segment nor
+    /// snapshot, or that could not be read at all.
     pub unreadable: Vec<(RelPath, Option<Stop>)>,
 }
 
@@ -130,6 +130,9 @@ pub struct Reader {
     folder: BTreeMap<WriterId, Folder>,
     /// What the files derive.
     derived: Rc<Derived>,
+    /// The files of each writer's directory the last read of it could not read,
+    /// with why. Each is taken as the read before found it, if any did.
+    unread: BTreeMap<WriterId, Vec<(RelPath, String)>>,
 }
 
 /// One writer's directory as the last read found it.
@@ -205,12 +208,28 @@ struct Scanned {
 struct Listed {
     writer: WriterId,
     files: Vec<Scanned>,
+    unread: Unread,
 }
 
 /// What a reader read of the folder, before it places it.
 pub struct Listing {
     writers: Vec<Listed>,
     everyone: bool,
+}
+
+impl Listing {
+    /// This listing, unless a file of `own`'s directory could not be read: then
+    /// why. A writer never writes on top of a history it could not read whole.
+    pub fn whole_for(mut self, own: Option<WriterId>) -> Result<Self> {
+        let listed = self
+            .writers
+            .iter_mut()
+            .find(|listed| Some(listed.writer) == own);
+        match listed.and_then(|listed| listed.unread.pop()) {
+            Some((_, error)) => Err(error),
+            None => Ok(self),
+        }
+    }
 }
 
 impl Reader {
@@ -220,6 +239,7 @@ impl Reader {
             layout,
             folder: BTreeMap::new(),
             derived: Rc::default(),
+            unread: BTreeMap::new(),
         }
     }
 
@@ -228,11 +248,18 @@ impl Reader {
     pub(crate) fn shed(&mut self) {
         self.derived = Rc::default();
         self.folder = BTreeMap::new();
+        self.unread = BTreeMap::new();
     }
 
     /// What the files derive, as of the last read.
     pub fn derived(&self) -> &Derived {
         &self.derived
+    }
+
+    /// The files the last read of each writer's directory could not read, with
+    /// why.
+    pub fn unread(&self) -> impl Iterator<Item = &(RelPath, String)> {
+        self.unread.values().flatten()
     }
 
     /// Every writer the files hold.
@@ -297,9 +324,13 @@ impl Reader {
         })
     }
 
-    /// The reads of [`Reader::read_writer`], for [`Reader::absorb`] to take in.
+    /// The reads of [`Reader::read_writer`], for [`Reader::absorb`] to take in;
+    /// failing where a file of the directory could not be read.
     pub fn list_writer(&self, writer: WriterId) -> Task<'static, Result<Listing>> {
-        self.scan(flow::ok(vec![writer]), false, false)
+        let listed = flow::run(self.scan(flow::ok(vec![writer]), false, false));
+        listed
+            .and_then(move |listing| Flow::Done(listing.whole_for(Some(writer))))
+            .task()
     }
 
     fn scan(
@@ -382,6 +413,7 @@ impl Reader {
             let present: BTreeSet<WriterId> = listed.iter().map(|listed| listed.writer).collect();
             let before = self.folder.len();
             self.folder.retain(|writer, _| present.contains(writer));
+            self.unread.retain(|writer, _| present.contains(writer));
             report.folder_changed = self.folder.len() != before;
         }
         for listed in listed {
@@ -482,7 +514,19 @@ impl Reader {
 
     /// Takes in what one writer's files gave.
     fn gather(&mut self, listed: Listed, report: &mut ReadReport) {
-        let Listed { writer, files } = listed;
+        let Listed {
+            writer,
+            files,
+            unread,
+        } = listed;
+        let unread = unread
+            .into_iter()
+            .map(|(path, why)| (path, why.to_string()));
+        let unread: Vec<(RelPath, String)> = unread.collect();
+        match unread.is_empty() {
+            true => self.unread.remove(&writer),
+            false => self.unread.insert(writer, unread),
+        };
         report.folder_changed |= !self.folder.contains_key(&writer);
         let folder = self.folder.entry(writer).or_default();
         let present: BTreeSet<&RelPath> = files.iter().map(|file| &file.path).collect();
@@ -534,6 +578,10 @@ impl Reader {
                 }
             }
         }
+        let unread = self.unread.get(&writer).into_iter().flatten();
+        report
+            .unreadable
+            .extend(unread.map(|(path, _)| (path.clone(), None)));
     }
 
     /// The latest clock reading among what the reader merges.
@@ -624,8 +672,11 @@ fn scan_writer<'a>(
                 .collect();
             read_planned(files)
         })
-        .map_ok(parsed)
-        .map_ok(move |files| Listed { writer, files })
+        .map_ok(move |(fetched, unread)| Listed {
+            writer,
+            files: parsed(fetched),
+            unread,
+        })
 }
 
 /// The most files of a writer's directory, other than the sealed segments and
@@ -787,21 +838,21 @@ fn whole_ranges(len: u64, modified: Option<u64>) -> Vec<Range> {
 
 /// Reads `files` as planned, in one [`crate::Io::ReadMany`], then whole in a
 /// second those whose tail or grown part showed the last read no longer holds.
-/// A file gone before its read is left out.
-fn read_planned<'a>(files: Vec<Planned>) -> Flow<'a, Result<Vec<(RelPath, Fetched)>>> {
+/// A file gone before its read is left out. A file that could not be read is
+/// found unchanged, and returned apart with why.
+fn read_planned<'a>(files: Vec<Planned>) -> Fallible<'a, (Vec<(RelPath, Fetched)>, Unread)> {
     let reads = files.iter().flat_map(|file| {
         let ranges = file.plan.reads(file.meta.len, file.meta.modified);
         ranges.into_iter().map(|range| (file.path.clone(), range))
     });
-    flow::read_many(Root::Folder, reads.collect()).and_then(move |read| {
+    flow::read_each(Root::Folder, reads.collect()).and_then(move |read| {
         let mut read = read.into_iter();
-        let mut found = Vec::new();
-        let mut again = Vec::new();
+        let (mut found, mut unread, mut again) = (Vec::new(), Vec::new(), Vec::new());
         for Planned { path, meta, plan } in files {
-            let parts: Vec<Option<Vec<u8>>> = read
-                .by_ref()
-                .take(plan.reads(meta.len, meta.modified).len())
-                .collect();
+            let ranges = plan.reads(meta.len, meta.modified).len();
+            let Some(parts) = parts(&mut read, ranges, &path, &mut found, &mut unread) else {
+                continue;
+            };
             match planned(plan, &meta, parts) {
                 Some(Some(fetched)) => found.push((path, fetched)),
                 Some(None) => again.push((path, meta)),
@@ -812,18 +863,40 @@ fn read_planned<'a>(files: Vec<Planned>) -> Flow<'a, Result<Vec<(RelPath, Fetche
             let ranges = whole_ranges(meta.len, meta.modified);
             ranges.into_iter().map(|range| (path.clone(), range))
         });
-        flow::read_many(Root::Folder, reads.collect()).map_ok(move |read| {
+        flow::read_each(Root::Folder, reads.collect()).map_ok(move |read| {
             let mut read = read.into_iter();
             for (path, meta) in again {
                 let ranges = whole_ranges(meta.len, meta.modified).len();
-                let parts: Vec<Option<Vec<u8>>> = read.by_ref().take(ranges).collect();
+                let Some(parts) = parts(&mut read, ranges, &path, &mut found, &mut unread) else {
+                    continue;
+                };
                 if let Some(whole) = whole(&meta, parts) {
                     found.push((path, whole));
                 }
             }
-            found
+            (found, unread)
         })
     })
+}
+
+/// The next `ranges` of `read`, the parts of the file at `path`; `None` where one
+/// failed, the file then found unchanged and its failure kept in `unread`.
+fn parts(
+    read: &mut impl Iterator<Item = Result<Option<Vec<u8>>>>,
+    ranges: usize,
+    path: &RelPath,
+    found: &mut Vec<(RelPath, Fetched)>,
+    unread: &mut Unread,
+) -> Option<Vec<Option<Vec<u8>>>> {
+    let parts: Vec<Result<Option<Vec<u8>>>> = read.take(ranges).collect();
+    match parts.into_iter().collect() {
+        Ok(parts) => Some(parts),
+        Err(error) => {
+            found.push((path.clone(), Fetched::Unchanged));
+            unread.push((path.clone(), error));
+            None
+        }
+    }
 }
 
 /// What `parts`, read as `plan` asked, found: `None` when the file is gone, and

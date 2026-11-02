@@ -27,7 +27,8 @@ pub struct Opened {
     /// consent.
     pub orphaned: Vec<Orphan>,
     /// Files in writers' directories that end before their last byte can be read,
-    /// or that are neither segment nor snapshot. Each is read again next time.
+    /// that are neither segment nor snapshot, or that could not be read at all.
+    /// Each is read again next time.
     pub unreadable: Vec<RelPath>,
     /// Pending records ignored: unreadable, naming a path outside the library, or
     /// not chained to their writer's log.
@@ -256,8 +257,8 @@ pub struct Committed {
 pub enum Local {
     Current,
     /// Each part that lags, with the failure that left it behind. The next commit,
-    /// refresh or close records the head again; a refresh scans again; a trash not
-    /// emptied stays as it is.
+    /// refresh or close records the head again; a refresh scans and reads again; a
+    /// trash not emptied stays as it is.
     Behind(BTreeMap<Lag, String>),
 }
 
@@ -276,6 +277,10 @@ pub enum Lag {
     /// its items stay in the folder, where no instance empties them;
     /// [`crate::library::Library::trash`] lists them.
     Trash,
+    /// A file in another writer's directory could not be read. What it holds is
+    /// not shown, and no unfinished effect is offered to settle, until a refresh
+    /// reads it.
+    Read,
 }
 
 /// How settling an interrupted effect will end: all made, or stopped partway.

@@ -586,7 +586,12 @@ before that point still end that line; any other changed file is read whole. A
 file is a segment when it is empty or its first line can be read, else a
 snapshot when it decodes as one; anything else is reported when the library
 opens, and read again next time. A snapshot whose `writer` is not `w` is
-reported, not used.
+reported, not used. A file another writer's directory lists that cannot be read
+for any reason but its absence, as a file a sync client keeps only online, is
+taken as the last read found it, or as not arrived yet, and reported and read
+again next time; until then no orphan is reported or settled, since the entry
+closing its record may be in that file. Where the file is in the directory of
+the writer this instance writes as, opening or refreshing fails instead.
 
 Per writer, from the files it reads, a reader derives:
 

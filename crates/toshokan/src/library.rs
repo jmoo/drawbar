@@ -34,7 +34,7 @@ use crate::path::RelPath;
 use crate::pending::{self, PendingRecord};
 use crate::plan::{FactChange, FileChange, Plan};
 use crate::reader::{ReadReport, Reader, Stamp};
-use crate::recovery::{self, Resumed, Settling};
+use crate::recovery::{self, Recovery, Resumed, Settling};
 use crate::report::{
     By, Change, Committed, Compacted, Emptied, Fork, Gap, HistoryItem, Item, ItemChange, Lag,
     Local, Mode, Opened, Orphan, Outcome, PathChange, Presence, Refreshed, Rekey, ScanReport,
@@ -44,7 +44,7 @@ use crate::schema::Schema;
 use crate::trash;
 use crate::undo::{self, Before, Entering, History};
 use crate::view::{FileRef, FileState, Listed, Parts, View};
-use crate::writer::{self, Claimed, Writer};
+use crate::writer::{self, Claimed, Picked, Writer};
 
 pub struct Library {
     layout: Layout,
@@ -155,6 +155,11 @@ impl Library {
             .and_then(move |(picked, remembered)| {
                 let reader = Reader::new(layout.clone());
                 flow::run(reader.list()).and_then(move |listing| {
+                    let own = picked.as_ref().map(Picked::writer);
+                    let listing = match listing.whole_for(own) {
+                        Ok(listing) => listing,
+                        Err(error) => return Flow::Done(Err(error)),
+                    };
                     let mut reader = reader;
                     let report = reader.absorb(listing);
                     let claimed = match picked {
@@ -165,7 +170,7 @@ impl Library {
                         })),
                     };
                     flow::run(claimed).map_ok(move |claimed| {
-                        let library = Library::new(
+                        let mut library = Library::new(
                             layout,
                             schema,
                             env,
@@ -174,6 +179,7 @@ impl Library {
                             claimed.writer,
                             remembered,
                         );
+                        library.lag_read();
                         (library, report, claimed.start)
                     })
                 })
@@ -451,6 +457,14 @@ impl Library {
             .task()
     }
 
+    /// Lags [`Lag::Read`] while the last read left a file unread.
+    fn lag_read(&mut self) {
+        match self.reader.unread().next() {
+            Some((_, why)) => self.behind.insert(Lag::Read, why.clone()),
+            None => self.behind.remove(&Lag::Read),
+        };
+    }
+
     /// Notes how saving `part` again went.
     fn lag(&mut self, part: Lag, saved: &Result<()>) {
         match saved {
@@ -557,6 +571,11 @@ impl Library {
         };
         flow::run(listed)
             .and_then(move |listing| {
+                let own = self.writer.as_ref().map(Writer::id);
+                let listing = match listing.whole_for(own) {
+                    Ok(listing) => listing,
+                    Err(error) => return Flow::Done(Err(error)),
+                };
                 let report = self.reader.absorb(listing);
                 self.absorb_read(&report);
                 self.unshown |= report.anything_new();
@@ -771,6 +790,7 @@ impl Library {
             return false;
         };
         own != Some(theirs.writer)
+            && self.reader.unread().next().is_none()
             && theirs.is_confined(&self.layout)
             && recovery::Chain::holds(placed, theirs.after())
             && !self.closed_records().contains(&(theirs.writer, name))
@@ -1019,6 +1039,7 @@ impl Library {
     /// name, and those where the entities they changed were bound, are unknown
     /// until a scan lists them.
     fn absorb_read(&mut self, report: &ReadReport) {
+        self.lag_read();
         if !report.anything_new() {
             self.follow(Vec::new());
             return;
@@ -1657,7 +1678,9 @@ fn recover(library: Library) -> Fallible<'static, Library> {
         let own = library.writer.as_ref().map(Writer::id);
         let settled = library.closed_records();
         let chains = &library.reader.derived().writers;
-        let (assessed, open) = recovery::classify(&library.layout, own, chains, &settled, found);
+        let (mut assessed, open) =
+            recovery::classify(&library.layout, own, chains, &settled, found);
+        hold_back(&mut assessed, &library.reader);
         flow::run(recovery::predict(
             &library.layout,
             assessed,
@@ -1677,6 +1700,14 @@ fn recover(library: Library) -> Fallible<'static, Library> {
     })
 }
 
+/// Offers no orphan while a file in a writer's directory is unread: the entry that
+/// closed its record may be there.
+fn hold_back(assessed: &mut Recovery, reader: &Reader) {
+    if reader.unread().next().is_some() {
+        assessed.orphaned.clear();
+    }
+}
+
 /// Reads every writer's pending records again, for the orphans that stand now, each
 /// the install's own and live as the pool and presence now say. Writes nothing.
 fn reorphaned(library: &mut Library) -> Fallible<'_, &mut Library> {
@@ -1691,13 +1722,14 @@ fn reorphaned(library: &mut Library) -> Fallible<'_, &mut Library> {
             .collect();
         let own = library.writer.as_ref().map(Writer::id);
         let settled = library.closed_records();
-        let (assessed, _) = recovery::classify(
+        let (mut assessed, _) = recovery::classify(
             &library.layout,
             own,
             &library.reader.derived().writers,
             &settled,
             found,
         );
+        hold_back(&mut assessed, &library.reader);
         let layout = library.layout.clone();
         fold(
             assessed.orphaned.into_iter(),

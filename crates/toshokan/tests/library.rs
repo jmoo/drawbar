@@ -87,7 +87,8 @@ struct Seen {
     blind: bool,
     /// Requests this picks fail.
     failing: Option<Box<Picks>>,
-    /// Reads of this file fail, each alone among the reads of a batch.
+    /// Reads of files at or under this path fail, each alone among the reads of a
+    /// batch.
     unreadable: Option<RelPath>,
     /// Writes in the folder fail as a full volume's do.
     full: bool,
@@ -269,7 +270,12 @@ impl Probe {
         if seen.failing.as_ref().is_some_and(|failing| failing(io)) {
             return Err(toshokan::IoError::Other("failed by the test".into()));
         }
-        if matches!(io, Io::Read { path, .. } if seen.unreadable.as_ref() == Some(path)) {
+        let unreadable = |path: &RelPath| {
+            seen.unreadable
+                .as_ref()
+                .is_some_and(|at| path.starts_with(at))
+        };
+        if matches!(io, Io::Read { path, .. } if unreadable(path)) {
             return Err(toshokan::IoError::Denied);
         }
         if seen.full && io.root() == Root::Folder && io.mutates() {
@@ -302,7 +308,7 @@ impl Probe {
         let done = match (io, done, &seen.unreadable) {
             (Io::ReadMany { reads, .. }, Ok(Reply::ReadMany(read)), Some(unreadable)) => {
                 let read = reads.iter().zip(read).map(|((path, _), read)| match path {
-                    _ if path == unreadable => Err(toshokan::IoError::Denied),
+                    _ if path.starts_with(unreadable) => Err(toshokan::IoError::Denied),
                     _ => read,
                 });
                 Ok(Reply::ReadMany(read.collect()))
@@ -681,6 +687,9 @@ through_both!(
     a_file_expected_as_listed_is_refused_once_its_length_or_time_moved,
     a_directory_that_cannot_be_listed_leaves_its_files_unknown_and_the_rest_scanned,
     a_file_that_cannot_be_read_leaves_its_entity_unknown_and_the_rest_listed,
+    another_writers_file_that_cannot_be_read_is_taken_in_once_it_can_be,
+    a_writer_whose_own_file_cannot_be_read_does_not_open,
+    orphans_are_held_back_while_a_writers_file_cannot_be_read,
     a_file_no_entity_is_bound_to_is_saved_renamed_and_trashed_and_each_undone,
     an_effect_by_path_on_an_entitys_file_is_refused,
     a_tree_moved_with_files_no_entity_is_bound_to_is_moved_back_by_undo,
@@ -4540,6 +4549,93 @@ fn a_file_that_cannot_be_read_leaves_its_entity_unknown_and_the_rest_listed<F: F
         [path("song.npno")],
         "the next scans every file"
     );
+}
+
+/// The directory of the only writer the folder holds.
+fn only_writer(folder: &MemDisk) -> RelPath {
+    let dirs = folder.directories(Root::Folder).into_iter();
+    let mut writers = dirs.filter(|dir| dir.parent() == Some(layout().writers()));
+    let only = writers.next().expect("a writer");
+    assert_eq!(writers.next(), None);
+    only
+}
+
+fn another_writers_file_that_cannot_be_read_is_taken_in_once_it_can_be<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    let probe = Probe::new(&machine(&folder));
+    probe.seen.borrow_mut().unreadable = Some(only_writer(&folder));
+    let (mut b, opened) = F::open(probe.clone(), env("b", 2, &clock)).unwrap();
+    assert!(b.view().entity(song).is_none(), "not read yet");
+    assert!(
+        opened
+            .unreadable
+            .iter()
+            .all(|at| at.starts_with(&only_writer(&folder)))
+            && !opened.unreadable.is_empty(),
+        "{:?}",
+        opened.unreadable
+    );
+    let tagged = b
+        .commit("Tag", |i| i.create(|e| _ = e.add(TAGS, tag("b"))).0)
+        .unwrap();
+    assert_eq!(behind(&tagged), [Lag::Read]);
+    heal(&probe);
+    b.refresh().unwrap();
+    assert_eq!(tags(&b.view(), song), [tag("new")]);
+    let tagged = b.commit("Tag", |i| i.add(song, TAGS, tag("b"))).unwrap();
+    assert_eq!(behind(&tagged), []);
+}
+
+fn a_writer_whose_own_file_cannot_be_read_does_not_open<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    create(&mut a, "song.npno", b"song");
+    a.close().unwrap();
+    let probe = Probe::new(&here);
+    probe.seen.borrow_mut().unreadable = Some(only_writer(&folder));
+    let refused = F::open(probe.clone(), env("a", 1, &clock)).map(drop);
+    assert!(
+        matches!(
+            refused,
+            Err(Error::Io {
+                error: IoError::Denied,
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    heal(&probe);
+    let (again, opened) = F::open(probe, env("a", 1, &clock)).unwrap();
+    assert!(
+        matches!(opened.start, Start::Resumed(_)),
+        "{:?}",
+        opened.start
+    );
+    again.close().unwrap();
+}
+
+fn orphans_are_held_back_while_a_writers_file_cannot_be_read<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut ours, _) = F::open(probe.clone(), env("b", 2, &clock)).unwrap();
+    let orphan = a_rename_left_by_another(&folder, &clock, &mut ours);
+    let late = only_writer(&folder).join("snapshot-x.json").unwrap();
+    put(&folder, late.as_str(), b"late");
+    probe.seen.borrow_mut().unreadable = Some(late);
+    assert_eq!(ours.refresh().unwrap().orphaned, [], "held back");
+    let refused = ours.settle(orphan, Settlement::Finished);
+    assert!(
+        matches!(refused, Err(Error::Refused(Refusal::Nothing))),
+        "{refused:?}"
+    );
+    heal(&probe);
+    assert_eq!(ours.refresh().unwrap().orphaned.len(), 1);
 }
 
 fn a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept<F: Facade>() {
