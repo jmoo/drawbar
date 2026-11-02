@@ -2632,6 +2632,9 @@ impl Store {
             keys.filter_map(Key::entity).collect()
         };
         let wearing = |name: &String| shown.wearing(name);
+        let wear = |name: &String| -> BTreeSet<toshokan::EntityId> {
+            shown.wearing(name).into_iter().collect()
+        };
         let intent = match asked {
             Asked::Tag { assets, name, make } => {
                 let waits = |id: &u64| self.ids.key(*id).is_none() && self.writes(*id, workspace);
@@ -2639,11 +2642,12 @@ impl Store {
                     return None;
                 }
                 let listed = shown.names.contains(name);
+                let wear = wear(name);
                 let files: Vec<Key> = assets
                     .iter()
                     .filter_map(|id| self.ids.key(*id).cloned())
                     .filter(|key| match key {
-                        Key::Entity(entity) => !wearing(name).contains(entity),
+                        Key::Entity(entity) => !wear.contains(entity),
                         Key::File(_) => true,
                     })
                     .collect();
@@ -2659,7 +2663,7 @@ impl Store {
                 }
             }
             Asked::Untag { assets, name } => {
-                let wear = wearing(name);
+                let wear = wear(name);
                 let entities: Vec<_> = entities(assets)
                     .into_iter()
                     .filter(|entity| wear.contains(entity))

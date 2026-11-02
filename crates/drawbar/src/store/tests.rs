@@ -7340,3 +7340,41 @@ fn a_file_whose_folder_is_renamed_while_its_first_tag_commits_stays_one_asset() 
     assert_eq!(session.worn(id), ["Sunday"]);
     assert_eq!(session.said("outside drawbar"), 0);
 }
+
+/// How long the frame that sends a second tag over a large selection takes, and the one
+/// that sends a move of that selection. Run in release, with `--ignored --nocapture`.
+#[test]
+#[ignore = "a timing, not a check"]
+fn a_frame_tagging_or_moving_thousands_of_files_is_brief() {
+    const FILES: usize = 3_000;
+    let root = Temp::new();
+    programs(&root, FILES);
+    fs::create_dir(root.at("Gig")).unwrap();
+    let mut session = Session::open(&root);
+    let ids: Vec<u64> = session.bench.workspace.listed().map(|e| e.id).collect();
+    assert_eq!(ids.len(), FILES);
+    session.tag(&ids, "Sunday");
+    let tag = session.bench.browser.tags.make("Live").expect("a new tag");
+    session.bench.act(vec![crate::browser::Act::Tag {
+        ids: ids.clone(),
+        tag,
+    }]);
+    let started = std::time::Instant::now();
+    session.poll();
+    println!("tag: {:?}", started.elapsed());
+    session.decided();
+
+    let gig = LibPath::parse("Gig").unwrap();
+    let folder = session.bench.browser.folders.id_of(&gig).expect("listed");
+    let acts = ids.iter().map(|id| crate::browser::Act::File {
+        id: *id,
+        folder: Some(folder),
+    });
+    session.bench.act(acts.collect());
+    let started = std::time::Instant::now();
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Files);
+    println!("move: {:?}", started.elapsed());
+}
