@@ -460,8 +460,10 @@ impl Library {
             .task()
     }
 
-    /// The files [`Lag::Read`] lags for, in order.
-    fn unread(&self) -> Vec<RelPath> {
+    /// The files in other writers' directories, pending records among them, that
+    /// the last read could not read, in order: what they hold is not shown, and no
+    /// orphan is reported, until a read takes them in. [`Lag::Read`] lags for them.
+    pub fn unread(&self) -> Vec<RelPath> {
         let unread = self.reader.unread().map(|(path, _)| path.clone());
         unread.collect::<BTreeSet<RelPath>>().into_iter().collect()
     }

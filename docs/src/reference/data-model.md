@@ -235,6 +235,10 @@ folder. After a restore from a backup, facts no file holds now are gone at the
 next read. While a sync client is still delivering files, facts can disappear
 and come back, and a change made meanwhile is at worst a visible conflict
 ([What users see](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/RETENTION.md#what-users-see)).
+A file of another writer that cannot be read, as one a sync client keeps only
+online, counts as not delivered yet, and no unfinished change is offered to
+settle until it is read. One of the reader's own writer stops the library
+opening.
 
 ## Changes made outside drawbar
 

@@ -226,6 +226,11 @@ impl<B: Backend> Library<B> {
         self.core.finishing()
     }
 
+    /// As [`crate::library::Library::unread`].
+    pub fn unread(&self) -> Vec<RelPath> {
+        self.core.unread()
+    }
+
     /// An intent to build and commit. Its saves take bytes, or any [`Source`]
     /// boxed, such as a [`Splice`].
     pub fn intent(&mut self, label: &str) -> Intent<&mut Self> {
