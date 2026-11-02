@@ -3098,7 +3098,7 @@ impl Store {
     }
 
     /// Copy a rescue into the library's top level, under its own name or a free one, as
-    /// one change that can be undone, and delete it once the copy lands.
+    /// one change undo does not take back, and delete it once the copy lands.
     fn keep_rescue(
         &mut self,
         rescue: Rescue,
