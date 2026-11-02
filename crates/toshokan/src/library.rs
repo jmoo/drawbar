@@ -2319,6 +2319,9 @@ fn log_resumed(
     let kinds = match closed {
         true => Vec::new(),
         false => {
+            if record.r#final {
+                library.entering = Entering::Final;
+            }
             planned.ops.extend(file_ops);
             planned.displaced = applied.displaced;
             planned.forks = library.known_forks(&planned.ops);
@@ -2713,12 +2716,10 @@ fn carry_out<'a>(
     let (Some(entry), Ok(_)) = (encoded, widest) else {
         return Flow::Done(Err(Error::Refused(Refusal::Invalid(Invalid::TooLong))));
     };
-    let record = Rc::new(PendingRecord::new(
-        id,
-        &logged.label,
-        entry.line(),
-        &effects,
-    ));
+    let record = Rc::new(PendingRecord {
+        r#final: library.entering == Entering::Final,
+        ..PendingRecord::new(id, &logged.label, entry.line(), &effects)
+    });
     let (name, journaled) = (effects.record, effects.moves_files());
     let layout = library.layout.clone();
     let identify = Rc::clone(&library.env.identify);

@@ -715,6 +715,7 @@ through_both!(
     a_refresh_reports_another_installs_unfinished_change_as_it_stands,
     a_settlement_after_a_refused_undo_is_no_undo_of_it,
     settling_another_writers_change_is_no_step_of_undo,
+    a_settlement_resumed_in_a_later_session_is_no_step_of_undo,
     a_scan_of_every_file_reports_the_directories_it_listed,
     a_directory_made_and_filled_in_one_change_is_undone_in_one,
     directories_made_and_removed_around_tree_moves_undo_and_redo,
@@ -5556,6 +5557,65 @@ fn settling_another_writers_change_is_no_step_of_undo<F: Facade>() {
             "{how:?}: the import is undone"
         );
     }
+}
+
+fn a_settlement_resumed_in_a_later_session_is_no_step_of_undo<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (x, y) = (machine(&folder), machine(&folder));
+    let probe = Probe::new(&x);
+    let (mut ours, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut ours, "song.npno", b"one");
+    let their_probe = Probe::new(&y);
+    let (mut theirs, _) = F::open(their_probe.clone(), env("b", 2, &clock)).unwrap();
+    theirs.rescan().unwrap();
+    fail(&their_probe, into_trash);
+    let saved = theirs.commit("Save", |i| {
+        i.save(
+            song,
+            &path("song.npno"),
+            b"two".to_vec(),
+            Expect::Holds(identity(b"one")),
+        )
+        .add(song, TAGS, tag("saved"))
+    });
+    assert!(saved.is_err(), "{saved:?}");
+    drop(theirs);
+    let orphaned = ours.refresh().unwrap().orphaned;
+    let [orphan] = &orphaned[..] else {
+        panic!("their save is left to settle: {orphaned:?}");
+    };
+    refuse(&probe, Some("song.npno"));
+    let stopped = ours.settle(orphan.clone(), Settlement::Finished);
+    assert!(matches!(stopped, Err(Error::Io { .. })), "{stopped:?}");
+    drop(ours);
+
+    let x = Machine {
+        folder: folder.clone(),
+        local: x.local.restart(),
+    };
+    let (mut again, opened) = F::open(Probe::new(&x), env("a", 3, &clock)).unwrap();
+    assert_eq!(
+        opened.settled.len(),
+        1,
+        "the settlement is this writer's own"
+    );
+    let [again_orphaned] = &opened.orphaned[..] else {
+        panic!("their record is settled again: {:?}", opened.orphaned);
+    };
+    assert_eq!(again_orphaned.record, orphan.record);
+    again
+        .settle(again_orphaned.clone(), Settlement::Finished)
+        .unwrap();
+    assert_eq!(read(&folder, "song.npno").as_deref(), Some(&b"two"[..]));
+    let undone = again.undo();
+    assert!(
+        matches!(undone, Err(Error::Refused(Refusal::Nothing))),
+        "nothing to undo: {undone:?}"
+    );
+    assert_eq!(read(&folder, "song.npno").as_deref(), Some(&b"two"[..]));
+    assert_eq!(again.refresh().unwrap().orphaned, [], "settled once");
+    assert_eq!(tags(&again.view(), song), ["new", "saved"]);
 }
 
 fn a_directory_made_and_filled_in_one_change_is_undone_in_one<F: Facade>() {

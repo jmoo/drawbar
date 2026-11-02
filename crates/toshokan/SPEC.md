@@ -954,6 +954,8 @@ A pending record is a JSON object:
 and `dir` ops and `displaced`, whose `prev` is the writer's head when the record
 was written.
 `"moves":"copy"`, omitted otherwise, says the steps move files by copying.
+`"final":true`, omitted otherwise, says the intent is final (see Undo and redo),
+as a settlement is, so that it is no step of undo when a later session logs it.
 `files` says where each entity's file is once the first `done_after` steps are
 done; a `path` of `null` is no file. `"pin":true` marks a file the intent adopts
 as it is, logged as a `pin` op rather than a `file` op. `replaces`, omitted when

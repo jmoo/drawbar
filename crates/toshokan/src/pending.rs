@@ -44,6 +44,9 @@ pub struct PendingRecord {
     pub held: Vec<(RelPath, Expect)>,
     /// How the steps move files, whoever carries them out.
     pub moves: Moves,
+    /// Whether the intent is final, no step of undo in whichever session logs
+    /// its entry, as a settlement of another writer's record is.
+    pub r#final: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -63,6 +66,8 @@ struct Wire {
     held: Vec<(RelPath, Expect)>,
     #[serde(default, skip_serializing_if = "Moves::renames")]
     moves: Moves,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    r#final: bool,
 }
 
 #[derive(ThisError, Clone, PartialEq, Eq, Debug)]
@@ -98,6 +103,7 @@ impl PendingRecord {
                 .map(|check| (check.path.clone(), check.expect))
                 .collect(),
             moves: plan.moves,
+            r#final: false,
         }
     }
 
@@ -133,6 +139,7 @@ impl PendingRecord {
             dirs: wire.dirs,
             held: wire.held,
             moves: wire.moves,
+            r#final: wire.r#final,
         })
     }
 
@@ -148,6 +155,7 @@ impl PendingRecord {
             dirs: self.dirs.clone(),
             held: self.held.clone(),
             moves: self.moves,
+            r#final: self.r#final,
         };
         serde_json::to_vec(&wire).expect("a record serializes")
     }
@@ -349,6 +357,7 @@ mod tests {
             dirs: Vec::new(),
             held: Vec::new(),
             moves: Moves::Rename,
+            r#final: false,
         }
     }
 
@@ -400,6 +409,25 @@ mod tests {
             text(&copying)
         );
         assert_eq!(PendingRecord::decode(&copying.encode()).unwrap(), copying);
+    }
+
+    #[test]
+    fn a_final_record_says_so_and_any_other_says_nothing() {
+        let step = record(vec![]);
+        let settling = PendingRecord {
+            r#final: true,
+            ..record(vec![])
+        };
+        let text = |record: &PendingRecord| String::from_utf8(record.encode()).unwrap();
+        assert!(!text(&step).contains("final"), "{}", text(&step));
+        assert!(
+            text(&settling).ends_with(r#","final":true}"#),
+            "{}",
+            text(&settling)
+        );
+        for record in [step, settling] {
+            assert_eq!(PendingRecord::decode(&record.encode()).unwrap(), record);
+        }
     }
 
     #[test]

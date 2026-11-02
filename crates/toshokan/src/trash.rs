@@ -141,6 +141,7 @@ mod tests {
             dirs: Vec::new(),
             held: Vec::new(),
             moves: Moves::Rename,
+            r#final: false,
         };
         (nonce(9), record)
     }
