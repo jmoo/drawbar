@@ -5312,6 +5312,43 @@ fn every_tag_asked_for_before_a_quit_is_put_on() {
     assert_eq!(again.worn(again.named("B.ne5p")), ["Late"]);
 }
 
+/// A browser lets a library go once it is settled, without a last pass that waits. A tag
+/// asked for while a new tag's name is still being chosen, and every tag asked after it,
+/// is put on before then, and a tab closing first asks to stay.
+#[test]
+fn every_tag_asked_for_before_a_library_is_let_go_unwaited_is_put_on() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    for name in ["A.ne5p", "B.ne5p"] {
+        fs::write(root.at(name), &program).unwrap();
+    }
+    let mut session = Session::open(&root);
+    let (a, b) = (session.named("A.ne5p"), session.named("B.ne5p"));
+    let tags = &mut session.bench.browser.tags;
+    let live = tags.make("Live").expect("a new tag");
+    let fresh = tags.make("Fresh").expect("a new tag");
+    tags.name_new(fresh);
+    let asked = [(b, fresh), (a, live)];
+    let acts = asked.map(|(id, tag)| crate::browser::Act::Tag { ids: vec![id], tag });
+    session.bench.act(acts.into());
+    let losing = |session: &Session| {
+        let Bench {
+            workspace, browser, ..
+        } = &session.bench;
+        session.store.losing(workspace, browser)
+    };
+    assert!(losing(&session), "a tab closing now would lose the tags");
+    while !session.settled() {
+        assert!(session.next(), "the library answered");
+    }
+    assert!(!losing(&session), "both are put on");
+    drop(session);
+
+    let again = Session::open(&root);
+    assert_eq!(again.worn(again.named("A.ne5p")), ["Live"]);
+    assert_eq!(again.worn(again.named("B.ne5p")), ["Fresh"]);
+}
+
 /// The Edit menu says what Undo takes back and Redo makes again: the change, and what it
 /// names. A change that failed is no step of either.
 #[test]

@@ -426,12 +426,14 @@ impl Store {
             .then(|| rescued.expect("a folder's name is one component"))
     }
 
-    /// Send the saves the files need, then say whether no save or rescan waits for its
-    /// answer. A library whose answers cannot be waited for is let go only once settled,
-    /// so its last pass sends no save.
+    /// Send the saves the files need, then say whether no save, rescan or tag waits for
+    /// its answer. A library whose answers cannot be waited for is let go only once
+    /// settled, so its last pass sends no save. A new tag whose name is still being chosen
+    /// goes under the name it has, as at a quit.
     pub fn settled(&mut self, workspace: &mut Workspace, browser: &mut Browser) -> bool {
+        browser.tags.named();
         self.sync(workspace, browser, Pass::Files);
-        let carried = self.asks.is_empty() || !self.open();
+        let carried = (self.asks.is_empty() && self.asked.is_empty()) || !self.open();
         let idle = !self.scanning && !self.saving() && self.moving.is_empty();
         carried && idle && self.committing == 0
     }
@@ -455,11 +457,13 @@ impl Store {
 
     /// Whether letting the library go now, with no last pass, would lose an edit: an
     /// unsaved one, an asset never written to a file, a write that has not landed, a
-    /// slot view's edit not kept yet, or a change held in memory where nothing may be
-    /// written. A browser tab may close without that pass.
+    /// slot view's edit not kept yet, a change held in memory where nothing may be
+    /// written, or a tag asked for and not sent. A browser tab may close without that
+    /// pass.
     pub fn losing(&self, workspace: &Workspace, browser: &Browser) -> bool {
         let unheld = self.unheld(workspace).next().is_some();
-        self.writing() || unheld || self.unkept_view(workspace) || self.held(browser)
+        let tagging = !self.asked.is_empty() || browser.tags.naming().is_some();
+        self.writing() || unheld || self.unkept_view(workspace) || self.held(browser) || tagging
     }
 
     /// Say that an unsaved edit could not be kept in this install's own state, or let go
