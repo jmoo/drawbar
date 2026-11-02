@@ -138,6 +138,17 @@ struct TakingIn {
     elsewhere: bool,
 }
 
+/// How far a session took up the list an older drawbar kept.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TookUp {
+    Not,
+    /// Another window of the install takes the list in or left its take-in unfinished, so
+    /// what it left is put back once the library holds the list.
+    Elsewhere,
+    /// Its take-in sent, or what a take-in left put back.
+    Done,
+}
+
 /// How many files one background [`Cmd::Read`] asks for at most, and how many of
 /// their listed bytes. A read something needs runs after it.
 const FETCHES: (usize, u64) = (32, 16 << 20);
@@ -293,9 +304,8 @@ pub struct Store {
     /// The folders that keep the slots' former occupants are to be looked in: the
     /// library has been listed, or a write has left one since.
     rescues_due: bool,
-    /// Whether this session took up the list an older drawbar kept: sent its take-in, or
-    /// put back what a take-in left.
-    took_up: bool,
+    /// How far this session took up the list an older drawbar kept.
+    took_up: TookUp,
     /// That take-in, until its change answers.
     taking_in: Option<TakingIn>,
     /// The assets the list brought this session, which the list is let go only once
@@ -380,7 +390,7 @@ impl Store {
             shelf: None,
             shelved: BTreeMap::new(),
             rescues_due: false,
-            took_up: false,
+            took_up: TookUp::Not,
             taking_in: None,
             brought: BTreeSet::new(),
             opening_copy: false,
@@ -1540,7 +1550,7 @@ impl Store {
                 let refused = match self.taking_in.take_if(|_| label == TAKE_IN) {
                     Some(taking) if taking.elsewhere => {
                         self.let_taking_go(taking.ids, workspace);
-                        self.took_up = false;
+                        self.took_up = TookUp::Elsewhere;
                         true
                     }
                     Some(taking) if landed || waiting == Waiting::This => {
@@ -2830,7 +2840,7 @@ impl Store {
             let restored = !self.restoring.contains_key(id);
             written && restored && (!entity.is_unsaved() || self.drafted.contains_key(id))
         };
-        self.took_up && self.has_taken_in(hash) && self.brought.iter().all(kept)
+        self.took_up == TookUp::Done && self.has_taken_in(hash) && self.brought.iter().all(kept)
     }
 
     /// Take the list an older drawbar kept into the library as one change, which Undo
@@ -2844,8 +2854,9 @@ impl Store {
     ///
     /// Where the library took the list in already, nothing else is written: each unsaved
     /// edit is put back over the file the take-in gave it, as the list's record names it,
-    /// or else brought in as a file of its own beside where it went. A take-in another
-    /// window of this install makes first is found so, once the library is read again.
+    /// or else brought in as a file of its own beside where it went. Where another window
+    /// of this install takes the list in first, or left its take-in unfinished, this
+    /// session sends none and puts the edits back once the library holds the list.
     pub fn take_in(
         &mut self,
         list: &older::List,
@@ -2857,11 +2868,17 @@ impl Store {
         // Nothing else is in flight whose failures the take-in would hold.
         let idle = !self.scanning && self.committing == 0 && self.finishing.is_empty();
         let ready = self.open() && self.listed && idle;
-        if !ready || list.is_empty() || self.took_up {
+        let taken = self.has_taken_in(&list.hash);
+        let due = match self.took_up {
+            TookUp::Not => true,
+            TookUp::Elsewhere => taken,
+            TookUp::Done => false,
+        };
+        if !ready || list.is_empty() || !due {
             return;
         }
-        self.took_up = true;
-        if self.has_taken_in(&list.hash) {
+        self.took_up = TookUp::Done;
+        if taken {
             return self.put_back(list, workspace, browser, log);
         }
         self.send_batch();

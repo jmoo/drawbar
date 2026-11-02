@@ -7534,3 +7534,48 @@ fn only_an_asset_a_change_kept_apart_changes_is_kept_apart() {
     assert!(here.bench.browser.folders.kept().is_empty());
     assert!(!here.bench.browser.folders.keeps_apart(at_here));
 }
+
+/// A window that finds another's take-in unfinished waits for it rather than sending its
+/// own again each frame, and puts the unsaved edit back once the library holds the list.
+#[test]
+fn a_window_waits_for_an_unfinished_take_in_without_sending_its_own_again() {
+    let root = Temp::new();
+    let (list, _, _, edit) = gig_list();
+    let mut first = Session::open(&root);
+    first.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "Gig/Pad 2.ne5p"),
+    ));
+    first.take_in(&list);
+    let mut second = Session::open(&root);
+    second.take_in(&list);
+    second.settle();
+    let next = second.bench.workspace.next_id();
+    for _ in 0..3 {
+        second.take_in(&list);
+        second.settle();
+    }
+    assert_eq!(
+        second.bench.workspace.next_id(),
+        next,
+        "nothing brought again"
+    );
+    assert!(!second.handed_over(&list));
+    first.close();
+
+    Session::open(&root).close();
+    second.settle();
+    assert!(
+        second.store.has_taken_in(&list.hash),
+        "finished by its install"
+    );
+    assert!(!second.handed_over(&list), "its edit is not put back yet");
+    second.take_in(&list);
+    second.take_in(&list);
+    second.sync();
+    let edits = second.bench.workspace.listed();
+    let edits = edits
+        .filter(|entity| second.bytes(entity.id) == edit)
+        .count();
+    assert_eq!(edits, 1, "the edit put back once");
+    assert!(second.handed_over(&list));
+}
