@@ -2931,8 +2931,10 @@ impl Store {
         }
         self.took_up = TookUp::Done;
         if taken {
-            let placed = storage.and_then(|storage| older::placed(storage, &list.hash));
-            return self.put_back(list, placed, workspace, browser, log);
+            if let Some(storage) = storage {
+                self.put_back(list, storage, workspace, browser, log);
+            }
+            return;
         }
         self.send_batch();
         self.part(Intent::TakeIn {
@@ -3027,20 +3029,28 @@ impl Store {
 
     /// Put back each unsaved edit of the list the library took in, which the session
     /// that took it in may have ended before keeping: over the file the take-in gave it,
-    /// where the list's record says which that is and the library holds it, and as a
-    /// file of its own beside where it went otherwise. An edit kept since is left as it
-    /// is, and none is put back without a record of the list's take-in, `placed`, as
-    /// once one was handed over.
+    /// where the record of the take-in in `storage` names that file and the library holds
+    /// it, and as a file of its own beside where it went otherwise. An edit kept since is
+    /// left as it is, and none is put back once the record is emptied. Without a record
+    /// of the list, each edit comes in as a file of its own, once a record that says so
+    /// sticks.
     fn put_back(
         &mut self,
         list: &older::List,
-        placed: Option<BTreeMap<usize, LibPath>>,
+        storage: &mut dyn eframe::Storage,
         workspace: &mut Workspace,
         browser: &mut Browser,
         log: &mut Log,
     ) {
-        let Some(placed) = placed else {
-            return;
+        let placed = match older::record(storage, &list.hash) {
+            older::Record::Placed(placed) => placed,
+            older::Record::Emptied => return,
+            // ⚠️ Where local storage could not add even an empty record, the take-in
+            // brought each edit in as a file of its own, and no record sticks now either.
+            older::Record::Unknown if older::keep_placed(storage, &list.hash, &[]) => {
+                BTreeMap::new()
+            }
+            older::Record::Unknown => return,
         };
         for (at, asset) in list.assets.iter().enumerate() {
             let Some(edit) = &asset.unsaved else {

@@ -17,8 +17,8 @@ const KEYS: [&str; 3] = ["drawbar.this_computer", "drawbar.folders", "drawbar.ta
 
 /// The key of the record a take-in writes before it is sent: the list's hash, then a
 /// line for each asset that came with an unsaved edit, its place in the list and the
-/// library path its file was given, tab-separated. It is emptied once the library keeps
-/// what the take-in brought. Without a record of the list, nothing is to be put back.
+/// library path its file was given, tab-separated. It is emptied once nothing is to be
+/// put back: the library keeps what the take-in brought, or the record did not fit.
 const HANDOFF: &str = "drawbar.taking_in";
 
 /// The key of the hash of the list a library took in, which is not read again.
@@ -171,26 +171,39 @@ pub fn found(storage: &dyn eframe::Storage) -> Found {
     })
 }
 
-/// Where a take-in of the list of hash `hash` put the file of each asset that came with an
-/// unsaved edit, by its place in [`List::assets`], as the record eframe's store holds now
-/// says. `None` without a record of the list, as once a library holding the list keeps
-/// every unsaved edit it brought. A line that does not read names no file.
-pub fn placed(storage: &dyn eframe::Storage, hash: &str) -> Option<BTreeMap<usize, LibPath>> {
-    let record = storage.get_string(HANDOFF).unwrap_or_default();
+/// What the record of a take-in says of one list.
+#[derive(Debug, PartialEq)]
+pub enum Record {
+    /// Nothing: none was kept, another list's is, or the one kept did not reach the disk.
+    Unknown,
+    /// Emptied, so nothing is to be put back.
+    Emptied,
+    /// Where the take-in put the file of each asset that came with an unsaved edit, by
+    /// its place in [`List::assets`]. A line that does not read names no file.
+    Placed(BTreeMap<usize, LibPath>),
+}
+
+/// What the record eframe's store holds now says of the list of hash `hash`.
+pub fn record(storage: &dyn eframe::Storage, hash: &str) -> Record {
+    let Some(record) = storage.get_string(HANDOFF) else {
+        return Record::Unknown;
+    };
     let mut lines = record.lines();
-    if lines.next() != Some(hash) {
-        return None;
+    match lines.next() {
+        None => return Record::Emptied,
+        Some(line) if line != hash => return Record::Unknown,
+        Some(_) => {}
     }
     let read = lines.filter_map(|line| {
         let (at, path) = line.split_once('\t')?;
         Some((at.parse().ok()?, LibPath::parse(path)?))
     });
-    Some(read.collect())
+    Record::Placed(read.collect())
 }
 
 /// Keep, before the take-in of the list of hash `hash` is sent, where it puts the file
 /// of each asset that came with an unsaved edit, and return whether the record reads
-/// back. One that does not leaves no record of the list.
+/// back. One that does not is emptied, where that fits.
 ///
 /// ⚠️ eframe's web store drops a write the browser refuses, as it does once local
 /// storage is full, and emptying a record frees room where adding one would not.
@@ -544,16 +557,21 @@ mod tests {
         let keys = ["drawbar 2\n1\n", "drawbar folders 1\n", "drawbar tags 1\n"];
         let mut storage = stored(keys);
         let hash = list(keys).hash;
-        assert_eq!(placed(&storage, &hash), None, "no record kept");
+        assert_eq!(record(&storage, &hash), Record::Unknown, "no record kept");
         let pad = LibPath::parse("Gig 2/Pad.ne5p").unwrap();
         keep_placed(&mut storage, &hash, &[(1, pad.clone())]);
-        assert_eq!(placed(&storage, &hash), Some(BTreeMap::from([(1, pad)])));
+        let placed = Record::Placed(BTreeMap::from([(1, pad)]));
+        assert_eq!(record(&storage, &hash), placed);
         let Found::List(read) = found(&storage) else {
             panic!("a list");
         };
         assert_eq!(read.hash, hash, "the record is no part of the list");
         keep_placed(&mut storage, "another list", &[]);
-        assert_eq!(placed(&storage, &hash), None, "another list's record");
+        assert_eq!(
+            record(&storage, &hash),
+            Record::Unknown,
+            "another list's record"
+        );
     }
 
     #[test]
@@ -622,15 +640,18 @@ mod tests {
     }
 
     #[test]
-    fn a_record_that_does_not_fit_is_not_kept_and_leaves_none_of_the_list() {
+    fn a_record_that_does_not_fit_is_not_kept_and_one_held_before_is_emptied() {
         let keys = ["drawbar 2\n1\n", "drawbar folders 1\n", "drawbar tags 1\n"];
         let hash = list(keys).hash;
         let pad = LibPath::parse("Gig 2/Pad.ne5p").unwrap();
         let mut earlier = stored(keys);
         keep_placed(&mut earlier, &hash, &[]);
-        for mut storage in [Full(stored(keys)), Full(earlier)] {
+        for (mut storage, left) in [
+            (Full(stored(keys)), Record::Unknown),
+            (Full(earlier), Record::Emptied),
+        ] {
             assert!(!keep_placed(&mut storage, &hash, &[(1, pad.clone())]));
-            assert_eq!(placed(&storage, &hash), None);
+            assert_eq!(record(&storage, &hash), left);
         }
         assert!(keep_placed(&mut stored(keys), &hash, &[(1, pad)]));
     }
@@ -640,9 +661,9 @@ mod tests {
         let keys = ["drawbar 2\n1\n", "drawbar folders 1\n", "drawbar tags 1\n"];
         let hash = list(keys).hash;
         let pad = LibPath::parse("Gig 2/Pad.ne5p").unwrap();
-        for record in [Some(vec![(1, pad)]), None] {
+        for kept in [Some(vec![(1, pad)]), None] {
             let mut storage = RefusingMarker(stored(keys));
-            if let Some(placed) = &record {
+            if let Some(placed) = &kept {
                 keep_placed(&mut storage, &hash, placed);
             }
             let_go(&mut storage, &hash);
@@ -650,7 +671,8 @@ mod tests {
                 matches!(found(&storage), Found::List(_)),
                 "a list, since the marker did not stick"
             );
-            assert_eq!(placed(&storage, &hash), None, "with record {record:?}");
+            let left = record(&storage, &hash);
+            assert_eq!(left, Record::Emptied, "with record {kept:?}");
         }
     }
 }

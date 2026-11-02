@@ -6810,7 +6810,8 @@ fn an_unsaved_edit_a_crash_left_unkept_is_put_back_over_its_file() {
     let mut first = Session::open(&root);
     first.take_in(&mut kept);
     let pad = LibPath::parse("Gig/Pad.ne5p").unwrap();
-    assert_eq!(older::placed(&kept, &list.hash), Some([(1, pad)].into()));
+    let placed = older::Record::Placed([(1, pad)].into());
+    assert_eq!(older::record(&kept, &list.hash), placed);
     assert!(first.store.has_taken_in(&list.hash));
     assert!(!first.handed_over(&list), "its edit is not kept yet");
     drop(first);
@@ -7705,4 +7706,26 @@ fn a_window_that_finds_the_list_taken_in_holds_it_until_it_keeps_the_edit() {
     assert!(second.bytes(pad) == edit, "the edit is back over its file");
     second.sync();
     assert!(second.handed_over(&list));
+}
+
+/// A record of the take-in that never reached the disk, as where the browser stopped
+/// before writing it, leaves the next launch the list alone: the unsaved edit that
+/// session did not keep comes in as a file of its own.
+#[test]
+fn an_unsaved_edit_whose_record_was_lost_comes_in_as_a_file_of_its_own() {
+    let root = Temp::new();
+    let (mut kept, _, soft, edit) = gig_kept();
+    let list = older_list(&kept);
+    let mut first = Session::open(&root);
+    first.take_in(&mut kept);
+    drop(first);
+
+    let (mut lost, ..) = gig_kept();
+    let mut again = Session::open(&root);
+    again.take_in(&mut lost);
+    again.sync();
+    assert_eq!(root.names("Gig"), ["Pad 2.ne5p", "Pad 3.ne5p", "Pad.ne5p"]);
+    assert_eq!(root.read("Gig/Pad.ne5p"), soft);
+    assert_eq!(root.read("Gig/Pad 3.ne5p"), edit);
+    assert!(again.handed_over(&list));
 }
