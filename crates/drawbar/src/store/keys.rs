@@ -58,9 +58,10 @@ pub fn class_of(code: u32) -> ObjectClass {
 }
 
 /// An [`ORIGIN`], as the library keeps it. A slot is its class's code ([`class_code`])
-/// and its bank and slot from zero, as the wire numbers them.
+/// and its bank and slot from zero, as the wire numbers them. A member a newer build
+/// adds is ignored.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
-#[serde(tag = "from", rename_all = "lowercase", deny_unknown_fields)]
+#[serde(tag = "from", rename_all = "lowercase")]
 pub enum Came {
     New,
     Slot { class: u32, bank: u32, slot: u32 },
@@ -463,6 +464,25 @@ mod tests {
             serde_json::to_string(&came).unwrap(),
             r#"{"from":"slot","class":4,"bank":1,"slot":7}"#
         );
+    }
+
+    #[test]
+    fn an_origin_with_a_member_a_newer_build_added_reads_as_its_known_kind() {
+        let read = |json: &str| serde_json::from_str::<Came>(json).ok();
+        assert_eq!(read(r#"{"from":"new","by":"x"}"#), Some(Came::New));
+        assert_eq!(
+            read(r#"{"from":"slot","class":4,"bank":1,"slot":7,"instrument":"x"}"#),
+            Some(Came::Slot {
+                class: 4,
+                bank: 1,
+                slot: 7
+            })
+        );
+        assert_eq!(
+            read(r#"{"from":"rescued","bank":1,"slot":7,"instrument":"x"}"#),
+            Some(Came::Rescued { bank: 1, slot: 7 })
+        );
+        assert_eq!(read(r#"{"from":"cloud","bank":1,"slot":7}"#), None);
     }
 
     #[test]
