@@ -11,6 +11,9 @@ use crate::store::KeptKind;
 /// The widest Kept apart is.
 const WIDTH: f32 = 560.0;
 
+/// The most changes a card lists. Take all takes the rest too.
+const ROWS: usize = 100;
+
 /// What Kept apart says above its cards.
 const ABOUT: &str = "These changes were made where the library's history split, as when \
                      two computers went on from one copy of drawbar's own data, or a sync \
@@ -119,7 +122,7 @@ fn card(
         if kept.rows.is_empty() {
             ui.add(egui::Label::new(egui::RichText::new("Nothing left to review.").weak()).wrap());
         }
-        for row in &kept.rows {
+        for row in kept.rows.iter().take(ROWS) {
             ui.horizontal(|ui| {
                 let mut said = row.said.clone();
                 if row.forgotten {
@@ -148,6 +151,11 @@ fn card(
                 );
             });
         }
+        let more = kept.rows.len().saturating_sub(ROWS);
+        if more > 0 {
+            let more = crate::strings::counted(more, "more change", "more changes");
+            ui.add(egui::Label::new(egui::RichText::new(format!("and {more}")).weak()).wrap());
+        }
         let takes = each && kept.rows.iter().any(|row| row.takes);
         if takes || whole {
             ui.horizontal(|ui| {
@@ -174,5 +182,51 @@ mod tests {
         assert_eq!(offers(KeptKind::Run), (true, true));
         assert_eq!(offers(KeptKind::Unplaced), (true, true));
         assert_eq!(offers(KeptKind::Gap), (true, false));
+    }
+
+    #[test]
+    fn a_card_with_more_changes_than_it_lists_counts_the_rest_and_offers_take_all() {
+        let row = |n: usize| crate::folders::KeptRow {
+            key: (
+                toshokan::EntityId::from_u128(n as u128),
+                toshokan::report::What::File,
+                None,
+            ),
+            id: None,
+            said: format!("change {n}"),
+            takes: true,
+            forgotten: false,
+        };
+        let kept = Kept {
+            kind: KeptKind::Run,
+            run: toshokan::log::Run {
+                writer: toshokan::WriterId::from_u128(7),
+                from: 1,
+                first: None,
+                last: toshokan::log::Own {
+                    n: 1,
+                    hash: toshokan::EntryHash::from_u128(1),
+                },
+                tip: None,
+            },
+            title: "A branch".into(),
+            rows: (0..ROWS + 2).map(row).collect(),
+        };
+        let ctx = crate::testing::context();
+        let input = crate::testing::screen(egui::vec2(800.0, 4000.0), Vec::new());
+        let output = crate::testing::run(&ctx, input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                card(ui, &kept, &mut Vec::new(), &mut None, &mut false);
+            });
+        });
+        let words = crate::testing::words(&output);
+        let listed = |n: usize| words.contains(&format!("change {n}"));
+        assert!(listed(ROWS - 1), "{words:?}");
+        assert!(!listed(ROWS), "{words:?}");
+        assert!(
+            words.contains(&"and 2 more changes".to_string()),
+            "{words:?}"
+        );
+        assert!(words.contains(&"Take all".to_string()), "{words:?}");
     }
 }

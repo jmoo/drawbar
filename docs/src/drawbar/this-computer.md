@@ -204,7 +204,8 @@ drawbar keeps a history of the changes made to a library, such as tags added and
 files renamed, so that every computer sharing the folder agrees on them.
 Sometimes part of that history cannot be merged with the rest. **Kept apart**
 then appears in the sidebar, and the activity log says so once. Click it to see
-each group of changes: who made them, when, and what each one does.
+each group of changes: who made them, when, and what each one does. A group
+lists at most 100 changes and counts the rest.
 
 This happens when:
 
@@ -219,10 +220,11 @@ This happens when:
 
 Nothing kept apart changes your library until you choose to:
 
-- **Take** makes one change. **Take all** makes every change in the group. Each
-  is one step that **Edit ▸ Undo** takes back. Taking a change to a sound the
-  branch added brings the sound too, at its file. Where your library already has
-  a sound at that file, the change is made to it.
+- **Take** makes one change. **Take all** makes every change in the group,
+  including those it does not list. Each is one step that **Edit ▸ Undo** takes
+  back. Taking a change to a sound the branch added brings the sound too, at its
+  file. Where your library already has a sound at that file, the change is made
+  to it.
 - Taking a change to where a sound's file is makes the sound's file the one at
   that path. The file must be there, as drawbar last found it, and belong to no
   other sound; otherwise the activity log says why it was not taken.
