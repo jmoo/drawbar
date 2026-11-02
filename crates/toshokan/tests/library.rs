@@ -7711,6 +7711,62 @@ fn a_change_of_case_alone_renames_a_file_and_a_folder() {
     }
 }
 
+/// A rename the folder of its source refuses names the source, the file to allow,
+/// and once it is allowed, opening the library again finishes the rename.
+#[cfg(unix)]
+#[test]
+fn a_rename_refused_at_its_source_names_the_source() {
+    use std::os::unix::fs::PermissionsExt;
+    use toshokan::blocking::{Library, Native};
+
+    let (folder, local) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let locked = folder.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("a.wav"), b"a").unwrap();
+    let clock = TestClock::at(1_000);
+    let open = |seed| {
+        let native = Native::new(folder.path(), local.path());
+        Library::open(native, layout(), &schema(), env("a", seed, &clock))
+            .unwrap()
+            .0
+    };
+    let mut a = open(1);
+    a.rescan().unwrap();
+    let mode = |mode| std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(mode));
+    mode(0o555).unwrap();
+    if std::fs::write(locked.join("probe"), b"").is_ok() {
+        mode(0o755).unwrap();
+        eprintln!("skipped: this user writes a read-only directory");
+        return;
+    }
+    let source = path("locked/a.wav");
+    let failed = a
+        .intent("Rename")
+        .rename_file(&source, &path("b.wav"), Expect::Holds(identity(b"a")))
+        .commit();
+    let next = a.intent("Trash").trash_file(&source, Expect::File).commit();
+    mode(0o755).unwrap();
+    assert!(
+        matches!(&failed, Err(Error::Io { path, error: IoError::Denied, .. }) if *path == source),
+        "{failed:?}"
+    );
+    let unfinished = Why::Unfinished {
+        label: "Rename".into(),
+        path: source,
+        error: IoError::Denied,
+    };
+    assert!(
+        matches!(&next, Err(Error::ReadOnly(why)) if *why == unfinished),
+        "{next:?}"
+    );
+    a.close().unwrap();
+
+    let mut again = open(2);
+    again.settle_interrupted().unwrap();
+    assert_eq!(std::fs::read(folder.path().join("b.wav")).unwrap(), b"a");
+    assert!(!locked.join("a.wav").exists());
+}
+
 /// Which renames a crash follows, by their source and destination.
 #[cfg(not(target_arch = "wasm32"))]
 type Stops = Rc<std::cell::Cell<Option<fn(&RelPath, &RelPath) -> bool>>>;

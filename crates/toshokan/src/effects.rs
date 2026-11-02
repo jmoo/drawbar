@@ -1227,7 +1227,23 @@ fn run_step<'a>(
     let moved = match (step, step.ends(layout, writer)) {
         (_, Some((from, to))) if record.moves == Moves::Copy => mark(layout, writer, name, index)
             .and_then(move |()| flow::copy_move(Root::Folder, &from, &to)),
-        (_, Some((from, to))) => flow::rename(Root::Folder, &from, &to),
+        (_, Some((from, to))) => {
+            // A refused rename does not say which end refused. Where the source is a
+            // library file, it is the one a user is likelier to have locked.
+            let takes_a_library_file = step.taken().is_some();
+            flow::rename(Root::Folder, &from, &to).then(move |moved| match moved {
+                Err(crate::Error::Io {
+                    root,
+                    path,
+                    error: IoError::Denied,
+                }) if takes_a_library_file && path == to => Flow::Done(Err(crate::Error::Io {
+                    root,
+                    path: from,
+                    error: IoError::Denied,
+                })),
+                moved => Flow::Done(moved),
+            })
+        }
         (EffectStep::MakeDir { path }, None) => flow::ensure_dir(Root::Folder, path),
         (EffectStep::RemoveDir { path }, None) => {
             let io = Io::RemoveDir {
