@@ -2898,23 +2898,24 @@ impl Store {
     /// may be written and no change of drawbar's own waits to be finished. Each folder is
     /// a new one in the library's top level, and each asset a file in its folder, both
     /// under names nothing beside them has, the asset's with the extension its bytes call
-    /// for. An unsaved edit stays unsaved over the file. `keep` is given, before the
-    /// change is sent, where each asset that came with an unsaved edit goes, by its place
-    /// in the list, and returns whether it kept that record; where it did not, each such
-    /// edit comes in as a file of its own beside the asset's instead.
+    /// for. An unsaved edit stays unsaved over the file. Before the change is sent,
+    /// `storage` keeps the record of where each asset that came with an unsaved edit
+    /// goes, by its place in the list ([`older::keep_placed`]); where none does, each
+    /// such edit comes in as a file of its own beside the asset's instead.
     ///
     /// Where the library took the list in already, nothing else is written: each unsaved
-    /// edit is put back over the file the take-in gave it, as the list's record names it,
-    /// or else brought in as a file of its own beside where it went. Where another window
-    /// of this install takes the list in first, or left its take-in unfinished, this
-    /// session sends none and puts the edits back once the library holds the list.
+    /// edit is put back over the file the take-in gave it, as the record in `storage`
+    /// names it now, or else brought in as a file of its own beside where it went. Where
+    /// another window of this install takes the list in first, or left its take-in
+    /// unfinished, this session sends none and puts the edits back once the library holds
+    /// the list.
     pub fn take_in(
         &mut self,
         list: &older::List,
+        storage: Option<&mut (dyn eframe::Storage + 'static)>,
         workspace: &mut Workspace,
         browser: &mut Browser,
         log: &mut Log,
-        keep: impl FnOnce(&[(usize, LibPath)]) -> bool,
     ) {
         // Nothing else is in flight whose failures the take-in would hold.
         let idle = !self.scanning && self.committing == 0 && self.finishing.is_empty();
@@ -2930,7 +2931,8 @@ impl Store {
         }
         self.took_up = TookUp::Done;
         if taken {
-            return self.put_back(list, workspace, browser, log);
+            let placed = storage.and_then(|storage| older::placed(storage, &list.hash));
+            return self.put_back(list, placed, workspace, browser, log);
         }
         self.send_batch();
         self.part(Intent::TakeIn {
@@ -2984,7 +2986,8 @@ impl Store {
             }
             ids.insert(id);
         }
-        if !keep(&placed) {
+        let kept = storage.is_some_and(|storage| older::keep_placed(storage, &list.hash, &placed));
+        if !kept {
             for ((at, path), id) in placed.iter().zip(edited) {
                 let asset = &list.assets[*at];
                 workspace.replace_bytes(id, asset.saved.clone(), log);
@@ -3026,16 +3029,17 @@ impl Store {
     /// that took it in may have ended before keeping: over the file the take-in gave it,
     /// where the list's record says which that is and the library holds it, and as a
     /// file of its own beside where it went otherwise. An edit kept since is left as it
-    /// is, and none is put back without a record of the list's take-in, as once one was
-    /// handed over.
+    /// is, and none is put back without a record of the list's take-in, `placed`, as
+    /// once one was handed over.
     fn put_back(
         &mut self,
         list: &older::List,
+        placed: Option<BTreeMap<usize, LibPath>>,
         workspace: &mut Workspace,
         browser: &mut Browser,
         log: &mut Log,
     ) {
-        let Some(placed) = &list.placed else {
+        let Some(placed) = placed else {
             return;
         };
         for (at, asset) in list.assets.iter().enumerate() {

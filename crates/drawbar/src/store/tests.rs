@@ -6744,22 +6744,16 @@ fn kept_before(assets: &str, folders: &str, tags: &str) -> crate::testing::Fake 
 }
 
 /// The list `storage` holds.
-fn older_list(storage: &crate::testing::Fake) -> older::List {
+fn older_list(storage: &dyn eframe::Storage) -> older::List {
     match older::found(storage) {
         older::Found::List(list) => list,
         other => panic!("{other:?}"),
     }
 }
 
-/// A list as drawbar 0.10's `store::save`, `folders.rs` and `tags.rs` wrote it: a program
-/// off slot 2:8 named Grand, two assets named Pad in the folder Gig, one with an unsaved
-/// edit, an empty folder, and a tag nothing wears.
-fn gig_list() -> (older::List, Vec<u8>, Vec<u8>, Vec<u8>) {
-    let (storage, program, soft, edit) = gig_kept();
-    (older_list(&storage), program, soft, edit)
-}
-
-/// The store [`gig_list`] reads.
+/// eframe's store holding a list as drawbar 0.10's `store::save`, `folders.rs` and
+/// `tags.rs` wrote it: a program off slot 2:8 named Grand, two assets named Pad in the
+/// folder Gig, one with an unsaved edit, an empty folder, and a tag nothing wears.
 fn gig_kept() -> (crate::testing::Fake, Vec<u8>, Vec<u8>, Vec<u8>) {
     use base64::prelude::{Engine as _, BASE64_STANDARD};
 
@@ -6784,31 +6778,18 @@ fn gig_kept() -> (crate::testing::Fake, Vec<u8>, Vec<u8>, Vec<u8>) {
 }
 
 impl Session {
-    /// Take `list` in, as a frame does, and wait until the library has answered. Returns
-    /// where the take-in said it puts each asset that came with an unsaved edit.
-    fn take_in(&mut self, list: &older::List) -> Vec<(usize, LibPath)> {
-        let mut kept = Vec::new();
-        self.take_in_keeping(list, |placed| {
-            kept = placed.to_vec();
-            true
-        });
-        kept
-    }
-
-    /// [`Session::take_in`], keeping the record of where the take-in puts its edits with
-    /// `keep`.
-    fn take_in_keeping(
-        &mut self,
-        list: &older::List,
-        keep: impl FnOnce(&[(usize, LibPath)]) -> bool,
-    ) {
+    /// Take in the list `kept` holds, as a frame does, and wait until the library has
+    /// answered.
+    fn take_in(&mut self, kept: &mut (dyn eframe::Storage + 'static)) {
+        let list = older_list(kept);
         let Bench {
             workspace,
             browser,
             log,
             ..
         } = &mut self.bench;
-        self.store.take_in(list, workspace, browser, log, keep);
+        self.store
+            .take_in(&list, Some(kept), workspace, browser, log);
         self.decided();
     }
 
@@ -6818,32 +6799,24 @@ impl Session {
     }
 }
 
-/// [`gig_list`] as a restart finds it, with the record its take-in kept, if any.
-fn gig_list_again(placed: Option<Vec<(usize, LibPath)>>) -> older::List {
-    let (list, ..) = gig_list();
-    older::List {
-        placed: placed.map(|placed| placed.into_iter().collect()),
-        ..list
-    }
-}
-
 /// A session that ends after the take-in lands and before it keeps its unsaved edit
 /// leaves the list; the next puts the edit back over the file the take-in made, and
 /// lets the list go once it keeps the edit.
 #[test]
 fn an_unsaved_edit_a_crash_left_unkept_is_put_back_over_its_file() {
     let root = Temp::new();
-    let (list, _, soft, edit) = gig_list();
+    let (mut kept, _, soft, edit) = gig_kept();
+    let list = older_list(&kept);
     let mut first = Session::open(&root);
-    let placed = first.take_in(&list);
-    assert_eq!(placed, [(1, LibPath::parse("Gig/Pad.ne5p").unwrap())]);
+    first.take_in(&mut kept);
+    let pad = LibPath::parse("Gig/Pad.ne5p").unwrap();
+    assert_eq!(older::placed(&kept, &list.hash), Some([(1, pad)].into()));
     assert!(first.store.has_taken_in(&list.hash));
     assert!(!first.handed_over(&list), "its edit is not kept yet");
     drop(first);
 
-    let list = gig_list_again(Some(placed));
     let mut again = Session::open(&root);
-    again.take_in(&list);
+    again.take_in(&mut kept);
     assert_eq!(
         root.names("Gig"),
         ["Pad 2.ne5p", "Pad.ne5p"],
@@ -6869,15 +6842,14 @@ fn an_unsaved_edit_a_crash_left_unkept_is_put_back_over_its_file() {
 #[test]
 fn an_unsaved_edit_a_crash_left_unkept_over_a_file_changed_since_asks() {
     let root = Temp::new();
-    let (list, program, ..) = gig_list();
+    let (mut kept, program, ..) = gig_kept();
     let mut first = Session::open(&root);
-    let placed = first.take_in(&list);
+    first.take_in(&mut kept);
     drop(first);
     fs::write(root.at("Gig/Pad.ne5p"), with_gain(&program, "99")).unwrap();
 
-    let list = gig_list_again(Some(placed));
     let mut again = Session::open(&root);
-    again.take_in(&list);
+    again.take_in(&mut kept);
     let (title, _) = again.bench.browser.asking().expect("a question");
     assert_eq!(title, "“Pad.ne5p” changed on disk");
 }
@@ -6885,9 +6857,10 @@ fn an_unsaved_edit_a_crash_left_unkept_over_a_file_changed_since_asks() {
 #[test]
 fn a_draft_that_fails_keeps_the_list_until_one_lands() {
     let root = Temp::new();
-    let (list, ..) = gig_list();
+    let (mut kept, ..) = gig_kept();
+    let list = older_list(&kept);
     let mut session = Session::open(&root);
-    session.take_in(&list);
+    session.take_in(&mut kept);
     session.store.fault(Fault::Refuse(
         |io| matches!(io, toshokan::Io::Create { path, .. } if path.as_str().starts_with("unsaved/")),
     ));
@@ -6906,15 +6879,15 @@ fn a_draft_that_fails_keeps_the_list_until_one_lands() {
 #[test]
 fn an_unsaved_edit_whose_file_is_gone_comes_in_as_a_file_of_its_own() {
     let root = Temp::new();
-    let (list, _, _, edit) = gig_list();
+    let (mut kept, _, _, edit) = gig_kept();
+    let list = older_list(&kept);
     let mut first = Session::open(&root);
-    let placed = first.take_in(&list);
+    first.take_in(&mut kept);
     drop(first);
     fs::remove_file(root.at("Gig/Pad.ne5p")).unwrap();
 
-    let list = gig_list_again(Some(placed));
     let mut again = Session::open(&root);
-    again.take_in(&list);
+    again.take_in(&mut kept);
     again.sync();
     assert_eq!(root.names("Gig"), ["Pad 2.ne5p", "Pad 3.ne5p"]);
     assert_eq!(root.read("Gig/Pad 3.ne5p"), edit);
@@ -6930,16 +6903,18 @@ fn an_unsaved_edit_whose_file_is_gone_comes_in_as_a_file_of_its_own() {
 #[test]
 fn a_list_handed_over_has_no_edit_put_back() {
     let root = Temp::new();
-    let (list, _, soft, edit) = gig_list();
+    let (mut kept, _, soft, edit) = gig_kept();
+    let list = older_list(&kept);
     let mut first = Session::open(&root);
-    first.take_in(&list);
+    first.take_in(&mut kept);
     first.sync();
     assert!(first.handed_over(&list));
     first.close();
+    older::let_go(&mut kept, &list.hash);
+    eframe::Storage::set_string(&mut kept, "drawbar.taken_in", String::new());
 
-    let list = gig_list_again(None);
     let mut again = Session::open(&root);
-    again.take_in(&list);
+    again.take_in(&mut kept);
     again.sync();
     assert_eq!(
         root.names("Gig"),
@@ -6963,9 +6938,10 @@ fn the_list_an_older_drawbar_kept_comes_in_as_files_with_their_folders_tags_and_
     let program = Fresh::Program.bytes().unwrap();
     fs::write(root.at("Grand.ne5p"), &program).unwrap();
     fs::create_dir(root.at("Gig")).unwrap();
-    let (list, program, soft, edit) = gig_list();
+    let (mut kept, program, soft, edit) = gig_kept();
+    let list = older_list(&kept);
     let mut session = Session::open(&root);
-    session.take_in(&list);
+    session.take_in(&mut kept);
 
     assert_eq!(
         root.names(""),
@@ -7019,13 +6995,13 @@ fn the_list_an_older_drawbar_kept_comes_in_as_files_with_their_folders_tags_and_
 #[test]
 fn bytes_that_do_not_decode_come_in_byte_for_byte() {
     let root = Temp::new();
-    let storage = kept_before(
+    let mut kept = kept_before(
         "drawbar 2\n3\n1\tfresh\tBroken.ne5p\tAAEC\n2\tfresh\tJunk\tAAEC\n",
         "",
         "",
     );
     let mut session = Session::open(&root);
-    session.take_in(&older_list(&storage));
+    session.take_in(&mut kept);
     assert_eq!(root.read("Broken.ne5p"), [0, 1, 2]);
     assert_eq!(root.read("Junk.bin"), [0, 1, 2]);
 }
@@ -7035,15 +7011,16 @@ fn bytes_that_do_not_decode_come_in_byte_for_byte() {
 #[test]
 fn a_list_the_library_took_in_is_not_taken_in_again() {
     let root = Temp::new();
-    let (list, ..) = gig_list();
+    let (mut kept, ..) = gig_kept();
+    let list = older_list(&kept);
     let mut first = Session::open(&root);
-    first.take_in(&list);
+    first.take_in(&mut kept);
     first.close();
     let names = root.names("");
 
     let mut again = Session::open(&root);
     assert!(again.store.has_taken_in(&list.hash));
-    again.take_in(&list);
+    again.take_in(&mut kept);
     assert_eq!(root.names(""), names);
     assert_eq!(again.said("drawbar brought"), 0);
     again.close();
@@ -7058,18 +7035,19 @@ fn a_list_the_library_took_in_is_not_taken_in_again() {
 #[test]
 fn two_windows_take_the_list_in_once() {
     let root = Temp::new();
-    let (list, _, soft, edit) = gig_list();
+    let (mut kept, _, soft, edit) = gig_kept();
+    let list = older_list(&kept);
     let mut first = Session::open(&root);
     let mut second = Session::open(&root);
-    first.take_in(&list);
-    let placed = second.take_in(&list);
+    first.take_in(&mut kept);
+    second.take_in(&mut kept);
     second.settle();
 
     assert_eq!(root.names(""), [".drawbar", "Empty", "Gig", "Grand.ne5p"]);
     assert_eq!(second.said("drawbar brought"), 0);
     assert_eq!(second.said("could not bring"), 0, "no failure");
     assert!(second.store.has_taken_in(&list.hash));
-    second.take_in(&gig_list_again(Some(placed)));
+    second.take_in(&mut kept);
     second.read_all();
     assert_eq!(
         root.names("Gig"),
@@ -7088,15 +7066,16 @@ fn two_windows_take_the_list_in_once() {
 #[test]
 fn a_take_in_left_unfinished_is_not_taken_in_again_by_another_window() {
     let root = Temp::new();
-    let (list, ..) = gig_list();
+    let (mut kept, ..) = gig_kept();
+    let list = older_list(&kept);
     let mut first = Session::open(&root);
     first.store.fault(Fault::Refuse(
         |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "Gig/Pad 2.ne5p"),
     ));
-    first.take_in(&list);
+    first.take_in(&mut kept);
     assert!(!first.store.has_taken_in(&list.hash), "left unfinished");
     let mut second = Session::open(&root);
-    second.take_in(&list);
+    second.take_in(&mut kept);
     second.settle();
     assert_eq!(second.said("drawbar brought"), 0);
     assert_eq!(root.names(""), [".drawbar", "Empty", "Gig", "Grand.ne5p"]);
@@ -7106,12 +7085,13 @@ fn a_take_in_left_unfinished_is_not_taken_in_again_by_another_window() {
 #[test]
 fn a_take_in_that_writes_nothing_leaves_the_list_for_the_next_session() {
     let root = Temp::new();
-    let (list, ..) = gig_list();
+    let (mut kept, ..) = gig_kept();
+    let list = older_list(&kept);
     let mut session = Session::open(&root);
     session.store.fault(Fault::Refuse(
         |io| matches!(io, toshokan::Io::Write { path, .. } if path.as_str().contains("/tmp/")),
     ));
-    session.take_in(&list);
+    session.take_in(&mut kept);
     session.settle();
 
     assert_eq!(root.names(""), [".drawbar"], "nothing was written");
@@ -7128,24 +7108,25 @@ fn a_take_in_that_writes_nothing_leaves_the_list_for_the_next_session() {
         "said once, for the whole"
     );
     assert_eq!(session.said("was not saved"), 0, "said once, for the whole");
-    session.take_in(&list);
+    session.take_in(&mut kept);
     assert_eq!(root.names(""), [".drawbar"], "tried once a session");
     session.close();
 
     let mut next = Session::open(&root);
-    next.take_in(&list);
+    next.take_in(&mut kept);
     assert!(next.store.has_taken_in(&list.hash));
     assert_eq!(root.names(""), [".drawbar", "Empty", "Gig", "Grand.ne5p"]);
 }
 
 #[test]
 fn a_read_only_library_takes_nothing_in() {
-    let (list, ..) = gig_list();
+    let (mut kept, ..) = gig_kept();
+    let list = older_list(&kept);
     let (root, _) = newer_drawbar_wrote();
     let mut session = Session::open(&root);
     assert!(session.store.read_only().is_some());
     let names = root.names("");
-    session.take_in(&list);
+    session.take_in(&mut kept);
     assert_eq!(root.names(""), names);
     assert!(!session.store.has_taken_in(&list.hash));
 }
@@ -7517,19 +7498,19 @@ fn only_an_asset_a_change_kept_apart_changes_is_kept_apart() {
 #[test]
 fn a_window_waits_for_an_unfinished_take_in_without_sending_its_own_again() {
     let root = Temp::new();
-    let (list, _, _, edit) = gig_list();
+    let (mut kept, _, _, edit) = gig_kept();
+    let list = older_list(&kept);
     let mut first = Session::open(&root);
+    let mut second = Session::open(&root);
     first.store.fault(Fault::Refuse(
         |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "Gig/Pad 2.ne5p"),
     ));
-    let placed = first.take_in(&list);
-    let list = gig_list_again(Some(placed));
-    let mut second = Session::open(&root);
-    second.take_in(&list);
+    first.take_in(&mut kept);
+    second.take_in(&mut kept);
     second.settle();
     let next = second.bench.workspace.next_id();
     for _ in 0..3 {
-        second.take_in(&list);
+        second.take_in(&mut kept);
         second.settle();
     }
     assert_eq!(
@@ -7547,8 +7528,9 @@ fn a_window_waits_for_an_unfinished_take_in_without_sending_its_own_again() {
         "finished by its install"
     );
     assert!(!second.handed_over(&list), "its edit is not put back yet");
-    second.take_in(&list);
-    second.take_in(&list);
+    second.take_in(&mut kept);
+    second.take_in(&mut kept);
+    second.read_all();
     second.sync();
     assert_eq!(root.names("Gig"), ["Pad 2.ne5p", "Pad.ne5p"]);
     let pad = second.named("Pad.ne5p");
@@ -7583,11 +7565,9 @@ fn a_take_in_whose_record_does_not_fit_brings_each_edit_in_once() {
     let root = Temp::new();
     let (storage, _, soft, edit) = gig_kept();
     let mut storage = Full(storage);
-    let list = older_list(&storage.0);
+    let list = older_list(&storage);
     let mut first = Session::open(&root);
-    first.take_in_keeping(&list, |placed| {
-        older::keep_placed(&mut storage, &list.hash, placed)
-    });
+    first.take_in(&mut storage);
     assert_eq!(root.names("Gig"), ["Pad 2.ne5p", "Pad 3.ne5p", "Pad.ne5p"]);
     assert_eq!(root.read("Gig/Pad.ne5p"), soft);
     assert_eq!(root.read("Gig/Pad 3.ne5p"), edit);
@@ -7600,9 +7580,8 @@ fn a_take_in_whose_record_does_not_fit_brings_each_edit_in_once() {
     first.close();
 
     for _ in 0..2 {
-        let list = older_list(&storage.0);
         let mut again = Session::open(&root);
-        again.take_in(&list);
+        again.take_in(&mut storage);
         again.sync();
         assert_eq!(root.names("Gig"), ["Pad 2.ne5p", "Pad 3.ne5p", "Pad.ne5p"]);
         assert!(again.handed_over(&list));
@@ -7648,9 +7627,10 @@ impl Session {
 #[test]
 fn a_take_in_survives_an_undo_and_a_close() {
     let root = Temp::new();
-    let (list, ..) = gig_list();
+    let (mut kept, ..) = gig_kept();
+    let list = older_list(&kept);
     let mut session = Session::open(&root);
-    session.take_in(&list);
+    session.take_in(&mut kept);
     assert_eq!(session.store.undo_label(), None, "Undo offers no take-in");
     session.undo();
     session.close();
@@ -7706,4 +7686,23 @@ fn a_file_whose_delete_is_undone_in_flight_comes_back_once_the_library_answers()
     assert!(root.at("a.ne5p").exists(), "the delete was undone");
     let back = session.named("a.ne5p");
     assert_eq!(session.path(back).as_deref(), Some("a.ne5p"));
+}
+
+/// A window that opens once another took the list in reads the record of that take-in as
+/// it is then: it puts the unsaved edit back, and holds the list until it keeps the edit.
+#[test]
+fn a_window_that_finds_the_list_taken_in_holds_it_until_it_keeps_the_edit() {
+    let root = Temp::new();
+    let (mut kept, _, _, edit) = gig_kept();
+    let list = older_list(&kept);
+    let mut first = Session::open(&root);
+    first.take_in(&mut kept);
+    let mut second = Session::open(&root);
+    second.take_in(&mut kept);
+    assert!(!second.handed_over(&list), "not before it keeps the edit");
+    second.read_all();
+    let pad = second.named("Pad.ne5p");
+    assert!(second.bytes(pad) == edit, "the edit is back over its file");
+    second.sync();
+    assert!(second.handed_over(&list));
 }

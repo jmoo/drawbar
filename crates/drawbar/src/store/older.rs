@@ -67,10 +67,6 @@ pub struct List {
     pub tags: BTreeSet<String>,
     /// How many lines did not read.
     pub unreadable: usize,
-    /// Where a take-in of this list put the file of each asset that came with an unsaved
-    /// edit, by its place in [`List::assets`], where the record of one is kept. `None`
-    /// once a library holding the list keeps every unsaved edit it brought.
-    pub placed: Option<BTreeMap<usize, LibPath>>,
 }
 
 /// One asset of the list.
@@ -166,9 +162,7 @@ pub fn found(storage: &dyn eframe::Storage) -> Found {
     if storage.get_string(TAKEN).as_deref() == Some(hash.as_str()) {
         return Found::Nothing;
     }
-    let record = storage.get_string(HANDOFF).unwrap_or_default();
     Found::List(List {
-        placed: placed(&record, &hash),
         hash,
         assets: assets.collect(),
         folders: folders.named.into_iter().map(|(_, name)| name).collect(),
@@ -177,9 +171,12 @@ pub fn found(storage: &dyn eframe::Storage) -> Found {
     })
 }
 
-/// Where the take-in of the list of hash `hash` put each file, as `record` says. A line
-/// that does not read names no file.
-fn placed(record: &str, hash: &str) -> Option<BTreeMap<usize, LibPath>> {
+/// Where a take-in of the list of hash `hash` put the file of each asset that came with an
+/// unsaved edit, by its place in [`List::assets`], as the record eframe's store holds now
+/// says. `None` without a record of the list, as once a library holding the list keeps
+/// every unsaved edit it brought. A line that does not read names no file.
+pub fn placed(storage: &dyn eframe::Storage, hash: &str) -> Option<BTreeMap<usize, LibPath>> {
+    let record = storage.get_string(HANDOFF).unwrap_or_default();
     let mut lines = record.lines();
     if lines.next() != Some(hash) {
         return None;
@@ -546,20 +543,17 @@ mod tests {
     fn the_record_of_a_take_in_is_read_for_its_own_list_alone() {
         let keys = ["drawbar 2\n1\n", "drawbar folders 1\n", "drawbar tags 1\n"];
         let mut storage = stored(keys);
-        assert_eq!(list(keys).placed, None, "no record kept");
         let hash = list(keys).hash;
+        assert_eq!(placed(&storage, &hash), None, "no record kept");
         let pad = LibPath::parse("Gig 2/Pad.ne5p").unwrap();
         keep_placed(&mut storage, &hash, &[(1, pad.clone())]);
+        assert_eq!(placed(&storage, &hash), Some(BTreeMap::from([(1, pad)])));
         let Found::List(read) = found(&storage) else {
             panic!("a list");
         };
-        assert_eq!(read.placed, Some(BTreeMap::from([(1, pad)])));
         assert_eq!(read.hash, hash, "the record is no part of the list");
         keep_placed(&mut storage, "another list", &[]);
-        let Found::List(read) = found(&storage) else {
-            panic!("a list");
-        };
-        assert_eq!(read.placed, None, "another list's record");
+        assert_eq!(placed(&storage, &hash), None, "another list's record");
     }
 
     #[test]
@@ -636,10 +630,7 @@ mod tests {
         keep_placed(&mut earlier, &hash, &[]);
         for mut storage in [Full(stored(keys)), Full(earlier)] {
             assert!(!keep_placed(&mut storage, &hash, &[(1, pad.clone())]));
-            let Found::List(read) = found(&storage) else {
-                panic!("a list");
-            };
-            assert_eq!(read.placed, None);
+            assert_eq!(placed(&storage, &hash), None);
         }
         assert!(keep_placed(&mut stored(keys), &hash, &[(1, pad)]));
     }
@@ -655,10 +646,11 @@ mod tests {
                 keep_placed(&mut storage, &hash, placed);
             }
             let_go(&mut storage, &hash);
-            let Found::List(after) = found(&storage) else {
-                panic!("a list, since the marker did not stick");
-            };
-            assert_eq!(after.placed, None, "with record {record:?}");
+            assert!(
+                matches!(found(&storage), Found::List(_)),
+                "a list, since the marker did not stick"
+            );
+            assert_eq!(placed(&storage, &hash), None, "with record {record:?}");
         }
     }
 }

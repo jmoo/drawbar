@@ -1071,25 +1071,10 @@ impl eframe::App for DrawbarApp {
                 self.shell.filter.keep_tags(&self.browser.tags);
                 let left = store.take_left().into_iter();
                 arrived.extend(left.map(browser::Act::Remove));
-                if let Some(list) = self.older.as_mut() {
-                    // Kept first, so a session that ends before the edits are kept leaves
-                    // the next where to put them back.
-                    let mut kept = None;
-                    let keep = |placed: &[_]| {
-                        let Some(storage) = storage.as_deref_mut() else {
-                            return false;
-                        };
-                        let stuck = crate::store::older::keep_placed(storage, &list.hash, placed);
-                        kept = stuck.then(|| placed.iter().cloned().collect());
-                        stuck
-                    };
+                if let Some(list) = &self.older {
                     let (workspace, browser) = (&mut self.workspace, &mut self.browser);
-                    store.take_in(list, workspace, browser, &mut self.log, keep);
-                    // A put-back this session, where another window took the list in
-                    // first, reads the record as it is now.
-                    if let Some(kept) = kept {
-                        list.placed = Some(kept);
-                    }
+                    let storage = storage.as_deref_mut();
+                    store.take_in(list, storage, workspace, browser, &mut self.log);
                 }
                 released
             }
