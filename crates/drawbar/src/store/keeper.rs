@@ -1252,8 +1252,8 @@ fn taking_in() -> RelPath {
 
 /// Commit the `parts` of the take-in of the list of hash `hash` holding [`taking_in`],
 /// after reading what other writers logged since, which goes in `looked`. Where another
-/// window holds the lock, or the library took the list in already, nothing is tried, and
-/// [`Event::TakenInElsewhere`] says so.
+/// window holds the lock or left a take-in unfinished, or the library took the list in
+/// already, nothing is tried, and [`Event::TakenInElsewhere`] says so.
 async fn take_in<F: Fs>(
     library: &mut Library<F>,
     label: &str,
@@ -1279,8 +1279,13 @@ async fn take_in<F: Fs>(
     let committed = match library.refresh().await {
         Err(e) => Err(told(&e)),
         Ok(refreshed) => {
+            // A take-in of this install's left open logs its fact once it is finished.
+            let unfinished = refreshed
+                .orphaned
+                .iter()
+                .any(|orphan| (orphan.ours || orphan.live) && orphan.label == label);
             looked.extend(refreshed.changes);
-            match library.view().find(TAKEN_IN, &hash).is_empty() {
+            match library.view().find(TAKEN_IN, &hash).is_empty() && !unfinished {
                 true => Ok(batch(library, label, parts, answer).await),
                 false => {
                     answer(Event::TakenInElsewhere);

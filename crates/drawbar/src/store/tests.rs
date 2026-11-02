@@ -6982,6 +6982,26 @@ fn two_windows_take_the_list_in_once() {
     assert!(second.handed_over(&list));
 }
 
+/// A take-in one window left unfinished keeps another window of the install from taking
+/// the list in again: the library holds one copy of each sound.
+#[test]
+fn a_take_in_left_unfinished_is_not_taken_in_again_by_another_window() {
+    let root = Temp::new();
+    let (list, ..) = gig_list();
+    let mut first = Session::open(&root);
+    first.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "Gig/Pad 2.ne5p"),
+    ));
+    first.take_in(&list);
+    assert!(!first.store.has_taken_in(&list.hash), "left unfinished");
+    let mut second = Session::open(&root);
+    second.take_in(&list);
+    second.settle();
+    assert_eq!(second.said("drawbar brought"), 0);
+    assert_eq!(root.names(""), [".drawbar", "Empty", "Gig", "Grand.ne5p"]);
+    assert_eq!(root.names("Gig"), ["Pad.ne5p"]);
+}
+
 #[test]
 fn a_take_in_that_writes_nothing_leaves_the_list_for_the_next_session() {
     let root = Temp::new();
