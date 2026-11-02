@@ -314,7 +314,8 @@ bring back any you deleted.
   of them, so rename one to keep the library whole on every computer.
 - **Not read** or **not all listed.** drawbar could not read that file or
   folder, and the activity log names it. What is in such a folder is not shown
-  until drawbar can read it.
+  until drawbar can read it, and neither is such a file when drawbar must read it
+  to tell which sound it is.
 - **Failed verification.** The sample or piano file is damaged. drawbar checks
   one when you open or send it, and will not send a damaged one.
 - **No storage in the browser.** Some private windows give drawbar none. drawbar

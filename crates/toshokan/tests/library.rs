@@ -87,6 +87,8 @@ struct Seen {
     blind: bool,
     /// Requests this picks fail.
     failing: Option<Box<Picks>>,
+    /// Reads of this file fail, each alone among the reads of a batch.
+    unreadable: Option<RelPath>,
     /// Writes in the folder fail as a full volume's do.
     full: bool,
     /// Requests this picks are carried out, and then fail, as a reply a backend
@@ -267,6 +269,9 @@ impl Probe {
         if seen.failing.as_ref().is_some_and(|failing| failing(io)) {
             return Err(toshokan::IoError::Other("failed by the test".into()));
         }
+        if matches!(io, Io::Read { path, .. } if seen.unreadable.as_ref() == Some(path)) {
+            return Err(toshokan::IoError::Denied);
+        }
         if seen.full && io.root() == Root::Folder && io.mutates() {
             return Err(toshokan::IoError::NoSpace);
         }
@@ -293,6 +298,16 @@ impl Probe {
                     .collect(),
             )),
             (_, done) => done,
+        };
+        let done = match (io, done, &seen.unreadable) {
+            (Io::ReadMany { reads, .. }, Ok(Reply::ReadMany(read)), Some(unreadable)) => {
+                let read = reads.iter().zip(read).map(|((path, _), read)| match path {
+                    _ if path == unreadable => Err(toshokan::IoError::Denied),
+                    _ => read,
+                });
+                Ok(Reply::ReadMany(read.collect()))
+            }
+            (_, done, _) => done,
         };
         match seen.unanswered.as_ref().is_some_and(|picks| picks(io)) {
             true => done.and(Err(toshokan::IoError::Other(
@@ -665,6 +680,7 @@ through_both!(
     a_view_lists_each_library_files_length_once_scanned,
     a_file_expected_as_listed_is_refused_once_its_length_or_time_moved,
     a_directory_that_cannot_be_listed_leaves_its_files_unknown_and_the_rest_scanned,
+    a_file_that_cannot_be_read_leaves_its_entity_unknown_and_the_rest_listed,
     a_file_no_entity_is_bound_to_is_saved_renamed_and_trashed_and_each_undone,
     an_effect_by_path_on_an_entitys_file_is_refused,
     a_tree_moved_with_files_no_entity_is_bound_to_is_moved_back_by_undo,
@@ -3317,7 +3333,7 @@ fn fail(probe: &Probe, which: impl Fn(&Io) -> bool + 'static) {
 
 fn heal(probe: &Probe) {
     let mut seen = probe.seen.borrow_mut();
-    (seen.failing, seen.unanswered) = (None, None);
+    (seen.failing, seen.unanswered, seen.unreadable) = (None, None, None);
 }
 
 fn unanswered(probe: &Probe, which: impl Fn(&Io) -> bool + 'static) {
@@ -4478,6 +4494,52 @@ fn a_directory_that_cannot_be_listed_leaves_its_files_unknown_and_the_rest_scann
     );
     let file = view.entity(kept).unwrap().file().unwrap();
     assert_eq!(file.state, FileState::InSync);
+}
+
+fn a_file_that_cannot_be_read_leaves_its_entity_unknown_and_the_rest_listed<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    put(&folder, "other.npno", b"other");
+    put(&folder, "song.npno", b"SONG");
+    let probe = Probe::new(&machine(&folder));
+    probe.seen.borrow_mut().unreadable = Some(path("song.npno"));
+    let (mut b, _) = F::open(probe.clone(), env("b", 2, &clock)).unwrap();
+    for _ in 0..2 {
+        let refreshed = b.rescan().unwrap();
+        assert_eq!(refreshed.unlisted, [path("song.npno")]);
+        let view = b.view();
+        assert!(
+            view.listed(&path("other.npno")).is_some(),
+            "the rest is listed"
+        );
+        let file = view.entity(song).unwrap().file().unwrap();
+        assert_eq!(
+            (file.path, file.state),
+            (path("song.npno"), FileState::Unscanned),
+            "unknown, not missing"
+        );
+    }
+    heal(&probe);
+    let refreshed = b.rescan().unwrap();
+    assert_eq!(refreshed.unlisted, [] as [RelPath; 0]);
+    let file = b.view().entity(song).unwrap().file().unwrap();
+    assert_eq!(
+        (file.path, file.state),
+        (path("song.npno"), FileState::ChangedOutside)
+    );
+    put(&folder, "song.npno", b"Song");
+    probe.seen.borrow_mut().unreadable = Some(path("song.npno"));
+    b.rescan_paths(vec![path("song.npno")]).unwrap();
+    let file = b.view().entity(song).unwrap().file().unwrap();
+    assert_eq!(file.state, FileState::Unscanned, "a scan of one path");
+    let refreshed = b.refresh().unwrap();
+    assert_eq!(
+        refreshed.unlisted,
+        [path("song.npno")],
+        "the next scans every file"
+    );
 }
 
 fn a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept<F: Facade>() {

@@ -90,7 +90,8 @@ pub struct Library {
     /// Each file the last scan listed, as the views show it; `None` until a scan of
     /// every file has run.
     listing: Option<Arc<BTreeMap<RelPath, Listed>>>,
-    /// The directories the last scan of every file could not list.
+    /// The directories the last scan of every file could not list, and the files
+    /// whose identities it could not read.
     unlisted: Vec<RelPath>,
     /// The directories below the root a scan of every file just listed, until a
     /// refresh reports them.
@@ -1861,14 +1862,15 @@ fn walked<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
     let names = &*known.env.names;
     let needed = binding::resolve(&mut found, &known.facts, &known.scan, names);
     let identified = binding::identified(found, needed, &known.env.identify);
-    identified
-        .map_ok(move |read| (library, read))
-        .and_then(move |(library, (scan, read))| {
+    identified.map_ok(move |read| (library, read)).and_then(
+        move |(library, (scan, read, unreadable))| {
             let mut library = library;
             let known = library.borrow_mut();
             let walk = known.walking.take();
             known.walked = walk.as_ref().map(Walk::dirs);
-            let unlisted = walk.map(Walk::unlisted).unwrap_or_default();
+            let mut unlisted = walk.map(Walk::unlisted).unwrap_or_default();
+            unlisted.extend(unreadable.into_iter().map(|(path, _)| path));
+            unlisted.sort();
             known.listing = Some(listing(&scan));
             if !known.unscanned.is_empty() || !unlisted.is_empty() {
                 known.unscanned = Unscanned::default();
@@ -1881,7 +1883,8 @@ fn walked<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
             known.unrelisted.clear();
             known.rebind(scan);
             remember(library, read)
-        })
+        },
+    )
 }
 
 /// The files of `scan`, as the views list them.
@@ -1930,9 +1933,10 @@ fn unscanned(
     ok(library)
 }
 
-/// Once entries are durable, binds to what `scan` finds. A scan that fails does
-/// not fail what was logged: `unsure`, where files may have moved, and the
-/// entities bound there are unknown until a scan of every file succeeds.
+/// Once entries are durable, binds to what `scan` finds. A scan that fails, or
+/// cannot read a file's identity, does not fail what was logged: `unsure`, where
+/// files may have moved, and the entities bound there are unknown until a scan of
+/// every file succeeds.
 /// Identities it fails to keep in the local root are kept after the next scan.
 fn rebind_logged<'a>(
     library: &'a mut Library,
@@ -1956,10 +1960,13 @@ fn rebind_logged<'a>(
                 library.bind_due |= library.unrelisted.remove(path);
             }
             match scanned {
-                Ok((scan, read)) => {
-                    library.rebind(scan);
-                    remember(library, read)
-                }
+                Ok((scan, read, unreadable)) => match unreadable.into_iter().next() {
+                    None => {
+                        library.rebind(scan);
+                        remember(library, read)
+                    }
+                    Some((path, error)) => unscanned(library, [unsure, vec![path]].concat(), error),
+                },
                 Err(error) => unscanned(library, unsure, error),
             }
         })

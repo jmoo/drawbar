@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 use crate::env::{ExactNames, Identify, Names};
 use crate::error::{Result, Unbindable};
-use crate::flow::{self, fold, ok};
+use crate::flow::{self, fold, ok, Flow};
 use crate::ids::{EntityId, Identity};
 use crate::io::{Kind, Meta, Root, Task};
 use crate::layout::Layout;
@@ -214,6 +214,12 @@ pub fn scan(
             let unknown = resolve(&mut scan, &facts, &previous, &ExactNames);
             identified(scan, unknown, &identify)
         })
+        .and_then(
+            |(scan, read, unreadable)| match unreadable.into_iter().next() {
+                Some((_, error)) => Flow::Done(Err(error)),
+                None => ok((scan, read)),
+            },
+        )
         .task()
 }
 
@@ -551,30 +557,35 @@ fn away(facts: &Facts, files: &FileKeys, names: &dyn Names) -> HashSet<u64> {
     away.lengths
 }
 
-/// `scan` with the identities of `unknown` read; with the paths read. A file gone
-/// before its read is left out.
+/// `scan` with the identities of `unknown` read; with the paths read, and the
+/// paths that could not be read with why. A file gone before its read, or that
+/// could not be read, is left out.
 pub(crate) fn identified<'a>(
     mut scan: Scan,
     unknown: Vec<(RelPath, u64)>,
     identify: &Rc<dyn Identify>,
-) -> flow::Fallible<'a, (Scan, Vec<RelPath>)> {
+) -> flow::Fallible<'a, (Scan, Vec<RelPath>, flow::Unread)> {
     let paths: Vec<RelPath> = unknown.iter().map(|(path, _)| path.clone()).collect();
-    flow::identities(Root::Folder, unknown, identify).map_ok(move |identities| {
-        let mut read = Vec::new();
+    flow::each_identity(Root::Folder, unknown, identify).map_ok(move |identities| {
+        let (mut read, mut unreadable) = (Vec::new(), Vec::new());
         for (path, identity) in paths.into_iter().zip(identities) {
             match identity {
-                Some(identity) => {
+                Ok(Some(identity)) => {
                     if let Some(file) = scan.files.get_mut(&path) {
                         file.identity = Some(identity);
                     }
                     read.push(path);
                 }
-                None => {
+                Ok(None) => {
                     scan.files.remove(&path);
+                }
+                Err(error) => {
+                    scan.files.remove(&path);
+                    unreadable.push((path, error));
                 }
             }
         }
-        (scan, read)
+        (scan, read, unreadable)
     })
 }
 

@@ -23,6 +23,9 @@ pub(crate) enum Flow<'a, T> {
 
 pub(crate) type Fallible<'a, T> = Flow<'a, Result<T>>;
 
+/// The files that could not be read, with why.
+pub(crate) type Unread = Vec<(RelPath, Error)>;
+
 impl<'a, T: 'a> Flow<'a, T> {
     pub(crate) fn io(io: Io, then: impl FnOnce(IoResult) -> Self + 'a) -> Self {
         Self::Io(io, Box::new(then))
@@ -255,6 +258,14 @@ pub(crate) fn read_many<'a>(
     root: Root,
     reads: Vec<(RelPath, Range)>,
 ) -> Fallible<'a, Vec<Option<Vec<u8>>>> {
+    read_each(root, reads).and_then(|read| Flow::Done(read.into_iter().collect()))
+}
+
+/// As [`read_many`], with the error of each read that failed in its place.
+fn read_each<'a>(
+    root: Root,
+    reads: Vec<(RelPath, Range)>,
+) -> Fallible<'a, Vec<Result<Option<Vec<u8>>>>> {
     let mut batches: Vec<Vec<(RelPath, Range)>> = Vec::new();
     let mut asked = 0u64;
     for read in reads {
@@ -282,13 +293,12 @@ pub(crate) fn read_many<'a>(
                 }
                 Err(error) => return Flow::Done(Err(io.failed(error))),
             };
-            for (path, read) in paths.into_iter().zip(read) {
-                match read {
-                    Ok(bytes) => all.push(Some(bytes)),
-                    Err(IoError::NotFound) => all.push(None),
-                    Err(error) => return Flow::Done(Err(Error::Io { root, path, error })),
-                }
-            }
+            let read = paths.into_iter().zip(read).map(|(path, read)| match read {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(IoError::NotFound) => Ok(None),
+                Err(error) => Err(Error::Io { root, path, error }),
+            });
+            all.extend(read);
             ok(all)
         })
     })
@@ -762,14 +772,24 @@ pub(crate) fn observe_all<'a>(
 }
 
 /// The identity of each file of `files`, given its length; `None` for a file no
-/// longer there. Files whose ranges come to at most [`CHUNK`] bytes are read
-/// together; each larger one a [`CHUNK`] at a time, so no more than that of it
-/// is held at once.
+/// longer there.
 pub(crate) fn identities<'a>(
     root: Root,
     files: Vec<(RelPath, u64)>,
     identify: &Rc<dyn Identify>,
 ) -> Fallible<'a, Vec<Option<Identity>>> {
+    each_identity(root, files, identify).and_then(|each| Flow::Done(each.into_iter().collect()))
+}
+
+/// As [`identities`], with the error of each file that could not be read in its
+/// place. Files whose ranges come to at most [`CHUNK`] bytes are read together;
+/// each larger one a [`CHUNK`] at a time, so no more than that of it is held at
+/// once.
+pub(crate) fn each_identity<'a>(
+    root: Root,
+    files: Vec<(RelPath, u64)>,
+    identify: &Rc<dyn Identify>,
+) -> Fallible<'a, Vec<Result<Option<Identity>>>> {
     let mut groups: Vec<Vec<(RelPath, u64, Vec<Range>)>> = Vec::new();
     let mut small = true;
     for (path, len) in files {
@@ -803,19 +823,27 @@ fn together<'a>(
     root: Root,
     files: Vec<(RelPath, u64, Vec<Range>)>,
     identify: Rc<dyn Identify>,
-) -> Fallible<'a, Vec<Option<Identity>>> {
+) -> Fallible<'a, Vec<Result<Option<Identity>>>> {
     let reads = files
         .iter()
         .flat_map(|(path, _, ranges)| ranges.iter().map(move |range| (path.clone(), *range)));
-    read_many(root, reads.collect()).map_ok(move |parts| {
+    read_each(root, reads.collect()).map_ok(move |parts| {
         let mut parts = parts.into_iter();
         files
             .into_iter()
             .map(|(path, len, ranges)| {
-                let read: Option<Vec<Vec<u8>>> = parts.by_ref().take(ranges.len()).collect();
-                let mut digest = identify.digest(&path, len);
-                read?.iter().for_each(|part| digest.update(part));
-                Some(digest.finish())
+                let mut digest = Ok(Some(identify.digest(&path, len)));
+                for part in parts.by_ref().take(ranges.len()) {
+                    digest = match (digest, part) {
+                        (Ok(Some(mut digest)), Ok(Some(part))) => {
+                            digest.update(&part);
+                            Ok(Some(digest))
+                        }
+                        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+                        (Ok(_), Ok(_)) => Ok(None),
+                    };
+                }
+                digest.map(|digest| digest.map(|digest| digest.finish()))
             })
             .collect()
     })
@@ -828,7 +856,7 @@ fn streamed<'a>(
     len: u64,
     ranges: Vec<Range>,
     identify: Rc<dyn Identify>,
-) -> Fallible<'a, Option<Identity>> {
+) -> Fallible<'a, Result<Option<Identity>>> {
     let pieces: Vec<Range> = ranges
         .into_iter()
         .flat_map(|range| {
@@ -839,10 +867,10 @@ fn streamed<'a>(
             })
         })
         .collect();
-    let digest = Some(identify.digest(&path, len));
+    let digest = Ok(Some(identify.digest(&path, len)));
     fold(pieces.into_iter(), digest, move |digest, piece| {
-        let Some(mut digest) = digest else {
-            return ok(None);
+        let Ok(Some(mut digest)) = digest else {
+            return ok(digest);
         };
         let io = Io::Read {
             root,
@@ -852,16 +880,16 @@ fn streamed<'a>(
         attempt(io.clone()).then(move |result| match result {
             Ok(Reply::Bytes(bytes)) => {
                 digest.update(&bytes);
-                ok(Some(digest))
+                ok(Ok(Some(digest)))
             }
-            Err(IoError::NotFound) => ok(None),
+            Err(IoError::NotFound) => ok(Ok(None)),
             Ok(_) => Flow::Done(Err(
                 io.failed(IoError::Other("the backend gave the wrong reply".into()))
             )),
-            Err(error) => Flow::Done(Err(io.failed(error))),
+            Err(error) => ok(Err(io.failed(error))),
         })
     })
-    .map_ok(|digest| digest.map(|digest| digest.finish()))
+    .map_ok(|digest| digest.map(|digest| digest.map(|digest| digest.finish())))
 }
 
 /// What one file holds of another's bytes.
@@ -988,6 +1016,92 @@ mod tests {
         );
         let chunk = format!("read {CHUNK}");
         assert_eq!(asked, ["many 1", &chunk, &chunk, "read 5", "many 2"]);
+    }
+
+    /// Reads a file's first byte and the rest as two ranges.
+    struct Halves;
+
+    impl Identify for Halves {
+        fn ranges(&self, _: &RelPath, len: u64) -> Vec<Range> {
+            let rest = len.saturating_sub(1);
+            vec![
+                Range { offset: 0, len: 1 },
+                Range {
+                    offset: 1,
+                    len: rest,
+                },
+            ]
+        }
+
+        fn digest(&self, path: &RelPath, len: u64) -> Box<dyn crate::env::Digest> {
+            Whole.digest(path, len)
+        }
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_gets_its_error_and_the_others_their_identities() {
+        let disk = MemDisk::new();
+        let large: Vec<u8> = (0..(2 * CHUNK + 5)).map(|n| n as u8).collect();
+        for (at, bytes) in [("x", &b"xxxx"[..]), ("a", b"small"), ("big", &large)] {
+            disk.perform(Io::Create {
+                root: Root::Folder,
+                path: path(at),
+                bytes: bytes.to_vec(),
+            })
+            .unwrap();
+        }
+        let identify: Rc<dyn Identify> = Rc::new(Halves);
+        let files = vec![
+            (path("gone"), 3),
+            (path("x"), 4),
+            (path("a"), 5),
+            (path("big"), large.len() as u64),
+        ];
+        let unreadable = |at: &RelPath| *at == path("x") || *at == path("big");
+        let mut task = run_in_place(each_identity(Root::Folder, files, &identify).task());
+        let mut result = None;
+        let found = loop {
+            match task.resume(result.take()) {
+                Step::Io(Io::Read { path, .. }) if unreadable(&path) => {
+                    result = Some(Err(IoError::Denied));
+                }
+                Step::Io(Io::ReadMany { root, reads }) => {
+                    let read = reads.iter().map(|(at, range)| match unreadable(at) {
+                        true => Err(IoError::Denied),
+                        false => disk.perform(Io::Read {
+                            root,
+                            path: at.clone(),
+                            range: *range,
+                        }),
+                    });
+                    let read = read.map(|read| match read {
+                        Ok(Reply::Bytes(bytes)) => Ok(bytes),
+                        Ok(other) => panic!("{other:?}"),
+                        Err(error) => Err(error),
+                    });
+                    result = Some(Ok(Reply::ReadMany(read.collect())));
+                }
+                Step::Io(io) => result = Some(disk.perform(io)),
+                Step::Done(found) => break found.unwrap(),
+            }
+        };
+        let shown: Vec<String> = found
+            .iter()
+            .map(|found| match found {
+                Ok(identity) => format!("{identity:?}"),
+                Err(error) => error.to_string(),
+            })
+            .collect();
+        let a = Halves.of_bytes(&path("a"), b"small");
+        assert_eq!(
+            shown,
+            [
+                "None".to_owned(),
+                "Folder x: access to it is not allowed".to_owned(),
+                format!("{:?}", Some(a)),
+                "Folder big: access to it is not allowed".to_owned(),
+            ]
+        );
     }
 
     /// A task run through [`run`] inside another flow, as library operations

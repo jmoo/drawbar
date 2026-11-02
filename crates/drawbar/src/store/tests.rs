@@ -4696,6 +4696,45 @@ fn a_folder_that_cannot_be_read_is_reported_and_the_rest_opens() {
     assert!(session.bench.browser.folders.unwalked.is_empty());
 }
 
+/// A tagged file changed since and that drawbar may not read is reported and left out,
+/// and the rest of the library opens; once it can be read, a rescan lists it.
+#[cfg(unix)]
+#[test]
+fn a_changed_tagged_file_that_cannot_be_read_is_reported_and_the_rest_opens() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(root.at("Song.ne5p"), &program).unwrap();
+    let mut first = Session::listed(&root);
+    let song = first.named("Song.ne5p");
+    first.tag(&[song], "Live");
+    first.close();
+    let mut changed = program.clone();
+    changed[program.len() / 2] ^= 1;
+    fs::write(root.at("Song.ne5p"), &changed).unwrap();
+    fs::write(root.at("Other.ne5p"), &program).unwrap();
+    let mode = |mode| {
+        let locked = fs::Permissions::from_mode(mode);
+        fs::set_permissions(root.at("Song.ne5p"), locked).unwrap();
+    };
+    mode(0o000);
+    let mut session = Session::listed(&root);
+    mode(0o644);
+    let names = |session: &Session| {
+        let listed = session.bench.workspace.listed();
+        let mut names: Vec<String> = listed.map(|entity| entity.name.clone()).collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names(&session), ["Other.ne5p"]);
+    assert_eq!(session.said("drawbar could not read “Song.ne5p”"), 1);
+
+    session.refocus();
+    assert_eq!(names(&session), ["Other.ne5p", "Song.ne5p"]);
+    assert!(session.bench.browser.folders.unwalked.is_empty());
+}
+
 /// A tagged file deleted outside drawbar stays a lost row under one id, rescan after
 /// rescan, until the user forgets it; the row goes once the library has let it go.
 #[test]

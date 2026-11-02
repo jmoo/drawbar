@@ -705,7 +705,9 @@ their identities:
    and the refresh that finishes it reports every directory it listed.
    A directory it cannot list is left out, as is every directory it has not
    reached once it has listed 1,000,000 entries: what is under them is unknown,
-   as after a failed scan, and the scan reports them. A layout that hides leaves
+   as after a failed scan, and the scan reports them. So is a file whose identity
+   it needs and cannot read for any reason but its absence: the file is unknown,
+   as after a failed scan, and the scan reports it with those directories. A layout that hides leaves
    out every name that starts with a dot. Every listing leaves out symbolic
    links, special files and names that are not valid UTF-8. A view lists no
    file until a scan of every file has run.
