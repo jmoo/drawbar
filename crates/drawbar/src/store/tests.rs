@@ -7729,3 +7729,54 @@ fn an_unsaved_edit_whose_record_was_lost_comes_in_as_a_file_of_its_own() {
     assert_eq!(root.read("Gig/Pad 3.ne5p"), edit);
     assert!(again.handed_over(&list));
 }
+
+/// A take-in the next change finishes is no step Undo takes back: Undo offers the change
+/// alone, and an undo of each and a close leave every sound in the library.
+#[test]
+fn a_take_in_the_next_change_finishes_survives_an_undo_and_a_close() {
+    let root = Temp::new();
+    let (mut kept, ..) = gig_kept();
+    let list = older_list(&kept);
+    let mut session = Session::open(&root);
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "Gig/Pad 2.ne5p"),
+    ));
+    session.take_in(&mut kept);
+    session.make_tag("Sunday");
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo New tag “Sunday”")
+    );
+    session.undo();
+    assert_eq!(session.store.undo_label(), None, "Undo offers no take-in");
+    session.undo();
+    session.close();
+
+    let again = Session::open(&root);
+    assert!(again.store.has_taken_in(&list.hash));
+    assert_eq!(root.names(""), [".drawbar", "Empty", "Gig", "Grand.ne5p"]);
+    assert_eq!(root.names("Gig"), ["Pad 2.ne5p", "Pad.ne5p"]);
+}
+
+/// So is a rescue the next change finishes.
+#[test]
+fn a_rescue_the_next_change_finishes_survives_an_undo_and_a_close() {
+    let root = Temp::new();
+    with_rescue(&root);
+    let mut session = Session::open(&root);
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "nord-rescued-1-4.npno"),
+    ));
+    session.sync();
+    session.make_tag("Sunday");
+    assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue());
+    session.undo();
+    assert_eq!(session.store.undo_label(), None, "Undo offers no rescue");
+    session.undo();
+    session.close();
+    assert_eq!(
+        root.read("nord-rescued-1-4.npno"),
+        a_rescue(),
+        "the rescue stays in the library"
+    );
+}

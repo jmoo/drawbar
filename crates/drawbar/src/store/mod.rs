@@ -829,6 +829,20 @@ impl Intent {
         }
     }
 
+    /// Whether it, or a part of it, copies a slot's former occupant into the library or
+    /// takes in the list an older drawbar kept, which no undo takes back.
+    pub fn lasting(&self) -> bool {
+        match self {
+            Intent::Import {
+                came: Some(keys::Came::Rescued { .. }),
+                ..
+            }
+            | Intent::TakeIn { .. } => true,
+            Intent::Batch(parts) => parts.iter().any(Intent::lasting),
+            _ => false,
+        }
+    }
+
     /// Whether what it writes is filled from a file, whose read may fail before
     /// anything is written.
     pub fn reads(&self) -> bool {

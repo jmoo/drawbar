@@ -71,6 +71,9 @@ pub struct Keeper<F> {
     unsaved: unsaved::Store,
     /// The entries this session logged, whose undo ends with it.
     session: BTreeSet<EntryHash>,
+    /// Whether the change of this session's own that waits for the next write to finish
+    /// it is one no undo takes back.
+    lasting: bool,
     /// The most bytes this writer's trash holds before its oldest go.
     trash: u64,
     /// The view the app was last shown.
@@ -104,6 +107,7 @@ impl<F: Fs> Keeper<F> {
             library: None,
             unsaved: unsaved::Store::new(instance, Box::new(Shared(clock))),
             session: BTreeSet::new(),
+            lasting: false,
             trash: TRASH,
             shown: None,
             told_read_only: false,
@@ -139,6 +143,9 @@ impl<F: Fs> Keeper<F> {
             (finished, Ok(())) => finished,
             (finished, Err(why)) => return self.not_tried(&cmd, finished, &why, answer),
         };
+        if changes {
+            self.lasting = matches!(&cmd, Cmd::Intent(intent) if intent.lasting());
+        }
         match cmd {
             Cmd::Open => {
                 let opened = self.open().await;
@@ -241,6 +248,9 @@ impl<F: Fs> Keeper<F> {
         let finished = library
             .last_logged()
             .filter(|_| library.last_logged() != before);
+        if finished.is_some() && std::mem::take(&mut self.lasting) {
+            library.forget_undo();
+        }
         self.session.extend(finished);
         (finished, settled)
     }
@@ -714,7 +724,8 @@ impl<F: Fs> Keeper<F> {
         // ⚠️ Where folders do not rename, one moves file by file as the last scan found
         // it: a look at it first takes along what came into it since.
         let mut looked = Vec::new();
-        let lasting = no_undo(&intent);
+        let lasting = intent.lasting();
+        let before = library.last_logged();
         let folders = moved_folders(&intent);
         if !folders.is_empty() && !library.fs().capabilities(Root::Folder).rename_dir {
             let paths = folders.iter().filter_map(relative).collect();
@@ -815,7 +826,7 @@ impl<F: Fs> Keeper<F> {
         // ⚠️ Undoing a rescue's copy trashes the slot's former occupant, whose only other
         // copy is gone, and undoing a take-in trashes sounds whose list is not offered
         // again; the trash empties at close.
-        if lasting && changes.as_ref().is_some_and(|committed| committed.undoable) {
+        if lasting && library.last_logged() != before {
             library.forget_undo();
         }
         let intent = changes
@@ -889,20 +900,6 @@ fn not_made(intent: Intent, why: String, answer: &mut impl FnMut(Event)) -> Stri
         .filter(|event| !matches!(event, Event::Committed { .. }))
         .for_each(answer);
     why
-}
-
-/// Whether `intent`, or a part of it, copies a slot's former occupant into the library or
-/// takes in the list an older drawbar kept, which no undo takes back.
-fn no_undo(intent: &Intent) -> bool {
-    match intent {
-        Intent::Import {
-            came: Some(Came::Rescued { .. }),
-            ..
-        }
-        | Intent::TakeIn { .. } => true,
-        Intent::Batch(parts) => parts.iter().any(no_undo),
-        _ => false,
-    }
 }
 
 /// The folders `intent` moves, its parts' included.

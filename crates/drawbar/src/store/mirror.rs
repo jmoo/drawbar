@@ -1800,7 +1800,11 @@ impl Store {
     /// Send a change to the facts.
     fn commit(&mut self, intent: Intent) {
         self.committing += 1;
-        self.answering.push_back(Step::Change(intent.describe()));
+        let step = match intent.lasting() {
+            true => Step::Lasting,
+            false => Step::Change(intent.describe()),
+        };
+        self.answering.push_back(step);
         self.send(Cmd::Intent(intent));
     }
 
@@ -4194,6 +4198,8 @@ fn settling(how: toshokan::log::Settlement) -> &'static str {
 enum Step {
     /// A change, as the Edit menu names it.
     Change(String),
+    /// A change no undo takes back.
+    Lasting,
     Undo,
     Redo,
 }
@@ -4236,6 +4242,7 @@ impl History {
                 self.done.push((change, entry));
                 self.undone.clear();
             }
+            Step::Lasting => {}
             Step::Undo => {
                 if let Some((change, _)) = self.done.pop() {
                     self.undone.push((change, entry));
@@ -4255,7 +4262,7 @@ impl History {
         let (steps, cannot) = match step {
             Step::Undo => (&mut self.done, "cannot be undone"),
             Step::Redo => (&mut self.undone, "cannot be made again"),
-            Step::Change(_) => return None,
+            Step::Change(_) | Step::Lasting => return None,
         };
         let (change, _) = steps.pop()?;
         Some(format!("{change} {cannot}"))
