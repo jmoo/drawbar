@@ -7007,6 +7007,27 @@ fn bytes_that_do_not_decode_come_in_byte_for_byte() {
     assert_eq!(root.read("Junk.bin"), [0, 1, 2]);
 }
 
+/// drawbar 0.10 kept any text as a note under the name it was dropped with. drawbar opens
+/// a note only by `.txt`, so one named for another extension comes in with it added.
+#[test]
+fn a_note_named_for_another_extension_comes_in_as_a_note() {
+    let root = Temp::new();
+    let mut kept = kept_before(
+        "drawbar 2\n2\n1\tfresh\tSet.ne5p.oracle.json\tU2V0IDEK\n",
+        "",
+        "",
+    );
+    let mut session = Session::open(&root);
+    session.take_in(&mut kept);
+    assert_eq!(root.names(""), [".drawbar", "Set.ne5p.oracle.json.txt"]);
+    assert_eq!(session.said("differ only by case"), 0);
+    session.close();
+
+    let again = Session::open(&root);
+    let note = again.named("Set.ne5p.oracle.json.txt");
+    assert_eq!(again.bytes(note), b"Set 1\n");
+}
+
 /// A crash after the take-in landed and before the keys were emptied leaves the list:
 /// the library remembers it, here and in another install, and takes it in once.
 #[test]

@@ -1177,10 +1177,10 @@ fn tagged_filename(name: &str, tag: impl FnOnce() -> String) -> String {
 
 /// The filename a kept asset's file takes when the app chooses it: the name made one the
 /// library's rule allows, and given the extension the bytes call for unless it already
-/// carries one.
+/// ends in one drawbar opens.
 pub(crate) fn library_filename(entity: &LocalEntity) -> String {
     let stem = names::portable(&entity.name);
-    match crate::strings::carries_tag(&stem) {
+    match crate::store::opens(&stem) {
         true => stem,
         false => names::portable(&format!("{stem}.{}", entity.format_tag())),
     }
