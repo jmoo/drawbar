@@ -919,12 +919,14 @@ fn items(
         }
         own
     };
-    let known_before =
-        |field: &FieldKey, n: u64| merged_own.iter().any(|(f, at)| f == field && *at < n);
+    let first_from = |field: &FieldKey, n: u64| {
+        let next = merged_own.range((field.clone(), n)..).next();
+        next.filter(|(f, _)| f == field).map(|(_, at)| *at)
+    };
+    let known_before = |field: &FieldKey, n: u64| first_from(field, 0).is_some_and(|at| at < n);
     // An unplaced line is an older or diverged copy of what the merge holds from
     // there on: the writer's own later history already decided what it wrote.
-    let known_since =
-        |field: &FieldKey, n: u64| merged_own.iter().any(|(f, at)| f == field && *at >= n);
+    let known_since = |field: &FieldKey, n: u64| first_from(field, n).is_some();
     let taken = |field: &FieldKey| kills.takes.contains_key(&(field.clone(), w.writer));
     // A tip's own write the merge leaves out, above the fork point, dismissed
     // or after a dismissed one, that replaced an own write the merge does not
