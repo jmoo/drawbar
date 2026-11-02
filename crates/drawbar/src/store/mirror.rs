@@ -267,6 +267,9 @@ pub struct Store {
     reading: bool,
     /// Each rename sent that has not answered, from and to.
     moving: Vec<(LibPath, LibPath)>,
+    /// The files deleted while a change is in flight, each kept until none is: the
+    /// answer to a change sent before the delete still lists the file.
+    deleting: BTreeSet<LibPath>,
     /// The most bytes of the library's files the assets may hold whole: [`MOST_BYTES`].
     budget: u64,
     /// How many files have been asked of the backend to read.
@@ -365,6 +368,7 @@ impl Store {
             fetching: BTreeSet::new(),
             reading: false,
             moving: Vec::new(),
+            deleting: BTreeSet::new(),
             budget: MOST_BYTES,
             #[cfg(test)]
             asked_files: 0,
@@ -1520,7 +1524,7 @@ impl Store {
                 waiting,
                 result,
             } => {
-                self.committing = self.committing.saturating_sub(1);
+                self.uncommit();
                 let landed = made.is_some();
                 let step = self.answering.pop_front();
                 self.history.waited(finished, waiting, step.as_ref());
@@ -1578,7 +1582,7 @@ impl Store {
                 }
             }
             Event::Unheard { label } => {
-                self.committing = self.committing.saturating_sub(1);
+                self.uncommit();
                 self.answering.pop_front();
                 // The look below finds whether it landed, as it finds each of its files.
                 if let Some(taking) = self.taking_in.take_if(|_| label == TAKE_IN) {
@@ -1731,6 +1735,14 @@ impl Store {
             }
         }
         false
+    }
+
+    /// A change, an undo or a redo answered.
+    fn uncommit(&mut self) {
+        self.committing = self.committing.saturating_sub(1);
+        if self.committing == 0 {
+            self.deleting.clear();
+        }
     }
 
     /// Send a change to the files.
@@ -2456,6 +2468,9 @@ impl Store {
             }
             if let Some(id) = self.renaming(path) {
                 self.ids.insert(id, key.clone());
+                continue;
+            }
+            if self.deleting.contains(path) {
                 continue;
             }
             if let Some(stat) = stat {
@@ -4019,8 +4034,9 @@ impl Store {
         };
         if let (Some(print), false) = (record.fingerprint, record.missing) {
             self.part(Intent::Delete {
-                files: vec![(at, print.expect())],
+                files: vec![(at.clone(), print.expect())],
             });
+            self.deleting.insert(at);
         }
         true
     }

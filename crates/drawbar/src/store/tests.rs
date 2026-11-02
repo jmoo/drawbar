@@ -7440,3 +7440,71 @@ fn a_folder_made_during_a_rescan_keeps_the_library_losing_until_it_is_sent() {
     session.settle();
     assert_eq!(root.names("").len(), 2, "the folder was made");
 }
+
+/// A file tagged and then deleted before the tag's answer arrives stays deleted: the
+/// tag's answer, which still lists the file, brings back no asset for it.
+#[test]
+fn a_file_deleted_while_its_first_tag_commits_stays_deleted() {
+    let root = Temp::new();
+    fs::write(root.at("a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.named("a.ne5p");
+    let tag = session
+        .bench
+        .browser
+        .tags
+        .make("Sunday")
+        .expect("a new tag");
+    session
+        .bench
+        .act(vec![crate::browser::Act::Tag { ids: vec![id], tag }]);
+    session.poll();
+    session.bench.act(vec![crate::browser::Act::Remove(id)]);
+    session.decided();
+    session.sync();
+
+    assert_eq!(
+        session.bench.workspace.listed().count(),
+        0,
+        "no asset is listed"
+    );
+    assert!(
+        session.bench.browser.folders.missing.is_empty(),
+        "none is missing"
+    );
+    assert_eq!(session.said("appeared"), 0);
+    assert_eq!(session.said("is missing"), 0);
+    assert!(!root.at("a.ne5p").exists(), "the file is in the trash");
+}
+
+/// A delete that fails leaves the file listed: the asset comes back once the library
+/// answers.
+#[test]
+fn a_file_whose_delete_fails_while_its_first_tag_commits_comes_back() {
+    let root = Temp::new();
+    fs::write(root.at("a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.named("a.ne5p");
+    let tag = session
+        .bench
+        .browser
+        .tags
+        .make("Sunday")
+        .expect("a new tag");
+    session
+        .bench
+        .act(vec![crate::browser::Act::Tag { ids: vec![id], tag }]);
+    session.poll();
+    let mut changed = root.read("a.ne5p");
+    changed.push(0);
+    fs::write(root.at("a.ne5p"), changed).unwrap();
+    session.bench.act(vec![crate::browser::Act::Remove(id)]);
+    session.decided();
+    session.sync();
+
+    assert_eq!(session.said("did not change as asked: deleting a.ne5p"), 1);
+    let back = session.named("a.ne5p");
+    assert_eq!(session.path(back).as_deref(), Some("a.ne5p"));
+    assert_eq!(session.said("is missing"), 0);
+    assert!(root.at("a.ne5p").exists(), "the file stays");
+}
