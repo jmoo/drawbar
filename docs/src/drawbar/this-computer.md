@@ -308,12 +308,12 @@ bring back any you deleted.
   put the old sound back, while it replaced a sound on your keyboard, the sound
   that was there may now be only on this computer. drawbar puts it in the
   library as a file of its own, named after the slot it came from, once the
-  instrument is idle or when the library next opens. Undo takes it out again,
-  and you can delete it like any other file. While the library cannot be
-  written, drawbar keeps it aside and asks: **Show the file** shows where it is,
-  **Discard** deletes it, and **Later** leaves it for the next library that can
-  take it. A file that does not read is not a copy of the sound, and drawbar
-  offers only to discard it.
+  instrument is idle or when the library next opens. Undo does not take it out,
+  since it may be the only copy, but you can delete it like any other file.
+  While the library cannot be written, drawbar keeps it aside and asks: **Show
+  the file** shows where it is, **Discard** deletes it, and **Later** leaves it
+  for the next library that can take it. A file that does not read is not a
+  copy of the sound, and drawbar offers only to discard it.
 - **Differs only by case.** Two names in one folder differ only in upper and
   lower case, such as `Pad.ne5p` and `pad.ne5p`. macOS and Windows hold only one
   of them, so rename one to keep the library whole on every computer.
