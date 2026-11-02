@@ -381,7 +381,7 @@ const FSYNC: bool = cfg!(any(unix, windows));
 /// Makes what `path`, a `kind`, holds durable: a file's bytes, a directory's names.
 #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
 fn flush(path: &Path, kind: Kind) -> io::Result<()> {
-    let file = File::open(path)?;
+    let file = flushable(path, kind)?;
     let flushed = file.sync_all();
     // `sync_all` asks Apple systems for a full sync, which SMB, AFP and WebDAV
     // volumes refuse, under more than one error, while taking a plain one; as SQLite
@@ -413,8 +413,23 @@ fn refused(error: &io::Error) -> bool {
     unix,
     not(any(target_os = "linux", target_os = "android", target_vendor = "apple"))
 ))]
-fn flush(path: &Path, _: Kind) -> io::Result<()> {
-    File::open(path)?.sync_all()
+fn flush(path: &Path, kind: Kind) -> io::Result<()> {
+    flushable(path, kind)?.sync_all()
+}
+
+/// `path`, a `kind`, opened so that it can be flushed: a file for writing where it
+/// can be, and otherwise for reading.
+#[cfg(unix)]
+fn flushable(path: &Path, kind: Kind) -> io::Result<File> {
+    // An SMB server refuses to flush a handle that cannot write. Reported by public
+    // documentation; not confirmed on hardware.
+    match kind {
+        Kind::File => OpenOptions::new()
+            .write(true)
+            .open(path)
+            .or_else(|_| File::open(path)),
+        Kind::Directory => File::open(path),
+    }
 }
 
 /// Makes what `path`, a `kind`, holds durable: a file's bytes, a directory's names.

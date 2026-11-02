@@ -615,6 +615,27 @@ fn a_native_lock_leaves_its_file_readable_and_writable() {
     assert_eq!(taken, Ok(Reply::Lock(Lock::Acquired)), "let go");
 }
 
+/// A file that may only be read, as a user's read-only file moved to the trash, is
+/// flushed all the same.
+#[cfg(unix)]
+#[test]
+fn a_native_sync_flushes_a_file_that_may_only_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+    use toshokan::blocking::{Backend, Native};
+
+    let (folder, local) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let file = folder.path().join("a.wav");
+    std::fs::write(&file, b"a").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let mut native = Native::new(folder.path(), local.path());
+    let synced = native.perform(Io::Sync {
+        root: Root::Folder,
+        path: path("a.wav"),
+    });
+    assert_eq!(synced, Ok(Reply::Done));
+    assert_eq!(std::fs::read(&file).unwrap(), b"a");
+}
+
 #[cfg(unix)]
 #[test]
 fn a_native_root_reaches_nothing_through_a_linked_directory() {
