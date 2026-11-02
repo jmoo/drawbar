@@ -4716,6 +4716,34 @@ fn a_lost_row_keeps_its_id_until_it_is_forgotten() {
     assert_eq!(lost(&again), Vec::<u64>::new());
 }
 
+/// A tagged asset whose file went while the library was open is missing, and deleting it
+/// lets the library go of it with its tags: no lost row stands in for it.
+#[test]
+fn a_missing_tagged_asset_deleted_leaves_no_lost_row() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.tag(&[id], "Sunday");
+    fs::remove_file(root.at("untitled.ne5p")).unwrap();
+    session.refocus();
+    assert!(
+        session.bench.browser.folders.missing.contains(&id),
+        "missing"
+    );
+
+    session.bench.act(vec![crate::browser::Act::Remove(id)]);
+    session.decided();
+    session.settle();
+    assert_eq!(
+        session.bench.browser.folders.lost().len(),
+        0,
+        "nothing lost"
+    );
+    session.close();
+    let again = Session::listed(&root);
+    assert_eq!(again.bench.browser.folders.lost().len(), 0, "nothing lost");
+}
+
 /// A rename that changes only case, on a disk that ignores case, leaves one asset with its
 /// tags under the new name, rescan after rescan, and deleting it leaves nothing behind.
 /// A disk that tells case apart has nothing to show here.

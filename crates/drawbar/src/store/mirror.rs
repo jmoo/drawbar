@@ -3940,7 +3940,7 @@ impl Store {
 
     /// Move the file of an asset that is gone to this writer's trash, once no copy waits
     /// to be made of it. An asset never written, or one whose file is missing, has
-    /// nothing to trash.
+    /// nothing to trash, and the library lets go of a missing one.
     fn delete(
         &mut self,
         id: u64,
@@ -3963,6 +3963,11 @@ impl Store {
         let Some(record) = self.records.remove(&id) else {
             return true;
         };
+        // A missing file's entity goes with its tags, as a lost row's does.
+        if record.missing && matches!(self.ids.key(id), Some(Key::Entity(_))) {
+            self.asked.push(Asked::Forget(id));
+            return true;
+        }
         self.ids.remove(id);
         let Some(at) = record.path else {
             return true;
