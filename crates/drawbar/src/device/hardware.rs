@@ -1404,7 +1404,7 @@ fn s7_a_program_on_the_instrument_exports_as_nord_cli_bundles_it() {
 /// A replace whose write fails and whose occupant cannot be put back leaves the occupant
 /// in this install's folder for the library, and once the instrument is idle it goes into
 /// the library as a file of its own, an entity that says which slot it came off, through a
-/// reopen. Putting it there is one change undo takes back and redo makes again.
+/// reopen. Undo does not offer to take it back, as the copy is the only one.
 #[test]
 #[ignore = "writes to an attached instrument; see the module's documentation"]
 fn s8_an_occupant_that_cannot_be_put_back_goes_into_the_library() {
@@ -1483,6 +1483,7 @@ fn s8_an_occupant_that_cannot_be_put_back_goes_into_the_library() {
     let name = rescues[0].0.clone();
     let rescue = kept_in.join(&name);
     fs::set_permissions(&rescue, mode(0o644)).expect("readable again");
+    let undoable = rig.store.undo_label();
     // As the app's next frame with the instrument idle does.
     rig.take_in_rescues();
     let landed = |rig: &Rig| {
@@ -1494,15 +1495,7 @@ fn s8_an_occupant_that_cannot_be_put_back_goes_into_the_library() {
             && !rescue.exists()
     };
     rig.until("the rescue lands in the library", SEND_LIMIT, landed);
-
-    rig.store.undo();
-    rig.until("the rescue's placement is undone", ATTACH_LIMIT, |rig| {
-        !rig.library.at(&name).exists()
-    });
-    rig.store.redo();
-    rig.until("the rescue's placement is redone", ATTACH_LIMIT, |rig| {
-        rig.library.at(&name).exists()
-    });
+    assert_eq!(rig.store.undo_label(), undoable, "Undo offers no rescue");
 
     let rig = rig.reopen();
     let kept = rig.asset(&name);
