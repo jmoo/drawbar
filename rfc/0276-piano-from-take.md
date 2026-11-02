@@ -287,8 +287,6 @@ If nothing is done, library building stays limited to people willing to hand-edi
 - Denoising that grows stronger along each note. The attack keeps its character with a light gate,
   while the tail is a few clean partials and can take a heavy one, a falling low-pass, or a mask
   around the note's harmonics. That would remove the hiss that remains on long held tails.
-- A pass for regular clicks: a tick at a fixed period, fitted to a timing grid. One test recording
-  needed it.
 - Other sound profiles. The first version is designed and tested on pianos: a sharp attack, a
   decaying tail and a release at key-up. The same steps need testing on sources with a different
   attack, sustain or decay, such as a slow swell or a steady sustained tone with no decay. Those may
