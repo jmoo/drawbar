@@ -657,7 +657,7 @@ impl<F: Fs> Keeper<F> {
         };
         let viewed = Viewed {
             followed: Some(followed(&committed)),
-            dirs: Some(folders(library.fs()).await),
+            dirs: folders(library.fs()).await,
             left: shown_paths(&committed.left),
             ..committed_view(library, &mut self.shown, committed.changes)
         };
@@ -677,7 +677,7 @@ impl<F: Fs> Keeper<F> {
         let committed = library.settle(orphan, how).await.map_err(|e| told(&e))?;
         let viewed = Viewed {
             followed: Some(followed(&committed)),
-            dirs: Some(folders(library.fs()).await),
+            dirs: folders(library.fs()).await,
             ..committed_view(library, &mut self.shown, committed.changes)
         };
         Ok((Some((committed.intent, committed.undoable)), viewed))
@@ -2236,15 +2236,14 @@ fn no_path(path: &LibPath) -> String {
 }
 
 /// Every folder below the root drawbar lists, in path order: none whose name starts with
-/// a dot, none reached through a link, and none past [`MOST_ENTRIES`] entries.
-async fn folders<F: Fs>(fs: &F) -> Vec<LibPath> {
+/// a dot, none reached through a link, and none past [`MOST_ENTRIES`] entries. `None`
+/// where a folder could not be listed.
+async fn folders<F: Fs>(fs: &F) -> Option<Vec<LibPath>> {
     let mut found = Vec::new();
     let mut waiting = VecDeque::from([RelPath::ROOT]);
     let mut looked = 0;
     while let Some(dir) = waiting.pop_front() {
-        let Ok(entries) = storage::list(fs, Root::Folder, &dir).await else {
-            continue;
-        };
+        let entries = storage::list(fs, Root::Folder, &dir).await.ok()?;
         for (name, meta) in entries {
             looked += 1;
             if looked > MOST_ENTRIES {
@@ -2263,7 +2262,7 @@ async fn folders<F: Fs>(fs: &F) -> Vec<LibPath> {
         }
     }
     found.sort();
-    found
+    Some(found)
 }
 
 #[cfg(test)]
@@ -2724,27 +2723,35 @@ mod tests {
         }
     }
 
-    /// Storage that renames no folder whole, and whose listings of the library folder
-    /// fail once `failing` is set.
-    struct Unlisted(Counted<Blocking>, Rc<std::cell::Cell<bool>>);
+    /// Storage that renames no folder whole, and whose listings of the folders of the
+    /// library folder that `fails` picks fail once `failing` is set.
+    struct Unlisted {
+        fs: Counted<Blocking>,
+        failing: Rc<std::cell::Cell<bool>>,
+        fails: fn(&RelPath) -> bool,
+    }
 
     impl Fs for Unlisted {
         fn capabilities(&self, root: Root) -> toshokan::io::Capabilities {
             toshokan::io::Capabilities {
                 rename_dir: false,
-                ..self.0.capabilities(root)
+                ..self.fs.capabilities(root)
             }
         }
 
         async fn perform(&self, io: toshokan::Io) -> toshokan::io::IoResult {
             match io {
                 toshokan::Io::List {
-                    root: Root::Folder, ..
+                    root: Root::Folder,
+                    ref dir,
                 }
                 | toshokan::Io::ListStat {
-                    root: Root::Folder, ..
-                } if self.1.get() => Err(IoError::Other("no listings here".into())),
-                io => self.0.perform(io).await,
+                    root: Root::Folder,
+                    ref dir,
+                } if self.failing.get() && (self.fails)(dir) => {
+                    Err(IoError::Other("no listings here".into()))
+                }
+                io => self.fs.perform(io).await,
             }
         }
     }
@@ -2764,7 +2771,12 @@ mod tests {
         );
         let (fs, env) = native.unopened.take().unwrap();
         let failing = Rc::new(std::cell::Cell::new(false));
-        let mut keeper = super::Keeper::new(Unlisted(fs, Rc::clone(&failing)), env);
+        let unlisted = Unlisted {
+            fs,
+            failing: Rc::clone(&failing),
+            fails: |_| true,
+        };
+        let mut keeper = super::Keeper::new(unlisted, env);
         let mut answers = Vec::new();
         let mut run = |keeper: &mut super::Keeper<Unlisted>, cmd| {
             nord_usb::block_on(keeper.run(cmd, &mut |event| answers.push(event)));
@@ -2792,6 +2804,49 @@ mod tests {
             "one answer for the change: {answers:?}"
         );
         assert!(root.at("Bulk/a.ne5p").exists(), "nothing moved");
+    }
+
+    /// An undo whose look at the folders fails says nothing of them, rather than leave
+    /// out the folders it could not list.
+    #[test]
+    fn an_undo_whose_folders_cannot_be_listed_leaves_them_unsaid() {
+        let root = Temp::new();
+        fs::create_dir(root.at("Set")).unwrap();
+        fs::write(root.at("Set/a.ne5p"), b"a").unwrap();
+        let mut native = native::keeper(
+            &root.0,
+            &root.local(),
+            Arc::default(),
+            Box::new(SystemClock),
+        );
+        let (fs, env) = native.unopened.take().unwrap();
+        let failing = Rc::new(std::cell::Cell::new(false));
+        let unlisted = Unlisted {
+            fs,
+            failing: Rc::clone(&failing),
+            fails: |dir| !dir.as_str().starts_with(super::super::keys::DIR),
+        };
+        let mut keeper = super::Keeper::new(unlisted, env);
+        let mut answers = Vec::new();
+        let mut run = |keeper: &mut super::Keeper<Unlisted>, cmd| {
+            nord_usb::block_on(keeper.run(cmd, &mut |event| answers.push(event)));
+        };
+        run(&mut keeper, Cmd::Open);
+        run(&mut keeper, Cmd::Rescan);
+        run(
+            &mut keeper,
+            Cmd::Intent(Intent::MakeTag {
+                name: "Live".into(),
+            }),
+        );
+        failing.set(true);
+        run(&mut keeper, Cmd::Undo);
+        let Some(Event::Committed { label, result, .. }) = answers.last() else {
+            panic!("{answers:?}")
+        };
+        assert_eq!(label, "Undo");
+        let viewed = result.as_ref().expect("the undo lands");
+        assert_eq!(viewed.dirs, None, "no folders said");
     }
 
     /// Where the library folder never makes a change durable, the library turns
