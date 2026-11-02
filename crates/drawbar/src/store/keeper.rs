@@ -87,6 +87,8 @@ pub struct Keeper<F> {
     /// The entities whose file the app was told could be any of several, as the last
     /// scan found them.
     told_ambiguous: BTreeSet<toshokan::EntityId>,
+    /// The files of other drawbars' history the app was told could not be read.
+    told_unread: BTreeSet<RelPath>,
     /// The lock this window holds while it has the library open.
     window: Option<RelPath>,
 }
@@ -109,6 +111,7 @@ impl<F: Fs> Keeper<F> {
             told_unemptied: false,
             told_unjoined: false,
             told_ambiguous: BTreeSet::new(),
+            told_unread: BTreeSet::new(),
             window: None,
         }
     }
@@ -140,9 +143,11 @@ impl<F: Fs> Keeper<F> {
             Cmd::Open => {
                 let opened = self.open().await;
                 answer(Event::Opened(opened));
+                self.tell_unread(answer);
             }
             Cmd::Rescan | Cmd::Refresh => {
                 let scanned = self.scanned(matches!(cmd, Cmd::Rescan), answer).await;
+                self.tell_unread(answer);
                 // A history that forked is said with the scan's answer.
                 let forked = scanned.as_ref().is_ok_and(|viewed| viewed.retired);
                 if self.restarted() && !forked {
@@ -337,6 +342,18 @@ impl<F: Fs> Keeper<F> {
             Some((LibPath::parse(was.as_str())?, candidates.collect()))
         });
         new.collect()
+    }
+
+    /// Say once a session each file of other drawbars' history the last read could not
+    /// read.
+    fn tell_unread(&mut self, answer: &mut impl FnMut(Event)) {
+        let unread = self.library.as_ref().map(Library::unread);
+        let new = unread.into_iter().flatten();
+        let new = new.filter(|path| self.told_unread.insert(path.clone()));
+        let new: Vec<String> = new.map(|path| path.as_str().to_owned()).collect();
+        if !new.is_empty() {
+            answer(Event::Unread(new));
+        }
     }
 
     /// Say that this session's undo history began again, where the library stopped

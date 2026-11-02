@@ -1697,6 +1697,14 @@ impl Store {
                 log.error(format!("emptying the trash: {why}"));
                 log.trouble(format!("drawbar's trash could not be emptied: {why}."));
             }
+            Event::Unread(paths) => {
+                for path in paths {
+                    log.trouble(format!(
+                        "drawbar could not read “{path}”, which another drawbar wrote, so \
+                         the changes in it are not shown yet."
+                    ));
+                }
+            }
             Event::Unjoined(why) => {
                 log.error(format!("joining the tags of one file: {why}"));
                 log.trouble(format!(

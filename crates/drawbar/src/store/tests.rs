@@ -4735,6 +4735,49 @@ fn a_changed_tagged_file_that_cannot_be_read_is_reported_and_the_rest_opens() {
     assert!(session.bench.browser.folders.unwalked.is_empty());
 }
 
+/// Another drawbar's history that cannot be read is said once a session in the activity
+/// log, and what it holds shows once it can be read.
+#[cfg(unix)]
+#[test]
+fn another_drawbars_history_that_cannot_be_read_is_said_once_a_session() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Temp::new();
+    fs::write(root.at("Grand.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut here = Session::listed(&root);
+    let grand = here.named("Grand.ne5p");
+    here.tag(&[grand], "Live");
+    here.close();
+    let writers = root.at(".drawbar/library/writers.2");
+    let theirs = fs::read_dir(&writers)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let files: Vec<_> = fs::read_dir(&theirs)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_file())
+        .collect();
+    let mode = |mode| {
+        for file in &files {
+            fs::set_permissions(file, fs::Permissions::from_mode(mode)).unwrap();
+        }
+    };
+    mode(0o000);
+    let local = Temp::new();
+    let mut there = Session::elsewhere(&root, &local);
+    there.refocus();
+    mode(0o644);
+    let said = "which another drawbar wrote, so the changes in it are not shown yet";
+    assert_eq!(there.said(said), files.len(), "once a session");
+    assert_eq!(tagged(&there), []);
+
+    there.refocus();
+    assert_eq!(tagged(&there), [wears("Grand.ne5p", &["Live"])]);
+}
+
 /// A tagged file deleted outside drawbar stays a lost row under one id, rescan after
 /// rescan, until the user forgets it; the row goes once the library has let it go.
 #[test]

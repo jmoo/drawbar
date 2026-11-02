@@ -78,7 +78,9 @@ changed when you come back to the window, and the activity log says so. Two
 drawbars that tag the same file before either sees the other's tags, as while a
 sync is paused, both keep them: once the sync catches up, the file wears every
 tag either gave it, and the activity log of the drawbar that brought them
-together names the file.
+together names the file. A file of another drawbar's record that a sync client
+keeps only online, or that this computer may not read, is named in the activity
+log once, and its changes show once drawbar can read it.
 
 In the browser, and on a desktop disk that cannot refuse to move a file onto one
 already there, drawbar checks that a name is free before a saved, copied or

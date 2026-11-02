@@ -1142,6 +1142,9 @@ pub enum Event {
     Unjoined(String),
     /// This session's undo history began again, and reaches none of the changes before.
     Restarted,
+    /// Files of other drawbars' history that could not be read, each said once a
+    /// session: what they hold is not shown until a refresh reads them.
+    Unread(Vec<String>),
     /// How many of the library's files [`Cmd::Restore`] wrote, or why it wrote none.
     Restored(Result<usize, String>),
     /// The name a copy of the library was saved under and how many of the library's files
@@ -1170,6 +1173,7 @@ impl Event {
             Event::Failed(_) => one("write"),
             Event::Unemptied(_) => one("trash"),
             Event::Unjoined(_) => one("join"),
+            Event::Unread(_) => one("unread"),
             Event::Restored(Err(_)) => one("restore"),
             Event::Copied(Err(_)) => one("copy"),
             Event::Unkept(_)
