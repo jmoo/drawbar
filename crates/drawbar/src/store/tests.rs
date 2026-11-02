@@ -7800,3 +7800,19 @@ fn a_file_whose_delete_is_refused_comes_back_once_the_library_answers() {
     assert_eq!(session.path(back).as_deref(), Some("untitled.ne5p"));
     assert!(root.at("untitled.ne5p").exists(), "the file stays");
 }
+
+/// A take-in after an Undo ends Redo, as the library's own redo ends with it.
+#[test]
+fn a_take_in_after_an_undo_leaves_nothing_to_redo() {
+    let root = Temp::new();
+    let (mut kept, ..) = gig_kept();
+    let mut session = Session::open(&root);
+    session.make_tag("Sunday");
+    session.undo();
+    assert!(
+        session.store.redo_label().is_some(),
+        "the tag can be made again"
+    );
+    session.take_in(&mut kept);
+    assert_eq!(session.store.redo_label(), None);
+}

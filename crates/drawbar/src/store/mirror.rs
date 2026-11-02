@@ -1573,8 +1573,12 @@ impl Store {
                     (Some(step), true) => self.history.forget(step),
                     _ => None,
                 };
-                if let (Some(entry), Some(step), true) = (made, step, undoable) {
-                    self.history.took(step, entry);
+                match (made, step, undoable) {
+                    (Some(entry), Some(step), true)
+                    | (Some(entry), Some(step @ Step::Lasting), _) => {
+                        self.history.took(step, entry)
+                    }
+                    _ => {}
                 }
                 let told = std::mem::take(&mut self.turned_read_only);
                 // A take-in that failed partway lands once its change is finished.
@@ -4248,7 +4252,8 @@ impl History {
                 self.done.push((change, entry));
                 self.undone.clear();
             }
-            Step::Lasting => {}
+            // Logging any step ends the library's redo, as a change does.
+            Step::Lasting => self.undone.clear(),
             Step::Undo => {
                 if let Some((change, _)) = self.done.pop() {
                     self.undone.push((change, entry));
