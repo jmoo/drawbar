@@ -477,7 +477,7 @@ impl Library {
     /// is written in the other writer's directory. Effects that fail leave the
     /// effect open to settle again, and this writer's own record of them to settle
     /// at its next write. Finishing
-    /// or rolling back a directory rename this folder cannot make is refused with
+    /// or rolling back a directory move this folder cannot make is refused with
     /// [`crate::Refusal::Unsupported`]; dismissing it is not. A settlement is no
     /// step of undo, and undo takes what it wrote for the other writer's.
     pub fn settle(&mut self, orphan: Orphan, how: Settlement) -> Task<'_, Result<Committed>> {

@@ -1059,10 +1059,11 @@ intent does: the settler's own record stays open, and the other writer's record
 stays open until the settlement is made again, which finds from the folder what
 remains. Only the record's writer removes it.
 
-A record written where directories rename may move a tree by one `rename`. A
-reader whose folder cannot rename directories refuses to finish that step or roll
-it back, and changes nothing; it can still dismiss the record, and a folder that
-renames directories can settle it.
+A record written where directories rename may move a tree by one `rename`, or,
+for a change of case alone, by a `to_trash` and a `from_trash`. A reader whose
+folder cannot rename directories refuses to finish or roll back a step that
+would rename a directory or move one to the trash, and changes nothing; it can
+still dismiss the record, and a folder that renames directories can settle it.
 
 ## Undo and redo
 

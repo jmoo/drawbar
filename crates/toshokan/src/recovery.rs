@@ -517,7 +517,8 @@ fn under<'a>(dir: RelPath) -> Fallible<'a, Vec<(RelPath, Kind)>> {
 /// settlement displaces go to this writer's trash, the start of a copy their next
 /// step left included. Finishing skips moving to the trash a path that holds
 /// nothing. Dismissing changes no file. Finishing or rolling back a step that
-/// renames a directory is refused where `capabilities` cannot rename one.
+/// would rename a directory or move one to the trash is refused where
+/// `capabilities` cannot rename one.
 ///
 /// Planned again after a settlement stopped partway, it plans what remains. The
 /// caller commits the plan, then, once its effects complete, appends a
@@ -575,7 +576,7 @@ impl Orphaned<'_> {
         let partial = progress.partial.iter().map(|cut| &cut.path);
         for stale in progress.leftover.iter().chain(partial) {
             if self.layout.check_library_path(stale).is_ok() {
-                self.trash(stale);
+                self.trash(stale)?;
             }
         }
         let steps = &self.theirs.steps;
@@ -610,7 +611,7 @@ impl Orphaned<'_> {
         match step {
             EffectStep::ToTrash { path, .. } if !self.present.contains(path) => {}
             EffectStep::ToTrash { path, item } => {
-                let ours = self.trash(path);
+                let ours = self.trash(path)?;
                 self.relayed.insert(*item, ours);
             }
             EffectStep::Place { staged, path } => {
@@ -644,7 +645,7 @@ impl Orphaned<'_> {
             }
             EffectStep::Place { path, .. } | EffectStep::FromTrash { path, .. } => {
                 if self.present.contains(path) {
-                    self.trash(path);
+                    self.trash(path)?;
                 }
             }
             EffectStep::Rename { from, to } => return self.rename(to, from),
@@ -672,14 +673,17 @@ impl Orphaned<'_> {
         Ok(())
     }
 
-    fn trash(&mut self, path: &RelPath) -> Nonce {
+    fn trash(&mut self, path: &RelPath) -> std::result::Result<Nonce, Refusal> {
+        if self.directories.contains(path) && !self.rename_dir {
+            return Err(Refusal::Unsupported(Capability::RenameDir));
+        }
         self.present.remove(path);
         let item = self.env.nonce();
         self.plan.steps.push(EffectStep::ToTrash {
             path: path.clone(),
             item,
         });
-        item
+        Ok(item)
     }
 
     /// Copies `source` to `path`: a file whole, a directory of their trash file by

@@ -14,7 +14,7 @@ use toshokan::crash;
 use toshokan::env::{ExactNames, PrefixIdentity, SeededRandom, TestClock};
 use toshokan::error::Why;
 use toshokan::intent::{Driver, Intent};
-use toshokan::io::{Capabilities, IoError, Range};
+use toshokan::io::{Capabilities, Capability, IoError, Range};
 use toshokan::layout::SEGMENT_EXTENSION;
 use toshokan::library::COMPACT_AFTER;
 use toshokan::line::MAX_LINE;
@@ -659,6 +659,7 @@ through_both!(
     a_change_of_case_another_install_did_not_start_is_finished_by_another,
     a_folder_another_left_in_its_trash_is_finished_by_another,
     a_folder_another_left_in_its_trash_is_rolled_back_by_another,
+    finishing_a_folder_case_change_where_moves_copy_is_refused_and_changes_nothing,
     a_refresh_reports_another_installs_unfinished_change_as_it_stands,
     a_settlement_after_a_refused_undo_is_no_undo_of_it,
     settling_another_writers_change_is_no_step_of_undo,
@@ -4951,6 +4952,65 @@ fn a_folder_another_left_in_its_trash_is_rolled_back_by_another<F: Facade>() {
         files.map(|at| at.as_str().to_owned()).collect::<Vec<_>>(),
         ["Organ/b/c.wav", "Organ/song.npno"]
     );
+}
+
+/// `folder`'s files and directories, in a folder whose moves copy.
+fn where_moves_copy(folder: &MemDisk) -> MemDisk {
+    let copied = MemDisk::with_capabilities(COPYING, Capabilities::ALL);
+    let dirs = folder.directories(Root::Folder).into_iter();
+    for path in dirs.filter(|dir| !dir.is_root()) {
+        let made = Io::MakeDir {
+            root: Root::Folder,
+            path,
+        };
+        copied.perform(made).unwrap();
+    }
+    for (path, bytes) in folder.files(Root::Folder) {
+        let root = Root::Folder;
+        copied.perform(Io::Create { root, path, bytes }).unwrap();
+    }
+    copied
+}
+
+fn finishing_a_folder_case_change_where_moves_copy_is_refused_and_changes_nothing<F: Facade>() {
+    let folder = MemDisk::with_capabilities(Capabilities::ALL, Capabilities::ALL);
+    let clock = TestClock::at(1_000);
+    put(&folder, "Organ/b/c.wav", b"c");
+    let probe = Probe::new(&machine(&folder));
+    let folding = |label, seed| Env {
+        names: Box::new(Folding),
+        ..env(label, seed, &clock)
+    };
+    let (mut theirs, _) = F::open(probe.clone(), folding("a", 1)).unwrap();
+    theirs.rescan().unwrap();
+    create(&mut theirs, "Organ/song.npno", b"song");
+    let first_step = |io: &Io| matches!(io, Io::Rename { from, .. } if from.as_str() == "Organ");
+    let logging = |io: &Io| io.root() == Root::Folder && io.path().as_str().ends_with(".txt");
+    fail(&probe, move |io| {
+        io.mutates() && (first_step(io) || logging(io))
+    });
+    let stopped = theirs.commit("Rename", |i| i.move_tree(&path("Organ"), &path("organ")));
+    heal(&probe);
+    assert!(stopped.is_err(), "{stopped:?}");
+    drop(theirs);
+
+    let copied = where_moves_copy(&folder);
+    let (mut ours, opened) = F::open(Probe::new(&machine(&copied)), folding("b", 2)).unwrap();
+    let [orphan] = opened.orphaned.as_slice() else {
+        panic!("one orphan: {:?}", opened.orphaned);
+    };
+    let before = library_files(&copied);
+    let refused = ours.settle(orphan.clone(), Settlement::Finished);
+    assert!(
+        matches!(
+            refused,
+            Err(Error::Refused(Refusal::Unsupported(Capability::RenameDir)))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(library_files(&copied), before, "nothing moved");
+    ours.commit("Tag", |i| i.create(|e| _ = e.add(TAGS, tag("x"))).0)
+        .expect("the library can still be written");
 }
 
 fn a_scan_of_every_file_reports_the_directories_it_listed<F: Facade>() {
