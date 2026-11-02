@@ -255,7 +255,7 @@ impl Backend {
 
     /// Wait `patience` for a command to show life before [`Backend::finish`] abandons it.
     #[cfg(test)]
-    fn patience(&mut self, patience: std::time::Duration) {
+    pub fn patience(&mut self, patience: std::time::Duration) {
         self.patience = patience;
     }
 
@@ -341,19 +341,22 @@ impl Backend {
     }
 
     /// Run every command already sent, then let the library go, or abandon it once a
-    /// command goes `PATIENCE` without a sign of life.
-    pub fn finish(&mut self) {
+    /// command goes `PATIENCE` without a sign of life. Returns whether it was let go
+    /// having run them.
+    pub fn finish(&mut self) -> bool {
         self.tx = None;
         let Some(worker) = self.worker.take() else {
-            return;
+            return !self.abandoned.load(Ordering::Acquire);
         };
         while !worker.is_finished() {
             if self.waiting() >= Some(self.patience) {
-                return self.abandon();
+                self.abandon();
+                return false;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let _ = worker.join();
+        true
     }
 }
 

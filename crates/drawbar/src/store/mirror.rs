@@ -1074,10 +1074,12 @@ impl Store {
             .is_some_and(|waited| waited >= self.patience)
     }
 
-    /// Wait `patience` for a command to show life before asking whether to reopen.
+    /// Wait `patience` for a command to show life before asking whether to reopen, or
+    /// before a library let go is abandoned.
     #[cfg(test)]
     pub fn patience(&mut self, patience: std::time::Duration) {
         self.patience = patience;
+        self.backend.patience(patience);
     }
 
     /// Make the library's thread fault, or never finish, with the next command it takes.
@@ -1879,15 +1881,7 @@ impl Store {
     ) {
         const ROUNDS: usize = 8;
         if self.stopped().is_some() || self.stalled() {
-            let lost = self.undrafted(workspace);
-            if !lost.is_empty() {
-                const SHOWN: usize = 5;
-                log.trouble(format!(
-                    "Edits made since they were last kept could not be written, since the \
-                     library stopped answering: {}.",
-                    crate::strings::quoted_some(&lost, SHOWN)
-                ));
-            }
+            self.name_lost(workspace, log);
             self.backend.abandon();
             return;
         }
@@ -1906,7 +1900,29 @@ impl Store {
             }
         }
         self.learn_crcs(workspace);
+        #[cfg(not(target_arch = "wasm32"))]
+        if !self.backend.finish() {
+            while let Some(event) = self.backend.try_recv() {
+                self.react(event, workspace, browser, queue, log);
+            }
+            self.name_lost(workspace, log);
+        }
+        #[cfg(target_arch = "wasm32")]
         self.backend.finish();
+    }
+
+    /// Name the unsaved edits not kept, which a library let go without waiting for it
+    /// does not write.
+    fn name_lost(&self, workspace: &Workspace, log: &mut Log) {
+        const SHOWN: usize = 5;
+        let lost = self.undrafted(workspace);
+        if !lost.is_empty() {
+            log.trouble(format!(
+                "Edits made since they were last kept could not be written, since the \
+                 library stopped answering: {}.",
+                crate::strings::quoted_some(&lost, SHOWN)
+            ));
+        }
     }
 
     /// Wait for every save and rename in flight to answer, and fold the answers in, sending

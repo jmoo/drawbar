@@ -287,7 +287,7 @@ bring back any you deleted.
   asks whether to close and reopen it. Edits made since drawbar last kept them
   are lost, and drawbar names them. A library you leave meanwhile, by opening
   another or quitting, is closed after that minute without asking, and those
-  edits are lost too. If the library stops altogether, drawbar closes it and
+  edits are lost too; the desktop app names them. If the library stops altogether, drawbar closes it and
   says so; **File ▸ Open recent library** opens it again.
 - **Restored from a backup.** When the library folder no longer holds changes
   drawbar showed before, as after a restore from a backup, drawbar shows the

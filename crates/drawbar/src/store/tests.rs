@@ -210,14 +210,7 @@ impl Session {
 
     /// Quit: everything is written first.
     fn close(mut self) {
-        let Bench {
-            workspace,
-            browser,
-            queue,
-            log,
-            ..
-        } = &mut self.bench;
-        self.store.close(workspace, browser, queue, log);
+        self.close_now();
     }
 
     /// Put the tag `name` on `ids` as the browser does, making it where no tag has that
@@ -7644,5 +7637,38 @@ fn a_take_in_whose_record_does_not_fit_brings_each_edit_in_once() {
         assert_eq!(root.names("Gig"), ["Pad 2.ne5p", "Pad 3.ne5p", "Pad.ne5p"]);
         assert!(again.handed_over(&list));
         again.close();
+    }
+}
+
+/// A library that stops answering only after the quit began is abandoned once it has
+/// shown no life for a while, and the edits queued behind it are named.
+#[test]
+fn a_library_that_stalls_during_a_quit_names_the_edits_it_did_not_keep() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.edit(id, "96");
+    session
+        .store
+        .patience(std::time::Duration::from_millis(300));
+    session.store.fault(Fault::Stall);
+    session.store.rescan();
+    session.close_now();
+    let said = session.said("could not be written, since the library stopped answering");
+    assert_eq!(said, 1, "the edit is named");
+}
+
+impl Session {
+    /// Quit, and keep the session to look at what it said.
+    fn close_now(&mut self) {
+        let Bench {
+            workspace,
+            browser,
+            queue,
+            log,
+            ..
+        } = &mut self.bench;
+        self.store.close(workspace, browser, queue, log);
     }
 }
