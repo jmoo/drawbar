@@ -104,7 +104,8 @@ version opens a library it can change, it brings those sounds in as files. Each
 folder becomes a folder at the top of the library, and each sound a file in its
 folder, named after it, with its tags and the slot it came from. A name already
 taken gets a number. A sound with an edit you had not saved comes back with that
-edit, still unsaved. The activity log says how many sounds came in.
+edit, still unsaved. If the browser's storage is full, the edit comes in as a file
+of its own beside the sound instead. The activity log says how many sounds came in.
 
 It is one change, so Undo takes it all back, and once the trash is emptied the
 sounds are gone from the library. Once the sounds are in the library and their

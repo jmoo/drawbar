@@ -6763,6 +6763,12 @@ fn older_list(storage: &crate::testing::Fake) -> older::List {
 /// off slot 2:8 named Grand, two assets named Pad in the folder Gig, one with an unsaved
 /// edit, an empty folder, and a tag nothing wears.
 fn gig_list() -> (older::List, Vec<u8>, Vec<u8>, Vec<u8>) {
+    let (storage, program, soft, edit) = gig_kept();
+    (older_list(&storage), program, soft, edit)
+}
+
+/// The store [`gig_list`] reads.
+fn gig_kept() -> (crate::testing::Fake, Vec<u8>, Vec<u8>, Vec<u8>) {
     use base64::prelude::{Engine as _, BASE64_STANDARD};
 
     let program = Fresh::Program.bytes().unwrap();
@@ -6782,25 +6788,36 @@ fn gig_list() -> (older::List, Vec<u8>, Vec<u8>, Vec<u8>) {
         "drawbar folders 1\nf\t1\tGig\nf\t2\tEmpty\nm\t2\t1\nm\t3\t1\n",
         "drawbar tags 1\nt\t1\tLive\nt\t2\tSoft\nt\t3\tUnworn\nm\t1\t1\nm\t2\t1\nm\t2\t2\n",
     );
-    (older_list(&storage), program, soft, edit)
+    (storage, program, soft, edit)
 }
 
 impl Session {
     /// Take `list` in, as a frame does, and wait until the library has answered. Returns
     /// where the take-in said it puts each asset that came with an unsaved edit.
     fn take_in(&mut self, list: &older::List) -> Vec<(usize, LibPath)> {
+        let mut kept = Vec::new();
+        self.take_in_keeping(list, |placed| {
+            kept = placed.to_vec();
+            true
+        });
+        kept
+    }
+
+    /// [`Session::take_in`], keeping the record of where the take-in puts its edits with
+    /// `keep`.
+    fn take_in_keeping(
+        &mut self,
+        list: &older::List,
+        keep: impl FnOnce(&[(usize, LibPath)]) -> bool,
+    ) {
         let Bench {
             workspace,
             browser,
             log,
             ..
         } = &mut self.bench;
-        let mut kept = Vec::new();
-        self.store.take_in(list, workspace, browser, log, |placed| {
-            kept = placed.to_vec()
-        });
+        self.store.take_in(list, workspace, browser, log, keep);
         self.decided();
-        kept
     }
 
     /// Whether `list` is the library's to keep now, so its keys may go.
@@ -6892,22 +6909,22 @@ fn a_draft_that_fails_keeps_the_list_until_one_lands() {
     assert!(session.handed_over(&list));
 }
 
-/// Without the record of where the take-in put it, an unsaved edit is brought in as a
-/// file of its own rather than lost.
+/// An unsaved edit whose file the take-in made is gone is brought in as a file of its
+/// own rather than lost.
 #[test]
-fn an_unsaved_edit_whose_file_is_not_known_comes_in_as_a_file_of_its_own() {
+fn an_unsaved_edit_whose_file_is_gone_comes_in_as_a_file_of_its_own() {
     let root = Temp::new();
-    let (list, _, soft, edit) = gig_list();
+    let (list, _, _, edit) = gig_list();
     let mut first = Session::open(&root);
-    first.take_in(&list);
+    let placed = first.take_in(&list);
     drop(first);
+    fs::remove_file(root.at("Gig/Pad.ne5p")).unwrap();
 
-    let list = gig_list_again(None);
+    let list = gig_list_again(Some(placed));
     let mut again = Session::open(&root);
     again.take_in(&list);
     again.sync();
-    assert_eq!(root.names("Gig"), ["Pad 2.ne5p", "Pad 3.ne5p", "Pad.ne5p"]);
-    assert_eq!(root.read("Gig/Pad.ne5p"), soft);
+    assert_eq!(root.names("Gig"), ["Pad 2.ne5p", "Pad 3.ne5p"]);
     assert_eq!(root.read("Gig/Pad 3.ne5p"), edit);
     assert_eq!(
         again.said("its unsaved edit is a file of its own, “Pad 3.ne5p”"),
@@ -6928,10 +6945,7 @@ fn a_list_handed_over_has_no_edit_put_back() {
     assert!(first.handed_over(&list));
     first.close();
 
-    let list = older::List {
-        handed_over: true,
-        ..gig_list_again(None)
-    };
+    let list = gig_list_again(None);
     let mut again = Session::open(&root);
     again.take_in(&list);
     again.sync();
@@ -7545,7 +7559,8 @@ fn a_window_waits_for_an_unfinished_take_in_without_sending_its_own_again() {
     first.store.fault(Fault::Refuse(
         |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "Gig/Pad 2.ne5p"),
     ));
-    first.take_in(&list);
+    let placed = first.take_in(&list);
+    let list = gig_list_again(Some(placed));
     let mut second = Session::open(&root);
     second.take_in(&list);
     second.settle();
@@ -7572,10 +7587,62 @@ fn a_window_waits_for_an_unfinished_take_in_without_sending_its_own_again() {
     second.take_in(&list);
     second.take_in(&list);
     second.sync();
-    let edits = second.bench.workspace.listed();
-    let edits = edits
-        .filter(|entity| second.bytes(entity.id) == edit)
-        .count();
-    assert_eq!(edits, 1, "the edit put back once");
+    assert_eq!(root.names("Gig"), ["Pad 2.ne5p", "Pad.ne5p"]);
+    let pad = second.named("Pad.ne5p");
+    assert!(second.bytes(pad) == edit, "the edit is back over its file");
     assert!(second.handed_over(&list));
+}
+
+/// eframe's web store once local storage is full: a write needing more room is dropped.
+struct Full(crate::testing::Fake);
+
+impl eframe::Storage for Full {
+    fn get_string(&self, key: &str) -> Option<String> {
+        self.0.get_string(key)
+    }
+
+    fn set_string(&mut self, key: &str, value: String) {
+        if self
+            .get_string(key)
+            .is_some_and(|held| held.len() >= value.len())
+        {
+            self.0.set_string(key, value);
+        }
+    }
+
+    fn flush(&mut self) {}
+}
+
+/// Where the record of a take-in does not fit, its unsaved edit comes in as a file of its
+/// own, and later launches, which find the list but no record, bring nothing in again.
+#[test]
+fn a_take_in_whose_record_does_not_fit_brings_each_edit_in_once() {
+    let root = Temp::new();
+    let (storage, _, soft, edit) = gig_kept();
+    let mut storage = Full(storage);
+    let list = older_list(&storage.0);
+    let mut first = Session::open(&root);
+    first.take_in_keeping(&list, |placed| {
+        older::keep_placed(&mut storage, &list.hash, placed)
+    });
+    assert_eq!(root.names("Gig"), ["Pad 2.ne5p", "Pad 3.ne5p", "Pad.ne5p"]);
+    assert_eq!(root.read("Gig/Pad.ne5p"), soft);
+    assert_eq!(root.read("Gig/Pad 3.ne5p"), edit);
+    let pad = first.named("Pad.ne5p");
+    assert!(!first.bench.workspace.get(pad).unwrap().is_unsaved());
+    assert_eq!(first.said("the edit is a file of its own, “Pad 3.ne5p”"), 1);
+    first.sync();
+    assert!(first.handed_over(&list));
+    older::let_go(&mut storage, &list.hash);
+    first.close();
+
+    for _ in 0..2 {
+        let list = older_list(&storage.0);
+        let mut again = Session::open(&root);
+        again.take_in(&list);
+        again.sync();
+        assert_eq!(root.names("Gig"), ["Pad 2.ne5p", "Pad 3.ne5p", "Pad.ne5p"]);
+        assert!(again.handed_over(&list));
+        again.close();
+    }
 }

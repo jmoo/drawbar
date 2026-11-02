@@ -130,16 +130,18 @@ over its new file and kept as any unsaved edit is.
 
 The same intent adds the BLAKE3 hash of the three keys' text to the library's
 `taken in` set. Before it is sent, drawbar records in `drawbar.taking_in` the hash
-and the path it gives each asset that has an unsaved edit. Only once the library
+and the path it gives each asset that has an unsaved edit. Where that record does
+not read back, as when local storage is full, the intent writes each such edit as a
+new file beside its asset instead of holding it unsaved. Only once the library
 holds the hash and each of those edits is kept, or saved or reverted since, does
 it empty the record and then record the hash in `drawbar.taken_in`; a list whose
 hash that key holds is not read again. The keys stay as they were, so drawbar 0.10 run
 again finds its list; a list it changes since has another hash and is taken in
 again. A change that fails is tried again at the next launch. A launch that finds the hash in the library takes nothing in again: it
-puts each unsaved edit back over the file the record names, and where the record
-or the file is gone, it writes the edit as a new file beside where it went. An
-emptied record puts nothing back, so a launch puts edits back at most once even
-where the browser refused the write to `drawbar.taken_in`. A key
+puts each unsaved edit back over the file the record names, and where the file is
+gone, it writes the edit as a new file beside where it went. A record emptied or
+missing puts nothing back, so a launch puts edits back at most once even where the
+browser refused the write to `drawbar.taken_in`. A key
 whose version line this build does not know leaves the whole list unread.
 
 ## How a change works

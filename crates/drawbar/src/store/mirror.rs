@@ -138,6 +138,34 @@ struct TakingIn {
     elsewhere: bool,
 }
 
+/// Make the unsaved edit of `asset`, where it holds one, an asset of its own, and return
+/// it with the name nothing in `dir` has that it is to take there.
+fn edit_apart(
+    asset: &older::Asset,
+    dir: &LibPath,
+    workspace: &mut Workspace,
+    browser: &Browser,
+    log: &mut Log,
+) -> Option<(u64, String)> {
+    let id = workspace.next_id();
+    let saved = Saved {
+        id,
+        name: asset.name.clone(),
+        path: None,
+        origin: asset
+            .came
+            .map_or_else(|| Origin::File(asset.name.clone()), Came::origin),
+        content: Content::whole(asset.unsaved.clone()?),
+        unsaved: None,
+    };
+    workspace.restore(vec![saved], None, log);
+    let entity = workspace.get(id)?;
+    let name = browser
+        .folders
+        .free(dir, &library_filename(entity), workspace);
+    Some((id, name))
+}
+
 /// How far a session took up the list an older drawbar kept.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TookUp {
@@ -2850,7 +2878,8 @@ impl Store {
     /// under names nothing beside them has, the asset's with the extension its bytes call
     /// for. An unsaved edit stays unsaved over the file. `keep` is given, before the
     /// change is sent, where each asset that came with an unsaved edit goes, by its place
-    /// in the list.
+    /// in the list, and returns whether it kept that record; where it did not, each such
+    /// edit comes in as a file of its own beside the asset's instead.
     ///
     /// Where the library took the list in already, nothing else is written: each unsaved
     /// edit is put back over the file the take-in gave it, as the list's record names it,
@@ -2863,7 +2892,7 @@ impl Store {
         workspace: &mut Workspace,
         browser: &mut Browser,
         log: &mut Log,
-        keep: impl FnOnce(&[(usize, LibPath)]),
+        keep: impl FnOnce(&[(usize, LibPath)]) -> bool,
     ) {
         // Nothing else is in flight whose failures the take-in would hold.
         let idle = !self.scanning && self.committing == 0 && self.finishing.is_empty();
@@ -2899,7 +2928,7 @@ impl Store {
         }
         let mut worn: BTreeMap<&str, Vec<Key>> = BTreeMap::new();
         let mut ids = BTreeSet::new();
-        let mut placed = Vec::new();
+        let (mut placed, mut edited) = (Vec::new(), Vec::new());
         for (at, asset) in list.assets.iter().enumerate() {
             let id = workspace.next_id();
             let origin = asset
@@ -2929,8 +2958,27 @@ impl Store {
             }
             if asset.unsaved.is_some() {
                 placed.push((at, path));
+                edited.push(id);
             }
             ids.insert(id);
+        }
+        if !keep(&placed) {
+            for ((at, path), id) in placed.iter().zip(edited) {
+                let asset = &list.assets[*at];
+                workspace.replace_bytes(id, asset.saved.clone(), log);
+                let Some((copy, name)) = edit_apart(asset, &path.parent(), workspace, browser, log)
+                else {
+                    continue;
+                };
+                workspace.follow(copy, path.parent().join(&name));
+                self.save(copy, workspace, &[]);
+                ids.insert(copy);
+                log.say(format!(
+                    "drawbar could not note where the unsaved edit of “{}” goes, so the edit \
+                     is a file of its own, “{name}”.",
+                    asset.name
+                ));
+            }
         }
         for (name, files) in worn {
             let name = name.to_string();
@@ -2949,7 +2997,6 @@ impl Store {
             why: None,
             elsewhere: false,
         });
-        keep(&placed);
         self.send_batch();
     }
 
@@ -2957,7 +3004,8 @@ impl Store {
     /// that took it in may have ended before keeping: over the file the take-in gave it,
     /// where the list's record says which that is and the library holds it, and as a
     /// file of its own beside where it went otherwise. An edit kept since is left as it
-    /// is, and none is put back once a take-in of the list was handed over.
+    /// is, and none is put back without a record of the list's take-in, as once one was
+    /// handed over.
     fn put_back(
         &mut self,
         list: &older::List,
@@ -2965,14 +3013,14 @@ impl Store {
         browser: &mut Browser,
         log: &mut Log,
     ) {
-        if list.handed_over {
+        let Some(placed) = &list.placed else {
             return;
-        }
+        };
         for (at, asset) in list.assets.iter().enumerate() {
             let Some(edit) = &asset.unsaved else {
                 continue;
             };
-            let placed = list.placed.as_ref().and_then(|placed| placed.get(&at));
+            let placed = placed.get(&at);
             let held = placed.and_then(|path| {
                 let mut listed = workspace.listed();
                 listed
@@ -3012,9 +3060,6 @@ impl Store {
         log: &mut Log,
     ) {
         let asset = &list.assets[at];
-        let Some(edit) = &asset.unsaved else {
-            return;
-        };
         let root = LibPath::root();
         let named = || {
             let folder = list.folders.get(asset.folder?)?;
@@ -3024,24 +3069,9 @@ impl Store {
         let dir = dir
             .filter(|dir| browser.folders.id_of(dir).is_some())
             .unwrap_or(root);
-        let id = workspace.next_id();
-        let saved = Saved {
-            id,
-            name: asset.name.clone(),
-            path: None,
-            origin: asset
-                .came
-                .map_or_else(|| Origin::File(asset.name.clone()), Came::origin),
-            content: Content::whole(edit.clone()),
-            unsaved: None,
-        };
-        workspace.restore(vec![saved], None, log);
-        let Some(entity) = workspace.get(id) else {
+        let Some((id, name)) = edit_apart(asset, &dir, workspace, browser, log) else {
             return;
         };
-        let name = browser
-            .folders
-            .free(&dir, &library_filename(entity), workspace);
         workspace.place(id, dir.join(&name));
         self.brought.insert(id);
         log.say(format!(

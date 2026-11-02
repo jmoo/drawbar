@@ -18,7 +18,7 @@ const KEYS: [&str; 3] = ["drawbar.this_computer", "drawbar.folders", "drawbar.ta
 /// The key of the record a take-in writes before it is sent: the list's hash, then a
 /// line for each asset that came with an unsaved edit, its place in the list and the
 /// library path its file was given, tab-separated. It is emptied once the library keeps
-/// what the take-in brought.
+/// what the take-in brought. Without a record of the list, nothing is to be put back.
 const HANDOFF: &str = "drawbar.taking_in";
 
 /// The key of the hash of the list a library took in, which is not read again.
@@ -68,11 +68,9 @@ pub struct List {
     /// How many lines did not read.
     pub unreadable: usize,
     /// Where a take-in of this list put the file of each asset that came with an unsaved
-    /// edit, by its place in [`List::assets`], where the record of one is kept.
+    /// edit, by its place in [`List::assets`], where the record of one is kept. `None`
+    /// once a library holding the list keeps every unsaved edit it brought.
     pub placed: Option<BTreeMap<usize, LibPath>>,
-    /// Whether the record of a take-in was emptied, so that a library holding the list
-    /// keeps every unsaved edit it brought, and none is to be put back.
-    pub handed_over: bool,
 }
 
 /// One asset of the list.
@@ -168,11 +166,9 @@ pub fn found(storage: &dyn eframe::Storage) -> Found {
     if storage.get_string(TAKEN).as_deref() == Some(hash.as_str()) {
         return Found::Nothing;
     }
-    let record = storage.get_string(HANDOFF);
-    let handed_over = record.as_deref() == Some("");
+    let record = storage.get_string(HANDOFF).unwrap_or_default();
     Found::List(List {
-        placed: placed(&record.unwrap_or_default(), &hash),
-        handed_over,
+        placed: placed(&record, &hash),
         hash,
         assets: assets.collect(),
         folders: folders.named.into_iter().map(|(_, name)| name).collect(),
@@ -196,14 +192,27 @@ fn placed(record: &str, hash: &str) -> Option<BTreeMap<usize, LibPath>> {
 }
 
 /// Keep, before the take-in of the list of hash `hash` is sent, where it puts the file
-/// of each asset that came with an unsaved edit.
-pub fn keep_placed(storage: &mut dyn eframe::Storage, hash: &str, placed: &[(usize, LibPath)]) {
+/// of each asset that came with an unsaved edit, and return whether the record reads
+/// back. One that does not leaves no record of the list.
+///
+/// ⚠️ eframe's web store drops a write the browser refuses, as it does once local
+/// storage is full, and emptying a record frees room where adding one would not.
+pub fn keep_placed(
+    storage: &mut dyn eframe::Storage,
+    hash: &str,
+    placed: &[(usize, LibPath)],
+) -> bool {
     let mut record = format!("{hash}\n");
     for (at, path) in placed {
         record.push_str(&format!("{at}\t{path}\n"));
     }
-    storage.set_string(HANDOFF, record);
+    storage.set_string(HANDOFF, record.clone());
+    let kept = storage.get_string(HANDOFF) == Some(record);
+    if !kept {
+        storage.set_string(HANDOFF, String::new());
+    }
     storage.flush();
+    kept
 }
 
 /// Remember that a library took in the list of hash `hash`, which is then not read
@@ -213,7 +222,7 @@ pub fn keep_placed(storage: &mut dyn eframe::Storage, hash: &str, placed: &[(usi
 /// ⚠️ eframe's store has no remove, and on the desktop it writes back whatever it holds
 /// in memory, so the record is emptied rather than left alone. eframe's web store drops
 /// a write the browser refuses, so the record is emptied first, which frees room for the
-/// marker and, where the marker does not stick, still says nothing is to be put back.
+/// marker and, where the marker does not stick, still leaves nothing to be put back.
 pub fn let_go(storage: &mut dyn eframe::Storage, hash: &str) {
     if storage.get_string(HANDOFF).as_deref() != Some("") {
         storage.set_string(HANDOFF, String::new());
@@ -598,8 +607,45 @@ mod tests {
         fn flush(&mut self) {}
     }
 
+    /// eframe's web store once local storage is full: a write needing more room is dropped.
+    struct Full(Fake);
+
+    impl eframe::Storage for Full {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get_string(key)
+        }
+
+        fn set_string(&mut self, key: &str, value: String) {
+            if self
+                .get_string(key)
+                .is_some_and(|held| held.len() >= value.len())
+            {
+                self.0.set_string(key, value);
+            }
+        }
+
+        fn flush(&mut self) {}
+    }
+
     #[test]
-    fn a_list_let_go_of_whose_marker_did_not_stick_is_read_as_handed_over() {
+    fn a_record_that_does_not_fit_is_not_kept_and_leaves_none_of_the_list() {
+        let keys = ["drawbar 2\n1\n", "drawbar folders 1\n", "drawbar tags 1\n"];
+        let hash = list(keys).hash;
+        let pad = LibPath::parse("Gig 2/Pad.ne5p").unwrap();
+        let mut earlier = stored(keys);
+        keep_placed(&mut earlier, &hash, &[]);
+        for mut storage in [Full(stored(keys)), Full(earlier)] {
+            assert!(!keep_placed(&mut storage, &hash, &[(1, pad.clone())]));
+            let Found::List(read) = found(&storage) else {
+                panic!("a list");
+            };
+            assert_eq!(read.placed, None);
+        }
+        assert!(keep_placed(&mut stored(keys), &hash, &[(1, pad)]));
+    }
+
+    #[test]
+    fn a_list_let_go_of_whose_marker_did_not_stick_has_nothing_to_put_back() {
         let keys = ["drawbar 2\n1\n", "drawbar folders 1\n", "drawbar tags 1\n"];
         let hash = list(keys).hash;
         let pad = LibPath::parse("Gig 2/Pad.ne5p").unwrap();
@@ -608,15 +654,10 @@ mod tests {
             if let Some(placed) = &record {
                 keep_placed(&mut storage, &hash, placed);
             }
-            let Found::List(before) = found(&storage) else {
-                panic!("a list");
-            };
-            assert!(!before.handed_over, "with record {record:?}");
             let_go(&mut storage, &hash);
             let Found::List(after) = found(&storage) else {
                 panic!("a list, since the marker did not stick");
             };
-            assert!(after.handed_over, "with record {record:?}");
             assert_eq!(after.placed, None, "with record {record:?}");
         }
     }

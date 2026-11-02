@@ -1076,10 +1076,12 @@ impl eframe::App for DrawbarApp {
                     // the next where to put them back.
                     let mut kept = None;
                     let keep = |placed: &[_]| {
-                        if let Some(storage) = storage.as_deref_mut() {
-                            crate::store::older::keep_placed(storage, &list.hash, placed);
-                        }
-                        kept = Some(placed.iter().cloned().collect());
+                        let Some(storage) = storage.as_deref_mut() else {
+                            return false;
+                        };
+                        let stuck = crate::store::older::keep_placed(storage, &list.hash, placed);
+                        kept = stuck.then(|| placed.iter().cloned().collect());
+                        stuck
                     };
                     let (workspace, browser) = (&mut self.workspace, &mut self.browser);
                     store.take_in(list, workspace, browser, &mut self.log, keep);
@@ -1087,7 +1089,6 @@ impl eframe::App for DrawbarApp {
                     // first, reads the record as it is now.
                     if let Some(kept) = kept {
                         list.placed = Some(kept);
-                        list.handed_over = false;
                     }
                 }
                 released
