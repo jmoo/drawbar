@@ -14,7 +14,7 @@ use toshokan::crash;
 use toshokan::env::{ExactNames, PrefixIdentity, SeededRandom, TestClock};
 use toshokan::error::Why;
 use toshokan::intent::{Driver, Intent};
-use toshokan::io::{Capabilities, Capability, IoError, Range};
+use toshokan::io::{Capabilities, Capability, IoError, Meta, Range};
 use toshokan::layout::SEGMENT_EXTENSION;
 use toshokan::library::COMPACT_AFTER;
 use toshokan::line::MAX_LINE;
@@ -98,6 +98,9 @@ struct Seen {
     log_read: u64,
     /// Renames from one library path to another.
     library_renames: u64,
+    /// The one modification time the folder reports for every file, as a volume
+    /// whose times are coarser than the writes between them.
+    coarse: Option<u64>,
     /// How often each library directory was listed.
     listed: BTreeMap<RelPath, u64>,
     /// Each library file whose bytes were read.
@@ -280,6 +283,17 @@ impl Probe {
     /// `done`, or a failure when the probe loses the reply to `io`.
     fn answer(&self, io: &Io, done: IoResult) -> IoResult {
         let seen = self.seen.borrow();
+        let coarse = seen.coarse.filter(|_| io.root() == Root::Folder);
+        let done = match (coarse, done) {
+            (Some(at), Ok(Reply::Stat(meta))) => Ok(Reply::Stat(meta.map(|m| coarse_at(m, at)))),
+            (Some(at), Ok(Reply::ListedStat(listed))) => Ok(Reply::ListedStat(
+                listed
+                    .into_iter()
+                    .map(|(name, meta)| (name, coarse_at(meta, at)))
+                    .collect(),
+            )),
+            (_, done) => done,
+        };
         match seen.unanswered.as_ref().is_some_and(|picks| picks(io)) {
             true => done.and(Err(toshokan::IoError::Other(
                 "unanswered by the test".into(),
@@ -294,6 +308,14 @@ impl Probe {
             .files(Root::Folder)
             .get(path)
             .map_or(0, |bytes| bytes.len() as u64)
+    }
+}
+
+/// `meta` at `at`, the one time a coarse volume reports for every file.
+fn coarse_at(meta: Meta, at: u64) -> Meta {
+    Meta {
+        modified: meta.modified.map(|_| at),
+        ..meta
     }
 }
 
@@ -595,6 +617,8 @@ through_both!(
     a_run_that_would_change_nothing_is_shown_until_dismissed,
     a_restored_folder_makes_the_writer_rekey,
     two_saves_undo_and_redo_one_after_the_other,
+    saves_of_one_length_within_the_volumes_time_resolution_stay_in_sync,
+    a_save_within_the_time_of_an_identity_read_stays_in_sync_after_reopening,
     a_compacted_writer_is_shown_and_reported_and_goes_with_its_files,
     an_interrupted_adoption_is_settled_as_an_adoption,
     the_first_write_after_a_crash_follows_the_settled_intent,
@@ -2580,6 +2604,87 @@ fn two_saves_undo_and_redo_one_after_the_other<F: Facade>() {
         a.redo().unwrap();
         assert_eq!(read(&folder, "song.npno").as_deref(), Some(bytes));
     }
+}
+
+fn saves_of_one_length_within_the_volumes_time_resolution_stay_in_sync<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let probe = Probe::new(&here);
+    probe.seen.borrow_mut().coarse = Some(0);
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"one");
+    a.rescan().unwrap();
+    let state = |a: &F| a.view().entity(song).unwrap().file().unwrap().state;
+    for (from, to) in [(&b"one"[..], &b"two"[..]), (b"two", b"six")] {
+        clock.advance(1_000);
+        a.commit("Save", |i| {
+            i.save(
+                song,
+                &path("song.npno"),
+                to.to_vec(),
+                Expect::Holds(identity(from)),
+            )
+        })
+        .unwrap();
+        assert_eq!(state(&a), FileState::InSync, "after saving {to:?}");
+        a.rescan().unwrap();
+        assert_eq!(
+            state(&a),
+            FileState::InSync,
+            "rescanned after saving {to:?}"
+        );
+    }
+    a.close().unwrap();
+    let probe = Probe::new(&here);
+    probe.seen.borrow_mut().coarse = Some(0);
+    let (mut a, _) = F::open(probe, env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    assert_eq!(state(&a), FileState::InSync, "reopened");
+}
+
+fn a_save_within_the_time_of_an_identity_read_stays_in_sync_after_reopening<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let probe = Probe::new(&here);
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"one");
+    put(&folder, "song.npno", b"one");
+    let touched = match folder.perform(Io::Stat {
+        root: Root::Folder,
+        path: path("song.npno"),
+    }) {
+        Ok(Reply::Stat(Some(meta))) => meta.modified,
+        other => panic!("{other:?}"),
+    };
+    probe.seen.borrow_mut().coarse = touched;
+    a.rescan().unwrap();
+    assert!(
+        probe.read_files().contains(&path("song.npno")),
+        "a rescan reads the identity of a file at its fact's length and another time"
+    );
+    fail(
+        &probe,
+        local_writes(&["identities.json", "identities.json.next"]),
+    );
+    a.commit("Save", |i| {
+        i.save(
+            song,
+            &path("song.npno"),
+            b"two".to_vec(),
+            Expect::Holds(identity(b"one")),
+        )
+    })
+    .unwrap();
+    let state = |a: &F| a.view().entity(song).unwrap().file().unwrap().state;
+    assert_eq!(state(&a), FileState::InSync, "saved");
+    a.close().unwrap();
+    let probe = Probe::new(&here);
+    probe.seen.borrow_mut().coarse = touched;
+    let (mut a, _) = F::open(probe, env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    assert_eq!(state(&a), FileState::InSync, "reopened");
 }
 
 fn undoing_a_save_restores_the_displaced_bytes<F: Facade>() {

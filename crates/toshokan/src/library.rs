@@ -1214,6 +1214,34 @@ impl Library {
         (remembered != self.remembered || self.unkept).then_some(remembered)
     }
 
+    /// Forgets what the last scan found at `paths`, which this writer just wrote:
+    /// what its facts say wins over a scan at the same length and time, which a
+    /// volume whose times are coarser than its writes reports for both.
+    fn wrote(&mut self, paths: &[RelPath]) {
+        for path in paths {
+            self.scan.files.remove(path);
+        }
+    }
+
+    /// Forgets each identity `remembered` keeps that a fact contradicts at its
+    /// path, length and time. It was read while no fact gave one there, so the
+    /// fact is newer: a save at a time the volume did not tell apart, which the
+    /// local root missed.
+    fn forget_contradicted(&mut self) {
+        if self.scan.files.is_empty() {
+            return;
+        }
+        for fact in self.facts.values().flatten().map(|fact| &fact.value) {
+            let contradicted = self.scan.files.get(&fact.path).is_some_and(|file| {
+                (file.len, file.modified) == (fact.len, fact.modified)
+                    && file.identity != Some(fact.identity)
+            });
+            if contradicted {
+                self.scan.files.remove(&fact.path);
+            }
+        }
+    }
+
     fn scan_task(&self) -> Task<'static, Result<Scan>> {
         binding::list_all(&self.layout).task()
     }
@@ -1522,6 +1550,7 @@ fn fold_opened(mut library: Library) -> Library {
     library.folded = library.reader.derived().folded.clone();
     let facts = library.folded.files();
     library.refiled(facts);
+    library.forget_contradicted();
     library.follow(library.reader.readings().collect());
     library.mode = library.mode_at_open();
     library
@@ -2223,6 +2252,7 @@ fn log_resumed(
         // The writer is still the record's: compaction waits while a
         // record is unsettled, and an append that rekeys fails.
         remove_record(library, name, &record).then(move |library| {
+            library.wrote(&record.paths());
             let scan = library.scan_task();
             rebind_logged(library, scan, record.paths()).map_ok(|library| {
                 library.show();
@@ -2735,6 +2765,7 @@ fn log_effects<'a>(
             false => Flow::Done(library),
         };
         removed.then(move |library| {
+            library.wrote(&touched);
             rescan_paths(library, touched).map_ok(move |library| {
                 library.show();
                 let ended = Ended { left: applied.left };

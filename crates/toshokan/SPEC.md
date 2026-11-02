@@ -673,7 +673,10 @@ their identities:
    when a fact, earlier scan or `identities.json` gives the identity for that
    path, length and time. The install keeps in `identities.json` the identities
    its scans read while their files keep their length and time; a scan that
-   cannot write them does not fail, and the next scan writes them. A file rewritten
+   cannot write them does not fail, and the next scan writes them. A fact gives
+   the identity over an earlier scan of a path its writer has just written, and
+   over `identities.json` at open: a file written twice within the volume's time
+   resolution keeps its length and time, and the fact is the newer. A file rewritten
    outside toshokan to the same length and the same modification time, as a
    coarse clock or a tool that sets the time back allows, keeps the identity read
    before until its length or time moves: a binding can then take it for what it
