@@ -103,7 +103,10 @@ impl Native {
     }
 
     fn stat(&self, root: Root, path: &RelPath) -> Result<Option<Meta>, IoError> {
-        let full = self.full(root, path)?;
+        // `full` refuses only a name Windows reads as a path, which no file there has.
+        let Ok(full) = self.full(root, path) else {
+            return Ok(None);
+        };
         let found = match path.is_root() {
             true => fs::metadata(&full),
             false => fs::symlink_metadata(&full),
@@ -1043,6 +1046,39 @@ mod tests {
         ] {
             let file = writable(&path, kind).unwrap_or_else(|e| panic!("{kind:?}: {e}"));
             file.sync_all().unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_name_windows_reads_as_a_path_is_never_there_and_never_made() {
+        let dir = std::env::temp_dir().join(format!("toshokan-names-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("Pad 1"), b"pad").unwrap();
+        let mut native = Native::new(&dir, &dir);
+        for name in ["Pad 1:2.npno", r"Pad 1\2.npno"] {
+            let at = RelPath::new(name).unwrap();
+            let stat = native.perform(Io::Stat {
+                root: Root::Folder,
+                path: at.clone(),
+            });
+            assert!(matches!(stat, Ok(Reply::Stat(None))), "{name}: {stat:?}");
+            let read = native.perform(Io::Read {
+                root: Root::Folder,
+                path: at.clone(),
+                range: Range { offset: 0, len: 3 },
+            });
+            assert_eq!(read.unwrap_err(), IoError::NotFound, "{name}");
+            let create = native.perform(Io::Create {
+                root: Root::Folder,
+                path: at,
+                bytes: b"x".to_vec(),
+            });
+            assert!(
+                matches!(create, Err(IoError::Other(_))),
+                "{name}: {create:?}"
+            );
         }
         let _ = fs::remove_dir_all(&dir);
     }
