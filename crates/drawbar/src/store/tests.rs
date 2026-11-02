@@ -7642,26 +7642,6 @@ fn a_take_in_survives_an_undo_and_a_close() {
     assert_eq!(root.names("Gig"), ["Pad 2.ne5p", "Pad.ne5p"]);
 }
 
-/// A delete that fails leaves the file listed once the library answers, with no look at
-/// the folder again.
-#[test]
-fn a_file_whose_delete_fails_comes_back_once_the_library_answers() {
-    let root = Temp::new();
-    fs::write(root.at("a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-    let mut session = Session::open(&root);
-    let id = session.named("a.ne5p");
-    session.store.fault(Fault::Refuse(
-        |io| matches!(io, toshokan::Io::Rename { from, .. } if from.as_str() == "a.ne5p"),
-    ));
-    session.bench.act(vec![crate::browser::Act::Remove(id)]);
-    session.decided();
-
-    assert_eq!(session.said("did not change as asked"), 1);
-    let back = session.named("a.ne5p");
-    assert_eq!(session.path(back).as_deref(), Some("a.ne5p"));
-    assert!(root.at("a.ne5p").exists(), "the file stays");
-}
-
 /// An undo of a delete sent before the delete answered, with another change sent after
 /// it, brings the file back once the library answers.
 #[test]
@@ -7779,4 +7759,44 @@ fn a_rescue_the_next_change_finishes_survives_an_undo_and_a_close() {
         a_rescue(),
         "the rescue stays in the library"
     );
+}
+
+/// A delete whose move to the trash fails after the library logged it is not listed
+/// again, and the next change finishes it.
+#[test]
+fn a_file_whose_delete_waits_to_be_finished_stays_gone() {
+    let root = Temp::new();
+    fs::write(root.at("a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.named("a.ne5p");
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Rename { from, .. } if from.as_str() == "a.ne5p"),
+    ));
+    session.bench.act(vec![crate::browser::Act::Remove(id)]);
+    session.decided();
+    let listed = |session: &Session| session.bench.workspace.listed().count();
+    assert_eq!(listed(&session), 0, "the file is not listed again");
+    session.make_tag("Sunday");
+    assert!(!root.at("a.ne5p").exists(), "the delete is finished");
+    assert_eq!(listed(&session), 0);
+}
+
+/// A delete refused before the library logged anything, as of a file that changed on
+/// disk, leaves the file listed once the library answers.
+#[test]
+fn a_file_whose_delete_is_refused_comes_back_once_the_library_answers() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let mut changed = root.read("untitled.ne5p");
+    changed.push(0);
+    fs::write(root.at("untitled.ne5p"), changed).unwrap();
+    session.bench.act(vec![crate::browser::Act::Remove(id)]);
+    session.decided();
+
+    assert_eq!(session.said("did not change as asked"), 1);
+    let back = session.named("untitled.ne5p");
+    assert_eq!(session.path(back).as_deref(), Some("untitled.ne5p"));
+    assert!(root.at("untitled.ne5p").exists(), "the file stays");
 }

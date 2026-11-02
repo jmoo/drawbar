@@ -1565,7 +1565,7 @@ impl Store {
                 waiting,
                 result,
             } => {
-                let deleted = self.uncommit();
+                let mut deleted = self.uncommit();
                 let landed = made.is_some();
                 let step = self.answering.pop_front();
                 self.history.waited(finished, waiting, step.as_ref());
@@ -1611,7 +1611,13 @@ impl Store {
                     },
                 }
                 if let Some(shown) = self.shown.take() {
-                    // A file whose delete failed or was undone is still listed.
+                    // A file whose delete failed or was undone is listed again, unless the
+                    // next write finishes the delete.
+                    let finishing = |key: &Key| {
+                        let path = shown.files.get(key).map(|(path, _)| path);
+                        path.is_some_and(|path| self.finishing.contains(path))
+                    };
+                    deleted.retain(|key| !finishing(key));
                     let back = self.arrive(&shown, Some(&deleted), workspace, browser, log);
                     if failed || back > 0 {
                         self.project_tags(&shown, browser);
