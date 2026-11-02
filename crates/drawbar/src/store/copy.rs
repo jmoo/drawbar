@@ -196,9 +196,10 @@ fn unlike(why: String) -> String {
 /// own state is kept. Every entry is written as it is, `.drawbar/library/` among them,
 /// so this runs before the library opens. [`OPENING`] stands while it writes, so a
 /// window that opens the library meanwhile opens it read-only: a copy that fails
-/// partway leaves the library empty, and one stopped partway leaves it read-only until
-/// a copy is opened again. drawbar's own files are not counted. It holds a window's lock
-/// while it runs, so a copy another window opens meanwhile is refused.
+/// partway leaves the library empty, and one stopped partway, or unable to remove what
+/// it replaces, leaves it read-only until a copy is opened again. drawbar's own files
+/// are not counted. It holds a window's lock while it runs, so a copy another window
+/// opens meanwhile is refused.
 pub async fn restore<F: Fs>(fs: &F, from: &Outside) -> Result<usize, String> {
     let ours = hold_window(fs).await?;
     let restored = restoring(fs, from, &ours).await;
@@ -222,6 +223,11 @@ async fn restoring<F: Fs>(fs: &F, from: &Outside, ours: &RelPath) -> Result<usiz
             return Err(why);
         }
     };
+    let earlier = match resumed {
+        true => Clearing::All,
+        false => Clearing::Drawbars,
+    };
+    clear(fs, earlier).await.map_err(failed)?;
     let mut files = 0;
     for restored in &entries {
         if let Err(why) = write(fs, &mut source, restored).await {
@@ -254,9 +260,9 @@ async fn start_opening<F: Fs>(fs: &F) -> Result<(), String> {
     Ok(())
 }
 
-/// The copy's entries, once nothing but this opening writes in the library and nothing
-/// stands where they go: no other window holds the library, and the folder holds only
-/// drawbar's own files, or what an opening stopped partway left where `resumed`.
+/// The copy's entries, once nothing but this opening writes in the library: no other
+/// window holds the library, and the folder holds only drawbar's own files, or what an
+/// opening stopped partway left where `resumed`.
 async fn ready_to_open<F: Fs>(
     fs: &F,
     source: &mut impl FileSource,
@@ -281,13 +287,7 @@ async fn ready_to_open<F: Fs>(
              opens only into an empty one"
         ));
     }
-    let entries = contents(source).await?;
-    let earlier = match resumed {
-        true => Clearing::All,
-        false => Clearing::Drawbars,
-    };
-    clear(fs, earlier).await.map_err(failed)?;
-    Ok(entries)
+    contents(source).await
 }
 
 /// The first of the user's files in the folder, outside drawbar's own, if any.

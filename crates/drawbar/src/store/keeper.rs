@@ -2889,6 +2889,45 @@ mod tests {
         assert!(!old.exists(), "the old history is replaced");
     }
 
+    /// Storage that removes no file named `kept.txt`.
+    struct Unremovable(Counted<Blocking>);
+
+    impl Fs for Unremovable {
+        fn capabilities(&self, root: Root) -> toshokan::io::Capabilities {
+            self.0.capabilities(root)
+        }
+
+        async fn perform(&self, io: toshokan::Io) -> toshokan::io::IoResult {
+            match io {
+                toshokan::Io::Remove { path, .. } if path.name() == Some("kept.txt") => {
+                    Err(IoError::Denied)
+                }
+                io => self.0.perform(io).await,
+            }
+        }
+    }
+
+    /// A copy whose opening cannot take away the history it replaces leaves the library
+    /// read-only until it is opened again, not writable over half that history.
+    #[test]
+    fn a_copy_that_cannot_clear_the_old_history_leaves_the_library_read_only() {
+        let from = Temp::new();
+        fs::write(from.at("a.ne5p"), b"first").unwrap();
+        let (_saved, copy) = saved(&from);
+        let to = Temp::new();
+        let old = to.at(".drawbar/library/writers.2/old");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("gone.txt"), b"history").unwrap();
+        fs::write(old.join("kept.txt"), b"history").unwrap();
+        let (fs, _) = unopened(&to).unopened.take().unwrap();
+        let restored = nord_usb::block_on(super::super::copy::restore(&Unremovable(fs), &copy));
+        assert!(restored.is_err(), "{restored:?}");
+        assert!(
+            to.at(super::super::copy::OPENING).exists(),
+            "the mark stands"
+        );
+    }
+
     /// A copy whose opening stopped partway leaves the library read-only, saying to open
     /// it again, and opening it again takes away what the first left.
     #[test]
