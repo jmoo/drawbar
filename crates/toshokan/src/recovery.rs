@@ -559,8 +559,8 @@ struct Orphaned<'a> {
     rename_dir: bool,
     plan: EffectPlan,
     env: &'a mut Env,
-    /// The items of their trash a step finished here put in this writer's trash
-    /// instead, by theirs.
+    /// The items of their trash whose file this settlement put in this writer's
+    /// trash instead, by theirs.
     relayed: BTreeMap<Nonce, Nonce>,
 }
 
@@ -617,16 +617,8 @@ impl Orphaned<'_> {
             EffectStep::Place { staged, path } => {
                 return self.copy(self.layout.staged(writer, *staged, path), path)
             }
-            // A way-point through the trash this settlement began is taken up from
-            // this writer's trash, where it put it.
             EffectStep::FromTrash { item, path } => match self.relayed.get(item) {
-                Some(&ours) => {
-                    self.present.insert(path.clone());
-                    self.plan.steps.push(EffectStep::FromTrash {
-                        item: ours,
-                        path: path.clone(),
-                    });
-                }
+                Some(&ours) => self.take_up(ours, path),
                 None => return self.copy(self.layout.trash(writer, *item), path),
             },
             EffectStep::Rename { from, to } => return self.rename(from, to),
@@ -640,12 +632,19 @@ impl Orphaned<'_> {
     fn undo(&mut self, step: &EffectStep) -> std::result::Result<(), Refusal> {
         let writer = self.theirs.writer;
         match step {
-            EffectStep::ToTrash { path, item } => {
-                return self.copy(self.layout.trash(writer, *item), path)
-            }
-            EffectStep::Place { path, .. } | EffectStep::FromTrash { path, .. } => {
+            EffectStep::ToTrash { path, item } => match self.relayed.get(item) {
+                Some(&ours) => self.take_up(ours, path),
+                None => return self.copy(self.layout.trash(writer, *item), path),
+            },
+            EffectStep::Place { path, .. } => {
                 if self.present.contains(path) {
                     self.trash(path)?;
+                }
+            }
+            EffectStep::FromTrash { path, item } => {
+                if self.present.contains(path) {
+                    let ours = self.trash(path)?;
+                    self.relayed.insert(*item, ours);
                 }
             }
             EffectStep::Rename { from, to } => return self.rename(to, from),
@@ -684,6 +683,16 @@ impl Orphaned<'_> {
             item,
         });
         Ok(item)
+    }
+
+    /// Takes `path` up from `ours`, the item of this writer's trash this
+    /// settlement put it in.
+    fn take_up(&mut self, ours: Nonce, path: &RelPath) {
+        self.present.insert(path.clone());
+        self.plan.steps.push(EffectStep::FromTrash {
+            item: ours,
+            path: path.clone(),
+        });
     }
 
     /// Copies `source` to `path`: a file whole, a directory of their trash file by

@@ -657,6 +657,7 @@ through_both!(
     an_effect_a_live_window_left_open_is_reported_live,
     an_effect_a_window_left_is_the_installs_once_the_window_closes,
     a_change_of_case_another_install_did_not_start_is_finished_by_another,
+    a_change_of_case_another_install_made_is_rolled_back_by_another,
     a_folder_another_left_in_its_trash_is_finished_by_another,
     a_folder_another_left_in_its_trash_is_rolled_back_by_another,
     finishing_a_folder_case_change_where_moves_copy_is_refused_and_changes_nothing,
@@ -4881,6 +4882,53 @@ fn a_change_of_case_another_install_did_not_start_is_finished_by_another<F: Faca
         .map(|(path, bytes)| format!("{path:?} {}", String::from_utf8_lossy(&bytes)))
         .collect();
     assert_eq!(files, [r#"RelPath("kick.wav") kick"#]);
+}
+
+fn a_change_of_case_another_install_made_is_rolled_back_by_another<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    put(&folder, "Kick.wav", b"kick");
+    let probe = Probe::new(&machine(&folder));
+    let folding = |label, seed| Env {
+        names: Box::new(Folding),
+        ..env(label, seed, &clock)
+    };
+    let (mut theirs, _) = F::open(probe.clone(), folding("a", 1)).unwrap();
+    theirs.rescan().unwrap();
+    theirs
+        .commit("Tag", |i| i.create(|e| _ = e.add(TAGS, tag("x"))).0)
+        .unwrap();
+    let logging = |io: &Io| io.root() == Root::Folder && io.path().as_str().ends_with(".txt");
+    fail(&probe, move |io| io.mutates() && logging(io));
+    let stopped = theirs.commit("Rename", |i| {
+        i.rename_file(
+            &path("Kick.wav"),
+            &path("kick.wav"),
+            Expect::Holds(identity(b"kick")),
+        )
+    });
+    heal(&probe);
+    assert!(stopped.is_err(), "{stopped:?}");
+    assert_eq!(
+        read(&folder, "kick.wav").as_deref(),
+        Some(b"kick".as_slice())
+    );
+    drop(theirs);
+
+    let (mut ours, opened) = F::open(Probe::new(&machine(&folder)), folding("b", 2)).unwrap();
+    let [orphan] = opened.orphaned.as_slice() else {
+        panic!("one orphan: {:?}", opened.orphaned);
+    };
+    ours.settle(orphan.clone(), Settlement::RolledBack).unwrap();
+    let files = library_files(&folder).into_keys();
+    assert_eq!(
+        files.map(|at| at.as_str().to_owned()).collect::<Vec<_>>(),
+        ["Kick.wav"]
+    );
+    assert_eq!(
+        read(&folder, "Kick.wav").as_deref(),
+        Some(b"kick".as_slice())
+    );
 }
 
 /// Leaves the folder `Organ` in another install's trash, as a crash between the

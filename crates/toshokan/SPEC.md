@@ -1052,12 +1052,12 @@ copies files out of the other writer's `tmp/` and `trash/` rather than moving
 them, a directory there file by file, making each directory under it, and moves
 a library file it displaces into its own trash. A `from_trash`
 of an item a `to_trash` it carried out itself put aside takes the file from its
-own trash, where that step put it. Once its steps
-are done, it appends a `settle` entry naming the writer and record, after which
-no reader reports the record. If a step fails, the settlement fails as an
-intent does: the settler's own record stays open, and the other writer's record
-stays open until the settlement is made again, which finds from the folder what
-remains. Only the record's writer removes it.
+own trash, where that step put it, and so does rolling back a `to_trash` whose
+`from_trash` it reversed. Once its steps are done, it appends a `settle` entry
+naming the writer and record, after which no reader reports the record. If a
+step fails, the settlement fails as an intent does: the settler's own record
+stays open, and the other writer's record stays open until the settlement is
+made again, which finds from the folder what remains. Only the record's writer removes it.
 
 A record written where directories rename may move a tree by one `rename`, or,
 for a change of case alone, by a `to_trash` and a `from_trash`. A reader whose
