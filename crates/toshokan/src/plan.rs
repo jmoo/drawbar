@@ -18,6 +18,7 @@ pub struct Content(pub usize);
 
 /// What a file effect requires at a path before it runs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Expect {
     /// Nothing is there.
     Absent,

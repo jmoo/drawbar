@@ -714,6 +714,9 @@ through_both!(
     an_undo_that_stops_partway_fails_and_the_next_write_finishes_it,
     an_own_effect_that_cannot_be_finished_leaves_the_library_read_only_until_reopened,
     an_own_effect_whose_source_is_gone_is_left_to_settle_with_consent,
+    a_resumed_save_leaves_a_newer_save_made_meanwhile,
+    an_orphan_save_is_not_finished_over_a_newer_save,
+    an_orphan_save_is_not_finished_onto_a_file_put_there_since,
     an_own_save_whose_staged_bytes_are_gone_rolls_back_to_the_old_bytes,
     an_own_save_over_a_file_deleted_since_is_finished,
     staged_files_stay_while_an_own_record_does_not_read,
@@ -6741,6 +6744,147 @@ fn an_own_effect_whose_source_is_gone_is_left_to_settle_with_consent<F: Facade>(
             .unwrap_or_else(|e| panic!("{shown}: rolled back: {e}"));
         assert!(again.refresh().unwrap().orphaned.is_empty(), "{shown}");
     });
+}
+
+fn into_trash(io: &Io) -> bool {
+    match io {
+        Io::Rename { to, .. } => to.as_str().contains("/trash/"),
+        Io::Create { path, .. } => path.as_str().contains("/trash/"),
+        _ => false,
+    }
+}
+
+/// Saves "two" over `song`, which holds "one", failing as the old bytes go to the
+/// trash, so the save's record stays open.
+fn interrupted_save<F: Facade>(library: &mut F, probe: &Probe, song: EntityId) {
+    fail(probe, into_trash);
+    let saved = library.commit("Save", |i| {
+        i.save(
+            song,
+            &path("song.npno"),
+            b"two".to_vec(),
+            Expect::Holds(identity(b"one")),
+        )
+    });
+    assert!(saved.is_err(), "{saved:?}");
+    heal(probe);
+}
+
+fn a_resumed_save_leaves_a_newer_save_made_meanwhile<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (x, y) = (machine(&folder), machine(&folder));
+    let probe = Probe::new(&x);
+    let (mut a, _) = F::open(probe.clone(), env("x", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"one");
+    interrupted_save(&mut a, &probe, song);
+    drop(a);
+
+    let (mut b, _) = F::open(Probe::new(&y), env("y", 2, &clock)).unwrap();
+    b.rescan().unwrap();
+    b.commit("Save", |i| {
+        i.save(
+            song,
+            &path("song.npno"),
+            b"three".to_vec(),
+            Expect::Holds(identity(b"one")),
+        )
+    })
+    .expect("y saves over the file it sees");
+    b.close().unwrap();
+
+    let x = Machine {
+        folder: folder.clone(),
+        local: x.local.restart(),
+    };
+    let (mut again, _) = F::open(Probe::new(&x), env("x", 3, &clock)).unwrap();
+    again
+        .commit("Tag", |i| i.add(song, TAGS, tag("next")))
+        .expect("the next write is made");
+    assert_eq!(read(&folder, "song.npno").as_deref(), Some(&b"three"[..]));
+    let orphaned = again.refresh().unwrap().orphaned;
+    let [orphan] = &orphaned[..] else {
+        panic!("the stale save is left to settle: {orphaned:?}");
+    };
+    let finished = again.settle(orphan.clone(), Settlement::Finished);
+    assert!(
+        matches!(&finished, Err(Error::Refused(Refusal::Changed(m))) if m.path == path("song.npno")),
+        "{finished:?}"
+    );
+    again.empty_trash(BTreeSet::new()).unwrap();
+    assert_eq!(read(&folder, "song.npno").as_deref(), Some(&b"three"[..]));
+}
+
+fn an_orphan_save_is_not_finished_over_a_newer_save<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"one");
+    let probe = Probe::new(&here);
+    let (mut b, _) = F::open(probe.clone(), env("b", 2, &clock)).unwrap();
+    b.rescan().unwrap();
+    interrupted_save(&mut b, &probe, song);
+    b.close().unwrap();
+
+    a.commit("Save", |i| {
+        i.save(
+            song,
+            &path("song.npno"),
+            b"three".to_vec(),
+            Expect::Holds(identity(b"one")),
+        )
+    })
+    .expect("a saves over the file it sees");
+    let orphaned = a.refresh().unwrap().orphaned;
+    let [orphan] = &orphaned[..] else {
+        panic!("the other window's save is left to settle: {orphaned:?}");
+    };
+    assert!(orphan.ours, "{orphan:?}");
+    let finished = a.settle(orphan.clone(), Settlement::Finished);
+    assert!(
+        matches!(&finished, Err(Error::Refused(Refusal::Changed(m))) if m.path == path("song.npno")),
+        "{finished:?}"
+    );
+    a.empty_trash(BTreeSet::new()).unwrap();
+    assert_eq!(read(&folder, "song.npno").as_deref(), Some(&b"three"[..]));
+}
+
+fn an_orphan_save_is_not_finished_onto_a_file_put_there_since<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let here = machine(&folder);
+    let (mut a, _) = F::open(Probe::new(&here), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"one");
+    let probe = Probe::new(&here);
+    let (mut b, _) = F::open(probe.clone(), env("b", 2, &clock)).unwrap();
+    b.rescan().unwrap();
+    refuse(&probe, Some("song.npno"));
+    let saved = b.commit("Save", |i| {
+        i.save(
+            song,
+            &path("song.npno"),
+            b"two".to_vec(),
+            Expect::Holds(identity(b"one")),
+        )
+    });
+    assert!(saved.is_err(), "{saved:?}");
+    refuse(&probe, None);
+    b.close().unwrap();
+
+    put(&folder, "song.npno", b"three");
+    let orphaned = a.refresh().unwrap().orphaned;
+    let [orphan] = &orphaned[..] else {
+        panic!("the other window's save is left to settle: {orphaned:?}");
+    };
+    let finished = a.settle(orphan.clone(), Settlement::Finished);
+    assert!(
+        matches!(&finished, Err(Error::Refused(Refusal::Changed(m))) if m.path == path("song.npno")),
+        "{finished:?}"
+    );
+    a.commit("Tag", |i| i.add(song, TAGS, tag("next")))
+        .expect("the library stays writable");
+    assert_eq!(read(&folder, "song.npno").as_deref(), Some(&b"three"[..]));
 }
 
 fn an_own_save_whose_staged_bytes_are_gone_rolls_back_to_the_old_bytes<F: Facade>() {

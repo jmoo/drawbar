@@ -959,7 +959,10 @@ say the same of what no entity owns, for the `path`, `tree` and `dir` ops:
 bound to, with `from` or `path` omitted for no file; `trees` holds
 `{"from":…,"to":…,"done_after":n}` for a tree moved whole; and `dirs` holds
 `{"path":…,"made":true,"done_after":n}` for a directory made, or removed where
-`made` is `false`. A reader reads at most 16 MiB of a record.
+`made` is `false`. `held`, omitted when empty, holds `[p,expect]` for each
+`to_trash` source `p` whose contents the intent checked: `{"holds":"<identity>"}`,
+or `{"listed":{"len":n,"modified":t}}` with `t` `null` for no time. A reader
+reads at most 16 MiB of a record.
 
 ### Recovery
 
@@ -1008,7 +1011,10 @@ when its history cannot go on, and the record is an open record of another write
 to settle with the user's consent, below. Settling it changes nothing until then.
 What is gone is judged from one look at the folder, so a file only briefly absent,
 as where a tool replaces it by removing it first, gives the record up as well. A
-`to_trash` whose path holds nothing is skipped rather than gone.
+`to_trash` whose path holds nothing is skipped rather than gone. A record is given
+up the same way when a remaining `to_trash` finds its source holding other than
+its `held` contents, as when another writer saved over the file since, so that
+newer bytes never go to the trash on the strength of an old check.
 
 Settling twice ends as settling once.
 
@@ -1044,7 +1050,11 @@ a `to_trash` whose path holds nothing, and logs the facts the record planned and
 its file ops with the record's `replaces`; to
 roll back, it reverses the done ones, skipping a file it would trash that is not
 there; to dismiss, it changes no file. Finishing or rolling back is refused, and
-changes nothing, where a step would move what the folder no longer holds. It finds
+changes nothing, where a step would move what the folder no longer holds.
+Finishing checks each `to_trash` source the folder holds against its `held`
+contents as a precondition, and is refused where it holds anything else; so is
+finishing or rolling back a step that puts a file where the folder holds one no
+earlier step moves away. It finds
 how far the steps got by checking them from the last, whichever way they move,
 since its own settling may have carried them further or reversed some; a
 `to_trash` of a record whose moves copy shows done as any other move does. A

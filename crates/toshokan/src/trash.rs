@@ -138,6 +138,7 @@ mod tests {
             unbound: Vec::new(),
             trees: Vec::new(),
             dirs: Vec::new(),
+            held: Vec::new(),
             moves: Moves::Rename,
         };
         (nonce(9), record)

@@ -2195,8 +2195,9 @@ fn settle_one(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Li
 /// Carries out the rest of the record `settling` and logs its entry. Where the
 /// folder refuses the rest, the record stays open and the library is read-only
 /// until it is opened again, which tries the rest again. Where what the rest
-/// moves is gone, so no retry could finish it, the writer stops writing, and the
-/// record is an orphan to settle with the user's consent.
+/// moves is gone, or a file it moves to the trash changed since it was checked, so
+/// no retry could finish it, the writer stops writing, and the record is an orphan
+/// to settle with the user's consent.
 fn resume(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Library> {
     let name = settling.record;
     let label = settling.pending.label.clone();
@@ -2211,7 +2212,7 @@ fn resume(library: &mut Library, settling: Settling) -> Fallible<'_, &mut Librar
     );
     flow::run(settled).then(move |settled| match settled {
         Ok(Resumed::Applied(applied)) => log_resumed(library, name, record, applied),
-        Ok(Resumed::Gone) => stop_writing(library, None)
+        Ok(Resumed::GivenUp) => stop_writing(library, None)
             .then(|(library, stopped)| Flow::Done(stopped.map(|()| library))),
         Err(Error::Io { path, error, .. }) => {
             let why = Why::Unfinished { label, path, error };

@@ -5,6 +5,8 @@
 //! acted on only when it is chained to the head the owner's local root recorded
 //! and every path it names is a library path.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error as ThisError;
 
@@ -17,6 +19,7 @@ use crate::layout::Layout;
 use crate::line::Line;
 use crate::log::{Entry, Own};
 use crate::path::RelPath;
+use crate::plan::Expect;
 use crate::schema::Raw;
 
 /// The longest record a reader reads.
@@ -36,6 +39,9 @@ pub struct PendingRecord {
     pub unbound: Vec<UnboundEnd>,
     pub trees: Vec<TreeEnd>,
     pub dirs: Vec<DirEnd>,
+    /// What the intent checked the contents of each `to_trash` source to be: a
+    /// step whose source holds anything else is not carried out.
+    pub held: Vec<(RelPath, Expect)>,
     /// How the steps move files, whoever carries them out.
     pub moves: Moves,
 }
@@ -53,6 +59,8 @@ struct Wire {
     trees: Vec<TreeEnd>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     dirs: Vec<DirEnd>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    held: Vec<(RelPath, Expect)>,
     #[serde(default, skip_serializing_if = "Moves::renames")]
     moves: Moves,
 }
@@ -65,6 +73,18 @@ pub struct NotRecord {
 
 impl PendingRecord {
     pub fn new(writer: WriterId, label: &str, entry: Line, plan: &EffectPlan) -> Self {
+        let trashed: BTreeSet<&RelPath> = plan
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                EffectStep::ToTrash { path, .. } => Some(path),
+                _ => None,
+            })
+            .collect();
+        let held = plan.checks.iter().filter(|check| {
+            let contents = matches!(check.expect, Expect::Holds(_) | Expect::Listed { .. });
+            contents && trashed.contains(&check.path)
+        });
         Self {
             writer,
             entry,
@@ -74,6 +94,9 @@ impl PendingRecord {
             unbound: plan.unbound.clone(),
             trees: plan.trees.clone(),
             dirs: plan.dirs.clone(),
+            held: held
+                .map(|check| (check.path.clone(), check.expect))
+                .collect(),
             moves: plan.moves,
         }
     }
@@ -108,6 +131,7 @@ impl PendingRecord {
             unbound: wire.unbound,
             trees: wire.trees,
             dirs: wire.dirs,
+            held: wire.held,
             moves: wire.moves,
         })
     }
@@ -122,6 +146,7 @@ impl PendingRecord {
             unbound: self.unbound.clone(),
             trees: self.trees.clone(),
             dirs: self.dirs.clone(),
+            held: self.held.clone(),
             moves: self.moves,
         };
         serde_json::to_vec(&wire).expect("a record serializes")
@@ -136,7 +161,8 @@ impl PendingRecord {
         let unbound = unbound.flat_map(|end| end.from.iter().chain(end.path.iter()));
         let trees = self.trees.iter().flat_map(|end| [&end.from, &end.to]);
         let dirs = self.dirs.iter().map(|end| &end.path);
-        let ends = ends.chain(unbound).chain(trees).chain(dirs);
+        let held = self.held.iter().map(|(path, _)| path);
+        let ends = ends.chain(unbound).chain(trees).chain(dirs).chain(held);
         steps
             .chain(ends)
             .all(|path| layout.check_library_path(path).is_ok())
@@ -246,7 +272,7 @@ pub fn cut_short(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::{EntityId, EntryHash, Hlc};
+    use crate::ids::{EntityId, EntryHash, Hlc, Identity};
     use crate::log::{EntryKind, Logged};
 
     #[test]
@@ -296,6 +322,7 @@ mod tests {
             unbound: Vec::new(),
             trees: Vec::new(),
             dirs: Vec::new(),
+            held: Vec::new(),
             moves: Moves::Rename,
         }
     }
@@ -351,6 +378,58 @@ mod tests {
     }
 
     #[test]
+    fn a_record_keeps_the_contents_its_trashed_sources_were_checked_against() {
+        use crate::effects::Precondition;
+        let check = |at: &str, expect| Precondition {
+            path: path(at),
+            expect,
+            spelled: false,
+        };
+        let trash = |at: &str| EffectStep::ToTrash {
+            path: path(at),
+            item: Nonce::from_u128(3),
+        };
+        let listed = Expect::Listed {
+            len: 3,
+            modified: None,
+        };
+        let plan = EffectPlan {
+            checks: vec![
+                check("a", Expect::Holds(Identity::from_u128(5))),
+                check("b", listed),
+                check("c", Expect::File),
+                check("d", Expect::Holds(Identity::from_u128(6))),
+            ],
+            steps: vec![trash("a"), trash("b"), trash("c")],
+            ..EffectPlan::new(Nonce::from_u128(1))
+        };
+        let entry = record(Vec::new()).entry;
+        let made = PendingRecord::new(WriterId::from_u128(1), "Save", entry, &plan);
+        let held = [
+            (path("a"), Expect::Holds(Identity::from_u128(5))),
+            (path("b"), listed),
+        ];
+        assert_eq!(made.held, held);
+        let text = String::from_utf8(made.encode()).unwrap();
+        let id = "00000000000000000000000000000005";
+        let wire = format!(
+            r#""held":[["a",{{"holds":"{id}"}}],["b",{{"listed":{{"len":3,"modified":null}}}}]]"#
+        );
+        assert!(text.contains(&wire), "{text}");
+        assert_eq!(PendingRecord::decode(&made.encode()).unwrap(), made);
+    }
+
+    #[test]
+    fn a_record_without_held_contents_or_with_a_member_unknown_to_it_decodes() {
+        let plain = record(Vec::new());
+        let text = String::from_utf8(plain.encode()).unwrap();
+        assert!(!text.contains("held"), "{text}");
+        assert_eq!(PendingRecord::decode(text.as_bytes()).unwrap(), plain);
+        let newer = text.replacen('{', r#"{"later":[1],"#, 1);
+        assert_eq!(PendingRecord::decode(newer.as_bytes()).unwrap(), plain);
+    }
+
+    #[test]
     fn only_a_nonce_and_a_step_number_name_a_marker() {
         let nonce = Nonce::from_u128(3);
         assert_eq!(marker(&format!("{nonce}.12")), Some((nonce, 12)));
@@ -380,6 +459,9 @@ mod tests {
         let mut escaping = record(vec![]);
         escaping.files[0].path = Some(path(".t/x"));
         assert!(!escaping.is_confined(&layout));
+        let mut checked = record(vec![]);
+        checked.held = vec![(path(".t/x"), Expect::File)];
+        assert!(!checked.is_confined(&layout));
     }
 
     #[test]

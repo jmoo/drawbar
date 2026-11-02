@@ -1012,9 +1012,81 @@ fn refusal<'a>(
     plan: &EffectPlan,
     identify: &Rc<dyn Identify>,
 ) -> Fallible<'a, Option<Refusal>> {
-    let identify = Rc::clone(identify);
-    let checks = plan.checks.clone();
     let trees: BTreeSet<RelPath> = plan.trees.iter().map(|tree| tree.from.clone()).collect();
+    let checked = mismatch(plan.checks.clone(), trees, identify);
+    let trashed: BTreeSet<Nonce> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            EffectStep::ToTrash { item, .. } => Some(*item),
+            _ => None,
+        })
+        .collect();
+    let items: Vec<RelPath> = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            EffectStep::FromTrash { item, .. } if !trashed.contains(item) => {
+                Some(layout.trash(writer, *item))
+            }
+            _ => None,
+        })
+        .collect();
+    checked.and_then(move |refused| {
+        fold(items.into_iter(), refused, |refused, item| match refused {
+            Some(refused) => ok(Some(refused)),
+            None => flow::stat(Root::Folder, &item)
+                .map_ok(|meta| meta.is_none().then_some(Refusal::Emptied)),
+        })
+    })
+}
+
+/// The first `to_trash` step of `record` from step `start` on whose source is
+/// there and holds other than what the intent checked it to hold. A source counts
+/// as there under any spelling the volume finds it by, since the step moves it so.
+pub(crate) fn changed<'a>(
+    record: &PendingRecord,
+    start: usize,
+    identify: &Rc<dyn Identify>,
+) -> Fallible<'a, Option<Refusal>> {
+    let sources: BTreeSet<&RelPath> = record
+        .steps
+        .iter()
+        .skip(start)
+        .filter_map(|step| match step {
+            EffectStep::ToTrash { path, .. } => Some(path),
+            _ => None,
+        })
+        .collect();
+    let held = record
+        .held
+        .iter()
+        .filter(|(path, _)| sources.contains(path));
+    let checks: Vec<Precondition> = held
+        .map(|(path, expect)| Precondition {
+            path: path.clone(),
+            expect: *expect,
+            spelled: false,
+        })
+        .collect();
+    let identify = Rc::clone(identify);
+    fold(checks.into_iter(), Vec::new(), |mut there, check| {
+        flow::stat(Root::Folder, &check.path).map_ok(move |meta| {
+            there.extend(meta.map(|_| check));
+            there
+        })
+    })
+    .and_then(move |there| mismatch(there, BTreeSet::new(), &identify))
+}
+
+/// The first of `checks` that does not hold. A directory satisfies only a check
+/// that it is one where a tree of `trees` moves from.
+fn mismatch<'a>(
+    checks: Vec<Precondition>,
+    trees: BTreeSet<RelPath>,
+    identify: &Rc<dyn Identify>,
+) -> Fallible<'a, Option<Refusal>> {
+    let identify = Rc::clone(identify);
     let paths: Vec<(RelPath, bool)> = checks
         .iter()
         .map(|check| (check.path.clone(), check.spelled))
@@ -1035,7 +1107,7 @@ fn refusal<'a>(
             })
         },
     );
-    let checked = stated.and_then(move |metas| {
+    stated.and_then(move |metas| {
         let identified = |check: &Precondition, meta: &Option<Meta>| match meta {
             Some(meta) if meta.kind == Kind::File => {
                 matches!(check.expect, Expect::Absent | Expect::Holds(_))
@@ -1076,31 +1148,6 @@ fn refusal<'a>(
                     }))
                 })
             })
-        })
-    });
-    let trashed: BTreeSet<Nonce> = plan
-        .steps
-        .iter()
-        .filter_map(|step| match step {
-            EffectStep::ToTrash { item, .. } => Some(*item),
-            _ => None,
-        })
-        .collect();
-    let items: Vec<RelPath> = plan
-        .steps
-        .iter()
-        .filter_map(|step| match step {
-            EffectStep::FromTrash { item, .. } if !trashed.contains(item) => {
-                Some(layout.trash(writer, *item))
-            }
-            _ => None,
-        })
-        .collect();
-    checked.and_then(move |refused| {
-        fold(items.into_iter(), refused, |refused, item| match refused {
-            Some(refused) => ok(Some(refused)),
-            None => flow::stat(Root::Folder, &item)
-                .map_ok(|meta| meta.is_none().then_some(Refusal::Emptied)),
         })
     })
 }

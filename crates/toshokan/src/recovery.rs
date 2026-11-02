@@ -17,7 +17,7 @@ use std::rc::Rc;
 
 use crate::derive::Placed;
 use crate::effects::{
-    self, Applied, Cut, EffectPlan, EffectStep, FileEnd, Moves, Progress, Staged,
+    self, Applied, Cut, EffectPlan, EffectStep, FileEnd, Moves, Precondition, Progress, Staged,
 };
 use crate::env::{Env, Identify};
 use crate::error::{Refusal, Result};
@@ -28,6 +28,7 @@ use crate::layout::Layout;
 use crate::log::{Own, Settlement};
 use crate::path::RelPath;
 use crate::pending::{self, PendingRecord, Records, MAX_RECORD};
+use crate::plan::Expect;
 use crate::report::{Orphan, Outcome, PartialReport};
 
 /// What recovery needs of a writer's placed history.
@@ -210,7 +211,8 @@ fn standing(
 /// and setting aside in the trash any other copy cut short there. The caller then
 /// appends the record's entry with what [`Applied`] says, after which
 /// [`effects::finish`] may remove the record. Where what a remaining step moves is
-/// gone, it does nothing and says so.
+/// gone, or a file it moves to the trash holds other than what the intent checked,
+/// it does nothing and says so.
 pub fn settle(
     layout: &Layout,
     name: Nonce,
@@ -220,15 +222,26 @@ pub fn settle(
 ) -> Task<'static, Result<Resumed>> {
     let layout = layout.clone();
     effects::observe(&layout, name, &record)
-        .and_then(move |seen| {
-            let progress = effects::progress(&layout, &record, &seen, capabilities.fsync);
+        .and_then({
+            let (layout, record, identify) =
+                (layout.clone(), Rc::clone(&record), Rc::clone(&identify));
+            move |seen| {
+                let progress = effects::progress(&layout, &record, &seen, capabilities.fsync);
+                effects::changed(&record, progress.done, &identify)
+                    .map_ok(move |changed| (seen, progress, changed.is_some()))
+            }
+        })
+        .and_then(move |(seen, progress, changed)| {
             let outcome = effects::predict(&layout, name, &record, &seen, &progress);
-            if let Outcome::Partial(PartialReport {
-                error: IoError::NotFound,
-                ..
-            }) = outcome
-            {
-                return flow::ok(Resumed::Gone);
+            let gone = matches!(
+                outcome,
+                Outcome::Partial(PartialReport {
+                    error: IoError::NotFound,
+                    ..
+                })
+            );
+            if gone || changed {
+                return flow::ok(Resumed::GivenUp);
             }
             let Progress {
                 done,
@@ -267,8 +280,9 @@ pub fn settle(
 pub enum Resumed {
     /// Its remaining steps were carried out, as this says.
     Applied(Applied),
-    /// What a remaining step moves is gone, so none was taken.
-    Gone,
+    /// What a remaining step moves is gone, or is not what the intent checked, so
+    /// none was taken.
+    GivenUp,
 }
 
 /// The step of a record whose cut-short copy is set aside.
@@ -516,7 +530,8 @@ fn under<'a>(dir: RelPath) -> Fallible<'a, Vec<(RelPath, Kind)>> {
 /// directory: its staged and trashed bytes are copied, and library files the
 /// settlement displaces go to this writer's trash, the start of a copy their next
 /// step left included. Finishing skips moving to the trash a path that holds
-/// nothing. Dismissing changes no file. Finishing or rolling back a step that
+/// nothing, and checks one that holds something to hold what their intent
+/// checked. Dismissing changes no file. Finishing or rolling back a step that
 /// would rename a directory or move one to the trash is refused where
 /// `capabilities` cannot rename one.
 ///
@@ -611,6 +626,13 @@ impl Orphaned<'_> {
         match step {
             EffectStep::ToTrash { path, .. } if !self.present.contains(path) => {}
             EffectStep::ToTrash { path, item } => {
+                let held = self.theirs.held.iter().filter(|(at, _)| at == path);
+                let checks = held.map(|(path, expect)| Precondition {
+                    path: path.clone(),
+                    expect: *expect,
+                    spelled: false,
+                });
+                self.plan.checks.extend(checks);
                 let ours = self.trash(path)?;
                 self.relayed.insert(*item, ours);
             }
@@ -664,7 +686,7 @@ impl Orphaned<'_> {
         if !self.present.remove(from) {
             return Err(Refusal::Gone(to.clone()));
         }
-        self.present.insert(to.clone());
+        self.vacant(to);
         self.plan.steps.push(EffectStep::Rename {
             from: from.clone(),
             to: to.clone(),
@@ -685,10 +707,22 @@ impl Orphaned<'_> {
         Ok(item)
     }
 
+    /// Takes `path` for a step that puts a file there, checking that nothing is
+    /// there where the folder holds something no step planned before moves away.
+    fn vacant(&mut self, path: &RelPath) {
+        if !self.present.insert(path.clone()) {
+            self.plan.checks.push(Precondition {
+                path: path.clone(),
+                expect: Expect::Absent,
+                spelled: false,
+            });
+        }
+    }
+
     /// Takes `path` up from `ours`, the item of this writer's trash this
     /// settlement put it in.
     fn take_up(&mut self, ours: Nonce, path: &RelPath) {
-        self.present.insert(path.clone());
+        self.vacant(path);
         self.plan.steps.push(EffectStep::FromTrash {
             item: ours,
             path: path.clone(),
@@ -702,12 +736,13 @@ impl Orphaned<'_> {
         if !self.present.contains(&source) {
             return Err(Refusal::Gone(path.clone()));
         }
-        self.present.insert(path.clone());
         let Some(held) = self.trashed.get(&source) else {
+            self.vacant(path);
             let staged = self.env.nonce();
             self.plan.place(staged, Staged::Copy(source), path.clone());
             return Ok(());
         };
+        self.present.insert(path.clone());
         self.plan
             .steps
             .push(EffectStep::MakeDir { path: path.clone() });
