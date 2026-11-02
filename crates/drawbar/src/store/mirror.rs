@@ -2442,11 +2442,19 @@ impl Store {
                 .filter_map(|key| listed.files.get_key_value(key))
                 .collect(),
         };
-        let mut arrived: Vec<(LibPath, Key, Stat)> = files
-            .into_iter()
-            .filter(|(key, _)| self.ids.id(key).is_none())
-            .filter_map(|(key, (path, stat))| Some((path.clone(), key.clone(), (*stat)?)))
-            .collect();
+        let mut arrived: Vec<(LibPath, Key, Stat)> = Vec::new();
+        for (key, (path, stat)) in files {
+            if self.ids.id(key).is_some() {
+                continue;
+            }
+            if let Some(id) = self.renaming(path) {
+                self.ids.insert(id, key.clone());
+                continue;
+            }
+            if let Some(stat) = stat {
+                arrived.push((path.clone(), key.clone(), *stat));
+            }
+        }
         if arrived.is_empty() {
             return 0;
         }
@@ -2470,6 +2478,16 @@ impl Store {
             self.place_ahead(*id, workspace, &browser.folders);
         }
         ids.len()
+    }
+
+    /// The asset known by where a rename sent from `path` and not answered yet puts it:
+    /// a listing taken before the rename landed lists that asset's file at `path`.
+    fn renaming(&self, path: &LibPath) -> Option<u64> {
+        let to = self
+            .moving
+            .iter()
+            .find_map(|(from, to)| path.moved(from, to))?;
+        self.ids.id(&Key::File(to))
     }
 
     /// Show each entity whose file is nowhere, which no asset stands for, as lost, with

@@ -7277,3 +7277,66 @@ fn a_rescue_taken_in_survives_an_undo_and_a_close() {
         "the rescue stays in the library"
     );
 }
+
+/// A file tagged and then moved before the tag's answer arrives is still the same asset:
+/// it keeps its id and its tag, and nothing is said to have changed outside drawbar.
+#[test]
+fn a_file_moved_while_its_first_tag_commits_stays_one_asset() {
+    let root = Temp::new();
+    fs::create_dir(root.at("Gig")).unwrap();
+    fs::write(root.at("a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.named("a.ne5p");
+    let tag = session
+        .bench
+        .browser
+        .tags
+        .make("Sunday")
+        .expect("a new tag");
+    session
+        .bench
+        .act(vec![crate::browser::Act::Tag { ids: vec![id], tag }]);
+    session.poll();
+    let gig = LibPath::parse("Gig").unwrap();
+    let folder = session.bench.browser.folders.id_of(&gig).expect("listed");
+    session.bench.act(vec![crate::browser::Act::File {
+        id,
+        folder: Some(folder),
+    }]);
+    session.decided();
+    session.sync();
+
+    assert_eq!(session.only(), id, "the asset keeps its id");
+    assert_eq!(session.path(id).as_deref(), Some("Gig/a.ne5p"));
+    assert_eq!(session.worn(id), ["Sunday"]);
+    assert_eq!(session.said("outside drawbar"), 0);
+}
+
+/// So is a file whose folder is renamed before the tag's answer arrives.
+#[test]
+fn a_file_whose_folder_is_renamed_while_its_first_tag_commits_stays_one_asset() {
+    let root = Temp::new();
+    fs::create_dir(root.at("Gig")).unwrap();
+    fs::write(root.at("Gig/a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.named("a.ne5p");
+    let tag = session
+        .bench
+        .browser
+        .tags
+        .make("Sunday")
+        .expect("a new tag");
+    session
+        .bench
+        .act(vec![crate::browser::Act::Tag { ids: vec![id], tag }]);
+    session.poll();
+    let gig = LibPath::parse("Gig").unwrap();
+    let folder = session.bench.browser.folders.id_of(&gig).expect("listed");
+    session.rename_folder(folder, "Set");
+    session.decided();
+    session.sync();
+    assert_eq!(session.only(), id, "the asset keeps its id");
+    assert_eq!(session.path(id).as_deref(), Some("Set/a.ne5p"));
+    assert_eq!(session.worn(id), ["Sunday"]);
+    assert_eq!(session.said("outside drawbar"), 0);
+}
