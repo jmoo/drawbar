@@ -122,9 +122,9 @@ drawbar 0.10 and earlier kept This computer in eframe's store, under
 origin and bytes, base64-encoded, and the folders and tags by asset id
 (`store/older.rs`). At the first open of a library that may be written, once its
 files are listed and no change of drawbar's own waits to be finished, drawbar
-takes that list in as one intent: a directory for each folder, a new file for
-each asset holding its saved bytes, its tags and its slot origin, and the tag
-names. A file name is free in its folder and takes the extension its bytes call
+takes that list in as one intent, which no undo takes back: a directory for each
+folder, a new file for each asset holding its saved bytes, its tags and its slot
+origin, and the tag names. A file name is free in its folder and takes the extension its bytes call
 for; bytes that do not decode are written as they are. An unsaved edit is held
 over its new file and kept as any unsaved edit is.
 

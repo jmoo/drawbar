@@ -107,10 +107,10 @@ taken gets a number. A sound with an edit you had not saved comes back with that
 edit, still unsaved. If the browser's storage is full, the edit comes in as a file
 of its own beside the sound instead. The activity log says how many sounds came in.
 
-It is one change, so Undo takes it all back, and once the trash is emptied the
-sounds are gone from the library. Once the sounds are in the library and their
-unsaved edits are kept, drawbar does not bring them in again, but it leaves the
-old list where it was, so the earlier version still finds it. If drawbar stops
+Undo does not take this back; delete the sounds you do not want. Once the sounds
+are in the library and their unsaved edits are kept, drawbar does not bring them
+in again, but it leaves the old list where it was, so the earlier version still
+finds it. If drawbar stops
 before then, it puts the unsaved edits back the next time it starts. If the
 change fails, drawbar says why and tries again the next time it starts.
 

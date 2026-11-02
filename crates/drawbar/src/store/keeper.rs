@@ -714,7 +714,7 @@ impl<F: Fs> Keeper<F> {
         // ⚠️ Where folders do not rename, one moves file by file as the last scan found
         // it: a look at it first takes along what came into it since.
         let mut looked = Vec::new();
-        let rescue = takes_in_rescue(&intent);
+        let lasting = no_undo(&intent);
         let folders = moved_folders(&intent);
         if !folders.is_empty() && !library.fs().capabilities(Root::Folder).rename_dir {
             let paths = folders.iter().filter_map(relative).collect();
@@ -813,13 +813,14 @@ impl<F: Fs> Keeper<F> {
             part => gathered(library, label, vec![part], &mut looked, answer).await?,
         };
         // ⚠️ Undoing a rescue's copy trashes the slot's former occupant, whose only other
-        // copy is gone, and the trash empties at close.
-        if rescue && changes.as_ref().is_some_and(|committed| committed.undoable) {
+        // copy is gone, and undoing a take-in trashes sounds whose list is not offered
+        // again; the trash empties at close.
+        if lasting && changes.as_ref().is_some_and(|committed| committed.undoable) {
             library.forget_undo();
         }
         let intent = changes
             .as_ref()
-            .map(|committed| (committed.intent, committed.undoable && !rescue));
+            .map(|committed| (committed.intent, committed.undoable && !lasting));
         let left = changes
             .as_ref()
             .map(|committed| shown_paths(&committed.left));
@@ -890,14 +891,16 @@ fn not_made(intent: Intent, why: String, answer: &mut impl FnMut(Event)) -> Stri
     why
 }
 
-/// Whether `intent`, or a part of it, copies a slot's former occupant into the library.
-fn takes_in_rescue(intent: &Intent) -> bool {
+/// Whether `intent`, or a part of it, copies a slot's former occupant into the library or
+/// takes in the list an older drawbar kept, which no undo takes back.
+fn no_undo(intent: &Intent) -> bool {
     match intent {
         Intent::Import {
             came: Some(Came::Rescued { .. }),
             ..
-        } => true,
-        Intent::Batch(parts) => parts.iter().any(takes_in_rescue),
+        }
+        | Intent::TakeIn { .. } => true,
+        Intent::Batch(parts) => parts.iter().any(no_undo),
         _ => false,
     }
 }

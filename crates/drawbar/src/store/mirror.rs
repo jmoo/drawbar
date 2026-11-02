@@ -2888,7 +2888,7 @@ impl Store {
     }
 
     /// Take the list an older drawbar kept into the library as one change, which Undo
-    /// takes back, once a session: once a scan has listed every file, while the library
+    /// does not take back, once a session: once a scan has listed every file, while the library
     /// may be written and no change of drawbar's own waits to be finished. Each folder is
     /// a new one in the library's top level, and each asset a file in its folder, both
     /// under names nothing beside them has, the asset's with the extension its bytes call

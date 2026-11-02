@@ -7002,10 +7002,6 @@ fn the_list_an_older_drawbar_kept_comes_in_as_files_with_their_folders_tags_and_
         1
     );
     assert!(session.store.has_taken_in(&list.hash));
-    assert_eq!(
-        session.store.undo_label().as_deref(),
-        Some("Undo Bring in kept sounds")
-    );
     session.close();
 
     let again = Session::open(&root);
@@ -7032,31 +7028,6 @@ fn bytes_that_do_not_decode_come_in_byte_for_byte() {
     session.take_in(&older_list(&storage));
     assert_eq!(root.read("Broken.ne5p"), [0, 1, 2]);
     assert_eq!(root.read("Junk.bin"), [0, 1, 2]);
-}
-
-#[test]
-fn one_undo_takes_the_whole_take_in_back() {
-    let root = Temp::new();
-    let (list, ..) = gig_list();
-    let mut session = Session::open(&root);
-    session.take_in(&list);
-    session.undo();
-    session.settle();
-
-    assert_eq!(root.names(""), [".drawbar"]);
-    assert!(session.tag_names().is_empty());
-    assert!(!session.store.has_taken_in(&list.hash));
-    // As for any file that goes, an asset holding an unsaved edit or a slot's contents
-    // stays, shown missing, until it is saved again or let go of.
-    let missing: Vec<&str> = session
-        .bench
-        .workspace
-        .listed()
-        .filter(|entity| session.bench.browser.folders.missing.contains(&entity.id))
-        .map(|entity| entity.name.as_str())
-        .collect();
-    assert_eq!(missing, ["Grand.ne5p", "Pad.ne5p"]);
-    assert_eq!(session.bench.workspace.listed().count(), 2);
 }
 
 /// A crash after the take-in landed and before the keys were emptied leaves the list:
@@ -7670,4 +7641,22 @@ impl Session {
         } = &mut self.bench;
         self.store.close(workspace, browser, queue, log);
     }
+}
+
+/// The list is not offered again once taken in, so Undo offers no take-in: an undo and
+/// a close leave every sound in the library.
+#[test]
+fn a_take_in_survives_an_undo_and_a_close() {
+    let root = Temp::new();
+    let (list, ..) = gig_list();
+    let mut session = Session::open(&root);
+    session.take_in(&list);
+    assert_eq!(session.store.undo_label(), None, "Undo offers no take-in");
+    session.undo();
+    session.close();
+
+    let again = Session::open(&root);
+    assert!(again.store.has_taken_in(&list.hash));
+    assert_eq!(root.names(""), [".drawbar", "Empty", "Gig", "Grand.ne5p"]);
+    assert_eq!(root.names("Gig"), ["Pad 2.ne5p", "Pad.ne5p"]);
 }
