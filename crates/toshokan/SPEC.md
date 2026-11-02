@@ -1193,7 +1193,8 @@ and a rename written through still flush its log through every earlier change of
 names. On Apple systems it asks for a full sync, and takes a plain one where a
 network volume refuses it. On Linux and Apple systems, a volume that cannot sync
 a directory has each sync of one taken as done. A request another program holds the file of for a moment, as antivirus
-does after a write, is tried again for about half a second.
+does after a write, is tried again for about half a second, and a file's sync
+for about five seconds, since its bytes have landed.
 
 ### Browsers
 

@@ -293,7 +293,11 @@ impl Native {
     fn sync(&self, root: Root, path: &RelPath) -> Result<(), IoError> {
         let full = self.full(root, path)?;
         let kind = self.stat(root, path)?.ok_or(IoError::NotFound)?.kind;
-        patiently(|| flush(&full, kind)).map_err(io_error)
+        let waits = match kind {
+            Kind::File => &SYNCING[..],
+            Kind::Directory => &BRIEFLY[..],
+        };
+        patiently_for(waits, || flush(&full, kind)).map_err(io_error)
     }
 
     fn lock(&mut self, name: RelPath) -> Result<Lock, IoError> {
@@ -459,11 +463,27 @@ fn flush(_: &Path, _: Kind) -> io::Result<()> {
     Ok(())
 }
 
+/// Milliseconds to wait between tries of a request another program holds up:
+/// about half a second in all.
+const BRIEFLY: [u64; 4] = [10, 40, 150, 400];
+
+/// A file sync's waits, about five seconds in all. Windows syncs through another
+/// handle that may write, which a sync client or antivirus reading the file just
+/// written can hold up for longer, and a sync that fails fails a write whose bytes
+/// landed: a log append that did makes the next commit retire the writer.
+const SYNCING: [u64; 7] = [10, 40, 150, 400, 1_000, 1_500, 2_000];
+
 /// Runs `op` again, for about half a second, while another program holds the file
 /// it names, as antivirus and indexing do for a moment after a file is written. A
 /// refusal that lasts, as of a read-only folder, is said that much later.
+fn patiently<T>(op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    patiently_for(&BRIEFLY, op)
+}
+
+/// Runs `op` again after each of `waits`, in milliseconds, while another program
+/// holds the file it names.
 #[cfg(windows)]
-fn patiently<T>(mut op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+fn patiently_for<T>(waits: &[u64], mut op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     use windows_sys::Win32::Foundation::{
         ERROR_ACCESS_DENIED, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION,
     };
@@ -473,7 +493,7 @@ fn patiently<T>(mut op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
         ERROR_LOCK_VIOLATION,
         ERROR_ACCESS_DENIED,
     ];
-    for wait in [10, 40, 150, 400] {
+    for &wait in waits {
         match op() {
             Err(error)
                 if error
@@ -489,7 +509,7 @@ fn patiently<T>(mut op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
 }
 
 #[cfg(not(windows))]
-fn patiently<T>(mut op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+fn patiently_for<T>(_: &[u64], mut op: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     op()
 }
 
