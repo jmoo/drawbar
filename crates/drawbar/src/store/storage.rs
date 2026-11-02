@@ -146,7 +146,8 @@ pub async fn create<F: Fs>(fs: &F, root: Root, path: &RelPath, bytes: Vec<u8>) -
     sync(fs, root, &dir).await
 }
 
-/// The whole file at `path`; `None` where no file is.
+/// The whole file at `path`; `None` where no file is. A file that ends before the length
+/// stated for it is an [`io::ErrorKind::UnexpectedEof`].
 pub async fn read_whole<F: Fs>(fs: &F, root: Root, path: &RelPath) -> io::Result<Option<Vec<u8>>> {
     let Some(meta) = meta(fs, root, path).await? else {
         return Ok(None);
@@ -160,9 +161,47 @@ pub async fn read_whole<F: Fs>(fs: &F, root: Root, path: &RelPath) -> io::Result
         let len = CHUNK.min(meta.len - offset);
         let read = read(fs, root, path, Range { offset, len }).await?;
         if read.is_empty() {
-            break;
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("{path} ended before the {} bytes stated for it", meta.len),
+            ));
         }
         bytes.extend_from_slice(&read);
     }
     Ok(Some(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Storage that says each file is a byte longer than it holds, as when it shrinks
+    /// after it is stated.
+    struct Shrinking(toshokan::MemDisk);
+
+    impl Fs for Shrinking {
+        fn capabilities(&self, root: Root) -> toshokan::io::Capabilities {
+            Fs::capabilities(&self.0, root)
+        }
+
+        async fn perform(&self, io: Io) -> toshokan::io::IoResult {
+            match Fs::perform(&self.0, io).await {
+                Ok(Reply::Stat(Some(meta))) if meta.kind == Kind::File => {
+                    let len = meta.len + 1;
+                    Ok(Reply::Stat(Some(Meta { len, ..meta })))
+                }
+                replied => replied,
+            }
+        }
+    }
+
+    #[test]
+    fn a_file_shorter_than_it_was_stated_is_not_read_as_whole() {
+        let fs = Shrinking(toshokan::MemDisk::new());
+        let path = RelPath::new("kept").unwrap();
+        nord_usb::block_on(create(&fs, Root::Local, &path, b"kept".to_vec())).unwrap();
+        let read = nord_usb::block_on(read_whole(&fs, Root::Local, &path));
+        let e = read.expect_err("a short file is not whole");
+        assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof, "{e}");
+    }
 }
