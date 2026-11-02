@@ -5378,7 +5378,7 @@ fn every_tag_asked_for_before_a_library_is_let_go_unwaited_is_put_on() {
         session.store.losing(workspace, browser)
     };
     assert!(losing(&session), "a tab closing now would lose the tags");
-    while !session.settled() {
+    while !session.settled() || session.store.writing() {
         assert!(session.next(), "the library answered");
     }
     assert!(!losing(&session), "both are put on");
