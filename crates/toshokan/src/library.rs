@@ -31,7 +31,7 @@ use crate::log::{
 };
 use crate::merge::{side_by_side, Folded, Part};
 use crate::path::RelPath;
-use crate::pending::{self, PendingRecord};
+use crate::pending::{self, PendingRecord, Records};
 use crate::plan::{FactChange, FileChange, Plan};
 use crate::reader::{ReadReport, Reader, Stamp};
 use crate::recovery::{self, Recovery, Resumed, Settling};
@@ -232,6 +232,9 @@ impl Library {
                         .unreadable
                         .into_iter()
                         .map(|(path, _)| path)
+                        .chain(library.unread())
+                        .collect::<BTreeSet<RelPath>>()
+                        .into_iter()
                         .collect(),
                     ignored: library.ignored.clone(),
                 };
@@ -457,6 +460,12 @@ impl Library {
             .task()
     }
 
+    /// The files [`Lag::Read`] lags for, in order.
+    fn unread(&self) -> Vec<RelPath> {
+        let unread = self.reader.unread().map(|(path, _)| path.clone());
+        unread.collect::<BTreeSet<RelPath>>().into_iter().collect()
+    }
+
     /// Lags [`Lag::Read`] while the last read left a file unread.
     fn lag_read(&mut self) {
         match self.reader.unread().next() {
@@ -603,6 +612,7 @@ impl Library {
                     unlisted: library.unlisted.clone(),
                     dirs: library.walked.take(),
                     orphaned: library.orphaned.clone(),
+                    unread: library.unread(),
                     retired,
                 })
             })
@@ -1673,8 +1683,11 @@ fn compact_due(library: &mut Library, closing: bool) -> Flow<'_, &mut Library> {
 /// orphans. Writes nothing.
 fn recover(library: Library) -> Fallible<'static, Library> {
     let writers = library.reader.writers_known().into_iter().collect();
-    flow::run(recovery::read(&library.layout, writers)).and_then(move |found| {
+    flow::run(recovery::read(&library.layout, writers)).and_then(move |mut found| {
         let mut library = library;
+        if let Err(error) = unread_records(&mut library, &mut found) {
+            return Flow::Done(Err(error));
+        }
         let own = library.writer.as_ref().map(Writer::id);
         let settled = library.closed_records();
         let chains = &library.reader.derived().writers;
@@ -1700,6 +1713,29 @@ fn recover(library: Library) -> Fallible<'static, Library> {
     })
 }
 
+/// Fails where a pending record of this writer could not be read, and keeps in the
+/// reader those of other writers that could not be.
+fn unread_records(library: &mut Library, found: &mut [(WriterId, Records)]) -> Result<()> {
+    let own = library.writer.as_ref().map(Writer::id);
+    let mut unread = Vec::new();
+    for (writer, records) in found {
+        if Some(*writer) == own {
+            *records = std::mem::take(records).whole()?;
+        }
+        unread.extend(records.unread.iter().map(|(path, error)| {
+            let why = Error::Io {
+                root: Root::Folder,
+                path: path.clone(),
+                error: error.clone(),
+            };
+            (path.clone(), why.to_string())
+        }));
+    }
+    library.reader.unread_records(unread);
+    library.lag_read();
+    Ok(())
+}
+
 /// Offers no orphan while a file in a writer's directory is unread: the entry that
 /// closed its record may be there.
 fn hold_back(assessed: &mut Recovery, reader: &Reader) {
@@ -1712,7 +1748,10 @@ fn hold_back(assessed: &mut Recovery, reader: &Reader) {
 /// the install's own and live as the pool and presence now say. Writes nothing.
 fn reorphaned(library: &mut Library) -> Fallible<'_, &mut Library> {
     let writers = library.reader.writers_known().into_iter().collect();
-    flow::run(recovery::read(&library.layout, writers)).and_then(move |found| {
+    flow::run(recovery::read(&library.layout, writers)).and_then(move |mut found| {
+        if let Err(error) = unread_records(library, &mut found) {
+            return Flow::Done(Err(error));
+        }
         let records: BTreeMap<(WriterId, Nonce), PendingRecord> = found
             .iter()
             .flat_map(|(writer, found)| {
@@ -1810,7 +1849,7 @@ fn release_if_idle<'a, L: BorrowMut<Library> + 'a>(
             let closed = held.closed_records();
             names.any(|name| !closed.contains(&(writer, *name)))
         };
-        if open || !found.unreadable.is_empty() {
+        if open || !found.unreadable.is_empty() || !found.unread.is_empty() {
             return ok(library);
         }
         let mut library = library;

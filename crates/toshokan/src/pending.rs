@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error as ThisError;
 
 use crate::effects::{DirEnd, EffectPlan, EffectStep, FileEnd, Moves, TreeEnd, UnboundEnd};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::flow::{self, fold, ok, Flow};
 use crate::ids::{Nonce, WriterId};
-use crate::io::{Kind, Root, Task};
+use crate::io::{IoError, Kind, Root, Task};
 use crate::layout::Layout;
 use crate::line::Line;
 use crate::log::{Entry, Own};
@@ -189,6 +189,22 @@ pub struct Records {
     pub records: Vec<(Nonce, PendingRecord)>,
     /// Everything else named as a record.
     pub unreadable: Vec<RelPath>,
+    /// Records that could not be read for any reason but their absence, with why.
+    pub unread: Vec<(RelPath, IoError)>,
+}
+
+impl Records {
+    /// These records, unless one could not be read: then why.
+    pub fn whole(mut self) -> Result<Self> {
+        match self.unread.pop() {
+            Some((path, error)) => Err(Error::Io {
+                root: Root::Folder,
+                path,
+                error,
+            }),
+            None => Ok(self),
+        }
+    }
 }
 
 /// The record and step a file of a pending directory marks as started, when its
@@ -199,7 +215,8 @@ pub(crate) fn marker(name: &str) -> Option<(Nonce, usize)> {
     (format!("{}.{}", marked.0, marked.1) == name).then_some(marked)
 }
 
-/// Every pending record of `writer`. Reads only, each read bounded.
+/// Every pending record of `writer`. Reads only, each read bounded. A record gone
+/// before its read is left out.
 pub fn read_all(layout: &Layout, writer: WriterId) -> Task<'static, Result<Records>> {
     let layout = layout.clone();
     let dir = layout.pending_dir(writer);
@@ -220,12 +237,20 @@ pub fn read_all(layout: &Layout, writer: WriterId) -> Task<'static, Result<Recor
                         // Markers, and what other programs leave, as `.DS_Store`.
                         (_, None) => ok(found),
                         (Kind::File, Some(name)) => {
-                            read(path.clone(), writer).map_ok(move |record| {
+                            read(path.clone(), writer).then(move |record| {
                                 match record {
-                                    Some(record) => found.records.push((name, record)),
-                                    None => found.unreadable.push(path),
+                                    Ok(Some(record)) => found.records.push((name, record)),
+                                    Ok(None) => found.unreadable.push(path),
+                                    Err(Error::Io {
+                                        error: IoError::NotFound,
+                                        ..
+                                    }) => {}
+                                    Err(Error::Io { error, .. }) => {
+                                        found.unread.push((path, error))
+                                    }
+                                    Err(error) => return Flow::Done(Err(error)),
                                 }
-                                found
+                                ok(found)
                             })
                         }
                         (_, Some(_)) => {

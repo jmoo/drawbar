@@ -277,9 +277,9 @@ pub enum Lag {
     /// its items stay in the folder, where no instance empties them;
     /// [`crate::library::Library::trash`] lists them.
     Trash,
-    /// A file in another writer's directory could not be read. What it holds is
-    /// not shown, and no unfinished effect is offered to settle, until a refresh
-    /// reads it.
+    /// A file in another writer's directory, a pending record among them, could not
+    /// be read. What it holds is not shown, and no unfinished effect is offered to
+    /// settle, until a refresh reads it.
     Read,
 }
 
@@ -321,6 +321,10 @@ pub struct Refreshed {
     /// As [`Opened::orphaned`], as the pending records stand at this refresh: a
     /// writer elsewhere may have begun or finished an effect since.
     pub orphaned: Vec<Orphan>,
+    /// The files in other writers' directories that could not be read, in order.
+    /// What they hold is not shown, and no orphan is reported, until a refresh
+    /// reads them.
+    pub unread: Vec<RelPath>,
     /// This instance's writer, when the read found its history forked: it writes
     /// no more, and the next commit writes as a new writer.
     pub retired: Option<WriterId>,

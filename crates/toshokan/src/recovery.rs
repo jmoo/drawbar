@@ -21,7 +21,7 @@ use crate::effects::{
 };
 use crate::env::{Env, Identify};
 use crate::error::{Refusal, Result};
-use crate::flow::{self, each, fold, Fallible};
+use crate::flow::{self, each, fold, Fallible, Flow};
 use crate::ids::{Nonce, WriterId};
 use crate::io::{Capabilities, Capability, IoError, Kind, Root, Task};
 use crate::layout::Layout;
@@ -328,6 +328,7 @@ fn set_aside<'a>(
 pub fn tidy(layout: &Layout, writer: WriterId) -> Task<'static, Result<()>> {
     let layout = layout.clone();
     flow::run(pending::read_all(&layout, writer))
+        .and_then(|found| Flow::Done(found.whole()))
         .and_then(move |found| {
             if !found.unreadable.is_empty() {
                 return flow::ok(());

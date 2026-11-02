@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::effects::EffectStep;
 use crate::error::Result;
-use crate::flow::{self, each};
+use crate::flow::{self, each, Flow};
 use crate::ids::{Nonce, WriterId};
 use crate::io::{Kind, Root, Task};
 use crate::layout::Layout;
@@ -58,6 +58,7 @@ pub fn empty(
 ) -> Task<'static, Result<Emptied>> {
     let layout = layout.clone();
     flow::run(pending::read_all(&layout, writer))
+        .and_then(|found| Flow::Done(found.whole()))
         .and_then(move |found| {
             if !found.unreadable.is_empty() {
                 return flow::ok(Emptied {

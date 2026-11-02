@@ -133,6 +133,9 @@ pub struct Reader {
     /// The files of each writer's directory the last read of it could not read,
     /// with why. Each is taken as the read before found it, if any did.
     unread: BTreeMap<WriterId, Vec<(RelPath, String)>>,
+    /// The pending records of other writers the last read of them could not read,
+    /// with why.
+    unread_records: Vec<(RelPath, String)>,
 }
 
 /// One writer's directory as the last read found it.
@@ -240,6 +243,7 @@ impl Reader {
             folder: BTreeMap::new(),
             derived: Rc::default(),
             unread: BTreeMap::new(),
+            unread_records: Vec::new(),
         }
     }
 
@@ -249,6 +253,7 @@ impl Reader {
         self.derived = Rc::default();
         self.folder = BTreeMap::new();
         self.unread = BTreeMap::new();
+        self.unread_records = Vec::new();
     }
 
     /// What the files derive, as of the last read.
@@ -256,10 +261,16 @@ impl Reader {
         &self.derived
     }
 
-    /// The files the last read of each writer's directory could not read, with
-    /// why.
+    /// The files the last read of each writer's directory, and of the pending
+    /// records of other writers, could not read, with why.
     pub fn unread(&self) -> impl Iterator<Item = &(RelPath, String)> {
-        self.unread.values().flatten()
+        self.unread.values().flatten().chain(&self.unread_records)
+    }
+
+    /// Takes in which pending records of other writers the last read of them could
+    /// not read, with why.
+    pub(crate) fn unread_records(&mut self, unread: Vec<(RelPath, String)>) {
+        self.unread_records = unread;
     }
 
     /// Every writer the files hold.

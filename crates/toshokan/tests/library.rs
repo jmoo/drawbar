@@ -690,6 +690,8 @@ through_both!(
     another_writers_file_that_cannot_be_read_is_taken_in_once_it_can_be,
     a_writer_whose_own_file_cannot_be_read_does_not_open,
     orphans_are_held_back_while_a_writers_file_cannot_be_read,
+    orphans_are_held_back_while_a_pending_record_cannot_be_read,
+    a_writer_whose_own_pending_record_cannot_be_read_does_not_open,
     a_file_no_entity_is_bound_to_is_saved_renamed_and_trashed_and_each_undone,
     an_effect_by_path_on_an_entitys_file_is_refused,
     a_tree_moved_with_files_no_entity_is_bound_to_is_moved_back_by_undo,
@@ -4636,6 +4638,86 @@ fn orphans_are_held_back_while_a_writers_file_cannot_be_read<F: Facade>() {
     );
     heal(&probe);
     assert_eq!(ours.refresh().unwrap().orphaned.len(), 1);
+}
+
+fn orphans_are_held_back_while_a_pending_record_cannot_be_read<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    let (mut ours, _) = F::open(probe.clone(), env("b", 2, &clock)).unwrap();
+    let orphan = a_rename_left_by_another(&folder, &clock, &mut ours);
+    let record = layout().pending(orphan.writer, orphan.record);
+    probe.seen.borrow_mut().unreadable = Some(record.clone());
+    let refreshed = ours.refresh().unwrap();
+    assert_eq!(
+        (refreshed.orphaned, refreshed.unread),
+        (vec![], vec![record]),
+        "held back"
+    );
+    let refused = ours.settle(orphan, Settlement::Finished);
+    assert!(
+        matches!(
+            refused,
+            Err(Error::Io {
+                error: IoError::Denied,
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    heal(&probe);
+    let refreshed = ours.refresh().unwrap();
+    assert_eq!(
+        (refreshed.orphaned.len(), refreshed.unread),
+        (1, vec![]),
+        "read again"
+    );
+}
+
+fn a_writer_whose_own_pending_record_cannot_be_read_does_not_open<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    put(&folder, "a.wav", b"a");
+    let mut here = machine(&folder);
+    let probe = Probe::new(&here);
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    a.commit("Tag", |i| i.create(|e| _ = e.add(TAGS, tag("x"))).0)
+        .unwrap();
+    let logging = |io: &Io| io.root() == Root::Folder && io.path().as_str().ends_with(".txt");
+    fail(&probe, move |io| io.mutates() && logging(io));
+    let stopped = a.commit("Rename", |i| {
+        i.rename_file(
+            &path("a.wav"),
+            &path("b.wav"),
+            Expect::Holds(identity(b"a")),
+        )
+    });
+    heal(&probe);
+    assert!(stopped.is_err(), "{stopped:?}");
+    drop(a);
+    here.crash();
+    let probe = Probe::new(&here);
+    let pending = only_writer(&folder).join("pending").unwrap();
+    probe.seen.borrow_mut().unreadable = Some(pending);
+    let refused = F::open(probe.clone(), env("a", 1, &clock)).map(drop);
+    assert!(
+        matches!(
+            refused,
+            Err(Error::Io {
+                error: IoError::Denied,
+                ..
+            })
+        ),
+        "{refused:?}"
+    );
+    heal(&probe);
+    let (_, opened) = F::open(probe, env("a", 1, &clock)).unwrap();
+    assert!(
+        matches!(opened.start, Start::Resumed(_)),
+        "{:?}",
+        opened.start
+    );
 }
 
 fn a_view_lists_no_file_before_a_scan_of_every_file_though_identities_are_kept<F: Facade>() {

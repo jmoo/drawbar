@@ -981,7 +981,11 @@ wherever its writer's log has gone since; one that is closed is spent, waiting
 only for its writer to remove it.
 
 A record is ignored when it does not decode, names another writer, names a path
-that is not a library path, or its `prev` is not in its writer's log. Opening
+that is not a library path, or its `prev` is not in its writer's log. A record of
+another writer that cannot be read for any reason but its absence is reported and
+read again at the next refresh, and until then no orphan is reported or settled;
+one of this writer's fails the open or refresh, and the trash and staging it may
+name are left as they are. Opening
 reports the records it ignores, and the open records of other writers as
 orphans. Each refresh reads every writer's pending records again and reports the
 orphans as they stand then, since a writer elsewhere may have begun or finished
