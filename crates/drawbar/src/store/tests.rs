@@ -6792,6 +6792,39 @@ fn an_unsaved_edit_whose_file_is_not_known_comes_in_as_a_file_of_its_own() {
     assert!(again.handed_over(&list));
 }
 
+/// A list a session handed over, whose marker did not stick so that the next launch reads
+/// it again, has no edit put back: nothing is brought in again.
+#[test]
+fn a_list_handed_over_has_no_edit_put_back() {
+    let root = Temp::new();
+    let (list, _, soft, edit) = gig_list();
+    let mut first = Session::open(&root);
+    first.take_in(&list);
+    first.sync();
+    assert!(first.handed_over(&list));
+    first.close();
+
+    let list = older::List {
+        handed_over: true,
+        ..gig_list_again(None)
+    };
+    let mut again = Session::open(&root);
+    again.take_in(&list);
+    again.sync();
+    assert_eq!(
+        root.names("Gig"),
+        ["Pad 2.ne5p", "Pad.ne5p"],
+        "nothing brought in"
+    );
+    assert_eq!(root.read("Gig/Pad.ne5p"), soft);
+    let pad = again.named("Pad.ne5p");
+    assert!(
+        again.bytes(pad) == edit,
+        "the edit kept as any unsaved edit is"
+    );
+    assert!(again.handed_over(&list));
+}
+
 /// The library already holds a file named Grand and a folder named Gig, so what comes in
 /// is numbered past them, and the two assets named Pad past each other.
 #[test]

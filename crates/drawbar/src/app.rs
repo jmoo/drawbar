@@ -1087,6 +1087,7 @@ impl eframe::App for DrawbarApp {
                     // first, reads the record as it is now.
                     if let Some(kept) = kept {
                         list.placed = Some(kept);
+                        list.handed_over = false;
                     }
                 }
                 released

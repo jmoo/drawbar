@@ -2896,7 +2896,7 @@ impl Store {
     /// that took it in may have ended before keeping: over the file the take-in gave it,
     /// where the list's record says which that is and the library holds it, and as a
     /// file of its own beside where it went otherwise. An edit kept since is left as it
-    /// is.
+    /// is, and none is put back once a take-in of the list was handed over.
     fn put_back(
         &mut self,
         list: &older::List,
@@ -2904,6 +2904,9 @@ impl Store {
         browser: &mut Browser,
         log: &mut Log,
     ) {
+        if list.handed_over {
+            return;
+        }
         for (at, asset) in list.assets.iter().enumerate() {
             let Some(edit) = &asset.unsaved else {
                 continue;
