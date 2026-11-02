@@ -5111,7 +5111,7 @@ fn an_older_copy_of_drawbars_history_restored_from_a_backup_keeps_nothing_apart(
         fs::write(path, bytes).unwrap();
     }
     let session = Session::listed(&root);
-    assert!(session.bench.browser.folders.kept.is_empty());
+    assert!(session.bench.browser.folders.kept().is_empty());
     assert!(tagged(&session).is_empty());
 }
 
@@ -6276,12 +6276,12 @@ fn forked(root: &Temp) -> (Session, Session, u64, u64, Temp) {
 impl Session {
     /// The run kept apart that holds a change described as `said` says.
     fn kept(&self, said: &str) -> crate::folders::Kept {
-        let kept = self.bench.browser.folders.kept.iter();
+        let kept = self.bench.browser.folders.kept().iter();
         let mut found = kept.filter(|kept| kept.rows.iter().any(|row| row.said.contains(said)));
         found
             .next()
             .cloned()
-            .unwrap_or_else(|| panic!("{said:?} in {:?}", self.bench.browser.folders.kept))
+            .unwrap_or_else(|| panic!("{said:?} in {:?}", self.bench.browser.folders.kept()))
     }
 
     fn take_kept(&mut self, run: toshokan::log::Run, changes: Vec<KeptKey>) {
@@ -6309,7 +6309,7 @@ fn a_forked_writers_branches_show_as_changes_kept_apart() {
     let root = Temp::new();
     let (here, there, at_here, at_there, _copy) = forked(&root);
     for (session, id) in [(&here, at_here), (&there, at_there)] {
-        let kept = &session.bench.browser.folders.kept;
+        let kept = session.bench.browser.folders.kept();
         assert_eq!(kept.len(), 2, "one per branch: {kept:?}");
         assert!(kept.iter().all(|kept| kept.kind == KeptKind::Run));
         assert_eq!(session.worn(id), ["New"], "neither branch is merged");
@@ -6388,12 +6388,12 @@ fn a_change_to_an_asset_a_branch_made_is_taken_with_the_asset() {
         .find(|row| row.said.contains("its origin becomes"));
     here.take_kept(kept.run, vec![row.unwrap().key.clone()]);
     assert_eq!(here.said("did not change as asked"), 0);
-    let left = here.bench.browser.folders.kept.iter();
+    let left = here.bench.browser.folders.kept().iter();
     let left = left.filter(|left| left.run == kept.run);
     assert!(
         left.flat_map(|left| &left.rows).next().is_none(),
         "the asset is made at its file: {:?}",
-        here.bench.browser.folders.kept
+        here.bench.browser.folders.kept()
     );
 }
 
@@ -6437,7 +6437,7 @@ fn a_branchs_change_to_a_file_the_library_recorded_since_is_taken_onto_its_asset
     here.take_kept(theirs.run, Vec::new());
     assert_eq!(here.said("did not change as asked"), 0);
     assert_eq!(here.worn(grand), ["Later", "There"]);
-    let mut left = here.bench.browser.folders.kept.iter();
+    let mut left = here.bench.browser.folders.kept().iter();
     let left = left.find(|left| left.run == theirs.run);
     let left = left.expect("the run stays until it is dismissed");
     assert_eq!(left.rows, Vec::new(), "nothing left to review");
@@ -6452,7 +6452,7 @@ fn a_change_to_an_asset_only_a_dismissed_branch_made_is_not_listed() {
     let theirs = here.kept("gains the tag “There”").run;
     let ours = here.kept("gains the tag “Here”").run;
     here.dismiss_kept(ours);
-    let mut left = here.bench.browser.folders.kept.iter();
+    let mut left = here.bench.browser.folders.kept().iter();
     let left = left.find(|left| left.run == theirs);
     let left = left.expect("the run stays until it is dismissed");
     let said: Vec<&str> = left.rows.iter().map(|row| row.said.as_str()).collect();
@@ -6475,7 +6475,7 @@ fn changes_kept_apart_are_taken_whole_or_dismissed_for_every_reader() {
             .bench
             .browser
             .folders
-            .kept
+            .kept()
             .iter()
             .any(|kept| kept.run == ours.run),
         "dismissed"
@@ -6486,7 +6486,7 @@ fn changes_kept_apart_are_taken_whole_or_dismissed_for_every_reader() {
             .bench
             .browser
             .folders
-            .kept
+            .kept()
             .iter()
             .any(|kept| kept.run == ours.run),
         "dismissed for the other reader too"
@@ -6528,7 +6528,7 @@ fn changes_after_history_a_sync_has_not_brought_wait_apart_until_it_does() {
 
     fs::rename(&away, &snapshot).unwrap();
     ours.settle();
-    assert_eq!(ours.bench.browser.folders.kept, Vec::new(), "merged");
+    assert_eq!(ours.bench.browser.folders.kept(), Vec::new(), "merged");
     assert_eq!(tagged(&ours), [wears("Grand.ne5p", &["Monday", "Sunday"])]);
 }
 
@@ -6551,7 +6551,7 @@ fn a_run_kept_apart_counts_its_changes_and_offers_dismissal_once_nothing_is_left
         .bench
         .browser
         .folders
-        .kept
+        .kept()
         .iter()
         .find(|kept| kept.run == theirs.run)
         .cloned()
@@ -6563,7 +6563,7 @@ fn a_run_kept_apart_counts_its_changes_and_offers_dismissal_once_nothing_is_left
         .bench
         .browser
         .folders
-        .kept
+        .kept()
         .iter()
         .any(|kept| kept.run == left.run));
 }
@@ -6593,7 +6593,7 @@ fn a_file_a_branch_kept_apart_renamed_is_taken_where_the_folder_holds_it() {
     there.settle();
     here.settle();
     let moves = |s: &Session| {
-        let kept = s.bench.browser.folders.kept.iter();
+        let kept = s.bench.browser.folders.kept().iter();
         let mut rows = kept.flat_map(|kept| kept.rows.iter().map(move |row| (kept.run, row)));
         rows.find(|(_, row)| row.said.contains(" is at ") || row.said.contains(" moves to "))
             .map(|(run, row)| (run, row.key.clone(), row.said.clone()))
@@ -7192,7 +7192,7 @@ fn undo_after_a_dismissal_takes_back_the_change_before_it() {
     );
     here.undo();
     assert_eq!(here.worn(at_here), ["New"], "the take is undone");
-    let kept = &here.bench.browser.folders.kept;
+    let kept = here.bench.browser.folders.kept();
     assert!(
         !kept.iter().any(|kept| kept.run == ours.run),
         "still dismissed"
@@ -7507,4 +7507,30 @@ fn a_file_whose_delete_fails_while_its_first_tag_commits_comes_back() {
     assert_eq!(session.path(back).as_deref(), Some("a.ne5p"));
     assert_eq!(session.said("is missing"), 0);
     assert!(root.at("a.ne5p").exists(), "the file stays");
+}
+
+/// An asset a change kept apart changes is one the inspector notes, until the changes are
+/// dismissed; an asset no such change touches never is.
+#[test]
+fn only_an_asset_a_change_kept_apart_changes_is_kept_apart() {
+    let root = Temp::new();
+    let (mut here, _there, at_here, _, _copy) = forked(&root);
+    let other = here.create();
+    here.sync();
+    assert!(here.bench.browser.folders.keeps_apart(at_here));
+    assert!(!here.bench.browser.folders.keeps_apart(other));
+
+    let runs: Vec<toshokan::log::Run> = here
+        .bench
+        .browser
+        .folders
+        .kept()
+        .iter()
+        .map(|kept| kept.run)
+        .collect();
+    for run in runs {
+        here.dismiss_kept(run);
+    }
+    assert!(here.bench.browser.folders.kept().is_empty());
+    assert!(!here.bench.browser.folders.keeps_apart(at_here));
 }

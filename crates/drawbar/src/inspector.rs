@@ -707,11 +707,7 @@ fn needed(ui: &mut egui::Ui, class: ObjectClass, named: Option<&str>, id: u32) {
 
 /// A note that a change to something picked is kept apart, opening Kept apart.
 fn kept_apart(ui: &mut egui::Ui, picked: &[u64], browser: &Browser, acts: &mut Vec<Act>) {
-    let kept = &browser.folders.kept;
-    if !picked
-        .iter()
-        .any(|&id| kept.iter().any(|run| run.touches(id)))
-    {
+    if !picked.iter().any(|&id| browser.folders.keeps_apart(id)) {
         return;
     }
     card(ui, Head::fixed(Glyph::FolderGit2, "Kept apart"), |ui| {

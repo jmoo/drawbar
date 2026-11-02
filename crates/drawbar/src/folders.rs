@@ -183,8 +183,9 @@ pub struct Folders {
     pub libraries: Vec<Library>,
     /// The library open last, which the browser must be let into again before it opens.
     pub reconnect: Option<Library>,
-    /// The changes the library keeps apart rather than merging them.
-    pub kept: Vec<Kept>,
+    kept: Vec<Kept>,
+    /// The assets a change of [`Folders::kept`] changes.
+    kept_ids: BTreeSet<u64>,
 }
 
 /// Changes the library keeps apart, as Kept apart shows them: who made them and when,
@@ -208,13 +209,6 @@ pub struct KeptRow {
     pub takes: bool,
     /// It settles a value no reader holds any more.
     pub forgotten: bool,
-}
-
-impl Kept {
-    /// Whether the change to the asset `id` is kept apart here.
-    pub fn touches(&self, id: u64) -> bool {
-        self.rows.iter().any(|row| row.id == Some(id))
-    }
 }
 
 impl Folders {
@@ -366,6 +360,22 @@ impl Folders {
     /// Show these assets, whose files are gone, as lost, in place of those shown before.
     pub(crate) fn set_lost(&mut self, lost: Vec<Lost>) {
         self.lost = lost;
+    }
+
+    /// The changes the library keeps apart rather than merging them.
+    pub fn kept(&self) -> &[Kept] {
+        &self.kept
+    }
+
+    pub(crate) fn set_kept(&mut self, kept: Vec<Kept>) {
+        let rows = kept.iter().flat_map(|kept| &kept.rows);
+        self.kept_ids = rows.filter_map(|row| row.id).collect();
+        self.kept = kept;
+    }
+
+    /// Whether a change to the asset `id` is kept apart.
+    pub fn keeps_apart(&self, id: u64) -> bool {
+        self.kept_ids.contains(&id)
     }
 
     fn next_id(&self) -> u64 {

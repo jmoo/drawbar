@@ -34,7 +34,7 @@ pub(crate) fn offers(kind: KeptKind) -> (bool, bool) {
 impl Browser {
     /// Draw Kept apart while it shows and no question does.
     pub(super) fn kept_sheet(&mut self, ctx: &egui::Context, acts: &mut Vec<Act>) {
-        if self.folders.kept.is_empty() {
+        if self.folders.kept().is_empty() {
             self.show_kept = false;
         }
         if !self.show_kept {
@@ -56,7 +56,7 @@ impl Browser {
                         .id_salt("browser_kept_cards")
                         .max_height(sheet::middle(ui.ctx(), 240.0, 120.0))
                         .show(ui, |ui| {
-                            for kept in &self.folders.kept {
+                            for kept in self.folders.kept() {
                                 card(ui, kept, acts, &mut dismiss, &mut done);
                                 ui.add_space(sheet::GAP * 3.0);
                             }

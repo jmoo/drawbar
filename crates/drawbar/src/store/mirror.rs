@@ -2142,7 +2142,7 @@ impl Store {
             });
         }
         self.kept_runs = shown.iter().map(|kept| kept.run).collect();
-        browser.folders.kept = shown;
+        browser.folders.set_kept(shown);
     }
 
     /// Settle as `how` says a change another drawbar left unfinished.

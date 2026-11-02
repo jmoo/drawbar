@@ -781,7 +781,7 @@ impl Browser {
                     below.push(Line::State(state));
                 }
             }
-            if !self.folders.kept.is_empty() {
+            if !self.folders.kept().is_empty() {
                 below.push(Line::Kept);
             }
         }
@@ -1006,7 +1006,7 @@ impl Browser {
                 };
                 state_row(ui, state, count, filter, acts);
             }
-            Line::Kept => kept_row(ui, self.folders.kept.len(), acts),
+            Line::Kept => kept_row(ui, self.folders.kept().len(), acts),
             Line::Kind(kind) => self.kind_row(ui, kind, workspace, device, filter, acts),
             Line::Tag(id) => self.tag_row(ui, id, workspace, device, filter, acts),
             Line::NewTag => new_tag_row(ui, acts),
