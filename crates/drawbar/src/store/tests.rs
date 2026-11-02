@@ -7660,3 +7660,50 @@ fn a_take_in_survives_an_undo_and_a_close() {
     assert_eq!(root.names(""), [".drawbar", "Empty", "Gig", "Grand.ne5p"]);
     assert_eq!(root.names("Gig"), ["Pad 2.ne5p", "Pad.ne5p"]);
 }
+
+/// A delete that fails leaves the file listed once the library answers, with no look at
+/// the folder again.
+#[test]
+fn a_file_whose_delete_fails_comes_back_once_the_library_answers() {
+    let root = Temp::new();
+    fs::write(root.at("a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.named("a.ne5p");
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Rename { from, .. } if from.as_str() == "a.ne5p"),
+    ));
+    session.bench.act(vec![crate::browser::Act::Remove(id)]);
+    session.decided();
+
+    assert_eq!(session.said("did not change as asked"), 1);
+    let back = session.named("a.ne5p");
+    assert_eq!(session.path(back).as_deref(), Some("a.ne5p"));
+    assert!(root.at("a.ne5p").exists(), "the file stays");
+}
+
+/// An undo of a delete sent before the delete answered, with another change sent after
+/// it, brings the file back once the library answers.
+#[test]
+fn a_file_whose_delete_is_undone_in_flight_comes_back_once_the_library_answers() {
+    let root = Temp::new();
+    fs::write(root.at("a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    fs::write(root.at("b.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let (a, b) = (session.named("a.ne5p"), session.named("b.ne5p"));
+    let tag = session.bench.browser.tags.make("Live").expect("a new tag");
+    session.bench.act(vec![crate::browser::Act::Remove(a)]);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Files);
+    session.store.undo();
+    let ids = vec![b];
+    session
+        .bench
+        .act(vec![crate::browser::Act::Tag { ids, tag }]);
+    session.decided();
+
+    assert!(root.at("a.ne5p").exists(), "the delete was undone");
+    let back = session.named("a.ne5p");
+    assert_eq!(session.path(back).as_deref(), Some("a.ne5p"));
+}

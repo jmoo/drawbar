@@ -306,9 +306,10 @@ pub struct Store {
     reading: bool,
     /// Each rename sent that has not answered, from and to.
     moving: Vec<(LibPath, LibPath)>,
-    /// The files deleted while a change is in flight, each kept until none is: the
-    /// answer to a change sent before the delete still lists the file.
-    deleting: BTreeSet<LibPath>,
+    /// The files deleted while a change is in flight, with the key each was known by,
+    /// each kept until none is: the answer to a change sent before the delete still lists
+    /// the file.
+    deleting: BTreeMap<LibPath, Key>,
     /// The most bytes of the library's files the assets may hold whole: [`MOST_BYTES`].
     budget: u64,
     /// How many files have been asked of the backend to read.
@@ -406,7 +407,7 @@ impl Store {
             fetching: BTreeSet::new(),
             reading: false,
             moving: Vec::new(),
-            deleting: BTreeSet::new(),
+            deleting: BTreeMap::new(),
             budget: MOST_BYTES,
             #[cfg(test)]
             asked_files: 0,
@@ -1564,7 +1565,7 @@ impl Store {
                 waiting,
                 result,
             } => {
-                self.uncommit();
+                let deleted = self.uncommit();
                 let landed = made.is_some();
                 let step = self.answering.pop_front();
                 self.history.waited(finished, waiting, step.as_ref());
@@ -1594,26 +1595,29 @@ impl Store {
                     }
                     None => false,
                 };
+                let failed = result.is_err();
                 match result {
                     Ok(viewed) => {
                         self.viewed(viewed, workspace, browser, queue, log);
                     }
-                    Err(why) => {
-                        match forgotten {
-                            Some(forgotten) => log.trouble(format!("{forgotten}: {why}.")),
-                            None if refused => {}
-                            None if told => log.error(format!("{label}: {why}")),
-                            None => {
-                                log.error(format!("{label}: {why}"));
-                                log.trouble(format!("The library did not change as asked: {why}."));
-                            }
+                    Err(why) => match forgotten {
+                        Some(forgotten) => log.trouble(format!("{forgotten}: {why}.")),
+                        None if refused => {}
+                        None if told => log.error(format!("{label}: {why}")),
+                        None => {
+                            log.error(format!("{label}: {why}"));
+                            log.trouble(format!("The library did not change as asked: {why}."));
                         }
-                        if let Some(shown) = self.shown.take() {
-                            self.project_tags(&shown, browser);
-                            browser.forget_gone(workspace);
-                            self.shown = Some(shown);
-                        }
+                    },
+                }
+                if let Some(shown) = self.shown.take() {
+                    // A file whose delete failed or was undone is still listed.
+                    let back = self.arrive(&shown, Some(&deleted), workspace, browser, log);
+                    if failed || back > 0 {
+                        self.project_tags(&shown, browser);
+                        browser.forget_gone(workspace);
                     }
+                    self.shown = Some(shown);
                 }
             }
             Event::TakenInElsewhere => {
@@ -1777,11 +1781,13 @@ impl Store {
         false
     }
 
-    /// A change, an undo or a redo answered.
-    fn uncommit(&mut self) {
+    /// A change, an undo or a redo answered: once none is in flight, the keys of the files
+    /// deleted since one was.
+    fn uncommit(&mut self) -> BTreeSet<Key> {
         self.committing = self.committing.saturating_sub(1);
-        if self.committing == 0 {
-            self.deleting.clear();
+        match self.committing {
+            0 => std::mem::take(&mut self.deleting).into_values().collect(),
+            _ => BTreeSet::new(),
         }
     }
 
@@ -2524,7 +2530,7 @@ impl Store {
                 self.ids.insert(id, key.clone());
                 continue;
             }
-            if self.deleting.contains(path) {
+            if self.deleting.contains_key(path) {
                 continue;
             }
             if let Some(stat) = stat {
@@ -4091,7 +4097,7 @@ impl Store {
             self.asked.push(Asked::Forget(id));
             return true;
         }
-        self.ids.remove(id);
+        let key = self.ids.remove(id);
         let Some(at) = record.path else {
             return true;
         };
@@ -4099,7 +4105,8 @@ impl Store {
             self.part(Intent::Delete {
                 files: vec![(at.clone(), print.expect())],
             });
-            self.deleting.insert(at);
+            let key = key.unwrap_or_else(|| Key::File(at.clone()));
+            self.deleting.insert(at, key);
         }
         true
     }
