@@ -457,9 +457,8 @@ impl Store {
 
     /// Whether letting the library go now, with no last pass, would lose an edit: an
     /// unsaved one, an asset never written to a file, a write that has not landed, a
-    /// slot view's edit not kept yet, a change held in memory where nothing may be
-    /// written, or a tag asked for and not sent. A browser tab may close without that
-    /// pass.
+    /// slot view's edit not kept yet, a change held in memory only, or a tag asked for
+    /// and not sent. A browser tab may close without that pass.
     pub fn losing(&self, workspace: &Workspace, browser: &Browser) -> bool {
         let unheld = self.unheld(workspace).next().is_some();
         let tagging = !self.asked.is_empty() || browser.tags.naming().is_some();
@@ -488,11 +487,11 @@ impl Store {
         })
     }
 
-    /// Whether a change is held in memory only, where nothing may be written: a deletion,
-    /// a save, a rename or move, or a folder change.
+    /// Whether a change is held in memory only: a folder change not sent yet, or, where
+    /// nothing may be written, a deletion, a save, or a rename or move.
     fn held(&self, browser: &Browser) -> bool {
         let read_only = matches!(self.phase, Phase::ReadOnly(_) | Phase::Unfinished(_));
-        read_only && (browser.folders.changed() || !self.asks.is_empty())
+        browser.folders.changed() || (read_only && !self.asks.is_empty())
     }
 
     /// The names of the assets that letting this library go would lose: each unsaved edit

@@ -7378,3 +7378,22 @@ fn a_frame_tagging_or_moving_thousands_of_files_is_brief() {
     session.store.sync(workspace, browser, Pass::Files);
     println!("move: {:?}", started.elapsed());
 }
+
+/// A folder made while a rescan is in flight is sent only after it answers, so until
+/// then a browser tab must not close without a last pass.
+#[test]
+fn a_folder_made_during_a_rescan_keeps_the_library_losing_until_it_is_sent() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    session.store.rescan();
+    session.bench.act(vec![crate::browser::Act::NewFolder]);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Files);
+    assert!(session.store.scanning(), "the rescan has not answered");
+    assert!(session.store.losing(workspace, browser));
+    session.sync();
+    session.settle();
+    assert_eq!(root.names("").len(), 2, "the folder was made");
+}
