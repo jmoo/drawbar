@@ -422,17 +422,11 @@ impl Dismissals {
         covered
     }
 
-    /// Whether some dismissal names the own entry numbered `n` in tip `tip`.
-    fn cover_tip(&self, writer: WriterId, tip: &Snapshot, n: u64) -> bool {
-        self.in_tip(writer, tip)
-            .any(|run| (run.from..=run.last.n).contains(&n))
-    }
-
     /// The dismissals of `writer`'s runs on the chain of tip `tip`.
     fn in_tip<'d>(&'d self, writer: WriterId, tip: &'d Snapshot) -> impl Iterator<Item = &'d Run> {
         self.0.iter().filter(move |run| {
-            let names = tip.names(run.last) || run.tip.is_some_and(|head| tip.names(head));
-            run.writer == writer && names
+            run.writer == writer
+                && (tip.names(run.last) || run.tip.is_some_and(|head| tip.names(head)))
         })
     }
 
@@ -444,19 +438,23 @@ impl Dismissals {
         let dismissed = self.in_tip(w.writer, tip).map(|run| run.from).min();
         forked.into_iter().chain(dismissed).min()
     }
+}
 
-    /// The first number from `from` on that no dismissal names in tip `tip`;
-    /// `None` when they name every one.
-    fn after_in_tip(&self, writer: WriterId, tip: &Snapshot, from: u64) -> Option<u64> {
-        let mut first = from;
-        while let Some(run) = self
-            .in_tip(writer, tip)
-            .find(|run| (run.from..=run.last.n).contains(&first))
-        {
-            first = run.last.n.checked_add(1)?;
-        }
-        Some(first)
+/// The first of `runs` that names the own entry numbered `n`.
+fn covering<'r>(runs: &[&'r Run], n: u64) -> Option<&'r Run> {
+    runs.iter()
+        .copied()
+        .find(|run| (run.from..=run.last.n).contains(&n))
+}
+
+/// The first number from `from` on that none of `runs` names; `None` when they
+/// name every one.
+fn after(runs: &[&Run], from: u64) -> Option<u64> {
+    let mut first = from;
+    while let Some(run) = covering(runs, first) {
+        first = run.last.n.checked_add(1)?;
     }
+    Some(first)
 }
 
 /// Whether the chain back from `start`, through entries `through` holds for,
@@ -938,6 +936,7 @@ fn items(
         else {
             continue;
         };
+        let dismissed: Vec<&Run> = dismissals.in_tip(w.writer, tip).collect();
         let forced: BTreeMap<FieldKey, (Ref, Hlc, Value)> = tip
             .state
             .own
@@ -961,9 +960,7 @@ fn items(
             .state
             .own
             .iter()
-            .filter(|(_, held)| {
-                held.at.n >= from && !dismissals.cover_tip(w.writer, tip, held.at.n)
-            })
+            .filter(|(_, held)| held.at.n >= from && covering(&dismissed, held.at.n).is_none())
             .map(|(field, held)| {
                 (
                     field.clone(),
@@ -974,7 +971,7 @@ fn items(
             })
             .collect();
         own.sort_by_key(|(_, at, _, _)| at.n);
-        let first = dismissals.after_in_tip(w.writer, tip, from);
+        let first = after(&dismissed, from);
         let above = first.and_then(|first| tip.head.n.checked_sub(first));
         let entries = above.map_or(0, |above| above.saturating_add(1));
         let head = (entries > 0).then_some(tip.at);
@@ -1404,11 +1401,12 @@ mod tests {
                 tip: None,
             }])
         };
-        assert!(!run(&entries[2]).cover_tip(W, &tip, entries[2].n()));
-        assert!(
-            run(&entries[3]).cover_tip(W, &tip, entries[2].n()),
-            "the tip names it"
-        );
+        let covers = |dismissals: Dismissals| {
+            let in_tip: Vec<&Run> = dismissals.in_tip(W, &tip).collect();
+            covering(&in_tip, entries[2].n()).is_some()
+        };
+        assert!(!covers(run(&entries[2])));
+        assert!(covers(run(&entries[3])), "the tip names it");
     }
 
     /// The steps the walks back along chains take to derive what `seen` holds.
