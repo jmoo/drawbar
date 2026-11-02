@@ -5682,6 +5682,48 @@ fn a_change_a_window_left_after_this_one_opened_is_finished() {
     assert!(root.read("Grand.ne5p") == saved, "the save is finished");
 }
 
+/// A save a window left, over a file changed since it checked it, is not finished
+/// over it, whether the window stopped before or after it moved the old bytes to the
+/// trash: drawbar asks about it, and the file keeps its newer bytes.
+#[test]
+fn a_save_a_window_left_over_a_file_changed_since_is_asked_about() {
+    fn into_pending(io: &toshokan::Io) -> bool {
+        matches!(io, toshokan::Io::Rename { to, .. } if to.as_str().contains("/pending/"))
+    }
+    fn into_trash(io: &toshokan::Io) -> bool {
+        matches!(io, toshokan::Io::Rename { to, .. } if to.as_str().contains("/trash/"))
+    }
+    for (stops, shown) in [
+        (into_pending as fn(&_) -> _, "checked"),
+        (into_trash, "trashed"),
+    ] {
+        let root = Temp::new();
+        let mut session = Session::listed(&root);
+        let program = Fresh::Program.bytes().unwrap();
+        fs::write(root.at("Grand.ne5p"), &program).unwrap();
+        let at = toshokan::RelPath::new("Grand.ne5p").unwrap();
+        let expect = toshokan::Expect::Holds(
+            keys::identity_of_bytes(&path("Grand.ne5p"), &program).unwrap(),
+        );
+        let saving = with_gain(&program, "77");
+        let window = interrupted(&root, &root.local(), (stops, true), |other| {
+            let _ = other.intent("Save").save_file(&at, saving, expect).commit();
+        });
+        drop(window);
+        let newer = with_gain(&program, "12");
+        fs::write(root.at("Grand.ne5p"), &newer).unwrap();
+        session.settle();
+        session.poll();
+        session.a_minute_later();
+        let (title, _) = session.bench.browser.asking().expect("a question is asked");
+        assert_eq!(title, "drawbar could not finish “Save”", "{shown}");
+        assert!(
+            root.read("Grand.ne5p") == newer,
+            "{shown}: the newer bytes stay"
+        );
+    }
+}
+
 /// A change a live window of this install is making is not asked about, and once that
 /// window stops, the next read finishes it.
 #[test]

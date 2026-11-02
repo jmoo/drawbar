@@ -269,8 +269,9 @@ bring back any you deleted.
   step of Undo. What drawbar left unfinished on this computer, after a crash, a
   failed save or in another window, is finished without asking, by its next
   change or when the library next opens. If it can no longer be finished,
-  because a file it was moving is gone, drawbar asks whether to roll it back or
-  leave it as is, and Undo no longer reaches the changes before it.
+  because a file it was moving is gone or was saved over since, drawbar asks
+  whether to roll it back or leave it as is, and Undo no longer reaches the
+  changes before it.
 - **A folder that stays.** Where a folder moves one file at a time, as in the
   browser, a folder that still holds a file drawbar does not list, such as one
   whose name starts with a dot, stays where it was, and the activity log names

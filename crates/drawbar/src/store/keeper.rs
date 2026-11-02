@@ -590,10 +590,11 @@ impl<F: Fs> Keeper<F> {
         for mut orphan in ours {
             match library.settle(orphan.clone(), Settlement::Finished).await {
                 Ok(_) => {}
-                Err(e @ Error::Refused(Refusal::Gone(_))) => unfinishable.push(Leftover {
-                    orphan,
-                    unfinishable: Some(told(&e)),
-                }),
+                Err(e @ Error::Refused(Refusal::Gone(_) | Refusal::Changed(_))) => unfinishable
+                    .push(Leftover {
+                        orphan,
+                        unfinishable: Some(told(&e)),
+                    }),
                 Err(_) => {
                     orphan.ours = false;
                     refreshed.orphaned.push(orphan);
