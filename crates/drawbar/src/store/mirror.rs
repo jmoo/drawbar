@@ -4439,14 +4439,18 @@ pub(crate) fn duplicates(
         .map(|folder| (None, &folder.path, false));
     let strangers = folders.strangers().map(|path| (None, path, true));
     for (id, path, stranger) in assets.chain(dirs).chain(strangers) {
-        by_name
+        let entries = by_name
             .entry((path.parent(), names::key(path.leaf())))
-            .or_default()
-            .push(Entry {
-                id,
-                name: path.leaf().to_string(),
-                stranger,
-            });
+            .or_default();
+        // An asset whose file drawbar does not open is listed as that file too.
+        if stranger && entries.iter().any(|entry| entry.name == path.leaf()) {
+            continue;
+        }
+        entries.push(Entry {
+            id,
+            name: path.leaf().to_string(),
+            stranger,
+        });
     }
     // A group of files drawbar does not hold is none of its business.
     let groups: Vec<Group> = by_name

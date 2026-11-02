@@ -7007,10 +7007,10 @@ fn bytes_that_do_not_decode_come_in_byte_for_byte() {
     assert_eq!(root.read("Junk.bin"), [0, 1, 2]);
 }
 
-/// drawbar 0.10 kept any text as a note under the name it was dropped with. drawbar opens
-/// a note only by `.txt`, so one named for another extension comes in with it added.
+/// drawbar 0.10 kept any text as a note under the name it was dropped with, and drawbar
+/// opens a note only by `.txt`.
 #[test]
-fn a_note_named_for_another_extension_comes_in_as_a_note() {
+fn a_note_named_for_a_file_drawbar_does_not_open_comes_in_as_that_file() {
     let root = Temp::new();
     let mut kept = kept_before(
         "drawbar 2\n2\n1\tfresh\tSet.ne5p.oracle.json\tU2V0IDEK\n",
@@ -7019,13 +7019,27 @@ fn a_note_named_for_another_extension_comes_in_as_a_note() {
     );
     let mut session = Session::open(&root);
     session.take_in(&mut kept);
-    assert_eq!(root.names(""), [".drawbar", "Set.ne5p.oracle.json.txt"]);
+    assert_eq!(root.read("Set.ne5p.oracle.json"), b"Set 1\n");
     assert_eq!(session.said("differ only by case"), 0);
     session.close();
 
     let again = Session::open(&root);
-    let note = again.named("Set.ne5p.oracle.json.txt");
-    assert_eq!(again.bytes(note), b"Set 1\n");
+    assert_eq!(again.bench.workspace.listed().count(), 0);
+    assert_eq!(
+        again.bench.browser.folders.others,
+        [LibPath::root().join("Set.ne5p.oracle.json")]
+    );
+}
+
+#[test]
+fn a_sound_named_with_a_dot_is_filed_under_its_format() {
+    let mut bench = Bench::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let id = bench
+        .workspace
+        .ingest("E.Grand".into(), Origin::Fresh, program, &mut bench.log);
+    let entity = bench.workspace.get(id).unwrap();
+    assert_eq!(crate::workspace::library_filename(entity), "E.Grand.ne5p");
 }
 
 /// A crash after the take-in landed and before the keys were emptied leaves the list:

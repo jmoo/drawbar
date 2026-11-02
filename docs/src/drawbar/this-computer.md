@@ -105,7 +105,10 @@ folder becomes a folder at the top of the library, and each sound a file in its
 folder, named after it, with its tags and the slot it came from. A name already
 taken gets a number. A sound with an edit you had not saved comes back with that
 edit, still unsaved. If the browser's storage is full, the edit comes in as a file
-of its own beside the sound instead. The activity log says how many sounds came in.
+of its own beside the sound instead. A note named for a kind of file drawbar does
+not open, such as `.json`, keeps its name and shows only under **Show all files**.
+In the browser, a [copy of the library](#keeping-a-copy-in-the-browser) holds it.
+The activity log says how many sounds came in.
 
 Undo does not take this back; delete the sounds you do not want. Once the sounds
 are in the library and their unsaved edits are kept, drawbar does not bring them
