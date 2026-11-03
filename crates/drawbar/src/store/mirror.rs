@@ -3733,37 +3733,31 @@ impl Store {
         if self.scanning && pass != Pass::Last {
             return false;
         }
-        let mut ops = browser.folders.take_ops();
-        // ⚠️ A change that touches a rename still to answer waits for it, with every change
-        // after it: were the rename refused, the change would act on whatever else has that
-        // name on disk.
-        let held = ops.iter().position(|op| {
-            ends(op)
-                .into_iter()
-                .any(|path| unsettled(&self.moving, path))
-        });
-        let mut held = held.map(|at| ops.split_off(at)).unwrap_or_default();
-        let (mut removals, ops): (Vec<Op>, Vec<Op>) = ops
+        let (mut removals, ops): (Vec<Op>, Vec<Op>) = browser
+            .folders
+            .take_ops()
             .into_iter()
             .partition(|op| matches!(op, Op::RemoveDir(_)));
         // The folder changes are this pass's gesture's, as its asks are.
         self.batch.take = self.passes;
+        // ⚠️ A change that touches a rename still to answer, one this pass sends included,
+        // waits for it, with every change after it: were the rename refused, the change
+        // would act on whatever else has that name on disk.
+        let touches = |moving: &[(LibPath, LibPath)], op: &Op| {
+            ends(op).into_iter().any(|path| unsettled(moving, path))
+        };
+        let removal_waits = removals.iter().any(|op| touches(&self.moving, op));
         let mut waiting = Vec::new();
         for op in ops {
-            // A hidden file's change under a rename this pass sends waits for it too.
-            let renamed = matches!(op, Op::MoveFile { .. } | Op::DeleteFile(_))
-                && ends(&op)
-                    .into_iter()
-                    .any(|path| unsettled(&self.moving, path));
-            match waiting.is_empty() && !renamed {
+            let waits = touches(&self.moving, &op);
+            match waiting.is_empty() && !waits {
                 true => self.tree_op(op),
                 false => waiting.push(op),
             }
         }
-        if !waiting.is_empty() || !held.is_empty() {
+        if removal_waits || !waiting.is_empty() {
             waiting.append(&mut removals);
         }
-        waiting.append(&mut held);
         // The files those changes move wait with them.
         let held_moves: Vec<(LibPath, LibPath)> = waiting
             .iter()

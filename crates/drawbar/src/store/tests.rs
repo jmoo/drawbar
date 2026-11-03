@@ -1886,6 +1886,140 @@ fn a_hidden_file_moved_out_of_a_folder_renamed_in_the_same_pass_waits_for_the_re
     assert_eq!(root.names("Moved"), ["a.ne5p", "notes.pdf"]);
 }
 
+fn folder_at(session: &Session, path: &str) -> u64 {
+    let at = LibPath::parse(path).unwrap();
+    session.bench.browser.folders.id_of(&at).expect(path)
+}
+
+/// Rename the folder `id` to `to`, sending nothing yet.
+fn relocate(session: &mut Session, id: u64, to: &str) {
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    let to = LibPath::parse(to).unwrap();
+    browser.folders.relocate(id, to, workspace);
+}
+
+/// Send what this pass can, which leaves a change waiting, then everything.
+fn sync_after_waiting(session: &mut Session) {
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    let done = session.store.sync(workspace, browser, Pass::Files);
+    assert!(!done, "a change waits");
+    session.settle();
+    session.sync();
+}
+
+#[test]
+fn a_folder_renamed_inside_a_folder_renamed_in_the_same_pass_waits_for_it() {
+    let root = Temp::new();
+    fs::create_dir_all(root.at("Outer/Gig")).unwrap();
+    fs::write(root.at("Outer/Gig/b.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    fs::write(root.at("Outer/Gig/n.pdf"), b"%PDF").unwrap();
+    let mut session = Session::open(&root);
+    let (outer, gig) = (
+        folder_at(&session, "Outer"),
+        folder_at(&session, "Outer/Gig"),
+    );
+    relocate(&mut session, outer, "Moved");
+    relocate(&mut session, gig, "Moved/Gig2");
+    sync_after_waiting(&mut session);
+    assert_eq!(root.names(""), [".drawbar", "Moved"]);
+    assert_eq!(root.names("Moved"), ["Gig2"]);
+    assert_eq!(root.names("Moved/Gig2"), ["b.ne5p", "n.pdf"]);
+    assert_eq!(session.said("did not change as asked"), 0);
+}
+
+#[test]
+fn a_folder_made_inside_a_folder_renamed_in_the_same_pass_waits_for_it() {
+    let root = Temp::new();
+    fs::create_dir(root.at("Outer")).unwrap();
+    fs::write(root.at("Outer/b.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let outer = folder_at(&session, "Outer");
+    relocate(&mut session, outer, "Moved");
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    browser
+        .folders
+        .make(&LibPath::parse("Moved").unwrap(), workspace);
+    sync_after_waiting(&mut session);
+    assert_eq!(root.names("Moved"), ["New folder", "b.ne5p"]);
+    assert_eq!(session.said("did not change as asked"), 0);
+}
+
+#[test]
+fn removing_a_folder_inside_a_folder_renamed_in_the_same_pass_moves_its_folders_up() {
+    let root = Temp::new();
+    fs::create_dir_all(root.at("Outer/Gig/Set")).unwrap();
+    fs::write(
+        root.at("Outer/Gig/Set/b.ne5p"),
+        Fresh::Program.bytes().unwrap(),
+    )
+    .unwrap();
+    let mut session = Session::open(&root);
+    let (outer, gig) = (
+        folder_at(&session, "Outer"),
+        folder_at(&session, "Outer/Gig"),
+    );
+    relocate(&mut session, outer, "Moved");
+    session
+        .bench
+        .act(vec![crate::browser::Act::RemoveFolder(gig)]);
+    sync_after_waiting(&mut session);
+    assert_eq!(root.names(""), [".drawbar", "Moved"]);
+    assert_eq!(root.names("Moved"), ["Set"]);
+    assert_eq!(root.names("Moved/Set"), ["b.ne5p"]);
+    assert_eq!(session.said("did not change as asked"), 0);
+}
+
+/// The disk refuses the rename, since an empty folder drawbar does not know has the
+/// name. The removal sent after it removes the folder drawbar holds, never that one.
+#[test]
+fn removing_a_folder_whose_rename_is_unanswered_waits_for_it() {
+    let (root, mut session, folder, _) = gig();
+    fs::create_dir(root.at("Set")).unwrap();
+    session.rename_folder(folder, "Set");
+    session
+        .bench
+        .act(vec![crate::browser::Act::RemoveFolder(folder)]);
+    sync_after_waiting(&mut session);
+    assert_eq!(root.names(""), [".drawbar", "Set", "a.ne5p"]);
+}
+
+/// The disk refuses the first rename, since a folder drawbar does not know has the
+/// name. The second, sent after it, renames the folder where it still is.
+#[test]
+fn a_rename_inside_a_refused_rename_of_the_same_pass_lands_where_the_folder_is() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::create_dir_all(root.at("Outer/Gig")).unwrap();
+    fs::write(root.at("Outer/Gig/b.ne5p"), &program).unwrap();
+    let mut session = Session::open(&root);
+    let (outer, gig) = (
+        folder_at(&session, "Outer"),
+        folder_at(&session, "Outer/Gig"),
+    );
+    let b = session.only();
+    fs::create_dir(root.at("Moved")).unwrap();
+    fs::write(root.at("Moved/theirs.pdf"), b"theirs").unwrap();
+    relocate(&mut session, outer, "Moved");
+    relocate(&mut session, gig, "Moved/Gig2");
+    sync_after_waiting(&mut session);
+    assert_eq!(root.names("Moved"), ["theirs.pdf"], "theirs is untouched");
+    assert_eq!(root.names("Outer/Gig2"), ["b.ne5p"]);
+    assert_eq!(session.path(b).as_deref(), Some("Outer/Gig2/b.ne5p"));
+
+    let edited = with_gain(&program, "12");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(b, edited.clone(), log);
+    workspace.mark_saved(b);
+    session.sync();
+    assert!(root.read("Outer/Gig2/b.ne5p") == edited, "the save landed");
+}
+
 /// Two renames of one folder, the second sent before the first answers. The disk
 /// refuses the first, since a folder drawbar does not know has the name; that folder is
 /// left alone, and the second renames the folder drawbar holds.
