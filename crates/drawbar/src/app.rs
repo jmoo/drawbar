@@ -941,15 +941,28 @@ impl DrawbarApp {
     /// files.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn open_copy(&mut self, ctx: &egui::Context) {
-        let resumed = self.store.as_ref().is_some_and(Store::opening_copy);
-        if self.browser.folders.count(None, &self.workspace) > 0 && !resumed {
-            self.log.say(
-                "A copy opens only into an empty library, and the library in this browser \
-                 holds files.",
-            );
-            return;
+        if let Some(why) = self.copy_refused() {
+            return self.log.say(why);
         }
         self.libraries.pick_copy(ctx);
+    }
+
+    /// Why a copy cannot open into the browser's library now, or `None` when it can: it
+    /// holds no file, hidden ones included, or a copy it was opening stopped partway.
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub(crate) fn copy_refused(&self) -> Option<&'static str> {
+        if self.store.as_ref().is_some_and(Store::opening_copy) {
+            return None;
+        }
+        let folders = &self.browser.folders;
+        let files = folders.count(None, &self.workspace) > 0;
+        match (files, folders.others.is_empty()) {
+            (true, _) => Some("A copy opens only into an empty library, and this one holds files."),
+            (false, false) => {
+                Some("A copy opens only into an empty library, and this one holds hidden files.")
+            }
+            (false, true) => None,
+        }
     }
 
     /// Let the library go, and open the copy `from` into the browser's own library,
@@ -1673,6 +1686,31 @@ mod tests {
             eframe::Storage::set_string(&mut storage, key, text.to_string());
         }
         storage
+    }
+
+    #[test]
+    fn a_copy_opens_only_into_a_library_holding_no_file_hidden_ones_included() {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = DrawbarApp::with_library(&cc, None);
+        assert_eq!(app.copy_refused(), None, "an empty library takes a copy");
+
+        app.browser.folders.others = vec![crate::store::LibPath::root().join("scan.pdf")];
+        assert_eq!(
+            app.copy_refused(),
+            Some("A copy opens only into an empty library, and this one holds hidden files.")
+        );
+
+        let id = app
+            .workspace
+            .create(crate::workspace::Fresh::Program, &mut app.log)
+            .unwrap();
+        app.workspace
+            .place(id, crate::store::LibPath::root().join("Grand.ne5p"));
+        assert_eq!(
+            app.copy_refused(),
+            Some("A copy opens only into an empty library, and this one holds files.")
+        );
     }
 
     fn held(storage: &crate::testing::Fake, key: &str) -> String {

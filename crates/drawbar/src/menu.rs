@@ -563,7 +563,13 @@ impl DrawbarApp {
             #[cfg(target_arch = "wasm32")]
             Command::OpenCopy => {
                 let store = self.store.as_ref()?;
-                (*store.root() == crate::store::Root::Private).then_some(plain)?
+                (*store.root() == crate::store::Root::Private).then_some(())?;
+                let why = self.copy_refused();
+                Offer {
+                    enabled: why.is_none(),
+                    hint: why,
+                    ..plain
+                }
             }
             Command::AllFiles => check(self.browser.folders.all_files),
             Command::ReportProblem | Command::SendFeedback | Command::Privacy => plain,
