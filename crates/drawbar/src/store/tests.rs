@@ -7097,6 +7097,8 @@ fn a_second_window_does_not_bring_a_hidden_notes_edit_in_again() {
     second.sync();
     assert_eq!(root.names(""), [".drawbar", "Set 2.json", "Set.json"]);
     assert_eq!(second.bench.workspace.listed().count(), 0, "never a row");
+    let hidden = ["Set 2.json", "Set.json"].map(|name| LibPath::root().join(name));
+    assert_eq!(second.bench.browser.folders.others, hidden);
     assert_eq!(second.said("could not find the file"), 0);
 }
 
@@ -7221,6 +7223,23 @@ fn a_take_in_that_writes_nothing_leaves_the_list_for_the_next_session() {
     next.take_in(&mut kept);
     assert!(next.store.has_taken_in(&list.hash));
     assert_eq!(root.names(""), [".drawbar", "Empty", "Gig", "Grand.ne5p"]);
+}
+
+#[test]
+fn a_take_in_that_writes_nothing_lists_no_hidden_file() {
+    let root = Temp::new();
+    let list = "drawbar 2\n2\n1\tfresh\tSet.json\tU2V0IDEK\tU2V0IDIK\n";
+    let mut kept = kept_before(list, "", "");
+    let mut session = Session::open(&root);
+    session.store.fault(Fault::Refuse(
+        |io| matches!(io, toshokan::Io::Write { path, .. } if path.as_str().contains("/tmp/")),
+    ));
+    session.take_in(&mut kept);
+    session.settle();
+    assert_eq!(root.names(""), [".drawbar"], "nothing was written");
+    let others = &session.bench.browser.folders.others;
+    assert!(others.is_empty(), "{others:?} are listed");
+    assert_eq!(session.said("hidden file of its own"), 0);
 }
 
 #[test]

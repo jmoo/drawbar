@@ -1584,7 +1584,7 @@ impl Store {
                 // A take-in that failed partway lands once its change is finished.
                 let refused = match self.taking_in.take_if(|_| label == TAKE_IN) {
                     Some(taking) if taking.elsewhere => {
-                        self.let_taking_go(taking.ids, workspace);
+                        self.let_taking_go(taking.ids, workspace, browser);
                         self.took_up = TookUp::Elsewhere;
                         true
                     }
@@ -1594,7 +1594,7 @@ impl Store {
                     }
                     Some(taking) => {
                         let why = result.as_ref().err().cloned();
-                        self.not_taken_in(taking, why, workspace, log);
+                        self.not_taken_in(taking, why, workspace, browser, log);
                         true
                     }
                     None => false,
@@ -2970,7 +2970,7 @@ impl Store {
         let mut worn: BTreeMap<&str, Vec<Key>> = BTreeMap::new();
         let mut ids = BTreeSet::new();
         let (mut placed, mut edited) = (Vec::new(), Vec::new());
-        let mut hidden = 0;
+        let (mut hidden, mut apart) = (0, String::new());
         for (at, asset) in list.assets.iter().enumerate() {
             let id = workspace.next_id();
             let origin = asset
@@ -3006,13 +3006,13 @@ impl Store {
                     placed.push((at, path));
                     let copy = workspace.next_id();
                     workspace.reserve(copy + 1);
-                    let apart = browser.folders.free(dir, &name, workspace);
-                    log.say(format!(
-                        "The unsaved edit of “{}” is a hidden file of its own, “{apart}”.",
+                    let beside = browser.folders.free(dir, &name, workspace);
+                    apart.push_str(&format!(
+                        " The unsaved edit of “{}” is a hidden file of its own, “{beside}”.",
                         asset.name
                     ));
-                    browser.folders.others.push(dir.join(&apart));
-                    files.push((copy, dir.join(&apart), edit));
+                    browser.folders.others.push(dir.join(&beside));
+                    files.push((copy, dir.join(&beside), edit));
                 }
                 for (id, path, bytes) in files {
                     self.part(Intent::Save {
@@ -3067,7 +3067,7 @@ impl Store {
         let said = match hidden {
             0 => list.said(),
             n => format!(
-                "{} {} came in hidden, since drawbar does not open {it}; {} lists {it}.",
+                "{} {} came in hidden, since drawbar does not open {it}; {} lists {it}.{apart}",
                 list.said(),
                 crate::strings::counted(n, "file", "files"),
                 crate::folders::SHOW_ALL_FILES,
@@ -3198,11 +3198,20 @@ impl Store {
         }
     }
 
-    /// Let go of what a take-in that wrote nothing brought, and look at the library again.
-    fn let_taking_go(&mut self, ids: BTreeSet<u64>, workspace: &mut Workspace) {
+    /// Let go of what a take-in that wrote nothing brought, list only the hidden files
+    /// the library holds, and look at the library again.
+    fn let_taking_go(
+        &mut self,
+        ids: BTreeSet<u64>,
+        workspace: &mut Workspace,
+        browser: &mut Browser,
+    ) {
         for id in ids {
             self.records.remove(&id);
             workspace.forget(id);
+        }
+        if let Some(shown) = &self.shown {
+            browser.folders.others = shown.others();
         }
         self.rescan();
     }
@@ -3215,12 +3224,13 @@ impl Store {
         taking: TakingIn,
         why: Option<String>,
         workspace: &mut Workspace,
+        browser: &mut Browser,
         log: &mut Log,
     ) {
         let why = why
             .or(taking.why)
             .unwrap_or_else(|| "it made nothing".to_string());
-        self.let_taking_go(taking.ids, workspace);
+        self.let_taking_go(taking.ids, workspace, browser);
         log.error(format!("{TAKE_IN}: {why}"));
         log.trouble(format!(
             "drawbar could not bring the sounds an earlier version kept into the library: \
