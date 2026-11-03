@@ -297,11 +297,11 @@ impl Builds {
         for (stored, (path, at)) in wavs {
             // Needed every frame, read or not, so making room for one never evicts another.
             workspace.hurry(*at);
-            match held(workspace.get(*at)) {
+            match held(path, workspace.get(*at)) {
                 Held::Read(bytes) => _ = read.insert(stored.clone(), bytes),
                 Held::Unread => waiting = true,
                 Held::Not(why) => {
-                    refused = Some(format!("{path}: {why}"));
+                    refused = Some(why);
                     break;
                 }
             }
@@ -331,17 +331,20 @@ enum Held {
     /// Its bytes as the asset holds them now, an unsaved edit included.
     Read(Bytes),
     Unread,
-    /// Why a build cannot have them.
+    /// Why the build is refused.
     Not(String),
 }
 
-/// What a build can have of the WAV asset `entity`.
-fn held(entity: Option<&LocalEntity>) -> Held {
+/// What a build can have of the WAV asset `entity` at `path`.
+fn held(path: &LibPath, entity: Option<&LocalEntity>) -> Held {
     let Some(entity) = entity else {
-        return Held::Not("it is gone".to_string());
+        return Held::Not(format!("{path}: it is gone"));
     };
     if let VerifyState::NotRead(why) = entity.verify() {
-        return Held::Not(why);
+        return Held::Not(match why == crate::store::too_much() {
+            true => "the WAVs it plays need more room than drawbar keeps for files".to_string(),
+            false => format!("{path}: {why}"),
+        });
     }
     if entity.unread() {
         return Held::Unread;

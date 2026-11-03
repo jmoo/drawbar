@@ -8834,3 +8834,53 @@ fn a_build_naming_a_hidden_file_says_it_is_one_and_builds_only_from_wavs() {
     );
     assert_eq!(session.said("missing"), 0);
 }
+
+/// A build whose WAVs do not fit in what drawbar holds is refused for that, and none of
+/// its WAVs is read once it is: a WAV is read only when something asks for it.
+#[test]
+fn a_build_past_the_budget_says_so_and_reads_no_wav_after_it_is_refused() {
+    let root = Temp::new();
+    let wavs = ["c3.wav", "c4.wav", "c5.wav"];
+    project_with_wavs(
+        &root,
+        &[
+            ("c3.wav", "Marimba/c3.wav"),
+            ("c4.wav", "Marimba/c4.wav"),
+            ("c5.wav", "Marimba/c5.wav"),
+        ],
+    );
+    let wav = fs::metadata(root.at("Marimba/c3.wav")).unwrap().len();
+    let project = fs::metadata(root.at("Marimba/Marimba.nsmpproj"))
+        .unwrap()
+        .len();
+    let mut session = Session::within(&root, project + wav * 5 / 2);
+    let id = session.named("Marimba.nsmpproj");
+    session.build(id);
+    assert_eq!(
+        session.said(
+            "building Marimba.nsmpproj: the WAVs it plays need more room than drawbar keeps \
+             for files"
+        ),
+        1
+    );
+    let unread = |session: &Session| -> Vec<&str> {
+        let workspace = &session.bench.workspace;
+        let unread = wavs.into_iter().filter(|name| {
+            let entity = workspace.get(session.named(name)).unwrap();
+            entity.unread()
+        });
+        unread.collect()
+    };
+    let refused = unread(&session);
+    assert!(!refused.is_empty(), "a WAV was left unread");
+
+    for _ in 0..4 {
+        session.later();
+        session.answer_reads();
+    }
+    assert_eq!(
+        unread(&session),
+        refused,
+        "a WAV was read in the background"
+    );
+}
