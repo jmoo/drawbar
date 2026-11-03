@@ -1713,6 +1713,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn files_dropped_together_that_drawbar_does_not_open_are_refused_in_one_line() {
+        use eframe::App as _;
+
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = DrawbarApp::with_library(&cc, None);
+        let program = crate::workspace::Fresh::Program.bytes().unwrap();
+        let dropped = [
+            ("scan.pdf", b"%PDF".to_vec()),
+            ("Grand.ne5p", program),
+            ("cover.jpg", b"JFIF".to_vec()),
+        ];
+        let mut input = crate::testing::screen(egui::vec2(1280.0, 720.0), Vec::new());
+        input.dropped_files = dropped
+            .into_iter()
+            .map(|(name, bytes)| egui::DroppedFile {
+                name: name.into(),
+                bytes: Some(bytes.into()),
+                ..Default::default()
+            })
+            .collect();
+        let mut frame = eframe::Frame::_new_kittest();
+        crate::testing::run(&ctx, input, |ctx| app.update(ctx, &mut frame));
+
+        let refusals: Vec<&str> = app
+            .log
+            .iter()
+            .map(|entry| entry.text.as_str())
+            .filter(|text| text.contains("not copied in"))
+            .collect();
+        let [refusal] = refusals[..] else {
+            panic!("one refusal line: {refusals:?}");
+        };
+        assert!(
+            refusal.contains("“scan.pdf”") && refusal.contains("“cover.jpg”"),
+            "{refusal}"
+        );
+        assert_eq!(app.workspace.listed().count(), 1, "the program came in");
+    }
+
     fn held(storage: &crate::testing::Fake, key: &str) -> String {
         eframe::Storage::get_string(storage, key).unwrap_or_default()
     }
