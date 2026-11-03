@@ -2224,6 +2224,54 @@ mod tests {
         }
     }
 
+    /// File ▸ Open recent is left out while the open library is all it would list, and
+    /// offered once there is another to switch to or the open one opens again.
+    #[test]
+    fn open_recent_is_left_out_while_it_would_list_only_the_open_library() {
+        let screen = egui::vec2(1440.0, 1400.0);
+        let library = |name: &str, open| crate::folders::Library {
+            root: name.into(),
+            name: name.to_string(),
+            open,
+        };
+        let reopening = crate::folders::Where {
+            reopens: true,
+            ..Default::default()
+        };
+        for (libraries, place, offered) in [
+            (vec![], None, false),
+            (vec![library("This computer", true)], None, false),
+            (
+                vec![library("This computer", true)],
+                Some(reopening.clone()),
+                true,
+            ),
+            (
+                vec![library("This computer", true), library("Elsewhere", false)],
+                None,
+                true,
+            ),
+        ] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx, None);
+            app.platform = Platform::Web;
+            let _ = settled(&ctx, &mut app, screen);
+            let listed = libraries.len();
+            app.browser.folders.libraries = libraries;
+            app.browser.folders.place = place;
+            let f10 = pressed(egui::Key::F10, egui::Modifiers::NONE);
+            let _ = frame_of(&ctx, &mut app, screen, vec![f10]);
+            let painted = settled(&ctx, &mut app, screen);
+            assert!(painted.wrote("Import…"), "the File menu is open");
+            assert_eq!(
+                painted.wrote(crate::menu::RECENT),
+                offered,
+                "{listed} libraries, reopening: {}",
+                app.browser.folders.place.is_some()
+            );
+        }
+    }
+
     /// Without WebUSB, the top bar's pill and Instrument ▸ Connect… stay where they are,
     /// grayed out, and say why.
     #[test]

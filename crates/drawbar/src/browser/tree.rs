@@ -440,10 +440,9 @@ fn narrow(acts: &mut Vec<Act>, narrow: Narrow) {
 }
 
 /// Whether a menu offers [`library_items`]: where this build can pick a folder, or could
-/// once the browser turns folder access on, or where
-/// [`crate::folders::Folders::libraries`] lists some.
+/// once the browser turns folder access on, or where it offers recent libraries.
 pub fn offers_libraries(folders: &crate::folders::Folders, picking: Picking) -> bool {
-    picking != Picking::Absent || !folders.libraries.is_empty()
+    picking != Picking::Absent || offers_recent(folders)
 }
 
 /// The items that open another folder as the library, switch to a recent one, and show
@@ -463,7 +462,7 @@ pub fn library_items(
         }
         Picking::Absent => {}
     }
-    if !folders.libraries.is_empty() {
+    if offers_recent(folders) {
         menu::button(ui, crate::menu::RECENT, |ui| {
             for library in &folders.libraries {
                 if marked(ui, &library.name, library.open) {
@@ -479,6 +478,13 @@ pub fn library_items(
             ui.close();
         }
     }
+}
+
+/// Whether Open recent is offered: while choosing one of its libraries would do
+/// something. Choosing the open library does nothing unless it opens again.
+pub(crate) fn offers_recent(folders: &Folders) -> bool {
+    let acts = |library| recent(folders, library).is_some();
+    folders.libraries.iter().any(acts)
 }
 
 /// What choosing `library` among the recent libraries does: opens it, or opens the

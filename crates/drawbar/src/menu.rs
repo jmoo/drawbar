@@ -83,8 +83,8 @@ pub enum Entry {
     Do(Command),
     Rule,
     Sub(&'static str, Vec<Entry>),
-    /// The recent libraries, as a submenu of [`Command::Recent`] lines, left out while
-    /// there are none.
+    /// The recent libraries, as a submenu of [`Command::Recent`] lines, left out while it
+    /// would list only the open, working library.
     Recent,
 }
 
@@ -545,7 +545,9 @@ impl DrawbarApp {
                 Picking::Absent => return None,
             },
             Command::Recent(at) => {
-                let library = self.browser.folders.libraries.get(at)?;
+                let folders = &self.browser.folders;
+                let offered = crate::browser::offers_recent(folders);
+                let library = folders.libraries.get(at).filter(|_| offered)?;
                 Offer {
                     label: library.name.clone(),
                     ..check(library.open)
