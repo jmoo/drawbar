@@ -8923,7 +8923,7 @@ fn a_build_logs_each_setting_the_instrument_cannot_hold() {
     session.build(id);
     assert_eq!(
         session.said(
-            "Marimba.nsmp: zone1 sets m_loopDetune = -50, which the instrument has nowhere \
+            "Marimba.nsmp: zone 129 sets m_loopDetune = -50, which the instrument has nowhere \
              to hold"
         ),
         1
