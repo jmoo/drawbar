@@ -2998,6 +2998,7 @@ impl Store {
                 worn.entry(tag).or_default().push(Key::File(path.clone()));
             }
             if !super::opens(&name) {
+                hidden += 1;
                 // ⚠️ Forgotten before it has a path, or its file is asked to be deleted.
                 workspace.forget(id);
                 browser.folders.others.push(path.clone());
@@ -3023,7 +3024,6 @@ impl Store {
                         came,
                     });
                     ids.insert(id);
-                    hidden += 1;
                 }
                 continue;
             }
@@ -3067,9 +3067,9 @@ impl Store {
         let said = match hidden {
             0 => list.said(),
             n => format!(
-                "{} {} came in hidden, since drawbar does not open {it}; {} lists {it}.{apart}",
+                "{} {n} of them came in hidden, since drawbar does not open {it}; View ▸ {} \
+                 lists {it}.{apart}",
                 list.said(),
-                crate::strings::counted(n, "file", "files"),
                 crate::folders::SHOW_ALL_FILES,
                 it = if n == 1 { "it" } else { "them" },
             ),

@@ -7024,7 +7024,7 @@ fn a_note_named_for_a_file_drawbar_does_not_open_comes_in_hidden_under_that_name
     let hidden = [LibPath::root().join("Set.ne5p.oracle.json")];
     assert_eq!(session.bench.workspace.listed().count(), 0, "never a row");
     assert_eq!(session.bench.browser.folders.others, hidden);
-    assert_eq!(session.said("1 file came in hidden"), 1);
+    assert_eq!(session.said("1 of them came in hidden"), 1);
     assert_eq!(session.said("differ only by case"), 0);
     assert!(session.handed_over(&list));
     session.close();
@@ -7048,8 +7048,13 @@ fn the_unsaved_edit_of_a_hidden_note_is_a_hidden_file_beside_it() {
     assert_eq!(root.read("Set.json"), b"Set 1\n");
     assert_eq!(root.read("Set 2.json"), b"Set 2\n");
     assert_eq!(session.bench.workspace.listed().count(), 0);
-    assert_eq!(session.said("2 files came in hidden"), 1);
-    assert_eq!(session.said("is a hidden file of its own, “Set 2.json”"), 1);
+    let said = format!(
+        "drawbar brought 1 sound an earlier version kept into the library, with its tags \
+         and folders. 1 of them came in hidden, since drawbar does not open it; View ▸ {} \
+         lists it. The unsaved edit of “Set.json” is a hidden file of its own, “Set 2.json”.",
+        crate::folders::SHOW_ALL_FILES
+    );
+    assert_eq!(session.said(&said), 1);
 }
 
 #[test]
