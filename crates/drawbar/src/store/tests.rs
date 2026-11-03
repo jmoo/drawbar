@@ -8919,8 +8919,9 @@ fn a_build_past_the_budget_says_so_and_reads_no_wav_after_it_is_refused() {
     let (mut session, refused) = built_past_the_budget(&root);
     assert_eq!(
         session.said(
-            "building Marimba.nsmpproj: the WAVs it plays need more room than drawbar keeps \
-             for files"
+            "building Marimba.nsmpproj: drawbar holds at most 1 GiB of one library's files in \
+             memory, and the WAVs it plays, with the files open, selected, in view, unsaved or \
+             waiting to be sent, come to more"
         ),
         1
     );
