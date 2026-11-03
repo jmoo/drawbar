@@ -75,7 +75,7 @@ The library folder can live in Dropbox, OneDrive or iCloud Drive, or on a
 network share, and syncing just works: a copy that is out of date, changes that
 arrive out of order, and a folder partly restored from a backup all come
 together again. Each drawbar keeps its own record of what it changed in the
-hidden folder, so none overwrites another's. That is also why several drawbars
+`.drawbar` folder, so none overwrites another's. That is also why several drawbars
 can use one library at once: on two computers, in two windows, in two browser
 tabs, or in the browser and the desktop app on one folder. A tab shows another
 tab's changes as soon as they are made; otherwise drawbar shows what the others
@@ -113,7 +113,10 @@ taken gets a number. A sound with an edit you had not saved comes back with that
 edit, still unsaved. If the browser's storage is full, the edit comes in as a file
 of its own beside the sound instead. A note named for a kind of file drawbar does
 not open, such as `.json`, keeps its name and comes in as a hidden file, and an
-edit you had not saved to it is a hidden file of its own beside it.
+edit you had not saved to it is a hidden file of its own beside it. Bytes
+drawbar could not read come in unchanged, and hidden unless their name ends in
+an extension drawbar opens; a name with no extension gains `.bin`, so `Junk`
+becomes `Junk.bin`.
 In the browser, a [copy of the library](#keeping-a-copy-in-the-browser) holds them.
 The activity log says how many sounds came in.
 
@@ -265,7 +268,7 @@ bring back any you deleted.
 ## If something goes wrong
 
 - **Read-only.** drawbar cannot write the library folder, a newer drawbar has
-  written its hidden folder, drawbar could not finish a change, as when
+  written its `.drawbar` folder, drawbar could not finish a change, as when
   another program put a file where a save was going, or the library folder does
   not make sure a change is kept, as on some network and USB drives: move such a
   library to a folder on a local disk. Hover the library's name
