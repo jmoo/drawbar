@@ -815,7 +815,7 @@ impl DrawbarApp {
     /// Let go of a library drawbar can no longer reach: one whose thread or worker
     /// stopped, so that opening it again starts a fresh one, or in the browser a picked
     /// folder the browser no longer lets it into, which the private library stands in
-    /// for until reconnected.
+    /// for until the user chooses the folder again.
     #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))]
     fn let_lost_library_go(&mut self, ctx: &egui::Context) {
         let Some(store) = &self.store else {
@@ -846,19 +846,14 @@ impl DrawbarApp {
         if !store.denied() {
             return;
         }
-        let root = store.root().clone();
-        let name = root.name().unwrap_or_default();
+        let name = store.root().name().unwrap_or_default();
         self.log.trouble(format!(
-            "This browser no longer lets drawbar into {name}, so it was closed. Choose \
-             File ▸ Reconnect {name} to open it again. Until then the library is {}.",
+            "This browser no longer lets drawbar into {name}, so it was closed. Choose it \
+             in File ▸ {} to open it again. Until then the library is {}.",
+            crate::menu::RECENT,
             crate::libraries::THIS_COMPUTER
         ));
         self.switch_library(ctx, crate::store::Root::Private);
-        self.browser.folders.reconnect = Some(crate::folders::Library {
-            root,
-            name,
-            open: false,
-        });
     }
 
     /// Put the library just opened first among the recent ones.
@@ -894,24 +889,20 @@ impl DrawbarApp {
                 Heard::Restored { recent, permitted } => {
                     self.libraries.restored(recent);
                     let last = self.libraries.last().cloned();
-                    let (root, reconnect) = match last {
+                    let (root, denied) = match last {
                         Some(last @ Root::Picked(_)) if !permitted => (Root::Private, Some(last)),
                         last => (last.unwrap_or(Root::Private), None),
                     };
                     self.store = Some(library(ctx, root));
                     self.opened();
-                    if let Some(root) = reconnect {
-                        let name = root.name().unwrap_or_default();
+                    if let Some(denied) = denied {
+                        let name = denied.name().unwrap_or_default();
                         self.log.say(format!(
-                            "{name} opens again once you let this browser into it: choose \
-                             File ▸ Reconnect {name}. Until then the library is {}.",
+                            "{name} opens again once you let this browser into it: choose it \
+                             in File ▸ {}. Until then the library is {}.",
+                            crate::menu::RECENT,
                             crate::libraries::THIS_COMPUTER
                         ));
-                        self.browser.folders.reconnect = Some(crate::folders::Library {
-                            root,
-                            name,
-                            open: false,
-                        });
                     }
                 }
                 Heard::Open(root) => self.waiting = Some((root, false)),

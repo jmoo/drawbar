@@ -310,7 +310,8 @@ Other differences:
   file and removes the old one
   ([What is supported](../getting-started/support.md#the-library-in-the-browser)).
 - A folder handle can be kept only in IndexedDB, and it comes back without its
-  permission. The browser asks again on a click of **File ▸ Reconnect**.
+  permission. The browser asks again when the folder is chosen in **File ▸ Open
+  recent**.
 - The first write asks the browser to keep the storage
   (`navigator.storage.persist()`). Where the browser gives the page no storage,
   the library lasts until the tab closes.

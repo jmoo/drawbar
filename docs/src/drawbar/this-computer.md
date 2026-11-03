@@ -65,8 +65,8 @@ In the browser, browsers that can open a folder on your computer offer **File �
 Open folder…** too ([What is supported](../getting-started/support.md)
 lists them). The browser asks whether drawbar may change the folder. It forgets
 that answer when drawbar.app closes, unless you allowed it on every visit, so the
-next visit starts with the browser's own library, and **File ▸ Reconnect**
-*folder* asks again. If you take the permission back while the folder is open,
+next visit starts with the browser's own library. Choose the folder in **File ▸
+Open recent** and the browser asks again. If you take the permission back while the folder is open,
 drawbar closes it the same way. A folder's unsaved edits come back while it is
 on **File ▸ Open recent**; picked again after it left that list, it
 opens without them.

@@ -455,16 +455,6 @@ pub fn library_items(
     picking: Picking,
     acts: &mut Vec<Act>,
 ) {
-    if let Some(library) = &folders.reconnect {
-        let label = format!("Reconnect {}", library.name);
-        offer(
-            ui,
-            &label,
-            None,
-            Act::OpenLibrary(library.root.clone()),
-            acts,
-        );
-    }
     match picking {
         Picking::On => offer(ui, OPEN_FOLDER, None, Act::PickLibrary, acts),
         Picking::TurnedOff => {

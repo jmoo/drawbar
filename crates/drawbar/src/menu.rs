@@ -35,8 +35,6 @@ pub enum Command {
     NewFolder,
     /// Open another folder as the library.
     PickLibrary,
-    /// Let the browser back into the library open last.
-    Reconnect,
     /// Switch to the recent library at this place in [`crate::folders::Folders::libraries`].
     Recent(usize),
     RevealLibrary,
@@ -128,7 +126,6 @@ pub fn label(command: Command) -> &'static str {
         Command::FromWavs(making) => making.item().0,
         Command::NewFolder => "New folder",
         Command::PickLibrary => OPEN_FOLDER,
-        Command::Reconnect => "Reconnect library",
         Command::Recent(_) => "Recent library",
         Command::RevealLibrary => SHOW_FOLDER,
         #[cfg(target_arch = "wasm32")]
@@ -236,7 +233,6 @@ pub fn menus(platform: Platform) -> Vec<Menu> {
     file.extend([
         Rule,
         Do(C::PickLibrary),
-        Do(C::Reconnect),
         Entry::Recent,
         Do(C::RevealLibrary),
         Rule,
@@ -548,10 +544,6 @@ impl DrawbarApp {
                 },
                 Picking::Absent => return None,
             },
-            Command::Reconnect => {
-                let library = self.browser.folders.reconnect.as_ref()?;
-                relabeled(format!("Reconnect {}", library.name))
-            }
             Command::Recent(at) => {
                 let library = self.browser.folders.libraries.get(at)?;
                 Offer {
@@ -689,13 +681,6 @@ impl DrawbarApp {
                 acts.extend(made(command))
             }
             Command::PickLibrary => acts.push(Act::PickLibrary),
-            Command::Reconnect => acts.extend(
-                self.browser
-                    .folders
-                    .reconnect
-                    .as_ref()
-                    .map(|library| Act::OpenLibrary(library.root.clone())),
-            ),
             Command::Recent(at) => {
                 let folders = &self.browser.folders;
                 let chosen = folders.libraries.get(at);
