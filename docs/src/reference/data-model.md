@@ -140,8 +140,9 @@ again finds its list; a list it changes since has another hash and is taken in
 again. A change that fails is tried again at the next launch. A launch or window
 that finds the hash in the library takes nothing in again: it reads the record and
 puts each unsaved edit back over the file the record names, and where the file is
-gone, it writes the edit as a new file beside where it went. An emptied record puts
-nothing back, so a launch puts edits back at most once even where the browser
+gone, it writes the edit as a new file beside where it went. It puts nothing back
+for a file drawbar does not open, whose edit the take-in wrote beside it. An emptied
+record puts nothing back, so a launch puts edits back at most once even where the browser
 refused the write to `drawbar.taken_in`. Where the record is missing, as when the
 browser stopped before writing it, each unsaved edit is written as a new file once a
 record of the hash alone reads back. Where none does, nothing is written: local

@@ -2912,7 +2912,8 @@ impl Store {
     /// may be written and no change of drawbar's own waits to be finished. Each folder is
     /// a new one in the library's top level, and each asset a file in its folder, both
     /// under names nothing beside them has, the asset's with the extension its bytes call
-    /// for. An unsaved edit stays unsaved over the file. Before the change is sent,
+    /// for. An unsaved edit stays unsaved over the file, but a hidden file's is a hidden
+    /// file of its own beside it, as it has no asset to stay over. Before the change is sent,
     /// `storage` keeps the record of where each asset that came with an unsaved edit
     /// goes, by its place in the list ([`older::keep_placed`]); where none does, each
     /// such edit comes in as a file of its own beside the asset's instead.
@@ -3000,8 +3001,9 @@ impl Store {
                 // ⚠️ Forgotten before it has a path, or its file is asked to be deleted.
                 workspace.forget(id);
                 browser.folders.others.push(path.clone());
-                let mut files = vec![(id, path, asset.saved.clone())];
+                let mut files = vec![(id, path.clone(), asset.saved.clone())];
                 if let Some(edit) = asset.unsaved.clone() {
+                    placed.push((at, path));
                     let copy = workspace.next_id();
                     workspace.reserve(copy + 1);
                     let apart = browser.folders.free(dir, &name, workspace);
@@ -3035,7 +3037,8 @@ impl Store {
         }
         let kept = storage.is_some_and(|storage| older::keep_placed(storage, &list.hash, &placed));
         if !kept {
-            for ((at, path), id) in placed.iter().zip(edited) {
+            let opened = placed.iter().filter(|(_, path)| super::opens(path.leaf()));
+            for ((at, path), id) in opened.zip(edited) {
                 let asset = &list.assets[*at];
                 workspace.replace_bytes(id, asset.saved.clone(), log);
                 let Some((copy, name)) = edit_apart(asset, &path.parent(), workspace, browser, log)
@@ -3112,6 +3115,10 @@ impl Store {
                 continue;
             };
             let placed = placed.get(&at);
+            // The take-in wrote a hidden file's edit as a hidden file of its own.
+            if placed.is_some_and(|path| !super::opens(path.leaf())) {
+                continue;
+            }
             let held = placed.and_then(|path| {
                 let mut listed = workspace.listed();
                 listed

@@ -7053,6 +7053,54 @@ fn the_unsaved_edit_of_a_hidden_note_is_a_hidden_file_beside_it() {
 }
 
 #[test]
+fn a_hidden_notes_edit_is_not_brought_in_again_after_a_crash() {
+    use base64::prelude::{Engine as _, BASE64_STANDARD};
+    let program = Fresh::Program.bytes().unwrap();
+    let (soft, edit) = (with_gain(&program, "12"), with_gain(&program, "40"));
+    let assets = format!(
+        "drawbar 2\n3\n1\tfresh\tSet.json\tU2V0IDEK\tU2V0IDIK\n2\tfresh\tPad\t{}\t{}\n",
+        BASE64_STANDARD.encode(&soft),
+        BASE64_STANDARD.encode(&edit),
+    );
+    let root = Temp::new();
+    let mut kept = kept_before(&assets, "", "");
+    let mut first = Session::open(&root);
+    first.take_in(&mut kept);
+    drop(first);
+
+    let mut again = Session::open(&root);
+    again.take_in(&mut kept);
+    again.sync();
+    let names = [".drawbar", "Pad.ne5p", "Set 2.json", "Set.json"];
+    assert_eq!(root.names(""), names);
+    let rows: Vec<&str> = again.bench.workspace.listed().map(|e| &*e.name).collect();
+    assert_eq!(rows, ["Pad.ne5p"], "a hidden file is never a row");
+    let pad = again.named("Pad.ne5p");
+    assert!(
+        again.bytes(pad) == edit,
+        "the sound's edit is back over its file"
+    );
+    assert_eq!(again.said("could not find the file"), 0);
+}
+
+#[test]
+fn a_second_window_does_not_bring_a_hidden_notes_edit_in_again() {
+    let list = "drawbar 2\n2\n1\tfresh\tSet.json\tU2V0IDEK\tU2V0IDIK\n";
+    let root = Temp::new();
+    let mut kept = kept_before(list, "", "");
+    let mut first = Session::open(&root);
+    let mut second = Session::open(&root);
+    first.take_in(&mut kept);
+    second.take_in(&mut kept);
+    second.settle();
+    second.take_in(&mut kept);
+    second.sync();
+    assert_eq!(root.names(""), [".drawbar", "Set 2.json", "Set.json"]);
+    assert_eq!(second.bench.workspace.listed().count(), 0, "never a row");
+    assert_eq!(second.said("could not find the file"), 0);
+}
+
+#[test]
 fn a_sound_named_with_a_dot_is_filed_under_its_format() {
     let mut bench = Bench::new();
     let program = Fresh::Program.bytes().unwrap();
