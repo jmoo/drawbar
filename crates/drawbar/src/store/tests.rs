@@ -5388,6 +5388,38 @@ fn removing_a_folder_with_hidden_files_in_it_is_one_undo_step() {
     assert_eq!(others(&session), ["Gig/Set/cover.jpg", "Gig/notes.pdf"]);
 }
 
+/// Deleting a hidden file moves it to the trash, as deleting a sound does, and undo
+/// puts it back.
+#[test]
+fn a_deleted_hidden_file_goes_to_the_trash_and_undo_brings_it_back() {
+    let root = Temp::new();
+    fs::create_dir(root.at("Gig")).unwrap();
+    fs::write(root.at("Gig/notes.pdf"), b"%PDF").unwrap();
+    let mut session = Session::open(&root);
+    let notes = LibPath::parse("Gig/notes.pdf").unwrap();
+    session
+        .bench
+        .act(vec![crate::browser::Act::DeleteHidden(notes.clone())]);
+    session.sync();
+    assert_eq!(root.names("Gig"), Vec::<String>::new());
+    assert!(session.bench.browser.folders.others.is_empty());
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo Delete “notes.pdf”")
+    );
+    session.undo();
+    session.settle();
+    assert_eq!(fs::read(root.at("Gig/notes.pdf")).unwrap(), b"%PDF");
+    assert_eq!(
+        session.bench.browser.folders.others,
+        std::slice::from_ref(&notes)
+    );
+    session.redo();
+    session.settle();
+    assert_eq!(root.names("Gig"), Vec::<String>::new());
+    assert!(session.bench.browser.folders.others.is_empty());
+}
+
 /// A new tag made on a selection and named in its editor is one change: one undo takes
 /// it off every asset and out of the list.
 #[test]

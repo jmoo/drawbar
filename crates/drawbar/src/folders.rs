@@ -36,6 +36,8 @@ pub enum Op {
         from: LibPath,
         to: LibPath,
     },
+    /// Move a hidden file to the library's trash.
+    DeleteFile(LibPath),
     /// Sent after every other change of the same sync, once whatever was in it has
     /// moved out.
     RemoveDir(LibPath),
@@ -405,7 +407,7 @@ impl Folders {
                     }
                 }
                 Op::RemoveDir(path) => dirs.retain(|dir| dir != path),
-                Op::MoveFile { .. } => {}
+                Op::MoveFile { .. } | Op::DeleteFile(_) => {}
             }
         }
         self.list.retain(|folder| dirs.contains(&folder.path));
@@ -556,7 +558,7 @@ impl Folders {
         };
         for op in &mut self.ops {
             match op {
-                Op::MakeDir(path) | Op::RemoveDir(path) => back(path),
+                Op::MakeDir(path) | Op::RemoveDir(path) | Op::DeleteFile(path) => back(path),
                 Op::MoveDir { from, to } | Op::MoveFile { from, to } => {
                     back(from);
                     back(to);
@@ -595,6 +597,16 @@ impl Folders {
             from: from.clone(),
             to,
         });
+    }
+
+    /// Move the hidden file at `path` to the library's trash.
+    pub(crate) fn delete_hidden(&mut self, path: &LibPath) {
+        let Some(at) = self.others.iter().position(|held| held == path) else {
+            return;
+        };
+        self.others.remove(at);
+        self.generation += 1;
+        self.ops.push(Op::DeleteFile(path.clone()));
     }
 
     /// Remove an empty folder. The caller moves out what was in it first.

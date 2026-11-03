@@ -102,6 +102,8 @@ pub enum Act {
     RemoveFolderAndHidden(u64),
     /// Turn on Show hidden files.
     ShowHidden,
+    /// Move a hidden file to the library's trash.
+    DeleteHidden(LibPath),
     /// Put a tag on every one of these assets. A view is kept first.
     Tag {
         ids: Vec<u64>,
@@ -338,6 +340,7 @@ impl Act {
             | Act::RemoveFolder(_)
             | Act::RemoveFolderAndHidden(_)
             | Act::ShowHidden
+            | Act::DeleteHidden(_)
             | Act::Tag { .. }
             | Act::Untag { .. }
             | Act::NewTag(_)
@@ -677,6 +680,7 @@ pub fn apply(
             Act::RemoveFolder(id) => remove_folder(browser, workspace, log, id, false),
             Act::RemoveFolderAndHidden(id) => remove_folder(browser, workspace, log, id, true),
             Act::ShowHidden => browser.folders.all_files = true,
+            Act::DeleteHidden(path) => browser.folders.delete_hidden(&path),
             Act::File { id, folder } => {
                 let (Some(dir), Some(entity)) = (browser.folders.dir(folder), workspace.get(id))
                 else {
@@ -3176,7 +3180,7 @@ mod tests {
             .unwrap();
         let name = bench.workspace.get(id).unwrap().name.clone();
 
-        bench.browser.ask_delete(id, &name);
+        bench.browser.ask_delete(&name, Act::Remove(id));
         let note = bench.browser.ask.take().and_then(|ask| ask.note);
         let note = note.expect("a note");
         assert!(note.contains("held in memory only"), "{note}");

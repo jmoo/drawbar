@@ -3890,6 +3890,9 @@ impl Store {
                 }
                 self.rename_folder(from, to);
             }
+            Op::DeleteFile(path) => self.part(Intent::Delete {
+                files: vec![(path, toshokan::Expect::File)],
+            }),
             Op::MoveFile { from, to } => {
                 self.moving.push((from.clone(), to.clone()));
                 let expect = toshokan::Expect::File;
@@ -4411,7 +4414,7 @@ fn leave(left: &mut Vec<u64>, leaving: Leaving, workspace: &Workspace, log: &mut
 /// The paths a change to the folders acts on, where it was and where it goes.
 fn ends(op: &Op) -> [&LibPath; 2] {
     match op {
-        Op::MakeDir(path) | Op::RemoveDir(path) => [path, path],
+        Op::MakeDir(path) | Op::RemoveDir(path) | Op::DeleteFile(path) => [path, path],
         Op::MoveDir { from, to } | Op::MoveFile { from, to } => [from, to],
     }
 }

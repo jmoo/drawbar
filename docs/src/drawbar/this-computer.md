@@ -23,7 +23,8 @@ kept on this computer, in drawbar's own data, never in the library folder.
 
 drawbar hides the files in the library it does not open, such as a PDF or a
 photo, and never changes them on its own. **View ▸ Show hidden files** lists
-them, drawn faint. Names that start with a dot never show.
+them, drawn faint, and a hidden file's menu offers **Delete…**. Names that start
+with a dot never show.
 
 In the browser, your library is kept in the browser's own storage for
 drawbar.app, which no other site or app can see. It keeps your files, tags and
@@ -160,11 +161,11 @@ of characters long. If another drawbar has changed what an undo would take
 back, that undo is refused, and Undo goes on to the change before it. An edit
 you have not saved is taken back with **Revert** instead.
 
-Deleting a sound, or saving over one, moves the old file into drawbar's trash in
-the hidden folder, where Undo finds it. Undo reaches only the changes made since
-the library opened, and the trash keeps only what they need, at most 1 GiB. Past
-that, the oldest goes first, and the activity log says which change Undo no
-longer reaches. Quitting empties the trash. What a crash left there goes when
+Deleting a sound or a hidden file, or saving over a sound, moves the old file
+into drawbar's trash in the `.drawbar` folder, where Undo finds it. Undo reaches
+only the changes made since the library opened, and the trash keeps only what
+they need, at most 1 GiB. Past that, the oldest goes first, and the activity
+log says which change Undo no longer reaches. Quitting empties the trash. What a crash left there goes when
 the library next opens, once drawbar has finished any change the crash
 interrupted. When drawbar has to go on with a history of its own, it empties the
 trash of the history it leaves, since Undo starts again. After its data was

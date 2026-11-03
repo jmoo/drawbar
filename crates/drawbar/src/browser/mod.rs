@@ -746,8 +746,8 @@ impl Browser {
         }
     }
 
-    /// Ask before an asset is deleted with its file.
-    fn ask_delete(&mut self, id: u64, name: &str) {
+    /// Ask before `act` deletes `name` with its file.
+    fn ask_delete(&mut self, name: &str, act: Act) {
         let note = match self.folders.read_only() {
             false => "It is deleted from this computer, with its file in the library folder.",
             true => {
@@ -759,7 +759,7 @@ impl Browser {
             format!("Delete “{name}”?"),
             Some(note.into()),
             Verb::Delete,
-            vec![Act::Remove(id)],
+            vec![act],
         ));
     }
 

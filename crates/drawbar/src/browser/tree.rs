@@ -1056,8 +1056,8 @@ impl Browser {
     }
 
     /// A file drawbar does not open.
-    fn stranger_row(&self, ui: &mut egui::Ui, index: usize, depth: usize) {
-        let Some(path) = self.folders.others.get(index) else {
+    fn stranger_row(&mut self, ui: &mut egui::Ui, index: usize, depth: usize) {
+        let Some(path) = self.folders.others.get(index).cloned() else {
             return;
         };
         let drawn = row(
@@ -1075,7 +1075,13 @@ impl Browser {
         );
         drawn
             .response
-            .on_hover_text("Hidden: drawbar does not open this kind of file.");
+            .on_hover_text("Hidden: drawbar does not open this kind of file.")
+            .context_menu(|ui| {
+                if ui.button("Delete…").clicked() {
+                    self.ask_delete(path.leaf(), Act::DeleteHidden(path.clone()));
+                    ui.close();
+                }
+            });
     }
 
     /// The assets directly in `folder`, or in the root for `None`, as rows.
@@ -1358,7 +1364,7 @@ impl Browser {
         menu::button(ui, "Tag", |ui| self.tag_items(ui, &picked, acts));
         ui.separator();
         if ui.button("Delete…").clicked() {
-            self.ask_delete(id, &entity.name);
+            self.ask_delete(&entity.name, Act::Remove(id));
             ui.close();
         }
     }
