@@ -788,7 +788,7 @@ impl Browser {
             Verb::MoveUp,
             vec![Act::RemoveFolderAndHidden(id)],
         );
-        ask.others = vec![("Show them", vec![Act::ShowHidden])];
+        ask.others = vec![("Show them", vec![Act::ShowHidden(id)])];
         self.raise(ask);
     }
 

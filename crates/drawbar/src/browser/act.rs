@@ -100,8 +100,8 @@ pub enum Act {
     /// [`Act::RemoveFolder`], confirmed though the folder holds hidden files, which move
     /// up with the rest.
     RemoveFolderAndHidden(u64),
-    /// Turn on Show hidden files.
-    ShowHidden,
+    /// Turn on Show hidden files, and open the folder to show those in it.
+    ShowHidden(u64),
     /// Move a hidden file to the library's trash.
     DeleteHidden(LibPath),
     /// Put a tag on every one of these assets. A view is kept first.
@@ -339,7 +339,7 @@ impl Act {
             | Act::NewFolderIn(_)
             | Act::RemoveFolder(_)
             | Act::RemoveFolderAndHidden(_)
-            | Act::ShowHidden
+            | Act::ShowHidden(_)
             | Act::DeleteHidden(_)
             | Act::Tag { .. }
             | Act::Untag { .. }
@@ -679,7 +679,10 @@ pub fn apply(
             Act::NewFolderIn(parent) => new_folder(browser, workspace, Some(parent)),
             Act::RemoveFolder(id) => remove_folder(browser, workspace, log, id, false),
             Act::RemoveFolderAndHidden(id) => remove_folder(browser, workspace, log, id, true),
-            Act::ShowHidden => browser.folders.all_files = true,
+            Act::ShowHidden(folder) => {
+                browser.folders.all_files = true;
+                browser.open.insert(super::tree::Branch::Folder(folder));
+            }
             Act::DeleteHidden(path) => browser.folders.delete_hidden(&path),
             Act::File { id, folder } => {
                 let (Some(dir), Some(entity)) = (browser.folders.dir(folder), workspace.get(id))
@@ -3651,7 +3654,7 @@ mod tests {
     }
 
     #[test]
-    fn show_them_shows_the_hidden_files_and_keeps_the_folder() {
+    fn show_them_shows_the_hidden_files_in_the_open_folder_and_keeps_it() {
         let mut bench = Bench::new();
         let folder = gig_hiding(&mut bench, &["Gig/notes.pdf"]);
 
@@ -3659,6 +3662,8 @@ mod tests {
         let acts = bench.browser.answer("Show them");
         bench.act(acts);
         assert!(bench.browser.folders.all_files);
+        let open = &bench.browser.open;
+        assert!(open.contains(&super::super::tree::Branch::Folder(folder)));
         assert!(bench.browser.folders.path_of(folder).is_some());
         assert!(bench.browser.folders.take_ops().is_empty());
     }
