@@ -510,14 +510,20 @@ pub fn carries_tag(name: &str) -> bool {
     })
 }
 
-/// `typed`, with the format tag `stored` carries, if any.
+/// `typed`, ending in the format tag `stored` carries, if any. A tag `typed` already ends
+/// in, in any case, is not added again.
 ///
 /// The kind glyph beside a name already shows the file type, so the edit box never shows
 /// the tag. A rename, or a duplicate named after its original, must still keep it.
 pub fn tagged(stored: &str, typed: &str) -> String {
+    let ends_in = |tag: &str| {
+        typed
+            .rsplit_once('.')
+            .is_some_and(|(stem, end)| !stem.is_empty() && end.eq_ignore_ascii_case(tag))
+    };
     match stored.rsplit_once('.').filter(|_| carries_tag(stored)) {
-        Some((_, tag)) => format!("{typed}.{tag}"),
-        None => typed.to_string(),
+        Some((_, tag)) if !ends_in(tag) => format!("{typed}.{tag}"),
+        _ => typed.to_string(),
     }
 }
 

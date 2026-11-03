@@ -1221,16 +1221,8 @@ fn rename(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id: u
         workspace.rename(id, name.clone());
         return log.say(format!("Renamed it “{name}”."));
     };
-    // A name typed without an extension drawbar takes in keeps the old one, so a rename
-    // never hides a file.
-    let typed_tag = match comes_in(&entity.name) {
-        true => comes_in(&name),
-        false => crate::strings::carries_tag(&name),
-    };
-    let name = match typed_tag {
-        true => name,
-        false => crate::strings::tagged(&entity.name, &name),
-    };
+    // A rename never changes a file's extension.
+    let name = crate::strings::tagged(&entity.name, &name);
     put(browser, workspace, log, id, path.parent(), name);
 }
 
@@ -3415,6 +3407,26 @@ mod tests {
             said.contains("“CON.ne5p”") && said.contains("device"),
             "{said}"
         );
+    }
+
+    #[test]
+    fn a_rename_never_changes_a_files_extension() {
+        let mut bench = Bench::new();
+        let note = bench.workspace.create(Fresh::Text, &mut bench.log).unwrap();
+        let [program] = placed(&mut bench, 1)[..] else {
+            unreachable!()
+        };
+        for (id, typed, named) in [
+            (program, "Choir.wav", "Choir.wav.ne5p"),
+            (program, "Grand.NE5P", "Grand.NE5P"),
+            (note, "notes.md", "notes.md.txt"),
+        ] {
+            bench.act(vec![Act::RenameLocal {
+                id,
+                name: typed.into(),
+            }]);
+            assert_eq!(name(&bench, id), named, "{typed}");
+        }
     }
 
     #[test]

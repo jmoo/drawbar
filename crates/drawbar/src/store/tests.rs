@@ -5621,6 +5621,26 @@ fn a_wav_dropped_again_asks_about_its_asset_and_offers_keep_both() {
 }
 
 #[test]
+fn a_program_renamed_with_a_wav_name_is_still_a_program_after_a_reopen() {
+    let root = Temp::new();
+    fs::write(root.at("a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.only();
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id,
+        name: "Choir.wav".into(),
+    }]);
+    session.sync();
+    session.close();
+    let again = Session::open(&root);
+    assert_eq!(again.bench.workspace.listed().count(), 1, "still a row");
+    assert!(
+        again.bench.browser.folders.others.is_empty(),
+        "no hidden file"
+    );
+}
+
+#[test]
 fn a_dropped_wav_renamed_with_a_dot_keeps_its_extension() {
     let (root, outside) = (Temp::new(), Temp::new());
     fs::write(outside.at("cello.wav"), crate::testing::wav_bytes()).unwrap();
