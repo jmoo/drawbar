@@ -873,13 +873,7 @@ mod tests {
     }
 
     fn scratch() -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("nord-sample-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::edit::tests::scratch("sample")
     }
 
     fn encode_args(wav: &Path, out: PathBuf, generation: u8, unverified: bool) -> EncodeArgs {
