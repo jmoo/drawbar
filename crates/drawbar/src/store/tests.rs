@@ -5621,6 +5621,26 @@ fn a_wav_dropped_again_asks_about_its_asset_and_offers_keep_both() {
 }
 
 #[test]
+fn a_dropped_wav_renamed_with_a_dot_keeps_its_extension() {
+    let (root, outside) = (Temp::new(), Temp::new());
+    fs::write(outside.at("cello.wav"), crate::testing::wav_bytes()).unwrap();
+    let mut session = Session::open(&root);
+    session.bench.act(vec![crate::browser::Act::Take {
+        from: outside.at("cello.wav"),
+        dir: LibPath::root(),
+        name: "cello.wav".into(),
+    }]);
+    session.sync();
+    let id = session.named("cello.wav");
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id,
+        name: "E.Piano".into(),
+    }]);
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "E.Piano.wav"]);
+}
+
+#[test]
 fn removing_a_folder_moves_a_dropped_wav_up_once() {
     let (root, outside) = (Temp::new(), Temp::new());
     fs::create_dir(root.at("Gig")).unwrap();

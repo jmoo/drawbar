@@ -1221,10 +1221,10 @@ fn rename(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id: u
         workspace.rename(id, name.clone());
         return log.say(format!("Renamed it “{name}”."));
     };
-    // A name typed without an extension drawbar opens keeps the old one, so a rename
+    // A name typed without an extension drawbar takes in keeps the old one, so a rename
     // never hides a file.
-    let typed_tag = match crate::store::opens(&entity.name) {
-        true => crate::store::opens(&name),
+    let typed_tag = match comes_in(&entity.name) {
+        true => comes_in(&name),
         false => crate::strings::carries_tag(&name),
     };
     let name = match typed_tag {
@@ -3727,16 +3727,16 @@ mod tests {
             bytes: crate::testing::wav_bytes(),
         }]);
         let id = bench.workspace.listed().next().expect("the WAV").id;
-        bench.browser.folders.others = vec![LibPath::parse("notes.pdf").unwrap()];
+        bench.browser.folders.others = vec![LibPath::parse("notes.wav").unwrap()];
 
         bench.act(vec![Act::RenameLocal {
             id,
-            name: "NOTES.pdf".into(),
+            name: "NOTES".into(),
         }]);
         let (title, answers) = bench.browser.asking().expect("a question");
         assert_eq!(
             title,
-            "A hidden file is already named “notes.pdf” in the top level of the library"
+            "A hidden file is already named “notes.wav” in the top level of the library"
         );
         assert_eq!(answers, ["Cancel", "Keep both"]);
     }
