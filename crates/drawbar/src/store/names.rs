@@ -74,11 +74,19 @@ fn is_device(name: &str) -> bool {
         .any(|device| device.eq_ignore_ascii_case(stem))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times [`key`] has run on this thread.
+    pub static KEYS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// What two names in one folder are compared by: the name lowercased by Unicode's
 /// mapping, in normalization form C, so `é` written precomposed and written as `e` plus
 /// a combining accent are one name, as APFS takes them.
 pub fn key(name: &str) -> String {
     use unicode_normalization::UnicodeNormalization as _;
+    #[cfg(test)]
+    KEYS.with(|keys| keys.set(keys.get() + 1));
     name.to_lowercase().nfc().collect()
 }
 

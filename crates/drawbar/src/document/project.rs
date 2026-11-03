@@ -701,9 +701,11 @@ pub fn offsets(snapshot: &Snapshot) -> Vec<Offset> {
 }
 
 /// Where an open project's WAVs are in the library, looked for again only when the
-/// project's bytes or its place change, or the library's assets do.
+/// project's bytes, decode or place change, or where the library holds its WAVs does.
 #[derive(Default)]
 pub struct Located {
+    /// The library's WAVs, as of a [`layout`](Workspace::layout).
+    wavs: Option<(u64, builds::Wavs)>,
     held: Option<(Seen, Found)>,
 }
 
@@ -711,18 +713,18 @@ pub struct Located {
 /// is, or why its audio files do not read.
 pub type Found = Result<Vec<(String, Wav)>, String>;
 
-/// What [`Located`] was taken against: the project's stamp and path, and the
-/// workspace's [`revision`](Workspace::revision) and [`layout`](Workspace::layout),
-/// which move when an asset is listed, read, renamed or removed.
-type Seen = (u64, Option<LibPath>, u64, u64);
+/// What [`Located`] was taken against: the project's stamp, whether it was decoded, its
+/// path, and the workspace's [`layout`](Workspace::layout).
+type Seen = (u64, bool, Option<LibPath>, u64);
 
 impl Located {
     pub fn of(&mut self, entity: &LocalEntity, workspace: &Workspace) -> &Found {
+        let layout = workspace.layout();
         let seen = (
             entity.stamp,
+            entity.entity.is_some(),
             entity.path.clone(),
-            workspace.revision(),
-            workspace.layout(),
+            layout,
         );
         let held = match self.held.take() {
             Some((held, found)) if held == seen => (held, found),
@@ -732,8 +734,12 @@ impl Located {
                     None => Err("it does not decode".to_string()),
                 };
                 let dir = builds::dir_of(entity);
-                let wavs = builds::wav_assets(workspace);
+                let wavs = match self.wavs.take() {
+                    Some((at, wavs)) if at == layout => wavs,
+                    _ => builds::Wavs::of(workspace),
+                };
                 let found = files.map(|files| builds::locate_all(&dir, &files, &wavs));
+                self.wavs = Some((layout, wavs));
                 (seen, found)
             }
         };
@@ -924,6 +930,64 @@ mod tests {
         assert_eq!(tone(&mut located, &workspace), Tone::Ready);
         workspace.remove(wav, &mut log);
         assert_eq!(tone(&mut located, &workspace), Tone::Blocked, "removed");
+    }
+
+    #[test]
+    fn a_projects_wavs_are_keyed_once_per_change_to_where_the_library_holds_them() {
+        let mut log = crate::log::Log::default();
+        let mut workspace = Workspace::new(context());
+        let placed = |workspace: &mut Workspace, at: &str, bytes: Vec<u8>| {
+            let at = LibPath::parse(at).unwrap();
+            let log = &mut crate::log::Log::default();
+            let id = workspace.ingest(at.leaf().into(), Origin::Fresh, bytes, log);
+            workspace.place(id, at);
+            id
+        };
+        let held = 200;
+        let wavs: Vec<u64> = (0..held)
+            .map(|n| {
+                let at = format!("Samples/take {n:03}.wav");
+                placed(&mut workspace, &at, testing::wav_bytes())
+            })
+            .collect();
+        let zones: Vec<NewZone> = (0..24)
+            .map(|n| NewZone {
+                path: format!(r"..\SAMPLES\Take {n:03}.WAV"),
+                sample_rate: 44100,
+                frames: 44100,
+                root_key: 36 + n,
+            })
+            .collect();
+        let project = Project::new("Marimba", &zones, 0).unwrap();
+        let bytes = nord_format::to_bytes(&Entity::SampleProject(project)).unwrap();
+        let id = placed(&mut workspace, "Marimba/Marimba.nsmpproj", bytes);
+        workspace.read_now([id], &mut log);
+        let mut located = Located::default();
+        let keyed = |located: &mut Located, workspace: &Workspace| {
+            let before = crate::store::names::KEYS.with(std::cell::Cell::get);
+            let found = located.of(workspace.get(id).unwrap(), workspace);
+            let listed = found.as_ref().unwrap().iter();
+            let listed = listed.filter(|(_, wav)| matches!(wav, Wav::Listed(..)));
+            let keys = crate::store::names::KEYS.with(std::cell::Cell::get) - before;
+            (listed.count(), keys)
+        };
+
+        let (listed, keys) = keyed(&mut located, &workspace);
+        assert_eq!(listed, 24);
+        assert!(keys <= held + 24, "{keys} keys for {held} WAVs and 24 paths");
+
+        let (revision, layout) = (workspace.revision(), workspace.layout());
+        let mut louder = testing::wav_bytes();
+        *louder.last_mut().unwrap() ^= 1;
+        workspace.replace_bytes(wavs[100], louder, &mut log);
+        assert!(workspace.revision() > revision && workspace.layout() == layout);
+        let (listed, keys) = keyed(&mut located, &workspace);
+        assert_eq!((listed, keys), (24, 0), "an edit leaves the WAVs where they are");
+
+        workspace.place(wavs[0], LibPath::parse("Elsewhere/take 000.wav").unwrap());
+        let (listed, keys) = keyed(&mut located, &workspace);
+        assert_eq!(listed, 23, "a WAV moved away is looked for again");
+        assert!(keys <= held + 24, "{keys} keys for {held} WAVs and 24 paths");
     }
 
     #[test]
