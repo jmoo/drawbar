@@ -95,8 +95,9 @@ between is replaced, and what it held is lost.
 ## Adding and making sounds
 
 Drop files on the window, or use **File ▸ Open…**. drawbar copies them into your
-library and leaves the originals where they were. A file drawbar cannot read
-still shows up, and the activity log says what went wrong.
+library and leaves the originals where they were. A kind of file drawbar does not
+open, such as a PDF, is not copied in, and the activity log says so. A file
+drawbar cannot read still shows up, and the activity log says what went wrong.
 
 **New** makes a fresh sound, note or folder. A fresh Stage program has every
 control at zero; it is not a factory sound.

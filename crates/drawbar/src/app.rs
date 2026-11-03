@@ -420,7 +420,7 @@ impl DrawbarApp {
 
     /// Copy anything dropped on the window into the library, in the folder it was dropped
     /// on, or hand it to the New dialog while one is open and it is a WAV. A library that
-    /// cannot take a copy holds it in memory.
+    /// cannot take a copy holds it in memory. A file drawbar does not open is refused.
     ///
     /// The native backend fills `path` and the web backend fills `bytes`, which in the
     /// browser only a drop the page did not catch carries.
@@ -432,6 +432,7 @@ impl DrawbarApp {
         let takes = !drafting && self.store.as_ref().is_some_and(Store::takes_files);
         let mut joining = Vec::new();
         let mut imports = Vec::new();
+        let mut refused = Vec::new();
         for file in dropped {
             let name = match (file.name.is_empty(), &file.path) {
                 (false, _) => file.name.clone(),
@@ -441,6 +442,10 @@ impl DrawbarApp {
                     .unwrap_or_else(|| path.display().to_string()),
                 (true, None) => "dropped".to_string(),
             };
+            if !browser::comes_in(&name) {
+                refused.push(name);
+                continue;
+            }
             #[cfg(not(target_arch = "wasm32"))]
             if let (true, Some(path)) = (takes, &file.path) {
                 imports.push(browser::Act::Take {
@@ -478,10 +483,12 @@ impl DrawbarApp {
         #[cfg(target_arch = "wasm32")]
         {
             for (from, at) in crate::dropped::take() {
-                imports.extend(self.take_in(from, self.browser.landing_dir(Some(at)), takes));
+                let dir = self.browser.landing_dir(Some(at));
+                imports.extend(self.take_in(from, dir, takes, &mut refused));
             }
             crate::dropped::catch(ctx, takes);
         }
+        browser::refuse_unopened(&refused, &mut self.log);
         imports
     }
 
@@ -512,21 +519,31 @@ impl DrawbarApp {
     fn take_picked(&mut self) -> Vec<browser::Act> {
         let takes = self.store.as_ref().is_some_and(Store::takes_files);
         let picked = self.workspace.take_picked();
-        picked
+        let mut refused = Vec::new();
+        let acts = picked
             .into_iter()
-            .filter_map(|from| self.take_in(from, crate::store::LibPath::root(), takes))
-            .collect()
+            .filter_map(|from| {
+                self.take_in(from, crate::store::LibPath::root(), takes, &mut refused)
+            })
+            .collect();
+        browser::refuse_unopened(&refused, &mut self.log);
+        acts
     }
 
     /// Copy `from` into the folder `dir`, where the library `takes` a copy, and otherwise
-    /// read it into memory.
+    /// read it into memory. A file drawbar does not open joins `refused` instead.
     fn take_in(
         &mut self,
         from: crate::store::Outside,
         dir: crate::store::LibPath,
         takes: bool,
+        refused: &mut Vec<String>,
     ) -> Option<browser::Act> {
         let name = crate::store::outside_name(&from);
+        if !browser::comes_in(&name) {
+            refused.push(name);
+            return None;
+        }
         if takes {
             return Some(browser::Act::Take { from, dir, name });
         }

@@ -36,7 +36,8 @@ mod selection;
 mod tree;
 
 pub use act::{
-    apply, bulk, foreign_format, send_warnings, Act, Bulk, Rescuing, LOAD_ON_INSTRUMENT,
+    apply, bulk, comes_in, foreign_format, refuse_unopened, send_warnings, Act, Bulk, Rescuing,
+    LOAD_ON_INSTRUMENT,
 };
 #[cfg(test)]
 pub(crate) use drag::TAGGED;

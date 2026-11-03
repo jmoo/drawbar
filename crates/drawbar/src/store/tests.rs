@@ -2489,6 +2489,48 @@ fn a_reopen_reads_summaries_only_for_drawn_rows_and_nothing_was_kept() {
     assert!(second.bench.workspace.get(upright).unwrap().unread());
 }
 
+#[test]
+fn a_dropped_file_drawbar_does_not_open_is_refused_and_writes_nothing() {
+    let (root, outside) = (Temp::new(), Temp::new());
+    fs::write(outside.at("scan.pdf"), b"%PDF-1.7").unwrap();
+    let mut session = Session::open(&root);
+    session.bench.act(vec![crate::browser::Act::Take {
+        from: outside.at("scan.pdf"),
+        dir: LibPath::root(),
+        name: "scan.pdf".into(),
+    }]);
+    session.sync();
+
+    assert!(root.names("").is_empty(), "{:?}", root.names(""));
+    assert_eq!(session.bench.workspace.listed().count(), 0);
+    assert_eq!(
+        session.said("“scan.pdf” was not copied in: drawbar does not open this kind of file."),
+        1
+    );
+}
+
+#[test]
+fn a_mixed_drop_brings_the_sound_in_and_refuses_the_rest() {
+    let (root, outside) = (Temp::new(), Temp::new());
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(outside.at("Grand.ne5p"), &program).unwrap();
+    fs::write(outside.at("scan.pdf"), b"%PDF-1.7").unwrap();
+    let mut session = Session::open(&root);
+    let take = |name: &str| crate::browser::Act::Take {
+        from: outside.at(name),
+        dir: LibPath::root(),
+        name: name.into(),
+    };
+    session
+        .bench
+        .act(vec![take("scan.pdf"), take("Grand.ne5p")]);
+    session.sync();
+
+    assert_eq!(root.names(""), [".drawbar", "Grand.ne5p"]);
+    assert_eq!(root.read("Grand.ne5p"), program);
+    assert_eq!(session.said("“scan.pdf” was not copied in"), 1);
+}
+
 /// A file from outside is copied into the folder it was dropped on, and left where it
 /// came from. The copy of a sample instrument rests, never held whole, and the copy of a
 /// small file is read as any file of the library's own once something needs it.

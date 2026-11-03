@@ -973,6 +973,28 @@ fn ambiguous(held: &[(String, Occupant)], dir: &LibPath) -> String {
     }
 }
 
+/// Whether a file from outside may come in: one drawbar opens, a bundle it unpacks, or a
+/// WAV it encodes.
+pub fn comes_in(name: &str) -> bool {
+    crate::store::opens(name)
+        || crate::bundle::is_bundle(name)
+        || crate::newproject::is_wav_name(name)
+}
+
+/// Say that the files `names` were not taken in, since drawbar does not open them.
+pub fn refuse_unopened(names: &[String], log: &mut Log) {
+    let quoted = crate::strings::quoted_some(names, 3);
+    match names.len() {
+        0 => {}
+        1 => log.trouble(format!(
+            "{quoted} was not copied in: drawbar does not open this kind of file."
+        )),
+        _ => log.trouble(format!(
+            "{quoted} were not copied in: drawbar does not open these kinds of file."
+        )),
+    }
+}
+
 /// A file opened from outside the library, into its top level.
 fn import(
     browser: &mut Browser,
@@ -986,6 +1008,9 @@ fn import(
             "“{name}” was not imported: a bundle unpacks into the library, which cannot \
              take files now."
         ));
+    }
+    if !comes_in(&name) {
+        return refuse_unopened(&[name], log);
     }
     if let Some(why) = names::refusal(&name) {
         return log.trouble(format!(
@@ -1023,6 +1048,9 @@ fn take(
 ) {
     if crate::bundle::is_bundle(&name) {
         return workspace.unbundle(from, dir, name);
+    }
+    if !comes_in(&name) {
+        return refuse_unopened(&[name], log);
     }
     if let Some(why) = names::refusal(&name) {
         return log.trouble(format!(
@@ -1823,6 +1851,21 @@ mod tests {
                 at: at(3),
             },
         ]
+    }
+
+    #[test]
+    fn several_refused_files_are_one_line_naming_the_first_three() {
+        let mut log = Log::default();
+        let names = ["a.pdf", "b.png", "c.zip", "d.doc", "e.mp3"].map(String::from);
+        refuse_unopened(&names, &mut log);
+        let said: Vec<&str> = log.iter().map(|entry| entry.text.as_str()).collect();
+        assert_eq!(
+            said,
+            [
+                "“a.pdf”, “b.png”, “c.zip” and 2 more were not copied in: drawbar does not \
+              open these kinds of file."
+            ]
+        );
     }
 
     #[test]
