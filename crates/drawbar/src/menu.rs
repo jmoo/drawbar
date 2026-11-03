@@ -9,7 +9,7 @@ use eframe::egui;
 use nord_usb::ObjectClass;
 
 use crate::app::{accent, DrawbarApp, ThemeChoice};
-use crate::browser::Act;
+use crate::browser::{bulk, Act, Bulk};
 use crate::device::NO_USB;
 use crate::icon::{sized, Glyph};
 use crate::libraries::Picking;
@@ -606,7 +606,8 @@ impl DrawbarApp {
                     },
                 }
             }
-            Command::Save | Command::Export => active.map(|_| plain)?,
+            Command::Save => active.map(|_| plain)?,
+            Command::Export => (!self.exports().is_empty()).then_some(plain)?,
             Command::Revert => {
                 let unsaved = self
                     .workspace
@@ -709,7 +710,7 @@ impl DrawbarApp {
             }
             Command::Save => acts.extend(active.map(Act::SaveDoc)),
             Command::Revert => acts.extend(active.map(Act::Revert)),
-            Command::Export => acts.extend(active.map(Act::Export)),
+            Command::Export => acts.extend(self.exports()),
             Command::CloseTab => acts.push(Act::CloseTab),
             Command::Quit => acts.push(Act::Quit),
             Command::Keyboard => acts.push(Act::ShowTab(Spot::Keyboard)),
@@ -809,6 +810,17 @@ impl DrawbarApp {
         let id = self.tabs.active()?;
         let (class, _) = self.workspace.get(id)?.origin.slot()?;
         Some(class)
+    }
+
+    /// What File ▸ Export… exports: the checked assets on this computer, as the
+    /// Selection card's Export… does, or else the open document.
+    fn exports(&self) -> Vec<Act> {
+        let checked: Vec<_> = self.browser.picked().items().collect();
+        let exports = bulk(Bulk::Export, &checked, &self.device.state);
+        match exports.is_empty() {
+            true => self.tabs.active().map(Act::Export).into_iter().collect(),
+            false => exports,
+        }
     }
 
     /// The selected assets that are waiting to be sent.
@@ -1195,6 +1207,47 @@ mod tests {
             commands(&menu.entries, &mut all);
         }
         all
+    }
+
+    /// File ▸ Export… exports what is checked on this computer, and the open document
+    /// only while nothing there is checked.
+    #[test]
+    fn export_takes_the_checked_assets_before_the_open_document() {
+        use crate::browser::Item;
+
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = DrawbarApp::with_library(&cc, None);
+        let exports = |app: &mut DrawbarApp| {
+            let enabled = app.offer(Command::Export).map(|offer| offer.enabled);
+            let mut acts = Vec::new();
+            app.run(
+                &ctx,
+                &mut eframe::Frame::_new_kittest(),
+                Command::Export,
+                &mut acts,
+            );
+            (enabled, acts)
+        };
+        assert_eq!(exports(&mut app), (None, vec![]), "nothing to export");
+
+        let mut fresh = || app.workspace.create(Fresh::Program, &mut app.log).unwrap();
+        let (open, checked) = (fresh(), fresh());
+        app.tabs.open(open);
+        assert_eq!(exports(&mut app), (Some(true), vec![Act::Export(open)]));
+
+        app.browser.check(Item::Slot {
+            class: ObjectClass::Program,
+            at: nord_usb::Location { bank: 0, slot: 0 },
+        });
+        assert_eq!(
+            exports(&mut app),
+            (Some(true), vec![Act::Export(open)]),
+            "a checked slot is not on this computer"
+        );
+
+        app.browser.check(Item::Local(checked));
+        assert_eq!(exports(&mut app), (Some(true), vec![Act::Export(checked)]));
     }
 
     #[test]
