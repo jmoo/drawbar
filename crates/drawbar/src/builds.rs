@@ -386,10 +386,8 @@ fn land(
     for warning in built.warnings {
         log.warn(format!("{name}: {warning}"));
     }
-    log.say(format!(
-        "Built “{name}” from “{project}”: {} zone(s).",
-        built.zones
-    ));
+    let zones = crate::strings::counted(built.zones, "zone", "zones");
+    log.say(format!("Built “{name}” from “{project}”: {zones}."));
 }
 
 fn refuse(log: &mut Log, project: &str, why: &str) {

@@ -8758,7 +8758,10 @@ fn a_project_builds_beside_itself_into_what_its_folder_on_disk_builds() {
         session.bench.tabs.holds(made),
         "the instrument opens in a tab"
     );
-    assert_eq!(session.said("Built “Marimba.nsmp”"), 1);
+    assert_eq!(
+        session.said("Built “Marimba.nsmp” from “Marimba.nsmpproj”: 2 zones."),
+        1
+    );
     session.sync();
     assert_eq!(
         root.names("Marimba"),
