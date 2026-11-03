@@ -466,6 +466,7 @@ fn control(kind: ControlKind) -> String {
 pub(crate) mod tests {
     use super::*;
     use nord_format::formats::ne5;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A wrong-format target points to the noun whose `edit` reads it, or to the file
     /// verb for a format with no noun, and never to a command that does not exist.
@@ -546,14 +547,38 @@ pub(crate) mod tests {
         assert!(!editable(&mut stub));
     }
 
+    /// A new empty folder, never handed out twice in this process.
     pub(crate) fn scratch(what: &str) -> std::path::PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("nord-{what}-{}-{nanos}", std::process::id()));
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "nord-{what}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn scratch_folders_made_at_once_are_distinct() {
+        let start = std::sync::Barrier::new(8);
+        let dirs: Vec<std::path::PathBuf> = std::thread::scope(|threads| {
+            let made: Vec<_> = (0..8)
+                .map(|_| {
+                    threads.spawn(|| {
+                        start.wait();
+                        (0..20).map(|_| scratch("at-once")).collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            made.into_iter().flat_map(|t| t.join().unwrap()).collect()
+        });
+        let distinct: std::collections::BTreeSet<&std::path::PathBuf> = dirs.iter().collect();
+        assert_eq!(distinct.len(), dirs.len(), "a folder was handed out twice");
+        for dir in distinct {
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     /// An edit's destination is often its own source, so a write that cannot finish
