@@ -556,7 +556,7 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
 
     ui.out(format!("{} — {} zone(s)", ui.bold(name), plan.zones.len()));
     let warnings = plan.warnings();
-    let warn = |zone: Option<usize>| {
+    let warn = |zone: Option<u32>| {
         for warning in warnings.iter().filter(|w| w.zone() == zone) {
             match warning {
                 build::Warning::MapGainClamped { .. }
@@ -573,10 +573,10 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
     for (index, zone) in plan.zones.iter().enumerate() {
         let stream = placed
             .get(index)
-            .ok_or_else(|| format!("zone{} did not reach the file", index + 1))?;
+            .ok_or_else(|| format!("zone {} did not reach the file", zone.zone_id))?;
         ui.out(format!(
-            "  zone{:<2} root {:<4} top {:<4} {}",
-            index + 1,
+            "  zone {:<3} root {:<4} top {:<4} {}",
+            zone.zone_id,
             note::name(zone.root_key),
             note::name(zone.top_note),
             stroke_line(stream.stream, stream.at, layout, file_peak)?,
@@ -586,10 +586,10 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
             false => format!(" gain {:.3}", zone.gain),
         };
         ui.out(ui.dim(format!(
-            "         stroke {}{gain} from {}",
+            "           stroke {}{gain} from {}",
             zone.global_id, zone.source
         )));
-        warn(Some(index + 1));
+        warn(Some(zone.zone_id));
     }
 
     let path = args

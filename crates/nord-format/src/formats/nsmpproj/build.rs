@@ -178,8 +178,8 @@ impl std::fmt::Display for Position {
     }
 }
 
-/// Why a project cannot be built. A `zone` is 1-based, in the project's order: highest
-/// first.
+/// Why a project cannot be built. A `zone` is the zone's `m_zoneId`, the number the
+/// project editor shows.
 #[derive(ThisError, Debug)]
 #[non_exhaustive]
 pub enum BuildError {
@@ -196,97 +196,93 @@ pub enum BuildError {
     /// A v2 preset velocity level the narrow `sty` has no decoded value for.
     #[error("{field} = {value} has no decoded v2 preset level")]
     VelocityLevel { field: &'static str, value: u8 },
-    #[error("zone{zone}'s root note {root} is outside its range {bottom}..={top}")]
+    #[error("zone {zone}'s root note {root} is outside its range {bottom}..={top}")]
     RootOutsideRange {
-        zone: usize,
+        zone: u32,
         root: u8,
         bottom: u8,
         top: u8,
     },
     /// The zone below this one reaches the highest note.
-    #[error("zone{} reaches note {top}, leaving no range for zone{zone}", .zone + 1)]
-    NoRangeLeft { zone: usize, top: u8 },
+    #[error("zone {below} reaches note {top}, leaving no range for zone {zone}")]
+    NoRangeLeft { zone: u32, below: u32, top: u8 },
     /// The encoded keyboard map tiles its zones, so each zone starts one note above
     /// the next one down, and the lowest at [`LOWEST_NOTE`].
     #[error(
-        "zone{zone} starts at note {bottom}, but its encoded range would start at \
+        "zone {zone} starts at note {bottom}, but its encoded range would start at \
          {encoded}; the encoded keyboard map tiles its zones, so that gap or overlap \
          cannot be reproduced"
     )]
-    KeyRangeGap {
-        zone: usize,
-        bottom: u8,
-        encoded: u8,
-    },
-    #[error("zone{zone} is disabled in the project. Enable or remove it before building.")]
-    ZoneDisabled { zone: usize },
+    KeyRangeGap { zone: u32, bottom: u8, encoded: u8 },
+    #[error("zone {zone} is disabled in the project. Enable or remove it before building.")]
+    ZoneDisabled { zone: u32 },
     /// A velocity split or a round robin.
     #[error(
-        "zone{zone} plays {strokes} strokes, which is a velocity split or a round robin; \
+        "zone {zone} plays {strokes} strokes, which is a velocity split or a round robin; \
          this writer supports one stroke per zone"
     )]
-    StrokeCount { zone: usize, strokes: usize },
-    #[error("zone{zone}'s only stroke is switched off")]
-    StrokeOff { zone: usize },
+    StrokeCount { zone: u32, strokes: usize },
+    #[error("zone {zone}'s only stroke is switched off")]
+    StrokeOff { zone: u32 },
     #[error(
-        "zone{zone} sets detune {detune} and velocity {}..={} on its stroke; where the \
+        "zone {zone} sets detune {detune} and velocity {}..={} on its stroke; where the \
          instrument applies those is not decoded, so nothing here reproduces them",
         .velocity.0, .velocity.1
     )]
     StrokeExpression {
-        zone: usize,
+        zone: u32,
         detune: i32,
         velocity: (u8, u8),
     },
-    #[error("zone{zone} names stroke {stroke}, which the project does not hold")]
-    NoStroke { zone: usize, stroke: u32 },
-    #[error("zone{zone} plays audio file {file}, which the project does not hold")]
-    NoAudioFile { zone: usize, file: u32 },
+    #[error("zone {zone} names stroke {stroke}, which the project does not hold")]
+    NoStroke { zone: u32, stroke: u32 },
+    #[error("zone {zone} plays audio file {file}, which the project does not hold")]
+    NoAudioFile { zone: u32, file: u32 },
     /// `path` is the file as the [`Source`] names it.
     #[error("{path}: {why}")]
     Unavailable { path: String, why: Unavailable },
     /// `path` is the file as the [`Source`] names it.
     #[error("{path}: {why}")]
     Audio { path: String, why: AudioError },
-    #[error("zone{zone} plays frames {start}..{stop} of {path}, which is nothing")]
+    #[error("zone {zone} plays frames {start}..{stop} of {path}, which is nothing")]
     EmptyTrim {
-        zone: usize,
+        zone: u32,
         start: usize,
         stop: usize,
         path: String,
     },
     #[error(
-        "zone{zone}'s {position} is at frame {value}, outside the {frames} frames its \
+        "zone {zone}'s {position} is at frame {value}, outside the {frames} frames its \
          audio holds"
     )]
     FrameOutside {
-        zone: usize,
+        zone: u32,
         position: Position,
         value: f64,
         frames: usize,
     },
     /// `field` is the project's `m_loopLengthLong` or `m_loopLengthShort`.
-    #[error("zone{zone}'s {field} is {length}, which is not a loop")]
+    #[error("zone {zone}'s {field} is {length}, which is not a loop")]
     LoopLength {
-        zone: usize,
+        zone: u32,
         field: &'static str,
         length: f64,
     },
     #[error(
-        "zone{zone} loops from frame {loop_start} but its audio is trimmed to start at \
+        "zone {zone} loops from frame {loop_start} but its audio is trimmed to start at \
          {start}; the loop would begin before the sample does"
     )]
     LoopBeforeStart {
-        zone: usize,
+        zone: u32,
         loop_start: usize,
         start: usize,
     },
     /// Only the long loop's linear fade, mode 0, is decoded.
     #[error(
-        "zone{zone} sets m_loopXFModeLong = {mode}; only the linear fade (mode 0) is \
+        "zone {zone} sets m_loopXFModeLong = {mode}; only the linear fade (mode 0) is \
          decoded, and the fade is baked into the audio, so this one cannot be written"
     )]
-    CrossfadeMode { zone: usize, mode: u32 },
+    CrossfadeMode { zone: u32, mode: u32 },
 }
 
 /// A loop setting in the project that no instrument field holds.
@@ -330,8 +326,8 @@ impl std::fmt::Display for Dropped {
     }
 }
 
-/// What a build writes, but not as the project states it. A `zone` is 1-based, as in
-/// [`BuildError`].
+/// What a build writes, but not as the project states it. A `zone` is the zone's
+/// `m_zoneId`, as in [`BuildError`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Warning {
     /// The map's gain is outside what the instrument holds, so it is clamped at
@@ -341,25 +337,26 @@ pub enum Warning {
     },
     /// A zone gain of 16 or more, which overflows both of the instrument's gain fields.
     GainWraps {
-        zone: usize,
+        zone: u32,
         gain: f64,
     },
     Dropped {
-        zone: usize,
+        zone: u32,
         settings: Vec<Dropped>,
     },
     /// The editor replaces this `m_startSecondary` on load, and the build encodes from
     /// the replacement, a file frame.
     SecondaryStartRepaired {
-        zone: usize,
+        zone: u32,
         stated: f64,
         encoded: f64,
     },
 }
 
 impl Warning {
-    /// The 1-based zone the warning concerns, or `None` for the whole instrument.
-    pub fn zone(&self) -> Option<usize> {
+    /// The `m_zoneId` of the zone the warning concerns, or `None` for the whole
+    /// instrument.
+    pub fn zone(&self) -> Option<u32> {
         match self {
             Warning::MapGainClamped { .. } => None,
             Warning::GainWraps { zone, .. }
@@ -380,7 +377,7 @@ impl std::fmt::Display for Warning {
             ),
             Warning::GainWraps { zone, gain } => write!(
                 f,
-                "zone{zone} sets gain {gain}, which overflows both of the instrument's gain \
+                "zone {zone} sets gain {gain}, which overflows both of the instrument's gain \
                  fields; the file will state a far quieter level, as the editor's render of \
                  this project does"
             ),
@@ -388,7 +385,7 @@ impl std::fmt::Display for Warning {
                 let settings: Vec<String> = settings.iter().map(Dropped::to_string).collect();
                 write!(
                     f,
-                    "zone{zone} sets {}, which the instrument has nowhere to hold",
+                    "zone {zone} sets {}, which the instrument has nowhere to hold",
                     settings.join(", ")
                 )
             }
@@ -398,7 +395,7 @@ impl std::fmt::Display for Warning {
                 encoded,
             } => write!(
                 f,
-                "zone{zone} states m_startSecondary = {stated}, which the editor repairs on \
+                "zone {zone} states m_startSecondary = {stated}, which the editor repairs on \
                  load; encoded from frame {encoded} as the editor would"
             ),
         }
@@ -413,6 +410,8 @@ const WRAPPING_ZONE_GAIN: f64 = 16.0;
 /// keyboard it plays it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlannedZone {
+    /// The project's `m_zoneId`.
+    pub zone_id: u32,
     pub global_id: u32,
     pub root_key: u8,
     pub top_note: u8,
@@ -461,23 +460,22 @@ impl Plan {
                 gain: self.map_gain,
             });
         }
-        for (index, zone) in self.zones.iter().enumerate() {
-            let number = index + 1;
+        for zone in &self.zones {
             if zone.gain >= WRAPPING_ZONE_GAIN {
                 warnings.push(Warning::GainWraps {
-                    zone: number,
+                    zone: zone.zone_id,
                     gain: zone.gain,
                 });
             }
             if !zone.dropped.is_empty() {
                 warnings.push(Warning::Dropped {
-                    zone: number,
+                    zone: zone.zone_id,
                     settings: zone.dropped.clone(),
                 });
             }
             if let Some(stated) = zone.repaired_secondary_start {
                 warnings.push(Warning::SecondaryStartRepaired {
-                    zone: number,
+                    zone: zone.zone_id,
                     stated,
                     encoded: zone.secondary_start + zone.start as f64,
                 });
@@ -578,9 +576,8 @@ fn zones<S: Source + ?Sized>(
 
     zones
         .iter()
-        .enumerate()
-        .map(|(index, zone)| {
-            let at = index + 1;
+        .map(|zone| {
+            let at = zone.zone_id;
             if !zone.enabled {
                 return Err(BuildError::ZoneDisabled { zone: at });
             }
@@ -643,6 +640,7 @@ fn zones<S: Source + ?Sized>(
             }
             let encoded_secondary = stroke.encoded_secondary_start();
             Ok(PlannedZone {
+                zone_id: zone.zone_id,
                 global_id: layer.global_id,
                 root_key: zone.root_key,
                 top_note: zone.top_note,
@@ -673,7 +671,7 @@ fn zones<S: Source + ?Sized>(
 ///
 /// Inferred from specimens; not confirmed on hardware.
 fn zone_loop(
-    at: usize,
+    at: u32,
     stroke: &Stroke,
     start: usize,
     stop: usize,
@@ -755,7 +753,7 @@ fn zone_loop(
 
 fn validate_key_ranges(zones: &[Zone]) -> Result<(), BuildError> {
     for (index, zone) in zones.iter().enumerate() {
-        let at = index + 1;
+        let at = zone.zone_id;
         if !(zone.bottom_note..=zone.top_note).contains(&zone.root_key) {
             return Err(BuildError::RootOutsideRange {
                 zone: at,
@@ -770,6 +768,7 @@ fn validate_key_ranges(zones: &[Zone]) -> Result<(), BuildError> {
                 .checked_add(1)
                 .ok_or(BuildError::NoRangeLeft {
                     zone: at,
+                    below: below.zone_id,
                     top: below.top_note,
                 })?,
             None => LOWEST_NOTE,
@@ -790,19 +789,14 @@ fn validate_key_ranges(zones: &[Zone]) -> Result<(), BuildError> {
 /// Positions are `%f` decimals counted at 44,100 Hz, whatever the file's own rate.
 /// A zone encodes `start..stop`, not the whole `begin..end` extent.
 /// Inferred from specimens; not confirmed on hardware.
-fn frame(at: usize, position: Position, value: f64, frames: usize) -> Result<usize, BuildError> {
+fn frame(at: u32, position: Position, value: f64, frames: usize) -> Result<usize, BuildError> {
     Ok(exact_frame(at, position, value, frames)?.round() as usize)
 }
 
 /// [`frame`] without the rounding, for a value the encoder needs exact: a crossfade
 /// stated as a percentage can fall between two frames, and rounding it first would move
 /// a field on the field lattice.
-fn exact_frame(
-    at: usize,
-    position: Position,
-    value: f64,
-    frames: usize,
-) -> Result<f64, BuildError> {
+fn exact_frame(at: u32, position: Position, value: f64, frames: usize) -> Result<f64, BuildError> {
     if !value.is_finite() || !(0.0..=frames as f64).contains(&value) {
         return Err(BuildError::FrameOutside {
             zone: at,
@@ -945,6 +939,35 @@ mod tests {
         assert_eq!(built, stated);
     }
 
+    /// `two_zones` with the first `stated` in its highest zone's stroke replaced.
+    fn highest_stroke_with(stated: &str, edited: &str) -> Project {
+        let text = two_zones().render();
+        let first = text.find("map_zone {").unwrap();
+        let edit = text[first..].replacen(stated, edited, 1);
+        let project = Project::parse(&(text[..first].to_string() + &edit)).unwrap();
+        assert_eq!(project.zones().unwrap()[0].zone_id, 130);
+        project
+    }
+
+    #[test]
+    fn refusals_and_warnings_name_a_zone_by_the_id_the_project_editor_shows() {
+        let source = both(wav(codec::SOURCE_RATE, 1), wav(codec::SOURCE_RATE, 1));
+        let detuned = highest_stroke_with("m_detune = 0", "m_detune = 5");
+        let refused = plan(&detuned, codec::Layout::V2, &source)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.starts_with("zone 130 sets detune 5"), "{refused}");
+
+        let loud = highest_stroke_with("m_gain = 1.000000", "m_gain = 16.000000");
+        let warnings = plan(&loud, codec::Layout::V2, &source).unwrap().warnings();
+        let named: Vec<(Option<u32>, String)> =
+            warnings.iter().map(|w| (w.zone(), w.to_string())).collect();
+        assert!(
+            matches!(&named[..], [(Some(130), said)] if said.starts_with("zone 130 sets gain 16")),
+            "{named:?}"
+        );
+    }
+
     /// Both zones play `low.wav`, and `high.wav` stays listed with no stroke playing it.
     fn high_unplayed() -> Project {
         let project = two_zones();
@@ -1033,9 +1056,9 @@ mod tests {
         );
     }
 
-    fn map_zone(root_key: u8, bottom_note: u8, top_note: u8) -> Zone {
+    fn map_zone(zone_id: u32, root_key: u8, bottom_note: u8, top_note: u8) -> Zone {
         Zone {
-            zone_id: 0,
+            zone_id,
             root_key,
             enabled: true,
             bottom_note,
@@ -1046,40 +1069,61 @@ mod tests {
 
     #[test]
     fn a_project_key_map_must_be_representable_by_top_notes() {
-        let valid = [map_zone(72, 61, 84), map_zone(48, LOWEST_NOTE, 60)];
+        let valid = [
+            map_zone(130, 72, 61, 84),
+            map_zone(129, 48, LOWEST_NOTE, 60),
+        ];
         assert!(validate_key_ranges(&valid).is_ok());
 
-        let gap = [map_zone(72, 62, 84), map_zone(48, LOWEST_NOTE, 60)];
+        let gap = [
+            map_zone(130, 72, 62, 84),
+            map_zone(129, 48, LOWEST_NOTE, 60),
+        ];
         assert!(matches!(
             validate_key_ranges(&gap),
             Err(BuildError::KeyRangeGap {
-                zone: 1,
+                zone: 130,
                 bottom: 62,
                 encoded: 61
             })
         ));
 
-        let misplaced_root = [map_zone(60, 61, 84), map_zone(48, LOWEST_NOTE, 60)];
+        let misplaced_root = [
+            map_zone(130, 60, 61, 84),
+            map_zone(129, 48, LOWEST_NOTE, 60),
+        ];
         assert!(matches!(
             validate_key_ranges(&misplaced_root),
-            Err(BuildError::RootOutsideRange { zone: 1, .. })
+            Err(BuildError::RootOutsideRange { zone: 130, .. })
         ));
 
-        let raised_floor = [map_zone(60, LOWEST_NOTE + 1, 84)];
+        let raised_floor = [map_zone(129, 60, LOWEST_NOTE + 1, 84)];
         assert!(matches!(
             validate_key_ranges(&raised_floor),
-            Err(BuildError::KeyRangeGap { zone: 1, .. })
+            Err(BuildError::KeyRangeGap { zone: 129, .. })
         ));
 
         let top = u8::MAX;
-        let no_room = [map_zone(top, top, top), map_zone(48, LOWEST_NOTE, top)];
-        assert!(matches!(
-            validate_key_ranges(&no_room),
-            Err(BuildError::NoRangeLeft {
-                zone: 1,
-                top: u8::MAX
-            })
-        ));
+        let no_room = [
+            map_zone(130, top, top, top),
+            map_zone(129, 48, LOWEST_NOTE, top),
+        ];
+        let refused = validate_key_ranges(&no_room).unwrap_err();
+        assert!(
+            matches!(
+                refused,
+                BuildError::NoRangeLeft {
+                    zone: 130,
+                    below: 129,
+                    top: u8::MAX
+                }
+            ),
+            "{refused:?}"
+        );
+        assert!(
+            refused.to_string().starts_with("zone 129 reaches note 255"),
+            "{refused}"
+        );
     }
 
     #[test]
