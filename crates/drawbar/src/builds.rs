@@ -200,9 +200,10 @@ impl Builds {
     }
 
     /// Build the project `id` from what it holds now, its unsaved edits included, and
-    /// look for its WAVs again. Refuses, in the log, a project that does not decode or
-    /// names a WAV the library does not list.
-    pub fn start(&mut self, id: u64, workspace: &Workspace, folders: &Folders, log: &mut Log) {
+    /// look for its WAVs again, asking again for any an earlier read could not read.
+    /// Refuses, in the log, a project that does not decode or names a WAV the library
+    /// does not list.
+    pub fn start(&mut self, id: u64, workspace: &mut Workspace, folders: &Folders, log: &mut Log) {
         let Some(entity) = workspace.get(id) else {
             return;
         };
@@ -222,17 +223,18 @@ impl Builds {
         if !unresolved.is_empty() {
             return refuse(log, &name, &unresolved.join("; "));
         }
-        let wavs = located
+        let wavs: BTreeMap<String, (LibPath, u64)> = located
             .into_iter()
             .filter_map(|(stored, wav)| match wav {
                 Wav::Listed(path, at) => Some((stored, (path, at))),
                 Wav::Outside | Wav::Ambiguous(_) | Wav::Hidden(_) | Wav::Missing => None,
             })
             .collect();
-        let stage = Stage::Reading {
-            project: project.clone(),
-            wavs,
-        };
+        let project = project.clone();
+        for (_, at) in wavs.values() {
+            workspace.retry(*at);
+        }
+        let stage = Stage::Reading { project, wavs };
         self.running.insert(id, Running { name, stage });
     }
 
