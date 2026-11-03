@@ -1612,58 +1612,6 @@ fn a_file_deleted_outside_goes_unless_it_holds_what_the_file_did_not() {
 }
 
 #[test]
-fn two_assets_one_name_apart_in_case_are_flagged_both() {
-    let mut bench = Bench::new();
-    let mut place = |name: &str| {
-        let id = bench
-            .workspace
-            .create(Fresh::Program, &mut bench.log)
-            .unwrap();
-        bench.workspace.place(id, LibPath::root().join(name));
-        id
-    };
-    let (lower, upper, other) = (place("c3.ne5p"), place("C3.ne5p"), place("d3.ne5p"));
-    let (flagged, groups) = mirror::duplicates(&bench.workspace, &bench.browser.folders);
-    assert_eq!(flagged.into_iter().collect::<Vec<_>>(), [lower, upper]);
-    assert!(!groups
-        .iter()
-        .any(|(_, group)| group.iter().any(|(id, _)| *id == Some(other))));
-    let names: Vec<&str> = groups[0].1.iter().map(|(_, name)| name.as_str()).collect();
-    assert_eq!(names, ["c3.ne5p", "C3.ne5p"]);
-}
-
-/// The pair is flagged on every disk, since a library copied to one that ignores case
-/// could hold only one of them, and the warning claims nothing about this disk.
-#[test]
-fn two_names_differing_only_by_case_are_flagged_without_claiming_the_disk_ignores_case() {
-    let Bench {
-        mut workspace,
-        mut browser,
-        mut log,
-        ..
-    } = Bench::new();
-    for name in ["Case.ne5p", "case.ne5p"] {
-        let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        workspace.place(id, LibPath::root().join(name));
-    }
-    let before = log.iter().count();
-    mirror::flag_duplicates(&workspace, &mut browser, &mut log);
-    let said: Vec<&str> = log
-        .iter()
-        .skip(before)
-        .map(|entry| entry.text.as_str())
-        .collect();
-    assert_eq!(
-        said,
-        [
-            "“Case.ne5p” and “case.ne5p” in the library differ only by case and would collide \
-          on macOS or Windows; rename one of them."
-        ]
-    );
-    assert_eq!(browser.folders.duplicates.len(), 2);
-}
-
-#[test]
 fn a_disk_holding_both_spellings_shows_both_and_renames_neither() {
     let root = Temp::new();
     let program = Fresh::Program.bytes().unwrap();
@@ -1676,10 +1624,7 @@ fn a_disk_holding_both_spellings_shows_both_and_renames_neither() {
 
     let mut session = Session::open(&root);
     assert_eq!(session.bench.workspace.listed().count(), 2);
-    assert_eq!(session.bench.browser.folders.duplicates.len(), 2);
-    assert_eq!(session.said("differ only by case"), 1);
     session.refocus();
-    assert_eq!(session.said("differ only by case"), 1, "said once");
     session.close();
     assert_eq!(
         root.names(""),
@@ -7096,7 +7041,6 @@ fn a_note_named_for_a_file_drawbar_does_not_open_comes_in_hidden_under_that_name
     assert_eq!(session.bench.workspace.listed().count(), 0, "never a row");
     assert_eq!(session.bench.browser.folders.others, hidden);
     assert_eq!(session.said("1 of them came in hidden"), 1);
-    assert_eq!(session.said("differ only by case"), 0);
     assert!(session.handed_over(&list));
     session.close();
 

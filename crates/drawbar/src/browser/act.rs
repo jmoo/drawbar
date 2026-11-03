@@ -952,14 +952,25 @@ fn overwritable(occupant: Occupant, workspace: &Workspace) -> Option<u64> {
     (!workspace.get(held)?.is_unsaved()).then_some(held)
 }
 
-fn ambiguous(held: &[String], dir: &LibPath) -> String {
-    let named: Vec<String> = held.iter().map(|name| format!("“{name}”")).collect();
-    format!(
-        "{} in {} differ only by case and would collide on macOS or Windows. Rename one \
-         of them first.",
-        named.join(" and "),
+fn ambiguous(held: &[(String, Occupant)], dir: &LibPath) -> String {
+    let names: Vec<&String> = held.iter().map(|(name, _)| name).collect();
+    let said = format!(
+        "{} in {} are one name to drawbar, so it cannot tell which one is meant. Rename \
+         one of them first.",
+        crate::strings::quoted_some(&names, names.len()),
         spoken(dir)
-    )
+    );
+    let hidden: Vec<&String> = held
+        .iter()
+        .filter(|(name, what)| *what == Occupant::Other && !crate::store::opens(name))
+        .map(|(name, _)| name)
+        .collect();
+    let quoted = crate::strings::quoted_some(&hidden, hidden.len());
+    match hidden.len() {
+        0 => said,
+        1 => format!("{said} {quoted} is a hidden file."),
+        _ => format!("{said} {quoted} are hidden files."),
+    }
 }
 
 /// A file opened from outside the library, into its top level.
@@ -1812,6 +1823,20 @@ mod tests {
                 at: at(3),
             },
         ]
+    }
+
+    #[test]
+    fn a_name_matching_a_hidden_file_and_a_folder_names_the_hidden_file() {
+        let held = [
+            ("Scan.pdf".to_string(), Occupant::Folder(1)),
+            ("scan.pdf".to_string(), Occupant::Other),
+        ];
+        assert_eq!(
+            ambiguous(&held, &LibPath::root()),
+            "“Scan.pdf” and “scan.pdf” in the top level of the library are one name to \
+             drawbar, so it cannot tell which one is meant. Rename one of them first. \
+             “scan.pdf” is a hidden file."
+        );
     }
 
     /// ⌘S on a view writes it back to its slot at once. Nothing joins the queue, which

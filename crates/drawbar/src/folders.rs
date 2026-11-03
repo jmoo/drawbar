@@ -106,8 +106,8 @@ pub enum Clash {
     Free,
     Taken(Occupant),
     /// The folder already holds two entries under that name, so neither may be named:
-    /// their names, for the refusal.
-    Ambiguous(Vec<String>),
+    /// their names and what each is, for the refusal.
+    Ambiguous(Vec<(String, Occupant)>),
 }
 
 /// Where the listed assets are, taken once for each [`Workspace::layout`] and each change
@@ -175,8 +175,6 @@ pub struct Folders {
     /// Assets whose file went missing outside drawbar while it held them.
     pub missing: BTreeSet<u64>,
     lost: Vec<Lost>,
-    /// Assets whose name collides with another entry of their folder.
-    pub duplicates: BTreeSet<u64>,
     pub place: Option<Where>,
     /// Files drawbar does not open, shown only while [`Folders::all_files`] is on.
     pub others: Vec<LibPath>,
@@ -326,25 +324,6 @@ impl Folders {
         };
     }
 
-    /// A hash of every folder's path and every file drawbar does not open: what besides
-    /// the assets two names can collide in.
-    pub fn names_hash(&self) -> u64 {
-        use std::hash::{Hash as _, Hasher as _};
-        let mut hasher = std::hash::DefaultHasher::new();
-        for folder in &self.list {
-            folder.path.hash(&mut hasher);
-        }
-        for path in self.strangers() {
-            path.hash(&mut hasher);
-        }
-        hasher.finish()
-    }
-
-    /// Every file drawbar does not open.
-    pub fn strangers(&self) -> impl Iterator<Item = &LibPath> {
-        self.others.iter()
-    }
-
     /// Whether a hidden file in `dir` is named `name`, in any case.
     pub fn hides(&self, dir: &LibPath, name: &str) -> bool {
         let key = names::key(name);
@@ -443,7 +422,8 @@ impl Folders {
             (path.parent() == *dir).then(|| (path.leaf(), Occupant::Lost(lost.id)))
         });
         let others = self
-            .strangers()
+            .others
+            .iter()
             .filter(|path| path.parent() == *dir)
             .map(|path| (path.leaf(), Occupant::Other));
         assets
@@ -473,7 +453,7 @@ impl Folders {
         match holding.as_slice() {
             [] => Clash::Free,
             [(_, what)] => Clash::Taken(*what),
-            many => Clash::Ambiguous(many.iter().map(|(name, _)| name.clone()).collect()),
+            many => Clash::Ambiguous(many.to_vec()),
         }
     }
 
@@ -723,10 +703,12 @@ mod tests {
             workspace.place(id, LibPath::root().join(name));
         }
         let folders = Folders::default();
-        assert_eq!(
-            folders.clash(&LibPath::root(), "c3.NE5P", &workspace, None),
-            Clash::Ambiguous(vec!["c3.ne5p".into(), "C3.ne5p".into()])
-        );
+        let Clash::Ambiguous(held) = folders.clash(&LibPath::root(), "c3.NE5P", &workspace, None)
+        else {
+            panic!("c3.NE5P matches both spellings");
+        };
+        let names: Vec<&str> = held.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["c3.ne5p", "C3.ne5p"]);
     }
 
     #[test]

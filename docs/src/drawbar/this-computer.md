@@ -324,9 +324,6 @@ bring back any you deleted.
   the file** shows where it is, **Discard** deletes it, and **Later** leaves it
   for the next library that can take it. A file that does not read is not a
   copy of the sound, and drawbar offers only to discard it.
-- **Differs only by case.** Two names in one folder differ only in upper and
-  lower case, such as `Pad.ne5p` and `pad.ne5p`. macOS and Windows hold only one
-  of them, so rename one to keep the library whole on every computer.
 - **Not read** or **not all listed.** drawbar could not read that file or
   folder, and the activity log names it. What is in such a folder is not shown
   until drawbar can read it, and neither is such a file when drawbar must read it

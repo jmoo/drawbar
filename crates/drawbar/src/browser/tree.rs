@@ -1229,13 +1229,9 @@ impl Browser {
         let wears = self.tags.worn(entity.id).len();
         let word =
             crate::strings::kind_word(kind, qualifier(entity, &naming.kept, naming.instrument));
-        let trouble = match (
-            self.folders.missing.contains(&entity.id),
-            self.folders.duplicates.contains(&entity.id),
-        ) {
-            (true, _) => Some("missing"),
-            (false, true) => Some("differs only by case"),
-            (false, false) => entity.verify().note(),
+        let trouble = match self.folders.missing.contains(&entity.id) {
+            true => Some("missing"),
+            false => entity.verify().note(),
         };
         let drawn = row(
             ui,
