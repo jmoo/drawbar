@@ -548,7 +548,7 @@ impl<F: Fs> Keeper<F> {
         };
         let writable = match library.mode() {
             Mode::Writable if opening_copy => Err(Unwritable::ReadOnly(format!(
-                "a copy was being opened into it when drawbar stopped; open the copy again \
+                "a copy was being imported into it when drawbar stopped; import it again \
                  with File ▸ {}",
                 crate::menu::IMPORT_LIBRARY
             ))),

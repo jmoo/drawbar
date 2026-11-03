@@ -948,9 +948,9 @@ impl DrawbarApp {
         let folders = &self.browser.folders;
         let files = folders.count(None, &self.workspace) > 0;
         match (files, folders.others.is_empty()) {
-            (true, _) => Some("A copy opens only into an empty library, and this one holds files."),
+            (true, _) => Some("drawbar imports a library only into an empty one, and this one holds files."),
             (false, false) => {
-                Some("A copy opens only into an empty library, and this one holds hidden files.")
+                Some("drawbar imports a library only into an empty one, and this one holds hidden files.")
             }
             (false, true) => None,
         }
@@ -1680,16 +1680,16 @@ mod tests {
     }
 
     #[test]
-    fn a_copy_opens_only_into_a_library_holding_no_file_hidden_ones_included() {
+    fn a_library_imports_only_into_one_holding_no_file_hidden_ones_included() {
         let ctx = egui::Context::default();
         let cc = eframe::CreationContext::_new_kittest(ctx.clone());
         let mut app = DrawbarApp::with_library(&cc, None);
-        assert_eq!(app.copy_refused(), None, "an empty library takes a copy");
+        assert_eq!(app.copy_refused(), None, "an empty library takes an import");
 
         app.browser.folders.others = vec![crate::store::LibPath::root().join("scan.pdf")];
         assert_eq!(
             app.copy_refused(),
-            Some("A copy opens only into an empty library, and this one holds hidden files.")
+            Some("drawbar imports a library only into an empty one, and this one holds hidden files.")
         );
 
         let id = app
@@ -1700,7 +1700,7 @@ mod tests {
             .place(id, crate::store::LibPath::root().join("Grand.ne5p"));
         assert_eq!(
             app.copy_refused(),
-            Some("A copy opens only into an empty library, and this one holds files.")
+            Some("drawbar imports a library only into an empty one, and this one holds files.")
         );
     }
 

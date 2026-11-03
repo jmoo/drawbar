@@ -41,14 +41,13 @@ file, named for the day, such as `drawbar library 2026-10-30.zip`. It holds your
 files, folders and tags. Unsaved edits stay in the browser. Change nothing in the
 library until the download finishes, or the copy may not be whole.
 
-To bring a copy back, choose **File ▸ Import library…** while the browser's
-library holds none of your files, hidden files included: after the browser
-deleted it, or in another browser. The item is unavailable while the library
-holds any. drawbar opens only a copy it saved, and never mixes a copy with files
-already there. Close drawbar in the browser's other tabs first. If opening a
-copy stops partway, the library opens read-only until you open the copy again.
+To bring a copy back, choose **File ▸ Import library…** after the browser
+deleted the library, or in another browser. drawbar imports only a copy it
+exported, and the item is unavailable while the library holds any file, hidden
+ones included. Close drawbar in the browser's other tabs first. If an import
+stops partway, the library opens read-only until you import the copy again.
 A web app added to the Dock or the Home Screen keeps storage of its own, apart
-from Safari's, so save a copy in Safari and open it in the web app. In Chrome and
+from Safari's, so export a copy in Safari and import it in the web app. In Chrome and
 Edge you can also unzip the copy and open the folder with **File ▸ Open
 folder…**.
 
@@ -179,7 +178,8 @@ trash: it stays in the library folder, under `.drawbar/library/writers.2`, until
 you remove it by hand.
 
 **Export…** saves a copy somewhere else. **File ▸ Export…** (⇧⌘E) exports the
-checked sounds on this computer, or the open document when none is checked.
+checked sounds on this computer, or the open document when nothing on this
+computer is checked.
 Rename with F2. If a name is taken, drawbar asks whether to **Overwrite** the
 file there or **Keep both**. Only **Keep both** is offered when the file there is
 hidden, and the question says so.

@@ -3190,7 +3190,7 @@ impl Workspace {
         let ctx = self.ctx.clone();
         spawn(async move {
             let picked = rfd::AsyncFileDialog::new()
-                .set_title("Open Nord files")
+                .set_title("Import Nord files")
                 .pick_files()
                 .await;
             for handle in picked.unwrap_or_default() {

@@ -178,7 +178,7 @@ pub fn restorable(mut entries: Vec<Stored>, directory: u64) -> Result<Vec<Restor
 fn refused(unread: Unread) -> String {
     match unread {
         Unread::Compressed => format!(
-            "its files are compressed, and a copy drawbar saves never is. Unzip it, and \
+            "its files are compressed, and a library drawbar exports never is. Unzip it, and \
              open the folder with File ▸ {} in Chrome or Edge",
             crate::menu::OPEN_FOLDER
         ),
@@ -187,7 +187,7 @@ fn refused(unread: Unread) -> String {
 }
 
 fn unlike(why: String) -> String {
-    format!("it is not a copy of a library drawbar saved: {why}")
+    format!("it is not a library drawbar exported: {why}")
 }
 
 /// Open the copy `from` into the library on `fs`, which must hold none of the user's

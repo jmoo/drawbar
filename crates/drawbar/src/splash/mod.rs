@@ -248,7 +248,7 @@ impl Start {
             },
             (Start::Open, _) => Card {
                 glyph: Glyph::FolderOpen,
-                label: "Open files…",
+                label: "Import files…",
                 sub: "Programs, samples, pianos and set lists already on this computer.",
                 hint: "",
                 lead: false,
