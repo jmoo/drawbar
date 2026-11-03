@@ -465,7 +465,7 @@ pub const OPEN_FOLDER: &str = "Open folder…";
 
 pub const SHOW_FOLDER: &str = "Show library folder";
 
-/// The item that downloads a copy of the library, at once.
+/// The item that downloads a copy of the library.
 pub const EXPORT_LIBRARY: &str = "Export library";
 
 /// The item that opens a copy of a library into the browser's own.
@@ -1209,8 +1209,6 @@ mod tests {
         all
     }
 
-    /// File ▸ Export… exports what is checked on this computer, and the open document
-    /// only while nothing there is checked.
     #[test]
     fn export_takes_the_checked_assets_before_the_open_document() {
         use crate::browser::Item;

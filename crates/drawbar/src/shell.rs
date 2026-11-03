@@ -619,7 +619,6 @@ impl DrawbarApp {
         }
     }
 
-    /// Import, New, and Save.
     fn file_tools(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         let mac = crate::platform::mac_keyboard(ui.ctx());
         let hint = |label: &str, command| match key_text(command, self.platform, mac) {
