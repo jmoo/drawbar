@@ -176,7 +176,7 @@ instrument (Stage 4, OS 1.64), loading the library through Sound Manager.
 
 ### Where the code goes
 
-- A new crate, `nord-prep` (name open), of pure functions over sample buffers: no UI and no
+- A new crate, `npno-prep`, of pure functions over sample buffers: no UI and no
   instrument. It builds for wasm, so the web app gets it too.
 - All WAV handling moves into the new crate from `nord-format`: PCM reading and writing, and the
   `cue `, `LIST`/`adtl` and `smpl` chunks, so WAV metadata has one home. `nord-format` stays a Nord
@@ -222,7 +222,7 @@ Per CONTRIBUTING, these test behavior rather than snapshots:
 
 ### Pull requests
 
-- [ ] `nord-prep`: WAV handling moved from `nord-format`, with `cue `/`adtl` regions. The build
+- [ ] `npno-prep`: WAV handling moved from `nord-format`, with `cue `/`adtl` regions. The build
   takes a labelled region as a stroke.
 - [ ] Detectors: hits, notes and layers, cuts. `nord piano prep` writes regions. Fixtures and docs.
 - [ ] Loop search, written as `smpl` loops on the regions (#257).
@@ -277,7 +277,8 @@ If nothing is done, library building stays limited to people willing to hand-edi
 - **Other editors.** Which editors keep `cue `/`adtl` regions and `smpl` loops when they save? To be
   checked before relying on them.
 - **Default layer values, trims and ladders for v6** are the build's job, tracked in #278.
-- **The crate name.**
+- **The crate name.** Proposed: `npno-prep`, as it prepares the strokes for a `.npno` build. Open to a
+  name that fits the other crates better.
 
 ## Future possibilities
 
