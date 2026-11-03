@@ -7369,13 +7369,27 @@ fn a_note_named_for_a_file_drawbar_does_not_open_comes_in_hidden_under_that_name
     let hidden = [LibPath::root().join("Set.ne5p.oracle.json")];
     assert_eq!(session.bench.workspace.listed().count(), 0, "never a row");
     assert_eq!(session.bench.browser.folders.others, hidden);
-    assert_eq!(session.said("1 of them came in hidden"), 1);
+    assert_eq!(session.said("It came in hidden"), 1);
     assert!(session.handed_over(&list));
     session.close();
 
     let again = Session::open(&root);
     assert_eq!(again.bench.workspace.listed().count(), 0);
     assert_eq!(again.bench.browser.folders.others, hidden);
+}
+
+#[test]
+fn a_list_with_some_hidden_notes_says_how_many_came_in_hidden() {
+    let root = Temp::new();
+    let mut kept = kept_before(
+        "drawbar 2\n3\n1\tfresh\tSet.json\tU2V0IDEK\n2\tfresh\tBroken.ne5p\tAAEC\n",
+        "",
+        "",
+    );
+    let mut session = Session::open(&root);
+    session.take_in(&mut kept);
+    assert_eq!(session.said("2 sounds"), 1);
+    assert_eq!(session.said("1 of them came in hidden"), 1);
 }
 
 /// `U2V0IDIK` is the base64 of `Set 2\n`.
@@ -7394,7 +7408,7 @@ fn the_unsaved_edit_of_a_hidden_note_is_a_hidden_file_beside_it() {
     assert_eq!(session.bench.workspace.listed().count(), 0);
     let said = format!(
         "drawbar brought 1 sound an earlier version kept into the library, with its tags \
-         and folders. 1 of them came in hidden, since drawbar does not open it; View ▸ {} \
+         and folders. It came in hidden, since drawbar does not open it; View ▸ {} \
          lists it. The unsaved edit of “Set.json” is a hidden file of its own, “Set 2.json”.",
         crate::folders::SHOW_HIDDEN_FILES
     );

@@ -3056,14 +3056,20 @@ impl Store {
             });
         }
         browser.folders.others.sort();
-        let said = match hidden {
-            0 => list.said(),
-            n => format!(
-                "{} {n} of them came in hidden, since drawbar does not open {it}; View ▸ {} \
-                 lists {it}.{apart}",
+        let it = if hidden == 1 { "it" } else { "them" };
+        let came = match (hidden, hidden == list.assets.len()) {
+            (0, _) => None,
+            (1, true) => Some("It".to_string()),
+            (_, true) => Some("They".to_string()),
+            (n, false) => Some(format!("{n} of them")),
+        };
+        let said = match came {
+            None => list.said(),
+            Some(came) => format!(
+                "{} {came} came in hidden, since drawbar does not open {it}; View ▸ {} lists \
+                 {it}.{apart}",
                 list.said(),
                 crate::folders::SHOW_HIDDEN_FILES,
-                it = if n == 1 { "it" } else { "them" },
             ),
         };
         self.brought.extend(&ids);
