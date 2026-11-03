@@ -8922,3 +8922,24 @@ fn a_build_past_the_budget_says_so_and_reads_no_wav_after_it_is_refused() {
         "a WAV was read in the background"
     );
 }
+
+#[test]
+fn a_build_asks_again_for_a_wav_an_earlier_read_could_not_read() {
+    let root = Temp::new();
+    project_with_wavs(
+        &root,
+        &[("c3.wav", "Marimba/c3.wav"), ("c4.wav", "Marimba/c4.wav")],
+    );
+    let wav = fs::metadata(root.at("Marimba/c3.wav")).unwrap().len();
+    let project = fs::metadata(root.at("Marimba/Marimba.nsmpproj"))
+        .unwrap()
+        .len();
+    let mut session = Session::within(&root, project + wav * 3 / 2);
+    let id = session.named("Marimba.nsmpproj");
+    session.build(id);
+    assert_eq!(session.said("“Marimba.nsmpproj” was not built."), 1);
+
+    session.store.budget(project + wav * 3);
+    session.build(id);
+    assert_eq!(session.said("Built “Marimba.nsmp”"), 1);
+}

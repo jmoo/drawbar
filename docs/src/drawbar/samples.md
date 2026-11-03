@@ -42,8 +42,9 @@ in case, or a hidden file, such as an AIFF, since drawbar builds only from
 WAVs.
 
 A build reads the project and its WAVs as drawbar holds them, unsaved edits
-included, and writes a v2 instrument beside the project under the project file's
-name, numbered if that name is taken. The instrument opens in a tab. Settings
+included, and tries again any WAV an earlier read could not read. It writes a
+v2 instrument beside the project under the project file's name, numbered if
+that name is taken. The instrument opens in a tab. Settings
 the instrument cannot hold are listed in the activity log, and anything the
 encoder cannot reproduce stops the build with the reason.
 
