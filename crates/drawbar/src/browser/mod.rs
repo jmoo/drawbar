@@ -25,7 +25,7 @@ use crate::queue::Queue;
 use crate::sheet;
 use crate::store::{LibPath, Rescue};
 use crate::tags::Tags;
-use crate::workspace::Workspace;
+use crate::workspace::{LocalEntity, Workspace};
 
 mod act;
 mod drag;
@@ -874,9 +874,9 @@ impl Browser {
 
     /// Ask what to do with the edit an earlier session kept of a slot whose view was
     /// edited before that edit was read: `kept` is its bytes.
-    pub(crate) fn ask_kept_slot_edit(&mut self, id: u64, name: &str, kept: Vec<u8>) {
+    pub(crate) fn ask_kept_slot_edit(&mut self, id: u64, entity: &LocalEntity, kept: Vec<u8>) {
         self.raise(Ask {
-            title: format!("“{name}” has unsaved edits from before"),
+            title: format!("“{}” has unsaved edits from before", entity.name),
             note: Some(
                 "drawbar kept unsaved edits of this slot when it last let it go, and you \
                  have edited it since. Keep mine keeps your edits. Take theirs puts the \
@@ -892,7 +892,7 @@ impl Browser {
             others: vec![(
                 "Keep both",
                 vec![Act::Import {
-                    name: name.to_string(),
+                    name: crate::workspace::library_filename(entity),
                     bytes: kept,
                 }],
             )],

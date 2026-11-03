@@ -4504,6 +4504,38 @@ fn a_slot_view_edited_before_its_kept_edit_is_read_asks_which_to_keep() {
     assert!(second.bench.workspace.get(id).unwrap().is_unsaved());
 }
 
+#[test]
+fn keep_both_of_a_kept_slot_edit_files_the_earlier_edit_under_the_sound_name() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let at = Location::from_user(1, 1);
+    let mut first = Session::open(&root);
+    let id = first.view_slot("N1", at, program.clone());
+    let earlier = first.edit(id, "96");
+    first.close();
+
+    let mut second = Session::open(&root);
+    second.store.attached(Some("N1".to_string()));
+    let origin = Origin::Device {
+        class: ObjectClass::Program,
+        at,
+    };
+    let Bench { workspace, log, .. } = &mut second.bench;
+    let id = workspace.view("Grand".to_string(), origin, program.clone(), log);
+    let named = crate::workspace::library_filename(workspace.get(id).unwrap());
+    second.edit(id, "12");
+    second.autosave();
+    let acts = second.bench.browser.answer("Keep both");
+    second.bench.act(acts);
+    second.sync();
+    assert!(named.starts_with("Grand."), "{named}");
+    assert!(root.names("").contains(&named), "{:?}", root.names(""));
+    assert!(
+        root.read(&named) == earlier,
+        "{named} holds the earlier edit"
+    );
+}
+
 /// A slot view whose edit was sent, or let go of, leaves no edit for the next view.
 #[test]
 fn a_slot_view_sent_leaves_no_kept_edit() {

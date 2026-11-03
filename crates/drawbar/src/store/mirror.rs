@@ -773,7 +773,7 @@ impl Store {
             return;
         };
         if entity.is_unsaved() {
-            return browser.ask_kept_slot_edit(id, &entity.name, bytes);
+            return browser.ask_kept_slot_edit(id, entity, bytes);
         }
         let changed = base != view.base;
         workspace.replace_bytes(id, bytes, log);
