@@ -2065,6 +2065,60 @@ mod tests {
         assert!(said.iter().any(|word| word == "cover.jpg"), "{said:?}");
     }
 
+    #[test]
+    fn a_hidden_files_delete_asks_first_and_says_undo_brings_it_back() {
+        let Bench {
+            ctx,
+            mut browser,
+            workspace,
+            device,
+            queue,
+            ..
+        } = Bench::new();
+        let cover = LibPath::root().join("cover.jpg");
+        browser.folders.others = vec![cover.clone()];
+        browser.folders.all_files = true;
+        let run = |browser: &mut Browser, events: Vec<egui::Event>| {
+            let input = testing::screen(egui::vec2(800.0, 600.0), events);
+            let output = testing::run(&ctx, input, |ctx| {
+                egui::SidePanel::left("browser")
+                    .exact_width(crate::shell::BROWSER)
+                    .show(ctx, |ui| {
+                        browser.ui(ui, &workspace, &device, &queue, &Filter::default());
+                    });
+            });
+            testing::painted(&output)
+        };
+
+        let seen = run(&mut browser, Vec::new());
+        let row = testing::where_(&seen, "cover.jpg").center();
+        let secondary = |pressed| egui::Event::PointerButton {
+            pos: row,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let opened = vec![
+            egui::Event::PointerMoved(row),
+            secondary(true),
+            secondary(false),
+        ];
+        run(&mut browser, opened);
+        let seen = run(&mut browser, Vec::new());
+        let delete = testing::where_(&seen, "Delete…").center();
+        run(&mut browser, testing::click(delete));
+
+        let ask = browser.ask.as_ref().expect("a question");
+        assert_eq!(ask.title, "Delete “cover.jpg”?");
+        let note = ask.note.as_deref().unwrap_or_default();
+        assert!(note.contains("Undo brings it back"), "{note}");
+        let acts = browser.answer("Delete");
+        assert!(
+            matches!(acts.as_slice(), [Act::DeleteHidden(path)] if *path == cover),
+            "{acts:?}"
+        );
+    }
+
     /// Drawing the tree asks every folder row for its count and its contents, and none
     /// of that is taken again until something moves.
     #[test]

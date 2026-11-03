@@ -749,9 +749,13 @@ impl Browser {
 
     /// Ask before `act` deletes `name` with its file.
     fn ask_delete(&mut self, name: &str, act: Act) {
-        let note = match self.folders.read_only() {
-            false => "It is deleted from this computer, with its file in the library folder.",
-            true => {
+        let hidden = matches!(act, Act::DeleteHidden(_));
+        let note = match (self.folders.read_only(), hidden) {
+            (false, false) => {
+                "It is deleted from this computer, with its file in the library folder."
+            }
+            (false, true) => "It goes to drawbar's trash, and Undo brings it back.",
+            (true, _) => {
                 "The library is read-only, so its file stays in the library folder, and the \
                  deletion is held in memory only."
             }
