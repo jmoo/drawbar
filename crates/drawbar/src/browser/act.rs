@@ -982,12 +982,9 @@ fn ambiguous(held: &[(String, Occupant)], dir: &LibPath) -> String {
     }
 }
 
-/// Whether a file from outside may come in: one drawbar opens, a bundle it unpacks, or a
-/// WAV it encodes.
+/// Whether a file from outside may come in: one drawbar opens, or a bundle it unpacks.
 pub fn comes_in(name: &str) -> bool {
-    crate::store::opens(name)
-        || crate::bundle::is_bundle(name)
-        || crate::newproject::is_wav_name(name)
+    crate::store::opens(name) || crate::bundle::is_bundle(name)
 }
 
 /// Say that the files `names` were not taken in, since drawbar does not open them.
