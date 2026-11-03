@@ -308,9 +308,11 @@ background, so they match their slots on the instrument before anything shows
 them.
 
 A WAV is known from its name alone: its row needs nothing from its contents,
-and it never matches a slot. So it is read only when it is opened, acted on or
-built from, never for its row, a selection or the background. Its first tag
-still reads it once, for the identity the library knows it by.
+and it never matches a slot. So drawbar reads one only when it is opened, acted
+on or built from, never for its row, a selection or the background. toshokan
+reads a WAV whole for its identity when it is first tagged. When a tagged file
+has gone missing, toshokan reads every file of the same length whose identity
+it does not know yet, to find where it moved.
 
 A piano library or sample instrument is never held whole. It rests in its file,
 indexed and read by range ([Large libraries](file-formats.md#large-libraries)).
