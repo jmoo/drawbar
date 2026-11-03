@@ -10,9 +10,9 @@
 //! and encoding it takes long enough that the build runs in the background.
 //!
 //! ⚠️ A project holds **paths, not audio**. A new one goes in a folder of its own with a
-//! copy of each WAV it plays, each named by a bare leaf, so the project builds where it
-//! lands and the Sample Editor finds its WAVs beside it. An instrument and a library hold
-//! the audio itself, so the encoder's limits on what a WAV may be apply to them.
+//! copy of each WAV it plays beside it, each named by a bare leaf, so Build and the
+//! Sample Editor find them. An instrument and a library hold the audio itself, so the
+//! encoder's limits on what a WAV may be apply to them.
 
 use eframe::egui;
 use nord_format::formats::npno::encode::{
