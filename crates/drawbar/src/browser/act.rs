@@ -97,6 +97,11 @@ pub enum Act {
     NewFolder,
     NewFolderIn(u64),
     RemoveFolder(u64),
+    /// [`Act::RemoveFolder`], confirmed though the folder holds hidden files, which move
+    /// up with the rest.
+    RemoveFolderAndHidden(u64),
+    /// Turn on Show hidden files.
+    ShowHidden,
     /// Put a tag on every one of these assets. A view is kept first.
     Tag {
         ids: Vec<u64>,
@@ -331,6 +336,8 @@ impl Act {
             | Act::NewFolder
             | Act::NewFolderIn(_)
             | Act::RemoveFolder(_)
+            | Act::RemoveFolderAndHidden(_)
+            | Act::ShowHidden
             | Act::Tag { .. }
             | Act::Untag { .. }
             | Act::NewTag(_)
@@ -667,7 +674,9 @@ pub fn apply(
             Act::Forget(id) => browser.tags.forget(id),
             Act::NewFolder => new_folder(browser, workspace, None),
             Act::NewFolderIn(parent) => new_folder(browser, workspace, Some(parent)),
-            Act::RemoveFolder(id) => remove_folder(browser, workspace, log, id),
+            Act::RemoveFolder(id) => remove_folder(browser, workspace, log, id, false),
+            Act::RemoveFolderAndHidden(id) => remove_folder(browser, workspace, log, id, true),
+            Act::ShowHidden => browser.folders.all_files = true,
             Act::File { id, folder } => {
                 let (Some(dir), Some(entity)) = (browser.folders.dir(folder), workspace.get(id))
                 else {
@@ -854,7 +863,7 @@ fn remove(
 }
 
 /// How a folder is named in a sentence.
-fn spoken(dir: &LibPath) -> String {
+pub(super) fn spoken(dir: &LibPath) -> String {
     match dir.is_root() {
         true => "the top level of the library".to_string(),
         false => format!("“{dir}”"),
@@ -1304,16 +1313,29 @@ fn rename_folder(
 }
 
 /// Remove a folder, moving what was in it up a level. Nothing is deleted, and nothing
-/// moves unless everything can.
-fn remove_folder(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id: u64) {
+/// moves unless everything can. Hidden files directly in it move only once `hidden` says
+/// the user knows of them, or while they are shown.
+fn remove_folder(
+    browser: &mut Browser,
+    workspace: &mut Workspace,
+    log: &mut Log,
+    id: u64,
+    hidden: bool,
+) {
     let Some(path) = browser.folders.path_of(id).cloned() else {
         return;
     };
-    if browser.folders.holds_strangers(&path) {
+    let unwalked = browser.folders.unwalked.iter().find(|dir| dir.is_in(&path));
+    if let Some(unwalked) = unwalked {
         return log.trouble(format!(
-            "“{}” was not removed: it holds files drawbar does not hold.",
+            "“{}” was not removed: drawbar could not read “{unwalked}”, so it cannot move \
+             what is in it.",
             path.leaf()
         ));
+    }
+    let others = browser.folders.hidden_in(&path);
+    if !others.is_empty() && !hidden && !browser.folders.all_files {
+        return browser.ask_remove_hidden(id, &path, &others);
     }
     let up = path.parent();
     let assets: Vec<(u64, String)> = browser
@@ -1328,16 +1350,24 @@ fn remove_folder(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log
         .into_iter()
         .filter_map(|child| Some((child, browser.folders.name_of(child)?.to_string())))
         .collect();
-    let blocked = assets
-        .iter()
-        .chain(&folders)
-        .map(|(_, name)| name)
-        .find(|name| browser.folders.clash(&up, name, workspace, None) != Clash::Free);
-    if let Some(name) = blocked {
-        return log.trouble(format!(
-            "The folder was not removed: “{name}” is already in {}.",
-            spoken(&up)
-        ));
+    let names = assets.iter().chain(&folders).map(|(_, name)| name.as_str());
+    let blocked = names
+        .chain(others.iter().map(LibPath::leaf))
+        .map(|name| (name, browser.folders.clash(&up, name, workspace, None)))
+        .find(|(_, clash)| *clash != Clash::Free);
+    if let Some((name, clash)) = blocked {
+        let place = spoken(&up);
+        return log.trouble(match clash {
+            Clash::Taken(Occupant::Other) => format!(
+                "The folder was not removed: a hidden file is already named “{name}” in \
+                 {place}."
+            ),
+            _ => format!("The folder was not removed: “{name}” is already in {place}."),
+        });
+    }
+    for from in others {
+        let to = up.join(from.leaf());
+        browser.folders.move_hidden(&from, to);
     }
     for (asset, name) in assets {
         workspace.place(asset, up.join(&name));
@@ -3444,6 +3474,137 @@ mod tests {
         assert_eq!(name(&bench, outside), "untitled.ne5p");
         let said = bench.log.status().1;
         assert!(said.contains("was not removed"), "{said}");
+    }
+
+    /// A folder named `Gig` holding these hidden files, with their paths in the library.
+    fn gig_hiding(bench: &mut Bench, hidden: &[&str]) -> u64 {
+        let root = crate::store::LibPath::root();
+        let folder = bench.browser.folders.make(&root, &bench.workspace);
+        bench.act(vec![Act::RenameFolder {
+            id: folder,
+            name: "Gig".into(),
+        }]);
+        let others = hidden.iter().map(|path| LibPath::parse(path).unwrap());
+        bench.browser.folders.others = others.collect();
+        bench.browser.folders.take_ops();
+        folder
+    }
+
+    #[test]
+    fn removing_a_folder_that_holds_hidden_files_asks_before_moving_them_up() {
+        let mut bench = Bench::new();
+        let names = [
+            "Gig/a.pdf",
+            "Gig/b.pdf",
+            "Gig/c.pdf",
+            "Gig/d.pdf",
+            "Gig/Set/e.pdf",
+        ];
+        let folder = gig_hiding(&mut bench, &names);
+
+        bench.act(vec![Act::RemoveFolder(folder)]);
+        assert!(bench.browser.folders.path_of(folder).is_some(), "not yet");
+        let (title, answers) = bench.browser.asking().expect("a question");
+        assert_eq!(
+            title, "“Gig” holds 4 hidden files",
+            "only those directly in it"
+        );
+        assert_eq!(answers, ["Cancel", "Show them", "Move them up too"]);
+        assert_eq!(bench.browser.expected(), Some("Move them up too"));
+
+        let acts = bench.browser.answer("Move them up too");
+        bench.act(acts);
+        assert!(bench.browser.folders.path_of(folder).is_none());
+        let others: Vec<&str> = bench
+            .browser
+            .folders
+            .others
+            .iter()
+            .map(LibPath::as_str)
+            .collect();
+        assert_eq!(
+            others,
+            ["Gig/Set/e.pdf", "a.pdf", "b.pdf", "c.pdf", "d.pdf"]
+        );
+        let ops = bench.browser.folders.take_ops();
+        assert_eq!(
+            ops.first(),
+            Some(&crate::folders::Op::MoveFile {
+                from: LibPath::parse("Gig/a.pdf").unwrap(),
+                to: LibPath::parse("a.pdf").unwrap(),
+            }),
+            "{ops:?}"
+        );
+        assert_eq!(
+            ops.last(),
+            Some(&crate::folders::Op::RemoveDir(
+                LibPath::parse("Gig").unwrap()
+            )),
+            "{ops:?}"
+        );
+    }
+
+    #[test]
+    fn show_them_shows_the_hidden_files_and_keeps_the_folder() {
+        let mut bench = Bench::new();
+        let folder = gig_hiding(&mut bench, &["Gig/notes.pdf"]);
+
+        bench.act(vec![Act::RemoveFolder(folder)]);
+        let acts = bench.browser.answer("Show them");
+        bench.act(acts);
+        assert!(bench.browser.folders.all_files);
+        assert!(bench.browser.folders.path_of(folder).is_some());
+        assert!(bench.browser.folders.take_ops().is_empty());
+    }
+
+    #[test]
+    fn removing_a_folder_while_hidden_files_are_shown_moves_them_without_asking() {
+        let mut bench = Bench::new();
+        let folder = gig_hiding(&mut bench, &["Gig/notes.pdf"]);
+        bench.browser.folders.all_files = true;
+
+        bench.act(vec![Act::RemoveFolder(folder)]);
+        assert!(bench.browser.asking().is_none());
+        assert!(bench.browser.folders.path_of(folder).is_none());
+        let others: Vec<&str> = bench
+            .browser
+            .folders
+            .others
+            .iter()
+            .map(LibPath::as_str)
+            .collect();
+        assert_eq!(others, ["notes.pdf"]);
+    }
+
+    #[test]
+    fn a_hidden_file_a_level_up_with_the_same_name_keeps_the_folder_and_is_named_hidden() {
+        let mut bench = Bench::new();
+        let folder = gig_hiding(&mut bench, &["Gig/notes.pdf", "notes.pdf"]);
+
+        bench.act(vec![Act::RemoveFolderAndHidden(folder)]);
+        assert!(bench.browser.folders.path_of(folder).is_some());
+        assert!(bench.browser.folders.take_ops().is_empty());
+        assert_eq!(
+            bench.log.status().1,
+            "The folder was not removed: a hidden file is already named “notes.pdf” in the \
+             top level of the library."
+        );
+    }
+
+    #[test]
+    fn a_folder_holding_a_subfolder_drawbar_could_not_read_stays() {
+        let mut bench = Bench::new();
+        let folder = gig_hiding(&mut bench, &[]);
+        let locked = LibPath::parse("Gig/Locked").unwrap();
+        bench.browser.folders.unwalked.insert(locked);
+
+        bench.act(vec![Act::RemoveFolder(folder)]);
+        assert!(bench.browser.folders.path_of(folder).is_some());
+        assert_eq!(
+            bench.log.status().1,
+            "“Gig” was not removed: drawbar could not read “Gig/Locked”, so it cannot move \
+             what is in it."
+        );
     }
 
     fn with_gain(bytes: &[u8]) -> Vec<u8> {

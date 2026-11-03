@@ -129,6 +129,7 @@ enum Verb {
     Finish,
     RollBack,
     Reopen,
+    MoveUp,
 }
 
 impl Verb {
@@ -144,6 +145,7 @@ impl Verb {
             Verb::Finish => "Finish",
             Verb::RollBack => "Roll back",
             Verb::Reopen => "Close and reopen",
+            Verb::MoveUp => "Move them up too",
         }
     }
 
@@ -151,7 +153,7 @@ impl Verb {
     fn button(self, ui: &mut egui::Ui) -> egui::Response {
         let (label, glyph) = (self.label(), self.glyph());
         match self {
-            Verb::Save | Verb::KeepBoth | Verb::Finish | Verb::RollBack => {
+            Verb::Save | Verb::KeepBoth | Verb::Finish | Verb::RollBack | Verb::MoveUp => {
                 sheet::primary(ui, Some(glyph), label)
             }
             Verb::Replace
@@ -171,7 +173,7 @@ impl Verb {
             Verb::Overwrite => Glyph::Replace,
             Verb::KeepBoth => Glyph::Copy,
             Verb::TakeTheirs => Glyph::RotateCcw,
-            Verb::Finish => Glyph::Check,
+            Verb::Finish | Verb::MoveUp => Glyph::Check,
             Verb::RollBack => Glyph::RotateCcw,
             Verb::Reopen => Glyph::RefreshCw,
         }
@@ -759,6 +761,30 @@ impl Browser {
             Verb::Delete,
             vec![Act::Remove(id)],
         ));
+    }
+
+    /// Ask before removing a folder whose hidden files, `hidden`, would move up with the
+    /// rest.
+    fn ask_remove_hidden(&mut self, id: u64, path: &LibPath, hidden: &[LibPath]) {
+        const SHOWN: usize = 3;
+        let names: Vec<&str> = hidden.iter().map(LibPath::leaf).collect();
+        let mut ask = Ask::new(
+            format!(
+                "“{}” holds {}",
+                path.leaf(),
+                crate::strings::counted(hidden.len(), "hidden file", "hidden files")
+            ),
+            Some(format!(
+                "Removing the folder moves {} up to {} with everything else in it. Nothing \
+                 is deleted.",
+                crate::strings::quoted_some(&names, SHOWN),
+                act::spoken(&path.parent())
+            )),
+            Verb::MoveUp,
+            vec![Act::RemoveFolderAndHidden(id)],
+        );
+        ask.others = vec![("Show them", vec![Act::ShowHidden])];
+        self.raise(ask);
     }
 
     /// Ask what to do about a name already taken in a folder. `over` is what overwriting

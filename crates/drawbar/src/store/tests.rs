@@ -5352,6 +5352,42 @@ fn removing_a_folder_with_folders_in_it_is_one_undo_step() {
     assert_eq!(root.names("Set"), ["b.ne5p"]);
 }
 
+/// Removing a folder that holds hidden files moves them up with the rest in one change,
+/// and one undo puts them back in it.
+#[test]
+fn removing_a_folder_with_hidden_files_in_it_is_one_undo_step() {
+    let root = Temp::new();
+    fs::create_dir_all(root.at("Gig/Set")).unwrap();
+    fs::write(root.at("Gig/a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    fs::write(root.at("Gig/notes.pdf"), b"%PDF").unwrap();
+    fs::write(root.at("Gig/Set/cover.jpg"), b"not a nord file").unwrap();
+    let mut session = Session::open(&root);
+    let gig = LibPath::parse("Gig").unwrap();
+    let folder = session.bench.browser.folders.id_of(&gig).expect("listed");
+    session
+        .bench
+        .act(vec![crate::browser::Act::RemoveFolder(folder)]);
+    let acts = session.bench.browser.answer("Move them up too");
+    session.bench.act(acts);
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "Set", "a.ne5p", "notes.pdf"]);
+    assert_eq!(root.names("Set"), ["cover.jpg"]);
+    let others = |session: &Session| -> Vec<String> {
+        let others = session.bench.browser.folders.others.iter();
+        others.map(LibPath::to_string).collect()
+    };
+    assert_eq!(others(&session), ["Set/cover.jpg", "notes.pdf"]);
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo Remove folder “Gig”")
+    );
+    session.undo();
+    session.settle();
+    assert_eq!(root.names(""), [".drawbar", "Gig"]);
+    assert_eq!(root.names("Gig"), ["Set", "a.ne5p", "notes.pdf"]);
+    assert_eq!(others(&session), ["Gig/Set/cover.jpg", "Gig/notes.pdf"]);
+}
+
 /// A new tag made on a selection and named in its editor is one change: one undo takes
 /// it off every asset and out of the list.
 #[test]

@@ -31,6 +31,11 @@ pub enum Op {
         from: LibPath,
         to: LibPath,
     },
+    /// Move a hidden file, which no asset holds.
+    MoveFile {
+        from: LibPath,
+        to: LibPath,
+    },
     /// Sent after every other change of the same sync, once whatever was in it has
     /// moved out.
     RemoveDir(LibPath),
@@ -297,8 +302,9 @@ impl Folders {
     /// A value that changes whenever the tree's lines for the library would: the
     /// folders, and the lists of what is beside the assets in them.
     ///
-    /// ⚠️ Those lists only grow, or are replaced whole by a listing that also syncs the
-    /// folders, so their lengths and the generation together catch every change.
+    /// ⚠️ Those lists only grow, change with the generation, or are replaced whole by a
+    /// listing that also syncs the folders, so their lengths and the generation together
+    /// catch every change.
     pub(crate) fn shape(&self) -> Shape {
         (
             self.generation,
@@ -337,11 +343,10 @@ impl Folders {
         self.others.iter()
     }
 
-    /// Whether a folder holds something drawbar does not, or may: a file it does not
-    /// hold, or contents it did not list.
-    pub fn holds_strangers(&self, dir: &LibPath) -> bool {
-        self.strangers().any(|path| path.is_in(dir) && path != dir)
-            || self.unwalked.iter().any(|path| path.is_in(dir))
+    /// The hidden files directly in `dir`.
+    pub fn hidden_in(&self, dir: &LibPath) -> Vec<LibPath> {
+        let directly = |path: &&LibPath| path.parent() == *dir;
+        self.others.iter().filter(directly).cloned().collect()
     }
 
     /// The assets whose file is gone, which the library keeps tags for.
@@ -400,6 +405,7 @@ impl Folders {
                     }
                 }
                 Op::RemoveDir(path) => dirs.retain(|dir| dir != path),
+                Op::MoveFile { .. } => {}
             }
         }
         self.list.retain(|folder| dirs.contains(&folder.path));
@@ -551,7 +557,7 @@ impl Folders {
         for op in &mut self.ops {
             match op {
                 Op::MakeDir(path) | Op::RemoveDir(path) => back(path),
-                Op::MoveDir { from, to } => {
+                Op::MoveDir { from, to } | Op::MoveFile { from, to } => {
                     back(from);
                     back(to);
                 }
@@ -575,6 +581,20 @@ impl Folders {
     /// Put back changes taken and not sent, ahead of any made since.
     pub(crate) fn hold(&mut self, ops: Vec<Op>) {
         self.ops.splice(0..0, ops);
+    }
+
+    /// Move the hidden file at `from` to `to`.
+    pub(crate) fn move_hidden(&mut self, from: &LibPath, to: LibPath) {
+        let Some(at) = self.others.iter().position(|path| path == from) else {
+            return;
+        };
+        self.others[at] = to.clone();
+        self.others.sort();
+        self.generation += 1;
+        self.ops.push(Op::MoveFile {
+            from: from.clone(),
+            to,
+        });
     }
 
     /// Remove an empty folder. The caller moves out what was in it first.

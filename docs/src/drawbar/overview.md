@@ -47,7 +47,9 @@ anything for an explanation.
 
 Folders on this computer are real folders, and the instrument never sees them.
 Make one with **New ▸ New folder**. Removing a folder moves what was in it up a
-level.
+level. If it holds [hidden files](this-computer.md#where-your-library-lives),
+drawbar asks first: **Move them up too** moves them with the rest, and **Show
+them** turns on **Show hidden files** and leaves the folder as it is.
 
 Tags label sounds without moving them, and a sound can have several. **Tag ▸ New
 tag…** in a row's menu tags the selected sounds. Click a tag in the inspector to
