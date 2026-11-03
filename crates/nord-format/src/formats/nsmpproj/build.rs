@@ -20,8 +20,8 @@ use crate::wav::{read_pcm16, Pcm16};
 /// `/` and `\` both separate components, and empty and `.` components are dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudioPath {
-    /// A leading separator, or a first component holding `:` such as `C:`. Held as
-    /// stored.
+    /// A leading separator, or a first component that is a drive: one ASCII letter
+    /// and `:`, such as `C:`. Held as stored.
     Absolute(String),
     /// Components from the project's own folder, where `..` climbs one folder.
     Relative(Vec<String>),
@@ -32,7 +32,8 @@ impl AudioPath {
     pub fn parse(stored: &str) -> AudioPath {
         let slashed = stored.replace('\\', "/");
         let first = slashed.split('/').next().unwrap_or_default();
-        if slashed.starts_with('/') || first.contains(':') {
+        let drive = matches!(first.as_bytes(), [letter, b':'] if letter.is_ascii_alphabetic());
+        if slashed.starts_with('/') || drive {
             return AudioPath::Absolute(stored.to_string());
         }
         AudioPath::Relative(
@@ -844,6 +845,20 @@ mod tests {
         assert_eq!(within("C:/x.wav"), None);
         assert_eq!(within(r"C:\Samples\c4.wav"), None);
         assert_eq!(AudioPath::parse("").within([]), None);
+    }
+
+    #[test]
+    fn a_colon_makes_a_drive_only_after_a_single_letter() {
+        let within = |stored: &str| AudioPath::parse(stored).within(["Marimba"]);
+        let path = |parts: &[&str]| Some(parts.iter().map(|p| p.to_string()).collect());
+        assert_eq!(within("c3:soft.wav"), path(&["Marimba", "c3:soft.wav"]));
+        assert_eq!(within("a:b/c4.wav"), path(&["Marimba", "a:b", "c4.wav"]));
+        assert_eq!(
+            AudioPath::parse("c3:soft.wav").on_disk(Path::new("kit")),
+            Path::new("kit/c3:soft.wav")
+        );
+        assert_eq!(within("c:"), None);
+        assert_eq!(within(r"d:\c4.wav"), None);
     }
 
     #[test]
