@@ -223,6 +223,10 @@ impl Backend {
                         Cmd::Read { files, room } => {
                             landed.push(Event::Read(exec::read_all(&disk, files, room).await));
                         }
+                        Cmd::ReadOthers { id, paths } => {
+                            let files = exec::read_others(&disk, paths).await;
+                            landed.push(Event::ReadOthers { id, files });
+                        }
                         cmd => keeper.run(cmd, &mut |event| landed.push(event)).await,
                     }
                     #[cfg(test)]

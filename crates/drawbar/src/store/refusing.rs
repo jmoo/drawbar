@@ -25,6 +25,7 @@ pub(super) fn refused(cmd: &Cmd) -> Refusing {
         Cmd::Discard(_) | Cmd::DiscardSlot(_) => Refusing::Kept,
         Cmd::ReadSlot(slot) => Refusing::Slot(slot.clone()),
         Cmd::Read { files, .. } => Refusing::Read(files.iter().map(|(id, ..)| *id).collect()),
+        Cmd::ReadOthers { id, paths } => Refusing::ReadOthers(*id, paths.clone()),
         Cmd::Restore(_) => Refusing::Restore,
     };
     refusing
@@ -41,6 +42,7 @@ pub(super) enum Refusing {
     Kept,
     Slot(Slot),
     Read(Vec<u64>),
+    ReadOthers(u64, Vec<LibPath>),
     Restore,
 }
 
@@ -96,6 +98,13 @@ impl Refusing {
             Refusing::Read(ids) => vec![Event::Read(
                 ids.into_iter().map(|id| (id, Err(failed()))).collect(),
             )],
+            Refusing::ReadOthers(id, paths) => vec![Event::ReadOthers {
+                id,
+                files: paths
+                    .into_iter()
+                    .map(|path| (path, Err(failed())))
+                    .collect(),
+            }],
             Refusing::Intent(label, owing) => {
                 let owed = owing.into_iter().map(|owing| match owing {
                     Owing::Saved(id, path) => Event::Saved {

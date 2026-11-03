@@ -221,7 +221,9 @@ impl<F: Fs> Keeper<F> {
                 let kept = self.read_slot(&slot).await.map_err(|e| e.to_string());
                 answer(Event::SlotKept { slot, kept });
             }
-            Cmd::Read { .. } => unreachable!("the backend reads files itself"),
+            Cmd::Read { .. } | Cmd::ReadOthers { .. } => {
+                unreachable!("the backend reads files itself")
+            }
             Cmd::Restore(from) => {
                 let restored = match &self.unopened {
                     Some((fs, _)) => super::copy::restore(fs, &from).await,
