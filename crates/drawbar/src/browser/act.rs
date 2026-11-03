@@ -591,7 +591,7 @@ enum Ready {
 }
 
 /// Whether every asset `act` reads has been read. One not read yet is asked for, and the
-/// act waits for it.
+/// act waits for it. One whose read failed refuses the act.
 fn ready(act: &Act, workspace: &mut Workspace) -> Ready {
     let mut later = false;
     for id in act.reads() {
@@ -623,6 +623,10 @@ pub fn apply(
     builds: &mut Builds,
     log: &mut Log,
 ) {
+    // An act asked for now asks again for what an earlier read could not read.
+    for id in acts.iter().flat_map(Act::reads) {
+        workspace.retry(id);
+    }
     let mut held = std::mem::take(&mut browser.held);
     held.extend(acts);
     for act in held {
