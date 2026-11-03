@@ -3736,12 +3736,17 @@ mod tests {
     #[test]
     fn a_rename_onto_a_hidden_files_name_says_it_is_hidden_and_offers_only_keep_both() {
         let mut bench = Bench::new();
-        bench.act(vec![Act::Import {
-            name: "cello.wav".into(),
-            bytes: crate::testing::wav_bytes(),
-        }]);
-        let id = bench.workspace.listed().next().expect("the WAV").id;
-        bench.browser.folders.others = vec![LibPath::parse("notes.wav").unwrap()];
+        let unknown = vec![0xA5; 64];
+        let id = bench
+            .workspace
+            .ingest("scan".into(), Origin::Fresh, unknown, &mut bench.log);
+        let filed = crate::workspace::library_filename(bench.workspace.get(id).unwrap());
+        assert_eq!(
+            filed, "scan.bin",
+            "bytes of no format are filed as a hidden file"
+        );
+        bench.workspace.place(id, LibPath::root().join(&filed));
+        bench.browser.folders.others = vec![LibPath::parse("notes.bin").unwrap()];
 
         bench.act(vec![Act::RenameLocal {
             id,
@@ -3750,7 +3755,7 @@ mod tests {
         let (title, answers) = bench.browser.asking().expect("a question");
         assert_eq!(
             title,
-            "A hidden file is already named “notes.wav” in the top level of the library"
+            "A hidden file is already named “notes.bin” in the top level of the library"
         );
         assert_eq!(answers, ["Cancel", "Keep both"]);
     }
