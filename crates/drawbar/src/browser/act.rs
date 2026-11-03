@@ -1218,8 +1218,13 @@ fn rename(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id: u
         workspace.rename(id, name.clone());
         return log.say(format!("Renamed it “{name}”."));
     };
-    // Every file carries its extension, so a name typed without one keeps the old one.
-    let name = match crate::strings::carries_tag(&name) {
+    // A name typed without an extension drawbar opens keeps the old one, so a rename
+    // never hides a file.
+    let typed_tag = match crate::store::opens(&entity.name) {
+        true => crate::store::opens(&name),
+        false => crate::strings::carries_tag(&name),
+    };
+    let name = match typed_tag {
         true => name,
         false => crate::strings::tagged(&entity.name, &name),
     };
@@ -3403,6 +3408,24 @@ mod tests {
     }
 
     #[test]
+    fn a_rename_with_a_dot_keeps_the_extension_and_keep_both_does_too() {
+        let mut bench = Bench::new();
+        let [first, second] = placed(&mut bench, 2)[..] else {
+            unreachable!()
+        };
+        for id in [first, second] {
+            bench.act(vec![Act::RenameLocal {
+                id,
+                name: "E.Piano".into(),
+            }]);
+        }
+        assert_eq!(name(&bench, first), "E.Piano.ne5p");
+        let acts = bench.browser.answer("Keep both");
+        bench.act(acts);
+        assert_eq!(name(&bench, second), "E.Piano 2.ne5p");
+    }
+
+    #[test]
     fn a_rename_onto_a_taken_name_asks_and_an_overwrite_keeps_the_other_id() {
         let mut bench = Bench::new();
         let [kept, renamed] = placed(&mut bench, 2)[..] else {
@@ -3687,9 +3710,11 @@ mod tests {
     #[test]
     fn a_rename_onto_a_hidden_files_name_says_it_is_hidden_and_offers_only_keep_both() {
         let mut bench = Bench::new();
-        let [id] = placed(&mut bench, 1)[..] else {
-            unreachable!()
-        };
+        bench.act(vec![Act::Import {
+            name: "cello.wav".into(),
+            bytes: crate::testing::wav_bytes(),
+        }]);
+        let id = bench.workspace.listed().next().expect("the WAV").id;
         bench.browser.folders.others = vec![LibPath::parse("notes.pdf").unwrap()];
 
         bench.act(vec![Act::RenameLocal {
