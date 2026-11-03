@@ -8876,14 +8876,13 @@ fn a_build_naming_a_hidden_file_says_it_is_one_and_builds_only_from_wavs() {
     assert_eq!(session.said("missing"), 0);
 }
 
-/// A build whose WAVs do not fit in what drawbar holds is refused for that, and none of
-/// its WAVs is read once it is: a WAV is read only when something asks for it.
-#[test]
-fn a_build_past_the_budget_says_so_and_reads_no_wav_after_it_is_refused() {
-    let root = Temp::new();
-    let wavs = ["c3.wav", "c4.wav", "c5.wav"];
+const PAST_THE_BUDGET: [&str; 3] = ["c3.wav", "c4.wav", "c5.wav"];
+
+/// A session over a project in `root` playing [`PAST_THE_BUDGET`], built where drawbar
+/// holds two and a half of them, and the WAVs the refused build left unread.
+fn built_past_the_budget(root: &Temp) -> (Session, Vec<&'static str>) {
     project_with_wavs(
-        &root,
+        root,
         &[
             ("c3.wav", "Marimba/c3.wav"),
             ("c4.wav", "Marimba/c4.wav"),
@@ -8894,9 +8893,30 @@ fn a_build_past_the_budget_says_so_and_reads_no_wav_after_it_is_refused() {
     let project = fs::metadata(root.at("Marimba/Marimba.nsmpproj"))
         .unwrap()
         .len();
-    let mut session = Session::within(&root, project + wav * 5 / 2);
+    let mut session = Session::within(root, project + wav * 5 / 2);
     let id = session.named("Marimba.nsmpproj");
     session.build(id);
+    let refused = unread_of(&session, &PAST_THE_BUDGET);
+    assert!(!refused.is_empty(), "a WAV was left unread");
+    (session, refused)
+}
+
+/// Those of `names` not read.
+fn unread_of(session: &Session, names: &[&'static str]) -> Vec<&'static str> {
+    let workspace = &session.bench.workspace;
+    let unread = names.iter().copied().filter(|name| {
+        let entity = workspace.get(session.named(name)).unwrap();
+        entity.unread()
+    });
+    unread.collect()
+}
+
+/// A build whose WAVs do not fit in what drawbar holds is refused for that, and none of
+/// its WAVs is read once it is: a WAV is read only when something asks for it.
+#[test]
+fn a_build_past_the_budget_says_so_and_reads_no_wav_after_it_is_refused() {
+    let root = Temp::new();
+    let (mut session, refused) = built_past_the_budget(&root);
     assert_eq!(
         session.said(
             "building Marimba.nsmpproj: the WAVs it plays need more room than drawbar keeps \
@@ -8904,26 +8924,41 @@ fn a_build_past_the_budget_says_so_and_reads_no_wav_after_it_is_refused() {
         ),
         1
     );
-    let unread = |session: &Session| -> Vec<&str> {
-        let workspace = &session.bench.workspace;
-        let unread = wavs.into_iter().filter(|name| {
-            let entity = workspace.get(session.named(name)).unwrap();
-            entity.unread()
-        });
-        unread.collect()
-    };
-    let refused = unread(&session);
-    assert!(!refused.is_empty(), "a WAV was left unread");
 
     for _ in 0..4 {
         session.later();
         session.answer_reads();
     }
     assert_eq!(
-        unread(&session),
+        unread_of(&session, &PAST_THE_BUDGET),
         refused,
         "a WAV was read in the background"
     );
+}
+
+#[test]
+fn opening_exporting_or_duplicating_a_wav_refused_for_room_asks_for_it_again() {
+    use crate::browser::{Act, Item};
+    let acts: [fn(u64) -> Act; 3] = [
+        |id| Act::Open(Item::Local(id)),
+        Act::Export,
+        Act::DuplicateLocal,
+    ];
+    for act in acts {
+        let root = Temp::new();
+        let (mut session, refused) = built_past_the_budget(&root);
+        let id = session.named(refused[0]);
+        session.store.budget(crate::store::MOST_BYTES);
+        let asking = format!("{:?}", act(id));
+        session.bench.act(vec![act(id)]);
+        for _ in 0..4 {
+            session.answer_reads();
+            session.bench.act(Vec::new());
+        }
+        let entity = session.bench.workspace.get(id).unwrap();
+        assert!(!entity.unread(), "{asking} {} left it unread", refused[0]);
+        assert_eq!(session.said("could not be read"), 0, "{asking}");
+    }
 }
 
 #[test]
