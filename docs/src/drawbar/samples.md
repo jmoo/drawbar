@@ -37,8 +37,9 @@ is offered once every WAV the project plays is in the library, at the path the
 project gives from its own folder. A name that differs only in case counts.
 Otherwise the header reads **N WAVs missing**, and hovering over it lists each
 one and why: not in the library, outside it (an absolute path, or one that
-climbs above the library's folder), or matching two files whose names differ
-only in case.
+climbs above the library's folder), matching two files whose names differ only
+in case, or a hidden file, such as an AIFF, since drawbar builds only from
+WAVs.
 
 A build reads the project and its WAVs as drawbar holds them, unsaved edits
 included, and writes a v2 instrument beside the project under the project file's

@@ -1386,6 +1386,7 @@ impl DrawbarApp {
             tags: self.browser.tags(),
             played,
             builds: &self.builds,
+            folders: &self.browser.folders,
         };
         let wants = self.document.ui(
             ui,
