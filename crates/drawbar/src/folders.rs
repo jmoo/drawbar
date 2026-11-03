@@ -88,7 +88,7 @@ pub enum Occupant {
     Folder(u64),
     /// An asset whose file is gone, which the library keeps tags for.
     Lost(u64),
-    /// A file drawbar does not hold: one it does not open, or one it did not read.
+    /// A file drawbar does not open.
     Other,
 }
 
@@ -151,7 +151,7 @@ impl Census {
 }
 
 /// What [`Folders::shape`] returns.
-pub(crate) type Shape = (u64, [usize; 4], bool);
+pub(crate) type Shape = (u64, [usize; 3], bool);
 
 #[derive(Default)]
 pub struct Folders {
@@ -172,8 +172,6 @@ pub struct Folders {
     pub place: Option<Where>,
     /// Files drawbar does not open, shown only while [`Folders::all_files`] is on.
     pub others: Vec<LibPath>,
-    /// Files drawbar would hold that it did not read, and why.
-    pub unread: Vec<(LibPath, String)>,
     /// Folders whose contents were not all listed.
     pub unwalked: BTreeSet<LibPath>,
     /// Show the files drawbar does not open, too.
@@ -303,12 +301,7 @@ impl Folders {
     pub(crate) fn shape(&self) -> Shape {
         (
             self.generation,
-            [
-                self.others.len(),
-                self.unread.len(),
-                self.unwalked.len(),
-                self.lost.len(),
-            ],
+            [self.others.len(), self.unwalked.len(), self.lost.len()],
             self.all_files,
         )
     }
@@ -338,11 +331,9 @@ impl Folders {
         hasher.finish()
     }
 
-    /// Every file drawbar does not hold, read or not.
+    /// Every file drawbar does not open.
     pub fn strangers(&self) -> impl Iterator<Item = &LibPath> {
-        self.others
-            .iter()
-            .chain(self.unread.iter().map(|(path, _)| path))
+        self.others.iter()
     }
 
     /// Whether a folder holds something drawbar does not, or may: a file it does not
@@ -536,9 +527,7 @@ impl Folders {
                 lost.path = moved;
             }
         }
-        let others = self.others.iter_mut();
-        let unread = self.unread.iter_mut().map(|(path, _)| path);
-        for path in others.chain(unread) {
+        for path in &mut self.others {
             if let Some(moved) = path.moved(from, to) {
                 *path = moved;
             }

@@ -1754,7 +1754,6 @@ fn only_files_drawbar_opens_are_read_and_the_rest_are_listed_by_name() {
         .map(LibPath::as_str)
         .collect();
     assert_eq!(others, ["Cello/notes.pdf", "cover.jpg"], "no hidden file");
-    assert!(session.bench.browser.folders.unread.is_empty());
     session.close();
 }
 

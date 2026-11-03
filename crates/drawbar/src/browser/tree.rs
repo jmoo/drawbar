@@ -115,10 +115,8 @@ pub(super) enum Line {
         folder: Option<u64>,
         depth: usize,
     },
-    /// A file drawbar does not hold: the `index`th of [`Folders::unread`] when `unread`,
-    /// and otherwise of [`Folders::others`].
+    /// The `index`th of [`Folders::others`].
     Stranger {
-        unread: bool,
         index: usize,
         depth: usize,
     },
@@ -193,7 +191,7 @@ impl Line {
             Line::Computer => egui::Id::new("computer"),
             Line::Folder { id, .. } => egui::Id::new(("folder", id)),
             Line::Local { id, .. } => egui::Id::new(("local", id)),
-            Line::Stranger { unread, index, .. } => egui::Id::new(("stranger", unread, index)),
+            Line::Stranger { index, .. } => egui::Id::new(("stranger", index)),
             Line::Lost(id) => egui::Id::new(("lost", id)),
             Line::Note { under, said, .. } => egui::Id::new(("note", under, said)),
             Line::Instrument => egui::Id::new("instrument"),
@@ -342,15 +340,14 @@ impl Rows {
     }
 }
 
-/// The folders inside each folder, and the files drawbar does not hold in each, gathered
+/// The folders inside each folder, and the files drawbar does not open in each, gathered
 /// in one pass for a pass over the library's lines.
 struct Beside<'a> {
     /// In path order, under the folder they are in, or `None` for the root.
     children: BTreeMap<Option<u64>, Vec<&'a Folder>>,
-    /// Under the folder they are in: the files drawbar did not read, as `(true, index)`
-    /// into [`Folders::unread`], then, while all files are shown, those it does not open,
-    /// as `(false, index)` into [`Folders::others`].
-    strangers: BTreeMap<LibPath, Vec<(bool, usize)>>,
+    /// While all files are shown, indices into [`Folders::others`], under the folder
+    /// they are in.
+    strangers: BTreeMap<LibPath, Vec<usize>>,
 }
 
 impl<'a> Beside<'a> {
@@ -372,20 +369,14 @@ impl<'a> Beside<'a> {
             };
             children.entry(holder).or_default().push(folder);
         }
-        let unread = folders
-            .unread
-            .iter()
-            .enumerate()
-            .map(|(index, (path, _))| (path, (true, index)));
         let others = folders
             .others
             .iter()
             .enumerate()
-            .filter(|_| folders.all_files)
-            .map(|(index, path)| (path, (false, index)));
-        let mut strangers: BTreeMap<LibPath, Vec<(bool, usize)>> = BTreeMap::new();
-        for (path, at) in unread.chain(others) {
-            strangers.entry(path.parent()).or_default().push(at);
+            .filter(|_| folders.all_files);
+        let mut strangers: BTreeMap<LibPath, Vec<usize>> = BTreeMap::new();
+        for (index, path) in others {
+            strangers.entry(path.parent()).or_default().push(index);
         }
         Beside {
             children,
@@ -397,7 +388,7 @@ impl<'a> Beside<'a> {
         self.children.get(&folder).map_or(&[], Vec::as_slice)
     }
 
-    fn strangers(&self, dir: &LibPath) -> &[(bool, usize)] {
+    fn strangers(&self, dir: &LibPath) -> &[usize] {
         self.strangers.get(dir).map_or(&[], Vec::as_slice)
     }
 }
@@ -755,7 +746,7 @@ impl Browser {
                 let opening = self.folders.place.as_ref().is_some_and(|at| at.opening);
                 let empty = workspace.listed().next().is_none()
                     && self.folders.all().is_empty()
-                    && self.strangers_shown(None) == 0
+                    && (!self.folders.all_files || self.folders.others.is_empty())
                     && self.folders.unwalked.is_empty();
                 let said = match (opening, empty) {
                     (true, true) => Some("Opening the library…"),
@@ -838,16 +829,10 @@ impl Browser {
                     depth: depth + 1,
                 }),
         );
-        lines.extend(
-            beside
-                .strangers(dir)
-                .iter()
-                .map(|&(unread, index)| Line::Stranger {
-                    unread,
-                    index,
-                    depth: depth + 1,
-                }),
-        );
+        lines.extend(beside.strangers(dir).iter().map(|&index| Line::Stranger {
+            index,
+            depth: depth + 1,
+        }));
         if self.folders.unwalked.contains(dir) {
             lines.push(Line::Note {
                 under: folder.map_or(Branch::Computer, Branch::Folder),
@@ -978,11 +963,7 @@ impl Browser {
                     );
                 }
             }
-            Line::Stranger {
-                unread,
-                index,
-                depth,
-            } => self.stranger_row(ui, unread, index, depth),
+            Line::Stranger { index, depth } => self.stranger_row(ui, index, depth),
             Line::Lost(id) => self.lost_row(ui, id, acts),
             Line::Note { said, depth, .. } => nothing(ui, depth, said),
             Line::Instrument => self.instrument_row(ui, workspace, device, queue, filter, acts),
@@ -1074,17 +1055,9 @@ impl Browser {
         });
     }
 
-    /// A file drawbar does not hold: one it did not read, or one it does not open.
-    fn stranger_row(&self, ui: &mut egui::Ui, unread: bool, index: usize, depth: usize) {
-        let found = match unread {
-            true => self
-                .folders
-                .unread
-                .get(index)
-                .map(|(path, why)| (path, Some(why.as_str()))),
-            false => self.folders.others.get(index).map(|path| (path, None)),
-        };
-        let Some((path, why)) = found else {
+    /// A file drawbar does not open.
+    fn stranger_row(&self, ui: &mut egui::Ui, index: usize, depth: usize) {
+        let Some(path) = self.folders.others.get(index) else {
             return;
         };
         let drawn = row(
@@ -1092,22 +1065,17 @@ impl Browser {
             false,
             &Cells {
                 indent: indent(depth, false),
-                glyph: Some(match why {
-                    Some(_) => Glyph::CircleAlert,
-                    None => Glyph::CircleDashed,
-                }),
+                glyph: Some(Glyph::CircleDashed),
                 name: path.leaf(),
-                note: why.map(|_| "not read"),
                 faint: true,
                 child: true,
                 whole: true,
                 ..Cells::default()
             },
         );
-        drawn.response.on_hover_text(match why {
-            Some(why) => format!("drawbar did not read this file: {why}."),
-            None => "drawbar does not open this kind of file.".to_string(),
-        });
+        drawn
+            .response
+            .on_hover_text("drawbar does not open this kind of file.");
     }
 
     /// The assets directly in `folder`, or in the root for `None`, as rows.
@@ -1188,23 +1156,6 @@ impl Browser {
                 );
             });
         });
-    }
-
-    /// How many lines [`Beside::strangers`] holds for a folder's files.
-    fn strangers_shown(&self, folder: Option<u64>) -> usize {
-        let Some(dir) = self.folders.dir(folder) else {
-            return 0;
-        };
-        let unread = self.folders.unread.iter().map(|(path, _)| path);
-        let others = self
-            .folders
-            .others
-            .iter()
-            .filter(|_| self.folders.all_files);
-        unread
-            .chain(others)
-            .filter(|path| path.parent() == dir)
-            .count()
     }
 
     /// An asset whose file is gone, which this app does not hold. It keeps something the
@@ -2094,7 +2045,6 @@ mod tests {
             ..
         } = Bench::new();
         browser.folders.others = vec![LibPath::root().join("cover.jpg")];
-        browser.folders.unread = vec![(LibPath::root().join("Huge.nsmp"), "too big".into())];
         let drawn = |browser: &mut Browser| {
             let output = testing::run(&ctx, egui::RawInput::default(), |ctx| {
                 egui::SidePanel::left("browser")
@@ -2107,7 +2057,6 @@ mod tests {
         };
 
         let said = drawn(&mut browser);
-        assert!(said.iter().any(|word| word == "Huge.nsmp"), "{said:?}");
         assert!(!said.iter().any(|word| word == "cover.jpg"), "{said:?}");
         browser.folders.all_files = true;
         let said = drawn(&mut browser);
