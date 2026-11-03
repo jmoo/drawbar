@@ -344,7 +344,12 @@ fn held(path: &LibPath, entity: Option<&LocalEntity>) -> Held {
     };
     if let VerifyState::NotRead(why) = entity.verify() {
         return Held::Not(match why == crate::store::too_much() {
-            true => "the WAVs it plays need more room than drawbar keeps for files".to_string(),
+            true => format!(
+                "drawbar holds at most {} GiB of one library's files in memory, and the WAVs \
+                 it plays, with the files open, selected, in view, unsaved or waiting to be \
+                 sent, come to more",
+                crate::store::MOST_BYTES >> 30
+            ),
             false => format!("{path}: {why}"),
         });
     }
