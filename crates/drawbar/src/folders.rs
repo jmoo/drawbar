@@ -324,12 +324,13 @@ impl Folders {
         };
     }
 
-    /// Whether a hidden file in `dir` is named `name`, in any case.
-    pub fn hides(&self, dir: &LibPath, name: &str, workspace: &Workspace) -> bool {
+    /// The name of the hidden file in `dir` named `name` in any case, as it is spelled.
+    pub fn hides(&self, dir: &LibPath, name: &str, workspace: &Workspace) -> Option<String> {
         let key = names::key(name);
         self.entries(dir, workspace)
             .into_iter()
-            .any(|(named, _, what)| named == key && what == Occupant::Other)
+            .find(|(named, _, what)| *named == key && *what == Occupant::Other)
+            .map(|(_, spelled, _)| spelled)
     }
 
     /// The hidden files directly in `dir`.

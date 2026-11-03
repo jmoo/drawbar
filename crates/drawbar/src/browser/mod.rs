@@ -801,14 +801,14 @@ impl Browser {
     ) {
         let place = act::spoken(dir);
         let hidden = self.folders.hides(dir, name, workspace);
-        let title = match hidden {
-            true => format!("A hidden file is already named “{name}” in {place}"),
-            false => format!("“{name}” is already in {place}"),
+        let title = match &hidden {
+            Some(hidden) => format!("A hidden file is already named “{hidden}” in {place}"),
+            None => format!("“{name}” is already in {place}"),
         };
         let both_note = format!("Keep both names the new one “{free}”.");
         let unwritable = match hidden {
-            true => "drawbar does not overwrite a hidden file.",
-            false => {
+            Some(_) => "drawbar does not overwrite a hidden file.",
+            None => {
                 "What is there holds changes of its own, or is not a file, so it cannot be \
                  overwritten."
             }

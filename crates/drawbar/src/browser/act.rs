@@ -1354,7 +1354,11 @@ fn rename_folder(
         Clash::Free => browser.folders.relocate(id, dir.join(&name), workspace),
         Clash::Ambiguous(held) => log.trouble(ambiguous(&held, &dir)),
         Clash::Taken(Occupant::Other) => log.trouble(format!(
-            "A hidden file is already named “{name}” in {}, so the folder kept its name.",
+            "A hidden file is already named “{}” in {}, so the folder kept its name.",
+            browser
+                .folders
+                .hides(&dir, &name, workspace)
+                .unwrap_or(name.clone()),
             spoken(&dir)
         )),
         Clash::Taken(_) => log.trouble(format!(
@@ -1411,8 +1415,11 @@ fn remove_folder(
         let place = spoken(&up);
         return log.trouble(match clash {
             Clash::Taken(Occupant::Other) => format!(
-                "The folder was not removed: a hidden file is already named “{name}” in \
-                 {place}."
+                "The folder was not removed: a hidden file is already named “{}” in {place}.",
+                browser
+                    .folders
+                    .hides(&up, name, workspace)
+                    .unwrap_or(name.to_string())
             ),
             _ => format!("The folder was not removed: “{name}” is already in {place}."),
         });
@@ -3678,14 +3685,14 @@ mod tests {
     #[test]
     fn a_hidden_file_a_level_up_with_the_same_name_keeps_the_folder_and_is_named_hidden() {
         let mut bench = Bench::new();
-        let folder = gig_hiding(&mut bench, &["Gig/notes.pdf", "notes.pdf"]);
+        let folder = gig_hiding(&mut bench, &["Gig/notes.pdf", "NOTES.pdf"]);
 
         bench.act(vec![Act::RemoveFolderAndHidden(folder)]);
         assert!(bench.browser.folders.path_of(folder).is_some());
         assert!(bench.browser.folders.take_ops().is_empty());
         assert_eq!(
             bench.log.status().1,
-            "The folder was not removed: a hidden file is already named “notes.pdf” in the \
+            "The folder was not removed: a hidden file is already named “NOTES.pdf” in the \
              top level of the library."
         );
     }
@@ -3702,7 +3709,7 @@ mod tests {
         assert_eq!(bench.browser.folders.name_of(folder), Some("Gig"));
         assert_eq!(
             bench.log.status().1,
-            "A hidden file is already named “Notes” in the top level of the library, so \
+            "A hidden file is already named “notes” in the top level of the library, so \
              the folder kept its name."
         );
     }
@@ -3724,7 +3731,7 @@ mod tests {
         let (title, answers) = bench.browser.asking().expect("a question");
         assert_eq!(
             title,
-            "A hidden file is already named “NOTES.pdf” in the top level of the library"
+            "A hidden file is already named “notes.pdf” in the top level of the library"
         );
         assert_eq!(answers, ["Cancel", "Keep both"]);
     }
