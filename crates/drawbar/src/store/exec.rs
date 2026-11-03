@@ -4,7 +4,7 @@
 use std::io;
 use std::sync::Arc;
 
-use super::{Event, Failure, Fingerprint, Found, LibPath, Stat};
+use super::{Contents, Event, Failure, Fingerprint, Found, LibPath, Stat};
 use crate::ondisk::OnDisk;
 
 /// The most bytes of a library's files drawbar reads whole into memory, counting what it
@@ -92,6 +92,33 @@ async fn read_one(
         identity,
         ..Found::unread(path, stat)
     })
+}
+
+/// The files a [`super::Cmd::ReadOthers`] asks for, each read whole where the listing
+/// names it a hidden file.
+pub async fn read_others(fs: &impl Fs, paths: Vec<LibPath>) -> Contents {
+    let mut read = Vec::with_capacity(paths.len());
+    for path in paths {
+        let answer = read_other(fs, &path).await;
+        read.push((path, answer));
+    }
+    read
+}
+
+async fn read_other(fs: &impl Fs, path: &LibPath) -> Result<Vec<u8>, Failure> {
+    let dotted = path.components().any(|part| part.starts_with('.'));
+    if dotted || opens(path.leaf()) {
+        return Err(Failure::Io(format!("{path} is not a hidden file")));
+    }
+    let io = |e: io::Error| match e.kind() {
+        io::ErrorKind::NotFound => Failure::Moved,
+        _ => Failure::Io(e.to_string()),
+    };
+    fs.stat(path.as_str())
+        .await
+        .map_err(io)?
+        .ok_or(Failure::Moved)?;
+    fs.read(path.as_str()).await.map_err(io)
 }
 
 /// `event`, where it answers a change that wrote a file, with that file looked at as a

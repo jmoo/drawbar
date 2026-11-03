@@ -8508,3 +8508,41 @@ fn a_take_in_after_an_undo_leaves_nothing_to_redo() {
     session.take_in(&mut kept);
     assert_eq!(session.store.redo_label(), None);
 }
+
+#[test]
+fn a_hidden_file_is_read_whole_when_asked() {
+    let path = |text| LibPath::parse(text).unwrap();
+    let root = Temp::new();
+    fs::create_dir_all(root.at("Kit")).unwrap();
+    fs::write(root.at("Kit/c3.wav"), b"RIFF c3").unwrap();
+    fs::write(root.at("Kit/c4.wav"), b"RIFF c4").unwrap();
+    fs::write(root.at("Kit/.c5.wav"), b"RIFF c5").unwrap();
+    fs::write(root.at("Kit/Organ.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::listed(&root);
+    let listed = &session.bench.browser.folders.others;
+    assert_eq!(listed, &[path("Kit/c3.wav"), path("Kit/c4.wav")]);
+    fs::remove_file(root.at("Kit/c4.wav")).unwrap();
+
+    let asked = ["Kit/c3.wav", "Kit/c4.wav", "Kit/.c5.wav", "Kit/Organ.ne5p"];
+    session.store.read_others(7, asked.map(path).into());
+    let answered = loop {
+        assert!(session.next(), "the read answered");
+        let taken = session.store.take_others();
+        if !taken.is_empty() {
+            break taken;
+        }
+    };
+    let [(7, files)] = answered.as_slice() else {
+        panic!("one answer, to the request: {answered:?}");
+    };
+    let read: Vec<(&str, &Result<Vec<u8>, Failure>)> =
+        files.iter().map(|(at, read)| (at.as_str(), read)).collect();
+    assert_eq!(read[0], ("Kit/c3.wav", &Ok(b"RIFF c3".to_vec())));
+    assert_eq!(read[1], ("Kit/c4.wav", &Err(Failure::Moved)), "gone");
+    for (at, refused) in &read[2..] {
+        assert!(
+            matches!(refused, Err(Failure::Io(why)) if why.contains("is not a hidden file")),
+            "{at} is not a hidden file, and is not read: {refused:?}"
+        );
+    }
+}

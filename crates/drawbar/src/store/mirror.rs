@@ -19,9 +19,9 @@ use super::ids::Ids;
 use super::keys::{Came, TAGS, TAG_NAMES};
 use super::shown::Shown;
 use super::{
-    names, older, Backend, Cmd, CopyOf, Event, Failure, Fingerprint, Found, Holds, Intent, Key,
-    LibPath, Moving, Opened, Rescue, Source, Stat, Unwritable, Viewed, Waiting, MOST_BYTES,
-    TAKE_IN,
+    names, older, Backend, Cmd, Contents, CopyOf, Event, Failure, Fingerprint, Found, Holds,
+    Intent, Key, LibPath, Moving, Opened, Rescue, Source, Stat, Unwritable, Viewed, Waiting,
+    MOST_BYTES, TAKE_IN,
 };
 use crate::browser::{Browser, Rescuing};
 use crate::folders::{Folders, Op, Where};
@@ -327,6 +327,8 @@ pub struct Store {
     /// How many times room has been looked for by going through every asset.
     #[cfg(test)]
     pub(crate) looked_for_room: usize,
+    /// What each [`Cmd::ReadOthers`] answered, by its id, until taken.
+    others: Vec<(u64, Contents)>,
     /// How many writing commands have been sent.
     sent: u64,
     /// Where drawbar keeps a slot's former occupant no library could take, whose files
@@ -419,6 +421,7 @@ impl Store {
             roomless: BTreeMap::new(),
             #[cfg(test)]
             looked_for_room: 0,
+            others: Vec::new(),
             sent: 0,
             #[cfg(not(target_arch = "wasm32"))]
             shelf: None,
@@ -1303,6 +1306,18 @@ impl Store {
         true
     }
 
+    /// Read hidden files whole, outside the assets' budget. The answer comes back from
+    /// [`Store::take_others`] under `id`.
+    pub fn read_others(&mut self, id: u64, paths: Vec<LibPath>) {
+        self.send(Cmd::ReadOthers { id, paths });
+    }
+
+    /// The answers to [`Store::read_others`] heard since the last call, each under its
+    /// request's id.
+    pub fn take_others(&mut self) -> Vec<(u64, Contents)> {
+        std::mem::take(&mut self.others)
+    }
+
     fn send(&mut self, cmd: Cmd) {
         #[cfg(test)]
         if let Cmd::Read { files, .. } = &cmd {
@@ -1701,6 +1716,7 @@ impl Store {
             Event::SlotKept { slot, kept } => {
                 self.restore_slot_edit(&slot, kept, workspace, browser, log);
             }
+            Event::ReadOthers { id, files } => self.others.push((id, files)),
             Event::Drafted { of, kept } => {
                 let sent = self.drafting.pop_front();
                 match (sent, kept) {
