@@ -5431,8 +5431,6 @@ fn removing_a_folder_with_folders_in_it_is_one_undo_step() {
     assert_eq!(root.names("Set"), ["b.ne5p"]);
 }
 
-/// Removing a folder that holds hidden files moves them up with the rest in one change,
-/// and one undo puts them back in it.
 #[test]
 fn removing_a_folder_with_hidden_files_in_it_is_one_undo_step() {
     let root = Temp::new();
@@ -5512,8 +5510,6 @@ fn removing_a_folder_moves_a_dropped_wav_up_once() {
     assert!(warned.all(|level| level == crate::log::Level::Info));
 }
 
-/// Deleting a hidden file moves it to the trash, as deleting a sound does, and undo
-/// puts it back.
 #[test]
 fn a_deleted_hidden_file_goes_to_the_trash_and_undo_brings_it_back() {
     let root = Temp::new();
