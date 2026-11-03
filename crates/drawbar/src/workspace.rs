@@ -384,8 +384,8 @@ impl Content {
     }
 
     /// What a listing knows of a file `len` bytes long that nothing has read, by what its
-    /// name says it is ([`crate::browser::tagged`]). A WAV is what its name says, as if remembered: its row draws nothing from its
-    /// bytes, and it matches no slot.
+    /// name says it is ([`crate::browser::tagged`]). A WAV is what its name says, as if
+    /// remembered: its row draws nothing from its bytes, and it matches no slot.
     fn listed(by_name: Option<(&'static str, crate::browser::Kind)>, len: u64) -> Content {
         match by_name {
             Some((_, crate::browser::Kind::Wav)) => Content::Remembered {

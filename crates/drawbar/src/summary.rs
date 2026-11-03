@@ -62,9 +62,7 @@ impl Summary {
             },
         })
     }
-}
 
-impl Summary {
     /// What a WAV's name says of it: no slot checksum, nothing it plays, and no check that
     /// applies.
     pub fn wav() -> Summary {
