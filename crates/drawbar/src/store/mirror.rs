@@ -3742,25 +3742,38 @@ impl Store {
                 .into_iter()
                 .any(|path| unsettled(&self.moving, path))
         });
-        let held = held.map(|at| ops.split_off(at)).unwrap_or_default();
+        let mut held = held.map(|at| ops.split_off(at)).unwrap_or_default();
+        let (mut removals, ops): (Vec<Op>, Vec<Op>) = ops
+            .into_iter()
+            .partition(|op| matches!(op, Op::RemoveDir(_)));
+        // The folder changes are this pass's gesture's, as its asks are.
+        self.batch.take = self.passes;
+        let mut waiting = Vec::new();
+        for op in ops {
+            // A hidden file's change under a rename this pass sends waits for it too.
+            let renamed = matches!(op, Op::MoveFile { .. } | Op::DeleteFile(_))
+                && ends(&op)
+                    .into_iter()
+                    .any(|path| unsettled(&self.moving, path));
+            match waiting.is_empty() && !renamed {
+                true => self.tree_op(op),
+                false => waiting.push(op),
+            }
+        }
+        if !waiting.is_empty() || !held.is_empty() {
+            waiting.append(&mut removals);
+        }
+        waiting.append(&mut held);
         // The files those changes move wait with them.
-        let held_moves: Vec<(LibPath, LibPath)> = held
+        let held_moves: Vec<(LibPath, LibPath)> = waiting
             .iter()
             .map(|op| {
                 let [from, to] = ends(op);
                 (from.clone(), to.clone())
             })
             .collect();
-        let holds = !held.is_empty();
-        browser.folders.hold(held);
-        let (removals, ops): (Vec<Op>, Vec<Op>) = ops
-            .into_iter()
-            .partition(|op| matches!(op, Op::RemoveDir(_)));
-        // The folder changes are this pass's gesture's, as its asks are.
-        self.batch.take = self.passes;
-        for op in ops {
-            self.tree_op(op);
-        }
+        let holds = !waiting.is_empty();
+        browser.folders.hold(waiting);
         crate::folders::place_new(workspace, &browser.folders);
         self.take_asks(workspace);
         let mut done = self.arrivals(workspace, &held_moves);

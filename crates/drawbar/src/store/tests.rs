@@ -1826,6 +1826,66 @@ fn gig() -> (Temp, Session, u64, u64) {
     (root, session, folder, tag)
 }
 
+#[test]
+fn a_hidden_file_deleted_in_a_folder_renamed_in_the_same_pass_waits_for_the_rename() {
+    let root = Temp::new();
+    fs::create_dir(root.at("Outer")).unwrap();
+    fs::write(root.at("Outer/notes.pdf"), b"%PDF").unwrap();
+    let mut session = Session::open(&root);
+    let outer = LibPath::parse("Outer").unwrap();
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    let folder = browser.folders.id_of(&outer).expect("listed");
+    browser
+        .folders
+        .relocate(folder, LibPath::parse("Moved").unwrap(), workspace);
+    browser
+        .folders
+        .delete_hidden(&LibPath::parse("Moved/notes.pdf").unwrap());
+    assert!(
+        !session.store.sync(workspace, browser, Pass::Files),
+        "the delete waits"
+    );
+    session.settle();
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "Moved"]);
+    assert_eq!(root.names("Moved"), Vec::<String>::new());
+}
+
+#[test]
+fn a_hidden_file_moved_out_of_a_folder_renamed_in_the_same_pass_waits_for_the_rename() {
+    let root = Temp::new();
+    fs::create_dir_all(root.at("Outer/Gig")).unwrap();
+    fs::write(root.at("Outer/Gig/a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    fs::write(root.at("Outer/Gig/notes.pdf"), b"%PDF").unwrap();
+    let mut session = Session::open(&root);
+    let [outer, gig] = ["Outer", "Outer/Gig"].map(|at| {
+        let at = LibPath::parse(at).unwrap();
+        session.bench.browser.folders.id_of(&at).expect("listed")
+    });
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    browser
+        .folders
+        .relocate(outer, LibPath::parse("Moved").unwrap(), workspace);
+    session
+        .bench
+        .act(vec![crate::browser::Act::RemoveFolderAndHidden(gig)]);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    assert!(
+        !session.store.sync(workspace, browser, Pass::Files),
+        "the move waits"
+    );
+    session.settle();
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "Moved"]);
+    assert_eq!(root.names("Moved"), ["a.ne5p", "notes.pdf"]);
+}
+
 /// Two renames of one folder, the second sent before the first answers. The disk
 /// refuses the first, since a folder drawbar does not know has the name; that folder is
 /// left alone, and the second renames the folder drawbar holds.
