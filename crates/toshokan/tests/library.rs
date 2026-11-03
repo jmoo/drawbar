@@ -4793,6 +4793,9 @@ fn a_file_no_entity_is_bound_to_is_saved_renamed_and_trashed_and_each_undone<F: 
     .unwrap();
     assert_eq!(files(), held(&[("b.wav", b"wavy")]));
     assert!(a.view().entities().is_empty(), "no file became an entity");
+    let view = a.view();
+    let unbound: Vec<&str> = view.unbound().map(RelPath::as_str).collect();
+    assert_eq!(unbound, ["b.wav"], "the view lists only the files left");
     let undone: [&[(&str, &[u8])]; 4] = [
         &[("b.wav", b"wavy"), ("new.syx", b"new")],
         &[("a.wav", b"wavy"), ("new.syx", b"new")],

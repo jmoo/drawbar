@@ -1253,7 +1253,7 @@ impl Library {
     /// volume whose times are coarser than its writes reports for both.
     fn wrote(&mut self, paths: &[RelPath]) {
         for path in paths {
-            self.scan.files.remove(path);
+            self.bind_due |= self.scan.files.remove(path).is_some();
         }
     }
 
