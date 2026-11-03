@@ -42,19 +42,21 @@ only in case.
 
 A build reads the project and its WAVs as drawbar holds them, unsaved edits
 included, and writes a v2 instrument beside the project under the project file's
-name, numbered if that name is taken. The instrument opens in a tab. Settings the instrument cannot hold
-are listed in the activity log, and anything the encoder cannot reproduce stops
-the build with the reason.
+name, numbered if that name is taken. The instrument opens in a tab. Settings
+the instrument cannot hold are listed in the activity log, and anything the
+encoder cannot reproduce stops the build with the reason.
 
 ## WAVs
 
-A WAV in your library opens as a document of its own: the whole file's waveform,
-one lane per channel, with its rate, channels and length in the header.
-**Play** plays it. **Gain** with **Apply gain** scales every sample by that
-gain, and the line beside it first says how many samples would clip. A gain is an
-edit like any other: Save writes it into the file and Revert takes it back.
-**Encode** makes a one-zone instrument from the WAV. A WAV drawbar cannot read,
-such as a 24-bit one, says why and offers none of these.
+Drop WAVs on the window, or use **File ▸ Import…**, to copy them into your
+library, where they are listed beside your sounds. A WAV opens as a document of
+its own: the whole file's waveform, one lane per channel, with its rate,
+channels and length in the header. **Play** plays it. **Gain** with **Apply
+gain** scales every sample by that gain, and the line beside it first says how
+many samples would clip. A gain is an edit like any other: **Save** writes it
+into the file and **Revert** takes it back. **Encode** makes a one-zone
+instrument from the WAV. A WAV drawbar cannot read, such as a 24-bit one, says
+why and offers none of these.
 
 **New ▸ Sample instrument…** takes several WAVs, one zone each, with a root key
 for each. **New ▸ Sample Editor project…** makes a project from them instead, in
