@@ -52,34 +52,52 @@ impl Wav {
     }
 }
 
-/// The library's WAV assets, by path, each with its id.
+/// The library's WAV assets, by path, each with its id: the files named as WAVs, which
+/// stay WAVs whatever a read finds in them.
 pub fn wav_assets(workspace: &Workspace) -> Vec<(LibPath, u64)> {
     let mut wavs: Vec<(LibPath, u64)> = workspace
         .listed()
-        .filter(|entity| Kind::of(entity) == Kind::Wav)
+        .filter(|entity| entity.by_name().is_some_and(|(_, kind)| kind == Kind::Wav))
         .filter_map(|entity| Some((entity.path.clone()?, entity.id)))
         .collect();
     wavs.sort();
     wavs
 }
 
+/// The library's WAV assets by the [`names::key`] of their paths, each key's in path
+/// order.
+pub struct Wavs(BTreeMap<String, Vec<(LibPath, u64)>>);
+
+impl Wavs {
+    pub fn of(workspace: &Workspace) -> Wavs {
+        Wavs::new(wav_assets(workspace))
+    }
+
+    fn new(wavs: Vec<(LibPath, u64)>) -> Wavs {
+        let mut keyed: BTreeMap<String, Vec<(LibPath, u64)>> = BTreeMap::new();
+        for (path, id) in wavs {
+            keyed
+                .entry(names::key(path.as_str()))
+                .or_default()
+                .push((path, id));
+        }
+        Wavs(keyed)
+    }
+}
+
 /// Where a project in `dir` finds the WAV it stores as `stored`, among the library's
 /// WAV assets: the one at that exact path, or else the one whose path has the same
 /// [`names::key`], which is how the library tells two names apart.
-pub fn locate(dir: &LibPath, stored: &str, wavs: &[(LibPath, u64)]) -> Wav {
+pub fn locate(dir: &LibPath, stored: &str, wavs: &Wavs) -> Wav {
     let Some(parts) = AudioPath::parse(stored).within(dir.components()) else {
         return Wav::Outside;
     };
     let wanted = parts.join("/");
-    if let Some((path, id)) = wavs.iter().find(|(path, _)| path.as_str() == wanted) {
+    let alike = wavs.0.get(&names::key(&wanted)).map_or(&[][..], Vec::as_slice);
+    if let Some((path, id)) = alike.iter().find(|(path, _)| path.as_str() == wanted) {
         return Wav::Listed(path.clone(), *id);
     }
-    let key = names::key(&wanted);
-    let alike: Vec<&(LibPath, u64)> = wavs
-        .iter()
-        .filter(|(path, _)| names::key(path.as_str()) == key)
-        .collect();
-    match alike.as_slice() {
+    match alike {
         [] => Wav::Missing,
         [(path, id)] => Wav::Listed(path.clone(), *id),
         _ => Wav::Ambiguous(alike.iter().map(|(path, _)| path.clone()).collect()),
@@ -87,11 +105,7 @@ pub fn locate(dir: &LibPath, stored: &str, wavs: &[(LibPath, u64)]) -> Wav {
 }
 
 /// Each of a project's audio files by its stored path, with where its WAV is.
-pub fn locate_all(
-    dir: &LibPath,
-    files: &[AudioFile],
-    wavs: &[(LibPath, u64)],
-) -> Vec<(String, Wav)> {
+pub fn locate_all(dir: &LibPath, files: &[AudioFile], wavs: &Wavs) -> Vec<(String, Wav)> {
     files
         .iter()
         .map(|file| (file.path.clone(), locate(dir, &file.path, wavs)))
@@ -184,7 +198,7 @@ impl Builds {
             Ok(files) => files,
             Err(e) => return refuse(log, &name, &e.to_string()),
         };
-        let located = locate_all(&dir_of(entity), &files, &wav_assets(workspace));
+        let located = locate_all(&dir_of(entity), &files, &Wavs::of(workspace));
         let unresolved = unresolved(&located);
         if !unresolved.is_empty() {
             return refuse(log, &name, &unresolved.join("; "));
@@ -368,8 +382,8 @@ mod tests {
     }
 
     /// WAV assets at these paths, numbered from 1 in order.
-    fn listed(paths: &[&str]) -> Vec<(LibPath, u64)> {
-        paths.iter().map(|text| path(text)).zip(1..).collect()
+    fn listed(paths: &[&str]) -> Wavs {
+        Wavs::new(paths.iter().map(|text| path(text)).zip(1..).collect())
     }
 
     /// The asset at `text` among `wavs`, as [`listed`] numbers them.
