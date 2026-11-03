@@ -5407,6 +5407,51 @@ fn removing_a_folder_with_hidden_files_in_it_is_one_undo_step() {
     assert_eq!(others(&session), ["Gig/Set/cover.jpg", "Gig/notes.pdf"]);
 }
 
+#[test]
+fn a_wav_dropped_again_asks_about_its_asset_and_offers_keep_both() {
+    let (root, outside) = (Temp::new(), Temp::new());
+    fs::write(outside.at("cello.wav"), crate::testing::wav_bytes()).unwrap();
+    let mut session = Session::open(&root);
+    let take = || crate::browser::Act::Take {
+        from: outside.at("cello.wav"),
+        dir: LibPath::root(),
+        name: "cello.wav".into(),
+    };
+    session.bench.act(vec![take()]);
+    session.sync();
+    session.bench.act(vec![take()]);
+    let (title, answers) = session.bench.browser.asking().expect("a question");
+    assert_eq!(
+        title,
+        "“cello.wav” is already in the top level of the library"
+    );
+    assert!(answers.contains(&"Keep both"), "{answers:?}");
+}
+
+#[test]
+fn removing_a_folder_moves_a_dropped_wav_up_once() {
+    let (root, outside) = (Temp::new(), Temp::new());
+    fs::create_dir(root.at("Gig")).unwrap();
+    fs::write(root.at("Gig/a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    fs::write(outside.at("cello.wav"), crate::testing::wav_bytes()).unwrap();
+    let mut session = Session::open(&root);
+    let gig = LibPath::parse("Gig").unwrap();
+    session.bench.act(vec![crate::browser::Act::Take {
+        from: outside.at("cello.wav"),
+        dir: gig.clone(),
+        name: "cello.wav".into(),
+    }]);
+    session.sync();
+    let folder = session.bench.browser.folders.id_of(&gig).expect("listed");
+    session
+        .bench
+        .act(vec![crate::browser::Act::RemoveFolder(folder)]);
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "a.ne5p", "cello.wav"]);
+    let mut warned = session.bench.log.iter().map(|entry| entry.level);
+    assert!(warned.all(|level| level == crate::log::Level::Info));
+}
+
 /// Deleting a hidden file moves it to the trash, as deleting a sound does, and undo
 /// puts it back.
 #[test]

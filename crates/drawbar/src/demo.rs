@@ -73,7 +73,7 @@ pub fn file(
     }
     let made = folders.named_or_made(&LibPath::root(), FOLDER, workspace);
     let Some(dir) = made.and_then(|id| folders.path_of(id).cloned()) else {
-        let file = match folders.hides(&LibPath::root(), FOLDER) {
+        let file = match folders.hides(&LibPath::root(), FOLDER, workspace) {
             true => "A hidden file",
             false => "A file",
         };

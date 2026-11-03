@@ -794,12 +794,13 @@ impl Browser {
         &mut self,
         name: &str,
         dir: &crate::store::LibPath,
+        workspace: &Workspace,
         over: Option<Vec<Act>>,
         both: Vec<Act>,
         free: &str,
     ) {
         let place = act::spoken(dir);
-        let hidden = self.folders.hides(dir, name);
+        let hidden = self.folders.hides(dir, name, workspace);
         let title = match hidden {
             true => format!("A hidden file is already named “{name}” in {place}"),
             false => format!("“{name}” is already in {place}"),

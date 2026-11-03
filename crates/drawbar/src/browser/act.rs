@@ -924,7 +924,7 @@ fn put(
                     }
                 },
             };
-            browser.ask_clash(&name, &dir, over, both, &free);
+            browser.ask_clash(&name, &dir, workspace, over, both, &free);
         }
     }
 }
@@ -1031,7 +1031,7 @@ fn import(
                 bytes: bytes.clone(),
             }];
             let over = over(occupant, workspace, bytes, None);
-            browser.ask_clash(&name, &root, over, both, &free);
+            browser.ask_clash(&name, &root, workspace, over, both, &free);
         }
     }
 }
@@ -1079,7 +1079,7 @@ fn take(
                 dir: dir.clone(),
                 name: free.clone(),
             }];
-            browser.ask_clash(&name, &dir, over, both, &free);
+            browser.ask_clash(&name, &dir, workspace, over, both, &free);
         }
     }
 }
@@ -1385,7 +1385,7 @@ fn remove_folder(
             path.leaf()
         ));
     }
-    let others = browser.folders.hidden_in(&path);
+    let others = browser.folders.hidden_in(&path, workspace);
     if !others.is_empty() && !hidden && !browser.folders.all_files {
         return browser.ask_remove_hidden(id, &path, &others);
     }

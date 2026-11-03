@@ -325,19 +325,20 @@ impl Folders {
     }
 
     /// Whether a hidden file in `dir` is named `name`, in any case.
-    pub fn hides(&self, dir: &LibPath, name: &str) -> bool {
+    pub fn hides(&self, dir: &LibPath, name: &str, workspace: &Workspace) -> bool {
         let key = names::key(name);
-        let named = |path: &&LibPath| names::key(path.leaf()) == key;
-        self.others
-            .iter()
-            .filter(named)
-            .any(|path| path.parent() == *dir)
+        self.entries(dir, workspace)
+            .into_iter()
+            .any(|(named, _, what)| named == key && what == Occupant::Other)
     }
 
     /// The hidden files directly in `dir`.
-    pub fn hidden_in(&self, dir: &LibPath) -> Vec<LibPath> {
-        let directly = |path: &&LibPath| path.parent() == *dir;
-        self.others.iter().filter(directly).cloned().collect()
+    pub fn hidden_in(&self, dir: &LibPath, workspace: &Workspace) -> Vec<LibPath> {
+        self.entries(dir, workspace)
+            .into_iter()
+            .filter(|(_, _, what)| *what == Occupant::Other)
+            .map(|(_, name, _)| dir.join(&name))
+            .collect()
     }
 
     /// The assets whose file is gone, which the library keeps tags for.
@@ -406,12 +407,17 @@ impl Folders {
         }
     }
 
-    /// Everything named in `dir`, with its key and what it is.
+    /// Everything named in `dir`, with its key and what it is. A file drawbar does not
+    /// open is one entry, its asset's, where one holds it.
     fn entries(&self, dir: &LibPath, workspace: &Workspace) -> Vec<(String, String, Occupant)> {
-        let assets = workspace.listed().filter_map(|entity| {
-            let path = entity.path.as_ref()?;
-            (path.parent() == *dir).then(|| (path.leaf(), Occupant::Asset(entity.id)))
-        });
+        let assets: Vec<(&str, Occupant)> = workspace
+            .listed()
+            .filter_map(|entity| {
+                let path = entity.path.as_ref()?;
+                (path.parent() == *dir).then(|| (path.leaf(), Occupant::Asset(entity.id)))
+            })
+            .collect();
+        let held: BTreeSet<&str> = assets.iter().map(|(name, _)| *name).collect();
         let folders = self
             .list
             .iter()
@@ -425,8 +431,11 @@ impl Folders {
             .others
             .iter()
             .filter(|path| path.parent() == *dir)
+            .filter(|path| !held.contains(path.leaf()))
             .map(|path| (path.leaf(), Occupant::Other));
         assets
+            .iter()
+            .copied()
             .chain(folders)
             .chain(lost)
             .chain(others)
