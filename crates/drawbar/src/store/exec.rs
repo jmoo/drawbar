@@ -126,8 +126,8 @@ async fn rested(fs: &impl Fs, found: Result<Found, Failure>) -> Result<Found, Fa
 /// Why a read [`Failure::Room`] refused did not run.
 pub fn too_much() -> String {
     format!(
-        "drawbar holds at most {} GiB of one library's files in memory, and the files open, \
-         selected, in view, unsaved or waiting to be sent already come to that",
+        "drawbar holds at most {} GiB of one library's files in memory, and this file, with \
+         what it holds or is reading already, comes to more",
         MOST_BYTES >> 30
     )
 }

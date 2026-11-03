@@ -346,8 +346,7 @@ fn held(path: &LibPath, entity: Option<&LocalEntity>) -> Held {
         return Held::Not(match why == crate::store::too_much() {
             true => format!(
                 "drawbar holds at most {} GiB of one library's files in memory, and the WAVs \
-                 it plays, with the files open, selected, in view, unsaved or waiting to be \
-                 sent, come to more",
+                 it plays, with what it holds or is reading already, come to more",
                 crate::store::MOST_BYTES >> 30
             ),
             false => format!("{path}: {why}"),
