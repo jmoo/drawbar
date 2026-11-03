@@ -3070,7 +3070,7 @@ impl Store {
                 "{} {n} of them came in hidden, since drawbar does not open {it}; View ▸ {} \
                  lists {it}.{apart}",
                 list.said(),
-                crate::folders::SHOW_ALL_FILES,
+                crate::folders::SHOW_HIDDEN_FILES,
                 it = if n == 1 { "it" } else { "them" },
             ),
         };

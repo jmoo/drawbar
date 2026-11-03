@@ -21,6 +21,10 @@ so back up the whole library folder. That folder says nothing about your other
 files, so it stays small however large the library is. Your unsaved edits are
 kept on this computer, in drawbar's own data, never in the library folder.
 
+drawbar hides the files in the library it does not open, such as a PDF or a
+photo, and never changes them on its own. **View ▸ Show hidden files** lists
+them, drawn faint. Names that start with a dot never show.
+
 In the browser, your library is kept in the browser's own storage for
 drawbar.app, which no other site or app can see. It keeps your files, tags and
 unsaved edits from one visit to the next, but the browser can delete it, as
@@ -106,8 +110,8 @@ folder, named after it, with its tags and the slot it came from. A name already
 taken gets a number. A sound with an edit you had not saved comes back with that
 edit, still unsaved. If the browser's storage is full, the edit comes in as a file
 of its own beside the sound instead. A note named for a kind of file drawbar does
-not open, such as `.json`, keeps its name and shows only under **Show all files**,
-and an edit you had not saved to it is a file of its own beside it.
+not open, such as `.json`, keeps its name and comes in as a hidden file, and an
+edit you had not saved to it is a hidden file of its own beside it.
 In the browser, a [copy of the library](#keeping-a-copy-in-the-browser) holds them.
 The activity log says how many sounds came in.
 

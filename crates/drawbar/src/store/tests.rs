@@ -1753,7 +1753,11 @@ fn only_files_drawbar_opens_are_read_and_the_rest_are_listed_by_name() {
         .iter()
         .map(LibPath::as_str)
         .collect();
-    assert_eq!(others, ["Cello/notes.pdf", "cover.jpg"], "no hidden file");
+    assert_eq!(
+        others,
+        ["Cello/notes.pdf", "cover.jpg"],
+        "no name with a dot first"
+    );
     session.close();
 }
 
@@ -7051,7 +7055,7 @@ fn the_unsaved_edit_of_a_hidden_note_is_a_hidden_file_beside_it() {
         "drawbar brought 1 sound an earlier version kept into the library, with its tags \
          and folders. 1 of them came in hidden, since drawbar does not open it; View ▸ {} \
          lists it. The unsaved edit of “Set.json” is a hidden file of its own, “Set 2.json”.",
-        crate::folders::SHOW_ALL_FILES
+        crate::folders::SHOW_HIDDEN_FILES
     );
     assert_eq!(session.said(&said), 1);
 }

@@ -17,7 +17,7 @@ use super::row::{row, Cells, Drawn, STEP};
 use super::{Ask, Browser, Click, Verb};
 use crate::device::{occupancy, read_only, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
-use crate::folders::{Folder, Folders, SHOW_ALL_FILES};
+use crate::folders::{Folder, Folders, SHOW_HIDDEN_FILES};
 use crate::icon::Glyph;
 use crate::libraries::Picking;
 use crate::menu::{self, marked, new_menu, OPEN_LIBRARY};
@@ -345,7 +345,7 @@ impl Rows {
 struct Beside<'a> {
     /// In path order, under the folder they are in, or `None` for the root.
     children: BTreeMap<Option<u64>, Vec<&'a Folder>>,
-    /// While all files are shown, indices into [`Folders::others`], under the folder
+    /// While hidden files are shown, indices into [`Folders::others`], under the folder
     /// they are in.
     strangers: BTreeMap<LibPath, Vec<usize>>,
 }
@@ -806,7 +806,7 @@ impl Browser {
 
     /// What is directly in `folder` at `dir`, or in the root for `None`: its folders,
     /// each with what is in it when it is open, then its assets, then the files drawbar
-    /// does not hold, then a line if the folder was not listed whole.
+    /// does not open, then a line if the folder was not listed whole.
     fn folder_lines(
         &self,
         folder: Option<u64>,
@@ -1043,7 +1043,7 @@ impl Browser {
                 offer(ui, "Open…", None, Act::OpenFiles, acts);
                 menu::button(ui, "New", |ui| new_menu(ui, acts));
                 let all = browser.folders.all_files;
-                if marked(ui, SHOW_ALL_FILES, all) {
+                if marked(ui, SHOW_HIDDEN_FILES, all) {
                     browser.folders.all_files = !all;
                 }
                 let picking = crate::libraries::picking();
@@ -1075,7 +1075,7 @@ impl Browser {
         );
         drawn
             .response
-            .on_hover_text("drawbar does not open this kind of file.");
+            .on_hover_text("Hidden: drawbar does not open this kind of file.");
     }
 
     /// The assets directly in `folder`, or in the root for `None`, as rows.

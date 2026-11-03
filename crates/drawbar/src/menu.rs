@@ -147,7 +147,7 @@ pub fn label(command: Command) -> &'static str {
         Command::Zoom(Step::In) => "Zoom in",
         Command::Zoom(Step::Out) => "Zoom out",
         Command::Zoom(Step::Reset) => "Reset zoom",
-        Command::AllFiles => crate::folders::SHOW_ALL_FILES,
+        Command::AllFiles => crate::folders::SHOW_HIDDEN_FILES,
         Command::Theme(choice) => choice.name(),
         Command::Connect => "Connect…",
         Command::Disconnect => "Disconnect",

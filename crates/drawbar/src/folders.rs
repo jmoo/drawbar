@@ -44,8 +44,9 @@ pub struct Lost {
     pub path: LibPath,
 }
 
-/// The menu item that shows the files drawbar does not open, and hides them again.
-pub const SHOW_ALL_FILES: &str = "Show all files";
+/// The menu item that shows the hidden files, those drawbar does not open, and hides them
+/// again.
+pub const SHOW_HIDDEN_FILES: &str = "Show hidden files";
 
 /// Where [`Folders::all_files`] is kept between sessions: a preference of the app, not of
 /// any one library.
@@ -317,7 +318,7 @@ impl Folders {
         };
     }
 
-    /// A hash of every folder's path and every file drawbar does not hold: what besides
+    /// A hash of every folder's path and every file drawbar does not open: what besides
     /// the assets two names can collide in.
     pub fn names_hash(&self) -> u64 {
         use std::hash::{Hash as _, Hasher as _};
