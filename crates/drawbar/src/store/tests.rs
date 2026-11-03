@@ -8908,3 +8908,50 @@ fn a_build_asks_again_for_a_wav_an_earlier_read_could_not_read() {
     session.build(id);
     assert_eq!(session.said("Built “Marimba.nsmp”"), 1);
 }
+
+#[test]
+fn a_build_logs_each_setting_the_instrument_cannot_hold() {
+    let root = Temp::new();
+    project_with_wavs(&root, &[("c3.wav", "Marimba/c3.wav")]);
+    let text = String::from_utf8(root.read("Marimba/Marimba.nsmpproj")).unwrap();
+    let looped = text
+        .replace("m_loopEnabled = 0", "m_loopEnabled = 1")
+        .replace("m_loopDetune = 0", "m_loopDetune = -50");
+    fs::write(root.at("Marimba/Marimba.nsmpproj"), looped).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.named("Marimba.nsmpproj");
+    session.build(id);
+    assert_eq!(
+        session.said(
+            "Marimba.nsmp: zone1 sets m_loopDetune = -50, which the instrument has nowhere \
+             to hold"
+        ),
+        1
+    );
+    assert_eq!(session.said("Built “Marimba.nsmp”"), 1);
+}
+
+#[test]
+fn a_build_whose_project_is_removed_while_it_runs_is_dropped() {
+    let root = Temp::new();
+    project_with_wavs(&root, &[("c3.wav", "Marimba/c3.wav")]);
+    let mut session = Session::listed(&root);
+    let id = session.named("Marimba.nsmpproj");
+    session.read(&[id]);
+    session.bench.act(vec![crate::browser::Act::Build(id)]);
+    let Bench {
+        workspace,
+        browser,
+        tabs,
+        builds,
+        log,
+        ..
+    } = &mut session.bench;
+    assert!(builds.running(id));
+    workspace.remove(id, log);
+    builds.poll(workspace, &browser.folders, tabs, log);
+    assert!(!builds.running(id));
+    session.answer_reads();
+    assert_eq!(session.said("Built"), 0);
+    assert_eq!(session.said("was not built"), 0);
+}
