@@ -73,8 +73,12 @@ pub fn file(
     }
     let made = folders.named_or_made(&LibPath::root(), FOLDER, workspace);
     let Some(dir) = made.and_then(|id| folders.path_of(id).cloned()) else {
+        let file = match folders.hides(&LibPath::root(), FOLDER) {
+            true => "A hidden file",
+            false => "A file",
+        };
         log.trouble(format!(
-            "A file is called “{FOLDER}”, so the demo sounds have no folder to go in."
+            "{file} is called “{FOLDER}”, so the demo sounds have no folder to go in."
         ));
         return 0;
     };
@@ -159,6 +163,18 @@ mod tests {
                 entity.parse_error
             );
         }
+    }
+
+    #[test]
+    fn a_hidden_file_named_for_the_folder_keeps_the_demos_out_and_is_named_hidden() {
+        let mut bench = Bench::new();
+        bench.browser.folders.others = vec![LibPath::root().join(FOLDER)];
+
+        assert_eq!(filing(&mut bench), 0);
+        assert_eq!(
+            bench.log.status().1,
+            "A hidden file is called “Demo sounds”, so the demo sounds have no folder to go in."
+        );
     }
 
     #[test]

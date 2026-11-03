@@ -797,12 +797,20 @@ impl Browser {
         both: Vec<Act>,
         free: &str,
     ) {
-        let place = match dir.is_root() {
-            true => "the top level of the library".to_string(),
-            false => format!("“{dir}”"),
+        let place = act::spoken(dir);
+        let hidden = self.folders.hides(dir, name);
+        let title = match hidden {
+            true => format!("A hidden file is already named “{name}” in {place}"),
+            false => format!("“{name}” is already in {place}"),
         };
-        let title = format!("“{name}” is already in {place}");
         let both_note = format!("Keep both names the new one “{free}”.");
+        let unwritable = match hidden {
+            true => "drawbar does not overwrite a hidden file.",
+            false => {
+                "What is there holds changes of its own, or is not a file, so it cannot be \
+                 overwritten."
+            }
+        };
         self.raise(match over {
             Some(over) => Ask {
                 title,
@@ -818,10 +826,7 @@ impl Browser {
             },
             None => Ask::new(
                 title,
-                Some(format!(
-                    "What is there holds changes of its own, or is not a file, so it cannot \
-                     be overwritten. {both_note}"
-                )),
+                Some(format!("{unwritable} {both_note}")),
                 Verb::KeepBoth,
                 both,
             ),

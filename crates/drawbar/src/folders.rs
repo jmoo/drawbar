@@ -345,6 +345,16 @@ impl Folders {
         self.others.iter()
     }
 
+    /// Whether a hidden file in `dir` is named `name`, in any case.
+    pub fn hides(&self, dir: &LibPath, name: &str) -> bool {
+        let key = names::key(name);
+        let named = |path: &&LibPath| names::key(path.leaf()) == key;
+        self.others
+            .iter()
+            .filter(named)
+            .any(|path| path.parent() == *dir)
+    }
+
     /// The hidden files directly in `dir`.
     pub fn hidden_in(&self, dir: &LibPath) -> Vec<LibPath> {
         let directly = |path: &&LibPath| path.parent() == *dir;

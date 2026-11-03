@@ -1309,6 +1309,10 @@ fn rename_folder(
     {
         Clash::Free => browser.folders.relocate(id, dir.join(&name), workspace),
         Clash::Ambiguous(held) => log.trouble(ambiguous(&held, &dir)),
+        Clash::Taken(Occupant::Other) => log.trouble(format!(
+            "A hidden file is already named “{name}” in {}, so the folder kept its name.",
+            spoken(&dir)
+        )),
         Clash::Taken(_) => log.trouble(format!(
             "“{name}” is already in {}, so the folder kept its name.",
             spoken(&dir)
@@ -3593,6 +3597,43 @@ mod tests {
             "The folder was not removed: a hidden file is already named “notes.pdf” in the \
              top level of the library."
         );
+    }
+
+    #[test]
+    fn a_folder_renamed_to_a_hidden_files_name_keeps_its_name_and_says_why() {
+        let mut bench = Bench::new();
+        let folder = gig_hiding(&mut bench, &["notes"]);
+
+        bench.act(vec![Act::RenameFolder {
+            id: folder,
+            name: "Notes".into(),
+        }]);
+        assert_eq!(bench.browser.folders.name_of(folder), Some("Gig"));
+        assert_eq!(
+            bench.log.status().1,
+            "A hidden file is already named “Notes” in the top level of the library, so \
+             the folder kept its name."
+        );
+    }
+
+    #[test]
+    fn a_rename_onto_a_hidden_files_name_says_it_is_hidden_and_offers_only_keep_both() {
+        let mut bench = Bench::new();
+        let [id] = placed(&mut bench, 1)[..] else {
+            unreachable!()
+        };
+        bench.browser.folders.others = vec![LibPath::parse("notes.pdf").unwrap()];
+
+        bench.act(vec![Act::RenameLocal {
+            id,
+            name: "NOTES.pdf".into(),
+        }]);
+        let (title, answers) = bench.browser.asking().expect("a question");
+        assert_eq!(
+            title,
+            "A hidden file is already named “NOTES.pdf” in the top level of the library"
+        );
+        assert_eq!(answers, ["Cancel", "Keep both"]);
     }
 
     #[test]

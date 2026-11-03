@@ -174,7 +174,8 @@ trash: it stays in the library folder, under `.drawbar/library/writers.2`, until
 you remove it by hand.
 
 **Export…** saves a copy somewhere else. Rename with F2. If a name is taken,
-drawbar asks whether to **Overwrite** the file there or **Keep both**.
+drawbar asks whether to **Overwrite** the file there or **Keep both**. Only
+**Keep both** is offered when the file there is hidden, and the question says so.
 
 ## Bundles
 
