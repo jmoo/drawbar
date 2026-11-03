@@ -130,7 +130,7 @@ pub fn outside_len(from: &Outside) -> Option<u64> {
     Some(from.size() as u64)
 }
 
-pub use exec::{opens, MOST_BYTES};
+pub use exec::{opens, too_much, MOST_BYTES};
 pub use ids::Key;
 pub use keys::identity_of_bytes;
 pub use mirror::{Pass, Store};

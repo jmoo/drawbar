@@ -358,4 +358,5 @@ counts for nothing. When a read would not fit, drawbar lets go of clean assets,
 least recently needed first. An asset let go of keeps a summary of its read, so
 its row still draws as it did and still matches its slot. A view, an unsaved
 asset, and one open, selected or waiting to be sent are never let go of. A read
-that cannot fit even then is tried again once room can be made.
+that cannot fit even then is tried again once room can be made, except a WAV's,
+which waits for something to ask for it again.

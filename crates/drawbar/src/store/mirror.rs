@@ -322,7 +322,8 @@ pub struct Store {
     #[cfg(test)]
     pub(crate) asked_files: usize,
     /// The assets whose read was refused for want of room, each with its file's length,
-    /// to ask for again once room can be made for it. One that could never fit is not.
+    /// to ask for again once room can be made for it. One that could never fit is not,
+    /// nor a WAV, which is read only when something asks for it.
     roomless: BTreeMap<u64, u64>,
     /// How many times room has been looked for by going through every asset.
     #[cfg(test)]
@@ -1406,7 +1407,8 @@ impl Store {
                         (true, false) => workspace.again(id),
                         (false, true) => _ = self.fetched.remove(&id),
                         (false, false) => {
-                            if len <= self.budget {
+                            let wav = workspace.get(id).is_some_and(LocalEntity::is_wav);
+                            if len <= self.budget && !wav {
                                 self.roomless.insert(id, len);
                             }
                             workspace.unreadable(id, too_much(), log);
