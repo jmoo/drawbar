@@ -161,6 +161,7 @@ pub struct Around<'a> {
     /// Keys played here strike the key map when the current face shows one.
     pub played: &'a Played,
     pub builds: &'a crate::builds::Builds,
+    pub folders: &'a crate::folders::Folders,
 }
 
 /// What a document's frame asked the app for.
@@ -398,7 +399,7 @@ impl Document {
                 Some(open) => header::Extras {
                     loud: Some(project::loud(
                         entity,
-                        open.wavs.of(entity, workspace),
+                        open.wavs.of(entity, workspace, around.folders),
                         around.builds.running(id),
                     )),
                     ..header::Extras::default()
@@ -1791,6 +1792,7 @@ mod tests {
                             tags: &self.tags,
                             played: &Played::default(),
                             builds: &self.builds,
+                            folders: &crate::folders::Folders::default(),
                         },
                     );
                 });
@@ -2773,6 +2775,7 @@ mod tests {
                             tags: &tags,
                             played: &Played::default(),
                             builds: &crate::builds::Builds::default(),
+                            folders: &crate::folders::Folders::default(),
                         },
                     );
                 });
@@ -3005,6 +3008,7 @@ mod tests {
                             tags: &tags,
                             played: &Played::default(),
                             builds: &crate::builds::Builds::default(),
+                            folders: &crate::folders::Folders::default(),
                         },
                     );
                 });

@@ -34,6 +34,9 @@ pub enum Wav {
     Outside,
     /// Listed files whose paths differ from the stored one only by [`names::key`].
     Ambiguous(Vec<LibPath>),
+    /// No WAV, but this hidden file, whose path differs from the stored one at most by
+    /// [`names::key`].
+    Hidden(LibPath),
     Missing,
 }
 
@@ -47,6 +50,9 @@ impl Wav {
                 let paths: Vec<&str> = paths.iter().map(LibPath::as_str).collect();
                 Some(format!("ambiguous between {}", paths.join(" and ")))
             }
+            Wav::Hidden(path) => Some(format!(
+                "{path} is a hidden file, and drawbar builds only from WAVs"
+            )),
             Wav::Missing => Some("missing".to_string()),
         }
     }
@@ -64,24 +70,33 @@ pub fn wav_assets(workspace: &Workspace) -> Vec<(LibPath, u64)> {
     wavs
 }
 
-/// The library's WAV assets by the [`names::key`] of their paths, each key's in path
-/// order.
-pub struct Wavs(BTreeMap<String, Vec<(LibPath, u64)>>);
+/// The library's WAV assets and its hidden files, by the [`names::key`] of their paths:
+/// each key's WAVs in path order, and its first hidden file.
+pub struct Wavs {
+    wavs: BTreeMap<String, Vec<(LibPath, u64)>>,
+    hidden: BTreeMap<String, LibPath>,
+}
 
 impl Wavs {
-    pub fn of(workspace: &Workspace) -> Wavs {
-        Wavs::new(wav_assets(workspace))
+    pub fn of(workspace: &Workspace, folders: &Folders) -> Wavs {
+        Wavs::new(wav_assets(workspace), &folders.others)
     }
 
-    fn new(wavs: Vec<(LibPath, u64)>) -> Wavs {
-        let mut keyed: BTreeMap<String, Vec<(LibPath, u64)>> = BTreeMap::new();
-        for (path, id) in wavs {
-            keyed
-                .entry(names::key(path.as_str()))
-                .or_default()
-                .push((path, id));
+    fn new(listed: Vec<(LibPath, u64)>, hidden: &[LibPath]) -> Wavs {
+        let mut wavs: BTreeMap<String, Vec<(LibPath, u64)>> = BTreeMap::new();
+        for (path, id) in listed {
+            let key = names::key(path.as_str());
+            wavs.entry(key).or_default().push((path, id));
         }
-        Wavs(keyed)
+        let mut keyed = BTreeMap::new();
+        for path in hidden {
+            let key = names::key(path.as_str());
+            keyed.entry(key).or_insert_with(|| path.clone());
+        }
+        Wavs {
+            wavs,
+            hidden: keyed,
+        }
     }
 }
 
@@ -93,12 +108,16 @@ pub fn locate(dir: &LibPath, stored: &str, wavs: &Wavs) -> Wav {
         return Wav::Outside;
     };
     let wanted = parts.join("/");
-    let alike = wavs.0.get(&names::key(&wanted)).map_or(&[][..], Vec::as_slice);
+    let key = names::key(&wanted);
+    let alike = wavs.wavs.get(&key).map_or(&[][..], Vec::as_slice);
     if let Some((path, id)) = alike.iter().find(|(path, _)| path.as_str() == wanted) {
         return Wav::Listed(path.clone(), *id);
     }
     match alike {
-        [] => Wav::Missing,
+        [] => wavs
+            .hidden
+            .get(&key)
+            .map_or(Wav::Missing, |path| Wav::Hidden(path.clone())),
         [(path, id)] => Wav::Listed(path.clone(), *id),
         _ => Wav::Ambiguous(alike.iter().map(|(path, _)| path.clone()).collect()),
     }
@@ -183,7 +202,7 @@ impl Builds {
     /// Build the project `id` from what it holds now, its unsaved edits included, and
     /// look for its WAVs again. Refuses, in the log, a project that does not decode or
     /// names a WAV the library does not list.
-    pub fn start(&mut self, id: u64, workspace: &Workspace, log: &mut Log) {
+    pub fn start(&mut self, id: u64, workspace: &Workspace, folders: &Folders, log: &mut Log) {
         let Some(entity) = workspace.get(id) else {
             return;
         };
@@ -198,7 +217,7 @@ impl Builds {
             Ok(files) => files,
             Err(e) => return refuse(log, &name, &e.to_string()),
         };
-        let located = locate_all(&dir_of(entity), &files, &Wavs::of(workspace));
+        let located = locate_all(&dir_of(entity), &files, &Wavs::of(workspace, folders));
         let unresolved = unresolved(&located);
         if !unresolved.is_empty() {
             return refuse(log, &name, &unresolved.join("; "));
@@ -207,7 +226,7 @@ impl Builds {
             .into_iter()
             .filter_map(|(stored, wav)| match wav {
                 Wav::Listed(path, at) => Some((stored, (path, at))),
-                Wav::Outside | Wav::Ambiguous(_) | Wav::Missing => None,
+                Wav::Outside | Wav::Ambiguous(_) | Wav::Hidden(_) | Wav::Missing => None,
             })
             .collect();
         let stage = Stage::Reading {
@@ -383,7 +402,7 @@ mod tests {
 
     /// WAV assets at these paths, numbered from 1 in order.
     fn listed(paths: &[&str]) -> Wavs {
-        Wavs::new(paths.iter().map(|text| path(text)).zip(1..).collect())
+        Wavs::new(paths.iter().map(|text| path(text)).zip(1..).collect(), &[])
     }
 
     /// The asset at `text` among `wavs`, as [`listed`] numbers them.

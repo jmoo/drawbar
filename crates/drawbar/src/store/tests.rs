@@ -342,6 +342,7 @@ impl Session {
                         tags: &browser.tags,
                         played: &crate::midi::Played::default(),
                         builds,
+                        folders: &browser.folders,
                     },
                 );
             });
@@ -8853,4 +8854,21 @@ fn a_build_whose_wav_is_gone_by_the_time_it_is_read_is_refused_with_its_path() {
         .workspace
         .listed()
         .all(|entity| entity.name != "Marimba.nsmp"));
+}
+
+#[test]
+fn a_build_naming_a_hidden_file_says_it_is_one_and_builds_only_from_wavs() {
+    let root = Temp::new();
+    project_with_wavs(&root, &[("c3.aiff", "Marimba/c3.aiff")]);
+    let mut session = Session::open(&root);
+    let id = session.named("Marimba.nsmpproj");
+    session.build(id);
+    assert_eq!(
+        session.said(
+            "building Marimba.nsmpproj: c3.aiff: Marimba/c3.aiff is a hidden file, and \
+             drawbar builds only from WAVs"
+        ),
+        1
+    );
+    assert_eq!(session.said("missing"), 0);
 }
