@@ -42,7 +42,7 @@ Every browser keeps a library in its own storage for drawbar.app. Safari deletes
 it once Safari has been used for seven days without a visit to drawbar.app,
 unless drawbar.app is added to the Home Screen. Other browsers may
 clear it when space runs low, unless they have promised to keep it. **File ▸
-Save a copy of the library** keeps a copy; see
+Export library** keeps a copy; see
 [Your files](../drawbar/this-computer.md#keeping-a-copy-in-the-browser). Chrome and Edge
 can also open a folder on your computer as the library, and Brave can once
 `brave://flags/#file-system-access-api` is turned on. Outside Chrome, moving a

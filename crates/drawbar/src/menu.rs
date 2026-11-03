@@ -24,7 +24,8 @@ use crate::zoom::Step;
 /// Everything a menu item can do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
-    Open,
+    /// Copy picked files into the library, as a drop does.
+    Import,
     /// Take back this session's last change to the library.
     Undo,
     /// Make again the change undone last.
@@ -120,22 +121,22 @@ impl Offer {
 /// The words of a command's item, before anything about the moment changes them.
 pub fn label(command: Command) -> &'static str {
     match command {
-        Command::Open => "Open…",
+        Command::Import => IMPORT,
         Command::Undo => "Undo",
         Command::Redo => "Redo",
         Command::New(kind) => kind.label(),
         Command::FromWavs(making) => making.item().0,
         Command::NewFolder => "New folder",
-        Command::PickLibrary => OPEN_LIBRARY,
+        Command::PickLibrary => OPEN_FOLDER,
         Command::Reconnect => "Reconnect library",
         Command::Recent(_) => "Recent library",
-        Command::RevealLibrary => "Show the library folder",
+        Command::RevealLibrary => SHOW_FOLDER,
         #[cfg(target_arch = "wasm32")]
-        Command::SaveCopy => SAVE_COPY,
+        Command::SaveCopy => EXPORT_LIBRARY,
         #[cfg(target_arch = "wasm32")]
-        Command::OpenCopy => OPEN_COPY,
+        Command::OpenCopy => IMPORT_LIBRARY,
         Command::Save => "Save",
-        Command::Revert => "Revert to saved",
+        Command::Revert => "Revert",
         Command::Export => "Export…",
         Command::CloseTab => "Close tab",
         Command::Quit => "Quit",
@@ -229,23 +230,23 @@ pub fn menus(platform: Platform) -> Vec<Menu> {
     use Command as C;
     use Entry::{Do, Rule};
 
-    let mut file = vec![Do(C::Open), Entry::Sub("New", new_entries()), Rule];
+    let mut file = vec![Entry::Sub("New", new_entries()), Do(C::Import)];
+    #[cfg(target_arch = "wasm32")]
+    file.push(Do(C::OpenCopy));
     file.extend([
-        Do(C::Reconnect),
+        Rule,
         Do(C::PickLibrary),
+        Do(C::Reconnect),
         Entry::Recent,
         Do(C::RevealLibrary),
-    ]);
-    #[cfg(target_arch = "wasm32")]
-    file.extend([Do(C::SaveCopy), Do(C::OpenCopy)]);
-    file.extend([
         Rule,
         Do(C::Save),
         Do(C::Revert),
         Do(C::Export),
-        Rule,
-        Do(C::CloseTab),
     ]);
+    #[cfg(target_arch = "wasm32")]
+    file.push(Do(C::SaveCopy));
+    file.extend([Rule, Do(C::CloseTab)]);
     if platform.quits_from_file() {
         file.push(Do(C::Quit));
     }
@@ -380,7 +381,7 @@ pub fn shortcut(command: Command, platform: Platform, mac: bool) -> Option<egui:
     };
     let command_and = |with, key| Shortcut::new(With::COMMAND.plus(with), key);
     Some(match command {
-        Command::Open => Shortcut::new(With::COMMAND, Key::O),
+        Command::Import => Shortcut::new(With::COMMAND, Key::O),
         Command::Undo => Shortcut::new(With::COMMAND, Key::Z),
         Command::Redo => command_and(With::SHIFT, Key::Z),
         Command::Save => Shortcut::new(With::COMMAND, Key::S),
@@ -450,7 +451,7 @@ const KEYED: [Command; 17] = [
     Command::Browser,
     Command::Inspector,
     Command::Activity,
-    Command::Open,
+    Command::Import,
     Command::Save,
     Command::ReadEverything,
     Command::CloseTab,
@@ -462,16 +463,20 @@ const KEYED: [Command; 17] = [
     Command::Zoom(Step::Reset),
 ];
 
-pub const OPEN_LIBRARY: &str = "Open library folder…";
+pub const IMPORT: &str = "Import…";
 
-/// The item that downloads a copy of the library.
-pub const SAVE_COPY: &str = "Save a copy of the library";
+pub const OPEN_FOLDER: &str = "Open folder…";
 
-/// File ▸ Open a copy…, as messages name it.
-pub const OPEN_COPY: &str = "Open a copy…";
+pub const SHOW_FOLDER: &str = "Show library folder";
+
+/// The item that downloads a copy of the library, at once.
+pub const EXPORT_LIBRARY: &str = "Export library";
+
+/// The item that opens a copy of a library into the browser's own.
+pub const IMPORT_LIBRARY: &str = "Import library…";
 
 /// The title of [`Entry::Recent`]'s submenu.
-pub const RECENT: &str = "Open recent library";
+pub const RECENT: &str = "Open recent";
 
 /// The minimum width of a drop-down menu, so its width does not change with which items
 /// are enabled and a long label keeps a gap before its key text.
@@ -525,7 +530,7 @@ impl DrawbarApp {
             ..Offer::of(command)
         };
         Some(match command {
-            Command::Open
+            Command::Import
             | Command::New(_)
             | Command::FromWavs(_)
             | Command::NewFolder
@@ -677,7 +682,7 @@ impl DrawbarApp {
     ) {
         let active = self.tabs.active();
         match command {
-            Command::Open => acts.push(Act::OpenFiles),
+            Command::Import => acts.push(Act::OpenFiles),
             Command::Undo => self.store.iter_mut().for_each(crate::store::Store::undo),
             Command::Redo => self.store.iter_mut().for_each(crate::store::Store::redo),
             Command::New(_) | Command::FromWavs(_) | Command::NewFolder => {
@@ -1260,8 +1265,8 @@ mod tests {
         );
         assert_eq!(web(Command::Quit, true), None, "a tab cannot quit");
         assert_eq!(
-            web(Command::Open, true),
-            shortcut(Command::Open, Platform::Mac, true),
+            web(Command::Import, true),
+            shortcut(Command::Import, Platform::Mac, true),
             "a page may take ⌘O"
         );
         assert_eq!(

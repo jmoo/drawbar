@@ -20,7 +20,7 @@ use crate::filter::{Filter, Narrow, Place, State};
 use crate::folders::{Folder, Folders, SHOW_HIDDEN_FILES};
 use crate::icon::Glyph;
 use crate::libraries::Picking;
-use crate::menu::{self, marked, new_menu, OPEN_LIBRARY};
+use crate::menu::{self, marked, new_menu, IMPORT, OPEN_FOLDER, SHOW_FOLDER};
 use crate::panel::panel_header;
 use crate::queue::{Queue, Queued};
 use crate::store::LibPath;
@@ -447,7 +447,7 @@ pub fn offers_libraries(folders: &crate::folders::Folders, picking: Picking) -> 
 }
 
 /// The items that open another folder as the library, switch to a recent one, and show
-/// the open one's folder. Open library folder… is grayed out where the browser turns
+/// the open one's folder. Open folder… is grayed out where the browser turns
 /// folder access off, and says on hover how to turn it on.
 pub fn library_items(
     ui: &mut egui::Ui,
@@ -466,9 +466,9 @@ pub fn library_items(
         );
     }
     match picking {
-        Picking::On => offer(ui, OPEN_LIBRARY, None, Act::PickLibrary, acts),
+        Picking::On => offer(ui, OPEN_FOLDER, None, Act::PickLibrary, acts),
         Picking::TurnedOff => {
-            ui.add_enabled(false, egui::Button::new(OPEN_LIBRARY))
+            ui.add_enabled(false, egui::Button::new(OPEN_FOLDER))
                 .on_disabled_hover_text(crate::libraries::TURNED_OFF);
         }
         Picking::Absent => {}
@@ -484,7 +484,7 @@ pub fn library_items(
     }
     let reveal = folders.place.as_ref().and_then(|at| at.reveal.as_ref());
     if let Some(url) = reveal {
-        if ui.button("Show the library folder").clicked() {
+        if ui.button(SHOW_FOLDER).clicked() {
             ui.ctx().open_url(egui::OpenUrl::new_tab(url));
             ui.close();
         }
@@ -750,7 +750,7 @@ impl Browser {
                     && self.folders.unwalked.is_empty();
                 let said = match (opening, empty) {
                     (true, true) => Some("Opening the library…"),
-                    (false, true) => Some("Drop Nord files here, or use Open…"),
+                    (false, true) => Some("Drop Nord files here, or use Import…"),
                     (_, false) => None,
                 };
                 below.extend(said.map(|said| Line::Note {
@@ -1040,7 +1040,7 @@ impl Browser {
         let listed = Browser::standing_for(workspace, |_| true);
         response.context_menu(|ui| {
             self.set_menu(ui, &listed, workspace, device, acts, |browser, ui, acts| {
-                offer(ui, "Open…", None, Act::OpenFiles, acts);
+                offer(ui, IMPORT, None, Act::OpenFiles, acts);
                 menu::button(ui, "New", |ui| new_menu(ui, acts));
                 let all = browser.folders.all_files;
                 if marked(ui, SHOW_HIDDEN_FILES, all) {
@@ -1952,10 +1952,10 @@ mod tests {
     use crate::testing::{self, context, words, Bench};
     use crate::workspace::Fresh;
 
-    /// Open library folder… is offered where a folder can be picked, grayed out with the
+    /// Open folder… is offered where a folder can be picked, grayed out with the
     /// way to turn folder access on where Brave turns it off, and missing elsewhere.
     #[test]
-    fn open_library_folder_is_grayed_out_where_brave_turns_folder_access_off() {
+    fn open_folder_is_grayed_out_where_brave_turns_folder_access_off() {
         let ctx = context();
         ctx.style_mut(|style| style.interaction.tooltip_delay = 0.0);
         let folders = Folders::default();
@@ -1977,7 +1977,7 @@ mod tests {
             testing::shapes(output)
                 .into_iter()
                 .find_map(|(shape, _)| match shape {
-                    egui::Shape::Text(text) if text.galley.text() == OPEN_LIBRARY => Some((
+                    egui::Shape::Text(text) if text.galley.text() == OPEN_FOLDER => Some((
                         egui::Rect::from_min_size(text.pos, text.galley.size()).center(),
                         text.fallback_color.gamma_multiply(text.opacity_factor),
                     )),

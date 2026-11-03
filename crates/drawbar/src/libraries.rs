@@ -16,7 +16,7 @@ pub use web::{picking, Heard, Libraries};
 /// What the browser calls the default library.
 pub const THIS_COMPUTER: &str = "This computer";
 
-/// What a grayed-out Open library folder… says on hover, in Brave.
+/// What a grayed-out Open folder… says on hover, in Brave.
 pub const TURNED_OFF: &str = "Brave turns off folder access. Turn on \
      brave://flags/#file-system-access-api and relaunch Brave.";
 

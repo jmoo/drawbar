@@ -514,7 +514,7 @@ impl DrawbarApp {
         at
     }
 
-    /// The files File ▸ Open… picked, copied into the top level of the library, or held
+    /// The files File ▸ Import… picked, copied into the top level of the library, or held
     /// in memory by a library that cannot take a copy.
     fn take_picked(&mut self) -> Vec<browser::Act> {
         let takes = self.store.as_ref().is_some_and(Store::takes_files);
@@ -997,14 +997,14 @@ impl DrawbarApp {
         let elsewhere = match crate::libraries::picking() {
             crate::libraries::Picking::On => format!(
                 " File ▸ {} keeps it in a folder on this computer instead.",
-                crate::menu::OPEN_LIBRARY
+                crate::menu::OPEN_FOLDER
             ),
             _ => String::new(),
         };
         self.log.say(format!(
             "The library is kept only in this browser's storage. {what} Keep a copy with \
              File ▸ {}.{elsewhere}",
-            crate::menu::SAVE_COPY
+            crate::menu::EXPORT_LIBRARY
         ));
     }
 }
@@ -2111,7 +2111,7 @@ mod tests {
         assert!(app.workspace.get(id).is_none(), "discarded, as agreed");
     }
 
-    /// Opening the library again, as File ▸ Open recent library does for one that opened
+    /// Opening the library again, as File ▸ Open recent does for one that opened
     /// read-only, asks first as leaving it does, and only a yes lets the edit go.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
@@ -2144,7 +2144,7 @@ mod tests {
         assert!(!unsaved(&app), "discarded, as agreed");
     }
 
-    /// A library that did not open is opened again from File ▸ Open recent library, as
+    /// A library that did not open is opened again from File ▸ Open recent, as
     /// one that opened read-only is.
     #[cfg(unix)]
     #[test]

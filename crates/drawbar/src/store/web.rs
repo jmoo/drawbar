@@ -751,7 +751,7 @@ async fn save_copy(folder: &Folder) -> Result<(String, usize), String> {
 }
 
 /// A copy of the library in the directory `dir` of the private file system, as File ▸
-/// Save a copy of the library saves one, without the download.
+/// Export library saves one, without the download.
 #[doc(hidden)]
 pub async fn copy_of(dir: &RelPath) -> Result<web_sys::Blob, String> {
     let root = toshokan::web::private_dir(dir)

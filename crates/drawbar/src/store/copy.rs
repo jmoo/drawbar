@@ -1,5 +1,5 @@
-//! A copy of a library: a ZIP of its folder, as File ▸ Save a copy of the library saves
-//! it, and opening one into a library that holds no files.
+//! A copy of a library: a ZIP of its folder, as File ▸ Export library saves it, and
+//! opening one into a library that holds no files.
 //!
 //! A copy holds every file of the folder, toshokan's logs in `.drawbar/library/` among
 //! them, so a drawbar that opens it reads the library's history as it reads a synced
@@ -180,7 +180,7 @@ fn refused(unread: Unread) -> String {
         Unread::Compressed => format!(
             "its files are compressed, and a copy drawbar saves never is. Unzip it, and \
              open the folder with File ▸ {} in Chrome or Edge",
-            crate::menu::OPEN_LIBRARY
+            crate::menu::OPEN_FOLDER
         ),
         Unread::Malformed(why) => unlike(why.to_string()),
     }
@@ -507,7 +507,7 @@ async fn write<F: Fs>(
         .map_err(|e| format!("writing {path}: {e}"))
 }
 
-/// The copy of the library in `folder` that File ▸ Save a copy of the library saves, as
+/// The copy of the library in `folder` that File ▸ Export library saves, as
 /// the browser lays it out from the files.
 #[cfg(test)]
 pub(super) fn saved(folder: &std::path::Path) -> Vec<u8> {
@@ -727,7 +727,7 @@ mod tests {
     fn a_compressed_copy_says_how_to_open_it_instead() {
         let refused = refused(Unread::Compressed);
         assert!(refused.contains("compressed"), "{refused}");
-        assert!(refused.contains(crate::menu::OPEN_LIBRARY), "{refused}");
+        assert!(refused.contains(crate::menu::OPEN_FOLDER), "{refused}");
     }
 
     /// An end of central directory record, as the ZIP format lays it out, naming one

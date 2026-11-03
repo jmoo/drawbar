@@ -141,7 +141,7 @@ impl Libraries {
         let ctx = ctx.clone();
         crate::workspace::spawn(async move {
             let picked = rfd::AsyncFileDialog::new()
-                .set_title("Open a copy of a library")
+                .set_title("Import a library")
                 .add_filter("ZIP archive", &["zip"])
                 .pick_file()
                 .await;

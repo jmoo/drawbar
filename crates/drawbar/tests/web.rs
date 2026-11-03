@@ -887,7 +887,7 @@ async fn two_installs_see_each_others_changes() {
     second.close().await;
 }
 
-/// A copy of a library, as File ▸ Save a copy of the library saves it, opens into an
+/// A copy of a library, as File ▸ Export library saves it, opens into an
 /// empty one with its files, its folders and its tags, through the library's worker.
 #[wasm_bindgen_test]
 async fn a_copy_saved_of_a_library_opens_into_an_empty_one() {
