@@ -2969,11 +2969,13 @@ impl Store {
         let mut worn: BTreeMap<&str, Vec<Key>> = BTreeMap::new();
         let mut ids = BTreeSet::new();
         let (mut placed, mut edited) = (Vec::new(), Vec::new());
+        let mut hidden = 0;
         for (at, asset) in list.assets.iter().enumerate() {
             let id = workspace.next_id();
             let origin = asset
                 .came
                 .map_or_else(|| Origin::File(asset.name.clone()), Came::origin);
+            let came = Came::of(&origin);
             let saved = Saved {
                 id,
                 name: asset.name.clone(),
@@ -2991,11 +2993,40 @@ impl Store {
                 .folders
                 .free(dir, &library_filename(entity), workspace);
             let path = dir.join(&name);
-            workspace.follow(id, path.clone());
-            self.save(id, workspace, &[]);
             for tag in &asset.tags {
                 worn.entry(tag).or_default().push(Key::File(path.clone()));
             }
+            if !super::opens(&name) {
+                // ⚠️ Forgotten before it has a path, or its file is asked to be deleted.
+                workspace.forget(id);
+                browser.folders.others.push(path.clone());
+                let mut files = vec![(id, path, asset.saved.clone())];
+                if let Some(edit) = asset.unsaved.clone() {
+                    let copy = workspace.next_id();
+                    workspace.reserve(copy + 1);
+                    let apart = browser.folders.free(dir, &name, workspace);
+                    log.say(format!(
+                        "The unsaved edit of “{}” is a hidden file of its own, “{apart}”.",
+                        asset.name
+                    ));
+                    browser.folders.others.push(dir.join(&apart));
+                    files.push((copy, dir.join(&apart), edit));
+                }
+                for (id, path, bytes) in files {
+                    self.part(Intent::Save {
+                        id,
+                        path: path.clone(),
+                        bytes,
+                        expect: toshokan::Expect::Absent,
+                        came,
+                    });
+                    ids.insert(id);
+                    hidden += 1;
+                }
+                continue;
+            }
+            workspace.follow(id, path.clone());
+            self.save(id, workspace, &[]);
             if asset.unsaved.is_some() {
                 placed.push((at, path));
                 edited.push(id);
@@ -3029,7 +3060,17 @@ impl Store {
                 make: false,
             });
         }
-        let said = list.said();
+        browser.folders.others.sort();
+        let said = match hidden {
+            0 => list.said(),
+            n => format!(
+                "{} {} came in hidden, since drawbar does not open {it}; {} lists {it}.",
+                list.said(),
+                crate::strings::counted(n, "file", "files"),
+                crate::folders::SHOW_ALL_FILES,
+                it = if n == 1 { "it" } else { "them" },
+            ),
+        };
         self.brought.extend(&ids);
         self.taking_in = Some(TakingIn {
             ids,

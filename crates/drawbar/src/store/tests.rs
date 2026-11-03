@@ -7010,25 +7010,46 @@ fn bytes_that_do_not_decode_come_in_byte_for_byte() {
 /// drawbar 0.10 kept any text as a note under the name it was dropped with, and drawbar
 /// opens a note only by `.txt`.
 #[test]
-fn a_note_named_for_a_file_drawbar_does_not_open_comes_in_as_that_file() {
+fn a_note_named_for_a_file_drawbar_does_not_open_comes_in_hidden_under_that_name() {
     let root = Temp::new();
     let mut kept = kept_before(
         "drawbar 2\n2\n1\tfresh\tSet.ne5p.oracle.json\tU2V0IDEK\n",
         "",
         "",
     );
+    let list = older_list(&kept);
     let mut session = Session::open(&root);
     session.take_in(&mut kept);
     assert_eq!(root.read("Set.ne5p.oracle.json"), b"Set 1\n");
+    let hidden = [LibPath::root().join("Set.ne5p.oracle.json")];
+    assert_eq!(session.bench.workspace.listed().count(), 0, "never a row");
+    assert_eq!(session.bench.browser.folders.others, hidden);
+    assert_eq!(session.said("1 file came in hidden"), 1);
     assert_eq!(session.said("differ only by case"), 0);
+    assert!(session.handed_over(&list));
     session.close();
 
     let again = Session::open(&root);
     assert_eq!(again.bench.workspace.listed().count(), 0);
-    assert_eq!(
-        again.bench.browser.folders.others,
-        [LibPath::root().join("Set.ne5p.oracle.json")]
+    assert_eq!(again.bench.browser.folders.others, hidden);
+}
+
+/// `U2V0IDIK` is the base64 of `Set 2\n`.
+#[test]
+fn the_unsaved_edit_of_a_hidden_note_is_a_hidden_file_beside_it() {
+    let root = Temp::new();
+    let mut kept = kept_before(
+        "drawbar 2\n2\n1\tfresh\tSet.json\tU2V0IDEK\tU2V0IDIK\n",
+        "",
+        "",
     );
+    let mut session = Session::open(&root);
+    session.take_in(&mut kept);
+    assert_eq!(root.read("Set.json"), b"Set 1\n");
+    assert_eq!(root.read("Set 2.json"), b"Set 2\n");
+    assert_eq!(session.bench.workspace.listed().count(), 0);
+    assert_eq!(session.said("2 files came in hidden"), 1);
+    assert_eq!(session.said("is a hidden file of its own, “Set 2.json”"), 1);
 }
 
 #[test]
