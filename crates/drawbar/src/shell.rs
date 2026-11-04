@@ -19,6 +19,7 @@ use crate::log::Level;
 use crate::menu::{key_text, new_menu, search_key, Command};
 use crate::panel::{flat, CARD_RADIUS, GUTTER};
 use crate::platform::{Frame, Platform};
+use crate::sheet;
 use crate::tabs::Spot;
 use crate::zoom::{Step, Stop, Zoom};
 
@@ -73,6 +74,10 @@ const SEARCH_HINT: &str = "Search the library by name, or drop files here";
 /// The height of a chip or a button in the top bar, and the size of its glyph.
 const CHIP: f32 = 30.0;
 const BAR_GLYPH: f32 = 16.0;
+
+/// How long, in seconds, a change to the library runs unanswered before the window shows
+/// what it is doing.
+const CHANGING_SHOWN: f64 = 2.0;
 
 /// The room the Mac's traffic lights take at the left of the bar, at 100%.
 const LIGHTS: f32 = 78.0;
@@ -129,6 +134,9 @@ pub struct Shell {
     pub zoom_chip: egui::Rect,
     /// What the inspector's selection cards show, until the selection changes.
     pub(crate) picked: crate::inspector::Picked,
+    /// When the library's oldest unanswered change was first seen, as
+    /// [`egui::InputState::time`] counts.
+    pub(crate) changing: Option<f64>,
 }
 
 impl Default for Shell {
@@ -149,6 +157,7 @@ impl Default for Shell {
             zoom_open: false,
             zoom_chip: egui::Rect::NOTHING,
             picked: Default::default(),
+            changing: None,
         }
     }
 }
@@ -965,6 +974,39 @@ impl DrawbarApp {
                 );
                 row.spacing_mut().item_spacing.x = 6.0;
                 self.said(&mut row, acts);
+            });
+    }
+
+    /// Over the window, what the library is doing for a change that has run
+    /// [`CHANGING_SHOWN`] without an answer, until it has one. A question the browser asks
+    /// meanwhile shows instead.
+    pub(crate) fn changing(&mut self, ctx: &egui::Context) {
+        let Some(doing) = self.store.as_ref().and_then(crate::store::Store::doing) else {
+            self.shell.changing = None;
+            return;
+        };
+        let now = ctx.input(|input| input.time);
+        let shown = *self.shell.changing.get_or_insert(now) + CHANGING_SHOWN;
+        if now < shown {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(shown - now));
+            return;
+        }
+        if self.browser.asks() {
+            return;
+        }
+        egui::Modal::new(egui::Id::new("changing"))
+            .frame(sheet::frame(&ctx.style().visuals))
+            .show(ctx, |ui| {
+                ui.add_space(sheet::GAP * 4.0);
+                sheet::section(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let size = egui::Vec2::splat(BAR_GLYPH);
+                        let (mark, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                        turning(ui, mark);
+                        ui.label(doing);
+                    });
+                });
+                ui.add_space(sheet::GAP * 4.0);
             });
     }
 

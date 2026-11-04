@@ -1213,6 +1213,7 @@ impl eframe::App for DrawbarApp {
         self.menu_bar_events(ctx, frame, |_| true, &mut acts);
         self.shortcuts(ctx, frame, |_| true, &mut acts);
         self.browser.dialog(ctx, &mut acts);
+        self.changing(ctx);
         self.backdrop(ctx);
         self.top_bar(ctx, frame, &mut acts);
         self.status_line(ctx, &mut acts);
@@ -1964,6 +1965,37 @@ mod tests {
             crate::testing::screen(egui::vec2(1280.0, 720.0), Vec::new()),
             |ctx| app.update(ctx, &mut frame),
         );
+    }
+
+    /// A change the library leaves unanswered shows what it is doing over the window once
+    /// it has gone two seconds unanswered, and not before.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_change_unanswered_for_two_seconds_shows_what_it_is_doing() {
+        use eframe::App as _;
+
+        let root = crate::testing::Temp::new();
+        let (ctx, mut app) = opened_over(&root);
+        let store = app.store.as_mut().expect("a library");
+        store.patience(std::time::Duration::from_secs(10));
+        store.fault(crate::store::Fault::Stall);
+        app.browser.tags.make("Live").expect("a new tag");
+        let mut at = |time: f64| {
+            let mut window = eframe::Frame::_new_kittest();
+            let mut input = crate::testing::screen(egui::vec2(1280.0, 720.0), Vec::new());
+            input.time = Some(time);
+            let output = crate::testing::run(&ctx, input, |ctx| app.update(ctx, &mut window));
+            let doing = "Making tag “Live”…";
+            crate::testing::words(&output)
+                .iter()
+                .any(|word| word == doing)
+        };
+        assert!(!at(0.0), "not while it is sent");
+        assert!(!at(1.0), "not as it is first seen unanswered");
+        assert!(!at(2.9), "not before two seconds");
+        assert!(at(3.0), "once two seconds have gone");
+        let store = app.store.as_mut().expect("a library");
+        store.patience(std::time::Duration::ZERO);
     }
 
     /// The browser build's ⌘Z undoes the last change to the library, and ⇧⌘Z redoes it.

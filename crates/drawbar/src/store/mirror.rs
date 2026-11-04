@@ -214,8 +214,8 @@ pub struct Store {
     awaiting: BTreeSet<u64>,
     /// This session's changes, as the Edit menu names them.
     history: History,
-    /// What each change, undo or redo sent and not answered is, in order.
-    answering: VecDeque<Step>,
+    /// Each change, undo or redo sent and not answered, in order.
+    answering: VecDeque<Sent>,
     /// Assets whose file changed outside drawbar while they held it, read again to see
     /// what it holds now.
     rechecking: BTreeSet<u64>,
@@ -1563,7 +1563,7 @@ impl Store {
             } => {
                 let mut deleted = self.uncommit();
                 let landed = made.is_some();
-                let step = self.answering.pop_front();
+                let step = self.answering.pop_front().map(|sent| sent.step);
                 self.history.waited(finished, waiting, step.as_ref());
                 let forgotten = match (&step, forgot) {
                     (Some(step), true) => self.history.forget(step),
@@ -1805,43 +1805,61 @@ impl Store {
 
     /// Send a change to the facts.
     fn commit(&mut self, intent: Intent) {
-        self.committing += 1;
         let step = match intent.lasting() {
             true => Step::Lasting,
             false => Step::Change(intent.describe()),
         };
-        self.answering.push_back(step);
+        self.awaits(step, intent.doing());
         self.send(Cmd::Intent(intent));
+    }
+
+    /// Wait for the answer to `step`, which says `doing` until it comes.
+    fn awaits(&mut self, step: Step, doing: String) {
+        self.committing += 1;
+        self.answering.push_back(Sent { step, doing });
     }
 
     /// Undo this session's last change not undone.
     pub fn undo(&mut self) {
-        if self.opened() {
-            self.committing += 1;
-            self.answering.push_back(Step::Undo);
-            self.send(Cmd::Undo);
-        }
+        let Some((change, _)) = self.history.done.last().filter(|_| self.undoes()) else {
+            return;
+        };
+        let doing = format!("Undoing {change}…");
+        self.awaits(Step::Undo, doing);
+        self.send(Cmd::Undo);
     }
 
     /// Redo the change undone last.
     pub fn redo(&mut self) {
-        if self.opened() {
-            self.committing += 1;
-            self.answering.push_back(Step::Redo);
-            self.send(Cmd::Redo);
-        }
+        let Some((change, _)) = self.history.undone.last().filter(|_| self.undoes()) else {
+            return;
+        };
+        let doing = format!("Redoing {change}…");
+        self.awaits(Step::Redo, doing);
+        self.send(Cmd::Redo);
     }
 
     /// What Undo takes back now, as the Edit menu names it.
     pub fn undo_label(&self) -> Option<String> {
-        let (last, _) = self.history.done.last()?;
+        let (last, _) = self.history.done.last().filter(|_| self.undoes())?;
         Some(format!("Undo {last}"))
     }
 
     /// What Redo makes again now, as the Edit menu names it.
     pub fn redo_label(&self) -> Option<String> {
-        let (last, _) = self.history.undone.last()?;
+        let (last, _) = self.history.undone.last().filter(|_| self.undoes())?;
         Some(format!("Redo {last}"))
+    }
+
+    /// Whether Undo and Redo may go now: the library is open, and every change to it was
+    /// sent and answered.
+    fn undoes(&self) -> bool {
+        self.opened() && self.committing == 0 && self.asks.is_empty()
+    }
+
+    /// What the library is doing for the oldest change, undo or redo not answered yet.
+    pub fn doing(&self) -> Option<&str> {
+        self.answering.front().map(|sent| sent.doing.as_str())
     }
 
     /// Read what other drawbars wrote to the library since it was last read.
@@ -2152,8 +2170,7 @@ impl Store {
             return;
         }
         let intent = Intent::Take { run, changes };
-        self.committing += 1;
-        self.answering.push_back(Step::Change(intent.describe()));
+        self.awaits(Step::Change(intent.describe()), intent.doing());
         self.send(Cmd::Intent(intent));
     }
 
@@ -2163,8 +2180,7 @@ impl Store {
             return;
         }
         let intent = Intent::Dismiss { run };
-        self.committing += 1;
-        self.answering.push_back(Step::Change(intent.describe()));
+        self.awaits(Step::Change(intent.describe()), intent.doing());
         self.send(Cmd::Intent(intent));
     }
 
@@ -2224,9 +2240,10 @@ impl Store {
         if !self.open() {
             return;
         }
-        let change = format!("{} “{}”", settling(how), orphan.label);
-        self.committing += 1;
-        self.answering.push_back(Step::Change(change));
+        let verb = settling(how);
+        let change = format!("{} “{}”", verb.label, orphan.label);
+        let doing = format!("{} “{}”…", verb.doing, orphan.label);
+        self.awaits(Step::Change(change), doing);
         self.send(Cmd::Settle { orphan, how });
     }
 
@@ -4268,12 +4285,20 @@ impl Store {
 }
 
 /// What the Edit menu calls settling another drawbar's unfinished change as `how`.
-fn settling(how: toshokan::log::Settlement) -> &'static str {
+fn settling(how: toshokan::log::Settlement) -> super::Verb {
+    let verb = |label, doing| super::Verb { label, doing };
     match how {
-        toshokan::log::Settlement::Finished => "Finish",
-        toshokan::log::Settlement::RolledBack => "Roll back",
-        toshokan::log::Settlement::Dismissed => "Leave as is",
+        toshokan::log::Settlement::Finished => verb("Finish", "Finishing"),
+        toshokan::log::Settlement::RolledBack => verb("Roll back", "Rolling back"),
+        toshokan::log::Settlement::Dismissed => verb("Leave as is", "Leaving as is"),
     }
+}
+
+/// A change, an undo or a redo sent and not answered yet, and what drawbar says while it
+/// runs.
+struct Sent {
+    step: Step,
+    doing: String,
 }
 
 /// One answer of the library this session's undo history follows.
