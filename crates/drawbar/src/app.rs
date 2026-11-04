@@ -230,9 +230,12 @@ impl DrawbarApp {
             .map(crate::libraries::Recent::restore)
             .unwrap_or_default();
         let started = crate::store::starting(recent.last(), crate::store::default_root());
-        let (root, ready) = started.unzip();
-        let mut app = DrawbarApp::with_library(cc, root.map(|root| library(&cc.egui_ctx, root)));
-        if let Some(Err(why)) = ready {
+        let store = match &started {
+            Ok(root) => root.clone().map(|root| library(&cc.egui_ctx, root)),
+            Err(_) => None,
+        };
+        let mut app = DrawbarApp::with_library(cc, store);
+        if let Err(why) = started {
             app.log.trouble(why);
         }
         app

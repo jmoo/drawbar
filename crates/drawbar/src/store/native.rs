@@ -104,14 +104,13 @@ pub fn openable(root: &Path, default: Option<&Path>) -> Result<(), String> {
 }
 
 /// The library a start opens, `last` where one was open before, else `default`, which is
-/// made where it is missing, with why it cannot be opened, if it cannot.
-pub fn starting(
-    last: Option<&Path>,
-    default: Option<PathBuf>,
-) -> Option<(PathBuf, Result<(), String>)> {
-    let root = last.map(Path::to_path_buf).or(default.clone())?;
-    let ready = openable(&root, default.as_deref());
-    Some((root, ready))
+/// made where it is missing, or why it cannot be opened.
+pub fn starting(last: Option<&Path>, default: Option<PathBuf>) -> Result<Option<PathBuf>, String> {
+    let Some(root) = last.map(Path::to_path_buf).or(default.clone()) else {
+        return Ok(None);
+    };
+    openable(&root, default.as_deref())?;
+    Ok(Some(root))
 }
 
 /// A folder as a `file:` URL, or `None` for a path that is not absolute.
@@ -731,8 +730,18 @@ mod tests {
         let root = Temp::new();
         let default = root.at("drawbar/library");
         let started = starting(None, Some(default.clone()));
-        assert_eq!(started, Some((default.clone(), Ok(()))));
+        assert_eq!(started, Ok(Some(default.clone())));
         assert!(default.is_dir());
+    }
+
+    /// A start whose default library cannot be made opens no library, and says why.
+    #[test]
+    fn a_start_that_cannot_make_the_default_library_opens_none() {
+        let root = Temp::new();
+        let default = root.at("library");
+        fs::write(&default, b"not a folder").unwrap();
+        let why = starting(None, Some(default)).expect_err("refused");
+        assert!(why.contains("is not a folder drawbar can open"), "{why}");
     }
 
     /// A start opens the library open last and makes no default beside it.
@@ -741,7 +750,7 @@ mod tests {
         let root = Temp::new();
         let default = root.at("drawbar/library");
         let started = starting(Some(&root.0), Some(default.clone()));
-        assert_eq!(started, Some((root.0.clone(), Ok(()))));
+        assert_eq!(started, Ok(Some(root.0.clone())));
         assert!(!default.exists());
     }
 
