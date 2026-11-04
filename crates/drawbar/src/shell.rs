@@ -79,6 +79,9 @@ const BAR_GLYPH: f32 = 16.0;
 /// what it is doing.
 const CHANGING_SHOWN: f64 = 2.0;
 
+/// The widest the dialog of a change running grows, as the window allows.
+const CHANGING_WIDTH: f32 = 420.0;
+
 /// The room the Mac's traffic lights take at the left of the bar, at 100%.
 const LIGHTS: f32 = 78.0;
 
@@ -997,13 +1000,14 @@ impl DrawbarApp {
         egui::Modal::new(egui::Id::new("changing"))
             .frame(sheet::frame(&ctx.style().visuals))
             .show(ctx, |ui| {
+                ui.set_max_width(sheet::width(ui.ctx(), CHANGING_WIDTH));
                 ui.add_space(sheet::GAP * 4.0);
                 sheet::section(ui, |ui| {
                     ui.horizontal(|ui| {
                         let size = egui::Vec2::splat(BAR_GLYPH);
                         let (mark, _) = ui.allocate_exact_size(size, egui::Sense::hover());
                         turning(ui, mark);
-                        ui.label(doing);
+                        ui.add(egui::Label::new(doing).wrap());
                     });
                 });
                 ui.add_space(sheet::GAP * 4.0);

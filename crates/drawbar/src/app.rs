@@ -2002,6 +2002,31 @@ mod tests {
         store.patience(std::time::Duration::ZERO);
     }
 
+    /// The dialog of a change with a long name wraps it within the window.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_dialog_of_a_change_with_a_long_name_fits_the_window() {
+        use eframe::App as _;
+
+        let root = crate::testing::Temp::new();
+        let (ctx, mut app) = opened_over(&root);
+        let store = app.store.as_mut().expect("a library");
+        store.patience(std::time::Duration::from_secs(10));
+        store.fault(crate::store::Fault::Stall);
+        app.browser.tags.make(&"x".repeat(250)).expect("a new tag");
+        for time in [0.0, 1.0, 3.0, 3.1] {
+            let mut window = eframe::Frame::_new_kittest();
+            let mut input = crate::testing::screen(egui::vec2(1280.0, 720.0), Vec::new());
+            input.time = Some(time);
+            crate::testing::run(&ctx, input, |ctx| app.update(ctx, &mut window));
+        }
+        let shown = ctx.memory(|memory| memory.area_rect(egui::Id::new("changing")));
+        let store = app.store.as_mut().expect("a library");
+        store.patience(std::time::Duration::ZERO);
+        let shown = shown.expect("the dialog shows");
+        assert!(ctx.screen_rect().contains_rect(shown), "{shown:?}");
+    }
+
     /// The browser build's ⌘Z undoes the last change to the library, and ⇧⌘Z redoes it.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
