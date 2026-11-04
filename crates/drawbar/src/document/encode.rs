@@ -60,20 +60,14 @@ pub fn read(bytes: &[u8]) -> Source {
 pub fn encodable(source: &Source) -> Result<&Pcm16, String> {
     let pcm = source.as_ref().map_err(String::clone)?;
     if pcm.rate != SOURCE_RATE {
-        return Err(format!(
-            "{} Hz: the encoder takes only {SOURCE_RATE} Hz, so resample the file first",
-            pcm.rate
-        ));
+        return Err(format!("{} Hz: needs {SOURCE_RATE} Hz", pcm.rate));
     }
     if pcm.channels != 1 && pcm.channels != 2 {
-        return Err(format!(
-            "{} channels: an instrument's audio holds one or two channels",
-            pcm.channels
-        ));
+        return Err(format!("{} channels: needs mono or stereo", pcm.channels));
     }
     if pcm.frames() < encode::MIN_FRAMES {
         return Err(format!(
-            "{} frames: the encoder needs at least {}",
+            "{} frames: needs at least {}",
             pcm.frames(),
             encode::MIN_FRAMES
         ));
@@ -97,14 +91,11 @@ pub fn instrument(draft: &Draft, source: &Source) -> Result<Vec<u8>, String> {
     instrument.to_bytes().map_err(|e| e.to_string())
 }
 
-/// How far each generation has been taken, in the operator's words.
-fn generation_note(layout: Layout) -> &'static str {
+/// The warning a generation carries, for one not yet played on hardware.
+fn unplayed(layout: Layout) -> Option<&'static str> {
     match layout {
-        Layout::V2 => "played on hardware: mono, stereo and looped",
-        Layout::V3 | Layout::V4 => {
-            "unverified: this reproduces the Sample Editor's render, but it has not \
-             been played on an instrument that supports this generation"
-        }
+        Layout::V2 => None,
+        Layout::V3 | Layout::V4 => Some("not played on hardware"),
     }
 }
 
@@ -121,19 +112,6 @@ fn label(ui: &mut egui::Ui, text: &str) {
 
 /// Draw the panel. `true` once the operator has asked for the instrument to be made.
 pub fn ui(ui: &mut egui::Ui, draft: &mut Draft, source: &Source) -> bool {
-    ui.label(egui::RichText::new("This is a WAV, not a Nord file.").strong());
-    ui.label(
-        egui::RichText::new(
-            "It can be encoded into a one-zone sample instrument. The file matches Nord \
-             Sample Editor's output apart from floating-point rounding in the resampling \
-             kernel, which changes nothing the instrument plays. Instruments encoded \
-             this way have been played on hardware.",
-        )
-        .small()
-        .weak(),
-    );
-    ui.add_space(6.0);
-
     if let Ok(pcm) = source {
         ui.label(
             egui::RichText::new(format!(
@@ -173,15 +151,14 @@ pub fn ui(ui: &mut egui::Ui, draft: &mut Draft, source: &Source) -> bool {
         ui.horizontal(|ui| {
             label(ui, "Generation");
             for layout in Layout::ALL {
-                ui.selectable_value(&mut draft.layout, layout, layout.generation())
-                    .on_hover_text(generation_note(layout));
+                ui.selectable_value(&mut draft.layout, layout, layout.generation());
             }
         });
-        if draft.layout != Layout::V2 {
+        if let Some(warning) = unplayed(draft.layout) {
             ui.horizontal(|ui| {
                 ui.add_space(LABEL);
                 ui.label(
-                    egui::RichText::new(generation_note(draft.layout))
+                    egui::RichText::new(warning)
                         .small()
                         .color(crate::app::warn(ui.visuals())),
                 );
@@ -190,11 +167,7 @@ pub fn ui(ui: &mut egui::Ui, draft: &mut Draft, source: &Source) -> bool {
         ui.horizontal(|ui| {
             ui.add_space(LABEL);
             ui.checkbox(&mut draft.plain, "Plain records")
-                .on_hover_text(
-                    "write every content field in full instead of using the editor's \
-                     record coding: the same audio in a larger file that differs from \
-                     the editor's bytes",
-                );
+                .on_hover_text("same audio, larger file");
         });
     });
 
@@ -206,10 +179,7 @@ pub fn ui(ui: &mut egui::Ui, draft: &mut Draft, source: &Source) -> bool {
     ui.add_space(8.0);
     let mut asked = false;
     ui.horizontal(|ui| {
-        asked = ui
-            .button("Encode")
-            .on_hover_text("adds a new sample instrument to this computer; the WAV stays as it is")
-            .clicked();
+        asked = ui.button("Encode").clicked();
         ui.label(
             egui::RichText::new(format!(
                 "one zone, root {}, up to {}, .{}",

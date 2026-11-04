@@ -268,11 +268,7 @@ fn gain(ui: &mut egui::Ui, state: &mut State, sets: &mut Sets) {
             .suffix(" dB"),
     );
     state.gain = (state.gain * 10.0).round() / 10.0;
-    let apply = ui
-        .add_enabled(state.gain != 0.0, egui::Button::new(APPLY_GAIN))
-        .on_hover_text(
-            "scales every sample by this gain; Revert goes back to the file as it was saved",
-        );
+    let apply = ui.add_enabled(state.gain != 0.0, egui::Button::new(APPLY_GAIN));
     if apply.clicked() {
         sets.push((GAIN.to_string(), format!("{:.1}", state.gain)));
         state.gain = 0.0;
