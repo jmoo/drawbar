@@ -398,7 +398,6 @@ impl Document {
             Shape::Project => match self.open.as_mut() {
                 Some(open) => header::Extras {
                     loud: Some(project::loud(
-                        entity,
                         open.wavs.of(entity, workspace, around.folders),
                         around.builds.running(id),
                     )),
