@@ -503,10 +503,14 @@ impl Folders {
     }
 
     fn made(&mut self, path: LibPath) -> u64 {
+        self.queue_make(path.clone());
+        self.insert(path)
+    }
+
+    fn queue_make(&mut self, path: LibPath) {
         // A folder removed and made again in one sync must not be removed after.
         self.ops.retain(|op| *op != Op::RemoveDir(path.clone()));
-        self.ops.push(Op::MakeDir(path.clone()));
-        self.insert(path)
+        self.ops.push(Op::MakeDir(path));
     }
 
     /// Rename or move a folder, with everything inside it.
@@ -516,7 +520,15 @@ impl Folders {
         };
         self.follow(&from, &to);
         workspace.relocate(&from, &to);
-        self.ops.push(Op::MoveDir { from, to });
+        // ⚠️ The library refuses a change that makes a folder and moves it, so one not
+        // sent yet is made where it is now.
+        match self.ops.last() == Some(&Op::MakeDir(from.clone())) {
+            true => {
+                self.ops.pop();
+                self.queue_make(to);
+            }
+            false => self.ops.push(Op::MoveDir { from, to }),
+        }
     }
 
     /// Move whatever is shown under `from`, file or folder, to the same place under

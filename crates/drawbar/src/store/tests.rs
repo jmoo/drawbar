@@ -5528,6 +5528,62 @@ fn a_new_folder_is_undone() {
     assert_eq!(root.names(""), [".drawbar"], "the folder is gone");
 }
 
+#[test]
+fn a_new_folder_named_before_it_is_sent_is_made_under_its_name() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    session.bench.act(vec![crate::browser::Act::NewFolder]);
+    let made = LibPath::parse("New folder").unwrap();
+    let id = session.bench.browser.folders.id_of(&made).expect("shown");
+    session.bench.act(vec![crate::browser::Act::RenameFolder {
+        id,
+        name: "Gig".into(),
+    }]);
+    session.sync();
+    session.settle();
+    assert_eq!(root.names(""), [".drawbar", "Gig"]);
+    assert_eq!(
+        session.bench.log.problems(),
+        0,
+        "{}",
+        session.bench.log.transcript()
+    );
+    session.undo();
+    session.settle();
+    assert_eq!(root.names(""), [".drawbar"], "one undo takes it back");
+}
+
+#[test]
+fn a_folder_named_removed_and_made_again_under_that_name_stays() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let gig = |session: &mut Session| {
+        session.bench.act(vec![crate::browser::Act::NewFolder]);
+        let made = LibPath::parse("New folder").unwrap();
+        let id = session.bench.browser.folders.id_of(&made).expect("shown");
+        session.bench.act(vec![crate::browser::Act::RenameFolder {
+            id,
+            name: "Gig".into(),
+        }]);
+        let gig = LibPath::parse("Gig").unwrap();
+        session.bench.browser.folders.id_of(&gig).expect("named")
+    };
+    let id = gig(&mut session);
+    session
+        .bench
+        .act(vec![crate::browser::Act::RemoveFolder(id)]);
+    gig(&mut session);
+    session.sync();
+    session.settle();
+    assert_eq!(
+        session.bench.log.problems(),
+        0,
+        "{}",
+        session.bench.log.transcript()
+    );
+    assert_eq!(root.names(""), [".drawbar", "Gig"]);
+}
+
 /// Removing a folder that holds files and folders moves them up and removes it in one
 /// change: one undo puts everything back where it was, and one redo removes it again.
 #[test]
