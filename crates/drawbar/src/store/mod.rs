@@ -752,22 +752,42 @@ pub struct Moving {
     pub expect: toshokan::Expect,
 }
 
+/// What the Edit menu calls a change, and what drawbar says while it runs.
+#[derive(Clone, Copy)]
+struct Verb {
+    label: &'static str,
+    doing: &'static str,
+}
+
 impl Intent {
     /// What the Edit menu calls it: its label and what it names.
     pub fn describe(&self) -> String {
-        let named = |path: &LibPath| format!("{} “{}”", self.label(), path.leaf());
-        let tag = |name: &str| format!("{} “{name}”", self.label());
+        self.phrase(|verb| verb.label)
+    }
+
+    /// What drawbar says while it runs: [`Intent::describe`] as it happens.
+    pub fn doing(&self) -> String {
+        format!("{}…", self.phrase(|verb| verb.doing))
+    }
+
+    /// Its verb as `pick` takes it, and what it names.
+    fn phrase(&self, pick: fn(Verb) -> &'static str) -> String {
+        let verb = pick(self.verb());
+        let named = |path: &LibPath| format!("{verb} “{}”", path.leaf());
+        let tag = |name: &str| format!("{verb} “{name}”");
         let files = |paths: Vec<&LibPath>| match paths[..] {
             [path] => named(path),
-            _ => format!("{} {} files", self.label(), paths.len()),
+            _ => format!("{verb} {} files", paths.len()),
         };
         match self {
             Intent::Batch(parts) => {
                 let label = self.label();
                 let files: usize = parts.iter().map(Intent::files).sum();
                 match parts.iter().all(|part| part.label() == label) && files > 1 {
-                    true => format!("{label} {files} files"),
-                    false => gesture(parts).map(Intent::describe).unwrap_or_default(),
+                    true => format!("{verb} {files} files"),
+                    false => gesture(parts)
+                        .map(|part| part.phrase(pick))
+                        .unwrap_or_default(),
                 }
             }
             Intent::Move { moves } => files(moves.iter().map(|moving| &moving.from).collect()),
@@ -788,44 +808,55 @@ impl Intent {
             Intent::Forget { .. }
             | Intent::Take { .. }
             | Intent::Dismiss { .. }
-            | Intent::TakeIn { .. } => self.label().to_string(),
+            | Intent::TakeIn { .. } => verb.to_string(),
         }
     }
 
     /// What the history and other writers call it.
     pub fn label(&self) -> &'static str {
+        self.verb().label
+    }
+
+    fn verb(&self) -> Verb {
+        let verb = |label, doing| Verb { label, doing };
+        let rename = verb("Rename", "Renaming");
+        let moving = verb("Move", "Moving");
         match self {
-            Intent::Tag { make: true, .. } => "New tag",
-            Intent::Tag { .. } => "Tag",
-            Intent::Untag { .. } => "Untag",
-            Intent::MakeTag { .. } => "New tag",
-            Intent::RenameTag { .. } => "Rename tag",
-            Intent::RemoveTag { .. } => "Remove tag",
-            Intent::Forget { .. } => "Forget",
-            Intent::Take { .. } => "Take kept-apart changes",
-            Intent::Dismiss { .. } => "Dismiss kept-apart changes",
+            Intent::Tag { make: true, .. } | Intent::MakeTag { .. } => {
+                verb("New tag", "Making tag")
+            }
+            Intent::Tag { .. } => verb("Tag", "Tagging"),
+            Intent::Untag { .. } => verb("Untag", "Untagging"),
+            Intent::RenameTag { .. } => verb("Rename tag", "Renaming tag"),
+            Intent::RemoveTag { .. } => verb("Remove tag", "Removing tag"),
+            Intent::Forget { .. } => verb("Forget", "Forgetting"),
+            Intent::Take { .. } => verb("Take kept-apart changes", "Taking kept-apart changes"),
+            Intent::Dismiss { .. } => verb(
+                "Dismiss kept-apart changes",
+                "Dismissing kept-apart changes",
+            ),
             Intent::Save {
                 expect: toshokan::Expect::Absent,
                 ..
-            } => "New",
-            Intent::Save { .. } | Intent::Rewrite { .. } => "Save",
-            Intent::Import { .. } => "Copy in",
+            } => verb("New", "Saving"),
+            Intent::Save { .. } | Intent::Rewrite { .. } => verb("Save", "Saving"),
+            Intent::Import { .. } => verb("Copy in", "Copying in"),
             Intent::Move { moves } => {
                 let renames = |moving: &Moving| moving.from.parent() == moving.to.parent();
                 match moves.iter().all(renames) {
-                    true => "Rename",
-                    false => "Move",
+                    true => rename,
+                    false => moving,
                 }
             }
             Intent::MoveFolder { from, to } => match from.parent() == to.parent() {
-                true => "Rename",
-                false => "Move",
+                true => rename,
+                false => moving,
             },
-            Intent::Delete { .. } => "Delete",
-            Intent::MakeDir { .. } => "New folder",
-            Intent::RemoveDir { .. } => "Remove folder",
-            Intent::Batch(parts) => gesture(parts).map_or("Change", Intent::label),
-            Intent::TakeIn { .. } => TAKE_IN,
+            Intent::Delete { .. } => verb("Delete", "Deleting"),
+            Intent::MakeDir { .. } => verb("New folder", "Making folder"),
+            Intent::RemoveDir { .. } => verb("Remove folder", "Removing folder"),
+            Intent::Batch(parts) => gesture(parts).map_or(verb("Change", "Changing"), Intent::verb),
+            Intent::TakeIn { .. } => verb(TAKE_IN, "Bringing in kept sounds"),
         }
     }
 

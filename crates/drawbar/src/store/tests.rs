@@ -8148,31 +8148,81 @@ fn a_take_in_survives_an_undo_and_a_close() {
     assert_eq!(root.names("Gig"), ["Pad 2.ne5p", "Pad.ne5p"]);
 }
 
-/// An undo of a delete sent before the delete answered, with another change sent after
-/// it, brings the file back once the library answers.
+/// A change the library has not answered says what it is doing until it stalls, and Undo
+/// and Redo wait for it.
 #[test]
-fn a_file_whose_delete_is_undone_in_flight_comes_back_once_the_library_answers() {
+fn a_change_in_flight_says_what_it_is_doing_and_undo_waits_for_it() {
+    let root = Temp::new();
+    fs::create_dir(root.at("Gig")).unwrap();
+    let mut session = Session::open(&root);
+    let ids = [session.create(), session.create()];
+    session.sync();
+    assert!(
+        session.store.undo_label().is_some(),
+        "the new files can be undone"
+    );
+    assert_eq!(session.store.doing(), None);
+
+    let gig = LibPath::parse("Gig").unwrap();
+    let folder = session.bench.browser.folders.id_of(&gig).expect("listed");
+    session.store.patience(std::time::Duration::from_secs(10));
+    session.store.fault(Fault::Stall);
+    let acts = ids.iter().map(|id| crate::browser::Act::File {
+        id: *id,
+        folder: Some(folder),
+    });
+    session.bench.act(acts.collect());
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    session.store.sync(workspace, browser, Pass::Files);
+    assert_eq!(session.store.doing(), Some("Moving 2 files…"));
+    assert_eq!(session.store.undo_label(), None);
+    assert_eq!(session.store.redo_label(), None);
+
+    // A change counts as stalled only once the library's thread has taken it.
+    session.store.patience(std::time::Duration::ZERO);
+    let stalled = (0..1000).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        session.store.doing().is_none()
+    });
+    assert!(stalled, "a stall is asked about instead");
+    assert_eq!(session.store.undo_label(), None);
+    session.let_go_stalled();
+}
+
+/// Undo waits for the change in flight: pressed before a delete answers, it takes back
+/// nothing, and pressed once it has, it brings the file back.
+#[test]
+fn an_undo_pressed_while_a_delete_is_in_flight_does_nothing() {
     let root = Temp::new();
     fs::write(root.at("a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
-    fs::write(root.at("b.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
     let mut session = Session::open(&root);
-    let (a, b) = (session.named("a.ne5p"), session.named("b.ne5p"));
-    let tag = session.bench.browser.tags.make("Live").expect("a new tag");
+    let a = session.named("a.ne5p");
+    session.create();
+    session.sync();
+    assert!(
+        session.store.undo_label().is_some(),
+        "the new file can be undone"
+    );
     session.bench.act(vec![crate::browser::Act::Remove(a)]);
     let Bench {
         workspace, browser, ..
     } = &mut session.bench;
     session.store.sync(workspace, browser, Pass::Files);
+    assert_eq!(
+        session.store.undo_label(),
+        None,
+        "Undo waits for the delete"
+    );
     session.store.undo();
-    let ids = vec![b];
-    session
-        .bench
-        .act(vec![crate::browser::Act::Tag { ids, tag }]);
     session.decided();
+    assert!(!root.at("a.ne5p").exists(), "the delete stands");
 
+    let label = session.store.undo_label();
+    assert_eq!(label.as_deref(), Some("Undo Delete “a.ne5p”"));
+    session.undo();
     assert!(root.at("a.ne5p").exists(), "the delete was undone");
-    let back = session.named("a.ne5p");
-    assert_eq!(session.path(back).as_deref(), Some("a.ne5p"));
 }
 
 /// A window that opens once another took the list in reads the record of that take-in as

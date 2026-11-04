@@ -707,6 +707,11 @@ impl Browser {
         }
     }
 
+    /// Whether a question shows over the window.
+    pub(crate) fn asks(&self) -> bool {
+        self.ask.is_some()
+    }
+
     /// The title of the question showing or next to show, and its answers.
     #[cfg(test)]
     pub(crate) fn asking(&self) -> Option<(String, Vec<&'static str>)> {
