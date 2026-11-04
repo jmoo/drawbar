@@ -2440,7 +2440,8 @@ impl Workspace {
     }
 
     /// Let go of the reads of `ids` wanted and not asked of the library yet, which what
-    /// wanted them needs no more. Whatever still needs one asks for it again.
+    /// wanted them needs no more. A need renewed each frame, as an open document's, asks
+    /// again. ⚠️ One asked for once, as restoring a kept draft's, is let go with them.
     pub fn unwant(&self, ids: impl IntoIterator<Item = u64>) {
         let mut wanted = self.wanted.borrow_mut();
         for id in ids {
