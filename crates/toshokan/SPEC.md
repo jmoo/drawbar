@@ -863,7 +863,8 @@ A save over a file is `to_trash` then `place`; a save where nothing is, `place`;
 a trash, `to_trash`; a rename, `rename`, refused when something is at the
 destination; restoring a trash item over a file, `to_trash` then `from_trash`. A
 directory moves by one `rename` where the backend renames directories, otherwise
-by one `rename` per file the last scan saw, then `remove_dir` deepest first. A
+by a `make_dir` of its new name, one `rename` per file the last scan saw, then
+`remove_dir` deepest first. A
 `to_trash` whose path holds nothing when it runs is skipped, as there is nothing to
 keep, and a `place` or `rename` makes the directories its destination needs, so a
 save into a folder removed meanwhile makes it again.

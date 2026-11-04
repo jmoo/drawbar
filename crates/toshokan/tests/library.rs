@@ -695,6 +695,7 @@ through_both!(
     a_file_no_entity_is_bound_to_is_saved_renamed_and_trashed_and_each_undone,
     an_effect_by_path_on_an_entitys_file_is_refused,
     a_tree_moved_with_files_no_entity_is_bound_to_is_moved_back_by_undo,
+    a_folder_holding_no_file_is_renamed_and_named_back_by_undo,
     a_tree_move_is_undone_by_one_rename_where_directories_rename,
     a_tree_move_is_not_undone_once_an_entitys_file_it_moved_changed,
     a_tree_move_from_a_folder_moved_since_the_last_scan_is_refused_and_writing_goes_on,
@@ -4876,6 +4877,28 @@ fn a_tree_moved_with_files_no_entity_is_bound_to_is_moved_back_by_undo<F: Facade
         "redone"
     );
     assert_eq!(dirs(), ["new", "new/deep"], "and its old name");
+}
+
+fn a_folder_holding_no_file_is_renamed_and_named_back_by_undo<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    a.commit("New folder", |i| i.make_dir(&path("old")))
+        .unwrap();
+    let dirs = || {
+        let dirs = folder.directories(Root::Folder).into_iter();
+        let dirs = dirs.filter(|dir| !dir.starts_with(&path(".t")) && !dir.is_root());
+        dirs.map(|dir| dir.as_str().to_owned())
+            .collect::<Vec<String>>()
+    };
+    a.commit("Rename", |i| i.move_tree(&path("old"), &path("new")))
+        .unwrap();
+    assert_eq!(dirs(), ["new"], "renamed");
+    a.undo().unwrap();
+    assert_eq!(dirs(), ["old"], "undone");
+    a.redo().unwrap();
+    assert_eq!(dirs(), ["new"], "redone");
 }
 
 fn a_tree_move_is_undone_by_one_rename_where_directories_rename<F: Facade>() {

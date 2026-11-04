@@ -640,6 +640,9 @@ impl Resolver<'_> {
                 from: from.clone(),
                 to: to.clone(),
             });
+        } else if !files.contains(from) {
+            // Renaming its files makes the tree's directory only where it holds a file.
+            self.step(EffectStep::MakeDir { path: to.clone() });
         }
         for path in &files {
             if !rename_dir {

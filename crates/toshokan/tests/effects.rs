@@ -677,6 +677,7 @@ fn without_directory_renames_a_tree_moves_file_by_file_and_removes_its_directori
     assert_eq!(
         plan.steps,
         [
+            EffectStep::MakeDir { path: path("z") },
             rename("x/2", "z/2"),
             rename("x/y/1", "z/y/1"),
             remove("x/y"),
