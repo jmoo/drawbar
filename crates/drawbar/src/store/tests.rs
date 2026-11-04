@@ -8180,12 +8180,13 @@ fn a_change_in_flight_says_what_it_is_doing_and_undo_waits_for_it() {
     assert_eq!(session.store.undo_label(), None);
     assert_eq!(session.store.redo_label(), None);
 
+    // A change counts as stalled only once the library's thread has taken it.
     session.store.patience(std::time::Duration::ZERO);
-    assert_eq!(
-        session.store.doing(),
-        None,
-        "a stall is asked about instead"
-    );
+    let stalled = (0..1000).any(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        session.store.doing().is_none()
+    });
+    assert!(stalled, "a stall is asked about instead");
     assert_eq!(session.store.undo_label(), None);
     session.let_go_stalled();
 }
