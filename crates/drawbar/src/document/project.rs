@@ -789,7 +789,7 @@ pub fn loud(entity: &LocalEntity, found: &Found, building: bool) -> Loud {
         return Loud {
             tone: Tone::Ready,
             hint: format!(
-                "writes a {} instrument to {lands}, numbered if that name is taken",
+                "writes a {} instrument to {lands}",
                 builds::LAYOUT.generation()
             ),
             click: Click::Build,

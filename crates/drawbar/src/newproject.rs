@@ -89,19 +89,10 @@ impl Making {
         match self {
             Making::Project => (
                 "Sample Editor project…",
-                "pick the WAVs it plays; the project and a copy of each WAV go in a new \
-                 folder named after it",
+                "copies the WAVs into a new folder",
             ),
-            Making::Instrument => (
-                "Sample instrument…",
-                "pick the WAVs it plays; the audio is encoded into the instrument, so \
-                 the files are not needed afterward",
-            ),
-            Making::Piano => (
-                "Piano library…",
-                "pick one WAV per stroke; the audio is encoded into the library, so the \
-                 files are not needed afterward",
-            ),
+            Making::Instrument => ("Sample instrument…", "encodes the WAVs"),
+            Making::Piano => ("Piano library…", "encodes one WAV per stroke"),
         }
     }
 
@@ -116,18 +107,13 @@ impl Making {
     fn caption(self) -> &'static str {
         match self {
             Making::Project => {
-                "One zone per file, ordered by root key. The project and a copy of each \
-                 WAV go in a new folder named after the project."
+                "One zone per file, ordered by root key. The WAVs are copied into a new \
+                 folder with the project."
             }
-            Making::Instrument => {
-                "One zone per file, ordered by root key. The audio is encoded into the \
-                 instrument, so the WAVs are not needed afterward."
-            }
+            Making::Instrument => "One zone per file, ordered by root key.",
             Making::Piano => {
                 "One stroke per WAV. A name like 060-b0-l00.wav sets the root, bank and \
-                 layer; set them here otherwise. A WAV with a loop loops there while \
-                 the key is held. Kind, gain and the damper limit are edited in the \
-                 document afterward."
+                 layer."
             }
         }
     }
