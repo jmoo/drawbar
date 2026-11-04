@@ -25,7 +25,7 @@ use crate::queue::Queue;
 use crate::sheet;
 use crate::store::{LibPath, Rescue};
 use crate::tags::Tags;
-use crate::workspace::Workspace;
+use crate::workspace::{LocalEntity, Workspace};
 
 mod act;
 mod drag;
@@ -36,7 +36,8 @@ mod selection;
 mod tree;
 
 pub use act::{
-    apply, bulk, foreign_format, send_warnings, Act, Bulk, Rescuing, LOAD_ON_INSTRUMENT,
+    apply, bulk, comes_in, foreign_format, refuse_unopened, send_warnings, Act, Bulk, Rescuing,
+    LOAD_ON_INSTRUMENT,
 };
 #[cfg(test)]
 pub(crate) use drag::TAGGED;
@@ -129,6 +130,7 @@ enum Verb {
     Finish,
     RollBack,
     Reopen,
+    MoveUp,
 }
 
 impl Verb {
@@ -144,6 +146,7 @@ impl Verb {
             Verb::Finish => "Finish",
             Verb::RollBack => "Roll back",
             Verb::Reopen => "Close and reopen",
+            Verb::MoveUp => "Move them up too",
         }
     }
 
@@ -151,7 +154,7 @@ impl Verb {
     fn button(self, ui: &mut egui::Ui) -> egui::Response {
         let (label, glyph) = (self.label(), self.glyph());
         match self {
-            Verb::Save | Verb::KeepBoth | Verb::Finish | Verb::RollBack => {
+            Verb::Save | Verb::KeepBoth | Verb::Finish | Verb::RollBack | Verb::MoveUp => {
                 sheet::primary(ui, Some(glyph), label)
             }
             Verb::Replace
@@ -171,7 +174,7 @@ impl Verb {
             Verb::Overwrite => Glyph::Replace,
             Verb::KeepBoth => Glyph::Copy,
             Verb::TakeTheirs => Glyph::RotateCcw,
-            Verb::Finish => Glyph::Check,
+            Verb::Finish | Verb::MoveUp => Glyph::Check,
             Verb::RollBack => Glyph::RotateCcw,
             Verb::Reopen => Glyph::RefreshCw,
         }
@@ -744,11 +747,15 @@ impl Browser {
         }
     }
 
-    /// Ask before an asset is deleted with its file.
-    fn ask_delete(&mut self, id: u64, name: &str) {
-        let note = match self.folders.read_only() {
-            false => "It is deleted from this computer, with its file in the library folder.",
-            true => {
+    /// Ask before `act` deletes `name` with its file.
+    fn ask_delete(&mut self, name: &str, act: Act) {
+        let hidden = matches!(act, Act::DeleteHidden(_));
+        let note = match (self.folders.read_only(), hidden) {
+            (false, false) => {
+                "It is deleted from this computer, with its file in the library folder."
+            }
+            (false, true) => "It goes to drawbar's trash, and Undo brings it back.",
+            (true, _) => {
                 "The library is read-only, so its file stays in the library folder, and the \
                  deletion is held in memory only."
             }
@@ -757,8 +764,32 @@ impl Browser {
             format!("Delete “{name}”?"),
             Some(note.into()),
             Verb::Delete,
-            vec![Act::Remove(id)],
+            vec![act],
         ));
+    }
+
+    /// Ask before removing a folder whose hidden files, `hidden`, would move up with the
+    /// rest.
+    fn ask_remove_hidden(&mut self, id: u64, path: &LibPath, hidden: &[LibPath]) {
+        const SHOWN: usize = 3;
+        let names: Vec<&str> = hidden.iter().map(LibPath::leaf).collect();
+        let mut ask = Ask::new(
+            format!(
+                "“{}” holds {}",
+                path.leaf(),
+                crate::strings::counted(hidden.len(), "hidden file", "hidden files")
+            ),
+            Some(format!(
+                "Removing the folder moves {} up to {} with everything else in it. Nothing \
+                 is deleted.",
+                crate::strings::quoted_some(&names, SHOWN),
+                act::spoken(&path.parent())
+            )),
+            Verb::MoveUp,
+            vec![Act::RemoveFolderAndHidden(id)],
+        );
+        ask.others = vec![("Show them", vec![Act::ShowHidden(id)])];
+        self.raise(ask);
     }
 
     /// Ask what to do about a name already taken in a folder. `over` is what overwriting
@@ -767,16 +798,25 @@ impl Browser {
         &mut self,
         name: &str,
         dir: &crate::store::LibPath,
+        workspace: &Workspace,
         over: Option<Vec<Act>>,
         both: Vec<Act>,
         free: &str,
     ) {
-        let place = match dir.is_root() {
-            true => "the top level of the library".to_string(),
-            false => format!("“{dir}”"),
+        let place = act::spoken(dir);
+        let hidden = self.folders.hides(dir, name, workspace);
+        let title = match &hidden {
+            Some(hidden) => format!("A hidden file is already named “{hidden}” in {place}"),
+            None => format!("“{name}” is already in {place}"),
         };
-        let title = format!("“{name}” is already in {place}");
         let both_note = format!("Keep both names the new one “{free}”.");
+        let unwritable = match hidden {
+            Some(_) => "drawbar does not overwrite a hidden file.",
+            None => {
+                "What is there holds changes of its own, or is not a file, so it cannot be \
+                 overwritten."
+            }
+        };
         self.raise(match over {
             Some(over) => Ask {
                 title,
@@ -792,10 +832,7 @@ impl Browser {
             },
             None => Ask::new(
                 title,
-                Some(format!(
-                    "What is there holds changes of its own, or is not a file, so it cannot \
-                     be overwritten. {both_note}"
-                )),
+                Some(format!("{unwritable} {both_note}")),
                 Verb::KeepBoth,
                 both,
             ),
@@ -842,9 +879,9 @@ impl Browser {
 
     /// Ask what to do with the edit an earlier session kept of a slot whose view was
     /// edited before that edit was read: `kept` is its bytes.
-    pub(crate) fn ask_kept_slot_edit(&mut self, id: u64, name: &str, kept: Vec<u8>) {
+    pub(crate) fn ask_kept_slot_edit(&mut self, id: u64, entity: &LocalEntity, kept: Vec<u8>) {
         self.raise(Ask {
-            title: format!("“{name}” has unsaved edits from before"),
+            title: format!("“{}” has unsaved edits from before", entity.name),
             note: Some(
                 "drawbar kept unsaved edits of this slot when it last let it go, and you \
                  have edited it since. Keep mine keeps your edits. Take theirs puts the \
@@ -860,7 +897,7 @@ impl Browser {
             others: vec![(
                 "Keep both",
                 vec![Act::Import {
-                    name: name.to_string(),
+                    name: crate::workspace::library_filename(entity),
                     bytes: kept,
                 }],
             )],

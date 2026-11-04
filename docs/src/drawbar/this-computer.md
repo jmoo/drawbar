@@ -21,6 +21,11 @@ so back up the whole library folder. That folder says nothing about your other
 files, so it stays small however large the library is. Your unsaved edits are
 kept on this computer, in drawbar's own data, never in the library folder.
 
+drawbar hides the files in the library it does not open, such as a PDF or a
+photo, and never changes them on its own. **View ▸ Show hidden files** lists
+them, drawn faint, and a hidden file's menu offers **Delete…**. Names that start
+with a dot never show.
+
 In the browser, your library is kept in the browser's own storage for
 drawbar.app, which no other site or app can see. It keeps your files, tags and
 unsaved edits from one visit to the next, but the browser can delete it, as
@@ -37,10 +42,10 @@ files, folders and tags. Unsaved edits stay in the browser. Change nothing in th
 library until the download finishes, or the copy may not be whole.
 
 To bring a copy back, choose **File ▸ Open a copy…** while the browser's library
-holds none of your files: after the browser deleted it, or in another browser.
-drawbar opens only a copy it saved, and only into a library with none of your
-files in it, so it never mixes a copy with files already there. Close drawbar in
-the browser's other tabs first. If opening a copy stops partway, the library opens
+holds none of your files, hidden files included: after the browser deleted it, or
+in another browser. The item is unavailable while the library holds any. drawbar
+opens only a copy it saved, and never mixes a copy with files already there.
+Close drawbar in the browser's other tabs first. If opening a copy stops partway, the library opens
 read-only until you open the copy again. A web
 app added to the Dock or the Home Screen keeps storage of its own, apart from
 Safari's, so save a copy in Safari and open it in the web app. In Chrome and
@@ -70,7 +75,7 @@ The library folder can live in Dropbox, OneDrive or iCloud Drive, or on a
 network share, and syncing just works: a copy that is out of date, changes that
 arrive out of order, and a folder partly restored from a backup all come
 together again. Each drawbar keeps its own record of what it changed in the
-hidden folder, so none overwrites another's. That is also why several drawbars
+`.drawbar` folder, so none overwrites another's. That is also why several drawbars
 can use one library at once: on two computers, in two windows, in two browser
 tabs, or in the browser and the desktop app on one folder. A tab shows another
 tab's changes as soon as they are made; otherwise drawbar shows what the others
@@ -90,8 +95,9 @@ between is replaced, and what it held is lost.
 ## Adding and making sounds
 
 Drop files on the window, or use **File ▸ Open…**. drawbar copies them into your
-library and leaves the originals where they were. A file drawbar cannot read
-still shows up, and the activity log says what went wrong.
+library and leaves the originals where they were. A kind of file drawbar does not
+open, such as a PDF, is not copied in, and the activity log says so. A file
+drawbar cannot read still shows up, and the activity log says what went wrong.
 
 **New** makes a fresh sound, note or folder. A fresh Stage program has every
 control at zero; it is not a factory sound.
@@ -106,8 +112,11 @@ folder, named after it, with its tags and the slot it came from. A name already
 taken gets a number. A sound with an edit you had not saved comes back with that
 edit, still unsaved. If the browser's storage is full, the edit comes in as a file
 of its own beside the sound instead. A note named for a kind of file drawbar does
-not open, such as `.json`, keeps its name and shows only under **Show all files**,
-and an edit you had not saved to it is a file of its own beside it.
+not open, such as `.json`, keeps its name and comes in as a hidden file, and an
+edit you had not saved to it is a hidden file of its own beside it. Bytes
+drawbar could not read come in unchanged, and hidden unless their name ends in
+an extension drawbar opens; a name with no extension gains `.bin`, so `Junk`
+becomes `Junk.bin`.
 In the browser, a [copy of the library](#keeping-a-copy-in-the-browser) holds them.
 The activity log says how many sounds came in.
 
@@ -156,11 +165,11 @@ of characters long. If another drawbar has changed what an undo would take
 back, that undo is refused, and Undo goes on to the change before it. An edit
 you have not saved is taken back with **Revert** instead.
 
-Deleting a sound, or saving over one, moves the old file into drawbar's trash in
-the hidden folder, where Undo finds it. Undo reaches only the changes made since
-the library opened, and the trash keeps only what they need, at most 1 GiB. Past
-that, the oldest goes first, and the activity log says which change Undo no
-longer reaches. Quitting empties the trash. What a crash left there goes when
+Deleting a sound or a hidden file, or saving over a sound, moves the old file
+into drawbar's trash in the `.drawbar` folder, where Undo finds it. Undo reaches
+only the changes made since the library opened, and the trash keeps only what
+they need, at most 1 GiB. Past that, the oldest goes first, and the activity
+log says which change Undo no longer reaches. Quitting empties the trash. What a crash left there goes when
 the library next opens, once drawbar has finished any change the crash
 interrupted. When drawbar has to go on with a history of its own, it empties the
 trash of the history it leaves, since Undo starts again. After its data was
@@ -169,7 +178,8 @@ trash: it stays in the library folder, under `.drawbar/library/writers.2`, until
 you remove it by hand.
 
 **Export…** saves a copy somewhere else. Rename with F2. If a name is taken,
-drawbar asks whether to **Overwrite** the file there or **Keep both**.
+drawbar asks whether to **Overwrite** the file there or **Keep both**. Only
+**Keep both** is offered when the file there is hidden, and the question says so.
 
 ## Bundles
 
@@ -258,7 +268,7 @@ bring back any you deleted.
 ## If something goes wrong
 
 - **Read-only.** drawbar cannot write the library folder, a newer drawbar has
-  written its hidden folder, drawbar could not finish a change, as when
+  written its `.drawbar` folder, drawbar could not finish a change, as when
   another program put a file where a save was going, or the library folder does
   not make sure a change is kept, as on some network and USB drives: move such a
   library to a folder on a local disk. Hover the library's name
@@ -318,9 +328,6 @@ bring back any you deleted.
   the file** shows where it is, **Discard** deletes it, and **Later** leaves it
   for the next library that can take it. A file that does not read is not a
   copy of the sound, and drawbar offers only to discard it.
-- **Differs only by case.** Two names in one folder differ only in upper and
-  lower case, such as `Pad.ne5p` and `pad.ne5p`. macOS and Windows hold only one
-  of them, so rename one to keep the library whole on every computer.
 - **Not read** or **not all listed.** drawbar could not read that file or
   folder, and the activity log names it. What is in such a folder is not shown
   until drawbar can read it, and neither is such a file when drawbar must read it

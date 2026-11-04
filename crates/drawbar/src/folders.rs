@@ -31,6 +31,13 @@ pub enum Op {
         from: LibPath,
         to: LibPath,
     },
+    /// Move a hidden file, which no asset holds.
+    MoveFile {
+        from: LibPath,
+        to: LibPath,
+    },
+    /// Move a hidden file to the library's trash.
+    DeleteFile(LibPath),
     /// Sent after every other change of the same sync, once whatever was in it has
     /// moved out.
     RemoveDir(LibPath),
@@ -44,8 +51,9 @@ pub struct Lost {
     pub path: LibPath,
 }
 
-/// The menu item that shows the files drawbar does not open, and hides them again.
-pub const SHOW_ALL_FILES: &str = "Show all files";
+/// The menu item that shows the hidden files, those drawbar does not open, and hides them
+/// again.
+pub const SHOW_HIDDEN_FILES: &str = "Show hidden files";
 
 /// Where [`Folders::all_files`] is kept between sessions: a preference of the app, not of
 /// any one library.
@@ -88,7 +96,7 @@ pub enum Occupant {
     Folder(u64),
     /// An asset whose file is gone, which the library keeps tags for.
     Lost(u64),
-    /// A file drawbar does not hold: one it does not open, or one it did not read.
+    /// A file drawbar does not open.
     Other,
 }
 
@@ -98,8 +106,8 @@ pub enum Clash {
     Free,
     Taken(Occupant),
     /// The folder already holds two entries under that name, so neither may be named:
-    /// their names, for the refusal.
-    Ambiguous(Vec<String>),
+    /// their names and what each is, for the refusal.
+    Ambiguous(Vec<(String, Occupant)>),
 }
 
 /// Where the listed assets are, taken once for each [`Workspace::layout`] and each change
@@ -151,7 +159,7 @@ impl Census {
 }
 
 /// What [`Folders::shape`] returns.
-pub(crate) type Shape = (u64, [usize; 4], bool);
+pub(crate) type Shape = (u64, [usize; 3], bool);
 
 #[derive(Default)]
 pub struct Folders {
@@ -167,13 +175,9 @@ pub struct Folders {
     /// Assets whose file went missing outside drawbar while it held them.
     pub missing: BTreeSet<u64>,
     lost: Vec<Lost>,
-    /// Assets whose name collides with another entry of their folder.
-    pub duplicates: BTreeSet<u64>,
     pub place: Option<Where>,
     /// Files drawbar does not open, shown only while [`Folders::all_files`] is on.
     pub others: Vec<LibPath>,
-    /// Files drawbar would hold that it did not read, and why.
-    pub unread: Vec<(LibPath, String)>,
     /// Folders whose contents were not all listed.
     pub unwalked: BTreeSet<LibPath>,
     /// Show the files drawbar does not open, too.
@@ -298,17 +302,13 @@ impl Folders {
     /// A value that changes whenever the tree's lines for the library would: the
     /// folders, and the lists of what is beside the assets in them.
     ///
-    /// ⚠️ Those lists only grow, or are replaced whole by a listing that also syncs the
-    /// folders, so their lengths and the generation together catch every change.
+    /// ⚠️ Those lists only grow, change with the generation, or are replaced whole by a
+    /// listing that also syncs the folders, so their lengths and the generation together
+    /// catch every change.
     pub(crate) fn shape(&self) -> Shape {
         (
             self.generation,
-            [
-                self.others.len(),
-                self.unread.len(),
-                self.unwalked.len(),
-                self.lost.len(),
-            ],
+            [self.others.len(), self.unwalked.len(), self.lost.len()],
             self.all_files,
         )
     }
@@ -324,32 +324,22 @@ impl Folders {
         };
     }
 
-    /// A hash of every folder's path and every file drawbar does not hold: what besides
-    /// the assets two names can collide in.
-    pub fn names_hash(&self) -> u64 {
-        use std::hash::{Hash as _, Hasher as _};
-        let mut hasher = std::hash::DefaultHasher::new();
-        for folder in &self.list {
-            folder.path.hash(&mut hasher);
-        }
-        for path in self.strangers() {
-            path.hash(&mut hasher);
-        }
-        hasher.finish()
+    /// The name of the hidden file in `dir` named `name` in any case, as it is spelled.
+    pub fn hides(&self, dir: &LibPath, name: &str, workspace: &Workspace) -> Option<String> {
+        let key = names::key(name);
+        self.entries(dir, workspace)
+            .into_iter()
+            .find(|(named, _, what)| *named == key && *what == Occupant::Other)
+            .map(|(_, spelled, _)| spelled)
     }
 
-    /// Every file drawbar does not hold, read or not.
-    pub fn strangers(&self) -> impl Iterator<Item = &LibPath> {
-        self.others
-            .iter()
-            .chain(self.unread.iter().map(|(path, _)| path))
-    }
-
-    /// Whether a folder holds something drawbar does not, or may: a file it does not
-    /// hold, or contents it did not list.
-    pub fn holds_strangers(&self, dir: &LibPath) -> bool {
-        self.strangers().any(|path| path.is_in(dir) && path != dir)
-            || self.unwalked.iter().any(|path| path.is_in(dir))
+    /// The hidden files directly in `dir`.
+    pub fn hidden_in(&self, dir: &LibPath, workspace: &Workspace) -> Vec<LibPath> {
+        self.entries(dir, workspace)
+            .into_iter()
+            .filter(|(_, _, what)| *what == Occupant::Other)
+            .map(|(_, name, _)| dir.join(&name))
+            .collect()
     }
 
     /// The assets whose file is gone, which the library keeps tags for.
@@ -408,6 +398,7 @@ impl Folders {
                     }
                 }
                 Op::RemoveDir(path) => dirs.retain(|dir| dir != path),
+                Op::MoveFile { .. } | Op::DeleteFile(_) => {}
             }
         }
         self.list.retain(|folder| dirs.contains(&folder.path));
@@ -417,12 +408,17 @@ impl Folders {
         }
     }
 
-    /// Everything named in `dir`, with its key and what it is.
+    /// Everything named in `dir`, with its key and what it is. A file drawbar does not
+    /// open is one entry, its asset's, where one holds it.
     fn entries(&self, dir: &LibPath, workspace: &Workspace) -> Vec<(String, String, Occupant)> {
-        let assets = workspace.listed().filter_map(|entity| {
-            let path = entity.path.as_ref()?;
-            (path.parent() == *dir).then(|| (path.leaf(), Occupant::Asset(entity.id)))
-        });
+        let assets: Vec<(&str, Occupant)> = workspace
+            .listed()
+            .filter_map(|entity| {
+                let path = entity.path.as_ref()?;
+                (path.parent() == *dir).then(|| (path.leaf(), Occupant::Asset(entity.id)))
+            })
+            .collect();
+        let held: BTreeSet<&str> = assets.iter().map(|(name, _)| *name).collect();
         let folders = self
             .list
             .iter()
@@ -433,10 +429,14 @@ impl Folders {
             (path.parent() == *dir).then(|| (path.leaf(), Occupant::Lost(lost.id)))
         });
         let others = self
-            .strangers()
+            .others
+            .iter()
             .filter(|path| path.parent() == *dir)
+            .filter(|path| !held.contains(path.leaf()))
             .map(|path| (path.leaf(), Occupant::Other));
         assets
+            .iter()
+            .copied()
             .chain(folders)
             .chain(lost)
             .chain(others)
@@ -463,7 +463,7 @@ impl Folders {
         match holding.as_slice() {
             [] => Clash::Free,
             [(_, what)] => Clash::Taken(*what),
-            many => Clash::Ambiguous(many.iter().map(|(name, _)| name.clone()).collect()),
+            many => Clash::Ambiguous(many.to_vec()),
         }
     }
 
@@ -536,9 +536,7 @@ impl Folders {
                 lost.path = moved;
             }
         }
-        let others = self.others.iter_mut();
-        let unread = self.unread.iter_mut().map(|(path, _)| path);
-        for path in others.chain(unread) {
+        for path in &mut self.others {
             if let Some(moved) = path.moved(from, to) {
                 *path = moved;
             }
@@ -560,8 +558,8 @@ impl Folders {
         };
         for op in &mut self.ops {
             match op {
-                Op::MakeDir(path) | Op::RemoveDir(path) => back(path),
-                Op::MoveDir { from, to } => {
+                Op::MakeDir(path) | Op::RemoveDir(path) | Op::DeleteFile(path) => back(path),
+                Op::MoveDir { from, to } | Op::MoveFile { from, to } => {
                     back(from);
                     back(to);
                 }
@@ -585,6 +583,30 @@ impl Folders {
     /// Put back changes taken and not sent, ahead of any made since.
     pub(crate) fn hold(&mut self, ops: Vec<Op>) {
         self.ops.splice(0..0, ops);
+    }
+
+    /// Move the hidden file at `from` to `to`.
+    pub(crate) fn move_hidden(&mut self, from: &LibPath, to: LibPath) {
+        let Some(at) = self.others.iter().position(|path| path == from) else {
+            return;
+        };
+        self.others[at] = to.clone();
+        self.others.sort();
+        self.generation += 1;
+        self.ops.push(Op::MoveFile {
+            from: from.clone(),
+            to,
+        });
+    }
+
+    /// Move the hidden file at `path` to the library's trash.
+    pub(crate) fn delete_hidden(&mut self, path: &LibPath) {
+        let Some(at) = self.others.iter().position(|held| held == path) else {
+            return;
+        };
+        self.others.remove(at);
+        self.generation += 1;
+        self.ops.push(Op::DeleteFile(path.clone()));
     }
 
     /// Remove an empty folder. The caller moves out what was in it first.
@@ -691,10 +713,12 @@ mod tests {
             workspace.place(id, LibPath::root().join(name));
         }
         let folders = Folders::default();
-        assert_eq!(
-            folders.clash(&LibPath::root(), "c3.NE5P", &workspace, None),
-            Clash::Ambiguous(vec!["c3.ne5p".into(), "C3.ne5p".into()])
-        );
+        let Clash::Ambiguous(held) = folders.clash(&LibPath::root(), "c3.NE5P", &workspace, None)
+        else {
+            panic!("c3.NE5P matches both spellings");
+        };
+        let names: Vec<&str> = held.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["c3.ne5p", "C3.ne5p"]);
     }
 
     #[test]

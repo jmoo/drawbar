@@ -68,8 +68,8 @@ change would make every tagged file of that kind look changed outside drawbar: a
 Nord format added since is read whole. [Binding](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#binding)
 has the rules.
 
-The hidden folder is made at the first change, so a folder opened and looked at
-stays as it was. A scan leaves out the hidden folder and every other name that
+The `.drawbar` folder is made at the first change, so a folder opened and looked
+at stays as it was. A scan leaves out the `.drawbar` folder and every other name that
 starts with a dot.
 
 Every name drawbar makes follows the strictest rules of macOS, Windows and
@@ -225,7 +225,7 @@ drawbar in a browser tab may still be making it.
 
 A library opens read-only when its folder cannot be written, when this writer's
 log holds an entry of a kind or with an operation a newer build added, or when
-the folder holds a newer layout of the hidden folder beside this one. What may
+the folder holds a newer layout of the `.drawbar` folder beside this one. What may
 change between versions without that, and what may not, is in
 [Compatibility](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#compatibility). It turns read-only until it is
 opened again when a change it began cannot be finished, as when another program

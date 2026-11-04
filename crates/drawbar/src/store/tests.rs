@@ -1612,58 +1612,6 @@ fn a_file_deleted_outside_goes_unless_it_holds_what_the_file_did_not() {
 }
 
 #[test]
-fn two_assets_one_name_apart_in_case_are_flagged_both() {
-    let mut bench = Bench::new();
-    let mut place = |name: &str| {
-        let id = bench
-            .workspace
-            .create(Fresh::Program, &mut bench.log)
-            .unwrap();
-        bench.workspace.place(id, LibPath::root().join(name));
-        id
-    };
-    let (lower, upper, other) = (place("c3.ne5p"), place("C3.ne5p"), place("d3.ne5p"));
-    let (flagged, groups) = mirror::duplicates(&bench.workspace, &bench.browser.folders);
-    assert_eq!(flagged.into_iter().collect::<Vec<_>>(), [lower, upper]);
-    assert!(!groups
-        .iter()
-        .any(|(_, group)| group.iter().any(|(id, _)| *id == Some(other))));
-    let names: Vec<&str> = groups[0].1.iter().map(|(_, name)| name.as_str()).collect();
-    assert_eq!(names, ["c3.ne5p", "C3.ne5p"]);
-}
-
-/// The pair is flagged on every disk, since a library copied to one that ignores case
-/// could hold only one of them, and the warning claims nothing about this disk.
-#[test]
-fn two_names_differing_only_by_case_are_flagged_without_claiming_the_disk_ignores_case() {
-    let Bench {
-        mut workspace,
-        mut browser,
-        mut log,
-        ..
-    } = Bench::new();
-    for name in ["Case.ne5p", "case.ne5p"] {
-        let id = workspace.create(Fresh::Program, &mut log).unwrap();
-        workspace.place(id, LibPath::root().join(name));
-    }
-    let before = log.iter().count();
-    mirror::flag_duplicates(&workspace, &mut browser, &mut log);
-    let said: Vec<&str> = log
-        .iter()
-        .skip(before)
-        .map(|entry| entry.text.as_str())
-        .collect();
-    assert_eq!(
-        said,
-        [
-            "“Case.ne5p” and “case.ne5p” in the library differ only by case and would collide \
-          on macOS or Windows; rename one of them."
-        ]
-    );
-    assert_eq!(browser.folders.duplicates.len(), 2);
-}
-
-#[test]
 fn a_disk_holding_both_spellings_shows_both_and_renames_neither() {
     let root = Temp::new();
     let program = Fresh::Program.bytes().unwrap();
@@ -1676,10 +1624,7 @@ fn a_disk_holding_both_spellings_shows_both_and_renames_neither() {
 
     let mut session = Session::open(&root);
     assert_eq!(session.bench.workspace.listed().count(), 2);
-    assert_eq!(session.bench.browser.folders.duplicates.len(), 2);
-    assert_eq!(session.said("differ only by case"), 1);
     session.refocus();
-    assert_eq!(session.said("differ only by case"), 1, "said once");
     session.close();
     assert_eq!(
         root.names(""),
@@ -1753,8 +1698,11 @@ fn only_files_drawbar_opens_are_read_and_the_rest_are_listed_by_name() {
         .iter()
         .map(LibPath::as_str)
         .collect();
-    assert_eq!(others, ["Cello/notes.pdf", "cover.jpg"], "no hidden file");
-    assert!(session.bench.browser.folders.unread.is_empty());
+    assert_eq!(
+        others,
+        ["Cello/notes.pdf", "cover.jpg"],
+        "no name with a dot first"
+    );
     session.close();
 }
 
@@ -1876,6 +1824,200 @@ fn gig() -> (Temp, Session, u64, u64) {
     let gig = LibPath::parse("Gig").unwrap();
     let folder = session.bench.browser.folders.id_of(&gig).expect("listed");
     (root, session, folder, tag)
+}
+
+#[test]
+fn a_hidden_file_deleted_in_a_folder_renamed_in_the_same_pass_waits_for_the_rename() {
+    let root = Temp::new();
+    fs::create_dir(root.at("Outer")).unwrap();
+    fs::write(root.at("Outer/notes.pdf"), b"%PDF").unwrap();
+    let mut session = Session::open(&root);
+    let outer = LibPath::parse("Outer").unwrap();
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    let folder = browser.folders.id_of(&outer).expect("listed");
+    browser
+        .folders
+        .relocate(folder, LibPath::parse("Moved").unwrap(), workspace);
+    browser
+        .folders
+        .delete_hidden(&LibPath::parse("Moved/notes.pdf").unwrap());
+    assert!(
+        !session.store.sync(workspace, browser, Pass::Files),
+        "the delete waits"
+    );
+    session.settle();
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "Moved"]);
+    assert_eq!(root.names("Moved"), Vec::<String>::new());
+}
+
+#[test]
+fn a_hidden_file_moved_out_of_a_folder_renamed_in_the_same_pass_waits_for_the_rename() {
+    let root = Temp::new();
+    fs::create_dir_all(root.at("Outer/Gig")).unwrap();
+    fs::write(root.at("Outer/Gig/a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    fs::write(root.at("Outer/Gig/notes.pdf"), b"%PDF").unwrap();
+    let mut session = Session::open(&root);
+    let [outer, gig] = ["Outer", "Outer/Gig"].map(|at| {
+        let at = LibPath::parse(at).unwrap();
+        session.bench.browser.folders.id_of(&at).expect("listed")
+    });
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    browser
+        .folders
+        .relocate(outer, LibPath::parse("Moved").unwrap(), workspace);
+    session
+        .bench
+        .act(vec![crate::browser::Act::RemoveFolderAndHidden(gig)]);
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    assert!(
+        !session.store.sync(workspace, browser, Pass::Files),
+        "the move waits"
+    );
+    session.settle();
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "Moved"]);
+    assert_eq!(root.names("Moved"), ["a.ne5p", "notes.pdf"]);
+}
+
+fn folder_at(session: &Session, path: &str) -> u64 {
+    let at = LibPath::parse(path).unwrap();
+    session.bench.browser.folders.id_of(&at).expect(path)
+}
+
+/// Rename the folder `id` to `to`, sending nothing yet.
+fn relocate(session: &mut Session, id: u64, to: &str) {
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    let to = LibPath::parse(to).unwrap();
+    browser.folders.relocate(id, to, workspace);
+}
+
+/// Send what this pass can, which leaves a change waiting, then everything.
+fn sync_after_waiting(session: &mut Session) {
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    let done = session.store.sync(workspace, browser, Pass::Files);
+    assert!(!done, "a change waits");
+    session.settle();
+    session.sync();
+}
+
+#[test]
+fn a_folder_renamed_inside_a_folder_renamed_in_the_same_pass_waits_for_it() {
+    let root = Temp::new();
+    fs::create_dir_all(root.at("Outer/Gig")).unwrap();
+    fs::write(root.at("Outer/Gig/b.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    fs::write(root.at("Outer/Gig/n.pdf"), b"%PDF").unwrap();
+    let mut session = Session::open(&root);
+    let (outer, gig) = (
+        folder_at(&session, "Outer"),
+        folder_at(&session, "Outer/Gig"),
+    );
+    relocate(&mut session, outer, "Moved");
+    relocate(&mut session, gig, "Moved/Gig2");
+    sync_after_waiting(&mut session);
+    assert_eq!(root.names(""), [".drawbar", "Moved"]);
+    assert_eq!(root.names("Moved"), ["Gig2"]);
+    assert_eq!(root.names("Moved/Gig2"), ["b.ne5p", "n.pdf"]);
+    assert_eq!(session.said("did not change as asked"), 0);
+}
+
+#[test]
+fn a_folder_made_inside_a_folder_renamed_in_the_same_pass_waits_for_it() {
+    let root = Temp::new();
+    fs::create_dir(root.at("Outer")).unwrap();
+    fs::write(root.at("Outer/b.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let outer = folder_at(&session, "Outer");
+    relocate(&mut session, outer, "Moved");
+    let Bench {
+        workspace, browser, ..
+    } = &mut session.bench;
+    browser
+        .folders
+        .make(&LibPath::parse("Moved").unwrap(), workspace);
+    sync_after_waiting(&mut session);
+    assert_eq!(root.names("Moved"), ["New folder", "b.ne5p"]);
+    assert_eq!(session.said("did not change as asked"), 0);
+}
+
+#[test]
+fn removing_a_folder_inside_a_folder_renamed_in_the_same_pass_moves_its_folders_up() {
+    let root = Temp::new();
+    fs::create_dir_all(root.at("Outer/Gig/Set")).unwrap();
+    fs::write(
+        root.at("Outer/Gig/Set/b.ne5p"),
+        Fresh::Program.bytes().unwrap(),
+    )
+    .unwrap();
+    let mut session = Session::open(&root);
+    let (outer, gig) = (
+        folder_at(&session, "Outer"),
+        folder_at(&session, "Outer/Gig"),
+    );
+    relocate(&mut session, outer, "Moved");
+    session
+        .bench
+        .act(vec![crate::browser::Act::RemoveFolder(gig)]);
+    sync_after_waiting(&mut session);
+    assert_eq!(root.names(""), [".drawbar", "Moved"]);
+    assert_eq!(root.names("Moved"), ["Set"]);
+    assert_eq!(root.names("Moved/Set"), ["b.ne5p"]);
+    assert_eq!(session.said("did not change as asked"), 0);
+}
+
+/// The disk refuses the rename, since an empty folder drawbar does not know has the
+/// name. The removal sent after it removes the folder drawbar holds, never that one.
+#[test]
+fn removing_a_folder_whose_rename_is_unanswered_waits_for_it() {
+    let (root, mut session, folder, _) = gig();
+    fs::create_dir(root.at("Set")).unwrap();
+    session.rename_folder(folder, "Set");
+    session
+        .bench
+        .act(vec![crate::browser::Act::RemoveFolder(folder)]);
+    sync_after_waiting(&mut session);
+    assert_eq!(root.names(""), [".drawbar", "Set", "a.ne5p"]);
+}
+
+/// The disk refuses the first rename, since a folder drawbar does not know has the
+/// name. The second, sent after it, renames the folder where it still is.
+#[test]
+fn a_rename_inside_a_refused_rename_of_the_same_pass_lands_where_the_folder_is() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    fs::create_dir_all(root.at("Outer/Gig")).unwrap();
+    fs::write(root.at("Outer/Gig/b.ne5p"), &program).unwrap();
+    let mut session = Session::open(&root);
+    let (outer, gig) = (
+        folder_at(&session, "Outer"),
+        folder_at(&session, "Outer/Gig"),
+    );
+    let b = session.only();
+    fs::create_dir(root.at("Moved")).unwrap();
+    fs::write(root.at("Moved/theirs.pdf"), b"theirs").unwrap();
+    relocate(&mut session, outer, "Moved");
+    relocate(&mut session, gig, "Moved/Gig2");
+    sync_after_waiting(&mut session);
+    assert_eq!(root.names("Moved"), ["theirs.pdf"], "theirs is untouched");
+    assert_eq!(root.names("Outer/Gig2"), ["b.ne5p"]);
+    assert_eq!(session.path(b).as_deref(), Some("Outer/Gig2/b.ne5p"));
+
+    let edited = with_gain(&program, "12");
+    let Bench { workspace, log, .. } = &mut session.bench;
+    workspace.replace_bytes(b, edited.clone(), log);
+    workspace.mark_saved(b);
+    session.sync();
+    assert!(root.read("Outer/Gig2/b.ne5p") == edited, "the save landed");
 }
 
 /// Two renames of one folder, the second sent before the first answers. The disk
@@ -2539,6 +2681,48 @@ fn a_reopen_reads_summaries_only_for_drawn_rows_and_nothing_was_kept() {
     assert_eq!(second.reads(), 1, "the drawn row is read");
     let upright = second.named("Upright.ne5p");
     assert!(second.bench.workspace.get(upright).unwrap().unread());
+}
+
+#[test]
+fn a_dropped_file_drawbar_does_not_open_is_refused_and_writes_nothing() {
+    let (root, outside) = (Temp::new(), Temp::new());
+    fs::write(outside.at("scan.pdf"), b"%PDF-1.7").unwrap();
+    let mut session = Session::open(&root);
+    session.bench.act(vec![crate::browser::Act::Take {
+        from: outside.at("scan.pdf"),
+        dir: LibPath::root(),
+        name: "scan.pdf".into(),
+    }]);
+    session.sync();
+
+    assert!(root.names("").is_empty(), "{:?}", root.names(""));
+    assert_eq!(session.bench.workspace.listed().count(), 0);
+    assert_eq!(
+        session.said("“scan.pdf” was not copied in: drawbar does not open this kind of file."),
+        1
+    );
+}
+
+#[test]
+fn a_mixed_drop_brings_the_sound_in_and_refuses_the_rest() {
+    let (root, outside) = (Temp::new(), Temp::new());
+    let program = Fresh::Program.bytes().unwrap();
+    fs::write(outside.at("Grand.ne5p"), &program).unwrap();
+    fs::write(outside.at("scan.pdf"), b"%PDF-1.7").unwrap();
+    let mut session = Session::open(&root);
+    let take = |name: &str| crate::browser::Act::Take {
+        from: outside.at(name),
+        dir: LibPath::root(),
+        name: name.into(),
+    };
+    session
+        .bench
+        .act(vec![take("scan.pdf"), take("Grand.ne5p")]);
+    session.sync();
+
+    assert_eq!(root.names(""), [".drawbar", "Grand.ne5p"]);
+    assert_eq!(root.read("Grand.ne5p"), program);
+    assert_eq!(session.said("“scan.pdf” was not copied in"), 1);
 }
 
 /// A file from outside is copied into the folder it was dropped on, and left where it
@@ -4514,6 +4698,38 @@ fn a_slot_view_edited_before_its_kept_edit_is_read_asks_which_to_keep() {
     assert!(second.bench.workspace.get(id).unwrap().is_unsaved());
 }
 
+#[test]
+fn keep_both_of_a_kept_slot_edit_files_the_earlier_edit_under_the_sound_name() {
+    let root = Temp::new();
+    let program = Fresh::Program.bytes().unwrap();
+    let at = Location::from_user(1, 1);
+    let mut first = Session::open(&root);
+    let id = first.view_slot("N1", at, program.clone());
+    let earlier = first.edit(id, "96");
+    first.close();
+
+    let mut second = Session::open(&root);
+    second.store.attached(Some("N1".to_string()));
+    let origin = Origin::Device {
+        class: ObjectClass::Program,
+        at,
+    };
+    let Bench { workspace, log, .. } = &mut second.bench;
+    let id = workspace.view("Grand".to_string(), origin, program.clone(), log);
+    let named = crate::workspace::library_filename(workspace.get(id).unwrap());
+    second.edit(id, "12");
+    second.autosave();
+    let acts = second.bench.browser.answer("Keep both");
+    second.bench.act(acts);
+    second.sync();
+    assert!(named.starts_with("Grand."), "{named}");
+    assert!(root.names("").contains(&named), "{:?}", root.names(""));
+    assert!(
+        root.read(&named) == earlier,
+        "{named} holds the earlier edit"
+    );
+}
+
 /// A slot view whose edit was sent, or let go of, leaves no edit for the next view.
 #[test]
 fn a_slot_view_sent_leaves_no_kept_edit() {
@@ -5347,6 +5563,155 @@ fn removing_a_folder_with_folders_in_it_is_one_undo_step() {
         "removed again"
     );
     assert_eq!(root.names("Set"), ["b.ne5p"]);
+}
+
+#[test]
+fn removing_a_folder_with_hidden_files_in_it_is_one_undo_step() {
+    let root = Temp::new();
+    fs::create_dir_all(root.at("Gig/Set")).unwrap();
+    fs::write(root.at("Gig/a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    fs::write(root.at("Gig/notes.pdf"), b"%PDF").unwrap();
+    fs::write(root.at("Gig/Set/cover.jpg"), b"not a nord file").unwrap();
+    let mut session = Session::open(&root);
+    let gig = LibPath::parse("Gig").unwrap();
+    let folder = session.bench.browser.folders.id_of(&gig).expect("listed");
+    session
+        .bench
+        .act(vec![crate::browser::Act::RemoveFolder(folder)]);
+    let acts = session.bench.browser.answer("Move them up too");
+    session.bench.act(acts);
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "Set", "a.ne5p", "notes.pdf"]);
+    assert_eq!(root.names("Set"), ["cover.jpg"]);
+    let others = |session: &Session| -> Vec<String> {
+        let others = session.bench.browser.folders.others.iter();
+        others.map(LibPath::to_string).collect()
+    };
+    assert_eq!(others(&session), ["Set/cover.jpg", "notes.pdf"]);
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo Remove folder “Gig”")
+    );
+    session.undo();
+    session.settle();
+    assert_eq!(root.names(""), [".drawbar", "Gig"]);
+    assert_eq!(root.names("Gig"), ["Set", "a.ne5p", "notes.pdf"]);
+    assert_eq!(others(&session), ["Gig/Set/cover.jpg", "Gig/notes.pdf"]);
+}
+
+#[test]
+fn a_wav_dropped_again_asks_about_its_asset_and_offers_keep_both() {
+    let (root, outside) = (Temp::new(), Temp::new());
+    fs::write(outside.at("cello.wav"), crate::testing::wav_bytes()).unwrap();
+    let mut session = Session::open(&root);
+    let take = || crate::browser::Act::Take {
+        from: outside.at("cello.wav"),
+        dir: LibPath::root(),
+        name: "cello.wav".into(),
+    };
+    session.bench.act(vec![take()]);
+    session.sync();
+    session.bench.act(vec![take()]);
+    let (title, answers) = session.bench.browser.asking().expect("a question");
+    assert_eq!(
+        title,
+        "“cello.wav” is already in the top level of the library"
+    );
+    assert!(answers.contains(&"Keep both"), "{answers:?}");
+}
+
+#[test]
+fn a_program_renamed_with_a_wav_name_is_still_a_program_after_a_reopen() {
+    let root = Temp::new();
+    fs::write(root.at("a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let id = session.only();
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id,
+        name: "Choir.wav".into(),
+    }]);
+    session.sync();
+    session.close();
+    let again = Session::open(&root);
+    assert_eq!(again.bench.workspace.listed().count(), 1, "still a row");
+    assert!(
+        again.bench.browser.folders.others.is_empty(),
+        "no hidden file"
+    );
+}
+
+#[test]
+fn a_dropped_wav_renamed_with_a_dot_keeps_its_extension() {
+    let (root, outside) = (Temp::new(), Temp::new());
+    fs::write(outside.at("cello.wav"), crate::testing::wav_bytes()).unwrap();
+    let mut session = Session::open(&root);
+    session.bench.act(vec![crate::browser::Act::Take {
+        from: outside.at("cello.wav"),
+        dir: LibPath::root(),
+        name: "cello.wav".into(),
+    }]);
+    session.sync();
+    let id = session.named("cello.wav");
+    session.bench.act(vec![crate::browser::Act::RenameLocal {
+        id,
+        name: "E.Piano".into(),
+    }]);
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "E.Piano.wav"]);
+}
+
+#[test]
+fn removing_a_folder_moves_a_dropped_wav_up_once() {
+    let (root, outside) = (Temp::new(), Temp::new());
+    fs::create_dir(root.at("Gig")).unwrap();
+    fs::write(root.at("Gig/a.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    fs::write(outside.at("cello.wav"), crate::testing::wav_bytes()).unwrap();
+    let mut session = Session::open(&root);
+    let gig = LibPath::parse("Gig").unwrap();
+    session.bench.act(vec![crate::browser::Act::Take {
+        from: outside.at("cello.wav"),
+        dir: gig.clone(),
+        name: "cello.wav".into(),
+    }]);
+    session.sync();
+    let folder = session.bench.browser.folders.id_of(&gig).expect("listed");
+    session
+        .bench
+        .act(vec![crate::browser::Act::RemoveFolder(folder)]);
+    session.sync();
+    assert_eq!(root.names(""), [".drawbar", "a.ne5p", "cello.wav"]);
+    let mut warned = session.bench.log.iter().map(|entry| entry.level);
+    assert!(warned.all(|level| level == crate::log::Level::Info));
+}
+
+#[test]
+fn a_deleted_hidden_file_goes_to_the_trash_and_undo_brings_it_back() {
+    let root = Temp::new();
+    fs::create_dir(root.at("Gig")).unwrap();
+    fs::write(root.at("Gig/notes.pdf"), b"%PDF").unwrap();
+    let mut session = Session::open(&root);
+    let notes = LibPath::parse("Gig/notes.pdf").unwrap();
+    session
+        .bench
+        .act(vec![crate::browser::Act::DeleteHidden(notes.clone())]);
+    session.sync();
+    assert_eq!(root.names("Gig"), Vec::<String>::new());
+    assert!(session.bench.browser.folders.others.is_empty());
+    assert_eq!(
+        session.store.undo_label().as_deref(),
+        Some("Undo Delete “notes.pdf”")
+    );
+    session.undo();
+    session.settle();
+    assert_eq!(fs::read(root.at("Gig/notes.pdf")).unwrap(), b"%PDF");
+    assert_eq!(
+        session.bench.browser.folders.others,
+        std::slice::from_ref(&notes)
+    );
+    session.redo();
+    session.settle();
+    assert_eq!(root.names("Gig"), Vec::<String>::new());
+    assert!(session.bench.browser.folders.others.is_empty());
 }
 
 /// A new tag made on a selection and named in its editor is one change: one undo takes
@@ -7024,14 +7389,27 @@ fn a_note_named_for_a_file_drawbar_does_not_open_comes_in_hidden_under_that_name
     let hidden = [LibPath::root().join("Set.ne5p.oracle.json")];
     assert_eq!(session.bench.workspace.listed().count(), 0, "never a row");
     assert_eq!(session.bench.browser.folders.others, hidden);
-    assert_eq!(session.said("1 of them came in hidden"), 1);
-    assert_eq!(session.said("differ only by case"), 0);
+    assert_eq!(session.said("It came in hidden"), 1);
     assert!(session.handed_over(&list));
     session.close();
 
     let again = Session::open(&root);
     assert_eq!(again.bench.workspace.listed().count(), 0);
     assert_eq!(again.bench.browser.folders.others, hidden);
+}
+
+#[test]
+fn a_list_with_some_hidden_notes_says_how_many_came_in_hidden() {
+    let root = Temp::new();
+    let mut kept = kept_before(
+        "drawbar 2\n3\n1\tfresh\tSet.json\tU2V0IDEK\n2\tfresh\tBroken.ne5p\tAAEC\n",
+        "",
+        "",
+    );
+    let mut session = Session::open(&root);
+    session.take_in(&mut kept);
+    assert_eq!(session.said("2 sounds"), 1);
+    assert_eq!(session.said("1 of them came in hidden"), 1);
 }
 
 /// `U2V0IDIK` is the base64 of `Set 2\n`.
@@ -7050,9 +7428,9 @@ fn the_unsaved_edit_of_a_hidden_note_is_a_hidden_file_beside_it() {
     assert_eq!(session.bench.workspace.listed().count(), 0);
     let said = format!(
         "drawbar brought 1 sound an earlier version kept into the library, with its tags \
-         and folders. 1 of them came in hidden, since drawbar does not open it; View ▸ {} \
+         and folders. It came in hidden, since drawbar does not open it; View ▸ {} \
          lists it. The unsaved edit of “Set.json” is a hidden file of its own, “Set 2.json”.",
-        crate::folders::SHOW_ALL_FILES
+        crate::folders::SHOW_HIDDEN_FILES
     );
     assert_eq!(session.said(&said), 1);
 }

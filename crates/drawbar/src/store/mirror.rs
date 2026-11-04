@@ -249,9 +249,6 @@ pub struct Store {
     /// The change answered next is the one that turned the library read-only, which
     /// the log has said already.
     turned_read_only: bool,
-    /// What names were last compared in for duplicates: the workspace's layout, and the
-    /// [`crate::folders::Folders::names_hash`].
-    compared: Option<(u64, u64)>,
     /// The assets a projection passed over while a save or a rename of their files was
     /// in flight, which the next one looks at again.
     deferred: BTreeSet<u64>,
@@ -384,7 +381,6 @@ impl Store {
             keeping: VecDeque::new(),
             told_unkept: false,
             turned_read_only: false,
-            compared: None,
             deferred: BTreeSet::new(),
             focused: true,
             scanning: false,
@@ -777,7 +773,7 @@ impl Store {
             return;
         };
         if entity.is_unsaved() {
-            return browser.ask_kept_slot_edit(id, &entity.name, bytes);
+            return browser.ask_kept_slot_edit(id, entity, bytes);
         }
         let changed = base != view.base;
         workspace.replace_bytes(id, bytes, log);
@@ -2345,10 +2341,6 @@ impl Store {
         if !first {
             self.attribute(&changes, workspace, log);
         }
-        let compared = (workspace.layout(), browser.folders.names_hash());
-        if self.compared.replace(compared) != Some(compared) {
-            flag_duplicates(workspace, browser, log);
-        }
         self.shown = Some(shown);
         self.quiet = false;
         touched
@@ -3064,14 +3056,20 @@ impl Store {
             });
         }
         browser.folders.others.sort();
-        let said = match hidden {
-            0 => list.said(),
-            n => format!(
-                "{} {n} of them came in hidden, since drawbar does not open {it}; View ▸ {} \
-                 lists {it}.{apart}",
+        let it = if hidden == 1 { "it" } else { "them" };
+        let came = match (hidden, hidden == list.assets.len()) {
+            (0, _) => None,
+            (1, true) => Some("It".to_string()),
+            (_, true) => Some("They".to_string()),
+            (n, false) => Some(format!("{n} of them")),
+        };
+        let said = match came {
+            None => list.said(),
+            Some(came) => format!(
+                "{} {came} came in hidden, since drawbar does not open {it}; View ▸ {} lists \
+                 {it}.{apart}",
                 list.said(),
-                crate::folders::SHOW_ALL_FILES,
-                it = if n == 1 { "it" } else { "them" },
+                crate::folders::SHOW_HIDDEN_FILES,
             ),
         };
         self.brought.extend(&ids);
@@ -3741,34 +3739,41 @@ impl Store {
         if self.scanning && pass != Pass::Last {
             return false;
         }
-        let mut ops = browser.folders.take_ops();
-        // ⚠️ A change that touches a rename still to answer waits for it, with every change
-        // after it: were the rename refused, the change would act on whatever else has that
-        // name on disk.
-        let held = ops.iter().position(|op| {
-            ends(op)
-                .into_iter()
-                .any(|path| unsettled(&self.moving, path))
-        });
-        let held = held.map(|at| ops.split_off(at)).unwrap_or_default();
+        let (mut removals, ops): (Vec<Op>, Vec<Op>) = browser
+            .folders
+            .take_ops()
+            .into_iter()
+            .partition(|op| matches!(op, Op::RemoveDir(_)));
+        // The folder changes are this pass's gesture's, as its asks are.
+        self.batch.take = self.passes;
+        // ⚠️ A change that touches a rename still to answer, one this pass sends included,
+        // waits for it, with every change after it: were the rename refused, the change
+        // would act on whatever else has that name on disk.
+        let touches = |moving: &[(LibPath, LibPath)], op: &Op| {
+            ends(op).into_iter().any(|path| unsettled(moving, path))
+        };
+        let removal_waits = removals.iter().any(|op| touches(&self.moving, op));
+        let mut waiting = Vec::new();
+        for op in ops {
+            let waits = touches(&self.moving, &op);
+            match waiting.is_empty() && !waits {
+                true => self.tree_op(op),
+                false => waiting.push(op),
+            }
+        }
+        if removal_waits || !waiting.is_empty() {
+            waiting.append(&mut removals);
+        }
         // The files those changes move wait with them.
-        let held_moves: Vec<(LibPath, LibPath)> = held
+        let held_moves: Vec<(LibPath, LibPath)> = waiting
             .iter()
             .map(|op| {
                 let [from, to] = ends(op);
                 (from.clone(), to.clone())
             })
             .collect();
-        let holds = !held.is_empty();
-        browser.folders.hold(held);
-        let (removals, ops): (Vec<Op>, Vec<Op>) = ops
-            .into_iter()
-            .partition(|op| matches!(op, Op::RemoveDir(_)));
-        // The folder changes are this pass's gesture's, as its asks are.
-        self.batch.take = self.passes;
-        for op in ops {
-            self.tree_op(op);
-        }
+        let holds = !waiting.is_empty();
+        browser.folders.hold(waiting);
         crate::folders::place_new(workspace, &browser.folders);
         self.take_asks(workspace);
         let mut done = self.arrivals(workspace, &held_moves);
@@ -3889,6 +3894,16 @@ impl Store {
                     }
                 }
                 self.rename_folder(from, to);
+            }
+            Op::DeleteFile(path) => self.part(Intent::Delete {
+                files: vec![(path, toshokan::Expect::File)],
+            }),
+            Op::MoveFile { from, to } => {
+                self.moving.push((from.clone(), to.clone()));
+                let expect = toshokan::Expect::File;
+                self.part(Intent::Move {
+                    moves: vec![Moving { from, to, expect }],
+                });
             }
         }
     }
@@ -4404,8 +4419,8 @@ fn leave(left: &mut Vec<u64>, leaving: Leaving, workspace: &Workspace, log: &mut
 /// The paths a change to the folders acts on, where it was and where it goes.
 fn ends(op: &Op) -> [&LibPath; 2] {
     match op {
-        Op::MakeDir(path) | Op::RemoveDir(path) => [path, path],
-        Op::MoveDir { from, to } => [from, to],
+        Op::MakeDir(path) | Op::RemoveDir(path) | Op::DeleteFile(path) => [path, path],
+        Op::MoveDir { from, to } | Op::MoveFile { from, to } => [from, to],
     }
 }
 
@@ -4439,94 +4454,6 @@ fn unsettled<'a>(moving: impl IntoIterator<Item = &'a (LibPath, LibPath)>, path:
     moving
         .into_iter()
         .any(|(from, to)| path.is_in(from) || from.is_in(path) || path.is_in(to) || to.is_in(path))
-}
-
-/// Flag the entries of one folder whose names are one name under [`names::key`], and
-/// warn once about each new pair. Nothing is renamed: renaming a user's files on open
-/// would be hostile, and either name may be the one other files refer to.
-pub(crate) fn flag_duplicates(workspace: &Workspace, browser: &mut Browser, log: &mut Log) {
-    let (flagged, groups) = duplicates(workspace, &browser.folders);
-    for (dir, group) in groups {
-        let ids: Vec<u64> = group.iter().filter_map(|(id, _)| *id).collect();
-        if !ids.is_empty() && ids.iter().all(|id| browser.folders.duplicates.contains(id)) {
-            continue;
-        }
-        let names: Vec<String> = group.iter().map(|(_, name)| format!("“{name}”")).collect();
-        let place = match dir.is_root() {
-            true => "the library".to_string(),
-            false => dir.to_string(),
-        };
-        log.warn(format!(
-            "{} in {place} differ only by case and would collide on macOS or Windows; rename \
-             one of them.",
-            names.join(" and ")
-        ));
-    }
-    browser.folders.duplicates = flagged;
-}
-
-/// One entry of a folder, as [`duplicates`] compares it.
-struct Entry {
-    /// An asset's id, or `None` for a folder or a file drawbar does not hold.
-    id: Option<u64>,
-    name: String,
-    /// A file drawbar does not hold.
-    stranger: bool,
-}
-
-/// Entries sharing a name: each asset's id, or `None` for a folder or a file drawbar does
-/// not hold, and its name.
-type Sharing = Vec<(Option<u64>, String)>;
-
-/// One folder's entries that share a name.
-type Group = (LibPath, Sharing);
-
-/// The assets sharing a name with another entry of their folder, and every such group
-/// with its folder. A folder in a group has no id there.
-pub(crate) fn duplicates(
-    workspace: &Workspace,
-    folders: &crate::folders::Folders,
-) -> (BTreeSet<u64>, Vec<Group>) {
-    let mut by_name: BTreeMap<(LibPath, String), Vec<Entry>> = BTreeMap::new();
-    let assets = workspace
-        .listed()
-        .filter_map(|entity| Some((Some(entity.id), entity.path.as_ref()?, false)));
-    let dirs = folders
-        .all()
-        .iter()
-        .map(|folder| (None, &folder.path, false));
-    let strangers = folders.strangers().map(|path| (None, path, true));
-    for (id, path, stranger) in assets.chain(dirs).chain(strangers) {
-        let entries = by_name
-            .entry((path.parent(), names::key(path.leaf())))
-            .or_default();
-        // An asset whose file drawbar does not open is listed as that file too.
-        if stranger && entries.iter().any(|entry| entry.name == path.leaf()) {
-            continue;
-        }
-        entries.push(Entry {
-            id,
-            name: path.leaf().to_string(),
-            stranger,
-        });
-    }
-    // A group of files drawbar does not hold is none of its business.
-    let groups: Vec<Group> = by_name
-        .into_iter()
-        .filter(|(_, group)| group.len() > 1 && group.iter().any(|entry| !entry.stranger))
-        .map(|((dir, _), group)| {
-            let group = group
-                .into_iter()
-                .map(|entry| (entry.id, entry.name))
-                .collect();
-            (dir, group)
-        })
-        .collect();
-    let flagged = groups
-        .iter()
-        .flat_map(|(_, group)| group.iter().filter_map(|(id, _)| *id))
-        .collect();
-    (flagged, groups)
 }
 
 /// What became of an asset whose file a rescan found gone.
