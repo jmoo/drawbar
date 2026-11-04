@@ -3739,7 +3739,7 @@ mod tests {
         assert!(open.document.pends(open.id));
         assert!(
             open.entity().is_unsaved(),
-            "which offers Revert to saved in the menu",
+            "which offers Revert in the menu",
         );
         assert_eq!(
             open.entity().bytes,

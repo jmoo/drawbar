@@ -514,7 +514,7 @@ impl DrawbarApp {
         at
     }
 
-    /// The files File ▸ Open… picked, copied into the top level of the library, or held
+    /// The files File ▸ Import… picked, copied into the top level of the library, or held
     /// in memory by a library that cannot take a copy.
     fn take_picked(&mut self) -> Vec<browser::Act> {
         let takes = self.store.as_ref().is_some_and(Store::takes_files);
@@ -815,7 +815,7 @@ impl DrawbarApp {
     /// Let go of a library drawbar can no longer reach: one whose thread or worker
     /// stopped, so that opening it again starts a fresh one, or in the browser a picked
     /// folder the browser no longer lets it into, which the private library stands in
-    /// for until reconnected.
+    /// for until the user chooses the folder again.
     #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))]
     fn let_lost_library_go(&mut self, ctx: &egui::Context) {
         let Some(store) = &self.store else {
@@ -846,19 +846,14 @@ impl DrawbarApp {
         if !store.denied() {
             return;
         }
-        let root = store.root().clone();
-        let name = root.name().unwrap_or_default();
+        let name = store.root().name().unwrap_or_default();
         self.log.trouble(format!(
-            "This browser no longer lets drawbar into {name}, so it was closed. Choose \
-             File ▸ Reconnect {name} to open it again. Until then the library is {}.",
+            "This browser no longer lets drawbar into {name}, so it was closed. Choose it \
+             in File ▸ {} to open it again. Until then the library is {}.",
+            crate::menu::RECENT,
             crate::libraries::THIS_COMPUTER
         ));
         self.switch_library(ctx, crate::store::Root::Private);
-        self.browser.folders.reconnect = Some(crate::folders::Library {
-            root,
-            name,
-            open: false,
-        });
     }
 
     /// Put the library just opened first among the recent ones.
@@ -894,24 +889,20 @@ impl DrawbarApp {
                 Heard::Restored { recent, permitted } => {
                     self.libraries.restored(recent);
                     let last = self.libraries.last().cloned();
-                    let (root, reconnect) = match last {
+                    let (root, denied) = match last {
                         Some(last @ Root::Picked(_)) if !permitted => (Root::Private, Some(last)),
                         last => (last.unwrap_or(Root::Private), None),
                     };
                     self.store = Some(library(ctx, root));
                     self.opened();
-                    if let Some(root) = reconnect {
-                        let name = root.name().unwrap_or_default();
+                    if let Some(denied) = denied {
+                        let name = denied.name().unwrap_or_default();
                         self.log.say(format!(
-                            "{name} opens again once you let this browser into it: choose \
-                             File ▸ Reconnect {name}. Until then the library is {}.",
+                            "{name} opens again once you let this browser into it: choose it \
+                             in File ▸ {}. Until then the library is {}.",
+                            crate::menu::RECENT,
                             crate::libraries::THIS_COMPUTER
                         ));
-                        self.browser.folders.reconnect = Some(crate::folders::Library {
-                            root,
-                            name,
-                            open: false,
-                        });
                     }
                 }
                 Heard::Open(root) => self.waiting = Some((root, false)),
@@ -957,9 +948,9 @@ impl DrawbarApp {
         let folders = &self.browser.folders;
         let files = folders.count(None, &self.workspace) > 0;
         match (files, folders.others.is_empty()) {
-            (true, _) => Some("A copy opens only into an empty library, and this one holds files."),
+            (true, _) => Some("drawbar imports a library only into an empty one, and this one holds files."),
             (false, false) => {
-                Some("A copy opens only into an empty library, and this one holds hidden files.")
+                Some("drawbar imports a library only into an empty one, and this one holds hidden files.")
             }
             (false, true) => None,
         }
@@ -997,14 +988,14 @@ impl DrawbarApp {
         let elsewhere = match crate::libraries::picking() {
             crate::libraries::Picking::On => format!(
                 " File ▸ {} keeps it in a folder on this computer instead.",
-                crate::menu::OPEN_LIBRARY
+                crate::menu::OPEN_FOLDER
             ),
             _ => String::new(),
         };
         self.log.say(format!(
             "The library is kept only in this browser's storage. {what} Keep a copy with \
              File ▸ {}.{elsewhere}",
-            crate::menu::SAVE_COPY
+            crate::menu::EXPORT_LIBRARY
         ));
     }
 }
@@ -1689,16 +1680,16 @@ mod tests {
     }
 
     #[test]
-    fn a_copy_opens_only_into_a_library_holding_no_file_hidden_ones_included() {
+    fn a_library_imports_only_into_one_holding_no_file_hidden_ones_included() {
         let ctx = egui::Context::default();
         let cc = eframe::CreationContext::_new_kittest(ctx.clone());
         let mut app = DrawbarApp::with_library(&cc, None);
-        assert_eq!(app.copy_refused(), None, "an empty library takes a copy");
+        assert_eq!(app.copy_refused(), None, "an empty library takes an import");
 
         app.browser.folders.others = vec![crate::store::LibPath::root().join("scan.pdf")];
         assert_eq!(
             app.copy_refused(),
-            Some("A copy opens only into an empty library, and this one holds hidden files.")
+            Some("drawbar imports a library only into an empty one, and this one holds hidden files.")
         );
 
         let id = app
@@ -1709,7 +1700,7 @@ mod tests {
             .place(id, crate::store::LibPath::root().join("Grand.ne5p"));
         assert_eq!(
             app.copy_refused(),
-            Some("A copy opens only into an empty library, and this one holds files.")
+            Some("drawbar imports a library only into an empty one, and this one holds files.")
         );
     }
 
@@ -2111,7 +2102,7 @@ mod tests {
         assert!(app.workspace.get(id).is_none(), "discarded, as agreed");
     }
 
-    /// Opening the library again, as File ▸ Open recent library does for one that opened
+    /// Opening the library again, as File ▸ Open recent does for one that opened
     /// read-only, asks first as leaving it does, and only a yes lets the edit go.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
@@ -2144,7 +2135,7 @@ mod tests {
         assert!(!unsaved(&app), "discarded, as agreed");
     }
 
-    /// A library that did not open is opened again from File ▸ Open recent library, as
+    /// A library that did not open is opened again from File ▸ Open recent, as
     /// one that opened read-only is.
     #[cfg(unix)]
     #[test]

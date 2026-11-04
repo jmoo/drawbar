@@ -1552,7 +1552,7 @@ enum Incoming {
         name: String,
         bytes: Vec<u8>,
     },
-    /// A file File ▸ Open… picked, to be copied into the library.
+    /// A file File ▸ Import… picked, to be copied into the library.
     Picked(Outside),
     /// A bundle to unpack into a new folder in `dir`, and what its directory says it
     /// holds.
@@ -1656,7 +1656,7 @@ pub struct Workspace {
     /// overwrites, with the stamp of the save that writes them. It goes only once that
     /// save has landed.
     saving_over: std::collections::BTreeMap<u64, (Leaving, u64)>,
-    /// The files File ▸ Open… picked, not yet taken.
+    /// The files File ▸ Import… picked, not yet taken.
     picked: Vec<Outside>,
     unbundled: Vec<Unbundled>,
     /// Assets whose bytes are still to be decoded, in the order they arrived, and those
@@ -3190,7 +3190,7 @@ impl Workspace {
         let ctx = self.ctx.clone();
         spawn(async move {
             let picked = rfd::AsyncFileDialog::new()
-                .set_title("Open Nord files")
+                .set_title("Import Nord files")
                 .pick_files()
                 .await;
             for handle in picked.unwrap_or_default() {
@@ -3230,7 +3230,7 @@ impl Workspace {
             .any(|e| (!e.unread() && *e.bytes == *bytes) || e.saved.holds(bytes))
     }
 
-    /// The files File ▸ Open… picked since the last call.
+    /// The files File ▸ Import… picked since the last call.
     pub fn take_picked(&mut self) -> Vec<Outside> {
         std::mem::take(&mut self.picked)
     }

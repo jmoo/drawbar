@@ -606,7 +606,7 @@ pub enum Cmd {
         files: Vec<(u64, LibPath, Option<Fingerprint>)>,
         room: u64,
     },
-    /// Open this copy of a library, as File ▸ Save a copy of the library saves one, into
+    /// Open this copy of a library, as File ▸ Export library saves one, into
     /// the library, which must hold no files and must not have opened yet. Answered by
     /// [`Event::Restored`].
     Restore(#[serde(with = "wire::outside")] Outside),

@@ -548,9 +548,9 @@ impl<F: Fs> Keeper<F> {
         };
         let writable = match library.mode() {
             Mode::Writable if opening_copy => Err(Unwritable::ReadOnly(format!(
-                "a copy was being opened into it when drawbar stopped; open the copy again \
+                "a copy was being imported into it when drawbar stopped; import it again \
                  with File ▸ {}",
-                crate::menu::OPEN_COPY
+                crate::menu::IMPORT_LIBRARY
             ))),
             Mode::Writable => Ok(()),
             Mode::ReadOnly(why @ Why::Unfinished { .. }) => {
@@ -2473,7 +2473,7 @@ mod tests {
         )
     }
 
-    /// A copy of the library in `from`, as File ▸ Save a copy of the library saves it,
+    /// A copy of the library in `from`, as File ▸ Export library saves it,
     /// in a folder of its own.
     fn saved(from: &Temp) -> (Temp, std::path::PathBuf) {
         let saved = Temp::new();
@@ -3041,7 +3041,7 @@ mod tests {
         };
         assert!(opened.opening_copy);
         assert!(
-            matches!(&opened.writable, Err(Unwritable::ReadOnly(why)) if why.contains(crate::menu::OPEN_COPY)),
+            matches!(&opened.writable, Err(Unwritable::ReadOnly(why)) if why.contains(crate::menu::IMPORT_LIBRARY)),
             "{:?}",
             opened.writable
         );

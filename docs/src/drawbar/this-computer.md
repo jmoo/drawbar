@@ -14,7 +14,7 @@ On the desktop, your library is a folder in drawbar's own data:
 - Linux: `~/.local/share/drawbar/library`
 - Windows: `%LOCALAPPDATA%\drawbar\library`
 
-**File ▸ Show the library folder** opens it. Finder, your backups and Nord
+**File ▸ Show library folder** opens it. Finder, your backups and Nord
 Sample Editor see the same files and folders drawbar does. drawbar keeps your
 tags, and where each sound came from, in a hidden `.drawbar` folder beside them,
 so back up the whole library folder. That folder says nothing about your other
@@ -36,39 +36,38 @@ drawbar** shows how much space it takes; see [Help and About](help.md).
 
 ## Keeping a copy in the browser
 
-**File ▸ Save a copy of the library** downloads the whole library as one ZIP
+**File ▸ Export library** downloads the whole library as one ZIP
 file, named for the day, such as `drawbar library 2026-10-30.zip`. It holds your
 files, folders and tags. Unsaved edits stay in the browser. Change nothing in the
 library until the download finishes, or the copy may not be whole.
 
-To bring a copy back, choose **File ▸ Open a copy…** while the browser's library
-holds none of your files, hidden files included: after the browser deleted it, or
-in another browser. The item is unavailable while the library holds any. drawbar
-opens only a copy it saved, and never mixes a copy with files already there.
-Close drawbar in the browser's other tabs first. If opening a copy stops partway, the library opens
-read-only until you open the copy again. A web
-app added to the Dock or the Home Screen keeps storage of its own, apart from
-Safari's, so save a copy in Safari and open it in the web app. In Chrome and
-Edge you can also unzip the copy and open the folder with **File ▸ Open library
+To bring a copy back, choose **File ▸ Import library…** after the browser
+deleted the library, or in another browser. drawbar imports only a copy it
+exported, and the item is unavailable while the library holds any file, hidden
+ones included. Close drawbar in the browser's other tabs first. If an import
+stops partway, the library opens read-only until you import the copy again.
+A web app added to the Dock or the Home Screen keeps storage of its own, apart
+from Safari's, so export a copy in Safari and import it in the web app. In Chrome and
+Edge you can also unzip the copy and open the folder with **File ▸ Open
 folder…**.
 
 ## Opening another folder
 
-On the desktop, **File ▸ Open library folder…** opens any folder as your
+On the desktop, **File ▸ Open folder…** opens any folder as your
 library: a Sample Editor project, a sample pack, a folder on a shared drive.
-**File ▸ Open recent library** switches back. drawbar opens the last library
+**File ▸ Open recent** switches back. drawbar opens the last library
 again when it starts, and changes nothing in a folder until you change something
 there. Unsaved edits come back when you open the library again from the same
 place. A library you moved or renamed opens without them.
 
 In the browser, browsers that can open a folder on your computer offer **File ▸
-Open library folder…** too ([What is supported](../getting-started/support.md)
+Open folder…** too ([What is supported](../getting-started/support.md)
 lists them). The browser asks whether drawbar may change the folder. It forgets
 that answer when drawbar.app closes, unless you allowed it on every visit, so the
-next visit starts with the browser's own library, and **File ▸ Reconnect**
-*folder* asks again. If you take the permission back while the folder is open,
+next visit starts with the browser's own library. Choose the folder in **File ▸
+Open recent** and the browser asks again. If you take the permission back while the folder is open,
 drawbar closes it the same way. A folder's unsaved edits come back while it is
-on **File ▸ Open recent library**; picked again after it left that list, it
+on **File ▸ Open recent**; picked again after it left that list, it
 opens without them.
 
 The library folder can live in Dropbox, OneDrive or iCloud Drive, or on a
@@ -94,10 +93,11 @@ between is replaced, and what it held is lost.
 
 ## Adding and making sounds
 
-Drop files on the window, or use **File ▸ Open…**. drawbar copies them into your
-library and leaves the originals where they were. A kind of file drawbar does not
-open, such as a PDF, is not copied in, and the activity log says so. A file
-drawbar cannot read still shows up, and the activity log says what went wrong.
+Drop files on the window, or use **File ▸ Import…**. drawbar copies them into
+your library and leaves the originals where they were. A kind of file drawbar
+does not open, such as a PDF, is not copied in, and the activity log says so. A
+file drawbar cannot read still shows up, and the activity log says what went
+wrong.
 
 **New** makes a fresh sound, note or folder. A fresh Stage program has every
 control at zero; it is not a factory sound.
@@ -177,15 +177,18 @@ copied to a second computer it cannot, as the other copy may still need that
 trash: it stays in the library folder, under `.drawbar/library/writers.2`, until
 you remove it by hand.
 
-**Export…** saves a copy somewhere else. Rename with F2. If a name is taken,
-drawbar asks whether to **Overwrite** the file there or **Keep both**. Only
-**Keep both** is offered when the file there is hidden, and the question says so.
+**Export…** saves a copy somewhere else. **File ▸ Export…** (⇧⌘E) exports the
+checked sounds on this computer, or the open document when nothing on this
+computer is checked.
+Rename with F2. If a name is taken, drawbar asks whether to **Overwrite** the
+file there or **Keep both**. Only **Keep both** is offered when the file there is
+hidden, and the question says so.
 
 ## Bundles
 
 A bundle (`.ne5pbundle` or `.ne5tbundle`) is the file Nord Sound Manager uses to
 carry programs, or a set list, together with the pianos and samples they play.
-Drop one on the window, or open it with **File ▸ Open…**, and drawbar unpacks it
+Drop one on the window, or open it with **File ▸ Import…**, and drawbar unpacks it
 into a new folder named after the bundle. The bundle itself is not kept.
 
 To make one, check the sounds to bundle and choose **Export as bundle…**. They
@@ -272,13 +275,13 @@ bring back any you deleted.
   another program put a file where a save was going, or the library folder does
   not make sure a change is kept, as on some network and USB drives: move such a
   library to a folder on a local disk. Hover the library's name
-  for the reason and what to do, then choose the library in **File ▸ Open recent
-  library** to open it again. Unsaved edits are still kept, and an edit you save
+  for the reason and what to do, then choose the library in **File ▸ Open recent**
+  to open it again. Unsaved edits are still kept, and an edit you save
   there comes back unsaved. New sounds, moves and deletions in a read-only
   library are held in memory only, and are lost when you quit. If opening it again would lose a sound or an edit, drawbar
   asks first.
 - **Not opened.** If a library cannot be opened, hover its name for the reason,
-  then choose it in **File ▸ Open recent library** to try again. Nothing you
+  then choose it in **File ▸ Open recent** to try again. Nothing you
   make meanwhile is kept.
 - **A change left unfinished.** If drawbar on another computer, or in a browser
   on this one, stopped in the middle of changing files in a shared library,
@@ -302,7 +305,7 @@ bring back any you deleted.
   are lost, and drawbar names them. A library you leave meanwhile, by opening
   another or quitting, is closed after that minute without asking, and those
   edits are lost too; the desktop app names them. If the library stops altogether, drawbar closes it and
-  says so; **File ▸ Open recent library** opens it again.
+  says so; **File ▸ Open recent** opens it again.
 - **Restored from a backup.** When the library folder no longer holds changes
   drawbar showed before, as after a restore from a backup, drawbar shows the
   folder as it is the next time it looks. While a sync is still bringing the

@@ -9,7 +9,7 @@ use eframe::egui;
 use nord_usb::ObjectClass;
 
 use crate::app::{accent, DrawbarApp, ThemeChoice};
-use crate::browser::Act;
+use crate::browser::{bulk, Act, Bulk};
 use crate::device::NO_USB;
 use crate::icon::{sized, Glyph};
 use crate::libraries::Picking;
@@ -24,7 +24,8 @@ use crate::zoom::Step;
 /// Everything a menu item can do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
-    Open,
+    /// Copy picked files into the library, as a drop does.
+    Import,
     /// Take back this session's last change to the library.
     Undo,
     /// Make again the change undone last.
@@ -34,8 +35,6 @@ pub enum Command {
     NewFolder,
     /// Open another folder as the library.
     PickLibrary,
-    /// Let the browser back into the library open last.
-    Reconnect,
     /// Switch to the recent library at this place in [`crate::folders::Folders::libraries`].
     Recent(usize),
     RevealLibrary,
@@ -84,8 +83,8 @@ pub enum Entry {
     Do(Command),
     Rule,
     Sub(&'static str, Vec<Entry>),
-    /// The recent libraries, as a submenu of [`Command::Recent`] lines, left out while
-    /// there are none.
+    /// The recent libraries, as a submenu of [`Command::Recent`] lines, left out while it
+    /// would list only the open, working library.
     Recent,
 }
 
@@ -120,22 +119,21 @@ impl Offer {
 /// The words of a command's item, before anything about the moment changes them.
 pub fn label(command: Command) -> &'static str {
     match command {
-        Command::Open => "Open…",
+        Command::Import => IMPORT,
         Command::Undo => "Undo",
         Command::Redo => "Redo",
         Command::New(kind) => kind.label(),
         Command::FromWavs(making) => making.item().0,
         Command::NewFolder => "New folder",
-        Command::PickLibrary => OPEN_LIBRARY,
-        Command::Reconnect => "Reconnect library",
+        Command::PickLibrary => OPEN_FOLDER,
         Command::Recent(_) => "Recent library",
-        Command::RevealLibrary => "Show the library folder",
+        Command::RevealLibrary => SHOW_FOLDER,
         #[cfg(target_arch = "wasm32")]
-        Command::SaveCopy => SAVE_COPY,
+        Command::SaveCopy => EXPORT_LIBRARY,
         #[cfg(target_arch = "wasm32")]
-        Command::OpenCopy => OPEN_COPY,
+        Command::OpenCopy => IMPORT_LIBRARY,
         Command::Save => "Save",
-        Command::Revert => "Revert to saved",
+        Command::Revert => "Revert",
         Command::Export => "Export…",
         Command::CloseTab => "Close tab",
         Command::Quit => "Quit",
@@ -229,23 +227,22 @@ pub fn menus(platform: Platform) -> Vec<Menu> {
     use Command as C;
     use Entry::{Do, Rule};
 
-    let mut file = vec![Do(C::Open), Entry::Sub("New", new_entries()), Rule];
+    let mut file = vec![Entry::Sub("New", new_entries()), Do(C::Import)];
+    #[cfg(target_arch = "wasm32")]
+    file.push(Do(C::OpenCopy));
     file.extend([
-        Do(C::Reconnect),
+        Rule,
         Do(C::PickLibrary),
         Entry::Recent,
         Do(C::RevealLibrary),
-    ]);
-    #[cfg(target_arch = "wasm32")]
-    file.extend([Do(C::SaveCopy), Do(C::OpenCopy)]);
-    file.extend([
         Rule,
         Do(C::Save),
         Do(C::Revert),
         Do(C::Export),
-        Rule,
-        Do(C::CloseTab),
     ]);
+    #[cfg(target_arch = "wasm32")]
+    file.push(Do(C::SaveCopy));
+    file.extend([Rule, Do(C::CloseTab)]);
     if platform.quits_from_file() {
         file.push(Do(C::Quit));
     }
@@ -380,7 +377,7 @@ pub fn shortcut(command: Command, platform: Platform, mac: bool) -> Option<egui:
     };
     let command_and = |with, key| Shortcut::new(With::COMMAND.plus(with), key);
     Some(match command {
-        Command::Open => Shortcut::new(With::COMMAND, Key::O),
+        Command::Import => Shortcut::new(With::COMMAND, Key::O),
         Command::Undo => Shortcut::new(With::COMMAND, Key::Z),
         Command::Redo => command_and(With::SHIFT, Key::Z),
         Command::Save => Shortcut::new(With::COMMAND, Key::S),
@@ -450,7 +447,7 @@ const KEYED: [Command; 17] = [
     Command::Browser,
     Command::Inspector,
     Command::Activity,
-    Command::Open,
+    Command::Import,
     Command::Save,
     Command::ReadEverything,
     Command::CloseTab,
@@ -462,16 +459,20 @@ const KEYED: [Command; 17] = [
     Command::Zoom(Step::Reset),
 ];
 
-pub const OPEN_LIBRARY: &str = "Open library folder…";
+pub const IMPORT: &str = "Import…";
+
+pub const OPEN_FOLDER: &str = "Open folder…";
+
+pub const SHOW_FOLDER: &str = "Show library folder";
 
 /// The item that downloads a copy of the library.
-pub const SAVE_COPY: &str = "Save a copy of the library";
+pub const EXPORT_LIBRARY: &str = "Export library";
 
-/// File ▸ Open a copy…, as messages name it.
-pub const OPEN_COPY: &str = "Open a copy…";
+/// The item that opens a copy of a library into the browser's own.
+pub const IMPORT_LIBRARY: &str = "Import library…";
 
 /// The title of [`Entry::Recent`]'s submenu.
-pub const RECENT: &str = "Open recent library";
+pub const RECENT: &str = "Open recent";
 
 /// The minimum width of a drop-down menu, so its width does not change with which items
 /// are enabled and a long label keeps a gap before its key text.
@@ -525,7 +526,7 @@ impl DrawbarApp {
             ..Offer::of(command)
         };
         Some(match command {
-            Command::Open
+            Command::Import
             | Command::New(_)
             | Command::FromWavs(_)
             | Command::NewFolder
@@ -543,12 +544,10 @@ impl DrawbarApp {
                 },
                 Picking::Absent => return None,
             },
-            Command::Reconnect => {
-                let library = self.browser.folders.reconnect.as_ref()?;
-                relabeled(format!("Reconnect {}", library.name))
-            }
             Command::Recent(at) => {
-                let library = self.browser.folders.libraries.get(at)?;
+                let folders = &self.browser.folders;
+                let offered = crate::browser::offers_recent(folders);
+                let library = folders.libraries.get(at).filter(|_| offered)?;
                 Offer {
                     label: library.name.clone(),
                     ..check(library.open)
@@ -607,7 +606,8 @@ impl DrawbarApp {
                     },
                 }
             }
-            Command::Save | Command::Export => active.map(|_| plain)?,
+            Command::Save => active.map(|_| plain)?,
+            Command::Export => (!self.exports().is_empty()).then_some(plain)?,
             Command::Revert => {
                 let unsaved = self
                     .workspace
@@ -677,20 +677,13 @@ impl DrawbarApp {
     ) {
         let active = self.tabs.active();
         match command {
-            Command::Open => acts.push(Act::OpenFiles),
+            Command::Import => acts.push(Act::OpenFiles),
             Command::Undo => self.store.iter_mut().for_each(crate::store::Store::undo),
             Command::Redo => self.store.iter_mut().for_each(crate::store::Store::redo),
             Command::New(_) | Command::FromWavs(_) | Command::NewFolder => {
                 acts.extend(made(command))
             }
             Command::PickLibrary => acts.push(Act::PickLibrary),
-            Command::Reconnect => acts.extend(
-                self.browser
-                    .folders
-                    .reconnect
-                    .as_ref()
-                    .map(|library| Act::OpenLibrary(library.root.clone())),
-            ),
             Command::Recent(at) => {
                 let folders = &self.browser.folders;
                 let chosen = folders.libraries.get(at);
@@ -717,7 +710,7 @@ impl DrawbarApp {
             }
             Command::Save => acts.extend(active.map(Act::SaveDoc)),
             Command::Revert => acts.extend(active.map(Act::Revert)),
-            Command::Export => acts.extend(active.map(Act::Export)),
+            Command::Export => acts.extend(self.exports()),
             Command::CloseTab => acts.push(Act::CloseTab),
             Command::Quit => acts.push(Act::Quit),
             Command::Keyboard => acts.push(Act::ShowTab(Spot::Keyboard)),
@@ -817,6 +810,17 @@ impl DrawbarApp {
         let id = self.tabs.active()?;
         let (class, _) = self.workspace.get(id)?.origin.slot()?;
         Some(class)
+    }
+
+    /// What File ▸ Export… exports: the checked assets on this computer, as the
+    /// Selection card's Export… does, or else the open document.
+    fn exports(&self) -> Vec<Act> {
+        let checked: Vec<_> = self.browser.picked().items().collect();
+        let exports = bulk(Bulk::Export, &checked, &self.device.state);
+        match exports.is_empty() {
+            true => self.tabs.active().map(Act::Export).into_iter().collect(),
+            false => exports,
+        }
     }
 
     /// The selected assets that are waiting to be sent.
@@ -1206,6 +1210,45 @@ mod tests {
     }
 
     #[test]
+    fn export_takes_the_checked_assets_before_the_open_document() {
+        use crate::browser::Item;
+
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = DrawbarApp::with_library(&cc, None);
+        let exports = |app: &mut DrawbarApp| {
+            let enabled = app.offer(Command::Export).map(|offer| offer.enabled);
+            let mut acts = Vec::new();
+            app.run(
+                &ctx,
+                &mut eframe::Frame::_new_kittest(),
+                Command::Export,
+                &mut acts,
+            );
+            (enabled, acts)
+        };
+        assert_eq!(exports(&mut app), (None, vec![]), "nothing to export");
+
+        let mut fresh = || app.workspace.create(Fresh::Program, &mut app.log).unwrap();
+        let (open, checked) = (fresh(), fresh());
+        app.tabs.open(open);
+        assert_eq!(exports(&mut app), (Some(true), vec![Act::Export(open)]));
+
+        app.browser.check(Item::Slot {
+            class: ObjectClass::Program,
+            at: nord_usb::Location { bank: 0, slot: 0 },
+        });
+        assert_eq!(
+            exports(&mut app),
+            (Some(true), vec![Act::Export(open)]),
+            "a checked slot is not on this computer"
+        );
+
+        app.browser.check(Item::Local(checked));
+        assert_eq!(exports(&mut app), (Some(true), vec![Act::Export(checked)]));
+    }
+
+    #[test]
     fn quit_is_in_the_file_menu_only_where_the_window_is_the_apps_to_close() {
         assert!(every(Platform::Windows).contains(&Command::Quit));
         assert!(every(Platform::Linux).contains(&Command::Quit));
@@ -1260,8 +1303,8 @@ mod tests {
         );
         assert_eq!(web(Command::Quit, true), None, "a tab cannot quit");
         assert_eq!(
-            web(Command::Open, true),
-            shortcut(Command::Open, Platform::Mac, true),
+            web(Command::Import, true),
+            shortcut(Command::Import, Platform::Mac, true),
             "a page may take ⌘O"
         );
         assert_eq!(

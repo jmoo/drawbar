@@ -619,7 +619,6 @@ impl DrawbarApp {
         }
     }
 
-    /// Open, New, and Save.
     fn file_tools(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         let mac = crate::platform::mac_keyboard(ui.ctx());
         let hint = |label: &str, command| match key_text(command, self.platform, mac) {
@@ -631,7 +630,7 @@ impl DrawbarApp {
             Glyph::FolderOpen,
             BAR_GLYPH,
             CHIP,
-            &hint("Open files…", Command::Open),
+            &hint(crate::menu::IMPORT, Command::Import),
         )
         .clicked()
         {
@@ -2215,12 +2214,60 @@ mod tests {
         let _ = settled(&ctx, &mut app, screen);
         let said = words_at(&ctx, &mut app, screen, Vec::new());
         for (sub, item) in [
-            ("New", "Open…"),
-            (crate::menu::RECENT, "Open…"),
+            ("New", "Import…"),
+            (crate::menu::RECENT, "Import…"),
             ("Theme", "Browser panel"),
         ] {
             let (sub, item) = (testing::where_(&said, sub), testing::where_(&said, item));
             assert_eq!(sub.left(), item.left(), "{sub:?} against {item:?}");
+        }
+    }
+
+    /// File ▸ Open recent is left out while the open library is all it would list, and
+    /// offered once there is another to switch to or the open one opens again.
+    #[test]
+    fn open_recent_is_left_out_while_it_would_list_only_the_open_library() {
+        let screen = egui::vec2(1440.0, 1400.0);
+        let library = |name: &str, open| crate::folders::Library {
+            root: name.into(),
+            name: name.to_string(),
+            open,
+        };
+        let reopening = crate::folders::Where {
+            reopens: true,
+            ..Default::default()
+        };
+        for (libraries, place, offered) in [
+            (vec![], None, false),
+            (vec![library("This computer", true)], None, false),
+            (
+                vec![library("This computer", true)],
+                Some(reopening.clone()),
+                true,
+            ),
+            (
+                vec![library("This computer", true), library("Elsewhere", false)],
+                None,
+                true,
+            ),
+        ] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx, None);
+            app.platform = Platform::Web;
+            let _ = settled(&ctx, &mut app, screen);
+            let listed = libraries.len();
+            app.browser.folders.libraries = libraries;
+            app.browser.folders.place = place;
+            let f10 = pressed(egui::Key::F10, egui::Modifiers::NONE);
+            let _ = frame_of(&ctx, &mut app, screen, vec![f10]);
+            let painted = settled(&ctx, &mut app, screen);
+            assert!(painted.wrote("Import…"), "the File menu is open");
+            assert_eq!(
+                painted.wrote(crate::menu::RECENT),
+                offered,
+                "{listed} libraries, reopening: {}",
+                app.browser.folders.place.is_some()
+            );
         }
     }
 
@@ -2342,7 +2389,7 @@ mod tests {
             for title in ["File", "View", "Instrument", "Help"] {
                 assert!(painted.wrote(title), "{height}: {title}");
             }
-            assert_eq!(painted.wrote("Open…"), flat, "{height}: File's items");
+            assert_eq!(painted.wrote("Import…"), flat, "{height}: File's items");
             let widest = ctx.memory(|memory| {
                 memory
                     .areas()

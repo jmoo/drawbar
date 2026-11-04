@@ -185,8 +185,6 @@ pub struct Folders {
     /// The libraries the window can switch to, the open one among them. Empty where
     /// the window cannot switch.
     pub libraries: Vec<Library>,
-    /// The library open last, which the browser must be let into again before it opens.
-    pub reconnect: Option<Library>,
     kept: Vec<Kept>,
     /// The assets a change of [`Folders::kept`] changes.
     kept_ids: BTreeSet<u64>,
