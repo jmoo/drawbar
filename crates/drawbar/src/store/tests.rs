@@ -8899,6 +8899,35 @@ fn a_build_past_the_budget_says_so_and_reads_no_wav_after_it_is_refused() {
     );
 }
 
+/// A refused build lets go of the WAVs it had not had read yet: nothing asks for them.
+#[test]
+fn a_refused_build_asks_for_none_of_its_other_wavs() {
+    let root = Temp::new();
+    project_with_wavs(
+        &root,
+        &[("c3.wav", "Marimba/c3.wav"), ("c4.wav", "Marimba/c4.wav")],
+    );
+    let mut session = Session::listed(&root);
+    let id = session.named("Marimba.nsmpproj");
+    let gone = session.named("c3.wav");
+    session.read(&[id]);
+    session.bench.act(vec![crate::browser::Act::Build(id)]);
+    let Bench {
+        workspace,
+        browser,
+        tabs,
+        builds,
+        log,
+        ..
+    } = &mut session.bench;
+    builds.poll(workspace, &browser.folders, tabs, log);
+    assert!(workspace.wants(), "the build asks for its WAVs");
+    workspace.remove(gone, log);
+    builds.poll(workspace, &browser.folders, tabs, log);
+    assert!(!builds.running(id), "refused");
+    assert!(!workspace.wants(), "nothing asks for the other WAV");
+}
+
 #[test]
 fn opening_exporting_or_duplicating_a_wav_refused_for_room_asks_for_it_again() {
     use crate::browser::{Act, Item};
@@ -8983,10 +9012,16 @@ fn a_build_whose_project_is_removed_while_it_runs_is_dropped() {
         log,
         ..
     } = &mut session.bench;
+    builds.poll(workspace, &browser.folders, tabs, log);
     assert!(builds.running(id));
+    assert!(workspace.wants(), "the build asks for its WAV");
     workspace.remove(id, log);
     builds.poll(workspace, &browser.folders, tabs, log);
     assert!(!builds.running(id));
+    assert!(
+        !workspace.wants(),
+        "nothing asks for the WAV once the build is dropped"
+    );
     session.answer_reads();
     assert_eq!(session.said("Built"), 0);
     assert_eq!(session.said("was not built"), 0);
