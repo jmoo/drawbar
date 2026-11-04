@@ -709,7 +709,9 @@ pub struct Located {
     /// The library's WAVs and hidden files, as of a [`layout`](Workspace::layout) and a
     /// [`shape`](Folders::shape).
     wavs: Option<((u64, Shape), builds::Wavs)>,
-    held: Option<(Seen, Found, LibPath)>,
+    held: Option<(Seen, Found)>,
+    /// Where a build files the instrument, as of what it was taken against.
+    lands: Option<(Filed, LibPath)>,
 }
 
 /// Where an open project's WAVs are, and where a build of it files the instrument.
@@ -727,6 +729,10 @@ pub type Found = Result<Vec<(String, Wav)>, String>;
 /// [`shape`](Folders::shape).
 type Seen = (u64, bool, Option<LibPath>, (u64, Shape));
 
+/// What where a build files was taken against: the project's path and name and the
+/// layout, which an edit to the project leaves alone.
+type Filed = (Option<LibPath>, String, (u64, Shape));
+
 impl Located {
     pub fn of(
         &mut self,
@@ -742,7 +748,7 @@ impl Located {
             layout,
         );
         let held = match self.held.take() {
-            Some((held, found, lands)) if held == seen => (held, found, lands),
+            Some((held, found)) if held == seen => (held, found),
             _ => {
                 let files = match entity.entity.as_deref().and_then(project) {
                     Some(project) => build::played(project).map_err(|e| e.to_string()),
@@ -755,12 +761,20 @@ impl Located {
                 };
                 let found = files.map(|files| builds::locate_all(&dir, &files, &wavs));
                 self.wavs = Some((layout, wavs));
-                let name = builds::instrument_name(&entity.name);
-                let lands = dir.join(&folders.free(&dir, &name, workspace));
-                (seen, found, lands)
+                (seen, found)
             }
         };
-        let (_, found, lands) = self.held.insert(held);
+        let filed = (entity.path.clone(), entity.name.clone(), layout);
+        let lands = match self.lands.take() {
+            Some((held, lands)) if held == filed => (held, lands),
+            _ => {
+                let dir = builds::dir_of(entity);
+                let name = builds::instrument_name(&entity.name);
+                (filed, dir.join(&folders.free(&dir, &name, workspace)))
+            }
+        };
+        let found = &self.held.insert(held).1;
+        let lands = &self.lands.insert(lands).1;
         Placed { found, lands }
     }
 }
@@ -1030,6 +1044,18 @@ mod tests {
             (listed, keys),
             (24, 0),
             "an edit leaves the WAVs where they are"
+        );
+
+        let edited = Project::new("Marimba", &zones, 1).unwrap();
+        let edited = nord_format::to_bytes(&Entity::SampleProject(edited)).unwrap();
+        workspace.replace_bytes(id, edited, &mut log);
+        workspace.read_now([id], &mut log);
+        assert!(workspace.layout() == layout);
+        let (listed, keys) = keyed(&mut located, &workspace);
+        assert_eq!(listed, 24);
+        assert!(
+            keys <= 24,
+            "an edit to the project keys {keys} names, past its 24 paths"
         );
 
         workspace.place(wavs[0], LibPath::parse("Elsewhere/take 000.wav").unwrap());
