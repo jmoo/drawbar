@@ -229,12 +229,13 @@ impl DrawbarApp {
             .storage
             .map(crate::libraries::Recent::restore)
             .unwrap_or_default();
-        let root = recent
-            .last()
-            .map(std::path::Path::to_path_buf)
-            .or_else(crate::store::default_root);
-        let store = root.map(|root| library(&cc.egui_ctx, root));
-        DrawbarApp::with_library(cc, store)
+        let started = crate::store::starting(recent.last(), crate::store::default_root());
+        let (root, ready) = started.unzip();
+        let mut app = DrawbarApp::with_library(cc, root.map(|root| library(&cc.egui_ctx, root)));
+        if let Some(Err(why)) = ready {
+            app.log.trouble(why);
+        }
+        app
     }
 
     /// The app over the browser's own library, or, where the browser opens folders, the

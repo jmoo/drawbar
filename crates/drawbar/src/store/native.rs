@@ -103,6 +103,17 @@ pub fn openable(root: &Path, default: Option<&Path>) -> Result<(), String> {
     ))
 }
 
+/// The library a start opens, `last` where one was open before, else `default`, which is
+/// made where it is missing, with why it cannot be opened, if it cannot.
+pub fn starting(
+    last: Option<&Path>,
+    default: Option<PathBuf>,
+) -> Option<(PathBuf, Result<(), String>)> {
+    let root = last.map(Path::to_path_buf).or(default.clone())?;
+    let ready = openable(&root, default.as_deref());
+    Some((root, ready))
+}
+
 /// A folder as a `file:` URL, or `None` for a path that is not absolute.
 fn folder_url(dir: &Path) -> Option<String> {
     url::Url::from_directory_path(dir).ok().map(String::from)
@@ -712,6 +723,26 @@ mod tests {
         let why = openable(&gone, Some(&root.at("library"))).expect_err("refused");
         assert!(why.contains("is not a folder drawbar can open"), "{why}");
         assert!(!gone.exists());
+    }
+
+    /// A first start makes the default library's folder, which a write needs.
+    #[test]
+    fn a_first_start_makes_the_default_library() {
+        let root = Temp::new();
+        let default = root.at("drawbar/library");
+        let started = starting(None, Some(default.clone()));
+        assert_eq!(started, Some((default.clone(), Ok(()))));
+        assert!(default.is_dir());
+    }
+
+    /// A start opens the library open last and makes no default beside it.
+    #[test]
+    fn a_start_opens_the_library_open_last() {
+        let root = Temp::new();
+        let default = root.at("drawbar/library");
+        let started = starting(Some(&root.0), Some(default.clone()));
+        assert_eq!(started, Some((root.0.clone(), Ok(()))));
+        assert!(!default.exists());
     }
 
     /// A file where the default library would be is left alone.

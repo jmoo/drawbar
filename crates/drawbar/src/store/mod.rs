@@ -49,7 +49,7 @@ mod unsaved;
 pub(crate) mod wire;
 mod zip;
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{default_root, local_root, openable, sync_dir, Backend};
+pub use native::{default_root, local_root, openable, starting, sync_dir, Backend};
 
 #[cfg(target_arch = "wasm32")]
 mod web;
