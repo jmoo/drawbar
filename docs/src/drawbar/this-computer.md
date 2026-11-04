@@ -165,8 +165,8 @@ of characters long. If another drawbar has changed what an undo would take
 back, that undo is refused, and Undo goes on to the change before it. An edit
 you have not saved is taken back with **Revert** instead.
 
-Undo and Redo wait while a change is being written. A change that takes more
-than two seconds shows what it is doing over the window until it is done.
+Undo and Redo are off while a change is being written. A change that takes more
+than two seconds shows what it is doing over the window.
 
 Deleting a sound or a hidden file, or saving over a sound, moves the old file
 into drawbar's trash in the `.drawbar` folder, where Undo finds it. Undo reaches
