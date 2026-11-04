@@ -8148,8 +8148,8 @@ fn a_take_in_survives_an_undo_and_a_close() {
     assert_eq!(root.names("Gig"), ["Pad 2.ne5p", "Pad.ne5p"]);
 }
 
-/// A change the library has not answered says what it is doing, and Undo and Redo wait
-/// for it.
+/// A change the library has not answered says what it is doing until it stalls, and Undo
+/// and Redo wait for it.
 #[test]
 fn a_change_in_flight_says_what_it_is_doing_and_undo_waits_for_it() {
     let root = Temp::new();
@@ -8165,7 +8165,7 @@ fn a_change_in_flight_says_what_it_is_doing_and_undo_waits_for_it() {
 
     let gig = LibPath::parse("Gig").unwrap();
     let folder = session.bench.browser.folders.id_of(&gig).expect("listed");
-    session.store.patience(std::time::Duration::from_secs(1));
+    session.store.patience(std::time::Duration::from_secs(10));
     session.store.fault(Fault::Stall);
     let acts = ids.iter().map(|id| crate::browser::Act::File {
         id: *id,
@@ -8179,6 +8179,14 @@ fn a_change_in_flight_says_what_it_is_doing_and_undo_waits_for_it() {
     assert_eq!(session.store.doing(), Some("Moving 2 files…"));
     assert_eq!(session.store.undo_label(), None);
     assert_eq!(session.store.redo_label(), None);
+
+    session.store.patience(std::time::Duration::ZERO);
+    assert_eq!(
+        session.store.doing(),
+        None,
+        "a stall is asked about instead"
+    );
+    assert_eq!(session.store.undo_label(), None);
     session.let_go_stalled();
 }
 

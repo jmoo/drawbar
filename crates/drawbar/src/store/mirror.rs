@@ -1857,9 +1857,11 @@ impl Store {
         self.opened() && self.committing == 0 && self.asks.is_empty()
     }
 
-    /// What the library is doing for the oldest change, undo or redo not answered yet.
+    /// What the library is doing for the oldest change, undo or redo not answered yet:
+    /// nothing once it has stalled, which drawbar asks about instead.
     pub fn doing(&self) -> Option<&str> {
-        self.answering.front().map(|sent| sent.doing.as_str())
+        let sent = self.answering.front().filter(|_| !self.stalled())?;
+        Some(&sent.doing)
     }
 
     /// Read what other drawbars wrote to the library since it was last read.
