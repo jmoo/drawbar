@@ -709,7 +709,13 @@ pub struct Located {
     /// The library's WAVs and hidden files, as of a [`layout`](Workspace::layout) and a
     /// [`shape`](Folders::shape).
     wavs: Option<((u64, Shape), builds::Wavs)>,
-    held: Option<(Seen, Found)>,
+    held: Option<(Seen, Found, LibPath)>,
+}
+
+/// Where an open project's WAVs are, and where a build of it files the instrument.
+pub struct Placed<'a> {
+    pub found: &'a Found,
+    pub lands: &'a LibPath,
 }
 
 /// Each audio file a zone of the project plays, by its stored path, with where its WAV
@@ -722,7 +728,12 @@ pub type Found = Result<Vec<(String, Wav)>, String>;
 type Seen = (u64, bool, Option<LibPath>, (u64, Shape));
 
 impl Located {
-    pub fn of(&mut self, entity: &LocalEntity, workspace: &Workspace, folders: &Folders) -> &Found {
+    pub fn of(
+        &mut self,
+        entity: &LocalEntity,
+        workspace: &Workspace,
+        folders: &Folders,
+    ) -> Placed<'_> {
         let layout = (workspace.layout(), folders.shape());
         let seen = (
             entity.stamp,
@@ -731,7 +742,7 @@ impl Located {
             layout,
         );
         let held = match self.held.take() {
-            Some((held, found)) if held == seen => (held, found),
+            Some((held, found, lands)) if held == seen => (held, found, lands),
             _ => {
                 let files = match entity.entity.as_deref().and_then(project) {
                     Some(project) => build::played(project).map_err(|e| e.to_string()),
@@ -744,10 +755,13 @@ impl Located {
                 };
                 let found = files.map(|files| builds::locate_all(&dir, &files, &wavs));
                 self.wavs = Some((layout, wavs));
-                (seen, found)
+                let name = builds::instrument_name(&entity.name);
+                let lands = dir.join(&folders.free(&dir, &name, workspace));
+                (seen, found, lands)
             }
         };
-        &self.held.insert(held).1
+        let (_, found, lands) = self.held.insert(held);
+        Placed { found, lands }
     }
 }
 
@@ -756,7 +770,7 @@ pub const BUILD: &str = "Build → .nsmp";
 
 /// The header's loud action for a project: its build, ready once the library lists
 /// every WAV it plays.
-pub fn loud(entity: &LocalEntity, found: &Found, building: bool) -> Loud {
+pub fn loud(placed: Placed, building: bool) -> Loud {
     let build = Loud {
         label: BUILD.to_string(),
         short: "Build".to_string(),
@@ -774,7 +788,7 @@ pub fn loud(entity: &LocalEntity, found: &Found, building: bool) -> Loud {
             ..build
         };
     }
-    let wavs = match found {
+    let wavs = match placed.found {
         Ok(wavs) => wavs,
         Err(why) => {
             return Loud {
@@ -785,12 +799,12 @@ pub fn loud(entity: &LocalEntity, found: &Found, building: bool) -> Loud {
     };
     let unresolved = builds::unresolved(wavs);
     if unresolved.is_empty() {
-        let lands = builds::dir_of(entity).join(&builds::instrument_name(&entity.name));
         return Loud {
             tone: Tone::Ready,
             hint: format!(
-                "writes a {} instrument to {lands}",
-                builds::LAYOUT.generation()
+                "writes a {} instrument to {}",
+                builds::LAYOUT.generation(),
+                placed.lands
             ),
             click: Click::Build,
             ..build
@@ -876,10 +890,23 @@ mod tests {
         }
         let entity = workspace.get(id).unwrap();
         loud(
-            entity,
             Located::default().of(entity, &workspace, &folders),
             building,
         )
+    }
+
+    /// The build's hint names the file it writes: beside the project, numbered once an
+    /// earlier build holds the name.
+    #[test]
+    fn the_build_names_the_file_it_writes() {
+        let first = loud_over(&["c3.wav"], &["Marimba/c3.wav"], false);
+        assert_eq!(first.hint, "writes a v2 instrument to Marimba/Marimba.nsmp");
+        let wavs = ["Marimba/c3.wav", "Marimba/Marimba.nsmp"];
+        let again = loud_over(&["c3.wav"], &wavs, false);
+        assert_eq!(
+            again.hint,
+            "writes a v2 instrument to Marimba/Marimba 2.nsmp"
+        );
     }
 
     #[test]
@@ -896,11 +923,7 @@ mod tests {
         let draft = Draft::plan(Making::Project, picked).unwrap();
         let id = draft.make(&mut workspace, &mut folders, &mut log).unwrap();
         let entity = workspace.get(id).unwrap();
-        let held = loud(
-            entity,
-            Located::default().of(entity, &workspace, &folders),
-            false,
-        );
+        let held = loud(Located::default().of(entity, &workspace, &folders), false);
         assert_eq!(
             (held.label.as_str(), held.tone, held.click),
             (BUILD, Tone::Ready, Click::Build),
@@ -936,12 +959,7 @@ mod tests {
         let mut located = Located::default();
         let tone = |located: &mut Located, workspace: &Workspace| {
             let entity = workspace.get(id).unwrap();
-            loud(
-                entity,
-                located.of(entity, workspace, &Folders::default()),
-                false,
-            )
-            .tone
+            loud(located.of(entity, workspace, &Folders::default()), false).tone
         };
         assert_eq!(tone(&mut located, &workspace), Tone::Blocked, "not placed");
         workspace.place(wav, LibPath::parse("Marimba/c3.wav").unwrap());
@@ -987,8 +1005,8 @@ mod tests {
         let mut located = Located::default();
         let keyed = |located: &mut Located, workspace: &Workspace| {
             let before = crate::store::names::KEYS.with(std::cell::Cell::get);
-            let found = located.of(workspace.get(id).unwrap(), workspace, &Folders::default());
-            let listed = found.as_ref().unwrap().iter();
+            let placed = located.of(workspace.get(id).unwrap(), workspace, &Folders::default());
+            let listed = placed.found.as_ref().unwrap().iter();
             let listed = listed.filter(|(_, wav)| matches!(wav, Wav::Listed(..)));
             let keys = crate::store::names::KEYS.with(std::cell::Cell::get) - before;
             (listed.count(), keys)
@@ -997,8 +1015,9 @@ mod tests {
         let (listed, keys) = keyed(&mut located, &workspace);
         assert_eq!(listed, 24);
         assert!(
-            keys <= held + 24,
-            "{keys} keys for {held} WAVs and 24 paths"
+            keys <= held + 24 + 2,
+            "{keys} keys for {held} WAVs, 24 paths, and the project and the instrument's name \
+             in its folder"
         );
 
         let (revision, layout) = (workspace.revision(), workspace.layout());
@@ -1017,8 +1036,9 @@ mod tests {
         let (listed, keys) = keyed(&mut located, &workspace);
         assert_eq!(listed, 23, "a WAV moved away is looked for again");
         assert!(
-            keys <= held + 24,
-            "{keys} keys for {held} WAVs and 24 paths"
+            keys <= held + 24 + 2,
+            "{keys} keys for {held} WAVs, 24 paths, and the project and the instrument's name \
+             in its folder"
         );
     }
 
