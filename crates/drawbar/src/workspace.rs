@@ -2439,6 +2439,15 @@ impl Workspace {
         }
     }
 
+    /// Let go of the reads of `ids` wanted and not asked of the library yet, which what
+    /// wanted them needs no more. Whatever still needs one asks for it again.
+    pub fn unwant(&self, ids: impl IntoIterator<Item = u64>) {
+        let mut wanted = self.wanted.borrow_mut();
+        for id in ids {
+            wanted.remove(&id);
+        }
+    }
+
     /// The unread assets the library is now asked for: those needed most, a read's worth
     /// of them. A row no longer drawn is not read for it.
     pub fn take_wanted(&mut self) -> Vec<u64> {

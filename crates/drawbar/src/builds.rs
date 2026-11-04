@@ -187,6 +187,15 @@ struct Running {
     stage: Stage,
 }
 
+impl Stage {
+    /// Let go of the reads of the WAVs a build still waits for, once it stops waiting.
+    fn let_go(&self, workspace: &Workspace) {
+        if let Stage::Reading { wavs, .. } = self {
+            workspace.unwant(wavs.values().map(|(_, at)| *at));
+        }
+    }
+}
+
 /// The builds in flight, one at most per project.
 #[derive(Default)]
 pub struct Builds {
@@ -248,7 +257,13 @@ impl Builds {
         tabs: &mut Tabs,
         log: &mut Log,
     ) {
-        self.running.retain(|id, _| workspace.get(*id).is_some());
+        self.running.retain(|id, running| {
+            let kept = workspace.get(*id).is_some();
+            if !kept {
+                running.stage.let_go(workspace);
+            }
+            kept
+        });
         let reading: Vec<u64> = self
             .running
             .iter()
@@ -311,16 +326,16 @@ impl Builds {
         if waiting && refused.is_none() {
             return;
         }
-        let Some(Running {
-            name,
-            stage: Stage::Reading { project, .. },
-        }) = self.running.remove(&id)
-        else {
+        let Some(Running { name, stage }) = self.running.remove(&id) else {
             return;
         };
         if let Some(why) = refused {
+            stage.let_go(workspace);
             return refuse(log, &name, &why);
         }
+        let Stage::Reading { project, .. } = stage else {
+            return;
+        };
         let source = Read(read);
         let job = work::run(workspace.ctx(), move |_| encode(&project, &source));
         let stage = Stage::Encoding(job);
