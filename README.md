@@ -26,7 +26,7 @@ your terminal, or from your own code.
 
 ## Try it
 
-Open [drawbar.app](https://drawbar.app/) in Chrome, Edge, Safari, Firefox, or Brave* (*with `brave://flags/#file-system-access-api` enabled*). 
+Open [drawbar.app](https://drawbar.app/) in Chrome, Edge, Safari, Firefox, or Brave.
 
 
 Or, with
