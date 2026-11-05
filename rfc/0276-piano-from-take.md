@@ -8,13 +8,14 @@
 ## Summary
 
 Turn one long recording of an instrument into the strokes of a piano library, with the recording
-itself as the document. Detectors find the hits, name their notes and layers, mark each attack and
-release, and find a sustain loop. They write the results into the WAV as standard regions and loops,
-labelled with stroke names. New ▸ Piano library then builds from "a WAV, or a named region of one".
-Levelling, fades and the loop crossfade are build rules. Background noise removal writes a new WAV.
-The processing goes into a new crate of pure functions over sample buffers, which also takes over all
-WAV reading and writing. It is first exposed as a `nord-cli` command and then as a drawbar UI. A
-Python prototype already does all of these steps; libraries built from its output play on a Stage 4.
+itself as the document. The take is first resampled to 35,002 Hz as a new WAV. Detectors then find
+the hits, name their notes and layers, mark each attack and release, and find a sustain loop. On
+Save, the results go into the WAV as standard regions and loops, labelled with stroke names. New ▸
+Piano library then builds from "a WAV, or a named region of one". Levelling, fades, hum removal and
+the loop crossfade are build rules. The processing goes into a new crate of pure functions over
+sample buffers, which also takes over all WAV reading and writing. It is first exposed as a
+`nord-cli` command and then as a drawbar UI. A Python prototype already does all of these steps;
+libraries built from its output play on a Stage 4.
 
 ## Motivation
 
@@ -30,49 +31,60 @@ strike, the release has to come from the same hit's key-up, the loop has to end 
 and the levels must follow the library's rules rather than each file's. Nord's own Sample Editor
 handles key zones but not velocity layers, and it does not export WAVs.
 
-The prototype shows the gap can be closed: a Wurlitzer recording made on a phone (13 roots,
-3 layers, releases and loops) went from one WAV to a library that plays on a Stage 4 in a single
-run. Hit splitting, note naming, layer order, cuts and loops all came out right without hand
-editing; a sheet listing the notes and a few skipped hits was the only input.
+The prototype shows the gap can be closed. A Wurlitzer recorded through an interface (8.5 minutes,
+91 hits, 23 roots, 2 to 4 layers per root) and an earlier phone recording of the same instrument
+(13 roots, 3 layers) each went from one WAV to a library that plays on a Stage 4 in a single run.
+Hit splitting, note naming, layer order, cuts and loops came out right without hand editing; a sheet
+listing the notes and a few hits to drop was the only input.
 
 ## Guide-level explanation
 
 Recording stays outside drawbar. Anyone recording an instrument already has an audio interface and
-software that records, so drawbar starts from the WAV.
+software that records, so drawbar starts from the WAV. WAVs are documents in drawbar, as Nord files
+are, and the take editor follows the other document editors.
 
-1. **Open a take** (one or more WAVs). Several takes are normal: one per octave, or a retake of a few
-   notes.
-2. **Find strokes.** For each take, the notes in playing order: a list (`E3 G3 A#3 …`), or a start
-   note, a step in semitones and a count. Then the number of layers, and how they are chosen. These
-   are inputs to the detectors, not stored; the detectors write regions and are done:
+1. **Open a take** (one or more WAVs, 16-bit, 24-bit or 32-bit float). Several takes are normal: one
+   per octave, or a retake of a few notes.
+2. **Resample.** Detect, the loop markers and Build work only at 35,002 Hz. At any other rate the
+   document says so and offers Resample, which writes a new WAV next to the take and opens it. The
+   original is never changed. The new WAV keeps the take's bit depth (24-bit or float); the build
+   goes to 16-bit.
+3. **Detect.** For each take, the notes in playing order: a list (`E3 G3 A#3 …`), or a start note, a
+   step in semitones and a count. Then the number of layers, and how they are chosen. These are
+   inputs to the detectors, not stored; Detect runs only when pressed, writes regions and is done:
    - **Playing order**: the first hit of a note is the loudest layer. This suits players who play
      loud, medium, soft, and recordings whose level can't be trusted (a phone's automatic gain made
      measured loudness useless on our test take).
    - **Loudness**: hits sorted by measured level, with near-duplicates within 2 dB dropped and the
      kept layers spread evenly in dB.
-3. **Noise.** Off, Light (−6 dB), Medium (−12 dB) or Strong (−20 dB), with before/after playback of a
-   gap and a note. The profile comes from the take's opening silence and the gaps between hits. It
-   writes a new WAV next to the take.
-4. **Hit grid.** One row per note, one column per hit. Each cell plays its region and shows its
-   layer, its length, whether a release region was found, and the loop match. Warnings mark a pitch
-   that disagrees with the note list, a hit with no key-up, and a weak loop match. Each edit changes
-   the WAV's regions:
-   - skip a hit (a stray noise, a stopped note): remove its regions;
-   - set its layer, swap it with another hit, or give it a different note: relabel the region;
-   - drag its start, key-up, release end and loop on the waveform: move the region or loop.
-5. **Build.** New ▸ Piano library takes the WAV and builds a stroke from each labelled region, so
-   template, kind, gain and format work as they do now.
+4. **Hit grid.** One row per note, one column per hit. Each cell is one hit, saved as two regions
+   (attack and release). It plays the hit and shows its layer, its length, whether a release was
+   found, and the loop match. Warnings mark a pitch that disagrees with the note list, a hit with no
+   key-up, a hit too quiet to use, and a weak loop match. Each edit changes the WAV's regions:
+   - drop a hit (a stray noise, a stopped note): delete its regions; Undo brings them back;
+   - set its layer, swap it with another hit, or give it a different note: relabel the regions;
+   - drag its start, key-up, release end and loop on the waveform: move the regions or loop. Loop
+     points snap to zero crossings, and a loop-wrap audition plays from just before the loop end and
+     lets it cycle.
+5. **Save** with drawbar's global save. Edits are held until then and written in one write, which
+   #226 makes one undo step.
+6. **Build.** New ▸ Piano library takes the WAV and builds a stroke from each labelled region, so
+   template, kind, gain and format work as they do now. It renders a fresh npno each time.
+
+The editor uses the standard document top bar for the file name, Detect and Build. The left bar
+stays the file tree. The selected hit, its cut points and its audition sit in the right sidebar.
 
 The WAV is the record. A user decides only where each stroke sits, what it is, and where its loop
 is, and standard RIFF chunks hold all three:
 
 - a `cue ` point and a `LIST`/`adtl` `ltxt` region per stroke, labelled with the name the build
-  already reads (`060-b0-l00`, `060-b2-l00`);
-- a `smpl` loop tied to its region's cue ID.
+  already reads (`060-b0-l00` for the attack, `060-b2-l00` for the release);
+- a `smpl` loop tied to the attack's cue ID.
 
-Nothing else is stored: no sheet, and no overrides to re-match when a detector changes. Other
-editors can read and write the same regions. The link from a built npno back to its takes can be
-#271 metadata, so a library can be rebuilt from them.
+A save rewrites only the `cue `, `LIST`/`adtl` and `smpl` chunks. The audio and every other chunk
+are kept byte for byte, so another app's data is never dropped. Nothing else is stored: no sheet, no
+hit states, and no overrides to re-match when a detector changes. Other editors can read and write
+the same regions.
 
 | Step | Today | With this RFC |
 |---|---|---|
@@ -80,30 +92,45 @@ editors can read and write the same regions. The link from a built npno back to 
 | Name each hit's root | `060-b0-l00.wav` names or the dialog | From a note list in playing order, checked against detected pitch |
 | Choose velocity layers | `lNN` or `vNN` names | By playing order or measured loudness, with per-hit override |
 | Cut the attack | Whole WAV | Strike detection, key-up detection, length cap |
-| Cut the release | Separate WAV by hand | From the key-up of the same hit |
-| Level | Per-WAV gain (#165) | Build rule: each stroke to one peak; releases to their own peak |
+| Cut the release | Separate WAV by hand | From the key-up of the same hit, kept only when it stands clear of the noise |
+| Level | Per-WAV gain (#165) | Build rules from the audio (#279); releases keep their recorded balance with their attack |
 | Loop | From a WAV's `smpl` loop (#256) | Loop search, written as a `smpl` loop on the region; crossfade at build; covers #257 |
-| Background noise | — | Spectral gate learned from the take's silence, with a strength setting; writes a new WAV |
-| Layer values, thresholds, trims, build | New ▸ Piano library (#267) | Builds from labelled regions as well as whole WAVs; v6 defaults in #278 |
+| Background noise | — | Too-quiet hits flagged; hum removed and hiss followed down per stroke at build |
+| Sample rate | Resampled at build | Resample the take first, as a new WAV |
+| Layer values, thresholds, trims, build | New ▸ Piano library (#267) | Builds from labelled regions as well as whole WAVs; v6 defaults in #278 and #279 |
 
 ## Reference-level explanation
 
 Provenance uses the forms in `CONTRIBUTING.md`. "Heard on a Stage 4" means a by-ear check on our
 instrument (Stage 4, OS 1.64), loading the library through Sound Manager.
 
+### Input and resampling
+
+- The take is read as 16-bit, 24-bit or 32-bit float PCM. A recording straight from an interface is
+  normally 24-bit or float; #165's reader takes only 16-bit.
+- Resample writes a band-limited resample to 35,002 Hz at the take's own bit depth (24-bit, or float
+  for a float take) as a new WAV. Detection and loop search run on that, so the loop points are
+  where the build plays them.
+- Stereo is not in the first version: the prototype mixes to mono. A stereo version needs one loop for
+  both channels.
+
 ### Hits
 
-- Envelope: RMS in 10 ms frames, after a 15 Hz highpass.
+- Envelope: RMS in 10 ms frames, after a 15 Hz highpass, on the take as recorded.
 - Onset: the envelope rises 15 dB above its minimum over the previous 150 ms and is still 15 dB above
   the noise floor (the 10th-percentile level) 100 ms later. The second test rejects clicks. Of onsets
-  closer than 1 s, the loudest wins.
+  closer than 1 s, the loudest wins. Only the first frame of a rise counts; otherwise a note whose
+  level wavers drifts the onset 30 to 50 ms late.
 - Level of a hit: the envelope's maximum over its first 100 ms.
 - Pitch of a hit: harmonic product spectrum over 50 to 550 ms after the onset.
+- Too quiet: a hit whose peak is less than 54 dB over the hum-free floor is flagged, and Detect leaves
+  it out. Levelling brings its hiss up with it: soft treble hits recorded about 30 dB over the floor
+  gave very noisy loops (heard on a Stage 4).
 
 ### Notes and layers
 
 - Hits are assigned by walking the note list in order. A hit moves on to the next note when its pitch
-  class is nearer that note's than the current one's. Skipped hits take no part. Comparing pitch
+  class is nearer that note's than the current one's. Dropped hits take no part. Comparing pitch
   class tolerates the octave errors common on low notes.
 - A hit more than half a semitone from its note's pitch class gets a warning.
 - More hits than layers: loudness mode keeps the hits nearest evenly spaced levels between the
@@ -115,9 +142,10 @@ instrument (Stage 4, OS 1.64), loading the library through Sound Manager.
 
 ### Cuts
 
-- Strike: the first sample within −12 dB of the hit's early peak, minus a 1 ms pre-roll. Vendor
-  attacks reach −6 dB within 1 ms (inferred from specimens). Key noise kept before the strike delayed
-  the attack, more so on keys below the root (heard on a Stage 4).
+- Strike: the first sample within −12 dB of the hit's early peak, minus a 1 ms pre-roll, found on the
+  take before any filtering. Vendor attacks reach −6 dB within 1 ms (inferred from specimens). Key
+  noise kept before the strike delayed the attack, more so on keys below the root (heard on a
+  Stage 4). Finding the strike after hum filtering moved it and left a click (heard on a Stage 4).
 - Key-up: the earliest 0.2 s window whose fall is within 3 dB of the steepest fall of at least 10 dB,
   starting while the note is 15 dB above the noise floor, searched from 0.3 s after the onset. The
   damper's thump can delay that window, so the slow decay over 0.4 to 0.15 s before it is fitted with
@@ -128,77 +156,96 @@ instrument (Stage 4, OS 1.64), loading the library through Sound Manager.
   release.
 - Attack length is capped at 6 s by default. Vendor attacks are at most about 6.5 s, the lowest notes
   longest (inferred from specimens).
-- Release: from 30 ms before key-up, up to 0.7 s by default, with a 5 ms fade in and a fade over its
-  last fifth. Vendor releases run 0.5 to 0.9 s (inferred from specimens).
+- Release: from 5 ms before key-up to where it reaches 6 dB over the floor, at most 1 s, with a 5 ms
+  fade in and a 50 ms fade out. A release is kept only when the note is at least 25 dB over the floor
+  at key-up. Below that it was mostly hiss, and levelling made it buzz (heard on a Stage 4). Vendor
+  releases run 0.5 to 0.9 s (inferred from specimens).
 - No fade at the end of a looped attack: the end sits inside the loop. A fade there produced a loud
   square wave or fast clicking once the loop played (heard on a Stage 4).
 
 ### Level
 
-- Every attack is scaled to one peak (−13 dBFS by default), whatever its layer. Vendor libraries keep
+- The build levels from the audio (#279), so the regions are not normalised. Vendor libraries keep
   every layer near the same peak (inferred from specimens: attack layers peak at −12.5 to −17.5 dBFS),
   and the playback gain does the rest.
-- Releases are scaled to their own peak. Scaled with their attack's gain, they sat 35 to 57 dB down
-  and could not be heard (heard on a Stage 4).
+- Releases keep their recorded level under their own attack, lifted by at most 12 dB and never louder
+  than 14 dB under it. Scaled with their attack's gain alone, they sat 35 to 57 dB down and could not
+  be heard. Levelled all to one peak, the quiet key-offs were lifted 25 to 40 dB and their noise came
+  up with them (heard on a Stage 4). Trims up to about 49 dB under the attack have played fine (heard on a Stage 4).
 
 ### Loop
 
-- The loop ends 150 ms before the end of the attack, clear of the damper at key-up.
-- Its length starts at a whole number of the note's periods near 100 ms. It is then tuned within one
-  period either side for the best normalized correlation between the audio before the loop end and
-  the audio before the loop start.
+Two cases, decided by how the note decays before its key-up:
+
+- **Sustaining notes** (still within 20 dB of their peak 150 ms before key-up): a loop of about
+  500 ms ending 150 ms before the key-up, clear of the damper. Its length is a whole number of the
+  note's periods, tuned within one period either side for the best normalized correlation between
+  the audio before the loop end and the audio before the loop start, and the decay across the loop
+  is evened out at build so its end meets its start. 100 ms loops repeated the hiss audibly and beat
+  against the note (heard on a Stage 4).
+- **Dying notes** (short treble notes that fall 20 dB before the key-up): no loop in the note. At
+  build the stroke follows the note's own decay rate, slowing to a third of it, down to 70 dB under
+  its peak, then loops on silence. A loop placed in such a note sat in the noise and clicked, and a
+  straight line in dB was heard as a fade that stops (heard on a Stage 4). Vendor dying notes also loop
+  on silence, 48 to 63 dB under their peak (inferred from specimens).
 - At build, the last 30 ms before the loop end are crossfaded (raised cosine) into the audio before
-  the loop start, so the wrap is continuous. The match score is reported, and the hit grid warns below 0.5.
-- Written as a `smpl` loop, type 0, end frame inclusive, tied to the stroke's region by its cue ID.
-  In the prototype, one loop per stroke WAV at 35,002 Hz, which #256 reads; loops built this way
-  sustain until key-up without clicks (heard on a Stage 4). In a take at another rate the build's
-  resample moves the loop points; see Unresolved questions.
+  the loop start, so the wrap is continuous. The crossfade length is the one build setting in the
+  first version. The match score is reported, and the hit grid warns below 0.5.
+- Written as a `smpl` loop, type 0, end frame inclusive, tied to the attack's region by its cue ID.
 
 ### Noise
 
-- Quiet frames: 50 ms frames within 4 dB of the take's 10th-percentile level.
-- Spectral gate: STFT with a 4096-sample window. Each bin's noise profile is the 90th percentile of
-  the quiet frames, and the gain is `sqrt(1 − 1.5 · profile / power)`, floored at the chosen strength.
-  Note content well above the profile passes unchanged.
-- The 90th percentile, not the mean, because the noise level wandered between gaps in the test take.
-- Hum is gated, not notched. Narrow notches rang for about 0.5 s when a note sat on a hum line (F4 at
-  349 Hz against 350 Hz), and they raised the gaps by 4 dB.
-- On the phone take, the −20 dB setting took the gap before the first note from −51 to −61 dB. On the
-  built library, hiss was inaudible on normal playing (heard on a Stage 4). Long held chords still hiss,
-  worst with bright timbres (heard on a Stage 4).
-- Takes should open with 3 to 5 s of silence. The docs say so.
+There is no broadband denoiser in the first version. A spectral gate (STFT, profile from the take's
+quiet frames) worked on the phone take but spoiled the treble loops of an interface take: a loud C5
+loop's match fell from 0.86 to 0.15 at −12 dB. The best results of both takes used no gate (heard on a
+Stage 4). Instead:
+
+- **Too-quiet hits** are flagged and left out (see Hits). Treble boost and Dyno expose whatever noise
+  a soft hit carries.
+- **Hum.** Mains hum is tracked from the take, its frequency measured every 4 s. Each stroke gets a
+  4th-order high-pass at 0.7 × its fundamental. Below F4 the strongest hum lines are also notched,
+  but only where a line is at least 30 notch-widths from a partial of the note. The filters run
+  forward only: run both ways, the notches rang ahead of the attack and, near a partial, on with the
+  note (heard on a Stage 4). On the interface take, 93% of the floor was 50 Hz hum.
+- **Hiss follow.** A low-pass that follows the note's own top end down as it dies. Its cutoff is the
+  top of the highest 1/6-octave band where the note is still 6 dB over the take's hiss. It never
+  rises again after the first 50 ms, so the strike keeps all its treble, and never falls under 1.5 ×
+  the fundamental. It removes the hiss above the note and leaves the note alone where it is above the
+  hiss. Treble boost and Dyno had made that hiss very loud (heard on a Stage 4).
+- Takes should open with 3 to 5 s of silence, be free of ground loops, peak around −6 dBFS, and hold
+  each note until it has died. The docs say so.
 
 ### Output
 
-- 16-bit mono at 35,002 Hz with TPDF dither, from a band-limited resample.
-- Stereo is not in the first version: the prototype mixes to mono. A stereo version needs one loop for
-  both channels.
+- 16-bit mono at 35,002 Hz with TPDF dither, at build.
 
 ### Where the code goes
 
 - A new crate, `npno-prep`, of pure functions over sample buffers: no UI and no
   instrument. It builds for wasm, so the web app gets it too.
-- All WAV handling moves into the new crate from `nord-format`: PCM reading and writing, and the
-  `cue `, `LIST`/`adtl` and `smpl` chunks, so WAV metadata has one home. `nord-format` stays a Nord
-  format crate.
+- All WAV handling moves into the new crate from `nord-format`: PCM reading (16-bit, 24-bit, float)
+  and writing, the resampler, and the `cue `, `LIST`/`adtl` and `smpl` chunks, so WAV metadata has
+  one home. Writing replaces only those chunks and copies the rest. `nord-format` stays a Nord format
+  crate.
 - The build accepts a region of a WAV as a stroke, named by the region's label.
-- The STFT needs an FFT. `rustfft` (MIT/Apache, pure Rust, builds for wasm) is the candidate.
-  Everything else is plain arithmetic.
+- Pitch detection and hiss follow need an FFT. `rustfft` (MIT/Apache, pure Rust, builds for wasm) is the
+  candidate. Everything else is plain arithmetic and IIR filters.
 - `nord-cli` gets `nord piano prep TAKE.wav --notes … --layers N`. It writes the regions and loops
   into the take (or a copy), and prints a listing of hits, layers and warnings.
-- `drawbar` gets the hit grid over a take WAV, playing regions through the existing player.
+- `drawbar` gets the take editor over a WAV document, playing regions through the existing player.
 
 ```rust
 pub struct Take { pub rate: u32, pub samples: Vec<f32> }
 pub struct Hit { pub onset: usize, pub next: usize, pub level_db: f32, pub pitch_hz: Option<f32> }
 pub struct Cuts { pub attack: Range<usize>, pub release: Option<Range<usize>> }
-pub struct LoopPoints { pub start: usize, pub len: usize, pub match_score: f32 }
+pub enum Sustain { Loop { start: usize, len: usize, match_score: f32 }, Dies { rate_db_per_s: f32 } }
 
+pub fn resample(take: &Take, rate: u32) -> Take;
 pub fn hits(take: &Take) -> Vec<Hit>;
 pub fn assign(hits: &[Hit], notes: &NoteList, layers: &LayerRule) -> Vec<Assigned>;
 pub fn cut(take: &Take, hit: &Hit, options: &CutOptions) -> Cuts;
-pub fn find_loop(attack: &[f32], rate: u32, pitch_hz: f32, keyup: usize) -> Option<LoopPoints>;
-pub fn denoise(take: &Take, strength: Strength) -> Take;
+pub fn find_sustain(attack: &[f32], rate: u32, pitch_hz: f32, keyup: usize) -> Sustain;
+pub fn clean(stroke: &[f32], rate: u32, pitch_hz: f32, hum: &HumProfile) -> Vec<f32>;
 ```
 
 ### Tests
@@ -211,32 +258,37 @@ Per CONTRIBUTING, these test behavior rather than snapshots:
   notes and layers.
 - A loop on a pure tone matches to within a stated correlation, and the crossfaded wrap has no step
   larger than a stated bound.
-- The gate lowers a gap by at least the chosen strength, and changes a tone well above the profile by
-  less than a stated amount.
+- The hum filter lowers a synthetic hum line by a stated amount and changes a tone 30 notch-widths
+  away by less than a stated amount.
 - A short self-recorded take as a fixture. It is ours, so it may be committed. The test checks the hit
   count and the note order the note list states.
-- Region round trip: regions, labels and loops written to a WAV read back unchanged, and the build
-  makes the same strokes from regions as from the same audio cut into separate WAVs.
+- Region round trip: regions, labels and loops written to a WAV read back unchanged, every other
+  chunk and the audio are byte for byte the same, and the build makes the same strokes from regions
+  as from the same audio cut into separate WAVs.
+- 24-bit and float takes read to the same samples as a 16-bit copy, within its precision.
 - The Python prototype's output on the same fixture is a hand-checked reference while porting. It is
   not a committed oracle.
 
 ### Pull requests
 
-- [ ] `npno-prep`: WAV handling moved from `nord-format`, with `cue `/`adtl` regions. The build
-  takes a labelled region as a stroke.
+- [ ] `npno-prep`: WAV handling moved from `nord-format`, with 24-bit and float reading, the
+  resampler, and `cue `/`adtl` regions saved without touching other chunks. The build takes a
+  labelled region as a stroke.
 - [ ] Detectors: hits, notes and layers, cuts. `nord piano prep` writes regions. Fixtures and docs.
-- [ ] Loop search, written as `smpl` loops on the regions (#257).
-- [ ] Noise gate with strength, writing a new WAV.
-- [ ] drawbar: hit grid over a take, with playback and region edits. Docs.
+- [ ] Sustain: loop search written as `smpl` loops on the regions (#257), and dying notes.
+- [ ] Hum removal and hiss follow as build rules.
+- [ ] drawbar: the take editor over a WAV document, with Resample, Detect, playback, loop-wrap
+  audition and region edits. Docs.
 
 ## Drawbacks
 
-- It is a sizable addition: a new crate, an FFT dependency, a CLI command and a hit grid UI.
-- The detectors are heuristics tuned on few recordings: one phone take of a Wurlitzer, a four-note
+- It is a sizable addition: a new crate, an FFT dependency, a CLI command and a take editor.
+- The detectors are heuristics tuned on few recordings: two takes of one Wurlitzer, a four-note
   pilot and synthetic takes. Other instruments and rooms will find cases they miss, so the hit grid's
   region edits are not optional.
-- Denoising always costs some of the sound. A strength setting moves the trade-off to the user rather
-  than removing it.
+- Without a broadband denoiser, a noisy recording gives a noisy library. Hiss inside the note's own
+  band in its first second stays. The editor can only flag the worst hits and say what the recording
+  needs.
 - The plan depends on other editors keeping `cue `/`adtl` regions and `smpl` loops when they save. One
   that drops them loses the user's work on that take.
 
@@ -247,6 +299,9 @@ Per CONTRIBUTING, these test behavior rather than snapshots:
 | Keep preparing strokes in outside editors | Slow (one file per stroke) and error-prone; no general editor knows strike, key-up, release or loop rules |
 | Nord Sample Editor as the front end | It has key zones but no velocity layers, and it does not export WAVs |
 | A take document (a plan over the source WAVs, with a stored sheet and overrides) | A new file format that duplicates what WAV and npno files already hold, and its overrides must be re-matched whenever a detector changes |
+| Write regions on every edit | Rewrites a large WAV on each drag and floods sync and undo history; the other editors write on Save |
+| Find loops on the take and refine them after the build's resample | Two loop searches, and the points the user dragged are not the points that play |
+| A spectral gate on the take | Spoiled the treble loops of an interface take, and the best results came without it |
 | Ship the Python prototype alongside drawbar | A second runtime and language; it can't run in the web app, and its UI would be separate |
 | A batch tool only, with no UI | Hit detection will sometimes be wrong; fixing it needs listening and dragging, which is a UI |
 | Record inside drawbar | Players already have recording software and interfaces; it adds device and latency work for little gain |
@@ -261,33 +316,42 @@ If nothing is done, library building stays limited to people willing to hand-edi
 - **drawbar today**: New ▸ Piano library builds from one WAV per stroke (#165), reads `smpl` loops
   (#256), fades rule-built strokes at note-off (#258) and loops by a per-kind curve (#264). #257 asks
   for an automatic loop search and #263 for tunable settings; this RFC covers the first and feeds the
-  second.
+  second. #279 levels and sets release trims from the audio.
 - **The prototype**: `prep.py` in our project (Python, numpy/scipy), driven by a TOML sheet. Built
-  through #267 and loaded on a Stage 4, its Wurlitzer library plays with working loops, releases on
-  key-up and little hiss after denoising. Some hiss remains on long held tails, worst with bright
-  timbres.
+  through #279 as format 6 and loaded on a Stage 4, its Wurlitzer library from the interface take
+  plays with working loops, dying treble notes, releases on key-up and little hiss (heard on a
+  Stage 4).
 
 ## Unresolved questions
 
-- **Loop points and the sample rate.** The loops are tuned at 35,002 Hz so the build doesn't move them.
-  In a 48 kHz take the build's resample shifts them. Either the build refines and crossfades the loop
-  after resampling, or the take is resampled to 35,002 Hz first, as a new WAV like denoise.
-- **Build rules and their settings.** Levelling (one attack peak, a separate release peak), the loop
-  crossfade and the pre-roll become build rules, so their settings sit with #263.
+- **Detect again after edits.** Should Detect ask first, or only touch the regions the user hasn't
+  edited? The second needs a way to tell edited regions from detected ones without storing hit
+  states.
+- **Right sidebar and the global cards.** Proposed: while the take editor has focus, its cards (the
+  selected hit, its cut points, audition) sit above the global Selection and Tags cards, which stay
+  collapsed. The cards follow the hit selected in the take view; selecting another file in the
+  browser gives the sidebar back to that file. This touches every editor.
 - **Other editors.** Which editors keep `cue `/`adtl` regions and `smpl` loops when they save? To be
   checked before relying on them.
-- **Default layer values, trims and ladders for v6** are the build's job, tracked in #278.
+- **Default layer values, trims and ladders for v6** are the build's job, tracked in #278 and #279.
+  The prototype's values: 4 layers at 0/22/50/85, 3 at 0/20/70.
 - **The crate name.** Proposed: `npno-prep`, as it prepares the strokes for a `.npno` build. Open to a
   name that fits the other crates better.
 
 ## Future possibilities
 
+- Linking a built npno back to its takes (#271 metadata, with #226), so a library can be rebuilt from
+  them. Left out of the first version: it has many edge cases to test.
+- More build settings (#263): levels, fades, loop length, the hum and hiss rules.
+- Typed values for the cut and loop points, beside dragging.
 - Stereo takes, with one loop shared by both channels.
 - Several takes merged into one library, such as a retake of a few notes.
 - Writing each hit's measured pitch into the fine-tune table.
-- Denoising that grows stronger along each note. The attack keeps its character with a light gate,
-  while the tail is a few clean partials and can take a heavy one, a falling low-pass, or a mask
-  around the note's harmonics. That would remove the hiss that remains on long held tails.
+- Filling the keyboard past the recorded roots by pitching the lowest and highest notes, as the
+  prototype does up to 12 semitones (with #279).
+- A denoiser for the hiss inside the note's band, stronger along each note: the attack keeps its
+  character with a light touch, while the tail is a few clean partials and can take a heavy one, or a
+  mask around the note's harmonics.
 - Other sound profiles. The first version is designed and tested on pianos: a sharp attack, a
   decaying tail and a release at key-up. The same steps need testing on sources with a different
   attack, sustain or decay, such as a slow swell or a steady sustained tone with no decay. Those may
