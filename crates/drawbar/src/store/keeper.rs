@@ -2903,6 +2903,7 @@ mod tests {
             Box::new(SystemClock),
         );
         let (fs, env) = native.unopened.take().unwrap();
+        let flushes = fs.capabilities(Root::Folder).fsync;
         let failing = Rc::new(std::cell::Cell::new(false));
         let mut keeper = super::Keeper::new(Unsynced(fs, Rc::clone(&failing)), env);
         let mut answers = Vec::new();
@@ -2930,8 +2931,14 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(told.len(), 1, "{answers:?}");
-        assert!(told[0].contains("move the library to a folder on a local disk"));
+        match flushes {
+            true => {
+                assert_eq!(told.len(), 1, "{answers:?}");
+                assert!(told[0].contains("move the library to a folder on a local disk"));
+            }
+            // A folder that flushes nothing, as a browser's, has no flush to fail.
+            false => assert!(told.is_empty(), "{answers:?}"),
+        }
     }
 
     #[test]
