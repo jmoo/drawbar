@@ -1,12 +1,6 @@
-//! Reading writers' logs from the folder, and deriving what they show.
-//!
-//! A reader takes every file directly in `writers.2/<w>/`, whatever its name,
-//! and reads it by its contents as segment lines or as a snapshot. From the files
-//! it sees, [`crate::derive`] places each entry, finds forks, and merges. Reading
-//! writes nothing in the folder.
-//!
-//! Each line is parsed and decoded once: the reader keeps what it read of each
-//! file while it lives, and reads only the bytes a segment gained since.
+//! Reading writers' logs from the folder, and deriving what they show through
+//! [`crate::derive`]. A reader keeps what it read of each file while it lives,
+//! and reads only the bytes a segment gained since.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;

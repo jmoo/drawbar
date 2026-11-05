@@ -1,11 +1,5 @@
 //! This instance's writer: the only code that writes under `writers.2/<w>/` for its
 //! own `w`, and it writes nowhere else in toshokan's root.
-//!
-//! A writer opens a new segment under a random name the first time it appends in a
-//! process, appends to it, and seals it with the seal marker when the process
-//! closes it cleanly or compacts, or when an append would take it past
-//! [`SEGMENT_BOUND`]. Before each append it confirms the folder still
-//! holds its head; after each, it records the head in the local root.
 
 use serde::{Deserialize, Serialize};
 
@@ -798,8 +792,6 @@ mod tests {
 
     use super::*;
 
-    /// `head.json` is written over in place, so a shorter record would leave the end of
-    /// a longer one behind it.
     #[test]
     fn every_live_head_record_has_one_length_and_the_retired_one_is_longer() {
         let len = |n: u128, retired| {
