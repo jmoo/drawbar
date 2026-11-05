@@ -16,17 +16,20 @@ your terminal, or from your own code.
 
 | | | |
 |---|---|---|
-| 🎚️ | [drawbar](crates/drawbar/README.md) | The app. Browse the sounds on your computer and your instrument side by side, edit them, and send them back. Browser or desktop. |
-| 🛠️ | [nord-cli](crates/nord-cli/README.md) | `nord`, the same from a terminal, for scripts. |
-| 🎹 | [nord-format](crates/nord-format/README.md) | Rust library: read and write Nord files, byte for byte. |
-| 🔌 | [nord-usb](crates/nord-usb/README.md) | Rust library: talk to a Nord over USB. |
+| 🎚️ | [drawbar](crates/drawbar/README.md) | Browse the sounds on your computer and your instrument side by side, edit them, and send them back. Browser or desktop. |
+| 🛠️ | [nord-cli](crates/nord-cli/README.md) | `nord`, the same from a terminal. |
+| 🎹 | [nord-format](crates/nord-format/README.md) | Library for reading and writing Nord files, byte for byte. |
+| 🔌 | [nord-usb](crates/nord-usb/README.md) | Library for talking to a Nord over USB. |
+| 📚 | [toshokan](crates/toshokan/README.md) | Library for keeping tags and history beside a folder of real files, in Dropbox, iCloud or any synced folder. |
 | 🧬 | [nord-bits-derive](crates/nord-bits-derive/README.md) | The macro behind nord-format's layouts. |
-| 📚 | [toshokan](crates/toshokan/README.md) | Rust library: keep tags and edit history beside the files they describe, in Dropbox, iCloud or any synced folder. drawbar's library. |
+
 
 ## Try it
 
-Open [drawbar.app](https://drawbar.app/) in Chrome, Edge or Brave. Or,
-with
+Open [drawbar.app](https://drawbar.app/) in Chrome, Edge, Safari, Firefox, or Brave* (*with `brave://flags/#file-system-access-api` enabled*). 
+
+
+Or, with
 [Nix](https://nixos.org/download/):
 
 ```sh
