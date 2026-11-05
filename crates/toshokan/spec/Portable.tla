@@ -107,7 +107,7 @@ Holds(fs) ==
     UNION {IF fs[f].kind = "seg" THEN Range(fs[f].ents) ELSE fs[f].folds :
                f \in {g \in 1..Len(fs) : ~fs[g].deleted}}
 
-\* Entries written and not taken by a restore.
+\* Entries written and not taken by a restore or a dropped version.
 Kept == All \ lost
 
 -----------------------------------------------------------------------------
@@ -723,7 +723,7 @@ OwnDirectory ==
             files[f].dir = wid[i]
 
 \* The folder keeps every entry written, in a segment or folded in a
-\* snapshot, unless a restore took it.
+\* snapshot, unless a restore or a dropped version took it.
 Retained == Kept \subseteq Holds(files)
 
 \* A snapshot certifies its own anchor, and, where it carries certificates, the
@@ -742,7 +742,7 @@ AnchorsCertified ==
                        => files[t].anchor \in files[s].certs
 
 \* Every effect begun has a pending record or a closing entry in the folder,
-\* unless a restore took both.
+\* unless a restore or a dropped version took both.
 EffectAccounted ==
     \A x \in (1..nEff) \ lostEffects :
         \/ \E f \in Files : files[f].kind = "pend" /\ files[f].eff = x /\ ~files[f].deleted
@@ -759,7 +759,8 @@ Converged(r) ==
 DeliveredConverges == \A r \in Instances : Delivered(r) => Converged(r)
 
 \* Once every file has reached a reader, every effect begun is closed,
-\* reported, or the reader's own effect in flight, unless a restore took it.
+\* reported, or the reader's own effect in flight, unless a restore or a
+\* dropped version took it.
 Settled(r) ==
     \A x \in (1..nEff) \ lostEffects :
         x \in Closed(r) \cup Reported(r) \cup {inflight[r].eff}

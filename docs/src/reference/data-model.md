@@ -255,7 +255,7 @@ entries whose predecessor has not synced yet, merged once it arrives, and
 unplaced lines of an older copy of a log segment, as a sync client or a backup
 leaves.
 [Kept apart](../drawbar/this-computer.md#kept-apart) says what the user sees and
-does, and [Runs](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#5-runs)
+does, and [Runs](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#runs)
 how toshokan finds them.
 
 ## In the browser

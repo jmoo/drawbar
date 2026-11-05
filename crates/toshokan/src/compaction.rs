@@ -20,7 +20,7 @@ use crate::writer::Writer;
 /// Confirms the folder holds this writer's head, seals the open segment, writes
 /// `snapshot-<name>.json` folding the chain up to the head into its previous
 /// snapshot, and only once the folder holds it deletes the files it supersedes,
-/// as Snapshots in `spec/format.md` says. Where `capabilities`, the folder's,
+/// as Compaction in `spec/protocol.md` says. Where `capabilities`, the folder's,
 /// rename files, the snapshot is staged in the writer's `tmp/`; else it is
 /// written in place, where a crash can tear it. Returns the writer with the
 /// result.
@@ -276,7 +276,7 @@ pub enum Found<'a> {
 /// The snapshot of `writer` that folds `since`, its entries after `previous`'s
 /// head in chain order, into `previous`, labeled `label` when there is no
 /// previous one. It certifies the segments and snapshots `found` shows and the
-/// entries of `since` as Snapshots in `spec/format.md` says, so its certificates
+/// entries of `since` as Compaction in `spec/protocol.md` says, so its certificates
 /// name its head. `None` when it folds nothing.
 pub fn snapshot<'a>(
     writer: WriterId,

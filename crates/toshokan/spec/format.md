@@ -1,10 +1,11 @@
 # toshokan format
 
-This document specifies everything toshokan writes and how it reads, merges and
-changes it, precisely enough for a second implementation to share a library with
-this one. A library lives in a folder that a sync client may deliver late, out of
-order, partly restored or with conflicted copies, and the rules here are written
-for it. The format may change before 1.0.
+This document specifies the bytes toshokan writes and reads, precisely enough
+for a second implementation to share a library with this one.
+[protocol.md](protocol.md) specifies how writers and readers behave. A library
+lives in a folder that a sync client may deliver late, out of order, partly
+restored or with conflicted copies, and the rules here are written for it. The
+format may change before 1.0.
 
 All text is UTF-8. All hexadecimal is lowercase. JSON is written without
 insignificant whitespace.
@@ -29,7 +30,6 @@ Every path in this table is relative to the root.
 Only writer `w` creates, appends to, renames or removes anything under
 `writers.2/<w>/`. Others only make and sync the directories `writers.2/`, the
 root and the app's directory around it. There is no file at the level of the library.
-Nothing reads an earlier format's `writers/`.
 
 A staged file is named by its nonce and the extension of the file it becomes:
 what follows the last `.` of that file's name, if anything does, and if the name
@@ -39,7 +39,7 @@ its nonce alone, so a step names it without knowing where its bytes came from.
 Names of segments and snapshots are advisory. A reader reads every file directly
 in `writers.2/<w>/`, whatever its name, by its contents, so a sync client's
 conflicted copy is read like any other file. A browser's swap file is the
-exception (see Browsers).
+exception (see [Browsers](protocol.md#browsers)).
 
 A **library path** is a path in the folder outside the root and outside the
 app's directory around it, other than the folder itself and a browser's swap
@@ -56,20 +56,9 @@ Each install keeps, per library, a local root of its own that is never synced:
 toshokan reads and writes nothing else there, so the app may keep files of its
 own beside these, under names that are not a genesis hash.
 
-`<genesis>` is the hash of the writer's genesis entry. The directory is created
-only after that entry is durable in the folder, so the directories of the local
-root are the install's pool of writers. An instance writes as the first writer
-of the pool whose lock it takes. It also takes, as it opens and at each refresh,
-the lock of every other writer no instance writes as now, as another window of
-the app wrote until it closed, and
-keeps it while that writer left pending records open: it reports them as orphans
-that are the install's own (`ours`), to settle without asking. It lets go of such
-a lock at once when the writer left none, a record its own log closed counting as
-none, and as soon as its records are settled, so the next instance writes as it
-and the pool stays as large as the instances that run at once. An orphan whose writer's lock another
-instance on this machine holds is `live`: that instance may be carrying it out
-still. Asking which writers other instances hold tries only the locks this
-instance does not hold itself.
+`<genesis>` is the hash of the writer's genesis entry. The directories of the
+local root are the install's pool of writers (see
+[Writers](protocol.md#writers)).
 
 `head.json` is `{"writer":"<writer id>","head":"<entry hash>"}`, with
 `"retired":true` last once the writer is never written again, and
@@ -83,10 +72,10 @@ length but the retired one, which is longer and written last, so no write leaves
 the end of an earlier record behind. A crash can tear that write. What it leaves
 is the old or the new record whole, bytes that do not read, which leave the
 writer out of the pool, or a record naming an entry no log holds, which retires
-the writer (see Writers). A file in the local root that is replaced, such as
-`identities.json`, is first written beside it as `<name>.next` and synced; then
-`<name>` is removed and `<name>.next` renamed to it. A reader takes `<name>`, or
-`<name>.next` when `<name>` is missing.
+the writer (see [Writers](protocol.md#writers)). A file in the local root that
+is replaced, such as `identities.json`, is first written beside it as
+`<name>.next` and synced; then `<name>` is removed and `<name>.next` renamed to
+it. A reader takes `<name>`, or `<name>.next` when `<name>` is missing.
 
 ## Compatibility
 
@@ -104,7 +93,8 @@ keeps running the build it loaded. Within version 2:
    in place, so a reader drops what it does not know there.
 2. **Additive.** Anywhere else, a new object member may appear. It is optional,
    changes nothing about the members beside it, and a reader that does not know
-   it keeps it where Merging and Snapshots keep what they do not know. Data a
+   it keeps it where [Merging](protocol.md#merging) and [Snapshots](#snapshots)
+   keep what they do not know. Data a
    newer build adds to a snapshot's records goes in a new member of `state`.
 3. **New meaning is a new name.** A change of meaning, a required member, or a
    new way to close a pending record is a new `kind`, `op`, `step` or `moves`
@@ -119,6 +109,12 @@ keeps running the build it loaded. Within version 2:
 6. **Fixtures hold it.** Every state under `tests/fixtures` reads to its oracle in
    every later build, and every fixture of a newer version behaves as its README
    says.
+
+There are no migrations before 1.0. A folder of an earlier format, under
+`writers/`, opens as an empty library whose files are all unbound; nothing
+reads its directories, which are left for older builds. A local
+root's `view.bin` and `view.log`, which older builds kept, are ignored, as are
+old `head.json` files.
 
 ## Identifiers and clocks
 
@@ -138,9 +134,8 @@ ranges of its bytes the app names for the file's path and length. It may read
 only a few ranges of a file only where the file's format holds a checksum that
 covers every other byte of the file, and must read every byte of any other: an
 identity of part of a file would take a file changed elsewhere for the one it
-was. toshokan reads those ranges and feeds them to the app's digest, a
-file at most 1 MiB of ranges together with others and a larger one 1 MiB at a
-time, and never computes an identity itself.
+was. toshokan reads those ranges and feeds them to the app's digest, and never
+computes an identity itself.
 
 A clock reading is the JSON array `[wall_ms, counter]`: milliseconds since the
 Unix epoch and a counter within the millisecond, a hybrid logical clock. A
@@ -193,10 +188,11 @@ An entry is an object whose first members are:
 
 followed by the members of its kind. A genesis entry is numbered 0, and every
 other entry its predecessor's number plus one. A reader ignores members it does
-not know, at any depth but an observed write's (see Compatibility), and keeps the
-line and the whole entry (see Merging), so they survive. An entry of another kind,
+not know, at any depth but an observed write's (see
+[Compatibility](#compatibility)), and keeps the line and the whole entry (see
+[Merging](protocol.md#merging)), so they survive. An entry of another kind,
 without `kind`, or whose members do not decode, is kept and merged as unknown; so is a line whose JSON has no readable
-`n` or `at`, which still links the chain but is never placed.
+`n` or `at`, which still links the chain but is never merged.
 
 An entry names another as `["<writer>",<n>,"<hash>"]`, and one of its own
 writer's as `[<n>,"<hash>"]`.
@@ -253,7 +249,7 @@ unknown.
 A run, which `take` and `runs` name, is `{"writer","from","first"?,"last","tip"?}`:
 the writer's entries numbered from `from` to `last` on `last`'s chain, the first
 by its hash; a run a snapshot holds is named by that snapshot's head as `tip`,
-and its first entry by number alone (see Reading).
+and its first entry by number alone (see [Runs](protocol.md#runs)).
 
 For example:
 
@@ -282,7 +278,8 @@ effect with the user's consent:
 | `record`  | The record's nonce                             |
 | `outcome` | `"finished"`, `"rolled-back"` or `"dismissed"` |
 
-A **bind** entry pins moves this writer's reader found (see Binding), after the
+A **bind** entry pins moves this writer's reader found (see
+[Binding](protocol.md#binding)), after the
 intent it committed with:
 
 | Member | Value         |
@@ -361,38 +358,6 @@ for the file register.
 A contribution holds at most one own write and one own delete per field, and per
 field and other writer one take and two references, so these are bounded by the
 fields its writer wrote, not by its history; `settled` gains a pair per record
-closed (see What stays). Members of `state` a reader does
-not know are kept; members it does not know inside a record refuse the snapshot.
-
-Only a snapshot's writer compacts: at close, every 512 of its own entries, and
-when the app asks. It confirms that a file in its directory holds its last
-entry, as before an append; if none does, it writes nothing and a new writer
-takes over. When a snapshot in its directory already has that head, there is
-nothing to compact: it writes nothing, deletes as below only what that snapshot
-lets it, which a compaction cut short left, and looks first at that snapshot
-when it next confirms the entry. Otherwise it folds the entries after its
-previous snapshot's head into that snapshot's state, certifies every segment of
-its directory by the part of it on its chain, the snapshots of its directory on
-its chain by their certificates, and every other entry it folds by hash, and
-writes the snapshot. A segment file that ends before a certificate of the
-previous snapshot with its first line reaches, as a dropped version does, gets
-no certificate of its own. A snapshot longer than a reader reads (see Reading) is
-refused before anything is written, so the log it would fold stays, and the
-instance compacts no more on its own until it opens again. Where the folder
-renames files, it writes it to `tmp/` under its nonce, syncs it, renames it into
-place and syncs both directories; a staged snapshot a crash leaves is removed with the other files of
-`tmp/` (see Recovery). Elsewhere it writes the snapshot in place and syncs it
-and its directory, and a crash can tear it, leaving a file reported as
-unreadable. The writer's next compaction there deletes a `snapshot-` file of its
-directory that ends, but for a zero-filled tail, inside its JSON value, with
-what that compaction supersedes; a whole snapshot it cannot read, as a newer
-build writes, stays. It then confirms that the folder holds the snapshot.
-Only then does it delete every segment in its directory that ends with a seal
-marker and every line of which the new snapshot certifies, and every snapshot
-whose head the new one certifies. A segment without a seal marker, such as one
-left open by a crash or a copy, is never deleted, and neither is a segment
-holding an entry off the chain. Just before deleting each file it confirms that
-the new snapshot is still in the folder, and that the file still has the length
-it read and, for a segment, ends with its seal marker; a file that changed is
-left.
-
+closed (see [Bounded retention](protocol.md#bounded-retention)). Members of
+`state` a reader does not know are kept; members it does not know inside a
+record refuse the snapshot.

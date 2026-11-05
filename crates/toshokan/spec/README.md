@@ -1,17 +1,16 @@
 # The portable-root protocol, model-checked
 
 [`Portable.tla`](Portable.tla) specifies how toshokan's writers keep logs in a
-synced folder and how every reader merges them. TLC checks it against a sync
-layer that delivers each file to each reader independently and in any order.
+synced folder and how every reader merges them, as [protocol.md](protocol.md)
+and [format.md](format.md) state in full. TLC checks it against a sync layer
+that delivers each file to each reader independently and in any order. It
+checks placement, forks, runs, certificates, dismissals, restores of the folder
+and of one directory, and dropped versions, over an abstract merge.
 
 ```sh
 nix build .#nord.toshokan-spec       # small bounds, a few minutes; `nix flake check` runs it
 nix build .#nord.toshokan-spec-deep  # larger bounds, much longer
 ```
-
-This model follows the bounded retention of [protocol.md](protocol.md#bounded-retention):
-snapshots that certify the files their chain was written to instead of listing
-every folded hash, and forks shown as runs instead of merged.
 
 [models.nix](models.nix) holds the models TLC checks: each one's scenario, the
 constants it changes from a baseline, what it checks, and the build that runs
@@ -20,49 +19,32 @@ it. To run one by hand, `nix build .#nord.toshokan-spec-configs`, which writes
 directory, and there run `tlc -workers 8 -lncheck final -config Portable.cfg
 Portable.tla` under `nix shell nixpkgs#tlaplus18`.
 
-## The protocol
+## The model
 
-Each writer has a random id, which names its directory, and only that writer
-writes there. An entry is identified by its hash, which covers the hash of its
-predecessor, so a writer's entries form a chain. A writer appends entries to
-segments, and a process that closes its segment seals it with a marker. A
-writer folds its own chain into a snapshot, and then deletes the snapshot the
-new one supersedes and the sealed segments that a snapshot in its directory
-folds. A multi-step effect writes a pending record and logs the entry that
-closes it, which names the record: the model closes an effect by its own
-`logged` flag, and the code closes a record only by an entry naming its nonce,
-never by its place in the chain. The record is then spent, and its owner deletes
-it before it begins another effect, or never. Another writer that sees the record
-of an effect no entry closes reports it, and with the user's consent closes it in
-its own log; only the record's owner deletes it.
+An entry is a number standing for its hash. It holds its writer's directory,
+its predecessor, its number in its chain, the effect it closes and the entries
+it dismisses. A file is a segment, a snapshot or a pending record. A segment
+only grows, and the process writing it seals it when it closes it. A snapshot's
+head is the model's *anchor*: a reader chains only from it, and recognizes only
+the lines the snapshot certifies. A pending record is one effect, in flight or
+spent. The model closes an effect by its own `logged` flag, where the code
+closes a record only by an entry naming its nonce, never by its place in the
+chain. Files are never edited in place, and their owner deletes
+them whole. Each reader sees each file through `vis`: nothing, a readable
+prefix, or all of it, independently of every other file and reader.
 
-Each entry carries its number in its writer's chain. A snapshot lets a reader
-chain only from its anchor, and recognize the lines it certifies: those it folds
-of every segment its chain was ever written to.
-
-A reader takes every file in a writer's directory, whatever its name. Its tips
-are the snapshots no other snapshot certifies. It skips an entry a tip
-certifies, places an entry whose predecessor is a tip's anchor or placed, holds
-back an entry whose predecessor may still come after the tips, and shows any
-other entry as a run. A fork point is an entry with two successors, one a tip
-certifies before an entry no tip folds, or the highest entry every tip of a
-writer certifies; every entry of that writer numbered above it is a run, so no
-two branches are ever merged. Where a writer has several tips, the reader merges
-only what they all fold. Folds are ghosts: the model treats a snapshot as the
-whole chain it folds, so it checks placement only. Its certificates are exact:
-a tip knows every entry it folds, while the code's segment certificate names a
-segment by its first line and a position only, so a shorter copy of one cannot
-be told from another copy with the same first line. That ambiguity, what a
-snapshot's lossy contribution keeps, where the code's tips part by the hashes
-they name, and how references kill are checked by the value-level tests in
-`tests/retention`. A dismissal, an entry naming runs, takes
-them out of view for good: a reader never merges what a dismissal names, and
-shows an entry after one as a run. A reader keeps nothing between reads: each
-read derives its tips, placement, fork points, runs and gaps from the files it
-sees, as a reader opening for the first time would. While sync is still
-delivering, what it shows can go and come back, as when a compaction's deletions
-arrive before its snapshot. There is no grace step: after a restore, the folder
-wins at once.
+A reader takes every file in a writer's directory, whatever its name, and keeps
+nothing between reads: each read derives its tips, placement, fork points, runs
+and gaps from the files it sees. Where a writer has several tips, the model
+merges only what they all fold, and finds a fork point at the highest entry
+every one of them certifies. Folds are ghosts: the model treats a snapshot
+as the whole chain it folds, so it checks placement only. Its certificates are
+exact: a tip knows every entry it folds, while the code's segment certificate
+names a segment by its first line and a position only, so a shorter copy of one
+cannot be told from another copy with the same first line. That ambiguity, what
+a snapshot's contribution keeps, where the code's tips part by the hashes they
+name, and how references kill are checked by `tests/retention` (see
+[Values](#values)). After a restore, the folder wins at once.
 
 A copied local root (a restored backup, a cloned disk) makes two instances write
 one directory: a fork. A writer's local root exists only once its first entry is
@@ -92,9 +74,7 @@ Snapshots and pending records are named at random too. The model gives every
 file a unique name except segments under `UniqueNames = FALSE`.
 
 Superseded files are deleted as soon as the snapshot that replaces them is
-written. Deleting them one compaction later would protect no property here; it
-would only shorten the time a reader shows a gap when sync delivers files
-roughly in order.
+written.
 
 ## What is checked
 
@@ -113,7 +93,7 @@ roughly in order.
 | `DismissalsHold` | A reader never merges what a dismissal it merged names; once every file has reached it, it neither shows nor merges what a kept, merged dismissal names. |
 | `OwnDirectory` | A writer creates, appends to and deletes files only in its own directory. |
 | `Retained` | The folder keeps every entry written, in a segment or folded in a snapshot, unless a restore or a dropped version took it. |
-| `EffectAccounted` | Every effect begun has a pending record or a closing entry in the folder, unless a restore took both. |
+| `EffectAccounted` | Every effect begun has a pending record or a closing entry in the folder, unless a restore or a dropped version took both. |
 | `DeliveredConverges` | Once every file has reached a reader, it merges, shows or has dismissed every kept entry, holds back only what follows a lost entry, and reports every fork among the kept entries it sees, whatever the delivery order. |
 | `DeliveredSettles` | Once every file has reached a reader, every effect is closed by an entry it holds, merged or on a branch it shows apart, reported, or that reader's own effect in flight; this includes the effects of a writer whose local root was lost. |
 | `Monotone` | As files arrive, a reader stops merging an entry only when it now shows it or has dismissed it. |
@@ -170,7 +150,7 @@ another in it includes.
 ## Refinement
 
 The spec applies to the code because the code keeps the model's rules and its
-reader's obligations. [format.md](format.md) and [protocol.md](protocol.md) state each in full.
+reader's obligations:
 
 - Entries carry their number. A snapshot certifies every entry it folds, its
   head among them: by the segments its chain was written to, and by hash.
@@ -199,7 +179,7 @@ them, resurrections, hidden files and conflicted copies under other names.
 | Property or rule | Checked by |
 | --- | --- |
 | `ChainOrder`, `NothingIgnored`, `Retained`, `DeliveredConverges`, `Agree`, `Monotone` | `tests/portable.rs`: every delivery order of small scenarios, and seeded interleavings of writes, compactions, crashes, clones and lost local roots with sync; at each step a reader that reads only what changed places what one reading every file places, and where files only arrived it keeps every entry and fork point it held |
-| `NoMergedFork`, `DismissalsHold` | `tests/retention`: the value-level checks of the retention design run toshokan's encoding, compaction and derivation against an oracle that never compacts |
+| `NoMergedFork`, `DismissalsHold` | `tests/retention`: see [Values](#values) |
 | `OwnDirectory` | `tests/library.rs`: every instance runs on a backend that panics on a write in another writer's directory |
 | `EffectAccounted` | `tests/crash.rs`: every effect crashed after every operation, under torn, zeroed and lost tails, where moves rename and where they copy |
 | `DeliveredSettles` | `tests/crash.rs` and `tests/library.rs`: a crash, or the loss of the local root, at every step is settled once, by the writer itself or with consent by another, where moves rename and where they copy; a spent record is reported only by a reader its closing entry has not reached |
@@ -223,9 +203,51 @@ code compares contents where it would otherwise trust a length:
   length it read and ends with its seal marker (`tests/writer.rs`).
 
 What the model abstracts away is checked in Rust: the merge by `tests/facts.rs`
-and by `tests/retention`, which compares toshokan's merge of bounded histories,
-delivered in many orders and compacted, with an oracle's; file effects by
-`tests/crash.rs`; binding by the bounded search in `src/binding.rs`.
+and by `tests/retention`; file effects by `tests/crash.rs`; binding by the
+bounded search in `src/binding.rs`.
+
+### Values
+
+The model merges entries, not values. References, deletes that kill fields,
+contradicted references, forgotten bases and the display of runs are checked by
+`tests/retention`, which runs toshokan's encoding, compaction and derivation
+against an oracle that holds every entry ever written, never compacts and merges
+by exact hash. Histories of up to three writers and a clone, which may resume
+mid-segment, write two entities' existence, two registers and two set members,
+delete and revive, dismiss and take runs, and compact after any entry, or after
+a sync client dropped the open segment's newest line. Each writer writes from
+what toshokan shows it of the folder. Every folder they leave is read at rest,
+along every delivery order or, past a cap, a spread of them (with deleted files
+delivered early, late or never), with conflicted copies, at every subset of its
+files, after a restore of the folder or of one directory to every earlier state,
+and after every dropped version of a segment. A reader holds nothing between
+reads.
+
+The properties: readers at rest show what the oracle shows; a replaced value
+never shows alone again along a reader's deliveries, unless what replaced it was
+dismissed or lies beyond a fork, or the field carries an item or a contradiction
+report; a branch's step changes no merged value outside a forgotten basis; no
+reader merges what a dismissal names; a contribution stays within one own write
+per field and two references per field and other writer; and after a fault, the
+folder wins, but for a value that a line the folder holds replaced on its own
+chain, through the entry the fault took. An extra value fails unless the
+oracle's value shows beside it after a fault, on a field the reader reports
+contradicted, or the field is a forgotten basis. A missing value fails unless an
+item of its writer shows it on that field, or shows that field as a forgotten
+basis while no tip holds the write that carried it.
+
+`tests/retention_slice.rs`, in the default suite, runs a bounded slice;
+`tests/retention_sweep.rs` runs the rest by name.
+
+### Growth
+
+`tests/no_growth.rs`, in the default suite, checks [Bounded
+retention](protocol.md#bounded-retention) for ten entities at 10,000 and 100,000
+entries: the folder, what open reads and keeps, and the requests of open, commit
+and refresh stay the same, but for the certificates and the record pairs the
+entries between add, and a digit per number. Its history names records by
+nonce and writes no pending record, so it does not cover the commit of a file
+effect.
 
 ## What is abstracted away
 
