@@ -10,10 +10,7 @@ the mutating requests its steps make. Each case then runs it again in a fresh
 directory and stops it at one of those requests, before sending it or while the
 browser performs it, and kills it there as `KILLS` lists. A page of the browser,
 started again where the kill took it, checks the directory with the power-loss
-checker: each library path holds its old bytes, its new bytes, or nothing while a
-pending record names it; every entry an acknowledged step committed is there;
-recovery reaches the model before or after the step in flight; settling again
-changes nothing; the next write succeeds.
+checker in `tests/power_loss`.
 
 --stride N takes every Nth request of each workload, starting at a different one for
 each workload; 1 takes them all. The kills, and stopping before or during a request,

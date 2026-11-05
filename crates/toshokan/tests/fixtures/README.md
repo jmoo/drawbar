@@ -9,8 +9,7 @@ Each state is a directory:
 - `folder/` and `local/` are the library folder and the install's local root.
 - `empty-dirs.json` lists the directories of each that hold nothing, which git
   cannot keep.
-- `view.oracle.json` is what a reader shows once it has scanned every file. It is
-  written by hand from what the generator did.
+- `view.oracle.json` is what a reader shows once it has scanned every file.
 - `README.md` says what the state holds and how it was written.
 
 The `format` suite opens each state with its local root and as a fresh install,

@@ -60,7 +60,6 @@ fn opened(machine: &Machine) -> (Library, Opened) {
     (library, opened)
 }
 
-/// The facts a reader shows of `machine`.
 fn facts(machine: &Machine) -> Value {
     let (library, opened) = opened(machine);
     observed(&library, &opened, &machine.folder)

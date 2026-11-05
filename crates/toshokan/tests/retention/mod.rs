@@ -1,4 +1,4 @@
-//! Value-level checks of toshokan under the retention design in `spec/protocol.md`.
+//! Value-level checks of toshokan against "Bounded retention" in `spec/protocol.md`.
 //!
 //! Histories of three writers and a clone write one entity's existence, one
 //! register and set members, compact at every point, and dismiss runs. Every

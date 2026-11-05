@@ -21,7 +21,6 @@ use super::world::{
 };
 use super::{Bound, Compaction, Design, Reading};
 
-/// toshokan, under the retention design.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Real;
 

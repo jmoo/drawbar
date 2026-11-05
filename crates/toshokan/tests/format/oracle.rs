@@ -219,7 +219,6 @@ pub fn differences(at: &str, expected: &Value, found: &Value) -> Vec<String> {
     }
 }
 
-/// The oracle `name` of state `state`.
 pub fn oracle(state: &str, name: &str) -> Value {
     let at = fixtures().join(state).join(name);
     let text = std::fs::read(&at).unwrap_or_else(|e| panic!("{}: {e}", at.display()));

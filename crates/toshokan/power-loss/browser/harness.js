@@ -31,7 +31,6 @@ async function root(path) {
 window.harness = {
   workloads: () => crashWorkloads(),
 
-  // Starts a worker on `entry`, handing it `fields`.
   start(entry, fields) {
     worker?.terminate();
     said = { queue: [], marks: [], lost: 0, waiting: null };
@@ -104,7 +103,6 @@ window.harness = {
     }
   },
 
-  // Removes the run directory `name` of `parent`.
   async wipe(parent, name) {
     const dir = await root(parent);
     await dir.removeEntry(name, { recursive: true }).catch(() => {});

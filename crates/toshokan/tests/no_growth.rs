@@ -1,6 +1,7 @@
 //! At a constant library size, what the folder keeps, what a reader keeps and what
 //! open, commit and refresh ask of the backend stay flat as history grows tenfold.
-//! Two parts of a snapshot grow with use, by bounds SPEC's What stays states:
+//! Two parts of a snapshot grow with use, by the bounds "What stays" in
+//! `spec/protocol.md` states:
 //! certificates, per segment a writer ended, and the record pairs of `settled`,
 //! per commit that moved files.
 //!
@@ -251,7 +252,6 @@ fn besides_snapshots(folder: &MemDisk) -> (usize, usize, Vec<Vec<u8>>) {
     (besides, numbers, snapshots)
 }
 
-/// How many numbers `value` holds.
 fn numbers(value: &serde_json::Value) -> usize {
     match value {
         serde_json::Value::Number(_) => 1,

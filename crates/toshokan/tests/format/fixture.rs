@@ -69,10 +69,8 @@ pub const STATES: [&str; 5] = [
 /// Beside a state's trees: the directories of each that hold nothing.
 pub const EMPTY_DIRS: &str = "empty-dirs.json";
 
-/// The directory under the fixtures holding the reverse cases.
 pub const REVERSE: &str = "reverse";
 
-/// The directory holding every fixture state.
 pub fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
