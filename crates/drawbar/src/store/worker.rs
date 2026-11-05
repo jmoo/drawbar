@@ -3,14 +3,16 @@
 //! The page starts the worker from [`BOOTSTRAP`] and posts it the URL of the bundle's
 //! wasm-bindgen glue, the module the page already compiled, and where the library is.
 //! The worker instantiates the same bundle and calls [`serve`], which answers `{ready}`
-//! or `{failed}`, and `{failed, outdated}` where the glue could not be imported. From then on each command is `{id, text, attached}`, a
-//! [`wire::Message`], and is answered by `{id, text, attached}` holding every answer it
-//! gave, in order; or by `{id, failed}`. A command with `{whole}` answers the whole view
-//! rather than what changed since the last answer, which the page lost. The worker runs
-//! commands one at a time, in the order they arrive. `{close}` lets the library go, and
-//! is answered by `{closed}`. A fault in the worker is posted as `{failed}`, after which
-//! it answers nothing. `{listed, answered}` says how many files its listings have found
-//! and how many requests its storage has answered, each time either moves.
+//! or `{failed}`, and `{failed, outdated}` where the glue could not be imported. Then:
+//!
+//! - Each command is `{id, text, attached}`, a [`wire::Message`], answered by
+//!   `{id, text, attached}` holding every answer it gave, in order, or by `{id, failed}`.
+//!   A command with `{whole}` answers the whole view rather than what changed since the
+//!   last answer, which the page lost. Commands run one at a time, in arrival order.
+//! - `{close}` lets the library go, and is answered by `{closed}`.
+//! - A fault in the worker is posted as `{failed}`, after which it answers nothing.
+//! - `{listed, answered}` says how many files its listings have found and how many
+//!   requests its storage has answered, each time either moves.
 //!
 //! Started for rescues instead, the worker keeps no library: each message is a
 //! [`RescueIo`] on the files of one directory of the origin private file system, which

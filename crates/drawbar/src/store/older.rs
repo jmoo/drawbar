@@ -1,9 +1,9 @@
 //! The list of This computer that drawbar 0.10 and earlier kept in eframe's string
-//! store, local storage in a browser and `app.ron` on the desktop, which a library takes
-//! in once ([`super::Store::take_in`]) and then leaves where it was, so that an earlier
-//! drawbar run again still finds it. Each key held a version line and then one line
-//! per row, tab-separated, as that build's `store.rs`, `named.rs`, `folders.rs` and
-//! `tags.rs` wrote them.
+//! store: local storage in a browser, `app.ron` on the desktop. A library takes it in
+//! once ([`super::Store::take_in`]) and leaves it where it was, so an earlier drawbar run
+//! again still finds it. Each key held a version line and then one line per row,
+//! tab-separated, as that build's `store.rs`, `named.rs`, `folders.rs` and `tags.rs`
+//! wrote them.
 
 use std::collections::{BTreeMap, BTreeSet};
 

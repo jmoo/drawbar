@@ -4,9 +4,9 @@
 //!
 //! Each keep is a new file in `unsaved/`, written whole under a name `.next` ends, then
 //! moved to its own, by the instance that keeps it, and never changed after, so no two
-//! windows of the install write one file. Of the files kept of
-//! one edit, the one kept at the latest clock is the edit. An instance lets go of the
-//! files it kept or read of an edit once it has kept the edit again, or the edit ends.
+//! windows of the install write one file. Of the files kept of one edit, the one kept at
+//! the latest clock is the edit. An instance lets go of the files it kept or read of an
+//! edit once it has kept the edit again, or the edit ends.
 //!
 //! A file is a JSON line, `{"of":…,"base":…,"at":…}`, then the bytes. Its name is
 //! `<tag>-<instance>-<count>`: the first 16 bytes of the BLAKE3 hash of `of` as JSON, in

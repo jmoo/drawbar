@@ -158,7 +158,6 @@ mod tests {
         assert_eq!((&part.from, part.bytes.clone()), (&outside, 4..9));
     }
 
-    /// A slot's edit goes beside the text, and comes back whole.
     #[test]
     fn a_slot_edit_goes_beside_the_text() {
         use super::super::Slot;
@@ -181,7 +180,6 @@ mod tests {
         assert_eq!(bytes, b"slot bytes");
     }
 
-    /// What the app shows, keyed by entity and by path, comes back as it was.
     #[test]
     fn what_the_app_shows_comes_back_keyed_as_it_was() {
         use super::super::shown::{Change, Shown};
@@ -260,7 +258,6 @@ mod tests {
         );
     }
 
-    /// A message that names an attachment it does not carry does not decode.
     #[test]
     fn a_message_naming_a_missing_attachment_does_not_decode() {
         let mut message = encode(&Cmd::Intent(Intent::Save {
