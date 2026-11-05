@@ -6,8 +6,8 @@ Runs in the browser or on the desktop.
 
 ![drawbar with an instrument attached and a piano library open in its editor](../../docs/src/assets/screenshot.png)
 
-Open [drawbar.app](https://drawbar.app/) in Chrome or Edge, or run the desktop
-app:
+Open [drawbar.app](https://drawbar.app/) in Chrome, Edge or Brave, or run
+the desktop app:
 
 ```sh
 nix run github:jmoo/drawbar#drawbar
@@ -24,7 +24,7 @@ cargo install drawbar
 - Unpack a Nord Sound Manager bundle into a folder, or export sounds from either
   side, with the pianos and samples they play, as one.
 - Keep a text note beside the sounds for the set list and the cues.
-- In any browser, save a copy of the library as one ZIP file, and open it again
+- In the browser, save a copy of the library as one ZIP file, and open it again
   in another browser or after the browser cleared its storage.
 - On the desktop, or in a browser that can open a folder, open any folder as the
   library, such as a Sample Editor project. Nothing in it changes until you

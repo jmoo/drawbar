@@ -1,5 +1,5 @@
-//! A bounded slice of the value-level checks of toshokan under the retention
-//! design; `retention_sweep` runs the rest. See `retention/mod.rs`.
+//! A bounded slice of the value-level checks of toshokan's merge;
+//! `retention_sweep` runs the rest.
 
 mod retention;
 
@@ -95,8 +95,6 @@ fn two_entities_match_the_oracle() {
     ));
 }
 
-/// A restore that takes a dismissal and the branch it dismissed takes the fork
-/// point with them.
 #[test]
 fn a_restore_that_takes_a_dismissed_branch_takes_its_fork_point() {
     let acts = [

@@ -698,8 +698,6 @@ mod tests {
         assert_eq!(relative, unset, "a relative LOCALAPPDATA is ignored");
     }
 
-    /// The derived cache sits beside `app.ron`, one level above the default library, so
-    /// the library never holds it.
     #[cfg(target_os = "macos")]
     #[test]
     fn the_default_library_is_a_folder_of_the_storage_eframe_keeps() {
@@ -737,7 +735,6 @@ mod tests {
         assert!(default.is_dir());
     }
 
-    /// A start whose default library cannot be made opens no library, and says why.
     #[test]
     fn a_start_that_cannot_make_the_default_library_opens_none() {
         let root = Temp::new();

@@ -1,16 +1,6 @@
-//! Recovery of interrupted effects, after a crash and after loss of the local root.
-//!
-//! Opening assesses and writes nothing in the folder. This writer's own records
-//! are settled before its next write: the steps resume where they stopped, and
-//! the intent's entry is appended with what they did, and the record is removed.
-//! One whose entry the log already holds is spent, and is removed before the next
-//! write or at close. A record of a writer this install does not write as
-//! is reported as possibly still in progress elsewhere, and settled only with the
-//! user's consent, by this writer and in its own log; only its owner ever removes
-//! it. Settling twice equals settling once.
-//!
-//! A record is closed by an entry that names it, in its writer's log or in a
-//! settlement; a record no entry names is open.
+//! Recovery of interrupted effects, after a crash and after loss of the local
+//! root: this writer's records settled before its next write, and other writers'
+//! reported as orphans and settled only when asked.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
@@ -68,9 +58,8 @@ pub struct Settling {
 
 /// Reads every writer's pending records and sorts them. `own` is this writer and
 /// the head its local root recorded; `settled` the records some writer settled.
-/// Every other writer's open records are orphans: after the local root is lost,
-/// an install cannot tell its former writer's records from a live writer's.
-/// Requests only [`crate::Io::List`], [`crate::Io::Stat`] and [`crate::Io::Read`].
+/// Every other writer's open records are orphans. Requests only
+/// [`crate::Io::List`], [`crate::Io::Stat`] and [`crate::Io::Read`].
 ///
 /// [`read`], [`classify`] and [`predict`] in turn, for a caller that cannot lend
 /// `logs` while the reads run.
@@ -206,13 +195,11 @@ fn standing(
 }
 
 /// Resumes this writer's open record `name` where its steps stopped, in a folder
-/// that can do what `capabilities` says, after removing a source the last done
-/// step left beside its destination and the start of a copy the next step left,
-/// and setting aside in the trash any other copy cut short there. The caller then
-/// appends the record's entry with what [`Applied`] says, after which
-/// [`effects::finish`] may remove the record. Where what a remaining step moves is
-/// gone, or a file it moves to the trash holds other than what the intent checked,
-/// it does nothing and says so.
+/// that can do what `capabilities` says, after clearing what the last done step
+/// and a copy cut short left behind. The caller then appends the record's entry
+/// with what [`Applied`] says, after which [`effects::finish`] may remove the
+/// record. Where a remaining step cannot run, it does nothing and returns
+/// [`Resumed::GivenUp`].
 pub fn settle(
     layout: &Layout,
     name: Nonce,
@@ -356,13 +343,11 @@ pub fn tidy(layout: &Layout, writer: WriterId) -> Task<'static, Result<()>> {
         .task()
 }
 
-/// Removes those of `ignored` that are records of this writer cut short before
-/// their bytes landed, and returns them. A record whose moves copy is created in
-/// place and synced before any of its steps runs, so a crash before then leaves
-/// it empty or, in a folder that syncs, whose `capabilities` declare `fsync`,
-/// started or zeroed ([`pending::cut_short`]); no version writes such a record.
-/// Any other record that does not decode stays, and so does one longer than
-/// [`MAX_RECORD`].
+/// Removes those of `ignored` that are records of this writer created in place
+/// and cut short before their bytes landed, and returns them: empty, or where
+/// `capabilities` declare `fsync`, as [`pending::cut_short`] judges. No version
+/// writes such a record. Any other record that does not decode stays, as does one
+/// longer than [`MAX_RECORD`].
 pub fn remove_empty(
     layout: &Layout,
     writer: WriterId,
@@ -529,12 +514,8 @@ fn under<'a>(dir: RelPath) -> Fallible<'a, Vec<(RelPath, Kind)>> {
 /// far it got, carried out by this writer like an intent's, in a folder that can
 /// do what `capabilities` says. Nothing is written in the other writer's
 /// directory: its staged and trashed bytes are copied, and library files the
-/// settlement displaces go to this writer's trash, the start of a copy their next
-/// step left included. Finishing skips moving to the trash a path that holds
-/// nothing, and checks one that holds something to hold what their intent
-/// checked. Dismissing changes no file. Finishing or rolling back a step that
-/// would rename a directory or move one to the trash is refused where
-/// `capabilities` cannot rename one.
+/// settlement displaces go to this writer's trash. It refuses as the Recovery
+/// section of `spec/protocol.md` says.
 ///
 /// Planned again after a settlement stopped partway, it plans what remains. The
 /// caller commits the plan, then, once its effects complete, appends a

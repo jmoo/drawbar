@@ -7,10 +7,14 @@
 //! system, or a folder the user picked. Its local root, which only this install
 //! reads, is always a directory of the origin private file system, named by its
 //! path there. Each declares its [`Capabilities`](crate::io::Capabilities) for
-//! the browser it runs in; SPEC.md lists them.
+//! the browser it runs in, as
+//! [Browsers](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#browsers)
+//! lists them.
 //!
-//! [`Hints`] tells other tabs of the same library that a commit landed, so they
-//! refresh without polling.
+//! [`Hints`] says when to refresh or rescan: after a commit in another tab of the
+//! same library, when the browser's watcher saw the folder change, and, for a
+//! folder another program may write, when the page is focused or shown and
+//! periodically while it is visible.
 
 mod fs;
 mod hints;

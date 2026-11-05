@@ -1,6 +1,6 @@
 //! A writer's trash: bytes its intents displaced, kept for undo until it empties
 //! them. Emptying a trash is the only way bytes leave the folder, and only its
-//! owner empties it, never of what a pending record of its may still move.
+//! owner empties it, keeping what a pending record of its may still move.
 
 use std::collections::{BTreeMap, BTreeSet};
 

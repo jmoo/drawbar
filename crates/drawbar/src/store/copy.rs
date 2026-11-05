@@ -565,8 +565,6 @@ pub(super) fn saved(folder: &std::path::Path) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    /// Each window of an install holds a lock of its own while it has the library open,
-    /// and one past them all opens nothing until another lets its lock go.
     #[test]
     fn a_window_past_every_lock_held_is_refused_until_one_is_let_go() {
         let disk = toshokan::MemDisk::new();

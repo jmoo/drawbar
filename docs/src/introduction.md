@@ -11,7 +11,8 @@ terminal.
 > instruments. [What is supported](getting-started/support.md) lists what has
 > been tested on hardware.
 
-**Open drawbar** at [drawbar.app](https://drawbar.app/) in Chrome or Edge.
+**Open drawbar** at [drawbar.app](https://drawbar.app/) in Chrome, Edge or
+Brave.
 [Install](getting-started/install.md) covers the desktop app and `nord`.
 
 ## In this guide

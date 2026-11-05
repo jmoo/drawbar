@@ -47,9 +47,9 @@ exported, and the item is unavailable while the library holds any file, hidden
 ones included. Close drawbar in the browser's other tabs first. If an import
 stops partway, the library opens read-only until you import the copy again.
 A web app added to the Dock or the Home Screen keeps storage of its own, apart
-from Safari's, so export a copy in Safari and import it in the web app. In Chrome and
-Edge you can also unzip the copy and open the folder with **File ▸ Open
-folder…**.
+from Safari's, so export a copy in Safari and import it in the web app. In
+Chrome and Edge you can also unzip the copy and open the folder with **File ▸
+Open folder…**.
 
 ## Opening another folder
 
@@ -65,26 +65,27 @@ Open folder…** too ([What is supported](../getting-started/support.md)
 lists them). The browser asks whether drawbar may change the folder. It forgets
 that answer when drawbar.app closes, unless you allowed it on every visit, so the
 next visit starts with the browser's own library. Choose the folder in **File ▸
-Open recent** and the browser asks again. If you take the permission back while the folder is open,
-drawbar closes it the same way. A folder's unsaved edits come back while it is
-on **File ▸ Open recent**; picked again after it left that list, it
-opens without them.
+Open recent** and the browser asks again. If you take the permission back while
+the folder is open, drawbar closes it the same way. A folder's unsaved edits come
+back while it is on **File ▸ Open recent**; picked again after it left that list,
+it opens without them.
 
 The library folder can live in Dropbox, OneDrive or iCloud Drive, or on a
-network share, and syncing just works: a copy that is out of date, changes that
-arrive out of order, and a folder partly restored from a backup all come
-together again. Each drawbar keeps its own record of what it changed in the
-`.drawbar` folder, so none overwrites another's. That is also why several drawbars
-can use one library at once: on two computers, in two windows, in two browser
-tabs, or in the browser and the desktop app on one folder. A tab shows another
-tab's changes as soon as they are made; otherwise drawbar shows what the others
-changed when you come back to the window, and the activity log says so. Two
-drawbars that tag the same file before either sees the other's tags, as while a
-sync is paused, both keep them: once the sync catches up, the file wears every
-tag either gave it, and the activity log of the drawbar that brought them
-together names the file. A file of another drawbar's record that a sync client
-keeps only online, or that this computer may not read, is named in the activity
-log once, and its changes show once drawbar can read it.
+network share. A copy that is out of date, changes that arrive out of order, and
+a folder partly restored from a backup all come together again without your
+help. Each drawbar keeps its own record of what it changed in the `.drawbar`
+folder, so none overwrites another's. Several drawbars can therefore use one
+library at once: on two computers, in two windows, in two browser tabs, or in
+the browser and the desktop app on one folder. A tab shows another tab's changes
+as soon as they are made. Otherwise drawbar shows what the others changed when
+you come back to the window, and the activity log says so.
+
+If two drawbars tag the same file before either sees the other's tags, as while
+a sync is paused, the file wears every tag either gave it once the sync catches
+up. The activity log of the drawbar that brought them together names the file. A
+file of another drawbar's record that a sync client keeps only online, or that
+this computer may not read, is named in the activity log once, and its changes
+show once drawbar can read it.
 
 In the browser, and on a desktop disk that cannot refuse to move a file onto one
 already there, drawbar checks that a name is free before a saved, copied or
@@ -116,16 +117,16 @@ not open, such as `.json`, keeps its name and comes in as a hidden file, and an
 edit you had not saved to it is a hidden file of its own beside it. Bytes
 drawbar could not read come in unchanged, and hidden unless their name ends in
 an extension drawbar opens; a name with no extension gains `.bin`, so `Junk`
-becomes `Junk.bin`.
-In the browser, a [copy of the library](#keeping-a-copy-in-the-browser) holds them.
+becomes `Junk.bin`. In the browser, a
+[copy of the library](#keeping-a-copy-in-the-browser) includes the hidden files.
 The activity log says how many sounds came in.
 
 Undo does not take this back; delete the sounds you do not want. Once the sounds
 are in the library and their unsaved edits are kept, drawbar does not bring them
 in again, but it leaves the old list where it was, so the earlier version still
-finds it. If drawbar stops
-before then, it puts the unsaved edits back the next time it starts. If the
-change fails, drawbar says why and tries again the next time it starts.
+finds it. If drawbar stops before then, it puts the unsaved edits back the next
+time it starts. If the change fails, drawbar says why and tries again the next
+time it starts.
 
 ## Saving
 
@@ -136,7 +137,11 @@ connected instrument. **Revert** goes back to the last save.
 Unsaved edits are kept when you quit: those of sounds in your library, and those
 of a sound you were viewing in a slot of the instrument. A slot's edits come
 back when you view that slot of the same instrument again with the same library
-open; if the slot changed since, drawbar asks which to keep. drawbar also keeps
+open; if the slot changed since, drawbar asks which to keep. **Keep mine** keeps
+your edits, to send when you choose, **Take theirs** discards them, and **Keep
+both** keeps yours as a new file on this computer. Where edits kept from an
+earlier session meet edits you made since, **Take theirs** puts the earlier
+edits back, and **Keep both** keeps the earlier edits as a new file. drawbar also keeps
 edits every few seconds, so after a crash you may lose the last few seconds. In
 the browser, closing the tab before drawbar has kept your latest edit makes the
 browser ask whether to leave. Stay a moment, and the edit is kept. A read-only
@@ -169,16 +174,17 @@ Undo and Redo are off while a change is being written. A change that takes more
 than two seconds shows what it is doing over the window.
 
 Deleting a sound or a hidden file, or saving over a sound, moves the old file
-into drawbar's trash in the `.drawbar` folder, where Undo finds it. Undo reaches
-only the changes made since the library opened, and the trash keeps only what
-they need, at most 1 GiB. Past that, the oldest goes first, and the activity
-log says which change Undo no longer reaches. Quitting empties the trash. What a crash left there goes when
-the library next opens, once drawbar has finished any change the crash
-interrupted. When drawbar has to go on with a history of its own, it empties the
-trash of the history it leaves, since Undo starts again. After its data was
-copied to a second computer it cannot, as the other copy may still need that
-trash: it stays in the library folder, under `.drawbar/library/writers.2`, until
-you remove it by hand.
+into drawbar's trash in the `.drawbar` folder, where Undo finds it. The trash
+keeps only what Undo can still reach, at most 1 GiB. Past that, the oldest goes
+first, and the activity log says which change Undo no longer reaches. Quitting
+empties the trash. What a crash left there goes when the library next opens,
+once drawbar has finished any change the crash interrupted.
+
+When drawbar has to go on with a history of its own, Undo starts again. If that
+happens while the library is open, drawbar empties the trash of the history it
+leaves. If it happens as the library opens, or because drawbar's data was copied
+to a second computer, that trash stays in the library folder, under
+`.drawbar/library/writers.2`, until you remove it by hand.
 
 **Export…** saves a copy somewhere else. **File ▸ Export…** (⇧⌘E) exports the
 checked sounds on this computer, or the open document when nothing on this
@@ -232,9 +238,10 @@ lists at most 100 changes and counts the rest.
 
 This happens when:
 
-- drawbar's own data was copied to a second computer, and both copies went on
-  making changes. Each copy's changes are a branch of their own, and the
-  activity log says that this drawbar goes on with a history of its own.
+- drawbar's own data was copied to a second computer, restored from a backup,
+  or brought back with a virtual machine, and both copies went on making
+  changes, however briefly. Each copy's changes are a branch of their own, and
+  the activity log says that this drawbar goes on with a history of its own.
 - A sync has brought later changes before the earlier ones they follow. These
   wait until the rest arrives and are merged then. Meanwhile they can be taken
   but not dismissed.
@@ -273,16 +280,21 @@ bring back any you deleted.
 
 ## If something goes wrong
 
-- **Read-only.** drawbar cannot write the library folder, a newer drawbar has
-  written its `.drawbar` folder, drawbar could not finish a change, as when
-  another program put a file where a save was going, or the library folder does
-  not make sure a change is kept, as on some network and USB drives: move such a
-  library to a folder on a local disk. Hover the library's name
-  for the reason and what to do, then choose the library in **File ▸ Open recent**
-  to open it again. Unsaved edits are still kept, and an edit you save
-  there comes back unsaved. New sounds, moves and deletions in a read-only
-  library are held in memory only, and are lost when you quit. If opening it again would lose a sound or an edit, drawbar
-  asks first.
+- **Read-only.** A library is read-only when:
+  - drawbar cannot write its folder;
+  - a newer drawbar gave its `.drawbar` folder a newer layout, or changed it from
+    this computer in a way this one cannot read;
+  - drawbar could not finish a change, as when another program put a file where
+    a save was going;
+  - the folder does not make sure a change is kept, as on some network and USB
+    drives. Move such a library to a folder on a local disk.
+
+  Hover the library's name for the reason and what to do, then choose the
+  library in **File ▸ Open recent** to open it again. Unsaved edits are still
+  kept, and an edit you save there comes back unsaved. New sounds, moves and
+  deletions in a read-only library are held in memory only, and are lost when
+  you quit. If opening it again would lose a sound or an edit, drawbar asks
+  first.
 - **Not opened.** If a library cannot be opened, hover its name for the reason,
   then choose it in **File ▸ Open recent** to try again. Nothing you
   make meanwhile is kept.
@@ -303,18 +315,19 @@ bring back any you deleted.
   it.
 - **Too many tabs.** One library opens in at most 16 tabs or windows at once. The
   next one does not open it and says so; close one, then open the library again.
-- **Not answering.** If the library shows no sign of life for a minute, drawbar
-  asks whether to close and reopen it. Edits made since drawbar last kept them
+- **Not answering.** If the library has not answered for a minute, drawbar
+  asks whether to reopen it. Edits made since drawbar last kept them
   are lost, and drawbar names them. A library you leave meanwhile, by opening
   another or quitting, is closed after that minute without asking, and those
-  edits are lost too; the desktop app names them. If the library stops altogether, drawbar closes it and
-  says so; **File ▸ Open recent** opens it again.
+  edits are lost too; the desktop app names them. If the library stops
+  altogether, drawbar closes it and says so; **File ▸ Open recent** opens it
+  again.
 - **Restored from a backup.** When the library folder no longer holds changes
   drawbar showed before, as after a restore from a backup, drawbar shows the
-  folder as it is the next time it looks. While a sync is still bringing the
-  folder's files, changes can disappear the same way and come back once they
-  arrive. A change you make meanwhile is kept: at worst it shows beside the one
-  the sync brings.
+  folder as it is the next time it looks, without asking. While a sync is still
+  bringing the folder's files, changes can disappear the same way and come back
+  once they arrive. A change you make meanwhile is kept: at worst it shows beside
+  the one the sync brings.
 - **Missing.** The file was deleted outside drawbar, but it had tags or unsaved
   edits, or came from your keyboard. Save it to bring the file back, or delete
   it. After a restart, a missing file with tags shows as lost, with its tags,

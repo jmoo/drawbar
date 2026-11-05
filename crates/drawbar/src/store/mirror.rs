@@ -2931,16 +2931,16 @@ impl Store {
         self.took_up == TookUp::Done && self.has_taken_in(hash) && self.brought.iter().all(kept)
     }
 
-    /// Take the list an older drawbar kept into the library as one change, which Undo
-    /// does not take back, once a session: once a scan has listed every file, while the library
-    /// may be written and no change of drawbar's own waits to be finished. Each folder is
-    /// a new one in the library's top level, and each asset a file in its folder, both
-    /// under names nothing beside them has, the asset's with the extension its bytes call
-    /// for. An unsaved edit stays unsaved over the file, but a hidden file's is a hidden
-    /// file of its own beside it, as it has no asset to stay over. Before the change is sent,
-    /// `storage` keeps the record of where each asset that came with an unsaved edit
-    /// goes, by its place in the list ([`older::keep_placed`]); where none does, each
-    /// such edit comes in as a file of its own beside the asset's instead.
+    /// Take the list an older drawbar kept into the library, once a session, as one
+    /// change Undo does not take back: once a scan has listed every file, while the
+    /// library may be written and no change of drawbar's own waits to be finished. Each
+    /// folder is a new one in the library's top level, and each asset a file in its
+    /// folder, both under names nothing beside them has, the asset's with the extension
+    /// its bytes call for. An unsaved edit stays unsaved over the file; a hidden file's
+    /// edit, with no asset to stay over, is a hidden file of its own beside it. Before the
+    /// change is sent, `storage` keeps the record of where each asset that came with an
+    /// unsaved edit goes, by its place in the list ([`older::keep_placed`]). Where no
+    /// record is kept, each such edit comes in as a file of its own beside the asset's.
     ///
     /// Where the library took the list in already, nothing else is written: each unsaved
     /// edit is put back over the file the take-in gave it, as the record in `storage`

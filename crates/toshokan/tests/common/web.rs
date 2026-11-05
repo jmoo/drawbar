@@ -190,7 +190,6 @@ impl Drop for Bridge {
     }
 }
 
-/// The bridge worker's entry point.
 #[wasm_bindgen(js_name = toshokanBridge)]
 pub async fn bridge(start: JsValue) {
     let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();

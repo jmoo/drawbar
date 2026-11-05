@@ -37,7 +37,6 @@ pub fn fork_points(world: &World, forks: &BTreeSet<(Dir, Hash)>) -> BTreeMap<Dir
     lowest
 }
 
-/// Places `visible`, a set of entries.
 pub fn place(world: &World, visible: &BTreeSet<Hash>) -> Placement {
     let complete = |e: Hash| world.chain(e).iter().all(|a| visible.contains(a));
     let mut successors: BTreeMap<Hash, BTreeSet<Hash>> = BTreeMap::new();
@@ -162,7 +161,6 @@ pub fn live(world: &World, merged: &BTreeSet<Hash>) -> Vec<Live> {
         .collect()
 }
 
-/// What an oracle shows of `placement`.
 pub fn shown(world: &World, placement: &Placement) -> Shown {
     shown_within(world, placement, None)
 }

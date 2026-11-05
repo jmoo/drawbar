@@ -1,30 +1,14 @@
-//! "This computer", kept as a folder of real files.
+//! "This computer", kept as a folder of real files: a folder in the browser is a
+//! directory, an asset is a file, and a move is a rename. toshokan keeps what a file
+//! cannot say, such as its tags, in `.drawbar/library/` at the root
+//! (`docs/src/reference/data-model.md`).
 //!
-//! The library is a directory tree: a folder in the browser is a directory, an asset is a
-//! file, and a move is a rename. What a file cannot say (its tags) is kept by toshokan in
-//! a hidden `.drawbar/library/` folder at the root, as facts about the entities that say
-//! it; every other file is known by its listing alone. Every running drawbar appends only
-//! to its own log there, so the folder can be synced between computers.
-//!
-//! ```text
-//! <root>/
-//!   .drawbar/
-//!     library/        toshokan's root: each writer's log, pending effects and trash
-//!   Grand.npno
-//!   Cello/c3.wav
-//! ```
-//!
-//! Opening writes nothing in the folder: `.drawbar/library/` is made at the first fact
-//! said.
-//!
-//! The app talks to a backend in [`Cmd`]s and hears back in [`Event`]s, in order, and
-//! never waits for one: the desktop runs them on a thread, and a browser's storage
-//! answers only asynchronously. Every change the user makes to the files or the facts
-//! is an [`Intent`], one undo step, which toshokan checks against the files before it
-//! writes them. Only reading a file and making or removing an empty folder are not.
-//! [`Store`] is the app's side of that conversation: it turns what the user asked of
-//! the [`crate::workspace::Workspace`] into intents, and projects the library's view
-//! onto the workspace and the browser's tags.
+//! The app sends a backend [`Cmd`]s and hears back [`Event`]s, in order, and never waits
+//! for one: the desktop runs them on a thread, and a browser's storage answers only
+//! asynchronously. Every change the user makes to the files or the facts is an
+//! [`Intent`]. [`Store`] turns what the user asked of the [`crate::workspace::Workspace`]
+//! into intents, and projects the library's view onto the workspace and the browser's
+//! tags.
 
 mod copy;
 mod counted;
@@ -1108,8 +1092,9 @@ pub enum Event {
     /// What a [`Cmd::Rescan`] or a [`Cmd::Refresh`] found.
     Scanned(Result<Viewed, String>),
     /// Whether an intent, an undo or a redo was made, as a step this session's undo
-    /// takes back, by the entry that logged it, and the view after it, or why not. A change to a file that failed is
-    /// told by its own answer, and is answered here with the view as it stands.
+    /// takes back, by the entry that logged it, and the view after it, or why not. A
+    /// change to a file that failed is told by its own answer, and is answered here with
+    /// the view as it stands.
     Committed {
         label: String,
         made: Option<toshokan::EntryHash>,

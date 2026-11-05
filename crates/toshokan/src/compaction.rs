@@ -17,28 +17,25 @@ use crate::report::{Compacted, Rekey};
 use crate::snapshot::{SegmentCert, Snapshot};
 use crate::writer::Writer;
 
-/// Confirms the folder holds this writer's head, seals the open segment, and
-/// writes `snapshot-<name>.json` folding the chain up to the head into its
-/// previous snapshot, durably: staged in the writer's `tmp/` and renamed into
-/// place where `capabilities`, the folder's, rename files, else in place, where
-/// a crash can tear it. Only once the folder holds that snapshot does it delete
-/// each segment of the writer's directory that ends with a seal marker and
-/// every line of which the snapshot certifies, and each snapshot whose head it
-/// certifies. Each is checked again just before it is deleted, and left when it
-/// changed. Returns the writer with the result.
+/// Confirms the folder holds this writer's head, seals the open segment, writes
+/// `snapshot-<name>.json` folding the chain up to the head into its previous
+/// snapshot, and only once the folder holds it deletes the files it supersedes,
+/// as Compaction in `spec/protocol.md` says. Where `capabilities`, the folder's,
+/// rename files, the snapshot is staged in the writer's `tmp/`; else it is
+/// written in place, where a crash can tear it. Returns the writer with the
+/// result.
 ///
 /// `reader` must have read the writer's directory after its last append.
-/// `recorded` holds the lines of segments of the directory the writer read
-/// before, which may be gone now: each is certified as a segment too. Fails
-/// with [`Error::Rekey`] when the reader or the folder does not hold the
-/// writer's head, or the reader finds the writer's history forked, writing
-/// nothing, or when the folder loses the snapshot before a deletion. Refused
-/// with [`Refusal::Nothing`] when a snapshot the reader found in the writer's
-/// directory already has its head; it then writes
-/// nothing, deletes what that snapshot lets it that a compaction cut short
-/// left, and confirms its head from that snapshot from then on. Refused with
-/// [`Refusal::SnapshotTooLong`], writing nothing, when the snapshot would be
-/// longer than a reader holds.
+/// `recorded` holds the lines of segments the writer read before, which may be
+/// gone now: each is certified as a segment too. Fails with [`Error::Rekey`],
+/// writing nothing, when the reader or the folder does not hold the writer's
+/// head or the reader finds its history forked, and, having written it, when the
+/// folder loses the snapshot before a deletion. Refused with
+/// [`Refusal::Nothing`] when a snapshot the reader found in the writer's
+/// directory already has its head: it then writes nothing, deletes what that
+/// snapshot lets it that a compaction cut short left, and confirms its head from
+/// that snapshot from then on. Refused with [`Refusal::SnapshotTooLong`],
+/// writing nothing, when the snapshot would be longer than a reader holds.
 pub fn compact(
     writer: Writer,
     reader: &Reader,
@@ -278,11 +275,10 @@ pub enum Found<'a> {
 
 /// The snapshot of `writer` that folds `since`, its entries after `previous`'s
 /// head in chain order, into `previous`, labeled `label` when there is no
-/// previous one. It certifies each segment `found` shows by its first line and
-/// the last line on the chain, the snapshots on the chain by their
-/// certificates, and by hash every other entry of `since` and the last entry of
-/// each dismissal of its own runs on the chain, so its certificates name its
-/// head. `None` when it folds nothing.
+/// previous one. It certifies the segments and snapshots `found` shows and the
+/// entries of `since` as Compaction in `spec/protocol.md` and Snapshots in
+/// `spec/format.md` say, so its certificates
+/// name its head. `None` when it folds nothing.
 pub fn snapshot<'a>(
     writer: WriterId,
     genesis: EntryHash,
@@ -357,10 +353,10 @@ pub fn snapshot<'a>(
 }
 
 /// How many of a segment's first lines `snapshot`, or `added`, certifies: those
-/// a segment certificate of it covers, and those after them it names. None of
-/// a file that ends before a certificate with its first line reaches: it may be
-/// a dropped version of that segment, whose lines past the first may be on
-/// the chain unnamed, and a certificate ending inside it would make them a fork.
+/// a segment certificate of it covers, and those after them it names. None of a
+/// file that ends before a certificate with its first line reaches, as a dropped
+/// version does: a certificate ending inside it would make its unnamed lines a
+/// fork.
 fn certified_prefix(
     lines: &[Rc<Entry>],
     snapshot: Option<&Snapshot>,
@@ -478,9 +474,10 @@ impl Doomed {
         self
     }
 
-    /// Deletes each file once the snapshot at `path` is confirmed to be in
-    /// the folder still, and the file to be as the reader found it; a segment
-    /// also only while it ends with its seal marker. Returns the deleted segments, and whether it deleted any file.
+    /// Deletes each file once the snapshot at `path` is confirmed to be in the
+    /// folder still, and the file to be as the reader found it; a segment also
+    /// only while it ends with its seal marker. Returns the deleted segments, and
+    /// whether it deleted any file.
     fn delete<'a>(
         self,
         path: RelPath,

@@ -465,10 +465,8 @@ pub const OPEN_FOLDER: &str = "Open folder…";
 
 pub const SHOW_FOLDER: &str = "Show library folder";
 
-/// The item that downloads a copy of the library.
 pub const EXPORT_LIBRARY: &str = "Export library";
 
-/// The item that opens a copy of a library into the browser's own.
 pub const IMPORT_LIBRARY: &str = "Import library…";
 
 /// The title of [`Entry::Recent`]'s submenu.

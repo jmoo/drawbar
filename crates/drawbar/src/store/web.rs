@@ -1,17 +1,11 @@
-//! The browser's library: a folder tree in the origin private file system, which every
-//! browser drawbar runs in keeps for the page and nothing else can see, or a folder on
-//! this computer the user picked, in browsers that let a page open one.
+//! The browser's library: a folder tree in the origin private file system, or a folder
+//! on this computer the user picked, in browsers that let a page open one.
 //!
 //! The library is kept in a dedicated worker of its own ([`super::worker`]), which runs
-//! toshokan over the browser's storage and every command but a read. The page reads the
-//! files itself, from the folder's handles, so a file's bytes cross to the worker only to
-//! be written. Commands run one at a time, in the order they were sent. A library let go
-//! runs the commands it was sent before it lets go, and the next library opens only then,
-//! or once one of those commands goes [`PATIENCE`] without a sign of life.
-//!
-//! Tabs of one library tell each other of their commits, and each refreshes when it hears
-//! of one. A picked folder is also looked at again when the tab comes back into view, as
-//! a program outside the browser may have written it.
+//! toshokan over the browser's storage and every command but a read. Commands run one at
+//! a time, in the order they were sent. A library let go runs the commands it was sent
+//! before it lets go, and the next library opens only then, or once one of those commands
+//! goes [`PATIENCE`] without a sign of life.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};

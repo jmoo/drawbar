@@ -1,20 +1,7 @@
-//! Every file effect crashed after every operation, under torn and zero-filled
-//! tails, renames done by copy and names made durable early; in a folder that
-//! cannot rename, where every move copies, writes land only when their stream
-//! closes, and a file is created empty before its bytes land, as in a browser's
-//! picked folder; and on a volume that syncs and cannot rename, as FAT and exFAT,
-//! where every move copies and a crash zeroes or tears what was not yet synced.
-//!
-//! Before recovery, no bytes have left the folder, and each user path holds its
-//! old bytes, its new bytes or nothing, and nothing only while a pending record
-//! names it; where moves copy, also a copy of its new bytes cut short while a
-//! pending record names it. Recovery finishes every recorded effect, removes every
-//! record and staged file, changes nothing when run again, and ends the same
-//! however often it is itself cut short. After the local root is lost, an
-//! unfinished effect is reported for consent, settling it never writes in its
-//! writer's directory, and settling it again after a settlement stopped partway
-//! ends as one settlement does, whether the settler's moves are the writer's or
-//! the other kind.
+//! Every file effect crashed after every operation, in a folder that renames, a
+//! browser's picked folder, and a volume that syncs and cannot rename, as FAT and
+//! exFAT. What a crash may leave is in `spec/protocol.md`, under "File effects and
+//! pending records".
 
 mod common;
 

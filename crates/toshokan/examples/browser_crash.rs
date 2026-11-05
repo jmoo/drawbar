@@ -1,10 +1,5 @@
-//! The power-loss workloads in a browser, for the sweep in `power-loss/browser`.
-//!
-//! A page's worker runs a workload on the origin private file system and stops at
-//! the mutating request its driver chose, for the driver to kill it; a worker of a
-//! later page checks what the killed one left with the power-loss checker. The
-//! quota run imports files until the origin's quota refuses one, waits for the
-//! driver to make room, and writes again.
+//! The power-loss workloads in a browser, for the sweep in `power-loss/browser`,
+//! whose driver kills each run partway and checks what it left.
 //!
 //! Each export runs in a dedicated worker `worker.js` starts. The library blocks on
 //! a second worker, which holds an [`Executor`] for each backend, through shared
@@ -301,7 +296,6 @@ impl Place for Opfs {
     }
 }
 
-/// The names of the power-loss workloads.
 #[wasm_bindgen(js_name = crashWorkloads)]
 pub fn workloads() -> Vec<String> {
     let names = power_loss::workloads().into_iter().map(|w| w.name.into());

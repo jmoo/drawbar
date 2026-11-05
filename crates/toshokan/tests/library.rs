@@ -1,7 +1,7 @@
 //! The library end to end, through the blocking and the async driver.
 //!
 //! Every instance runs on a probe that panics on a write in another writer's
-//! directory (I3) and counts the writes it passes to the folder (I4).
+//! directory and counts the writes it passes to the folder.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -3662,7 +3662,6 @@ fn segment_write(io: &Io) -> bool {
     write && io.root() == Root::Folder && io.path().as_str().ends_with(SEGMENT_EXTENSION)
 }
 
-/// Picks a sync of a segment.
 fn segment_sync(io: &Io) -> bool {
     let sync = matches!(io, Io::Sync { .. });
     sync && io.root() == Root::Folder && io.path().as_str().ends_with(SEGMENT_EXTENSION)
@@ -3834,8 +3833,6 @@ fn a_new_library_whose_folder_never_syncs_a_directory_leaves_at_most_two_writers
     );
 }
 
-/// A full folder is no folder that keeps no write: after a writer stopped over a
-/// write that landed, running out of space is said as that.
 fn a_full_folder_after_a_writer_stopped_is_said_as_full<F: Facade>() {
     if !FOLDER.get().fsync {
         return;

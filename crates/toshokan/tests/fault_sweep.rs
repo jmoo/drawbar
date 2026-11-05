@@ -1,13 +1,6 @@
-//! Every request the power-loss workloads make after their setup, faulted once:
-//! failed before it takes effect, carried out with its reply lost, carried out
-//! with its reply lost and every request after it failing, or, where it carries
-//! bytes, cut short. The run goes on as an app would: a step that fails
-//! ends the run, and the library either writes again, which settles what the
-//! failure left, or is dropped. Either way the folder is then checked as a power
-//! loss leaves it, and the install opened again: each path holds its old bytes,
-//! its new bytes, or nothing while a record names it; every acknowledged entry is
-//! there; recovery reaches the model before or after the failed step and nothing
-//! else; settling again changes nothing; and the next write succeeds.
+//! Every request the power-loss workloads make after their setup, faulted once
+//! with each [`Fault`] that can befall it. The library then writes again or is
+//! dropped, and the power-loss checker checks what the folder holds.
 
 mod power_loss;
 

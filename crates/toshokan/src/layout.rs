@@ -11,6 +11,8 @@
 //! <local>/<genesis>/           one writer of this install, by its genesis entry
 //!   head.json                  the head this writer last wrote, and whether it is
 //!                              retired; locked while an instance writes as it
+//! <local>/identities.json      identities this install's scans read that no fact
+//!                              gives
 //! ```
 //!
 //! The app names `<root>`: one directory of the folder, or one inside a directory of
@@ -188,9 +190,8 @@ impl Layout {
 /// Whether `name` is a swap file Chromium writes beside a picked folder's file
 /// while a writable stream on it is open: bytes that never landed, which
 /// toshokan neither reads nor scans.
-// Chromium names it `<name>.crswap` while the stream is open. Confirmed on hardware.
-// A tab stopped meanwhile leaves it behind. Inferred from specimens; not confirmed on
-// hardware.
+// Chromium names it `<name>.crswap` while the stream is open. That a tab stopped
+// meanwhile leaves it behind is inferred and has not been seen.
 pub(crate) fn is_swap_file(name: &str) -> bool {
     name.ends_with(".crswap")
 }

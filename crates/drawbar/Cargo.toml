@@ -41,10 +41,11 @@ nord-format = { path = "../nord-format", version = "0.8.0", features = [
 rfd = { version = "0.15", features = ["file-handle-inner"] }
 # The list drawbar 0.10 kept in eframe's store, read once. ron already builds it.
 base64 = "0.22"
-# Drafts of edits, and the derived cache. eframe's `persistence` already builds both.
+# Drafts of edits, and the recent libraries. eframe's `persistence` already builds both.
 ron = "0.10"
 serde = { version = "1", features = ["derive", "rc"] }
-# The messages between the page and the browser library's worker. toshokan builds it.
+# Unsaved edits' headers, and the messages between the page and the browser library's
+# worker. toshokan builds it.
 serde_json = "1"
 # The library's facts, beside its files.
 toshokan = { path = "../toshokan", version = "0.1.0" }

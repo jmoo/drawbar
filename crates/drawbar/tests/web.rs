@@ -693,8 +693,6 @@ async fn a_rescue_another_tab_is_writing_is_let_be_until_it_lets_go() {
     tab.close().await;
 }
 
-/// A worker that keeps rescues, started where the page's bundle is gone, as once
-/// drawbar.app is updated, says drawbar.app was updated.
 #[wasm_bindgen_test]
 async fn a_rescue_worker_whose_bundle_is_gone_says_drawbar_was_updated() {
     let dir = Root::Private.local().join(RESCUED).unwrap();

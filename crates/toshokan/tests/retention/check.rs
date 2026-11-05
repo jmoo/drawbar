@@ -1,22 +1,14 @@
 //! The properties, and the enumeration that drives them.
 //!
-//! P3, P5, P6, P8, P10, P12: at rest, toshokan's readers show what the oracle
-//! shows. P1: along a reader's deliveries, a value a merged write replaced never
-//! shows alone again. P4: a step by one branch of a forked writer changes no
-//! merged value. P7: no reader merges what a dismissal it holds names. P9: a
-//! contribution's size is bounded by fields and writers, and its certificates
-//! name the head of every snapshot of its directory on its chain. P11: after a restore,
-//! a dropped version, or a compacted segment back shorter and unsealed, the folder
-//! wins, and nothing the oracle shows is missing from both toshokan's merge and
-//! its items of the writer that wrote it. Five divergences are counted rather than
-//! failed: an extra value beside the oracle's after a fault, on a field toshokan
-//! reports contradicted; a value the oracle shows after a fault
-//! that a held line's chain replaced, through an entry the fault took; a merged
-//! value toshokan shows only in an item, as a forgotten basis, because a fork
-//! lies inside a segment, or because a fault left a file it cannot place; a
-//! faulted reading that shows such unplaced lines; and, after a compacted segment
-//! came back shorter, a reading that shows as a run to take what the oracle
-//! merges, since a certificate cannot tell that copy from another instance's.
+//! At rest, toshokan's readers show what the oracle shows. P1: along a reader's
+//! deliveries, a value a merged write replaced never shows alone again. P4: a step
+//! by one branch of a forked writer changes no merged value. P7: no reader merges
+//! what a dismissal it holds names. P9: a contribution's size is bounded by fields
+//! and writers, and its certificates name the head of every snapshot of its
+//! directory on its chain. P11: after a restore, a dropped version, or a compacted
+//! segment back shorter and unsealed, the folder wins, and nothing the oracle shows
+//! is missing from both toshokan's merge and its items of the writer that wrote it.
+//! The divergences [`Tally`] lists are counted rather than failed.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

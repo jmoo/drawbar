@@ -1,17 +1,4 @@
 //! Undo and redo: compensating intents, per writer, for this session's intents.
-//!
-//! Undo plans the intent that reverses this writer's latest intent not yet undone:
-//! facts are set back by new writes, files come back from this writer's trash
-//! under a precondition. Redo reverses the latest undo the same way, while this
-//! writer has committed nothing else since. Either is refused, with a reason,
-//! where another writer has changed the same thing since: a register no longer
-//! holds only what the intent wrote, a set member was added or removed by
-//! someone else, or the entity was deleted or revived.
-//!
-//! Bindings an intent pinned are left alone. The entities an intent created or
-//! revived are deleted again rather than having their fields cleared, and undoing
-//! a delete revives an entity with the values the delete ended, so a redo
-//! revives it whole.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -323,8 +310,6 @@ fn reverse(intent: EntryHash, logged: &Logged, reversing: &Reversing) -> Result<
             _ => None,
         })
         .collect();
-    // The file changes undo in the reverse of the order the intent made them; a tree
-    // moves back where it moved.
     let mut undone: Vec<Option<FileChange>> = Vec::new();
     let mut facts = Vec::new();
     for op in &logged.ops {

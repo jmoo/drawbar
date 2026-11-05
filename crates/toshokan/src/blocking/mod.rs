@@ -169,6 +169,10 @@ pub struct Library<B> {
 }
 
 impl<B: Backend> Library<B> {
+    /// Opens the library in the folder as one writer of this install and reads the
+    /// folder. Opening writes nothing in the folder and scans no library file: each
+    /// entity's file is [`FileState::Unscanned`](crate::FileState::Unscanned) at the
+    /// path its facts give until a [`rescan`](Self::rescan) finishes.
     pub fn open(
         mut backend: B,
         layout: Layout,
@@ -199,6 +203,7 @@ impl<B: Backend> Library<B> {
         self.core.rebound()
     }
 
+    /// This session's intents, for undo and redo.
     pub fn history(&self) -> &[HistoryItem] {
         self.core.history()
     }
@@ -226,7 +231,9 @@ impl<B: Backend> Library<B> {
         self.core.finishing()
     }
 
-    /// As [`crate::library::Library::unread`].
+    /// The files in other writers' directories, pending records among them, that
+    /// the last read could not read, in order. What they hold is not shown, and no
+    /// orphan is reported, until a read takes them in.
     pub fn unread(&self) -> Vec<RelPath> {
         self.core.unread()
     }
@@ -237,14 +244,27 @@ impl<B: Backend> Library<B> {
         Intent::new(self, label)
     }
 
+    /// Undoes this session's latest intent not undone. Refused with
+    /// [`Refusal::Nothing`](crate::Refusal::Nothing) when there is none,
+    /// [`Refusal::ChangedSince`](crate::Refusal::ChangedSince) where another writer
+    /// changed the same thing since, and [`Refusal::Emptied`](crate::Refusal::Emptied)
+    /// when the bytes it would bring back have left the trash.
     pub fn undo(&mut self) -> Result<Committed> {
         run(&mut self.backend, self.core.undo())
     }
 
+    /// Redoes this session's latest undo, while nothing was committed since. Refused
+    /// as [`undo`](Self::undo) is.
     pub fn redo(&mut self) -> Result<Committed> {
         run(&mut self.backend, self.core.redo())
     }
 
+    /// Settles another writer's unfinished effect, with the user's consent, in this
+    /// writer's own log: finishes it, rolls it back or dismisses it, as `how` says.
+    /// Effects that fail leave it open to settle again. Finishing or rolling back a
+    /// directory move this folder cannot make is refused with
+    /// [`Refusal::Unsupported`](crate::Refusal::Unsupported). A settlement is no step
+    /// of undo.
     pub fn settle(&mut self, orphan: Orphan, how: Settlement) -> Result<Committed> {
         run(&mut self.backend, self.core.settle(orphan, how))
     }
@@ -265,18 +285,28 @@ impl<B: Backend> Library<B> {
         run(&mut self.backend, self.core.rescan_paths(paths))
     }
 
+    /// Settles now this writer's effects a crash interrupted, as
+    /// [`Opened::settled`] reports them, rather than before its next write.
     pub fn settle_interrupted(&mut self) -> Result<()> {
         run(&mut self.backend, self.core.settle_interrupted())
     }
 
+    /// Every writer with its last entry time, and whether another instance on this
+    /// machine holds it.
     pub fn others(&mut self) -> Result<Vec<WriterInfo>> {
         run(&mut self.backend, self.core.others())
     }
 
+    /// The bytes still in the trash of each writer this install wrote as, oldest
+    /// first: this writer's, which undo restores and emptying removes, and those of
+    /// the writers it retired, kept as they are.
     pub fn trash(&mut self) -> Result<Vec<TrashItem>> {
         run(&mut self.backend, self.core.trash())
     }
 
+    /// Removes from this writer's trash every item but those of `kept` and those an
+    /// unfinished effect may still move. An undo that needs a removed item is then
+    /// refused with [`Refusal::Emptied`](crate::Refusal::Emptied).
     pub fn empty_trash(&mut self, kept: BTreeSet<Nonce>) -> Result<Emptied> {
         run(&mut self.backend, self.core.empty_trash(kept))
     }
@@ -287,7 +317,10 @@ impl<B: Backend> Library<B> {
         run(&mut self.backend, self.core.compact())
     }
 
-    /// Closes the library cleanly and returns the backend.
+    /// Closes the library cleanly and returns the backend. A record of a finished
+    /// effect it cannot remove stays for the next instance to find, and that failure
+    /// is returned once the library is closed. A library dropped without closing
+    /// leaves its segment open, as a crash does.
     pub fn close(mut self) -> Result<B> {
         run(&mut self.backend, self.core.close())?;
         Ok(self.backend)
@@ -307,8 +340,9 @@ impl<'l, B: Backend + 'l> Driver for &'l mut Library<B> {
 }
 
 impl<'l, B: Backend + 'l> Intent<&'l mut Library<B>> {
-    /// Commits the intent. One whose file effects fail logs nothing and fails; the
-    /// next write finishes them first.
+    /// Commits the intent. A refused intent fails with
+    /// [`Error::Refused`](crate::Error::Refused) and changes nothing. One whose file
+    /// effects fail logs nothing and fails; the next write finishes them first.
     pub fn commit(self) -> Result<Committed> {
         let (library, plan, sources) = self.into_parts();
         run_with(&mut library.backend, sources, library.core.commit(plan))

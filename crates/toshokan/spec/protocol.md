@@ -1,57 +1,9 @@
-# toshokan format and protocol
+# toshokan protocol
 
-This document specifies everything toshokan writes and how it reads, merges and
-changes it, precisely enough for a second implementation to share a library with
-this one. A library lives in a folder that a sync client may deliver late, out of
-order, partly restored or with conflicted copies, and the rules here are written
-for it. The format may change before 1.0.
-
-All text is UTF-8. All hexadecimal is lowercase. JSON is written without
-insignificant whitespace.
-
-## Design
-
-The core does no I/O. Every operation is a state machine that asks for reads,
-writes and syncs, and consumes their results. The `blocking` driver runs it on
-the machine's file system, and the `asynch` driver on any async backend, such as
-a browser's; both run it on an in-memory disk that models what survives a crash.
-A directory listing with every file's metadata is one request, and so are many
-reads, so a scan of every file costs a request per directory rather than per
-file. After any change to the file facts or to the files a reader sees, every
-fact is bound again.
-Time, randomness, the app's identity function and the volume's name rules are
-injected, so the crash harness and the sync simulator replay every run exactly.
-
-Each writer appends to a hash-chained log in its own directory. Entries name each
-other by hash, so writers never collide, and a reader places entries by chain
-whatever their files are called. Fields are multi-value registers and
-observed-remove sets, merged by a join. A file effect stages its bytes, writes a
-pending record, moves displaced bytes into the writer's trash, and logs what it
-did; recovery after a crash, or after losing the app's data, finishes or reports
-it. Where the folder cannot rename files, each move copies and then removes its
-source, under the same record.
-
-[spec/](spec/README.md) model-checks, in TLA+, the protocol between writers and
-readers, and maps its properties to the tests that check the code.
-
-Principles:
-
-1. **The folder belongs to the user.** Files keep their names, bytes and places
-   unless the app asks. Opening writes nothing there.
-2. **One writer per file.** Each writer writes only in its own directory.
-3. **Merge is a pure function.** The same entries give the same state, in any
-   order, on any machine.
-4. **Nothing is overwritten.** Displaced bytes go to the writer's trash, which
-   only that writer empties.
-5. **Conflicts are shown.** Concurrent edits are kept, and the app can list them.
-6. **Keep what you don't understand.** What a newer writer wrote survives, even
-   when an older one compacts it.
-7. **Nondeterminism is injected.** Time, randomness and file identity come from
-   the app, so tests replay exactly.
-8. **Small.** The standard library, serde, BLAKE3 and thiserror, plus rustix on
-   Linux and Apple systems, libc on Apple systems and windows-sys on Windows,
-   for a rename that never replaces, and wasm-bindgen, js-sys and web-sys for
-   the browser.
+This document specifies how toshokan's writers and readers behave.
+[format.md](format.md) specifies the bytes they write and read.
+[README.md](README.md) describes the TLA+ model of the protocol between writers
+and readers, and maps its properties to the tests that check the code.
 
 ## Durability
 
@@ -68,308 +20,13 @@ to that file or a read of another file (see Browsers). Stopping the app before
 then loses the write, as if it had not completed. Every use of durable in this
 document means this, and nothing toshokan reports promises more.
 
-A backend also says whether it can append, rename a file, rename a directory,
-and rename without replacing. toshokan plans from what it says, never from a
-request that failed. A folder that cannot append is opened read-only. The local
-root must rename files. Where a crash can tear a rename, as on FAT and exFAT, a
-crash while a file of the local root is replaced can lose that file, as losing
-the local root would.
-
-## Layout
-
-The app chooses a library folder and the name of a root directory inside it,
-such as `.drawbar`, or a root inside a directory of the app's own, such as
-`.drawbar/library` inside `.drawbar`. In the folder, toshokan writes only under
-that root, and in the library's files only as an intent's file effects ask.
-Every path in this table is relative to the root.
-
-| Path                                  | Contents                                |
-| ------------------------------------- | --------------------------------------- |
-| `writers.2/<w>/<segment>.txt`         | A segment of writer `w`'s log           |
-| `writers.2/<w>/snapshot-<nonce>.json` | A snapshot of writer `w`'s log          |
-| `writers.2/<w>/pending/<nonce>.json`  | The record of an unfinished file effect |
-| `writers.2/<w>/pending/<nonce>.<i>`   | Empty: step `i` of `<nonce>` has begun  |
-| `writers.2/<w>/trash/<nonce>`         | Bytes an intent of `w` displaced        |
-| `writers.2/<w>/tmp/<nonce>.<ext>`     | A file `w` is staging                   |
-
-Only writer `w` creates, appends to, renames or removes anything under
-`writers.2/<w>/`. Others only make and sync the directories `writers.2/`, the
-root and the app's directory around it. There is no file at the level of the library.
-Nothing reads an earlier format's `writers/`.
-
-A staged file is named by its nonce and the extension of the file it becomes:
-what follows the last `.` of that file's name, if anything does, and if the name
-stays within 255 bytes; otherwise by its nonce alone. A trash item is named by
-its nonce alone, so a step names it without knowing where its bytes came from.
-
-Names of segments and snapshots are advisory. A reader reads every file directly
-in `writers.2/<w>/`, whatever its name, by its contents, so a sync client's
-conflicted copy is read like any other file. A browser's swap file is the
-exception (see Browsers).
-
-A **library path** is a path in the folder outside the root and outside the
-app's directory around it, other than the folder itself and a browser's swap
-file, and, where the app's layout hides them, other than a path with a name
-that starts with a dot. Only library paths are the user's files.
-
-Each install keeps, per library, a local root of its own that is never synced:
-
-| Path                  | Contents                                                     |
-| --------------------- | ------------------------------------------------------------ |
-| `<genesis>/head.json` | The last entry this writer wrote, and whether it is retired  |
-| `identities.json`     | Identities the install's scans read                          |
-
-toshokan reads and writes nothing else there, so the app may keep files of its
-own beside these, under names that are not a genesis hash.
-
-`<genesis>` is the hash of the writer's genesis entry. The directory is created
-only after that entry is durable in the folder, so the directories of the local
-root are the install's pool of writers. An instance writes as the first writer
-of the pool whose lock it takes. It also takes, as it opens and at each refresh,
-the lock of every other writer no instance writes as now, as another window of
-the app wrote until it closed, and
-keeps it while that writer left pending records open: it reports them as orphans
-that are the install's own (`ours`), to settle without asking. It lets go of such
-a lock at once when the writer left none, a record its own log closed counting as
-none, and as soon as its records are settled, so the next instance writes as it
-and the pool stays as large as the instances that run at once. An orphan whose writer's lock another
-instance on this machine holds is `live`: that instance may be carrying it out
-still. Asking which writers other instances hold tries only the locks this
-instance does not hold itself.
-
-`head.json` is `{"writer":"<writer id>","head":"<entry hash>"}`, with
-`"retired":true` last once the writer is never written again, and
-`identities.json` is
-`[["<library path>",<length>,<modification time or null>,"<identity>"],…]`.
-A writer's lock is taken on its `head.json`; a backend that holds locks as file
-locks keeps the file readable and writable while it is held. So `head.json` is
-never replaced, which would make a new file another process could lock: it is
-written over in place and synced. Every record of one writer has the same
-length but the retired one, which is longer and written last, so no write leaves
-the end of an earlier record behind. A crash can tear that write. What it leaves
-is the old or the new record whole, bytes that do not read, which leave the
-writer out of the pool, or a record naming an entry no log holds, which retires
-the writer (see Writers). A file in the local root that is replaced, such as
-`identities.json`, is first written beside it as `<name>.next` and synced; then
-`<name>` is removed and `<name>.next` renamed to it. A reader takes `<name>`, or
-`<name>.next` when `<name>` is missing.
-
-## Compatibility
-
-`writers.2` is version 2 of this format. Builds of different versions read and
-write one library at once, as computers that sync a folder do, and an open page
-keeps running the build it loaded. Within version 2:
-
-1. **Frozen.** The line form and the seal marker; an entry's `prev`, `n`, `at`
-   and `kind`; ids as 32 hex digits; every array form (clock readings, `Ref`,
-   `Own`, `Forked`, certificates, `settled` pairs, `unknown` pairs, the rows of
-   `identities.json`); the names of every file and directory in Layout; the lock
-   names; and the limits on a line, a record and a file. Frozen too: the members
-   of each record of a snapshot's `state` and of an observed write, since a reader
-   refuses what it does not know in them, and of `head.json`, which is written over
-   in place, so a reader drops what it does not know there.
-2. **Additive.** Anywhere else, a new object member may appear. It is optional,
-   changes nothing about the members beside it, and a reader that does not know
-   it keeps it where Merging and Snapshots keep what they do not know. Data a
-   newer build adds to a snapshot's records goes in a new member of `state`.
-3. **New meaning is a new name.** A change of meaning, a required member, or a
-   new way to close a pending record is a new `kind`, `op`, `step` or `moves`
-   value; `outcome` keeps its three values, and only an `intent` naming the record
-   or a `settle` closes one. A reader keeps such an entry unknown, opens
-   read-only when its own writer's history holds an unknown kind or op, never
-   finishes a record it cannot decode, and never deletes a file it cannot read.
-4. **App values are the app's.** A value a reader cannot decode is shown
-   unreadable, kept and merged as any other.
-5. **Anything else is a new layout.** A library whose root holds `writers.<k>`
-   for a `k` past 2 opens read-only.
-6. **Fixtures hold it.** Every state under `tests/fixtures` reads to its oracle in
-   every later build, and every fixture of a newer version behaves as its README
-   says.
-
-## Identifiers and clocks
-
-Every identifier is 128 bits written as 32 hexadecimal digits.
-
-| Name       | Meaning                                                              |
-| ---------- | -------------------------------------------------------------------- |
-| writer id  | A writer, random                                                     |
-| entity id  | An entity, random                                                    |
-| segment    | A segment's name, random                                             |
-| nonce      | A snapshot, pending record, trash item or staged file's name, random |
-| entry hash | An entry's id, link and checksum                                     |
-| identity   | What the app's identity function says a file holds                   |
-
-The identity function is the app's: a fingerprint of a file's contents from the
-ranges of its bytes the app names for the file's path and length. It may read
-only a few ranges of a file only where the file's format holds a checksum that
-covers every other byte of the file, and must read every byte of any other: an
-identity of part of a file would take a file changed elsewhere for the one it
-was. toshokan reads those ranges and feeds them to the app's digest, a
-file at most 1 MiB of ranges together with others and a larger one 1 MiB at a
-time, and never computes an identity itself.
-
-A clock reading is the JSON array `[wall_ms, counter]`: milliseconds since the
-Unix epoch and a counter within the millisecond, a hybrid logical clock. A
-writer's next reading is later than every reading it has seen up to one day past
-its machine's clock; a reading further ahead is shown but not followed, so one
-wrong or forged clock cannot hold back the others. A counter that runs out moves
-the reading to the next millisecond. Readings order writes for display only, by
-reading and then by writer id.
-
-## Segments
-
-A segment is a sequence of lines. Each line is:
-
-```text
-<json> TAB <hash> LF
-```
-
-`<json>` is one entry, a JSON object, with no tab or newline. Its `prev` member is
-the hash of the entry before it in the writer's chain, or 32 zeros for the
-writer's genesis entry. `<hash>` is the first 16 bytes of the BLAKE3 hash of the
-16 bytes of `prev` followed by the bytes of `<json>`. The hash is the entry's id.
-
-For example, the JSON `{"prev":"0…0"}` makes the line:
-
-```text
-{"prev":"00000000000000000000000000000000"}	21fbde4eb554d0b73a2edf6821643616
-```
-
-A line longer than 16 MiB, a line whose hash does not match, a final line without
-its LF, or a line starting with a zero byte ends the readable part of the file
-for now. Every line before it counts; a later read of the same file may get
-further.
-
-A process that closes a segment ends it with the **seal marker**: `sealed`, TAB,
-the hash of the segment's last line, LF. The marker is not a line, and nothing
-follows it. A segment ends with a seal marker when its last bytes are exactly
-the marker naming its last line; any other bytes after the last line end its
-readable part. The marker's last 34 bytes are those of the line it names.
-
-## Entries
-
-An entry is an object whose first members are:
-
-| Member | Value                                           |
-| ------ | ----------------------------------------------- |
-| `prev` | The hash of the entry before it                 |
-| `n`    | Its number in its writer's chain                |
-| `at`   | Its clock reading                               |
-| `kind` | `"genesis"`, `"intent"`, `"settle"` or `"bind"` |
-
-followed by the members of its kind. A genesis entry is numbered 0, and every
-other entry its predecessor's number plus one. A reader ignores members it does
-not know, at any depth but an observed write's (see Compatibility), and keeps the
-line and the whole entry (see Merging), so they survive. An entry of another kind,
-without `kind`, or whose members do not decode, is kept and merged as unknown; so is a line whose JSON has no readable
-`n` or `at`, which still links the chain but is never placed.
-
-An entry names another as `["<writer>",<n>,"<hash>"]`, and one of its own
-writer's as `[<n>,"<hash>"]`.
-
-A **genesis** entry starts a writer's chain, with `prev` all zeros:
-
-| Member   | Value                              |
-| -------- | ---------------------------------- |
-| `writer` | The writer's id                    |
-| `label`  | The name other writers show for it |
-
-A genesis entry after another entry, or numbered other than 0, is unknown.
-
-An **intent** entry logs one committed intent, the unit of commit, undo and
-attribution:
-
-| Member      | Value                                                            |
-| ----------- | ---------------------------------------------------------------- |
-| `label`     | What the user did                                                |
-| `ops`       | The fact changes, in order                                       |
-| `displaced` | Bytes it moved into the writer's trash; omitted if none          |
-| `forks`     | The fork points its writer knew of, `["<writer>",<n>]`; omitted if none |
-| `record`    | The nonce of the pending record whose effects it logs, which it closes; omitted if none |
-
-Each op is an object whose `op` member names it:
-
-| `op`      | Members                                          | Meaning                                      |
-| --------- | ------------------------------------------------ | -------------------------------------------- |
-| `create`  | `entity`, `replaces`, `take`?                    | The entity exists                            |
-| `delete`  | `entity`, `replaces`, `observed`, `take`?        | The entity is deleted                        |
-| `write`   | `entity`, `key`, `value`, `replaces`, `take`?    | A register holds `value`; cleared without it |
-| `add`     | `entity`, `key`, `value`, `replaces`, `take`?    | A set gains `value`                          |
-| `remove`  | `entity`, `key`, `value`, `tags`, `take`?        | A set loses `value`                          |
-| `file`    | `entity`, `file`, `replaces`, `take`?            | A file effect left the entity's file here; none without `file` |
-| `pin`     | `entity`, `file`, `replaces`, `take`?            | A reader bound the entity's file here        |
-| `dismiss` | `runs`                                           | The user dismissed these runs                |
-| `path`    | `from`, `file`, both optional                    | A file effect moved a file no entity's from `from` to `file` |
-| `tree`    | `from`, `to`                                     | A file effect moved the tree at `from` to `to`, which it made |
-| `dir`     | `path`, `made`                                   | A file effect made the directory `path` (`true`) or removed it (`false`) |
-
-`replaces` and `tags` are arrays of references to the writes of the same field
-the writer saw live: of a register, of a set's member, or of the file register.
-`observed` names the live field writes of the entity a delete saw, each as
-`{"key","at"}` for a register, `{"key","value","at"}` for a set's member or
-`{"file":true,"at"}` for the file register, with `at` the reference. A `value`
-is the app's JSON, kept byte for byte; `"value":null` writes `null`. A `file` is
-`{"path","identity","len"}` with an optional `modified`, the backend's
-modification time, compared only for equality. Each member of `displaced` is
-`{"item","from","identity","len"}`: the trash item's nonce, the library path the
-bytes left, their identity and length. An op of another name, missing a member,
-or with an observed write holding a member the reader does not know, is kept and
-unknown.
-
-A run, which `take` and `runs` name, is `{"writer","from","first"?,"last","tip"?}`:
-the writer's entries numbered from `from` to `last` on `last`'s chain, the first
-by its hash; a run a snapshot holds is named by that snapshot's head as `tip`,
-and its first entry by number alone (see Reading).
-
-For example:
-
-```json
-{"prev":"…02","n":3,"at":[3,0],"kind":"intent","label":"Tag","ops":[{"op":"add","entity":"…0e","key":"tags","value":"x","replaces":[]},{"op":"write","entity":"…0e","key":"origin","replaces":[["…0b",4,"…01"]]}]}
-```
-
-An intent is one line, file ops and `displaced` items included. Before it writes
-anything, a commit refuses an intent whose line would be longer than a line can
-be with the facts a settlement adds, every file op and `displaced` item its
-effects may add whether they finish or stop, and a fork point for every writer it
-names, each as long as it can be, or whose pending record would be longer than a
-reader reads (`Invalid::TooLong`). A file op replaces the writes the intent's
-writer knew of when it planned it, which finishing another writer's record
-keeps, so no entry that logs the intent, at commit or when a record settles, is
-longer. A commit appends its entries in one order: the
-intent, the `settle` entry when it closes another writer's record, then its
-`bind` entries, each holding at most 1 MiB of ops.
-
-A **settle** entry records that this writer settled another writer's unfinished
-effect with the user's consent:
-
-| Member    | Value                                          |
-| --------- | ---------------------------------------------- |
-| `writer`  | The writer whose pending record it settles     |
-| `record`  | The record's nonce                             |
-| `outcome` | `"finished"`, `"rolled-back"` or `"dismissed"` |
-
-A **bind** entry pins moves this writer's reader found (see Binding), after the
-intent it committed with:
-
-| Member | Value         |
-| ------ | ------------- |
-| `ops`  | Its `pin` ops |
-
-Its ops are merged as an intent's are, and it is never undone. A commit spreads
-its pins over as many `bind` entries as keep each line within the limit, so any
-number of moves can be pinned.
-
-Nothing derived is logged: views, bindings a reader has not pinned, and the
-merged state exist only in readers and in snapshots.
-
 ## Merging
 
 A reader merges what each writer still contributes: its tip snapshots' state
-and the entries it places after them (see Reading). The merge is a function of
-those, so readers holding the same files and memories show the same, whatever
-order the files arrived in. Every write is named by its writer, number and hash.
-An entry's ops apply in order, so where two of them write one field, the later
-is the entry's write.
+and the entries merged after them (see Reading). The merge is a function of
+those alone, whatever order the files arrived in. Every write is named by its
+writer, number and hash. An entry's ops apply in order, so where two of them
+write one field, the later is the entry's write.
 
 Keys are declared by the app as registers or sets, each under a name. A key's
 values are the app's JSON. A field is an entity's existence, one of its
@@ -390,9 +47,7 @@ registers, one member of one of its sets, or its file register. A write is
 - **Takes.** An op whose `take` names a run of `y` kills, on its field, every
   write of `y` numbered below the run's `from`.
 
-Killing below `n` is sound because a writer's write replaced every earlier
-write of its own it saw, a writer always sees its own, and no two branches of a
-writer are merged.
+What the live writes show:
 
 - **Registers** show the values of their live writes. Live writes of different
   values are a conflict; equal values are one value. A reader shows the latest
@@ -418,118 +73,36 @@ writer are merged.
 A value that does not decode as the key's declared type is shown as unreadable,
 and kept and merged like any other.
 
-## Snapshots
-
-`snapshot-<nonce>.json` is one JSON object, without a final newline:
-
-| Member      | Value                                              |
-| ----------- | -------------------------------------------------- |
-| `writer`    | The writer's id                                    |
-| `label`     | The writer's label                                 |
-| `at`        | The clock reading of the last folded entry         |
-| `genesis`   | The hash of the writer's genesis entry             |
-| `n`, `head` | The number and hash of the last folded entry       |
-| `certified` | What lets a reader recognize every folded entry    |
-| `state`     | What the writer contributes                        |
-
-Members a reader does not know are kept, and a compaction carries those of the
-snapshot it folds into the new one.
-
-`certified` is `{"segments"?,"hashes"?}`. Each member of `segments` is
-`[[<n>,"<hash>"],[<n>,"<hash>"]]`: a segment the chain was written to, by its
-first line, and the last of its lines the snapshot folds. `hashes` names every
-other folded entry and the last entry of each dismissal of the writer's own runs
-on its chain. The snapshot's head is among the entries these name, so the
-certificates of the snapshots it folds name their heads. A reader ignores other
-members of `certified`, such as a `heads` list, whose entries the rest already
-name.
-A reader refuses a snapshot with a certificate whose last line comes before its
-first, or that names an entry numbered past its head.
-
-`state` holds, per entity, records that each name a field: no member for
-existence, `key` for a register, `key` and `value` for a set's member, `"file":true`
-for the file register.
-
-```text
-{"entities":{"<entity>":{
-   "writes":[{field…,"at":[n,"h"],"stamp","first","set"?,"off"?,"pin"?}],
-   "refs":[{field…,"above"?,"own":[n,"h"],"target":["w",n,"h"]}],
-   "killed":[{field…,"own":[n,"h"]}],
-   "takes":[{field…,"writer","own":[n,"h"],"below"}]}},
- "dismissals":[{"own":[n,"h"],"run":{…}}],
- "trash":[{"item","entry","at","from","identity","len"}],
- "settled":[["<writer>","<record>"]],
- "unknown":[["<entry>",<json>]],
- "extended":[["<entry>",<json>]]}
-```
-
-- `writes`: the writer's latest own write to each field, live or not, with its
-  clock reading, `first`, the number of its first own write to the field, and
-  its value: `set` a register's value or a file write's file, `off` for a
-  delete, a set's remove, a clear or a file write of no file, `pin` for a `pin`.
-- `refs`: per field and other writer, the latest reference at or below the fork
-  point of that writer its writer knows of, and, with `above`, the latest above
-  it, each with its own entry. A reference made before its writer knew of a
-  fork, to a write above it, moves above it at the writer's next reference on
-  that field to that writer.
-- `killed`: per own write held, the first own delete of its entity at or after
-  it.
-- `takes`: per field and other writer, the latest take of a run of that writer,
-  below the run's `from`.
-- `dismissals`: the runs the writer dismissed, each with its entry.
-- `settled`: each pending record the writer closed, by its writer and nonce: its
-  own, by the intent naming it, and another writer's, by a settlement.
-
-A contribution holds at most one own write and one own delete per field, and per
-field and other writer one take and two references, so these are bounded by the
-fields its writer wrote, not by its history; `settled` gains a pair per record
-closed (see What stays). Members of `state` a reader does
-not know are kept; members it does not know inside a record refuse the snapshot.
-
-Only a snapshot's writer compacts: at close, every 512 of its own entries, and
-when the app asks. It confirms that a file in its directory holds its last
-entry, as before an append; if none does, it writes nothing and a new writer
-takes over. When a snapshot in its directory already has that head, there is
-nothing to compact: it writes nothing, deletes as below only what that snapshot
-lets it, which a compaction cut short left, and looks first at that snapshot
-when it next confirms the entry. Otherwise it folds the entries after its
-previous snapshot's head into that snapshot's state, certifies every segment of
-its directory by the part of it on its chain, the snapshots of its directory on
-its chain by their certificates, and every other entry it folds by hash, and
-writes the snapshot. A segment file that ends before a certificate of the
-previous snapshot with its first line reaches, as a dropped version does, gets
-no certificate of its own. A snapshot longer than a reader reads (see Reading) is
-refused before anything is written, so the log it would fold stays, and the
-instance compacts no more on its own until it opens again. Where the folder
-renames files, it writes it to `tmp/` under its nonce, syncs it, renames it into
-place and syncs both directories; a staged snapshot a crash leaves is removed with the other files of
-`tmp/` (see Recovery). Elsewhere it writes the snapshot in place and syncs it
-and its directory, and a crash can tear it, leaving a file reported as
-unreadable. The writer's next compaction there deletes a `snapshot-` file of its
-directory that ends, but for a zero-filled tail, inside its JSON value, with
-what that compaction supersedes; a whole snapshot it cannot read, as a newer
-build writes, stays. It then confirms that the folder holds the snapshot.
-Only then does it delete every segment in its directory that ends with a seal
-marker and every line of which the new snapshot certifies, and every snapshot
-whose head the new one certifies. A segment without a seal marker, such as one
-left open by a crash or a copy, is never deleted, and neither is a segment
-holding an entry off the chain. Just before deleting each file it confirms that
-the new snapshot is still in the folder, and that the file still has the length
-it read and, for a segment, ends with its seal marker; a file that changed is
-left.
-
 ## Writers
 
-The writers of an install are the directories of its local root. An instance
-takes the first, in order of name, whose lock it gets and whose `head.json`
-reads and is not retired. It continues that writer only if what it has
-read of the writer starts from its genesis entry, holds its recorded head, has
-one last entry and no fork point, and a file in its directory holds that last
-entry now. Otherwise it marks `head.json` retired, releases the lock, and writes
-as a new writer from its next write: a copied local root, whose history another
-instance also continues, and a folder restored from an older copy, which no
-longer holds the writer's last entry, each start a new writer. An instance that
-finds its own history forked while it runs does the same.
+The writers of an install are the directories of its local root, its pool. An
+instance takes the first, in order of name, whose lock it gets and whose
+`head.json` reads and is not retired. It continues that writer only if what it
+has read of the writer starts from its genesis entry, holds its recorded head,
+has one last entry and no fork point, and a file in its directory holds that
+last entry now. Otherwise it marks `head.json` retired, releases the lock, and
+writes as a new writer from its next write: a copied local root, whose history
+another instance also continues, and a folder restored from an older copy, which
+no longer holds the writer's last entry, each start a new writer. An instance
+that finds its own history forked while it runs does the same.
+
+An instance also takes, as it opens and at each refresh, the lock of every other
+writer no instance writes as now, as another window of the app wrote until it
+closed, and keeps it while that writer left pending records open: it reports
+them as orphans that are the install's own (`ours`), to settle without asking.
+It lets go of such a lock at once when the writer left none, a record its own
+log closed counting as none, and as soon as its records are settled, so the next
+instance writes as it and the pool stays as large as the instances that run at
+once. An orphan whose writer's lock another instance on this machine holds is
+`live`: that instance may be carrying it out still. Asking which writers other
+instances hold tries only the locks this instance does not hold itself.
+
+A writer forks when two instances write as it: a copied local root, a virtual
+machine resumed twice, a restored backup of a local root. Each fork point is
+reported once. The writer retires whenever its own instance's reader holds a
+fork of its history, which opening, a refresh, or a compaction refused with
+`Rekey::Forked` reports; an instance never compacts a history it knows forked.
+A gap in its directory does not retire it.
 
 A new writer is created at an instance's first write. Its first segment holds
 its genesis entry; the segment, its directory and every directory above it are
@@ -554,12 +127,11 @@ anything else of its next write is carried out; if the first entry of the write
 landed whole, it stops in the same way, and the entries that landed stand. Once
 one writer of an instance stopped so, or failed to be created, a failed write of
 a writer that took over, its creation included, turns the library read-only
-until it opens again (`Why::NotDurable`): on a folder that makes no write
-durable, each commit would otherwise start another writer. A write refused for
-want of space is no such failure: it fails as it is. After the append is synced it stats the segment
-and writes `head.json`, before the commit returns. An append that fails leaves
-the segment without a seal marker and appends nothing more to it, so nothing
-follows a torn line or an entry that may not be durable.
+until it opens again (`Why::NotDurable`). A write refused for want of space is
+no such failure: it fails as it is. After the append is synced it stats the
+segment and writes `head.json`, before the commit returns. An append that fails
+leaves the segment without a seal marker and appends nothing more to it, so
+nothing follows a torn line or an entry that may not be durable.
 
 The entries are then durable, and the commit succeeds whatever fails after them
 (see Intents). A `head.json` that cannot be written lags: the instance writes it
@@ -599,8 +171,8 @@ Per writer, from the files it reads, a reader derives:
   head.
 - **Folded** entries, which it skips: one a tip names, or a line of a file whose
   first line and line at a segment certificate's position are the certificate's.
-  This recognizes re-delivered files, late deletions, conflicted copies and the
-  folded part of a segment that runs on past a tip's head.
+  This recognizes re-delivered files, late deletions, conflicted copies, crash
+  leftovers and the folded part of a segment that runs on past a tip's head.
 - **Unplaced** lines: those past the first of a file without a seal marker that
   starts like a certified segment but is shorter, held back: it may be a
   version a sync client dropped, a copy that diverged before its end, or a file
@@ -610,19 +182,34 @@ Per writer, from the files it reads, a reader derives:
   shorter certificate with the same first line matches the file, its lines past
   that one are a branch, shown as a run and never merged.
 - **Merged** entries: one numbered one past its predecessor, which is a tip's
-  head or merged, or a genesis entry when the writer has no tip.
+  head or merged, or a genesis entry when the writer has no tip. An entry
+  numbered other than one past its predecessor is never merged.
 - **Fork points**: an entry with two successors; a folded entry, not a tip's
   head, that precedes an entry no tip folds; the predecessor of a line no tip
-  folds numbered at or below a tip's head, since certificates are complete; and
-  where several tips part, the highest entry each of them names. Every entry and
-  every tip's write numbered above the lowest fork point is a **run**, and
-  neither branch is merged.
-- **Gaps**: entries whose predecessor may still come, held back.
-- Entries a dismissal names, which no reader merges or shows; an entry after
-  one is a run, and so are a tip's writes after one on its chain and the
-  entries after that tip's head. A tip's run starts at the first of its entries
-  the merge leaves out: above the lowest fork point, or from the first a
-  dismissal names on its chain.
+  folds numbered at or below a tip's head, even where a segment certificate
+  holds it and it cannot be checked by hash, since certificates are complete;
+  and the parting of several tips, below.
+- **Dismissed** entries: those a dismissal names, which no reader merges or
+  shows, even once it stops seeing the fork. An own delete a tip holds that a
+  dismissed entry made does not apply. An entry after one is a run, and so are a
+  tip's writes after one on its chain and the entries after that tip's head. A
+  tip's run starts at the first of its entries the merge leaves out: above the
+  lowest fork point, or from the first a dismissal names on its chain.
+- **Runs**: every entry and every tip's write numbered above the lowest fork
+  point, on either branch, so that neither branch is merged; every other entry
+  numbered at most one past the highest tip's head; and every entry after a run.
+- **Gaps**: every other entry, whose predecessor may still come.
+
+Where several tips of a writer do not certify each other, the writer forked and
+both sides compacted. Their **parting** is the highest entry every tip names by
+hash: in its certificates, as its head, as an own write, as the own entry of a
+reference, as an own delete, or as a dismissal. Below the parting the reader
+merges the union of the tips' own writes; above it, every tip's own writes and
+references are runs. Two tips with one head are copies of one chain compacted
+twice: their own writes and references are the same, and the reader takes the
+union of the rest, trash items and settlements.
+
+### Runs
 
 What the merge leaves out is shown as **items**: each run, gap and file's
 unplaced lines, with the net change it would make
@@ -630,22 +217,35 @@ against the merged state, field by field, how many entries it holds and the
 earliest and latest of their clock readings. Of a run a tip holds, a reader
 counts every number from the run's first entry no dismissal names to the tip's
 head, and knows only the readings of the head and of the writes the tip keeps.
-A tip's own write the merge leaves out that replaced an own write of its writer
-no merged entry holds is a forgotten basis: its run shows that field whatever
-the merged state shows, until an intent takes a run of that writer on that
-field. An intent takes changes from an item with ops that name its run in
-`take`, and dismisses a run or unplaced lines with a `dismiss` op; a gap cannot
-be dismissed. A run is shown until it is dismissed, with no change once it would
+Readers that see the same files name each run alike (see
+[Entries](format.md#entries) for the form).
+
+An intent takes changes from an item with ops that name its run in `take`, and
+dismisses a run or unplaced lines with a `dismiss` op; a gap cannot be
+dismissed. A run is shown until it is dismissed, with no change once it would
 change nothing; a gap only while it would change something, and unplaced lines
-while they would and no dismissal names them exactly. An unplaced line's write
+while they would and no dismissal names them exactly. Nothing about a gap
+expires: when it fills, its entries are merged, and a change the user took from
+it writes the same value, so the field shows one value. An unplaced line's write
 to a field its writer's merged history writes at the line's number or above
 changes nothing: that history already decided the field.
 
-A writer forks when two instances write as it: a copied local root, a virtual
-machine resumed twice, a restored backup of a local root. Each fork point is
-reported once. The writer retires whenever its own instance's reader holds a
-fork of its history, which opening, a refresh, or a compaction refused with
-`Rekey::Forked` reports; an instance never compacts a history it knows forked.
+A dismissal by a tip's head also covers the writes numbered up to that head in
+any later tip that certifies it. A tip matches a dismissal by the hash of its
+last entry where the tip names it. A tip that compacted past a line-run's last
+entry inside one segment names it nowhere, and is shown again as an item, to
+dismiss again.
+
+A tip's own write the merge leaves out, above the fork point or named by a
+dismissal, may have replaced an own write of its writer the tip no longer holds.
+It did when the tip's first-write number for its field is below the write's and,
+for a write above the fork point, no higher than the fork point could be: where
+several tips part inside a segment, just below the lowest head. When it did and
+no merged write of that writer on that field is numbered below it, the write is
+a **forgotten basis**: its run shows that field whatever the merged state shows,
+and a dismissal does not hide it. Only an intent that takes a run of that writer
+on that field settles it; a write that merely names the run's write, by a writer
+that had not seen the fork, does not.
 
 ### What a reader holds
 
@@ -655,19 +255,25 @@ files show the same. While an instance runs, its reader keeps what it read of
 each file, to read again only the files that changed. What only a file the
 folder no longer holds gave is gone at the next read: while a sync client
 delivers a compaction's deletions before its snapshot, until the snapshot
-arrives, and at once after a restore of the folder from an older copy.
+arrives, and at once after a restore of the folder from an older copy, with no
+prompt.
 
-A reference to a number of a writer above the highest the files show of it, or
-to a number at which the files show only another entry of that writer, kills
-only the write with its hash. What only the missing write replaced is shown
-beside the current value until the rest arrives: a conflict, never a value
-shown alone in place of a newer one.
+A reference is **contradicted** when it names a number of a writer above the
+highest the files show of it, or a number at which the files show only another
+entry of that writer. It kills only the write with its hash, and so does every
+other reference of the same entry to that writer; a reference a snapshot holds
+is judged alone. What only the missing write replaced is shown beside the
+current value until the rest arrives: a conflict, never a value shown alone in
+place of a newer one. Where a snapshot holds the reference in place of its
+entry, the earlier exact targets are gone, and a write the missing one did not
+replace can come back too, beside the current value.
 
 ## Binding
 
 Which library file is an entity's is derived, never logged as such. A binding is
 a function of the merged file registers, the library files a reader sees and
-their identities:
+their identities. After any change to the file facts or to the files a reader
+sees, every fact is bound again:
 
 1. A scan lists every library file with its length and modification time. It
    reads an identity only where it decides a binding: for a file at the path of
@@ -883,12 +489,9 @@ out its steps, the writer resuming them included, moves the same way.
 
 A writer carries out an intent's steps in this order:
 
-1. Create each new file in `tmp/` and fill it, then sync it and `tmp/`.
-   The app's bytes are written a chunk at a time by the driver, never held by
-   the core; they may copy ranges of a library file, and stat it to learn
-   whether it changed while they read it. A copy out of
-   another writer's directory is made a chunk at a time. A file whose filling
-   fails is removed.
+1. Create each new file in `tmp/` and fill it, then sync it and `tmp/`. A copy
+   out of another writer's directory is made a chunk at a time. A file whose
+   filling fails is removed.
 2. Check every precondition: a path holds nothing, a file whose identity is the
    one the app expects, or, for a file the app has not read, a file of the length
    and modification time a scan listed, or any file; a directory satisfies none
@@ -978,23 +581,24 @@ reads at most 16 MiB of a record.
 
 A record is closed by an entry that names it: its writer's intent whose `record`
 is the record's nonce, or another writer's `settle` entry. A tip that folded such
-an entry still names it, and so does an entry on a branch shown apart or
-dismissed, whose effect is that branch's. A record no entry names is open,
-wherever its writer's log has gone since; one that is closed is spent, waiting
-only for its writer to remove it.
+an entry still names it, and so does an entry in a run, in a gap or dismissed,
+whose effect is that branch's. A record no entry names is open, wherever its
+writer's log has gone since; one that is closed is spent, waiting only for its
+writer to remove it.
 
 A record is ignored when it does not decode, names another writer, names a path
-that is not a library path, or its `prev` is not in its writer's log. A record of
-another writer that cannot be read for any reason but its absence is reported and
-read again at the next refresh, and until then no orphan is reported or settled;
-one of this writer's fails the open or refresh, and the trash and staging it may
-name are left as they are. Opening
-reports the records it ignores, and the open records of other writers as
-orphans. Each refresh reads every writer's pending records again and reports the
-orphans as they stand then, since a writer elsewhere may have begun or finished
-an effect meanwhile, each with whether it is the install's own and live as the
-pool and its locks say then, and with a hash of what the folder shows of its
-paths and markers, which moves while a writer carries the effect out.
+that is not a library path, or its `prev` is not held: it is not a tip's head, an entry a tip's certificates
+name, or numbered below a tip's head, and no entry merged, in a run or in a gap,
+has it. A record of another writer that cannot be read for any reason but its
+absence is reported and read again at the next refresh, and until then no
+orphan is reported or settled; one of this writer's fails the open or refresh,
+and the trash and staging it may name are left as they are. Opening reports the
+records it ignores, and the open records of other writers as orphans. Each
+refresh reads every writer's pending records again and reports the orphans as
+they stand then, since a writer elsewhere may have begun or finished an effect
+meanwhile, each with whether it is the install's own and live as the pool and
+its locks say then, and with a hash of what the folder shows of its paths and
+markers, which moves while a writer carries the effect out.
 
 Opening finds this writer's open records whose `prev` is its head, and says how
 settling each will end. The writer settles them before it checks its next
@@ -1058,7 +662,7 @@ where it holds the start of the source's bytes, which the source still holds.
 An open record of any other writer may belong to a live writer elsewhere, or to
 this install's own writer from before its local root was lost; a reader cannot
 tell them apart. It reports the record, and settles it only when the user asks,
-or, for a record that is `ours` (see Layout), when the app asks without asking
+or, for a record that is `ours` (see Writers), when the app asks without asking
 the user, as an intent of its own: to finish, it carries out the remaining steps, skipping
 a `to_trash` whose path holds nothing, and logs the facts the record planned and
 its file ops with the record's `replaces`; to
@@ -1155,36 +759,83 @@ undo: it reads its directory again, removes its records an entry closed, as one
 whose write landed though it was reported failed, and then every item no record
 of the writer still in the folder names. Its open records become orphans and
 keep what they name. A writer whose history forked keeps its trash, since
-another instance may still write as it. Where the folder cannot be written, the
-writer retires without emptying; where emptying fails, or a record that does not
-read holds it, the writer retires all the same, and the instance reports why
-(`Lag::Trash`).
+another instance may still write as it, and so does a writer an instance retires
+as it opens. Where the folder cannot be written, the writer retires without
+emptying; where emptying fails, or a record that does not read holds it, the
+writer retires all the same, and the instance reports why (`Lag::Trash`).
 
 An instance lists the trash of every writer whose directory its local root
 holds: its writer's and those of the writers it retired. A retired writer's
 items stay where they are, since no instance writes as that writer again; undo
 reaches only the items of this session's writer.
 
-## What stays
+## Compaction
 
-The folder keeps, for the life of a writer: one snapshot, holding at most one
-own write per field it wrote and per other writer two references and one take,
-and a certificate per segment it ever wrote, about 92 bytes each, where a
-segment ends at each close of a process that appended, each compaction and each
-MiB, and a pair in `settled`, about 70 bytes, per commit that moved files and
-per settlement (see [RETENTION.md](RETENTION.md)); the segments written since;
-one segment per process that crashed or was copied; trash items until the writer
-empties them, which a writer that stops while its instance runs does as it
-retires, other than over a fork; a spent pending record until the writer's next
-write or close; and the pending records of a writer that will never run again,
-settled or not, with the trash items they name. A writer retired over a fork, or
-as an instance opened, keeps its trash. The local root keeps one directory per
-writer the install has used.
+Only a snapshot's writer compacts: at close when it has written since its last
+snapshot, every 512 of its own entries, and when the app asks. It folds from
+what the folder holds as it reads it now. It confirms that a file in its
+directory holds its last entry, as before an append; if none does, it writes
+nothing and a new writer takes over. When a snapshot in its directory already
+has that head, there is nothing to compact: it writes nothing, deletes as below
+only what that snapshot lets it, which a compaction cut short left, and looks
+first at that snapshot when it next confirms the entry. Otherwise it folds the
+entries after its previous snapshot's head into that snapshot's state (see
+[Snapshots](format.md#snapshots)). It certifies every segment it knows its
+chain was written to by the part of that segment on its chain, the snapshots of
+its directory on its chain by their certificates, and every other entry it folds
+by hash, and writes the snapshot. It knows a segment from its previous
+snapshot, from the files it read or wrote since, and from the files in its
+directory now. A segment file that ends before a certificate of the previous snapshot with its first line
+reaches, as a dropped version does, gets no certificate of its own. A snapshot
+longer than a reader reads (see Reading) is refused before anything is written,
+so the log it would fold stays, and the instance compacts no more on its own
+until it opens again.
+
+Where the folder renames files, it writes the snapshot to `tmp/` under its
+nonce, syncs it, renames it into place and syncs both directories; a staged
+snapshot a crash leaves is removed with the other files of `tmp/` (see
+Recovery). Elsewhere it writes the snapshot in place and syncs it and its
+directory, and a crash can tear it, leaving a file reported as unreadable. The
+writer's next compaction there deletes a `snapshot-` file of its directory that
+ends, but for a zero-filled tail, inside its JSON value, with what that
+compaction supersedes; a whole snapshot it cannot read, as a newer build writes,
+stays.
+
+It then confirms that the folder holds the snapshot. Only then does it delete
+every segment in its directory that ends with a seal marker and every line of
+which the new snapshot certifies, and every snapshot whose head the new one
+certifies. A segment without a seal marker, such as one left open by a crash or
+a copy, is never deleted, and neither is a segment holding an entry off the
+chain. Just before deleting each file it confirms that the new snapshot is still
+in the folder, and that the file still has the length it read and, for a
+segment, ends with its seal marker; a file that changed is left.
+
+## Bounded retention
+
+The folder keeps, for the life of a writer:
+
+- one snapshot, whose contribution is bounded by the fields its writer wrote
+  (see [Snapshots](format.md#snapshots)), but for two parts that grow with use:
+  a certificate per segment it ever wrote, about 90 bytes each, where a segment
+  ends at each close of a process that appended, each compaction and each MiB;
+  and a pair in `settled`, about 70 bytes, per commit that moved files and per
+  settlement;
+- the segments written since that snapshot, and one segment per process that
+  crashed or was copied;
+- trash items until the writer empties them (see Trash);
+- a spent pending record until the writer's next write or close;
+- once it will never run again, its pending records, settled or not, with the
+  trash items they name.
+
+Nothing else in a snapshot grows with history, and nothing in it grows with the
+library's size. What a retired writer leaves stays for good, since no instance
+writes as it again. The local root keeps one directory per writer the install
+has used.
 
 ## Backends
 
-A backend declares, for each root, what it can do, and the core plans from that
-alone:
+A backend declares, for each of the folder and the local root, what it can do,
+and toshokan plans from that alone, never from a request that failed:
 
 | Capability    | Meaning                                                        |
 | ------------- | -------------------------------------------------------------- |
@@ -1197,7 +848,10 @@ alone:
 Without `rename_dir`, a directory moves file by file, and without `rename_file`
 each move copies and then removes its source (see File effects). Without
 `append`, a library opens read-only. Without `fsync`, a sync is answered at once,
-and a completed request is as durable as the backend makes it.
+and a completed request is as durable as the backend makes it (see Durability).
+The local root must rename files. Where a crash can tear a rename, as on FAT and
+exFAT, a crash while a file of the local root is replaced can lose that file, as
+losing the local root would.
 
 The native backend tells a volume by the type of file system it reports, read at
 the root or, before the root exists, at the nearest directory above it. It
@@ -1206,27 +860,29 @@ journal of its names, so that a crash can keep a rename's removal of the old
 name without the new one, and where it cannot tell: FAT, exFAT, NTFS, HFS, HFS+
 and UDF on Linux; FAT, exFAT, NTFS and UDF on Apple systems; FAT, exFAT and UDF
 on Windows; every FUSE file system, which hides what it stores to; and a volume
-whose type cannot be read. There every move copies. The type is all it reads:
-ext2, and ext4 made without a journal, report ext4's type and are taken to
-rename atomically, as is any file system not named here. It declares
-`no_replace` where renames also refuse an existing destination (see File
-effects). On Windows it syncs a file through a handle that may write and a
-directory through one opened for backup semantics, and its renames return once
-they are on the disk. Where a volume refuses to flush a directory, a file's flush
-and a rename written through still flush its log through every earlier change of
-names. On Apple systems it asks for a full sync, and takes a plain one where that
-fails, as on network volumes that refuse it. On Linux and Apple systems, a volume that cannot sync
-a directory has each sync of one taken as done. A request another program holds the file of for a moment, as antivirus
-does after a write, is tried again for about half a second, and a file's sync
-for about five seconds, since its bytes have landed.
+whose type cannot be read. There every move copies. Whether renames are atomic
+is judged by the type alone: ext2, and ext4 made without a journal, report
+ext4's type and are taken to rename atomically, as is any file system not named
+here. It declares `no_replace` where renames also refuse an existing
+destination (see File effects), which on Apple systems it reads from the
+volume's capabilities. On Windows it syncs a file through a handle that may
+write and a directory through one opened for backup semantics, and its renames
+return once they are on the disk. Where a volume refuses to flush a directory, a
+file's flush and a rename written through still flush its log through every
+earlier change of names. Reported by public documentation; not confirmed on
+hardware. On Apple systems it asks for a full sync, and takes a plain one where
+the volume refuses it, as network volumes do. Reported by public documentation;
+not confirmed on hardware. On Linux and Apple systems, a volume that cannot sync
+a directory has each sync of one taken as done. A request another program holds
+the file of for a moment, as antivirus does after a write, is tried again for
+about half a second, and a file's sync for about five seconds, since its bytes
+have landed.
 
 ### Browsers
 
-In a browser, the library runs in a dedicated worker of the app's own, on an
-executor that performs its requests there, and the reports it makes, which
-serialize, go to the page as messages. The folder is a directory of the origin
-private file system or a folder the user picked; the local root is always a
-directory of the origin private file system.
+The folder is a directory of the origin private file system or a folder the
+user picked; the local root is always a directory of the origin private file
+system.
 
 | Folder                                      | `append` | `rename_file` | `rename_dir` | `no_replace` | `fsync` |
 | ------------------------------------------- | -------- | ------------- | ------------ | ------------ | ------- |
@@ -1240,51 +896,43 @@ directory of the origin private file system.
   for one request each. Chromium's `flush()` takes a fraction of a millisecond,
   as a write that reaches the disk does, and Firefox's and WebKit's take
   microseconds, so only Chromium declares `fsync`. That Chromium's reaches the
-  disk is inferred from its cost, not confirmed. A directory's names live in
-  the browser's own database, which toshokan cannot sync, so a sync of a
-  directory returns at once, and a name made or removed is only as durable as
-  that database keeps it; that it survives the machine stopping is not
-  confirmed. Chromium cannot rename a directory there, so no browser declares
-  `rename_dir`. A write the origin's quota refuses fails with `NoSpace`:
-  Chromium throws `QuotaExceededError`, and Firefox writes fewer bytes than it
-  was given.
-- **Picked folder.** Only Chromium-based browsers can open one. Files are read
-  through `getFile()` and written through writable streams, which write a copy
-  and put it in place at `close()`: that is the moment a write lands, and
-  nothing is synced beyond it. An append copies the whole file, which the 1 MiB
-  bound on segments keeps small. The writes that fill one file share one
-  stream, kept open while other files are read. A file created with bytes is
-  named first and filled at its stream's close, so a tab stopped between leaves
-  it empty. Before putting a file in place, Chromium checks it with Safe
-  Browsing, in full unless its type is one Chromium samples, such as `.txt` and
-  `.json`, so toshokan names its own files with those. Chromium's published
+  disk is inferred from its cost. A directory's names live in the browser's own
+  database, which toshokan cannot sync, so a sync of a directory returns at
+  once, and a name made or removed is only as durable as that database keeps it.
+  Whether such a name survives the machine stopping has not been tested.
+  Chromium cannot rename a directory there, so no browser declares `rename_dir`.
+  A write the origin's quota refuses fails with `NoSpace`: Chromium throws
+  `QuotaExceededError`, and Firefox writes fewer bytes than it was given.
+- **Picked folder.** Files are read through `getFile()` and written through
+  writable streams, which write a copy and put it in place at `close()`: that is
+  the moment a write lands, and nothing is synced beyond it. An append copies
+  the whole file, which the 1 MiB bound on segments keeps small. The writes that
+  fill one file share one stream, kept open while other files are read. A file
+  created with bytes is named first and filled at its stream's close, so a tab
+  stopped between leaves it empty. Before putting a file in place, Chromium
+  checks it with Safe Browsing, in full unless its type is one Chromium samples,
+  such as `.txt` and `.json`, the types of toshokan's own files; its published
   file-type policy still checks some closes of a sampled type in full. A saved
   library file is staged under its own extension, so a type Chromium does not
-  sample pays the full check, which is slow. A trash item has no extension, so
-  where moves copy, each file moved into the trash pays the full check. Brave
-  cannot rename a file outside the private file system.
-  Renaming there was confirmed only in Chrome and Brave, so `Folder::picked`
-  declares `rename_file` only where `navigator.userAgentData` names Google
-  Chrome and `navigator.brave` is absent; elsewhere each move copies, and each
-  copy pays the check again. A rename the browser refuses although the folder
-  declares it fails with `Unsupported`.
-- **Directories.** A library tells the executor its root as it opens. The
-  executor keeps the handles of the directories it finds under that root and in the
-  local root, where no writer removes or renames a directory, and finds each
-  other directory from the folder's top for every request. Several reads of one
-  such directory find its files by one listing of it. In Firefox, each step of
-  a path and each file's handle grows slow once the origin holds many files.
+  sample pays the full check. A trash item has no extension, so where moves
+  copy, each file moved into the trash pays the full check. Renaming there was
+  tested only in Chrome, which renames, and Brave, which refuses. Every other
+  browser is taken to refuse: a picked folder declares `rename_file` only where
+  `navigator.userAgentData` names Google Chrome and `navigator.brave` is absent.
+  A rename the browser refuses although the folder declares it fails with
+  `Unsupported`.
+- **Paths.** In Firefox, each step of a path and each file's handle grows slow
+  once the origin holds many files.
 - **Renames** replace a file at the destination in every browser, so none
   declares `no_replace`. **Creates** check that nothing is there and then make
   the file, which opens one already there, so a file another program makes
   between the two is replaced by a copy's bytes, or removed when the copy finds
   it too long, as a rename replaces one.
 - **Swap files.** While a writable stream is open, Chromium keeps its bytes in
-  `<name>.crswap` beside the file, and a tab stopped meanwhile can leave that
-  file behind. That it shows while the stream is open was observed; that a
-  stopped tab leaves it is inferred, not confirmed. toshokan reads, scans and
-  reports no file whose name ends in `.crswap`, wherever it is, and refuses
-  such a name as a library path.
+  `<name>.crswap` beside the file. A tab stopped meanwhile can leave that file
+  behind, which is inferred and has not been seen. toshokan reads, scans and
+  reports no file whose name ends in `.crswap`, wherever it is, and refuses such
+  a name as a library path.
 - **Times.** Chromium and Firefox report a file's last change in milliseconds,
   WebKit in whole seconds: two changes that keep a file's length within that
   time look alike.
@@ -1292,9 +940,54 @@ directory of the origin private file system.
   the executor and released when its worker ends.
 - **Hints.** A tab that commits announces its newest entry on the
   `BroadcastChannel` `toshokan:<library>`, and the library's other tabs refresh.
-  Where the browser has a `FileSystemObserver`, which only Chromium has, a page
-  watches its folder and rescans the paths the observer reports changed, or
-  every file when it cannot say which. A page rescans every file once a library
-  opens; one whose folder another program may write also rescans every file when
-  it is shown or focused, and periodically while it is visible.
+  Only Chromium has a `FileSystemObserver`, through which a page can watch its
+  folder.
 
+## Guarantees
+
+**Kept.**
+
+- Readers that see the same files merge and show the same entries, at once,
+  whatever order the files came in; after a restore, what the restored folder
+  says.
+- Every kept entry is merged, shown as a run, dismissed by the user, or held back
+  after an entry a restore or a dropped version took.
+- An entry no fork precedes and that follows nothing lost is merged.
+- No two branches of a writer are ever merged together.
+- A reader finds every fork point from the files, whichever branch's files it
+  sees first, but for a fork inside a segment.
+- A run stays shown until it is dismissed or its files go.
+- A step by one branch of a forked writer changes no merged value, except on a
+  field shown as a forgotten basis.
+- A replaced value or removed member never comes back without a conflict, also
+  while sync is in flight, but as Not kept says of a fork its writer did not
+  know of: a write a reference covers stays dead, and a reference the files
+  contradict shows what it replaced only beside the current value.
+- A delete's references are kept for good, so an edit made long after, by an
+  instance that had not read the delete, is still a deletion conflict.
+- No offline writer's work stops counting, however long it was away.
+- Chain order, single-writer directories, no bytes leaving the folder except by
+  emptying a trash, total recovery, opening writing nothing.
+
+**Not kept.**
+
+- A fork's branches are not merged side by side: each branch after the fork
+  point is a run for the user, however briefly both copies of a local root ran.
+- What a reader shows does not only grow while sync delivers files out of
+  order: facts can disappear and come back.
+- A branch that compacts past a pre-fork value it replaced takes that value out
+  of the merge, and the field shows as a forgotten basis.
+- Where several tips part inside a segment, a pre-fork entry with no effect left
+  can show as a run, and an own write that may be pre-fork as a forgotten basis.
+- Reviving a deleted entity brings back only the concurrent edit.
+- A reader may show a field empty, or as a conflict, until the write that
+  replaced the value it showed arrives.
+- A copy of a segment that diverged and stops short, unsealed, hides its write
+  to a field the other copy wrote at a higher number; a copy one line longer is
+  a run, and shows it.
+- A writer that replaced two writes of another writer to a field before it saw
+  a fork of that writer keeps a reference only to the later one. Once it
+  compacts, a reader that finds the fork between the two shows the earlier
+  write's value again.
+- A snapshot lost while a newer segment survives leaves that segment held back
+  as a gap until the writer's next snapshot reaches it.

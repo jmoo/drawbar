@@ -95,10 +95,8 @@ impl Executor {
                 "a library's storage is written only from a dedicated worker".into(),
             ));
         }
-        // Chromium's `flush()` waits for the disk, as its time shows; Firefox's
-        // and WebKit's return at once, so they declare no sync. A sync covers a
-        // file's contents only: see `Tree::sync`. `userAgentData` exists only in
-        // Chromium.
+        // Only Chromium's `flush()` costs what a disk write does, and only Chromium
+        // has `userAgentData`.
         let chromium = field(&navigator(), "userAgentData").is_some();
         let private = Capabilities {
             append: true,
@@ -444,9 +442,8 @@ impl Tree {
     }
 
     /// Each of `reads`, as [`Tree::read`] reads it, finding each directory they
-    /// name once: a browser can take milliseconds for each step of a path. The
-    /// files of a directory kept that more than one read names are found by one
-    /// listing of it, which Firefox gives in about the time of one step.
+    /// name once. The files of a kept directory that more than one read names are
+    /// found by one listing of it, which Firefox gives in about the time of one step.
     async fn read_many(&self, reads: &[(RelPath, Range)]) -> Vec<Result<Vec<u8>, IoError>> {
         let mut named: BTreeMap<RelPath, usize> = BTreeMap::new();
         for parent in reads.iter().filter_map(|(path, _)| path.parent()) {
@@ -628,11 +625,10 @@ impl Tree {
         self.walk(path, Some(&options)).await.map(drop)
     }
 
-    /// Flushes a file through a sync access handle. A directory's names cannot
-    /// be synced: the browser keeps them in its own database, as durable as it
-    /// makes them. A file a stream fills is landed before any sync of it reaches
-    /// here, since a sync does not keep the stream open ([`Io::keeps_open`]), and
-    /// closing the stream is what makes its bytes durable.
+    /// Flushes a file through a sync access handle. A directory's names live in
+    /// the browser's own database, which cannot be synced. A file a stream fills
+    /// has landed before its sync reaches here, since a sync does not keep the
+    /// stream open ([`Io::keeps_open`]).
     async fn sync(&self, path: &RelPath) -> Result<(), IoError> {
         if path.is_root() {
             return Ok(());
@@ -725,8 +721,7 @@ async fn snapshot(file: &FileSystemFileHandle) -> Result<File, IoError> {
         .unchecked_into())
 }
 
-/// A file's metadata. Browsers keep the time of a change in milliseconds, so
-/// two changes within one millisecond that keep the length look alike.
+/// A file's metadata, its time from `lastModified`, which counts milliseconds.
 fn meta(file: &File) -> Meta {
     let modified = file.last_modified();
     Meta {

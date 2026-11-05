@@ -135,10 +135,10 @@ struct Resolved {
 }
 
 impl Library {
-    /// Claims a writer from the pool, reads the folder and assesses recovery.
-    /// No library file is scanned: each entity's file is
-    /// [`FileState::Unscanned`] at the path its facts give until
-    /// [`Library::rescan`] finishes. `capabilities` are the folder's.
+    /// Claims a writer from the pool, reads the folder and assesses recovery. No
+    /// library file is scanned: each entity's file is [`FileState::Unscanned`] at
+    /// the path its facts give until [`Library::rescan`] finishes. `capabilities`
+    /// are the folder's.
     pub fn open(
         layout: Layout,
         schema: Schema,
@@ -388,8 +388,8 @@ impl Library {
     /// is [`crate::Error::Refused`], and the refused intent changes nothing. Effects
     /// that fail log nothing and fail the commit; the next write finishes them
     /// first, and where it cannot, the library is read-only until it is opened
-    /// again. Otherwise a commit whose entries are
-    /// durable succeeds, and [`Committed::local`] says what of this instance lags it.
+    /// again. Otherwise a commit whose entries are durable succeeds, and
+    /// [`Committed::local`] says what of this instance lags it.
     pub fn commit(
         &mut self,
         plan: std::result::Result<Plan, Invalid>,
@@ -502,10 +502,10 @@ impl Library {
     /// this writer's own log: finishes it, rolls it back or dismisses it. Nothing
     /// is written in the other writer's directory. Effects that fail leave the
     /// effect open to settle again, and this writer's own record of them to settle
-    /// at its next write. Finishing
-    /// or rolling back a directory move this folder cannot make is refused with
-    /// [`crate::Refusal::Unsupported`]; dismissing it is not. A settlement is no
-    /// step of undo, and undo takes what it wrote for the other writer's.
+    /// at its next write. Finishing or rolling back a directory move this folder
+    /// cannot make is refused with [`crate::Refusal::Unsupported`]; dismissing it is
+    /// not. A settlement is no step of undo, and undo takes what it wrote for the
+    /// other writer's.
     pub fn settle(&mut self, orphan: Orphan, how: Settlement) -> Task<'_, Result<Committed>> {
         if let Err(error) = self.writable() {
             return Task::ready(Err(error));
@@ -726,11 +726,10 @@ impl Library {
     /// [`Refusal::Nothing`] when this instance writes as no writer yet, and when
     /// a snapshot in the writer's directory already has its last entry, and with
     /// [`Refusal::SnapshotTooLong`] when the snapshot would be longer than a
-    /// reader holds, writing nothing. Fails
-    /// with [`Error::Rekey`] when the writer's history forked or the folder lost
-    /// its last entry, and the instance stops writing as it. This writer's
-    /// interrupted effects are settled first, and a failure to settle them fails
-    /// the compaction.
+    /// reader holds, writing nothing. Fails with [`Error::Rekey`] when the writer's
+    /// history forked or the folder lost its last entry, and the instance stops
+    /// writing as it. This writer's interrupted effects are settled first, and a
+    /// failure to settle them fails the compaction.
     #[doc(hidden)]
     pub fn compact(&mut self) -> Task<'_, Result<Compacted>> {
         if let Err(error) = self.writable() {
@@ -1798,8 +1797,8 @@ fn reorphaned(library: &mut Library) -> Fallible<'_, &mut Library> {
 
 /// Takes the lock of every other writer of this install's pool that no instance
 /// writes as now and that left pending records open, and keeps it, so this
-/// instance settles their effects, and no other does. Every other idle writer's lock is let go at once, so another
-/// instance may write as it.
+/// instance settles their effects, and no other does. Every other idle writer's
+/// lock is let go at once, so another instance may write as it.
 fn idle_pool<'a, L: BorrowMut<Library> + 'a>(library: L) -> Fallible<'a, L> {
     let own = library.borrow().writer.as_ref().map(Writer::genesis);
     flow::run(Writer::pool()).and_then(move |pool| {
@@ -2066,8 +2065,6 @@ fn moved_paths(steps: &[EffectStep]) -> Vec<RelPath> {
     moves.flat_map(EffectStep::library_paths).cloned().collect()
 }
 
-/// Removes this writer's spent records, then settles its interrupted effects, so
-/// that what is planned next is planned against the facts and history they leave.
 /// The directory of a layout newer than this build's, where the library's root holds
 /// one beside it: what it holds is written in a way this build may not write over.
 fn newer_layout(entries: &[DirEntry]) -> Option<String> {
@@ -2078,6 +2075,8 @@ fn newer_layout(entries: &[DirEntry]) -> Option<String> {
         .map(|entry| entry.name.clone())
 }
 
+/// Removes this writer's spent records, then settles its interrupted effects, so
+/// that what is planned next is planned against the facts and history they leave.
 /// A spent record that cannot be removed fails the write, and so does a failed
 /// write of this writer's that landed, which stops it.
 fn settle_first(library: &mut Library) -> Fallible<'_, &mut Library> {

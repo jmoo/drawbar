@@ -2407,8 +2407,6 @@ mod tests {
         assert!(root.at("Locked/b.ne5p").exists());
     }
 
-    /// A change too large for the library to log as one entry is refused whole, each
-    /// file saying why, and the folder keeps every file.
     #[test]
     fn a_change_too_large_to_log_as_one_is_refused_whole_and_says_why() {
         const FILES: usize = 13_000;
@@ -2605,8 +2603,6 @@ mod tests {
         }
     }
 
-    /// A copy opened while another window opens one into the same library is refused,
-    /// and the first opens alone.
     #[test]
     fn a_copy_is_not_opened_while_another_window_opens_one() {
         let from = Temp::new();
@@ -3031,8 +3027,6 @@ mod tests {
         );
     }
 
-    /// A copy whose opening stopped partway leaves the library read-only, saying to open
-    /// it again, and opening it again takes away what the first left.
     #[test]
     fn a_copy_stopped_partway_leaves_the_library_read_only_until_it_is_opened_again() {
         let from = Temp::new();
@@ -3126,8 +3120,6 @@ mod tests {
         assert_eq!(trash(&mut third), [], "the closed session's undo needed it");
     }
 
-    /// Only this writer's trash is emptied: what an earlier writer of this install left
-    /// stays, and alone it leaves nothing to empty.
     #[test]
     fn the_trash_of_an_earlier_writer_is_neither_emptied_nor_counted() {
         let item = |writer, n, len| TrashItem {
@@ -3318,7 +3310,6 @@ mod tests {
         assert_eq!(root.read("C3.ne5p"), b"upper");
     }
 
-    /// A file that changed since drawbar read it is neither saved over nor deleted.
     #[test]
     fn a_file_changed_since_it_was_read_is_left_as_it_is() {
         let root = Temp::new();
@@ -3350,8 +3341,6 @@ mod tests {
         assert_eq!(root.read("c3.ne5p"), b"changed!");
     }
 
-    /// A save the commit landed is answered as saved with what it wrote, though the file
-    /// cannot be looked at right after.
     #[test]
     fn a_landed_save_that_cannot_be_looked_at_after_is_saved_with_what_it_wrote() {
         struct Unstated(toshokan::MemDisk);
@@ -3408,8 +3397,6 @@ mod tests {
         }
     }
 
-    /// A copy of a library file that another program rewrites while it is read, range by
-    /// range, is refused as moved, and nothing lands.
     #[test]
     fn a_copy_of_a_file_rewritten_while_it_is_read_is_refused() {
         let root = Temp::new();
@@ -3471,9 +3458,6 @@ mod tests {
         assert!(!root.at("Copy.nsmp").exists(), "nothing lands");
     }
 
-    /// A folder of the library that is a link to one outside it is never written through:
-    /// a save, a copy, a move and a delete whose path passes through it are each refused,
-    /// and the folder it names keeps what it holds.
     #[cfg(unix)]
     #[test]
     fn a_path_through_a_linked_folder_is_refused() {

@@ -1,10 +1,9 @@
 //! Entries: what one line of a writer's log says.
 //!
-//! An entry is the JSON of a [`Line`]: an object with `prev`, `n` (its number in
-//! its writer's chain), `at` (an [`Hlc`]), `kind`, and the members its kind
-//! defines. Unknown kinds, ops and members are kept verbatim: the line itself is
-//! kept, what does not decode is carried as [`Raw`], and an entry with members
-//! this build does not know says so.
+//! An entry is the JSON of a [`Line`], with the members Entries in
+//! `spec/format.md` gives. What this build does not know survives: the line is
+//! kept, what does not decode is carried as [`Raw`], and
+//! [`Entry::unknown_members`] says when an entry holds members it leaves out.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -1488,7 +1487,7 @@ mod tests {
         }
     }
 
-    // The members of each kind and op are the format SPEC.md specifies.
+    // The members of each kind and op are the format spec/format.md specifies.
     #[test]
     fn an_intent_is_written_as_specified() {
         let entity = EntityId::from_u128(0xe);
@@ -1530,7 +1529,7 @@ mod tests {
         assert_eq!(entry.json(), expected);
     }
 
-    // The members of each kind, in the order SPEC.md gives them.
+    // The members of each kind, in the order spec/format.md gives them.
     #[test]
     fn every_kind_is_written_as_specified() {
         let id = |n: u128| format!("{n:032x}");

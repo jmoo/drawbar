@@ -1,14 +1,7 @@
 //! A sync adversary for tests, mirroring the sync layer of `spec/Portable.tla`: one
 //! folder that writers write and several readers see, each reader receiving every
-//! file independently and in any order.
-//!
-//! The spec lets sync show a reader any prefix of each file at any time. A
-//! [`SyncEvent`] is one such step: [`SyncEvent::Deliver`] shows all of a file,
-//! [`SyncEvent::Shorten`] a prefix, [`SyncEvent::Delete`] and [`SyncEvent::Hide`]
-//! none of it, and [`SyncEvent::Resurrect`] a file the origin deleted. The spec
-//! names no file, so [`SyncEvent::ConflictedCopy`], which shows a file under
-//! another name, is a step it covers without modeling. Steps the spec charges to
-//! its chaos budget are those [`SyncEvent::is_chaos`] says.
+//! file independently and in any order. The spec names no file, so it covers
+//! [`SyncEvent::ConflictedCopy`] without modeling it.
 
 use std::collections::BTreeMap;
 

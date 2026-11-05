@@ -358,6 +358,10 @@ pub struct Library<F> {
 }
 
 impl<F: Fs> Library<F> {
+    /// Opens the library in the folder as one writer of this install and reads the
+    /// folder. Opening writes nothing in the folder and scans no library file: each
+    /// entity's file is [`FileState::Unscanned`](crate::FileState::Unscanned) at the
+    /// path its facts give until a [`rescan`](Self::rescan) finishes.
     pub async fn open(fs: F, layout: Layout, schema: &Schema, env: Env) -> Result<(Self, Opened)> {
         fs.own(layout.root());
         let capabilities = fs.capabilities(Root::Folder);
@@ -384,6 +388,7 @@ impl<F: Fs> Library<F> {
         self.core.rebound()
     }
 
+    /// This session's intents, for undo and redo.
     pub fn history(&self) -> &[HistoryItem] {
         self.core.history()
     }
@@ -411,7 +416,9 @@ impl<F: Fs> Library<F> {
         self.core.finishing()
     }
 
-    /// As [`crate::library::Library::unread`].
+    /// The files in other writers' directories, pending records among them, that
+    /// the last read could not read, in order. What they hold is not shown, and no
+    /// orphan is reported, until a read takes them in.
     pub fn unread(&self) -> Vec<RelPath> {
         self.core.unread()
     }
@@ -422,24 +429,38 @@ impl<F: Fs> Library<F> {
         Intent::new(self, label)
     }
 
+    /// Undoes this session's latest intent not undone. Refused with
+    /// [`Refusal::Nothing`](crate::Refusal::Nothing) when there is none,
+    /// [`Refusal::ChangedSince`](crate::Refusal::ChangedSince) where another writer
+    /// changed the same thing since, and [`Refusal::Emptied`](crate::Refusal::Emptied)
+    /// when the bytes it would bring back have left the trash.
     pub async fn undo(&mut self) -> Result<Committed> {
         run(&self.fs, self.core.undo()).await
     }
 
+    /// Redoes this session's latest undo, while nothing was committed since. Refused
+    /// as [`undo`](Self::undo) is.
     pub async fn redo(&mut self) -> Result<Committed> {
         run(&self.fs, self.core.redo()).await
     }
 
-    /// As [`crate::library::Library::forget_undo`].
+    /// Lets go of what the next undo would reverse, as once its undo is refused: the
+    /// next undo reaches this session's intent before it.
     pub fn forget_undo(&mut self) {
         self.core.forget_undo();
     }
 
-    /// As [`crate::library::Library::forget_redo`].
+    /// Lets go of what the next redo would reverse, as once its redo is refused.
     pub fn forget_redo(&mut self) {
         self.core.forget_redo();
     }
 
+    /// Settles another writer's unfinished effect, with the user's consent, in this
+    /// writer's own log: finishes it, rolls it back or dismisses it, as `how` says.
+    /// Effects that fail leave it open to settle again. Finishing or rolling back a
+    /// directory move this folder cannot make is refused with
+    /// [`Refusal::Unsupported`](crate::Refusal::Unsupported). A settlement is no step
+    /// of undo.
     pub async fn settle(&mut self, orphan: Orphan, how: Settlement) -> Result<Committed> {
         run(&self.fs, self.core.settle(orphan, how)).await
     }
@@ -462,18 +483,28 @@ impl<F: Fs> Library<F> {
         run(&self.fs, self.core.rescan_paths(paths)).await
     }
 
+    /// Settles now this writer's effects a crash interrupted, as
+    /// [`Opened::settled`] reports them, rather than before its next write.
     pub async fn settle_interrupted(&mut self) -> Result<()> {
         run(&self.fs, self.core.settle_interrupted()).await
     }
 
+    /// Every writer with its last entry time, and whether another instance on this
+    /// machine holds it.
     pub async fn others(&mut self) -> Result<Vec<WriterInfo>> {
         run(&self.fs, self.core.others()).await
     }
 
+    /// The bytes still in the trash of each writer this install wrote as, oldest
+    /// first: this writer's, which undo restores and emptying removes, and those of
+    /// the writers it retired, kept as they are.
     pub async fn trash(&mut self) -> Result<Vec<TrashItem>> {
         run(&self.fs, self.core.trash()).await
     }
 
+    /// Removes from this writer's trash every item but those of `kept` and those an
+    /// unfinished effect may still move. An undo that needs a removed item is then
+    /// refused with [`Refusal::Emptied`](crate::Refusal::Emptied).
     pub async fn empty_trash(&mut self, kept: BTreeSet<Nonce>) -> Result<Emptied> {
         run(&self.fs, self.core.empty_trash(kept)).await
     }
@@ -484,7 +515,10 @@ impl<F: Fs> Library<F> {
         run(&self.fs, self.core.compact()).await
     }
 
-    /// Closes the library cleanly and returns the backend.
+    /// Closes the library cleanly and returns the backend. A record of a finished
+    /// effect it cannot remove stays for the next instance to find, and that failure
+    /// is returned once the library is closed. A library dropped without closing
+    /// leaves its segment open, as a crash does.
     pub async fn close(mut self) -> Result<F> {
         run(&self.fs, self.core.close()).await?;
         Ok(self.fs)
@@ -504,8 +538,9 @@ impl<'l, F: Fs + 'l> Driver for &'l mut Library<F> {
 }
 
 impl<'l, F: Fs + 'l> Intent<&'l mut Library<F>> {
-    /// Commits the intent. One whose file effects fail logs nothing and fails; the
-    /// next write finishes them first.
+    /// Commits the intent. A refused intent fails with
+    /// [`Error::Refused`](crate::Error::Refused) and changes nothing. One whose file
+    /// effects fail logs nothing and fails; the next write finishes them first.
     pub async fn commit(self) -> Result<Committed> {
         let (library, plan, sources) = self.into_parts();
         run_with(&library.fs, sources, library.core.commit(plan)).await

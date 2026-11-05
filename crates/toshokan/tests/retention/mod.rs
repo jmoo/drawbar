@@ -1,4 +1,5 @@
-//! Value-level checks of toshokan under the retention design in `RETENTION.md`.
+//! Value-level checks of toshokan's merge and runs, as Values in `spec/README.md`
+//! describes them.
 //!
 //! Histories of three writers and a clone write one entity's existence, one
 //! register and set members, compact at every point, and dismiss runs. Every

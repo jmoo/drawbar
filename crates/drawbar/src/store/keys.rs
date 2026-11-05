@@ -27,8 +27,8 @@ pub const TAKEN_IN: Set<String> = Set::new("taken in");
 pub const ORIGIN: Register<Came> = Register::new("origin");
 
 /// The code the library keeps for each class an asset can come off. Part of the format:
-/// the first six are the codes the index of the drawbar before the store fixed, which
-/// were the Electro 5's partition numbers then.
+/// the first six are the codes drawbar 0.10's index fixed, which were the Electro 5's
+/// partition numbers then.
 const CLASSES: [(ObjectClass, u32); 9] = [
     (ObjectClass::Piano, 1),
     (ObjectClass::Sample, 3),
@@ -411,7 +411,6 @@ mod tests {
         assert_ne!(exact.key(upper), exact.key(lower));
     }
 
-    /// The probe agrees with what the volume does with a name in another case.
     #[test]
     fn a_volume_is_probed_for_folding_case_as_it_folds_it() {
         let dir = crate::testing::Temp::new();
@@ -454,8 +453,7 @@ mod tests {
         }
         assert_eq!(class_code(ObjectClass::Unknown(3)), None);
         assert_eq!(class_of(42), ObjectClass::Unknown(42));
-        // The bytes the drawbar before the store wrote for this slot's class, as the
-        // library keeps them.
+        // The bytes drawbar 0.10 wrote for this slot's class, as the library keeps them.
         let came = Came::of(&Origin::Device {
             class: ObjectClass::Program,
             at: Location { bank: 1, slot: 7 },

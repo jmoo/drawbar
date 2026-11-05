@@ -92,8 +92,6 @@ async fn write_outside(folder: &RelPath, at: &str, bytes: &[u8]) {
     JsFuture::from(writable.close()).await.unwrap();
 }
 
-/// A folder watched where the browser can watch it hints the paths another program
-/// wrote in it.
 #[wasm_bindgen_test]
 async fn a_watched_folder_hints_the_paths_another_program_wrote() {
     let folder = path(&format!("library/{:032x}/folder", CryptoRandom.next_u128()));

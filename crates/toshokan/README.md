@@ -1,15 +1,24 @@
 # toshokan
 
-**Keep what a file can't say about itself beside the file, in a folder that syncs.**
+**Keep tags and edit history beside the files they describe, in a folder that syncs.**
 
-toshokan (図書館, "library") keeps tags, provenance and relations between files
-in a hidden directory inside a folder of real files, so the folder can live in
-Dropbox, OneDrive, iCloud or on a network share. Each running app appends only
-to files of its own, so a stale computer, files that arrive out of order, a
-partial restore or a conflicted copy needs no intervention, and once a sync
-settles every reader shows the same state. Nothing is overwritten in place, so
-an interrupted or conflicting change leaves every file recoverable.
+toshokan (図書館, "library") keeps tags, provenance and relations between files in
+a hidden directory inside a folder of real files, so the folder can live in
+Dropbox, OneDrive, iCloud or on a network share.
 
+- A stale computer, files that arrive out of order, a partial restore or a
+  conflicted copy need no intervention.
+- Once a sync settles, every reader shows the same state.
+- Nothing is overwritten in place, so an interrupted or conflicting change leaves
+  every file recoverable.
+- Several apps or computers can write to one folder at once without error.
+  Their concurrent edits are kept and shown as conflicts.
+- Files keep their names, bytes and places unless the app asks, and opening a
+  library writes nothing in the folder.
+- It runs natively and in the browser, on the origin private file system or a
+  folder the user picked.
+
+For live collaboration, a CRDT library such as Automerge is a better fit.
 The on-disk format may change before 1.0.
 
 An app declares its keys, opens a library as one writer, renders views and
@@ -44,8 +53,7 @@ let tags = view.entity(song).unwrap().members(TAGS);
 lib.undo()?;
 ```
 
-The crate documentation describes the API, the browser driver and how to run
-the browser suites. [SPEC.md](SPEC.md) specifies every file toshokan writes and
-how it is merged, [RETENTION.md](RETENTION.md) how little history it keeps, and
-[spec/](spec/README.md) model-checks the protocol and maps it to the tests,
-the power-loss tests included.
+The [crate documentation](https://docs.rs/toshokan) describes the API.
+[spec/format.md](spec/format.md) specifies every file toshokan writes,
+[spec/protocol.md](spec/protocol.md) how writers and readers use them, and
+[spec/](spec/README.md) model-checks the protocol.

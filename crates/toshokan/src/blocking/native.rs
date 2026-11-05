@@ -17,20 +17,13 @@ use crate::path::RelPath;
 /// two directories, and locks as OS file locks on files in the local root.
 ///
 /// Symbolic links and special files are not library files: listings leave them
-/// out, and naming one fails, as does any request on a path through a
-/// directory that is a link. What a root's renames promise is probed without
-/// writing, from its volume's file system: by type on Linux and Android, by type
-/// and the volume's capabilities on Apple systems, and by name on Windows. A
-/// volume that keeps no journal of its names, such as FAT or exFAT, declares no
-/// [`Capabilities::rename_file`] or [`Capabilities::rename_dir`], so that every
-/// move copies, and one whose renames refuse an existing destination declares
-/// [`Capabilities::no_replace`], as every other volume on Windows does. On
-/// Windows names containing `\` or `:` are refused, and a request another
-/// program holds the file of for a moment is tried again. A create or rename
-/// through a file fails as [`IoError::NotDirectory`] everywhere; other requests
-/// there fail as [`IoError::NotFound`] on Windows. The local root's
-/// directory, and those it is in, are made where missing at its first change or
-/// lock.
+/// out, and naming one fails, as does any request on a path through a directory
+/// that is a link. Each root's capabilities are read, without writing, from its
+/// volume's file system, as the Backends section of `spec/protocol.md` lists. On
+/// Windows, names containing `\` or `:` are refused. A create or rename through a
+/// file fails as [`IoError::NotDirectory`] everywhere; other requests there fail
+/// as [`IoError::NotFound`] on Windows. The local root's directory, and those it
+/// is in, are made where missing at its first change or lock.
 pub struct Native {
     folder: PathBuf,
     local: PathBuf,
@@ -383,11 +376,9 @@ const FSYNC: bool = cfg!(any(unix, windows));
 fn flush(path: &Path, kind: Kind) -> io::Result<()> {
     let file = flushable(path, kind)?;
     let flushed = file.sync_all();
-    // `sync_all` asks Apple systems for a full sync, which SMB, AFP and WebDAV
-    // volumes refuse, under more than one error, while taking a plain one; as in
-    // SQLite, a failure of it falls back to a plain one, but here an I/O error, the
-    // write failing, does not. Reported by public documentation; not confirmed on
-    // hardware.
+    // SMB, AFP and WebDAV volumes refuse a full sync and take a plain one; as SQLite
+    // does, fall back to one unless the error is the write failing (`EIO`).
+    // Reported by public documentation; not confirmed on hardware.
     #[cfg(target_vendor = "apple")]
     let flushed = flushed.or_else(|error| match rustix::io::Errno::from_io_error(&error) {
         Some(rustix::io::Errno::IO) => Err(error),

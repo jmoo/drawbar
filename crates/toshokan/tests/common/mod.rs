@@ -423,7 +423,6 @@ pub const COPYING: Capabilities = Capabilities {
     fsync: false,
 };
 
-/// An empty disk whose folder is [`COPYING`].
 pub fn copying() -> MemDisk {
     MemDisk::with_capabilities(COPYING, Capabilities::ALL)
 }

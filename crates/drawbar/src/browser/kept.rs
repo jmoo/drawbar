@@ -1,5 +1,5 @@
-//! Kept apart: the changes the library shows apart from it rather than merging them,
-//! one card per run, each change taken or the run dismissed.
+//! Kept apart: the changes the library shows beside it unmerged, one card per run, each
+//! change taken or the run dismissed.
 
 use eframe::egui;
 
@@ -13,13 +13,6 @@ const WIDTH: f32 = 560.0;
 
 /// The most changes a card lists. Take all takes the rest too.
 const ROWS: usize = 100;
-
-/// What Kept apart says above its cards.
-const ABOUT: &str = "These changes were made where the library's history split, as when \
-                     two computers went on from one copy of drawbar's own data, or a sync \
-                     left part of a history behind. drawbar shows them here rather than \
-                     mixing them in. Take the changes you want; dismiss a branch you don't \
-                     want.";
 
 /// What a card offers, by its kind: whether each change can be taken, and whether the
 /// whole run can be taken and dismissed.
@@ -49,8 +42,6 @@ impl Browser {
                 ui.add_space(sheet::GAP * 4.0);
                 sheet::section(ui, |ui| {
                     sheet::heading(ui, "Kept apart", None);
-                    ui.add_space(sheet::GAP * 2.0);
-                    ui.add(egui::Label::new(ABOUT).wrap());
                     ui.add_space(sheet::GAP * 3.0);
                     egui::ScrollArea::vertical()
                         .id_salt("browser_kept_cards")

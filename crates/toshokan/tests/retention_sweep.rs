@@ -1,4 +1,4 @@
-//! The full value-level sweep of toshokan under the retention design:
+//! The full value-level sweep of toshokan's merge, which takes minutes:
 //! `cargo test --profile release-tests --test retention_sweep -- --ignored`.
 
 mod retention;

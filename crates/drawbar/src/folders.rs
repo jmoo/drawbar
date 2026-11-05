@@ -350,7 +350,7 @@ impl Folders {
         self.lost = lost;
     }
 
-    /// The changes the library keeps apart rather than merging them.
+    /// The changes the library keeps apart.
     pub fn kept(&self) -> &[Kept] {
         &self.kept
     }

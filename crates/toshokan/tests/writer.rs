@@ -155,7 +155,7 @@ fn written_once(capabilities: Capabilities) -> MemDisk {
     instance.machine.folder.restart()
 }
 
-/// `head.json` as SPEC.md gives it.
+/// `head.json` as spec/format.md gives it.
 fn head_record(writer: WriterId, head: EntryHash) -> Vec<u8> {
     format!(r#"{{"writer":"{writer}","head":"{head}"}}"#).into_bytes()
 }
@@ -295,8 +295,6 @@ fn a_writer_whose_last_entry_follows_a_hidden_segment_does_not_resume() {
     );
 }
 
-/// Each writer keeps one file in the local root, `head.json`, which also says when
-/// the writer is retired.
 #[test]
 fn a_writer_keeps_one_file_in_the_local_root_retired_or_not() {
     let mut original = Instance::open(machine(), 1);

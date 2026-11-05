@@ -1064,7 +1064,6 @@ fn a_rescue_a_read_only_library_cannot_take_stays_and_is_offered() {
     assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue());
 }
 
-/// A rescue's name says the slot it came off.
 #[test]
 fn a_rescue_names_the_slot_it_came_off() {
     let slot = |name: &str| Rescue::slot_of(name);
@@ -1080,8 +1079,6 @@ fn a_rescue_names_the_slot_it_came_off() {
     assert_eq!(slot("Grand.npno"), None);
 }
 
-/// A copy fetched off a slot keeps saying which slot once drawbar opens the library
-/// again.
 #[test]
 fn a_copy_off_a_slot_still_says_which_once_reopened() {
     let (root, fetched) = (Temp::new(), Temp::new());
@@ -1329,7 +1326,6 @@ fn a_save_the_next_change_finishes_can_be_undone_after_it() {
     assert_eq!(root.read("untitled.ne5p"), old, "the save is undone");
 }
 
-/// An undo the next change finishes leaves Undo at the step before the one it undid.
 #[test]
 fn an_undo_the_next_change_finishes_leaves_undo_at_the_step_before() {
     let root = Temp::new();
@@ -1358,8 +1354,6 @@ fn an_undo_the_next_change_finishes_leaves_undo_at_the_step_before() {
     );
 }
 
-/// A library a change of drawbar's own left read-only still keeps unsaved edits when it
-/// opens read-only again.
 #[test]
 fn a_library_reopened_while_a_change_still_cannot_be_finished_keeps_edits() {
     let root = Temp::new();
@@ -1699,8 +1693,6 @@ fn a_move_carries_the_folder_and_what_is_in_it_and_nothing_beside_it() {
     assert_eq!(path("c3.wav").moved(&from, &to), None);
 }
 
-/// An asset made with New keeps saying so once its file is written and drawbar opens
-/// the library again.
 #[test]
 fn a_new_asset_with_a_file_is_still_new_after_a_restart() {
     let root = Temp::new();
@@ -2098,7 +2090,6 @@ fn a_second_rename_waits_for_a_first_the_disk_refuses() {
     );
 }
 
-/// Two renames of one folder, the second sent before the first answers, both land.
 #[test]
 fn a_second_rename_waits_for_a_first_that_lands() {
     let (root, mut session, folder, tag) = gig();
@@ -2176,7 +2167,6 @@ fn a_folder_renamed_while_a_file_in_it_is_renamed_waits_for_it() {
     assert_eq!(session.said("did not change as asked"), 1);
 }
 
-/// An act on a file not read yet waits for it to be read, and decodes it before it runs.
 #[test]
 fn acting_on_a_file_not_read_yet_reads_and_decodes_it_first() {
     let root = Temp::new();
@@ -2884,8 +2874,6 @@ fn a_bundle_from_outside_unpacks_into_a_new_flat_folder() {
     );
 }
 
-/// A member whose bytes do not match the bundle's checksum for them is refused, and the
-/// rest of the bundle still arrives.
 #[test]
 fn a_damaged_member_of_a_bundle_is_refused_and_the_rest_arrive() {
     let (root, outside) = (Temp::new(), Temp::new());
@@ -3587,8 +3575,6 @@ fn an_overwrite_keeps_its_source_where_it_was_edited_meanwhile() {
     assert_eq!(root.read("Moved.ne5p"), ours, "and its file");
 }
 
-/// An overwrite with bytes held whole removes the asset it was moved from once its save
-/// has landed, and that asset's file with it.
 #[test]
 fn an_overwrite_removes_the_file_it_came_from_once_it_lands() {
     let root = Temp::new();
@@ -3771,8 +3757,6 @@ fn a_plan_that_no_longer_applies_to_its_changed_file_is_kept_until_theirs_is_tak
     assert!(root.read("Grand.npno") == theirs);
 }
 
-/// A sample instrument's edit that no longer applies to the file saved over it outside
-/// drawbar is kept, unsaved, rather than let go.
 #[test]
 fn a_sample_edit_that_no_longer_applies_to_its_changed_file_is_kept() {
     let root = Temp::new();
@@ -4367,8 +4351,6 @@ fn a_library_that_stops_answering_is_asked_about_and_let_go() {
     assert_eq!(said, 1, "the edit is named");
 }
 
-/// A library whose thread stops says so, and letting it go names the edits it could
-/// not keep.
 #[test]
 fn a_library_whose_thread_stops_says_so_and_is_let_go() {
     let root = Temp::new();
@@ -4504,8 +4486,6 @@ fn a_slot_views_unsaved_edit_comes_back_when_the_slot_is_viewed_again() {
     assert_eq!(second.said("appeared"), 0, "what was there is not news");
 }
 
-/// The autosave keeps a slot view's unsaved edit, so a drawbar stopped without a quit
-/// finds it again.
 #[test]
 fn a_slot_views_unsaved_edit_the_autosave_kept_survives_a_crash() {
     let root = Temp::new();
@@ -4665,8 +4645,6 @@ fn an_older_keeps_answer_never_marks_a_newer_edit_kept() {
     assert!(second.bytes(id) == newer);
 }
 
-/// A keep that fails at every autosave is said once, and again only once a keep has
-/// succeeded since.
 #[cfg(unix)]
 #[test]
 fn a_keep_that_keeps_failing_is_said_once_per_run_of_failures() {
@@ -5451,7 +5429,6 @@ fn an_undo_another_drawbar_refuses_is_let_go_of_for_the_change_before_it() {
     assert!(tagged(&first).is_empty());
 }
 
-/// Assets moved together in one gesture are one change: one undo moves every file back.
 #[test]
 fn a_selection_moved_together_is_one_undo_step() {
     let root = Temp::new();
@@ -5479,7 +5456,6 @@ fn a_selection_moved_together_is_one_undo_step() {
     assert_eq!(root.names(""), top, "beside the folder");
 }
 
-/// Files dropped together are one change: one undo takes every one back.
 #[test]
 fn files_dropped_together_are_one_undo_step() {
     let root = Temp::new();
@@ -5556,8 +5532,6 @@ fn a_tag_on_a_slot_view_is_one_undo_step() {
     );
 }
 
-/// A bundle unpacked into a new folder is one change: one undo takes back the folder
-/// and every file in it.
 #[test]
 fn a_bundle_unpacked_is_one_undo_step() {
     let (root, outside) = (Temp::new(), Temp::new());
@@ -5594,7 +5568,6 @@ fn a_bundle_unpacked_is_one_undo_step() {
     );
 }
 
-/// A new folder is a change of its own, which undo takes back.
 #[test]
 fn a_new_folder_is_undone() {
     let root = Temp::new();
@@ -5850,8 +5823,6 @@ fn a_deleted_hidden_file_goes_to_the_trash_and_undo_brings_it_back() {
     assert!(session.bench.browser.folders.others.is_empty());
 }
 
-/// A new tag made on a selection and named in its editor is one change: one undo takes
-/// it off every asset and out of the list.
 #[test]
 fn a_new_tag_named_on_a_selection_is_one_undo_step() {
     let root = Temp::new();
@@ -6529,8 +6500,6 @@ fn path(text: &str) -> LibPath {
     LibPath::parse(text).unwrap()
 }
 
-/// A pending record of another writer that does not read is left alone, and said so
-/// once.
 #[test]
 fn a_record_that_does_not_read_is_left_alone_and_said_so() {
     let root = Temp::new();
@@ -6818,7 +6787,6 @@ fn a_forked_writers_branches_show_as_changes_kept_apart() {
     assert!(kept.title.starts_with("Another drawbar"), "{}", kept.title);
 }
 
-/// Taking one change kept apart makes it, as one change undo takes back.
 #[test]
 fn a_change_kept_apart_is_taken_and_undone() {
     let root = Temp::new();
@@ -6835,7 +6803,6 @@ fn a_change_kept_apart_is_taken_and_undone() {
     assert_eq!(here.worn(at_here), ["New"], "undone");
 }
 
-/// Taking one tag a branch put on an asset leaves the other tag it put on kept apart.
 #[test]
 fn taking_one_tag_kept_apart_takes_no_other_tag_on_that_asset() {
     let root = Temp::new();
@@ -6858,7 +6825,6 @@ fn taking_one_tag_kept_apart_takes_no_other_tag_on_that_asset() {
     assert_eq!(here.worn(at_here), ["Live"], "neither branch is merged");
 }
 
-/// Taking a change to an asset a branch made makes the asset, at its file, with it.
 #[test]
 fn a_change_to_an_asset_a_branch_made_is_taken_with_the_asset() {
     let root = Temp::new();
@@ -7376,8 +7342,6 @@ fn a_draft_that_fails_keeps_the_list_until_one_lands() {
     assert!(session.handed_over(&list));
 }
 
-/// An unsaved edit whose file the take-in made is gone is brought in as a file of its
-/// own rather than lost.
 #[test]
 fn an_unsaved_edit_whose_file_is_gone_comes_in_as_a_file_of_its_own() {
     let root = Temp::new();
@@ -7956,7 +7920,6 @@ fn a_file_moved_while_its_first_tag_commits_stays_one_asset() {
     assert_eq!(session.said("outside drawbar"), 0);
 }
 
-/// So is a file whose folder is renamed before the tag's answer arrives.
 #[test]
 fn a_file_whose_folder_is_renamed_while_its_first_tag_commits_stays_one_asset() {
     let root = Temp::new();
@@ -8430,7 +8393,6 @@ fn a_take_in_the_next_change_finishes_survives_an_undo_and_a_close() {
     assert_eq!(root.names("Gig"), ["Pad 2.ne5p", "Pad.ne5p"]);
 }
 
-/// So is a rescue the next change finishes.
 #[test]
 fn a_rescue_the_next_change_finishes_survives_an_undo_and_a_close() {
     let root = Temp::new();

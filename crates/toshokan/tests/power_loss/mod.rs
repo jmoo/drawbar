@@ -501,7 +501,6 @@ impl<B> Faulty<B> {
     }
 }
 
-/// The name of `io`'s kind.
 fn kind(io: &Io) -> &'static str {
     match io {
         Io::List { .. } => "List",

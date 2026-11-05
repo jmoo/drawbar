@@ -1,9 +1,6 @@
 //! Pending records: the journal of multi-step effects, in `pending/<nonce>.json`.
-//!
-//! A record is written before an intent's first file effect and removed after its
-//! entry is durable, only by its owner. The folder may be adversarial: a record is
-//! acted on only when it is chained to the head the owner's local root recorded
-//! and every path it names is a library path.
+//! The folder may be adversarial, so a record is acted on only when it chains to
+//! its owner's recorded head and names only library paths.
 
 use std::collections::BTreeSet;
 

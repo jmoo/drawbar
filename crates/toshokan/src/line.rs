@@ -1,9 +1,8 @@
 //! The line codec of log segments.
 //!
-//! A line is `<json>\t<hash>\n`. The JSON is one object holding `prev`, the hash of
-//! the entry before it in the writer's chain, and `hash` is
-//! [`EntryHash::of`]`(prev, json)` in 32 hexadecimal digits. The hash is the entry's
-//! id, the chain link and the line's checksum.
+//! A line is `<json>\t<hash>\n`, where `hash` is [`EntryHash::of`]`(prev, json)`
+//! and names the entry, links the chain and checks the line. The encoding is
+//! Segments in `spec/format.md`.
 
 use serde::Deserialize;
 use thiserror::Error as ThisError;

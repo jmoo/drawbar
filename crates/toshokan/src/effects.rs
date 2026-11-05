@@ -1,18 +1,6 @@
-//! File effects without atomic replace.
-//!
-//! Nothing in a user path is overwritten or deleted in place. A save fills a
-//! staged file in `tmp/` from the app's content, which the driver writes, and
-//! syncs it; every precondition is checked; a pending record
-//! is written; displaced bytes are renamed into this writer's trash and the staged
-//! file into place; the intent's entry is appended; the pending record is removed.
-//! Each user path holds its old bytes, nothing or its new bytes, and while it holds
-//! nothing a pending record names it. A source is never removed before its
-//! destination is durable. Where the folder cannot rename files, each move copies
-//! and then removes its source ([`Moves::Copy`]); a user path being copied to may
-//! also hold the start of its new bytes, while a pending record names it.
-//!
-//! A commit runs [`resolve`], [`prepare`], [`apply`], the writer's append, then
-//! [`finish`]. Recovery resumes [`apply`] where an interrupted run stopped.
+//! File effects without atomic replace. A commit runs [`resolve`], [`prepare`],
+//! [`apply`], the writer's append, then [`finish`]; recovery resumes [`apply`]
+//! where an interrupted run stopped.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
@@ -668,10 +656,9 @@ impl Resolver<'_> {
     }
 
     /// Renames the file `from` to `to`, where nothing is. Where the volume may take
-    /// the two for one name, as a change of case alone on a volume that ignores
-    /// case, the file itself may be found at `to`: only an entry of exactly that
-    /// name clashes, and the file moves through a free name beside it, so that no
-    /// step finds its source and its destination one file.
+    /// the two for one name, as a change of case alone does where names fold case,
+    /// only an entry spelled exactly `to` clashes, and the file moves through the
+    /// trash.
     fn rename(
         &mut self,
         from: &RelPath,
@@ -864,7 +851,7 @@ impl Resolver<'_> {
 /// Stages and syncs the plan's files, checks every precondition, then writes
 /// `record` as the plan's pending record, whole or not at all. A record longer
 /// than a reader reads is refused before anything is written, and a failed
-/// precondition removes what was staged and refuses; nothing in a user path has
+/// precondition removes what was staged and refuses; nothing in a library path has
 /// changed. A plan that moves no file only checks.
 pub fn prepare(
     layout: &Layout,
@@ -1602,10 +1589,9 @@ pub(crate) fn progress(
     }
 }
 
-/// How far another writer's record's steps got, as the folder shows them, which
-/// settlements may since have carried further or partly reversed, unless the
-/// marked step of a record that copies left the start of a copy past where the
-/// folder shows them.
+/// How far another writer's record's steps got, as the folder shows them, since
+/// settlements may have carried them further or reversed some. For a record that
+/// copies, a marked step whose copy was cut short wins when it is at least as far.
 pub(crate) fn reached(
     layout: &Layout,
     record: &PendingRecord,
@@ -1652,14 +1638,11 @@ fn scanned(layout: &Layout, record: &PendingRecord, seen: &Observation) -> Progr
     Progress::upto(0)
 }
 
-/// How far copies got. A step's marker is made once every step before it is done,
-/// and its source is removed only once its destination holds all of the source's
-/// bytes, so the last marked step is the one in progress. Contents alone cannot
-/// tell which step that is, since a later step may put bytes back where an earlier
-/// one copied them from. The marked step's destination, which its create refused
-/// to find already there, is a copy cut short while it holds the start of its
-/// source's bytes or, in a folder that syncs, where a crash zeroes or tears bytes
-/// not yet synced, anything no longer than them.
+/// How far copies got. A marker is made once every step before it is done, so the
+/// last marked step is the one in progress; contents alone cannot tell, since a
+/// later step may put bytes back where an earlier one copied them from. Its
+/// destination is a copy cut short while it holds the start of its source's bytes
+/// or, where `synced`, anything no longer than them.
 fn copied(layout: &Layout, record: &PendingRecord, seen: &Observation, synced: bool) -> Progress {
     let Some(i) = seen.started else {
         return Progress::upto(0);
