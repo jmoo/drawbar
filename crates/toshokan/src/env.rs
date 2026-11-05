@@ -24,6 +24,10 @@ pub trait Random {
 /// apart, read a piece at a time. It may differ by kind of file: a format whose
 /// own checksum covers the whole file can be told apart by its checksum, where
 /// any other needs every byte.
+///
+/// toshokan reads the ranges and feeds them to the digest. A file whose ranges come
+/// to at most [`CHUNK`](crate::io::CHUNK) bytes is read together with others, and a
+/// larger one a `CHUNK` at a time.
 pub trait Identify {
     /// The ranges of the file at `path`, of `len` bytes, its identity is computed
     /// from.

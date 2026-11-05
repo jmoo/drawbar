@@ -11,6 +11,8 @@
 //! <local>/<genesis>/           one writer of this install, by its genesis entry
 //!   head.json                  the head this writer last wrote, and whether it is
 //!                              retired; locked while an instance writes as it
+//! <local>/identities.json      identities this install's scans read that no fact
+//!                              gives
 //! ```
 //!
 //! The app names `<root>`: one directory of the folder, or one inside a directory of

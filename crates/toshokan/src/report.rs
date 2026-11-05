@@ -17,10 +17,9 @@ pub struct Opened {
     pub mode: Mode,
     /// Which writer this instance will write as.
     pub start: Start,
-    /// This writer's effects that a crash interrupted. Opening writes nothing in
-    /// the folder, so each is finished before this writer's next write, as its
-    /// outcome predicts, or when the app settles them sooner
-    /// (`settle_interrupted`).
+    /// This writer's effects that a crash interrupted. Each is finished before this
+    /// writer's next write, as its outcome predicts, or when the app settles them
+    /// sooner (`settle_interrupted`).
     pub settled: Vec<Settled>,
     /// Unfinished effects of writers this install no longer writes as. They may
     /// still be in progress elsewhere, so they are settled only with the user's
@@ -275,7 +274,7 @@ pub enum Lag {
     Scan,
     /// The trash of a writer this instance stopped writing as was not emptied, so
     /// its items stay in the folder, where no instance empties them;
-    /// [`crate::library::Library::trash`] lists them.
+    /// [`blocking::Library::trash`](crate::blocking::Library::trash) lists them.
     Trash,
     /// A file in another writer's directory, a pending record among them, could not
     /// be read. What it holds is not shown, and no unfinished effect is offered to
