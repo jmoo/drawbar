@@ -163,11 +163,11 @@ tag names, and an asset's origin.
 
 ## Reference-level explanation
 
-The store's format and protocol are specified in `crates/toshokan/SPEC.md`, its history
-rules in `RETENTION.md`, and the protocol's TLA+ model in `spec/`, all on
-[#226](https://github.com/jmoo/drawbar/pull/226). This RFC proposes adopting that design and
-does not restate it. What follows is the shape of it, with the section of `SPEC.md` that
-specifies each part.
+The store's format is specified in `crates/toshokan/spec/format.md`, its protocol and
+history rules in `spec/protocol.md`, and the protocol's TLA+ model in `spec/Portable.tla`,
+all on [#226](https://github.com/jmoo/drawbar/pull/226). This RFC proposes adopting that
+design and does not restate it. What follows is the shape of it, with the section of the
+spec that specifies each part.
 
 ### Three kinds of state
 
@@ -190,11 +190,11 @@ specifies each part.
 - **A merge that shows conflicts** (Merging). Registers keep every concurrent value, sets
   keep concurrent adds, and a delete keeps an entity that has a concurrent edit it did not
   see. Whatever a reader does not understand, it keeps.
-- **Bounded history** (Snapshots, `RETENTION.md`). A writer compacts its own log. The store
+- **Bounded history** (Snapshots, Bounded retention). A writer compacts its own log. The store
   keeps only as much history as stops one instance overwriting another's work. At a fixed
   library size, what remains grows only with deleted entities, removed tags, a certificate
   of about 92 bytes per segment its writer ended, and a pair in `settled` of about 70 bytes
-  per commit that moved files and per settlement; `RETENTION.md` sizes each term.
+  per commit that moved files and per settlement; Bounded retention sizes each term.
 - **Derived bindings** (Binding). Which file is an entity's is worked out from paths and
   file identities, with Godot's rule for copies, and is never written at open. The identity
   function is the app's. drawbar reads only the header and the last two bytes of a Nord
@@ -216,9 +216,9 @@ specifies each part.
   UDF, any FUSE file system) or the browser cannot rename, a move copies and then removes
   its source under the same pending record. Paths compare under the volume's rules for case
   and Unicode normalization. A folder that cannot append opens read-only.
-- **A core with no I/O** (Design, Backends). One state machine, with a blocking driver for
-  native and an async driver for the browser. The crash harness, the sync simulator and the
-  value-level harness drive the real code.
+- **A core with no I/O** (Backends, and Design in the crate docs). One state machine, with
+  a blocking driver for native and an async driver for the browser. The crash harness, the
+  sync simulator and the value-level harness drive the real code.
 
 ### Plain metadata instead of per-file sidecars
 
@@ -329,7 +329,7 @@ drawbar grows by about 2,900 lines in the areas it changes.
 ## Drawbacks
 
 - **Size.** A store of 19,000 lines and a format of its own is a large thing for one
-  application to own, and a second implementation must follow `SPEC.md` exactly to share a
+  application to own, and a second implementation must follow the spec exactly to share a
   library.
 - **Opaque to other tools.** Tags and relations live in JSON lines in a hidden directory.
   Nothing but toshokan reads them, and a file copied out of the library leaves its facts
