@@ -189,12 +189,18 @@ spec that specifies each part.
   continues as a new writer.
 - **A merge that shows conflicts** (Merging). Registers keep every concurrent value, sets
   keep concurrent adds, and a delete keeps an entity that has a concurrent edit it did not
-  see. Whatever a reader does not understand, it keeps.
+  see. Whatever a reader does not understand, it keeps. A writer's newer write on a field
+  drops its own older ones, which is safe because a writer always sees its own writes and
+  replaced each one it saw, and no two branches of one writer are merged.
 - **Bounded history** (Snapshots, Bounded retention). A writer compacts its own log. The store
-  keeps only as much history as stops one instance overwriting another's work. At a fixed
-  library size, what remains grows only with deleted entities, removed tags, a certificate
-  of about 92 bytes per segment its writer ended, and a pair in `settled` of about 70 bytes
-  per commit that moved files and per settlement; Bounded retention sizes each term.
+  keeps only as much history as stops one instance overwriting another's work. A snapshot
+  certifies the segments it folded, each by its first hash and how far it reached, so it
+  need not list every hash it folded, and that keeps it bounded. At a fixed library
+  size, what remains grows only with deleted entities, removed tags, a certificate of about
+  92 bytes per segment its writer ended, and a pair in `settled` of about 70 bytes per
+  commit that moved files and per settlement; Bounded retention sizes each term. For 2,000
+  entities, three writers and a compaction threshold of 512 entries, that comes to about
+  6 MB of memory and 4 MB of folder.
 - **Derived bindings** (Binding). Which file is an entity's is worked out from paths and
   file identities, with Godot's rule for copies, and is never written at open. The identity
   function is the app's. drawbar reads only the header and the last two bytes of a Nord
@@ -346,6 +352,10 @@ drawbar grows by about 2,900 lines in the areas it changes.
 - **A narrow race remains** where renames can replace a file, as in every browser and on
   network shares: a file another program makes at a path between drawbar's check and its
   move is replaced, and its bytes leave the folder.
+- **A folder that cannot keep a write turns read-only.** When a write cannot be made
+  durable, its writer stops and a new one takes over. If that one fails too, the library
+  turns read-only until it is opened again, since otherwise each commit on such a folder
+  would start another writer.
 - **An older copy can show as a branch.** A certificate names a segment by its first line
   and a position, so an older, shorter copy of a compacted segment that a sync brings back
   cannot be told from another instance's copy that left the chain there. It shows as a Kept
@@ -381,6 +391,13 @@ Within the design:
   drawbar's library sizes it saved tens of milliseconds.
 - **Bounded history.** History exists to stop overwrites, not for version control, so
   undo is per session and a restored folder wins.
+- **Forks shown, not merged.** After a fork, each branch of the writer shows as a Kept
+  apart branch for the user to resolve. Merging the branches side by side would break the
+  rule that lets a writer's newer write drop its older ones.
+- **Replaced files deleted at once.** A writer deletes the files a new snapshot replaces as
+  soon as the snapshot is written. Keeping them one compaction longer would protect no
+  property, and would only shorten how long a reader shows a gap while sync delivers files
+  roughly in order.
 - **Sans-IO.** The web is async only and native is simpler blocking; one core with two
   drivers serves both, and lets the crash harness, the sync simulator and the value-level
   harness drive the real code without a file system.
