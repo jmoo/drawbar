@@ -766,6 +766,49 @@ fn a_file_changed_outside_with_nothing_unsaved_is_shown_as_it_is_now() {
     assert!(!session.bench.workspace.get(id).unwrap().is_unsaved());
 }
 
+/// Give the file at `at` another modification time, as a browser's move does.
+fn touch(root: &Temp, at: &str) {
+    let then = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    fs::File::options()
+        .write(true)
+        .open(root.at(at))
+        .and_then(|file| file.set_modified(then))
+        .unwrap();
+}
+
+#[test]
+fn a_file_whose_time_alone_changed_is_not_said_to_have_changed() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    touch(&root, "untitled.ne5p");
+    session.refocus();
+    assert_eq!(session.said("changed on disk"), 0);
+
+    let theirs = with_gain(&session.bytes(id), "12");
+    fs::write(root.at("untitled.ne5p"), &theirs).unwrap();
+    session.refocus();
+    assert_eq!(session.bytes(id), theirs, "a change after it is still seen");
+}
+
+#[test]
+fn an_edit_over_a_file_whose_time_alone_changed_asks_nothing() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    let mine = with_gain(&session.bytes(id), "96");
+    let log = &mut session.bench.log;
+    session.bench.workspace.replace_bytes(id, mine.clone(), log);
+    touch(&root, "untitled.ne5p");
+    session.refocus();
+    assert!(session.bench.browser.asking().is_none(), "nothing to ask");
+    let entity = session.bench.workspace.get(id).unwrap();
+    assert_eq!(entity.bytes, mine);
+    assert!(entity.is_unsaved());
+}
+
 #[test]
 fn a_save_over_a_file_changed_since_it_was_read_is_refused() {
     let root = Temp::new();

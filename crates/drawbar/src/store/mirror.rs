@@ -3418,6 +3418,8 @@ impl Store {
         let name = entity.name.clone();
         let unsaved = entity.is_unsaved();
         let holds = found.holds();
+        // A copy, or a browser's move, gives a file a new time over the same bytes.
+        let same = (found.bytes.as_deref()).is_some_and(|bytes| entity.saved.holds(bytes));
         match (unsaved, found.bytes, found.file) {
             (true, Some(bytes), _) => workspace.rebase(id, bytes, log),
             (true, None, Some(file)) => workspace.rebase_file(id, file),
@@ -3427,9 +3429,9 @@ impl Store {
         }
         // An edit held over the file the asset rests in is made again over the file as
         // it is now, and one that file already holds leaves nothing to choose between.
-        match unsaved && workspace.get(id).is_some_and(LocalEntity::is_unsaved) {
+        match !same && unsaved && workspace.get(id).is_some_and(LocalEntity::is_unsaved) {
             true => conflict(id, workspace, browser, log),
-            false if quietly => {}
+            false if quietly || same => {}
             false => log.say(format!(
                 "“{name}” changed on disk, and drawbar now shows it as it is there."
             )),
