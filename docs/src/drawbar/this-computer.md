@@ -276,17 +276,21 @@ bring back any you deleted.
 
 ## If something goes wrong
 
-- **Read-only.** A library is read-only when drawbar cannot write its folder,
-  when a newer drawbar gave its `.drawbar` folder a newer layout or changed it
-  from this computer in a way this one cannot read, when drawbar could not finish
-  a change, as when another program put a file where a save was going, or when
-  the folder does not make sure a change is kept, as on some network and USB
-  drives; move such a library to a folder on a local disk. Hover the library's
-  name for the reason and what to do, then choose the library in **File ▸ Open
-  recent** to open it again. Unsaved edits are still kept, and an edit you save
-  there comes back unsaved. New sounds, moves and deletions in a read-only
-  library are held in memory only, and are lost when you quit. If opening it
-  again would lose a sound or an edit, drawbar asks first.
+- **Read-only.** A library is read-only when:
+  - drawbar cannot write its folder;
+  - a newer drawbar gave its `.drawbar` folder a newer layout, or changed it from
+    this computer in a way this one cannot read;
+  - drawbar could not finish a change, as when another program put a file where
+    a save was going;
+  - the folder does not make sure a change is kept, as on some network and USB
+    drives. Move such a library to a folder on a local disk.
+
+  Hover the library's name for the reason and what to do, then choose the
+  library in **File ▸ Open recent** to open it again. Unsaved edits are still
+  kept, and an edit you save there comes back unsaved. New sounds, moves and
+  deletions in a read-only library are held in memory only, and are lost when
+  you quit. If opening it again would lose a sound or an edit, drawbar asks
+  first.
 - **Not opened.** If a library cannot be opened, hover its name for the reason,
   then choose it in **File ▸ Open recent** to try again. Nothing you
   make meanwhile is kept.
