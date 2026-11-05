@@ -1,26 +1,10 @@
 //! What a reader makes of the files it sees: each writer's tips, the entries it
-//! places after them, the entries it holds back or shows apart as runs, gaps and
-//! unplaced lines, its fork points, and the merged state.
+//! places after them, the runs, gaps and unplaced lines it shows apart, its fork
+//! points, and the merged state.
 //!
-//! A pure function of the files, so that readers seeing the same files show the
-//! same, whatever order the files came in.
-//!
-//! - **Tips** are the snapshots of a writer no other of its snapshots certifies.
-//! - A line a tip certifies by name, or one a segment certificate matches, is
-//!   **folded**. An unsealed file shorter than a certificate is a dropped version
-//!   or a diverged copy: its lines past the first are **unplaced**. A sealed
-//!   one, or one that differs at the certified position, diverged: only its
-//!   first line is folded.
-//! - An entry whose predecessor is a tip's head or placed, numbered one past it,
-//!   is **placed**; a genesis entry is placed when the writer has no tip.
-//! - A **fork point** is an entry with two successors, a certified predecessor
-//!   of an entry no tip folds, the predecessor of a line no tip folds at or below
-//!   a tip's head, or where several tips part. Every entry of a writer numbered
-//!   above its lowest fork point is a **run**, and so is every entry after a
-//!   dismissed one. A held entry that may still follow a tip is a **gap**.
-//! - The merge kills, per field: a writer's own earlier writes, by its later own
-//!   write, and its own writes in or before its own delete of their entity;
-//!   writes a reference covers; and a taken run's writer's writes below the run.
+//! [`derive`] is a pure function of the files, so readers that see the same files
+//! show the same state whatever order the files came in. Its terms are those of
+//! Reading in `spec/protocol.md`, and its kills those of Merging.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
@@ -257,10 +241,8 @@ fn classify(writer: WriterId, seen: &Seen<'_>) -> Writer {
             Some(pos) => w
                 .folded
                 .extend(lines[..=pos].iter().map(|entry| entry.hash())),
-            // A sealed file shorter than a certificate diverged from it. An
-            // unsealed one may be a version a sync client dropped, one still
-            // arriving, or a copy that diverged before its end: nothing tells
-            // them apart.
+            // An unsealed file shorter than a certificate may be a dropped version,
+            // one still arriving, or a diverged copy; a sealed one diverged.
             None if !segment.sealed && shorter => {
                 w.folded.insert(first.hash());
                 w.ambiguous

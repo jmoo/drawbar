@@ -1,13 +1,9 @@
 //! Binding files to entities.
 //!
 //! A binding is a pure function of the logged facts, the files a reader sees and
-//! the app's cheap identity: by path, then by identity. When an entity's path is
-//! gone, a file holding its identity is a move; while the path still holds it, such
-//! a file is only a file no entity is bound to. When several files could be the
-//! one, or one file could be several entities', nothing is bound and it is
-//! reported. A file the facts of several entities hold at its path is the lowest
-//! one's, and the others are joined into it. Scans never write; every commit pins
-//! the moves this writer found.
+//! the app's cheap identity. [`scan`] lists the files, [`bind`] binds them, and
+//! [`pins`] gives the moves a commit logs. Scans never write. The rules are those
+//! of Binding in `spec/protocol.md`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::Rc;

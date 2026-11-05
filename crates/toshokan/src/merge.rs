@@ -1,12 +1,8 @@
 //! The merged state: every live write, by entity and field, and what readers
 //! show of them.
 //!
-//! Which writes are live is [`crate::derive`]'s business. Here a register shows
-//! the values of its live writes, several of them a conflict; a set holds each
-//! value with a live add; an entity exists while a create is live, and is in a
-//! deletion conflict while a delete is live beside a live create or a live field
-//! write that holds something. An entity with no live existence write, which
-//! only a forgotten basis or a lost write leaves, shows its live fields.
+//! Which writes are live is [`crate::derive`]'s business. What each kind of field
+//! shows of its live writes is Merging in `spec/protocol.md`.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};

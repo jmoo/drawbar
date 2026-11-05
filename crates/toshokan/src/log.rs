@@ -1,10 +1,9 @@
 //! Entries: what one line of a writer's log says.
 //!
-//! An entry is the JSON of a [`Line`]: an object with `prev`, `n` (its number in
-//! its writer's chain), `at` (an [`Hlc`]), `kind`, and the members its kind
-//! defines. Unknown kinds, ops and members are kept verbatim: the line itself is
-//! kept, what does not decode is carried as [`Raw`], and an entry with members
-//! this build does not know says so.
+//! An entry is the JSON of a [`Line`], with the members Entries in
+//! `spec/format.md` gives. What this build does not know survives: the line is
+//! kept, what does not decode is carried as [`Raw`], and
+//! [`Entry::unknown_members`] says when an entry holds members it leaves out.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;

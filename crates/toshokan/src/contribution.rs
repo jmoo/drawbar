@@ -2,14 +2,6 @@
 //! field, live or not, and what its entries say of other writers' writes. A
 //! snapshot holds a contribution; a reader folds the entries placed after it in
 //! the same way.
-//!
-//! A field is one register, one member of a set, an entity's existence or its
-//! file. A contribution keeps, per field, the latest own write with the number of
-//! its first; per field and other writer, the latest reference at or below the
-//! fork point of that writer it knows of and the latest above it; per own
-//! field write, the first own delete at or above it; per field and other writer,
-//! the latest take of a run; and its dismissals, trash, settlements and the
-//! entries and ops this build does not know.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
