@@ -8,6 +8,8 @@ use std::path::PathBuf;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use toshokan::io::Capabilities;
 
 use eframe::egui;
 
@@ -61,6 +63,32 @@ impl Temp {
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn backend(ctx: &egui::Context, root: &Temp) -> crate::store::Backend {
     crate::store::Backend::start(ctx, root.0.clone(), root.local())
+}
+
+/// What a library a test opens can do on `root`, as `DRAWBAR_TEST_FOLDER` says:
+/// `desktop`, the default, as the disk reports; `browser`, as a browser's own storage or a
+/// folder picked in Chrome, which renames files but not folders and flushes nothing;
+/// `copying`, as a folder picked in Brave, which renames nothing.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn abilities(root: toshokan::io::Root, disk: Capabilities) -> Capabilities {
+    static PROFILE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let profile = PROFILE
+        .get_or_init(|| std::env::var("DRAWBAR_TEST_FOLDER").unwrap_or_else(|_| "desktop".into()));
+    let browser = Capabilities {
+        rename_dir: false,
+        no_replace: false,
+        fsync: false,
+        ..disk
+    };
+    match (profile.as_str(), root) {
+        ("desktop", _) => disk,
+        ("browser", _) | ("copying", toshokan::io::Root::Local) => browser,
+        ("copying", toshokan::io::Root::Folder) => Capabilities {
+            rename_file: false,
+            ..browser
+        },
+        (other, _) => panic!("DRAWBAR_TEST_FOLDER is desktop, browser or copying, not {other:?}"),
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

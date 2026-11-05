@@ -226,6 +226,9 @@ Before a change is done:
 
 - `nix fmt` formats Rust, Nix, TOML, and shell with the pinned tools.
 - `nix develop -c cargo test --workspace` runs the default test suite.
+  `DRAWBAR_TEST_FOLDER=browser` runs drawbar's tests on a folder that renames no
+  folder, as a browser's; `copying`, on one that renames nothing, as a folder picked
+  in Brave. `scripts/test.bash`, which CI runs, runs both.
 - `nix flake check` runs what CI's check job runs.
 - `scripts/evidence.bash --fast` runs the evidence a toshokan change needs, and
   the full tier before such a change merges.

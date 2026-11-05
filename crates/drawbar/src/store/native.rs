@@ -398,7 +398,10 @@ pub(super) struct Blocking(RefCell<Native>);
 
 impl toshokan::asynch::Fs for Blocking {
     fn capabilities(&self, root: Root) -> Capabilities {
-        self.0.borrow().capabilities(root)
+        let disk = self.0.borrow().capabilities(root);
+        #[cfg(test)]
+        let disk = crate::testing::abilities(root, disk);
+        disk
     }
 
     async fn perform(&self, io: Io) -> IoResult {

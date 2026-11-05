@@ -551,7 +551,7 @@ impl Baseline {
     }
 
     /// Whether these are `bytes`. Never, for bytes not read yet.
-    fn holds(&self, bytes: &[u8]) -> bool {
+    pub(crate) fn holds(&self, bytes: &[u8]) -> bool {
         match &self.content {
             Content::Resting { file, .. } => file.holds(bytes),
             Content::Unread { .. } | Content::Remembered { .. } => false,
