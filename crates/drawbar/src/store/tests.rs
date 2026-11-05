@@ -766,6 +766,18 @@ fn a_file_changed_outside_with_nothing_unsaved_is_shown_as_it_is_now() {
     assert!(!session.bench.workspace.get(id).unwrap().is_unsaved());
 }
 
+/// Whether `io` puts a file at `at`: renames it into place, or, where the folder renames
+/// nothing, makes the copy there.
+fn puts(io: &toshokan::Io, at: &str) -> bool {
+    let all = toshokan::io::Capabilities::ALL;
+    let copies = !crate::testing::abilities(toshokan::io::Root::Folder, all).rename_file;
+    match io {
+        toshokan::Io::Rename { to, .. } => to.as_str() == at,
+        toshokan::Io::Create { path, .. } => copies && path.as_str() == at,
+        _ => false,
+    }
+}
+
 /// Give the file at `at` another modification time, as a browser's move does.
 fn touch(root: &Temp, at: &str) {
     let then = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
@@ -1209,9 +1221,9 @@ fn a_save_whose_file_could_not_be_put_in_place_leaves_a_file_through_a_restart()
     session.sync();
     let old = root.read("untitled.ne5p");
     let new = with_gain(&old, "96");
-    session.store.fault(Fault::Refuse(
-        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "untitled.ne5p"),
-    ));
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
     let log = &mut session.bench.log;
     session.bench.workspace.replace_bytes(id, new.clone(), log);
     session.bench.workspace.mark_saved(id);
@@ -1254,9 +1266,9 @@ fn a_save_that_cannot_be_finished_leaves_the_library_read_only_until_it_opens_ag
     let id = session.create();
     session.sync();
     let new = with_gain(&root.read("untitled.ne5p"), "96");
-    session.store.fault(Fault::Refuse(
-        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "untitled.ne5p"),
-    ));
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
     let log = &mut session.bench.log;
     session.bench.workspace.replace_bytes(id, new.clone(), log);
     session.bench.workspace.mark_saved(id);
@@ -1298,9 +1310,9 @@ fn a_save_the_next_change_finishes_can_be_undone_after_it() {
     session.sync();
     let old = root.read("untitled.ne5p");
     let new = with_gain(&old, "96");
-    session.store.fault(Fault::Refuse(
-        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "untitled.ne5p"),
-    ));
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
     let log = &mut session.bench.log;
     session.bench.workspace.replace_bytes(id, new.clone(), log);
     session.bench.workspace.mark_saved(id);
@@ -1332,9 +1344,9 @@ fn an_undo_the_next_change_finishes_leaves_undo_at_the_step_before() {
         .replace_bytes(id, with_gain(&old, "96"), log);
     session.bench.workspace.mark_saved(id);
     session.sync();
-    session.store.fault(Fault::Refuse(
-        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "untitled.ne5p"),
-    ));
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
     session.undo();
     session.make_tag("Sunday");
     assert_eq!(root.read("untitled.ne5p"), old, "the undo is finished");
@@ -1355,9 +1367,7 @@ fn a_library_reopened_while_a_change_still_cannot_be_finished_keeps_edits() {
     let id = session.create();
     session.sync();
     let old = root.read("untitled.ne5p");
-    session.store.fault(Fault::Refuse(
-        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "b.ne5p"),
-    ));
+    session.store.fault(Fault::Refuse(|io| puts(io, "b.ne5p")));
     let rename = crate::browser::Act::RenameLocal {
         id,
         name: "b.ne5p".into(),
@@ -6337,9 +6347,9 @@ fn a_save_that_can_no_longer_be_finished_is_asked_about_and_rolls_back() {
     let id = session.create();
     session.sync();
     let old = root.read("untitled.ne5p");
-    session.store.fault(Fault::Refuse(
-        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "untitled.ne5p"),
-    ));
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "untitled.ne5p")));
     let log = &mut session.bench.log;
     session
         .bench
@@ -6394,9 +6404,9 @@ fn a_first_save_that_can_no_longer_be_finished_is_not_said_to_be_finished() {
     fs::write(root.at("Grand.ne5p"), &program).unwrap();
     let mut session = Session::listed(&root);
     let id = session.named("Grand.ne5p");
-    session.store.fault(Fault::Refuse(
-        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "Grand.ne5p"),
-    ));
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "Grand.ne5p")));
     let log = &mut session.bench.log;
     session
         .bench
@@ -7658,9 +7668,9 @@ fn a_take_in_left_unfinished_is_not_taken_in_again_by_another_window() {
     let (mut kept, ..) = gig_kept();
     let list = older_list(&kept);
     let mut first = Session::open(&root);
-    first.store.fault(Fault::Refuse(
-        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "Gig/Pad 2.ne5p"),
-    ));
+    first
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "Gig/Pad 2.ne5p")));
     first.take_in(&mut kept);
     assert!(!first.store.has_taken_in(&list.hash), "left unfinished");
     let mut second = Session::open(&root);
@@ -8108,9 +8118,9 @@ fn a_window_waits_for_an_unfinished_take_in_without_sending_its_own_again() {
     let list = older_list(&kept);
     let mut first = Session::open(&root);
     let mut second = Session::open(&root);
-    first.store.fault(Fault::Refuse(
-        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "Gig/Pad 2.ne5p"),
-    ));
+    first
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "Gig/Pad 2.ne5p")));
     first.take_in(&mut kept);
     second.take_in(&mut kept);
     second.settle();
@@ -8373,9 +8383,9 @@ fn a_take_in_the_next_change_finishes_survives_an_undo_and_a_close() {
     let (mut kept, ..) = gig_kept();
     let list = older_list(&kept);
     let mut session = Session::open(&root);
-    session.store.fault(Fault::Refuse(
-        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "Gig/Pad 2.ne5p"),
-    ));
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "Gig/Pad 2.ne5p")));
     session.take_in(&mut kept);
     session.make_tag("Sunday");
     assert_eq!(
@@ -8399,9 +8409,9 @@ fn a_rescue_the_next_change_finishes_survives_an_undo_and_a_close() {
     let root = Temp::new();
     with_rescue(&root);
     let mut session = Session::open(&root);
-    session.store.fault(Fault::Refuse(
-        |io| matches!(io, toshokan::Io::Rename { to, .. } if to.as_str() == "nord-rescued-1-4.npno"),
-    ));
+    session
+        .store
+        .fault(Fault::Refuse(|io| puts(io, "nord-rescued-1-4.npno")));
     session.sync();
     session.make_tag("Sunday");
     assert_eq!(root.read("nord-rescued-1-4.npno"), a_rescue());
