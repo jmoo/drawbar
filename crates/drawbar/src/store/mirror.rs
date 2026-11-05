@@ -177,6 +177,16 @@ enum TookUp {
     Done,
 }
 
+/// Where the rescan or refresh in flight is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scan {
+    Idle,
+    /// Sent, and not answered yet.
+    Sent,
+    /// Answered, and waiting for the files being read again to answer.
+    Rechecking,
+}
+
 /// How many files one background [`Cmd::Read`] asks for at most, and how many of
 /// their listed bytes. A read something needs runs after it.
 const FETCHES: (usize, u64) = (32, 16 << 20);
@@ -257,8 +267,7 @@ pub struct Store {
     left: Vec<u64>,
     /// Whether the window had focus at the last [`Store::focus`].
     focused: bool,
-    /// A rescan or a refresh is in flight.
-    scanning: bool,
+    scan: Scan,
     /// The scan of every file that follows opening is in flight: the view lists no file
     /// yet.
     first_scan: bool,
@@ -383,7 +392,7 @@ impl Store {
             turned_read_only: false,
             deferred: BTreeSet::new(),
             focused: true,
-            scanning: false,
+            scan: Scan::Idle,
             first_scan: false,
             patience: PATIENCE,
             asked_stalled: false,
@@ -473,7 +482,7 @@ impl Store {
         browser.tags.named();
         self.sync(workspace, browser, Pass::Files);
         let carried = (self.asks.is_empty() && self.asked.is_empty()) || !self.open();
-        let idle = !self.scanning && !self.saving() && self.moving.is_empty();
+        let idle = self.scan == Scan::Idle && !self.saving() && self.moving.is_empty();
         carried && idle && self.committing == 0
     }
 
@@ -1127,7 +1136,10 @@ impl Store {
             let rescan = !matches!(hint, Hint::Committed(_));
             self.behind = Some(self.behind.unwrap_or(false) || rescan);
         }
-        let Some(rescan) = self.behind.filter(|_| self.opened() && !self.scanning) else {
+        let Some(rescan) = self
+            .behind
+            .filter(|_| self.opened() && self.scan == Scan::Idle)
+        else {
             return;
         };
         self.behind = None;
@@ -1441,7 +1453,7 @@ impl Store {
     /// Whether a rescan is waiting for its answer.
     #[cfg(test)]
     pub fn scanning(&self) -> bool {
-        self.scanning
+        self.scan != Scan::Idle
     }
 
     /// Whether the library is still opening, or listing its files after.
@@ -1546,7 +1558,7 @@ impl Store {
             }
             Event::Scanned(Err(why)) => {
                 self.first_scan = false;
-                self.scanning = false;
+                self.scan = Scan::Idle;
                 self.send_waits = false;
                 self.moved.clear();
                 log.error(format!("reading the library again: {why}"));
@@ -1650,7 +1662,7 @@ impl Store {
             Event::Read(answers) => {
                 let rechecked = answers.iter().all(|(id, _)| self.rechecking.contains(id));
                 self.took(answers, workspace, browser, queue, log);
-                if rechecked && self.scanning {
+                if rechecked && self.scan == Scan::Rechecking {
                     return self.scanned(queue, workspace, log);
                 }
             }
@@ -1866,10 +1878,10 @@ impl Store {
 
     /// Read what other drawbars wrote to the library since it was last read.
     pub fn refresh(&mut self) {
-        if !self.opened() || self.scanning {
+        if !self.opened() || self.scan != Scan::Idle {
             return;
         }
-        self.scanning = true;
+        self.scan = Scan::Sent;
         self.send(Cmd::Refresh);
     }
 
@@ -1896,10 +1908,10 @@ impl Store {
     /// Scan the tree again, to fold in what changed outside drawbar and what other
     /// drawbars wrote.
     pub(crate) fn rescan(&mut self) {
-        if !self.opened() || self.scanning {
+        if !self.opened() || self.scan != Scan::Idle {
             return;
         }
-        self.scanning = true;
+        self.scan = Scan::Sent;
         self.send(Cmd::Rescan);
     }
 
@@ -1975,7 +1987,7 @@ impl Store {
                 None => return false,
                 // ⚠️ A scan taken before the last pass's moves would read each as a
                 // deletion, and nothing needs it now.
-                Some(Event::Scanned(_)) => self.scanning = false,
+                Some(Event::Scanned(_)) => self.scan = Scan::Idle,
                 Some(event) => {
                     self.react(event, workspace, browser, queue, log);
                     self.ask_tags(workspace, browser, log);
@@ -2156,7 +2168,7 @@ impl Store {
         };
         if now < due {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(due - now));
-        } else if self.scanning {
+        } else if self.scan != Scan::Idle {
             // The scan's answer reads them again, or else the next look after it.
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         } else {
@@ -2812,10 +2824,11 @@ impl Store {
     /// A rescan has answered: once each file it found changed has been read again, it
     /// is done, and a send held for it goes ahead unless what it would send moved.
     fn scanned(&mut self, queue: &Queue, workspace: &Workspace, log: &mut Log) -> bool {
-        self.scanning = !self.rechecking.is_empty();
-        if self.scanning {
+        if !self.rechecking.is_empty() {
+            self.scan = Scan::Rechecking;
             return false;
         }
+        self.scan = Scan::Idle;
         let moved = std::mem::take(&mut self.moved);
         std::mem::take(&mut self.send_waits) && self.release(&moved, queue, workspace, log)
     }
@@ -2944,7 +2957,7 @@ impl Store {
         log: &mut Log,
     ) {
         // Nothing else is in flight whose failures the take-in would hold.
-        let idle = !self.scanning && self.committing == 0 && self.finishing.is_empty();
+        let idle = self.scan == Scan::Idle && self.committing == 0 && self.finishing.is_empty();
         let ready = self.open() && self.listed && idle;
         let taken = self.has_taken_in(&list.hash);
         let due = match self.took_up {
@@ -3757,7 +3770,7 @@ impl Store {
         if !self.open() {
             return true;
         }
-        if self.scanning && pass != Pass::Last {
+        if self.scan != Scan::Idle && pass != Pass::Last {
             return false;
         }
         let (mut removals, ops): (Vec<Op>, Vec<Op>) = browser

@@ -5227,6 +5227,33 @@ fn each_answer_lists_what_the_whole_view_lists() {
     );
 }
 
+/// A refresh answers only once what it read is shown, even while a file an undo
+/// changed is still being read again.
+#[test]
+fn a_refresh_shows_another_drawbars_change_while_an_undone_file_is_read_again() {
+    let root = Temp::new();
+    let mut session = Session::open(&root);
+    let id = session.create();
+    session.sync();
+    session.edit(id, "96");
+    session.bench.workspace.mark_saved(id);
+    session.sync();
+    session.undo();
+    let other = Temp::new();
+    let mut theirs = Session::elsewhere(&root, &other);
+    let file = theirs.named("untitled.ne5p");
+    theirs.tag(&[file], "Theirs");
+    theirs.sync();
+    theirs.close();
+    session.refresh();
+
+    assert_eq!(
+        session.worn(id),
+        ["Theirs"],
+        "the tag the other drawbar put on"
+    );
+}
+
 /// A tagged file saved in drawbar and then moved outside it keeps its tags at its new
 /// name: the library knows it by what drawbar wrote.
 #[test]
