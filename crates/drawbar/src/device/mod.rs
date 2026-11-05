@@ -1219,8 +1219,8 @@ enum Asked {
 }
 
 /// Why nothing can be connected, in a browser with no WebUSB.
-pub const NO_USB: &str =
-    "This browser can't reach an instrument over USB. Open drawbar in Chrome or Edge to connect.";
+pub const NO_USB: &str = "This browser can't reach an instrument over USB. Open drawbar in \
+     Chrome, Edge or Brave to connect.";
 
 pub struct Device {
     pub state: DeviceState,

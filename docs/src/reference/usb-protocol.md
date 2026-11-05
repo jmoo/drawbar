@@ -95,7 +95,7 @@ progress percentage; progress shows on its own display.
 | Feature | Default | Gives |
 |---|:--:|---|
 | `nusb` | yes | Desktop backend for macOS, Linux and Windows, in pure Rust. |
-| `web` | | Browser backend over WebUSB. Chrome and Edge only. |
+| `web` | | Browser backend over WebUSB. Chrome, Edge and Brave only. |
 | `replay` | | Drive the protocol from captures, with no hardware. |
 | `blocking` | | Block on the async API from synchronous code. |
 | `corpus` | | Tests against the private capture corpus. Implies `replay`. |

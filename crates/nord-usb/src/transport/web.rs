@@ -1,5 +1,5 @@
-//! Browser transport via WebUSB (`navigator.usb`). Chrome and Edge only; Firefox and
-//! Safari have declined the spec.
+//! Browser transport via WebUSB (`navigator.usb`). Chrome, Edge and Brave only; Firefox
+//! and Safari have declined the spec.
 //!
 //! Confirmed on hardware.
 //!

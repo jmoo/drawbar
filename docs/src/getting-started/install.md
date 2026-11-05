@@ -8,7 +8,7 @@ kept in the browser's storage for the site, which the browser can delete. You ca
 [open a folder](../drawbar/this-computer.md#opening-another-folder) on your
 computer instead.
 
-Only Chrome and Edge can connect to an instrument. Files work in any browser.
+Only Chrome, Edge and Brave can connect to an instrument. Files work in any browser.
 Which browsers can play the key maps from a MIDI controller is on
 [What is supported](support.md#midi-controllers).
 

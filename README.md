@@ -25,7 +25,8 @@ your terminal, or from your own code.
 
 ## Try it
 
-Open [drawbar.app](https://drawbar.app/) in Chrome or Edge. Or, with
+Open [drawbar.app](https://drawbar.app/) in Chrome, Edge or Brave. Or,
+with
 [Nix](https://nixos.org/download/):
 
 ```sh

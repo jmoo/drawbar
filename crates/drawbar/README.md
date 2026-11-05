@@ -6,8 +6,8 @@ Runs in the browser or on the desktop.
 
 ![drawbar with an instrument attached and a piano library open in its editor](../../docs/src/assets/screenshot.png)
 
-Open [drawbar.app](https://drawbar.app/) in Chrome or Edge, or run the desktop
-app:
+Open [drawbar.app](https://drawbar.app/) in Chrome, Edge or Brave, or run
+the desktop app:
 
 ```sh
 nix run github:jmoo/drawbar#drawbar

@@ -54,8 +54,8 @@ Firefox on every change, and in Safari when the library changes.
 ## MIDI controllers
 
 The sample and piano key maps can be played from a MIDI controller. The desktop
-app listens on every MIDI input the computer has. In the browser, Chrome, Edge
-and Firefox can hear a controller. Safari cannot, so drawbar grays out the menu
+app listens on every MIDI input the computer has. In the browser, Chrome, Edge,
+Brave and Firefox can hear a controller. Safari cannot, so drawbar grays out the menu
 item there. Firefox asks you to allow MIDI access for the site first.
 
 ## What "tested" means

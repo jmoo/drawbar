@@ -251,7 +251,7 @@ fn usb(device: &Device) -> Line {
         false => Line::new(
             "WebUSB",
             "unavailable",
-            "Chrome or Edge can connect an instrument",
+            "Chrome, Edge or Brave can connect an instrument",
         ),
     }
 }
