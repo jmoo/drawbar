@@ -1,4 +1,4 @@
-//! Keep what a file cannot say about itself beside the file, in a folder that syncs.
+//! Keep tags and edit history beside the files they describe, in a folder that syncs.
 //!
 //! toshokan keeps facts about a folder of the user's files (tags, provenance,
 //! relations) in a hidden directory inside it, so the folder can be synced by
@@ -13,8 +13,9 @@
 //! - when recovery is needed, the app can say what happened without the user
 //!   knowing how the logs work.
 //!
-//! An app that wants live collaboration should use a CRDT library such as
-//! Automerge. The on-disk format may change before 1.0.
+//! Several writers can work in one folder at once without error. An app that
+//! wants live collaboration is better served by a CRDT library such as Automerge.
+//! The on-disk format may change before 1.0.
 //!
 //! # Design
 //!
@@ -25,8 +26,8 @@
 //!   never has two versions of one file to reconcile.
 //! - **Merge is a pure function.** Every reader merges the logs to the same
 //!   state, whatever order they arrived in, on any machine.
-//! - **Conflicts are shown.** Several writers can edit at once. Their concurrent
-//!   edits are kept, and a view lists them.
+//! - **Conflicts are shown.** Concurrent edits by several writers are kept, and a
+//!   view lists them.
 //! - **Nothing is overwritten.** Files are saved, renamed and deleted without
 //!   overwriting anything in place. Displaced bytes go to the writer's own trash,
 //!   which only that writer empties, so file undo is durable.

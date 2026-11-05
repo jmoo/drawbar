@@ -190,9 +190,8 @@ impl Layout {
 /// Whether `name` is a swap file Chromium writes beside a picked folder's file
 /// while a writable stream on it is open: bytes that never landed, which
 /// toshokan neither reads nor scans.
-// Chromium names it `<name>.crswap` while the stream is open. Confirmed on hardware.
-// A tab stopped meanwhile leaves it behind. Inferred from specimens; not confirmed on
-// hardware.
+// Chromium names it `<name>.crswap` while the stream is open. That a tab stopped
+// meanwhile leaves it behind is inferred and has not been seen.
 pub(crate) fn is_swap_file(name: &str) -> bool {
     name.ends_with(".crswap")
 }

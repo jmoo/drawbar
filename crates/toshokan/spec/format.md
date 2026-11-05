@@ -110,11 +110,10 @@ keeps running the build it loaded. Within version 2:
    every later build, and every fixture of a newer version behaves as its README
    says.
 
-There are no migrations before 1.0. A folder of an earlier format, under
-`writers/`, opens as an empty library whose files are all unbound; nothing
-reads its directories, which are left for older builds. A local
-root's `view.bin` and `view.log`, which older builds kept, are ignored, as are
-old `head.json` files.
+A folder of an earlier format, under `writers/`, opens as an empty library
+whose files are all unbound; nothing reads its directories, which are left for
+older builds. A local root's `view.bin` and `view.log`, which older builds kept,
+are ignored, as are old `head.json` files.
 
 ## Identifiers and clocks
 

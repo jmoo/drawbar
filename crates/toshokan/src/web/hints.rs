@@ -134,8 +134,8 @@ impl Hints {
     /// Chromium has one, and it reports changes made through the browser's own
     /// file system handles.
     ///
-    /// It also reports writes by other programs to a picked folder. Reported by
-    /// public documentation; not confirmed on hardware.
+    /// Chromium's documentation says it also reports writes by other programs to
+    /// a picked folder.
     pub async fn watch(&mut self, folder: &Folder) -> Result<bool, IoError> {
         let Some(observer) = field(&js_sys::global(), "FileSystemObserver") else {
             return Ok(false);

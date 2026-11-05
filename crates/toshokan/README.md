@@ -1,6 +1,6 @@
 # toshokan
 
-**Keep what a file cannot say about itself beside the file, in a folder that syncs.**
+**Keep tags and edit history beside the files they describe, in a folder that syncs.**
 
 toshokan (図書館, "library") keeps tags, provenance and relations between files in
 a hidden directory inside a folder of real files, so the folder can live in
@@ -11,13 +11,14 @@ Dropbox, OneDrive, iCloud or on a network share.
 - Once a sync settles, every reader shows the same state.
 - Nothing is overwritten in place, so an interrupted or conflicting change leaves
   every file recoverable.
-- Concurrent edits are kept and shown as conflicts.
+- Several apps or computers can write to one folder at once without error.
+  Their concurrent edits are kept and shown as conflicts.
 - Files keep their names, bytes and places unless the app asks, and opening a
   library writes nothing in the folder.
 - It runs natively and in the browser, on the origin private file system or a
   folder the user picked.
 
-It is not for live collaboration, which a CRDT library such as Automerge serves.
+For live collaboration, a CRDT library such as Automerge is a better fit.
 The on-disk format may change before 1.0.
 
 An app declares its keys, opens a library as one writer, renders views and

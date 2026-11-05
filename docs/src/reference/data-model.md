@@ -7,7 +7,7 @@ is on [Your files](../drawbar/this-computer.md).
 
 The code is in `crates/drawbar/src`: `store/` holds the library on disk,
 `workspace.rs` the assets in memory, and `ondisk.rs` the files read by range.
-Every change to the files, and everything a file cannot say about itself, goes
+Every change to the files, and everything drawbar keeps about them, goes
 through [toshokan](https://github.com/jmoo/drawbar/tree/master/crates/toshokan),
 whose crate documentation says what it guarantees when sync goes wrong. Its
 [protocol](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md)
@@ -168,10 +168,10 @@ under `writers.2/`, and toshokan merges every writer's log to the same state,
 whatever order a sync client delivers them in
 ([Writers](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#writers)).
 
-Several drawbars on one library at once follow from the same design: two
-windows, two tabs, or two computers that sync the folder. It is not meant for
-live collaboration. The windows and tabs of one install share its local root. A
-tab and the desktop app on one folder are two installs, as two computers are.
+Several drawbars can use one library at once without error: two windows, two
+tabs, or two computers that sync the folder. The windows and tabs of one install
+share its local root. A tab and the desktop app on one folder are two installs,
+as two computers are.
 
 A drawbar sees the others' changes when it reads their logs again: when its
 window comes back into focus, before a send to the instrument, and after a

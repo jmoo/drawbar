@@ -895,14 +895,14 @@ system.
   lock, and written, appended to and flushed through sync access handles, opened
   for one request each. Chromium's `flush()` takes a fraction of a millisecond,
   as a write that reaches the disk does, and Firefox's and WebKit's take
-  microseconds, so only Chromium declares `fsync`. Inferred from specimens; not
-  confirmed on hardware. A
-  directory's names live in the browser's own database, which toshokan cannot
-  sync, so a sync of a directory returns at once, and a name made or removed is only as durable as that database keeps it. Whether
-such a name survives the machine stopping has not been tested. Chromium cannot rename a directory
-  there, so no browser declares `rename_dir`. A write the origin's quota refuses
-  fails with `NoSpace`: Chromium throws `QuotaExceededError`, and Firefox writes
-  fewer bytes than it was given.
+  microseconds, so only Chromium declares `fsync`. That Chromium's reaches the
+  disk is inferred from its cost. A directory's names live in the browser's own
+  database, which toshokan cannot sync, so a sync of a directory returns at
+  once, and a name made or removed is only as durable as that database keeps it.
+  Whether such a name survives the machine stopping has not been tested.
+  Chromium cannot rename a directory there, so no browser declares `rename_dir`.
+  A write the origin's quota refuses fails with `NoSpace`: Chromium throws
+  `QuotaExceededError`, and Firefox writes fewer bytes than it was given.
 - **Picked folder.** Files are read through `getFile()` and written through
   writable streams, which write a copy and put it in place at `close()`: that is
   the moment a write lands, and nothing is synced beyond it. An append copies
@@ -911,16 +911,16 @@ such a name survives the machine stopping has not been tested. Chromium cannot r
   created with bytes is named first and filled at its stream's close, so a tab
   stopped between leaves it empty. Before putting a file in place, Chromium
   checks it with Safe Browsing, in full unless its type is one Chromium samples,
-  such as `.txt` and `.json`, the types of toshokan's own files; its file-type
-  policy still checks some closes of a sampled type in full. Reported by public
-  documentation; not confirmed on hardware. A saved library file is staged under
-  its own extension, so a type Chromium does not sample pays the full check. A
-  trash item has no extension, so where moves copy, each file moved into the
-  trash pays the full check. Chrome renames a file there and Brave refuses.
-  Confirmed on hardware. Every other browser is taken to refuse: a picked folder
-  declares `rename_file` only where `navigator.userAgentData` names Google
-  Chrome and `navigator.brave` is absent. A rename the browser refuses although
-  the folder declares it fails with `Unsupported`.
+  such as `.txt` and `.json`, the types of toshokan's own files; its published
+  file-type policy still checks some closes of a sampled type in full. A saved
+  library file is staged under its own extension, so a type Chromium does not
+  sample pays the full check. A trash item has no extension, so where moves
+  copy, each file moved into the trash pays the full check. Renaming there was
+  tested only in Chrome, which renames, and Brave, which refuses. Every other
+  browser is taken to refuse: a picked folder declares `rename_file` only where
+  `navigator.userAgentData` names Google Chrome and `navigator.brave` is absent.
+  A rename the browser refuses although the folder declares it fails with
+  `Unsupported`.
 - **Paths.** In Firefox, each step of a path and each file's handle grows slow
   once the origin holds many files.
 - **Renames** replace a file at the destination in every browser, so none
@@ -929,10 +929,10 @@ such a name survives the machine stopping has not been tested. Chromium cannot r
   between the two is replaced by a copy's bytes, or removed when the copy finds
   it too long, as a rename replaces one.
 - **Swap files.** While a writable stream is open, Chromium keeps its bytes in
-  `<name>.crswap` beside the file. Confirmed on hardware. A tab stopped
-  meanwhile can leave that file behind. Inferred from specimens; not confirmed
-  on hardware. toshokan reads, scans and reports no file whose name ends in
-  `.crswap`, wherever it is, and refuses such a name as a library path.
+  `<name>.crswap` beside the file. A tab stopped meanwhile can leave that file
+  behind, which is inferred and has not been seen. toshokan reads, scans and
+  reports no file whose name ends in `.crswap`, wherever it is, and refuses such
+  a name as a library path.
 - **Times.** Chromium and Firefox report a file's last change in milliseconds,
   WebKit in whole seconds: two changes that keep a file's length within that
   time look alike.

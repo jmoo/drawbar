@@ -1,7 +1,7 @@
 [package]
 name = "toshokan"
 categories = ["data-structures", "filesystem", "wasm"]
-description = "Keep what a file cannot say about itself beside the file, in a folder that syncs"
+description = "Keep tags and edit history beside the files they describe, in a folder that syncs"
 edition.workspace = true
 # `File::try_lock`, which the writer lock takes.
 rust-version = "1.89"

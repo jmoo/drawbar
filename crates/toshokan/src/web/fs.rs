@@ -418,7 +418,7 @@ impl Tree {
     }
 
     /// Each entry's metadata is fetched at once, which takes 2.5 times less than
-    /// one after another in Chromium and WebKit. Confirmed on hardware.
+    /// one after another in Chromium and WebKit, by measurement.
     async fn list_stat(&self, dir: &RelPath) -> Result<Vec<(String, Meta)>, IoError> {
         let listed = children(&self.dir(dir).await?).await?;
         let metas = join(listed.iter().map(|(_, entry)| async move {
@@ -721,7 +721,7 @@ async fn snapshot(file: &FileSystemFileHandle) -> Result<File, IoError> {
         .unchecked_into())
 }
 
-/// A file's metadata, its time from `lastModified` in milliseconds.
+/// A file's metadata, its time from `lastModified`, which counts milliseconds.
 fn meta(file: &File) -> Meta {
     let modified = file.last_modified();
     Meta {
@@ -743,7 +743,7 @@ fn position(offset: u64) -> Result<f64, IoError> {
 
 /// What a sync access handle's write of `len` bytes that wrote `n` means.
 // Firefox meets the origin's quota by writing fewer bytes than asked, where the
-// standard throws `QuotaExceededError`, as Chromium does. Confirmed on hardware.
+// standard throws `QuotaExceededError`, as Chromium does. Measured.
 fn whole(n: f64, len: usize) -> Result<(), IoError> {
     match n == len as f64 {
         true => Ok(()),
