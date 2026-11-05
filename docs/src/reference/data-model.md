@@ -1,29 +1,19 @@
 # Library data model
 
-drawbar keeps This computer as a folder of real files, so that a library folder
-Dropbox, OneDrive, iCloud or a network share syncs just works. Sync goes wrong in
-ordinary ways, even for someone who runs one drawbar at a time. Another computer
-holds stale state, files arrive out of order, a backup restores part of the
-folder, or a conflicted copy appears.
-
-drawbar holds to four things through all of these:
-
-- normal syncing needs no intervention;
-- once a sync settles, every drawbar shows the same library;
-- an interrupted or conflicting change leaves every sound file recoverable;
-- when recovery is needed, drawbar says what happened without asking the user
-  to understand its log.
-
-The rest of this page describes how: what is stored where, how a change is
-made, and how drawbar stays in step with sync and with other programs. What a
-user sees of it is on [Your files](../drawbar/this-computer.md).
+drawbar keeps This computer as a folder of real files, so the folder can be
+synced. This page describes what is stored where, how a change is made, and how
+drawbar stays in step with sync and with other programs. What a user sees of it
+is on [Your files](../drawbar/this-computer.md).
 
 The code is in `crates/drawbar/src`: `store/` holds the library on disk,
 `workspace.rs` the assets in memory, and `ondisk.rs` the files read by range.
 Every change to the files, and everything a file cannot say about itself, goes
-through [toshokan](https://github.com/jmoo/drawbar/tree/master/crates/toshokan).
-Its [`spec/format.md`](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/format.md)
-is the precise version of most of this page.
+through [toshokan](https://github.com/jmoo/drawbar/tree/master/crates/toshokan),
+whose crate documentation says what it guarantees when sync goes wrong. Its
+[protocol](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md)
+has the rules this page relies on, and its
+[format](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/format.md)
+the bytes.
 
 ## What lives where
 
@@ -124,29 +114,17 @@ origin and bytes, base64-encoded, and the folders and tags by asset id
 files are listed and no change of drawbar's own waits to be finished, drawbar
 takes that list in as one intent, which no undo takes back: a directory for each
 folder, a new file for each asset holding its saved bytes, its tags and its slot
-origin, and the tag names. A file name is free in its folder and takes the extension its bytes call
-for; bytes that do not decode are written as they are. An unsaved edit is held
-over its new file and kept as any unsaved edit is.
+origin, and the tag names. A file name is free in its folder and takes the
+extension its bytes call for; bytes that do not decode are written as they are.
+An unsaved edit is held over its new file and kept as any unsaved edit is.
 
 The same intent adds the BLAKE3 hash of the three keys' text to the library's
-`taken in` set. Before it is sent, drawbar records in `drawbar.taking_in` the hash
-and the path it gives each asset that has an unsaved edit. Where that record does
-not read back, as when local storage is full, the intent writes each such edit as a
-new file beside its asset instead of holding it unsaved. Only once the library
-holds the hash and each of those edits is kept, or saved or reverted since, does
-it empty the record and then record the hash in `drawbar.taken_in`; a list whose
-hash that key holds is not read again. The keys stay as they were, so drawbar 0.10 run
-again finds its list; a list it changes since has another hash and is taken in
-again. A change that fails is tried again at the next launch. A launch or window
-that finds the hash in the library takes nothing in again: it reads the record and
-puts each unsaved edit back over the file the record names, and where the file is
-gone, it writes the edit as a new file beside where it went. It puts nothing back
-for a file drawbar does not open, whose edit the take-in wrote beside it. An emptied
-record puts nothing back, so a launch puts edits back at most once even where the browser
-refused the write to `drawbar.taken_in`. Where the record is missing, as when the
-browser stopped before writing it, each unsaved edit is written as a new file once a
-record of the hash alone reads back. Where none does, nothing is written: local
-storage is full, as it was when the take-in wrote those files already. A key whose version line this build
+`taken in` set, so a list is taken in once. The keys stay as they were, so
+drawbar 0.10 run again finds its list, and a list it changes since has another
+hash and is taken in again. `drawbar.taking_in` and `drawbar.taken_in` record
+the take-in's progress in eframe's store, so that a launch that stops partway
+puts the unsaved edits back at most once (`Store::take_in`). A take-in that
+fails is tried again at the next launch. A key whose version line this build
 does not know leaves the whole list unread.
 
 ## How a change works
@@ -158,13 +136,11 @@ checks each file the intent touches against what drawbar last knew of it: its
 identity where drawbar has read or written the file, and its length and time
 otherwise.
 
-toshokan then stages the new bytes in the writer's `tmp/`, records the change as
-pending, moves the bytes it displaces to the writer's `trash/`, and logs what it
-did. A crash or a failed write leaves each path holding its old bytes or its
-new ones. The next change finishes what a failed write left, and the next open
-finishes what a crash left or rolls it back.
-[File effects and pending records](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#file-effects-and-pending-records)
-has the steps. drawbar never reads a file whole to write it: a copy, or an edit
+toshokan then stages the new bytes, records the change as pending, moves the
+bytes it displaces to the writer's trash, and logs what it did, so a crash or a
+failed write leaves each path holding its old bytes or its new ones
+([File effects and pending records](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#file-effects-and-pending-records)).
+drawbar never reads a file whole to write it: a copy, or an edit
 of a resting file, streams a chunk at a time.
 
 Undo reaches only this session's intents. It is refused where another drawbar
@@ -187,12 +163,9 @@ library onto the workspace. A fact shows once its intent has committed.
 
 ## Sync and several drawbars
 
-Every running drawbar writes as a writer of its own. It appends to its own log
-under `writers.2/` and reads the others' logs. Only a writer writes in its own
-directory, so a sync client never has two versions of one of those files to
-reconcile, and a conflicted copy of a log is read like any other file. toshokan
-merges every log to the same state, whatever order a sync client delivers them
-in, and keeps concurrent changes to one field as a conflict
+Every running drawbar writes as a writer of its own: it appends to its own log
+under `writers.2/`, and toshokan merges every writer's log to the same state,
+whatever order a sync client delivers them in
 ([Writers](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#writers)).
 
 Several drawbars on one library at once follow from the same design: two
@@ -206,42 +179,42 @@ failure that may mean the folder changed. A tab tells the library's other tabs
 of each change it commits, and they read it at once.
 
 Two drawbars can each make an entity of one file before either sees the other's,
-as when both tag it while a sync is paused. Once both logs are read, the file is
-the entity's with the lower id, and the other is joined into it
-([Binding](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#binding)).
-A drawbar that can write commits one change joining each such entity: the
-lower one gains the tags and the origin it lacks, and the other is deleted. That
-change is no step of Undo. A read-only drawbar writes nothing and shows the
-tags of both on the file.
+as when both tag it while a sync is paused.
+[Binding](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#binding)
+says which keeps the file. A drawbar that can write commits one change joining
+each such pair: the entity that keeps the file gains the tags and the origin it
+lacks, and the other is deleted. That change is no step of Undo. A read-only
+drawbar writes nothing and shows the tags of both on the file.
 
-A change another drawbar left unfinished is settled. One this install left,
-after a crash or in a window since closed, is finished without asking. One
-another install left is asked about: finish it, roll it back, or leave it. One
-of this install's own that can no longer be finished, since a file it moves is
-gone or was changed since the change checked it, is asked about too: roll it back or leave it. Its writer stops writing, so
-a new one goes on, and Undo starts again. Settling a change is no step of Undo.
+A change another drawbar left unfinished is settled
+([File effects and pending records](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#file-effects-and-pending-records)).
+One this install left, after a crash or in a window since closed, is finished
+without asking. One another install left is asked about: finish it, roll it
+back, or leave it. One of this install's own that can no longer be finished,
+since a file it moves is gone or was changed since the change checked it, is
+asked about too: roll it back or leave it. Its writer stops writing, so a new
+one goes on, and Undo starts again. Settling a change is no step of Undo.
 drawbar asks only once the change has stood unmoved for five seconds, since a
 drawbar in a browser tab may still be making it.
 
 A library opens read-only when its folder cannot be written, when this writer's
 log holds an entry of a kind or with an operation a newer build added, or when
-the folder holds a newer layout of the `.drawbar` folder beside this one. What may
-change between versions without that, and what may not, is in
-[Compatibility](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/format.md#compatibility). It turns read-only until it is
-opened again when a change it began cannot be finished, as when another program
-put a file where the change puts one; opening it again tries once more. It also
-turns read-only until it is opened again when its folder keeps failing to make a
-write durable: once a write reported as failed landed all the same, and the
-writer that took over failed to write too. Another
-drawbar on the folder never makes it read-only. Changes in a read-only library
+the folder holds a newer layout of the `.drawbar` folder beside this one. What
+may change between versions without that, and what may not, is in
+[Compatibility](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/format.md#compatibility).
+It turns read-only until it is opened again when a change it began cannot be
+finished, as when another program put a file where the change puts one; opening
+it again tries once more. It also turns read-only until it is opened again when
+its folder keeps failing to make a write durable
+([Writers](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#writers)).
+Another drawbar on the folder never makes it read-only. Changes in a read-only library
 are held in memory only, except edits, unsaved or saved there, which this
 install's own state keeps as unsaved edits.
 
 A reader keeps nothing between opens: what it shows comes from the files in the
-folder. After a restore from a backup, facts no file holds now are gone at the
-next read. While a sync client is still delivering files, facts can disappear
-and come back, and a change made meanwhile is at worst a visible conflict
-([What users see](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#what-users-see)).
+folder, so a restore from a backup, or a sync still delivering files, changes
+what it shows at the next read
+([If something goes wrong](../drawbar/this-computer.md#if-something-goes-wrong)).
 A file of another writer that cannot be read, as one a sync client keeps only
 online, counts as not delivered yet, and no unfinished change is offered to
 settle until it is read. One of the reader's own writer stops the library
@@ -249,11 +222,12 @@ opening.
 
 ## Changes made outside drawbar
 
-A rescan lists every file by name, length and time. It reads a file's identity
-only where that decides which file is an entity's. An entity's file renamed or
-moved outside drawbar is followed by its identity, and the asset keeps its tags
-and its origin. A file with no entity is known by its path alone, so its rename
-reads as one file gone and another arrived, with nothing lost.
+A rescan lists every file by name, length and time, and reads a file's identity
+only where that decides which file is an entity's, so an asset renamed or moved
+outside drawbar keeps its tags and its origin
+([Binding](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#binding)).
+A file with no entity is known by its path alone, so its rename reads as one file
+gone and another arrived, with nothing lost.
 
 Where several files could each be an entity's moved file, or one file several
 entities', none is bound, and drawbar says so once in the activity log.
@@ -274,19 +248,14 @@ ahead only if nothing it would send changed on disk.
 
 ## Kept apart
 
-**Kept apart** lists what toshokan cannot place in a writer's single history,
-shown apart from the merged state. Most of it is branches. A writer's history
-forks when two installs go on from one copy of drawbar's own data, and each
-branch's changes after the fork wait for the user. The rest is entries whose
-predecessor has not synced yet, merged once it arrives, and lines of an older
-copy of a log segment, as a sync client or a backup leaves. Of those lines, only
-what the writer's later history never changed again is shown.
-
-Taking changes is one intent, which undo takes back. Dismissing a branch, or the
-lines of an older segment, hides it from every reader and cannot be undone. A writer that finds its
-own history forked goes on as a new writer.
-[Kept apart](../drawbar/this-computer.md#kept-apart) says what the user sees,
-and [Runs](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#5-runs)
+**Kept apart** lists what toshokan cannot place in a writer's single history.
+Most of it is runs: the branches of a writer's history after two installs went
+on from one copy of drawbar's own data, each as a new writer. The rest is gaps,
+entries whose predecessor has not synced yet, merged once it arrives, and
+unplaced lines of an older copy of a log segment, as a sync client or a backup
+leaves.
+[Kept apart](../drawbar/this-computer.md#kept-apart) says what the user sees and
+does, and [Runs](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#5-runs)
 how toshokan finds them.
 
 ## In the browser
@@ -303,9 +272,8 @@ Other differences:
 - A picked folder may be written by other programs. It is also rescanned when
   its tab is shown or focused, every minute while it is in view, and where
   Chromium's `FileSystemObserver` reports a change.
-- A browser's rename can replace a file. toshokan checks that the destination is
-  free and then moves, so a file another program makes there in between is
-  replaced.
+- A browser's rename can replace a file another program makes at the
+  destination between toshokan's check that it is free and the move.
 - Where a browser cannot rename files in a picked folder, every move copies the
   file and removes the old one
   ([What is supported](../getting-started/support.md#the-library-in-the-browser)).
@@ -315,16 +283,12 @@ Other differences:
 - The first write asks the browser to keep the storage
   (`navigator.storage.persist()`). Where the browser gives the page no storage,
   the library lasts until the tab closes.
-- **Export library** is a ZIP of stored entries: every file of the
-  folder, `.drawbar/library/` among them, but not `.drawbar/local/` or Chromium's
-  `.crswap` files. The page reads each file once for its CRC-32 while no command
-  of its tab runs, then hands the browser a Blob of the headers and the files'
-  snapshots; drawbar's own files go in as read, since toshokan appends to its
-  logs in place. **Import library…** runs in the worker before the library opens:
-  it refuses unless the folder holds no file outside `.drawbar/local/`, reads
-  the archive by position, writes each entry as it is, and takes back what it
-  wrote if any entry fails. The library then opens as a new writer over the
-  copied history, as it would over a restored backup.
+- **Export library** is a ZIP of every file of the folder, `.drawbar/library/`
+  among them, but not `.drawbar/local/` or Chromium's `.crswap` files
+  (`store/copy.rs`). **Import library…** runs in the worker before the library
+  opens, refuses unless the folder holds no file outside `.drawbar/local/`, and
+  takes back what it wrote if any entry fails. The library then opens as a new
+  writer over the copied history, as it would over a restored backup.
 
 [Browsers](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#browsers)
 has what each browser can do.

@@ -44,16 +44,17 @@ kept longer; they describe everyone, not anyone.
 drawbar.app keeps your library in your browser, and sends none of it anywhere:
 
 - The origin private file system holds the browser's own library: your sounds,
-  their tags and folders, and the record of each change. It also holds the unsaved
-  edits of every library you open, including a folder on your computer.
+  their tags and folders, and the record of each change. For every library you
+  open, a folder on your computer included, it also holds the unsaved edits, and
+  the copy of a sound drawbar takes before writing over it on your instrument.
 - An IndexedDB database named `drawbar` holds the folders on your computer you
   opened lately, as handles the browser gives drawbar. Unless you allowed a
   folder on every visit, the browser asks you again before drawbar can open it.
 - Local storage holds drawbar's settings, and the sounds drawbar 0.10 and
   earlier kept under `drawbar.this_computer`, `drawbar.folders` and
   `drawbar.tags`. `drawbar.taking_in` and `drawbar.taken_in` record that a
-  library took those sounds in: their hash, and the file names given to sounds
-  that had unsaved edits.
+  library took those sounds in: their hash, and where each sound that had an
+  unsaved edit was put.
 
 [Where your library lives](drawbar/this-computer.md#where-your-library-lives)
 says what can delete it.

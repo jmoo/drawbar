@@ -97,10 +97,11 @@ the last test checks that every class holds what it held when the run started.
 `crates/drawbar/tests/web.rs` runs the browser's library through its worker: in
 the private file system and in a folder of it opened as a picked folder is, with
 two installs of one library and two tabs of one install, and with a worker that
-faults, stalls or loses an answer.
-`crates/toshokan/tests/web.rs` and its neighbors run toshokan's browser storage.
-wasm-bindgen's test runner runs them headless; on Linux, Nix runs both in
-Chromium and Firefox:
+faults, stalls or loses an answer. toshokan's `backends`, `effects`, `hints` and
+`web` suites run its browser backends, in the private file system and in a picked
+folder, and the hints that tell a page to look again. wasm-bindgen's test runner
+runs them headless; on Linux, Nix runs both crates' suites in Chromium and
+Firefox:
 
 ```sh
 nix build .#nord.browser-tests
@@ -112,11 +113,15 @@ library changes, an optional `safari` job runs them in Safari on macOS too; Safa
 cannot pick a folder, so it skips drawbar's picked-folder test. Edge runs them by
 hand, with `MSEDGEDRIVER` in place of `CHROMEDRIVER` below.
 
-Elsewhere, from `crates/` in `nix develop`, point the runner at a browser's driver:
+Elsewhere, from `crates/` in `nix develop`, point the runner at a browser's
+driver, with the browser installed:
 
 ```sh
 CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
   CHROMEDRIVER=chromedriver cargo test -p drawbar --target wasm32-unknown-unknown --test web
+CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
+  GECKODRIVER=geckodriver cargo test -p toshokan --features web --target wasm32-unknown-unknown \
+  --test backends --test effects --test hints --test web
 ```
 
 Safari runs them in a window, with `SAFARIDRIVER=/usr/bin/safaridriver`, once
@@ -135,9 +140,15 @@ public CI gates locally. On Linux, add `.#nord.browser-tests` for declared brows
 suites. See [Building from source](building.md).
 
 From `crates/`, `nix develop -c bash ../scripts/test.bash` runs the same native
-suite without a sandbox. It reads each crate's `testFeatures` from its manifest.
-The `release-tests` profile keeps optimization enabled and omits full link-time
-optimization; shipped packages keep their shipping profiles.
+suite without a sandbox, as CI does. It reads each crate's `testFeatures` from its
+manifest. The `release-tests` profile keeps optimization enabled and omits full
+link-time optimization; shipped packages keep their shipping profiles.
+
+`scripts/test.bash` then runs drawbar's `store::` and `app::` tests twice more,
+with `DRAWBAR_TEST_FOLDER` giving the test folders what a browser's can do:
+`browser` renames files but no folder and flushes nothing, as a browser's own
+storage or a folder picked in Chrome, and `copying` renames nothing, as a folder
+picked in Brave. The default, `desktop`, does what the disk reports.
 
 `nix build .#nord.all-corpus` runs every suite against the pinned private corpus,
 and `.#nord.<crate>-corpus` runs one crate's. `.#nord.all-corpus-full` uses the
@@ -146,13 +157,13 @@ corpus's R2 tier and needs a seeded store or R2 credentials. `.#nord.corpus` and
 
 A change to toshokan also needs its value-level retention sweep and its browser
 crash sweep, which CI does not run. `scripts/evidence.bash` runs all of it at once
-and prints each part's wall time: the sweep, every Nix build and check, each
-crate's tests among them, and on Linux the browser suites and crash sweep. TLC's
-model check, `nix build .#nord.toshokan-spec`, runs on its own. `--fast` runs
-toshokan's own suite and Clippy, for every change in between.
+and prints each part's wall time: the sweep, every Nix build and every check but
+TLC's model check, each crate's tests among them, and on Linux the browser suites
+and crash sweep. This full tier gates the change's merge. `--fast` runs
+toshokan's own suite and Clippy, for every change in between. TLC's model check,
+`nix build .#nord.toshokan-spec`, runs in `nix flake check`.
 
-Tests that run long build with `--profile release-tests`, which is `release`
-without link-time optimization:
+Tests that run long build with `--profile release-tests`:
 
 ```sh
 cargo test --workspace --profile release-tests

@@ -7,8 +7,8 @@ This repository contains Rust tools for Clavia Nord instruments:
 - `nord-cli` exposes both libraries from a terminal.
 - `nord-bits-derive` generates the bitfield implementations.
 - `drawbar` is the desktop and browser application.
-- `toshokan` keeps drawbar's library beside a folder of files, so the folder can
-  be synced.
+- `toshokan` keeps what a file cannot say about itself beside the file, in a
+  folder that syncs. drawbar's library is built on it.
 
 This is a public repository. Do not add personal information, secrets, agent
 memory, private notes, or the private specimen corpus. If a fact is needed to
@@ -226,12 +226,11 @@ Before a change is done:
 
 - `nix fmt` formats Rust, Nix, TOML, and shell with the pinned tools.
 - `nix develop -c cargo test --workspace` runs the default test suite.
-  `DRAWBAR_TEST_FOLDER=browser` runs drawbar's tests on a folder that renames no
-  folder, as a browser's; `copying`, on one that renames nothing, as a folder picked
-  in Brave. `scripts/test.bash`, which CI runs, runs both.
+  `scripts/test.bash`, which CI runs, adds drawbar's library tests on folders that
+  rename as a browser's do.
 - `nix flake check` runs what CI's check job runs.
-- `scripts/evidence.bash --fast` runs the evidence a toshokan change needs, and
-  the full tier before such a change merges.
+- For a toshokan change, `scripts/evidence.bash --fast` runs its evidence while
+  you work, and `scripts/evidence.bash` the full tier before it merges.
 - `nix build .#nord.all-corpus` runs all suites against the pinned private
   corpus, when the change touches decoded layout or protocol evidence;
   `.#nord.<crate>-corpus` selects one crate.
@@ -243,9 +242,10 @@ builds the production bundle and guide, and runs the declared browser suites in
 Chromium and Firefox. The check job rejects anything `nix fmt` would change and
 treats Clippy and rustdoc warnings as failures.
 The required `build` check collects the native, web and corpus results; release
-and deployment wait for it and `check`. Cross builds are local checks. An optional
-`safari` workflow runs the browser suites in Safari when toshokan or drawbar's
-library changes; `nix flake check` holds its Rust and wasm-bindgen pins.
+and deployment wait for it and `check`. Cross builds are local checks, and a
+crate's Windows cross build, `nix build .#<crate>-windows`, only compiles it. An
+optional `safari` workflow runs the browser suites in Safari when toshokan or
+drawbar's library changes; `nix flake check` holds its Rust and wasm-bindgen pins.
 
 The `autofix` PR label runs `nix fmt` on the branch and pushes a `style: nix fmt` commit when
 it changes anything; it reruns on pushes while the label is on. The public suite
@@ -254,9 +254,6 @@ committed fixtures, plus the corpus when enabled, by content, and applies sideca
 `.oracle.json` files where present. Test code names no corpus path: a claim about
 every file of a kind runs once per such file, and a claim about one file lives in
 its sidecar.
-
-CI runs the suites on Windows itself. A crate's Windows cross build,
-`nix build .#<crate>-windows`, only compiles it.
 
 The CI corpus job runs the committed tier for in-repository pull requests and
 gates publishing. It reads `jmoo/nord-corpus` through the read-only
