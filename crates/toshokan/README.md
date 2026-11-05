@@ -45,7 +45,7 @@ lib.undo()?;
 ```
 
 The crate documentation describes the API, the browser driver and how to run
-the browser suites. [SPEC.md](SPEC.md) specifies every file toshokan writes and
-how it is merged, [RETENTION.md](RETENTION.md) how little history it keeps, and
+the browser suites. [spec/format.md](spec/format.md) specifies every file toshokan writes,
+[spec/protocol.md](spec/protocol.md) how it is merged and how little history it keeps, and
 [spec/](spec/README.md) model-checks the protocol and maps it to the tests,
 the power-loss tests included.

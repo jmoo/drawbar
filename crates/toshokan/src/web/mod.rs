@@ -7,7 +7,7 @@
 //! system, or a folder the user picked. Its local root, which only this install
 //! reads, is always a directory of the origin private file system, named by its
 //! path there. Each declares its [`Capabilities`](crate::io::Capabilities) for
-//! the browser it runs in; SPEC.md lists them.
+//! the browser it runs in; spec/protocol.md lists them.
 //!
 //! [`Hints`] tells other tabs of the same library that a commit landed, so they
 //! refresh without polling.

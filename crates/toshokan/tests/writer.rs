@@ -155,7 +155,7 @@ fn written_once(capabilities: Capabilities) -> MemDisk {
     instance.machine.folder.restart()
 }
 
-/// `head.json` as SPEC.md gives it.
+/// `head.json` as spec/format.md gives it.
 fn head_record(writer: WriterId, head: EntryHash) -> Vec<u8> {
     format!(r#"{{"writer":"{writer}","head":"{head}"}}"#).into_bytes()
 }

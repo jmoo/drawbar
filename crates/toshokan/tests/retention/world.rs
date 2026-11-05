@@ -1,4 +1,4 @@
-//! Entries, files and what a reader shows, in the vocabulary of `RETENTION.md`:
+//! Entries, files and what a reader shows, in the vocabulary of `spec/protocol.md`:
 //! entities, their existence, registers and set members.
 
 use std::collections::{BTreeMap, BTreeSet};

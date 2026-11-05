@@ -109,7 +109,7 @@
 //! `web::Hints` says when to look again: a commit in another tab (`refresh`), the
 //! paths Chromium's file system observer saw change (`rescan_paths`), and focus or a
 //! period for a folder other programs write (`rescan`). The Browsers section of
-//! `SPEC.md` lists what each browser can do.
+//! `spec/protocol.md` lists what each browser can do.
 //!
 //! The browser suites run headless with `nix build .#nord.browser-tests` on Linux.
 //! Elsewhere, from `crates/` in the development shell, with a WebDriver and its

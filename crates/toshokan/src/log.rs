@@ -1488,7 +1488,7 @@ mod tests {
         }
     }
 
-    // The members of each kind and op are the format SPEC.md specifies.
+    // The members of each kind and op are the format spec/format.md specifies.
     #[test]
     fn an_intent_is_written_as_specified() {
         let entity = EntityId::from_u128(0xe);
@@ -1530,7 +1530,7 @@ mod tests {
         assert_eq!(entry.json(), expected);
     }
 
-    // The members of each kind, in the order SPEC.md gives them.
+    // The members of each kind, in the order spec/format.md gives them.
     #[test]
     fn every_kind_is_written_as_specified() {
         let id = |n: u128| format!("{n:032x}");

@@ -9,7 +9,7 @@ nix build .#nord.toshokan-spec       # small bounds, a few minutes; `nix flake c
 nix build .#nord.toshokan-spec-deep  # larger bounds, much longer
 ```
 
-This model follows the bounded retention of [RETENTION.md](../RETENTION.md):
+This model follows the bounded retention of [protocol.md](protocol.md#bounded-retention):
 snapshots that certify the files their chain was written to instead of listing
 every folded hash, and forks shown as runs instead of merged.
 
@@ -170,7 +170,7 @@ another in it includes.
 ## Refinement
 
 The spec applies to the code because the code keeps the model's rules and its
-reader's obligations. [SPEC.md](../SPEC.md) states each in full.
+reader's obligations. [format.md](format.md) and [protocol.md](protocol.md) state each in full.
 
 - Entries carry their number. A snapshot certifies every entry it folds, its
   head among them: by the segments its chain was written to, and by hash.

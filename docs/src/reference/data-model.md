@@ -22,7 +22,7 @@ The code is in `crates/drawbar/src`: `store/` holds the library on disk,
 `workspace.rs` the assets in memory, and `ondisk.rs` the files read by range.
 Every change to the files, and everything a file cannot say about itself, goes
 through [toshokan](https://github.com/jmoo/drawbar/tree/master/crates/toshokan).
-Its [`SPEC.md`](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md)
+Its [`spec/format.md`](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/format.md)
 is the precise version of most of this page.
 
 ## What lives where
@@ -65,7 +65,7 @@ the file by its identity: a BLAKE3 hash of its length and bytes. A Nord file's
 identity reads only its header and its checksum, so a large piano library costs
 a small read. Which extensions read that way is fixed with the format, since a
 change would make every tagged file of that kind look changed outside drawbar: a
-Nord format added since is read whole. [Binding](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#binding)
+Nord format added since is read whole. [Binding](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#binding)
 has the rules.
 
 The `.drawbar` folder is made at the first change, so a folder opened and looked
@@ -163,13 +163,13 @@ pending, moves the bytes it displaces to the writer's `trash/`, and logs what it
 did. A crash or a failed write leaves each path holding its old bytes or its
 new ones. The next change finishes what a failed write left, and the next open
 finishes what a crash left or rolls it back.
-[File effects and pending records](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#file-effects-and-pending-records)
+[File effects and pending records](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#file-effects-and-pending-records)
 has the steps. drawbar never reads a file whole to write it: a copy, or an edit
 of a resting file, streams a chunk at a time.
 
 Undo reaches only this session's intents. It is refused where another drawbar
 changed the same thing since
-([Undo and redo](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#undo-and-redo)),
+([Undo and redo](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#undo-and-redo)),
 and drawbar then lets go of that step, so the next undo reaches the one before.
 An intent too large for one log entry is refused before it writes anything.
 
@@ -178,7 +178,7 @@ nothing else. After each change drawbar keeps this session's items, newest
 first, up to 1 GiB, and empties the rest. The Edit menu stops at the first
 change whose item was emptied. Closing the library empties the trash, and so
 does opening one that can be written, once any unfinished change is settled
-([Trash](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#trash)).
+([Trash](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#trash)).
 
 The app never waits on the disk. `Store` turns the user's changes into intents
 and sends them to a backend: a thread on the desktop, a worker in the browser.
@@ -193,7 +193,7 @@ directory, so a sync client never has two versions of one of those files to
 reconcile, and a conflicted copy of a log is read like any other file. toshokan
 merges every log to the same state, whatever order a sync client delivers them
 in, and keeps concurrent changes to one field as a conflict
-([Writers](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#writers)).
+([Writers](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#writers)).
 
 Several drawbars on one library at once follow from the same design: two
 windows, two tabs, or two computers that sync the folder. It is not meant for
@@ -208,7 +208,7 @@ of each change it commits, and they read it at once.
 Two drawbars can each make an entity of one file before either sees the other's,
 as when both tag it while a sync is paused. Once both logs are read, the file is
 the entity's with the lower id, and the other is joined into it
-([Binding](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#binding)).
+([Binding](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#binding)).
 A drawbar that can write commits one change joining each such entity: the
 lower one gains the tags and the origin it lacks, and the other is deleted. That
 change is no step of Undo. A read-only drawbar writes nothing and shows the
@@ -227,7 +227,7 @@ A library opens read-only when its folder cannot be written, when this writer's
 log holds an entry of a kind or with an operation a newer build added, or when
 the folder holds a newer layout of the `.drawbar` folder beside this one. What may
 change between versions without that, and what may not, is in
-[Compatibility](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#compatibility). It turns read-only until it is
+[Compatibility](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/format.md#compatibility). It turns read-only until it is
 opened again when a change it began cannot be finished, as when another program
 put a file where the change puts one; opening it again tries once more. It also
 turns read-only until it is opened again when its folder keeps failing to make a
@@ -241,7 +241,7 @@ A reader keeps nothing between opens: what it shows comes from the files in the
 folder. After a restore from a backup, facts no file holds now are gone at the
 next read. While a sync client is still delivering files, facts can disappear
 and come back, and a change made meanwhile is at worst a visible conflict
-([What users see](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/RETENTION.md#what-users-see)).
+([What users see](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#what-users-see)).
 A file of another writer that cannot be read, as one a sync client keeps only
 online, counts as not delivered yet, and no unfinished change is offered to
 settle until it is read. One of the reader's own writer stops the library
@@ -286,7 +286,7 @@ Taking changes is one intent, which undo takes back. Dismissing a branch, or the
 lines of an older segment, hides it from every reader and cannot be undone. A writer that finds its
 own history forked goes on as a new writer.
 [Kept apart](../drawbar/this-computer.md#kept-apart) says what the user sees,
-and [Runs](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/RETENTION.md#5-runs)
+and [Runs](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#5-runs)
 how toshokan finds them.
 
 ## In the browser
@@ -326,7 +326,7 @@ Other differences:
   wrote if any entry fails. The library then opens as a new writer over the
   copied history, as it would over a restored backup.
 
-[Browsers](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/SPEC.md#browsers)
+[Browsers](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#browsers)
 has what each browser can do.
 
 ## How reads stay cheap
