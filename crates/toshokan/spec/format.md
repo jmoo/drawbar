@@ -191,8 +191,8 @@ other entry its predecessor's number plus one. A reader ignores members it does
 not know, at any depth but an observed write's (see
 [Compatibility](#compatibility)), and keeps the line and the whole entry (see
 [Merging](protocol.md#merging)), so they survive. An entry of another kind,
-without `kind`, or whose members do not decode, is kept and merged as unknown; so is a line whose JSON has no readable
-`n` or `at`, which still links the chain but is never merged.
+without `kind`, or whose members do not decode, is kept and merged as unknown. A line whose JSON has no readable `n` or `at` is
+kept and still links the chain, but is never merged.
 
 An entry names another as `["<writer>",<n>,"<hash>"]`, and one of its own
 writer's as `[<n>,"<hash>"]`.

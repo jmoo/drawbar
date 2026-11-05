@@ -276,7 +276,8 @@ pub enum Found<'a> {
 /// The snapshot of `writer` that folds `since`, its entries after `previous`'s
 /// head in chain order, into `previous`, labeled `label` when there is no
 /// previous one. It certifies the segments and snapshots `found` shows and the
-/// entries of `since` as Compaction in `spec/protocol.md` says, so its certificates
+/// entries of `since` as Compaction in `spec/protocol.md` and Snapshots in
+/// `spec/format.md` say, so its certificates
 /// name its head. `None` when it folds nothing.
 pub fn snapshot<'a>(
     writer: WriterId,

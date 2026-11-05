@@ -587,9 +587,9 @@ writer's log has gone since; one that is closed is spent, waiting only for its
 writer to remove it.
 
 A record is ignored when it does not decode, names another writer, names a path
-that is not a library path, or its `prev` is not held: it is neither a tip's
-head nor an entry a tip's certificates name, and no entry merged, in a run or in
-a gap. A record of another writer that cannot be read for any reason but its
+that is not a library path, or its `prev` is not held: it is not a tip's head, an entry a tip's certificates
+name, or numbered below a tip's head, and no entry merged, in a run or in a gap,
+has it. A record of another writer that cannot be read for any reason but its
 absence is reported and read again at the next refresh, and until then no
 orphan is reported or settled; one of this writer's fails the open or refresh,
 and the trash and staging it may name are left as they are. Opening reports the
@@ -893,13 +893,13 @@ system.
 
 - **Private file system.** Files are read through `getFile()`, which takes no
   lock, and written, appended to and flushed through sync access handles, opened
-  for one request each. Chromium's `flush()` reaches the disk, and Firefox's and
-  WebKit's do not, so only Chromium declares `fsync`: Chromium's takes a fraction
-  of a millisecond, as a write that reaches the disk does, and the others take
-  microseconds. Inferred from specimens; not confirmed on hardware. A
+  for one request each. Chromium's `flush()` takes a fraction of a millisecond,
+  as a write that reaches the disk does, and Firefox's and WebKit's take
+  microseconds, so only Chromium declares `fsync`. Inferred from specimens; not
+  confirmed on hardware. A
   directory's names live in the browser's own database, which toshokan cannot
-  sync, so a sync of a directory returns at once, and a name made or removed is
-  only as durable as that database keeps it. Chromium cannot rename a directory
+  sync, so a sync of a directory returns at once, and a name made or removed is only as durable as that database keeps it. Whether
+such a name survives the machine stopping has not been tested. Chromium cannot rename a directory
   there, so no browser declares `rename_dir`. A write the origin's quota refuses
   fails with `NoSpace`: Chromium throws `QuotaExceededError`, and Firefox writes
   fewer bytes than it was given.

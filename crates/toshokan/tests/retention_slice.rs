@@ -1,4 +1,4 @@
-//! A bounded slice of the value-level checks of bounded retention;
+//! A bounded slice of the value-level checks of toshokan's merge;
 //! `retention_sweep` runs the rest.
 
 mod retention;

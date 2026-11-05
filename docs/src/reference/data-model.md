@@ -285,7 +285,7 @@ Other differences:
   the library lasts until the tab closes.
 - **Export library** is a ZIP of every file of the folder, `.drawbar/library/`
   among them, but not `.drawbar/local/` or Chromium's `.crswap` files
-  (`store/copy.rs`). **Import library…** runs in the worker before the library
+  (`store/copy.rs`, `store/web.rs`). **Import library…** runs in the worker before the library
   opens, refuses unless the folder holds no file outside `.drawbar/local/`, and
   takes back what it wrote if any entry fails. The library then opens as a new
   writer over the copied history, as it would over a restored backup.

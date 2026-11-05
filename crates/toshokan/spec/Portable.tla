@@ -65,8 +65,8 @@ VARIABLES
     backup,     \* {} or {the folder as it was when backed up}
     restores,
     drops,
-    lost,       \* entries a restore took from the folder
-    lostEffects,\* effects a restore took every trace of
+    lost,       \* entries a restore or a dropped version took from the folder
+    lostEffects,\* effects a restore or a dropped version took every trace of
     \* Instance state, kept in the instance's local root.
     role,       \* "writer" or "reader"
     wid,        \* the directory this instance writes

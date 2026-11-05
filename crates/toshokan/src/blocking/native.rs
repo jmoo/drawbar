@@ -376,10 +376,9 @@ const FSYNC: bool = cfg!(any(unix, windows));
 fn flush(path: &Path, kind: Kind) -> io::Result<()> {
     let file = flushable(path, kind)?;
     let flushed = file.sync_all();
-    // `sync_all` asks Apple systems for a full sync, which SMB, AFP and WebDAV
-    // volumes refuse under more than one error while taking a plain one. As in
-    // SQLite, a failure falls back to a plain sync, except an I/O error, which is
-    // the write failing. Reported by public documentation; not confirmed on hardware.
+    // SMB, AFP and WebDAV volumes refuse a full sync and take a plain one; as SQLite
+    // does, fall back to one unless the error is the write failing (`EIO`).
+    // Reported by public documentation; not confirmed on hardware.
     #[cfg(target_vendor = "apple")]
     let flushed = flushed.or_else(|error| match rustix::io::Errno::from_io_error(&error) {
         Some(rustix::io::Errno::IO) => Err(error),

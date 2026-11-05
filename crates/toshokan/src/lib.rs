@@ -146,8 +146,9 @@
 //! ```
 //!
 //! `web::Hints` says when to look again: a commit in another tab (`refresh`), the
-//! paths Chromium's file system observer saw change (`rescan_paths`), and focus or a
-//! period for a folder other programs write (`rescan`).
+//! paths Chromium's file system observer saw change (`rescan_paths`), and focus,
+//! being shown, or a period while shown, for a folder other programs write
+//! (`rescan`).
 //! [Browsers](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#browsers)
 //! lists what each browser can do.
 
