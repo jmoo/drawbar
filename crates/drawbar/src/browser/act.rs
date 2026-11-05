@@ -958,8 +958,7 @@ fn overwritable(occupant: Occupant, workspace: &Workspace) -> Option<u64> {
 fn ambiguous(held: &[(String, Occupant)], dir: &LibPath) -> String {
     let names: Vec<&String> = held.iter().map(|(name, _)| name).collect();
     let said = format!(
-        "{} in {} are one name to drawbar, so it cannot tell which one is meant. Rename \
-         one of them first.",
+        "{} in {} count as one name. Rename one of them first.",
         crate::strings::quoted_some(&names, names.len()),
         spoken(dir)
     );
@@ -1883,9 +1882,8 @@ mod tests {
         ];
         assert_eq!(
             ambiguous(&held, &LibPath::root()),
-            "“Scan.pdf” and “scan.pdf” in the top level of the library are one name to \
-             drawbar, so it cannot tell which one is meant. Rename one of them first. \
-             “scan.pdf” is a hidden file."
+            "“Scan.pdf” and “scan.pdf” in the top level of the library count as one name. \
+             Rename one of them first. “scan.pdf” is a hidden file."
         );
     }
 

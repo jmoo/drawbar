@@ -984,8 +984,8 @@ impl DrawbarApp {
         self.told_risk = true;
         let what = match risk {
             Risk::Unvisited => {
-                "This browser deletes it once it has been used for seven days without a \
-                 visit to drawbar."
+                "This browser deletes it after seven days of use without a visit to \
+                 drawbar."
             }
             Risk::Pressure => "This browser may clear it when space runs low.",
         };
@@ -1971,8 +1971,6 @@ mod tests {
         );
     }
 
-    /// A change the library leaves unanswered shows what it is doing over the window once
-    /// it has gone two seconds unanswered, and not before.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_change_unanswered_for_two_seconds_shows_what_it_is_doing() {
@@ -2002,7 +2000,6 @@ mod tests {
         store.patience(std::time::Duration::ZERO);
     }
 
-    /// The dialog of a change with a long name wraps it within the window.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn the_dialog_of_a_change_with_a_long_name_fits_the_window() {

@@ -785,8 +785,7 @@ impl Browser {
                 crate::strings::counted(hidden.len(), "hidden file", "hidden files")
             ),
             Some(format!(
-                "Removing the folder moves {} up to {} with everything else in it. Nothing \
-                 is deleted.",
+                "Removing the folder moves {} up to {}.",
                 crate::strings::quoted_some(&names, SHOWN),
                 act::spoken(&path.parent())
             )),
@@ -868,12 +867,7 @@ impl Browser {
     pub(crate) fn ask_slot_conflict(&mut self, id: u64, name: &str) {
         self.raise(Ask {
             title: format!("“{name}” changed on the instrument"),
-            note: Some(
-                "The slot changed since drawbar kept your unsaved edits of it. Keep mine \
-                 keeps your edits, to send when you choose. Take theirs discards your \
-                 edits. Keep both keeps yours as a new file on this computer."
-                    .into(),
-            ),
+            note: Some("The slot changed since drawbar kept your unsaved edits of it.".into()),
             verb: Verb::TakeTheirs,
             acts: vec![Act::Revert(id)],
             others: vec![("Keep both", vec![Act::KeepBoth(id)])],
@@ -889,9 +883,7 @@ impl Browser {
             title: format!("“{}” has unsaved edits from before", entity.name),
             note: Some(
                 "drawbar kept unsaved edits of this slot when it last let it go, and you \
-                 have edited it since. Keep mine keeps your edits. Take theirs puts the \
-                 earlier edits in their place. Keep both keeps the earlier edits as a new \
-                 file on this computer."
+                 have edited it since."
                     .into(),
             ),
             verb: Verb::TakeTheirs,
@@ -942,8 +934,8 @@ impl Browser {
         let mut ask = Ask::new(
             "The library is not answering".to_string(),
             Some(
-                "It has shown no sign of life for a minute. Close and reopen it to go on; \
-                 edits made since they were last kept are lost."
+                "It has not answered for a minute. Reopening it loses the edits made since \
+                 drawbar last kept them."
                     .to_string(),
             ),
             Verb::Reopen,
@@ -966,10 +958,7 @@ impl Browser {
         let ask = match &leftover.unfinishable {
             None => Ask {
                 title: format!("Another drawbar left “{}” unfinished", orphan.label),
-                note: Some(format!(
-                    "It was changing {paths}. Finish completes the change, Roll back puts \
-                     the files back as they were, and Leave as is stops asking."
-                )),
+                note: Some(format!("It was changing {paths}.")),
                 verb: Verb::Finish,
                 acts: act(Settlement::Finished),
                 others: vec![
@@ -981,10 +970,7 @@ impl Browser {
             },
             Some(why) => Ask {
                 title: format!("drawbar could not finish “{}”", orphan.label),
-                note: Some(format!(
-                    "It was changing {paths}, and {why}. Roll back puts the files back as \
-                     they were, and Leave as is leaves them as they are now."
-                )),
+                note: Some(format!("It was changing {paths}, and {why}.")),
                 verb: Verb::RollBack,
                 acts: act(Settlement::RolledBack),
                 others: vec![("Leave as is", act(Settlement::Dismissed))],
@@ -1007,9 +993,8 @@ impl Browser {
             None => Ask {
                 title: format!("A write to the instrument left “{}”", rescue.name),
                 note: Some(
-                    "It may be the only copy of what that slot held. The library cannot be \
-                     written, so it stays on this computer, and goes into the library the \
-                     next time one opens that can be written."
+                    "It may be the only copy of what that slot held. It stays on this \
+                     computer until a library drawbar can write opens."
                         .into(),
                 ),
                 verb: Verb::Discard,
