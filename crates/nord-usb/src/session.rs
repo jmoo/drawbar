@@ -83,8 +83,8 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
         let opened = s.open_class().await;
 
         // ⚠️ This covers an abandoned class session only. An abandoned UI session
-        // reports every slot as empty without an error; `op::recover` handles that case.
-        // Confirmed on hardware.
+        // reports every slot as empty without an error. Confirmed on hardware.
+        // `op::recover` handles that case.
         let opened = match opened {
             Err(Error::DeviceStatus(STALE_SESSION)) => {
                 if let Err(error) = s.discard_stale_session().await {

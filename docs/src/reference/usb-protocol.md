@@ -7,8 +7,7 @@ bytes.
 ## What works
 
 [What is supported](../getting-started/support.md#usb) says what has been
-confirmed on which instrument and system. The WebUSB backend is verified for
-reads and writes from Chrome.
+confirmed on which instrument and system.
 
 Not implemented: writing a bundle to the instrument, firmware updates, and
 relink.

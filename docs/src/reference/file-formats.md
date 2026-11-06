@@ -73,7 +73,7 @@ order, and which the instrument is using for the state the file holds.
 
 drawbar's notes are outside these tiers, because `nord-format` does not read
 them. drawbar treats a file it cannot decode as a note when its bytes are UTF-8
-text. A file that begins with the magic of a format `nord-format` decodes, or
+text of up to 256 KiB. A file that begins with the magic of a format `nord-format` decodes, or
 whose extension names one, is never a note, so one that fails to decode keeps
 its error. An empty file is a note only when it is a `.txt`. What a user sees is
 under [Notes](../drawbar/editing.md#notes).

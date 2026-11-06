@@ -304,8 +304,7 @@ fn label_of(workspace: &Workspace, id: u64) -> Option<String> {
 /// Why the instrument would refuse the second of two queued writes of one name.
 fn waiting(class: ObjectClass, other: Location) -> String {
     format!(
-        "Something waiting for {} has the same name, and the instrument keeps one of each \
-         name. Rename one of them.",
+        "Something waiting for {} has the same name.",
         place(class, other)
     )
 }

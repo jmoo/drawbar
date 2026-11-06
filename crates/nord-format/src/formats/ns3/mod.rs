@@ -17,10 +17,10 @@
 //!
 //! Community documentation reports a second checksum at file offset `0x78`
 //! ("covering synth and organ panel data"). Specimens contradict it: the word is no
-//! common CRC-32 over any range, stays put between programs whose bodies differ, and
-//! takes values many unrelated programs share. It holds bit-packed panel parameters
-//! (body offset `0x4c`), and nothing verifies it. Inferred from specimens; not
-//! confirmed on hardware.
+//! common CRC-32 over any range, stays put between near-identical programs whose
+//! bodies differ, and takes values many unrelated programs share, as bit-packed panel
+//! parameters (body offset `0x4c`) would. Nothing verifies it. Inferred from specimens;
+//! not confirmed on hardware.
 
 use super::raw::raw_format;
 

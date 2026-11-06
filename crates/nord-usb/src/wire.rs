@@ -868,8 +868,8 @@ pub enum ObjectClass {
     /// The global settings singleton. The Electro 5's is wire-addressed `0:0` and reports
     /// no body checksum (`0xffffffff`), like the library classes.
     ///
-    /// ⚠️ Writing it reloads the selected program, so unsaved panel changes are lost.
-    /// Confirmed on hardware.
+    /// ⚠️ Writing the Electro 5's reloads the selected program, so unsaved panel changes
+    /// are lost. Confirmed on hardware. Another model is assumed to do the same.
     Settings,
     /// The organ presets of a model that keeps them apart from its programs.
     OrganPreset,

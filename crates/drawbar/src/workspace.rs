@@ -5054,7 +5054,7 @@ mod tests {
         );
     }
 
-    /// It is decoded and checked off the frame.
+    /// What a previous session held is decoded and checked off the frame.
     #[test]
     fn a_restored_asset_keeps_what_it_was() {
         let ctx = egui::Context::default();
@@ -5645,7 +5645,8 @@ mod tests {
         assert_eq!(entity.saved.crc32(), slot_of(&piano));
     }
 
-    /// Bytes held in memory, or the file it rests in once that file's check has passed.
+    /// The slot it reached becomes its link, for bytes held in memory or for the file it
+    /// rests in once that file's check has passed.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn a_write_that_landed_saves_the_asset_as_what_it_sent() {
@@ -5679,7 +5680,7 @@ mod tests {
         assert_eq!(entity.wrote.map(|wrote| wrote.crc32), slot_of(&sample));
     }
 
-    /// The bytes held stay, now unsaved against it.
+    /// The bytes the asset holds stay, now unsaved against that file.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn a_send_of_a_file_that_landed_saves_the_asset_as_that_file() {
@@ -5706,7 +5707,8 @@ mod tests {
         assert!(entity.is_unsaved());
     }
 
-    /// The bytes, held once with the baseline, or the file it rests in, checked again.
+    /// A revert puts back the bytes, held once with the baseline, or the file the asset
+    /// rests in, checked again.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn a_revert_returns_to_what_the_asset_was_saved_as() {

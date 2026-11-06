@@ -1780,7 +1780,7 @@ mod tests {
         assert_eq!(names(&smallest), ["africa bass", "Africa Split"]);
     }
 
-    /// ⚠️ Treating it as `0:0` would file everything on this computer at the top of the
+    /// ⚠️ A row with no address treated as `0:0` would file everything on this computer at the top of the
     /// instrument's first bank.
     #[test]
     fn a_row_with_no_address_sorts_after_every_row_that_has_one() {
@@ -3153,7 +3153,7 @@ mod tests {
         assert_eq!(after.widths, [None; 8]);
     }
 
-    /// With both docks open and with none. Nothing checks pixels: this catches a layout
+    /// Paints with both docks open and with none. Nothing checks pixels: this catches a layout
     /// that panics or an id that collides.
     #[test]
     fn the_table_paints_at_every_width_the_center_has() {

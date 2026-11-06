@@ -2,7 +2,7 @@
 
 drawbar was developed against a Nord Electro 5, and that is where its claims have
 been tested. Files from other instruments are supported from documentation and
-sample files. Connecting other instruments over USB has not been tried.
+sample files. Of the other instruments, only a Stage 4 has been connected over USB.
 
 ## Files
 
@@ -15,6 +15,8 @@ sample files. Connecting other instruments over USB has not been tried.
 | Electro 5 bundles (`.ne5pbundle`, `.ne5tbundle`) | Import to a folder, export from this computer or the instrument. Only uncompressed bundles open, as Nord Sound Manager writes them | Nord Sound Manager opens the bundles drawbar writes and sends them to the instrument. Bundles made from the instrument match what nord-cli makes. A piano or sample built in drawbar has not yet gone to the instrument in a bundle |
 | Other Nord files | Recognized and kept byte for byte, without editing | |
 | Text files | Edit, keep beside your files | Never sent to an instrument |
+
+nord-cli's `bundle` commands handle the same Electro 5 bundles.
 
 ### Piano libraries
 
@@ -30,6 +32,7 @@ sample files. Connecting other instruments over USB has not been tried.
   and stereo, on their own keys and transposed ones, and fade at the rate their
   kind and `--loop-fade` set. Loops built by hand in the same layout sustain on a
   Stage 4.
+- A release plays at the level the note has fallen to at key-up.
 - An Electro 5 on OS 2.04 plays both formats, built by rules or against a 6.x
   template, with their velocity layers, trims, releases and loops.
 - The velocities drawbar gives for each layer are an Electro 5's.

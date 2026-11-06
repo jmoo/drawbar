@@ -32,7 +32,8 @@
 //! ⚠️ A record's fields are left-anchored: they start at the first bit after the
 //! header word, and the alignment tail ends the segment. Read from the far end, content
 //! records still decode, since their counts leave no tail, but every 1:1 record (the
-//! warmup and the resyncs) shifts by whole field slots or rotates inside its width.
+//! warmup and the resyncs) shifts by whole field slots, or rotates inside its width when the tail is not a
+//! multiple of it.
 //!
 //! For [`Layout::V2`], decoding both this crate's encodes and vendor content matches
 //! the Electro 5's playback of the same instrument, a transposed note plays as exact

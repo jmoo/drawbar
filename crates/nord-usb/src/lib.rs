@@ -25,7 +25,7 @@
 //! # Features
 //!
 //! - `nusb` (default): the desktop backend for macOS, Linux and Windows, in pure Rust.
-//! - `web`: the browser backend over WebUSB, which only Chrome, Edge and Brave offer.
+//! - `web`: the browser backend over WebUSB, as Chrome, Edge and Brave offer it.
 //!   Building it needs `--cfg=web_sys_unstable_apis`.
 //! - `replay`: drive the protocol from recorded exchanges, with no hardware.
 //! - `blocking`: `block_on`, for calling the async API from synchronous code.

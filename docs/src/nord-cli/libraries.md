@@ -13,7 +13,8 @@ nord sample project new --zone a.wav=C3 --zone b.wav=C4 --name Marimba -o marimb
 nord sample build marimba.nsmpproj -o marimba.nsmp   # render a Sample Editor project
 ```
 
-`encode` turns a single WAV into an instrument, and `build` renders a whole
+`decode` names each zone it cannot read and why, and ends with a count of what
+decoded. `encode` turns a single WAV into an instrument, and `build` renders a whole
 project, loops and stereo included. A project's relative audio paths resolve from
 the project's folder, with `/` or `\` between folders. `--generation 2`, `3` or
 `4` picks the layout, and v2 is the default. v3 and v4 also need `--unverified`,
