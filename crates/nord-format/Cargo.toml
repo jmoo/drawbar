@@ -7,7 +7,7 @@ rust-version.workspace = true
 keywords = ["clavia", "electro", "nord", "parser"]
 license.workspace = true
 repository.workspace = true
-version = "0.8.0"
+version = "0.8.1"
 
 [lib]
 name = "nord_format"
@@ -38,7 +38,8 @@ synthetic = []
 nord-bits-derive = { path = "../nord-bits-derive", version = "=0.6.0" }
 crcxx = "0.3.1"
 thiserror = "2"
-zip = { version = "2", optional = true, default-features = false, features = [
+# zip 2.6 added a type parameter to `ZipFile`, which this code names.
+zip = { version = ">=2, <2.6", optional = true, default-features = false, features = [
   "deflate",
 ] }
 
