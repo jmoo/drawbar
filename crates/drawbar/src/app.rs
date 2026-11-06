@@ -167,6 +167,7 @@ pub struct DrawbarApp {
     pub(crate) shell: Shell,
     pub(crate) tabs: Tabs,
     pub(crate) document: Document,
+    pub(crate) builds: crate::builds::Builds,
     pub(crate) log: Log,
     pub(crate) theme: ThemeChoice,
     pub(crate) zoom: Zoom,
@@ -295,6 +296,7 @@ impl DrawbarApp {
             shell: Shell::default(),
             tabs: Tabs::default(),
             document: Document::default(),
+            builds: crate::builds::Builds::default(),
             log: Log::default(),
             theme,
             zoom,
@@ -1189,7 +1191,12 @@ impl eframe::App for DrawbarApp {
         drop_hint(ctx);
         // Opened by choosing WAVs under New. It is drawn before anything else this frame
         // because it is a modal over the whole window.
-        if let Some(made) = crate::newproject::dialog(ctx, &mut self.workspace, &mut self.log) {
+        if let Some(made) = crate::newproject::dialog(
+            ctx,
+            &mut self.workspace,
+            &mut self.browser.folders,
+            &mut self.log,
+        ) {
             self.tabs.open(made);
         }
         let asked = self.splash.show(ctx, crate::splash::Usb::of(&self.device));
@@ -1264,6 +1271,13 @@ impl eframe::App for DrawbarApp {
             &mut self.device,
             &mut self.tabs,
             &mut self.queue,
+            &mut self.builds,
+            &mut self.log,
+        );
+        self.builds.poll(
+            &mut self.workspace,
+            &self.browser.folders,
+            &mut self.tabs,
             &mut self.log,
         );
         self.device
@@ -1371,6 +1385,8 @@ impl DrawbarApp {
             queue: &self.queue,
             tags: self.browser.tags(),
             played,
+            builds: &self.builds,
+            folders: &self.browser.folders,
         };
         let wants = self.document.ui(
             ui,
@@ -1392,6 +1408,9 @@ impl DrawbarApp {
         }
         if wants.keep {
             acts.push(browser::Act::Keep(id));
+        }
+        if wants.build {
+            acts.push(browser::Act::Build(id));
         }
         if let Some(item) = wants.open {
             acts.push(browser::Act::Open(item));

@@ -383,6 +383,19 @@ impl Content {
         }
     }
 
+    /// What a listing knows of a file `len` bytes long that nothing has read, by what its
+    /// name says it is ([`crate::browser::tagged`]). A WAV is what its name says, as if
+    /// remembered: its row draws nothing from its bytes, and it matches no slot.
+    fn listed(by_name: Option<(&'static str, crate::browser::Kind)>, len: u64) -> Content {
+        match by_name {
+            Some((_, crate::browser::Kind::Wav)) => Content::Remembered {
+                len,
+                summary: Box::new(Summary::wav()),
+            },
+            _ => Content::unread(len),
+        }
+    }
+
     /// What a listing found of a file `len` bytes long: the file left on disk where the
     /// store indexed it, its bytes where it read them, or nothing read. Given both, the
     /// file is taken and the bytes dropped.
@@ -736,9 +749,18 @@ impl LocalEntity {
         content: Content,
         stamp: u64,
     ) -> LocalEntity {
+        let held = LocalEntity::undecoded(id, name, origin, Bytes::default(), stamp);
+        let content = match content {
+            Content::Unread {
+                len,
+                failed: None,
+                slot_crc: None,
+            } => Content::listed(held.by_name, len),
+            content => content,
+        };
         LocalEntity {
             saved: Baseline::new(content, stamp),
-            ..LocalEntity::undecoded(id, name, origin, Bytes::default(), stamp)
+            ..held
         }
     }
 
@@ -1030,6 +1052,25 @@ impl LocalEntity {
         self.by_name
     }
 
+    /// Whether these are undecoded bytes of a WAV: named as one, or held in a RIFF/WAVE
+    /// container. One named as a WAV is one whatever it holds, so its document can say
+    /// why it does not read.
+    pub fn is_wav(&self) -> bool {
+        let named = matches!(self.by_name, Some((_, crate::browser::Kind::Wav)));
+        self.entity.is_none() && (named || crate::document::wav::is_wav(&self.bytes))
+    }
+
+    /// Whether a selection reads it whole. A selection learns nothing from a WAV's bytes.
+    fn read_when_selected(&self) -> bool {
+        crate::browser::Kind::of(self) != crate::browser::Kind::Wav
+    }
+
+    /// Whether these bytes have no format to decode, so a parse error is no failure: a
+    /// note, or a WAV.
+    pub fn has_no_format(&self) -> bool {
+        self.is_text() || self.is_wav()
+    }
+
     /// Name it, and take what the new name says it is.
     fn set_name(&mut self, name: String) {
         self.by_name = crate::browser::tagged(&name);
@@ -1090,6 +1131,7 @@ impl LocalEntity {
         match (self.entity.as_deref(), &self.container) {
             (Some(entity), _) => Cow::Borrowed(entity.identity().format),
             (None, Some(container)) => Cow::Owned(container.tag()),
+            (None, None) if self.is_wav() => Cow::Borrowed(crate::document::wav::EXTENSION),
             (None, None) if self.is_text() => Cow::Borrowed(crate::document::text::EXTENSION),
             (None, None) => match (self.rests(), self.remembered()) {
                 (Some(file), _) => Cow::Borrowed(file.index.tag()),
@@ -1256,6 +1298,9 @@ fn format_tag(bytes: &[u8]) -> String {
     }
     if bytes.starts_with(nsmpproj::MAGIC) {
         return nsmpproj::FORMAT.to_string();
+    }
+    if crate::document::wav::is_wav(bytes) {
+        return crate::document::wav::EXTENSION.to_string();
     }
     if crate::document::text::is_text(bytes) {
         return crate::document::text::EXTENSION.to_string();
@@ -2324,8 +2369,9 @@ impl Workspace {
 
     /// These assets are selected, in place of those selected before: as
     /// [`Workspace::hurry`] while they stay selected, read after what is open or acted
-    /// on. One whose need was let go before its read, as when a read in the background
-    /// was refused for room, is asked for again.
+    /// on, but for a WAV, which only what opens or acts on it reads. One whose need was
+    /// let go before its read, as when a read in the background was refused for room, is
+    /// asked for again.
     pub fn select(&mut self, ids: impl IntoIterator<Item = u64>) {
         #[cfg(test)]
         self.selections.set(self.selections.get() + 1);
@@ -2342,6 +2388,7 @@ impl Workspace {
         };
         let remembered = matches!(entity.verify(), VerifyState::Remembered(_));
         let reads = entity.unread() && (entity.reading() || remembered);
+        let reads = reads && entity.read_when_selected();
         reads
             && !self.arriving.contains_key(&id)
             && !self.asked.contains(&id)
@@ -2368,7 +2415,11 @@ impl Workspace {
         if need == Need::Now {
             self.check_soon(id);
         }
-        let whole = need != Need::InView;
+        let whole = match need {
+            Need::InView => false,
+            Need::Selected => entity.read_when_selected(),
+            Need::Now => true,
+        };
         let remembered = matches!(entity.verify(), VerifyState::Remembered(_));
         if !entity.reading() && !(whole && remembered) {
             return;
@@ -2385,6 +2436,16 @@ impl Workspace {
         if held.is_none_or(|held| held < need) {
             wanted.insert(id, need);
             self.ctx.request_repaint();
+        }
+    }
+
+    /// Let go of the reads of `ids` wanted and not asked of the library yet, which what
+    /// wanted them needs no more. A need renewed each frame, as an open document's, asks
+    /// again. ⚠️ One asked for once, as restoring a kept draft's, is let go with them.
+    pub fn unwant(&self, ids: impl IntoIterator<Item = u64>) {
+        let mut wanted = self.wanted.borrow_mut();
+        for id in ids {
+            wanted.remove(&id);
         }
     }
 
@@ -2613,7 +2674,7 @@ impl Workspace {
         };
         let forgot = match &mut entity.saved.content {
             Content::Remembered { len, .. } => {
-                entity.saved.content = Content::unread(*len);
+                entity.saved.content = Content::listed(entity.by_name, *len);
                 true
             }
             Content::Unread { slot_crc, .. } => slot_crc.take().is_some(),
@@ -2720,8 +2781,11 @@ impl Workspace {
             return;
         }
         entity.decoded(decoded);
-        // A note has no format to decode, so a parse error on text is not a failure.
-        if let Some(e) = entity.parse_error.as_ref().filter(|_| !entity.is_text()) {
+        if let Some(e) = entity
+            .parse_error
+            .as_ref()
+            .filter(|_| !entity.has_no_format())
+        {
             log.warn(format!("{}: {e}", entity.name));
         }
         self.revision += 1;
@@ -2782,11 +2846,13 @@ impl Workspace {
         self.next_id += 1;
         let entity = LocalEntity::new(id, name, origin, bytes.into(), self.stamp());
         let arrival = match (&entity.parse_error, entity.verify()) {
-            // A note has no format to decode, so a parse error on text is not a
-            // failure.
-            (Some(_), _) if entity.is_text() => {
+            (Some(_), _) if entity.has_no_format() => {
+                let what = match entity.is_text() {
+                    true => "text",
+                    false => "WAV",
+                };
                 log.info(format!(
-                    "{}: text ({} bytes)",
+                    "{}: {what} ({} bytes)",
                     entity.name,
                     entity.bytes.len()
                 ));
@@ -3703,8 +3769,8 @@ impl Workspace {
         let Some(verify) = self.respell(id, bytes.into()) else {
             return;
         };
-        let note = self.get(id).is_some_and(|held| held.is_text());
-        if note || matches!(verify, VerifyState::Ok) {
+        let formatless = self.get(id).is_some_and(LocalEntity::has_no_format);
+        if formatless || matches!(verify, VerifyState::Ok) {
             return;
         }
         log.warn(format!(
@@ -3921,7 +3987,11 @@ impl Workspace {
                 }
             };
             let entity = LocalEntity { path, ..entity };
-            if let Some(e) = entity.parse_error.as_ref().filter(|_| !entity.is_text()) {
+            if let Some(e) = entity
+                .parse_error
+                .as_ref()
+                .filter(|_| !entity.has_no_format())
+            {
                 log.warn(format!("{}: {e}", entity.name));
             }
             self.next_id = self.next_id.max(next);

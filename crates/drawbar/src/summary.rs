@@ -5,6 +5,7 @@
 //! ([`crate::workspace::Workspace::evict`]).
 
 use nord_format::fields::Library;
+use nord_format::formats::nsmpproj::build::AudioPath;
 use nord_format::Entity;
 use nord_usb::ObjectClass;
 
@@ -60,6 +61,20 @@ impl Summary {
                 _ => Vec::new(),
             },
         })
+    }
+
+    /// What a WAV's name says of it: no slot checksum, nothing it plays, and no check that
+    /// applies.
+    pub fn wav() -> Summary {
+        Summary {
+            kind: Kind::Wav,
+            tag: crate::document::wav::EXTENSION.to_string(),
+            crc32: None,
+            plays: None,
+            verdict: Verdict::NotApplicable,
+            generation: None,
+            wavs: Vec::new(),
+        }
     }
 }
 
@@ -139,24 +154,10 @@ fn slashed(path: &str) -> String {
     path.replace('\\', "/")
 }
 
-/// The file a project in `dir` means by `named`: a path relative to its folder, `..`
-/// and `.` resolved. `None` for an absolute path, or one that leaves the library.
+/// The file a project in `dir` means by `named`: a path relative to its folder, read as
+/// [`AudioPath`] reads it. `None` for an absolute path, or one that leaves the library.
 pub fn resolve(dir: &LibPath, named: &str) -> Option<LibPath> {
-    let named = slashed(named);
-    if named.starts_with('/') || named.split('/').next()?.contains(':') {
-        return None;
-    }
-    let mut parts: Vec<&str> = dir.components().collect();
-    for part in named.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                parts.pop()?;
-            }
-            part => parts.push(part),
-        }
-    }
-    LibPath::parse(&parts.join("/")).filter(|path| !path.is_root())
+    LibPath::parse(&AudioPath::parse(named).within(dir.components())?.join("/"))
 }
 
 #[cfg(test)]

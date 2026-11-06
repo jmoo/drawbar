@@ -14,9 +14,10 @@ nord sample build marimba.nsmpproj -o marimba.nsmp   # render a Sample Editor pr
 ```
 
 `encode` turns a single WAV into an instrument, and `build` renders a whole
-project, loops and stereo included. `--generation 2`, `3` or `4` picks the
-layout, and v2 is the default. v3 and v4 also need `--unverified`, because they
-have not been played on an instrument.
+project, loops and stereo included. A project's relative audio paths resolve from
+the project's folder, with `/` or `\` between folders. `--generation 2`, `3` or
+`4` picks the layout, and v2 is the default. v3 and v4 also need `--unverified`,
+because they have not been played on an instrument.
 
 Both take 16-bit PCM WAVs at 44.1 kHz, mono or stereo, in the plain or the
 extensible WAV format. Convert anything else first.

@@ -5,6 +5,7 @@ use nord_usb::{Location, ObjectClass};
 
 use super::drag::{Item, Kind};
 use super::Browser;
+use crate::builds::Builds;
 use crate::device::{
     fit, read_only, write_warning, Device, DeviceCmd, DeviceState, Fetched, Fit, Outgoing, Payload,
     Purpose,
@@ -92,6 +93,9 @@ pub enum Act {
         id: u64,
         bytes: Vec<u8>,
     },
+    /// Build the Sample Editor project `id`, as it is now, into the instrument it
+    /// describes, filed beside it; see [`crate::builds`].
+    Build(u64),
     /// Let go of an asset whose file is gone, with the tags the library kept for it.
     Forget(u64),
     NewFolder,
@@ -310,6 +314,7 @@ impl Act {
             | Act::Restore { id, .. } => vec![*id],
             Act::Keep(id)
             | Act::KeepBoth(id)
+            | Act::Build(id)
             | Act::Send { id, .. }
             | Act::Retarget { id, .. }
             | Act::Replace { id, .. }
@@ -586,7 +591,7 @@ enum Ready {
 }
 
 /// Whether every asset `act` reads has been read. One not read yet is asked for, and the
-/// act waits for it.
+/// act waits for it. One whose read failed refuses the act.
 fn ready(act: &Act, workspace: &mut Workspace) -> Ready {
     let mut later = false;
     for id in act.reads() {
@@ -615,8 +620,13 @@ pub fn apply(
     device: &mut Device,
     tabs: &mut Tabs,
     queue: &mut Queue,
+    builds: &mut Builds,
     log: &mut Log,
 ) {
+    // An act asked for now asks again for what an earlier read could not read.
+    for id in acts.iter().flat_map(Act::reads) {
+        workspace.retry(id);
+    }
     let mut held = std::mem::take(&mut browser.held);
     held.extend(acts);
     for act in held {
@@ -674,6 +684,7 @@ pub fn apply(
                 None => log.say("That folder is gone, so nothing moved."),
             },
             Act::KeepBoth(id) => keep_both(browser, workspace, log, id),
+            Act::Build(id) => builds.start(id, workspace, &browser.folders, log),
             Act::Forget(id) => browser.tags.forget(id),
             Act::NewFolder => new_folder(browser, workspace, None),
             Act::NewFolderIn(parent) => new_folder(browser, workspace, Some(parent)),
@@ -975,12 +986,9 @@ fn ambiguous(held: &[(String, Occupant)], dir: &LibPath) -> String {
     }
 }
 
-/// Whether a file from outside may come in: one drawbar opens, a bundle it unpacks, or a
-/// WAV it encodes.
+/// Whether a file from outside may come in: one drawbar opens, or a bundle it unpacks.
 pub fn comes_in(name: &str) -> bool {
-    crate::store::opens(name)
-        || crate::bundle::is_bundle(name)
-        || crate::newproject::is_wav_name(name)
+    crate::store::opens(name) || crate::bundle::is_bundle(name)
 }
 
 /// Say that the files `names` were not taken in, since drawbar does not open them.
@@ -3732,12 +3740,17 @@ mod tests {
     #[test]
     fn a_rename_onto_a_hidden_files_name_says_it_is_hidden_and_offers_only_keep_both() {
         let mut bench = Bench::new();
-        bench.act(vec![Act::Import {
-            name: "cello.wav".into(),
-            bytes: crate::testing::wav_bytes(),
-        }]);
-        let id = bench.workspace.listed().next().expect("the WAV").id;
-        bench.browser.folders.others = vec![LibPath::parse("notes.wav").unwrap()];
+        let unknown = vec![0xA5; 64];
+        let id = bench
+            .workspace
+            .ingest("scan".into(), Origin::Fresh, unknown, &mut bench.log);
+        let filed = crate::workspace::library_filename(bench.workspace.get(id).unwrap());
+        assert_eq!(
+            filed, "scan.bin",
+            "bytes of no format are filed as a hidden file"
+        );
+        bench.workspace.place(id, LibPath::root().join(&filed));
+        bench.browser.folders.others = vec![LibPath::parse("notes.bin").unwrap()];
 
         bench.act(vec![Act::RenameLocal {
             id,
@@ -3746,7 +3759,7 @@ mod tests {
         let (title, answers) = bench.browser.asking().expect("a question");
         assert_eq!(
             title,
-            "A hidden file is already named “notes.wav” in the top level of the library"
+            "A hidden file is already named “notes.bin” in the top level of the library"
         );
         assert_eq!(answers, ["Cancel", "Keep both"]);
     }

@@ -307,6 +307,13 @@ After the listing, files with tags or a slot they came off are also read in the
 background, so they match their slots on the instrument before anything shows
 them.
 
+A WAV is known from its name alone: its row needs nothing from its contents,
+and it never matches a slot. So drawbar reads one only when it is opened, acted
+on or built from, never for its row, a selection or the background. toshokan
+reads a WAV whole for its identity when it is first tagged. When a tagged file
+has gone missing, toshokan reads every file of the same length whose identity
+it does not know yet, to find where it moved.
+
 A piano library or sample instrument is never held whole. It rests in its file,
 indexed and read by range ([Large libraries](file-formats.md#large-libraries)).
 Its checksum is checked in one streaming pass once something needs the verdict,
@@ -317,4 +324,6 @@ counts for nothing. When a read would not fit, drawbar lets go of clean assets,
 least recently needed first. An asset let go of keeps a summary of its read, so
 its row still draws as it did and still matches its slot. A view, an unsaved
 asset, and one open, selected or waiting to be sent are never let go of. A read
-that cannot fit even then is tried again once room can be made.
+that cannot fit even then is tried again once room can be made, except a WAV's.
+Any asset whose read failed is read again when it is next opened or acted on,
+and a WAV also when a project that plays it is built.

@@ -3234,7 +3234,7 @@ mod tests {
         );
         fs::create_dir(root.at("More")).unwrap();
         for i in 0..2300 {
-            fs::write(root.at(&format!("More/{i:04}.wav")), b"wave").unwrap();
+            fs::write(root.at(&format!("More/{i:04}.pdf")), b"%PDF").unwrap();
         }
         let listed = keeper.run_one(Cmd::Rescan);
         let [Event::Scanned(Ok(viewed))] = &listed[..] else {
