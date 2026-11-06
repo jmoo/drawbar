@@ -338,7 +338,7 @@ impl Report {
             ui.label(
                 egui::RichText::new(
                     "Reports go only to drawbar's developer, are never published, and are \
-                     deleted after three months. ",
+                     deleted after 90 days. ",
                 )
                 .small()
                 .weak(),
@@ -407,8 +407,7 @@ impl Report {
             }
             State::Refused(403) => "Only drawbar.app can send reports.".to_string(),
             State::Refused(429) => {
-                "drawbar has had too many reports just now. Please try again in a minute."
-                    .to_string()
+                "drawbar has had too many reports just now. Try again in a minute.".to_string()
             }
             State::Refused(status) => format!("The report was not accepted (error {status})."),
         }

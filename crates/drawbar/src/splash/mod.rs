@@ -2,13 +2,9 @@
 //! changed since the version last read.
 //!
 //! The notes are GitHub's release body for `drawbar-v<version>`, which
-//! `scripts/release.bash` writes in a fixed shape. [`classify`] reads that shape so the
-//! sheet can draw it without a Markdown parser. A line it does not recognize stays plain
-//! text.
-//!
-//! Both sheets are drawn here on every target, because Help opens the welcome on the
-//! desktop as well as in the browser. Only the browser opens a sheet unasked and fetches
-//! the notes.
+//! `scripts/release.bash` writes in a fixed shape; [`classify`] reads that shape without
+//! a Markdown parser, and a line it does not recognize stays plain text. Only the browser
+//! opens a sheet unasked and fetches the notes.
 
 use eframe::egui;
 
@@ -122,13 +118,13 @@ pub const SUPPORT: &[Row] = &[
             ),
             claim(
                 Mark::Yes,
-                "Transfers from macOS, Linux and the browser. Windows builds have not \
-                 been run against an instrument",
+                "Transfers from macOS, Linux and the browser. Nothing has been written \
+                 from Windows",
             ),
             claim(Mark::Yes, "Tested on an Electro 5"),
         ],
-        note: "Tested on an Electro 5 from macOS, Linux and the browser. Windows builds \
-               have not been run against an instrument.",
+        note: "Tested on an Electro 5 from macOS, Linux and the browser. Nothing has \
+               been written from Windows.",
     },
     Row {
         instrument: "Piano and sample files",
@@ -158,7 +154,7 @@ pub const SUPPORT: &[Row] = &[
             claim(Mark::Yes, "Edits programs, live slots and presets"),
             claim(
                 Mark::No,
-                "No Stage has been connected, so USB support cannot be guaranteed",
+                "A Stage 4 has connected, but no file has been read from it or written to it",
             ),
             claim(Mark::No, "Not tested on an instrument"),
         ],

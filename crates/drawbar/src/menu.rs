@@ -185,10 +185,9 @@ fn hint(command: Command) -> Option<&'static str> {
 /// defaults, and the two instrument files built from audio. Below it are files only this
 /// computer keeps: a note, a Sample Editor project, and a folder.
 ///
-/// ⚠️ One menu, used everywhere. The tree's context menu, the File menu, the top bar and
-/// the tab row all offer "New", and four different menus of one name would be four
-/// things to learn. Connecting an instrument makes nothing on this computer, so it is on
-/// the top bar's pill and in Instrument ▸ Connect… instead.
+/// ⚠️ One menu wherever "New" is offered: the tree's context menu, the File menu, the top
+/// bar and the tab row. Connecting an instrument makes nothing on this computer, so it is
+/// on the top bar's pill and in Instrument ▸ Connect… instead.
 pub fn new_menu(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     drop_down_style(ui);
     new_lines(ui, &new_entries(), acts);
@@ -1036,7 +1035,7 @@ fn item_button(ui: &mut egui::Ui, offer: &Offer, keys: Option<String>) -> bool {
 ///
 /// ⚠️ A check at the left, not a selected button or a `selectable_label`: both fill the
 /// row with `selection.bg_fill`, the instrument's red, which reads as a warning in a menu
-/// of ordinary items. **Every** checkable menu item in the app uses this or `check`.
+/// of ordinary items. Every checkable menu item in the app uses this or `check`.
 pub fn marked(ui: &mut egui::Ui, label: &str, on: bool) -> bool {
     let clicked = ui.add(check(ui, label, on)).clicked();
     if clicked {

@@ -1,18 +1,13 @@
 //! New → a Sample Editor project, a sample instrument, or a piano library: some WAVs,
 //! the key each was recorded at, and the `.nsmpproj`, `.nsmp`, or `.npno` made from them.
 //!
-//! The first two imitate the Sample Editor's *Import Auto…*: one zone per file, ordered
-//! by root key, with key ranges derived from the roots. Beyond the audio, either format
-//! needs only the root key, and the filename is the only source of a guess at one. The
-//! dialog lets the user correct that guess before anything is made.
+//! A project or an instrument gets one zone per file, ordered by root key, with key
+//! ranges derived from the roots, as the Sample Editor's *Import Auto…* does. A piano
+//! library also needs a bank and a velocity layer per file, and builds in the background.
 //!
-//! A piano library needs more per file (a bank and a velocity layer as well as a root),
-//! and encoding it takes long enough that the build runs in the background.
-//!
-//! ⚠️ A project holds **paths, not audio**. A new one goes in a folder of its own with a
-//! copy of each WAV it plays beside it, each named by a bare leaf, so Build and the
-//! Sample Editor find them. An instrument and a library hold the audio itself, so the
-//! encoder's limits on what a WAV may be apply to them.
+//! ⚠️ A project holds paths, not audio. A new one goes in a folder of its own with a copy
+//! of each WAV it plays beside it, each named by a bare leaf, so Build and the Sample
+//! Editor find them.
 
 use eframe::egui;
 use nord_format::formats::npno::encode::{
@@ -227,7 +222,7 @@ pub struct Draft {
 
 /// The key each file is assumed to have been recorded at.
 ///
-/// The note name at the end of each filename, if **every** file carries a distinct one.
+/// The note name at the end of each filename, if every file carries a distinct one.
 /// If any file lacks one or two share one, no name is trusted. Otherwise a chromatic run
 /// from middle C, moved down if it would not fit under the highest key a project maps.
 pub fn default_roots(paths: &[String]) -> Vec<u8> {

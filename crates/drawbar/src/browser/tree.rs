@@ -1271,9 +1271,8 @@ impl Browser {
     /// The menu of a row that stands for a set of assets: the bulk actions on the set,
     /// then the row's own items.
     ///
-    /// One builder for the folder, tag, kind, place and class rows. They differ in which
-    /// assets they stand for and in their own items. Otherwise they offer the same
-    /// actions, disabled for the same reasons and labeled the same way.
+    /// One builder for the folder, tag, kind, place and class rows, so they offer the
+    /// same actions, disabled for the same reasons and labeled the same way.
     fn set_menu(
         &mut self,
         ui: &mut egui::Ui,
@@ -1553,10 +1552,9 @@ impl Browser {
 
     /// One bank, as a branch over its slots.
     ///
-    /// ⚠️ A bank is a container only in the browser. The instrument has no folders inside
-    /// a class, only a bank and slot number per location, but four hundred rows in one
-    /// run cannot be navigated, so the list is split by bank. A bank the device named
-    /// shows its name; for pianos, those names are the panel's categories.
+    /// ⚠️ A bank is a container only in the browser: the instrument has a bank and slot
+    /// number per location, and no folders inside a class. A bank the device named shows
+    /// its name; for pianos, those names are the panel's categories.
     fn bank_row(&mut self, ui: &mut egui::Ui, device: &Device, class: ObjectClass, bank: u32) {
         let Some(slots) = device.state.bank(class, bank) else {
             return;

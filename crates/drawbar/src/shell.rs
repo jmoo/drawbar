@@ -1,12 +1,9 @@
 //! The shell: the top bar, the status line, and the cards between them.
 //!
-//! The window is the canvas. The top bar and the status line sit on it with no fill of
-//! their own, and the browser, the document, and the inspector are rounded cards on it,
-//! [`GUTTER`] apart and [`GUTTER`] in from the window's edges. A hidden side panel takes
-//! no room at all. Each side card resizes by dragging its edge facing the center, between
-//! its minimum width and whatever leaves the center `CENTER_WIDE` wide.
-//!
-//! The top bar is the one place the platforms differ; see [`crate::platform`].
+//! The browser, the document, and the inspector are rounded cards on the window,
+//! [`GUTTER`] apart and [`GUTTER`] in from its edges. Each side card resizes by dragging
+//! its edge facing the center, leaving the center at least `CENTER_WIDE` wide. The top
+//! bar is the one place the platforms differ; see [`crate::platform`].
 
 use eframe::egui;
 
@@ -40,9 +37,8 @@ const CENTER_TALL: f32 = 280.0;
 /// The smallest screen the shell lays out in: both side cards at their minimum widths,
 /// around a center that still keeps `CENTER_WIDE` by `CENTER_TALL` under its tabs.
 ///
-/// A browser tab can be any size, and a native window at its minimum size is too small at
-/// a large zoom, so either may show [`too_small_notice`] instead of a shell that cannot
-/// fit.
+/// A browser tab, or a native window at a large zoom, may be smaller, and then shows
+/// [`too_small_notice`].
 pub const LEAST: egui::Vec2 = egui::vec2(
     SIDE_LEAST + CENTER_WIDE + SIDE_LEAST + 4.0 * GUTTER,
     Platform::Web.top_bar() + STATUS + crate::tabs::HEIGHT + CENTER_TALL + GUTTER,
@@ -50,9 +46,7 @@ pub const LEAST: egui::Vec2 = egui::vec2(
 
 /// What that notice says, and what `index.html` says before the module has loaded.
 const TOO_SMALL: &str = "drawbar needs a larger screen";
-const TOO_SMALL_WHY: &str = "It is a desktop application: its panels need more room \
-                             than a phone or a narrow window has. Open it on a larger \
-                             screen, or make this window wider.";
+const TOO_SMALL_WHY: &str = "Open it on a larger screen, or make this window wider.";
 
 /// The search box: its height, its narrowest and widest, and the space between it and
 /// the bar's sides.
@@ -444,7 +438,7 @@ fn midi_reading(
         State::Failed(_) => Some((
             "MIDI failed".to_string(),
             crate::app::bad(visuals),
-            "drawbar could not listen to MIDI controllers. The activity log says why.".to_string(),
+            "drawbar could not listen to MIDI controllers.".to_string(),
         )),
         State::On { ports, refused } => Some(listening(ports, refused, visuals)),
     }
@@ -467,7 +461,7 @@ fn listening(
         (true, _) | (false, false) => warn(visuals),
     };
     let heard = match ports.is_empty() {
-        true => "No MIDI input is open. Plug in a controller to start playing.".to_string(),
+        true => "No MIDI input is open.".to_string(),
         false => format!("Listening to {}.", ports.join(", ")),
     };
     let busy = match refused.is_empty() {

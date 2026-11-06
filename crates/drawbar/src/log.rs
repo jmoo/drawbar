@@ -1,10 +1,9 @@
 //! The activity log: a bounded record of what the app did, oldest dropped first, and
 //! the plain-language line the status strip shows above it.
 //!
-//! The two are written separately. The log keeps protocol detail (slot numbers, byte
-//! counts, device status codes), and the status line keeps a sentence about sounds and
-//! places. [`Log::say`] and [`Log::trouble`] write both. The whole log opens in a popover
-//! over the status line.
+//! The log keeps protocol detail (slot numbers, byte counts, device status codes), and
+//! the status line a sentence about sounds and places. [`Log::say`] and [`Log::trouble`]
+//! write both.
 
 use std::collections::VecDeque;
 
@@ -231,7 +230,7 @@ impl Log {
             }
             if bar
                 .add(button(Glyph::Copy))
-                .on_hover_text("Copy the whole log, to attach it to a report")
+                .on_hover_text("Copy the whole log")
                 .clicked()
             {
                 bar.ctx().copy_text(self.transcript());
