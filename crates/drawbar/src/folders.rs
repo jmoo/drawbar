@@ -70,7 +70,7 @@ pub struct Where {
     pub kept: String,
     /// A URL that shows the folder in the system's file manager.
     pub reveal: Option<String>,
-    /// What state it is in, when that is not simply open.
+    /// What state it is in, where it is not open as usual.
     pub note: Option<String>,
     /// Nothing may be written to it, so a change to it is held in memory only.
     pub read_only: bool,

@@ -554,8 +554,6 @@ mod tests {
         }
     }
 
-    /// The index takes only the bytes around its own reads, never the audio between
-    /// them.
     #[test]
     fn a_piano_index_over_slices_fetches_its_directory_and_no_audio() {
         use nord_format::formats::npno::synthetic::{take, Build};
@@ -589,8 +587,6 @@ mod tests {
         );
     }
 
-    /// A sample's strokes sit one after another through its audio, and the index reads
-    /// a few bytes at each: it fetches about those, not the audio between them.
     #[test]
     fn a_sample_index_over_slices_fetches_its_strokes_openings_and_little_audio() {
         use nord_format::formats::nsmp::{codec, encode};
@@ -669,8 +665,6 @@ mod tests {
         assert!(slices.hold(0..10, vec![0; 9]).is_err(), "short");
     }
 
-    /// Whether a resting file holds some bytes is known only once its check has taken
-    /// its CRC, off the frame: asking before takes none.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_resting_file_holds_bytes_only_once_its_check_has_taken_its_crc() {

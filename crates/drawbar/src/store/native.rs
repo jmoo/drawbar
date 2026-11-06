@@ -477,10 +477,9 @@ fn stat(meta: &fs::Metadata) -> Stat {
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
     #[cfg(unix)]
     File::open(dir)?.sync_all()?;
-    // Windows opens a folder only for backup semantics, and flushes only through a
-    // handle that may write. Where a volume refuses to flush a folder, the flush of
-    // the file put in it flushes the volume's log through its new entry. Reported by
-    // public documentation; not confirmed on hardware.
+    // Public documentation, not tested: Windows opens a folder only with backup semantics
+    // and flushes it only through a handle that may write; where a volume refuses,
+    // flushing the new file flushes the volume's log with its entry.
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;

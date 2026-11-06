@@ -1,14 +1,10 @@
 //! "This computer", kept as a folder of real files: a folder in the browser is a
 //! directory, an asset is a file, and a move is a rename. toshokan keeps what a file
-//! cannot say, such as its tags, in `.drawbar/library/` at the root
-//! (`docs/src/reference/data-model.md`).
+//! cannot say, such as its tags, in `.drawbar/library/` at the root.
 //!
-//! The app sends a backend [`Cmd`]s and hears back [`Event`]s, in order, and never waits
-//! for one: the desktop runs them on a thread, and a browser's storage answers only
-//! asynchronously. Every change the user makes to the files or the facts is an
-//! [`Intent`]. [`Store`] turns what the user asked of the [`crate::workspace::Workspace`]
-//! into intents, and projects the library's view onto the workspace and the browser's
-//! tags.
+//! The app sends a backend [`Cmd`]s and hears back [`Event`]s in order, never waiting on
+//! one. [`Store`] turns what the user asks of the [`crate::workspace::Workspace`] into
+//! [`Intent`]s, and projects the library's view onto the workspace and the browser's tags.
 
 mod copy;
 mod counted;
@@ -1283,6 +1279,5 @@ const REWRITE: Codes = Codes {
     io: "rewrite-io",
 };
 
-// The tests run the desktop's backend over folders on disk.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;

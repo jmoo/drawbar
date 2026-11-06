@@ -27,7 +27,7 @@ use crate::workspace::{LocalEntity, Workspace};
 
 /// Which of the two places a row's contents are in.
 ///
-/// ⚠️ `Both` is a **link**: a slot [`crate::device::link`] matched this asset to. Its
+/// ⚠️ `Both` is a link: a slot [`crate::device::link`] matched this asset to. Its
 /// value says whether the two still agree. Saving an edit here turns it to `false`, and
 /// the link stays where it was.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -117,7 +117,7 @@ impl Where {
 /// The library (piano or sample) a row plays, which the row's bytes do not name.
 ///
 /// ⚠️ A name can only come from the instrument, because a program file stores a bare id
-/// and no name. `Wanted` is an id **nothing has resolved**, never one the instrument said
+/// and no name. `Wanted` is an id nothing has resolved, never one the instrument said
 /// it did not hold. No read this app makes reports a missing library.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Needs {
@@ -196,8 +196,8 @@ impl Row {
 /// Everything the library holds, narrowed by kind, place, and tags.
 ///
 /// The list on this computer comes first. A slot one of its assets came off is shown in
-/// that asset's row, not as a second row: a program read off 7:4 and kept is one thing in
-/// two places, which is what [`Where::Both`] says.
+/// that asset's row: a program read off 7:4 and kept is one thing in two places, a
+/// [`Where::Both`].
 pub fn rows(
     workspace: &Workspace,
     device: &DeviceState,
@@ -269,10 +269,8 @@ pub fn state(item: Item, where_: Where, queue: &Queue) -> Option<State> {
     }
 }
 
-/// The row for one item, for a caller that needs one item and not the whole table.
-///
-/// Uses the same two builders as [`rows`], so the inspector shows what the table shows.
-/// A folder or a tag is a grouping and makes no row.
+/// The row for one item, built as [`rows`] builds it, so the inspector shows what the
+/// table shows. A folder or a tag makes no row.
 pub fn row_of(
     item: Item,
     workspace: &Workspace,
@@ -431,10 +429,7 @@ pub fn mark_ink(mark: Mark, visuals: &egui::Visuals) -> egui::Color32 {
     }
 }
 
-/// What a mark means, in words.
-///
-/// The tree dot's hover, the table's Where cell's hover, and the document header's hint
-/// all use these words, so every mark in the window is explained the same way.
+/// What a mark means, in words, wherever a hover or hint explains one.
 pub fn mark_words(mark: Mark) -> &'static str {
     match mark {
         Mark::Agrees => "on the keyboard, the same as saved here",
@@ -1401,10 +1396,8 @@ fn where_look(
 
 /// One row of the table.
 ///
-/// ⚠️ Nothing inside is a widget, for the reason [`crate::browser::Cells`] gives: a label
-/// allocates a hover rect that wins the hit test over the row, so a click would land on
-/// whichever word is under the pointer. Only the row senses input, and the tooltip comes
-/// from the cell under the pointer.
+/// ⚠️ Nothing inside is a widget: a label allocates a hover rect that wins the hit test
+/// over the row, so a click would land on whichever word is under the pointer.
 #[allow(clippy::too_many_arguments)]
 fn paint(
     ui: &mut egui::Ui,
@@ -1645,8 +1638,6 @@ mod tests {
         }
     }
 
-    /// ⚠️ Every track shrinks and none goes negative. With the room, every column has
-    /// some.
     #[test]
     fn the_columns_share_the_width_without_overlapping_or_overflowing_it() {
         for width in [430.0_f32, 900.0] {
@@ -1674,8 +1665,7 @@ mod tests {
         }
     }
 
-    /// A narrow table hides its secondary columns, in turn, before the name gets narrower
-    /// than [`NAME_LEAST`]: programs are told apart by their names.
+    /// Programs are told apart by their names.
     #[test]
     fn a_narrow_table_hides_secondary_columns_before_the_name_shrinks() {
         let mut hidden_before = Vec::new();
@@ -1703,8 +1693,6 @@ mod tests {
         }
     }
 
-    /// ⚠️ The kind column gets at most 120 px, and the name must stay readable when the
-    /// center is narrow: programs are told apart by their names.
     #[test]
     fn the_kind_reaches_120_px_when_wide_and_yields_to_the_name_when_narrow() {
         let width_of = |tracks: &[Range<f32>; 8], column: Column| {
@@ -1741,8 +1729,6 @@ mod tests {
         }
     }
 
-    /// A width too small for the fixed columns still lays out: every track shrinks, and
-    /// none runs past the edge or turns negative.
     #[test]
     fn a_width_below_the_fixed_columns_shrinks_every_track_instead_of_going_negative() {
         for width in [0.0_f32, 40.0, 120.0] {
@@ -1788,15 +1774,14 @@ mod tests {
         assert_eq!(names(&found), ["africa bass", "Africa Split"]);
         assert!(arrange(held(), "nothing at all", Column::Name, Order::Up).is_empty());
 
-        // The sort orders what the search left, in either direction.
         let biggest = arrange(held(), "africa", Column::Size, Order::Down);
         assert_eq!(names(&biggest), ["Africa Split", "africa bass"]);
         let smallest = arrange(held(), "africa", Column::Size, Order::Up);
         assert_eq!(names(&smallest), ["africa bass", "Africa Split"]);
     }
 
-    /// ⚠️ A row with no address sorts after every row that has one. Treating it as `0:0`
-    /// would file everything on this computer at the top of the instrument's first bank.
+    /// ⚠️ Treating it as `0:0` would file everything on this computer at the top of the
+    /// instrument's first bank.
     #[test]
     fn a_row_with_no_address_sorts_after_every_row_that_has_one() {
         let rows = arrange(
@@ -1862,7 +1847,6 @@ mod tests {
                 .collect()
         };
         let mut filter = Filter::default();
-        // The slot the kept asset came off is that asset's row, not a second one.
         assert_eq!(
             names(&filter),
             ["Africa-Split.ne5p", "untitled.ne5l", "Squabble B", "Sunday"]
@@ -1871,14 +1855,12 @@ mod tests {
         filter.narrow(Narrow::Kind(Kind::Program));
         assert_eq!(names(&filter), ["Africa-Split.ne5p", "Squabble B"]);
 
-        // In both places, so either place admits it.
         filter.narrow(Narrow::Place(Place::Computer));
         assert_eq!(names(&filter), ["Africa-Split.ne5p"]);
         filter.narrow(Narrow::Place(Place::Computer));
         filter.narrow(Narrow::Place(Place::Keyboard));
         assert_eq!(names(&filter), ["Africa-Split.ne5p", "Squabble B"]);
 
-        // A tag narrows what the kind and the place left.
         filter.narrow(Narrow::Tag(sunday));
         assert_eq!(names(&filter), ["Africa-Split.ne5p"]);
     }
@@ -1917,7 +1899,6 @@ mod tests {
                 .find(|row| matches!(row.item, Item::Local(_)))
                 .map(|row| row.where_)
         };
-        // Nothing read: nothing is known about the other copy.
         device.relink(&mut workspace);
         assert_eq!(where_(&workspace, &device), Some(Where::Unread));
 
@@ -1925,8 +1906,7 @@ mod tests {
         device.relink(&mut workspace);
         assert_eq!(where_(&workspace, &device), Some(Where::Both(Some(true))));
 
-        // Edited here and not saved: the slot still holds what this was saved as, so the
-        // two places have not parted.
+        // Unsaved: the slot still holds what this was saved as.
         let (_, edited) =
             crate::fields::apply(&bytes, &[("center_panel.gain".into(), "96".into())])
                 .expect("the registry takes the set");
@@ -1934,7 +1914,6 @@ mod tests {
         device.relink(&mut workspace);
         assert_eq!(where_(&workspace, &device), Some(Where::Both(Some(true))));
 
-        // Saved: the link stays put and the sign turns over.
         workspace.mark_saved(id);
         device.relink(&mut workspace);
         assert_eq!(
@@ -1943,7 +1922,6 @@ mod tests {
         );
         assert_eq!(where_(&workspace, &device), Some(Where::Both(Some(false))));
 
-        // A slot the scan found vacant holds nothing to link to.
         device.pretend_bodies(ObjectClass::Program, 7, &[None]);
         device.relink(&mut workspace);
         assert_eq!(where_(&workspace, &device), Some(Where::Computer));
@@ -2262,9 +2240,8 @@ mod tests {
         );
     }
 
-    /// The state filter narrows the library to rows that need something. A write already
-    /// waiting moves its row from "differs" to "waiting", so one task is not counted
-    /// twice.
+    /// A write already waiting moves its row from "differs" to "waiting", so one task is
+    /// not counted twice.
     #[test]
     fn a_row_waiting_to_be_sent_is_not_also_one_that_differs() {
         use crate::filter::{Narrow, State};
@@ -2384,8 +2361,6 @@ mod tests {
         }
     }
 
-    /// A Where cell's hover says what the tree's dot for the row claims, as well as where
-    /// the row is.
     #[test]
     fn a_where_cell_says_what_the_trees_mark_claims() {
         let Bench {
@@ -2452,7 +2427,7 @@ mod tests {
             )
         );
 
-        // One of them is already in the queue, and the sentence says so.
+        // One of them is already in the queue.
         let id = workspace.create(Fresh::Program, &mut log).unwrap();
         going[3].item = Item::Local(id);
         crate::queue::enqueue(
@@ -2552,8 +2527,6 @@ mod tests {
         );
     }
 
-    /// A tag narrowing the library shows as a chip in the header, and a click on the chip
-    /// stops narrowing by it.
     #[test]
     fn a_click_on_a_tag_chip_turns_its_filter_off() {
         let mut bench = Bench::new();
@@ -2627,7 +2600,6 @@ mod tests {
         let mark = |workspace: &Workspace, device: &Device, queue: &Queue, id: u64| {
             keyboard_mark(workspace.get(id).unwrap(), &device.state, queue)
         };
-        // Nothing scanned: no row has a mark.
         assert_eq!(mark(&workspace, &device, &queue, same), None);
 
         device.pretend_bodies(
@@ -2662,7 +2634,6 @@ mod tests {
         assert_eq!(mark(&workspace, &device, &queue, waiting), Some(warn));
     }
 
-    /// An asset holding an edit nothing has saved says so where its name is written.
     #[test]
     fn an_unsaved_name_wears_a_star_in_the_table() {
         let Bench {
@@ -2701,7 +2672,6 @@ mod tests {
         assert!(said.contains(&"Africa Split*".to_string()), "{said:?}");
     }
 
-    /// The table asks for the files of the rows in view, and not of a row out of view.
     #[test]
     fn only_the_table_rows_in_view_are_asked_for() {
         let Bench {
@@ -3042,8 +3012,7 @@ mod tests {
             }))
         };
 
-        // The new folder opens its rename editor, and Escape closes it. The row is found
-        // in the table, right of the tree, and the folder in the tree.
+        // Escape closes the new folder's rename editor.
         frame(Vec::new());
         let said = frame(vec![testing::key(egui::Key::Escape)]);
         let found = |text: &str, in_tree: bool| {
@@ -3056,7 +3025,6 @@ mod tests {
                 .center()
         };
         let (from, onto) = (found("Africa Split", false), found("New folder", true));
-        // The pointer presses on the table's row, carries it over the folder, and lets go.
         for events in [
             vec![egui::Event::PointerMoved(from)],
             vec![testing::button(from, true)],
@@ -3185,9 +3153,8 @@ mod tests {
         assert_eq!(after.widths, [None; 8]);
     }
 
-    /// Paints the table headlessly at the center's width with both docks open and with
-    /// none, and picks a row at each. Nothing checks pixels:
-    /// this catches a layout that panics or an id that collides.
+    /// With both docks open and with none. Nothing checks pixels: this catches a layout
+    /// that panics or an id that collides.
     #[test]
     fn the_table_paints_at_every_width_the_center_has() {
         let mut bench = Bench::new();
@@ -3201,11 +3168,9 @@ mod tests {
         device.pretend_scanned(ObjectClass::Piano, 1, &["Royal Grand 3D"]);
         device.pretend_scanned(ObjectClass::SetList, 1, &["Sunday"]);
 
-        // Far enough in to land in the name column at either width.
         let on_a_row = on_row(0);
         let ctx = bench.ctx.clone();
         for width in [430.0_f32, 900.0] {
-            // The pointer moves, then presses, then the next frame has a row picked.
             let frames: [Vec<egui::Event>; 4] = [
                 Vec::new(),
                 vec![egui::Event::PointerMoved(on_a_row)],
