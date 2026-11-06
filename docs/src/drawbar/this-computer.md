@@ -330,8 +330,9 @@ bring back any you deleted.
   the one the sync brings.
 - **Missing.** The file was deleted outside drawbar, but it had tags or unsaved
   edits, or came from your keyboard. Save it to bring the file back, or delete
-  it. After a restart, a missing file with tags shows as lost, with its tags,
-  until you let it go.
+  it. A file another drawbar deleted goes with its tags unless you have unsaved
+  edits to it or it came from your keyboard. After a restart, a missing file
+  with tags shows as lost, with its tags, until you let it go.
 - **Two files that could each be one.** A tagged file was moved or copied
   outside drawbar, and now two files hold what it held, neither where it was.
   drawbar cannot tell which is the file, so it gives neither the tags, keeps

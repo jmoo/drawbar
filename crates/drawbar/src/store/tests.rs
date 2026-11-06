@@ -12,6 +12,9 @@ use crate::testing::{Bench, Temp};
 use crate::workspace::{Fresh, Origin, VerifyState};
 use nord_usb::{Location, ObjectClass};
 
+mod two_drawbars;
+mod walk;
+
 /// One run of the app over a library: the store, and the state it mirrors.
 struct Session {
     store: Store,
@@ -5345,6 +5348,28 @@ fn a_selection_deleted_together_is_one_undo_step() {
     session.undo();
     session.undo();
     assert_eq!(root.names(""), files, "two undos bring all three back");
+}
+
+#[test]
+fn a_tagged_file_deleted_again_by_redo_goes_without_being_kept_as_missing() {
+    let root = Temp::new();
+    fs::write(root.at("Strings.ne5p"), Fresh::Program.bytes().unwrap()).unwrap();
+    let mut session = Session::open(&root);
+    let file = session.named("Strings.ne5p");
+    session.tag(&[file], "Live");
+    session.bench.act(vec![crate::browser::Act::Remove(file)]);
+    session.sync();
+    session.undo();
+    session.redo();
+    assert_eq!(root.names(""), [".drawbar"]);
+    assert_eq!(session.bench.workspace.listed().count(), 0);
+    assert!(session.bench.browser.folders.missing.is_empty());
+    assert_eq!(
+        session.said("missing from the library folder"),
+        0,
+        "{}",
+        session.bench.log.transcript()
+    );
 }
 
 /// The segments of drawbar's history in the library folder, each with what it holds.

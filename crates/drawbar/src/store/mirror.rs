@@ -218,6 +218,8 @@ pub struct Store {
     /// Assets read again after an undo or redo changed their files, which take what the
     /// files hold now without a word.
     quietly: BTreeSet<u64>,
+    /// What the library's log says changed, as the view in hand reads it.
+    logged: Logged,
     /// The paths a change of drawbar's own names that its next change finishes.
     finishing: BTreeSet<LibPath>,
     /// Assets whose file waits for such a change, which take what it leaves.
@@ -375,6 +377,7 @@ impl Store {
             deleting_with: BTreeMap::new(),
             quiet: false,
             quietly: BTreeSet::new(),
+            logged: Logged::default(),
             finishing: BTreeSet::new(),
             awaiting: BTreeSet::new(),
             history: History::default(),
@@ -2277,6 +2280,7 @@ impl Store {
             changes,
             moves: _,
             followed,
+            theirs,
             unlisted,
             unfinished,
             kept,
@@ -2295,7 +2299,18 @@ impl Store {
         self.quiet = followed.is_some();
         for (from, to) in followed.into_iter().flatten() {
             if let (Some(from), Some(to)) = (from, to) {
-                self.follow_own(&from, &to, workspace);
+                self.follow(&from, &to, workspace);
+            }
+        }
+        self.logged = Logged::of(&changes);
+        for theirs in &theirs {
+            for (from, to) in &theirs.moved {
+                self.follow_theirs(&theirs.label, from.as_ref(), to.as_ref(), workspace);
+            }
+            for (path, entity) in &theirs.adopted {
+                if let Some(id) = self.ids.id(&Key::File(path.clone())) {
+                    self.logged.adopted.insert(id, *entity);
+                }
             }
         }
         let mut shown = self.shown.take().unwrap_or_default();
@@ -2374,12 +2389,14 @@ impl Store {
         }
         self.shown = Some(shown);
         self.quiet = false;
+        self.logged = Logged::default();
         touched
     }
 
     /// Follow a tree, or a file no entity is bound to, that this session's undo, redo or
-    /// settling moved from `from` to `to`: each asset in it keeps its id, and moves with it.
-    fn follow_own(&mut self, from: &LibPath, to: &LibPath, workspace: &mut Workspace) {
+    /// settling, or another drawbar, moved from `from` to `to`: each asset in it keeps its
+    /// id, and moves with it.
+    fn follow(&mut self, from: &LibPath, to: &LibPath, workspace: &mut Workspace) {
         self.ids.moved(from, to);
         for record in self.records.values_mut() {
             if let Some(moved) = record.path.as_ref().and_then(|at| at.moved(from, to)) {
@@ -2387,6 +2404,41 @@ impl Store {
             }
         }
         workspace.relocate(from, to);
+    }
+
+    /// Follow what another drawbar, which goes by `label`, did to a tree or a file no
+    /// entity is bound to: a move keeps each asset's id, and a file it made is no
+    /// newcomer from outside, and one it trashed is said to be its doing, wherever its
+    /// later moves take the path.
+    fn follow_theirs(
+        &mut self,
+        label: &str,
+        from: Option<&LibPath>,
+        to: Option<&LibPath>,
+        workspace: &mut Workspace,
+    ) {
+        match (from, to) {
+            (Some(from), Some(to)) => {
+                self.follow(from, to, workspace);
+                let follows = |key: Key| match key {
+                    Key::File(path) => Key::File(path.moved(from, to).unwrap_or(path)),
+                    Key::Entity(_) => key,
+                };
+                let made = std::mem::take(&mut self.logged.made);
+                self.logged.made = made.into_iter().map(follows).collect();
+                let deleted = std::mem::take(&mut self.logged.deleted);
+                let deleted = deleted.into_iter().map(|(key, by)| (follows(key), by));
+                self.logged.deleted = deleted.collect();
+            }
+            (Some(from), None) => {
+                let gone = Key::File(from.clone());
+                self.logged.deleted.insert(gone, Some(label.to_string()));
+            }
+            (None, Some(to)) => {
+                self.logged.made.insert(Key::File(to.clone()));
+            }
+            (None, None) => {}
+        }
     }
 
     /// Bring the workspace level with the files the view lists. Each file keeps the id it
@@ -2402,15 +2454,16 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) -> (BTreeSet<u64>, Option<String>) {
-        self.rekey(listed, reach);
+        let rekeyed = self.rekey(listed, reach);
         let mut touched = BTreeSet::new();
         let (mut moved, mut deleted, mut missing) = (0, 0, 0);
         let deferred = std::mem::take(&mut self.deferred);
         let known: Vec<(u64, Key)> = match reach {
             None => self.ids.iter().map(|(id, key)| (id, key.clone())).collect(),
             Some(keys) => {
-                let ids = keys.iter().filter_map(|key| self.ids.id(key));
-                let ids: BTreeSet<u64> = ids.chain(deferred).collect();
+                let keys = keys.iter().chain(self.logged.deleted.keys());
+                let ids = keys.filter_map(|key| self.ids.id(key));
+                let ids: BTreeSet<u64> = ids.chain(deferred).chain(rekeyed).collect();
                 let keyed = ids
                     .into_iter()
                     .filter_map(|id| Some((id, self.ids.key(id)?.clone())));
@@ -2457,6 +2510,9 @@ impl Store {
                         deleted += 1;
                         self.ids.remove(id);
                     }
+                    Vanished::Trashed => {
+                        self.ids.remove(id);
+                    }
                     Vanished::Missing => missing += 1,
                     Vanished::Untouched => {}
                 }
@@ -2474,11 +2530,12 @@ impl Store {
             }
             if record.path.as_ref() != Some(path) {
                 touched.insert(id);
-                moved += 1;
+                let outside = !self.logged.files.contains(&key);
+                moved += usize::from(outside);
                 record.path = Some(path.clone());
                 let before = workspace.get(id).map(|entity| entity.name.clone());
                 workspace.follow(id, browser.folders.ahead(path));
-                if let Some(before) = before.filter(|_| !self.quiet) {
+                if let Some(before) = before.filter(|_| outside && !self.quiet) {
                     log.say(format!(
                         "“{before}” was moved to {path} outside drawbar; its tags went with it."
                     ));
@@ -2504,8 +2561,8 @@ impl Store {
 
     /// Give each asset the key the library knows its file by now, where that changed: a
     /// file an intent made an entity of, an entity whose file was let go of, or a file
-    /// drawbar wrote that the view lists for the first time.
-    fn rekey(&mut self, listed: &Shown, reach: Option<&BTreeSet<Key>>) {
+    /// drawbar wrote that the view lists for the first time. Returns the assets rekeyed.
+    fn rekey(&mut self, listed: &Shown, reach: Option<&BTreeSet<Key>>) -> Vec<u64> {
         let reached = |key: &Key| reach.is_none_or(|keys| keys.contains(key));
         let by_path: BTreeMap<&LibPath, &Key> = listed
             .files
@@ -2513,10 +2570,11 @@ impl Store {
             .filter(|(key, _)| reached(key))
             .map(|(key, (path, _))| (path, key))
             .collect();
-        let unlisted: Vec<u64> = match reach {
+        let mut unlisted: BTreeSet<u64> = match reach {
             None => self.ids.iter().map(|(id, _)| id).collect(),
             Some(keys) => keys.iter().filter_map(|key| self.ids.id(key)).collect(),
         };
+        unlisted.extend(self.logged.adopted.keys());
         let unlisted = unlisted.into_iter().filter(|id| {
             let key = self.ids.key(*id);
             key.is_some_and(|key| !listed.files.contains_key(key))
@@ -2532,17 +2590,24 @@ impl Store {
                 .records
                 .get(&id)
                 .and_then(|record| record.path.as_ref());
-            let key = path.and_then(|path| by_path.get(path));
+            let adopted = self
+                .logged
+                .adopted
+                .get(&id)
+                .map(|entity| Key::Entity(*entity));
+            let key = adopted.or_else(|| Some((*by_path.get(path?)?).clone()));
             if let Some(key) = key.filter(|key| self.ids.id(key).is_none()) {
-                rekeyed.push((id, (*key).clone()));
+                rekeyed.push((id, key));
             }
         }
-        for (id, key) in rekeyed {
-            self.ids.insert(id, key);
+        for (id, key) in &rekeyed {
+            self.ids.insert(*id, key.clone());
         }
+        rekeyed.into_iter().map(|(id, _)| id).collect()
     }
 
-    /// Take in each file the view lists that no asset stands for. Returns how many.
+    /// Take in each file the view lists that no asset stands for. Returns how many came
+    /// from outside drawbar.
     fn arrive(
         &mut self,
         listed: &Shown,
@@ -2577,6 +2642,10 @@ impl Store {
         if arrived.is_empty() {
             return 0;
         }
+        let made = arrived
+            .iter()
+            .filter(|(_, key, _)| self.logged.made.contains(key));
+        let from_outside = arrived.len() - made.count();
         arrived.sort_by(|a, b| a.0.cmp(&b.0));
         let mut next = workspace.next_id();
         let mut back = Vec::new();
@@ -2596,7 +2665,7 @@ impl Store {
             self.settle(*id, workspace);
             self.place_ahead(*id, workspace, &browser.folders);
         }
-        ids.len()
+        from_outside
     }
 
     /// The asset known by where a rename sent from `path` and not answered yet puts it:
@@ -3459,7 +3528,8 @@ impl Store {
         }
     }
 
-    /// A file drawbar knew is gone, and nothing on disk holds what it held.
+    /// A file drawbar knew is gone, and nothing on disk holds what it held. One the
+    /// library's log deleted takes its tags with it.
     fn vanished(
         &mut self,
         id: u64,
@@ -3468,6 +3538,8 @@ impl Store {
         queue: &Queue,
         log: &mut Log,
     ) -> Vanished {
+        let key = self.ids.key(id);
+        let deleted = key.and_then(|key| self.logged.deleted.get(key)).cloned();
         let Some(record) = self.records.get_mut(&id) else {
             return Vanished::Untouched;
         };
@@ -3478,9 +3550,8 @@ impl Store {
             return Vanished::Untouched;
         };
         let name = entity.name.clone();
-        let keep = precious(entity, queue)
-            || !browser.tags.worn(id).is_empty()
-            || entity.origin.slot().is_some();
+        let tagged = deleted.is_none() && !browser.tags.worn(id).is_empty();
+        let keep = precious(entity, queue) || tagged || entity.origin.slot().is_some();
         if keep {
             record.missing = true;
             browser.folders.missing.insert(id);
@@ -3492,8 +3563,10 @@ impl Store {
         }
         self.records.remove(&id);
         workspace.forget(id);
-        if !self.quiet {
-            log.say(format!("“{name}” was deleted outside drawbar."));
+        match &deleted {
+            Some(Some(label)) => log.say(format!("Another {label} deleted “{name}”.")),
+            None if !self.quiet => log.say(format!("“{name}” was deleted outside drawbar.")),
+            Some(None) | None => {}
         }
         // The draft stays in this install's own state, and an open that finds the file
         // again puts it back.
@@ -3502,7 +3575,10 @@ impl Store {
                 "The unsaved edit of “{name}” is still kept, for when its file is back."
             ));
         }
-        Vanished::Deleted
+        match deleted {
+            Some(_) => Vanished::Trashed,
+            None => Vanished::Deleted,
+        }
     }
 
     fn saved(
@@ -4498,9 +4574,53 @@ fn unsettled<'a>(moving: impl IntoIterator<Item = &'a (LibPath, LibPath)>, path:
         .any(|(from, to)| path.is_in(from) || from.is_in(path) || path.is_in(to) || to.is_in(path))
 }
 
+/// What the library's log says changed, as one view reads it, which is not said to have
+/// happened outside drawbar.
+#[derive(Default)]
+struct Logged {
+    /// What a drawbar deleted, with the label of the other drawbar that did; `None` for
+    /// this one.
+    deleted: BTreeMap<Key, Option<String>>,
+    /// The entities whose files another drawbar wrote or moved.
+    files: BTreeSet<Key>,
+    /// What another drawbar made.
+    made: BTreeSet<Key>,
+    /// The assets known by a file another drawbar gave an entity, with that entity.
+    adopted: BTreeMap<u64, toshokan::EntityId>,
+}
+
+impl Logged {
+    /// What `changes` say this drawbar deleted and other drawbars did to entities.
+    fn of(changes: &[toshokan::report::Change]) -> Logged {
+        let mut logged = Logged::default();
+        for change in changes {
+            let key = Key::Entity(change.entity);
+            match (&change.by, &change.what) {
+                (By::This, What::Deleted) => {
+                    logged.deleted.insert(key, None);
+                }
+                (By::Writer { label, .. }, What::Deleted) => {
+                    logged.deleted.insert(key, Some(label.clone()));
+                }
+                (By::Writer { .. }, What::Created) => {
+                    logged.made.insert(key);
+                }
+                (By::Writer { .. }, What::File) => {
+                    logged.files.insert(key);
+                }
+                (By::Writer { .. }, What::Field(_)) | (By::This | By::Outside, _) => {}
+            }
+        }
+        logged
+    }
+}
+
 /// What became of an asset whose file a rescan found gone.
 enum Vanished {
     Deleted,
+    /// Deleted in the library's log: by another drawbar, which its own line said, or by
+    /// this one's undo or redo.
+    Trashed,
     /// Kept, since it holds something its file did not, and shown missing.
     Missing,
     /// Already known to be missing, or no longer held.

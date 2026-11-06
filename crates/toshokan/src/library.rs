@@ -37,8 +37,8 @@ use crate::reader::{ReadReport, Reader, Stamp};
 use crate::recovery::{self, Recovery, Resumed, Settling};
 use crate::report::{
     By, Change, Committed, Compacted, Emptied, Fork, Gap, HistoryItem, Item, ItemChange, Lag,
-    Local, Mode, Opened, Orphan, Outcome, PathChange, Presence, Refreshed, Rekey, ScanReport,
-    Settled, Start, TrashItem, What, WriterInfo,
+    Local, Mode, Opened, Orphan, Outcome, PathChange, PathChanges, Presence, Refreshed, Rekey,
+    ScanReport, Settled, Start, TrashItem, What, WriterInfo,
 };
 use crate::schema::Schema;
 use crate::trash;
@@ -121,6 +121,9 @@ pub struct Library {
     view: View,
     /// Whether a read folded in something the view does not show yet.
     unshown: bool,
+    /// What other writers' intents read since the last refresh's report did to files
+    /// no entity is bound to.
+    unshown_paths: Vec<PathChanges>,
     /// The parts of this instance's state that lag what it committed, with why.
     behind: BTreeMap<Lag, String>,
 }
@@ -287,6 +290,7 @@ impl Library {
             history: History::default(),
             entering: Entering::Step,
             unshown: false,
+            unshown_paths: Vec::new(),
             view: View::new(Parts {
                 folded: Folded::default(),
                 bindings: Arc::default(),
@@ -407,7 +411,8 @@ impl Library {
     pub fn undo(&mut self) -> Task<'_, Result<Committed>> {
         self.commit_with(|library| {
             let writer = library.own_id()?;
-            let plan = library.history.plan_undo(writer, &library.view);
+            let writers = &library.reader.derived().writers;
+            let plan = library.history.plan_undo(writer, &library.view, writers);
             library.resolve(plan.map_err(Error::Refused)?)
         })
     }
@@ -416,7 +421,8 @@ impl Library {
     pub fn redo(&mut self) -> Task<'_, Result<Committed>> {
         self.commit_with(|library| {
             let writer = library.own_id()?;
-            let plan = library.history.plan_redo(writer, &library.view);
+            let writers = &library.reader.derived().writers;
+            let plan = library.history.plan_redo(writer, &library.view, writers);
             library.resolve(plan.map_err(Error::Refused)?)
         })
     }
@@ -548,9 +554,10 @@ impl Library {
     /// attributed to its writer, or to nobody for outside changes, and what the
     /// folder no longer holds. A sealed segment or snapshot read before is taken
     /// by its name. Of the library's files it scans again only those at the paths
-    /// whose file facts the entries changed, or that entries read before changed
-    /// and no scan listed since, unless no scan of every file has finished since
-    /// the library opened or since a scan failed: then it scans every file. Writes
+    /// whose file facts the entries changed and those other writers' `path` and
+    /// `tree` ops among them name, or that entries read before named so and no
+    /// scan listed since, unless no scan of every file has finished since the
+    /// library opened or since a scan failed: then it scans every file. Writes
     /// nothing in the folder.
     pub fn refresh(&mut self) -> Task<'_, Result<Refreshed>> {
         self.look(Look::Logs)
@@ -607,9 +614,11 @@ impl Library {
             })
             .and_then(|(library, retired)| {
                 let changes = library.since_view();
+                let paths = std::mem::take(&mut library.unshown_paths);
                 library.reshow();
                 ok(Refreshed {
                     changes,
+                    paths,
                     scan: library.scan_report(),
                     unlisted: library.unlisted.clone(),
                     dirs: library.walked.take(),
@@ -1047,8 +1056,9 @@ impl Library {
     }
 
     /// Takes in what a read derived. The library paths the changed file facts
-    /// name, and those where the entities they changed were bound, are unknown
-    /// until a scan lists them.
+    /// name, those where the entities they changed were bound, and those other
+    /// writers' new entries moved files no entity is bound to from and to, or
+    /// adopted, are unknown until a scan lists them.
     fn absorb_read(&mut self, report: &ReadReport) {
         self.lag_read();
         if !report.anything_new() {
@@ -1057,7 +1067,47 @@ impl Library {
         }
         let moved = self.take_derived();
         self.unrelisted.extend(moved);
+        let read = self.path_changes(&report.placed);
+        for changes in &read {
+            let trees = changes.trees.iter().flat_map(|(from, to)| [from, to]);
+            let paths = changes.paths.iter();
+            let paths = paths.flat_map(|change| change.from.iter().chain(&change.to));
+            let adopted = changes.adopted.iter().map(|(path, _)| path);
+            self.unrelisted
+                .extend(trees.chain(paths).chain(adopted).cloned());
+        }
+        self.unshown_paths.extend(read);
         self.follow(self.reader.readings().collect());
+    }
+
+    /// What the intents of other writers among `placed`, newly merged, did to files
+    /// no entity is bound to, in order of their clock readings.
+    fn path_changes(&self, placed: &BTreeMap<WriterId, Vec<EntryHash>>) -> Vec<PathChanges> {
+        let own = self.writer.as_ref().map(Writer::id);
+        let writers = &self.reader.derived().writers;
+        let mut read: Vec<(&Entry, WriterId)> = Vec::new();
+        for (writer, hashes) in placed.iter().filter(|(writer, _)| Some(**writer) != own) {
+            let Some(merged) = writers.get(writer).map(|placed| &placed.merged) else {
+                continue;
+            };
+            let hashes: BTreeSet<&EntryHash> = hashes.iter().collect();
+            let new = merged.iter().filter(|entry| hashes.contains(&entry.hash()));
+            read.extend(new.map(|entry| (&**entry, *writer)));
+        }
+        read.sort_by_key(|(entry, writer)| (entry.at(), *writer));
+        let changes = read.into_iter().map(|(entry, writer)| {
+            let (paths, trees) = moved_unbound(contribution::ops(entry.kind()));
+            PathChanges {
+                by: self.by(writer),
+                paths,
+                trees,
+                adopted: adopted(entry.kind()),
+            }
+        });
+        let changes = changes.filter(|changes| {
+            !(changes.paths.is_empty() && changes.trees.is_empty() && changes.adopted.is_empty())
+        });
+        changes.collect()
     }
 
     /// The fork points this writer knows of the writers whose writes `ops` name.
@@ -2141,17 +2191,7 @@ fn committed(entries: &[Entry], created: Vec<EntityId>, local: Local) -> Committ
         EntryKind::Genesis(_) | EntryKind::Settle(_) | EntryKind::Unknown(_) => &[],
     });
     let ops: Vec<&Op> = ops.collect();
-    let paths = ops.iter().filter_map(|op| match op {
-        Op::Path { from, file } => Some(PathChange {
-            from: from.clone(),
-            to: file.as_ref().map(|file| file.path.clone()),
-        }),
-        _ => None,
-    });
-    let trees = ops.iter().filter_map(|op| match op {
-        Op::Tree { from, to } => Some((from.clone(), to.clone())),
-        _ => None,
-    });
+    let (paths, trees) = moved_unbound(ops.iter().copied());
     let undoable = match entries.first().map(Entry::kind) {
         Some(EntryKind::Intent(logged)) => undo::is_step(logged.ops.iter()),
         _ => false,
@@ -2161,11 +2201,42 @@ fn committed(entries: &[Entry], created: Vec<EntityId>, local: Local) -> Committ
         undoable,
         created,
         changes: distinct(ops.iter().copied().filter_map(change_of)),
-        paths: paths.collect(),
-        trees: trees.collect(),
+        paths,
+        trees,
         local,
         left: Vec::new(),
     }
+}
+
+/// Each file no entity is bound to that `ops` made, moved or trashed, and each
+/// tree they moved, in order.
+fn moved_unbound<'a>(
+    ops: impl IntoIterator<Item = &'a Op>,
+) -> (Vec<PathChange>, Vec<(RelPath, RelPath)>) {
+    let (mut paths, mut trees) = (Vec::new(), Vec::new());
+    for op in ops {
+        match op {
+            Op::Path { from, file } => paths.push(PathChange {
+                from: from.clone(),
+                to: file.as_ref().map(|file| file.path.clone()),
+            }),
+            Op::Tree { from, to } => trees.push((from.clone(), to.clone())),
+            _ => {}
+        }
+    }
+    (paths, trees)
+}
+
+/// Each file an intent of `kind` gave an entity as it was, with that entity.
+fn adopted(kind: &EntryKind) -> Vec<(RelPath, EntityId)> {
+    let EntryKind::Intent(logged) = kind else {
+        return Vec::new();
+    };
+    let pins = logged.ops.iter().filter_map(|op| match op {
+        Op::Pin { entity, file, .. } => Some((file.path.clone(), *entity)),
+        _ => None,
+    });
+    pins.collect()
 }
 
 /// The entity whose file `op` writes, if it writes one.

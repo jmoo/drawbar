@@ -2,9 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::contribution::{FieldKey, Name};
+use crate::contribution::{self, FieldKey, Name};
+use crate::derive::Placed;
 use crate::error::{Invalid, Refusal};
-use crate::ids::{EntityId, EntryHash, WriterId};
+use crate::ids::{EntityId, EntryHash, Hlc, WriterId};
 use crate::log::{Displaced, Entry, FileFact, Logged, Op, Ref};
 use crate::merge::{Exists, Folded, Write};
 use crate::path::RelPath;
@@ -24,7 +25,7 @@ pub struct History {
     /// The item of each intent, undo and redo.
     origins: BTreeMap<EntryHash, usize>,
     /// Each intent of this session, with what reversing it needs.
-    kept: BTreeMap<EntryHash, (Logged, Before)>,
+    kept: BTreeMap<EntryHash, (Hlc, Logged, Before)>,
     /// The entry of the latest intent, undo or redo.
     last: Option<EntryHash>,
     /// The final intents, whose writes undo takes for another writer's: a join
@@ -196,7 +197,7 @@ impl History {
         let label = logged.label.clone();
         let hash = entry.hash();
         self.last = Some(hash);
-        self.kept.insert(hash, (logged, before));
+        self.kept.insert(hash, (entry.at(), logged, before));
         let reversed = reverses.and_then(|reverses| {
             let item = *self.origins.get(&reverses)?;
             if self.done.last() == Some(&reverses) {
@@ -251,15 +252,26 @@ impl History {
     }
 
     /// The plan reversing the latest intent not undone, with [`Plan::reverses`]
-    /// naming it. `writer` is this writer's id.
-    pub fn plan_undo(&self, writer: WriterId, view: &View) -> Result<Plan, Refusal> {
-        self.reverse_latest(&self.done, writer, view.folded())
+    /// naming it. `writer` is this writer's id, and `writers` every writer's
+    /// entries as the reader places them.
+    pub fn plan_undo(
+        &self,
+        writer: WriterId,
+        view: &View,
+        writers: &BTreeMap<WriterId, Placed>,
+    ) -> Result<Plan, Refusal> {
+        self.reverse_latest(&self.done, writer, view.folded(), writers)
     }
 
     /// The plan reapplying the latest undone intent, while nothing was committed
     /// since its undo.
-    pub fn plan_redo(&self, writer: WriterId, view: &View) -> Result<Plan, Refusal> {
-        self.reverse_latest(&self.undone, writer, view.folded())
+    pub fn plan_redo(
+        &self,
+        writer: WriterId,
+        view: &View,
+        writers: &BTreeMap<WriterId, Placed>,
+    ) -> Result<Plan, Refusal> {
+        self.reverse_latest(&self.undone, writer, view.folded(), writers)
     }
 
     fn reverse_latest(
@@ -267,13 +279,16 @@ impl History {
         stack: &[EntryHash],
         writer: WriterId,
         folded: &Folded,
+        writers: &BTreeMap<WriterId, Placed>,
     ) -> Result<Plan, Refusal> {
         let latest = stack.last().ok_or(Refusal::Nothing)?;
-        let (logged, before) = self.kept.get(latest).ok_or(Refusal::Nothing)?;
+        let (at, logged, before) = self.kept.get(latest).ok_or(Refusal::Nothing)?;
         let reversing = Reversing {
             writer,
+            at: *at,
             finals: &self.finals,
             folded,
+            writers,
             before,
             displaced: &logged.displaced,
         };
@@ -290,6 +305,14 @@ fn reverse(intent: EntryHash, logged: &Logged, reversing: &Reversing) -> Result<
         .iter()
         .filter_map(|op| match op {
             Op::Create { entity, .. } => Some(*entity),
+            _ => None,
+        })
+        .collect();
+    let made_or_deleted: BTreeSet<EntityId> = logged
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Create { entity, .. } | Op::Delete { entity, .. } => Some(*entity),
             _ => None,
         })
         .collect();
@@ -341,18 +364,27 @@ fn reverse(intent: EntryHash, logged: &Logged, reversing: &Reversing) -> Result<
                 facts.push(reversing.remove(*entity, key, value)?);
             }
             Op::File { entity, file, .. } => {
+                if !made_or_deleted.contains(entity) {
+                    reversing.undeleted(*entity)?;
+                }
                 let change = reversing.file(*entity, file.as_ref())?;
                 undone.extend(carried(&mut trees, file.as_ref(), change).map(Some));
             }
             Op::Path { from, file } => {
-                let change = reversing.path(from.as_ref(), file.as_ref());
+                let change = reversing.path(from.as_ref(), file.as_ref())?;
                 undone.extend(carried(&mut trees, file.as_ref(), change).map(Some));
             }
-            Op::Dir { path, made } => undone.push(Some(match made {
-                true => FileChange::RemoveDir { path: path.clone() },
-                false => FileChange::MakeDir { path: path.clone() },
-            })),
-            Op::Tree { .. } => undone.push(None),
+            Op::Dir { path, made } => {
+                reversing.unchanged(|op| touches(op, path))?;
+                undone.push(Some(match made {
+                    true => FileChange::RemoveDir { path: path.clone() },
+                    false => FileChange::MakeDir { path: path.clone() },
+                }));
+            }
+            Op::Tree { to, .. } => {
+                reversing.unchanged(|op| touches(op, to))?;
+                undone.push(None);
+            }
             Op::Write { .. }
             | Op::Add { .. }
             | Op::Remove { .. }
@@ -421,8 +453,11 @@ fn carried(
 
 struct Reversing<'a> {
     writer: WriterId,
+    /// The clock reading of the intent being reversed.
+    at: Hlc,
     finals: &'a BTreeSet<EntryHash>,
     folded: &'a Folded,
+    writers: &'a BTreeMap<WriterId, Placed>,
     before: &'a Before,
     displaced: &'a [Displaced],
 }
@@ -461,15 +496,24 @@ impl Reversing<'_> {
     /// Refuses unless `entity` is shown and no delete of it survives, naming the
     /// latest delete.
     fn shown(&self, entity: EntityId) -> Result<(), Refusal> {
+        self.undeleted(entity)?;
+        match self.folded.existence(entity).is_empty() {
+            true => Err(Refusal::Invalid(Invalid::NoEntity(entity))),
+            false => Ok(()),
+        }
+    }
+
+    /// Refuses where a delete of `entity` survives, naming the latest. A live delete
+    /// ends the entity's field writes, so no register shows it.
+    fn undeleted(&self, entity: EntityId) -> Result<(), Refusal> {
         let existence = self.folded.existence(entity);
         let delete = existence
             .iter()
             .rev()
             .find(|write| write.value == Exists::Deleted);
-        match (delete, existence.is_empty()) {
-            (Some(write), _) => Err(changed(write)),
-            (None, true) => Err(Refusal::Invalid(Invalid::NoEntity(entity))),
-            (None, false) => Ok(()),
+        match delete {
+            Some(write) => Err(changed(write)),
+            None => Ok(()),
         }
     }
 
@@ -531,10 +575,40 @@ impl Reversing<'_> {
         })
     }
 
+    /// Refuses where an op of another writer's entry since the intent is `changes`,
+    /// naming the latest such entry.
+    fn unchanged(&self, changes: impl Fn(&Op) -> bool) -> Result<(), Refusal> {
+        let others = self.writers.iter().filter(|(by, _)| **by != self.writer);
+        let since = others.flat_map(|(by, placed)| {
+            let since = placed.merged.iter().rev();
+            since
+                .take_while(|entry| entry.at() > self.at)
+                .map(move |entry| (*by, entry))
+        });
+        let naming = since.filter(|(_, entry)| {
+            let ops = contribution::ops(entry.kind());
+            ops.iter().any(&changes)
+        });
+        match naming.max_by_key(|(_, entry)| entry.at()) {
+            Some((by, entry)) => Err(Refusal::ChangedSince {
+                by,
+                entry: entry.hash(),
+            }),
+            None => Ok(()),
+        }
+    }
+
     /// The file effect that puts back what an effect on a file no entity is bound
     /// to changed: the displaced bytes from the trash, the old name, or the trash
     /// for a file the effect added.
-    fn path(&self, from: Option<&RelPath>, file: Option<&FileFact>) -> Option<FileChange> {
+    fn path(
+        &self,
+        from: Option<&RelPath>,
+        file: Option<&FileFact>,
+    ) -> Result<Option<FileChange>, Refusal> {
+        if let Some(left) = file.map(|file| &file.path).or(from) {
+            self.unchanged(|op| names(op, left))?;
+        }
         let restore = |path: &RelPath, expect| {
             let item = self.displaced.iter().find(|item| item.from == *path)?;
             Some(FileChange::RestoreFile {
@@ -543,7 +617,7 @@ impl Reversing<'_> {
                 expect,
             })
         };
-        match (from, file) {
+        Ok(match (from, file) {
             (Some(from), Some(file)) if *from == file.path => {
                 restore(from, Expect::Holds(file.identity))
             }
@@ -558,7 +632,7 @@ impl Reversing<'_> {
             }),
             (Some(from), None) => restore(from, Expect::Absent),
             (None, None) => None,
-        }
+        })
     }
 
     /// The file effect that puts back what a file write changed: the displaced
@@ -582,6 +656,9 @@ impl Reversing<'_> {
             return Err(changed(write));
         }
         let old = self.before.files.get(&entity).cloned().flatten();
+        for path in file.into_iter().chain(&old).map(|fact| &fact.path) {
+            self.unchanged(|op| op.entity() != Some(entity) && names(op, path))?;
+        }
         let restore = |path: &RelPath, expect| {
             let item = self.displaced.iter().find(|item| item.from == *path)?;
             Some(FileChange::Restore {
@@ -610,5 +687,49 @@ impl Reversing<'_> {
             (None, Some(old)) => restore(&old.path, Expect::Absent),
             (None, None) => None,
         })
+    }
+}
+
+/// Whether `op` changes what is at `path`: a file effect from or to it, a binding of
+/// a file there, or a move of a tree holding it.
+fn names(op: &Op, path: &RelPath) -> bool {
+    let at = |file: &FileFact| file.path == *path;
+    match op {
+        Op::Path { from, file } => from.as_ref() == Some(path) || file.as_ref().is_some_and(at),
+        Op::File { file, .. } => file.as_ref().is_some_and(at),
+        Op::Pin { file, .. } => at(file),
+        Op::Tree { from, .. } => path.starts_with(from),
+        Op::Create { .. }
+        | Op::Delete { .. }
+        | Op::Write { .. }
+        | Op::Add { .. }
+        | Op::Remove { .. }
+        | Op::Dir { .. }
+        | Op::Dismiss { .. }
+        | Op::Unknown(_) => false,
+    }
+}
+
+/// Whether `op` changes the tree at `tree`: a file effect from or to a path in it, a
+/// binding of a file in it, a move of it, of a tree in it or of one holding it, or a
+/// directory made or removed in it.
+fn touches(op: &Op, tree: &RelPath) -> bool {
+    let within = |path: &RelPath| path.starts_with(tree);
+    match op {
+        Op::Path { from, file } => {
+            from.as_ref().is_some_and(within)
+                || file.as_ref().is_some_and(|file| within(&file.path))
+        }
+        Op::File { file, .. } => file.as_ref().is_some_and(|file| within(&file.path)),
+        Op::Pin { file, .. } => within(&file.path),
+        Op::Tree { from, .. } => within(from) || tree.starts_with(from),
+        Op::Dir { path, .. } => within(path),
+        Op::Create { .. }
+        | Op::Delete { .. }
+        | Op::Write { .. }
+        | Op::Add { .. }
+        | Op::Remove { .. }
+        | Op::Dismiss { .. }
+        | Op::Unknown(_) => false,
     }
 }
