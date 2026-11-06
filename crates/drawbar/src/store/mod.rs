@@ -1029,6 +1029,20 @@ pub struct Opened {
     pub trouble: Vec<String>,
 }
 
+/// What one change moved, which the workspace follows: each tree, then each file no
+/// entity is bound to, from and to.
+pub type Followed = Vec<(Option<LibPath>, Option<LibPath>)>;
+
+/// What one intent of another drawbar, which goes by `label`, did: each tree it moved,
+/// then each file no entity is bound to that it made, moved or trashed, from and to,
+/// then each such file it gave an entity, where the file is after it.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Theirs {
+    pub label: String,
+    pub moved: Followed,
+    pub adopted: Vec<(LibPath, EntityId)>,
+}
+
 /// The library as one answer left it.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Viewed {
@@ -1043,7 +1057,9 @@ pub struct Viewed {
     /// What this session's undo, redo or settling of an unfinished change did, which
     /// the workspace follows without a word: each tree it moved, then each file no
     /// entity is bound to that it made, moved or trashed, from and to.
-    pub followed: Option<Vec<(Option<LibPath>, Option<LibPath>)>>,
+    pub followed: Option<Followed>,
+    /// What other drawbars did since the view before, one intent at a time, in order.
+    pub theirs: Vec<Theirs>,
     /// The folders a scan of every file could not list, where the answer scanned every
     /// file. What is in them is not known.
     pub unlisted: Option<Vec<LibPath>>,

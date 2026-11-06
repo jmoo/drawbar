@@ -584,7 +584,8 @@ fn after(ms: i32) -> Promise {
 /// Every file and folder `answers` say moved, from and to, in order.
 fn moved(answers: &[Event]) -> Vec<(LibPath, LibPath)> {
     let viewed = |viewed: &super::Viewed| {
-        let followed = viewed.followed.iter().flatten();
+        let theirs = viewed.theirs.iter().flat_map(|theirs| &theirs.moved);
+        let followed = viewed.followed.iter().flatten().chain(theirs);
         let followed = followed.filter_map(|(from, to)| Some((from.clone()?, to.clone()?)));
         viewed
             .moves

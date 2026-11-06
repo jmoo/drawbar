@@ -23,7 +23,7 @@ use toshokan::plan::FactChange;
 use toshokan::reader::MAX_FILE;
 use toshokan::report::{
     By, Change, Committed, Compacted, Emptied, HistoryItem, Item, ItemKind, Joined, Opened,
-    PathChange, Presence, Refreshed, Rekey, Start, TrashItem, What, WriterInfo,
+    PathChange, PathChanges, Presence, Refreshed, Rekey, Start, TrashItem, What, WriterInfo,
 };
 use toshokan::simulator::Machine;
 use toshokan::snapshot::Snapshot;
@@ -693,6 +693,23 @@ through_both!(
     orphans_are_held_back_while_a_pending_record_cannot_be_read,
     a_writer_whose_own_pending_record_cannot_be_read_does_not_open,
     a_file_no_entity_is_bound_to_is_saved_renamed_and_trashed_and_each_undone,
+    a_refresh_scans_and_reports_what_another_writer_did_to_files_no_entity_is_bound_to,
+    a_refresh_reports_the_file_another_writer_adopted_where_it_was_adopted,
+    a_rename_a_failed_rescan_read_is_reported_by_the_refresh_after_a_commit,
+    an_undo_of_a_save_is_refused_as_changed_since_once_another_writer_renamed_the_file,
+    an_undo_of_a_rename_is_refused_as_changed_since_once_another_writer_adopted_the_file,
+    a_redo_of_a_rename_is_refused_as_changed_since_once_another_writer_trashed_the_file,
+    an_undo_of_a_rename_is_refused_as_changed_once_the_file_moved_outside,
+    an_undo_of_a_tree_move_is_refused_as_changed_since_once_another_writer_moved_the_tree,
+    a_redo_of_a_tree_move_is_refused_as_changed_since_once_another_writer_moved_the_tree,
+    an_undo_of_a_tree_move_is_refused_as_changed_since_once_another_writer_removed_the_tree,
+    a_redo_of_a_tree_move_is_refused_as_changed_since_once_another_writer_removed_the_tree,
+    an_undo_of_a_tree_move_is_refused_as_changed_once_the_tree_was_removed_outside,
+    an_undo_of_a_new_folder_is_refused_as_changed_since_once_another_writer_put_a_file_in_it,
+    an_undo_of_a_folder_removal_is_refused_as_changed_since_once_another_writer_made_it_again,
+    an_undo_of_a_new_folder_is_refused_as_not_empty_once_a_file_was_put_in_it_outside,
+    an_undo_of_a_move_is_refused_as_changed_since_once_another_writer_deleted_the_entity,
+    an_undo_of_a_delete_is_refused_as_changed_since_once_another_writer_made_a_file_at_its_path,
     an_effect_by_path_on_an_entitys_file_is_refused,
     a_tree_moved_with_files_no_entity_is_bound_to_is_moved_back_by_undo,
     a_folder_holding_no_file_is_renamed_and_named_back_by_undo,
@@ -4875,6 +4892,484 @@ fn a_tree_moved_with_files_no_entity_is_bound_to_is_moved_back_by_undo<F: Facade
         "redone"
     );
     assert_eq!(dirs(), ["new", "new/deep"], "and its old name");
+}
+
+fn a_refresh_scans_and_reports_what_another_writer_did_to_files_no_entity_is_bound_to<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    put(&folder, "a.wav", b"a");
+    put(&folder, "old/b.wav", b"b");
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+    b.rescan().unwrap();
+    let renamed = Expect::Holds(identity(b"a"));
+    b.commit("Rename", |i| {
+        i.rename_file(&path("a.wav"), &path("c.wav"), renamed)
+    })
+    .unwrap();
+    b.commit("Move", |i| i.move_tree(&path("old"), &path("new")))
+        .unwrap();
+    put(&folder, "outside.wav", b"outside");
+
+    let refreshed = a.refresh().unwrap();
+    let by = By::Writer {
+        writer: label_of(&a.view(), "b"),
+        label: "b".into(),
+    };
+    let rename = PathChange {
+        from: Some(path("a.wav")),
+        to: Some(path("c.wav")),
+    };
+    let expected = [
+        PathChanges {
+            by: by.clone(),
+            paths: vec![rename],
+            trees: vec![],
+            adopted: vec![],
+        },
+        PathChanges {
+            by,
+            paths: vec![],
+            trees: vec![(path("old"), path("new"))],
+            adopted: vec![],
+        },
+    ];
+    assert_eq!(refreshed.paths, expected);
+    assert_eq!(refreshed.changes, [], "no entity changed");
+    let view = a.view();
+    let unbound: Vec<&str> = view.unbound().map(RelPath::as_str).collect();
+    assert_eq!(
+        unbound,
+        ["c.wav", "new/b.wav"],
+        "only what b moved is scanned"
+    );
+    assert_eq!(a.refresh().unwrap().paths, [], "reported once");
+}
+
+fn a_refresh_reports_the_file_another_writer_adopted_where_it_was_adopted<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    put(&folder, "old/a.wav", b"a");
+    let (mut a, _) = F::open(Probe::new(&machine(&folder)), env("a", 1, &clock)).unwrap();
+    a.rescan().unwrap();
+    let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+    b.rescan().unwrap();
+    b.commit("Move", |i| i.move_tree(&path("old"), &path("new")))
+        .unwrap();
+    let held = Expect::Holds(identity(b"a"));
+    let adopted = b.commit("Tag", |i| {
+        let (i, _) = i.create(|e| {
+            e.adopt(&path("new/a.wav"), held).add(TAGS, tag("kept"));
+        });
+        i
+    });
+    let entity = adopted.unwrap().created[0];
+    b.commit("Rename", |i| i.rename(entity, &path("new/b.wav"), held))
+        .unwrap();
+
+    let refreshed = a.refresh().unwrap();
+    let by = By::Writer {
+        writer: label_of(&a.view(), "b"),
+        label: "b".into(),
+    };
+    let expected = [
+        PathChanges {
+            by: by.clone(),
+            paths: vec![],
+            trees: vec![(path("old"), path("new"))],
+            adopted: vec![],
+        },
+        PathChanges {
+            by,
+            paths: vec![],
+            trees: vec![],
+            adopted: vec![(path("new/a.wav"), entity)],
+        },
+    ];
+    assert_eq!(
+        refreshed.paths, expected,
+        "the rename moves an entity's file"
+    );
+}
+
+fn a_rename_a_failed_rescan_read_is_reported_by_the_refresh_after_a_commit<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let probe = Probe::new(&machine(&folder));
+    put(&folder, "a.wav", b"a");
+    let (mut a, _) = F::open(probe.clone(), env("a", 1, &clock)).unwrap();
+    let song = create(&mut a, "song.npno", b"song");
+    create(&mut a, "tune.npno", b"tune");
+    a.rescan().unwrap();
+    let (mut b, _) = F::open(Probe::new(&machine(&folder)), env("b", 2, &clock)).unwrap();
+    b.rescan().unwrap();
+    let renamed = Expect::Holds(identity(b"a"));
+    b.commit("Rename", |i| {
+        i.rename_file(&path("a.wav"), &path("c.wav"), renamed)
+    })
+    .unwrap();
+    move_outside(&folder, "tune.npno", "tune2.npno");
+    fail(&probe, |io| {
+        matches!(io, Io::ReadMany { .. }) && !layout().owns(io.path())
+    });
+    assert!(a.rescan().is_err(), "the moved tune cannot be identified");
+    heal(&probe);
+    a.commit("Tag", |i| i.add(song, TAGS, tag("x"))).unwrap();
+
+    let reported = a.refresh().unwrap().paths.into_iter();
+    let reported: Vec<Vec<PathChange>> = reported.map(|changes| changes.paths).collect();
+    let rename = PathChange {
+        from: Some(path("a.wav")),
+        to: Some(path("c.wav")),
+    };
+    assert_eq!(reported, [vec![rename]]);
+}
+
+/// A writer `a` that saved the file no entity is bound to `a.wav`, then `then` did
+/// to it, and another writer `b` that has read what `a` did.
+fn untagged_then<F: Facade>(
+    folder: &MemDisk,
+    clock: &TestClock,
+    then: impl FnOnce(&mut F),
+) -> (F, F) {
+    put(folder, "a.wav", b"wave");
+    let (mut a, _) = F::open(Probe::new(&machine(folder)), env("a", 1, clock)).unwrap();
+    a.rescan().unwrap();
+    then(&mut a);
+    let (mut b, _) = F::open(Probe::new(&machine(folder)), env("b", 2, clock)).unwrap();
+    b.rescan().unwrap();
+    (a, b)
+}
+
+fn save_untagged<F: Facade>(a: &mut F) {
+    let saved = Expect::Holds(identity(b"wave"));
+    a.commit("Save", |i| {
+        i.save_file(&path("a.wav"), b"wavy".to_vec(), saved)
+    })
+    .unwrap();
+}
+
+fn rename_untagged<F: Facade>(a: &mut F) {
+    let renamed = Expect::Holds(identity(b"wave"));
+    a.commit("Rename", |i| {
+        i.rename_file(&path("a.wav"), &path("b.wav"), renamed)
+    })
+    .unwrap();
+}
+
+/// `refused` is another writer's refusal naming `b` and the entry `by` logged.
+fn changed_since_by(refused: Result<Committed, Error>, b: &impl Facade, by: &Committed) {
+    let expected = Refusal::ChangedSince {
+        by: label_of(&b.view(), "b"),
+        entry: by.intent,
+    };
+    assert!(
+        matches!(&refused, Err(Error::Refused(refusal)) if *refusal == expected),
+        "{refused:?}"
+    );
+}
+
+fn an_undo_of_a_save_is_refused_as_changed_since_once_another_writer_renamed_the_file<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, mut b) = untagged_then::<F>(&folder, &clock, save_untagged);
+    let renamed = Expect::Holds(identity(b"wavy"));
+    let theirs = b
+        .commit("Rename", |i| {
+            i.rename_file(&path("a.wav"), &path("b.wav"), renamed)
+        })
+        .unwrap();
+    a.refresh().unwrap();
+
+    changed_since_by(a.undo(), &b, &theirs);
+    assert_eq!(read(&folder, "b.wav").as_deref(), Some(&b"wavy"[..]));
+    assert_eq!(read(&folder, "a.wav"), None);
+}
+
+fn an_undo_of_a_rename_is_refused_as_changed_since_once_another_writer_adopted_the_file<
+    F: Facade,
+>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, mut b) = untagged_then::<F>(&folder, &clock, rename_untagged);
+    let theirs = b
+        .commit("Tag", |i| {
+            let (i, _) = i.create(|e| {
+                e.adopt(&path("b.wav"), Expect::Holds(identity(b"wave")))
+                    .add(TAGS, tag("Live"));
+            });
+            i
+        })
+        .unwrap();
+    a.refresh().unwrap();
+
+    changed_since_by(a.undo(), &b, &theirs);
+    assert_eq!(read(&folder, "b.wav").as_deref(), Some(&b"wave"[..]));
+    assert_eq!(read(&folder, "a.wav"), None);
+}
+
+fn a_redo_of_a_rename_is_refused_as_changed_since_once_another_writer_trashed_the_file<
+    F: Facade,
+>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, mut b) = untagged_then::<F>(&folder, &clock, |a| {
+        rename_untagged(a);
+        a.undo().unwrap();
+    });
+    let trashed = Expect::Holds(identity(b"wave"));
+    let theirs = b
+        .commit("Delete", |i| i.trash_file(&path("a.wav"), trashed))
+        .unwrap();
+    a.refresh().unwrap();
+
+    changed_since_by(a.redo(), &b, &theirs);
+    assert_eq!(read(&folder, "a.wav"), None);
+    assert_eq!(read(&folder, "b.wav"), None);
+}
+
+/// A writer `a` that moved the tree `old`, holding `a.wav` no entity is bound to, to
+/// `new`, then `then` did, and another writer `b` that has read what `a` did.
+fn tree_then<F: Facade>(folder: &MemDisk, clock: &TestClock, then: impl FnOnce(&mut F)) -> (F, F) {
+    put(folder, "old/a.wav", b"wave");
+    let (mut a, _) = F::open(Probe::new(&machine(folder)), env("a", 1, clock)).unwrap();
+    a.rescan().unwrap();
+    a.commit("Move", |i| i.move_tree(&path("old"), &path("new")))
+        .unwrap();
+    then(&mut a);
+    let (mut b, _) = F::open(Probe::new(&machine(folder)), env("b", 2, clock)).unwrap();
+    b.rescan().unwrap();
+    (a, b)
+}
+
+fn move_tree<F: Facade>(b: &mut F, from: &str, to: &str) -> Committed {
+    b.commit("Move", |i| i.move_tree(&path(from), &path(to)))
+        .unwrap()
+}
+
+/// Removes the folder `at` as an app does: its file moves up, and the folder goes.
+fn remove_tree<F: Facade>(b: &mut F, at: &str) -> Committed {
+    let file = path(at).join("a.wav").unwrap();
+    let moved = Expect::Holds(identity(b"wave"));
+    b.commit("Remove folder", |i| {
+        i.rename_file(&file, &path("a.wav"), moved)
+            .remove_dir(&path(at))
+    })
+    .unwrap()
+}
+
+fn an_undo_of_a_tree_move_is_refused_as_changed_since_once_another_writer_moved_the_tree<
+    F: Facade,
+>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, mut b) = tree_then::<F>(&folder, &clock, |_| {});
+    let theirs = move_tree(&mut b, "new", "newer");
+    a.refresh().unwrap();
+
+    changed_since_by(a.undo(), &b, &theirs);
+    assert_eq!(read(&folder, "newer/a.wav").as_deref(), Some(&b"wave"[..]));
+}
+
+fn a_redo_of_a_tree_move_is_refused_as_changed_since_once_another_writer_moved_the_tree<
+    F: Facade,
+>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, mut b) = tree_then::<F>(&folder, &clock, |a| {
+        a.undo().unwrap();
+    });
+    let theirs = move_tree(&mut b, "old", "older");
+    a.refresh().unwrap();
+
+    changed_since_by(a.redo(), &b, &theirs);
+    assert_eq!(read(&folder, "older/a.wav").as_deref(), Some(&b"wave"[..]));
+}
+
+fn an_undo_of_a_tree_move_is_refused_as_changed_since_once_another_writer_removed_the_tree<
+    F: Facade,
+>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, mut b) = tree_then::<F>(&folder, &clock, |_| {});
+    let theirs = remove_tree(&mut b, "new");
+    a.refresh().unwrap();
+
+    changed_since_by(a.undo(), &b, &theirs);
+    assert_eq!(read(&folder, "a.wav").as_deref(), Some(&b"wave"[..]));
+    assert_eq!(read(&folder, "old/a.wav"), None);
+}
+
+fn a_redo_of_a_tree_move_is_refused_as_changed_since_once_another_writer_removed_the_tree<
+    F: Facade,
+>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, mut b) = tree_then::<F>(&folder, &clock, |a| {
+        a.undo().unwrap();
+    });
+    let theirs = remove_tree(&mut b, "old");
+    a.refresh().unwrap();
+
+    changed_since_by(a.redo(), &b, &theirs);
+    assert_eq!(read(&folder, "a.wav").as_deref(), Some(&b"wave"[..]));
+    assert_eq!(read(&folder, "new/a.wav"), None);
+}
+
+/// Writers `a` and `b` on one folder, `b` having read what `then` did as `a`.
+fn a_then<F: Facade>(folder: &MemDisk, clock: &TestClock, then: impl FnOnce(&mut F)) -> (F, F) {
+    let (mut a, _) = F::open(Probe::new(&machine(folder)), env("a", 1, clock)).unwrap();
+    a.rescan().unwrap();
+    then(&mut a);
+    let (mut b, _) = F::open(Probe::new(&machine(folder)), env("b", 2, clock)).unwrap();
+    b.rescan().unwrap();
+    (a, b)
+}
+
+fn make_gig<F: Facade>(a: &mut F) {
+    a.commit("New folder", |i| i.make_dir(&path("Gig")))
+        .unwrap();
+}
+
+fn an_undo_of_a_new_folder_is_refused_as_changed_since_once_another_writer_put_a_file_in_it<
+    F: Facade,
+>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, mut b) = a_then::<F>(&folder, &clock, make_gig);
+    let theirs = b
+        .commit("Add", |i| {
+            i.save_file(&path("Gig/a.wav"), b"wave".to_vec(), Expect::Absent)
+        })
+        .unwrap();
+    a.refresh().unwrap();
+
+    changed_since_by(a.undo(), &b, &theirs);
+    assert_eq!(read(&folder, "Gig/a.wav").as_deref(), Some(&b"wave"[..]));
+}
+
+fn an_undo_of_a_folder_removal_is_refused_as_changed_since_once_another_writer_made_it_again<
+    F: Facade,
+>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, mut b) = a_then::<F>(&folder, &clock, |a| {
+        make_gig(a);
+        a.commit("Remove folder", |i| i.remove_dir(&path("Gig")))
+            .unwrap();
+    });
+    let theirs = b
+        .commit("New folder", |i| i.make_dir(&path("Gig")))
+        .unwrap();
+    a.refresh().unwrap();
+
+    changed_since_by(a.undo(), &b, &theirs);
+    assert!(folder.directories(Root::Folder).contains(&path("Gig")));
+}
+
+fn an_undo_of_a_new_folder_is_refused_as_not_empty_once_a_file_was_put_in_it_outside<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = a_then::<F>(&folder, &clock, make_gig);
+    put(&folder, "Gig/a.wav", b"wave");
+    a.rescan().unwrap();
+
+    let refused = a.undo();
+    assert!(
+        matches!(
+            refused,
+            Err(Error::Refused(Refusal::Invalid(Invalid::NotEmpty(_))))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(read(&folder, "Gig/a.wav").as_deref(), Some(&b"wave"[..]));
+}
+
+fn an_undo_of_a_move_is_refused_as_changed_since_once_another_writer_deleted_the_entity<
+    F: Facade,
+>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let mut song = None;
+    let (mut a, mut b) = a_then::<F>(&folder, &clock, |a| {
+        let made = create(a, "song.npno", b"song");
+        let moved = Expect::Holds(identity(b"song"));
+        a.commit("Move", |i| i.rename(made, &path("Set/song.npno"), moved))
+            .unwrap();
+        song = Some(made);
+    });
+    let song = song.unwrap();
+    let trashed = Expect::Holds(identity(b"song"));
+    let theirs = b
+        .commit("Delete", |i| i.delete(song).trash(song, trashed))
+        .unwrap();
+    a.refresh().unwrap();
+
+    changed_since_by(a.undo(), &b, &theirs);
+    assert_eq!(read(&folder, "song.npno"), None);
+    assert_eq!(read(&folder, "Set/song.npno"), None);
+}
+
+fn an_undo_of_a_delete_is_refused_as_changed_since_once_another_writer_made_a_file_at_its_path<
+    F: Facade,
+>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, mut b) = a_then::<F>(&folder, &clock, |a| {
+        let song = create(a, "song.npno", b"song");
+        let trashed = Expect::Holds(identity(b"song"));
+        a.commit("Delete", |i| i.delete(song).trash(song, trashed))
+            .unwrap();
+    });
+    let theirs = b
+        .commit("Import", |i| {
+            let (i, _) = i.create(|e| {
+                e.save(&path("song.npno"), b"tune".to_vec(), Expect::Absent);
+            });
+            i
+        })
+        .unwrap();
+    a.refresh().unwrap();
+
+    changed_since_by(a.undo(), &b, &theirs);
+    assert_eq!(read(&folder, "song.npno").as_deref(), Some(&b"tune"[..]));
+}
+
+fn an_undo_of_a_tree_move_is_refused_as_changed_once_the_tree_was_removed_outside<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = tree_then::<F>(&folder, &clock, |_| {});
+    move_outside(&folder, "new/a.wav", "a.wav");
+    folder
+        .perform(Io::RemoveDir {
+            root: Root::Folder,
+            path: path("new"),
+        })
+        .unwrap();
+    a.rescan().unwrap();
+
+    let refused = a.undo();
+    assert!(
+        matches!(refused, Err(Error::Refused(Refusal::Changed(_)))),
+        "{refused:?}"
+    );
+    assert_eq!(read(&folder, "a.wav").as_deref(), Some(&b"wave"[..]));
+}
+
+fn an_undo_of_a_rename_is_refused_as_changed_once_the_file_moved_outside<F: Facade>() {
+    let folder = disk();
+    let clock = TestClock::at(1_000);
+    let (mut a, _) = untagged_then::<F>(&folder, &clock, rename_untagged);
+    move_outside(&folder, "b.wav", "c.wav");
+    a.rescan().unwrap();
+
+    let refused = a.undo();
+    assert!(
+        matches!(refused, Err(Error::Refused(Refusal::Changed(_)))),
+        "{refused:?}"
+    );
+    assert_eq!(read(&folder, "c.wav").as_deref(), Some(&b"wave"[..]));
 }
 
 fn a_folder_holding_no_file_is_renamed_and_named_back_by_undo<F: Facade>() {

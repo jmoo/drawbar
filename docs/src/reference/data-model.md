@@ -227,7 +227,9 @@ only where that decides which file is an entity's, so an asset renamed or moved
 outside drawbar keeps its tags and its origin
 ([Binding](https://github.com/jmoo/drawbar/blob/master/crates/toshokan/spec/protocol.md#binding)).
 A file with no entity is known by its path alone, so its rename reads as one file
-gone and another arrived, with nothing lost.
+gone and another arrived, with nothing lost. Another drawbar's rename, move or
+deletion of such a file is in its log, so a refresh follows it: the asset keeps
+its id, and a deletion names that drawbar.
 
 Where several files could each be an entity's moved file, or one file several
 entities', none is bound, and drawbar says so once in the activity log.
@@ -235,6 +237,9 @@ entities', none is bound, and drawbar says so once in the activity log.
 A file that is gone, and that no new file matches, leaves the list if it held
 nothing precious. One with tags, an unsaved edit, a slot it came off or a place
 in the send queue stays, marked missing, and saving it writes the file anew.
+An entity another drawbar deleted leaves with its tags unless it has an unsaved
+edit, a slot it came off or a place in the send queue. Another drawbar's move of
+an entity's file is followed without a notice.
 After a restart, an entity with tags whose file is gone shows as a lost row
 until the user forgets it.
 

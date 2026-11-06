@@ -224,6 +224,17 @@ pub struct PathChange {
     pub to: Option<RelPath>,
 }
 
+/// What one of another writer's intents did to files no entity is bound to, as
+/// [`Committed::paths`] and [`Committed::trees`] say of this writer's, and each file
+/// it gave an entity by a `pin` op, where the file is after it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PathChanges {
+    pub by: By,
+    pub paths: Vec<PathChange>,
+    pub trees: Vec<(RelPath, RelPath)>,
+    pub adopted: Vec<(RelPath, EntityId)>,
+}
+
 /// A committed intent, its file effects all made. Its entries are durable in the
 /// folder and shown.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -307,6 +318,9 @@ pub struct PartialReport {
 pub struct Refreshed {
     /// What changed since the last view, by its writer or from outside.
     pub changes: Vec<Change>,
+    /// What other writers' intents no refresh has reported yet did to files no entity
+    /// is bound to, in log order.
+    pub paths: Vec<PathChanges>,
     /// What the files scanned so far hold against the logged facts; empty until
     /// a scan of every file has succeeded.
     pub scan: ScanReport,

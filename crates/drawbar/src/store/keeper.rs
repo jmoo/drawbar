@@ -15,7 +15,8 @@ use toshokan::io::{Io, IoError, Kind, Lock, Range, Reply, Root};
 use toshokan::log::Settlement;
 use toshokan::plan::FactChange;
 use toshokan::report::{
-    Item, ItemChange, ItemKind, Joined, Mode, Refreshed, Rekey, ScanReport, Start, TrashItem, What,
+    By, Item, ItemChange, ItemKind, Joined, Mode, PathChange, Refreshed, Rekey, ScanReport, Start,
+    TrashItem, What,
 };
 use toshokan::{EntryHash, Env, Error, Expect, Nonce, RelPath, Set, View, WriterId};
 
@@ -24,8 +25,8 @@ use super::shown::Change;
 use super::storage::{self, CHUNK};
 use super::unsaved::{self, Base, Of};
 use super::{
-    Cmd, Event, Failure, Fingerprint, Found, Intent, Kept, KeptKey, Key, Leftover, LibPath, Opened,
-    Part, Source, Stat, Unwritable, Viewed, Waiting,
+    Cmd, Event, Failure, Fingerprint, Followed, Found, Intent, Kept, KeptKey, Key, Leftover,
+    LibPath, Opened, Part, Source, Stat, Unwritable, Viewed, Waiting,
 };
 use crate::rewrite::{self, Pieces};
 
@@ -684,7 +685,7 @@ impl<F: Fs> Keeper<F> {
             Err(e) => return (Err(told(&e)), false),
         };
         let viewed = Viewed {
-            followed: Some(followed(&committed)),
+            followed: Some(followed(&committed.trees, &committed.paths)),
             dirs: folders(library.fs()).await,
             left: shown_paths(&committed.left),
             ..committed_view(library, &mut self.shown, committed.changes)
@@ -704,7 +705,7 @@ impl<F: Fs> Keeper<F> {
         let library = self.library.as_mut().ok_or("the library is not open")?;
         let committed = library.settle(orphan, how).await.map_err(|e| told(&e))?;
         let viewed = Viewed {
-            followed: Some(followed(&committed)),
+            followed: Some(followed(&committed.trees, &committed.paths)),
             dirs: folders(library.fs()).await,
             ..committed_view(library, &mut self.shown, committed.changes)
         };
@@ -869,13 +870,13 @@ fn joined_files(joined: &[Joined], view: &View) -> Vec<(LibPath, Joined)> {
     files.collect()
 }
 
-/// What `committed` moved, for the app to follow without a word: each tree, then each
-/// file no entity is bound to that it made, moved or trashed, from and to.
-fn followed(committed: &toshokan::report::Committed) -> Vec<(Option<LibPath>, Option<LibPath>)> {
+/// What an intent moved, for the app to follow: each of `trees`, then each of `paths`,
+/// the files no entity is bound to that it made, moved or trashed, from and to.
+fn followed(trees: &[(RelPath, RelPath)], paths: &[PathChange]) -> Followed {
     let path = |path: Option<&RelPath>| path.and_then(|path| LibPath::parse(path.as_str()));
-    let trees = committed.trees.iter();
+    let trees = trees.iter();
     let trees = trees.map(|(from, to)| (path(Some(from)), path(Some(to))));
-    let paths = committed.paths.iter();
+    let paths = paths.iter();
     let paths = paths.map(|moved| (path(moved.from.as_ref()), path(moved.to.as_ref())));
     trees.chain(paths).collect()
 }
@@ -1903,6 +1904,7 @@ fn committed_view<F: Fs>(
         changes,
         moves: Vec::new(),
         followed: None,
+        theirs: Vec::new(),
         unlisted: None,
         unfinished: None,
         kept: kept(library),
@@ -2239,6 +2241,19 @@ fn viewed<F: Fs>(
         orphan,
         unfinishable: None,
     });
+    let moved = refreshed.paths.iter().filter_map(|changes| {
+        let By::Writer { label, .. } = &changes.by else {
+            return None;
+        };
+        let adopted = changes.adopted.iter();
+        let adopted =
+            adopted.filter_map(|(path, entity)| Some((LibPath::parse(path.as_str())?, *entity)));
+        Some(super::Theirs {
+            label: label.clone(),
+            moved: followed(&changes.trees, &changes.paths),
+            adopted: adopted.collect(),
+        })
+    });
     let dirs = refreshed.dirs.map(|dirs| {
         let shown = dirs.iter().filter_map(|dir| LibPath::parse(dir.as_str()));
         shown.collect::<Vec<_>>()
@@ -2250,6 +2265,7 @@ fn viewed<F: Fs>(
         moves: moves.collect(),
         changes: refreshed.changes,
         followed: None,
+        theirs: moved.collect(),
         unfinished: Some(theirs.chain(unfinishable).collect()),
         kept: kept(library),
         retired: refreshed.retired.is_some(),

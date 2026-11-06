@@ -234,12 +234,16 @@ impl Writer {
     }
 
     fn undo(&mut self, now: u64) -> Result<Entry, Refusal> {
-        let plan = self.history.plan_undo(self.id, &self.view())?;
+        let plan = self
+            .history
+            .plan_undo(self.id, &self.view(), &BTreeMap::new())?;
         Ok(self.commit(plan, now).unwrap())
     }
 
     fn redo(&mut self, now: u64) -> Result<Entry, Refusal> {
-        let plan = self.history.plan_redo(self.id, &self.view())?;
+        let plan = self
+            .history
+            .plan_redo(self.id, &self.view(), &BTreeMap::new())?;
         Ok(self.commit(plan, now).unwrap())
     }
 }
@@ -851,7 +855,10 @@ fn undo_puts_files_back_and_leaves_pins_alone() {
             take: None,
         };
         let changed = a.intent(3, vec![file, pin], trashed);
-        let plan = a.history.plan_undo(a.id, &a.view()).unwrap();
+        let plan = a
+            .history
+            .plan_undo(a.id, &a.view(), &BTreeMap::new())
+            .unwrap();
         assert_eq!(plan.files, expected, "{what}");
         assert_eq!(plan.facts, [], "{what}");
         assert_eq!(plan.reverses, Some(changed.hash()), "{what}");

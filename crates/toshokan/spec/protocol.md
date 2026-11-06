@@ -297,8 +297,10 @@ sees, every fact is bound again:
    identity is unread and now decides a binding, such as a file of the length of
    a file fact the commit wrote whose file is not at its path: that file may be
    the entity's, moved. A refresh scans again only the paths named by the file facts
-   the entries it read changed, before and after, and the paths those entities
-   were bound to, with the same identity reads. Until a scan lists such a path,
+   the entries it read changed, before and after, the paths those entities
+   were bound to, the paths other writers' `path` and `tree` ops among them name,
+   from and to, and those their `pin` ops name, with the same identity reads. Until
+   a scan lists such a path,
    as when the refresh stops first, no file there is bound or pinned, and the
    next refresh scans it. Such a path is found only under
    the spelling its directories list, since a volume that ignores case finds a
@@ -428,7 +430,10 @@ one. Each is refused where an entity's file is, under the volume's rules. The
 intent logs a `path` op for each such file as the folder shows it afterwards,
 with where it was: `from` alone for a file trashed, `file` alone for a file
 made, both for a file renamed or saved over. A commit reports each `path` op it
-logged, an undo's and a redo's included.
+logged, an undo's and a redo's included. A refresh reports the `path` and `tree`
+ops of other writers' intents that no refresh has reported, and the file and entity
+each of their `pin` ops names, per intent, in order of their clock readings, with
+their writer.
 
 A tree move is refused unless what it moves is still there: a directory at its
 source, or a file where the last scan listed one, and, moving file by file, a
@@ -731,11 +736,22 @@ then files, whatever order the intent made them in.
 An undo or redo is refused, naming the writer and entry, where another writer
 changed the same thing since: a register no longer holds only what the intent
 left, another writer added or removed the same value, a delete of the entity is
-live, or another writer wrote to an entity being uncreated. A file register holds
-what the intent left while every live write of it names the same path and
-identity, whatever modification time it gives, since putting a file back where
-moves copy gives it a new one. It is refused when the trash no longer holds the
-bytes it needs.
+live, the file register included, or another writer wrote to an entity being
+uncreated. It is refused too where an entry of another writer with a later clock
+reading changes what the intent's file effects left:
+
+- for a `path` op, the path it left the file at, or trashed it from: by a `path`
+  op from or to it, a `pin` or `file` op naming it, or a `tree` op moving it;
+- for a `file` op, each path it names, before and after, the same way, by an op
+  of another entity or of none;
+- for a `tree` op's `to` and a `dir` op's path, the tree there: by a `path` op
+  from or to a path in it, a `pin` or `file` op naming one, a `tree` op moving
+  it, a tree in it or one holding it, or a `dir` op in it.
+
+A file register holds what the intent left while every live write of it names
+the same path and identity, whatever modification time it gives, since putting a
+file back where moves copy gives it a new one. It is refused when the trash no
+longer holds the bytes it needs.
 
 ## Trash
 
