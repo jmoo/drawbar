@@ -39,14 +39,11 @@
 //! it. Zone counts move where a stroke's audio may start, so each stroke's allocation
 //! comes from [`stroke::header_len`](super::stroke::header_len).
 //!
-//! Stereo is the mono plan run once per channel and interleaved. A stereo stroke
-//! carries both channels under one header at the doubled cell, and every count-law
-//! landmark (the field total, the resync position, both 1:1 runs) is its mono value
-//! doubled. On the plan side, stereo is only a channel count: cells and 1:1 records
-//! double, the terminator states the doubled cell, and the predictor keeps a history
-//! per channel. Where the two channels' bits go depends on the generation: v2 and v3
-//! alternate fields in one bitstream, and v4 packs each channel's half into its own
-//! words and alternates those.
+//! Stereo is the mono plan run once per channel and interleaved under one header.
+//! Every count-law landmark (the cell, the field total, the resync position, both 1:1
+//! runs) doubles, the terminator states the doubled cell, and the predictor keeps a
+//! history per channel. v2 and v3 alternate the channels' fields in one bitstream; v4
+//! packs each channel's half into its own words and alternates those.
 //!
 //! For [`Layout::V2`], a stereo encode plays with its channels in order and
 //! independent. Confirmed on hardware. The wide generations: Inferred from specimens;
@@ -4109,8 +4106,7 @@ mod tests {
         }
     }
 
-    /// Decibel words read from editor renders of one project at sixteen stroke gains,
-    /// four of them predicted before the render and matched by it.
+    /// Decibel words read from editor renders of one project at sixteen stroke gains.
     #[test]
     fn a_zone_gain_in_decibels_is_the_word_the_editor_writes() {
         for (gain, word) in [

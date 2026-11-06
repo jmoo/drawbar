@@ -30,11 +30,9 @@
 //! samples diverges.
 //!
 //! ⚠️ A record's fields are left-anchored: they start at the first bit after the
-//! header word, and the alignment tail is at the end of the segment. Reading from the
-//! far end goes unnoticed on content records, whose field counts leave no tail, but it
-//! displaces every 1:1 record (the warmup and the resyncs) by a whole number of field
-//! slots, or rotates the values inside their width when the tail is not a multiple of
-//! it.
+//! header word, and the alignment tail ends the segment. Read from the far end, content
+//! records still decode, since their counts leave no tail, but every 1:1 record (the
+//! warmup and the resyncs) shifts by whole field slots or rotates inside its width.
 //!
 //! For [`Layout::V2`], decoding both this crate's encodes and vendor content matches
 //! the Electro 5's playback of the same instrument, a transposed note plays as exact

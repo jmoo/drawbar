@@ -29,14 +29,8 @@ const fn later_header_len(layout: Layout) -> usize {
 ///
 /// Encoded audio begins at a fixed offset. The `hdr`, the category strings, the keyboard
 /// map and the first stroke's header form a preamble of constant size, so the first
-/// stroke's header is whatever space the rest leave. Adding a zone grows `map` by a
-/// record and takes that much off the header. When the metadata would fill the
-/// preamble, the preamble grows by one packet and the header gets a full packet of
-/// room again.
-///
-/// This also explains why vendor files carry 15 more bytes of first-stroke header than
-/// this crate's output at equal zone counts: their `cat` payload is 9 bytes and ours is
-/// 24.
+/// stroke's header is whatever space the rest leave. Metadata that would fill the
+/// preamble grows it by one packet.
 ///
 /// The two narrow budgets describe the same absolute grid. [`Chain::Early`] has no
 /// `cat` and a `hdr` 93 bytes shorter, so its chain spends 102 fewer bytes ahead of the

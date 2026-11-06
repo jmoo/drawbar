@@ -37,7 +37,6 @@
 //! end, in [`Audio::tail`].
 //!
 //! The packing and the predictor: Inferred from specimens; not confirmed on hardware.
-//! This module only reconstructs samples; it plays nothing.
 //!
 //! The frames play at [`RATE`], and a stroke owns all
 //! `blocks × BLOCK_WORDS × 2 × channels` bytes the container gives it: a library whose

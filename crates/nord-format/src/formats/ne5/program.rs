@@ -91,9 +91,9 @@ impl Default for Program {
 
 /// Refuses a header whose `aux` word is not `0xFFFFFFFF`.
 ///
-/// Inferred from specimens; not confirmed on hardware. Every slot-addressed specimen
-/// carries `0xFFFFFFFF` at `0x10`. Another value means the word carries something this
-/// build does not model, so the file is refused.
+/// Every slot-addressed specimen carries `0xFFFFFFFF` at `0x10`, so another value
+/// carries something this build does not model. Inferred from specimens; not confirmed
+/// on hardware.
 ///
 /// ⚠️ Library formats (`nsmp`) use the word for real data and must not be gated on it.
 pub(crate) fn unset_aux(format: &'static str, header: &Header) -> Result<(), Error> {
@@ -175,7 +175,6 @@ mod tests {
         program.write_to(&mut Cursor::new(&mut bytes)).unwrap();
         assert_eq!(bytes.len(), FILE_LEN);
 
-        // Sanity: as written, it reads back.
         assert!(read_from(&mut Cursor::new(&mut bytes.clone())).is_ok());
 
         // The schema version lives at 0x14, little-endian.

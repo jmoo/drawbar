@@ -344,11 +344,10 @@ pub struct Slot {
     pub delay_ping_pong: bool,
     #[bits(1814..=1814)]
     pub delay_master_clock: bool,
-    /// ⚠️ This run is inconsistent with the rest of the format; re-derive it against the
-    /// byte map before relying on it. Three of its morph slots are thirteen bits, and every
-    /// other morph slot in the Stage 2 is five or eight. The manual gives the control as a
-    /// 20-750 ms delay time. A twelve-bit slot would hold that directly, but the stored
-    /// `delay_tempo` does not read as milliseconds.
+    /// ⚠️ This run is inconsistent with the rest of the format: three of its morph slots
+    /// are thirteen bits where every other Stage 2 morph slot is five or eight, and the
+    /// stored `delay_tempo` does not read as the manual's 20-750 ms. Re-derive it against
+    /// the byte map before relying on it.
     #[bits(1815..=1819)]
     pub delay_tempo_master_clock_divisor_wheel: MorphOf<5>,
     #[bits(1820..=1824)]
