@@ -6,15 +6,9 @@
 //! > Clavia's trademarks, used here only to identify which files this crate
 //! > reads.
 //!
-//! The nouns are the protocol's object classes. `nord program`, `nord sample`,
-//! `nord piano` and `nord setlist` are [`slot_action`] with the class fixed, plus verbs
-//! of their own. `nord live` and `nord settings` keep the verbs their class can answer,
-//! plus `edit`. The hidden `nord raw --class N` is [`slot_action`] with the class given
-//! as a number.
-//!
-//! `inspect`, `verify` and `edit` dispatch on the file format, so they sit at the top
-//! level. `edit` is how the formats with no noun of their own (the Stage bodies, the
-//! Sample Editor project) are edited.
+//! The nouns are the protocol's object classes, each running [`slot_action`] with its
+//! class fixed. `inspect`, `verify` and `edit` dispatch on the file format, so they sit
+//! at the top level.
 //!
 //! ⚠️ `raw` is hidden but supported: it is the only way to reach a class with no noun of
 //! its own.
@@ -282,27 +276,23 @@ enum SampleAction {
     ///
     /// The WAVs keep the stored sample rate, about 35 kHz. The rate the instrument plays
     /// back at depends on its interpolator, which is not decoded. Audio the decoder
-    /// cannot read is reported as unsupported with a reason, and the run ends with a
-    /// count of what decoded. A slot is only read, so this never needs `--yes`, and its
-    /// WAVs are named after the instrument.
+    /// cannot read is reported as unsupported. A slot is only read, and its WAVs are
+    /// named after the instrument.
     Decode(sample::DecodeArgs),
 
     /// Build a one-zone sample instrument from a 44.1 kHz mono or stereo 16-bit WAV.
     ///
-    /// The v2 output matches what Nord Sample Editor writes for the same input, byte for
-    /// byte, except that floating-point rounding in the resampler leaves an occasional
-    /// audio value off by one, which does not change what the instrument plays. Mono,
-    /// stereo and looped v2 encodes play on an Electro 5. The v3 and v4 outputs match
-    /// the editor's but have never been played, so they need `--unverified`.
+    /// The output matches what Nord Sample Editor writes for the same input, byte for
+    /// byte, except for an occasional audio value off by one from resampler rounding.
+    /// The v3 and v4 outputs need `--unverified`.
     Encode(sample::EncodeArgs),
 
     /// Build a sample instrument from a Nord Sample Editor project.
     ///
     /// The project supplies the zones, their root keys, top notes and trim points,
-    /// and the WAVs they play. Paths in the project are relative to its own directory.
-    /// Unsupported layer, detune, velocity and enabled EQ settings are refused by name.
-    /// Settings with no instrument representation are ignored and reported. See `encode`
-    /// for fidelity limits and the `--unverified` requirement.
+    /// and the WAVs they play. Unsupported layer, detune, velocity and enabled EQ
+    /// settings are refused by name, and settings the instrument has no place for are
+    /// ignored and reported. The v3 and v4 outputs need `--unverified`.
     Build(sample::BuildArgs),
 
     /// Round-trip a sample instrument from a file or a slot, and with `--deep` also
@@ -349,8 +339,6 @@ enum PianoAction {
     ///
     /// The strokes that remain are copied byte for byte, with no re-encoding. Keys
     /// whose root loses every stroke are left silent, and their count is reported.
-    /// Dropping a bank or a layer is confirmed on hardware: the trimmed library loads
-    /// and plays. Narrowing the key range is not confirmed on hardware.
     Trim(piano::TrimArgs),
 
     /// Cut a library in two at a key, writing both halves.
@@ -358,57 +346,27 @@ enum PianoAction {
 
     /// Build a piano library from a directory of WAVs.
     ///
-    /// Each WAV's name gives the root, bank and layer it holds. Any sample rate is
-    /// resampled to the rate the instrument plays at.
-    ///
-    /// What the audio does not decide (the decay coefficients, per-note tables,
-    /// playback parameters and stream version) comes from `--template`, taken from the
-    /// template's stroke of the same bank and nearest root, and each stroke is trimmed
-    /// by its own layer value.
-    ///
-    /// Without a template, each stroke decays from note-on and each held loop fades as
-    /// the instrument's own pianos of `--kind` do, with a fade at key-up and the damper
-    /// limit that `--kind` implies. In format 6, each layer is trimmed to play at the
-    /// level of its root's loudest layer, softer layers a little above it as the
-    /// instrument's own pianos of `--kind` are, and each release 18 dB under the
-    /// loudest; where the quietest needs more boost than the instrument gives at
-    /// `--gain`, the whole library is turned down until it fits. In format 5, each
-    /// stroke is trimmed by its own layer value.
-    ///
-    /// A WAV whose `smpl` chunk declares a loop builds a stroke that loops there while
-    /// the key is held; the WAV's frames past the loop's end are not used, and the
-    /// loop's last four frames become the four before its start, as a seamless loop has
-    /// them already. Any other stroke plays to its end. A release stroke cannot loop.
-    ///
-    /// Every key up to one semitone above the highest root sounds, playing the nearest
-    /// root at or above it. Keys past that are silent. Each layer plays from halfway to
-    /// the next louder layer's value, and a root's `l00`, `l01`, … step 20 apart in
-    /// format 6, spanning at least 0..50 and at most 0..100, and a fifth of that in
-    /// format 5, so that each layer covers its own part of the velocity range.
-    ///
-    /// Confirmed on hardware: a library built this way loads and plays, mono and
-    /// stereo, on every key it covers, and its loops sustain at an even level. One built
-    /// without a template fades a note out within about 30 ms of key-up.
+    /// Each WAV's name gives the root, bank and layer it holds, and any sample rate is
+    /// resampled. A WAV whose `smpl` chunk declares a loop builds a stroke that loops
+    /// there while the key is held. What the audio does not decide comes from
+    /// `--template`, or without one from `--kind`, `--gain`, `--damper-top` and
+    /// `--loop-fade`.
     Build(piano::BuildArgs),
 
     /// Re-encode a library's audio from its decoded frames, and report how each
     /// stroke's blocks compare.
     ///
     /// A library this tool wrote comes back byte for byte. Any other library comes back
-    /// block for block, except for the attenuation each block declares: the original
-    /// encoder measured that value, and decoding never reads it. The re-encoded library
-    /// sounds the same as the original. Each stroke keeps its root, bank and layer
-    /// value.
+    /// block for block, except for the attenuation each block declares, which decoding
+    /// never reads.
     Rebuild(piano::RebuildArgs),
 
     /// Rebuild each library from its decoded model and check that the bytes match, and
     /// with `--deep` also decode every stroke.
     ///
-    /// The rebuild recomputes the per-root counts, every audio offset, the alignment gap
-    /// and the container checksum, so a match shows the model accounts for the whole
-    /// file. `--deep` adds the codec's own checks: each block repeats the previous
-    /// block's last frames exactly, and each stroke decodes to the frame count its
-    /// record states.
+    /// The rebuild recomputes every count, offset and checksum, so a match shows the
+    /// model accounts for the whole file. `--deep` also checks that each block repeats
+    /// the previous block's last frames and each stroke decodes to its stated length.
     Verify(piano::VerifyArgs),
 }
 

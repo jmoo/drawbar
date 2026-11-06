@@ -621,7 +621,6 @@ mod tests {
         assert_eq!(levels.last().unwrap(), "127");
     }
 
-    /// The message names the values the field accepts.
     #[test]
     fn the_error_lists_a_short_value_set_and_ranges_a_long_one() {
         let short = FieldError::BadValue {

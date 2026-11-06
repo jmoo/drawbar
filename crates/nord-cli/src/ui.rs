@@ -1,14 +1,12 @@
 //! When to use color and Unicode, and which stream each line goes to.
 //!
-//! - **Data on stdout, messages on stderr.** `nord program get 7:4 | grep transpose` must
-//!   see only the summary, so every progress line, warning and pre-flight description
-//!   goes to stderr.
-//! - **Color and Unicode only on a TTY.** ⚠️ The cross-platform check compares what
-//!   `nord.exe` under Wine and the native Linux binary print for the same input. An
-//!   escape sequence or box-drawing character in piped output would make that
-//!   comparison depend on Wine's console code page.
-//! - **Without a TTY, never prompt.** Do not read a stdin nobody is attached to, and do
-//!   not proceed just because nobody is there to say no.
+//! Data goes to stdout and every other line to stderr, so a pipe sees only the data.
+//! Without a TTY there is no Unicode and no prompt, and no color unless `--color=always`
+//! asks for it.
+//!
+//! ⚠️ The cross-platform check compares what `nord.exe` under Wine and the native Linux
+//! binary print for the same input, so piped output must not depend on Wine's console
+//! code page.
 
 use std::fmt::Display;
 use std::io::{BufRead, IsTerminal, Write};
@@ -37,8 +35,7 @@ impl Ui {
         let color = match choice {
             ColorChoice::Always => true,
             ColorChoice::Never => false,
-            // `NO_COLOR` counts whatever its value: by convention, being set is the
-            // signal.
+            // `NO_COLOR` counts whatever its value.
             ColorChoice::Auto => {
                 tty && std::env::var_os("NO_COLOR").is_none()
                     && std::env::var("TERM").as_deref() != Ok("dumb")

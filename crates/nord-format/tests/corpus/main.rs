@@ -1,22 +1,11 @@
 //! The specimen sweep: one test per file, built at runtime with `libtest-mimic`.
 //!
-//! Two trees feed it. `tests/fixtures/` holds files written by this crate's own
-//! writers, committed so the sweep has files to read in any checkout. With
-//! `--features corpus`, the tree under `NORD_CORPUS_ROOT` joins it: any tree of
-//! Nord files is a corpus.
-//!
-//! Every file the reader recognizes, wherever it sits, is a specimen. Each one
-//! must pass its container checksum, parse, re-encode to the same bytes, decode
-//! no value its components cannot name, and match its `<file>.oracle.json`
-//! sidecar if it has one. A piano library or sample instrument must also index to
-//! the bytes a whole read gives each stroke or zone, without reading the audio. On
-//! a sample (every fixture, every specimen with a sidecar, and one of each
-//! container shape among the rest), every registry field must also take a new
-//! value without changing another. A sidecar needs its specimen beside it, unless
-//! the tree's `library.json` projects an R2 object to that path. The fixtures must
-//! hold a file of every type the reader dispatches. In the corpus, each claim about
-//! every specimen of a kind runs once per specimen of that kind, so a tree without
-//! that kind runs none. A file ending `.kernel.tsv` is an oracle for the sample
+//! It reads `tests/fixtures/` and, with `--features corpus`, the tree under
+//! `NORD_CORPUS_ROOT`. `docs/src/reference/testing.md` says what every specimen must
+//! satisfy. The per-field mutation check runs on a sample: every fixture, every
+//! specimen with a sidecar, and one of each container shape among the rest. A sidecar
+//! needs its specimen beside it, unless the tree's `library.json` projects an R2
+//! object to that path. A file ending `.kernel.tsv` is an oracle for the sample
 //! codec's interpolation kernel. Nothing here names a model, a directory, or a file
 //! in the corpus.
 //!

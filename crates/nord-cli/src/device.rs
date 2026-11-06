@@ -1,12 +1,6 @@
-//! The operations that talk to an attached instrument.
-//!
-//! Each one is parameterized by object class: the same code drives a program and a set
-//! list, differing only in the class the session opened.
-//!
-//! Read-only queries (`status`, `get`, `info`, `deps`) and the non-destructive `select`
-//! need no confirmation. The mutating actions (`put`, `move`, `delete`, `rename`,
-//! `duplicate`) each describe what they will change, then refuse to proceed without
-//! `--yes`.
+//! The operations that talk to an attached instrument, each parameterized by object
+//! class. The mutating ones describe what they will change, then refuse to proceed
+//! without `--yes`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -207,8 +201,8 @@ pub fn info(ui: &Ui) -> Result<(), String> {
             }
         }
     }
-    // This is what a caller runs to find out whether the instrument can be reached at
-    // all, so the exit code has to carry that answer and not just the printed lines.
+    // A caller runs this to learn whether the instrument can be reached at all, so the
+    // exit code carries that answer as well as the printed lines.
     match unreachable {
         Some(e) => Err(format!("could not identify the instrument: {e}")),
         None => Ok(()),
@@ -1316,10 +1310,6 @@ fn fail_after_delete() -> bool {
 
 /// Last resort: the slot's former contents exist only in the file they were read into,
 /// which is left where it is. Say where.
-///
-/// Both paths that can leave a slot without its contents reach this (a delete that may
-/// have landed before its transaction failed, and a write whose restore also failed), so
-/// the next step is worded once.
 fn spill(backup: &Backup, lost: String) -> String {
     format!(
         "{lost}; its former contents were saved to {}; send them back with `put`",
@@ -2180,8 +2170,6 @@ pub fn slot_info(ui: &Ui, at: Location, class: ObjectClass) -> Result<(), String
         ),
     );
     match info.crc32 {
-        // Library content (pianos, samples) reports 0xffffffff: no checksum is kept for
-        // objects this large.
         Some(crc) => row("crc32:", format!("{crc:#010x}")),
         None => row(
             "crc32:",
@@ -3166,7 +3154,6 @@ mod tests {
             assert_eq!(rescued(&dir), ["big.ne5p"], "no temporary is left");
         }
 
-        /// An earlier rescue of the same slot is never written over by a later backup.
         #[test]
         fn a_backup_never_takes_an_earlier_rescues_name() {
             let dir = crate::edit::tests::scratch("put-kept-beside");

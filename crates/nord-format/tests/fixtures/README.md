@@ -33,10 +33,9 @@ what was set.
   Nothing else of that format is known.
 
 `cargo test -p nord-format --features bundle --test generate_fixtures --
---ignored` writes the last six directories again.
+--ignored` writes `nsmp/`, `npno/`, `zip/`, `sysex/`, `midi/` and `cn3/` again.
 
-The sweep checks their checksums, decoding, exact round trips, field isolation,
-and oracle sidecars. It fails when this tree lacks a file of a type the reader
+[Testing](../../../../docs/src/reference/testing.md#nord-format) says what the
+sweep checks. It fails when this tree lacks a file of a type the reader
 dispatches: each container class the sweep reads and each tag in
-`nord_format::cbin_formats`. A corpus under `NORD_CORPUS_ROOT` has no such
-requirement; any tree of Nord files is one.
+`nord_format::cbin_formats`.

@@ -1,19 +1,8 @@
 //! `nord sample`: the verbs that apply only to a sample instrument.
 //!
-//! `edit` runs [`crate::edit::run`] with the class fixed. Only what the format crate
-//! can patch in place is settable: always the name, plus each zone's root key and
-//! boundaries when its keyboard map can be read and recomputed.
-//!
-//! `decode` turns the audio back into WAV, and `verify --deep` walks the encoded
-//! stream as well as the container. Both take a slot wherever they take a file.
-//! Reading a slot changes nothing, so neither asks for confirmation.
-//!
-//! `encode` builds a one-zone instrument from a WAV. `build` builds a whole
-//! instrument from a Sample Editor project, which supplies the zones, root keys, top
-//! notes and trim points.
-//!
-//! `project new` writes the Sample Editor's `.nsmpproj` save file from a set of
-//! WAVs, one zone per file.
+//! `decode` and `verify` take a slot wherever they take a file, and only read it.
+//! `encode` builds a one-zone instrument from a WAV, `build` builds one from a Sample
+//! Editor project, and `project new` writes such a project from WAVs.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -110,7 +99,7 @@ pub struct CodingArgs {
 
     /// Which generation to write: 2 (`.nsmp`), 3 (`.nsmp3`) or 4 (`.nsmp4`). The
     /// audio is the same in all three. The container and the stream's units differ.
-    /// Only v2 has been played on hardware, so 3 and 4 need `--unverified`.
+    /// 3 and 4 need `--unverified`.
     #[arg(long, value_name = "N", default_value_t = 2, value_parser = clap::value_parser!(u8).range(2..=4))]
     pub generation: u8,
 
@@ -140,8 +129,8 @@ impl CodingArgs {
             return Ok(layout);
         }
         Err(format!(
-            "no v{} encode has been played on an instrument, so the file is known only to \
-             match what Nord Sample Editor renders. Pass --unverified to write it anyway.",
+            "no v{} encode has been played on an instrument; pass --unverified to write \
+             it anyway",
             self.generation
         ))
     }
@@ -919,7 +908,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// A frame count the project cannot state is refused, and the error says why.
     #[test]
     #[cfg(target_pointer_width = "64")]
     fn a_frame_count_a_project_cannot_state_is_refused_by_name() {
@@ -1027,8 +1015,6 @@ mod tests {
         );
     }
 
-    /// A file the verb does not take is named by its format and steered to the command
-    /// that does read it.
     #[test]
     fn a_project_under_sample_edit_is_steered_to_the_file_verb() {
         let dir = scratch();
@@ -1081,8 +1067,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Two targets can be named the same thing in different directories, and the
-    /// second one's zones must not land on top of the first one's WAVs.
     #[test]
     fn a_second_target_of_the_same_name_does_not_overwrite_the_first_targets_wavs() {
         let dir = scratch();
