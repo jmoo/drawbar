@@ -1,14 +1,19 @@
 //! The dedicated worker that keeps a library in the browser, and the page's side of it.
 //!
-//! The page starts it from [`BOOTSTRAP`] with the URL of the bundle's glue, the compiled
-//! module and the library, and [`serve`] answers `{ready}`, `{failed}`, or
-//! `{failed, outdated}` where the glue would not import. Commands `{id, text, attached}`
-//! ([`wire::Message`]) run in arrival order, each answered by `{id, text, attached}`
-//! holding its answers in order, or `{id, failed}`; one with `{whole}` answers the whole
-//! view, since the page lost an answer. `{close}` is answered by `{closed}`, a fault posts
-//! `{failed}` and ends the worker, and `{listed, answered}` reports progress. Started for
-//! rescues, it serves [`RescueIo`] on one directory of the origin private file system,
-//! which only a worker can write in place.
+//! The page starts the worker from [`BOOTSTRAP`] with the URL of the bundle's glue, the
+//! compiled module and the library. [`serve`] answers `{ready}`, `{failed}`, or
+//! `{failed, outdated}` where the glue would not import. Then:
+//!
+//! - A command `{id, text, attached}` ([`wire::Message`]) is answered by
+//!   `{id, text, attached}` holding every answer it gave, in order, or by `{id, failed}`.
+//!   Commands run one at a time, in arrival order. One with `{whole}` answers the whole
+//!   view, since the page lost an answer.
+//! - `{close}` is answered by `{closed}`.
+//! - A fault posts `{failed}`, and the worker answers nothing after it.
+//! - `{listed, answered}` reports progress each time either count moves.
+//!
+//! Started for rescues, the worker keeps no library and serves [`RescueIo`] on one
+//! directory of the origin private file system, which only a worker can write in place.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};

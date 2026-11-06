@@ -1,6 +1,7 @@
 //! The instrument: what the app knows about the attached Nord, and the channel that
 //! talks to it. The UI never touches a transport. It sends a [`DeviceCmd`] to a worker
-//! that owns one and reads [`DeviceEvent`]s back, one operation at a time. What the user
+//! that owns one and reads [`DeviceEvent`]s back, one operation at a time, since a transaction is not
+//! re-entrant. What the user
 //! asks for waits in `pending` and runs ahead of the background walk in [`Scan`].
 
 use std::collections::{HashMap, VecDeque};

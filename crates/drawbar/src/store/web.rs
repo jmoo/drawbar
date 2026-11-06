@@ -121,7 +121,7 @@ pub enum Risk {
 
 /// Whether this browser deletes a site's storage after seven days of use without a
 /// visit, as Safari and other WebKit browsers do outside a web app.
-// WebKit's documentation says so; not tested.
+// From WebKit's documentation; not measured.
 fn deletes_unvisited() -> bool {
     let Some(window) = web_sys::window() else {
         return false;
