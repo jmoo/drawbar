@@ -1,14 +1,8 @@
-//! The Sample Editor project document.
-//!
-//! A `.nsmpproj` is the text file the editor saves and builds an `nsmp` from. It
-//! is the same object as an instrument, seen from the source side, so it has the
-//! same key map, zone rows, and velocity field. What can be set is what
-//! `nord-format` can edit in place: the instrument's name and velocity defaults,
-//! each zone's root key and key range, each stroke's trim, loop, gain, and
-//! velocity window, and each audio file's path. Paths match the CLI's (`name`,
-//! `zone129.root_key`, `stroke1.loop_start`, `velocity.attack_amount`,
-//! `file1.path`): zones and files are addressed by their stored ids, and a
-//! stroke by its global id.
+//! The Sample Editor project document: the `.nsmpproj` text the editor saves and builds
+//! an `nsmp` from, with an instrument's key map, zone rows, and velocity field. What can
+//! be set is what `nord-format` edits in place. Paths match the CLI's (`name`,
+//! `zone129.root_key`, `stroke1.loop_start`, `velocity.attack_amount`, `file1.path`):
+//! zones and files are addressed by their stored ids, and a stroke by its global id.
 
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -625,7 +619,7 @@ pub fn metadata(ui: &mut egui::Ui, snapshot: &Snapshot) {
             Fact {
                 key: "Build target",
                 value: "nsmp".to_string(),
-                note: "the codec is understood, but building is not implemented",
+                note: "what a build makes",
             },
         ],
     );

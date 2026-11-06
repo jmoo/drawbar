@@ -1,9 +1,7 @@
-//! Browser link: the device chooser, and a pump that runs one command at a time.
-//!
-//! There is one thread, so the "worker" is a chain of `spawn_local` tasks: each takes
-//! the device out of the shared cell, runs one command, and puts it back before
-//! starting the next. Holding a `RefCell` borrow across an `await` would panic as soon
-//! as the UI touched the same cell, so the device is moved out instead of borrowed.
+//! Browser link: the device chooser, and a pump that runs one command at a time. There
+//! is one thread, so the "worker" is a chain of `spawn_local` tasks: each moves the
+//! device out of the shared cell, runs one command, and puts it back before starting the
+//! next.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -273,9 +271,8 @@ async fn retire(
 
 /// Subscribe to the browser's own "that device is gone" event.
 ///
-/// ⚠️ Without this a pulled cable is invisible until something is attempted. Nothing in
-/// the app asks the browser whether the device is still there, so the instrument column
-/// would keep accepting clicks until one of them failed.
+/// ⚠️ Without this a pulled cable is invisible until a command fails: nothing else asks
+/// the browser whether the device is still there.
 fn watch_for_unplug(
     inner: &Rc<RefCell<Inner>>,
     emit: &Emit,

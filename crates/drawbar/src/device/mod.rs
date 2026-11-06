@@ -1,14 +1,7 @@
 //! The instrument: what the app knows about the attached Nord, and the channel that
-//! talks to it.
-//!
-//! egui is immediate-mode and single-threaded; USB operations are slow and async. The UI
-//! never touches a transport: it sends a [`DeviceCmd`] to a worker that owns one and reads
-//! [`DeviceEvent`]s back. One operation is in flight at a time, which is all the protocol
-//! allows, since a transaction is not re-entrant.
-//!
-//! Two queues feed that one slot. What the user asks for goes in `pending` and is always
-//! dispatched first; the background read of every bank of every class waits behind it in
-//! [`Scan`], so it never delays a click.
+//! talks to it. The UI never touches a transport. It sends a [`DeviceCmd`] to a worker
+//! that owns one and reads [`DeviceEvent`]s back, one operation at a time. What the user
+//! asks for waits in `pending` and runs ahead of the background walk in [`Scan`].
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Receiver;
@@ -58,10 +51,8 @@ pub(crate) fn user_bank(index: u32) -> Option<u32> {
 }
 
 /// One row of the instrument's partition table: a class it has, under the device's name
-/// for it.
-///
-/// This is what the instrument declares, not what this app expects. A class this app has
-/// no name for arrives as [`ObjectClass::Unknown`] and is shown under `name`.
+/// for it. A class this app has no name for arrives as [`ObjectClass::Unknown`] and is
+/// shown under `name`.
 pub struct Partition {
     pub class: ObjectClass,
     /// The device's own word: `Piano`, `Samp Lib`, `Program`, `Set List`, …
@@ -522,9 +513,8 @@ pub enum DeviceEvent {
 /// opens.
 ///
 /// `firmware`, `build`, `kind` and `max_transfer` come from
-/// [`Identity`](nord_usb::transport::usb::Identity), read over vendor control transfers on
-/// endpoint 0. Only the desktop transport issues those, so the browser build leaves them
-/// `None`.
+/// [`Identity`](nord_usb::transport::usb::Identity), which only the desktop transport
+/// reads, so the browser build leaves them `None`.
 #[derive(Clone)]
 pub struct DeviceCard {
     pub product: String,
@@ -633,8 +623,7 @@ impl DeviceState {
 
     /// What the instrument calls a bank, by the number the panel labels it with.
     ///
-    /// For pianos these are the panel's categories, such as `Grand` and `Upright`, which is
-    /// why the browser shows bank names.
+    /// For pianos these are the panel's categories, such as `Grand` and `Upright`.
     pub fn bank_name(&self, class: ObjectClass, bank: u32) -> Option<&str> {
         let name = self
             .geometry
@@ -718,11 +707,8 @@ impl DeviceState {
     /// The classes the instrument declares, in its own table order.
     ///
     /// These are the classes the browser, the switcher and a resync walk. Empty until the
-    /// partition table has been read.
-    ///
-    /// The `(Native)` rows are left out: each is a second view of a library the table
-    /// already lists under its user partition, so listing one would show the same pool
-    /// twice.
+    /// partition table has been read. The `(Native)` rows are left out: each is a second
+    /// view of a library the table already lists under its user partition.
     pub fn classes(&self) -> Vec<ObjectClass> {
         self.partitions
             .iter()
@@ -785,9 +771,8 @@ impl DeviceState {
 
     /// The format tags the scanned slots of a class report, in the order first seen.
     ///
-    /// Every slot a walk reads names its own format, so this is what the folder holds, not
-    /// what a model's folder is supposed to hold. An unscanned class returns nothing,
-    /// which means unknown, not empty.
+    /// This is what the folder holds, read from each slot's own format tag. An unscanned
+    /// class returns nothing, which means unknown, not empty.
     pub fn formats_in(&self, class: ObjectClass) -> Vec<String> {
         let mut seen: Vec<String> = Vec::new();
         for bank in self.banks_of(class) {
@@ -1071,11 +1056,10 @@ pub(crate) fn slot_label(name: &str) -> Option<String> {
 
 /// The slot a class whose slots report no checksum is matched to.
 ///
-/// ⚠️ Settings, samples and pianos report no body checksum, so no body can be recognized
-/// in one of their slots. Settings holds a single slot and that slot is the link; a
-/// sample or a piano is matched to the slot the instrument gave this asset's name. A name
-/// is a label, not a body, so [`crate::library::Where::Both`] leaves the sign off until a
-/// compare read settles it.
+/// ⚠️ Settings, samples and pianos report no body checksum. Settings holds a single slot
+/// and that slot is the link; a sample or a piano is matched to the slot the instrument
+/// gave this asset's name. A name is not a body, so [`crate::library::Where::Both`] leaves
+/// the sign off until a compare read settles it.
 fn named(state: &DeviceState, class: ObjectClass, entity: &LocalEntity) -> Option<Location> {
     match class {
         ObjectClass::Settings => {
@@ -1141,10 +1125,9 @@ fn holding(
 
 /// Which of the slots holding this asset's bytes it is matched to.
 ///
-/// One body can sit in any number of slots, and the address the row shows is the one
-/// the user has reason to expect: the slot it came off, or the slot it stands on, which
-/// [`Workspace::landed`] sets to the slot this app wrote it to. An asset standing nowhere
-/// takes the lowest address holding it.
+/// One body can sit in any number of slots. The row shows the slot it came off or the
+/// slot it stands on, which [`Workspace::landed`] sets; an asset standing nowhere takes
+/// the lowest address holding it.
 fn among(
     state: &DeviceState,
     class: ObjectClass,
@@ -1183,9 +1166,8 @@ fn stands(state: &DeviceState, entity: &LocalEntity) -> Option<(ObjectClass, Loc
 /// Whether the browser offers to change a class at all.
 ///
 /// ⚠️ A partition this app cannot name is listed and left alone: nothing here knows what
-/// its slots hold or what a write into one would mean. Every class it can name takes a
-/// write, a piano library included: it is sent like a sample, and whether the partition
-/// has room is for [`crate::room::free_bytes`] to answer.
+/// a write into it would mean. Every class it can name takes a write, piano libraries
+/// included; [`crate::room::free_bytes`] answers whether the partition has room.
 pub fn read_only(class: ObjectClass) -> bool {
     matches!(class, ObjectClass::Unknown(_))
 }
@@ -1198,9 +1180,8 @@ pub fn loadable(state: &DeviceState, class: ObjectClass, at: Location) -> bool {
 /// asked before it happens.
 ///
 /// A settings write makes the Electro 5 reload the selected program, so panel state the
-/// player has not stored is lost. Another model is assumed to do the same.
-///
-/// Confirmed on hardware.
+/// player has not stored is lost. Confirmed on hardware. Another model is assumed to do
+/// the same.
 pub fn write_warning(class: ObjectClass) -> Option<&'static str> {
     match class {
         ObjectClass::Settings => Some(
@@ -1418,18 +1399,14 @@ impl Device {
 
     /// Walk `class` again, in one session.
     ///
-    /// The cached names stay until each bank's replacement arrives: a walk is dozens of
-    /// reads long, and an empty folder for that long is worse than names about to be
-    /// confirmed. Banks a mutation touches are dropped at once (see `Device::dispatch`).
+    /// Cached names stay until each bank's replacement arrives. Banks a mutation touches
+    /// are dropped at once (see `Device::dispatch`).
     pub fn read_class(&mut self, class: ObjectClass) {
         self.state.scan.start(class);
     }
 
-    /// Read the whole instrument again: every class it declares, and with each one its
-    /// counters, its geometry and the slot the panel has loaded.
-    ///
-    /// One walk per class, as attaching does: a class's counters, banks and focus are all
-    /// read at the start of its session.
+    /// Read the whole instrument again, one walk per class as attaching does. Each walk
+    /// reads its class's counters, geometry and loaded slot at the start of its session.
     pub fn resync(&mut self) {
         for class in self.state.classes() {
             self.read_class(class);
@@ -1484,8 +1461,8 @@ impl Device {
         if self.asked_deps.as_ref().is_some_and(rewritten) {
             self.asked_deps = None;
         }
-        // Writing the Electro 5's loaded slot requires SELECT to reload it, and another
-        // model is assumed alike. Confirmed on hardware.
+        // Writing the Electro 5's loaded slot requires SELECT to reload it. Confirmed on
+        // hardware. Another model is assumed alike.
         let written = match &cmd {
             DeviceCmd::Put { class, at, .. } | DeviceCmd::Rename { class, at, .. } => {
                 Some((*class, vec![*at]))
@@ -1818,7 +1795,7 @@ impl Device {
                     }
                 }
                 // Only the partition table says which classes exist, so the walk starts
-                // here. Each class reads its counters, banks and focus in one session.
+                // here.
                 // ⚠️ The queue outlives a disconnection, and its entries were checked
                 // against whatever was attached when they were queued.
                 DeviceEvent::Partitions(partitions) => {
@@ -1905,9 +1882,8 @@ impl Device {
                     at,
                     received,
                 } => queue.summed(class, at, &received, workspace),
-                // It landed, so it is no longer owed. What landed is what it is saved as,
-                // and the slot it landed in is where it stands. This covers that object
-                // only; the rest of a batch still waits on its own write.
+                // This covers that object only; the rest of a batch still waits on its
+                // own write.
                 DeviceEvent::Sent {
                     id,
                     class,
@@ -1965,10 +1941,8 @@ impl Device {
                 }
             }
         }
-        // Relink when either side changes: the instrument reported something, or an asset
-        // arrived, changed, was kept or was reverted. An asset that arrives while an
-        // instrument is attached links to what the cache already shows, without waiting
-        // for the next walk.
+        // An asset that arrives while an instrument is attached links to what the cache
+        // already shows, without waiting for the next walk.
         if heard || self.linked != workspace.revision() {
             self.linked = workspace.revision();
             let state = &self.state;
@@ -2052,9 +2026,8 @@ mod tests {
         ]
     }
 
-    /// The app walks the classes in the instrument's table. A partition this app cannot
-    /// name is included under the device's name for it and is read-only. A `(Native)` row
-    /// is left out.
+    /// A partition this app cannot name is included under the device's name for it and is
+    /// read-only. A `(Native)` row is left out.
     #[test]
     fn the_instrument_says_which_classes_it_has() {
         let ctx = egui::Context::default();
@@ -2078,7 +2051,6 @@ mod tests {
         assert_eq!(device.state.folder_name(ObjectClass::Unknown(9)), "Rhythms");
         assert!(read_only(ObjectClass::Unknown(9)));
 
-        // Every class the table declared is walked, and nothing else is.
         for class in device.state.classes() {
             assert!(device.state.scan.progress(class).is_some(), "{class:?}");
         }
@@ -2222,9 +2194,8 @@ mod tests {
         );
     }
 
-    /// A partition is shown in the unit its total calls for, with both figures in that
-    /// unit. The Live and Settings partitions hold less than a megabyte and would read
-    /// 0/0 in megabytes.
+    /// The Live and Settings partitions hold less than a megabyte and would read 0/0 in
+    /// megabytes.
     #[test]
     fn a_partition_reads_in_the_unit_its_total_calls_for() {
         let partition = |class, used: u32, free: u32| {
@@ -2555,9 +2526,8 @@ mod tests {
         assert_eq!(workspace.get(other).unwrap().link, None);
     }
 
-    /// A link is a slot in the asset's own folder reporting the asset's body. A folder
-    /// that reports no checksum matches nothing, since a name is no evidence that the
-    /// bytes are the same.
+    /// A folder that reports no checksum matches nothing, since a name is no evidence that
+    /// the bytes are the same.
     #[test]
     fn a_link_is_a_slot_of_its_own_folder_reporting_its_own_body() {
         let ctx = egui::Context::default();
@@ -2726,8 +2696,7 @@ mod tests {
         );
     }
 
-    /// The slot an asset came off is where it stands, whatever that slot holds now. A
-    /// program copied from 1:1, changed here and saved, is still the copy of 1:1. The
+    /// A program copied from 1:1, changed here and saved, is still the copy of 1:1. The
     /// library reports that the two differ; that is no reason to point the link elsewhere.
     #[test]
     fn the_slot_an_asset_came_off_is_its_link_while_the_instrument_holds_it() {
@@ -2769,9 +2738,8 @@ mod tests {
         );
     }
 
-    /// A class whose slots report no checksum cannot be matched by body. Settings holds
-    /// one slot and that slot is the link; a sample or a piano is matched to the slot
-    /// carrying its own name, and to nothing at all where no slot does.
+    /// Settings holds one slot and that slot is the link; a sample or a piano is matched
+    /// to the slot carrying its own name, and to nothing where no slot does.
     #[test]
     fn a_class_reporting_no_checksum_links_by_its_singleton_or_by_name() {
         let ctx = egui::Context::default();
@@ -3130,9 +3098,8 @@ mod tests {
         assert_eq!(log.status().1, copied);
     }
 
-    /// A slot's dependencies are read once however often they are wanted. A refused
-    /// read is not repeated until asked again, and a write into the slot's bank or a
-    /// change on the instrument makes the slot worth reading again.
+    /// A slot's dependencies are read once however often they are wanted, and a refused
+    /// read waits until asked again.
     #[test]
     fn a_dependency_read_is_repeated_after_a_refusal_a_write_or_a_change() {
         let ctx = egui::Context::default();

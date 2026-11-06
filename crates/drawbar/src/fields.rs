@@ -30,10 +30,8 @@ pub fn is_electro5_settings(entity: &Entity) -> bool {
 /// points at.
 ///
 /// ⚠️ It gets its own view instead of a field strip, because `ne5::Song` declares no
-/// registry: its four slots are private fields, edited through `Song::set` in
-/// `document::setlist`. A Stage 3 song is an undecoded stub with no view, so it is not a
-/// set list here; claiming it were would put an empty Basic page in front of its byte
-/// record.
+/// registry: its four slots are edited through `Song::set` in `document::setlist`. A
+/// Stage 3 song is an undecoded stub with no view, so it is not a set list here.
 pub fn is_set_list(entity: &Entity) -> bool {
     matches!(entity, Entity::Song(Song::Electro5(_)))
 }
@@ -83,9 +81,8 @@ pub fn number(value: &str) -> Option<u64> {
 /// The registry paths the two sets of bytes spell differently, in registry order.
 ///
 /// ⚠️ An edit reaches the working copy in the frame it is made, so a pending change
-/// shows only when this document is compared with its saved bytes. Comparing `raw` with
-/// `bits` inside one decode would miss it, because an applied edit has already settled
-/// them. Bytes that do not decode name no paths.
+/// shows only against the saved bytes, never between `raw` and `bits` of one decode.
+/// Bytes that do not decode name no paths.
 pub fn changed(saved: &[u8], current: &[u8]) -> Vec<String> {
     let (Some(before), Some(after)) = (decoded(saved), decoded(current)) else {
         return Vec::new();

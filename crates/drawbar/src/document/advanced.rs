@@ -221,10 +221,8 @@ impl Advanced {
                     .color(crate::app::bad(ui.visuals())),
             );
         }
-        // ⚠️ Keys are read only when this cell loses focus. If they were read from the
-        // window every frame, an Enter pressed anywhere would submit every open cell,
-        // including a refused one, which would go back to the library and into the log on
-        // every press.
+        // ⚠️ Keys are read only when this cell loses focus. Read from the window, an Enter
+        // pressed anywhere would resubmit every open cell, a refused one included.
         if !response.lost_focus() {
             return;
         }
@@ -597,8 +595,6 @@ fn slot(ui: &mut egui::Ui, entity: &LocalEntity, device: &Device) -> Option<Slot
         Some(Some(info)) => {
             let (crc, note) = match info.crc32 {
                 Some(crc) => (format!("{crc:#010x}"), String::new()),
-                // Library content reports 0xffffffff: no checksum is kept for objects
-                // this large.
                 None => (
                     "none".to_string(),
                     "not checksummed for this class".to_string(),

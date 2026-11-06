@@ -109,8 +109,7 @@ pub struct FieldDiff {
 
 /// What is in the slot an entry is waiting for.
 ///
-/// ⚠️ `Unknown` is not `Vacant`: a bank nobody has read may hold something, and calling
-/// its slot free is the mistake this type exists to prevent.
+/// ⚠️ `Unknown` is not `Vacant`: a bank nobody has read may hold something.
 pub enum Occupancy {
     /// The bank has not been scanned, so a compare read is on its way to find out.
     Unknown,
@@ -220,14 +219,10 @@ fn read_occupant(device: &mut Device, log: &mut Log, class: ObjectClass, at: Loc
 
 /// Queue an asset to be written to a slot, and log what that displaced.
 ///
-/// The queue keeps one entry per asset and one per destination, so this moves the
-/// asset's entry if it was waiting for another slot and drops whatever else was waiting
-/// for this one. The slot is read unless the scan cache shows it empty or holding a body
-/// with the same checksum. A slot in a bank the scan never reached is read, not assumed
-/// vacant.
-///
-/// Queueing an asset for the slot it is already waiting for does nothing: it logs
-/// nothing and asks the instrument nothing.
+/// The slot is read unless the scan cache shows it empty or holding a body with the same
+/// checksum. A slot in a bank the scan never reached is read, not assumed vacant.
+/// Queueing an asset for the slot it is already waiting for logs nothing and asks the
+/// instrument nothing.
 pub fn enqueue(
     workspace: &Workspace,
     device: &mut Device,
@@ -798,8 +793,7 @@ fn wire_sum(bytes: &[u8]) -> Option<(Range<usize>, u32)> {
 /// How what is waiting differs from what the slot holds.
 ///
 /// ⚠️ The bytes decide whether the two agree. A registry covers only the fields it
-/// declares, and a bit no field claims is still a difference. Calling two bodies identical
-/// because every declared field matches would call a necessary write unnecessary.
+/// declares, and a bit no field claims is still a difference.
 ///
 /// When both bodies decode into registries, the difference is a list of fields;
 /// otherwise it is an offset into the wire body. Bodies are compared as the wire carries

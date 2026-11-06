@@ -68,7 +68,7 @@ pub fn ui(ui: &mut egui::Ui, on: bool, word: &str) -> Option<bool> {
         let lens = egui::pos2(rect.left() + PAD.x + LENS / 2.0, rect.center().y);
         let lit = crate::app::accent(visuals);
         match showing {
-            // The glow shows "on" at a glance; the lens alone is just a dot.
+            // The glow shows "on" at a glance; the lens alone is a dot.
             true => {
                 let glow = egui::Shadow {
                     offset: [0, 0],

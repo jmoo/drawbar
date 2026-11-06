@@ -1,19 +1,11 @@
-//! The piano-library document.
+//! The piano-library document. An edit decides which strokes go on the instrument: it is
+//! a plan over the bytes the asset was last saved as, and the working bytes are what that
+//! plan makes of them.
 //!
-//! A `.npno` is hundreds of megabytes of recorded notes, one stroke per root note, bank,
-//! and velocity layer. Editing one means deciding which strokes go on the instrument, so
-//! an edit here is not a field write. It is a plan over the bytes the asset was last
-//! saved as, and the working bytes are what that plan makes of them.
-//!
-//! ⚠️ An edit never makes those bytes. [`planned`] applies a plan over the borrowed
-//! baseline and is what a switch is checked against. [`materialize`] is the only
-//! whole-body copy, and it runs off the frame when the library is saved, sent, or
-//! exported.
-//!
-//! ⚠️ Nothing decodes to draw a frame. The facts the sections read (the roots, the
-//! layers, the banks, and what each costs) are read from the saved baseline once and
-//! kept. A stroke's audio is decoded only when someone asks to hear it. A library resting
-//! in its file is read through its index, and a stroke's audio from its own range.
+//! ⚠️ An edit never makes those bytes, and nothing decodes to draw a frame. [`planned`]
+//! applies a plan over the borrowed baseline, the facts the sections read are read from
+//! it once, and a stroke's audio is decoded only when asked for. [`materialize`], the only
+//! whole-body copy, runs off the frame when the library is saved, sent, or exported.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::RangeInclusive;
@@ -1304,10 +1296,9 @@ pub struct State {
 
 impl State {
     /// Read the baseline, take up the plan, and return what the header shows for a
-    /// piano library beyond what the asset alone says.
+    /// piano library beyond what the asset alone says: [`Extras::default`] for anything
+    /// else.
     ///
-    /// [`Extras::default`] for anything that is not a piano library, which leaves the
-    /// header's own rules in charge.
     /// `held` is the plan the workspace holds of a library resting in its file, which a
     /// plan over another baseline gives way to.
     pub fn begin(
@@ -1463,9 +1454,7 @@ impl State {
         }
     }
 
-    /// Forget this document's plan, and anything waiting on it. Revert puts the saved
-    /// bytes back and a removal takes them away, and a plan over bytes nothing holds is
-    /// not an edit of anything.
+    /// Forget this document's plan, and anything waiting on it.
     ///
     /// ⚠️ Only the document being drawn loses its draft and its facts: forgetting
     /// another document's plan must not close the open one.
@@ -1557,10 +1546,8 @@ impl State {
     /// The apply that has answered, where one has.
     ///
     /// ⚠️ An answer over a plan that has since changed, or over a document the workspace
-    /// no longer holds, is dropped, not written: its bytes are of a library nobody wants
-    /// anymore. Whatever was waiting on that document then waits on the apply of the plan
-    /// in hand, unless the plan has already reached the bytes or the document is gone,
-    /// when there is nothing left to wait for.
+    /// no longer holds, is dropped, not written. Whatever waited on that document then
+    /// waits on the apply of the plan in hand, unless nothing is left to wait for.
     pub fn answered(&mut self, ctx: &egui::Context, workspace: &Workspace) -> Option<Applied> {
         let answer = self.job.as_ref()?.job.poll();
         self.finished(answer, ctx, workspace)
@@ -4362,7 +4349,7 @@ mod tests {
     /// A partition with about `free` bytes left for pianos, and nothing else attached.
     ///
     /// The pretend allocation unit is small, so a test can name a free size the
-    /// partition's own counters can actually express.
+    /// partition's own counters can express.
     fn attached(free: u64) -> Device {
         const UNIT: u32 = 1024;
         let mut device = Device::new(egui::Context::default());
@@ -4578,7 +4565,7 @@ mod tests {
     }
 
     /// Every capability the Advanced face calls editable is something this editor
-    /// actually does: a plan change that lands in the rebuilt bytes, a stroke it decodes
+    /// does: a plan change that lands in the rebuilt bytes, a stroke it decodes
     /// when asked, or the send its header offers.
     #[test]
     fn every_editable_capability_is_something_the_editor_does() {
@@ -4921,7 +4908,7 @@ mod tests {
         let laid = editor.frame(Vec::new());
         assert!(!laid.said("ANSWERS FROM"), "no row is open yet");
 
-        // The size lane sits directly above the keyboard, just inside its own rect.
+        // The size lane sits directly above the keyboard, inside its own rect.
         let keyboard = laid.whites[0];
         let at = egui::pos2(laid.white(72).x, keyboard.top() - 10.0);
         editor.frame(testing::click(at));
