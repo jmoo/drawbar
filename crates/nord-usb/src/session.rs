@@ -6,12 +6,11 @@
 //! O18 I22, O22 I26, [ operation ], O22 I42, O18 I22, O18 I22
 //! ```
 //!
-//! The numbers are payload bytes. Captures show frame lengths 40 higher, which is the
-//! capture tool's Darwin header and not part of the wire.
+//! The numbers are frame lengths in bytes. Captures show each 40 bytes longer: the
+//! capture tool's Darwin header, which is not on the wire.
 //!
-//! Closing is explicit. `Drop` is neither async nor fallible, so a failed close there
-//! would be lost while a half-open transaction may leave the device in an odd state.
-//! `Drop` only complains, in debug builds.
+//! Closing is explicit, because `Drop` can neither await nor fail. A session dropped
+//! without [`Session::commit`] or [`Session::abort`] panics in debug builds.
 
 use std::marker::PhantomData;
 use std::time::Duration;
@@ -79,13 +78,13 @@ impl<'t, T: Transport> Session<'t, T, ReadOnly> {
             _capability: PhantomData,
         };
 
-        // ⚠️ An abandoned UI session makes every slot appear empty. Confirmed on hardware.
         s.handshake().await?;
 
         let opened = s.open_class().await;
 
         // ⚠️ This covers an abandoned class session only. An abandoned UI session
         // reports every slot as empty without an error; `op::recover` handles that case.
+        // Confirmed on hardware.
         let opened = match opened {
             Err(Error::DeviceStatus(STALE_SESSION)) => {
                 if let Err(error) = s.discard_stale_session().await {
@@ -247,10 +246,10 @@ impl<T: Transport, C> Session<'_, T, C> {
     ///
     /// # Warning
     ///
-    /// This sends bytes no capture has shown the device receiving. Unknown commands have
-    /// been reported to leave instrument firmware in a state only a power cycle clears,
-    /// and a write-shaped command reaching a real object destroys it. Probe only
-    /// read-shaped commands, and only on backed-up content.
+    /// This sends bytes no capture has shown the device receiving. An unknown command can
+    /// leave the instrument in a state only a power cycle clears (see
+    /// [`cmd::HIGHEST_ANSWERING`]), and a write-shaped command reaching a real object
+    /// destroys it. Probe only read-shaped commands, and only on backed-up content.
     pub async fn probe(
         &mut self,
         service: Service,
@@ -403,7 +402,6 @@ impl<T: Transport, C> Drop for Session<'_, T, C> {
     }
 }
 
-// With `panic = "abort"`, the panic these tests catch would end the test binary.
 /// The transport with no session around it, for the commands the device answers
 /// outside one: [`cmd::PARTITIONS`] and [`cmd::BANKS`]. No `HELLO`, no
 /// `SESSION_OPEN`, and nothing to close. The Electro 5 answers both this way, and
@@ -504,6 +502,7 @@ fn stalled(msg: &Message) -> Error {
     ))
 }
 
+// With `panic = "abort"`, the panic these tests catch would end the test binary.
 #[cfg(all(test, panic = "unwind"))]
 mod tests {
     use super::*;

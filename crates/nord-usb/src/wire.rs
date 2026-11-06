@@ -73,6 +73,9 @@ impl Service {
 /// The response is always the request `+1`, so only the request code is named. Codes
 /// come from captured traffic unless their documentation says otherwise. Most requests
 /// are even, but [`cmd::SELECT`] is odd, so parity carries no meaning.
+///
+/// A command acts on the class its session opened, so one [`cmd::DELETE`] serves every
+/// class.
 pub mod cmd {
     /// Subsystem paired with [`Service::Program`](super::Service::Program). The device
     /// reads it as a protocol version.
@@ -83,18 +86,18 @@ pub mod cmd {
     pub const SESSION_CLOSE: u32 = 0x06;
     /// Device/memory status; the response carries several counters.
     pub const STATUS: u32 = 0x08;
-    /// Delete a program.
+    /// Delete the object in a slot.
     pub const DELETE: u32 = 0x14;
     /// Read a chunk of an entity body. Args: bank, slot, offset, length.
     pub const READ: u32 = 0x12;
     /// Duplicate an object: `src_bank, src_slot, dst_bank, dst_slot`. The device copies
     /// internally, and no body crosses the wire.
     pub const COPY: u32 = 0x16;
-    /// Move a program between slots.
+    /// Move an object between slots.
     pub const MOVE: u32 = 0x18;
-    /// Read a program's metadata (name, format tag).
+    /// Read an object's metadata (name, format tag).
     pub const INFO: u32 = 0x1e;
-    /// Rename a program; args carry a length-prefixed string.
+    /// Rename an object; args carry a length-prefixed string.
     pub const RENAME: u32 = 0x1c;
     /// Load an object live on the instrument ("open on device", or a double-click).
     /// Nothing stored changes. This is the only request with an odd code and an even
@@ -159,9 +162,10 @@ pub mod cmd {
 
     /// Highest command the instrument has been seen to answer.
     ///
-    /// ⚠️ The codes above this are unexplored but not empty: at least one reaches a
-    /// destructive path, shows its own progress label, never replies, and needs a power
-    /// cycle. A code far from the known range may still be implemented.
+    /// ⚠️ The codes above this are unexplored but not empty. One, sent with no arguments,
+    /// shows `"Deleting..."` on the display unprompted, never replies, and needs a power
+    /// cycle; what it does with arguments is unknown. Confirmed on hardware. A code far
+    /// from the known range may still be implemented.
     pub const HIGHEST_ANSWERING: u32 = 0x3d;
 
     /// Unsolicited device → host notification. No request pairs with it, so it arrives
@@ -246,9 +250,9 @@ pub struct ProgramInfo {
     pub version: u32,
     /// CRC-32 of the body as the device reports it, for verifying a read.
     ///
-    /// `None` for classes the device does not checksum. Pianos, samples, and Settings
-    /// report `0xffffffff`, which is mapped to `None` so callers cannot verify against
-    /// it.
+    /// Programs and set lists report one. Pianos, samples, and Settings report
+    /// `0xffffffff`, which is mapped to `None` so callers cannot verify against it; what
+    /// such a slot holds is known only by reading it.
     pub crc32: Option<u32>,
     /// When a piano or sample was last changed, in seconds since the Unix epoch.
     ///
@@ -843,9 +847,10 @@ impl Message {
 /// The kind of object a session addresses.
 ///
 /// `SESSION_OPEN` carries a partition index, and [`cmd::STATUS`] then reports on that
-/// partition alone. Confirmed on hardware. Each model orders its partitions its own way,
-/// so a class is found by its partition's name ([`Self::partition_name`]), and
-/// [`Classes`] gives the index on the attached instrument.
+/// partition alone. Confirmed on hardware. Each model orders its partitions its own way
+/// (the Electro 5 keeps programs at 4), so a class is found by its partition's name
+/// ([`Self::partition_name`]), and [`Classes`] gives the index on the attached
+/// instrument.
 ///
 /// ⚠️ How each class takes a write ([`Self::overwrites_in_place`],
 /// [`Self::renames_and_copies`], [`Self::names_its_slots`], [`Self::is_library`]), which
@@ -862,6 +867,9 @@ pub enum ObjectClass {
     Live,
     /// The global settings singleton. The Electro 5's is wire-addressed `0:0` and reports
     /// no body checksum (`0xffffffff`), like the library classes.
+    ///
+    /// ⚠️ Writing it reloads the selected program, so unsaved panel changes are lost.
+    /// Confirmed on hardware.
     Settings,
     /// The organ presets of a model that keeps them apart from its programs.
     OrganPreset,
@@ -1199,8 +1207,6 @@ impl Location {
 
 #[cfg(test)]
 mod tests {
-    /// A library a decoded body refers into is the class of the same storage, and the
-    /// acceptance table uses that storage class.
     #[test]
     fn a_library_is_the_class_of_the_same_storage() {
         use super::ObjectClass;
@@ -1588,8 +1594,7 @@ mod tests {
         assert!(deps[1].is_required());
     }
 
-    /// A live flag addressing nothing (a routed section with nothing assigned) passes a
-    /// flag check but is not required.
+    /// A routed section with nothing assigned passes a flag check.
     #[test]
     fn a_live_row_addressing_nothing_is_not_required() {
         let d = Dependency {

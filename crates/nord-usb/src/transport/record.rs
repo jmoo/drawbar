@@ -1,12 +1,12 @@
 //! A recording tap over a live transport: every frame in either direction is appended
-//! to a script file in the format [`crate::transport::replay`] reads back.
+//! to a script file in the format the `replay` feature's transport reads back.
 //!
 //! Frames are written in wire order, byte for byte. Each bulk transfer adds one line,
 //! including a read that timed out, a write the device did not accept, and one the
 //! transport failed, so a replay meets the same silence and failures.
 //!
 //! Writes are unbuffered, so a session that wedges or is killed still leaves everything
-//! that reached the wire on disk. That is usually the case a recording is for.
+//! that reached the wire on disk.
 
 use std::fs::File;
 use std::io::Write;

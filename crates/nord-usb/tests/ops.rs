@@ -460,7 +460,6 @@ fn a_failed_commit_reports_rather_than_panicking() {
     );
 }
 
-/// A queued `CHANGED` notification is surfaced and drained before the command reply.
 #[test]
 fn an_unsolicited_changed_notification_is_drained_not_mistaken_for_the_reply() {
     let mut t = replaying("session/changed_notification.script");

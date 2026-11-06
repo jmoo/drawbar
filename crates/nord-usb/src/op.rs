@@ -112,7 +112,8 @@ pub struct Received {
 /// written. `file` then holds a partial body, as it does after any error; discarding it
 /// is the caller's.
 ///
-/// The frames are the same whatever `file` is: [`read_program`] is this, into memory.
+/// The frames are the same whatever `file` is: [`read_program`] is this, into memory,
+/// and into [`std::io::sink()`] it takes a slot's checksum without holding its body.
 pub async fn read_into<T: Transport, C>(
     session: &mut Session<'_, T, C>,
     at: Location,
@@ -537,7 +538,6 @@ async fn transfer_in<T: Transport>(
 /// does in Nord Sound Manager. The device switches to it immediately.
 ///
 /// **Non-destructive.** Nothing stored changes, so this needs no [`ReadWrite`] session.
-/// This is the only command with inverted parity (`0x2f` request, `0x30` response).
 pub async fn select<T: Transport, C>(session: &mut Session<'_, T, C>, at: Location) -> Result<()> {
     session
         .request(&Message::program(cmd::SELECT, at.to_bytes()))

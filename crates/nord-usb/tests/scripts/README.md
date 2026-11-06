@@ -137,6 +137,5 @@ whether the command succeeded or not; put it in a directory here or in the corpu
 becomes a trial.
 
 The hand-built scripts under `session/` cover paths no instrument produces on request: a
-refused close, a notification flood, a session an earlier run left open. Four of them
-name the tests that drive them with `driven_by`, because they test the session driver's
-behavior, not an exchange.
+refused close, a notification flood, a session an earlier run left open. Those that test
+the session driver itself name the tests that drive them with `driven_by`.
