@@ -2,7 +2,7 @@
 
 **Read and write Nord keyboard files from Rust, byte for byte.**
 
-- Programs, live slots, set lists, settings, sample instruments, piano libraries
+- Programs, live slots, songs, settings, sample instruments, piano libraries
   and the bundles that carry them.
 - What you read, you can write back unchanged. Anything the library does not yet
   decode is kept as raw bytes, and every editable field is checked to move no

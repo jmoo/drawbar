@@ -421,7 +421,7 @@ enum BundleAction {
     /// Write a folder's files into a bundle, each at its path under the folder.
     ///
     /// A `meta.xml` at the top of the folder, as `unpack` leaves one, is kept as the
-    /// manifest. Without one, the manifest lists which set lists play which programs.
+    /// manifest. Without one, the manifest lists which songs play which programs.
     Pack {
         /// The folder to pack.
         dir: PathBuf,

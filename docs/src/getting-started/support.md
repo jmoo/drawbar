@@ -8,7 +8,7 @@ sample files. Of the other instruments, only a Stage 4 has been connected over U
 
 | Files | What drawbar does | Tested on an instrument |
 |---|---|---|
-| Electro 5 programs, live slots, set lists and settings | View, edit, transfer | Yes |
+| Electro 5 programs, live slots, songs and settings | View, edit, transfer | Yes |
 | Stage 2, 3 and 4 programs and live slots, and Stage 3 and 4 presets | View, edit | No |
 | Sample instruments (`.nsmp`, `.nsmp3`, `.nsmp4`) | Decode, edit, encode, build from Sample Editor projects, audition, transfer | Playback of v2 files. Files encoded as v3 or v4 have not been played |
 | Piano libraries (`.npno`) | Decode, trim, split, rename, retune, remap, build from WAVs with loops, transfer | See [Piano libraries](#piano-libraries) |

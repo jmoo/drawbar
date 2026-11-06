@@ -24,7 +24,7 @@ instrument holds there, so edits you have not sent are not heard.
 
 - **Basic** is the sound's controls, in the instrument's own words.
 - **Advanced** is the record of the bytes, top to bottom:
-  - **About this file**: what the file says about itself. Set lists, files
+  - **About this file**: what the file says about itself. Songs, files
     with nothing to edit and bytes drawbar could not read have none.
   - **Container**: what the file's header states, and whether its checksum
     matches.
@@ -36,7 +36,7 @@ instrument holds there, so edits you have not sent are not heard.
     field. A value the field cannot hold is refused, with the reason. A field
     changed since the last save is highlighted and marked with a pencil, and the
     count above the table says how many there are. Samples and pianos list what
-    drawbar can edit in them and where each edit lands in the file. A set list
+    drawbar can edit in them and where each edit lands in the file. A song
     shows its four stored slots, and a file with nothing to edit shows its
     **Body bytes**. Bytes drawbar could not read have no body to show.
 
@@ -66,7 +66,7 @@ writes the morph.
 
 ## Set lists
 
-A set list opens as the programs it plays, one row each, with its bank and slot,
+A song from a set list opens as the programs it plays, one row each, with its bank and slot,
 the program's name where drawbar knows it, and whether the entry resolves. Drag
 rows to reorder them.
 

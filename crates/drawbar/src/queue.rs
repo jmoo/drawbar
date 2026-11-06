@@ -2239,9 +2239,9 @@ mod tests {
     }
 
     /// ⚠️ A type-0 file stores no body checksum. Every Electro 5 factory program is one,
-    /// as is everything Nord Sound Manager exports from one. An entry for such a file
-    /// settles against a slot it matches only because the checksum is computed from the
-    /// body, not read from the header.
+    /// as is everything Nord Sound Manager exports from one. Inferred from specimens; not
+    /// confirmed on hardware. An entry for such a file settles against a slot it matches
+    /// only because the checksum is computed from the body, not read from the header.
     #[test]
     fn a_type_0_entry_settles_against_the_slot_reporting_its_checksum_without_a_read() {
         let (mut workspace, mut log, bytes) = bench();

@@ -2076,8 +2076,9 @@ mod tests {
     }
 
     /// ⚠️ An Electro 5 factory program is a type-0 file, and so is every copy Nord Sound
-    /// Manager exports from one. Its header carries no body checksum, so nothing links
-    /// it to the slot it came off unless the checksum is computed from the body.
+    /// Manager exports from one. Inferred from specimens; not confirmed on hardware. Its
+    /// header carries no body checksum, so nothing links it to the slot it came off
+    /// unless the checksum is computed from the body.
     #[test]
     fn a_type_0_asset_links_to_the_slot_reporting_its_body_checksum() {
         let Bench {

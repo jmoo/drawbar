@@ -34,20 +34,20 @@ slots, so `nord live deps` prints the ids for a slot too.
 
 ## Bundles
 
-A bundle is the file Nord Sound Manager carries programs or a set list in, with
+A bundle is the file Nord Sound Manager carries programs or songs in, with
 the pianos and samples they play.
 
 ```sh
 nord bundle get program 7:4 7:5 -o gig.ne5pbundle   # programs and what they play
-nord bundle get setlist 1:2 -o b3.ne5tbundle        # a set list, its programs, and what they play
+nord bundle get setlist 1:2 -o b3.ne5tbundle        # a song, its programs, and what they play
 nord bundle unpack gig.ne5pbundle -o gig            # every file at its path, and meta.xml
 nord bundle pack gig -o gig.ne5pbundle              # and back
 ```
 
 `get` reads only. It finds each piano and sample by the name the instrument gives
 it, and warns about one it cannot find in exactly one slot. `pack` keeps a
-`meta.xml` it finds at the top of the folder; without one, it lists which set
-lists play which programs. [What is supported](../getting-started/support.md)
+`meta.xml` it finds at the top of the folder; without one, it lists which songs
+play which programs. [What is supported](../getting-started/support.md)
 says which instruments' bundles these commands handle.
 
 `inspect` and `unpack` read a bundle only in the uncompressed shape Nord Sound
