@@ -4,8 +4,6 @@
 instrument. Each one is a file. On the desktop, the files are in a folder you
 can see.
 
-> **drawbar is alpha.** Keep your own backups of anything that matters.
-
 ## Where your library lives
 
 On the desktop, your library is a folder in drawbar's own data:
@@ -47,9 +45,9 @@ exported, and the item is unavailable while the library holds any file, hidden
 ones included. Close drawbar in the browser's other tabs first. If an import
 stops partway, the library opens read-only until you import the copy again.
 A web app added to the Dock or the Home Screen keeps storage of its own, apart
-from Safari's, so export a copy in Safari and import it in the web app. In
-Chrome and Edge you can also unzip the copy and open the folder with **File ▸
-Open folder…**.
+from Safari's, so export a copy in Safari and import it in the web app. In a
+browser that can open a folder, you can also unzip the copy and open the folder
+with **File ▸ Open folder…**.
 
 ## Opening another folder
 
@@ -100,8 +98,8 @@ does not open, such as a PDF, is not copied in, and the activity log says so. A
 file drawbar cannot read still shows up, and the activity log says what went
 wrong.
 
-**New** makes a fresh sound, note or folder. A fresh Stage program has every
-control at zero; it is not a factory sound.
+**New** makes a fresh sound, note or folder. A fresh sound is not a factory
+sound, and some kinds start with every control at zero.
 
 ## Sounds an earlier version kept
 

@@ -134,7 +134,8 @@ Use `///` for a contract a caller can rely on without reading the body. Use
 `//` for a surprise encountered while reading the body. Do not turn an internal
 essay into API documentation merely to preserve it.
 
-Reverse-engineered claims use one of these exact provenance forms:
+A reverse-engineered claim states how certain it is and where that comes from,
+in one of these exact forms:
 
 ```rust
 // Confirmed on hardware.
@@ -142,6 +143,12 @@ Reverse-engineered claims use one of these exact provenance forms:
 // Reported by public documentation; not confirmed on hardware.
 // Unexplained: real programs hold this, and the panel cannot produce it.
 ```
+
+Where no form fits the subject, write its analog with the same two parts. A
+sample file has no panel, so an unknown field there reads
+`// Unexplained: vendor sample files hold this, and nothing in the file derives it.`
+Browser and operating-system behavior is not reverse engineering of the
+instrument; state it plainly, as measured or as its vendor documents it.
 
 Never drop the qualifier when moving or editing a claim. Arithmetic that shows
 an encoding is evidence rather than a mutable measurement and may stay:
@@ -235,25 +242,18 @@ Before a change is done:
   corpus, when the change touches decoded layout or protocol evidence;
   `.#nord.<crate>-corpus` selects one crate.
 
-CI runs the workspace with each crate's declared `testFeatures` on native Linux,
-Windows and macOS runners, and builds each crate on its own features on Linux and
-macOS. The web job
-builds the production bundle and guide, and runs the declared browser suites in
-Chromium and Firefox. The check job rejects anything `nix fmt` would change and
-treats Clippy and rustdoc warnings as failures.
-The required `build` check collects the native, web and corpus results; release
-and deployment wait for it and `check`. Cross builds are local checks, and a
-crate's Windows cross build, `nix build .#<crate>-windows`, only compiles it. An
-optional `safari` workflow runs the browser suites in Safari when toshokan or
-drawbar's library changes; `nix flake check` holds its Rust and wasm-bindgen pins.
+CI runs each crate with its declared `testFeatures`. The check job rejects
+anything `nix fmt` would change and treats Clippy and rustdoc warnings as
+failures. Release and deployment wait for `check` and the required `build`
+check. [Checks](docs/src/reference/building.md#checks) lists the jobs.
 
-The `autofix` PR label runs `nix fmt` on the branch and pushes a `style: nix fmt` commit when
-it changes anything; it reruns on pushes while the label is on. The public suite
-must compile and pass without private corpus access. `tests/corpus` discovers the
-committed fixtures, plus the corpus when enabled, by content, and applies sidecar
-`.oracle.json` files where present. Test code names no corpus path: a claim about
-every file of a kind runs once per such file, and a claim about one file lives in
-its sidecar.
+The `autofix` PR label runs `nix fmt` on the branch and pushes a `style: nix fmt`
+commit when it changes anything; it reruns on pushes while the label is on. The
+public suite must compile and pass without private corpus access.
+`tests/corpus` discovers the committed fixtures, plus the corpus when enabled, by
+content, and applies sidecar `.oracle.json` files where present. Test code names
+no corpus path: a claim about every file of a kind runs once per such file, and a
+claim about one file lives in its sidecar.
 
 The CI corpus job runs the committed tier for in-repository pull requests and
 gates publishing. It reads `jmoo/nord-corpus` through the read-only

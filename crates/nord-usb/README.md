@@ -1,14 +1,18 @@
 # nord-usb
 
 **Talk to a Nord keyboard over USB from Rust.** The protocol Nord Sound Manager
-speaks, worked out from captures, with backends for the desktop (`nusb`), the
-browser (`web`, over WebUSB), and recorded captures (`replay`, no hardware
-needed).
+speaks, worked out from captures.
 
-> ⚠️ Alpha software driving real hardware. Back up your instrument first; Nord
-> Sound Manager makes a full backup.
-> [What is supported](../../docs/src/getting-started/support.md) says which
-> operations have been verified on an instrument.
+- Backends for the desktop (`nusb`), the browser (`web`, over WebUSB), and
+  recorded captures (`replay`, no hardware needed).
+- Reads get a read-only session, so a write in one does not compile.
+- Every session closes even when its closure fails, so the instrument is not
+  left on its progress screen.
+- Pianos and samples stream to and from a file a transfer chunk at a time.
+
+> ⚠️ Alpha software driving real hardware: back up your instrument first.
+> [What is supported](../../docs/src/getting-started/support.md) says what has
+> been verified on an instrument.
 
 ## Usage
 
@@ -29,31 +33,11 @@ let (info, file) = device
     .await?;
 ```
 
-Writes go through `device.destructive(class, …)`, which hands the closure a
-session that can write. Both find the class's partition by the name the instrument's
-partition table gives it, which the device is asked for first, with no session. Both
-brackets close the transaction whether the closure
-succeeds or fails. An abandoned transaction would leave the instrument stuck on
-its progress screen until it is power-cycled.
-
-`device.write` sends a file held in memory. `device.write_from` reads it one
-transfer chunk at a time through a `FileSource`, which a caller implements for a
-file on disk or a browser `File`, so a piano or sample library is never loaded
-whole. Reads mirror it: `op::read_program` returns the file in memory, and
-`op::read_into` hands it to a `FileSink` a chunk at a time as it arrives.
-
 ## Learn more
 
-- [docs.rs](https://docs.rs/nord-usb)
-- [USB protocol](../../docs/src/reference/usb-protocol.md): what works where,
-  the frame layout, and the layering.
+- [docs.rs](https://docs.rs/nord-usb): the API, the protocol and the features.
+- [USB protocol](../../docs/src/reference/usb-protocol.md) in the guide.
 - [Testing](../../docs/src/reference/testing.md): the replay suite.
-
-## Building
-
-`cargo test -p nord-usb --features replay` from `crates/` in `nix develop`.
-Without `replay`, no wire encoding is tested. The `web` feature needs a flag that
-`crates/.cargo/config.toml` supplies, so build it from `crates/`.
 
 ## Disclaimer
 

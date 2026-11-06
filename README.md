@@ -7,8 +7,7 @@ your terminal, or from your own code.
 
 ![drawbar with an instrument attached and a piano library open in its editor](docs/src/assets/screenshot.png)
 
-> ⚠️ **Alpha.** Back up your instrument and your files first. Everything here was
-> worked out by studying real instruments.
+> ⚠️ **Alpha.** Back up your instrument and your files first.
 > [What is supported](docs/src/getting-started/support.md) lists what has been
 > tested on hardware.
 
@@ -23,14 +22,10 @@ your terminal, or from your own code.
 | 📚 | [toshokan](crates/toshokan/README.md) | Library for keeping tags and history beside a folder of real files, in Dropbox, iCloud or any synced folder. |
 | 🧬 | [nord-bits-derive](crates/nord-bits-derive/README.md) | The macro behind nord-format's layouts. |
 
-
 ## Try it
 
 Open [drawbar.app](https://drawbar.app/) in Chrome, Edge, Safari, Firefox, or Brave.
-
-
-Or, with
-[Nix](https://nixos.org/download/):
+Or, with [Nix](https://nixos.org/download/):
 
 ```sh
 nix run github:jmoo/drawbar#drawbar              # the desktop app

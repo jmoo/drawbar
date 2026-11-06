@@ -1,100 +1,82 @@
 # File formats
 
 `nord-format` reads and writes Nord files. It is a pure library: no USB, no I/O
-beyond `Read`, `Seek` and `Write`, and it builds for the browser.
+beyond `Read`, `Seek` and `Write`, and it builds for the browser. Its
+[crate documentation](https://docs.rs/nord-format/latest/nord_format/) on docs.rs is the reference for the API, the
+formats and their bytes.
 
 ## Round trips
 
 Whatever the library reads, it writes back byte for byte. Regions it does not
 decode are kept as raw bytes, and decoded values are views over them, so a file
-survives a round trip even where its meaning is not fully known. Every fixture
-and every file in the private corpus is checked this way, and every editable
-field is set and read back to prove it moves no other bit.
-
-## Large libraries
-
-A piano library or sample instrument can run to hundreds of megabytes, and a
-whole read holds all of it in memory. `npno::Index` and `nsmp::Index` read only a
-file's headers and stroke directory, through `Read` and `Seek`, and give the byte
-range of each stroke's audio. A caller reads one stroke by its range and decodes
-it. A sample stroke decodes against the file's peak, the largest statistic B of
-any of its strokes, which `nsmp::Index::file_peak` gives. The index does not
-verify the container checksum, which covers every byte; `cbin::inspect` checks
-it in one streaming pass, and `cbin::Verifier` does the same over chunks a caller
-supplies. Both report the body's CRC-32, the number an
-instrument reports for the slot holding it, whichever checksum the file stores. `Verifier::seal` gives the checksum such
-chunks call for, for a writer that streams a body before its checksum is known.
-
-An edit is saved without a whole read too. A sample instrument's
-`nsmp::Outline`, from its index, answers what a whole read answers outside the
-audio and takes the same edits; `Index::patch` turns it into a `cbin::Patch`, the
-few sections the edit changed and the restated checksum, which `Patch::copy`
-writes while copying the file through. An edited piano library is written by
-`Library::write_from`, which reads one stroke's audio at a time from the source
-file; `npno::Index::still_matches` first says whether the file still holds the
-directory the index read.
+survives a round trip even where its meaning is not fully known.
+[Testing](testing.md) says how this is checked.
 
 ## The support map
 
-The authoritative list is in the `formats` module documentation on
-[docs.rs](https://docs.rs/nord-format/latest/nord_format/formats/), beside the
-code. Each decoded body's documentation says how far reading and writing go, what
-a read validates, where the field placements came from, and shows the generated
-byte map. There are three tiers:
+The [`formats`](https://docs.rs/nord-format/latest/nord_format/formats/) module lists every format and how far its
+decoding goes, and each format's own documentation says what a read validates,
+where its field placements came from, and its byte map. There are three tiers:
 
-- **Decoded**: every field named. Electro 5 programs, live slots, set lists and
-  settings; Stage 2, 3 and 4 programs and live slots; the Stage 3 synth preset;
-  the Stage 4 synth, piano and organ presets.
+- **Decoded**: every field named.
 - **Structurally decoded**: the container and layout are understood, and the
-  audio is decoded and encoded. Sample instruments in every layout, piano
-  libraries in both formats (5.x and 6.x), and Sample Editor projects.
-- **Container-verified**: recognized, checksummed and kept byte for byte. Every
-  other CBIN tag, the Lead SysEx banks, the `.cn3` library, and ZIP backup
-  bundles behind the `bundle` feature.
+  audio is decoded and encoded. These are sample instruments, piano libraries in
+  both formats (5.x and 6.x), and Sample Editor projects.
+- **Container-verified**: recognized, checksummed and kept byte for byte.
+  Everything else.
+
+The `formats` documentation names the formats in each tier, and
+[What is supported](../getting-started/support.md) says what drawbar does with
+each instrument's files.
+
+Both generations of the [`cbin`](https://docs.rs/nord-format/latest/nord_format/cbin/) container are read and written: the
+current one with a CRC-32 over the body, and the older one with a CRC-16 over the
+whole file.
 
 Nord Sound Manager's bundles are a stored ZIP and a `meta.xml` manifest.
-`nord_format::bundle` reads and writes both a member at a time, never holding the
-archive, and refuses any archive laid out otherwise, so a bundle it reads writes
-back byte for byte. It needs no feature.
+[`bundle`](https://docs.rs/nord-format/latest/nord_format/bundle/) reads and writes both a member at a time, never holding
+the archive, and refuses any archive laid out otherwise, so a bundle it reads
+writes back byte for byte. It needs no feature. Reading an archive as an
+`Entity`, through `from_path` or `from_stream`, needs the `bundle` feature, and
+such an entity is read-only. The [features](https://docs.rs/nord-format/latest/nord_format/#features-and-dependencies) are
+listed on docs.rs.
 
-Text notes are outside these tiers, because `nord-format` does not read them.
-drawbar treats a file it cannot decode as a note when its bytes are UTF-8 text
-of up to 256 KiB. In a note, Tab types a tab, and pasted control characters
-other than tab and line breaks are dropped.
-A file that begins with the magic of a format `nord-format` decodes, or whose
-extension names one, is never a note, so one that fails to decode keeps its
-error. An empty file is a note only when it is a `.txt`. See
-[Editing](../drawbar/editing.md#notes).
+## Large libraries
 
-Both generations of the `CBIN` container are read and written: the current one
-with a CRC-32 over the body, and the older one with a CRC-16 over the whole file.
+A piano library or sample instrument can run to hundreds of megabytes, so none
+of these needs a whole read:
+
+- [`npno::Index`](https://docs.rs/nord-format/latest/nord_format/formats/npno/struct.Index.html) and
+  [`nsmp::Index`](https://docs.rs/nord-format/latest/nord_format/formats/nsmp/struct.Index.html) read a file's headers and
+  stroke directory and give the byte range of each stroke's audio.
+- [`cbin::inspect`](https://docs.rs/nord-format/latest/nord_format/cbin/fn.inspect.html) and
+  [`cbin::Verifier`](https://docs.rs/nord-format/latest/nord_format/cbin/struct.Verifier.html) check the container
+  checksum in one streaming pass.
+- A sample instrument's [`nsmp::Outline`](https://docs.rs/nord-format/latest/nord_format/formats/nsmp/struct.Outline.html)
+  takes the same edits as a whole read and saves them as a
+  [`cbin::Patch`](https://docs.rs/nord-format/latest/nord_format/cbin/struct.Patch.html) applied while the file is copied.
+- An edited piano library is written by
+  [`Library::write_from`](https://docs.rs/nord-format/latest/nord_format/formats/npno/struct.Library.html#method.write_from),
+  one stroke's audio at a time from the source file.
 
 ## The field registry
 
-Every `#[bitbody]` layout generates a registry. `fields()` lists each field with
-its path, placement, current value and accepted values, and `set_field(path,
-value)` writes one back through the type's own parser. That is what `nord edit
---fields` prints and what drawbar's Advanced table shows, so a field becomes
-editable by being declared.
+Every decoded layout generates a registry. `fields()` lists each field with its
+path, placement, current value, accepted values and control kind, and
+`set_field(path, value)` writes one back through the type's own parser. That is
+what `nord edit --fields` prints and what drawbar's Advanced table shows, so a
+field becomes editable by being declared. [`panel::of`](https://docs.rs/nord-format/latest/nord_format/panel/fn.of.html)
+adds the layout for formats that have one: which controls sit together, in what
+order, and which the instrument is using for the state the file holds.
 
-Each field carries its control kind: a knob with a unit, a bipolar knob, a
-selector, a drawbar, a morph slot, a pattern grid, or a library reference.
-`panel::of` adds the layout for formats that have one: which controls sit
-together, in what order, and which the instrument is using for the state the file
-holds.
+## Text notes
 
-```rust
-let entity = nord_format::from_path("patch.ne5p")?;
-if let Some(panel) = nord_format::panel::of(&entity) {
-    // ordered, nestable groups, each with a condition over the body's values
-}
-```
-
-## Features
-
-`bundle` reads the members of ZIP archives as entities, backups and Drum banks
-among them, and is off by default. `corpus` is for tests
-only and points the sweep at the private corpus. See [Testing](testing.md).
+drawbar's notes are outside these tiers, because `nord-format` does not read
+them. drawbar treats a file it cannot decode as a note when its bytes are UTF-8
+text. A file that begins with the magic of a format `nord-format` decodes, or
+whose extension names one, is never a note, so one that fails to decode keeps
+its error. An empty file is a note only when it is a `.txt`. What a user sees is
+under [Notes](../drawbar/editing.md#notes).
 
 To build the API documentation locally:
 

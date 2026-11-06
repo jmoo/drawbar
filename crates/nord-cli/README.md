@@ -25,12 +25,7 @@ nix run github:jmoo/drawbar#nord-cli -- --help
 The [guide](../../docs/src/nord-cli/overview.md) covers every command, and
 [What is supported](../../docs/src/getting-started/support.md) says what has been
 tested on an instrument. This is alpha software: back up first.
-
-## Building
-
-`nix develop`, then from `crates/`: `cargo run -p nord-cli -- --help` and
-`cargo test -p nord-cli`. `nix build .#nord-cli` also runs an install check. See
-[Building from source](../../docs/src/reference/building.md).
+[Building from source](../../docs/src/reference/building.md) covers a checkout.
 
 ## Disclaimer
 

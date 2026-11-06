@@ -2,14 +2,14 @@
 
 **Read and write Nord keyboard files from Rust, byte for byte.**
 
-Programs, live slots, set lists, settings, sample instruments, piano libraries
-and the bundles that carry them, from a library with no I/O of its own beyond
-`Read`, `Seek` and `Write`. It builds anywhere `std` does, including the browser.
-
-What you read, you can write back unchanged. Anything the library does not yet
-decode is kept as raw bytes, so a file survives a round trip even where its
-meaning is not fully known, and every editable field is checked to move no other
-bit.
+- Programs, live slots, set lists, settings, sample instruments, piano libraries
+  and the bundles that carry them.
+- What you read, you can write back unchanged. Anything the library does not yet
+  decode is kept as raw bytes, and every editable field is checked to move no
+  other bit.
+- Every decoded field can be listed and set by its path.
+- No I/O of its own beyond `Read`, `Seek` and `Write`, so it builds anywhere
+  `std` does, including the browser.
 
 ## Usage
 
@@ -48,18 +48,13 @@ std::fs::write("out.ne5p", to_bytes(&entity)?)?;
 ## Learn more
 
 - The [`formats` module](https://docs.rs/nord-format/latest/nord_format/formats/)
-  on docs.rs lists every supported file and how far its support goes.
+  on docs.rs lists every supported file and how far its support goes, and the
+  [crate documentation](https://docs.rs/nord-format) lists its features.
 - [File formats](../../docs/src/reference/file-formats.md) in the guide explains
   the support tiers and the registry.
 - [Testing](../../docs/src/reference/testing.md) explains what the fixture sweep
-  and the private corpus prove.
-
-## Building
-
-`cargo test -p nord-format` from `crates/` in `nix develop`. The `bundle` feature
-reads the members of ZIP backups and Drum banks; Nord Sound Manager's bundles need
-no feature. The test-only `corpus` feature points the sweep at the
-private corpus.
+  and the private corpus prove, and
+  [Building from source](../../docs/src/reference/building.md) how to run it.
 
 ## Disclaimer
 

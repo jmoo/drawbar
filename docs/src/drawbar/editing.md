@@ -73,8 +73,9 @@ rows to reorder them.
 ## Notes
 
 A text file opens as a box you type in: the set list, the cues, what the desk
-needs. A `.txt`, a `.md` or any other plain text file opens this way, and
-**New ▸ Text note** starts an empty one.
+needs. A `.txt`, a `.md` or any other plain text file of up to 256 KiB opens
+this way, and **New ▸ Text note** starts an empty one. Tab types a tab, and
+pasted control characters other than tabs and line breaks are dropped.
 
 A note is saved, reverted, renamed, filed, tagged and exported like anything
 else on the list. The header counts its lines where another document's header

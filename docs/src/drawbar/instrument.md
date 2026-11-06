@@ -9,7 +9,7 @@ have been tested.
 Close Nord Sound Manager first, since it keeps the USB connection to itself. Then
 click **Connect instrument…** in the top bar, or choose **Instrument ▸
 Connect…**. A web browser asks you to pick the device. The desktop app takes the
-first Nord it finds. [Install](../getting-started/install.md#in-the-browser)
+first Nord it finds. [What is supported](../getting-started/support.md#usb)
 lists the browsers that can connect.
 
 Once connected, drawbar reads the instrument's folders, and its slots appear,

@@ -12,9 +12,10 @@ settings, the effects, and which piano and sample a program depends on. It exits
 non-zero if any file fails to parse.
 
 `verify` reads a file, writes it back, and checks that the bytes are identical,
-reporting the offset of the first difference if not. Every supported format
-passes, pianos and samples included. `nord piano verify --deep` also decodes every
-recording inside, and `nord sample verify --deep` walks every encoded stroke.
+reporting the offset of the first difference if not. ZIP bundles and backups
+cannot be written back, so they fail. `nord piano verify --deep` also decodes
+every recording inside, and `nord sample verify --deep` walks every encoded
+stroke.
 
 ## A file where a slot goes
 
@@ -46,7 +47,8 @@ nord bundle pack gig -o gig.ne5pbundle              # and back
 `get` reads only. It finds each piano and sample by the name the instrument gives
 it, and warns about one it cannot find in exactly one slot. `pack` keeps a
 `meta.xml` it finds at the top of the folder; without one, it lists which set
-lists play which programs. Electro 5 bundles only.
+lists play which programs. [What is supported](../getting-started/support.md)
+says which instruments' bundles these commands handle.
 
 `inspect` and `unpack` read a bundle only in the uncompressed shape Nord Sound
 Manager writes. They refuse one with a compressed, damaged or repeated file, or a
