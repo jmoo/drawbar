@@ -78,7 +78,7 @@ git -C "$repo" fetch --quiet --tags origin
 # ⚠️ Publishing is irreversible. Validate every version against its commits
 # before publishing any crate, so the run touches all or none.
 under_bumped=()
-while IFS= read -r crate; do
+for crate in "${publish_order[@]}"; do
   version="$(crate_version "$crate")"
   if git -C "$repo" rev-parse -q --verify "refs/tags/$crate-v$version" >/dev/null; then continue; fi
   previous="$(latest_tag "$crate")"
@@ -87,7 +87,7 @@ while IFS= read -r crate; do
   wanted="$(next_version "$from" "$(commits_for "$crate" "$previous" | bump_level)")"
   version_at_least "$version" "$wanted" ||
     under_bumped+=("$crate is $version, but its commits since $previous call for $wanted")
-done < <(crates_in_publish_order)
+done
 
 if ((${#under_bumped[@]})); then
   echo "refusing to publish a version that understates its own changes:" >&2
@@ -96,7 +96,7 @@ if ((${#under_bumped[@]})); then
   exit 1
 fi
 
-while IFS= read -r crate; do
+for crate in "${publish_order[@]}"; do
   version="$(crate_version "$crate")"
   tag="$crate-v$version"
   if git -C "$repo" rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
@@ -120,4 +120,4 @@ while IFS= read -r crate; do
   else
     gh release create "$tag" --repo "$repo_url" --target "$sha" --title "$tag" --notes-file "$tmp/notes.md"
   fi
-done < <(crates_in_publish_order)
+done

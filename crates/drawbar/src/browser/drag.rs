@@ -19,7 +19,7 @@ use crate::workspace::{LocalEntity, Workspace};
 /// Every decoded [`nord_format::Entity`] has a kind of its own, so a decoded file is never
 /// called just a file. Declaration order matches [`Kind::ALL`], the order any set of kinds
 /// is listed in.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
     Program,
     SetList,

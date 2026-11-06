@@ -58,6 +58,7 @@ pub mod tags;
 pub mod telemetry;
 #[cfg(test)]
 mod testing;
+mod when;
 pub mod work;
 pub mod workspace;
 pub mod zoom;

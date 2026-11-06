@@ -1,0 +1,1 @@
+{"prev":"15c674c4ba5c3de5e25ad492887a5719","n":5,"at":[14000,0],"kind":"settle","writer":"b57e5657675ef005ff2ee709c280bf44","record":"1398b51ced0a2833ac2549ffe6a5ea42","outcome":"adopted"}	6f8456956ff876e7beea38e836a01a52

@@ -48,6 +48,12 @@
               type = "app";
             };
 
+            apps.toshokan-browser-crash = {
+              meta.description = "kill toshokan's library mid-change in browsers and check what is left";
+              program = pkgs.lib.getExe pkgs.nord.toshokan-browser-crash-sweep;
+              type = "app";
+            };
+
             # Rust tests run in the package builds: `nix build .#nord.all`.
             checks = {
               bump =
@@ -66,8 +72,14 @@
               clippy = pkgs.nord.clippy;
               # CI's Windows job installs its compiler through rustup.
               rustc-pin = pkgs.runCommand "check-rustc-pin" { } ''
-                grep -q '^ *RUST_VERSION: ${pkgs.rustc.version}$' ${./.github/workflows/ci.yml} || {
-                  echo "ci.yml's RUST_VERSION differs from nixpkgs' rustc ${pkgs.rustc.version}" >&2
+                for workflow in ${./.github/workflows/ci.yml} ${./.github/workflows/safari.yml}; do
+                  grep -q '^ *RUST_VERSION: ${pkgs.rustc.version}$' "$workflow" || {
+                    echo "$workflow's RUST_VERSION differs from nixpkgs' rustc ${pkgs.rustc.version}" >&2
+                    exit 1
+                  }
+                done
+                grep -q 'tool: wasm-bindgen@${pkgs.wasm-bindgen-cli.version}$' ${./.github/workflows/safari.yml} || {
+                  echo "safari.yml's wasm-bindgen differs from nixpkgs' ${pkgs.wasm-bindgen-cli.version}" >&2
                   exit 1
                 }
                 touch "$out"
@@ -90,31 +102,44 @@
                     node --test "$src/js/telemetry/test/check.test.js"
                     touch "$out"
                   '';
+              toshokan-spec = pkgs.nord.toshokan-spec;
             };
 
             devShells.default = pkgs.lib.crane.devShell {
               LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath pkgs.nord.guiLibs;
               RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
               inputsFrom = pkgs.lib.attrValues pkgs.nord.crates;
-              # scripts/* (see their `nix-deps` lines), `mdbook serve docs`, and the
-              # collector in js/telemetry (its tests, `wrangler dev`).
+              # scripts/* (see their `nix-deps` lines), `mdbook serve docs`, the
+              # collector in js/telemetry (its tests, `wrangler dev`), and toshokan's
+              # browser suites (geckodriver, lld, wasm-bindgen-cli).
               packages = with pkgs; [
                 cargo-about
                 curl
+                geckodriver
                 gh
                 jq
+                lld
                 mdbook
                 mdbook-mermaid
                 nodejs
                 (python3.withPackages (python: [ python.fonttools ]))
                 rust-analyzer
+                wasm-bindgen-cli
                 wrangler
               ];
             };
 
             legacyPackages = pkgs;
 
-            packages = pkgs.nord.crates // pkgs.nord.crossPackages // { inherit (pkgs.nord) docs site; };
+            packages =
+              pkgs.nord.crates
+              // pkgs.nord.crossPackages
+              // {
+                inherit (pkgs.nord) docs site;
+              }
+              // pkgs.lib.optionalAttrs (pkgs.nord ? toshokan-browser-crash) {
+                inherit (pkgs.nord) toshokan-browser-crash;
+              };
 
             treefmt = {
               programs = {

@@ -8,7 +8,7 @@
 use std::cell::{Ref, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::store::{names, LibPath, Row};
+use crate::store::{names, LibPath};
 use crate::workspace::{LocalEntity, Workspace};
 
 /// One directory in the library.
@@ -31,20 +31,29 @@ pub enum Op {
         from: LibPath,
         to: LibPath,
     },
+    /// Move a hidden file, which no asset holds.
+    MoveFile {
+        from: LibPath,
+        to: LibPath,
+    },
+    /// Move a hidden file to the library's trash.
+    DeleteFile(LibPath),
     /// Sent after every other change of the same sync, once whatever was in it has
     /// moved out.
     RemoveDir(LibPath),
 }
 
-/// An index row whose file is gone, for an asset drawbar does not hold: it keeps tags,
-/// or the slot it came off, that would otherwise be lost.
+/// An asset whose file is gone, which drawbar does not hold: the library keeps its tags,
+/// which would otherwise be lost.
 pub struct Lost {
     pub id: u64,
-    pub row: Row,
+    /// Where its file was.
+    pub path: LibPath,
 }
 
-/// The menu item that shows the files drawbar does not open, and hides them again.
-pub const SHOW_ALL_FILES: &str = "Show all files";
+/// The menu item that shows the hidden files, those drawbar does not open, and hides them
+/// again.
+pub const SHOW_HIDDEN_FILES: &str = "Show hidden files";
 
 /// Where [`Folders::all_files`] is kept between sessions: a preference of the app, not of
 /// any one library.
@@ -57,16 +66,18 @@ pub struct Where {
     pub name: Option<String>,
     /// Where it is, as the user would look for it.
     pub label: String,
+    /// What the browser keeps of it, and what may delete it. Empty on the desktop.
+    pub kept: String,
     /// A URL that shows the folder in the system's file manager.
     pub reveal: Option<String>,
     /// What state it is in, when that is not simply open.
     pub note: Option<String>,
     /// Nothing may be written to it, so a change to it is held in memory only.
     pub read_only: bool,
+    /// Opening it again may let it be written: it opened read-only or did not open.
+    pub reopens: bool,
     /// It is still being read.
     pub opening: bool,
-    /// How many files its listing has found, while it is still being listed.
-    pub listing: Option<usize>,
 }
 
 /// A library a window can open, for the menus that switch between them.
@@ -83,9 +94,9 @@ pub struct Library {
 pub enum Occupant {
     Asset(u64),
     Folder(u64),
-    /// An index row whose file is gone.
+    /// An asset whose file is gone, which the library keeps tags for.
     Lost(u64),
-    /// A file drawbar does not hold: one it does not open, or one it did not read.
+    /// A file drawbar does not open.
     Other,
 }
 
@@ -95,8 +106,8 @@ pub enum Clash {
     Free,
     Taken(Occupant),
     /// The folder already holds two entries under that name, so neither may be named:
-    /// their names, for the refusal.
-    Ambiguous(Vec<String>),
+    /// their names and what each is, for the refusal.
+    Ambiguous(Vec<(String, Occupant)>),
 }
 
 /// Where the listed assets are, taken once for each [`Workspace::layout`] and each change
@@ -148,7 +159,7 @@ impl Census {
 }
 
 /// What [`Folders::shape`] returns.
-pub(crate) type Shape = (u64, [usize; 4], bool);
+pub(crate) type Shape = (u64, [usize; 3], bool);
 
 #[derive(Default)]
 pub struct Folders {
@@ -164,26 +175,42 @@ pub struct Folders {
     /// Assets whose file went missing outside drawbar while it held them.
     pub missing: BTreeSet<u64>,
     lost: Vec<Lost>,
-    /// Assets whose name collides with another entry of their folder.
-    pub duplicates: BTreeSet<u64>,
     pub place: Option<Where>,
     /// Files drawbar does not open, shown only while [`Folders::all_files`] is on.
     pub others: Vec<LibPath>,
-    /// Files drawbar would hold that it did not read, and why.
-    pub unread: Vec<(LibPath, String)>,
     /// Folders whose contents were not all listed.
     pub unwalked: BTreeSet<LibPath>,
-    /// Folders to list whole ahead of the rest of a listing still in flight, each with
-    /// whether it has been asked for, and those listed whole since.
-    walks: BTreeMap<LibPath, bool>,
-    walked: BTreeSet<LibPath>,
     /// Show the files drawbar does not open, too.
     pub all_files: bool,
     /// The libraries the window can switch to, the open one among them. Empty where
     /// the window cannot switch.
     pub libraries: Vec<Library>,
-    /// The library open last, which the browser must be let into again before it opens.
-    pub reconnect: Option<Library>,
+    kept: Vec<Kept>,
+    /// The assets a change of [`Folders::kept`] changes.
+    kept_ids: BTreeSet<u64>,
+}
+
+/// Changes the library keeps apart, as Kept apart shows them: who made them and when,
+/// and each change, with the asset it changes.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Kept {
+    pub kind: crate::store::KeptKind,
+    pub run: toshokan::log::Run,
+    pub title: String,
+    pub rows: Vec<KeptRow>,
+}
+
+/// One change of a [`Kept`].
+#[derive(Clone, PartialEq, Debug)]
+pub struct KeptRow {
+    pub key: crate::store::KeptKey,
+    /// The asset it changes, where the window holds it.
+    pub id: Option<u64>,
+    pub said: String,
+    /// Whether taking it makes it: a change to where a file is cannot be taken.
+    pub takes: bool,
+    /// It settles a value no reader holds any more.
+    pub forgotten: bool,
 }
 
 impl Folders {
@@ -273,17 +300,13 @@ impl Folders {
     /// A value that changes whenever the tree's lines for the library would: the
     /// folders, and the lists of what is beside the assets in them.
     ///
-    /// ⚠️ Those lists only grow, or are replaced whole by a listing that also syncs the
-    /// folders, so their lengths and the generation together catch every change.
+    /// ⚠️ Those lists only grow, change with the generation, or are replaced whole by a
+    /// listing that also syncs the folders, so their lengths and the generation together
+    /// catch every change.
     pub(crate) fn shape(&self) -> Shape {
         (
             self.generation,
-            [
-                self.others.len(),
-                self.unread.len(),
-                self.unwalked.len(),
-                self.lost.len(),
-            ],
+            [self.others.len(), self.unwalked.len(), self.lost.len()],
             self.all_files,
         )
     }
@@ -299,32 +322,48 @@ impl Folders {
         };
     }
 
-    /// Every file drawbar does not hold, read or not.
-    pub fn strangers(&self) -> impl Iterator<Item = &LibPath> {
-        self.others
-            .iter()
-            .chain(self.unread.iter().map(|(path, _)| path))
+    /// The name of the hidden file in `dir` named `name` in any case, as it is spelled.
+    pub fn hides(&self, dir: &LibPath, name: &str, workspace: &Workspace) -> Option<String> {
+        let key = names::key(name);
+        self.entries(dir, workspace)
+            .into_iter()
+            .find(|(named, _, what)| *named == key && *what == Occupant::Other)
+            .map(|(_, spelled, _)| spelled)
     }
 
-    /// Whether a folder holds something drawbar does not, or may: a file it does not
-    /// hold, or contents it did not list.
-    pub fn holds_strangers(&self, dir: &LibPath) -> bool {
-        self.strangers().any(|path| path.is_in(dir) && path != dir)
-            || self.unwalked.iter().any(|path| path.is_in(dir))
+    /// The hidden files directly in `dir`.
+    pub fn hidden_in(&self, dir: &LibPath, workspace: &Workspace) -> Vec<LibPath> {
+        self.entries(dir, workspace)
+            .into_iter()
+            .filter(|(_, _, what)| *what == Occupant::Other)
+            .map(|(_, name, _)| dir.join(&name))
+            .collect()
     }
 
-    /// The index rows whose file is gone.
+    /// The assets whose file is gone, which the library keeps tags for.
     pub fn lost(&self) -> &[Lost] {
         &self.lost
     }
 
-    pub(crate) fn lose(&mut self, id: u64, row: Row) {
-        self.lost.push(Lost { id, row });
+    /// Show these assets, whose files are gone, as lost, in place of those shown before.
+    pub(crate) fn set_lost(&mut self, lost: Vec<Lost>) {
+        self.lost = lost;
     }
 
-    /// Drop a lost row, and whatever it kept.
-    pub(crate) fn forget(&mut self, id: u64) {
-        self.lost.retain(|lost| lost.id != id);
+    /// The changes the library keeps apart.
+    pub fn kept(&self) -> &[Kept] {
+        &self.kept
+    }
+
+    pub(crate) fn set_kept(&mut self, kept: Vec<Kept>) {
+        let rows = kept.iter().flat_map(|kept| &kept.rows);
+        self.kept_ids = rows.filter_map(|row| row.id).collect();
+        self.kept = kept;
+    }
+
+    /// Whether a change to the asset `id` is kept apart.
+    pub fn keeps_apart(&self, id: u64) -> bool {
+        self.kept_ids.contains(&id)
     }
 
     fn next_id(&self) -> u64 {
@@ -342,25 +381,6 @@ impl Folders {
         id
     }
 
-    /// Take in folders a listing found so far, keeping every folder already known. The
-    /// listing's end takes them all again through [`Folders::sync`].
-    pub(crate) fn add(&mut self, dirs: &[LibPath]) {
-        let known: BTreeSet<&LibPath> = self.list.iter().map(|folder| &folder.path).collect();
-        let new: Vec<LibPath> = dirs
-            .iter()
-            .filter(|dir| !known.contains(dir))
-            .cloned()
-            .collect();
-        if new.is_empty() {
-            return;
-        }
-        let ids = self.next_id()..;
-        self.list
-            .extend(ids.zip(new).map(|(id, path)| Folder { id, path }));
-        self.list.sort_by(|a, b| a.path.cmp(&b.path));
-        self.generation += 1;
-    }
-
     /// Take the folders the disk has, keeping the id of each one already known, with the
     /// changes not yet sent to it applied on top.
     pub(crate) fn sync(&mut self, dirs: &[LibPath]) {
@@ -376,6 +396,7 @@ impl Folders {
                     }
                 }
                 Op::RemoveDir(path) => dirs.retain(|dir| dir != path),
+                Op::MoveFile { .. } | Op::DeleteFile(_) => {}
             }
         }
         self.list.retain(|folder| dirs.contains(&folder.path));
@@ -385,26 +406,35 @@ impl Folders {
         }
     }
 
-    /// Everything named in `dir`, with its key and what it is.
+    /// Everything named in `dir`, with its key and what it is. A file drawbar does not
+    /// open is one entry, its asset's, where one holds it.
     fn entries(&self, dir: &LibPath, workspace: &Workspace) -> Vec<(String, String, Occupant)> {
-        let assets = workspace.listed().filter_map(|entity| {
-            let path = entity.path.as_ref()?;
-            (path.parent() == *dir).then(|| (path.leaf(), Occupant::Asset(entity.id)))
-        });
+        let assets: Vec<(&str, Occupant)> = workspace
+            .listed()
+            .filter_map(|entity| {
+                let path = entity.path.as_ref()?;
+                (path.parent() == *dir).then(|| (path.leaf(), Occupant::Asset(entity.id)))
+            })
+            .collect();
+        let held: BTreeSet<&str> = assets.iter().map(|(name, _)| *name).collect();
         let folders = self
             .list
             .iter()
             .filter(|folder| folder.path.parent() == *dir)
             .map(|folder| (folder.name(), Occupant::Folder(folder.id)));
         let lost = self.lost.iter().filter_map(|lost| {
-            let path = lost.row.path.as_ref()?;
+            let path = &lost.path;
             (path.parent() == *dir).then(|| (path.leaf(), Occupant::Lost(lost.id)))
         });
         let others = self
-            .strangers()
+            .others
+            .iter()
             .filter(|path| path.parent() == *dir)
+            .filter(|path| !held.contains(path.leaf()))
             .map(|path| (path.leaf(), Occupant::Other));
         assets
+            .iter()
+            .copied()
             .chain(folders)
             .chain(lost)
             .chain(others)
@@ -431,7 +461,7 @@ impl Folders {
         match holding.as_slice() {
             [] => Clash::Free,
             [(_, what)] => Clash::Taken(*what),
-            many => Clash::Ambiguous(many.iter().map(|(name, _)| name.clone()).collect()),
+            many => Clash::Ambiguous(many.to_vec()),
         }
     }
 
@@ -467,11 +497,20 @@ impl Folders {
         }
     }
 
+    /// Show the folder at `path`, which a change the store sends itself makes.
+    pub(crate) fn add(&mut self, path: LibPath) -> u64 {
+        self.insert(path)
+    }
+
     fn made(&mut self, path: LibPath) -> u64 {
+        self.queue_make(path.clone());
+        self.insert(path)
+    }
+
+    fn queue_make(&mut self, path: LibPath) {
         // A folder removed and made again in one sync must not be removed after.
         self.ops.retain(|op| *op != Op::RemoveDir(path.clone()));
-        self.ops.push(Op::MakeDir(path.clone()));
-        self.insert(path)
+        self.ops.push(Op::MakeDir(path));
     }
 
     /// Rename or move a folder, with everything inside it.
@@ -481,7 +520,15 @@ impl Folders {
         };
         self.follow(&from, &to);
         workspace.relocate(&from, &to);
-        self.ops.push(Op::MoveDir { from, to });
+        // ⚠️ The library refuses a change that makes a folder and moves it, so one not
+        // sent yet is made where it is now.
+        match self.ops.last() == Some(&Op::MakeDir(from.clone())) {
+            true => {
+                self.ops.pop();
+                self.queue_make(to);
+            }
+            false => self.ops.push(Op::MoveDir { from, to }),
+        }
     }
 
     /// Move whatever is shown under `from`, file or folder, to the same place under
@@ -495,27 +542,19 @@ impl Folders {
         self.list.sort_by(|a, b| a.path.cmp(&b.path));
         self.generation += 1;
         for lost in &mut self.lost {
-            if let Some(moved) = lost.row.path.as_ref().and_then(|at| at.moved(from, to)) {
-                lost.row.path = Some(moved);
+            if let Some(moved) = lost.path.moved(from, to) {
+                lost.path = moved;
             }
         }
-        let others = self.others.iter_mut();
-        let unread = self.unread.iter_mut().map(|(path, _)| path);
-        for path in others.chain(unread) {
+        for path in &mut self.others {
             if let Some(moved) = path.moved(from, to) {
                 *path = moved;
             }
         }
-        self.walks = std::mem::take(&mut self.walks)
+        self.unwalked = std::mem::take(&mut self.unwalked)
             .into_iter()
-            .map(|(path, asked)| (path.moved(from, to).unwrap_or(path), asked))
+            .map(|path| path.moved(from, to).unwrap_or(path))
             .collect();
-        for paths in [&mut self.unwalked, &mut self.walked] {
-            *paths = std::mem::take(paths)
-                .into_iter()
-                .map(|path| path.moved(from, to).unwrap_or(path))
-                .collect();
-        }
     }
 
     /// Move back what a rename the disk refused had moved, the changes not yet sent
@@ -529,8 +568,8 @@ impl Folders {
         };
         for op in &mut self.ops {
             match op {
-                Op::MakeDir(path) | Op::RemoveDir(path) => back(path),
-                Op::MoveDir { from, to } => {
+                Op::MakeDir(path) | Op::RemoveDir(path) | Op::DeleteFile(path) => back(path),
+                Op::MoveDir { from, to } | Op::MoveFile { from, to } => {
                     back(from);
                     back(to);
                 }
@@ -556,33 +595,28 @@ impl Folders {
         self.ops.splice(0..0, ops);
     }
 
-    /// Whether everything in `dir` has been listed: the whole library has, or `dir` was
-    /// listed ahead of the rest.
-    pub(crate) fn listed_whole(&self, dir: &LibPath) -> bool {
-        let listing = self.place.as_ref().is_some_and(|at| at.listing.is_some());
-        !listing || self.walked.iter().any(|done| dir.is_in(done))
+    /// Move the hidden file at `from` to `to`.
+    pub(crate) fn move_hidden(&mut self, from: &LibPath, to: LibPath) {
+        let Some(at) = self.others.iter().position(|path| path == from) else {
+            return;
+        };
+        self.others[at] = to.clone();
+        self.others.sort();
+        self.generation += 1;
+        self.ops.push(Op::MoveFile {
+            from: from.clone(),
+            to,
+        });
     }
 
-    /// Want `dir` listed whole ahead of the rest of the listing.
-    pub(crate) fn walk(&mut self, dir: &LibPath) {
-        self.walks.entry(dir.clone()).or_insert(false);
-    }
-
-    /// The folders wanted and not yet asked for, which are asked for now.
-    pub(crate) fn take_walks(&mut self) -> Vec<LibPath> {
-        let unasked = self.walks.iter_mut().filter(|(_, asked)| !**asked);
-        unasked
-            .map(|(dir, asked)| {
-                *asked = true;
-                dir.clone()
-            })
-            .collect()
-    }
-
-    /// Record that everything in `dir` has been listed.
-    pub(crate) fn walked(&mut self, dir: LibPath) {
-        self.walks.remove(&dir);
-        self.walked.insert(dir);
+    /// Move the hidden file at `path` to the library's trash.
+    pub(crate) fn delete_hidden(&mut self, path: &LibPath) {
+        let Some(at) = self.others.iter().position(|held| held == path) else {
+            return;
+        };
+        self.others.remove(at);
+        self.generation += 1;
+        self.ops.push(Op::DeleteFile(path.clone()));
     }
 
     /// Remove an empty folder. The caller moves out what was in it first.
@@ -689,10 +723,12 @@ mod tests {
             workspace.place(id, LibPath::root().join(name));
         }
         let folders = Folders::default();
-        assert_eq!(
-            folders.clash(&LibPath::root(), "c3.NE5P", &workspace, None),
-            Clash::Ambiguous(vec!["c3.ne5p".into(), "C3.ne5p".into()])
-        );
+        let Clash::Ambiguous(held) = folders.clash(&LibPath::root(), "c3.NE5P", &workspace, None)
+        else {
+            panic!("c3.NE5P matches both spellings");
+        };
+        let names: Vec<&str> = held.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["c3.ne5p", "C3.ne5p"]);
     }
 
     #[test]

@@ -7,6 +7,8 @@ This repository contains Rust tools for Clavia Nord instruments:
 - `nord-cli` exposes both libraries from a terminal.
 - `nord-bits-derive` generates the bitfield implementations.
 - `drawbar` is the desktop and browser application.
+- `toshokan` keeps tags and edit history beside the files they describe, in a
+  folder that syncs. drawbar's library is built on it.
 
 This is a public repository. Do not add personal information, secrets, agent
 memory, private notes, or the private specimen corpus. If a fact is needed to
@@ -224,7 +226,11 @@ Before a change is done:
 
 - `nix fmt` formats Rust, Nix, TOML, and shell with the pinned tools.
 - `nix develop -c cargo test --workspace` runs the default test suite.
+  `scripts/test.bash`, which CI runs, adds drawbar's library tests on folders that
+  rename as a browser's do.
 - `nix flake check` runs what CI's check job runs.
+- For a toshokan change, `scripts/evidence.bash --fast` runs its evidence while
+  you work, and `scripts/evidence.bash` the full tier before it merges.
 - `nix build .#nord.all-corpus` runs all suites against the pinned private
   corpus, when the change touches decoded layout or protocol evidence;
   `.#nord.<crate>-corpus` selects one crate.
@@ -236,7 +242,10 @@ builds the production bundle and guide, and runs the declared browser suites in
 Chromium and Firefox. The check job rejects anything `nix fmt` would change and
 treats Clippy and rustdoc warnings as failures.
 The required `build` check collects the native, web and corpus results; release
-and deployment wait for it and `check`. Cross builds are local checks.
+and deployment wait for it and `check`. Cross builds are local checks, and a
+crate's Windows cross build, `nix build .#<crate>-windows`, only compiles it. An
+optional `safari` workflow runs the browser suites in Safari when toshokan or
+drawbar's library changes; `nix flake check` holds its Rust and wasm-bindgen pins.
 
 The `autofix` PR label runs `nix fmt` on the branch and pushes a `style: nix fmt` commit when
 it changes anything; it reruns on pushes while the label is on. The public suite

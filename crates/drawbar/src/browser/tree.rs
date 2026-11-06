@@ -17,10 +17,10 @@ use super::row::{row, Cells, Drawn, STEP};
 use super::{Ask, Browser, Click, Verb};
 use crate::device::{occupancy, read_only, Device, DeviceState};
 use crate::filter::{Filter, Narrow, Place, State};
-use crate::folders::{Folder, Folders, SHOW_ALL_FILES};
+use crate::folders::{Folder, Folders, SHOW_HIDDEN_FILES};
 use crate::icon::Glyph;
 use crate::libraries::Picking;
-use crate::menu::{self, marked, new_menu, OPEN_LIBRARY};
+use crate::menu::{self, marked, new_menu, IMPORT, OPEN_FOLDER, SHOW_FOLDER};
 use crate::panel::panel_header;
 use crate::queue::{Queue, Queued};
 use crate::store::LibPath;
@@ -115,10 +115,8 @@ pub(super) enum Line {
         folder: Option<u64>,
         depth: usize,
     },
-    /// A file drawbar does not hold: the `index`th of [`Folders::unread`] when `unread`,
-    /// and otherwise of [`Folders::others`].
+    /// The `index`th of [`Folders::others`].
     Stranger {
-        unread: bool,
         index: usize,
         depth: usize,
     },
@@ -140,6 +138,8 @@ pub(super) enum Line {
         depth: usize,
     },
     State(State),
+    /// The changes the library keeps apart, while it keeps any.
+    Kept,
     Kind(Kind),
     Tag(u64),
     NewTag,
@@ -156,6 +156,7 @@ impl Line {
             Line::Computer
             | Line::Instrument
             | Line::State(_)
+            | Line::Kept
             | Line::Kind(_)
             | Line::Tag(_)
             | Line::NewTag => super::row::ROW,
@@ -190,7 +191,7 @@ impl Line {
             Line::Computer => egui::Id::new("computer"),
             Line::Folder { id, .. } => egui::Id::new(("folder", id)),
             Line::Local { id, .. } => egui::Id::new(("local", id)),
-            Line::Stranger { unread, index, .. } => egui::Id::new(("stranger", unread, index)),
+            Line::Stranger { index, .. } => egui::Id::new(("stranger", index)),
             Line::Lost(id) => egui::Id::new(("lost", id)),
             Line::Note { under, said, .. } => egui::Id::new(("note", under, said)),
             Line::Instrument => egui::Id::new("instrument"),
@@ -198,6 +199,7 @@ impl Line {
             Line::Bank(class, bank) => egui::Id::new(("bank", class, bank)),
             Line::Slot { class, at, .. } => egui::Id::new(("slot", class, at.bank, at.slot)),
             Line::State(state) => egui::Id::new(("state", state.title())),
+            Line::Kept => egui::Id::new("kept apart"),
             Line::Kind(kind) => egui::Id::new(("kind", Kind::ALL.iter().position(|k| *k == kind))),
             Line::Tag(id) => egui::Id::new(("tag", id)),
             Line::NewTag => egui::Id::new("new tag"),
@@ -338,15 +340,14 @@ impl Rows {
     }
 }
 
-/// The folders inside each folder, and the files drawbar does not hold in each, gathered
+/// The folders inside each folder, and the files drawbar does not open in each, gathered
 /// in one pass for a pass over the library's lines.
 struct Beside<'a> {
     /// In path order, under the folder they are in, or `None` for the root.
     children: BTreeMap<Option<u64>, Vec<&'a Folder>>,
-    /// Under the folder they are in: the files drawbar did not read, as `(true, index)`
-    /// into [`Folders::unread`], then, while all files are shown, those it does not open,
-    /// as `(false, index)` into [`Folders::others`].
-    strangers: BTreeMap<LibPath, Vec<(bool, usize)>>,
+    /// While hidden files are shown, indices into [`Folders::others`], under the folder
+    /// they are in.
+    strangers: BTreeMap<LibPath, Vec<usize>>,
 }
 
 impl<'a> Beside<'a> {
@@ -368,20 +369,14 @@ impl<'a> Beside<'a> {
             };
             children.entry(holder).or_default().push(folder);
         }
-        let unread = folders
-            .unread
-            .iter()
-            .enumerate()
-            .map(|(index, (path, _))| (path, (true, index)));
         let others = folders
             .others
             .iter()
             .enumerate()
-            .filter(|_| folders.all_files)
-            .map(|(index, path)| (path, (false, index)));
-        let mut strangers: BTreeMap<LibPath, Vec<(bool, usize)>> = BTreeMap::new();
-        for (path, at) in unread.chain(others) {
-            strangers.entry(path.parent()).or_default().push(at);
+            .filter(|_| folders.all_files);
+        let mut strangers: BTreeMap<LibPath, Vec<usize>> = BTreeMap::new();
+        for (index, path) in others {
+            strangers.entry(path.parent()).or_default().push(index);
         }
         Beside {
             children,
@@ -393,7 +388,7 @@ impl<'a> Beside<'a> {
         self.children.get(&folder).map_or(&[], Vec::as_slice)
     }
 
-    fn strangers(&self, dir: &LibPath) -> &[(bool, usize)] {
+    fn strangers(&self, dir: &LibPath) -> &[usize] {
         self.strangers.get(dir).map_or(&[], Vec::as_slice)
     }
 }
@@ -445,14 +440,13 @@ fn narrow(acts: &mut Vec<Act>, narrow: Narrow) {
 }
 
 /// Whether a menu offers [`library_items`]: where this build can pick a folder, or could
-/// once the browser turns folder access on, or where
-/// [`crate::folders::Folders::libraries`] lists some.
+/// once the browser turns folder access on, or where it offers recent libraries.
 pub fn offers_libraries(folders: &crate::folders::Folders, picking: Picking) -> bool {
-    picking != Picking::Absent || !folders.libraries.is_empty()
+    picking != Picking::Absent || offers_recent(folders)
 }
 
 /// The items that open another folder as the library, switch to a recent one, and show
-/// the open one's folder. Open library folder… is grayed out where the browser turns
+/// the open one's folder. Open folder… is grayed out where the browser turns
 /// folder access off, and says on hover how to turn it on.
 pub fn library_items(
     ui: &mut egui::Ui,
@@ -460,39 +454,47 @@ pub fn library_items(
     picking: Picking,
     acts: &mut Vec<Act>,
 ) {
-    if let Some(library) = &folders.reconnect {
-        let label = format!("Reconnect {}", library.name);
-        offer(
-            ui,
-            &label,
-            None,
-            Act::OpenLibrary(library.root.clone()),
-            acts,
-        );
-    }
     match picking {
-        Picking::On => offer(ui, OPEN_LIBRARY, None, Act::PickLibrary, acts),
+        Picking::On => offer(ui, OPEN_FOLDER, None, Act::PickLibrary, acts),
         Picking::TurnedOff => {
-            ui.add_enabled(false, egui::Button::new(OPEN_LIBRARY))
+            ui.add_enabled(false, egui::Button::new(OPEN_FOLDER))
                 .on_disabled_hover_text(crate::libraries::TURNED_OFF);
         }
         Picking::Absent => {}
     }
-    if !folders.libraries.is_empty() {
-        menu::button(ui, "Open recent library", |ui| {
+    if offers_recent(folders) {
+        menu::button(ui, crate::menu::RECENT, |ui| {
             for library in &folders.libraries {
-                if marked(ui, &library.name, library.open) && !library.open {
-                    acts.push(Act::OpenLibrary(library.root.clone()));
+                if marked(ui, &library.name, library.open) {
+                    acts.extend(recent(folders, library));
                 }
             }
         });
     }
     let reveal = folders.place.as_ref().and_then(|at| at.reveal.as_ref());
     if let Some(url) = reveal {
-        if ui.button("Show the library folder").clicked() {
+        if ui.button(SHOW_FOLDER).clicked() {
             ui.ctx().open_url(egui::OpenUrl::new_tab(url));
             ui.close();
         }
+    }
+}
+
+/// Whether Open recent is offered: while choosing one of its libraries would do
+/// something. Choosing the open library does nothing unless it opens again.
+pub(crate) fn offers_recent(folders: &Folders) -> bool {
+    let acts = |library| recent(folders, library).is_some();
+    folders.libraries.iter().any(acts)
+}
+
+/// What choosing `library` among the recent libraries does: opens it, or opens the
+/// open one again where it opened read-only or did not open.
+pub(crate) fn recent(folders: &Folders, library: &crate::folders::Library) -> Option<Act> {
+    let reopens = folders.place.as_ref().is_some_and(|at| at.reopens);
+    match (library.open, reopens) {
+        (false, _) => Some(Act::OpenLibrary(library.root.clone())),
+        (true, true) => Some(Act::ReopenLibrary),
+        (true, false) => None,
     }
 }
 
@@ -740,11 +742,11 @@ impl Browser {
                 let opening = self.folders.place.as_ref().is_some_and(|at| at.opening);
                 let empty = workspace.listed().next().is_none()
                     && self.folders.all().is_empty()
-                    && self.strangers_shown(None) == 0
+                    && (!self.folders.all_files || self.folders.others.is_empty())
                     && self.folders.unwalked.is_empty();
                 let said = match (opening, empty) {
                     (true, true) => Some("Opening the library…"),
-                    (false, true) => Some("Drop Nord files here, or use Open…"),
+                    (false, true) => Some("Drop Nord files here, or use Import…"),
                     (_, false) => None,
                 };
                 below.extend(said.map(|said| Line::Note {
@@ -765,6 +767,9 @@ impl Browser {
                 if count > 0 || filter.on(Narrow::State(state)) {
                     below.push(Line::State(state));
                 }
+            }
+            if !self.folders.kept().is_empty() {
+                below.push(Line::Kept);
             }
         }
         below.push(Line::End(Section::Places));
@@ -797,7 +802,7 @@ impl Browser {
 
     /// What is directly in `folder` at `dir`, or in the root for `None`: its folders,
     /// each with what is in it when it is open, then its assets, then the files drawbar
-    /// does not hold, then a line if the folder was not listed whole.
+    /// does not open, then a line if the folder was not listed whole.
     fn folder_lines(
         &self,
         folder: Option<u64>,
@@ -820,16 +825,10 @@ impl Browser {
                     depth: depth + 1,
                 }),
         );
-        lines.extend(
-            beside
-                .strangers(dir)
-                .iter()
-                .map(|&(unread, index)| Line::Stranger {
-                    unread,
-                    index,
-                    depth: depth + 1,
-                }),
-        );
+        lines.extend(beside.strangers(dir).iter().map(|&index| Line::Stranger {
+            index,
+            depth: depth + 1,
+        }));
         if self.folders.unwalked.contains(dir) {
             lines.push(Line::Note {
                 under: folder.map_or(Branch::Computer, Branch::Folder),
@@ -960,11 +959,7 @@ impl Browser {
                     );
                 }
             }
-            Line::Stranger {
-                unread,
-                index,
-                depth,
-            } => self.stranger_row(ui, unread, index, depth),
+            Line::Stranger { index, depth } => self.stranger_row(ui, index, depth),
             Line::Lost(id) => self.lost_row(ui, id, acts),
             Line::Note { said, depth, .. } => nothing(ui, depth, said),
             Line::Instrument => self.instrument_row(ui, workspace, device, queue, filter, acts),
@@ -988,6 +983,7 @@ impl Browser {
                 };
                 state_row(ui, state, count, filter, acts);
             }
+            Line::Kept => kept_row(ui, self.folders.kept().len(), acts),
             Line::Kind(kind) => self.kind_row(ui, kind, workspace, device, filter, acts),
             Line::Tag(id) => self.tag_row(ui, id, workspace, device, filter, acts),
             Line::NewTag => new_tag_row(ui, acts),
@@ -1021,12 +1017,15 @@ impl Browser {
         // can have started from.
         self.drop_zone(ui, &drawn.response, Onto::Computer, acts);
         let triangle = on_triangle(&drawn);
-        let response = match (&place.note, place.label.is_empty()) {
-            (_, true) => drawn.response,
-            (None, false) => drawn.response.on_hover_text(&place.label),
-            (Some(note), false) => drawn
-                .response
-                .on_hover_text(format!("{}\n{note}", place.label)),
+        let said: Vec<&str> = [Some(&place.label), Some(&place.kept), place.note.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .filter(|line| !line.is_empty())
+            .collect();
+        let response = match said.is_empty() {
+            true => drawn.response,
+            false => drawn.response.on_hover_text(said.join("\n")),
         };
         if response.clicked() {
             match triangle {
@@ -1037,10 +1036,10 @@ impl Browser {
         let listed = Browser::standing_for(workspace, |_| true);
         response.context_menu(|ui| {
             self.set_menu(ui, &listed, workspace, device, acts, |browser, ui, acts| {
-                offer(ui, "Open…", None, Act::OpenFiles, acts);
+                offer(ui, IMPORT, None, Act::OpenFiles, acts);
                 menu::button(ui, "New", |ui| new_menu(ui, acts));
                 let all = browser.folders.all_files;
-                if marked(ui, SHOW_ALL_FILES, all) {
+                if marked(ui, SHOW_HIDDEN_FILES, all) {
                     browser.folders.all_files = !all;
                 }
                 let picking = crate::libraries::picking();
@@ -1052,17 +1051,9 @@ impl Browser {
         });
     }
 
-    /// A file drawbar does not hold: one it did not read, or one it does not open.
-    fn stranger_row(&self, ui: &mut egui::Ui, unread: bool, index: usize, depth: usize) {
-        let found = match unread {
-            true => self
-                .folders
-                .unread
-                .get(index)
-                .map(|(path, why)| (path, Some(why.as_str()))),
-            false => self.folders.others.get(index).map(|path| (path, None)),
-        };
-        let Some((path, why)) = found else {
+    /// A file drawbar does not open.
+    fn stranger_row(&mut self, ui: &mut egui::Ui, index: usize, depth: usize) {
+        let Some(path) = self.folders.others.get(index).cloned() else {
             return;
         };
         let drawn = row(
@@ -1070,22 +1061,23 @@ impl Browser {
             false,
             &Cells {
                 indent: indent(depth, false),
-                glyph: Some(match why {
-                    Some(_) => Glyph::CircleAlert,
-                    None => Glyph::CircleDashed,
-                }),
+                glyph: Some(Glyph::CircleDashed),
                 name: path.leaf(),
-                note: why.map(|_| "not read"),
                 faint: true,
                 child: true,
                 whole: true,
                 ..Cells::default()
             },
         );
-        drawn.response.on_hover_text(match why {
-            Some(why) => format!("drawbar did not read this file: {why}."),
-            None => "drawbar does not open this kind of file.".to_string(),
-        });
+        drawn
+            .response
+            .on_hover_text("Hidden: drawbar does not open this kind of file.")
+            .context_menu(|ui| {
+                if ui.button("Delete…").clicked() {
+                    self.ask_delete(path.leaf(), Act::DeleteHidden(path.clone()));
+                    ui.close();
+                }
+            });
     }
 
     /// The assets directly in `folder`, or in the root for `None`, as rows.
@@ -1168,33 +1160,13 @@ impl Browser {
         });
     }
 
-    /// How many lines [`Beside::strangers`] holds for a folder's files.
-    fn strangers_shown(&self, folder: Option<u64>) -> usize {
-        let Some(dir) = self.folders.dir(folder) else {
-            return 0;
-        };
-        let unread = self.folders.unread.iter().map(|(path, _)| path);
-        let others = self
-            .folders
-            .others
-            .iter()
-            .filter(|_| self.folders.all_files);
-        unread
-            .chain(others)
-            .filter(|path| path.parent() == dir)
-            .count()
-    }
-
-    /// An index row whose file is gone, for an asset this app does not hold. It keeps
-    /// something the file alone would not give back, until the user lets it go.
+    /// An asset whose file is gone, which this app does not hold. It keeps something the
+    /// file alone would not give back, until the user lets it go.
     fn lost_row(&mut self, ui: &mut egui::Ui, id: u64, acts: &mut Vec<Act>) {
         let Some(lost) = self.folders.lost().iter().find(|lost| lost.id == id) else {
             return;
         };
-        let name = match &lost.row.path {
-            Some(path) => path.to_string(),
-            None => lost.row.name.clone(),
-        };
+        let name = lost.path.to_string();
         let drawn = row(
             ui,
             false,
@@ -1253,13 +1225,9 @@ impl Browser {
         let wears = self.tags.worn(entity.id).len();
         let word =
             crate::strings::kind_word(kind, qualifier(entity, &naming.kept, naming.instrument));
-        let trouble = match (
-            self.folders.missing.contains(&entity.id),
-            self.folders.duplicates.contains(&entity.id),
-        ) {
-            (true, _) => Some("missing"),
-            (false, true) => Some("differs only by case"),
-            (false, false) => entity.verify().note(),
+        let trouble = match self.folders.missing.contains(&entity.id) {
+            true => Some("missing"),
+            false => entity.verify().note(),
         };
         let drawn = row(
             ui,
@@ -1388,7 +1356,7 @@ impl Browser {
         menu::button(ui, "Tag", |ui| self.tag_items(ui, &picked, acts));
         ui.separator();
         if ui.button("Delete…").clicked() {
-            self.ask_delete(id, &entity.name);
+            self.ask_delete(&entity.name, Act::Remove(id));
             ui.close();
         }
     }
@@ -1917,6 +1885,27 @@ fn state_row(ui: &mut egui::Ui, state: State, count: usize, filter: &Filter, act
     }
 }
 
+/// What the Kept apart row says on hover.
+const KEPT: &str = "Changes kept apart from the library: take them or dismiss them";
+
+fn kept_row(ui: &mut egui::Ui, runs: usize, acts: &mut Vec<Act>) {
+    let drawn = row(
+        ui,
+        false,
+        &Cells {
+            indent: indent(0, false),
+            glyph: Some(Glyph::FolderGit2),
+            name: "Kept apart",
+            dot: Some((crate::app::warn(ui.visuals()), KEPT)),
+            count: Some(runs.to_string()),
+            ..Cells::default()
+        },
+    );
+    if drawn.response.on_hover_text(KEPT).clicked() {
+        acts.push(Act::ShowKept);
+    }
+}
+
 fn new_tag_row(ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     let drawn = row(
         ui,
@@ -1959,10 +1948,10 @@ mod tests {
     use crate::testing::{self, context, words, Bench};
     use crate::workspace::Fresh;
 
-    /// Open library folder… is offered where a folder can be picked, grayed out with the
+    /// Open folder… is offered where a folder can be picked, grayed out with the
     /// way to turn folder access on where Brave turns it off, and missing elsewhere.
     #[test]
-    fn open_library_folder_is_grayed_out_where_brave_turns_folder_access_off() {
+    fn open_folder_is_grayed_out_where_brave_turns_folder_access_off() {
         let ctx = context();
         ctx.style_mut(|style| style.interaction.tooltip_delay = 0.0);
         let folders = Folders::default();
@@ -1984,7 +1973,7 @@ mod tests {
             testing::shapes(output)
                 .into_iter()
                 .find_map(|(shape, _)| match shape {
-                    egui::Shape::Text(text) if text.galley.text() == OPEN_LIBRARY => Some((
+                    egui::Shape::Text(text) if text.galley.text() == OPEN_FOLDER => Some((
                         egui::Rect::from_min_size(text.pos, text.galley.size()).center(),
                         text.fallback_color.gamma_multiply(text.opacity_factor),
                     )),
@@ -2054,7 +2043,6 @@ mod tests {
             ..
         } = Bench::new();
         browser.folders.others = vec![LibPath::root().join("cover.jpg")];
-        browser.folders.unread = vec![(LibPath::root().join("Huge.nsmp"), "too big".into())];
         let drawn = |browser: &mut Browser| {
             let output = testing::run(&ctx, egui::RawInput::default(), |ctx| {
                 egui::SidePanel::left("browser")
@@ -2067,11 +2055,64 @@ mod tests {
         };
 
         let said = drawn(&mut browser);
-        assert!(said.iter().any(|word| word == "Huge.nsmp"), "{said:?}");
         assert!(!said.iter().any(|word| word == "cover.jpg"), "{said:?}");
         browser.folders.all_files = true;
         let said = drawn(&mut browser);
         assert!(said.iter().any(|word| word == "cover.jpg"), "{said:?}");
+    }
+
+    #[test]
+    fn a_hidden_files_delete_asks_first_and_says_undo_brings_it_back() {
+        let Bench {
+            ctx,
+            mut browser,
+            workspace,
+            device,
+            queue,
+            ..
+        } = Bench::new();
+        let cover = LibPath::root().join("cover.jpg");
+        browser.folders.others = vec![cover.clone()];
+        browser.folders.all_files = true;
+        let run = |browser: &mut Browser, events: Vec<egui::Event>| {
+            let input = testing::screen(egui::vec2(800.0, 600.0), events);
+            let output = testing::run(&ctx, input, |ctx| {
+                egui::SidePanel::left("browser")
+                    .exact_width(crate::shell::BROWSER)
+                    .show(ctx, |ui| {
+                        browser.ui(ui, &workspace, &device, &queue, &Filter::default());
+                    });
+            });
+            testing::painted(&output)
+        };
+
+        let seen = run(&mut browser, Vec::new());
+        let row = testing::where_(&seen, "cover.jpg").center();
+        let secondary = |pressed| egui::Event::PointerButton {
+            pos: row,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let opened = vec![
+            egui::Event::PointerMoved(row),
+            secondary(true),
+            secondary(false),
+        ];
+        run(&mut browser, opened);
+        let seen = run(&mut browser, Vec::new());
+        let delete = testing::where_(&seen, "Delete…").center();
+        run(&mut browser, testing::click(delete));
+
+        let ask = browser.ask.as_ref().expect("a question");
+        assert_eq!(ask.title, "Delete “cover.jpg”?");
+        let note = ask.note.as_deref().unwrap_or_default();
+        assert!(note.contains("Undo brings it back"), "{note}");
+        let acts = browser.answer("Delete");
+        assert!(
+            matches!(acts.as_slice(), [Act::DeleteHidden(path)] if *path == cover),
+            "{acts:?}"
+        );
     }
 
     /// Drawing the tree asks every folder row for its count and its contents, and none

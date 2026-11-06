@@ -1,7 +1,11 @@
 //! Tags that label the list on this computer.
 //!
-//! Kept in the library's index by asset id, so a tag follows its asset's file through a
-//! rename. An asset can have any number of tags.
+//! The library keeps them as names on the entity of each asset that wears them, so a tag
+//! follows its asset's file through a rename, and every tag made as a name in its list
+//! of tags, so one that nothing wears stays. What this list shows is what the library's
+//! view says: a change the user makes is asked for, and shows once the library has
+//! committed it, but a new tag, a rename or a removal shows at once, over the views that
+//! arrive until the library has answered it. An asset can have any number of tags.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -10,14 +14,48 @@ use crate::named::{List, Named};
 /// A tag is only a name.
 pub type Tag = Named;
 
+/// A change to the tags the user asked for, by tag name.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Asked {
+    /// A new tag, worn by nothing yet.
+    Make(String),
+    /// Put a tag on these assets, and where `make` says, name it in the list of tags as
+    /// [`Asked::Make`] does: the tag is new.
+    Tag {
+        assets: Vec<u64>,
+        name: String,
+        make: bool,
+    },
+    Untag {
+        assets: Vec<u64>,
+        name: String,
+    },
+    Rename {
+        from: String,
+        to: String,
+    },
+    Remove(String),
+    /// Let go of an asset whose file is gone, with its tags.
+    Forget(u64),
+}
+
 /// Which assets have which tags.
 #[derive(Default)]
 pub struct Tags {
     list: List,
     /// The tags on each asset, by workspace id. An asset with no entry is untagged.
     of: BTreeMap<u64, BTreeSet<u64>>,
+    /// The tags made here that the library does not name yet.
+    unworn: BTreeSet<u64>,
+    asked: Vec<Asked>,
+    /// The renames and removals asked for that the library may not have made yet, in
+    /// order: each name, and what it is called now, or `None` once removed.
+    pending: Vec<(String, Option<String>)>,
     /// Counts changes to the names and to which asset wears which tag.
     revision: u64,
+    /// A new tag whose name its editor is still choosing, and the first change asked
+    /// for that waits for the name.
+    naming: Option<(u64, usize)>,
 }
 
 /// The tags of an untagged asset, so a caller need not tell absent from empty.
@@ -37,44 +75,221 @@ impl Tags {
         self.revision
     }
 
-    /// A new tag with a name no other tag uses, or `None` when the list has no id left
-    /// ([`List::make`]).
+    /// A new tag with a name no other tag uses, worn by nothing, or `None` when the list
+    /// has no id left ([`List::make`]).
     pub(crate) fn make(&mut self, wanted: &str) -> Option<u64> {
+        let id = self.list.make(wanted)?;
         self.revision += 1;
-        self.list.make(wanted)
+        self.unworn.insert(id);
+        let name = self.list.name_of(id)?.to_string();
+        self.asked.push(Asked::Make(name));
+        Some(id)
     }
 
-    pub(crate) fn rename(&mut self, id: u64, name: String) {
-        self.revision += 1;
-        self.list.rename(id, name);
+    /// Hold the changes asked for from the making of the new tag `id` on, until its name
+    /// is chosen: making it and naming it are one change.
+    pub(crate) fn name_new(&mut self, id: u64) {
+        let Some(name) = self.list.name_of(id) else {
+            return;
+        };
+        let made = self.asked.iter().rposition(|asked| match asked {
+            Asked::Make(made)
+            | Asked::Tag {
+                name: made,
+                make: true,
+                ..
+            } => made == name,
+            _ => false,
+        });
+        self.naming = made.map(|at| (id, at));
     }
 
-    /// Remove a tag from the list and from every asset. Their other tags stay.
+    /// The new tag whose name its editor is still choosing.
+    pub(crate) fn naming(&self) -> Option<u64> {
+        self.naming.map(|(id, _)| id)
+    }
+
+    /// The editor of the new tag's name closed: what waited for it is asked for.
+    pub(crate) fn named(&mut self) {
+        self.naming = None;
+    }
+
+    /// Rename a tag here, and ask the library to rename it on every asset that wears it.
+    /// A new tag whose name is being chosen is asked for under this name instead. A name
+    /// another tag has merges this tag into that one, as the library does: the id of that
+    /// tag, which now stands for both.
+    pub(crate) fn rename(&mut self, id: u64, name: String) -> Option<u64> {
+        let from = self.list.name_of(id)?.to_string();
+        if from == name {
+            return None;
+        }
+        self.revision += 1;
+        let into = self.list.id_of(&name);
+        match into {
+            Some(into) => self.merge(id, into),
+            None => self.list.rename(id, name.clone()),
+        }
+        if let Some((_, at)) = self.naming.filter(|(naming, _)| *naming == id) {
+            self.naming = None;
+            for asked in &mut self.asked[at..] {
+                match asked {
+                    Asked::Make(made) | Asked::Tag { name: made, .. } if *made == from => {
+                        made.clone_from(&name);
+                    }
+                    _ => {}
+                }
+            }
+            return into;
+        }
+        self.pending.push((from.clone(), Some(name.clone())));
+        self.asked.push(Asked::Rename { from, to: name });
+        into
+    }
+
+    /// Let the tag `into` stand for the tag `id` too, on every asset that wears it.
+    fn merge(&mut self, id: u64, into: u64) {
+        for worn in self.of.values_mut() {
+            if worn.remove(&id) {
+                worn.insert(into);
+            }
+        }
+        self.list.remove(id);
+        self.unworn.remove(&id);
+    }
+
+    /// Remove a tag from the list, and ask the library to take it off every asset. Their
+    /// other tags stay.
     pub(crate) fn remove(&mut self, id: u64) {
+        let Some(name) = self.list.name_of(id).map(str::to_string) else {
+            return;
+        };
         self.revision += 1;
         self.list.remove(id);
         for worn in self.of.values_mut() {
             worn.remove(&id);
         }
         self.of.retain(|_, worn| !worn.is_empty());
+        self.unworn.remove(&id);
+        self.pending.push((name.clone(), None));
+        self.asked.push(Asked::Remove(name));
     }
 
-    /// Add a tag to an asset, or remove it. A tag not in the list cannot be added.
-    pub(crate) fn set(&mut self, asset: u64, tag: u64, on: bool) {
-        if on && self.list.holds(tag) {
-            if self.of.entry(asset).or_default().insert(tag) {
-                self.revision += 1;
+    /// Ask the library to put a tag on each of these assets: with its making, where that
+    /// was the last change asked for.
+    pub(crate) fn tag(&mut self, assets: &[u64], tag: u64) {
+        let name = self.list.name_of(tag).filter(|_| !assets.is_empty());
+        if let Some(name) = name {
+            let (assets, name) = (assets.to_vec(), name.to_string());
+            let make = self.asked.last() == Some(&Asked::Make(name.clone()));
+            if make {
+                self.asked.pop();
             }
+            self.asked.push(Asked::Tag { assets, name, make });
+        }
+    }
+
+    /// Ask the library to take a tag off each of these assets.
+    pub(crate) fn untag(&mut self, assets: &[u64], tag: u64) {
+        let name = self.list.name_of(tag).filter(|_| !assets.is_empty());
+        if let Some(name) = name {
+            let (assets, name) = (assets.to_vec(), name.to_string());
+            self.asked.push(Asked::Untag { assets, name });
+        }
+    }
+
+    /// Ask the library to let go of an asset whose file is gone, with its tags.
+    pub(crate) fn forget(&mut self, asset: u64) {
+        self.asked.push(Asked::Forget(asset));
+    }
+
+    /// The changes asked for since the last call, in order, but for those that wait for
+    /// a new tag's name.
+    pub(crate) fn take_asked(&mut self) -> Vec<Asked> {
+        match &mut self.naming {
+            Some((_, at)) => self.asked.drain(..std::mem::take(at)).collect(),
+            None => std::mem::take(&mut self.asked),
+        }
+    }
+
+    /// The library has answered every change asked for: what it shows next is all there
+    /// is.
+    pub(crate) fn settle(&mut self) {
+        if self.asked.is_empty() {
+            self.pending.clear();
+        }
+    }
+
+    /// What the name `name` the library's view holds is shown as: renamed or removed
+    /// here, until the library has answered.
+    fn shown(&self, name: &str) -> Option<String> {
+        let mut name = name.to_string();
+        for (from, to) in &self.pending {
+            if *from == name {
+                name = to.clone()?;
+            }
+        }
+        Some(name)
+    }
+
+    /// Show what the library's view says: the names it holds, and the names each asset
+    /// wears. Each name keeps the id it had; a tag the view no longer names goes, unless it
+    /// was made here and nothing wears it yet.
+    pub(crate) fn project(
+        &mut self,
+        named: BTreeSet<String>,
+        worn: BTreeMap<u64, BTreeSet<String>>,
+    ) {
+        self.revision += 1;
+        let named: BTreeSet<String> = named.iter().filter_map(|name| self.shown(name)).collect();
+        let worn: BTreeMap<u64, BTreeSet<String>> = worn
+            .into_iter()
+            .map(|(asset, names)| {
+                let names = names.iter().filter_map(|name| self.shown(name)).collect();
+                (asset, names)
+            })
+            .collect();
+        for name in &named {
+            match self.list.id_of(name) {
+                Some(id) => _ = self.unworn.remove(&id),
+                None => _ = self.list.make(name),
+            }
+        }
+        let gone: Vec<u64> = self
+            .list
+            .all()
+            .iter()
+            .filter(|tag| !named.contains(&tag.name) && !self.unworn.contains(&tag.id))
+            .map(|tag| tag.id)
+            .collect();
+        for id in gone {
+            self.list.remove(id);
+        }
+        let list = &self.list;
+        self.of = worn
+            .into_iter()
+            .map(|(asset, names)| {
+                let ids = names.iter().filter_map(|name| list.id_of(name)).collect();
+                (asset, ids)
+            })
+            .filter(|(_, ids): &(u64, BTreeSet<u64>)| !ids.is_empty())
+            .collect();
+    }
+
+    /// Put a tag on an asset, or take it off, as a view the library committed would.
+    #[cfg(test)]
+    pub(crate) fn set(&mut self, asset: u64, tag: u64, on: bool) {
+        if !self.list.holds(tag) {
             return;
         }
-        let Some(worn) = self.of.get_mut(&asset) else {
-            return;
-        };
-        if worn.remove(&tag) {
-            self.revision += 1;
-        }
-        if worn.is_empty() {
-            self.of.remove(&asset);
+        self.revision += 1;
+        match on {
+            true => _ = self.of.entry(asset).or_default().insert(tag),
+            false => {
+                if let Some(worn) = self.of.get_mut(&asset) {
+                    worn.remove(&tag);
+                }
+                self.of.retain(|_, worn| !worn.is_empty());
+            }
         }
     }
 
@@ -93,81 +308,175 @@ impl Tags {
     pub fn count(&self, tag: u64) -> usize {
         self.of.values().filter(|worn| worn.contains(&tag)).count()
     }
-
-    pub(crate) fn forget(&mut self, asset: u64) {
-        self.revision += 1;
-        self.of.remove(&asset);
-    }
-
-    /// Take the tags an index held: their names by id, and each asset's tags.
-    ///
-    /// ⚠️ A membership naming a tag the index does not list is dropped: it would leave a
-    /// tag on the asset that nothing can show or remove.
-    pub(crate) fn restore(
-        &mut self,
-        names: BTreeMap<u64, String>,
-        worn: impl Iterator<Item = (u64, impl Iterator<Item = u64>)>,
-    ) {
-        self.revision += 1;
-        for (id, name) in names {
-            self.list.restore(id, name);
-        }
-        for (asset, tags) in worn {
-            let tags: BTreeSet<u64> = tags.filter(|tag| self.list.holds(*tag)).collect();
-            if !tags.is_empty() {
-                self.of.insert(asset, tags);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn names(of: &[&str]) -> BTreeSet<String> {
+        of.iter().map(|name| name.to_string()).collect()
+    }
+
     #[test]
-    fn setting_a_tag_that_is_already_so_changes_nothing() {
+    fn renaming_another_tag_leaves_a_new_one_waiting_for_its_name() {
         let mut tags = Tags::default();
         let sunday = tags.make("Sunday").unwrap();
-        let made = tags.revision();
-        tags.set(7, sunday, true);
-        assert_eq!(tags.revision(), made + 1);
-        tags.set(7, sunday, true);
-        tags.set(8, sunday, false);
-        assert_eq!(tags.revision(), made + 1, "nothing changed");
-        tags.set(7, sunday, false);
-        assert_eq!(tags.revision(), made + 2);
-    }
-
-    /// Unlike a folder, an asset can have any number of tags.
-    #[test]
-    fn an_asset_wears_every_tag_it_is_given() {
-        let mut tags = Tags::default();
-        let (sunday, loud) = (tags.make("Sunday").unwrap(), tags.make("Loud").unwrap());
-        tags.set(7, sunday, true);
-        tags.set(7, loud, true);
-        assert_eq!(tags.worn(7).len(), 2);
-
-        tags.set(7, sunday, false);
-        assert_eq!(tags.worn(7), &BTreeSet::from([loud]));
-        // An id not in the list cannot be added.
-        tags.set(7, 99, true);
-        assert_eq!(tags.worn(7), &BTreeSet::from([loud]));
-        assert!(tags.worn(8).is_empty(), "an untagged asset has no tags");
+        tags.take_asked();
+        let fresh = tags.make("New tag").unwrap();
+        tags.name_new(fresh);
+        tags.rename(sunday, "Monday".into());
+        assert_eq!(tags.take_asked(), [], "everything waits for the name");
+        tags.rename(fresh, "Tuesday".into());
+        assert_eq!(
+            tags.take_asked(),
+            [
+                Asked::Make("Tuesday".into()),
+                Asked::Rename {
+                    from: "Sunday".into(),
+                    to: "Monday".into()
+                }
+            ]
+        );
     }
 
     #[test]
-    fn removing_a_tag_leaves_every_other_tag_where_it_was() {
+    fn a_rename_to_another_tags_name_shows_one_tag_worn_by_the_assets_of_both() {
         let mut tags = Tags::default();
-        let (gone, kept) = (tags.make("Sunday").unwrap(), tags.make("Loud").unwrap());
-        tags.set(7, gone, true);
-        tags.set(7, kept, true);
-        tags.set(8, gone, true);
-        tags.remove(gone);
+        let live = tags.make("Live").unwrap();
+        let studio = tags.make("Studio").unwrap();
+        let worn = || BTreeMap::from([(7, names(&["Live"])), (8, names(&["Studio"]))]);
+        tags.project(names(&["Live", "Studio"]), worn());
+        tags.take_asked();
+        assert_eq!(tags.rename(live, "Studio".into()), Some(studio));
+        assert_eq!(
+            tags.take_asked(),
+            [Asked::Rename {
+                from: "Live".into(),
+                to: "Studio".into()
+            }]
+        );
+        tags.project(names(&["Live", "Studio"]), worn());
+        assert_eq!(tags.all().len(), 1, "a view from before it");
+        assert_eq!(tags.count(studio), 2);
+        assert_eq!(tags.name_of(live), None);
+    }
 
-        assert_eq!(tags.worn(7), &BTreeSet::from([kept]));
-        assert!(tags.worn(8).is_empty());
-        assert_eq!(tags.count(kept), 1);
+    #[test]
+    fn a_new_tag_named_as_another_puts_that_one_on() {
+        let mut tags = Tags::default();
+        let studio = tags.make("Studio").unwrap();
+        tags.take_asked();
+        let fresh = tags.make("New tag").unwrap();
+        tags.tag(&[7], fresh);
+        tags.name_new(fresh);
+        assert_eq!(tags.rename(fresh, "Studio".into()), Some(studio));
+        assert_eq!(
+            tags.take_asked(),
+            [Asked::Tag {
+                assets: vec![7],
+                name: "Studio".into(),
+                make: true
+            }]
+        );
+        assert_eq!(tags.all().len(), 1);
+    }
+
+    #[test]
+    fn a_change_is_asked_for_and_shows_only_once_the_view_says_so() {
+        let mut tags = Tags::default();
+        let sunday = tags.make("Sunday").unwrap();
+        tags.tag(&[7, 8], sunday);
+        assert_eq!(
+            tags.take_asked(),
+            [Asked::Tag {
+                assets: vec![7, 8],
+                name: "Sunday".into(),
+                make: true
+            }],
+            "made and put on in one change"
+        );
+        assert!(
+            tags.worn(7).is_empty(),
+            "nothing shows before the library says"
+        );
+
+        let worn = BTreeMap::from([(7, names(&["Sunday"])), (8, names(&["Sunday"]))]);
+        tags.project(names(&["Sunday"]), worn);
+        assert_eq!(
+            tags.worn(7),
+            &BTreeSet::from([sunday]),
+            "the id it was made with"
+        );
+        assert_eq!(tags.count(sunday), 2);
+    }
+
+    #[test]
+    fn a_tag_made_here_stays_until_worn_and_goes_once_the_view_drops_it() {
+        let mut tags = Tags::default();
+        let fresh = tags.make("Fresh").unwrap();
+        tags.project(BTreeSet::new(), BTreeMap::new());
+        assert_eq!(
+            tags.name_of(fresh),
+            Some("Fresh"),
+            "made here, worn by nothing"
+        );
+
+        tags.project(names(&["Fresh"]), BTreeMap::from([(7, names(&["Fresh"]))]));
+        tags.project(BTreeSet::new(), BTreeMap::new());
+        assert_eq!(
+            tags.name_of(fresh),
+            None,
+            "worn once, then untagged everywhere"
+        );
+    }
+
+    #[test]
+    fn a_rename_shows_at_once_over_views_from_before_it_until_the_library_answers() {
+        let mut tags = Tags::default();
+        let sunday = tags.make("Sunday").unwrap();
+        let worn = || BTreeMap::from([(7, names(&["Sunday"]))]);
+        tags.project(names(&["Sunday"]), worn());
+        tags.take_asked();
+        tags.rename(sunday, "Monday".into());
+        assert_eq!(
+            tags.take_asked(),
+            [Asked::Rename {
+                from: "Sunday".into(),
+                to: "Monday".into()
+            }]
+        );
+        tags.project(names(&["Sunday"]), worn());
+        assert_eq!(
+            tags.name_of(sunday),
+            Some("Monday"),
+            "a view from before it"
+        );
+        assert_eq!(tags.worn(7), &BTreeSet::from([sunday]));
+
+        tags.settle();
+        tags.project(names(&["Sunday"]), worn());
+        assert_eq!(tags.name_of(sunday), None, "the library kept the old name");
+        assert_eq!(tags.all().len(), 1);
+    }
+
+    #[test]
+    fn a_removal_shows_at_once_and_asks_the_library() {
+        let mut tags = Tags::default();
+        let sunday = tags.make("Sunday").unwrap();
+        tags.project(
+            names(&["Sunday"]),
+            BTreeMap::from([(7, names(&["Sunday"]))]),
+        );
+        tags.take_asked();
+        tags.remove(sunday);
+        assert_eq!(tags.take_asked(), [Asked::Remove("Sunday".into())]);
+        tags.project(
+            names(&["Sunday"]),
+            BTreeMap::from([(7, names(&["Sunday"]))]),
+        );
+        assert!(tags.all().is_empty(), "a view from before it");
+        assert!(tags.worn(7).is_empty());
     }
 
     /// The menu checks a tag that is on the whole selection, and an empty selection is
@@ -183,17 +492,5 @@ mod tests {
 
         tags.set(8, sunday, true);
         assert!(tags.on_all(&[7, 8], sunday));
-    }
-
-    #[test]
-    fn a_membership_naming_no_listed_tag_is_dropped() {
-        let mut tags = Tags::default();
-        tags.restore(
-            BTreeMap::from([(1, "Sunday".to_string())]),
-            [(7, vec![1, 3].into_iter()), (8, vec![3].into_iter())].into_iter(),
-        );
-        assert_eq!(tags.worn(7), &BTreeSet::from([1]));
-        assert!(tags.worn(8).is_empty());
-        assert_eq!(tags.name_of(1), Some("Sunday"));
     }
 }

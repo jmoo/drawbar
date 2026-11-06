@@ -46,8 +46,8 @@ impl Scratch {
         }
     }
 
-    /// Make new files in `dir` from now on, a writable library's `.drawbar/tmp/`, or in
-    /// drawbar's own data with `None`.
+    /// Make new files in `dir` from now on, this install's folder for a writable
+    /// library's rescues, or in drawbar's own data with `None`.
     pub fn keep_in(&self, dir: Option<PathBuf>) {
         *self.dir.lock().expect("unpoisoned") = dir;
     }
@@ -134,6 +134,11 @@ impl Kept {
     pub async fn remove(self) -> io::Result<()> {
         drop(self.file);
         std::fs::remove_file(&self.path)
+    }
+
+    /// Leave the file where it is, for the library to take in.
+    pub async fn leave(self) -> io::Result<()> {
+        Ok(())
     }
 }
 

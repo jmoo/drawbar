@@ -325,7 +325,7 @@ fn not_ours() -> io::Error {
 }
 
 /// A file laid out as the bytes an edit holds and the ranges of its source it keeps.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Pieces {
     parts: Vec<Piece>,
     /// Whether the checksum the pieces store is the copy's own. Otherwise [`stream`]
@@ -333,9 +333,9 @@ pub struct Pieces {
     sealed: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 enum Piece {
-    Held(Vec<u8>),
+    Held(#[serde(with = "crate::store::wire::bytes")] Vec<u8>),
     Kept(Range<u64>),
 }
 

@@ -19,6 +19,7 @@ use crate::log::Level;
 use crate::menu::{key_text, new_menu, search_key, Command};
 use crate::panel::{flat, CARD_RADIUS, GUTTER};
 use crate::platform::{Frame, Platform};
+use crate::sheet;
 use crate::tabs::Spot;
 use crate::zoom::{Step, Stop, Zoom};
 
@@ -73,6 +74,13 @@ const SEARCH_HINT: &str = "Search the library by name, or drop files here";
 /// The height of a chip or a button in the top bar, and the size of its glyph.
 const CHIP: f32 = 30.0;
 const BAR_GLYPH: f32 = 16.0;
+
+/// How long, in seconds, a change to the library runs unanswered before the window shows
+/// what it is doing.
+const CHANGING_SHOWN: f64 = 2.0;
+
+/// The widest the dialog of a change running grows, as the window allows.
+const CHANGING_WIDTH: f32 = 420.0;
 
 /// The room the Mac's traffic lights take at the left of the bar, at 100%.
 const LIGHTS: f32 = 78.0;
@@ -129,6 +137,9 @@ pub struct Shell {
     pub zoom_chip: egui::Rect,
     /// What the inspector's selection cards show, until the selection changes.
     pub(crate) picked: crate::inspector::Picked,
+    /// When the library's oldest unanswered change was first seen, as
+    /// [`egui::InputState::time`] counts.
+    pub(crate) changing: Option<f64>,
 }
 
 impl Default for Shell {
@@ -149,6 +160,7 @@ impl Default for Shell {
             zoom_open: false,
             zoom_chip: egui::Rect::NOTHING,
             picked: Default::default(),
+            changing: None,
         }
     }
 }
@@ -401,14 +413,12 @@ impl Pill<'_> {
 }
 
 /// What the status line says while the library is being read, if it is: how many files
-/// its listing has found, then how many are still to be decoded.
-fn reading(place: Option<&crate::folders::Where>, unread: usize) -> Option<String> {
-    let said = match (place.and_then(|at| at.listing), unread) {
-        (Some(1), _) => "1 file".to_string(),
-        (Some(files), _) => format!("{files} files"),
-        (None, 0) => return None,
-        (None, 1) => "1 file to go".to_string(),
-        (None, unread) => format!("{unread} files to go"),
+/// are still to be decoded.
+fn reading(unread: usize) -> Option<String> {
+    let said = match unread {
+        0 => return None,
+        1 => "1 file to go".to_string(),
+        unread => format!("{unread} files to go"),
     };
     Some(format!("Reading the library… {said}"))
 }
@@ -621,7 +631,6 @@ impl DrawbarApp {
         }
     }
 
-    /// Open, New, and Save.
     fn file_tools(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         let mac = crate::platform::mac_keyboard(ui.ctx());
         let hint = |label: &str, command| match key_text(command, self.platform, mac) {
@@ -633,7 +642,7 @@ impl DrawbarApp {
             Glyph::FolderOpen,
             BAR_GLYPH,
             CHIP,
-            &hint("Open files…", Command::Open),
+            &hint(crate::menu::IMPORT, Command::Import),
         )
         .clicked()
         {
@@ -971,6 +980,40 @@ impl DrawbarApp {
             });
     }
 
+    /// Over the window, what the library is doing for a change that has run
+    /// [`CHANGING_SHOWN`] without an answer, until it has one. A question the browser asks
+    /// meanwhile shows instead.
+    pub(crate) fn changing(&mut self, ctx: &egui::Context) {
+        let Some(doing) = self.store.as_ref().and_then(crate::store::Store::doing) else {
+            self.shell.changing = None;
+            return;
+        };
+        let now = ctx.input(|input| input.time);
+        let shown = *self.shell.changing.get_or_insert(now) + CHANGING_SHOWN;
+        if now < shown {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(shown - now));
+            return;
+        }
+        if self.browser.asks() {
+            return;
+        }
+        egui::Modal::new(egui::Id::new("changing"))
+            .frame(sheet::frame(&ctx.style().visuals))
+            .show(ctx, |ui| {
+                ui.set_max_width(sheet::width(ui.ctx(), CHANGING_WIDTH));
+                ui.add_space(sheet::GAP * 4.0);
+                sheet::section(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let size = egui::Vec2::splat(BAR_GLYPH);
+                        let (mark, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                        turning(ui, mark);
+                        ui.add(egui::Label::new(doing).wrap());
+                    });
+                });
+                ui.add_space(sheet::GAP * 4.0);
+            });
+    }
+
     /// The zoom: a bare magnifier at 100%, and the percent beside it anywhere else, on a
     /// fill that says it is not the size the shell is drawn for. A click toggles the zoom
     /// popover.
@@ -1213,8 +1256,7 @@ impl DrawbarApp {
     /// The newest sentence, or what the instrument is doing, then the count of problems.
     fn said(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
         let visuals = ui.visuals().clone();
-        let place = self.browser.folders.place.as_ref();
-        let reading = reading(place, self.workspace.reading());
+        let reading = reading(self.workspace.reading());
         let (glyph, tint_, text) = match (&self.device.state.in_flight, reading) {
             (Some(words), _) => (None, visuals.text_color(), words.doing.clone()),
             (None, Some(reading)) => (None, visuals.text_color(), reading),
@@ -2218,12 +2260,60 @@ mod tests {
         let _ = settled(&ctx, &mut app, screen);
         let said = words_at(&ctx, &mut app, screen, Vec::new());
         for (sub, item) in [
-            ("New", "Open…"),
-            (crate::menu::RECENT, "Open…"),
+            ("New", "Import…"),
+            (crate::menu::RECENT, "Import…"),
             ("Theme", "Browser panel"),
         ] {
             let (sub, item) = (testing::where_(&said, sub), testing::where_(&said, item));
             assert_eq!(sub.left(), item.left(), "{sub:?} against {item:?}");
+        }
+    }
+
+    /// File ▸ Open recent is left out while the open library is all it would list, and
+    /// offered once there is another to switch to or the open one opens again.
+    #[test]
+    fn open_recent_is_left_out_while_it_would_list_only_the_open_library() {
+        let screen = egui::vec2(1440.0, 1400.0);
+        let library = |name: &str, open| crate::folders::Library {
+            root: name.into(),
+            name: name.to_string(),
+            open,
+        };
+        let reopening = crate::folders::Where {
+            reopens: true,
+            ..Default::default()
+        };
+        for (libraries, place, offered) in [
+            (vec![], None, false),
+            (vec![library("This computer", true)], None, false),
+            (
+                vec![library("This computer", true)],
+                Some(reopening.clone()),
+                true,
+            ),
+            (
+                vec![library("This computer", true), library("Elsewhere", false)],
+                None,
+                true,
+            ),
+        ] {
+            let ctx = egui::Context::default();
+            let mut app = app(&ctx, None);
+            app.platform = Platform::Web;
+            let _ = settled(&ctx, &mut app, screen);
+            let listed = libraries.len();
+            app.browser.folders.libraries = libraries;
+            app.browser.folders.place = place;
+            let f10 = pressed(egui::Key::F10, egui::Modifiers::NONE);
+            let _ = frame_of(&ctx, &mut app, screen, vec![f10]);
+            let painted = settled(&ctx, &mut app, screen);
+            assert!(painted.wrote("Import…"), "the File menu is open");
+            assert_eq!(
+                painted.wrote(crate::menu::RECENT),
+                offered,
+                "{listed} libraries, reopening: {}",
+                app.browser.folders.place.is_some()
+            );
         }
     }
 
@@ -2345,7 +2435,7 @@ mod tests {
             for title in ["File", "View", "Instrument", "Help"] {
                 assert!(painted.wrote(title), "{height}: {title}");
             }
-            assert_eq!(painted.wrote("Open…"), flat, "{height}: File's items");
+            assert_eq!(painted.wrote("Import…"), flat, "{height}: File's items");
             let widest = ctx.memory(|memory| {
                 memory
                     .areas()
@@ -2859,8 +2949,8 @@ mod tests {
         assert!(!detail.contains("TypeError"), "{detail}");
     }
 
-    /// Tag ▸ New tag… in a row's menu puts a new tag on that row and opens the tag's name
-    /// for typing where it can be seen, though the tags are below the fold.
+    /// Tag ▸ New tag… in a row's menu asks to put a new tag on that row and opens the tag's
+    /// name for typing where it can be seen, though the tags are below the fold.
     #[test]
     fn a_new_tag_from_a_rows_menu_tags_the_row_and_is_named_in_view() {
         use crate::workspace::Fresh;
@@ -2914,8 +3004,13 @@ mod tests {
             panic!("one tag was made: {:?}", tags.all().len());
         };
         assert_eq!(made.name, "Sunday");
-        assert!(tags.worn(named).contains(&made.id), "the row wears it");
-        assert_eq!(tags.count(made.id), 1, "and nothing else does");
+        use crate::tags::Asked;
+        let asked = app.browser.take_tag_asks();
+        let [Asked::Tag { assets, name, make }] = asked.as_slice() else {
+            panic!("the row is tagged and the tag named in one change: {asked:?}");
+        };
+        assert_eq!(assets, &[named], "the row alone");
+        assert_eq!((name.as_str(), make), ("Sunday", &true));
     }
 
     /// A question raised outside the browser is asked with the browser hidden.

@@ -1610,7 +1610,7 @@ fn nothing(ui: &mut egui::Ui) {
         ui.add_space(CELL_PAD);
         ui.label(
             egui::RichText::new(
-                "Nothing to show. Open Nord files, connect an instrument, or clear the search and filters.",
+                "Nothing to show. Import Nord files, connect an instrument, or clear the search and filters.",
             )
             .text_style(ui_text())
             .weak()

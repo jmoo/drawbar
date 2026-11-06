@@ -8,18 +8,29 @@ pub struct Named {
 
 /// A list of them, holding one entry per id and one name per entry.
 #[derive(Default)]
-pub struct List(Vec<Named>);
+pub struct List {
+    held: Vec<Named>,
+    last_id: u64,
+}
 
 impl List {
     pub fn all(&self) -> &[Named] {
-        &self.0
+        &self.held
     }
 
     pub fn name_of(&self, id: u64) -> Option<&str> {
-        self.0
+        self.held
             .iter()
             .find(|held| held.id == id)
             .map(|held| held.name.as_str())
+    }
+
+    /// The id of the entry named `name`.
+    pub fn id_of(&self, name: &str) -> Option<u64> {
+        self.held
+            .iter()
+            .find(|held| held.name == name)
+            .map(|held| held.id)
     }
 
     /// Whether the list holds this id. A membership naming an id it does not hold means
@@ -30,62 +41,37 @@ impl List {
 
     /// A new entry named `wanted`, or `wanted 2`, `wanted 3`, … if that name is taken.
     ///
-    /// ⚠️ `None` when the list holds [`u64::MAX`], which a stored grouping can name. Ids
-    /// only rise, so a removed id is never reused while a membership still refers to it,
-    /// and there is no id above the last.
+    /// ⚠️ `None` once the list has given [`u64::MAX`]. Ids only rise, so a removed id is
+    /// never reused while a membership still refers to it, and there is no id above the
+    /// last.
     pub fn make(&mut self, wanted: &str) -> Option<u64> {
-        let id = self
-            .0
-            .iter()
-            .map(|held| held.id)
-            .max()
-            .unwrap_or(0)
-            .checked_add(1)?;
+        let id = self.last_id.checked_add(1)?;
         let mut name = wanted.to_string();
         for nth in 2.. {
-            if !self.0.iter().any(|held| held.name == name) {
+            if !self.held.iter().any(|held| held.name == name) {
                 break;
             }
             name = format!("{wanted} {nth}");
         }
-        self.0.push(Named { id, name });
+        self.held.push(Named { id, name });
+        self.last_id = id;
         Some(id)
     }
 
     pub fn rename(&mut self, id: u64, name: String) {
-        if let Some(held) = self.0.iter_mut().find(|held| held.id == id) {
+        if let Some(held) = self.held.iter_mut().find(|held| held.id == id) {
             held.name = name;
         }
     }
 
     pub fn remove(&mut self, id: u64) {
-        self.0.retain(|held| held.id != id);
-    }
-
-    /// Restore one stored row.
-    ///
-    /// ⚠️ A second row for an id already in the list is refused. Memberships naming that
-    /// id mean the first row, and there is no way to choose between two names for one
-    /// thing.
-    pub fn restore(&mut self, id: u64, name: String) {
-        if !self.holds(id) {
-            self.0.push(Named { id, name });
-        }
+        self.held.retain(|held| held.id != id);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_list_holding_the_last_id_makes_nothing_more() {
-        let mut list = List::default();
-        list.restore(u64::MAX, "Sunday".into());
-        assert_eq!(list.make("Loud"), None);
-        assert_eq!(list.all().len(), 1, "nothing was added");
-        assert_eq!(list.name_of(u64::MAX), Some("Sunday"));
-    }
 
     #[test]
     fn a_new_one_gets_a_name_nothing_else_is_using() {
@@ -96,14 +82,11 @@ mod tests {
         assert_eq!(names, ["Sunday", "Sunday 2", "Sunday 3"]);
     }
 
-    /// Two rows with one id give one thing two names. The first is kept, so loading
-    /// never silently renames it.
     #[test]
-    fn a_second_row_for_an_id_already_read_is_refused() {
+    fn the_id_of_a_removed_entry_is_never_given_again() {
         let mut list = List::default();
-        list.restore(1, "Sunday".into());
-        list.restore(1, "Monday".into());
-        assert_eq!(list.all().len(), 1);
-        assert_eq!(list.name_of(1), Some("Sunday"));
+        let first = list.make("Live").unwrap();
+        list.remove(first);
+        assert_ne!(list.make("Live"), Some(first));
     }
 }

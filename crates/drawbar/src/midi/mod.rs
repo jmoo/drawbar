@@ -31,7 +31,7 @@ use crate::log::Log;
 
 /// What the Instrument menu says where the browser has no Web MIDI.
 pub const UNSUPPORTED: &str =
-    "This browser cannot use MIDI controllers; use Chrome, Edge, or Firefox.";
+    "This browser cannot use MIDI controllers; use Chrome, Edge, Brave, or Firefox.";
 
 /// How many note messages can wait for a frame. A full queue drops its oldest.
 const QUEUE: usize = 64;

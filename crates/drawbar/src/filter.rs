@@ -115,9 +115,18 @@ impl Filter {
         }
     }
 
-    /// Drop a deleted tag from the filter.
-    pub fn forget_tag(&mut self, tag: u64) {
-        self.tags.remove(&tag);
+    /// ⚠️ Drop the tags the list no longer holds. Their tree rows are gone too, so a tag
+    /// removed here, undone or removed by another drawbar would otherwise leave the table
+    /// empty with no way to clear the filter.
+    pub fn keep_tags(&mut self, tags: &crate::tags::Tags) {
+        self.tags.retain(|tag| tags.name_of(*tag).is_some());
+    }
+
+    /// Narrow by the tag `into` where the filter narrowed by `tag`, which merged into it.
+    pub fn merge_tag(&mut self, tag: u64, into: u64) {
+        if self.tags.remove(&tag) {
+            self.tags.insert(into);
+        }
     }
 
     /// ⚠️ Drop a kind that is no longer present anywhere. Its tree row is gone too, so if
@@ -214,11 +223,31 @@ mod tests {
 
     #[test]
     fn a_tag_that_is_gone_stops_narrowing() {
+        let names = |names: &[&str]| names.iter().map(|name| name.to_string()).collect();
+        let mut tags = crate::tags::Tags::default();
+        tags.project(names(&["Live", "Studio"]), Default::default());
+        let id = |name| tags.all().iter().find(|tag| tag.name == name).unwrap().id;
+        let (live, studio) = (id("Live"), id("Studio"));
+        let mut filter = Filter::default();
+        filter.narrow(Narrow::Tag(live));
+        filter.narrow(Narrow::Tag(studio));
+        tags.project(names(&["Studio"]), Default::default());
+        filter.keep_tags(&tags);
+        assert!(
+            !filter.on(Narrow::Tag(live)),
+            "the library no longer names Live"
+        );
+        assert!(filter.on(Narrow::Tag(studio)));
+    }
+
+    #[test]
+    fn a_tag_merged_into_another_narrows_by_that_one() {
         let mut filter = Filter::default();
         filter.narrow(Narrow::Tag(1));
-        filter.narrow(Narrow::Tag(2));
-        filter.forget_tag(1);
+        filter.merge_tag(1, 2);
         assert!(!filter.on(Narrow::Tag(1)));
         assert!(filter.on(Narrow::Tag(2)));
+        filter.merge_tag(3, 4);
+        assert!(!filter.on(Narrow::Tag(4)), "3 did not narrow");
     }
 }

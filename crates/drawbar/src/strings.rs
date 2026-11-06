@@ -510,14 +510,20 @@ pub fn carries_tag(name: &str) -> bool {
     })
 }
 
-/// `typed`, with the format tag `stored` carries, if any.
+/// `typed`, ending in the format tag `stored` carries, if any. A tag `typed` already ends
+/// in, in any case, is not added again.
 ///
 /// The kind glyph beside a name already shows the file type, so the edit box never shows
 /// the tag. A rename, or a duplicate named after its original, must still keep it.
 pub fn tagged(stored: &str, typed: &str) -> String {
+    let ends_in = |tag: &str| {
+        typed
+            .rsplit_once('.')
+            .is_some_and(|(stem, end)| !stem.is_empty() && end.eq_ignore_ascii_case(tag))
+    };
     match stored.rsplit_once('.').filter(|_| carries_tag(stored)) {
-        Some((_, tag)) => format!("{typed}.{tag}"),
-        None => typed.to_string(),
+        Some((_, tag)) if !ends_in(tag) => format!("{typed}.{tag}"),
+        _ => typed.to_string(),
     }
 }
 
@@ -597,10 +603,34 @@ pub fn listed<S: Borrow<str>>(words: &[S]) -> String {
     }
 }
 
+/// The first `shown` of `names`, each quoted, listed as a sentence would, with how
+/// many more there are: `“A”, “B” and 3 more`.
+pub fn quoted_some<S: std::fmt::Display>(names: &[S], shown: usize) -> String {
+    let mut words: Vec<String> = names
+        .iter()
+        .take(shown)
+        .map(|name| format!("“{name}”"))
+        .collect();
+    if names.len() > shown {
+        words.push(format!("{} more", names.len() - shown));
+    }
+    listed(&words)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn a_long_list_names_its_first_few_and_counts_the_rest() {
+        assert_eq!(quoted_some(&["Vox"], 2), "“Vox”");
+        assert_eq!(quoted_some(&["Vox", "Pipe"], 2), "“Vox” and “Pipe”");
+        assert_eq!(
+            quoted_some(&["Vox", "Pipe", "Reed", "Flute"], 2),
+            "“Vox”, “Pipe” and 2 more"
+        );
+    }
 
     #[test]
     fn a_list_reads_as_a_sentence_would_name_it() {

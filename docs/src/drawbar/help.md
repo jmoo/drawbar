@@ -32,9 +32,11 @@ guide, the releases and the issue tracker.
 
 **This build** lists what you are running: the version and target, the browser
 and whether it offers WebUSB when drawbar runs in one, the connected instrument,
-and how many files this computer holds. **Copy diagnostics** puts those lines and
-the activity log's last 200 entries on the clipboard. Paste them into a bug
-report so it says what you were running.
+and how many files this computer holds. In the browser it also shows how much of
+the browser's storage the library takes, and whether the browser keeps it or may
+delete it ([What is supported](../getting-started/support.md#the-library-in-the-browser)).
+**Copy diagnostics** puts those lines and the activity log's last 200 entries on
+the clipboard. Paste them into a bug report so it says what you were running.
 
 **Licenses** is every license a copy of drawbar has to carry: drawbar's own, the
 bundled fonts and icons, the Stage field maps it decodes with, and the Rust

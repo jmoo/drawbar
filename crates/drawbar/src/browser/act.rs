@@ -10,7 +10,7 @@ use crate::device::{
     Purpose,
 };
 use crate::filter::Narrow;
-use crate::folders::{Clash, Folders, Occupant};
+use crate::folders::{Clash, Occupant};
 use crate::log::Log;
 use crate::newproject::Making;
 use crate::queue::{enqueue, retarget, Occupancy, Queue, Queued};
@@ -87,11 +87,23 @@ pub enum Act {
     /// Keep an unsaved edit as a new asset beside its file, and take the file as it is on
     /// disk.
     KeepBoth(u64),
-    /// Let go of an index row whose file is gone, with the tags it kept.
+    /// Put bytes over an asset as an unsaved edit: an edit an earlier session kept.
+    Restore {
+        id: u64,
+        bytes: Vec<u8>,
+    },
+    /// Let go of an asset whose file is gone, with the tags the library kept for it.
     Forget(u64),
     NewFolder,
     NewFolderIn(u64),
     RemoveFolder(u64),
+    /// [`Act::RemoveFolder`], confirmed though the folder holds hidden files, which move
+    /// up with the rest.
+    RemoveFolderAndHidden(u64),
+    /// Turn on Show hidden files, and open the folder to show those in it.
+    ShowHidden(u64),
+    /// Move a hidden file to the library's trash.
+    DeleteHidden(LibPath),
     /// Put a tag on every one of these assets. A view is kept first.
     Tag {
         ids: Vec<u64>,
@@ -235,22 +247,26 @@ pub enum Act {
     /// [`Act::OpenLibrary`], confirmed though the library open now loses what it cannot
     /// keep.
     OpenLibraryDiscarding(crate::store::Root),
+    /// Let go of the library open now and open it again, as for one that opened
+    /// read-only.
+    ReopenLibrary,
+    /// [`Act::ReopenLibrary`], confirmed though the library loses what it cannot keep.
+    ReopenLibraryDiscarding,
     /// Do this with a slot's former occupant an interrupted write left. The app runs
     /// it, not [`apply`], since it reaches the library's files.
     Rescue(crate::store::Rescue, Rescuing),
-    /// Delete the `copies` working copies a library with no index keeps, and open it
-    /// again without them: asked again first unless `confirmed`. The app runs the
-    /// confirmed one, not [`apply`], since it reaches the library's files.
-    DropUnindexed {
-        copies: usize,
-        confirmed: bool,
+    /// Settle a change another drawbar left unfinished.
+    Settle(toshokan::report::Orphan, toshokan::log::Settlement),
+    /// Show the changes the library keeps apart.
+    ShowKept,
+    /// Take each of `changes` the library keeps apart in `run`, or every one it can where
+    /// none is named, as one change.
+    TakeKept {
+        run: Box<toshokan::log::Run>,
+        changes: Vec<crate::store::KeptKey>,
     },
-    /// Set aside the index of a library that does not read it, and open it again without
-    /// it: asked again first unless `confirmed`. The app runs the confirmed one, not
-    /// [`apply`], since it reaches the library's files.
-    SetAside {
-        confirmed: bool,
-    },
+    /// Never show or merge the changes the library keeps apart in `run` again.
+    DismissKept(Box<toshokan::log::Run>),
     /// Nothing happened, and this is why.
     Refused(String),
 }
@@ -258,8 +274,6 @@ pub enum Act {
 /// What to do with a slot's former occupant an interrupted write left on this computer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Rescuing {
-    /// Move it into the library's top level as an asset.
-    Keep,
     /// Show its folder in the system's file manager, and ask again.
     Show,
     /// Ask before it is deleted.
@@ -290,9 +304,10 @@ impl Act {
     pub fn reads(&self) -> Vec<u64> {
         match self {
             Act::Open(item) => item.local().into_iter().collect(),
-            Act::Overwrite { id, .. } | Act::MoveAs { id, .. } | Act::File { id, .. } => {
-                vec![*id]
-            }
+            Act::Overwrite { id, .. }
+            | Act::MoveAs { id, .. }
+            | Act::File { id, .. }
+            | Act::Restore { id, .. } => vec![*id],
             Act::Keep(id)
             | Act::KeepBoth(id)
             | Act::Send { id, .. }
@@ -323,6 +338,9 @@ impl Act {
             | Act::NewFolder
             | Act::NewFolderIn(_)
             | Act::RemoveFolder(_)
+            | Act::RemoveFolderAndHidden(_)
+            | Act::ShowHidden(_)
+            | Act::DeleteHidden(_)
             | Act::Tag { .. }
             | Act::Untag { .. }
             | Act::NewTag(_)
@@ -358,9 +376,13 @@ impl Act {
             | Act::PickLibrary
             | Act::OpenLibrary(_)
             | Act::OpenLibraryDiscarding(_)
+            | Act::ReopenLibrary
+            | Act::ReopenLibraryDiscarding
             | Act::Rescue(..)
-            | Act::DropUnindexed { .. }
-            | Act::SetAside { .. }
+            | Act::Settle(..)
+            | Act::ShowKept
+            | Act::TakeKept { .. }
+            | Act::DismissKept(_)
             | Act::Refused(_) => Vec::new(),
         }
     }
@@ -557,20 +579,15 @@ pub fn bulk(action: Bulk, checked: &[Item], state: &DeviceState) -> Vec<Act> {
 /// Whether an act may run now.
 enum Ready {
     Now,
-    /// An asset it reads is still being read, or a folder it removes still being listed.
+    /// An asset it reads is still being read.
     Later,
     /// An asset it reads could not be read, and this says so.
     Never(String),
 }
 
-/// Whether every asset `act` reads has been read, and everything in a folder it removes
-/// has been listed. One not read yet is asked for, and so is the listing of a folder, and
-/// the act waits for them.
-fn ready(act: &Act, workspace: &mut Workspace, folders: &mut Folders) -> Ready {
-    if let Some(dir) = removing(act, folders).filter(|dir| !folders.listed_whole(dir)) {
-        folders.walk(&dir);
-        return Ready::Later;
-    }
+/// Whether every asset `act` reads has been read. One not read yet is asked for, and the
+/// act waits for it.
+fn ready(act: &Act, workspace: &mut Workspace) -> Ready {
     let mut later = false;
     for id in act.reads() {
         let Some(entity) = workspace.get(id).filter(|entity| entity.unread()) else {
@@ -585,14 +602,6 @@ fn ready(act: &Act, workspace: &mut Workspace, folders: &mut Folders) -> Ready {
     match later {
         true => Ready::Later,
         false => Ready::Now,
-    }
-}
-
-/// The folder an act removes, if it removes one.
-fn removing(act: &Act, folders: &Folders) -> Option<LibPath> {
-    match act {
-        Act::RemoveFolder(id) => folders.path_of(*id).cloned(),
-        _ => None,
     }
 }
 
@@ -611,7 +620,7 @@ pub fn apply(
     let mut held = std::mem::take(&mut browser.held);
     held.extend(acts);
     for act in held {
-        match ready(&act, workspace, &mut browser.folders) {
+        match ready(&act, workspace) {
             Ready::Now => {}
             Ready::Later => {
                 browser.held.push(act);
@@ -647,6 +656,7 @@ pub fn apply(
             Act::ReadAgain(class) => device.read_class(class),
             Act::Keep(id) => workspace.keep(id, log),
             Act::Import { name, bytes } => import(browser, workspace, log, name, bytes),
+            Act::Restore { id, bytes } => workspace.replace_bytes(id, bytes, log),
             Act::Take { from, dir, name } => take(browser, workspace, log, from, dir, name),
             Act::Unpack(read) => unpack(browser, workspace, log, read),
             Act::TakeOver { id, from } => take_over(workspace, log, id, from),
@@ -664,13 +674,16 @@ pub fn apply(
                 None => log.say("That folder is gone, so nothing moved."),
             },
             Act::KeepBoth(id) => keep_both(browser, workspace, log, id),
-            Act::Forget(id) => {
-                browser.folders.forget(id);
-                browser.tags.forget(id);
-            }
+            Act::Forget(id) => browser.tags.forget(id),
             Act::NewFolder => new_folder(browser, workspace, None),
             Act::NewFolderIn(parent) => new_folder(browser, workspace, Some(parent)),
-            Act::RemoveFolder(id) => remove_folder(browser, workspace, log, id),
+            Act::RemoveFolder(id) => remove_folder(browser, workspace, log, id, false),
+            Act::RemoveFolderAndHidden(id) => remove_folder(browser, workspace, log, id, true),
+            Act::ShowHidden(folder) => {
+                browser.folders.all_files = true;
+                browser.open.insert(super::tree::Branch::Folder(folder));
+            }
+            Act::DeleteHidden(path) => browser.folders.delete_hidden(&path),
             Act::File { id, folder } => {
                 let (Some(dir), Some(entity)) = (browser.folders.dir(folder), workspace.get(id))
                 else {
@@ -683,16 +696,13 @@ pub fn apply(
                 put(browser, workspace, log, id, dir, name);
             }
             Act::Tag { ids, tag } => tag_all(browser, workspace, log, &ids, tag),
-            Act::Untag { ids, tag } => {
-                for id in ids {
-                    browser.tags.set(id, tag, false);
-                }
-            }
+            Act::Untag { ids, tag } => browser.tags.untag(&ids, tag),
             Act::NewTag(ids) => match browser.tags.make("New tag") {
                 // ⚠️ Edit the unique name chosen by `make`, not its generic seed: two
                 // tags with one name would show as one row twice.
                 Some(id) => {
                     tag_all(browser, workspace, log, &ids, id);
+                    browser.tags.name_new(id);
                     let name = browser.tags.name_of(id).unwrap_or_default().to_string();
                     browser.start_rename(Item::Tag(id), &name);
                     browser.reveal(Item::Tag(id), workspace);
@@ -700,13 +710,16 @@ pub fn apply(
                 }
                 None => log.trouble("The tag list is full, so there is no new tag."),
             },
-            Act::RenameTag { id, name } => browser.tags.rename(id, name),
+            Act::RenameTag { id, name } => {
+                if let Some(into) = browser.tags.rename(id, name) {
+                    shell.filter.merge_tag(id, into);
+                }
+            }
             Act::RemoveTag(id) => {
                 // ⚠️ A removed row cannot close its rename state; a reused id would inherit it.
                 browser.forget_rename(Item::Tag(id));
                 browser.tags.remove(id);
-                // ⚠️ A removed tag must also stop filtering the library.
-                shell.filter.forget_tag(id);
+                shell.filter.keep_tags(&browser.tags);
             }
             Act::SendChecked(ids) => queue_all(workspace, device, queue, log, &ids),
             Act::Open(Item::Folder(_) | Item::Tag(_)) => {}
@@ -814,20 +827,17 @@ pub fn apply(
                 .ctx()
                 .send_viewport_cmd(eframe::egui::ViewportCommand::Close),
             Act::Refused(why) => log.say(why),
-            Act::DropUnindexed {
-                copies,
-                confirmed: false,
-            } => browser.ask_drop_unindexed(copies),
-            Act::SetAside { confirmed: false } => browser.ask_set_aside(),
             // The app takes these before the browser's acts run.
             Act::PickLibrary
             | Act::OpenLibrary(_)
             | Act::OpenLibraryDiscarding(_)
+            | Act::ReopenLibrary
+            | Act::ReopenLibraryDiscarding
             | Act::Rescue(..)
-            | Act::DropUnindexed {
-                confirmed: true, ..
-            }
-            | Act::SetAside { confirmed: true } => {}
+            | Act::Settle(..)
+            | Act::TakeKept { .. }
+            | Act::DismissKept(_) => {}
+            Act::ShowKept => browser.show_kept = true,
         }
     }
 }
@@ -846,7 +856,6 @@ fn remove(
     queue.forget(id);
     // ⚠️ A removed row cannot close its rename state; a reused id would inherit it.
     browser.forget_rename(Item::Local(id));
-    browser.tags.forget(id);
     browser.folders.missing.remove(&id);
     if !browser.folders.read_only() {
         return workspace.remove(id, log);
@@ -861,7 +870,7 @@ fn remove(
 }
 
 /// How a folder is named in a sentence.
-fn spoken(dir: &LibPath) -> String {
+pub(super) fn spoken(dir: &LibPath) -> String {
     match dir.is_root() {
         true => "the top level of the library".to_string(),
         false => format!("“{dir}”"),
@@ -918,7 +927,7 @@ fn put(
                     }
                 },
             };
-            browser.ask_clash(&name, &dir, over, both, &free);
+            browser.ask_clash(&name, &dir, workspace, over, both, &free);
         }
     }
 }
@@ -946,14 +955,46 @@ fn overwritable(occupant: Occupant, workspace: &Workspace) -> Option<u64> {
     (!workspace.get(held)?.is_unsaved()).then_some(held)
 }
 
-fn ambiguous(held: &[String], dir: &LibPath) -> String {
-    let named: Vec<String> = held.iter().map(|name| format!("“{name}”")).collect();
-    format!(
-        "{} in {} differ only by case and would collide on macOS or Windows. Rename one \
-         of them first.",
-        named.join(" and "),
+fn ambiguous(held: &[(String, Occupant)], dir: &LibPath) -> String {
+    let names: Vec<&String> = held.iter().map(|(name, _)| name).collect();
+    let said = format!(
+        "{} in {} count as one name. Rename one of them first.",
+        crate::strings::quoted_some(&names, names.len()),
         spoken(dir)
-    )
+    );
+    let hidden: Vec<&String> = held
+        .iter()
+        .filter(|(name, what)| *what == Occupant::Other && !crate::store::opens(name))
+        .map(|(name, _)| name)
+        .collect();
+    let quoted = crate::strings::quoted_some(&hidden, hidden.len());
+    match hidden.len() {
+        0 => said,
+        1 => format!("{said} {quoted} is a hidden file."),
+        _ => format!("{said} {quoted} are hidden files."),
+    }
+}
+
+/// Whether a file from outside may come in: one drawbar opens, a bundle it unpacks, or a
+/// WAV it encodes.
+pub fn comes_in(name: &str) -> bool {
+    crate::store::opens(name)
+        || crate::bundle::is_bundle(name)
+        || crate::newproject::is_wav_name(name)
+}
+
+/// Say that the files `names` were not taken in, since drawbar does not open them.
+pub fn refuse_unopened(names: &[String], log: &mut Log) {
+    let quoted = crate::strings::quoted_some(names, 3);
+    match names.len() {
+        0 => {}
+        1 => log.trouble(format!(
+            "{quoted} was not copied in: drawbar does not open this kind of file."
+        )),
+        _ => log.trouble(format!(
+            "{quoted} were not copied in: drawbar does not open these kinds of file."
+        )),
+    }
 }
 
 /// A file opened from outside the library, into its top level.
@@ -969,6 +1010,9 @@ fn import(
             "“{name}” was not imported: a bundle unpacks into the library, which cannot \
              take files now."
         ));
+    }
+    if !comes_in(&name) {
+        return refuse_unopened(&[name], log);
     }
     if let Some(why) = names::refusal(&name) {
         return log.trouble(format!(
@@ -989,7 +1033,7 @@ fn import(
                 bytes: bytes.clone(),
             }];
             let over = over(occupant, workspace, bytes, None);
-            browser.ask_clash(&name, &root, over, both, &free);
+            browser.ask_clash(&name, &root, workspace, over, both, &free);
         }
     }
 }
@@ -1006,6 +1050,9 @@ fn take(
 ) {
     if crate::bundle::is_bundle(&name) {
         return workspace.unbundle(from, dir, name);
+    }
+    if !comes_in(&name) {
+        return refuse_unopened(&[name], log);
     }
     if let Some(why) = names::refusal(&name) {
         return log.trouble(format!(
@@ -1034,7 +1081,7 @@ fn take(
                 dir: dir.clone(),
                 name: free.clone(),
             }];
-            browser.ask_clash(&name, &dir, over, both, &free);
+            browser.ask_clash(&name, &dir, workspace, over, both, &free);
         }
     }
 }
@@ -1173,11 +1220,8 @@ fn rename(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id: u
         workspace.rename(id, name.clone());
         return log.say(format!("Renamed it “{name}”."));
     };
-    // Every file carries its extension, so a name typed without one keeps the old one.
-    let name = match crate::strings::carries_tag(&name) {
-        true => name,
-        false => crate::strings::tagged(&entity.name, &name),
-    };
+    // A rename never changes a file's extension.
+    let name = crate::strings::tagged(&entity.name, &name);
     put(browser, workspace, log, id, path.parent(), name);
 }
 
@@ -1303,6 +1347,14 @@ fn rename_folder(
     {
         Clash::Free => browser.folders.relocate(id, dir.join(&name), workspace),
         Clash::Ambiguous(held) => log.trouble(ambiguous(&held, &dir)),
+        Clash::Taken(Occupant::Other) => log.trouble(format!(
+            "A hidden file is already named “{}” in {}, so the folder kept its name.",
+            browser
+                .folders
+                .hides(&dir, &name, workspace)
+                .unwrap_or(name.clone()),
+            spoken(&dir)
+        )),
         Clash::Taken(_) => log.trouble(format!(
             "“{name}” is already in {}, so the folder kept its name.",
             spoken(&dir)
@@ -1311,16 +1363,29 @@ fn rename_folder(
 }
 
 /// Remove a folder, moving what was in it up a level. Nothing is deleted, and nothing
-/// moves unless everything can.
-fn remove_folder(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, id: u64) {
+/// moves unless everything can. Hidden files directly in it move only once `hidden` says
+/// the user knows of them, or while they are shown.
+fn remove_folder(
+    browser: &mut Browser,
+    workspace: &mut Workspace,
+    log: &mut Log,
+    id: u64,
+    hidden: bool,
+) {
     let Some(path) = browser.folders.path_of(id).cloned() else {
         return;
     };
-    if browser.folders.holds_strangers(&path) {
+    let unwalked = browser.folders.unwalked.iter().find(|dir| dir.is_in(&path));
+    if let Some(unwalked) = unwalked {
         return log.trouble(format!(
-            "“{}” was not removed: it holds files drawbar does not hold.",
+            "“{}” was not removed: drawbar could not read “{unwalked}”, so it cannot move \
+             what is in it.",
             path.leaf()
         ));
+    }
+    let others = browser.folders.hidden_in(&path, workspace);
+    if !others.is_empty() && !hidden && !browser.folders.all_files {
+        return browser.ask_remove_hidden(id, &path, &others);
     }
     let up = path.parent();
     let assets: Vec<(u64, String)> = browser
@@ -1335,16 +1400,27 @@ fn remove_folder(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log
         .into_iter()
         .filter_map(|child| Some((child, browser.folders.name_of(child)?.to_string())))
         .collect();
-    let blocked = assets
-        .iter()
-        .chain(&folders)
-        .map(|(_, name)| name)
-        .find(|name| browser.folders.clash(&up, name, workspace, None) != Clash::Free);
-    if let Some(name) = blocked {
-        return log.trouble(format!(
-            "The folder was not removed: “{name}” is already in {}.",
-            spoken(&up)
-        ));
+    let names = assets.iter().chain(&folders).map(|(_, name)| name.as_str());
+    let blocked = names
+        .chain(others.iter().map(LibPath::leaf))
+        .map(|name| (name, browser.folders.clash(&up, name, workspace, None)))
+        .find(|(_, clash)| *clash != Clash::Free);
+    if let Some((name, clash)) = blocked {
+        let place = spoken(&up);
+        return log.trouble(match clash {
+            Clash::Taken(Occupant::Other) => format!(
+                "The folder was not removed: a hidden file is already named “{}” in {place}.",
+                browser
+                    .folders
+                    .hides(&up, name, workspace)
+                    .unwrap_or(name.to_string())
+            ),
+            _ => format!("The folder was not removed: “{name}” is already in {place}."),
+        });
+    }
+    for from in others {
+        let to = up.join(from.leaf());
+        browser.folders.move_hidden(&from, to);
     }
     for (asset, name) in assets {
         workspace.place(asset, up.join(&name));
@@ -1359,9 +1435,9 @@ fn remove_folder(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log
 
 /// Put a tag on every one of these assets.
 ///
-/// ⚠️ Membership is by workspace id, and a view's id does not survive the session: the
-/// store skips views and nothing lists them, so the tag would be lost with the tab. A
-/// view is kept first, as [`Act::Keep`] does, and the log says so.
+/// ⚠️ The library tags files, and a view has none: the tag would be lost with the tab. A
+/// view is kept first, as [`Act::Keep`] does, and the log says so; its tag is asked for
+/// once its file is written.
 fn tag_all(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, ids: &[u64], tag: u64) {
     let views: Vec<u64> = ids
         .iter()
@@ -1377,9 +1453,7 @@ fn tag_all(browser: &mut Browser, workspace: &mut Workspace, log: &mut Log, ids:
             n => format!("Kept copies of {n} views on this computer to preserve their tags."),
         });
     }
-    for id in ids {
-        browser.tags.set(*id, tag, true);
-    }
+    browser.tags.tag(ids, tag);
 }
 
 /// Drain the queue, one command per folder.
@@ -1391,6 +1465,21 @@ fn send_batch(queue: &mut Queue, workspace: &Workspace, device: &mut Device, log
     // ⚠️ The instrument attached now may not be the one each entry was queued against:
     // the queue survives a disconnection, so every entry is checked again.
     crate::queue::refit(workspace, &device.state, queue, log);
+    let mut checking = None;
+    for held in will_write(queue) {
+        let entity = workspace
+            .get(held.id)
+            .filter(|entity| entity.awaits_check());
+        if let Some(entity) = entity {
+            workspace.check_soon(held.id);
+            checking.get_or_insert_with(|| entity.name.clone());
+        }
+    }
+    if let Some(name) = checking {
+        return log.trouble(format!(
+            "Nothing was sent: “{name}” is still being checked. Send again once it is."
+        ));
+    }
     // The whole batch is checked before the first delete-then-write.
     let batch = match grouped(queue, workspace) {
         Ok(batch) => batch,
@@ -1663,6 +1752,9 @@ fn save_doc(
             entity.name
         ));
     };
+    if entity.awaits_check() {
+        workspace.check_soon(id);
+    }
     // Refused before the write.
     let payload = match Payload::of(entity) {
         Ok(payload) => payload,
@@ -1711,8 +1803,12 @@ fn send(
     let Some(entity) = workspace.get(id) else {
         return;
     };
-    // Refused before anything is queued.
-    if let Err(e) = entity.sendable() {
+    // Refused before anything is queued. One whose check has not answered is queued,
+    // and asked to be checked, and a send of the queue before the check passes sends
+    // nothing.
+    if entity.awaits_check() {
+        workspace.check_soon(id);
+    } else if let Err(e) = entity.sendable() {
         log.error(format!("{}: {e}", entity.name));
         log.trouble(format!(
             "“{}” is not a file the instrument takes.",
@@ -1761,6 +1857,34 @@ mod tests {
                 at: at(3),
             },
         ]
+    }
+
+    #[test]
+    fn several_refused_files_are_one_line_naming_the_first_three() {
+        let mut log = Log::default();
+        let names = ["a.pdf", "b.png", "c.zip", "d.doc", "e.mp3"].map(String::from);
+        refuse_unopened(&names, &mut log);
+        let said: Vec<&str> = log.iter().map(|entry| entry.text.as_str()).collect();
+        assert_eq!(
+            said,
+            [
+                "“a.pdf”, “b.png”, “c.zip” and 2 more were not copied in: drawbar does not \
+              open these kinds of file."
+            ]
+        );
+    }
+
+    #[test]
+    fn a_name_matching_a_hidden_file_and_a_folder_names_the_hidden_file() {
+        let held = [
+            ("Scan.pdf".to_string(), Occupant::Folder(1)),
+            ("scan.pdf".to_string(), Occupant::Other),
+        ];
+        assert_eq!(
+            ambiguous(&held, &LibPath::root()),
+            "“Scan.pdf” and “scan.pdf” in the top level of the library count as one name. \
+             Rename one of them first. “scan.pdf” is a hidden file."
+        );
     }
 
     /// ⌘S on a view writes it back to its slot at once. Nothing joins the queue, which
@@ -1812,6 +1936,49 @@ mod tests {
             &mut bench.queue,
         );
         assert!(!bench.workspace.get(id).unwrap().is_unsaved());
+    }
+
+    /// A resting piano nothing has checked is queued by a send, which asks for its check.
+    /// A send of the queue before the check has passed writes nothing and says why, and
+    /// one after it writes the piano.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_send_of_a_resting_piano_checks_it_before_anything_is_written() {
+        let mut bench = Bench::new();
+        let dir = crate::testing::Temp::new();
+        let file = crate::testing::on_disk(&dir, "Upright.npno", &crate::testing::piano(40));
+        let id = crate::testing::rest_unchecked(&mut bench.workspace, "Upright.npno", file.clone());
+        let verdict = |bench: &Bench| bench.workspace.get(id).unwrap().verify().badge();
+        assert_eq!(verdict(&bench), "not checked");
+
+        let class = ObjectClass::Piano;
+        let at = Location::from_user(1, 1);
+        bench.device.pretend_scanned(class, 1, &[""]);
+        bench.act(vec![Act::Send { id, class, at }]);
+        assert!(!bench.queue.is_empty(), "queued while its check runs");
+        bench.workspace.poll(&mut bench.log);
+        bench.act(vec![Act::SendAll]);
+        let batch = |bench: &Bench| {
+            bench
+                .device
+                .queued()
+                .iter()
+                .any(|cmd| matches!(cmd, DeviceCmd::SendAll { .. }))
+        };
+        assert!(
+            !batch(&bench),
+            "nothing is written before the check answers"
+        );
+        assert_eq!(
+            bench.log.status().1,
+            "Nothing was sent: “Upright.npno” is still being checked. Send again once it is."
+        );
+
+        bench.workspace.settle_files(&mut bench.log);
+        assert_eq!(verdict(&bench), "ok");
+        assert_eq!(file.take_checks(), 1, "the check read it through");
+        bench.act(vec![Act::SendAll]);
+        assert!(batch(&bench), "written once checked");
     }
 
     /// A piano resting in its file is queued and batched without being read: the batch
@@ -3056,6 +3223,25 @@ mod tests {
         );
     }
 
+    /// A selected tag the library's view no longer names leaves the selection, so the
+    /// inspector does not go on describing a row nothing draws.
+    #[test]
+    fn a_selected_tag_the_library_drops_leaves_the_selection() {
+        let mut bench = Bench::new();
+        let named = std::collections::BTreeSet::from(["Gig".to_string()]);
+        bench.browser.tags.project(named, Default::default());
+        let tag = bench.browser.tags.all()[0].id;
+        bench.browser.selection.only(Item::Tag(tag));
+
+        bench
+            .browser
+            .tags
+            .project(Default::default(), Default::default());
+        bench.browser.forget_gone(&bench.workspace);
+
+        assert!(!bench.browser.selection.holds(Item::Tag(tag)));
+    }
+
     /// Nothing may be written to a read-only library, so deleting or saving there only
     /// changes what drawbar holds in memory, and the question and the status say so.
     #[test]
@@ -3071,7 +3257,7 @@ mod tests {
             .unwrap();
         let name = bench.workspace.get(id).unwrap().name.clone();
 
-        bench.browser.ask_delete(id, &name);
+        bench.browser.ask_delete(&name, Act::Remove(id));
         let note = bench.browser.ask.take().and_then(|ask| ask.note);
         let note = note.expect("a note");
         assert!(note.contains("held in memory only"), "{note}");
@@ -3222,6 +3408,44 @@ mod tests {
     }
 
     #[test]
+    fn a_rename_never_changes_a_files_extension() {
+        let mut bench = Bench::new();
+        let note = bench.workspace.create(Fresh::Text, &mut bench.log).unwrap();
+        let [program] = placed(&mut bench, 1)[..] else {
+            unreachable!()
+        };
+        for (id, typed, named) in [
+            (program, "Choir.wav", "Choir.wav.ne5p"),
+            (program, "Grand.NE5P", "Grand.NE5P"),
+            (note, "notes.md", "notes.md.txt"),
+        ] {
+            bench.act(vec![Act::RenameLocal {
+                id,
+                name: typed.into(),
+            }]);
+            assert_eq!(name(&bench, id), named, "{typed}");
+        }
+    }
+
+    #[test]
+    fn a_rename_with_a_dot_keeps_the_extension_and_keep_both_does_too() {
+        let mut bench = Bench::new();
+        let [first, second] = placed(&mut bench, 2)[..] else {
+            unreachable!()
+        };
+        for id in [first, second] {
+            bench.act(vec![Act::RenameLocal {
+                id,
+                name: "E.Piano".into(),
+            }]);
+        }
+        assert_eq!(name(&bench, first), "E.Piano.ne5p");
+        let acts = bench.browser.answer("Keep both");
+        bench.act(acts);
+        assert_eq!(name(&bench, second), "E.Piano 2.ne5p");
+    }
+
+    #[test]
     fn a_rename_onto_a_taken_name_asks_and_an_overwrite_keeps_the_other_id() {
         let mut bench = Bench::new();
         let [kept, renamed] = placed(&mut bench, 2)[..] else {
@@ -3369,6 +3593,178 @@ mod tests {
         assert_eq!(name(&bench, outside), "untitled.ne5p");
         let said = bench.log.status().1;
         assert!(said.contains("was not removed"), "{said}");
+    }
+
+    /// A folder named `Gig` holding these hidden files, with their paths in the library.
+    fn gig_hiding(bench: &mut Bench, hidden: &[&str]) -> u64 {
+        let root = crate::store::LibPath::root();
+        let folder = bench.browser.folders.make(&root, &bench.workspace);
+        bench.act(vec![Act::RenameFolder {
+            id: folder,
+            name: "Gig".into(),
+        }]);
+        let others = hidden.iter().map(|path| LibPath::parse(path).unwrap());
+        bench.browser.folders.others = others.collect();
+        bench.browser.folders.take_ops();
+        folder
+    }
+
+    #[test]
+    fn removing_a_folder_that_holds_hidden_files_asks_before_moving_them_up() {
+        let mut bench = Bench::new();
+        let names = [
+            "Gig/a.pdf",
+            "Gig/b.pdf",
+            "Gig/c.pdf",
+            "Gig/d.pdf",
+            "Gig/Set/e.pdf",
+        ];
+        let folder = gig_hiding(&mut bench, &names);
+
+        bench.act(vec![Act::RemoveFolder(folder)]);
+        assert!(bench.browser.folders.path_of(folder).is_some(), "not yet");
+        let (title, answers) = bench.browser.asking().expect("a question");
+        assert_eq!(
+            title, "“Gig” holds 4 hidden files",
+            "only those directly in it"
+        );
+        assert_eq!(answers, ["Cancel", "Show them", "Move them up too"]);
+        assert_eq!(bench.browser.expected(), Some("Move them up too"));
+
+        let acts = bench.browser.answer("Move them up too");
+        bench.act(acts);
+        assert!(bench.browser.folders.path_of(folder).is_none());
+        let others: Vec<&str> = bench
+            .browser
+            .folders
+            .others
+            .iter()
+            .map(LibPath::as_str)
+            .collect();
+        assert_eq!(
+            others,
+            ["Gig/Set/e.pdf", "a.pdf", "b.pdf", "c.pdf", "d.pdf"]
+        );
+        let ops = bench.browser.folders.take_ops();
+        assert_eq!(
+            ops.first(),
+            Some(&crate::folders::Op::MoveFile {
+                from: LibPath::parse("Gig/a.pdf").unwrap(),
+                to: LibPath::parse("a.pdf").unwrap(),
+            }),
+            "{ops:?}"
+        );
+        assert_eq!(
+            ops.last(),
+            Some(&crate::folders::Op::RemoveDir(
+                LibPath::parse("Gig").unwrap()
+            )),
+            "{ops:?}"
+        );
+    }
+
+    #[test]
+    fn show_them_shows_the_hidden_files_in_the_open_folder_and_keeps_it() {
+        let mut bench = Bench::new();
+        let folder = gig_hiding(&mut bench, &["Gig/notes.pdf"]);
+
+        bench.act(vec![Act::RemoveFolder(folder)]);
+        let acts = bench.browser.answer("Show them");
+        bench.act(acts);
+        assert!(bench.browser.folders.all_files);
+        let open = &bench.browser.open;
+        assert!(open.contains(&super::super::tree::Branch::Folder(folder)));
+        assert!(bench.browser.folders.path_of(folder).is_some());
+        assert!(bench.browser.folders.take_ops().is_empty());
+    }
+
+    #[test]
+    fn removing_a_folder_while_hidden_files_are_shown_moves_them_without_asking() {
+        let mut bench = Bench::new();
+        let folder = gig_hiding(&mut bench, &["Gig/notes.pdf"]);
+        bench.browser.folders.all_files = true;
+
+        bench.act(vec![Act::RemoveFolder(folder)]);
+        assert!(bench.browser.asking().is_none());
+        assert!(bench.browser.folders.path_of(folder).is_none());
+        let others: Vec<&str> = bench
+            .browser
+            .folders
+            .others
+            .iter()
+            .map(LibPath::as_str)
+            .collect();
+        assert_eq!(others, ["notes.pdf"]);
+    }
+
+    #[test]
+    fn a_hidden_file_a_level_up_with_the_same_name_keeps_the_folder_and_is_named_hidden() {
+        let mut bench = Bench::new();
+        let folder = gig_hiding(&mut bench, &["Gig/notes.pdf", "NOTES.pdf"]);
+
+        bench.act(vec![Act::RemoveFolderAndHidden(folder)]);
+        assert!(bench.browser.folders.path_of(folder).is_some());
+        assert!(bench.browser.folders.take_ops().is_empty());
+        assert_eq!(
+            bench.log.status().1,
+            "The folder was not removed: a hidden file is already named “NOTES.pdf” in the \
+             top level of the library."
+        );
+    }
+
+    #[test]
+    fn a_folder_renamed_to_a_hidden_files_name_keeps_its_name_and_says_why() {
+        let mut bench = Bench::new();
+        let folder = gig_hiding(&mut bench, &["notes"]);
+
+        bench.act(vec![Act::RenameFolder {
+            id: folder,
+            name: "Notes".into(),
+        }]);
+        assert_eq!(bench.browser.folders.name_of(folder), Some("Gig"));
+        assert_eq!(
+            bench.log.status().1,
+            "A hidden file is already named “notes” in the top level of the library, so \
+             the folder kept its name."
+        );
+    }
+
+    #[test]
+    fn a_rename_onto_a_hidden_files_name_says_it_is_hidden_and_offers_only_keep_both() {
+        let mut bench = Bench::new();
+        bench.act(vec![Act::Import {
+            name: "cello.wav".into(),
+            bytes: crate::testing::wav_bytes(),
+        }]);
+        let id = bench.workspace.listed().next().expect("the WAV").id;
+        bench.browser.folders.others = vec![LibPath::parse("notes.wav").unwrap()];
+
+        bench.act(vec![Act::RenameLocal {
+            id,
+            name: "NOTES".into(),
+        }]);
+        let (title, answers) = bench.browser.asking().expect("a question");
+        assert_eq!(
+            title,
+            "A hidden file is already named “notes.wav” in the top level of the library"
+        );
+        assert_eq!(answers, ["Cancel", "Keep both"]);
+    }
+
+    #[test]
+    fn a_folder_holding_a_subfolder_drawbar_could_not_read_stays() {
+        let mut bench = Bench::new();
+        let folder = gig_hiding(&mut bench, &[]);
+        let locked = LibPath::parse("Gig/Locked").unwrap();
+        bench.browser.folders.unwalked.insert(locked);
+
+        bench.act(vec![Act::RemoveFolder(folder)]);
+        assert!(bench.browser.folders.path_of(folder).is_some());
+        assert_eq!(
+            bench.log.status().1,
+            "“Gig” was not removed: drawbar could not read “Gig/Locked”, so it cannot move \
+             what is in it."
+        );
     }
 
     fn with_gain(bytes: &[u8]) -> Vec<u8> {

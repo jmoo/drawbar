@@ -8,6 +8,12 @@ features=${NORD_TEST_FEATURES-$(cargo metadata --locked --no-deps --format-versi
   [.packages[] | .name as $crate | .metadata.nix.testFeatures[]? | "\($crate)/\(.)"]
   | sort | join(",")')}
 cargo test --locked --workspace --profile release-tests --features "$features"
+# drawbar's library again on a folder that renames no folder, as a browser's, and on one
+# that renames nothing, as a folder picked in Brave.
+for folder in browser copying; do
+  DRAWBAR_TEST_FOLDER=$folder cargo test --locked --workspace --profile release-tests \
+    --features "$features" --lib -- store:: app::
+done
 bin=$(cargo build --locked --workspace --profile release-tests --features "$features" --bin nord \
   --message-format json | jq -r 'select(.reason == "compiler-artifact" and .target.name == "nord")
   | .executable // empty')

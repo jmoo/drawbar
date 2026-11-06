@@ -26,7 +26,7 @@ Every row carries `version`, the drawbar version. The rows are:
 | Row | Sent when | Fields |
 |---|---|---|
 | `visit` | drawbar opens | `navigation` (a new page or a reload), `first_day` and `first_month` (whether this browser has visited today or this month), `webusb` (whether the browser can connect an instrument), `fits` (whether the window is large enough), `referrer` (the website that linked here, without the page), `language` (the browser's language, such as `de`) |
-| `start_failed` | drawbar could not load | `step` (downloading or starting), `error` (the kind of error) |
+| `start_failed` | drawbar could not load | `step` (downloading or starting, or the browser lacking what drawbar needs), `error` (the kind of error) |
 | `panic` | drawbar crashed | `location` (the line of drawbar's code that crashed), `model` and `firmware` of the connected instrument |
 | `error` | something went wrong outside an instrument operation | `domain` (such as `usb`, `audio` or `library`), `kind` (such as `lost`), `model`, `firmware` |
 | `op` | an instrument operation failed, or one you asked for finished | `op` (such as `put`), `class` (programs, samples and so on, by name), `outcome` (`ok` or the kind of failure), `took` (under one second, ten seconds, a minute, or longer), `model`, `firmware` |
@@ -38,6 +38,26 @@ into. It does not store your IP address, and it keeps no logs.
 
 Rows are kept for three months. Totals made from them, such as visits per month, may be
 kept longer; they describe everyone, not anyone.
+
+## What stays in your browser
+
+drawbar.app keeps your library in your browser, and sends none of it anywhere:
+
+- The origin private file system holds the browser's own library: your sounds,
+  their tags and folders, and the record of each change. For every library you
+  open, a folder on your computer included, it also holds the unsaved edits, and
+  the copy of a sound drawbar takes before writing over it on your instrument.
+- An IndexedDB database named `drawbar` holds the folders on your computer you
+  opened lately, as handles the browser gives drawbar. Unless you allowed a
+  folder on every visit, the browser asks you again before drawbar can open it.
+- Local storage holds drawbar's settings, and the sounds drawbar 0.10 and
+  earlier kept under `drawbar.this_computer`, `drawbar.folders` and
+  `drawbar.tags`. `drawbar.taking_in` and `drawbar.taken_in` record that a
+  library took those sounds in: their hash, and where each sound that had an
+  unsaved edit was put.
+
+[Where your library lives](drawbar/this-computer.md#where-your-library-lives)
+says what can delete it.
 
 ## Reports you send
 

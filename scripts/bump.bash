@@ -29,11 +29,8 @@ done
 # shellcheck source=scripts/lib.bash
 source "$(dirname "${BASH_SOURCE[0]}")/lib.bash"
 
-crates=()
-while IFS= read -r crate; do crates+=("$crate"); done < <(crates_in_publish_order)
-
 declare -A tag_of released
-for crate in "${crates[@]}"; do
+for crate in "${publish_order[@]}"; do
   tag_of[$crate]="$(latest_tag "$crate")"
   released[$crate]="${tag_of[$crate]#"$crate"-v}"
 done
@@ -54,7 +51,7 @@ if [[ -n $title ]]; then
   # Ignore existing bump commits; their manifest edits would promote every
   # dependent to the title's level on a re-run.
   changed="$(git -C "$repo" log --invert-grep --grep='^chore(release): ' --format= --name-only "$merge_base..HEAD" | sort -u)"
-  for crate in "${crates[@]}"; do
+  for crate in "${publish_order[@]}"; do
     grep -q "^$(crate_dir "$crate")/" <<<"$changed" && title_level[$crate]=$level
   done
 fi
@@ -62,7 +59,7 @@ fi
 # The version each released crate's own history calls for. In title mode the
 # commits are read up to the merge-base, because the title speaks for the rest.
 declare -A level wanted reason
-for crate in "${crates[@]}"; do
+for crate in "${publish_order[@]}"; do
   tag=${tag_of[$crate]}
   if [[ -z $tag ]]; then
     echo "$crate: no release yet, first release is $(crate_version "$crate") as written"
@@ -84,7 +81,7 @@ done
 grew=1
 while ((grew)); do
   grew=0
-  for crate in "${crates[@]}"; do
+  for crate in "${publish_order[@]}"; do
     [[ -n ${wanted[$crate]:-} && ${wanted[$crate]} != "${released[$crate]}" ]] || continue
     while IFS= read -r dependent; do
       [[ -n $dependent && -n ${wanted[$dependent]:-} ]] || continue
@@ -101,7 +98,7 @@ done
 # version it holds is the release, and its dependents point at that.
 declare -A resolved
 bumped=()
-for crate in "${crates[@]}"; do
+for crate in "${publish_order[@]}"; do
   [[ -n ${wanted[$crate]:-} ]] || continue
   current="$(crate_version "$crate")"
   if version_at_least "$current" "${wanted[$crate]}"; then
@@ -123,7 +120,7 @@ done
 
 ((dry_run)) && exit 0
 
-for crate in "${crates[@]}"; do
+for crate in "${publish_order[@]}"; do
   [[ -n ${resolved[$crate]:-} ]] || continue
   manifest="$repo/$(crate_dir "$crate")/Cargo.toml"
   sed -i.bak "/^\[package\]/,/^\[/ s/^version = \"[^\"]*\"/version = \"${resolved[$crate]}\"/" "$manifest"

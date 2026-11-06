@@ -75,13 +75,11 @@ fn is_device(name: &str) -> bool {
 }
 
 /// What two names in one folder are compared by: the name lowercased by Unicode's
-/// mapping.
-///
-/// ⚠️ No normalization form is applied. `é` written precomposed and written as `e` plus
-/// a combining accent are two keys here, though APFS holds only one of them per folder;
-/// on APFS the create itself then refuses the second, and on ext4 both are written.
+/// mapping, in normalization form C, so `é` written precomposed and written as `e` plus
+/// a combining accent are one name, as APFS takes them.
 pub fn key(name: &str) -> String {
-    name.to_lowercase()
+    use unicode_normalization::UnicodeNormalization as _;
+    name.to_lowercase().nfc().collect()
 }
 
 /// Whether the library path `path` is inside the folder `dir`, comparing each name by
@@ -296,9 +294,10 @@ mod tests {
     }
 
     #[test]
-    fn two_names_that_differ_only_in_case_collide() {
+    fn two_names_that_differ_only_in_case_or_composition_collide() {
         assert_eq!(key("C3.WAV"), key("c3.wav"));
         assert_eq!(key("Flügel.npno"), key("FLÜGEL.NPNO"));
+        assert_eq!(key("Flu\u{308}gel.npno"), key("Flügel.npno"), "decomposed");
         assert_ne!(key("Strings.nsmp"), key("Strings.npno"));
         assert_ne!(key("My Piano.npno"), key("My-Piano.npno"));
     }

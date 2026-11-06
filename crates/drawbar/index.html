@@ -9,7 +9,7 @@
     />
     <meta
       name="description"
-      content="An unofficial editor for Nord keyboards. Read, edit and send programs, samples and pianos over USB, in Chrome or Edge or on the desktop."
+      content="An unofficial editor for Nord keyboards. Read, edit and send programs, samples and pianos over USB, in Chrome, Edge or Brave, or on the desktop."
     />
     <link rel="canonical" href="https://drawbar.app/" />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
@@ -23,7 +23,7 @@
     <meta property="og:title" content="drawbar: edit the sounds on your Nord keyboard" />
     <meta
       property="og:description"
-      content="An unofficial editor for Nord keyboards. Read, edit and send programs, samples and pianos over USB, in Chrome or Edge or on the desktop."
+      content="An unofficial editor for Nord keyboards. Read, edit and send programs, samples and pianos over USB, in Chrome, Edge or Brave, or on the desktop."
     />
     <meta property="og:image" content="https://drawbar.app/docs/assets/screenshot.png" />
     <meta property="og:image:width" content="2000" />
@@ -40,10 +40,10 @@
         "@type": "WebApplication",
         "name": "drawbar",
         "url": "https://drawbar.app/",
-        "description": "An unofficial editor for Nord keyboards. Read, edit and send programs, samples and pianos over USB, in Chrome or Edge or on the desktop.",
+        "description": "An unofficial editor for Nord keyboards. Read, edit and send programs, samples and pianos over USB, in Chrome, Edge or Brave, or on the desktop.",
         "applicationCategory": "MultimediaApplication",
         "operatingSystem": "Windows, macOS, Linux",
-        "browserRequirements": "Requires WebUSB and WebAssembly: Chrome or Edge.",
+        "browserRequirements": "Requires WebUSB and WebAssembly: Chrome, Edge or Brave.",
         "screenshot": "https://drawbar.app/docs/assets/screenshot.png",
         "license": "https://opensource.org/license/bsd-3-clause",
         "isAccessibleForFree": true,
@@ -237,6 +237,10 @@
         font-size: 11.5px;
         text-decoration: none;
         cursor: pointer;
+      }
+
+      #retry[hidden] {
+        display: none;
       }
 
       #retry {
@@ -441,6 +445,8 @@
       const TAKEN = new Set([
         "mod+k",
         "mod+o",
+        "mod+z",
+        "mod+shift+z",
         "mod+s",
         "mod+r",
         "mod+shift+e",
@@ -508,7 +514,18 @@
           "drawbar arrived but could not start in this browser.",
         webgl:
           "Turn on hardware acceleration in the browser's settings, then restart the browser.",
+        browser:
+          "This browser cannot keep drawbar's library. drawbar runs in a recent Chrome, Edge, Brave, Firefox or Safari.",
       };
+
+      /* What drawbar's library needs of the browser, which every engine has had since
+         2022: without it nothing drawbar makes is kept. */
+      const NEEDS = [
+        ["WebAssembly", () => typeof WebAssembly === "object"],
+        ["workers", () => typeof Worker === "function"],
+        ["a private file system", () => typeof navigator.storage?.getDirectory === "function"],
+        ["Web Locks", () => typeof navigator.locks?.request === "function"],
+      ];
 
       let total = Number("@wasmBytes@");
       let received = 0;
@@ -617,7 +634,14 @@
         label.textContent = "drawbar could not start";
         figure.textContent = "";
         note.textContent = /WebGL/.test(said) ? NOTE.webgl : NOTE[step];
-        foot.textContent = [size(), said].filter(Boolean).join(" · ");
+        const fetched = step === "browser" ? "" : size();
+        foot.textContent = [fetched, said].filter(Boolean).join(" · ");
+        if (step === "browser") {
+          document.getElementById("retry").hidden = true;
+          const wrong = document.getElementById("wrong");
+          wrong.href = "docs/getting-started/support.html#the-library-in-the-browser";
+          wrong.lastElementChild.textContent = "Which browsers drawbar runs in";
+        }
       }
 
       /* A reload can be answered from a cache with this same page, which may name the
@@ -630,6 +654,11 @@
 
       let step = "download";
       try {
+        const lacking = NEEDS.filter(([, has]) => !has()).map(([what]) => what);
+        if (lacking.length) {
+          step = "browser";
+          throw new Error(`it has no ${lacking.join(", no ")}`);
+        }
         show("fetching");
         const { default: init, start } = await import("./pkg/drawbar.js");
         const response = await fetch(WASM);
@@ -670,7 +699,9 @@
         await start(document.getElementById("drawbar"));
         splash.remove();
       } catch (e) {
-        const failed = e instanceof WebAssembly.CompileError ? "start" : step;
+        const compiling =
+          typeof WebAssembly === "object" && e instanceof WebAssembly.CompileError;
+        const failed = compiling ? "start" : step;
         fail(failed, e);
         beacon(failed, e);
         throw e;

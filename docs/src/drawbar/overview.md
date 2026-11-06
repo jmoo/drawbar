@@ -6,7 +6,7 @@ desktop app.
 
 | Part | What it is for |
 |---|---|
-| **Top bar** | Open, New and Save, the search box, **Send**, and **Connect instrument…** or your instrument's name. |
+| **Top bar** | Import, New and Save, the search box, **Send**, and **Connect instrument…** or your instrument's name. |
 | **Browser** (left) | **This computer** and, once connected, the instrument's folders. **Kinds** and **Tags** narrow the list. |
 | **Library** (center) | One table over both places. Sort by any column. In a narrow window, other columns hide before the names shorten. |
 | **Documents** (center) | Every sound you open gets a tab. |
@@ -47,11 +47,14 @@ anything for an explanation.
 
 Folders on this computer are real folders, and the instrument never sees them.
 Make one with **New ▸ New folder**. Removing a folder moves what was in it up a
-level.
+level. If it holds [hidden files](this-computer.md#where-your-library-lives),
+drawbar asks first: **Move them up too** moves them with the rest, and **Show
+them** turns on **Show hidden files** and opens the folder, which stays.
 
 Tags label sounds without moving them, and a sound can have several. **Tag ▸ New
 tag…** in a row's menu tags the selected sounds. Click a tag in the inspector to
-put it on, or take it off, everything selected. Removing a tag deletes no sounds.
+put it on, or take it off, everything selected. Renaming a tag to the name of
+another merges the two. Removing a tag deletes no sounds.
 
 ## MIDI controllers
 
