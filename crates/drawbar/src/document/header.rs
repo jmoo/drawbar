@@ -496,8 +496,8 @@ fn claim(ui: &mut egui::Ui, words: &str, ink: egui::Color32) -> egui::Response {
     response
 }
 
-/// The faces, the quiet actions, and the loud action, left to right. The layout runs
-/// right to left, so they are drawn in reverse.
+/// The faces where there is more than one, the quiet actions, and the loud action, left
+/// to right. The layout runs right to left, so they are drawn in reverse.
 fn right(
     ui: &mut egui::Ui,
     entity: &LocalEntity,
@@ -593,8 +593,10 @@ fn right(
         .on_hover_text(hint("Revert", why, words))
         .clicked();
 
-    rule(ui);
-    act.face = segments(ui, facts, stage);
+    if facts.faces.len() > 1 {
+        rule(ui);
+        act.face = segments(ui, facts, stage);
+    }
 }
 
 /// A hover that explains the control, and also names it once the stage has hidden its

@@ -20,7 +20,7 @@ use nord_format::formats::npno::encode::{
     Rules, Stem,
 };
 use nord_format::formats::npno::{Bank, Library, Version};
-use nord_format::formats::nsmp::codec::Layout;
+use nord_format::formats::nsmp::codec::{Layout, SOURCE_RATE};
 use nord_format::formats::nsmp::zone::derive_top_notes;
 use nord_format::formats::nsmp::{encode, MAX_NAME_LEN};
 use nord_format::formats::nsmpproj::{
@@ -31,7 +31,6 @@ use nord_format::wav::{Pcm16, SampleLoop};
 use nord_format::Entity;
 
 use crate::document::controls::fits;
-use crate::document::encode::{encodable, read, Source};
 use crate::document::note_picker;
 use crate::folders::Folders;
 use crate::log::Log;
@@ -117,6 +116,33 @@ impl Making {
             }
         }
     }
+}
+
+/// A picked WAV's audio, or why it did not read.
+pub type Source = Result<Pcm16, String>;
+
+fn read(bytes: &[u8]) -> Source {
+    nord_format::wav::read_pcm16(bytes).map_err(|e| e.to_string())
+}
+
+/// The audio an instrument can be encoded from, or which of the encoder's limits it hit:
+/// one rate, one or two channels, and at least [`encode::MIN_FRAMES`] frames.
+fn encodable(source: &Source) -> Result<&Pcm16, String> {
+    let pcm = source.as_ref().map_err(String::clone)?;
+    if pcm.rate != SOURCE_RATE {
+        return Err(format!("{} Hz: needs {SOURCE_RATE} Hz", pcm.rate));
+    }
+    if pcm.channels != 1 && pcm.channels != 2 {
+        return Err(format!("{} channels: needs mono or stereo", pcm.channels));
+    }
+    if pcm.frames() < encode::MIN_FRAMES {
+        return Err(format!(
+            "{} frames: needs at least {}",
+            pcm.frames(),
+            encode::MIN_FRAMES
+        ));
+    }
+    Ok(pcm)
 }
 
 /// One picked WAV, as the dialog shows it.
@@ -1016,7 +1042,34 @@ fn answered(workspace: &mut Workspace, log: &mut Log) -> Option<u64> {
 mod tests {
     use super::*;
     use nord_format::formats::npno::Loop;
-    use nord_format::formats::nsmp::codec::SOURCE_RATE;
+
+    #[test]
+    fn every_refusal_says_which_limit_it_hit() {
+        let refused = |samples: &[i16], rate, channels| {
+            encodable(&read(
+                &nord_format::wav::pcm16(samples, rate, channels).unwrap(),
+            ))
+            .err()
+        };
+        let frames = |count: usize, channels: usize| vec![0i16; count * channels];
+        let least = encode::MIN_FRAMES;
+
+        assert_eq!(refused(&frames(least, 1), SOURCE_RATE, 1), None);
+        assert_eq!(refused(&frames(least, 2), SOURCE_RATE, 2), None);
+
+        let slow = refused(&frames(least, 1), 22_050, 1).expect("the wrong rate");
+        assert_eq!(slow, format!("22050 Hz: needs {SOURCE_RATE} Hz"));
+        let wide = refused(&frames(least, 3), SOURCE_RATE, 3).expect("three channels");
+        assert_eq!(wide, "3 channels: needs mono or stereo");
+        let short = refused(&frames(least - 1, 1), SOURCE_RATE, 1).expect("too short");
+        assert_eq!(
+            short,
+            format!("{} frames: needs at least {least}", least - 1)
+        );
+
+        let unreadable = encodable(&read(b"RIFF\0\0\0\0WAVE")).expect_err("not readable");
+        assert!(!unreadable.is_empty());
+    }
 
     #[test]
     fn root_keys_are_read_off_the_names_or_counted_from_middle_c() {

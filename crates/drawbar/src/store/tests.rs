@@ -8517,12 +8517,7 @@ fn a_listed_wav_is_a_wav_asset_read_when_its_document_opens() {
         "a WAV is not a failed decode: {problems:?}"
     );
     assert_eq!(Kind::of(entity), Kind::Wav);
-    for offered in ["Play", "Encode"] {
-        assert!(
-            said.iter().any(|word| word == offered),
-            "{offered}: {said:?}"
-        );
-    }
+    assert!(said.iter().any(|word| word == "Play"), "{said:?}");
 }
 
 /// A gain is an edit like any other: it leaves the WAV unsaved until it is reverted or

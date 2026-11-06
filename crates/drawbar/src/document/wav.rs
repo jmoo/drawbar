@@ -1,5 +1,5 @@
-//! The WAV document: the whole file's waveform, audition through the app's player, a
-//! gain edit, and the encode panel.
+//! The WAV document: the whole file's waveform, audition through the app's player, and a
+//! gain edit.
 //!
 //! A gain rewrites the samples of the data chunk and nothing else, so every other chunk
 //! the file holds survives it.
@@ -10,7 +10,6 @@ use eframe::egui;
 use nord_format::wav::{self, Pcm16};
 
 use super::controls::Sets;
-use super::encode;
 use super::header::{Body, Cell};
 use super::sample;
 use crate::app;
@@ -103,10 +102,9 @@ fn facts(rate: u32, channels: u16, frames: usize) -> String {
     format!("{rate} Hz · {channels} · {seconds:.3} s")
 }
 
-/// What a WAV's document keeps between frames: the encode panel's draft, the gain typed
-/// so far, and a read of the bytes it is open on.
+/// What a WAV's document keeps between frames: the gain typed so far, and a read of the
+/// bytes it is open on.
 pub struct State {
-    pub draft: encode::Draft,
     /// In dB, to one decimal.
     pub gain: f64,
     read: Read,
@@ -122,7 +120,8 @@ type Lane = Vec<(f32, f32)>;
 struct Read {
     /// The [`LocalEntity::stamp`] of the bytes read.
     stamp: u64,
-    source: encode::Source,
+    /// The audio, or why the bytes do not read as 16-bit PCM.
+    source: Result<Pcm16, String>,
     /// How many samples hold each value, by the value's distance above `i16::MIN`, so a
     /// gain's clipping is counted without going through the samples again.
     census: Vec<u64>,
@@ -132,7 +131,7 @@ struct Read {
 
 impl Read {
     fn of(entity: &LocalEntity) -> Read {
-        let source = encode::read(&entity.bytes);
+        let source = wav::read_pcm16(&entity.bytes).map_err(|e| e.to_string());
         let mut census = Vec::new();
         if let Ok(pcm) = &source {
             census = vec![0; 1 << 16];
@@ -176,22 +175,16 @@ impl Read {
 impl State {
     pub fn new(entity: &LocalEntity) -> State {
         State {
-            draft: encode::Draft::new(&entity.name),
             gain: 0.0,
             read: Read::of(entity),
         }
     }
 
-    /// Read the bytes again where they are no longer the ones read, keeping the draft.
+    /// Read the bytes again where they are no longer the ones read, keeping the gain typed.
     pub fn follow(&mut self, entity: &LocalEntity) {
         if self.read.stamp != entity.stamp {
             self.read = Read::of(entity);
         }
-    }
-
-    /// The audio, or why the bytes do not read as 16-bit PCM.
-    pub fn source(&self) -> &encode::Source {
-        &self.read.source
     }
 
     pub fn pcm(&self) -> Option<&Pcm16> {
@@ -199,19 +192,11 @@ impl State {
     }
 }
 
-/// What a WAV's document asks of the app.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Ask {
-    /// Play the file, or stop it where it is playing.
-    Audition,
-    /// Make an instrument from it, as the panel describes.
-    Encode,
-}
-
 /// Draw the document: the waveform with Play and the gain over it where the bytes read,
-/// and why not where they do not, then the encode panel.
-pub fn ui(ui: &mut egui::Ui, state: &mut State, playing: bool, sets: &mut Sets) -> Option<Ask> {
-    let mut ask = None;
+/// and why not where they do not. `true` once the operator has asked to play the file, or
+/// to stop it where it is playing.
+pub fn ui(ui: &mut egui::Ui, state: &mut State, playing: bool, sets: &mut Sets) -> bool {
+    let mut audition = false;
     let columns = (ui.available_width() * ui.ctx().pixels_per_point()).round() as usize;
     match state.read.lanes(columns) {
         Some(lanes) => {
@@ -236,19 +221,12 @@ pub fn ui(ui: &mut egui::Ui, state: &mut State, playing: bool, sets: &mut Sets) 
                 true => ("Stop", Glyph::X),
                 false => ("Play", Glyph::AudioLines),
             };
-            if sample::action(ui, label, glyph, app::accent(ui.visuals())) {
-                ask = Some(Ask::Audition);
-            }
+            audition = sample::action(ui, label, glyph, app::accent(ui.visuals()));
             ui.add_space(12.0);
             gain(ui, state, sets);
         });
     }
-    ui.add_space(12.0);
-    ui.separator();
-    if encode::ui(ui, &mut state.draft, &state.read.source) {
-        ask = Some(Ask::Encode);
-    }
-    ask
+    audition
 }
 
 /// The label of the button that applies the gain.

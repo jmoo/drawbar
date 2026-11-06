@@ -23,7 +23,6 @@ use crate::workspace::{LocalEntity, VerifyState, Workspace};
 mod advanced;
 pub mod capability;
 pub mod controls;
-pub(crate) mod encode;
 mod field;
 mod header;
 pub mod keys;
@@ -73,8 +72,7 @@ pub(super) enum Shape {
     Text,
     /// A body no registry describes, kept byte for byte.
     Verbatim,
-    /// A WAV: its waveform, audition, gain, and the panel that encodes it into an
-    /// instrument.
+    /// A WAV: its waveform, audition, and gain.
     Wav,
     /// Bytes that did not decode.
     Undecoded,
@@ -186,7 +184,6 @@ pub struct Wants {
 enum Asked {
     Zone(sample::Ask),
     Root(piano::Ask),
-    Encode,
     /// Play the open WAV, or stop it.
     Audition,
     /// The header's Export, offered by a body with nothing to edit.
@@ -212,7 +209,7 @@ struct Opened {
     paths: std::collections::HashMap<u32, String>,
     /// The last refusal message.
     error: Option<String>,
-    /// A WAV's read, gain and encode panel.
+    /// A WAV's read and gain.
     wav: Option<wav::State>,
     /// What the instrument editor keeps between frames: the open zone, the struck key,
     /// the folded key table. Never an edit: edits go to the working copy immediately.
@@ -366,7 +363,7 @@ impl Document {
         }
 
         let faces = faces(shape);
-        let face = showing(&faces, self.views.get(&id).copied().unwrap_or_default());
+        let face = showing(faces, self.views.get(&id).copied().unwrap_or_default());
 
         // ⚠️ Only a registry body. Reading the saved bytes means decoding them, and a
         // piano library is hundreds of megabytes with no fields.
@@ -423,7 +420,7 @@ impl Document {
             ui,
             entity,
             &header::Facts {
-                faces: &faces,
+                faces,
                 showing: face,
                 device: &device.state,
                 queue: around.queue,
@@ -530,7 +527,6 @@ impl Document {
                 Asked::Export => self.export(ui.ctx(), id, workspace, log),
                 Asked::Zone(ask) => self.zone_audio(id, ask, workspace, log),
                 Asked::Root(ask) => self.root_audio(id, ask, workspace, log),
-                Asked::Encode => self.encode(id, workspace, log),
                 Asked::Audition => self.audition(id, workspace, log),
             }
         }
@@ -543,8 +539,7 @@ impl Document {
         }
         if let Some(name) = act.rename {
             // ⚠️ Rename only. The box already holds what was typed, and reopening the
-            // document would discard everything else it keeps, including a WAV's encode
-            // draft, which is stored nowhere else.
+            // document would discard everything else it keeps.
             workspace.rename(id, name);
         }
         if act.export {
@@ -901,10 +896,7 @@ impl Document {
     fn wav_body(&mut self, ui: &mut egui::Ui, id: u64, sets: &mut Sets) -> Option<Asked> {
         let playing = self.player.sounds((id, 0));
         let held = self.open.as_mut()?.wav.as_mut()?;
-        wav::ui(ui, held, playing, sets).map(|ask| match ask {
-            wav::Ask::Audition => Asked::Audition,
-            wav::Ask::Encode => Asked::Encode,
-        })
+        wav::ui(ui, held, playing, sets).then_some(Asked::Audition)
     }
 
     /// Play the open WAV through the app's player, or stop it where it is playing.
@@ -1239,33 +1231,6 @@ impl Document {
         sample::named(entity)
     }
 
-    /// Build an instrument from the open WAV as a new asset. The WAV is left unchanged.
-    fn encode(&mut self, id: u64, workspace: &mut Workspace, log: &mut Log) {
-        let Some(held) = self.open.as_ref().and_then(|open| open.wav.as_ref()) else {
-            return;
-        };
-        let draft = &held.draft;
-        let made = encode::instrument(draft, held.source()).map(|bytes| {
-            (
-                format!("{}.{}", draft.name, draft.layout.extension()),
-                bytes,
-            )
-        });
-        match made {
-            Ok((name, bytes)) => {
-                self.refused(None);
-                workspace.ingest(name, crate::workspace::Origin::Fresh, bytes, log);
-            }
-            Err(why) => {
-                log.error(format!(
-                    "encode {}: {why}",
-                    workspace.get(id).map_or("", |e| &e.name)
-                ));
-                self.refused(Some(why));
-            }
-        }
-    }
-
     fn project_body(&mut self, ui: &mut egui::Ui, decoded: &nord_format::Entity, sets: &mut Sets) {
         let Some(open) = self.open.as_mut() else {
             return;
@@ -1357,27 +1322,18 @@ impl Document {
 }
 
 /// The faces this document offers, in the order the control shows them.
-///
-/// Advanced is always offered, because every asset has a record, even bytes that did
-/// not decode.
-fn faces(shape: Shape) -> Vec<Face> {
-    let panel = match shape {
+fn faces(shape: Shape) -> &'static [Face] {
+    match shape {
         Shape::Fields
         | Shape::SetList
         | Shape::Sample
         | Shape::Project
         | Shape::Piano
         | Shape::Text
-        | Shape::Verbatim
-        | Shape::Wav => true,
-        Shape::Undecoded => false,
-    };
-    let mut faces = Vec::new();
-    if panel {
-        faces.push(Face::Basic);
+        | Shape::Verbatim => &[Face::Basic, Face::Advanced],
+        Shape::Wav => &[Face::Basic],
+        Shape::Undecoded => &[Face::Advanced],
     }
-    faces.push(Face::Advanced);
-    faces
 }
 
 /// What the header strip shows in place of its own defaults.
@@ -2170,37 +2126,6 @@ mod tests {
         assert_ne!(renamed, "untitled.ne5p", "the box was typed into");
         assert!(renamed.ends_with(".ne5p"), "the extension stays: {renamed}");
         assert!(renamed.contains('X'), "X is in the name: {renamed}");
-    }
-
-    /// ⚠️ A WAV's encode draft is stored nowhere else. A document rebuilt after a rename
-    /// would reset it to the encoder's defaults and lose the user's choices.
-    #[test]
-    fn renaming_a_wav_keeps_the_encode_draft_it_is_open_on() {
-        let mut open = Open::file("Marimba hit.wav", wav_bytes());
-        open.frame(Vec::new());
-        let draft = &mut open
-            .state()
-            .wav
-            .as_mut()
-            .expect("a WAV opens the panel")
-            .draft;
-        assert_ne!(
-            (draft.root_key, draft.top_note),
-            (48, 60),
-            "the test values must differ from the defaults"
-        );
-        (draft.root_key, draft.top_note) = (48, 60);
-
-        open.frame(vec![open.on_name_box("Marimba hit")]);
-        open.frame(vec![egui::Event::Text("X".to_string())]);
-        open.frame(vec![testing::key(egui::Key::Enter)]);
-        let renamed = open.entity().name.clone();
-        assert!(renamed.contains('X'), "the box was typed into: {renamed}");
-        assert!(renamed.ends_with(".wav"), "{renamed}");
-
-        open.frame(Vec::new());
-        let draft = &open.state().wav.as_ref().expect("the same panel").draft;
-        assert_eq!((draft.root_key, draft.top_note), (48, 60));
     }
 
     /// Where the file stores the name, the box writes it through the format and leaves
@@ -3321,29 +3246,27 @@ mod tests {
         vec![0x00, 0xff, 0x01, 0xfe]
     }
 
-    /// A WAV has no field table and no capabilities to list, so its Advanced face is
-    /// the record every asset has.
     #[test]
-    fn the_advanced_face_of_a_wav_is_the_record() {
+    fn a_wav_offers_only_its_basic_face_and_no_face_control() {
         let mut open = Open::file("Marimba hit.wav", wav_bytes());
+        assert_eq!(faces(shape(open.entity())), [Face::Basic]);
         open.document.views.insert(open.id, Face::Advanced);
         let said = open.twice();
-        assert!(said.iter().any(|word| word == "Container"), "{said:?}");
+        for absent in ["Basic", "Advanced", "Container"] {
+            assert!(
+                !said.iter().any(|word| word == absent),
+                "{absent}: {said:?}"
+            );
+        }
+        assert!(said.iter().any(|word| word == "Play"), "{said:?}");
     }
 
-    /// A WAV that reads offers audition, gain and encode, and states its audio in the
-    /// header. One that does not read says why and offers none of them.
+    /// A WAV that reads offers audition and gain, and states its audio in the header. One that does not read says why and offers none of them.
     #[test]
     fn a_wav_document_offers_what_its_audio_allows() {
         let mut open = Open::file("Marimba hit.wav", wav_bytes());
         let said = open.twice();
-        for offered in [
-            "Play",
-            "Gain",
-            wav::APPLY_GAIN,
-            "Encode",
-            "44100 Hz · mono · 1.000 s",
-        ] {
+        for offered in ["Play", "Gain", wav::APPLY_GAIN, "44100 Hz · mono · 1.000 s"] {
             assert!(
                 said.iter().any(|word| word == offered),
                 "{offered}: {said:?}"
@@ -3358,7 +3281,7 @@ mod tests {
             said.iter().any(|word| word.contains("24-bit")),
             "it says why: {said:?}"
         );
-        for refused in ["Play", "Gain", wav::APPLY_GAIN, "Encode"] {
+        for refused in ["Play", "Gain", wav::APPLY_GAIN] {
             assert!(
                 !said.iter().any(|word| word == refused),
                 "{refused}: {said:?}"
@@ -3403,43 +3326,6 @@ mod tests {
         let held = open.state().wav.as_ref().unwrap();
         assert_eq!(held.pcm().map(|pcm| pcm.samples.len()), Some(44_100));
         assert_eq!(peak(&open.entity().bytes), Some(11_999));
-    }
-
-    #[test]
-    fn a_wav_offers_an_encode_and_is_left_unchanged() {
-        let bytes = wav_bytes();
-        let mut open = Open::file("Marimba hit.wav", bytes.clone());
-        assert_eq!(
-            faces(shape(open.entity()))
-                .iter()
-                .map(|face| face.label())
-                .collect::<Vec<_>>(),
-            ["Basic", "Advanced"],
-        );
-
-        open.frame(Vec::new());
-        let Open {
-            mut document,
-            mut workspace,
-            mut log,
-            id,
-            ..
-        } = open;
-        document.encode(id, &mut workspace, &mut log);
-
-        assert!(document.refusal().is_none(), "{:?}", document.refusal());
-        assert_eq!(workspace.get(id).unwrap().bytes, bytes, "the WAV is intact");
-        let made = workspace
-            .entities()
-            .iter()
-            .find(|e| e.id != id)
-            .expect("an instrument was added");
-        assert_eq!(made.name, "Marimba hit.nsmp");
-        let snapshot = sample::snapshot(made.entity.as_deref().expect("it decoded"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(snapshot.name, "Marimba hit");
-        assert_eq!(snapshot.zones.len(), 1);
     }
 
     #[test]

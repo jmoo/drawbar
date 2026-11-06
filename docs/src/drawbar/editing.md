@@ -24,8 +24,8 @@ instrument holds there, so edits you have not sent are not heard.
 
 - **Basic** is the sound's controls, in the instrument's own words.
 - **Advanced** is the record of the bytes, top to bottom:
-  - **About this file**: what the file says about itself. Set lists, WAVs,
-    files with nothing to edit and bytes drawbar could not read have none.
+  - **About this file**: what the file says about itself. Set lists, files
+    with nothing to edit and bytes drawbar could not read have none.
   - **Container**: what the file's header states, and whether its checksum
     matches.
   - **On the instrument**, for a document read from a slot: what the
@@ -38,7 +38,10 @@ instrument holds there, so edits you have not sent are not heard.
     count above the table says how many there are. Samples and pianos list what
     drawbar can edit in them and where each edit lands in the file. A set list
     shows its four stored slots, and a file with nothing to edit shows its
-    **Body bytes**. A WAV and bytes drawbar could not read have no body to show.
+    **Body bytes**. Bytes drawbar could not read have no body to show.
+
+A WAV has only Basic, and bytes drawbar could not read have only Advanced, so
+neither shows the switch.
 
 ## Programs, live slots, settings and presets
 
