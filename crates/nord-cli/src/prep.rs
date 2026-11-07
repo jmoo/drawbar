@@ -6,7 +6,7 @@ use clap::{Args, ValueEnum};
 use nord_format::formats::npno::codec;
 use nord_format::note;
 use npno_prep::layers::{Choice, Order};
-use npno_prep::plan::{self, Fate, PlanOptions};
+use npno_prep::plan::{self, Fate, PlanOptions, SetLayer};
 use npno_prep::wav;
 
 use crate::edit::write_file;
@@ -15,26 +15,31 @@ use crate::ui::Ui;
 #[derive(Args)]
 pub struct PrepArgs {
     /// The take: one WAV of every note played, 16 to 32-bit PCM or float, mono or
-    /// stereo, at any rate.
-    #[arg(value_name = "TAKE")]
-    pub take: PathBuf,
+    /// stereo, at any rate. Or several, one per velocity layer, the loudest first, each
+    /// holding every note once: a note played again keeps its last hit.
+    #[arg(value_name = "TAKE", required = true, num_args = 1..)]
+    pub takes: Vec<PathBuf>,
 
-    /// The notes played, in playing order, as names or numbers: `B1,D2,F#2`. Each note
-    /// may be hit several times in a row; the hits of one note become its layers.
+    /// The notes played, in playing order, as names or numbers: `B1,D2,F#2`. In a
+    /// single take each note may be hit several times in a row; the hits of one note
+    /// become its layers.
     #[arg(long, value_name = "NOTES", value_delimiter = ',', required = true)]
     pub notes: Vec<String>,
 
-    /// The layers each note gets.
-    #[arg(long, value_name = "N", default_value_t = 4)]
-    pub layers: usize,
+    /// The layers each note of a single take gets: 4 unless given. Takes of one layer
+    /// each give a note one layer per take.
+    #[arg(long, value_name = "N")]
+    pub layers: Option<usize>,
 
-    /// How a note's layers are chosen from its hits.
-    #[arg(long, value_enum, default_value_t = OrderName::Loudness)]
-    pub order: OrderName,
+    /// How a single take's layers are chosen from each note's hits: by loudness unless
+    /// given.
+    #[arg(long, value_enum)]
+    pub order: Option<OrderName>,
 
-    /// Hits to leave out, by the number the listing gives them: `12,40`.
+    /// Hits to leave out, by the number the listing gives them: `12,40`, or with several
+    /// takes, the take's number too: `2:12`.
     #[arg(long, value_name = "HITS", value_delimiter = ',')]
-    pub skip: Vec<usize>,
+    pub skip: Vec<String>,
 
     /// Hits of one note closer than this in level are one layer, in decibels.
     #[arg(long, value_name = "DB", default_value_t = 2.0)]
@@ -48,9 +53,10 @@ pub struct PrepArgs {
     #[arg(long, value_name = "SECONDS", default_value_t = 1.0)]
     pub release_seconds: f64,
 
-    /// Where to write the take with its regions. A take at another rate is resampled
-    /// to the instrument's first, at its own bit depth.
-    #[arg(short, long, value_name = "FILE")]
+    /// Where to write the take with its regions, or with several takes, the directory
+    /// to write each into under its own name. A take at another rate is resampled to
+    /// the instrument's first, at its own bit depth.
+    #[arg(short, long, value_name = "FILE|DIR")]
     pub out: PathBuf,
 }
 
@@ -64,20 +70,113 @@ pub enum OrderName {
 }
 
 pub fn prep(ui: &Ui, args: PrepArgs) -> Result<(), String> {
-    let named = |e: &dyn std::fmt::Display| format!("{}: {e}", args.take.display());
     let notes = args
         .notes
         .iter()
         .map(|n| note::parse(n))
         .collect::<Result<Vec<u8>, String>>()?;
-    if args.layers == 0 {
+    let set = args.takes.len() > 1;
+    if set && (args.layers.is_some() || args.order.is_some()) {
+        return Err(
+            "--layers and --order choose among a single take's hits; with several takes, \
+             each take is one layer"
+                .into(),
+        );
+    }
+    let layers = args.layers.unwrap_or(4);
+    if layers == 0 {
         return Err("--layers must be at least 1".into());
     }
-    let bytes = std::fs::read(&args.take).map_err(|e| named(&e))?;
+    let skips = skips(&args.skip, args.takes.len())?;
+    let outs: Vec<PathBuf> = match set {
+        false => vec![args.out.clone()],
+        true => {
+            std::fs::create_dir_all(&args.out)
+                .map_err(|e| format!("{}: {e}", args.out.display()))?;
+            args.takes
+                .iter()
+                .map(|take| args.out.join(take.file_name().unwrap_or_default()))
+                .collect()
+        }
+    };
+    let mut written = Vec::new();
+    for (index, (path, out)) in args.takes.iter().zip(&outs).enumerate() {
+        if outs[..index].contains(out) {
+            return Err(format!(
+                "{}: two takes would be written to {}; give them different names",
+                path.display(),
+                out.display()
+            ));
+        }
+        if set {
+            ui.out(format!(
+                "take {}: {}, layer {} of {}",
+                index + 1,
+                path.display(),
+                index + 1,
+                args.takes.len()
+            ));
+        }
+        let mut options = PlanOptions::new(notes.clone(), layers);
+        options.order = match args.order {
+            Some(OrderName::Played) => Order::Played,
+            Some(OrderName::Loudness) | None => Order::Loudness,
+        };
+        options.skip = skips[index].clone();
+        options.min_layer_gap_db = args.min_layer_gap;
+        options.cut.max_seconds = args.max_seconds;
+        options.cut.release_seconds = args.release_seconds;
+        options.set = set.then_some(SetLayer {
+            layer: index,
+            of: args.takes.len(),
+        });
+        prep_take(ui, path, out, &options)?;
+        written.push(out.display().to_string());
+    }
+    ui.note(format!(
+        "build a library from them with `nord piano build {}`",
+        written.join(" ")
+    ));
+    Ok(())
+}
+
+/// The hits `--skip` leaves out of each of `takes` takes: `12` in a single take, and
+/// `2:12` in the second of several.
+fn skips(given: &[String], takes: usize) -> Result<Vec<Vec<usize>>, String> {
+    let mut out = vec![Vec::new(); takes];
+    for skip in given {
+        let bad = || match takes {
+            1 => format!("--skip {skip:?} is no hit number, as in 12"),
+            _ => format!("--skip {skip:?} is no take and hit number, as in 2:12"),
+        };
+        let (take, hit) = match (takes, skip.split_once(':')) {
+            (1, None) => (1, skip.as_str()),
+            (_, Some((take, hit))) if takes > 1 => {
+                (take.trim().parse::<usize>().map_err(|_| bad())?, hit)
+            }
+            _ => return Err(bad()),
+        };
+        let hit = hit.trim().parse::<usize>().map_err(|_| bad())?;
+        out.get_mut(take.wrapping_sub(1))
+            .ok_or_else(|| format!("--skip {skip:?}: there are {takes} takes"))?
+            .push(hit);
+    }
+    Ok(out)
+}
+
+/// Finds one take's hits, lists them and writes its regions to `out`.
+fn prep_take(
+    ui: &Ui,
+    path: &std::path::Path,
+    out: &std::path::Path,
+    options: &PlanOptions,
+) -> Result<(), String> {
+    let named = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let bytes = std::fs::read(path).map_err(|e| named(&e))?;
     let layout = wav::layout(&bytes).map_err(|e| named(&e))?;
     let take = wav::read(&bytes).map_err(|e| named(&e))?;
     let resampled = take.rate != codec::RATE;
-    if resampled && same_file(&args.take, &args.out) {
+    if resampled && same_file(path, out) {
         return Err(named(&format!(
             "a take at {} Hz is resampled to {} Hz, which would replace its audio; \
              write it to another file with -o",
@@ -89,17 +188,7 @@ pub fn prep(ui: &Ui, args: PrepArgs) -> Result<(), String> {
         true => npno_prep::resample::resample(&take, codec::RATE).map_err(|e| named(&e))?,
         false => take,
     };
-
-    let mut options = PlanOptions::new(notes, args.layers);
-    options.order = match args.order {
-        OrderName::Loudness => Order::Loudness,
-        OrderName::Played => Order::Played,
-    };
-    options.skip = args.skip;
-    options.min_layer_gap_db = args.min_layer_gap;
-    options.cut.max_seconds = args.max_seconds;
-    options.cut.release_seconds = args.release_seconds;
-    let plan = plan::plan(&plan::mono(&take), take.rate, &options);
+    let plan = plan::plan(&plan::mono(&take), take.rate, options);
 
     list(ui, &plan);
     let regions = plan.regions();
@@ -114,8 +203,8 @@ pub fn prep(ui: &Ui, args: PrepArgs) -> Result<(), String> {
         true => wav::write(&take, layout.format.encoding).map_err(|e| named(&e))?,
         false => bytes,
     };
-    let out = wav::with_marks(&audio, &marks).map_err(|e| named(&e))?;
-    write_file(ui, &args.out, &out)?;
+    let written = wav::with_marks(&audio, &marks).map_err(|e| named(&e))?;
+    write_file(ui, out, &written)?;
     if resampled {
         ui.note(format!(
             "resampled to the {} Hz the instrument plays at, so the regions lie where the \
@@ -123,11 +212,7 @@ pub fn prep(ui: &Ui, args: PrepArgs) -> Result<(), String> {
             codec::RATE
         ));
     }
-    ui.note(format!(
-        "{} region(s); build a library from them with `nord piano build {}`",
-        marks.regions.len(),
-        args.out.display()
-    ));
+    ui.note(format!("{} region(s)", marks.regions.len()));
     Ok(())
 }
 
@@ -178,6 +263,11 @@ fn list(ui: &Ui, plan: &plan::Plan) {
             Fate::Skipped => ("skipped".into(), String::new(), String::new()),
             Fate::TooQuiet { over_db } => (
                 format!("too quiet, {over_db:.0} dB over the floor"),
+                String::new(),
+                String::new(),
+            ),
+            Fate::Chosen(Choice::Replaced { by }) => (
+                format!("played again as hit {by}"),
                 String::new(),
                 String::new(),
             ),
@@ -339,6 +429,90 @@ mod tests {
         };
         crate::piano::build(&Ui::piped(), build).unwrap();
         assert!(npno.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn build_args(argv: &[&str]) -> crate::piano::BuildArgs {
+        let cli = crate::Cli::try_parse_from(
+            [&["nord", "piano", "build", "--name", "Set"], argv].concat(),
+        );
+        match cli.map(|cli| cli.command) {
+            Ok(crate::Command::Piano {
+                action: crate::PianoAction::Build(args),
+            }) => args,
+            _ => panic!("build did not parse"),
+        }
+    }
+
+    /// Two takes, one per layer, the second recorded with more gain: each note's last
+    /// hit in each take is that take's layer, and the two build one library. The same
+    /// take given twice names each stroke twice and is refused.
+    #[test]
+    fn takes_of_one_layer_each_prep_into_one_library() {
+        let dir = crate::edit::tests::scratch("piano-prep-set");
+        let loud = take(
+            44_100,
+            9.0,
+            &[(1.0, 60.0, -12.0, 3.0), (5.0, 64.0, -12.0, 7.0)],
+        );
+        let soft = take(
+            44_100,
+            13.0,
+            &[
+                (1.0, 60.0, -14.0, 3.0),
+                (5.0, 64.0, -30.0, 7.0),
+                (9.0, 64.0, -14.0, 11.0),
+            ],
+        );
+        let paths = [dir.join("loud.wav"), dir.join("soft.wav")];
+        for (path, audio) in paths.iter().zip([&loud, &soft]) {
+            let bytes = wav::write(audio, wav::Encoding::Int { bits: 24 }).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        let out = dir.join("regions");
+        let (a, b) = (paths[0].to_str().unwrap(), paths[1].to_str().unwrap());
+        let out_s = out.to_str().unwrap();
+        let err = prep(
+            &Ui::piped(),
+            prep_args(&[a, b, "--notes", "C4,E4", "--layers", "2", "-o", out_s]),
+        )
+        .unwrap_err();
+        assert!(err.contains("each take is one layer"), "{err}");
+        let err = prep(
+            &Ui::piped(),
+            prep_args(&[a, b, "--notes", "C4,E4", "--skip", "3", "-o", out_s]),
+        )
+        .unwrap_err();
+        assert!(err.contains("2:12"), "{err}");
+        prep(
+            &Ui::piped(),
+            prep_args(&[a, b, "--notes", "C4,E4", "-o", out_s]),
+        )
+        .unwrap();
+
+        let labels = |name: &str| -> Vec<String> {
+            let bytes = std::fs::read(out.join(name)).unwrap();
+            let marks = wav::read_marks(&bytes).unwrap();
+            marks.regions.into_iter().map(|r| r.label).collect()
+        };
+        assert_eq!(
+            labels("loud.wav"),
+            ["060-b0-v00", "060-b2-v00", "064-b0-v00", "064-b2-v00"]
+        );
+        assert_eq!(
+            labels("soft.wav"),
+            ["060-b0-v40", "060-b2-v40", "064-b0-v40", "064-b2-v40"]
+        );
+
+        let (loud_r, soft_r) = (out.join("loud.wav"), out.join("soft.wav"));
+        let (loud_r, soft_r) = (loud_r.to_str().unwrap(), soft_r.to_str().unwrap());
+        let npno = dir.join("set.npno");
+        let npno_s = npno.to_str().unwrap();
+        crate::piano::build(&Ui::piped(), build_args(&[loud_r, soft_r, "-o", npno_s])).unwrap();
+        let (_, piano) = crate::piano::read(&npno).unwrap();
+        assert_eq!(piano.library().unwrap().strokes().len(), 8);
+        let twice = crate::piano::build(&Ui::piped(), build_args(&[loud_r, loud_r, "-o", npno_s]));
+        assert!(twice.is_err(), "the same strokes twice");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

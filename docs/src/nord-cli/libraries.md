@@ -87,6 +87,19 @@ out, is left out: levelled with the others, its hiss would come up with it. A
 key-off that stands clear of neither the quiet before its hit nor the floor gets
 no release. `--skip` leaves out hits by the number the listing gives them.
 
+Or record one take per velocity layer, each playing every note once, and give them
+loudest first:
+
+```sh
+nord piano prep loud.wav medium.wav soft.wav --notes B1,D2,F#2,A2 -o regions/
+nord piano build regions/loud.wav regions/medium.wav regions/soft.wav --kind wurlitzer --name Wurli -o wurli.npno
+```
+
+Each take is one layer, whatever its level, so you may raise the gain for the softer
+ones. A note played twice in a take keeps its last hit. Each take's floor and hum
+are measured on their own, and each is written into `-o` under its own name.
+`--skip 2:12` leaves out hit 12 of the second take.
+
 A take at any other rate is resampled to the instrument's 35,002 Hz first, at its
 own bit depth, and the regions are placed on that, so they lie where the build
 reads them, and the original is never changed. A take already at 35,002 Hz may be

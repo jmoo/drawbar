@@ -22,6 +22,19 @@ pub struct PlanOptions {
     /// dB: levelled with the others, its hiss comes up with it.
     pub min_snr_db: f64,
     pub cut: CutOptions,
+    /// Set for a take of one layer: one of a set of takes, each holding every note at
+    /// one velocity. Each note's last hit is then that layer, and [`PlanOptions::layers`]
+    /// and [`PlanOptions::order`] are not read.
+    pub set: Option<SetLayer>,
+}
+
+/// A take's place in a set of takes, one per layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SetLayer {
+    /// Its layer, counting from the loudest.
+    pub layer: usize,
+    /// The takes in the set.
+    pub of: usize,
 }
 
 impl PlanOptions {
@@ -34,6 +47,7 @@ impl PlanOptions {
             min_layer_gap_db: 2.0,
             min_snr_db: 54.0,
             cut: CutOptions::default(),
+            set: None,
         }
     }
 }
@@ -154,17 +168,31 @@ pub fn plan(mono: &[f64], rate: u32, options: &PlanOptions) -> Plan {
             continue;
         }
         let group: Vec<&Hit> = members.iter().map(|&i| &planned[i].hit).collect();
-        let choices = layers::pick(
-            &group,
-            options.layers,
-            options.order,
-            options.min_layer_gap_db,
-        );
-        let count = choices
-            .iter()
-            .filter(|c| matches!(c, Choice::Layer(_)))
-            .count();
-        let values = layers::v6_values(count);
+        let (choices, values) = match options.set {
+            Some(set) => {
+                let last = group[group.len() - 1].number;
+                let choices = (0..group.len())
+                    .map(|i| match i + 1 == group.len() {
+                        true => Choice::Layer(set.layer),
+                        false => Choice::Replaced { by: last },
+                    })
+                    .collect();
+                (choices, layers::v6_values(set.of))
+            }
+            None => {
+                let choices = layers::pick(
+                    &group,
+                    options.layers,
+                    options.order,
+                    options.min_layer_gap_db,
+                );
+                let count = choices
+                    .iter()
+                    .filter(|c| matches!(c, Choice::Layer(_)))
+                    .count();
+                (choices, layers::v6_values(count))
+            }
+        };
         for (&i, choice) in members.iter().zip(choices) {
             planned[i].fate = match choice {
                 Choice::Layer(layer) => Fate::Kept {
@@ -255,5 +283,28 @@ mod tests {
             ]
         );
         assert!(plan.missing.is_empty());
+    }
+
+    /// The second of a set of three takes names every note's last hit with the second
+    /// of three layer values, however loud it was played.
+    #[test]
+    fn a_take_of_one_layer_keeps_each_notes_last_hit_as_that_layer() {
+        let rate = 35_002;
+        let notes = [
+            (1.0, 48.0, -30.0, 3.0),
+            (4.0, 48.0, -12.0, 6.0),
+            (7.0, 55.0, -14.0, 9.0),
+        ];
+        let x = take(rate, 10.5, &notes, -110.0);
+        let mut options = PlanOptions::new(vec![48, 55], 4);
+        options.set = Some(SetLayer { layer: 1, of: 3 });
+        let plan = plan(&x, rate, &options);
+        let fates: Vec<&Fate> = plan.hits.iter().map(|p| &p.fate).collect();
+        assert_eq!(fates[0], &Fate::Chosen(Choice::Replaced { by: 2 }));
+        let labels: Vec<String> = plan.regions().into_iter().map(|r| r.label).collect();
+        assert_eq!(
+            labels,
+            ["048-b0-v20", "048-b2-v20", "055-b0-v20", "055-b2-v20"]
+        );
     }
 }

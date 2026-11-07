@@ -171,8 +171,11 @@ pub struct BuildArgs {
     ///
     /// The `frames` column in the output counts the WAV's frames. A stroke pads them
     /// out to whole blocks, or ends with the block holding its loop's end.
-    #[arg(value_name = "DIR|TAKE")]
-    pub input: PathBuf,
+    ///
+    /// Several takes build one library, such as one take per velocity layer, each
+    /// holding every note.
+    #[arg(value_name = "DIR|TAKE", required = true, num_args = 1..)]
+    pub input: Vec<PathBuf>,
 
     /// A library to take everything the audio does not decide from: the decay
     /// coefficients, per-note tables, playback parameters, format and the word at the
@@ -320,7 +323,7 @@ pub struct SplitArgs {
 
 /// Read a file and parse it as a piano library, naming the format it turned out to
 /// be when it is not one.
-fn read(path: &Path) -> Result<(Vec<u8>, npno::Piano), String> {
+pub(crate) fn read(path: &Path) -> Result<(Vec<u8>, npno::Piano), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let entity = nord_format::from_stream(&mut std::io::Cursor::new(&bytes))
         .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -1307,13 +1310,29 @@ pub fn build(ui: &Ui, args: BuildArgs) -> Result<(), String> {
         "  {:>26}  {:>6} {:>10} {:>5} {:>9} {:>8}",
         "wav", "root", "bank", "value", "frames", "seconds"
     )));
-    let take = match args.input.is_dir() {
-        true => None,
-        false => Some(crate::wav::take(&args.input)?),
+    let takes = match args.input.as_slice() {
+        [dir] if dir.is_dir() => Vec::new(),
+        paths => paths
+            .iter()
+            .map(|path| match path.is_dir() {
+                true => Err(format!(
+                    "{}: a directory of WAVs is built on its own, not with takes",
+                    path.display()
+                )),
+                false => crate::wav::take(path),
+            })
+            .collect::<Result<Vec<_>, String>>()?,
     };
-    let files = match &take {
-        None => stroke_files(&args.input)?,
-        Some((audio, marks)) => region_strokes(&args.input, audio, marks)?,
+    let files = match takes.is_empty() {
+        true => stroke_files(&args.input[0])?,
+        false => {
+            let mut files = Vec::new();
+            for (path, (audio, marks)) in args.input.iter().zip(&takes) {
+                files.extend(region_strokes(path, audio, marks)?);
+            }
+            in_stroke_order(&mut files);
+            files
+        }
     };
     let values = layer_values(&files, version)?;
     let gains = take_gains(

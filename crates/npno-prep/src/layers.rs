@@ -62,6 +62,8 @@ pub enum Choice {
     Duplicate { of: usize },
     /// More hits than layers.
     Extra,
+    /// Played again later in a take of one layer, and hit `by` is kept.
+    Replaced { by: usize },
 }
 
 /// What becomes of each of `group`, one note's hits in playing order, as `layers`
