@@ -12,9 +12,8 @@
 //!   keeps every organ model's registration and plays one, and a Stage keeps every layer
 //!   and enables some.
 //!
-//! A [`Panel`] states all three as data, per format. It is written by hand, because
-//! semantics cannot be derived from bit placement, and as data it can be inspected and
-//! tested.
+//! A [`Panel`] states all three as data, per format, written by hand because semantics
+//! cannot be derived from bit placement.
 //!
 //! # What a caller may rely on
 //!
@@ -29,15 +28,12 @@
 //! - A [`Group`] names its members in reading order: the order the panel shows them, not
 //!   the bit order.
 //! - A path a group names is a real registry path of that body, and no path is named
-//!   twice. A test in this module checks both for every layout the crate ships, so a
-//!   layout cannot drift as a body gains fields.
+//!   twice. A test checks both for every layout the crate ships.
 //! - [`Panel::exhaustive`] says whether the groups account for every registered field. If
 //!   it is false, the leftovers can be non-empty, and a caller needs somewhere to put
 //!   them.
 //! - No group names a morph slot: the slot belongs to the parameter it morphs, which the
-//!   group names, and [`FieldSpec::morph_parent`] resolves the relation. That is why a
-//!   Stage body, most of whose fields are morph slots, needs a layout of about a hundred
-//!   lines instead of one line per field.
+//!   group names, and [`FieldSpec::morph_parent`] resolves the relation.
 //!
 //! # Relevance is not visibility
 //!
@@ -45,14 +41,12 @@
 //! instrument using these controls? A group that is not relevant is still state the file
 //! carries, and still writable: an organ registration for a model that is not selected is
 //! kept. Whether an irrelevant group is hidden, dimmed, or folded is the caller's
-//! decision, and it may differ by depth: a whole section nobody is playing is worth
-//! hiding, while the second of two registrations is worth showing quietly.
+//! decision.
 //!
 //! A condition is a set of value matches, any one of which satisfies it, and a nested
 //! group is relevant only if its parent is. A disjunction is a wider condition, and a
-//! conjunction is another level of nesting. This is less than a predicate language, so
-//! every condition stays comparable, printable, and checkable against the field's legal
-//! values.
+//! conjunction is another level of nesting, so every condition stays comparable,
+//! printable, and checkable against the field's legal values.
 
 use std::collections::{HashMap, HashSet};
 

@@ -397,8 +397,7 @@ pub fn accent_button(
 
 /// A header title: [`crate::app::micro`], uppercased.
 ///
-/// Uppercasing is the only treatment: egui has no letter spacing, and faking it looks
-/// worse than none.
+/// Uppercasing is the only treatment: egui has no letter spacing.
 pub fn caps(text: &str) -> egui::RichText {
     egui::RichText::new(text.to_uppercase()).text_style(crate::app::micro())
 }

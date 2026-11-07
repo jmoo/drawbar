@@ -1,12 +1,7 @@
-//! The key map: the keyboard, the lanes over it, and the geometry they share.
-//!
-//! One geometry serves both. The white keys share the width equally and the black keys
-//! hang between them. A key's cell in a lane matches its cell on the keyboard, so a band
-//! edge, a size bar, a per-key bar, and a root marker all sit over the key they name.
-//! Black cells are narrow and overlap the white cells on either side, as on a keyboard.
-//!
-//! Nothing here scrolls, pins, or holds state. A lane takes the width it is given, paints
-//! what it is handed, and returns what the pointer asked for.
+//! The key map: the keyboard, the lanes over it, and the geometry they share. A key's
+//! cell in a lane matches its cell on the keyboard, so a band edge, a size bar, a per-key
+//! bar, and a root marker all sit over the key they name. Nothing here scrolls, pins, or
+//! holds state.
 
 use eframe::egui;
 use nord_format::note;

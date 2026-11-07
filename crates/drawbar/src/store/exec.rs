@@ -194,8 +194,6 @@ mod tests {
         LibPath::parse(text).unwrap()
     }
 
-    /// A read asked for leaves a sample instrument in its file, which takes none of the
-    /// room, and refuses a file that does not fit what room is left.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_read_leaves_an_instrument_in_place_and_stops_at_the_room_left() {

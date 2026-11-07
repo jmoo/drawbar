@@ -1,6 +1,6 @@
 # Editing
 
-`edit` changes fields inside a program, live slot, settings file, set list or
+`edit` changes fields inside a program, live slot, settings file, song or
 sample instrument, in a file or in a slot. Piano libraries have flags of their
 own, covered in [Samples and pianos](libraries.md).
 
@@ -39,9 +39,9 @@ nord settings edit 1:1 --set fine_tune=0 --dry-run
 Writing settings reloads the program on the panel, and unsaved panel changes are
 lost. Store them first.
 
-## Set lists and samples
+## Songs and samples
 
-A set list's fields are the slots it plays, `slot1` to `slot4`. A sample
+A song's fields are the slots it plays, `slot1` to `slot4`. A sample
 instrument's are its name, where it stores one, and each zone's root key and
 top note, plus its low note in the layouts that store one. Instruments from the
 original Sample Library store no name. Notes are written as names (`C4` is middle

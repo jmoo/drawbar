@@ -10,7 +10,7 @@ nord program get 7:4 -o patch.ne5p         # copy bank 7, slot 4 off the instrum
 nord program edit patch.ne5p --set center_panel.gain=96 -o louder.ne5p
 nord program put louder.ne5p 7:4 --yes     # and send it back
 nord piano build strokes/ --name Marimba -o marimba.npno   # a piano library from WAVs
-nord bundle get setlist 1:2 -o b3.ne5tbundle   # a set list with everything it plays
+nord bundle get setlist 1:2 -o b3.ne5tbundle   # a song with everything it plays
 ```
 
 Anything that changes the instrument says what it is about to replace and asks
@@ -25,12 +25,7 @@ nix run github:jmoo/drawbar#nord-cli -- --help
 The [guide](../../docs/src/nord-cli/overview.md) covers every command, and
 [What is supported](../../docs/src/getting-started/support.md) says what has been
 tested on an instrument. This is alpha software: back up first.
-
-## Building
-
-`nix develop`, then from `crates/`: `cargo run -p nord-cli -- --help` and
-`cargo test -p nord-cli`. `nix build .#nord-cli` also runs an install check. See
-[Building from source](../../docs/src/reference/building.md).
+[Building from source](../../docs/src/reference/building.md) covers a checkout.
 
 ## Disclaimer
 

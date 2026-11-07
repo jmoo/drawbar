@@ -27,11 +27,11 @@
 //! - **Container-verified stubs.** Everything else. The body is kept as stored until
 //!   it is mapped, and each stub module's doc records what is known of it.
 //!
-//! Provenance is marked where each fact is stated, in four phrases: "Confirmed on
-//! hardware", "Inferred from specimens", "Reported by public documentation", and
-//! "Unexplained". Broadly, the Electro 5 bodies are pinned by hardware sweeps that
-//! change one setting at a time, and the Stage bodies come from community byte maps and
-//! specimen measurement, not confirmed on hardware. Each module says which.
+//! Each reverse-engineered fact carries its provenance where it is stated: confirmed
+//! on hardware, inferred from specimens, reported by public documentation, or
+//! unexplained. The Electro 5 bodies are pinned by hardware sweeps that change one
+//! setting at a time. The Stage bodies come from community byte maps and specimen
+//! measurement and are not confirmed on hardware.
 
 pub(crate) mod predictor;
 pub(crate) mod raw;

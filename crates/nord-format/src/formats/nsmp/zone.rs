@@ -306,9 +306,8 @@ impl Wide {
 /// 6 + 10 × key:  [gain u24 BE][detune ×3][a][b][a][key]
 /// ```
 ///
-/// Framing it the other way round, quad first and level behind, puts key k+1's
-/// level in key k's record and lands the vendor level curve's slope changes and
-/// its end a key below the zone span they belong to.
+/// Framed quad first, each record takes the next key's level, and the level curve
+/// lands a key below the zones it belongs to.
 ///
 /// The gain is linear with `0x100000` for unity. It is an authored per-key curve
 /// that no zone layout predicts, and the three bytes behind it hold a per-note

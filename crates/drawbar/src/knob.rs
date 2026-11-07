@@ -160,8 +160,7 @@ pub fn ui(ui: &mut egui::Ui, id_salt: &str, value: i64, min: i64, max: i64) -> O
 /// what was typed, unchanged.
 ///
 /// ⚠️ Nothing here clamps or parses. The field refuses a number past a stop, or text that
-/// is not a number, with its own message. Dropping them here would leave the dial on a
-/// value the user did not type, with nothing on screen saying why.
+/// is not a number, with its own message.
 fn readout(ui: &mut egui::Ui, id: egui::Id, value: i64, start_editing: bool) -> Option<String> {
     let editing = id.with("editing");
     let arming = id.with("arming");

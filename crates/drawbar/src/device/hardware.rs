@@ -1,22 +1,7 @@
-//! drawbar's own send paths against an attached instrument: a library opened over a
-//! temporary folder, the browser's acts, the queue, and the device worker over the USB
-//! transport, with no window.
-//!
-//! Every test writes to the instrument, so each is ignored and skipped unless
-//! `DRAWBAR_HARDWARE=1`. They run one at a time, in name order, and the last one empties
-//! whatever the run left behind:
-//!
-//! ```sh
-//! DRAWBAR_HARDWARE=1 cargo test -p drawbar --lib device::hardware -- --ignored --test-threads=1 --nocapture
-//! ```
-//!
-//! nord-cli reads the source objects off the instrument, reads back what drawbar wrote,
-//! and deletes it. `DRAWBAR_HARDWARE_NORD` names its binary (default `nord`). The sources
-//! are the slots `DRAWBAR_HARDWARE_PIANO` (default `1:6`) and `DRAWBAR_HARDWARE_OTHER_PIANO`
-//! (`6:3`), two piano libraries of a few megabytes, and `DRAWBAR_HARDWARE_SAMPLE` (`1:20`),
-//! a sample instrument of more than a megabyte. The bundle test reads the program at
-//! `DRAWBAR_HARDWARE_PROGRAM` (`6:9`), one that plays a piano and a sample, and writes
-//! nothing.
+//! drawbar's own send paths against an attached instrument, with no window. Every test
+//! writes to the instrument, so each is ignored and skipped unless `DRAWBAR_HARDWARE=1`.
+//! They run one at a time in name order. `docs/src/reference/testing.md` gives the
+//! command and the variables that pick the source slots.
 //!
 //! ⚠️ A test writes only to the last vacant slots of bank 1, as drawbar's own walk found
 //! them when it attached, and deletes only a slot holding a name this suite gives

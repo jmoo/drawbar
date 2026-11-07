@@ -48,7 +48,7 @@ pub struct CenterPanel {
     ///
     /// Meaningless while [`transpose_enabled`](Self::transpose_enabled) is clear: an
     /// untouched program stores `+1` here. Inferred from specimens; not confirmed on
-    /// hardware. Every specimen with the enable clear holds `+1`.
+    /// hardware.
     #[bits(24..=27)]
     pub transpose: Transpose,
     #[bits(28..=34)]

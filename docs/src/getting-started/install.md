@@ -8,12 +8,8 @@ kept in the browser's storage for the site, which the browser can delete. You ca
 [open a folder](../drawbar/this-computer.md#opening-another-folder) on your
 computer instead.
 
-Only Chrome, Edge and Brave can connect to an instrument. Files work in any browser.
-Which browsers can play the key maps from a MIDI controller is on
-[What is supported](support.md#midi-controllers).
-
-Close Nord Sound Manager before connecting, since it keeps the instrument to
-itself.
+Files work in any browser. [What is supported](support.md) says which browsers
+can connect to an instrument or hear a MIDI controller.
 
 ## On the desktop
 

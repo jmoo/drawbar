@@ -25,8 +25,8 @@
 //! values are views over the stored body, bits that no field claims survive untouched,
 //! and `to_bytes(from_stream(x)) == x` byte for byte. Archives read as entities are
 //! read-only; [`bundle`] reads and writes Nord Sound Manager's bundles, container and
-//! manifest, under the same invariant. It is tested against a private corpus of real
-//! files.
+//! manifest, under the same invariant. The crate is tested against a private corpus of
+//! real files.
 //!
 //! [`Entity::registry`] and [`Entity::registry_mut`] list and set the named fields of a
 //! decoded body by dotted path, such as `center_panel.transpose`.
@@ -43,11 +43,16 @@
 //!
 //! # Features and dependencies
 //!
-//! The `bundle` feature reads ZIP archives: bundles, backups and Drum banks. It is off
-//! by default and pulls in `zip`. The other runtime dependencies are `crcxx` and
-//! `thiserror`. The crate does no I/O beyond `Read`, `Seek` and `Write`, so it runs
-//! anywhere `std` does, including wasm. Device access lives in the companion `nord-usb`
-//! crate.
+//! - `bundle`, off by default, lets [`from_path`] and [`from_stream`] read ZIP archives:
+//!   Nord Sound Manager bundles, backups and Drum banks. It pulls in `zip`. The
+//!   [`bundle`] module needs no feature.
+//! - `corpus` and `synthetic` are for tests. `corpus` runs the suites over the tree of
+//!   Nord files that `NORD_CORPUS_ROOT` names, and `synthetic` exposes
+//!   `formats::npno::synthetic` to another crate's tests.
+//!
+//! The other runtime dependencies are `crcxx` and `thiserror`. The crate does no I/O
+//! beyond `Read`, `Seek` and `Write`, so it runs anywhere `std` does, including wasm.
+//! Device access lives in the companion `nord-usb` crate.
 
 pub mod accept;
 pub mod bank;
@@ -896,7 +901,6 @@ mod bundle_tests {
         assert_eq!(bank.programs[0].0, "One.nd2p");
     }
 
-    /// A ZIP holding anything that is not a CBIN file is not a bundle.
     #[test]
     fn a_zip_with_a_non_cbin_member_is_refused() {
         let a = member("ns3f");
@@ -924,9 +928,9 @@ mod bundle_tests {
 ///
 /// For every format this crate reads, `to_bytes(from_stream(x)) == x` byte for byte,
 /// whichever header generation `x` carries. Decoded values are views over the stored
-/// body, so an unedited file re-emits unchanged; `nord verify` checks this against real
-/// files. Fixed-length formats declare their body length on their [`cbin::Body`] impl,
-/// and the container refuses to emit a file of the wrong size.
+/// body, so an unedited file re-emits unchanged. Fixed-length formats declare their
+/// body length on their [`cbin::Body`] impl, and the container refuses to emit a file
+/// of the wrong size.
 ///
 /// Bundles are an error: a bundle is a ZIP walk over other entities, which this crate
 /// does not re-encode.

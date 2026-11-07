@@ -1,7 +1,7 @@
 [package]
 name = "nord-bits-derive"
 categories = ["development-tools::procedural-macro-helpers"]
-description = "The proc-macro behind nord-format: bit-packed binary layouts declared once"
+description = "The proc-macro behind nord-format: bit-mapped binary layouts declared once"
 edition.workspace = true
 rust-version.workspace = true
 keywords = ["bitfield", "nord", "proc-macro"]

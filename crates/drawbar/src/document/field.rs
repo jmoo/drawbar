@@ -1,14 +1,8 @@
 //! One registry body as a document: its sections, the cell each field is drawn as, and
-//! the morph lens over all of them.
-//!
-//! Sections come from `nord_format::panel` where the library defines a layout, from the
-//! app's menu order for a settings body, and from the registry's path prefixes for any
-//! other body. Each [`ControlKind`] has one cell renderer, so a field the library adds is
-//! drawn here without a table naming it.
-//!
-//! Nothing here clamps: a moved control returns the spelling `set_field` takes, the
-//! document applies every set of the frame to a fresh decode, and a refused value leaves
-//! the file untouched with the library's message on screen.
+//! the morph lens over all of them. Each [`ControlKind`] has one cell renderer, so a
+//! field the library adds is drawn without a table naming it. Nothing here clamps: a
+//! moved control returns the spelling `set_field` takes, and a refused value leaves the
+//! file untouched with the library's message on screen.
 
 use std::collections::{HashMap, HashSet};
 
@@ -873,8 +867,6 @@ fn clustered<'a>(rows: &[&'a Field], doc: &Doc<'a>) -> Vec<Cell<'a>> {
     for field in rows {
         // ⚠️ The selector that picks one of several stored alternatives heads each
         // alternative's card. Drawn here too, it would be two controls for one switch.
-        // The layout keeps it in the group above the ones it picks between, so it would
-        // also appear in a strip that has no alternatives of its own.
         if doc.picks.contains(field.path.as_str()) {
             continue;
         }
@@ -1255,8 +1247,7 @@ fn offerable(path: &str, value: &str) -> bool {
 /// A knob, and beside it whatever reading the unit supports.
 ///
 /// ⚠️ A unit is a label, not a promise of conversion. Where the panel's curve is not
-/// published, the knob prints the stored byte and the caption names the scale. Nothing
-/// here invents a reading the file does not support.
+/// published, the knob prints the stored byte and the caption names the scale.
 fn turned(
     ui: &mut egui::Ui,
     field: &Field,
@@ -1697,8 +1688,7 @@ fn plain(ui: &mut egui::Ui, field: &Field, legal: &[String]) -> Option<String> {
 /// A field too wide to enumerate: its stored bits, typed as they are spelled.
 fn wide(ui: &mut egui::Ui, field: &Field) -> Option<String> {
     // ⚠️ A half-typed value is not one the format would take, so the box commits when
-    // editing ends, not per keystroke. Until then the typed text is kept under the
-    // field's id.
+    // editing ends, not per keystroke.
     let id = ui.id().with(("wide", field.path.as_str()));
     let held: Option<String> = ui.data(|data| data.get_temp(id));
     let mut text = held.clone().unwrap_or_else(|| field.value.clone());

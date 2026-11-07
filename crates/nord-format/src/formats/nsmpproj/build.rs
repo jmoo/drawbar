@@ -704,7 +704,7 @@ fn zone_loop(
         });
     }
 
-    // Mode 1 rewrites the long loop's tail in a way not yet decoded. It affects only
+    // Mode 1 rewrites the long loop's tail in a way not decoded. It affects only
     // that fade: with the short loop switched on, the editor writes the same bytes
     // whatever the mode.
     // Inferred from specimens; not confirmed on hardware.

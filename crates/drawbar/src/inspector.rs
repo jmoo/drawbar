@@ -1,13 +1,8 @@
 //! The right dock: the selection, and the instrument while one is attached.
 //!
-//! Each part is a card. The selection's facts, its tags, and what a picked slot needs
-//! describe the rows selected in the browser, whether or not an instrument is connected.
-//! Room and Info hold what an attached instrument reports, so they are absent without
-//! one. Those two collapse independently, and their state is kept between sessions with
-//! the docks.
-//!
-//! Nothing here asks for data the rest of the app does not already have; a card with no
-//! data says so.
+//! Each part is a card. The selection cards describe the rows selected in the browser;
+//! Room and Info hold what an attached instrument reports, and are absent without one.
+//! Nothing here asks for data the rest of the app does not already have.
 
 use std::collections::{BTreeMap, BTreeSet};
 

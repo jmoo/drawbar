@@ -1,11 +1,6 @@
-//! `nord edit`: change fields in any editable file, dispatched on the file's
-//! format.
-//!
-//! The noun commands edit what the instrument stores. This file verb sits beside
-//! `inspect` and `verify`, so formats with no noun (the Stage programs and
-//! presets, the Sample Editor project) are editable too. It reaches everything
-//! `nord-format` can set: the generated registry where the body declares one,
-//! and the accessor-backed editors otherwise.
+//! `nord edit`: change fields in any editable file, dispatched on the file's format,
+//! so formats with no noun (the Stage programs and presets, the Sample Editor project)
+//! are editable too.
 
 use std::path::PathBuf;
 

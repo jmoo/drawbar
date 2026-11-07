@@ -377,8 +377,8 @@ fn flush(path: &Path, kind: Kind) -> io::Result<()> {
     let file = flushable(path, kind)?;
     let flushed = file.sync_all();
     // SMB, AFP and WebDAV volumes refuse a full sync and take a plain one; as SQLite
-    // does, fall back to one unless the error is the write failing (`EIO`).
-    // Reported by public documentation; not confirmed on hardware.
+    // does, fall back to one unless the error is the write failing (`EIO`). From
+    // platform documentation; not measured.
     #[cfg(target_vendor = "apple")]
     let flushed = flushed.or_else(|error| match rustix::io::Errno::from_io_error(&error) {
         Some(rustix::io::Errno::IO) => Err(error),
@@ -386,7 +386,7 @@ fn flush(path: &Path, kind: Kind) -> io::Result<()> {
     });
     match flushed {
         // A volume that cannot sync a directory keeps its names as durably as it
-        // keeps them. Reported by public documentation; not confirmed on hardware.
+        // keeps them. From platform documentation; not measured.
         Err(error) if kind == Kind::Directory && refused(&error) => Ok(()),
         flushed => flushed,
     }
@@ -416,8 +416,8 @@ fn flush(path: &Path, kind: Kind) -> io::Result<()> {
 /// can be, and otherwise for reading.
 #[cfg(unix)]
 fn flushable(path: &Path, kind: Kind) -> io::Result<File> {
-    // An SMB server refuses to flush a handle that cannot write. Reported by public
-    // documentation; not confirmed on hardware.
+    // An SMB server refuses to flush a handle that cannot write. From protocol
+    // documentation; not measured.
     match kind {
         Kind::File => OpenOptions::new()
             .write(true)
@@ -442,8 +442,8 @@ fn flush(path: &Path, kind: Kind) -> io::Result<()> {
     match writable(path, kind).and_then(|file| file.sync_all()) {
         // A file's flush, and a rename written through, flush the volume's log
         // through every earlier change of names, so a volume that cannot flush a
-        // directory keeps its names all the same. Reported by public documentation;
-        // not confirmed on hardware.
+        // directory keeps its names all the same. From platform documentation; not
+        // measured.
         Err(error)
             if kind == Kind::Directory
                 && error

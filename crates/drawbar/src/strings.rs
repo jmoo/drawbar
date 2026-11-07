@@ -5,8 +5,7 @@
 //! Both fall back when a lookup misses: an unmapped field shows a prettified path, so a
 //! field added to `nord-format` still appears, unpolished.
 //!
-//! Only English is embedded. Another language needs another pair of tables and one
-//! lookup; no module above this one spells a field name itself.
+//! Only English is embedded, and no module above this one spells a field name itself.
 
 use std::borrow::Borrow;
 
@@ -711,9 +710,7 @@ mod tests {
         );
         assert_eq!(value_label("effects_panel.fx3_type", "None_"), "none");
         assert_eq!(value_label("ctrl_pedal_type", "YamahaFc7"), "Yamaha FC-7");
-        // The panel's own vibrato names.
         assert_eq!(value_label("organ_panel.b3_vib", "C1"), "C1");
-        // Numbers speak for themselves.
         assert_eq!(value_label("center_panel.gain", "96"), "96");
     }
 

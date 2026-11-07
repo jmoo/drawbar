@@ -202,7 +202,6 @@ mod tests {
         assert_eq!(crc16(b"123456789"), 0x29B1, "not CRC-16/IBM-3740");
     }
 
-    /// A stream fed in pieces equals the slice computed whole.
     #[test]
     fn streams_match_slices() {
         let data: Vec<u8> = (0u8..=255).cycle().take(1000).collect();

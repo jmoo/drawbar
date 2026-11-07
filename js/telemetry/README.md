@@ -17,9 +17,10 @@ says what it takes and keeps, in words for users.
 The collector keeps no request logs and stores no address or user agent.
 [`queries/`](queries) holds the queries used to read Analytics Engine.
 
-Reports come from noreply@johndm.dev, which needs Cloudflare Email Routing on
-johndm.dev, and reports@drawbar.app must be a verified destination address. Email
-Routing sends to a verified address on the free plan; Email Sending is not needed.
+Reports come from the sending address in `src/mail.js`, whose domain needs
+Cloudflare Email Routing, and reports@drawbar.app must be a verified destination
+address. Email Routing sends to a verified address on the free plan; Email Sending
+is not needed.
 
 `node --test test/check.test.js` runs the tests; `nix flake check` runs them too. CI
 deploys from `master`.

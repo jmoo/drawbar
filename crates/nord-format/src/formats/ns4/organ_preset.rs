@@ -12,7 +12,7 @@ use crate::error::Error;
 use std::io::{Read, Seek};
 
 pub const FORMAT: &str = "ns4o";
-/// Stored ×100. Specimens reach 2.05; ns4decode was tested on 2.01.
+/// Stored ×100. ns4decode was tested on 2.01.
 pub const KNOWN_VERSIONS: &[u32] = &[201, 202, 203, 204, 205];
 pub const BODY_LEN: usize = 139;
 

@@ -9,30 +9,7 @@
 //! its responses. Every read and write must meet a step of its own direction, so a
 //! read the script does not expect is a mismatch, never a timeout.
 //!
-//! # Script format
-//!
-//! One step per line, which may carry a trailing `# label` comment:
-//!
-//! | Line | Step |
-//! |---|---|
-//! | `O <hex>` | the host sent a frame |
-//! | `O timeout <hex>` | the host offered a frame, and the device did not accept it in time |
-//! | `O error <hex>` | the transport failed sending a frame |
-//! | `I <hex>` | the device sent a frame |
-//! | `I timeout` | nothing arrived within the read's limit |
-//! | `I error` | the transport failed reading |
-//!
-//! Every other `#` line is either prose or a field, `# <key>: <value>` with the key in
-//! `[a-z_]+`, so a prose line whose first word is capitalized or hyphenated stays prose.
-//! An unknown lowercase key is an error, so the vocabulary cannot drift.
-//!
-//! `source`, `device`, `trimmed`, `note`, `driven_by`, and `undriven` describe the file
-//! and must precede its first step. `intent` and `expect` describe a section. `intent`
-//! opens one, which runs to the next `intent` or the end of the file, so a recorded
-//! command that opened several transactions is one script of several sections, in
-//! order. `expect` names the outcome its section must produce and defaults to `ok`. It
-//! may sit anywhere in that section, because a recorder only learns the outcome after
-//! the steps are written.
+//! The crate's `tests/scripts/README.md` specifies the script format.
 
 use super::Transport;
 use crate::error::{Error, Result};

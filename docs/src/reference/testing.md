@@ -46,23 +46,8 @@ default feature. Without it, `cargo test -p nord-usb` verifies none of the wire
 encoding. The Nix build enables it.
 
 `tests/replay` runs one trial per script under `tests/scripts`, and under the
-corpus with `--features corpus`. Every script is checked for framing, and one
-that declares an intent is driven through an exact-match transport and judged
-against what it said to expect. One that declares none must name the tests that
-drive it, or say why nothing does.
-
-```
-# source: nord
-# device: Nord Electro 5, firmware v2.04 build 592
-# intent: program info 7:11
-O 0000001200000006000000010000000006a1
-```
-
-A read that timed out, a write the device did not accept, and a transport failure
-are steps of their own, so a read the script does not expect fails the replay
-instead of passing as silence. `nord … --record <path>` writes a complete script.
-The step forms, the header keys, the `expect` values and the intent table are
-documented in
+corpus with `--features corpus`, and `nord … --record <path>` writes a script.
+The script format and what each trial checks are in
 [`crates/nord-usb/tests/scripts/README.md`](https://github.com/jmoo/drawbar/blob/master/crates/nord-usb/tests/scripts/README.md).
 
 ## drawbar on an instrument
@@ -86,11 +71,18 @@ DRAWBAR_HARDWARE=1 cargo test -p drawbar --lib device::hardware -- --ignored --t
 
 nord-cli reads the source objects, reads back what drawbar wrote, and deletes it
 again; `DRAWBAR_HARDWARE_NORD` names its binary when it is not `nord` on the
-path. The sources are slots on the instrument: `DRAWBAR_HARDWARE_PIANO` and
-`DRAWBAR_HARDWARE_OTHER_PIANO`, two piano libraries of a few megabytes, and
-`DRAWBAR_HARDWARE_SAMPLE`, a sample instrument of more than a megabyte. Each test
-writes only to the last vacant slots of bank 1 and deletes only names it gave, and
-the last test checks that every class holds what it held when the run started.
+path. The sources are slots on the instrument:
+
+| Variable | Default | Holds |
+|---|---|---|
+| `DRAWBAR_HARDWARE_PIANO` | `1:6` | a piano library of a few megabytes |
+| `DRAWBAR_HARDWARE_OTHER_PIANO` | `6:3` | another piano library of a few megabytes |
+| `DRAWBAR_HARDWARE_SAMPLE` | `1:20` | a sample instrument of more than a megabyte |
+| `DRAWBAR_HARDWARE_PROGRAM` | `6:9` | a program that plays a piano and a sample, which the bundle test reads |
+
+Each test writes only to the last vacant slots of bank 1 and deletes only names
+it gave, and the last test checks that every class holds what it held when the
+run started.
 
 ## In the browser
 
@@ -160,8 +152,8 @@ crash sweep, which CI does not run. `scripts/evidence.bash` runs all of it at on
 and prints each part's wall time: the sweep, every Nix build and every check but
 TLC's model check, each crate's tests among them, and on Linux the browser suites
 and crash sweep. This full tier gates the change's merge. `--fast` runs
-toshokan's own suite and Clippy, for every change in between. TLC's model check,
-`nix build .#nord.toshokan-spec`, runs in `nix flake check`.
+toshokan's own suite and Clippy, for every change in between.
+`nix build .#nord.toshokan-spec` runs TLC's model check on its own.
 
 Tests that run long build with `--profile release-tests`:
 

@@ -155,8 +155,6 @@ fn lenient_mode_tolerates_differing_requests() {
     assert_eq!(ok.unwrap().count, 375);
 }
 
-/// Fixed-size classes report slots.
-///
 /// Numbers are from an Electro 5: adding one program moved `used` by 141
 /// (53439 -> 53580), which is 121 body + 16 name + 4 CRC, and 56400 / 141 is 400, the
 /// instrument's 8 banks x 50 slots.

@@ -1,22 +1,19 @@
 //! The dedicated worker that keeps a library in the browser, and the page's side of it.
 //!
-//! The page starts the worker from [`BOOTSTRAP`] and posts it the URL of the bundle's
-//! wasm-bindgen glue, the module the page already compiled, and where the library is.
-//! The worker instantiates the same bundle and calls [`serve`], which answers `{ready}`
-//! or `{failed}`, and `{failed, outdated}` where the glue could not be imported. Then:
+//! The page starts the worker from [`BOOTSTRAP`] with the URL of the bundle's glue, the
+//! compiled module and the library. [`serve`] answers `{ready}`, `{failed}`, or
+//! `{failed, outdated}` where the glue would not import. Then:
 //!
-//! - Each command is `{id, text, attached}`, a [`wire::Message`], answered by
+//! - A command `{id, text, attached}` ([`wire::Message`]) is answered by
 //!   `{id, text, attached}` holding every answer it gave, in order, or by `{id, failed}`.
-//!   A command with `{whole}` answers the whole view rather than what changed since the
-//!   last answer, which the page lost. Commands run one at a time, in arrival order.
-//! - `{close}` lets the library go, and is answered by `{closed}`.
-//! - A fault in the worker is posted as `{failed}`, after which it answers nothing.
-//! - `{listed, answered}` says how many files its listings have found and how many
-//!   requests its storage has answered, each time either moves.
+//!   Commands run one at a time, in arrival order. One with `{whole}` answers the whole
+//!   view, since the page lost an answer.
+//! - `{close}` is answered by `{closed}`.
+//! - A fault posts `{failed}`, and the worker answers nothing after it.
+//! - `{listed, answered}` reports progress each time either count moves.
 //!
-//! Started for rescues instead, the worker keeps no library: each message is a
-//! [`RescueIo`] on the files of one directory of the origin private file system, which
-//! only a worker can write in place.
+//! Started for rescues, the worker keeps no library and serves [`RescueIo`] on one
+//! directory of the origin private file system, which only a worker can write in place.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};

@@ -1,15 +1,10 @@
 //! The browser dock: one tree with three sections, for the places a sound can be, the
 //! kinds of sound, and the tags on the local list.
 //!
-//! Nothing here touches the instrument. Drawing reads the caches and returns a list of
-//! [`Act`]s, which [`apply`] then runs against the workspace, the device and the tabs. A
-//! row can therefore be drawn while the thing it stands for is about to change.
-//!
-//! This file holds the state rows share: the selection, the in-place rename, the
-//! confirmation modal, and which branches are open. The tree is drawn in `tree`, the drag
-//! rules are in `drag`, and a single row is drawn in `row`. Folders and tags for the
-//! local list live outside the browser, in [`crate::folders`] and [`crate::tags`], and
-//! [`crate::store`] keeps both on disk.
+//! Nothing here touches the instrument. Drawing reads the caches and returns [`Act`]s,
+//! which [`apply`] runs against the workspace, the device and the tabs. This file holds
+//! the state rows share: the selection, the in-place rename, the confirmation modal, and
+//! which branches are open.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
@@ -439,9 +434,9 @@ impl Browser {
 
     /// Apply a click on a row to the selection.
     ///
-    /// ⚠️ No click opens the rename editor. An editor opened by a second click on a
-    /// selected row would wait with the whole name selected, and the next keystroke, even
-    /// one meant for the document, would replace it. Renaming is F2 and the row's menu.
+    /// ⚠️ No click opens the rename editor: one opened by a second click would wait with
+    /// the whole name selected, and the next keystroke would replace it. Renaming is F2
+    /// and the row's menu.
     fn clicked(&mut self, ui: &egui::Ui, click: Click) {
         self.rename = None;
         match gesture(&ui.input(|input| input.modifiers)) {
@@ -515,9 +510,8 @@ impl Browser {
 
     /// The in-place editor, prefilled and selected.
     ///
-    /// ⚠️ Only Enter renames; clicking away cancels. Committing on blur would turn a
-    /// stray keystroke into an unwanted rename, and the name is the only record of what
-    /// an object is, because the files do not store their own names.
+    /// ⚠️ Only Enter renames; clicking away cancels, so a stray keystroke never renames.
+    /// The name is the only record of what an object is.
     fn rename_row(&mut self, ui: &mut egui::Ui, indent: f32, original: &str) -> Option<String> {
         let rename = self.rename.as_mut()?;
         let output = ui

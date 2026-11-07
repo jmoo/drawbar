@@ -7,8 +7,7 @@ your terminal, or from your own code.
 
 ![drawbar with an instrument attached and a piano library open in its editor](docs/src/assets/screenshot.png)
 
-> ⚠️ **Alpha.** Back up your instrument and your files first. Everything here was
-> worked out by studying real instruments.
+> ⚠️ **Alpha.** Back up your instrument and your files first.
 > [What is supported](docs/src/getting-started/support.md) lists what has been
 > tested on hardware.
 
@@ -23,14 +22,10 @@ your terminal, or from your own code.
 | 📚 | [toshokan](crates/toshokan/README.md) | Library for keeping tags and history beside a folder of real files, in Dropbox, iCloud or any synced folder. |
 | 🧬 | [nord-bits-derive](crates/nord-bits-derive/README.md) | The macro behind nord-format's layouts. |
 
-
 ## Try it
 
 Open [drawbar.app](https://drawbar.app/) in Chrome, Edge, Safari, Firefox, or Brave.
-
-
-Or, with
-[Nix](https://nixos.org/download/):
+Or, with [Nix](https://nixos.org/download/):
 
 ```sh
 nix run github:jmoo/drawbar#drawbar              # the desktop app
@@ -40,7 +35,16 @@ nix run github:jmoo/drawbar#nord-cli -- --help   # the nord command
 The [user guide](docs/src/introduction.md) covers both. Developers will find the
 file formats, the USB protocol and
 [how to build from source](docs/src/reference/building.md) in its Reference
-section, and the house rules in [CONTRIBUTING.md](CONTRIBUTING.md).
+section.
+
+## Contributing
+
+Two rules bear repeating. All reverse engineering is black-box work for
+interoperability, from files and USB traffic produced by instruments the
+researcher owns, with no decompiling of Clavia's software or firmware. And
+nothing proprietary is committed: no factory presets, sound libraries, firmware,
+or files shipped with Clavia software. Fixtures are made by this project's own
+tools. [CONTRIBUTING.md](CONTRIBUTING.md) holds the rest of the house rules.
 
 ## Community
 

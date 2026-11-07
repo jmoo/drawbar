@@ -5,8 +5,9 @@ prints data to stdout and everything else to stderr, so its output pipes
 cleanly. Every command that changes the instrument says what it is about to
 replace and asks before it goes ahead.
 
+[Install](../getting-started/install.md#the-nord-command) it, then:
+
 ```sh
-cargo install nord-cli    # or: nix run github:jmoo/drawbar#nord-cli
 nord --help
 ```
 

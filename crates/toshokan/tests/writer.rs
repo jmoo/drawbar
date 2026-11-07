@@ -1106,7 +1106,7 @@ fn a_clone_leaves_a_sealed_segment_holding_an_entry_no_snapshot_folds() {
 }
 
 /// The folder of a machine, where a segment gains `bytes` once the snapshot is
-/// in place: between compaction's judgement of it and its deletion.
+/// in place: between compaction's judgment of it and its deletion.
 struct Meddling<'a> {
     machine: &'a mut Machine,
     segment: toshokan::RelPath,

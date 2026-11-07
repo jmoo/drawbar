@@ -7,18 +7,13 @@
 //! menu order: the MIDI channels sit between two System settings. The declaration below
 //! groups the fields by menu, and each field's bit range places it.
 //!
-//! Every placement: Confirmed on hardware. Changing one setting on the panel moves only
-//! the bits its field claims. Where a field's range runs past the values the captures
-//! reach, the field says so.
-//!
 //! Bits 0..=15 echo the schema version. Every `ne5` format carries this echo at `0x2c`
 //! because the container header is not transmitted over USB (see
 //! [`crate::formats::ne5::song`]). `ne5s` is version 0, so these bits read zero.
 //!
 //! Bits 16..=37 are the `startup_*` settings below, which the instrument restores at
-//! power-up. Bit 18 is the only bit below the menu settings that no field claims. It is
-//! clear in every specimen. It survives a re-encode untouched, as does everything past
-//! the last setting.
+//! power-up. Bit 18 is the only bit below the menu settings that no field claims, and
+//! every specimen holds it clear.
 //!
 //! Two menu settings are not stored here. Toggling memory protect or local control on
 //! the panel, with the change verified on the display, moves no bit of the body.
@@ -79,8 +74,8 @@ pub type FineTune = RangedI8<50, -50, 50>;
 /// Flat, because the two share bytes.
 ///
 /// Reads and writes byte-exactly. A read verifies the container checksum, gates
-/// on [`KNOWN_VERSIONS`] and the aux word, and refuses any slot but `0:0`. Every
-/// placement is pinned by a change-one-setting sweep. Confirmed on hardware.
+/// on [`KNOWN_VERSIONS`] and the aux word, and refuses any slot but `0:0`. Changing one
+/// setting on the panel moves only the bits its field claims. Confirmed on hardware.
 #[bitbody(34)]
 pub struct Settings {
     // ── System ─────────────────────────────────────────────────────────────────

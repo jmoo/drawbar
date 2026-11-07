@@ -21,6 +21,20 @@
 //! Desktop (macOS/Linux/Windows) uses `nusb`; browsers use WebUSB. WebUSB sets the
 //! shape of the API: see [`transport::Transport`] for why there are no `Send` bounds.
 //! Device discovery is left to each backend.
+//!
+//! # Features
+//!
+//! - `nusb` (default): the desktop backend for macOS, Linux and Windows, in pure Rust.
+//! - `web`: the browser backend over WebUSB, as Chrome, Edge and Brave offer it.
+//!   Building it needs `--cfg=web_sys_unstable_apis`.
+//! - `replay`: drive the protocol from recorded exchanges, with no hardware.
+//! - `blocking`: `block_on`, for calling the async API from synchronous code.
+//! - `corpus`: replay tests against a capture corpus at `NORD_CORPUS_ROOT`. Implies
+//!   `replay`.
+//! - `fault-injection`: `NORD_PROTOCOL_VERSION`, `NORD_READ_CHUNK` and
+//!   `NORD_WRITE_CHUNK` override the protocol version and transfer chunk sizes, for
+//!   research. ⚠️ A wrong value can stall the instrument's bulk endpoints until a power
+//!   cycle.
 
 pub mod bundle;
 #[cfg(feature = "nusb")]

@@ -1,16 +1,12 @@
 //! Unsaved edits, kept in this install's own state for the library and never in its
-//! folder: an asset's by the key the library knows its file by, and a slot view's by its
-//! slot. Losing that state loses them and nothing else.
+//! folder: an asset's by the key of its file, and a slot view's by its slot.
 //!
-//! Each keep is a new file in `unsaved/`, written whole under a name `.next` ends, then
-//! moved to its own, by the instance that keeps it, and never changed after, so no two
-//! windows of the install write one file. Of the files kept of one edit, the one kept at
-//! the latest clock is the edit. An instance lets go of the files it kept or read of an
-//! edit once it has kept the edit again, or the edit ends.
-//!
-//! A file is a JSON line, `{"of":…,"base":…,"at":…}`, then the bytes. Its name is
-//! `<tag>-<instance>-<count>`: the first 16 bytes of the BLAKE3 hash of `of` as JSON, in
-//! hex, then the keeping instance's random id and how many it had kept before.
+//! Each keep is a new file in `unsaved/`, made by [`storage::create`] and never changed,
+//! so no two windows write one file; the keep at the latest clock is the edit. An instance
+//! removes the files it kept or read of an edit once it keeps the edit again or it ends.
+//! A file is a JSON line, `{"of":…,"base":…,"at":…}`, then the bytes, named
+//! `<tag>-<instance>-<count>`: the first 16 bytes of the BLAKE3 hash of `of` as JSON in
+//! hex, the instance's random id, and how many it had kept before.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io;

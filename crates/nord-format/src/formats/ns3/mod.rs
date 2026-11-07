@@ -16,14 +16,11 @@
 //! public documentation this module's provenance comments refer to.
 //!
 //! Community documentation reports a second checksum at file offset `0x78`
-//! ("covering synth and organ panel data"). Specimens contradict it. The word there
-//! is not a common CRC-32 over any contiguous or field-excised range. It does not
-//! change between near-identical program pairs whose bodies differ, while the `0x18`
-//! checksum always does. It takes clustered values that many unrelated programs
-//! share, and it sits beside bytes that are constant across every specimen: the
-//! signature of bit-packed panel parameters, which body offset `0x4c` holds. Programs
-//! re-saved after panel edits still decode, so nothing verifies the word. Treat the
-//! claim as mistaken until a specimen shows otherwise.
+//! ("covering synth and organ panel data"). Specimens contradict it: the word is no
+//! common CRC-32 over any range, stays put between near-identical programs whose
+//! bodies differ, and takes values many unrelated programs share, as bit-packed panel
+//! parameters (body offset `0x4c`) would. Nothing verifies it. Inferred from specimens;
+//! not confirmed on hardware.
 
 use super::raw::raw_format;
 
