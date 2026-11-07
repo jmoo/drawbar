@@ -35,7 +35,16 @@ nix run github:jmoo/drawbar#nord-cli -- --help   # the nord command
 The [user guide](docs/src/introduction.md) covers both. Developers will find the
 file formats, the USB protocol and
 [how to build from source](docs/src/reference/building.md) in its Reference
-section, and the house rules in [CONTRIBUTING.md](CONTRIBUTING.md).
+section.
+
+## Contributing
+
+Two rules bear repeating. All reverse engineering is black-box work for
+interoperability, from files and USB traffic produced by instruments the
+researcher owns, with no decompiling of Clavia's software or firmware. And
+nothing proprietary is committed: no factory presets, sound libraries, firmware,
+or files shipped with Clavia software. Fixtures are made by this project's own
+tools. [CONTRIBUTING.md](CONTRIBUTING.md) holds the rest of the house rules.
 
 ## Community
 

@@ -30,10 +30,8 @@ above. Open it at
 ### [simonflore/opennord](https://github.com/simonflore/opennord) · AGPL-3.0
 
 A browser companion for the Stage 4 and Stage 2 that reads, organizes and
-transfers programs and samples, with a fully decoded Stage 4 program body and
-hardware-verified USB transfer in both directions. Its documentation is
-thorough and marks what has been verified on hardware. Open it at
-[opennord.gigmeister.app](https://opennord.gigmeister.app).
+transfers programs and samples over USB. It is a decompilation project. Open it
+at [opennord.gigmeister.app](https://opennord.gigmeister.app).
 
 ## Adding to this list
 

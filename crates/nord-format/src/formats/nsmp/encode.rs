@@ -121,7 +121,7 @@ const fn version(layout: Layout) -> u32 {
 }
 
 /// The sample-instrument `aux` value, the same in every generation.
-/// Unexplained: vendor sample files hold this, and nothing in the file derives it.
+/// Unexplained: real sample files hold this, and nothing in the file derives it.
 const AUX: u32 = 0x000f_0000;
 
 /// Largest field count a record header can state, from its 14-bit count field.
@@ -1476,7 +1476,7 @@ fn stroke_header(
     let mut head = vec![0u8; layout.header_len()];
     head[0..4].copy_from_slice(&zone.global_id.to_be_bytes());
     head[super::stroke::ROOT_KEY] = zone.root_key;
-    // Unexplained: vendor sample files hold this, and nothing in the file derives it.
+    // Unexplained: real sample files hold this, and nothing in the file derives it.
     head[6..8].copy_from_slice(&[0x88, 0xba]);
     // The channel count. The terminator's cell size states it too, and a reader uses
     // the terminator because the record sizes follow it.
@@ -1501,7 +1501,7 @@ fn stroke_header(
     for (i, p) in directory.iter().enumerate() {
         let at = codec::SEEK_AT + codec::SEEK_STRIDE * i;
         head[at..at + 2].copy_from_slice(&p.to_be_bytes());
-        // Unexplained: vendor sample files hold this, and nothing in the file derives it.
+        // Unexplained: real sample files hold this, and nothing in the file derives it.
         if i < 3 {
             head[at + 2] = 0x80;
         }
@@ -1654,13 +1654,13 @@ const STY_VERSION: u8 = 5;
 const CONTAINER_VERSION: u8 = 11;
 
 /// The category every chain's `cat` section opens with.
-/// Unexplained: vendor sample files hold this, and nothing in the file derives it.
+/// Unexplained: real sample files hold this, and nothing in the file derives it.
 const CATEGORY: u8 = 0x0f;
 
 /// The `hdr` section: a fixed prefix, then the instrument name NUL-padded.
 fn hdr(name: &str) -> Result<Section, Error> {
     let mut payload = vec![0u8; 111];
-    // Unexplained: vendor sample files hold this, and nothing in the file derives it.
+    // Unexplained: real sample files hold this, and nothing in the file derives it.
     payload[0..6].copy_from_slice(&[0x00, 0x01, 0xb4, 0x00, 0x06, 0x50]);
     super::StringField::NAME.write(&mut payload, name)?;
     Ok(Section {
@@ -1754,7 +1754,7 @@ fn sty(preset: Preset) -> Result<Section, Error> {
 struct WideSchema {
     container: u32,
     /// The `NSMP` payload. Constant per generation and unrelated to the stroke count.
-    /// Unexplained: vendor sample files hold this, and nothing in the file derives it.
+    /// Unexplained: real sample files hold this, and nothing in the file derives it.
     container_payload: [u8; 4],
     hdr: u32,
     map: u32,
@@ -1767,7 +1767,7 @@ struct WideSchema {
     map_tail: &'static [u8],
     sty: u32,
     /// The preset a project that touches none renders as.
-    /// Unexplained: vendor sample files hold this, and nothing in the file derives it.
+    /// Unexplained: real sample files hold this, and nothing in the file derives it.
     sty_payload: &'static [u8],
     /// Where the category's dynamics curve writes into that payload, and what.
     sty_dynamics: &'static [(usize, u8)],
@@ -1830,7 +1830,7 @@ fn wide_schema(layout: Layout) -> Option<WideSchema> {
 /// the vendor's filenames append left empty.
 fn hdr4(schema: &WideSchema, name: &str) -> Result<Section4, Error> {
     let mut payload = vec![0u8; 112];
-    // Unexplained: vendor sample files hold this, and nothing in the file derives it.
+    // Unexplained: real sample files hold this, and nothing in the file derives it.
     payload[4..6].copy_from_slice(&[0x06, 0x50]);
     super::StringField::NAME_V3.write(&mut payload, name)?;
     Ok(Section4 {
@@ -2156,7 +2156,7 @@ impl WideZoneRecord {
         r[0] = self.root_key;
         r[1] = self.top_note;
         r[2] = self.low_note;
-        // Unexplained: vendor sample files hold this, and nothing in the file derives it.
+        // Unexplained: real sample files hold this, and nothing in the file derives it.
         r[7] = 1;
         r[8..12].copy_from_slice(&self.global_id.to_be_bytes());
         // One sample in the zone, so the playing stroke sits at the bottom of the

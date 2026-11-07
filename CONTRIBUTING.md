@@ -146,7 +146,7 @@ in one of these exact forms:
 
 Where no form fits the subject, write its analog with the same two parts. A
 sample file has no panel, so an unknown field there reads
-`// Unexplained: vendor sample files hold this, and nothing in the file derives it.`
+`// Unexplained: real sample files hold this, and nothing in the file derives it.`
 Browser and operating-system behavior is not reverse engineering of the
 instrument; state it plainly, as measured or as its vendor documents it.
 

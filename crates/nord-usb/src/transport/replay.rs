@@ -9,8 +9,7 @@
 //! its responses. Every read and write must meet a step of its own direction, so a
 //! read the script does not expect is a mismatch, never a timeout.
 //!
-//! The script format is specified in
-//! [`tests/scripts/README.md`](https://github.com/jmoo/drawbar/blob/master/crates/nord-usb/tests/scripts/README.md).
+//! The crate's `tests/scripts/README.md` specifies the script format.
 
 use super::Transport;
 use crate::error::{Error, Result};
