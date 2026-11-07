@@ -344,7 +344,7 @@ enum PianoAction {
     /// Cut a library in two at a key, writing both halves.
     Split(piano::SplitArgs),
 
-    /// Build a piano library from a directory of WAVs.
+    /// Build a piano library from a directory of WAVs, or from the regions of one take.
     ///
     /// Each WAV's name gives the root, bank and layer it holds, and any sample rate is
     /// resampled. A WAV whose `smpl` chunk declares a loop builds a stroke that loops

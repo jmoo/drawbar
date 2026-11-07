@@ -55,6 +55,15 @@ PCM of 8 to 32 bits or float, and each region is rounded to 16 bits as a 16-bit
 WAV of it would be. A region labelled any other way, or a loop that crosses a
 region's end, is refused.
 
+A format 6 library built without a template plays each stroke at the level of
+its root's loudest layer, whatever the stroke's own level. So before rounding,
+`build` raises each softer region of a take to that layer's peak, and each
+release to its root's loudest attack. The soft layers keep their detail above
+the 16-bit steps and play as loud as they would unraised. The library grows,
+because louder audio takes more bits to code. A format 5 library, or one built
+against a template, plays each stroke's audio at its own level, so nothing is
+raised.
+
 ```sh
 nord piano build strokes/ --kind mallet --name Marimba -o marimba.npno
 nord piano build take.wav --kind wurlitzer --name Wurli -o wurli.npno

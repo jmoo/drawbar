@@ -39,16 +39,22 @@ pub fn take(path: &Path) -> Result<(Audio, Marks), String> {
     Ok((audio, marks))
 }
 
-/// The frames of `region` as 16-bit PCM, with `sample_loop` counted from its start.
+/// The frames of `region`, the take's samples within it.
 /// The region lies within the take, as [`wav::read_marks`] checks.
-pub fn cut(take: &Audio, region: &Region, sample_loop: Option<Loop>) -> Pcm16 {
+pub fn frames<'a>(take: &'a Audio, region: &Region) -> &'a [f32] {
     let channels = usize::from(take.channels);
     let start = region.start as usize * channels;
-    let end = start + region.frames as usize * channels;
+    &take.samples[start..start + region.frames as usize * channels]
+}
+
+/// The frames of `region` raised by `gain` and rounded to 16-bit PCM, with
+/// `sample_loop` counted from its start.
+pub fn cut(take: &Audio, region: &Region, sample_loop: Option<Loop>, gain: f32) -> Pcm16 {
+    let raised: Vec<f32> = frames(take, region).iter().map(|x| x * gain).collect();
     Pcm16 {
         rate: take.rate,
         channels: take.channels,
-        samples: wav::quantize(&take.samples[start..end]),
+        samples: wav::quantize(&raised),
         sample_loop,
     }
 }
